@@ -1,0 +1,17 @@
+[package]
+name = "shader_ast_impl"
+version = "0.1.0"
+authors = ["arc"]
+edition = "2018"
+
+[lib]
+proc-macro = true
+
+[dependencies]
+quote = "*"
+proc-macro-hack = "*"
+proc-macro2 = "*"
+
+[dependencies.syn]
+version = "*"
+features = ["full"]
