@@ -39,8 +39,8 @@ impl Default for Direction{
 
 #[derive(Clone, Default)]
 pub struct Lay{
-    pub margin:Pad,
-    pub padding:Pad,
+    pub margin:Margin,
+    pub padding:Padding,
     pub align:Vec2,
     pub direction:Direction,
     pub wrap:bool,
@@ -57,7 +57,7 @@ impl Lay{
 
     pub fn padded(around:f32)->Lay{
         Lay{
-            padding:Pad{
+            padding:Padding{
                 l:around,t:around,r:around,b:around
             },
             ..Default::default()
@@ -161,7 +161,7 @@ impl CxTurtle{
     }
 
     // walk the turtle with a 'w/h' and a margin
-    pub fn walk_wh(&mut self, vw:Value, vh:Value, margin:Pad)->Rect{
+    pub fn walk_wh(&mut self, vw:Value, vh:Value, margin:Margin)->Rect{
         let w = vw.eval(self);
         let h = vh.eval(self);
         let mut turtle = &mut self.turtles.last_mut().unwrap();

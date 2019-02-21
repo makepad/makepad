@@ -82,11 +82,11 @@ impl Quad{
         }
     }
 
-    pub fn draw_sized<'a>(&mut self, cx:&'a mut Cx, w:f32, h:f32, pad:Pad)->&'a mut Draw{
+    pub fn draw_sized<'a>(&mut self, cx:&'a mut Cx, w:f32, h:f32, margin:Margin)->&'a mut Draw{
         let dr = cx.drawing.instance(cx.shaders.get(self.shader_id));
         self.set_uniforms(dr);
         
-        let geom = cx.turtle.walk_wh(Value::Const(w), Value::Const(h), pad);
+        let geom = cx.turtle.walk_wh(Value::Const(w), Value::Const(h), margin);
 
         dr.rect("x,y,w,h", geom);
         dr.vec4("color", &self.color);

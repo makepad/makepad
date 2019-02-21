@@ -6,64 +6,12 @@ use std::mem;
 use std::ptr;
 use std::ffi::CStr;
 
-use crate::shader::*;
+pub use crate::cx_shared::*;
 use crate::cxdrawing::*;
 use crate::cxshaders::*;
-use crate::cxfonts::*;
-use crate::cxtextures::*;
-use crate::cxturtle::*;
-
-#[derive(Clone)]
-pub struct Cx{
-    pub title:String,
-    pub running:bool,
-
-    pub turtle:CxTurtle,
-    pub shaders:CxShaders,
-    pub drawing:CxDrawing,
-    pub fonts:CxFonts,
-    pub textures:CxTextures,
-
-    pub uniforms:Vec<f32>
-}
-
-impl Default for Cx{
-    fn default()->Self{
-        let mut uniforms = Vec::<f32>::new();
-        uniforms.resize(CX_UNI_SIZE, 0.0);
-        Self{
-            turtle:CxTurtle{..Default::default()},
-            fonts:CxFonts{..Default::default()},
-            drawing:CxDrawing{..Default::default()},
-            shaders:CxShaders{..Default::default()},
-            textures:CxTextures{..Default::default()},
-            title:"Hello World".to_string(),
-            running:true,
-            uniforms:uniforms
-        }
-    }
-}
-
-const CX_UNI_PROP1:usize = 0;
-const CX_UNI_SIZE:usize = 1;
 
 impl Cx{
-    pub fn def_shader(sh:&mut Shader){
-        Shader::def_df(sh);
-        Shader::def_builtins(sh);
-        Cx::def_uniforms(sh);
-        DrawList::def_uniforms(sh);
-    }
-
-    pub fn def_uniforms(_sh: &mut Shader){
-        //sh.cx_uniform("prop1", Kind::Float);
-    }
-
-    pub fn uniform_prop1(&mut self, v:f32){
-        self.uniforms[CX_UNI_PROP1] = v;
-    }
-
-    pub fn exec_draw_list(&mut self, id: usize){
+     pub fn exec_draw_list(&mut self, id: usize){
         // tad ugly otherwise the borrow checker locks 'self' and we can't recur
         for ci in 0..self.drawing.draw_lists[id].draws_len{
             let sub_list_id = self.drawing.draw_lists[id].draws[ci].sub_list_id;
@@ -128,7 +76,7 @@ impl Cx{
             gl::load_with(|symbol| gl_window.get_proc_address(symbol) as *const _);
             gl::ClearColor(0.3, 0.3, 0.3, 1.0);
             gl::Enable(gl::DEPTH_TEST);
-            gl::DepthFunc(gl::LESS);
+            gl::DepthFunc(gl::LEQUAL);
             gl::BlendEquationSeparate(gl::FUNC_ADD, gl::FUNC_ADD);
             gl::BlendFuncSeparate(gl::ONE, gl::ONE_MINUS_SRC_ALPHA, gl::ONE, gl::ONE_MINUS_SRC_ALPHA);
             gl::Enable(gl::BLEND);            
@@ -165,11 +113,20 @@ impl Cx{
             unsafe{
                 gl::Clear(gl::COLOR_BUFFER_BIT|gl::DEPTH_BUFFER_BIT);
             }
+            
+            if let Some(logical_size) = gl_window.get_inner_size(){
+                let camera_projection = Mat4::ortho(
+                        0.0, logical_size.width as f32, 0.0, logical_size.height as f32, -100.0, 100.0, 
+                        1.0,1.0
+                );
 
-            // lets paint the drawcommand tree
-            self.exec_draw_list(0);
+                self.uniform_camera_projection(camera_projection);
+                
+                // lets paint the drawcommand tree
+                self.exec_draw_list(0);
 
-            gl_window.swap_buffers().unwrap();
+                gl_window.swap_buffers().unwrap();
+            }
         }
     }
 

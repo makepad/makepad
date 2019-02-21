@@ -55,8 +55,10 @@ impl Button{
         self.bg.begin(cx, &self.lay);
 
         self.bg.color = color("orange");
-        self.bg.draw_sized(cx, 20.0, 20.0, pad(0,0,0,0));
-        self.bg.draw_sized(cx, 20.0, 20.0, pad(10,0,0,0));
+        self.bg.draw_sized(cx, 20.0, 20.0, margin(0,0,0,0));
+        self.bg.draw_sized(cx, 20.0, 20.0, margin(10,0,0,0));
+        
+        self.text.draw_text(cx, "Hi World");
 
         self.bg.end(cx);
 

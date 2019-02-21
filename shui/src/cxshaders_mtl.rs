@@ -197,8 +197,8 @@ impl CxShaders{
             "vec2"=>"packed_float2".to_string(),
             "vec3"=>"packed_float3".to_string(),
             "vec4"=>"packed_float4".to_string(),
-            "mat2"=>"float2x2".to_string(),
-            "mat3"=>"float3x3".to_string(),
+            "mat2"=>"packed_float2x2".to_string(),
+            "mat3"=>"packed_float3x3".to_string(),
             "mat4"=>"float4x4".to_string(),
             ty=>ty.to_string()
         }

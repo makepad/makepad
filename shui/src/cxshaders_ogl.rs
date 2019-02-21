@@ -33,12 +33,16 @@ impl<'a> SlCx<'a>{
         match var.store{
             ShVarStore::Instance=>{
                 if let SlTarget::Pixel = self.target{
-                    self.auto_vary.push(var.clone());
+                    if self.auto_vary.iter().find(|v|v.name == var.name).is_none(){
+                        self.auto_vary.push(var.clone());
+                    }
                 }
             },
             ShVarStore::Geometry=>{
                 if let SlTarget::Pixel = self.target{
-                    self.auto_vary.push(var.clone());
+                    if self.auto_vary.iter().find(|v|v.name == var.name).is_none(){
+                        self.auto_vary.push(var.clone());
+                    }
                 }
             },
             _=>()
@@ -743,8 +747,8 @@ impl CxShaders{
                 uniforms_dl:Self::compile_get_uniforms(program, sh, &ash.uniforms_dl),
                 uniforms_dr:Self::compile_get_uniforms(program, sh, &ash.uniforms_dr),
                 texture_slots:Self::compile_get_texture_slots(program, &ash.texture_slots),
+                named_instance_props:ash.named_instance_props.clone(),
                 assembled_shader:ash,
-                named_instance_props:ash.named_instance_props,
                 ..Default::default()
             })
         }
@@ -804,7 +808,7 @@ impl CxShaders{
                         2=>gl::Uniform2f(loc.loc, uni[o], uni[o+1]),
                         3=>gl::Uniform3f(loc.loc, uni[o], uni[o+1], uni[o+2]),
                         4=>gl::Uniform4f(loc.loc, uni[o], uni[o+1], uni[o+2], uni[o+3]),
-                        16=>gl::UniformMatrix4fv(loc.loc, 1, 0, uni.as_ptr().offset((o*4) as isize)),
+                        16=>gl::UniformMatrix4fv(loc.loc, 1, 0, uni.as_ptr().offset((o) as isize)),
                         _=>()
                     }
                 }

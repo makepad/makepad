@@ -10,69 +10,11 @@ use objc::{msg_send, sel, sel_impl};
 use metal::*;
 use winit::os::macos::WindowExt;
 
-use crate::shader::*;
+pub use crate::cx_shared::*;
 use crate::cxdrawing::*;
 use crate::cxshaders::*;
-use crate::cxfonts::*;
-use crate::cxtextures::*;
-use crate::cxturtle::*;
-
-#[derive(Clone)]
-pub struct Cx{
-    pub title:String,
-    pub running:bool,
-
-    pub turtle:CxTurtle,
-    pub shaders:CxShaders,
-    pub drawing:CxDrawing,
-    pub fonts:CxFonts,
-    pub textures:CxTextures,
-
-    pub uniforms:Vec<f32>,
-    pub buffers:CxBuffers
-}
-
-impl Default for Cx{
-    fn default()->Self{
-        let mut uniforms = Vec::<f32>::new();
-        uniforms.resize(CX_UNI_SIZE, 0.0);
-        Self{
-            turtle:CxTurtle{..Default::default()},
-            fonts:CxFonts{..Default::default()},
-            drawing:CxDrawing{..Default::default()},
-            shaders:CxShaders{..Default::default()},
-            textures:CxTextures{..Default::default()},
-            title:"Hello World".to_string(),
-            running:true,
-            uniforms:uniforms,
-            buffers:CxBuffers{..Default::default()}
-        }
-    }
-}
-
-const CX_UNI_CAMERA_PROJECTION:usize = 0;
-const CX_UNI_SIZE:usize = 16;
 
 impl Cx{
-    pub fn def_shader(sh:&mut Shader){
-        Shader::def_builtins(sh);
-        Shader::def_df(sh);
-        Cx::def_uniforms(sh);
-        DrawList::def_uniforms(sh);
-    }
-
-    pub fn def_uniforms(sh: &mut Shader){
-        sh.add_ast(shader_ast!(||{
-            let camera_projection:mat4<UniformCx>;
-        }));
-    }
-
-    pub fn uniform_camera_projection(&mut self, v:Mat4){
-        //dump in uniforms
-        for i in 0..16{
-            self.uniforms[CX_UNI_CAMERA_PROJECTION+i] = v.v[i];
-        }
-    }
 
     pub fn exec_draw_list(&mut self, id: usize, device:&Device, encoder:&RenderCommandEncoderRef){
         
@@ -149,10 +91,48 @@ impl Cx{
         }
     }
 
-    pub unsafe fn gl_string(raw_string: *const gl::types::GLubyte) -> String {
-        if raw_string.is_null() { return "(NULL)".into() }
-        String::from_utf8(CStr::from_ptr(raw_string as *const _).to_bytes().to_vec()).ok()
-                                    .expect("gl_string: non-UTF8 string")
+    pub fn repaint(&mut self, logical_size:&winit::dpi::LogicalSize, last_logical_size:&winit::dpi::LogicalSize, layer:&CoreAnimationLayer, device:&Device, command_queue:&CommandQueue){
+        let pool = unsafe { NSAutoreleasePool::new(cocoa::base::nil) };
+
+        let camera_projection = Mat4::ortho(
+            0.0, logical_size.width as f32, 0.0, logical_size.height as f32, -100.0, 100.0, 
+            (logical_size.width / last_logical_size.width) as f32, 
+            (logical_size.height / last_logical_size.height)as f32
+        );
+        self.uniform_camera_projection(camera_projection);
+       
+        if let Some(drawable) = layer.next_drawable() {
+            let render_pass_descriptor = RenderPassDescriptor::new();
+
+            let color_attachment = render_pass_descriptor.color_attachments().object_at(0).unwrap();
+            color_attachment.set_texture(Some(drawable.texture()));
+            color_attachment.set_load_action(MTLLoadAction::Clear);
+            color_attachment.set_clear_color(MTLClearColor::new(0.3, 0.3, 0.3, 1.0));
+            color_attachment.set_store_action(MTLStoreAction::Store);
+
+            let command_buffer = command_queue.new_command_buffer();
+
+            render_pass_descriptor.color_attachments().object_at(0).unwrap().set_load_action(MTLLoadAction::Clear);
+
+            let parallel_encoder = command_buffer.new_parallel_render_command_encoder(&render_pass_descriptor);
+            let encoder = parallel_encoder.render_command_encoder();
+
+            self.buffers.uni_cx.update_with_f32_data(&device, &self.uniforms);
+
+            // ok now we should call our render thing
+            self.exec_draw_list(0, &device, encoder);
+
+            encoder.end_encoding();
+            parallel_encoder.end_encoding();
+
+            command_buffer.present_drawable(&drawable);
+            command_buffer.commit();
+        
+            unsafe { 
+                msg_send![pool, release];
+                //pool = NSAutoreleasePool::new(cocoa::base::nil);
+            }
+        }
     }
 
     pub fn event_loop<F>(&mut self, mut callback:F)
@@ -184,12 +164,11 @@ impl Cx{
         layer.set_drawable_size(CGSize::new(draw_size.width as f64, draw_size.height as f64));
 
         let command_queue = device.new_command_queue();
-
-        let mut pool = unsafe { NSAutoreleasePool::new(cocoa::base::nil) };
+       
         
         self.shaders.compile_all_shaders(&device);
         let mut current_layer_size:Option<winit::dpi::LogicalSize> = None;
-
+        let mut last_logical_size = draw_size.clone();
         while self.running {
 
             events_loop.poll_events(|event|{
@@ -200,53 +179,26 @@ impl Cx{
                             let dpi_factor = glutin_window.get_hidpi_factor();
                             let draw_size = logical_size.to_physical(dpi_factor);
                             current_layer_size = Some(logical_size.clone());
+                            
+                            callback(self, Ev::Redraw);
+
+                            self.repaint(&logical_size, &last_logical_size, &layer, &device, &command_queue);
                             layer.set_drawable_size(
                                CGSize::new(draw_size.width as f64, draw_size.height as f64));
+                            last_logical_size = logical_size;
                         },
                         _ => ()
                     },
                     _ => ()
                 }
             });
-
-            if let Some(logical_size) = current_layer_size{
-                let camera_projection = Mat4::ortho(0.0, logical_size.width as f32, 0.0, logical_size.height as f32, -100.0, 100.0);
-                self.uniform_camera_projection(camera_projection);
-            }
-
+           
             callback(self, Ev::Redraw);
+            if let Some(logical_size) = glutin_window.get_inner_size(){
 
-            if let Some(drawable) = layer.next_drawable() {
-                let render_pass_descriptor = RenderPassDescriptor::new();
+                self.repaint(&logical_size, &last_logical_size, &layer, &device, &command_queue);
+                last_logical_size = logical_size;
 
-                let color_attachment = render_pass_descriptor.color_attachments().object_at(0).unwrap();
-                color_attachment.set_texture(Some(drawable.texture()));
-                color_attachment.set_load_action(MTLLoadAction::Clear);
-                color_attachment.set_clear_color(MTLClearColor::new(0.3, 0.3, 0.3, 1.0));
-                color_attachment.set_store_action(MTLStoreAction::Store);
-
-                let command_buffer = command_queue.new_command_buffer();
- 
-                render_pass_descriptor.color_attachments().object_at(0).unwrap().set_load_action(MTLLoadAction::Clear);
-
-                let parallel_encoder = command_buffer.new_parallel_render_command_encoder(&render_pass_descriptor);
-                let encoder = parallel_encoder.render_command_encoder();
-
-                self.buffers.uni_cx.update_with_f32_data(&device, &self.uniforms);
-
-                // ok now we should call our render thing
-                self.exec_draw_list(0, &device, encoder);
-
-                encoder.end_encoding();
-                parallel_encoder.end_encoding();
-
-                command_buffer.present_drawable(&drawable);
-                command_buffer.commit();
-
-                unsafe { 
-                    msg_send![pool, release];
-                    pool = NSAutoreleasePool::new(cocoa::base::nil);
-                }
             }
         }
     }

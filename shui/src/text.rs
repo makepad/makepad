@@ -2,14 +2,20 @@ use crate::shader::*;
 use crate::cx::*;
 use crate::cxdrawing::*;
 
+pub enum Wrapping{
+    Char,
+    Word,
+    Line,
+    None
+}
+
 pub struct Text{
     pub font_id:usize,
     pub shader_id:usize,
     pub text:String,
     pub color: Vec4,
     pub font_size:f32,
-    pub x: f32,
-    pub y: f32
+    pub wrapping:Wrapping,
 }
 
 impl Style for Text{
@@ -20,9 +26,8 @@ impl Style for Text{
             shader_id:cx.shaders.add(sh),
             font_id:cx.fonts.load("fonts/ubuntu_regular_256.font", &mut cx.textures),
             text:"".to_string(),
-            x:0.0,
-            y:0.0,
             font_size:10.0,
+            wrapping:Wrapping::Word,
             color:Vec4{x:1.0,y:1.0,z:1.0,w:1.0}
         }
     }
@@ -91,8 +96,8 @@ impl Text{
                     font_tc.zw,
                     normalized.xy
                 );
-                //tex_coord.xy = vec2(1.)-tex_coord.xy;
-                return vec4(clipped*vec2(0.01,-0.01),0.,1.);
+
+                return vec4(clipped,0.,1.) * camera_projection;
             }
         }));
     }
@@ -100,12 +105,14 @@ impl Text{
     pub fn draw_text(&mut self, cx:&mut Cx, text:&str){
         let dr = cx.drawing.instance(cx.shaders.get(self.shader_id));
         let font = cx.fonts.get(self.font_id);
+
         let turtle = &mut cx.turtle.turtles.last_mut().unwrap();
         if dr.first{
             dr.texture("texture", font.texture_id);
             dr.uvec2f("tex_size", font.width as f32, font.height as f32);
             dr.uvec4f("list_clip", -50000.0,-50000.0,50000.0,50000.0);
         }
+
         // lets draw 'str' from char a to z
         for c in text.chars(){
             
@@ -119,6 +126,7 @@ impl Text{
             }
            
             let glyph = &font.glyphs[slot];
+
             dr.vec4f("draw_clip", -50000.0,-50000.0,50000.0,50000.0);
             dr.vec4f("font_geom",glyph.x1 ,glyph.y1 ,glyph.x2 ,glyph.y2);
             dr.vec4f("font_tc",glyph.tx1 ,glyph.ty1 ,glyph.tx2 ,glyph.ty2);

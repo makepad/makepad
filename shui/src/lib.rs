@@ -22,6 +22,7 @@ mod cxshaders;
 mod cxtextures;
 
 mod cxshaders_shared;
+mod cx_shared;
 
 // shared modules
 mod cxdrawing;
