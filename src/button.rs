@@ -1,15 +1,12 @@
 //use crate::math::*;
 //use crate::shader::*;
-use crate::cx::*;
-use crate::cxdrawing::*;
-use crate::rect::*;
-use crate::text::*;
+use shui::*;
 
 pub struct Button{
     pub view:View,
     pub lay:Lay,
     pub time:f32,
-    pub bg: Rect,
+    pub bg: Quad,
     pub text: Text,
     pub label:String,
     pub did_click: bool
@@ -27,7 +24,7 @@ impl Style for Button{
             },
             label:"OK".to_string(),
             did_click:false,
-            bg:Rect{
+            bg:Quad{
                 ..Style::style(cx)
             },
             text:Text{..Style::style(cx)}
@@ -54,12 +51,14 @@ impl Button{
         self.view.begin(cx, &self.lay);
 
         // however our turtle stack needs to remain independent
-        //self.bg.begin(cx, &self.lay);
+        self.bg.color = color("green");
+        self.bg.begin(cx, &self.lay);
 
-        self.bg.color = vec4(1.,0.,0.,1.);
-        self.bg.draw_sized(cx, 20.0, 20.0);
+        self.bg.color = color("orange");
+        self.bg.draw_sized(cx, 20.0, 20.0, pad(0,0,0,0));
+        self.bg.draw_sized(cx, 20.0, 20.0, pad(10,0,0,0));
 
-        //self.bg.end(cx);
+        self.bg.end(cx);
 
         self.view.end(cx);
     }

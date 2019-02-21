@@ -50,23 +50,28 @@ impl Default for Cx{
     }
 }
 
-const CX_UNI_PROP1:usize = 0;
-const CX_UNI_SIZE:usize = 1;
+const CX_UNI_CAMERA_PROJECTION:usize = 0;
+const CX_UNI_SIZE:usize = 16;
 
 impl Cx{
     pub fn def_shader(sh:&mut Shader){
-        Shader::def_df(sh);
         Shader::def_builtins(sh);
+        Shader::def_df(sh);
         Cx::def_uniforms(sh);
         DrawList::def_uniforms(sh);
     }
 
-    pub fn def_uniforms(_sh: &mut Shader){
-        //sh.cx_uniform("prop1", Kind::Float);
+    pub fn def_uniforms(sh: &mut Shader){
+        sh.add_ast(shader_ast!(||{
+            let camera_projection:mat4<UniformCx>;
+        }));
     }
 
-    pub fn uniform_prop1(&mut self, v:f32){
-        self.uniforms[CX_UNI_PROP1] = v;
+    pub fn uniform_camera_projection(&mut self, v:Mat4){
+        //dump in uniforms
+        for i in 0..16{
+            self.uniforms[CX_UNI_CAMERA_PROJECTION+i] = v.v[i];
+        }
     }
 
     pub fn exec_draw_list(&mut self, id: usize, device:&Device, encoder:&RenderCommandEncoderRef){
@@ -183,6 +188,7 @@ impl Cx{
         let mut pool = unsafe { NSAutoreleasePool::new(cocoa::base::nil) };
         
         self.shaders.compile_all_shaders(&device);
+        let mut current_layer_size:Option<winit::dpi::LogicalSize> = None;
 
         while self.running {
 
@@ -193,6 +199,7 @@ impl Cx{
                         winit::WindowEvent::Resized(logical_size) => {
                             let dpi_factor = glutin_window.get_hidpi_factor();
                             let draw_size = logical_size.to_physical(dpi_factor);
+                            current_layer_size = Some(logical_size.clone());
                             layer.set_drawable_size(
                                CGSize::new(draw_size.width as f64, draw_size.height as f64));
                         },
@@ -201,7 +208,12 @@ impl Cx{
                     _ => ()
                 }
             });
-            
+
+            if let Some(logical_size) = current_layer_size{
+                let camera_projection = Mat4::ortho(0.0, logical_size.width as f32, 0.0, logical_size.height as f32, -100.0, 100.0);
+                self.uniform_camera_projection(camera_projection);
+            }
+
             callback(self, Ev::Redraw);
 
             if let Some(drawable) = layer.next_drawable() {

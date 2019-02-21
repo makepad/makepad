@@ -165,6 +165,8 @@ impl CxTurtle{
         let w = vw.eval(self);
         let h = vh.eval(self);
         let mut turtle = &mut self.turtles.last_mut().unwrap();
+        let x = turtle.walk_x + margin.l;
+        let y = turtle.walk_y + margin.t;
         match turtle.lay.direction{
             Direction::Right=>{
                 // wrap the turtle
@@ -194,8 +196,6 @@ impl CxTurtle{
             },
             _=>{}
         }
-        let x = turtle.walk_x + margin.l;
-        let y = turtle.walk_y + margin.t;
         if x < turtle.bound_x1{
             turtle.bound_x1 = x;
         }
@@ -211,15 +211,37 @@ impl CxTurtle{
     }
 
     pub fn end(&mut self)->Rect{
-        // this is where the turtle does its thing.
-        // and where we walk it with our lay
-        self.turtles.pop();
-        Rect{
-            x:0.0,
-            y:0.0,
-            w:0.0,
-            h:0.0
+        let old = self.turtles.pop().unwrap();
+    
+        let w = if old.width.is_nan(){
+            if old.bound_x2 == std::f32::NEG_INFINITY{ // nothing happened
+                Value::None
+            }
+            else{
+                Value::Const(old.bound_x2 - old.start_x + old.lay.padding.l + old.lay.padding.r)
+            }
         }
-        
+        else{
+            Value::Const(old.width + old.lay.padding.l + old.lay.padding.r)
+        };
+
+        let h = if old.width.is_nan(){
+            if old.bound_y2 == std::f32::NEG_INFINITY{ // nothing happened
+                Value::None
+            }
+            else{
+                Value::Const(old.bound_y2 - old.start_y + old.lay.padding.t + old.lay.padding.b)
+            }
+        }
+        else{
+            Value::Const(old.height + old.lay.padding.t + old.lay.padding.b)
+        };
+
+        // now well walk the old turtle
+        if self.turtles.len() == 0{
+            return rect(0.0,0.0,0.0,0.0);
+        }
+
+        return self.walk_wh(w, h, old.lay.margin);
     }
 }

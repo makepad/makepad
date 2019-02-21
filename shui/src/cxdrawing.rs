@@ -1,4 +1,3 @@
-use crate::math::*;
 use crate::shader::*;
 use crate::cx::*;
 use crate::cxshaders::*;
@@ -109,18 +108,20 @@ impl CxDrawing{
         let ir = self.instance_nesting.pop().unwrap();
         let draw_list = &mut self.draw_lists[ir.draw_list_id];
         let draw = &mut draw_list.draws[ir.draw_id];
+
+
         // ok now we have to patch x/y/w/h into it
         let csh = &cxsh.compiled_shaders[draw.shader_id];
         if let Some(x) = csh.named_instance_props.x{
             draw.instance[ir.instance_offset + x] = geom.x;
         }
-        if let Some(y) = csh.named_instance_props.x{
+        if let Some(y) = csh.named_instance_props.y{
             draw.instance[ir.instance_offset + y] = geom.y;
         }
-        if let Some(w) = csh.named_instance_props.x{
+        if let Some(w) = csh.named_instance_props.w{
             draw.instance[ir.instance_offset + w] = geom.w;
         }
-        if let Some(h) = csh.named_instance_props.x{
+        if let Some(h) = csh.named_instance_props.h{
             draw.instance[ir.instance_offset + h] = geom.h;
         }
     }

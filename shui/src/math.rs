@@ -51,10 +51,9 @@ impl Pad{
     }
 }
 
-pub fn pad(l:f32, t:f32, r:f32, b:f32)->Pad{
-    Pad{l:l, t:t, r:r, b:b}
+pub fn pad(l:i32, t:i32, r:i32, b:i32)->Pad{
+    Pad{l:l as f32, t:t as f32, r:r as f32, b:b as f32}
 }
-
 
 #[derive(Clone, Default, Debug)]
 pub struct Rect{
@@ -62,6 +61,10 @@ pub struct Rect{
     pub y:f32,
     pub w:f32,
     pub h:f32
+}
+
+pub fn rect(x:f32, y:f32, w:f32, h:f32)->Rect{
+    Rect{x:x, y:y, w:w, h:h}
 }
 
 impl Mat4{
@@ -92,31 +95,38 @@ impl Mat4{
         let m8 = s.x * (-sy * cz + cy * sx * sz);
         let m9 = s.y * (sy * sz + cy * sx * cz);
         let m10 = s.z * (cx * cy);
-        return Mat4{
-            v:[
-                m0, m4, m8, 0.0,
-                m1, m5, m9, 0.0,
-                m2, m6, m10, 0.0,
-                t2.x + (m0 * t1.x + m1 * t1.y + m1 * t1.z),
-                t2.y + (m4 * t1.x + m5 * t1.y + m6 * t1.z),
-                t2.z + (m8 * t1.x + m9 * t1.y + m10 * t1.z),
-                1.0
-            ]
-        }
+        return Mat4{v:[
+            m0, m4, m8, 0.0,
+            m1, m5, m9, 0.0,
+            m2, m6, m10, 0.0,
+            t2.x + (m0 * t1.x + m1 * t1.y + m1 * t1.z),
+            t2.y + (m4 * t1.x + m5 * t1.y + m6 * t1.z),
+            t2.z + (m8 * t1.x + m9 * t1.y + m10 * t1.z),
+            1.0
+        ]}
     }
 
     pub fn perspective(fov_y:f32, aspect:f32, near:f32, far:f32) -> Mat4{
         let f = 1.0 / f32::tan(fov_y / 2.0);
         let nf = 1.0 / (near - far);
-        return Mat4{
-            v:[
-                f / aspect, 0.0, 0.0, 0.0,
-                0.0, f , 0.0, 0.0,
-                0.0, 0.0, (far + near) * nf, -1.0,
-                0.0, 0.0, (2.0 * far * near) * nf, 0.0
+        return Mat4{v:[
+            f / aspect, 0.0, 0.0, 0.0,
+            0.0, f , 0.0, 0.0,
+            0.0, 0.0, (far + near) * nf, -1.0,
+            0.0, 0.0, (2.0 * far * near) * nf, 0.0
+        ]}
+    }
 
-            ]
-        }
+    pub fn ortho(left:f32, right:f32, top:f32, bottom:f32, near:f32, far:f32) -> Mat4{
+        let lr = 1.0 / (left - right);
+        let bt = 1.0 / (bottom - top);
+        let nf = 1.0 / (near - far);
+        return Mat4{v:[
+            -2.0 * lr, 0.0, 0.0, (left+right) * lr,
+            0.0, -2.0 * bt, 0.0, (top+bottom) * bt,
+            0.0, 0.0, 2.0 * nf, (far + near) * nf,
+            0.0, 0.0, 0.0, 1.0
+        ]}
     }
 } 
 

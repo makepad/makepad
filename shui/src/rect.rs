@@ -3,25 +3,25 @@ use crate::shader::*;
 use crate::cx::*;
 use crate::cxdrawing::*;
 
-pub struct Rect{
+pub struct Quad{
     pub shader_id:usize,
     pub id:u32,
     pub color: Vec4
 }
 
-impl Style for Rect{
+impl Style for Quad{
     fn style(cx:&mut Cx)->Self{
         let mut sh = Shader::def(); 
         Self::def_shader(&mut sh);
         Self{
             shader_id:cx.shaders.add(sh),
             id:0,
-            color:color("red")
+            color:color("green")
         }
     }
 }
 
-impl Rect{
+impl Quad{
     pub fn def_shader(sh: &mut Shader){
         // lets add the draw shader lib
         Cx::def_shader(sh);
@@ -52,7 +52,7 @@ impl Rect{
             }
 
             fn vertex()->vec4{
-                return vec4(pos*vec2(w, h)+vec2(x, y),0.,1.);
+                return vec4(pos*vec2(w, h)+vec2(x, y),0.,1.) * camera_projection;
             }
 
             fn pixel()->vec4{
@@ -82,12 +82,12 @@ impl Rect{
         }
     }
 
-    pub fn draw_sized<'a>(&mut self, cx:&'a mut Cx, w:f32, h:f32)->&'a mut Draw{
+    pub fn draw_sized<'a>(&mut self, cx:&'a mut Cx, w:f32, h:f32, pad:Pad)->&'a mut Draw{
         let dr = cx.drawing.instance(cx.shaders.get(self.shader_id));
         self.set_uniforms(dr);
         
-        let geom = cx.turtle.walk_wh(Value::Const(w), Value::Const(h), Pad::zero());
-        println!("{:?}", geom);
+        let geom = cx.turtle.walk_wh(Value::Const(w), Value::Const(h), pad);
+
         dr.rect("x,y,w,h", geom);
         dr.vec4("color", &self.color);
 

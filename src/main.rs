@@ -1,6 +1,8 @@
 #![allow(dead_code)]
 
 use shui::*;
+mod button;
+use crate::button::*;
 
 struct App{
     view:View,

@@ -278,6 +278,24 @@ impl ShBinary{
                     ty:left.ty
                 })
             }
+            else if right.ty == "mat4" && left.ty == "vec4"{
+                Ok(Sl{
+                    sl:format!("{}{}{}", left.sl, self.op.to_string(), right.sl),
+                    ty:left.ty
+                })
+            }
+            else if right.ty == "mat3" && left.ty == "vec3"{
+                Ok(Sl{
+                    sl:format!("{}{}{}", left.sl, self.op.to_string(), right.sl),
+                    ty:left.ty
+                })
+            }
+            else if right.ty == "mat2" && left.ty == "vec2"{
+                Ok(Sl{
+                    sl:format!("{}{}{}", left.sl, self.op.to_string(), right.sl),
+                    ty:left.ty
+                })
+            }
             else{
                 Err(SlErr{
                     msg:format!("Left type {} not the same as right {} in binary op {}{}{}", left.ty, right.ty, left.sl, self.op.to_string(), right.sl)

@@ -1,0 +1,13 @@
+[features]
+default = ["mtl"]
+ogl = []
+mtl = []
+
+[package]
+name = "makepad"
+version = "0.1.0"
+authors = ["arc"]
+edition = "2018"
+
+[dependencies]
+shui = {path="./shui"}

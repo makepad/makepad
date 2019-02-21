@@ -33,10 +33,10 @@ mod shader;
 
 mod rect;
 mod text;
-mod button;
 
 pub use crate::cx::*;
 pub use crate::cxdrawing::*;
-pub use crate::button::*;
 pub use crate::math::*;
 pub use crate::shader::*;
+pub use crate::rect::*;
+pub use crate::text::*;
