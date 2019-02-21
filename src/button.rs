@@ -18,7 +18,7 @@ impl Style for Button{
             time:0.0,
             view:View::new(),
             lay:Lay{
-                w:Value::Const(100.0),
+                w:Value::None,
                 h:Value::Const(100.0),
                 ..Lay::padded(10.0)
             },
@@ -51,14 +51,14 @@ impl Button{
         self.view.begin(cx, &self.lay);
 
         // however our turtle stack needs to remain independent
-        self.bg.color = color("green");
+        self.bg.color = color("coral");
         self.bg.begin(cx, &self.lay);
 
         self.bg.color = color("orange");
         self.bg.draw_sized(cx, 20.0, 20.0, margin(0,0,0,0));
         self.bg.draw_sized(cx, 20.0, 20.0, margin(10,0,0,0));
         
-        self.text.draw_text(cx, "Hi World");
+        self.text.draw_text(cx, "Im here");
 
         self.bg.end(cx);
 

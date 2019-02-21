@@ -30,6 +30,7 @@ mod cxfonts;
 mod cxturtle;
 
 mod math;
+mod colors;
 mod shader;
 
 mod rect;
@@ -41,3 +42,4 @@ pub use crate::math::*;
 pub use crate::shader::*;
 pub use crate::rect::*;
 pub use crate::text::*;
+pub use crate::colors::*;

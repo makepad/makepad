@@ -134,7 +134,7 @@ impl Text{
             dr.float("x", turtle.walk_x);
             dr.float("y", turtle.walk_y);
             dr.float("font_size", self.font_size);
-            dr.float("font_base", 0.0);
+            dr.float("font_base", 1.0);
              
             turtle.walk_x += glyph.advance * self.font_size;
         }

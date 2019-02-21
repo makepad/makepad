@@ -2,6 +2,8 @@
 // Shader AST typedefs
 
 pub use shader_ast::*;
+pub use crate::math::*;
+pub use crate::colors::*;
 
 // The AST block
 #[derive(Clone)]

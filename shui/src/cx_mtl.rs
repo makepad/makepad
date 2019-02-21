@@ -1,5 +1,4 @@
 use std::mem;
-use std::ffi::CStr;
 
 use cocoa::base::id as cocoa_id;
 use cocoa::foundation::{NSAutoreleasePool,NSUInteger};
@@ -12,7 +11,6 @@ use winit::os::macos::WindowExt;
 
 pub use crate::cx_shared::*;
 use crate::cxdrawing::*;
-use crate::cxshaders::*;
 
 impl Cx{
 
@@ -164,7 +162,8 @@ impl Cx{
         layer.set_drawable_size(CGSize::new(draw_size.width as f64, draw_size.height as f64));
 
         let command_queue = device.new_command_queue();
-       
+
+        glutin_window.set_position(winit::dpi::LogicalPosition::new(1920.0,400.0));
         
         self.shaders.compile_all_shaders(&device);
         let mut current_layer_size:Option<winit::dpi::LogicalSize> = None;
