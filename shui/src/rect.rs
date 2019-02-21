@@ -6,10 +6,6 @@ use crate::cxdrawing::*;
 pub struct Rect{
     pub shader_id:usize,
     pub id:u32,
-    pub x: f32,
-    pub y: f32,
-    pub w: f32,
-    pub h: f32,
     pub color: Vec4
 }
 
@@ -20,11 +16,7 @@ impl Style for Rect{
         Self{
             shader_id:cx.shaders.add(sh),
             id:0,
-            x:0.0,
-            y:0.0,
-            w:1.0,
-            h:1.0,
-            color:Vec4{x:1.0,y:0.0,z:0.0,w:0.0}
+            color:color("red")
         }
     }
 }
@@ -64,7 +56,7 @@ impl Rect{
             }
 
             fn pixel()->vec4{
-                return vec4(color.rgb*fac, fac);
+                return vec4(color.rgb*color.a, color.a);
             }
 
         }));
@@ -72,18 +64,46 @@ impl Rect{
         //sh.log =1;
     }
 
-    pub fn draw_at<'a>(&mut self, cx:&'a mut Cx, x:f32, y:f32, w:f32, h:f32)->&'a mut Draw{
-        let dr = cx.drawing.instance(cx.shaders.get(self.shader_id));
+    // allocate the instance slot
+    pub fn begin<'a>(&mut self, cx:&'a mut Cx, lay:&Lay)->&'a Draw{
+        self.draw_abs(cx,0.0,0.0,0.0,0.0);
+        cx.turtle.begin(lay);
+        return cx.drawing.push_instance(); // store a ref to our instance
+    }
 
+    // write the rect instance
+    pub fn end(&mut self, cx:&mut Cx){
+        cx.drawing.pop_instance(&cx.shaders, cx.turtle.end());
+    }
+
+    pub fn set_uniforms(&mut self, dr:&mut Draw){
         if dr.first{
             dr.ufloat("fac", 1.0);
         }
+    }
+
+    pub fn draw_sized<'a>(&mut self, cx:&'a mut Cx, w:f32, h:f32)->&'a mut Draw{
+        let dr = cx.drawing.instance(cx.shaders.get(self.shader_id));
+        self.set_uniforms(dr);
+        
+        let geom = cx.turtle.walk_wh(Value::Const(w), Value::Const(h), Pad::zero());
+        println!("{:?}", geom);
+        dr.rect("x,y,w,h", geom);
+        dr.vec4("color", &self.color);
+
+        dr
+    }
+
+    pub fn draw_abs<'a>(&mut self, cx:&'a mut Cx, x:f32, y:f32, w:f32, h:f32)->&'a mut Draw{
+        let dr = cx.drawing.instance(cx.shaders.get(self.shader_id));
+        self.set_uniforms(dr);
 
         dr.float("x", x);
         dr.float("y", y);
         dr.float("w", w);
         dr.float("h", h);
         dr.vec4("color", &self.color);
+
         dr
     }
 }

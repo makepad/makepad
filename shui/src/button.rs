@@ -6,7 +6,8 @@ use crate::rect::*;
 use crate::text::*;
 
 pub struct Button{
-    pub dn:DrawNode,
+    pub view:View,
+    pub lay:Lay,
     pub time:f32,
     pub bg: Rect,
     pub text: Text,
@@ -18,10 +19,17 @@ impl Style for Button{
     fn style(cx:&mut Cx)->Self{
         Self{
             time:0.0,
-            dn:DrawNode{..Default::default()},
+            view:View::new(),
+            lay:Lay{
+                w:Value::Const(100.0),
+                h:Value::Const(100.0),
+                ..Lay::padded(10.0)
+            },
             label:"OK".to_string(),
             did_click:false,
-            bg:Rect{..Style::style(cx)},
+            bg:Rect{
+                ..Style::style(cx)
+            },
             text:Text{..Style::style(cx)}
         }
     }
@@ -42,7 +50,23 @@ impl Button{
     }
 
     pub fn draw_with_label(&mut self, cx:&mut Cx, _label: &str){
-        self.dn.begin(cx);
+        // this marks a tree node.
+        self.view.begin(cx, &self.lay);
+
+        // however our turtle stack needs to remain independent
+        //self.bg.begin(cx, &self.lay);
+
+        self.bg.color = vec4(1.,0.,0.,1.);
+        self.bg.draw_sized(cx, 20.0, 20.0);
+
+        //self.bg.end(cx);
+
+        self.view.end(cx);
+    }
+}
+
+
+
         /*
         self.time = self.time + 0.01;
         for i in 0..200000{
@@ -53,9 +77,6 @@ impl Button{
                 f32::sin(i as f32 / 5.0+self.time), 
                 f32::cos(i as f32 / 3.2+self.time),
                 0.01, 0.01);
-        }*/
         self.text.draw_text(cx, "HELLO WORLD");
-
-        self.dn.end(cx);
-    }
-}
+       }*/
+ 

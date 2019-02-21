@@ -82,7 +82,8 @@ pub struct AssembledGLShader{
     pub texture_slots:Vec<ShVar>,
 
     pub fragment:String,
-    pub vertex:String
+    pub vertex:String,
+    pub named_instance_props: NamedInstanceProps
 }
 
 #[derive(Default,Clone)]
@@ -97,7 +98,8 @@ pub struct CompiledShader{
     pub uniforms_dr: Vec<GLUniform>,
     pub uniforms_dl: Vec<GLUniform>,
     pub uniforms_cx: Vec<GLUniform>,
-    pub texture_slots: Vec<GLUniform>
+    pub texture_slots: Vec<GLUniform>,
+    pub named_instance_props: NamedInstanceProps
 }
 
 #[derive(Default,Clone)]
@@ -671,7 +673,8 @@ impl CxShaders{
             uniforms_cx:uniforms_cx,
             texture_slots:texture_slots,
             fragment:pix_out,
-            vertex:vtx_out
+            vertex:vtx_out,
+            named_instance_props:NamedInstanceProps::construct(sh, &instances)
         })
     }
 
@@ -741,6 +744,7 @@ impl CxShaders{
                 uniforms_dr:Self::compile_get_uniforms(program, sh, &ash.uniforms_dr),
                 texture_slots:Self::compile_get_texture_slots(program, &ash.texture_slots),
                 assembled_shader:ash,
+                named_instance_props:ash.named_instance_props,
                 ..Default::default()
             })
         }

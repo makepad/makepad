@@ -720,3 +720,34 @@ pub fn assemble_fn_and_deps(sh:&Shader, cx:&mut SlCx)->Result<String, SlErr>{
 
     Ok(out)
 }
+
+#[derive(Default,Clone)]
+pub struct NamedInstanceProps{
+    pub x: Option<usize>,
+    pub y: Option<usize>,
+    pub w: Option<usize>,
+    pub h: Option<usize>,
+}
+
+impl NamedInstanceProps{
+    pub fn construct(sh:&Shader, instances:&Vec<ShVar>)->NamedInstanceProps{
+        let mut x = None;
+        let mut y = None;
+        let mut w = None;
+        let mut h = None;
+        let mut slot = 0;
+        for inst in instances{
+            match inst.name.as_ref(){
+                "x"=>x = Some(slot),
+                "y"=>y = Some(slot),
+                "w"=>w = Some(slot),
+                "h"=>h = Some(slot),
+                _=>()
+            }
+            slot += sh.get_type_slots(&inst.ty);
+        };
+        NamedInstanceProps{
+            x:x,y:y,w:w,h:h
+        }
+    }
+}

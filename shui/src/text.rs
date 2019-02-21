@@ -101,7 +101,7 @@ impl Text{
     pub fn draw_text(&mut self, cx:&mut Cx, text:&str){
         let dr = cx.drawing.instance(cx.shaders.get(self.shader_id));
         let font = cx.fonts.get(self.font_id);
-        let turtle = &mut cx.turtle;
+        let turtle = &mut cx.turtle.turtles.last_mut().unwrap();
         if dr.first{
             dr.texture("texture", font.texture_id);
             dr.uvec2f("tex_size", font.width as f32, font.height as f32);
@@ -124,12 +124,12 @@ impl Text{
             dr.vec4f("font_geom",glyph.x1 ,glyph.y1 ,glyph.x2 ,glyph.y2);
             dr.vec4f("font_tc",glyph.tx1 ,glyph.ty1 ,glyph.tx2 ,glyph.ty2);
             dr.vec4f("color",1.0,1.0,1.0,1.0);
-            dr.float("x", turtle.x);
-            dr.float("y", turtle.y);
+            dr.float("x", turtle.walk_x);
+            dr.float("y", turtle.walk_y);
             dr.float("font_size", self.font_size);
             dr.float("font_base", 0.0);
              
-            turtle.x += glyph.advance * self.font_size;
+            turtle.walk_x += glyph.advance * self.font_size;
         }
      
     }

@@ -31,7 +31,9 @@ impl<'a> SlCx<'a>{
             ShVarStore::UniformCx=>return format!("{}(_uni_cx.{})", mty, var.name),
             ShVarStore::Instance=>{
                 if let SlTarget::Pixel = self.target{
-                    self.auto_vary.push(var.clone());
+                    if self.auto_vary.iter().find(|v|v.name == var.name).is_none(){
+                        self.auto_vary.push(var.clone());
+                    }
                     return format!("_vary.{}",var.name);
                 }
                 else{
@@ -40,7 +42,9 @@ impl<'a> SlCx<'a>{
             },
             ShVarStore::Geometry=>{
                 if let SlTarget::Pixel = self.target{
-                    self.auto_vary.push(var.clone());
+                    if self.auto_vary.iter().find(|v|v.name == var.name).is_none(){
+                        self.auto_vary.push(var.clone());
+                    }
                     return format!("_vary.{}",var.name);
                 }
                 else{
@@ -57,15 +61,12 @@ impl<'a> SlCx<'a>{
 
 #[derive(Default,Clone)]
 pub struct AssembledMtlShader{
- //   pub geometry_slots:usize,
     pub instance_slots:usize,
- //   pub geometry_attribs:usize,
- //   pub instance_attribs:usize,
     pub uniforms_dr: Vec<ShVar>,
     pub uniforms_dl: Vec<ShVar>,
     pub uniforms_cx: Vec<ShVar>,
     pub texture_slots:Vec<ShVar>,
-
+    pub named_instance_props: NamedInstanceProps,
     pub mtlsl:String,
 }
 
@@ -144,7 +145,8 @@ pub struct CompiledShader{
     pub shader_id: usize,
     pub assembled_shader: AssembledMtlShader,
     pub geom_vbuf:MetalBuffer,
-    pub geom_ibuf:MetalBuffer
+    pub geom_ibuf:MetalBuffer,
+    pub named_instance_props: NamedInstanceProps
 }
 
 #[derive(Default,Clone)]
@@ -360,16 +362,17 @@ impl CxShaders{
         mtl_out.push_str(&pix_cx.defargs_call);
         mtl_out.push_str(");\n};\n");
 
-        //if sh.log != 0{
+        if sh.log != 0{
             println!("---- Metal shader -----\n{}",mtl_out);
-        //}
-       
-        Ok(AssembledMtlShader{
+        }
+
+         Ok(AssembledMtlShader{
             instance_slots:instance_slots,
             uniforms_dr:uniforms_dr,
             uniforms_dl:uniforms_dl,
             uniforms_cx:uniforms_cx,
             texture_slots:texture_slots,
+            named_instance_props:NamedInstanceProps::construct(sh, &instances),
             mtlsl:mtl_out
         })
     }
@@ -402,6 +405,7 @@ impl CxShaders{
                     Some(device.new_render_pipeline_state(&rpd).unwrap())
                 },
                 library:Some(library),
+                named_instance_props:ash.named_instance_props.clone(),
                 assembled_shader:ash,
                 geom_ibuf:{
                     let mut geom_ibuf = MetalBuffer{..Default::default()};

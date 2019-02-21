@@ -157,7 +157,7 @@ fn generate_fn_def(item:ItemFn)->TokenStream{
     quote!{
         ShFn{
             name:#name.to_string(),
-            args:vec![#(#args),*],
+            args:{let mut v=Vec::new();#(v.push(#args);)*v},
             ret:#return_type.to_string(),
             block:Some(#block)
         }
@@ -235,7 +235,7 @@ fn generate_block(block:Block)->TokenStream{
     }
     return quote!{
         ShBlock{
-            stmts:vec![#(Box::new(#stmts)),*]
+            stmts:{let mut v=Vec::new();#(v.push(Box::new(#stmts));)*v}
         }
     }
 }
@@ -288,7 +288,8 @@ fn generate_expr(expr:Expr)->TokenStream{
                 for arg in expr.args{
                     args.push(generate_expr(arg));
                 }
-                return quote!{ShExpr::ShCall(ShCall{call:#seg.to_string(), args:vec![#(Box::new(#args)),*]})}
+                
+                return quote!{ShExpr::ShCall(ShCall{call:#seg.to_string(), args:{let mut v=Vec::new();#(v.push(Box::new(#args));)*v}})}
             }
             else{
                  return error(expr.span(), "call identifier not simple");
@@ -548,10 +549,10 @@ fn generate_root(expr:Expr)->TokenStream{
 
             quote!{ 
                 ShAst{
-                    types:vec![],
-                    vars:vec![#(#vars),*],
-                    consts:vec![#(#consts),*],
-                    fns:vec![#(#fns),*]
+                    types:Vec::new(),//{let mut v=Vec::new();#(v.push(#types);)*v},
+                    vars:{let mut v=Vec::new();#(v.push(#vars);)*v},
+                    consts:{let mut v=Vec::new();#(v.push(#consts);)*v},
+                    fns:{let mut v=Vec::new();#(v.push(#fns);)*v}
                 }
             }
         }
