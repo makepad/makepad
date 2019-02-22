@@ -19,17 +19,17 @@ impl Style for Button{
             time:0.0,
             view:View::new(),
             layout:Layout{
-                w:Percent(50.0),
-                h:Percent(50.0),
+                w:Computed,
+                h:Computed,
                 ..Layout::new()
             },
             bg_layout:Layout{
-               align:Align::center(),
-                ..Layout::filled_paddedf(10.0,10.0,10.0,10.0)
+                ..Layout::paddedf(10.0,10.0,10.0,10.0)
             },
             label:"OK".to_string(),
             did_click:false,
             bg:Quad{
+                color:color("gray"),
                 ..Style::style(cx)
             },
             text:Text{..Style::style(cx)}
@@ -51,33 +51,17 @@ impl Button{
         self.did_click
     }
 
-    pub fn draw_with_label(&mut self, cx:&mut Cx, _label: &str){
+    pub fn draw_with_label(&mut self, cx:&mut Cx, label: &str){
         // this marks a tree node.
         self.view.begin(cx, &self.layout);
 
         // however our turtle stack needs to remain independent
-        self.bg.color = color("coral");
         self.bg.begin(cx, &self.bg_layout);
 
-        self.bg.color = color("purple");
-        self.bg.begin(cx, &self.bg_layout);
+        //self.bg.draw_sized(cx, Fixed(40.0),Fixed(140.0),Margin::zero());
 
-        self.bg.color = color("orange");
-        //self.bg.draw_sized(cx, Value::Percent(100.0), Value::Const(200.0), margin(0,0,0,0));
-
-        self.bg.color = color("orange");
-        self.bg.draw_sized(cx, Fixed(10.0), Fixed(10.0), margin(0,0,5,5));
-        self.bg.draw_sized(cx, Fixed(10.0), Fixed(10.0), margin(0,0,5,5));
-        //self.bg.draw_sized(cx, 10.0, 10.0, margin(0,0,5,5));
-        self.bg.color = color("pink");
-        for i in 0..100{
-            self.bg.color = vec4(i as f32/1000.0,i as f32/1000.0,i as f32/1000.0,1.0);
-            self.bg.draw_sized(cx, Fixed(10.0), Fixed(10.0), margin(0,0,5,5));
-        }
-
-        //self.text.draw_text(cx, "Im here");
-        self.bg.end(cx);
-
+        self.text.draw_text(cx, Computed, Computed, label);
+        
         self.bg.end(cx);
 
         self.view.end(cx);

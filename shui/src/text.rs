@@ -15,6 +15,7 @@ pub struct Text{
     pub text:String,
     pub color: Vec4,
     pub font_size:f32,
+    pub line_spacing:f32,
     pub wrapping:Wrapping,
 }
 
@@ -27,6 +28,7 @@ impl Style for Text{
             font_id:cx.fonts.load("fonts/ubuntu_regular_256.font", &mut cx.textures),
             text:"".to_string(),
             font_size:10.0,
+            line_spacing:1.3,
             wrapping:Wrapping::Word,
             color:Vec4{x:1.0,y:1.0,z:1.0,w:1.0}
         }
@@ -106,8 +108,8 @@ impl Text{
         let dr = cx.drawing.instance(cx.shaders.get(self.shader_id));
         let font = cx.fonts.get(self.font_id);
 
-        let mut wx = x.eval_width(&cx.turtle);
-        let mut wy = y.eval_height(&cx.turtle);
+        let wx = x.eval_width(&cx.turtle);
+        let wy = y.eval_height(&cx.turtle);
 
         if dr.first{
             dr.texture("texture", font.texture_id);
@@ -115,39 +117,105 @@ impl Text{
             dr.uvec4f("list_clip", -50000.0,-50000.0,50000.0,50000.0);
         }
 
-        if let Some(turtle) = &mut cx.turtle.turtles.last_mut(){
-            if wx.is_nan(){
-                wx = turtle.walk_x
-            }
-            if wy.is_nan(){
-                wy = turtle.walk_y
-            }
-        }
-        // lets draw 'str' from char a to z
-        for c in text.chars(){
-            
-            if c >= '\u{10000}'{
-                continue
-            }
-            // lets look up the glyph
-            let slot = font.unicodes[c as usize];
-            if slot == 0 {
-                continue
-            }
-           
-            let glyph = &font.glyphs[slot];
+        let mut chunk = Vec::new();
+        let mut width = 0.0;
 
-            dr.vec4f("draw_clip", -50000.0,-50000.0,50000.0,50000.0);
-            dr.vec4f("font_geom",glyph.x1 ,glyph.y1 ,glyph.x2 ,glyph.y2);
-            dr.vec4f("font_tc",glyph.tx1 ,glyph.ty1 ,glyph.tx2 ,glyph.ty2);
-            dr.vec4f("color",1.0,1.0,1.0,1.0);
-            dr.float("x", wx);
-            dr.float("y", wy);
-            dr.float("font_size", self.font_size);
-            dr.float("font_base", 1.0);
-             
-            wx += glyph.advance * self.font_size;
+        for (last,c) in text.chars().identify_last(){
+            let mut slot = 0;
+            let mut emit = last;
+
+            if c < '\u{10000}'{
+                slot = font.unicodes[c as usize];
+            }
+
+            if slot != 0 {
+                let glyph = &font.glyphs[slot];
+                width += glyph.advance * self.font_size;
+                match self.wrapping{
+                    Wrapping::Char=>{
+                        chunk.push(c);
+                        emit = true
+                    },
+                    Wrapping::Word=>{
+                        chunk.push(c);
+                        if c == 32 as char || c == 9 as char|| c == 10 as char|| c == 13 as char{
+                            emit = true;
+                        }
+                    },
+                    Wrapping::Line=>{
+                        chunk.push(c);
+                        if c == 10 as char|| c == 13 as char{
+                            emit = true;
+                        }
+                    },
+                    Wrapping::None=>{
+                        chunk.push(c);
+                    }
+                }
+            }
+            if emit{
+                let mut geom = cx.turtle.walk_wh(
+                    Fixed(width), 
+                    Fixed(self.font_size * self.line_spacing), 
+                    Margin::zero()
+                );
+                for wc in &chunk{
+                    let slot = font.unicodes[*wc as usize];
+                    let glyph = &font.glyphs[slot];
+                    dr.vec4f("draw_clip", -50000.0,-50000.0,50000.0,50000.0);
+                    dr.vec4f("font_geom",glyph.x1 ,glyph.y1 ,glyph.x2 ,glyph.y2);
+                    dr.vec4f("font_tc",glyph.tx1 ,glyph.ty1 ,glyph.tx2 ,glyph.ty2);
+                    dr.vec4f("color",1.0,1.0,1.0,1.0);
+                    dr.float("x", geom.x);
+                    dr.float("y", geom.y);
+                    dr.float("font_size", self.font_size);
+                    dr.float("font_base", 1.0);
+                    geom.x += glyph.advance * self.font_size;
+                }
+                width = 0.0;
+                chunk.truncate(0);
+            }
         }
      
+    }
+}
+
+// identifying last item in iterator
+
+trait IdentifyLast: Iterator + Sized {
+    fn identify_last(self) -> Iter<Self>;
+}
+
+impl<T> IdentifyLast for T where T: Iterator {
+    fn identify_last(mut self) -> Iter<Self> {
+        let e = self.next();
+        Iter {
+            iter: self,
+            buffer: e,
+        }
+    }
+}
+
+struct Iter<T> where T: Iterator {
+    iter: T,
+    buffer: Option<T::Item>,
+}
+
+impl<T> Iterator for Iter<T> where T: Iterator {
+    type Item = (bool, T::Item);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self.buffer.take() {
+            None => None,
+            Some(e) => {
+                match self.iter.next() {
+                    None => Some((true, e)),
+                    Some(f) => {
+                        self.buffer = Some(f);
+                        Some((false, e))
+                    },
+                }
+            },
+        }
     }
 }

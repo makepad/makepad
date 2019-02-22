@@ -307,52 +307,61 @@ impl CxTurtle{
         let w = f32::max(vw.eval_width(self),0.0);
         let h = f32::max(vh.eval_height(self),0.0);
 
-        let mut turtle = &mut self.turtles.last_mut().unwrap();
-        let (x,y) = match turtle.layout.direction{
-            Direction::Right=>{
-                if !turtle.layout.nowrap && (turtle.walk_x + margin.l + w) >
-                    (turtle.start_x + turtle.width - turtle.layout.padding.r){
-                    turtle.walk_x = turtle.start_x + turtle.layout.padding.l;
-                    turtle.walk_y += turtle.biggest;
-                    turtle.biggest = 0.0;
-                }
-                let x = turtle.walk_x + margin.l;
-                let y = turtle.walk_y + margin.t;
-                // walk it normally
-                turtle.walk_x += w + margin.l + margin.r;
+        if let Some(turtle) = self.turtles.last_mut(){
+            let (x,y) = match turtle.layout.direction{
+                Direction::Right=>{
+                    if !turtle.layout.nowrap && (turtle.walk_x + margin.l + w) >
+                        (turtle.start_x + turtle.width - turtle.layout.padding.r){
+                        turtle.walk_x = turtle.start_x + turtle.layout.padding.l;
+                        turtle.walk_y += turtle.biggest;
+                        turtle.biggest = 0.0;
+                    }
+                    let x = turtle.walk_x + margin.l;
+                    let y = turtle.walk_y + margin.t;
+                    // walk it normally
+                    turtle.walk_x += w + margin.l + margin.r;
 
-                // keep track of biggest item in the line (include item margin bottom)
-                let biggest = h + margin.t + margin.b;
-                if biggest > turtle.biggest{
-                    turtle.biggest = biggest;
+                    // keep track of biggest item in the line (include item margin bottom)
+                    let biggest = h + margin.t + margin.b;
+                    if biggest > turtle.biggest{
+                        turtle.biggest = biggest;
+                    }
+                    // update x2 bounds
+                    let bound_x2 = x + w; 
+                    if bound_x2 > turtle.bound_x2{
+                        turtle.bound_x2 = bound_x2;
+                    }
+                    // update y2 bounds (does not include item margin bottom)
+                    let bound_y2 = turtle.walk_y + h + margin.t;
+                    if bound_y2 > turtle.bound_y2{
+                        turtle.bound_y2 = bound_y2;
+                    }
+                    (x,y)
+                },
+                _=>{
+                    (turtle.walk_x + margin.l, turtle.walk_y + margin.t)
                 }
-                // update x2 bounds
-                let bound_x2 = x + w; 
-                if bound_x2 > turtle.bound_x2{
-                    turtle.bound_x2 = bound_x2;
-                }
-                // update y2 bounds (does not include item margin bottom)
-                let bound_y2 = turtle.walk_y + h + margin.t;
-                if bound_y2 > turtle.bound_y2{
-                    turtle.bound_y2 = bound_y2;
-                }
-                (x,y)
-            },
-            _=>{
-                (turtle.walk_x + margin.l, turtle.walk_y + margin.t)
+            };
+            if x < turtle.bound_x1{
+                turtle.bound_x1 = x;
             }
-        };
-        if x < turtle.bound_x1{
-            turtle.bound_x1 = x;
+            if y < turtle.bound_y1{
+                turtle.bound_y1 = y;
+            }
+            Rect{
+                x:x,
+                y:y,
+                w:w,
+                h:h
+            }
         }
-        if y < turtle.bound_y1{
-            turtle.bound_y1 = y;
-        }
-        Rect{
-            x:x,
-            y:y,
-            w:w,
-            h:h
+        else{
+             Rect{
+                x:0.0,
+                y:0.0,
+                w:w,
+                h:h
+            }
         }
     }
 

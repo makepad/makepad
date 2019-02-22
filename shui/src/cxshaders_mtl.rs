@@ -265,7 +265,7 @@ impl CxShaders{
         let instances = sh.flat_vars(ShVarStore::Instance);
         let mut varyings = sh.flat_vars(ShVarStore::Varying);
         let locals = sh.flat_vars(ShVarStore::Local);
-        let uniforms_cx = sh.flat_vars(ShVarStore::UniformCx);
+        let uniforms_cx = sh.flat_vars(ShVarStore::UniformCx); 
         let uniforms_dl = sh.flat_vars(ShVarStore::UniformDl);
         let uniforms_dr = sh.flat_vars(ShVarStore::Uniform);
 

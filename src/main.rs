@@ -34,7 +34,7 @@ impl App{
         if self.ok.handle_click(cx, ev){
             // do something!
         }
-    }
+    } 
 
     fn draw(&mut self, cx:&mut Cx){
         self.view.begin(cx, &Layout::filled_padded(10.0));
