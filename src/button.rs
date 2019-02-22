@@ -69,10 +69,11 @@ impl Button{
         self.bg.draw_sized(cx, Fixed(10.0), Fixed(10.0), margin(0,0,5,5));
         self.bg.draw_sized(cx, Fixed(10.0), Fixed(10.0), margin(0,0,5,5));
         //self.bg.draw_sized(cx, 10.0, 10.0, margin(0,0,5,5));
-        //for i in 0..10{
-          //  self.bg.color = vec4(i as f32/1000.0,i as f32/1000.0,i as f32/1000.0,1.0);
-       //    self.bg.draw_sized(cx, Fixed(10.0), Fixed(10.0), margin(0,0,5,5));
-      // }
+        self.bg.color = color("pink");
+        for i in 0..100{
+            self.bg.color = vec4(i as f32/1000.0,i as f32/1000.0,i as f32/1000.0,1.0);
+            self.bg.draw_sized(cx, Fixed(10.0), Fixed(10.0), margin(0,0,5,5));
+        }
 
         //self.text.draw_text(cx, "Im here");
         self.bg.end(cx);

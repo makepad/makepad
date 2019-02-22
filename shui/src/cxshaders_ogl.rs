@@ -661,9 +661,10 @@ impl CxShaders{
         pix_out.push_str("//Main function\n");
         pix_out.push_str(&pix_main);
 
-        println!("---------- Pixelshader:  ---------\n{}", pix_out);
-        println!("---------- Vertexshader:  ---------\n{}", vtx_out);
-
+        if sh.log != 0{
+            println!("---------- Pixelshader:  ---------\n{}", pix_out);
+            println!("---------- Vertexshader:  ---------\n{}", vtx_out);
+        }
         // we can also flatten our uniform variable set
         
         // lets composite our ShAst structure into a set of methods

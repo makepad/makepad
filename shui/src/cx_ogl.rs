@@ -54,6 +54,24 @@ impl Cx{
         String::from_utf8(CStr::from_ptr(raw_string as *const _).to_bytes().to_vec()).ok()
                                     .expect("gl_string: non-UTF8 string")
     }
+    
+    pub fn repaint(&mut self, logical_size:&winit::dpi::LogicalSize){
+        unsafe{
+            gl::Clear(gl::COLOR_BUFFER_BIT|gl::DEPTH_BUFFER_BIT);
+        }
+        
+        let camera_projection = Mat4::ortho(
+                0.0, logical_size.width as f32, 0.0, logical_size.height as f32, -100.0, 100.0, 
+                1.0,1.0
+        );
+        self.turtle.main_width = logical_size.width as f32;
+        self.turtle.main_height = logical_size.height as f32;
+
+        self.uniform_camera_projection(camera_projection);
+        
+        self.turtle.align_list.truncate(0);
+        self.exec_draw_list(0);
+    }
 
     pub fn event_loop<F>(&mut self, mut callback:F)
     where F: FnMut(&mut Cx, Ev),
@@ -102,6 +120,9 @@ impl Cx{
                             let dpi_factor = gl_window.get_hidpi_factor();
                             gl_window.resize(logical_size.to_physical(dpi_factor));
                             // lets resize the fractal framebuffer
+                            callback(self, Ev::Redraw);
+                            self.repaint(&logical_size);
+                            gl_window.swap_buffers().unwrap();
                         },
                         _ => ()
                     },
@@ -110,21 +131,8 @@ impl Cx{
             });
             callback(self, Ev::Redraw);
             
-            unsafe{
-                gl::Clear(gl::COLOR_BUFFER_BIT|gl::DEPTH_BUFFER_BIT);
-            }
-            
             if let Some(logical_size) = gl_window.get_inner_size(){
-                let camera_projection = Mat4::ortho(
-                        0.0, logical_size.width as f32, 0.0, logical_size.height as f32, -100.0, 100.0, 
-                        1.0,1.0
-                );
-
-                self.uniform_camera_projection(camera_projection);
-                
-                self.turtle.align_list.truncate(0);
-                self.exec_draw_list(0);
-
+                self.repaint(&logical_size);
                 gl_window.swap_buffers().unwrap();
             }
         }
