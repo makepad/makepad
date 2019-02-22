@@ -36,7 +36,7 @@ impl Style for App{
 impl App{
     fn handle(&mut self, cx:&mut Cx, ev:&Ev){
         if self.ok.handle_click(cx, ev){
-            // do something!
+            // we got clicked!
         }
     } 
 
@@ -49,7 +49,7 @@ impl App{
         self.oks.reset();
         for i in 0..500{
             //self.rc.draw_sized(cx,Fixed(5.0),Fixed(5.0),Margin::zero());
-            self.oks.add(&self.ok).draw_with_label(cx, &format!("OK"));
+            self.oks.add(&self.ok).draw_with_label(cx, &format!("OK{}",rand::random::<f32>()));
         }
 
         self.view.end(cx);

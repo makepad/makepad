@@ -112,9 +112,6 @@ impl Text{
         let dr = cx.drawing.instance_aligned(cx.shaders.get(self.shader_id), &mut cx.turtle);
         let font = cx.fonts.get(self.font_id);
 
-        //let wx = x.eval_width(&cx.turtle);
-        //let wy = y.eval_height(&cx.turtle);
-
         if dr.first{
             dr.texture("texture", font.texture_id);
             dr.uvec2f("tex_size", font.width as f32, font.height as f32);
@@ -168,17 +165,22 @@ impl Text{
                 for wc in &chunk{
                     let slot = font.unicodes[*wc as usize];
                     let glyph = &font.glyphs[slot];
-                    dr.vec4f("draw_clip", -50000.0,-50000.0,50000.0,50000.0);
-                    dr.vec4f("font_geom",glyph.x1 ,glyph.y1 ,glyph.x2 ,glyph.y2);
-                    dr.vec4f("font_tc",glyph.tx1 ,glyph.ty1 ,glyph.tx2 ,glyph.ty2);
-                    dr.vec4f("color",1.0,1.0,1.0,1.0);
-                    dr.float("x", geom.x);
-                    dr.float("y", geom.y);
                     let w = glyph.advance * self.font_size;
-                    dr.float("w", w);
-                    dr.float("h", height);
-                    dr.float("font_size", self.font_size);
-                    dr.float("font_base", 1.0);
+                    
+                    let data = [
+                        /*draw_clip*/ -50000.0,-50000.0,50000.0,50000.0,
+                        /*font_geom*/ glyph.x1 ,glyph.y1 ,glyph.x2 ,glyph.y2,
+                        /*font_tc*/ glyph.tx1 ,glyph.ty1 ,glyph.tx2 ,glyph.ty2,
+                        /*color*/ 1.0,1.0,1.0,1.0,
+                        /*x*/ geom.x,
+                        /*y*/ geom.y,
+                        /*w*/ w,
+                        /*h*/ height,
+                        /*font_size*/ self.font_size,
+                        /*font_base*/ 1.0
+                    ];
+                    dr.instance.extend_from_slice(&data);
+
                     geom.x += w;
                     count += 1;
                 }

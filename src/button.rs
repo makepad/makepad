@@ -46,7 +46,15 @@ impl Style for Button{
 impl Button{
     pub fn handle(&mut self, cx:&mut Cx, ev:&Ev){
         if ev.hit(&self.area, cx){
+            match ev{
+                Ev::FingerDown(fe)=>{
 
+                },
+                Ev::FingerMove(fe)=>{
+
+                },
+                _=>()
+            }
         }
    }
 

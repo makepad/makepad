@@ -90,9 +90,12 @@ impl Quad{
         let geom = cx.turtle.walk_wh(w, h, margin, None);
         
         // lets store our instance onto the turtle
+        let data = [
+            /*x,y,w,h*/geom.x,geom.y,geom.w,geom.h,
+            /*color*/self.color.x,self.color.y,self.color.z,self.color.w
+        ];
 
-        dc.rect("x,y,w,h", geom);
-        dc.vec4("color", &self.color);
+        dc.instance.extend_from_slice(&data);
 
         dc
     }
@@ -106,11 +109,11 @@ impl Quad{
         };
         self.set_uniforms(dc);
 
-        dc.float("x", x);
-        dc.float("y", y);
-        dc.float("w", w);
-        dc.float("h", h);
-        dc.vec4("color", &self.color);
+        let data = [
+            /*x,y,w,h*/x,y,w,h,
+            /*color*/self.color.x,self.color.y,self.color.z,self.color.w
+        ];
+        dc.instance.extend_from_slice(&data);
 
         dc
     }

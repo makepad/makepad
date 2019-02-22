@@ -149,53 +149,6 @@ impl Draw{
         }
     }
 
-    pub fn float(&mut self, _name: &str, v:f32){
-        self.instance.push(v);
-    }
-
-    pub fn rect(&mut self, _name: &str, rect:Rect){
-        self.instance.push(rect.x);
-        self.instance.push(rect.y);
-        self.instance.push(rect.w);
-        self.instance.push(rect.h);
-    }
-
-    pub fn vec2f(&mut self, _name: &str, x:f32, y:f32){
-        self.instance.push(x);
-        self.instance.push(y);
-    }
-
-    pub fn vec3f(&mut self, _name: &str, x:f32, y:f32, z:f32){
-        self.instance.push(x);
-        self.instance.push(y);
-        self.instance.push(z);
-    }
-
-    pub fn vec4f(&mut self, _name: &str, x:f32, y:f32, z:f32, w:f32){
-        self.instance.push(x);
-        self.instance.push(y);
-        self.instance.push(z);
-        self.instance.push(w);
-    }
-
-    pub fn vec2(&mut self, _name: &str, v:&Vec2){
-        self.instance.push(v.x);
-        self.instance.push(v.y);
-    }
-
-    pub fn vec3(&mut self, _name: &str, v:&Vec3){
-        self.instance.push(v.x);
-        self.instance.push(v.y);
-        self.instance.push(v.z);
-    }
-
-    pub fn vec4(&mut self, _name: &str, v:&Vec4){
-        self.instance.push(v.x);
-        self.instance.push(v.y);
-        self.instance.push(v.z);
-        self.instance.push(v.w);
-    }
-
     pub fn texture(&mut self, _name: &str, texture_id: usize){
         // how do we store these?
         self.textures.push(texture_id);
@@ -359,7 +312,7 @@ impl View{
 
 // area wraps a pointer into the geometry buffers
 // and reads the geometry right out of it
-#[derive(Clone, Default)]
+#[derive(Clone, Default, Debug, PartialEq)]
 pub struct Area{
     pub draw_list_id:usize,
     pub draw_id:usize,
