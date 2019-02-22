@@ -102,17 +102,27 @@ impl Text{
         }));
     }
 
-    pub fn draw_text(&mut self, cx:&mut Cx, text:&str){
+    pub fn draw_text(&mut self, cx:&mut Cx, x:Value, y:Value, text:&str){
         let dr = cx.drawing.instance(cx.shaders.get(self.shader_id));
         let font = cx.fonts.get(self.font_id);
 
-        let turtle = &mut cx.turtle.turtles.last_mut().unwrap();
+        let mut wx = x.eval_width(&cx.turtle);
+        let mut wy = y.eval_height(&cx.turtle);
+
         if dr.first{
             dr.texture("texture", font.texture_id);
             dr.uvec2f("tex_size", font.width as f32, font.height as f32);
             dr.uvec4f("list_clip", -50000.0,-50000.0,50000.0,50000.0);
         }
 
+        if let Some(turtle) = &mut cx.turtle.turtles.last_mut(){
+            if wx.is_nan(){
+                wx = turtle.walk_x
+            }
+            if wy.is_nan(){
+                wy = turtle.walk_y
+            }
+        }
         // lets draw 'str' from char a to z
         for c in text.chars(){
             
@@ -131,12 +141,12 @@ impl Text{
             dr.vec4f("font_geom",glyph.x1 ,glyph.y1 ,glyph.x2 ,glyph.y2);
             dr.vec4f("font_tc",glyph.tx1 ,glyph.ty1 ,glyph.tx2 ,glyph.ty2);
             dr.vec4f("color",1.0,1.0,1.0,1.0);
-            dr.float("x", turtle.walk_x);
-            dr.float("y", turtle.walk_y);
+            dr.float("x", wx);
+            dr.float("y", wy);
             dr.float("font_size", self.font_size);
             dr.float("font_base", 1.0);
              
-            turtle.walk_x += glyph.advance * self.font_size;
+            wx += glyph.advance * self.font_size;
         }
      
     }

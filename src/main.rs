@@ -6,16 +6,23 @@ use crate::button::*;
 
 struct App{
     view:View,
-    lay:Lay,
-    ok:Button
+    ok:Button,
+    debug_qd:Quad,
+    debug_tx:Text
 }
 
 impl Style for App{
     fn style(cx:&mut Cx)->Self{
         Self{
             view:View::new(),
-            lay:Lay::dynamic(),
             ok:Button{
+                ..Style::style(cx)
+            },
+            debug_qd:Quad{
+                ..Style::style(cx)
+            },
+            debug_tx:Text{
+                font_size:5.0,
                 ..Style::style(cx)
             }
         }
@@ -30,11 +37,28 @@ impl App{
     }
 
     fn draw(&mut self, cx:&mut Cx){
-        self.view.begin(cx, &self.lay);
+        self.view.begin(cx, &Layout::filled_padded(10.0));
         //self.text.draw_text(cx, "Hey world");
         self.ok.draw_with_label(cx, "OK");
 
         self.view.end(cx);
+
+        debug_pts_store.with(|c|{
+            let mut store = c.borrow_mut();
+            for (x,y,col,s) in store.iter(){
+                self.debug_qd.color = match col{
+                    0=>color("red"),
+                    1=>color("green"),
+                    2=>color("blue"),
+                    _=>color("yellow")
+                };
+                self.debug_qd.draw_abs(cx, *x, *y,2.0,2.0);
+                if s.len() != 0{
+                    self.debug_tx.draw_text(cx, Fixed(*x), Fixed(*y), s);
+                }
+            }
+            store.truncate(0);
+        })
     }
 }
 

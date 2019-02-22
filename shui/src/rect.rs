@@ -64,9 +64,11 @@ impl Quad{
     }
 
     // allocate the instance slot
-    pub fn begin<'a>(&mut self, cx:&'a mut Cx, lay:&Lay)->&'a Draw{
+    pub fn begin<'a>(&mut self, cx:&'a mut Cx, layout:&Layout)->&'a Draw{
         self.draw_abs(cx,0.0,0.0,0.0,0.0);
-        cx.turtle.begin(lay);
+        
+        cx.turtle.begin(layout);
+
         return cx.drawing.push_instance(); // store a ref to our instance
     }
 
@@ -81,11 +83,11 @@ impl Quad{
         }
     }
 
-    pub fn draw_sized<'a>(&mut self, cx:&'a mut Cx, w:f32, h:f32, margin:Margin)->&'a mut Draw{
+    pub fn draw_sized<'a>(&mut self, cx:&'a mut Cx, w:Value, h:Value, margin:Margin)->&'a mut Draw{
         let dr = cx.drawing.instance(cx.shaders.get(self.shader_id));
         self.set_uniforms(dr);
         
-        let geom = cx.turtle.walk_wh(Value::Const(w), Value::Const(h), margin);
+        let geom = cx.turtle.walk_wh(w, h, margin);
 
         dr.rect("x,y,w,h", geom);
         dr.vec4("color", &self.color);

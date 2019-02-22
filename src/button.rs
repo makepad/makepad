@@ -4,9 +4,10 @@ use shui::*;
 
 pub struct Button{
     pub view:View,
-    pub lay:Lay,
+    pub layout:Layout,
     pub time:f32,
     pub bg: Quad,
+    pub bg_layout:Layout,
     pub text: Text,
     pub label:String,
     pub did_click: bool
@@ -17,10 +18,13 @@ impl Style for Button{
         Self{
             time:0.0,
             view:View::new(),
-            lay:Lay{
-                w:Value::None,
-                h:Value::Const(100.0),
-                ..Lay::padded(10.0)
+            layout:Layout{
+                w:Fixed(100.0),
+                h:Computed,
+                ..Layout::new()
+            },
+            bg_layout:Layout{
+                ..Layout::filled_paddedf(0.0,0.0,0.0,0.0)
             },
             label:"OK".to_string(),
             did_click:false,
@@ -48,17 +52,25 @@ impl Button{
 
     pub fn draw_with_label(&mut self, cx:&mut Cx, _label: &str){
         // this marks a tree node.
-        self.view.begin(cx, &self.lay);
+        self.view.begin(cx, &self.layout);
 
         // however our turtle stack needs to remain independent
         self.bg.color = color("coral");
-        self.bg.begin(cx, &self.lay);
+        self.bg.begin(cx, &self.bg_layout);
 
         self.bg.color = color("orange");
-        self.bg.draw_sized(cx, 20.0, 20.0, margin(0,0,0,0));
-        self.bg.draw_sized(cx, 20.0, 20.0, margin(10,0,0,0));
-        
-        self.text.draw_text(cx, "Im here");
+        //self.bg.draw_sized(cx, Value::Percent(100.0), Value::Const(200.0), margin(0,0,0,0));
+
+        self.bg.color = color("orange");
+         self.bg.draw_sized(cx, Fixed(10.0), Fixed(10.0), margin(0,0,5,5));
+
+        //self.bg.draw_sized(cx, 10.0, 10.0, margin(0,0,5,5));
+        //for i in 0..10{
+          //  self.bg.color = vec4(i as f32/1000.0,i as f32/1000.0,i as f32/1000.0,1.0);
+       //    self.bg.draw_sized(cx, Fixed(10.0), Fixed(10.0), margin(0,0,5,5));
+      // }
+
+        //self.text.draw_text(cx, "Im here");
 
         self.bg.end(cx);
 

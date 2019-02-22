@@ -38,6 +38,8 @@ mod text;
 
 pub use crate::cx::*;
 pub use crate::cxdrawing::*;
+pub use crate::cxturtle::*;
+pub use crate::cxshaders::*;
 pub use crate::math::*;
 pub use crate::shader::*;
 pub use crate::rect::*;

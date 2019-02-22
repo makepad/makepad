@@ -2,6 +2,10 @@ use crate::shader::*;
 use crate::cx::*;
 use crate::cxshaders::*;
 pub use crate::cxturtle::*;
+pub use crate::cxturtle::Value::Computed;
+pub use crate::cxturtle::Value::Fixed;
+pub use crate::cxturtle::Value::Percent;
+pub use crate::cxturtle::Value::Expression;
 
 pub enum Ev{
     Redraw,
@@ -293,7 +297,7 @@ impl View{
         }
     }
 
-    pub fn begin(&mut self, cx:&mut Cx, lay:&Lay){
+    pub fn begin(&mut self, cx:&mut Cx, layout:&Layout){
         if !self.initialized{ // draw node needs initialization
             if cx.drawing.draw_lists_free.len() != 0{
                 self.draw_list_id = cx.drawing.draw_lists_free.pop().unwrap();
@@ -344,7 +348,7 @@ impl View{
         cx.drawing.draw_list_id = self.draw_list_id;
         cx.drawing.view_stack.push(self.clone());
         
-        cx.turtle.begin(lay);
+        cx.turtle.begin(layout);
         //cx.turtle.x = 0.0;
         //cx.turtle.y = 0.0;
     }

@@ -97,6 +97,9 @@ impl Cx{
             (logical_size.width / last_logical_size.width) as f32, 
             (logical_size.height / last_logical_size.height)as f32
         );
+        self.turtle.main_width = logical_size.width as f32;
+        self.turtle.main_height = logical_size.height as f32;
+        
         self.uniform_camera_projection(camera_projection);
        
         if let Some(drawable) = layer.next_drawable() {

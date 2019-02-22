@@ -37,53 +37,6 @@ pub fn vec4(x:f32, y:f32, z:f32, w:f32)->Vec4{
     Vec4{x:x, y:y, z:z, w:w}
 }
 
-#[derive(Clone, Default, Debug)]
-pub struct Padding{
-    pub l:f32,
-    pub t:f32,
-    pub r:f32,
-    pub b:f32
-}
-
-impl Padding{
-    pub fn zero()->Padding{
-        Padding{l:0.0,t:0.0,r:0.0,b:0.0}
-    }
-}
-
-pub fn padding(l:i32, t:i32, r:i32, b:i32)->Padding{
-    Padding{l:l as f32, t:t as f32, r:r as f32, b:b as f32}
-}
-
-#[derive(Clone, Default, Debug)]
-pub struct Margin{
-    pub l:f32,
-    pub t:f32,
-    pub r:f32,
-    pub b:f32
-}
-
-impl Margin{
-    pub fn zero()->Margin{
-        Margin{l:0.0,t:0.0,r:0.0,b:0.0}
-    }
-}
-
-pub fn margin(l:i32, t:i32, r:i32, b:i32)->Margin{
-    Margin{l:l as f32, t:t as f32, r:r as f32, b:b as f32}
-}
-
-#[derive(Clone, Default, Debug)]
-pub struct Rect{
-    pub x:f32,
-    pub y:f32,
-    pub w:f32,
-    pub h:f32
-}
-
-pub fn rect(x:f32, y:f32, w:f32, h:f32)->Rect{
-    Rect{x:x, y:y, w:w, h:h}
-}
 
 impl Mat4{
     pub fn identity() -> Mat4{
