@@ -5,6 +5,7 @@ use shui::*;
 #[derive(Clone)]
 pub struct Button{
     pub view:View,
+    pub area:Area,
     pub layout:Layout,
     pub time:f32,
     pub bg: Quad,
@@ -19,15 +20,17 @@ impl Style for Button{
         Self{
             time:0.0,
             view:View::new(),
+            area:Area::zero(),
             layout:Layout{
-                //w:Fixed(50.0),
-                //h:Fixed(50.0),
+                w:Fixed(50.0),
+                h:Fixed(50.0),
                 ..Layout::new()
             },
             bg_layout:Layout{
                 w:Computed,
                 h:Computed,
-                ..Layout::filled_paddedf(1.0,1.0,1.0,1.0)
+                margin:Margin::i32(1),
+                ..Layout::filled_padded(10.0)
             },
             label:"OK".to_string(),
             did_click:false,
@@ -41,9 +44,11 @@ impl Style for Button{
 }
 
 impl Button{
-    pub fn handle(&mut self, _cx:&mut Cx, _ev:&Ev){
-        // handle event and figure out if we got clicked
-    }
+    pub fn handle(&mut self, cx:&mut Cx, ev:&Ev){
+        if ev.hit(&self.area, cx){
+
+        }
+   }
 
     pub fn handle_click(&mut self, cx:&mut Cx, ev:&Ev)->bool{
         self.handle(cx, ev);
@@ -56,14 +61,14 @@ impl Button{
 
     pub fn draw_with_label(&mut self, cx:&mut Cx, label: &str){
         // this marks a tree node.
-       // self.view.begin(cx, &self.layout);
+        // self.view.begin(cx, &self.layout);
 
         // however our turtle stack needs to remain independent
         self.bg.begin(cx, &self.bg_layout);
 
         self.text.draw_text(cx, Computed, Computed, label);
         
-        self.bg.end(cx);
+        self.area = self.bg.end(cx);
 
         //self.view.end(cx);
     }

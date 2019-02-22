@@ -1,6 +1,5 @@
 use crate::shader::*;
 use crate::cx::*;
-use crate::cxshaders::*;
 pub use crate::cxturtle::*;
 pub use crate::cxturtle::Value::Computed;
 pub use crate::cxturtle::Value::Fixed;
@@ -8,17 +7,10 @@ pub use crate::cxturtle::Value::Percent;
 pub use crate::cxturtle::Value::Expression;
 
 #[derive(Clone, Default)]
-pub struct InstanceRef{
-    pub draw_list_id:usize,
-    pub draw_id:usize,
-    pub instance_offset:usize,
-}
-
-#[derive(Clone, Default)]
 pub struct CxDrawing{
     pub draw_lists: Vec<DrawList>,
     pub draw_lists_free: Vec<usize>,
-    pub instance_nesting: Vec<InstanceRef>,
+    pub instance_areas: Vec<Area>,
     pub view_stack: Vec<View>,
     pub draw_list_id: usize,
     pub frame_id: usize
@@ -32,7 +24,7 @@ impl CxDrawing{
     pub fn instance_aligned(&mut self, sh:&CompiledShader, turtle:&mut CxTurtle)->&mut Draw{
         let draw_list_id = self.draw_list_id;
         let dc = self.instance(sh);
-        turtle.align_list.push(AlignItem{
+        turtle.align_list.push(Area{
             draw_list_id:draw_list_id,
             draw_id:dc.draw_id,
             instance_offset:dc.current_instance_offset,
@@ -63,6 +55,7 @@ impl CxDrawing{
         if id >= draw_list.draws.len(){
             draw_list.draws.push(Draw{
                 draw_id:draw_list.draws.len(),
+                draw_list_id:self.draw_list_id,
                 sub_list_id:0,
                 shader_id:sh.shader_id,
                 instance:Vec::new(),
@@ -106,34 +99,20 @@ impl CxDrawing{
         let draw = &mut draw_list.draws[draw_id];
 
         // store our current instance properties so we can update-patch it in pop instance
-        self.instance_nesting.push(InstanceRef{
+        self.instance_areas.push(Area{
             draw_list_id: self.draw_list_id,
             draw_id:draw_id,
-            instance_offset:draw.current_instance_offset
+            instance_offset:draw.current_instance_offset,
+            instance_count:1
         });
         draw
     }
 
     // pops instance patching the supplied geometry in the instancebuffer
-    pub fn pop_instance(&mut self, cxsh:&CxShaders, geom:Rect){
-        let ir = self.instance_nesting.pop().unwrap();
-        let draw_list = &mut self.draw_lists[ir.draw_list_id];
-        let draw = &mut draw_list.draws[ir.draw_id];
-
-        // ok now we have to patch x/y/w/h into it
-        let csh = &cxsh.compiled_shaders[draw.shader_id];
-        if let Some(x) = csh.named_instance_props.x{
-            draw.instance[ir.instance_offset + x] = geom.x;
-        }
-        if let Some(y) = csh.named_instance_props.y{
-            draw.instance[ir.instance_offset + y] = geom.y;
-        }
-        if let Some(w) = csh.named_instance_props.w{
-            draw.instance[ir.instance_offset + w] = geom.w;
-        }
-        if let Some(h) = csh.named_instance_props.h{
-            draw.instance[ir.instance_offset + h] = geom.h;
-        }
+    pub fn pop_instance(&mut self, shaders:&CxShaders, geom:Rect)->Area{
+        let area = self.instance_areas.pop().unwrap();
+        area.set_rect_sep(self, shaders, &geom);
+        area
     }
 }
 
@@ -146,6 +125,7 @@ pub struct GLInstanceVAO{
 #[derive(Default,Clone)]
 pub struct Draw{
     pub draw_id:usize,
+    pub draw_list_id:usize,
     pub sub_list_id:usize, // if not 0, its a subnode
     pub shader_id:usize, // if shader_id changed, delete gl vao
     pub instance:Vec<f32>,
@@ -159,6 +139,16 @@ pub struct Draw{
 }
 
 impl Draw{
+
+    pub fn get_current_area(&self)->Area{
+        Area{
+            draw_list_id:self.draw_list_id,
+            draw_id:self.draw_id,
+            instance_offset:self.current_instance_offset,
+            instance_count:1
+        }
+    }
+
     pub fn float(&mut self, _name: &str, v:f32){
         self.instance.push(v);
     }
@@ -364,5 +354,76 @@ impl View{
     pub fn end(&mut self, cx:&mut Cx){
         cx.drawing.view_stack.pop();
         cx.turtle.end(&mut cx.drawing,&cx.shaders);
+    }
+}
+
+// area wraps a pointer into the geometry buffers
+// and reads the geometry right out of it
+#[derive(Clone, Default)]
+pub struct Area{
+    pub draw_list_id:usize,
+    pub draw_id:usize,
+    pub instance_offset:usize,
+    pub instance_count:usize
+}
+
+impl Area{
+    pub fn zero()->Area{
+        Area{draw_list_id:0, draw_id:0,instance_offset:0, instance_count:0}
+    }
+
+    pub fn get_rect_sep(&self, drawing:&CxDrawing, shaders:&CxShaders)->Rect{
+        let draw_list = &drawing.draw_lists[self.draw_list_id];
+        let draw = &draw_list.draws[self.draw_id];
+        let csh = &shaders.compiled_shaders[draw.shader_id];
+        // ok now we have to patch x/y/w/h into it
+        if let Some(ix) = csh.named_instance_props.x{
+            let x = draw.instance[self.instance_offset + ix];
+            if let Some(iy) = csh.named_instance_props.y{
+                let y = draw.instance[self.instance_offset + iy];
+                if let Some(iw) = csh.named_instance_props.w{
+                    let w = draw.instance[self.instance_offset + iw];
+                    if let Some(ih) = csh.named_instance_props.h{
+                        let h = draw.instance[self.instance_offset + ih];
+                        return Rect{x:x,y:y,w:w,h:h}
+                    }
+                }
+            }
+        }
+        Rect::zero()
+    }
+
+    pub fn get_rect(&self, cx:&Cx)->Rect{
+        self.get_rect_sep(&cx.drawing, &cx.shaders)
+    }
+
+    pub fn set_rect_sep(&self, drawing:&mut CxDrawing, shaders:&CxShaders, rect:&Rect){
+        let draw_list = &mut drawing.draw_lists[self.draw_list_id];
+        let draw = &mut draw_list.draws[self.draw_id];
+        let csh = &shaders.compiled_shaders[draw.shader_id];        // ok now we have to patch x/y/w/h into it
+
+        if let Some(ix) = csh.named_instance_props.x{
+            draw.instance[self.instance_offset + ix] = rect.x;
+        }
+        if let Some(iy) = csh.named_instance_props.y{
+            draw.instance[self.instance_offset + iy] = rect.y;
+        }
+        if let Some(iw) = csh.named_instance_props.w{
+            draw.instance[self.instance_offset + iw] = rect.w;
+        }
+        if let Some(ih) = csh.named_instance_props.h{
+            draw.instance[self.instance_offset + ih] = rect.h;
+        }
+    }
+
+    pub fn set_rect(&self, cx:&mut Cx, rect:&Rect){
+        self.set_rect_sep(&mut cx.drawing, &cx.shaders, rect)
+    }
+
+    pub fn contains(&self, what:&Vec2, cx:&Cx)->bool{
+        let rect = self.get_rect(cx);
+
+        return what.x >= rect.x && what.x <= rect.x + rect.w &&
+            what.y >= rect.y && what.y <= rect.y + rect.h;
     }
 }

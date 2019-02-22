@@ -94,8 +94,10 @@ pub struct Rect{
     pub h:f32
 }
 
-pub fn rect(x:f32, y:f32, w:f32, h:f32)->Rect{
-    Rect{x:x, y:y, w:w, h:h}
+impl Rect{
+    pub fn zero()->Rect{
+        Rect{x:0.0,y:0.0,w:0.0,h:0.0}
+    }
 }
 
 #[derive(Clone, Default, Debug)]
@@ -110,10 +112,9 @@ impl Margin{
     pub fn zero()->Margin{
         Margin{l:0.0,t:0.0,r:0.0,b:0.0}
     }
-}
-
-pub fn margin(l:i32, t:i32, r:i32, b:i32)->Margin{
-    Margin{l:l as f32, t:t as f32, r:r as f32, b:b as f32}
+    pub fn i32(v:i32)->Margin{
+        Margin{l:v as f32,t:v as f32,r:v as f32,b:v as f32}
+    }
 }
 
 #[derive(Clone, Default, Debug)]
@@ -128,10 +129,9 @@ impl Padding{
     pub fn zero()->Padding{
         Padding{l:0.0,t:0.0,r:0.0,b:0.0}
     }
-}
-
-pub fn padding(l:i32, t:i32, r:i32, b:i32)->Padding{
-    Padding{l:l as f32, t:t as f32, r:r as f32, b:b as f32}
+    pub fn i32(v:i32)->Padding{
+        Padding{l:v as f32,t:v as f32,r:v as f32,b:v as f32}
+    }
 }
 
 
@@ -246,17 +246,9 @@ impl Turtle{
 }
 
 #[derive(Clone, Default)]
-pub struct AlignItem{
-    pub draw_list_id:usize,
-    pub draw_id:usize,
-    pub instance_offset:usize,
-    pub instance_count:usize
-}
-
-#[derive(Clone, Default)]
 pub struct CxTurtle{
     pub turtles:Vec<Turtle>,
-    pub align_list:Vec<AlignItem>,
+    pub align_list:Vec<Area>,
     pub main_width:f32,
     pub main_height:f32,
     pub debug_pts:RefCell<Vec<(f32,f32,i32)>>
@@ -273,8 +265,10 @@ impl CxTurtle{
         self.debug_pts.borrow_mut().push((x,y,color));
     }
 
-    pub fn instance_aligned_set_count(&mut self, instance_count:usize){
-        self.align_list.last_mut().unwrap().instance_count = instance_count;
+    pub fn instance_aligned_set_count(&mut self, instance_count:usize)->Area{
+        let mut area =  self.align_list.last_mut().unwrap();
+        area.instance_count = instance_count;
+        area.clone()
     }
 
     // begin a new turtle with a layout
@@ -460,7 +454,7 @@ impl CxTurtle{
 
         // now well walk the top turtle with our old geometry and margins
         if self.turtles.len() == 0{
-            return rect(0.0,0.0,0.0,0.0);
+            return Rect::zero();
         }
 
         return self.walk_wh(w, h, margin, Some(WalkWrap{

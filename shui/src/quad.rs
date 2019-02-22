@@ -71,7 +71,7 @@ impl Quad{
     }
 
     // write the rect instance
-    pub fn end(&mut self, cx:&mut Cx){
+    pub fn end(&mut self, cx:&mut Cx)->Area{
         cx.end_instance()
     }
 

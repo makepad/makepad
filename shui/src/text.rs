@@ -63,6 +63,8 @@ impl Text{
             let color:vec4<Instance>;
             let x:float<Instance>;
             let y:float<Instance>;
+            let w:float<Instance>;
+            let h:float<Instance>;
             let font_size:float<Instance>;
             let font_base:float<Instance>;
             let tex_coord:vec2<Varying>;
@@ -106,7 +108,7 @@ impl Text{
         }));
     }
 
-    pub fn draw_text(&mut self, cx:&mut Cx, x:Value, y:Value, text:&str){
+    pub fn draw_text(&mut self, cx:&mut Cx, x:Value, y:Value, text:&str)->Area{
         let dr = cx.drawing.instance_aligned(cx.shaders.get(self.shader_id), &mut cx.turtle);
         let font = cx.fonts.get(self.font_id);
 
@@ -156,9 +158,10 @@ impl Text{
                 }
             }
             if emit{
+                let height = self.font_size * self.line_spacing;
                 let mut geom = cx.turtle.walk_wh(
                     Fixed(width), 
-                    Fixed(self.font_size * self.line_spacing), 
+                    Fixed(height), 
                     Margin::zero(),
                     None
                 );
@@ -171,16 +174,19 @@ impl Text{
                     dr.vec4f("color",1.0,1.0,1.0,1.0);
                     dr.float("x", geom.x);
                     dr.float("y", geom.y);
+                    let w = glyph.advance * self.font_size;
+                    dr.float("w", w);
+                    dr.float("h", height);
                     dr.float("font_size", self.font_size);
                     dr.float("font_base", 1.0);
-                    geom.x += glyph.advance * self.font_size;
+                    geom.x += w;
                     count += 1;
                 }
                 width = 0.0;
                 chunk.truncate(0);
             }
         }
-        cx.turtle.instance_aligned_set_count(count);
+        cx.turtle.instance_aligned_set_count(count)
     }
 }
 

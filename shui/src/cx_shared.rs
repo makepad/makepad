@@ -67,9 +67,9 @@ impl Cx{
         self.drawing.push_instance(draw_id)
     }
 
-    pub fn end_instance(&mut self){
+    pub fn end_instance(&mut self)->Area{
         let rect = self.turtle.end(&mut self.drawing,&self.shaders);
-        self.drawing.pop_instance(&self.shaders, rect);
+        self.drawing.pop_instance(&self.shaders, rect)
     }
 
 }
