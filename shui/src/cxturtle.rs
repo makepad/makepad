@@ -276,7 +276,7 @@ impl CxTurtle{
     pub fn instance_aligned_set_count(&mut self, instance_count:usize){
         self.align_list.last_mut().unwrap().instance_count = instance_count;
     }
-    
+
     // begin a new turtle with a layout
     pub fn begin(&mut self, layout:&Layout){
 
@@ -393,6 +393,7 @@ impl CxTurtle{
     }
 
     fn do_align(&self, dx:f32, dy:f32, walkwrap:WalkWrap){
+        
         // shift all the items in the drawlist with dx/dy
         for i in walkwrap.turtle.align_start..self.align_list.len(){
             let align_item = &self.align_list[i];

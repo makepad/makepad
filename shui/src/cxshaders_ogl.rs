@@ -98,7 +98,8 @@ pub struct CompiledShader{
     pub inst_attribs: Vec<GLAttribute>,
     pub geom_vb: gl::types::GLuint,
     pub geom_ib: gl::types::GLuint,
-    pub assembled_shader: AssembledGLShader,
+    //pub assembled_shader: AssembledGLShader,
+    pub instance_slots:usize,
     pub uniforms_dr: Vec<GLUniform>,
     pub uniforms_dl: Vec<GLUniform>,
     pub uniforms_cx: Vec<GLUniform>,
@@ -749,7 +750,8 @@ impl CxShaders{
                 uniforms_dr:Self::compile_get_uniforms(program, sh, &ash.uniforms_dr),
                 texture_slots:Self::compile_get_texture_slots(program, &ash.texture_slots),
                 named_instance_props:ash.named_instance_props.clone(),
-                assembled_shader:ash,
+                instance_slots:ash.instance_slots,
+                //assembled_shader:ash,
                 ..Default::default()
             })
         }

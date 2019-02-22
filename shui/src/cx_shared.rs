@@ -62,9 +62,9 @@ impl Cx{
         }
     }
 
-    pub fn begin_instance(&mut self,layout:&Layout)->&mut Draw{
+    pub fn begin_instance(&mut self,layout:&Layout, draw_id:usize)->&mut Draw{
         self.turtle.begin(layout);
-        self.drawing.push_instance()
+        self.drawing.push_instance(draw_id)
     }
 
     pub fn end_instance(&mut self){

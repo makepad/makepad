@@ -11,6 +11,7 @@ use winit::os::macos::WindowExt;
 
 pub use crate::cx_shared::*;
 use crate::cxdrawing::*;
+use crate::events::*;
 
 impl Cx{
 

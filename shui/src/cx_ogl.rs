@@ -9,6 +9,7 @@ use std::ffi::CStr;
 pub use crate::cx_shared::*;
 use crate::cxdrawing::*;
 use crate::cxshaders::*;
+use crate::events::*;
 
 impl Cx{
      pub fn exec_draw_list(&mut self, id: usize){
@@ -37,7 +38,7 @@ impl Cx{
                 unsafe{
                     gl::UseProgram(shgl.program);
                     gl::BindVertexArray(draw.vao.vao);
-                    let instances = draw.instance.len() / shgl.assembled_shader.instance_slots;
+                    let instances = draw.instance.len() / shgl.instance_slots;
                     let indices = sh.geometry_indices.len();
                     CxShaders::set_uniform_buffer_fallback(&shgl.uniforms_cx, &self.uniforms);
                     CxShaders::set_uniform_buffer_fallback(&shgl.uniforms_dl, &draw_list.uniforms);

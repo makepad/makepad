@@ -7,14 +7,6 @@ pub use crate::cxturtle::Value::Fixed;
 pub use crate::cxturtle::Value::Percent;
 pub use crate::cxturtle::Value::Expression;
 
-pub enum Ev{
-    Redraw,
-    Animate,
-    FingerMove{x:f32, y:f32},
-    FingerDown{x:f32, y:f32},
-    FingerUp{x:f32, y:f32},
-}
-
 #[derive(Clone, Default)]
 pub struct InstanceRef{
     pub draw_list_id:usize,
@@ -61,7 +53,7 @@ impl CxDrawing{
                 dc.first = false;
                 return dc
             }
-        }  
+        }
 
         // we need a new draw
         let id = draw_list.draws_len;
@@ -109,14 +101,14 @@ impl CxDrawing{
     }
 
     // push instance so it can be written to again in pop_instance
-    pub fn push_instance(&mut self)->&mut Draw{
+    pub fn push_instance(&mut self, draw_id:usize)->&mut Draw{
         let draw_list = &mut self.draw_lists[self.draw_list_id];
-        let draw = &mut draw_list.draws[draw_list.draws_len - 1];
+        let draw = &mut draw_list.draws[draw_id];
 
         // store our current instance properties so we can update-patch it in pop instance
         self.instance_nesting.push(InstanceRef{
             draw_list_id: self.draw_list_id,
-            draw_id:draw_list.draws_len - 1,
+            draw_id:draw_id,
             instance_offset:draw.current_instance_offset
         });
         draw
@@ -343,6 +335,7 @@ impl View{
             if parent_draw_list.draws_len > parent_draw_list.draws.len(){
                 parent_draw_list.draws.push({
                     Draw{
+                        draw_id:parent_draw_list.draws.len(),
                         sub_list_id:self.draw_list_id,
                         ..Default::default()
                     }

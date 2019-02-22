@@ -65,9 +65,9 @@ impl Quad{
     }
 
     pub fn begin<'a>(&mut self, cx:&'a mut Cx, layout:&Layout)->&'a mut Draw{
-        self.draw_abs(cx, true, 0.0,0.0,0.0,0.0);
+        let draw_id = self.draw_abs(cx, true, 0.0,0.0,0.0,0.0).draw_id;
         
-        cx.begin_instance(layout)
+        cx.begin_instance(layout, draw_id)
     }
 
     // write the rect instance

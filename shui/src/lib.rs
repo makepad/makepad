@@ -35,12 +35,14 @@ mod shader;
 
 mod quad;
 mod text;
+mod events;
 
 pub use crate::cx::*;
 pub use crate::cxdrawing::*;
 pub use crate::cxturtle::*;
 pub use crate::cxshaders::*;
 pub use crate::math::*;
+pub use crate::events::*;
 pub use crate::shader::*;
 pub use crate::quad::*;
 pub use crate::text::*;
