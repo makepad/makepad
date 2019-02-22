@@ -56,7 +56,7 @@ impl Button{
 
     pub fn draw_with_label(&mut self, cx:&mut Cx, label: &str){
         // this marks a tree node.
-        //self.view.begin(cx, &self.layout);
+       // self.view.begin(cx, &self.layout);
 
         // however our turtle stack needs to remain independent
         self.bg.begin(cx, &self.bg_layout);

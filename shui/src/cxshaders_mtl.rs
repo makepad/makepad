@@ -73,12 +73,13 @@ pub struct AssembledMtlShader{
 #[derive(Default,Clone)]
 pub struct MetalBuffer{
     pub buffer:Option<metal::Buffer>,
-    pub size:usize
+    pub size:usize,
+    pub used:usize
 }
 
 impl MetalBuffer{
     pub fn update_with_f32_data(&mut self, device:&Device, data:&Vec<f32>){
-        if self.size != data.len(){
+        if self.size < data.len(){
             self.buffer = None;
         }
         if let None = &self.buffer{
@@ -97,10 +98,11 @@ impl MetalBuffer{
             }
             buffer.did_modify_range(NSRange::new(0 as u64, (data.len() * std::mem::size_of::<f32>()) as u64));
         }
+        self.used = data.len()
     }
 
     pub fn update_with_u32_data(&mut self, device:&Device, data:&Vec<u32>){
-        if self.size != data.len(){
+        if self.size < data.len(){
             self.buffer = None;
         }
         if let None = &self.buffer{
@@ -119,6 +121,7 @@ impl MetalBuffer{
             }
             buffer.did_modify_range(NSRange::new(0 as u64, (data.len() * std::mem::size_of::<u32>()) as u64));
         }
+        self.used = data.len()
     }
 }
 
