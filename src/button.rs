@@ -19,13 +19,13 @@ impl Style for Button{
             time:0.0,
             view:View::new(),
             layout:Layout{
-                w:Percent(20.0),
-                h:Fixed(40.0),
+                w:Percent(50.0),
+                h:Percent(50.0),
                 ..Layout::new()
             },
             bg_layout:Layout{
-                align:Align::center(),
-                ..Layout::filled_paddedf(0.0,0.0,0.0,0.0)
+               align:Align::center(),
+                ..Layout::filled_paddedf(10.0,10.0,10.0,10.0)
             },
             label:"OK".to_string(),
             did_click:false,
@@ -59,6 +59,9 @@ impl Button{
         self.bg.color = color("coral");
         self.bg.begin(cx, &self.bg_layout);
 
+        self.bg.color = color("purple");
+        self.bg.begin(cx, &self.bg_layout);
+
         self.bg.color = color("orange");
         //self.bg.draw_sized(cx, Value::Percent(100.0), Value::Const(200.0), margin(0,0,0,0));
 
@@ -72,6 +75,7 @@ impl Button{
       // }
 
         //self.text.draw_text(cx, "Im here");
+        self.bg.end(cx);
 
         self.bg.end(cx);
 

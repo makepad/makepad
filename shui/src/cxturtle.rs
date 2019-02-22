@@ -34,7 +34,7 @@ impl Value{
             Value::Expression(_v)=>0.0,
             Value::Percent(v)=>{
                 if let Some(turtle) = cx_turtle.turtles.last(){
-                    turtle.width * (v * 0.01)
+                    (turtle.width - (turtle.layout.padding.l+turtle.layout.padding.r)) * (v * 0.01)
                 }
                 else{
                     cx_turtle.main_width * (v * 0.01)
@@ -50,7 +50,7 @@ impl Value{
             Value::Expression(_v)=>0.0,
             Value::Percent(v)=>{
                 if let Some(turtle) = cx_turtle.turtles.last(){
-                    turtle.height * (v * 0.01)
+                    (turtle.height - (turtle.layout.padding.t+turtle.layout.padding.b))* (v * 0.01)
                 }
                 else{
                     cx_turtle.main_height * (v * 0.01)
@@ -391,17 +391,15 @@ impl CxTurtle{
                 ((old.width - (old.layout.padding.l + old.layout.padding.r)) - (old.bound_x2 - (old.start_x + old.layout.padding.l)));
             let mut dy = old.layout.align.fy * 
                 ((old.height - (old.layout.padding.t + old.layout.padding.b)) - (old.bound_y2 - (old.start_y + old.layout.padding.t)));
-            if dx.is_nan(){ dx = 0.0}
-            if dy.is_nan(){ dy = 0.0}
-            // so, we know our total width and our bounding width
-            // now we should be able to center it
-            // we iterate over our alignment list from 
+            if dx.is_nan(){dx = 0.0}
+            if dy.is_nan(){dy = 0.0}
+
+            // shift all the items in the drawlist with dx/dy
             for i in old.align_start..self.align_list.len(){
                 let align_item = &self.align_list[i];
                 let draw_list = &mut drawing.draw_lists[align_item.draw_list_id];
                 let draw = &mut draw_list.draws[align_item.draw_id];
-                // alright we have draw
-                // ok now we have to patch x/y into it
+
                 let csh = &shaders.compiled_shaders[draw.shader_id];
                 if let Some(x) = csh.named_instance_props.x{
                     draw.instance[align_item.instance_offset + x] += dx;

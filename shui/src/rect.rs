@@ -63,7 +63,6 @@ impl Quad{
         //sh.log =1;
     }
 
-    // allocate the instance slot
     pub fn begin<'a>(&mut self, cx:&'a mut Cx, layout:&Layout)->&'a mut Draw{
         self.draw_abs(cx, true, 0.0,0.0,0.0,0.0);
         
