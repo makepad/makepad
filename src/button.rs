@@ -19,11 +19,12 @@ impl Style for Button{
             time:0.0,
             view:View::new(),
             layout:Layout{
-                w:Fixed(100.0),
-                h:Computed,
+                w:Percent(20.0),
+                h:Fixed(40.0),
                 ..Layout::new()
             },
             bg_layout:Layout{
+                align:Align::center(),
                 ..Layout::filled_paddedf(0.0,0.0,0.0,0.0)
             },
             label:"OK".to_string(),
@@ -62,8 +63,8 @@ impl Button{
         //self.bg.draw_sized(cx, Value::Percent(100.0), Value::Const(200.0), margin(0,0,0,0));
 
         self.bg.color = color("orange");
-         self.bg.draw_sized(cx, Fixed(10.0), Fixed(10.0), margin(0,0,5,5));
-
+        self.bg.draw_sized(cx, Fixed(10.0), Fixed(10.0), margin(0,0,5,5));
+        self.bg.draw_sized(cx, Fixed(10.0), Fixed(10.0), margin(0,0,5,5));
         //self.bg.draw_sized(cx, 10.0, 10.0, margin(0,0,5,5));
         //for i in 0..10{
           //  self.bg.color = vec4(i as f32/1000.0,i as f32/1000.0,i as f32/1000.0,1.0);

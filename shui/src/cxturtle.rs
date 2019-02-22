@@ -1,6 +1,8 @@
 pub use crate::math::*;
 pub use std::cell::RefCell;
 pub use std::thread;
+pub use crate::cxdrawing::*;
+pub use crate::cxshaders::*;
 
 thread_local!(pub static debug_pts_store: RefCell<Vec<(f32,f32,i32,String)>> = RefCell::new(Vec::new()));
 pub fn debug_pt(x:f32, y:f32, color:i32, s:&str){
@@ -73,15 +75,15 @@ pub struct Align{
 }
 
 impl Align{
-    fn left_top()->Align{Align{fx:0.,fy:0.}}
-    fn center_top()->Align{Align{fx:0.5,fy:0.0}}
-    fn right_top()->Align{Align{fx:1.0,fy:0.0}}
-    fn left_center()->Align{Align{fx:0.0,fy:0.5}}
-    fn center()->Align{Align{fx:0.5,fy:0.5}}
-    fn right_center()->Align{Align{fx:1.0,fy:0.5}}
-    fn left_bottom()->Align{Align{fx:0.,fy:1.0}}
-    fn center_bottom()->Align{Align{fx:0.5,fy:1.0}}
-    fn right_bottom()->Align{Align{fx:1.0,fy:1.0}}
+    pub fn left_top()->Align{Align{fx:0.,fy:0.}}
+    pub fn center_top()->Align{Align{fx:0.5,fy:0.0}}
+    pub fn right_top()->Align{Align{fx:1.0,fy:0.0}}
+    pub fn left_center()->Align{Align{fx:0.0,fy:0.5}}
+    pub fn center()->Align{Align{fx:0.5,fy:0.5}}
+    pub fn right_center()->Align{Align{fx:1.0,fy:0.5}}
+    pub fn left_bottom()->Align{Align{fx:0.,fy:1.0}}
+    pub fn center_bottom()->Align{Align{fx:0.5,fy:1.0}}
+    pub fn right_bottom()->Align{Align{fx:1.0,fy:1.0}}
 }
 
 #[derive(Clone, Default, Debug)]
@@ -224,6 +226,7 @@ impl Layout{
 
 #[derive(Clone, Default)]
 pub struct Turtle{
+    pub align_start:usize,
     pub walk_x:f32,
     pub walk_y:f32,
     pub start_x:f32,
@@ -243,8 +246,16 @@ impl Turtle{
 }
 
 #[derive(Clone, Default)]
+pub struct AlignItem{
+    pub draw_list_id:usize,
+    pub draw_id:usize,
+    pub instance_offset:usize
+}
+
+#[derive(Clone, Default)]
 pub struct CxTurtle{
     pub turtles:Vec<Turtle>,
+    pub align_list:Vec<AlignItem>,
     pub main_width:f32,
     pub main_height:f32,
     pub debug_pts:RefCell<Vec<(f32,f32,i32)>>
@@ -274,6 +285,7 @@ impl CxTurtle{
         let height = layout.h.eval_height(self);
 
         self.turtles.push(Turtle{
+            align_start:self.align_list.len(),
             layout:layout.clone(),
             start_x:start_x,
             start_y:start_y,
@@ -344,7 +356,8 @@ impl CxTurtle{
         }
     }
 
-    pub fn end(&mut self)->Rect{
+    // end a turtle returning computed geometry
+    pub fn end(&mut self, drawing:&mut CxDrawing, shaders:&CxShaders)->Rect{
         let old = self.turtles.pop().unwrap();
     
         let w = if old.width.is_nan(){
@@ -374,6 +387,29 @@ impl CxTurtle{
         // if we have alignment set, we should now align our childnodes
         if old.layout.align.fx > 0.0 || old.layout.align.fy > 0.0{
 
+            let mut dx = old.layout.align.fx * 
+                ((old.width - (old.layout.padding.l + old.layout.padding.r)) - (old.bound_x2 - (old.start_x + old.layout.padding.l)));
+            let mut dy = old.layout.align.fy * 
+                ((old.height - (old.layout.padding.t + old.layout.padding.b)) - (old.bound_y2 - (old.start_y + old.layout.padding.t)));
+            if dx.is_nan(){ dx = 0.0}
+            if dy.is_nan(){ dy = 0.0}
+            // so, we know our total width and our bounding width
+            // now we should be able to center it
+            // we iterate over our alignment list from 
+            for i in old.align_start..self.align_list.len(){
+                let align_item = &self.align_list[i];
+                let draw_list = &mut drawing.draw_lists[align_item.draw_list_id];
+                let draw = &mut draw_list.draws[align_item.draw_id];
+                // alright we have draw
+                // ok now we have to patch x/y into it
+                let csh = &shaders.compiled_shaders[draw.shader_id];
+                if let Some(x) = csh.named_instance_props.x{
+                    draw.instance[align_item.instance_offset + x] += dx;
+                }
+                if let Some(y) = csh.named_instance_props.y{
+                    draw.instance[align_item.instance_offset + y] += dy;
+                }
+            }
         }
 
         // now well walk the top turtle with our old geometry and margins

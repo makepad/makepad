@@ -121,6 +121,7 @@ impl Cx{
             self.buffers.uni_cx.update_with_f32_data(&device, &self.uniforms);
 
             // ok now we should call our render thing
+            self.turtle.align_list.truncate(0);
             self.exec_draw_list(0, &device, encoder);
 
             encoder.end_encoding();

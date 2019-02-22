@@ -122,7 +122,7 @@ impl Cx{
 
                 self.uniform_camera_projection(camera_projection);
                 
-                // lets paint the drawcommand tree
+                self.turtle.align_list.truncate(0);
                 self.exec_draw_list(0);
 
                 gl_window.swap_buffers().unwrap();

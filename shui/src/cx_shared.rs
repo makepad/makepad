@@ -61,4 +61,15 @@ impl Cx{
             self.uniforms[CX_UNI_CAMERA_PROJECTION+i] = v.v[i];
         }
     }
+
+    pub fn begin_instance(&mut self,layout:&Layout)->&mut Draw{
+        self.turtle.begin(layout);
+        self.drawing.push_instance()
+    }
+
+    pub fn end_instance(&mut self){
+        let rect = self.turtle.end(&mut self.drawing,&self.shaders);
+        self.drawing.pop_instance(&self.shaders, rect);
+    }
+
 }

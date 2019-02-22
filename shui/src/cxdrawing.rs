@@ -37,6 +37,17 @@ impl CxDrawing{
         &mut self.draw_lists[self.draw_list_id]
     }
 
+    pub fn instance_aligned(&mut self, sh:&CompiledShader, turtle:&mut CxTurtle)->&mut Draw{
+        let draw_list_id = self.draw_list_id;
+        let dc = self.instance(sh);
+        turtle.align_list.push(AlignItem{
+            draw_list_id:draw_list_id,
+            draw_id:dc.draw_id,
+            instance_offset:dc.current_instance_offset
+        });
+        dc
+    }
+
     pub fn instance(&mut self, sh:&CompiledShader)->&mut Draw{
         let draw_list = &mut self.draw_lists[self.draw_list_id];
         
@@ -58,6 +69,7 @@ impl CxDrawing{
         // see if we need to add a new one
         if id >= draw_list.draws.len(){
             draw_list.draws.push(Draw{
+                draw_id:draw_list.draws.len(),
                 sub_list_id:0,
                 shader_id:sh.shader_id,
                 instance:Vec::new(),
@@ -95,11 +107,12 @@ impl CxDrawing{
         draw
     }
 
-    // push 
+    // push instance so it can be written to again in pop_instance
     pub fn push_instance(&mut self)->&mut Draw{
         let draw_list = &mut self.draw_lists[self.draw_list_id];
         let draw = &mut draw_list.draws[draw_list.draws_len - 1];
-        // we used to be a sublist, construct vao
+
+        // store our current instance properties so we can update-patch it in pop instance
         self.instance_nesting.push(InstanceRef{
             draw_list_id: self.draw_list_id,
             draw_id:draw_list.draws_len - 1,
@@ -108,6 +121,7 @@ impl CxDrawing{
         draw
     }
 
+    // pops instance patching the supplied geometry in the instancebuffer
     pub fn pop_instance(&mut self, cxsh:&CxShaders, geom:Rect){
         let ir = self.instance_nesting.pop().unwrap();
         let draw_list = &mut self.draw_lists[ir.draw_list_id];
@@ -139,6 +153,7 @@ pub struct GLInstanceVAO{
 
 #[derive(Default,Clone)]
 pub struct Draw{
+    pub draw_id:usize,
     pub sub_list_id:usize, // if not 0, its a subnode
     pub shader_id:usize, // if shader_id changed, delete gl vao
     pub instance:Vec<f32>,
@@ -355,6 +370,6 @@ impl View{
 
     pub fn end(&mut self, cx:&mut Cx){
         cx.drawing.view_stack.pop();
-        cx.turtle.end();
+        cx.turtle.end(&mut cx.drawing,&cx.shaders);
     }
 }

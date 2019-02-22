@@ -52,7 +52,7 @@ impl App{
                     2=>color("blue"),
                     _=>color("yellow")
                 };
-                self.debug_qd.draw_abs(cx, *x, *y,2.0,2.0);
+                self.debug_qd.draw_abs(cx, false, *x, *y,2.0,2.0);
                 if s.len() != 0{
                     self.debug_tx.draw_text(cx, Fixed(*x), Fixed(*y), s);
                 }

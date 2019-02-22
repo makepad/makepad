@@ -64,47 +64,54 @@ impl Quad{
     }
 
     // allocate the instance slot
-    pub fn begin<'a>(&mut self, cx:&'a mut Cx, layout:&Layout)->&'a Draw{
-        self.draw_abs(cx,0.0,0.0,0.0,0.0);
+    pub fn begin<'a>(&mut self, cx:&'a mut Cx, layout:&Layout)->&'a mut Draw{
+        self.draw_abs(cx, true, 0.0,0.0,0.0,0.0);
         
-        cx.turtle.begin(layout);
-
-        return cx.drawing.push_instance(); // store a ref to our instance
+        cx.begin_instance(layout)
     }
 
     // write the rect instance
     pub fn end(&mut self, cx:&mut Cx){
-        cx.drawing.pop_instance(&cx.shaders, cx.turtle.end());
+        cx.end_instance()
     }
 
-    pub fn set_uniforms(&mut self, dr:&mut Draw){
-        if dr.first{
-            dr.ufloat("fac", 1.0);
+    pub fn set_uniforms(&mut self, dc:&mut Draw){
+        if dc.first{
+            dc.ufloat("fac", 1.0);
         }
     }
 
     pub fn draw_sized<'a>(&mut self, cx:&'a mut Cx, w:Value, h:Value, margin:Margin)->&'a mut Draw{
-        let dr = cx.drawing.instance(cx.shaders.get(self.shader_id));
-        self.set_uniforms(dr);
+        
+        let dc = cx.drawing.instance_aligned(cx.shaders.get(self.shader_id), &mut cx.turtle);
+        
+        self.set_uniforms(dc);
         
         let geom = cx.turtle.walk_wh(w, h, margin);
+        
+        // lets store our instance onto the turtle
 
-        dr.rect("x,y,w,h", geom);
-        dr.vec4("color", &self.color);
+        dc.rect("x,y,w,h", geom);
+        dc.vec4("color", &self.color);
 
-        dr
+        dc
     }
 
-    pub fn draw_abs<'a>(&mut self, cx:&'a mut Cx, x:f32, y:f32, w:f32, h:f32)->&'a mut Draw{
-        let dr = cx.drawing.instance(cx.shaders.get(self.shader_id));
-        self.set_uniforms(dr);
+    pub fn draw_abs<'a>(&mut self, cx:&'a mut Cx, align:bool, x:f32, y:f32, w:f32, h:f32)->&'a mut Draw{
+        let dc = if align{
+           cx.drawing.instance_aligned(cx.shaders.get(self.shader_id), &mut cx.turtle)
+        }
+        else{
+           cx.drawing.instance(cx.shaders.get(self.shader_id))
+        };
+        self.set_uniforms(dc);
 
-        dr.float("x", x);
-        dr.float("y", y);
-        dr.float("w", w);
-        dr.float("h", h);
-        dr.vec4("color", &self.color);
+        dc.float("x", x);
+        dc.float("y", y);
+        dc.float("w", w);
+        dc.float("h", h);
+        dc.vec4("color", &self.color);
 
-        dr
+        dc
     }
 }
