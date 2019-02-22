@@ -40,7 +40,7 @@ impl Cx{
                     draw.buffers.uni_dr.update_with_f32_data(device, &draw.uniforms);
                 }
 
-                let instances = (draw.instance.len() / shc.assembled_shader.instance_slots) as u64;
+                let instances = (draw.instance.len() / shc.instance_slots) as u64;
                 if let Some(pipeline_state) = &shc.pipeline_state{
                     encoder.set_render_pipeline_state(pipeline_state);
                     if let Some(buf) = &shc.geom_vbuf.buffer{encoder.set_vertex_buffer(0, Some(&buf), 0);}

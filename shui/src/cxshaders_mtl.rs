@@ -143,9 +143,10 @@ pub struct CompiledShader{
     pub library:Option<metal::Library>,
     pub pipeline_state:Option<metal::RenderPipelineState>,
     pub shader_id: usize,
-    pub assembled_shader: AssembledMtlShader,
+//    pub assembled_shader: AssembledMtlShader,
     pub geom_vbuf:MetalBuffer,
     pub geom_ibuf:MetalBuffer,
+    pub instance_slots:usize,
     pub named_instance_props: NamedInstanceProps
 }
 
@@ -405,8 +406,9 @@ impl CxShaders{
                     Some(device.new_render_pipeline_state(&rpd).unwrap())
                 },
                 library:Some(library),
+                instance_slots:ash.instance_slots,
                 named_instance_props:ash.named_instance_props.clone(),
-                assembled_shader:ash,
+                //assembled_shader:ash,
                 geom_ibuf:{
                     let mut geom_ibuf = MetalBuffer{..Default::default()};
                     geom_ibuf.update_with_u32_data(device, &sh.geometry_indices);

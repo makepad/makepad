@@ -2,6 +2,7 @@ use crate::shader::*;
 use crate::cx::*;
 use crate::cxdrawing::*;
 
+#[derive(Clone)]
 pub enum Wrapping{
     Char,
     Word,
@@ -9,6 +10,7 @@ pub enum Wrapping{
     None
 }
 
+#[derive(Clone)]
 pub struct Text{
     pub font_id:usize,
     pub shader_id:usize,
@@ -105,11 +107,11 @@ impl Text{
     }
 
     pub fn draw_text(&mut self, cx:&mut Cx, x:Value, y:Value, text:&str){
-        let dr = cx.drawing.instance(cx.shaders.get(self.shader_id));
+        let dr = cx.drawing.instance_aligned(cx.shaders.get(self.shader_id), &mut cx.turtle);
         let font = cx.fonts.get(self.font_id);
 
-        let wx = x.eval_width(&cx.turtle);
-        let wy = y.eval_height(&cx.turtle);
+        //let wx = x.eval_width(&cx.turtle);
+        //let wy = y.eval_height(&cx.turtle);
 
         if dr.first{
             dr.texture("texture", font.texture_id);
@@ -119,7 +121,7 @@ impl Text{
 
         let mut chunk = Vec::new();
         let mut width = 0.0;
-
+        let mut count = 0;
         for (last,c) in text.chars().identify_last(){
             let mut slot = 0;
             let mut emit = last;
@@ -157,7 +159,8 @@ impl Text{
                 let mut geom = cx.turtle.walk_wh(
                     Fixed(width), 
                     Fixed(self.font_size * self.line_spacing), 
-                    Margin::zero()
+                    Margin::zero(),
+                    None
                 );
                 for wc in &chunk{
                     let slot = font.unicodes[*wc as usize];
@@ -171,12 +174,13 @@ impl Text{
                     dr.float("font_size", self.font_size);
                     dr.float("font_base", 1.0);
                     geom.x += glyph.advance * self.font_size;
+                    count += 1;
                 }
                 width = 0.0;
                 chunk.truncate(0);
             }
         }
-     
+        cx.turtle.instance_aligned_set_count(count);
     }
 }
 

@@ -73,3 +73,37 @@ impl Cx{
     }
 
 }
+
+pub struct Elements<T>{
+    pub elements:Vec<T>,
+    pub len:usize
+}
+
+impl<T> Elements<T>
+where T:Clone
+{
+    pub fn new()->Elements<T>{
+        Elements::<T>{
+            elements:Vec::new(),
+            len:0
+        }
+    }
+
+    pub fn reset(&mut self){
+        self.len = 0;
+    }
+
+    pub fn add(&mut self, clone:&T)->&mut T{
+        if self.len >= self.elements.len(){
+            self.elements.push(clone.clone());
+            self.len += 1;
+            self.elements.last_mut().unwrap()
+
+        }
+        else{
+            let last = self.len;
+            self.len += 1;
+            &mut self.elements[last]
+        }
+    }
+}

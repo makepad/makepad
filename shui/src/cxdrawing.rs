@@ -19,7 +19,7 @@ pub enum Ev{
 pub struct InstanceRef{
     pub draw_list_id:usize,
     pub draw_id:usize,
-    pub instance_offset:usize
+    pub instance_offset:usize,
 }
 
 #[derive(Clone, Default)]
@@ -43,7 +43,8 @@ impl CxDrawing{
         turtle.align_list.push(AlignItem{
             draw_list_id:draw_list_id,
             draw_id:dc.draw_id,
-            instance_offset:dc.current_instance_offset
+            instance_offset:dc.current_instance_offset,
+            instance_count:1
         });
         dc
     }
@@ -126,7 +127,6 @@ impl CxDrawing{
         let ir = self.instance_nesting.pop().unwrap();
         let draw_list = &mut self.draw_lists[ir.draw_list_id];
         let draw = &mut draw_list.draws[ir.draw_id];
-
 
         // ok now we have to patch x/y/w/h into it
         let csh = &cxsh.compiled_shaders[draw.shader_id];

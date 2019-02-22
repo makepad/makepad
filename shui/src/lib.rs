@@ -33,7 +33,7 @@ mod math;
 mod colors;
 mod shader;
 
-mod rect;
+mod quad;
 mod text;
 
 pub use crate::cx::*;
@@ -42,6 +42,6 @@ pub use crate::cxturtle::*;
 pub use crate::cxshaders::*;
 pub use crate::math::*;
 pub use crate::shader::*;
-pub use crate::rect::*;
+pub use crate::quad::*;
 pub use crate::text::*;
 pub use crate::colors::*;

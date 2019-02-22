@@ -2,6 +2,7 @@ use crate::shader::*;
 use crate::cx::*;
 use crate::cxdrawing::*;
 
+#[derive(Clone)]
 pub struct Quad{
     pub shader_id:usize,
     pub id:u32,
@@ -86,7 +87,7 @@ impl Quad{
         
         self.set_uniforms(dc);
         
-        let geom = cx.turtle.walk_wh(w, h, margin);
+        let geom = cx.turtle.walk_wh(w, h, margin, None);
         
         // lets store our instance onto the turtle
 

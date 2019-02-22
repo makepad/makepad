@@ -34,7 +34,7 @@ impl Value{
             Value::Expression(_v)=>0.0,
             Value::Percent(v)=>{
                 if let Some(turtle) = cx_turtle.turtles.last(){
-                    f32::max(turtle.width - (turtle.layout.padding.l+turtle.layout.padding.r),0.0) * (v * 0.01)
+                    nan_clamp_neg(turtle.width - (turtle.layout.padding.l+turtle.layout.padding.r)) * (v * 0.01)
                 }
                 else{
                     cx_turtle.main_width * (v * 0.01)
@@ -50,7 +50,7 @@ impl Value{
             Value::Expression(_v)=>0.0,
             Value::Percent(v)=>{
                 if let Some(turtle) = cx_turtle.turtles.last(){
-                     f32::max(turtle.height - (turtle.layout.padding.t+turtle.layout.padding.b),0.0)* (v * 0.01)
+                    nan_clamp_neg(turtle.height - (turtle.layout.padding.t+turtle.layout.padding.b))* (v * 0.01)
                 }
                 else{
                     cx_turtle.main_height * (v * 0.01)
@@ -249,7 +249,8 @@ impl Turtle{
 pub struct AlignItem{
     pub draw_list_id:usize,
     pub draw_id:usize,
-    pub instance_offset:usize
+    pub instance_offset:usize,
+    pub instance_count:usize
 }
 
 #[derive(Clone, Default)]
@@ -261,11 +262,21 @@ pub struct CxTurtle{
     pub debug_pts:RefCell<Vec<(f32,f32,i32)>>
 }
 
+pub struct WalkWrap<'a>{
+    turtle:&'a Turtle,
+    drawing:&'a mut CxDrawing, 
+    shaders:&'a CxShaders
+}
+
 impl CxTurtle{
     pub fn debug_pt(&self, x:f32, y:f32, color:i32){
         self.debug_pts.borrow_mut().push((x,y,color));
     }
 
+    pub fn instance_aligned_set_count(&mut self, instance_count:usize){
+        self.align_list.last_mut().unwrap().instance_count = instance_count;
+    }
+    
     // begin a new turtle with a layout
     pub fn begin(&mut self, layout:&Layout){
 
@@ -303,18 +314,26 @@ impl CxTurtle{
     }
 
     // walk the turtle with a 'w/h' and a margin
-    pub fn walk_wh(&mut self, vw:Value, vh:Value, margin:Margin)->Rect{
-        let w = f32::max(vw.eval_width(self),0.0);
-        let h = f32::max(vh.eval_height(self),0.0);
-
-        if let Some(turtle) = self.turtles.last_mut(){
+    pub fn walk_wh(&mut self, vw:Value, vh:Value, margin:Margin, walk_wrap:Option<WalkWrap>)->Rect{
+        let w = nan_clamp_neg(vw.eval_width(self));
+        let h = nan_clamp_neg(vh.eval_height(self));
+        let mut do_align = false;
+        let mut align_dx = 0.0;
+        let mut align_dy = 0.0;
+        let ret = if let Some(turtle) = self.turtles.last_mut(){
             let (x,y) = match turtle.layout.direction{
                 Direction::Right=>{
                     if !turtle.layout.nowrap && (turtle.walk_x + margin.l + w) >
                         (turtle.start_x + turtle.width - turtle.layout.padding.r){
+                        // what is the move delta. 
+                        let old_x = turtle.walk_x;
+                        let old_y = turtle.walk_y;
                         turtle.walk_x = turtle.start_x + turtle.layout.padding.l;
                         turtle.walk_y += turtle.biggest;
                         turtle.biggest = 0.0;
+                        do_align = true;
+                        align_dx = turtle.walk_x - old_x;
+                        align_dy = turtle.walk_y - old_y;
                     }
                     let x = turtle.walk_x + margin.l;
                     let y = turtle.walk_y + margin.t;
@@ -362,6 +381,33 @@ impl CxTurtle{
                 w:w,
                 h:h
             }
+        };
+
+        if do_align{
+            if let Some(walk_wrap) = walk_wrap{
+                self.do_align(align_dx, align_dy, walk_wrap);
+            }
+        };
+
+        ret
+    }
+
+    fn do_align(&self, dx:f32, dy:f32, walkwrap:WalkWrap){
+        // shift all the items in the drawlist with dx/dy
+        for i in walkwrap.turtle.align_start..self.align_list.len(){
+            let align_item = &self.align_list[i];
+            let draw_list = &mut walkwrap.drawing.draw_lists[align_item.draw_list_id];
+            let draw = &mut draw_list.draws[align_item.draw_id];
+
+            for i in 0..align_item.instance_count{
+                let csh = &walkwrap.shaders.compiled_shaders[draw.shader_id];
+                if let Some(x) = csh.named_instance_props.x{
+                    draw.instance[align_item.instance_offset + x + i * csh.instance_slots] += dx;
+                }
+                if let Some(y) = csh.named_instance_props.y{
+                    draw.instance[align_item.instance_offset + y+ i * csh.instance_slots] += dy;
+                }
+            }
         }
     }
 
@@ -374,7 +420,7 @@ impl CxTurtle{
                 Value::Fixed(old.layout.padding.l + old.layout.padding.r)
             }
             else{ // use the bounding box
-                Value::Fixed(f32::max(old.bound_x2 - old.start_x + old.layout.padding.r,0.0))
+                Value::Fixed(nan_clamp_neg(old.bound_x2 - old.start_x + old.layout.padding.r))
             }
         }
         else{
@@ -386,13 +432,14 @@ impl CxTurtle{
                 Value::Fixed(old.layout.padding.t + old.layout.padding.b)
             }
             else{ // use the bounding box
-                Value::Fixed(f32::max(old.bound_y2 - old.start_y + old.layout.padding.b,0.0))
+                Value::Fixed(nan_clamp_neg(old.bound_y2 - old.start_y + old.layout.padding.b))
             }
         }
         else{
             Value::Fixed(old.height)
         };
 
+        let margin = old.layout.margin.clone();
         // if we have alignment set, we should now align our childnodes
         if old.layout.align.fx > 0.0 || old.layout.align.fy > 0.0{
 
@@ -403,20 +450,11 @@ impl CxTurtle{
             if dx.is_nan(){dx = 0.0}
             if dy.is_nan(){dy = 0.0}
 
-            // shift all the items in the drawlist with dx/dy
-            for i in old.align_start..self.align_list.len(){
-                let align_item = &self.align_list[i];
-                let draw_list = &mut drawing.draw_lists[align_item.draw_list_id];
-                let draw = &mut draw_list.draws[align_item.draw_id];
-
-                let csh = &shaders.compiled_shaders[draw.shader_id];
-                if let Some(x) = csh.named_instance_props.x{
-                    draw.instance[align_item.instance_offset + x] += dx;
-                }
-                if let Some(y) = csh.named_instance_props.y{
-                    draw.instance[align_item.instance_offset + y] += dy;
-                }
-            }
+            self.do_align(dx, dy, WalkWrap{
+                turtle:&old,
+                drawing:drawing,
+                shaders:shaders
+            });
         }
 
         // now well walk the top turtle with our old geometry and margins
@@ -424,6 +462,19 @@ impl CxTurtle{
             return rect(0.0,0.0,0.0,0.0);
         }
 
-        return self.walk_wh(w, h, old.layout.margin);
+        return self.walk_wh(w, h, margin, Some(WalkWrap{
+            turtle:&old,
+            drawing:drawing,
+            shaders:shaders
+        }));
+    }
+}
+
+pub fn nan_clamp_neg(v:f32)->f32{
+    if v.is_nan(){
+        v
+    }
+    else{
+        f32::max(v,0.0)
     }
 }

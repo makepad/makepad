@@ -2,6 +2,7 @@
 //use crate::shader::*;
 use shui::*;
 
+#[derive(Clone)]
 pub struct Button{
     pub view:View,
     pub layout:Layout,
@@ -19,12 +20,12 @@ impl Style for Button{
             time:0.0,
             view:View::new(),
             layout:Layout{
-                w:Computed,
-                h:Computed,
+                //w:Fixed(50.0),
+                //h:Fixed(50.0),
                 ..Layout::new()
             },
             bg_layout:Layout{
-                ..Layout::paddedf(10.0,10.0,10.0,10.0)
+                ..Layout::filled_paddedf(10.0,10.0,10.0,10.0)
             },
             label:"OK".to_string(),
             did_click:false,
@@ -58,8 +59,6 @@ impl Button{
         // however our turtle stack needs to remain independent
         self.bg.begin(cx, &self.bg_layout);
 
-        //self.bg.draw_sized(cx, Fixed(40.0),Fixed(140.0),Margin::zero());
-
         self.text.draw_text(cx, Computed, Computed, label);
         
         self.bg.end(cx);
@@ -71,6 +70,7 @@ impl Button{
 
 
         /*
+        //self.bg.draw_sized(cx, Fixed(40.0),Fixed(140.0),Margin::zero());
         self.time = self.time + 0.01;
         for i in 0..200000{
             self.bg.color.x = 0.5+0.5*f32::sin(i as f32 / 10.0+self.time);

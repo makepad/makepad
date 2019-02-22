@@ -7,6 +7,8 @@ use crate::button::*;
 struct App{
     view:View,
     ok:Button,
+    oks:Elements<Button>,
+    rc:Quad,
     debug_qd:Quad,
     debug_tx:Text
 }
@@ -18,6 +20,8 @@ impl Style for App{
             ok:Button{
                 ..Style::style(cx)
             },
+            oks:Elements::new(),
+            rc:Quad{..Style::style(cx)},
             debug_qd:Quad{
                 ..Style::style(cx)
             },
@@ -37,9 +41,16 @@ impl App{
     } 
 
     fn draw(&mut self, cx:&mut Cx){
-        self.view.begin(cx, &Layout::filled_padded(10.0));
-        //self.text.draw_text(cx, "Hey world");
-        self.ok.draw_with_label(cx, "OK");
+        self.view.begin(cx, &Layout{
+            w:Percent(50.0),
+            ..Layout::filled_padded(10.0)
+        });
+
+        self.oks.reset();
+        for i in 0..100{
+            //self.rc.draw_sized(cx,Fixed(50.0),Fixed(50.0),Margin::zero());
+            self.oks.add(&self.ok).draw_with_label(cx, &format!("OK{}",i));
+        }
 
         self.view.end(cx);
 
