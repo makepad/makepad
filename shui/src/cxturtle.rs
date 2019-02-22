@@ -34,7 +34,7 @@ impl Value{
             Value::Expression(_v)=>0.0,
             Value::Percent(v)=>{
                 if let Some(turtle) = cx_turtle.turtles.last(){
-                    (turtle.width - (turtle.layout.padding.l+turtle.layout.padding.r)) * (v * 0.01)
+                    f32::max(turtle.width - (turtle.layout.padding.l+turtle.layout.padding.r),0.0) * (v * 0.01)
                 }
                 else{
                     cx_turtle.main_width * (v * 0.01)
@@ -50,7 +50,7 @@ impl Value{
             Value::Expression(_v)=>0.0,
             Value::Percent(v)=>{
                 if let Some(turtle) = cx_turtle.turtles.last(){
-                    (turtle.height - (turtle.layout.padding.t+turtle.layout.padding.b))* (v * 0.01)
+                     f32::max(turtle.height - (turtle.layout.padding.t+turtle.layout.padding.b),0.0)* (v * 0.01)
                 }
                 else{
                     cx_turtle.main_height * (v * 0.01)
@@ -304,8 +304,8 @@ impl CxTurtle{
 
     // walk the turtle with a 'w/h' and a margin
     pub fn walk_wh(&mut self, vw:Value, vh:Value, margin:Margin)->Rect{
-        let w = vw.eval_width(self);
-        let h = vh.eval_height(self);
+        let w = f32::max(vw.eval_width(self),0.0);
+        let h = f32::max(vh.eval_height(self),0.0);
 
         let mut turtle = &mut self.turtles.last_mut().unwrap();
         let (x,y) = match turtle.layout.direction{
@@ -365,7 +365,7 @@ impl CxTurtle{
                 Value::Fixed(old.layout.padding.l + old.layout.padding.r)
             }
             else{ // use the bounding box
-                Value::Fixed(old.bound_x2 - old.start_x + old.layout.padding.r)
+                Value::Fixed(f32::max(old.bound_x2 - old.start_x + old.layout.padding.r,0.0))
             }
         }
         else{
@@ -377,7 +377,7 @@ impl CxTurtle{
                 Value::Fixed(old.layout.padding.t + old.layout.padding.b)
             }
             else{ // use the bounding box
-                Value::Fixed(old.bound_y2 - old.start_y + old.layout.padding.b)
+                Value::Fixed(f32::max(old.bound_y2 - old.start_y + old.layout.padding.b,0.0))
             }
         }
         else{
