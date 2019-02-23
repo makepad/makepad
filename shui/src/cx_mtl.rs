@@ -23,14 +23,14 @@ impl Cx{
             draw_list.buffers.uni_dl.update_with_f32_data(device, &draw_list.uniforms);
         }
         // tad ugly otherwise the borrow checker locks 'self' and we can't recur
-        for ci in 0..self.drawing.draw_lists[id].draws_len{
-            let sub_list_id = self.drawing.draw_lists[id].draws[ci].sub_list_id;
+        for ci in 0..self.drawing.draw_lists[id].draw_calls_len{
+            let sub_list_id = self.drawing.draw_lists[id].draw_calls[ci].sub_list_id;
             if sub_list_id != 0{
                 self.exec_draw_list(sub_list_id, device, encoder);
             }
             else{
                 let draw_list = &mut self.drawing.draw_lists[id];
-                let draw = &mut draw_list.draws[ci];
+                let draw = &mut draw_list.draw_calls[ci];
 
                 let sh = &self.shaders.shaders[draw.shader_id];
                 let shc = &self.shaders.compiled_shaders[draw.shader_id];
@@ -90,16 +90,15 @@ impl Cx{
         }
     }
 
-    pub fn repaint(&mut self, logical_size:&winit::dpi::LogicalSize, last_logical_size:&winit::dpi::LogicalSize, layer:&CoreAnimationLayer, device:&Device, command_queue:&CommandQueue){
+    pub fn repaint(&mut self, logical_size:&winit::dpi::LogicalSize, layer:&CoreAnimationLayer, device:&Device, command_queue:&CommandQueue){
         let pool = unsafe { NSAutoreleasePool::new(cocoa::base::nil) };
 
         let camera_projection = Mat4::ortho(
             0.0, logical_size.width as f32, 0.0, logical_size.height as f32, -100.0, 100.0, 
-            (logical_size.width / last_logical_size.width) as f32, 
-            (logical_size.height / last_logical_size.height)as f32
+            logical_size.width as f32/ self.turtle.target_size.x, 
+            logical_size.height as f32/ self.turtle.target_size.y
         );
-        self.turtle.main_width = logical_size.width as f32;
-        self.turtle.main_height = logical_size.height as f32;
+        self.turtle.target_size = vec2(logical_size.width as f32,logical_size.height as f32);
         
         self.uniform_camera_projection(camera_projection);
        
@@ -138,8 +137,36 @@ impl Cx{
         }
     }
 
-    pub fn event_loop<F>(&mut self, mut callback:F)
-    where F: FnMut(&mut Cx, Ev),
+    fn map_event(&mut self, winit_event:winit::Event, glutin_window:&winit::Window)->Event{
+        match winit_event{
+            winit::Event::WindowEvent{ event, .. } => match event {
+                winit::WindowEvent::CloseRequested =>{
+                    return Event::CloseRequested
+                },
+                winit::WindowEvent::Resized(logical_size) => {
+                    
+                    let dpi_factor = glutin_window.get_hidpi_factor();
+                    let old_dpi_factor = self.turtle.target_dpi_factor as f32;
+                    let old_size = self.turtle.target_size.clone();
+                    self.turtle.target_dpi_factor = dpi_factor as f32;
+                    self.turtle.target_size = vec2(logical_size.width as f32, logical_size.height as f32);
+                    
+                    return Event::Resized(ResizedEvent{
+                        old_size: old_size,
+                        old_dpi_factor: old_dpi_factor,
+                        new_size: self.turtle.target_size.clone(),
+                        new_dpi_factor: self.turtle.target_dpi_factor
+                    })
+                },
+                _ => ()
+            },
+            _ => ()
+        }
+        Event::None
+    }
+
+    pub fn event_loop<F>(&mut self, mut event_handler:F)
+    where F: FnMut(&mut Cx, Event),
     { 
 
         let mut events_loop = winit::EventsLoop::new();
@@ -171,38 +198,32 @@ impl Cx{
         glutin_window.set_position(winit::dpi::LogicalPosition::new(1920.0,400.0));
         
         self.shaders.compile_all_shaders(&device);
-        let mut current_layer_size:Option<winit::dpi::LogicalSize> = None;
+        //let mut current_layer_size:Option<winit::dpi::LogicalSize> = None;
         let mut last_logical_size = draw_size.clone();
-        while self.running {
 
-            events_loop.poll_events(|event|{
-                match event{
-                    winit::Event::WindowEvent{ event, .. } => match event {
-                        winit::WindowEvent::CloseRequested => self.running = false,
-                        winit::WindowEvent::Resized(logical_size) => {
-                            let dpi_factor = glutin_window.get_hidpi_factor();
-                            let draw_size = logical_size.to_physical(dpi_factor);
-                            current_layer_size = Some(logical_size.clone());
-                            
-                            callback(self, Ev::Redraw);
-
-                            self.repaint(&logical_size, &last_logical_size, &layer, &device, &command_queue);
-                            layer.set_drawable_size(
-                               CGSize::new(draw_size.width as f64, draw_size.height as f64));
-                            last_logical_size = logical_size;
-                        },
-                        _ => ()
-                    },
-                    _ => ()
+        while self.running{
+            events_loop.poll_events(|winit_event|{
+                let event = self.map_event(winit_event, &glutin_window);
+                if let Event::Resized(re) = &event{
+                    // resize drawable
+                    let logical_size = glutin_window.get_inner_size().unwrap();
+                    let dpi_factor = glutin_window.get_hidpi_factor();
+                    let local_size = logical_size.to_physical(dpi_factor);
+                    layer.set_drawable_size(CGSize::new(local_size.width as f64, local_size.height as f64));
                 }
+                // pass the event 
+                event_handler(self, event);
             });
-           
-            callback(self, Ev::Redraw);
-            if let Some(logical_size) = glutin_window.get_inner_size(){
-
-                self.repaint(&logical_size, &last_logical_size, &layer, &device, &command_queue);
-                last_logical_size = logical_size;
-
+            // call redraw event
+            if let Some(area) = &self.redraw_area{
+                event_handler(self, Event::Redraw);
+                self.repaint = true;
+            }
+            // repaint everything if we need to
+            if self.repaint{
+                if let Some(logical_size) = glutin_window.get_inner_size(){
+                    self.repaint(&logical_size, &layer, &device, &command_queue);
+                }
             }
         }
     }

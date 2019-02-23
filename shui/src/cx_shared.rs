@@ -17,7 +17,10 @@ pub struct Cx{
     pub textures:CxTextures,
 
     pub uniforms:Vec<f32>,
-    pub buffers:CxBuffers
+    pub buffers:CxBuffers,
+    pub animations:Vec<Animation>,
+    pub redraw_area:Option<Area>,
+    pub repaint:bool
 }
 
 impl Default for Cx{
@@ -33,7 +36,10 @@ impl Default for Cx{
             title:"Hello World".to_string(),
             running:true,
             uniforms:uniforms,
-            buffers:CxBuffers{..Default::default()}
+            buffers:CxBuffers{..Default::default()},
+            animations:Vec::new(),
+            redraw_area:Some(Area::zero()),
+            repaint:true
         }
     }
 }
@@ -62,16 +68,20 @@ impl Cx{
         }
     }
 
-    pub fn begin_instance(&mut self,layout:&Layout, draw_id:usize)->&mut Draw{
-        self.turtle.begin(layout);
-        self.drawing.push_instance(draw_id)
+    // trigger a redraw on the UI
+    pub fn redraw_all(){ 
+
     }
 
-    pub fn end_instance(&mut self)->Area{
-        let rect = self.turtle.end(&mut self.drawing,&self.shaders);
-        self.drawing.pop_instance(&self.shaders, rect)
+    pub fn animate(area:&Area, duration:f64){
     }
+}
 
+#[derive(Clone)]
+pub struct Animation{
+    pub area:Area,
+    pub start:f64,
+    pub duration:f64
 }
 
 pub struct Elements<T>{

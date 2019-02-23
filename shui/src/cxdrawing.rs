@@ -21,26 +21,26 @@ impl CxDrawing{
         &mut self.draw_lists[self.draw_list_id]
     }
 
-    pub fn instance_aligned(&mut self, sh:&CompiledShader, turtle:&mut CxTurtle)->&mut Draw{
+    pub fn instance_aligned(&mut self, sh:&CompiledShader, turtle:&mut CxTurtle)->&mut DrawCall{
         let draw_list_id = self.draw_list_id;
         let dc = self.instance(sh);
         turtle.align_list.push(Area{
             draw_list_id:draw_list_id,
-            draw_id:dc.draw_id,
+            draw_call_id:dc.draw_call_id,
             instance_offset:dc.current_instance_offset,
             instance_count:1
         });
         dc
     }
 
-    pub fn instance(&mut self, sh:&CompiledShader)->&mut Draw{
+    pub fn instance(&mut self, sh:&CompiledShader)->&mut DrawCall{
         let draw_list = &mut self.draw_lists[self.draw_list_id];
         
         // find our drawcall in the filled draws
-        for i in (0..draw_list.draws_len).rev(){
-            if draw_list.draws[i].shader_id == sh.shader_id{
+        for i in (0..draw_list.draw_calls_len).rev(){
+            if draw_list.draw_calls[i].shader_id == sh.shader_id{
                 // reuse this drawcmd.
-                let dc = &mut draw_list.draws[i];
+                let dc = &mut draw_list.draw_calls[i];
                 dc.current_instance_offset = dc.instance.len();
                 dc.first = false;
                 return dc
@@ -48,13 +48,13 @@ impl CxDrawing{
         }
 
         // we need a new draw
-        let id = draw_list.draws_len;
-        draw_list.draws_len = draw_list.draws_len + 1;
+        let id = draw_list.draw_calls_len;
+        draw_list.draw_calls_len = draw_list.draw_calls_len + 1;
         
         // see if we need to add a new one
-        if id >= draw_list.draws.len(){
-            draw_list.draws.push(Draw{
-                draw_id:draw_list.draws.len(),
+        if id >= draw_list.draw_calls.len(){
+            draw_list.draw_calls.push(DrawCall{
+                draw_call_id:draw_list.draw_calls.len(),
                 draw_list_id:self.draw_list_id,
                 sub_list_id:0,
                 shader_id:sh.shader_id,
@@ -67,11 +67,11 @@ impl CxDrawing{
                 vao:CxShaders::create_vao(sh),
                 buffers:DrawBuffers{..Default::default()}
             });
-            return &mut draw_list.draws[id];
+            return &mut draw_list.draw_calls[id];
         }
 
         // reuse a draw
-        let draw = &mut draw_list.draws[id];
+        let draw = &mut draw_list.draw_calls[id];
         // we used to be a sublist, construct vao
         if draw.sub_list_id != 0{
             draw.shader_id = sh.shader_id;
@@ -94,18 +94,18 @@ impl CxDrawing{
     }
 
     // push instance so it can be written to again in pop_instance
-    pub fn push_instance(&mut self, draw_id:usize)->&mut Draw{
+    pub fn push_instance(&mut self, draw_call_id:usize)->&mut DrawCall{
         let draw_list = &mut self.draw_lists[self.draw_list_id];
-        let draw = &mut draw_list.draws[draw_id];
+        let draw_call = &mut draw_list.draw_calls[draw_call_id];
 
         // store our current instance properties so we can update-patch it in pop instance
         self.instance_areas.push(Area{
             draw_list_id: self.draw_list_id,
-            draw_id:draw_id,
-            instance_offset:draw.current_instance_offset,
+            draw_call_id:draw_call_id,
+            instance_offset:draw_call.current_instance_offset,
             instance_count:1
         });
-        draw
+        draw_call
     }
 
     // pops instance patching the supplied geometry in the instancebuffer
@@ -123,8 +123,8 @@ pub struct GLInstanceVAO{
 }
 
 #[derive(Default,Clone)]
-pub struct Draw{
-    pub draw_id:usize,
+pub struct DrawCall{
+    pub draw_call_id:usize,
     pub draw_list_id:usize,
     pub sub_list_id:usize, // if not 0, its a subnode
     pub shader_id:usize, // if shader_id changed, delete gl vao
@@ -138,15 +138,62 @@ pub struct Draw{
     pub first:bool
 }
 
-impl Draw{
+impl DrawCall{
 
     pub fn get_current_area(&self)->Area{
         Area{
             draw_list_id:self.draw_list_id,
-            draw_id:self.draw_id,
+            draw_call_id:self.draw_call_id,
             instance_offset:self.current_instance_offset,
             instance_count:1
         }
+    }
+
+    pub fn float(&mut self, _name: &str, v:f32){
+        self.instance.push(v);
+    }
+
+    pub fn rect(&mut self, _name: &str, rect:Rect){
+        self.instance.push(rect.x);
+        self.instance.push(rect.y);
+        self.instance.push(rect.w);
+        self.instance.push(rect.h);
+    }
+
+    pub fn vec2f(&mut self, _name: &str, x:f32, y:f32){
+        self.instance.push(x);
+        self.instance.push(y);
+    }
+
+    pub fn vec3f(&mut self, _name: &str, x:f32, y:f32, z:f32){
+        self.instance.push(x);
+        self.instance.push(y);
+        self.instance.push(z);
+    }
+
+    pub fn vec4f(&mut self, _name: &str, x:f32, y:f32, z:f32, w:f32){
+        self.instance.push(x);
+        self.instance.push(y);
+        self.instance.push(z);
+        self.instance.push(w);
+    }
+
+    pub fn vec2(&mut self, _name: &str, v:&Vec2){
+        self.instance.push(v.x);
+        self.instance.push(v.y);
+    }
+
+    pub fn vec3(&mut self, _name: &str, v:&Vec3){
+        self.instance.push(v.x);
+        self.instance.push(v.y);
+        self.instance.push(v.z);
+    }
+
+    pub fn vec4(&mut self, _name: &str, v:&Vec4){
+        self.instance.push(v.x);
+        self.instance.push(v.y);
+        self.instance.push(v.z);
+        self.instance.push(v.w);
     }
 
     pub fn texture(&mut self, _name: &str, texture_id: usize){
@@ -207,8 +254,8 @@ const DL_UNI_SIZE:usize = 1;
 
 #[derive(Default,Clone)]
 pub struct DrawList{
-    pub draws:Vec<Draw>,
-    pub draws_len: usize,
+    pub draw_calls:Vec<DrawCall>,
+    pub draw_calls_len: usize,
     pub uniforms:Vec<f32>, // cmdlist uniforms
     pub buffers:DrawListBuffers
 }
@@ -247,7 +294,10 @@ impl View{
         }
     }
 
-    pub fn begin(&mut self, cx:&mut Cx, layout:&Layout){
+    pub fn begin(&mut self, cx:&mut Cx, layout:&Layout)->bool{
+
+        // cx will have a path to a drawlist
+
         if !self.initialized{ // draw node needs initialization
             if cx.drawing.draw_lists_free.len() != 0{
                 self.draw_list_id = cx.drawing.draw_lists_free.pop().unwrap();
@@ -263,7 +313,7 @@ impl View{
         else{
             // set len to 0
             let draw_list = &mut cx.drawing.draw_lists[self.draw_list_id];
-            draw_list.draws_len = 0;
+            draw_list.draw_calls_len = 0;
         }
         // push ourselves up the parent draw_stack
         if let Some(parent_view) = cx.drawing.view_stack.last(){
@@ -271,21 +321,21 @@ impl View{
             // we need a new draw
             let parent_draw_list = &mut cx.drawing.draw_lists[parent_view.draw_list_id];
 
-            let id = parent_draw_list.draws_len;
-            parent_draw_list.draws_len = parent_draw_list.draws_len + 1;
+            let id = parent_draw_list.draw_calls_len;
+            parent_draw_list.draw_calls_len = parent_draw_list.draw_calls_len + 1;
             
             // see if we need to add a new one
-            if parent_draw_list.draws_len > parent_draw_list.draws.len(){
-                parent_draw_list.draws.push({
-                    Draw{
-                        draw_id:parent_draw_list.draws.len(),
+            if parent_draw_list.draw_calls_len > parent_draw_list.draw_calls.len(){
+                parent_draw_list.draw_calls.push({
+                    DrawCall{
+                        draw_call_id:parent_draw_list.draw_calls.len(),
                         sub_list_id:self.draw_list_id,
                         ..Default::default()
                     }
                 })
             }
             else{// or reuse a sub list node
-                let draw = &mut parent_draw_list.draws[id];
+                let draw = &mut parent_draw_list.draw_calls[id];
                 if draw.sub_list_id == 0{ // we used to be a drawcmd
                     CxShaders::destroy_vao(&mut draw.vao);
                     draw.sub_list_id = self.draw_list_id;
@@ -300,6 +350,8 @@ impl View{
         cx.drawing.view_stack.push(self.clone());
         
         cx.turtle.begin(layout);
+
+        false
         //cx.turtle.x = 0.0;
         //cx.turtle.y = 0.0;
     }
@@ -315,19 +367,19 @@ impl View{
 #[derive(Clone, Default, Debug, PartialEq)]
 pub struct Area{
     pub draw_list_id:usize,
-    pub draw_id:usize,
+    pub draw_call_id:usize,
     pub instance_offset:usize,
     pub instance_count:usize
 }
 
 impl Area{
     pub fn zero()->Area{
-        Area{draw_list_id:0, draw_id:0,instance_offset:0, instance_count:0}
+        Area{draw_list_id:0, draw_call_id:0,instance_offset:0, instance_count:0}
     }
 
     pub fn get_rect_sep(&self, drawing:&CxDrawing, shaders:&CxShaders)->Rect{
         let draw_list = &drawing.draw_lists[self.draw_list_id];
-        let draw = &draw_list.draws[self.draw_id];
+        let draw = &draw_list.draw_calls[self.draw_call_id];
         let csh = &shaders.compiled_shaders[draw.shader_id];
         // ok now we have to patch x/y/w/h into it
         if let Some(ix) = csh.named_instance_props.x{
@@ -352,7 +404,7 @@ impl Area{
 
     pub fn set_rect_sep(&self, drawing:&mut CxDrawing, shaders:&CxShaders, rect:&Rect){
         let draw_list = &mut drawing.draw_lists[self.draw_list_id];
-        let draw = &mut draw_list.draws[self.draw_id];
+        let draw = &mut draw_list.draw_calls[self.draw_call_id];
         let csh = &shaders.compiled_shaders[draw.shader_id];        // ok now we have to patch x/y/w/h into it
 
         if let Some(ix) = csh.named_instance_props.x{

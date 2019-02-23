@@ -64,24 +64,25 @@ impl Quad{
         //sh.log =1;
     }
 
-    pub fn begin<'a>(&mut self, cx:&'a mut Cx, layout:&Layout)->&'a mut Draw{
-        let draw_id = self.draw_abs(cx, true, 0.0,0.0,0.0,0.0).draw_id;
-        
-        cx.begin_instance(layout, draw_id)
+    pub fn begin<'a>(&mut self, cx:&'a mut Cx, layout:&Layout)->&'a mut DrawCall{
+        let draw_call_id = self.draw_abs(cx, true, 0.0,0.0,0.0,0.0).draw_call_id;
+        cx.turtle.begin(layout);
+        cx.drawing.push_instance(draw_call_id)
     }
 
     // write the rect instance
     pub fn end(&mut self, cx:&mut Cx)->Area{
-        cx.end_instance()
+        let rect = cx.turtle.end(&mut cx.drawing ,&cx.shaders);
+        cx.drawing.pop_instance(&cx.shaders, rect)
     }
 
-    pub fn set_uniforms(&mut self, dc:&mut Draw){
+    pub fn set_uniforms(&mut self, dc:&mut DrawCall){
         if dc.first{
             dc.ufloat("fac", 1.0);
         }
     }
 
-    pub fn draw_sized<'a>(&mut self, cx:&'a mut Cx, w:Value, h:Value, margin:Margin)->&'a mut Draw{
+    pub fn draw_sized<'a>(&mut self, cx:&'a mut Cx, w:Value, h:Value, margin:Margin)->&'a mut DrawCall{
         
         let dc = cx.drawing.instance_aligned(cx.shaders.get(self.shader_id), &mut cx.turtle);
         
@@ -100,7 +101,7 @@ impl Quad{
         dc
     }
 
-    pub fn draw_abs<'a>(&mut self, cx:&'a mut Cx, align:bool, x:f32, y:f32, w:f32, h:f32)->&'a mut Draw{
+    pub fn draw_abs<'a>(&mut self, cx:&'a mut Cx, align:bool, x:f32, y:f32, w:f32, h:f32)->&'a mut DrawCall{
         let dc = if align{
            cx.drawing.instance_aligned(cx.shaders.get(self.shader_id), &mut cx.turtle)
         }

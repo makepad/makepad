@@ -34,9 +34,10 @@ impl Style for App{
 }
 
 impl App{
-    fn handle(&mut self, cx:&mut Cx, ev:&Ev){
-        if self.ok.handle_click(cx, ev){
+    fn handle(&mut self, cx:&mut Cx, event:&Event){
+        if let ButtonEvent::Clicked = self.ok.handle(cx, event){
             // we got clicked!
+            
         }
     } 
 
@@ -46,11 +47,12 @@ impl App{
             ..Layout::filled_padded(10.0)
         });
 
-        self.oks.reset();
+        self.ok.draw_with_label(cx, "OK");
+        /*self.oks.reset();
         for i in 0..500{
             //self.rc.draw_sized(cx,Fixed(5.0),Fixed(5.0),Margin::zero());
             self.oks.add(&self.ok).draw_with_label(cx, &format!("OK{}",rand::random::<f32>()));
-        }
+        }*/
 
         self.view.end(cx);
 
@@ -84,7 +86,7 @@ fn main() {
     };
 
     cx.event_loop(|cx, ev|{
-        if let Ev::Redraw = ev{
+        if let Event::Redraw = ev{
             return app.draw(cx);
         }
         app.handle(cx, &ev);

@@ -1,5 +1,5 @@
 [features]
-default = ["mtl"]
+default = ["ogl"]
 ogl = []
 mtl = []
 
@@ -15,18 +15,20 @@ glutin = "0.19"
 gl = "0.11" 
 rand = "0.3"
 scoped_threadpool = "0.1"
-metal = "0.14"
-cocoa = "0.18"
-core-graphics = "0.17"
 bitflags = "1"
 libc = "0.2"
 log = "0.4"
-objc-foundation = "0.1"
-objc_id = "0.1"
 block = "0.1.5"
 foreign-types = "0.3"
 winit = "0.18"
 sema = "0.1.4"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+metal = "0.14"
+cocoa = "0.18"
+core-graphics = "0.17"
+objc-foundation = "0.1"
+objc_id = "0.1"
 
 [dependencies.objc]
 version = "0.2.3"

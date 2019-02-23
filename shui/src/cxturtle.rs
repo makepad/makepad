@@ -37,7 +37,7 @@ impl Value{
                     nan_clamp_neg(turtle.width - (turtle.layout.padding.l+turtle.layout.padding.r)) * (v * 0.01)
                 }
                 else{
-                    cx_turtle.main_width * (v * 0.01)
+                    cx_turtle.target_size.x * (v * 0.01)
                 }
             }
         }
@@ -53,7 +53,7 @@ impl Value{
                     nan_clamp_neg(turtle.height - (turtle.layout.padding.t+turtle.layout.padding.b))* (v * 0.01)
                 }
                 else{
-                    cx_turtle.main_height * (v * 0.01)
+                    cx_turtle.target_size.y * (v * 0.01)
                 }
             }
         }
@@ -249,8 +249,8 @@ impl Turtle{
 pub struct CxTurtle{
     pub turtles:Vec<Turtle>,
     pub align_list:Vec<Area>,
-    pub main_width:f32,
-    pub main_height:f32,
+    pub target_size:Vec2,
+    pub target_dpi_factor:f32,
     pub debug_pts:RefCell<Vec<(f32,f32,i32)>>
 }
 
@@ -392,15 +392,15 @@ impl CxTurtle{
         for i in walkwrap.turtle.align_start..self.align_list.len(){
             let align_item = &self.align_list[i];
             let draw_list = &mut walkwrap.drawing.draw_lists[align_item.draw_list_id];
-            let draw = &mut draw_list.draws[align_item.draw_id];
+            let draw_call = &mut draw_list.draw_calls[align_item.draw_call_id];
 
             for i in 0..align_item.instance_count{
-                let csh = &walkwrap.shaders.compiled_shaders[draw.shader_id];
+                let csh = &walkwrap.shaders.compiled_shaders[draw_call.shader_id];
                 if let Some(x) = csh.named_instance_props.x{
-                    draw.instance[align_item.instance_offset + x + i * csh.instance_slots] += dx;
+                    draw_call.instance[align_item.instance_offset + x + i * csh.instance_slots] += dx;
                 }
                 if let Some(y) = csh.named_instance_props.y{
-                    draw.instance[align_item.instance_offset + y+ i * csh.instance_slots] += dy;
+                    draw_call.instance[align_item.instance_offset + y+ i * csh.instance_slots] += dy;
                 }
             }
         }

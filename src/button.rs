@@ -11,9 +11,8 @@ pub struct Button{
     pub bg: Quad,
     pub bg_layout:Layout,
     pub text: Text,
-    pub label:String,
-    pub did_click: bool
-}
+    pub label:String
+} 
 
 impl Style for Button{
     fn style(cx:&mut Cx)->Self{
@@ -33,7 +32,6 @@ impl Style for Button{
                 ..Layout::filled_padded(10.0)
             },
             label:"OK".to_string(),
-            did_click:false,
             bg:Quad{
                 color:color("gray"),
                 ..Style::style(cx)
@@ -43,33 +41,33 @@ impl Style for Button{
     }
 }
 
+pub enum ButtonEvent{
+    None,
+    Clicked
+}
+
 impl Button{
-    pub fn handle(&mut self, cx:&mut Cx, ev:&Ev){
-        if ev.hit(&self.area, cx){
-            match ev{
-                Ev::FingerDown(fe)=>{
+    pub fn handle(&mut self, cx:&mut Cx, event:&Event)->ButtonEvent{
+        if event.hits(&self.area, cx){
+            match event{
+                Event::Animate=>{
 
                 },
-                Ev::FingerMove(fe)=>{
-
+                Event::FingerDown(fe)=>{
+                    return ButtonEvent::Clicked
+                },
+                Event::FingerMove(fe)=>{
+                    println!("MOVE OVER");
                 },
                 _=>()
             }
         }
+        ButtonEvent::None
    }
-
-    pub fn handle_click(&mut self, cx:&mut Cx, ev:&Ev)->bool{
-        self.handle(cx, ev);
-        self.did_click()
-    }
-
-    pub fn did_click(&self)->bool{
-        self.did_click
-    }
 
     pub fn draw_with_label(&mut self, cx:&mut Cx, label: &str){
         // this marks a tree node.
-        // self.view.begin(cx, &self.layout);
+        if self.view.begin(cx, &self.layout){return};
 
         // however our turtle stack needs to remain independent
         self.bg.begin(cx, &self.bg_layout);
@@ -78,7 +76,7 @@ impl Button{
         
         self.area = self.bg.end(cx);
 
-        //self.view.end(cx);
+        self.view.end(cx);
     }
 }
 

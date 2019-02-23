@@ -14,14 +14,14 @@ use crate::events::*;
 impl Cx{
      pub fn exec_draw_list(&mut self, id: usize){
         // tad ugly otherwise the borrow checker locks 'self' and we can't recur
-        for ci in 0..self.drawing.draw_lists[id].draws_len{
-            let sub_list_id = self.drawing.draw_lists[id].draws[ci].sub_list_id;
+        for ci in 0..self.drawing.draw_lists[id].draw_calls_len{
+            let sub_list_id = self.drawing.draw_lists[id].draw_calls[ci].sub_list_id;
             if sub_list_id != 0{
                 self.exec_draw_list(sub_list_id);
             }
             else{
                 let draw_list = &self.drawing.draw_lists[id];
-                let draw = &draw_list.draws[ci];
+                let draw = &draw_list.draw_calls[ci];
                 if draw.update_frame_id == self.drawing.frame_id{
                     // update the instance buffer data
                     unsafe{
@@ -65,8 +65,7 @@ impl Cx{
                 0.0, logical_size.width as f32, 0.0, logical_size.height as f32, -100.0, 100.0, 
                 1.0,1.0
         );
-        self.turtle.main_width = logical_size.width as f32;
-        self.turtle.main_height = logical_size.height as f32;
+        self.turtle.target_size = vec2(logical_size.width as f32,logical_size.height as f32);
 
         self.uniform_camera_projection(camera_projection);
         
@@ -75,7 +74,7 @@ impl Cx{
     }
 
     pub fn event_loop<F>(&mut self, mut callback:F)
-    where F: FnMut(&mut Cx, Ev),
+    where F: FnMut(&mut Cx, Event),
     { 
         let gl_request = GlRequest::Latest;
         let gl_profile = GlProfile::Core;
@@ -121,7 +120,7 @@ impl Cx{
                             let dpi_factor = gl_window.get_hidpi_factor();
                             gl_window.resize(logical_size.to_physical(dpi_factor));
                             // lets resize the fractal framebuffer
-                            callback(self, Ev::Redraw);
+                            callback(self, Event::Redraw);
                             self.repaint(&logical_size);
                             gl_window.swap_buffers().unwrap();
                         },
@@ -130,7 +129,7 @@ impl Cx{
                     _ => ()
                 }
             });
-            callback(self, Ev::Redraw);
+            callback(self, Event::Redraw);
             
             if let Some(logical_size) = gl_window.get_inner_size(){
                 self.repaint(&logical_size);
