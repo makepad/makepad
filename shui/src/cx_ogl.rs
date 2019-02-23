@@ -7,7 +7,6 @@ use std::ptr;
 use std::ffi::CStr;
 
 pub use crate::cx_shared::*;
-use crate::cxdrawing::*;
 use crate::cxshaders::*;
 use crate::events::*;
 
@@ -56,24 +55,30 @@ impl Cx{
                                     .expect("gl_string: non-UTF8 string")
     }
     
-    pub fn repaint(&mut self, logical_size:&winit::dpi::LogicalSize){
+    pub fn repaint(&mut self, glutin_window:&glutin::GlWindow){
         unsafe{
             gl::Clear(gl::COLOR_BUFFER_BIT|gl::DEPTH_BUFFER_BIT);
         }
-        
-        let camera_projection = Mat4::ortho(
-                0.0, logical_size.width as f32, 0.0, logical_size.height as f32, -100.0, 100.0, 
-                1.0,1.0
-        );
-        self.turtle.target_size = vec2(logical_size.width as f32,logical_size.height as f32);
 
-        self.uniform_camera_projection(camera_projection);
-        
-        self.turtle.align_list.truncate(0);
+        self.prepare_frame();        
         self.exec_draw_list(0);
+
+        glutin_window.swap_buffers().unwrap();
     }
 
-    pub fn event_loop<F>(&mut self, mut callback:F)
+    fn resize_window_to_turtle(&mut self, glutin_window:&glutin::GlWindow){
+       // resize drawable
+        glutin_window.resize(PhysicalSize::new(
+            (self.turtle.target_size.x * self.turtle.target_dpi_factor) as f64,
+            (self.turtle.target_size.y * self.turtle.target_dpi_factor) as f64)
+        );
+        //gl_window.resize(logical_size.to_physical(dpi_factor));
+        //layer.set_drawable_size(CGSize::new(
+         //   (self.turtle.target_size.x * self.turtle.target_dpi_factor) as f64,
+          //   (self.turtle.target_size.y * self.turtle.target_dpi_factor) as f64));
+    }
+
+    pub fn event_loop<F>(&mut self, mut event_handler:F)
     where F: FnMut(&mut Cx, Event),
     { 
         let gl_request = GlRequest::Latest;
@@ -87,11 +92,11 @@ impl Cx{
             .with_vsync(true)
             .with_gl(gl_request)
             .with_gl_profile(gl_profile);
-        let gl_window = glutin::GlWindow::new(window, context, &events_loop).unwrap();
+        let glutin_window = glutin::GlWindow::new(window, context, &events_loop).unwrap();
 
         unsafe {
-            gl_window.make_current().unwrap();
-            gl::load_with(|symbol| gl_window.get_proc_address(symbol) as *const _);
+            glutin_window.make_current().unwrap();
+            gl::load_with(|symbol| glutin_window.get_proc_address(symbol) as *const _);
             gl::ClearColor(0.3, 0.3, 0.3, 1.0);
             gl::Enable(gl::DEPTH_TEST);
             gl::DepthFunc(gl::LEQUAL);
@@ -105,35 +110,50 @@ impl Cx{
             //   Cx::gl_string(gl::GetStringi(gl::EXTENSIONS, num as gl::types::GLuint))
             //}).collect();
             //println!("Extensions   : {}", extensions.join(", "))
-
         }
 
         // lets compile all shaders
         self.shaders.compile_all_shaders();
 
         while self.running{
-            events_loop.poll_events(|event|{
-                match event{
-                    winit::Event::WindowEvent{ event, .. } => match event {
-                        winit::WindowEvent::CloseRequested => self.running = false,
-                        winit::WindowEvent::Resized(logical_size) => {
-                            let dpi_factor = gl_window.get_hidpi_factor();
-                            gl_window.resize(logical_size.to_physical(dpi_factor));
-                            // lets resize the fractal framebuffer
-                            callback(self, Event::Redraw);
-                            self.repaint(&logical_size);
-                            gl_window.swap_buffers().unwrap();
-                        },
-                        _ => ()
-                    },
-                    _ => ()
+            events_loop.poll_events(|winit_event|{
+                let event = self.map_winit_event(winit_event, &glutin_window);
+                if let Event::Resized(_) = &event{
+                    self.resize_window_to_turtle(&glutin_window);
+                    event_handler(self, event); 
+                    event_handler(self, Event::Redraw);
+                    self.repaint(&glutin_window);
+                }
+                else{
+                    event_handler(self, event); 
                 }
             });
-            callback(self, Event::Redraw);
-            
-            if let Some(logical_size) = gl_window.get_inner_size(){
-                self.repaint(&logical_size);
-                gl_window.swap_buffers().unwrap();
+            // call redraw event
+            if let Some(area) = &self.redraw_area{
+                event_handler(self, Event::Redraw);
+                self.repaint = true;
+            }
+            // repaint everything if we need to
+            if self.repaint{
+                self.repaint(&glutin_window);
+                self.repaint = false;
+            }
+
+            // wait for the next event
+            if self.animations.len() == 0{
+                events_loop.run_forever(|winit_event|{
+                    let event = self.map_winit_event(winit_event, &glutin_window);
+                    if let Event::Resized(_) = &event{
+                        self.resize_window_to_turtle(&glutin_window);
+                        event_handler(self, event); 
+                        event_handler(self, Event::Redraw);
+                        self.repaint(&glutin_window);
+                    }
+                    else{
+                        event_handler(self, event);
+                    }
+                    winit::ControlFlow::Break
+                })
             }
         }
     }

@@ -4,6 +4,7 @@ use crate::cxshaders::*;
 use crate::cxfonts::*;
 use crate::cxtextures::*;
 use crate::cxturtle::*;
+use crate::events::*;
 
 #[derive(Clone)]
 pub struct Cx{
@@ -67,6 +68,44 @@ impl Cx{
             self.uniforms[CX_UNI_CAMERA_PROJECTION+i] = v.v[i];
         }
     }
+
+    pub fn prepare_frame(&mut self){
+        let camera_projection = Mat4::ortho(
+                0.0, self.turtle.target_size.x, 0.0, self.turtle.target_size.y, -100.0, 100.0, 
+                1.0,1.0
+        );
+        self.uniform_camera_projection(camera_projection);
+        self.turtle.align_list.truncate(0);
+    }
+
+    pub fn map_winit_event(&mut self, winit_event:winit::Event, glutin_window:&winit::Window)->Event{
+        match winit_event{
+            winit::Event::WindowEvent{ event, .. } => match event {
+                winit::WindowEvent::CloseRequested =>{
+                    self.running = false;
+                    return Event::CloseRequested
+                },
+                winit::WindowEvent::Resized(logical_size) => {
+                    
+                    let dpi_factor = glutin_window.get_hidpi_factor();
+                    let old_dpi_factor = self.turtle.target_dpi_factor as f32;
+                    let old_size = self.turtle.target_size.clone();
+                    self.turtle.target_dpi_factor = dpi_factor as f32;
+                    self.turtle.target_size = vec2(logical_size.width as f32, logical_size.height as f32);
+                    return Event::Resized(ResizedEvent{
+                        old_size: old_size,
+                        old_dpi_factor: old_dpi_factor,
+                        new_size: self.turtle.target_size.clone(),
+                        new_dpi_factor: self.turtle.target_dpi_factor
+                    })
+                },
+                _ => ()
+            },
+            _ => ()
+        }
+        Event::None
+    }
+
 
     // trigger a redraw on the UI
     pub fn redraw_all(){ 

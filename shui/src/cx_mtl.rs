@@ -90,16 +90,14 @@ impl Cx{
         }
     }
 
-    pub fn repaint(&mut self, logical_size:&winit::dpi::LogicalSize, layer:&CoreAnimationLayer, device:&Device, command_queue:&CommandQueue){
+    pub fn repaint(&mut self,layer:&CoreAnimationLayer, device:&Device, command_queue:&CommandQueue){
         let pool = unsafe { NSAutoreleasePool::new(cocoa::base::nil) };
 
         let camera_projection = Mat4::ortho(
-            0.0, logical_size.width as f32, 0.0, logical_size.height as f32, -100.0, 100.0, 
-            logical_size.width as f32/ self.turtle.target_size.x, 
-            logical_size.height as f32/ self.turtle.target_size.y
+            0.0, self.turtle.target_size.x, 0.0, self.turtle.target_size.y, -100.0, 100.0, 
+            1.0,1.0, 
         );
-        self.turtle.target_size = vec2(logical_size.width as f32,logical_size.height as f32);
-        
+
         self.uniform_camera_projection(camera_projection);
        
         if let Some(drawable) = layer.next_drawable() {
@@ -137,32 +135,11 @@ impl Cx{
         }
     }
 
-    fn map_event(&mut self, winit_event:winit::Event, glutin_window:&winit::Window)->Event{
-        match winit_event{
-            winit::Event::WindowEvent{ event, .. } => match event {
-                winit::WindowEvent::CloseRequested =>{
-                    return Event::CloseRequested
-                },
-                winit::WindowEvent::Resized(logical_size) => {
-                    
-                    let dpi_factor = glutin_window.get_hidpi_factor();
-                    let old_dpi_factor = self.turtle.target_dpi_factor as f32;
-                    let old_size = self.turtle.target_size.clone();
-                    self.turtle.target_dpi_factor = dpi_factor as f32;
-                    self.turtle.target_size = vec2(logical_size.width as f32, logical_size.height as f32);
-                    
-                    return Event::Resized(ResizedEvent{
-                        old_size: old_size,
-                        old_dpi_factor: old_dpi_factor,
-                        new_size: self.turtle.target_size.clone(),
-                        new_dpi_factor: self.turtle.target_dpi_factor
-                    })
-                },
-                _ => ()
-            },
-            _ => ()
-        }
-        Event::None
+    fn resize_layer_to_turtle(&mut self, layer:&CoreAnimationLayer){
+        // resize drawable
+        layer.set_drawable_size(CGSize::new(
+            (self.turtle.target_size.x * self.turtle.target_dpi_factor) as f64,
+             (self.turtle.target_size.y * self.turtle.target_dpi_factor) as f64));
     }
 
     pub fn event_loop<F>(&mut self, mut event_handler:F)
@@ -198,21 +175,21 @@ impl Cx{
         glutin_window.set_position(winit::dpi::LogicalPosition::new(1920.0,400.0));
         
         self.shaders.compile_all_shaders(&device);
-        //let mut current_layer_size:Option<winit::dpi::LogicalSize> = None;
-        let mut last_logical_size = draw_size.clone();
 
         while self.running{
+            // unfortunate duplication of code between poll and run_forever but i don't know how to put this in a closure
+            // without borrowchecker hell
             events_loop.poll_events(|winit_event|{
-                let event = self.map_event(winit_event, &glutin_window);
-                if let Event::Resized(re) = &event{
-                    // resize drawable
-                    let logical_size = glutin_window.get_inner_size().unwrap();
-                    let dpi_factor = glutin_window.get_hidpi_factor();
-                    let local_size = logical_size.to_physical(dpi_factor);
-                    layer.set_drawable_size(CGSize::new(local_size.width as f64, local_size.height as f64));
+                let event = self.map_winit_event(winit_event, &glutin_window);
+                if let Event::Resized(_) = &event{
+                    self.resize_layer_to_turtle(&layer);
+                    event_handler(self, event); 
+                    event_handler(self, Event::Redraw);
+                    self.repaint(&layer, &device, &command_queue);
                 }
-                // pass the event 
-                event_handler(self, event);
+                else{
+                    event_handler(self, event); 
+                }
             });
             // call redraw event
             if let Some(area) = &self.redraw_area{
@@ -221,9 +198,24 @@ impl Cx{
             }
             // repaint everything if we need to
             if self.repaint{
-                if let Some(logical_size) = glutin_window.get_inner_size(){
-                    self.repaint(&logical_size, &layer, &device, &command_queue);
-                }
+                self.repaint(&layer, &device, &command_queue);
+                self.repaint = false;
+            }
+            // wait for the next event
+            if self.animations.len() == 0{
+                events_loop.run_forever(|winit_event|{
+                    let event = self.map_winit_event(winit_event, &glutin_window);
+                    if let Event::Resized(_) = &event{
+                        self.resize_layer_to_turtle(&layer);
+                        event_handler(self, event); 
+                        event_handler(self, Event::Redraw);
+                        self.repaint(&layer, &device, &command_queue);
+                    }
+                    else{
+                        event_handler(self, event);
+                    }
+                    winit::ControlFlow::Break
+                })
             }
         }
     }
