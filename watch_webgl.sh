@@ -1,0 +1,1 @@
+cargo-watch watch -x 'build --target=wasm32-unknown-unknown --release --manifest-path="./webgl/Cargo.toml"'

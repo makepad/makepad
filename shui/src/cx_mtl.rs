@@ -226,5 +226,8 @@ impl Cx{
             }
         }
     }
-  
+
+    pub fn wasm_msg<F>(&mut self, msg:u32, mut event_handler:F)->u32{
+        0
+    }
 }

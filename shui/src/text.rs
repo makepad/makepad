@@ -27,7 +27,7 @@ impl Style for Text{
         Self::def_shader(&mut sh);
         Self{
             shader_id:cx.shaders.add(sh),
-            font_id:cx.fonts.load("fonts/ubuntu_regular_256.font", &mut cx.textures),
+            font_id:cx.fonts.load("resources/ubuntu_regular_256.font", &mut cx.textures),
             text:"".to_string(),
             font_size:10.0,
             line_spacing:1.3,

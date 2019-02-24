@@ -12,14 +12,14 @@ struct App{
     debug_qd:Quad,
     debug_tx:Text
 }
-
+ 
 impl Style for App{
     fn style(cx:&mut Cx)->Self{
         Self{
             view:View::new(),
             ok:Button{
-                ..Style::style(cx)
-            },
+                ..Style::style(cx)  
+            }, 
             oks:Elements::new(),
             rc:Quad{..Style::style(cx)},
             debug_qd:Quad{
@@ -76,7 +76,8 @@ impl App{
     }
 }
 
-fn main() {
+//TODO do this with a macro to generate both entrypoints
+pub fn main() {
     let mut cx = Cx{
         title:"Hi World".to_string(),
         ..Default::default()
@@ -89,4 +90,38 @@ fn main() {
     cx.event_loop(|cx, ev|{
         app.handle(cx, &ev);
     });
+}
+
+struct Wasm{
+    app:*mut App,
+    cx:*mut Cx
+}
+
+#[export_name = "wasm_init"]
+pub extern "C" fn wasm_init()->u32{
+    
+    let mut cx = Box::new(
+         Cx{
+            title:"Hi World".to_string(),
+            ..Default::default()
+        }
+    );
+    
+    let app = Box::new(
+        App{
+            ..Style::style(&mut cx)
+        }
+    );
+    /*
+    Box::into_raw(Box::new(Wasm{app:Box::into_raw(app),cx:Box::into_raw(cx)})) as u32
+    */
+    0
+}
+
+#[export_name = "wasm_msg"]
+pub unsafe extern "C" fn wasm_msg(wasm:u32, msg:u32)->u32{
+    let wasm = &*(wasm as *mut Wasm);
+    (*wasm.cx).wasm_msg(msg,|cx, ev|{
+        (*wasm.app).handle(cx, &ev);
+    })
 }

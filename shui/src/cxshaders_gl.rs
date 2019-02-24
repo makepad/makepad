@@ -1,7 +1,4 @@
-use std::mem;
-use std::ptr;
 use crate::shader::*;
-use crate::cxdrawing::*;
 use crate::cxshaders_shared::*;
 
 impl<'a> SlCx<'a>{

@@ -5,6 +5,7 @@ pub use crate::cx_shared::*;
 use crate::cxshaders::*;
 use crate::events::*;
 
+
 impl Cx{
      pub fn exec_draw_list(&mut self, id: usize){
         // tad ugly otherwise the borrow checker locks 'self' and we can't recur
@@ -13,12 +14,12 @@ impl Cx{
             if sub_list_id != 0{
                 self.exec_draw_list(sub_list_id);
             }
-            else{
+            else{ 
                 let draw_list = &self.drawing.draw_lists[id];
                 let draw = &draw_list.draw_calls[ci];
                 if draw.update_frame_id == self.drawing.frame_id{
                     // update the instance buffer data
-                   /*
+                   /* 
                     unsafe{
                         gl::BindBuffer(gl::ARRAY_BUFFER, draw.vao.vb);
                         gl::BufferData(gl::ARRAY_BUFFER,
@@ -69,6 +70,11 @@ impl Cx{
         //layer.set_drawable_size(CGSize::new(
          //   (self.turtle.target_size.x * self.turtle.target_dpi_factor) as f64,
           //   (self.turtle.target_size.y * self.turtle.target_dpi_factor) as f64));
+    }
+
+    // incoming wasm_msg
+    pub fn wasm_msg<F>(&mut self, msg:u32, mut event_handler:F)->u32{
+        0
     }
 
     pub fn event_loop<F>(&mut self, mut event_handler:F)
@@ -157,4 +163,22 @@ impl Cx{
         }
     }
 
+}
+
+// for use with message passing
+#[export_name = "wasm_alloc"]
+pub unsafe extern "C" fn wasm_alloc(size:u32)->u32{
+    let total_size  = size + 4;
+    let buf = std::alloc::alloc(std::alloc::Layout::from_size_align(total_size as usize, mem::align_of::<u32>()).unwrap()) as u32;
+    // lets write the type and bytes at the head
+    let wr = buf as *mut u32;
+    std::ptr::write(wr, size);
+    buf
+}
+
+#[export_name = "wasm_free"]
+pub unsafe extern "C" fn wasm_free(buf:u32){
+    let wr = buf as *mut u32;
+    let total_size = std::ptr::read(wr) + 4;
+    std::alloc::dealloc(buf as *mut u8, std::alloc::Layout::from_size_align(total_size as usize, mem::align_of::<u32>()).unwrap());
 }

@@ -18,14 +18,19 @@ impl CxFonts{
     pub fn load(&mut self, file_name: &str, tex:&mut CxTextures)->usize{
         let font_id = self.fonts.len();
         let mut out_tex = tex.add_empty();
-        self.fonts.push(
-            Font{
-                font_id:font_id,
-                texture_id: out_tex.texture_id,
-                ..Font::read(file_name, &mut out_tex).unwrap()
-            }
-        );
-        font_id
+        if let Ok(font) = Font::read(file_name, &mut out_tex){
+            self.fonts.push(
+                Font{
+                    font_id:font_id,
+                    texture_id: out_tex.texture_id,
+                    ..font
+                }
+            );
+            font_id
+        }
+        else{
+            0
+        }
     }
 
 }
@@ -73,17 +78,17 @@ pub struct Font{
 
 impl Font{
     pub fn read(inp: &str, tex:&mut crate::cxtextures::Texture) -> io::Result<Font> {
-        let mut file = File::open(inp).unwrap();
-        let _type_id = file.read_u32le();
+        let mut file = File::open(inp)?;
+        let _type_id = file.read_u32le()?;
 
         let mut ff = Font{
             font_id: 0,
-            width: file.read_u16le() as usize,
-            height: file.read_u16le() as usize,
-            slots: file.read_u32le() as usize,
-            rgbsize: file.read_u32le() as usize,
-            onesize: file.read_u32le() as usize,
-            kernsize:file.read_u32le() as usize,
+            width: file.read_u16le()? as usize,
+            height: file.read_u16le()? as usize,
+            slots: file.read_u32le()? as usize,
+            rgbsize: file.read_u32le()? as usize,
+            onesize: file.read_u32le()? as usize,
+            kernsize:file.read_u32le()? as usize,
             ..Default::default()
         };
         ff.unicodes.resize(65535, 0);
@@ -91,16 +96,16 @@ impl Font{
         ff.glyphs.reserve(ff.slots as usize);
         for _i in 0..(ff.slots as usize){
             ff.glyphs.push(Glyph{
-                unicode: file.read_u32le(),
-                x1: file.read_f32le(),
-                y1: file.read_f32le(),
-                x2: file.read_f32le(),
-                y2: file.read_f32le(),
-                advance: file.read_f32le(),
-                tsingle: file.read_u32le() as usize,
-                toffset: file.read_u32le() as usize,
-                tw: file.read_u32le() as usize,
-                th: file.read_u32le() as usize,
+                unicode: file.read_u32le()?,
+                x1: file.read_f32le()?,
+                y1: file.read_f32le()?,
+                x2: file.read_f32le()?,
+                y2: file.read_f32le()?,
+                advance: file.read_f32le()?,
+                tsingle: file.read_u32le()? as usize,
+                toffset: file.read_u32le()? as usize,
+                tw: file.read_u32le()? as usize,
+                th: file.read_u32le()? as usize,
                 tx1:0.0,
                 ty1:0.0,
                 tx2:0.0,
@@ -111,9 +116,9 @@ impl Font{
         ff.kerntable.reserve(ff.kernsize as usize);
         for _i in 0..(ff.kernsize){
             ff.kerntable.push(Kern{
-                i: file.read_u32le(),
-                j: file.read_u32le(),
-                kern: file.read_f32le()
+                i: file.read_u32le()?,
+                j: file.read_u32le()?,
+                kern: file.read_f32le()?
             })
         }
 
@@ -246,27 +251,27 @@ impl Font{
 trait ReadBytes : Read{
     #[inline]
 
-    fn read_u16le(&mut self) -> u16 {
+    fn read_u16le(&mut self) -> io::Result<u16> {
         let mut x = [0;2];
-        self.read(&mut x).unwrap();
+        self.read(&mut x)?;
         let ret = (x[0] as u16) | (x[1] as u16) << 8;
-        ret
+        Ok(ret)
     }
 
-    fn read_u32le(&mut self) -> u32 {
+    fn read_u32le(&mut self) -> io::Result<u32> {
         let mut x = [0;4];
-        self.read(&mut x).unwrap();
+        self.read(&mut x)?;
         let ret = (x[0] as u32) | ((x[1] as u32) << 8) | ((x[2] as u32) << 16) | ((x[3] as u32) << 24);
-        ret
+        Ok(ret)
     }
 
-    fn read_f32le(&mut self) -> f32 {
+    fn read_f32le(&mut self) -> io::Result<f32> {
         let mut x = [0;4];
-        self.read(&mut x).unwrap();
+        self.read(&mut x)?;
         let ret = (x[0] as u32) | ((x[1] as u32) << 8) | ((x[2] as u32) << 16) | ((x[3] as u32) << 24);
         unsafe{
             let ret:f32 = mem::transmute(ret);
-            ret
+            Ok(ret)
         }
     }
 }
