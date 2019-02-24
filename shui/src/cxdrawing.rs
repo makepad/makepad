@@ -118,8 +118,8 @@ impl CxDrawing{
 
 #[derive(Default,Clone)]
 pub struct GLInstanceVAO{
-    pub vao:gl::types::GLuint,
-    pub vb:gl::types::GLuint
+    pub vao:u32,
+    pub vb:u32
 }
 
 #[derive(Default,Clone)]
@@ -357,6 +357,10 @@ impl View{
     }
 
     pub fn end(&mut self, cx:&mut Cx){
+        // we should mark the align_list to track
+        // total dx/dy crossing its boundary
+        // then we can incrementally redraw with that dx/dy
+        // as long as we are a clipped area
         cx.drawing.view_stack.pop();
         cx.turtle.end(&mut cx.drawing,&cx.shaders);
     }

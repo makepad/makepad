@@ -1,7 +1,17 @@
 [features]
-default = ["ogl"]
-ogl = []
-mtl = []
+default = ["mtl"]
+ogl = [
+    "glutin","gl","bitflags","libc","log","block","foreign-types",
+    "winit","sema","time"
+]
+mtl = [
+    "glutin","gl","bitflags","libc","log","block","foreign-types",
+    "winit","sema","time","metal","cocoa","core-graphics",
+    "objc-foundation","objc_id","objc"
+]
+webgl = [
+    "bitflags"
+]
 
 [package]
 name = "shui"
@@ -11,25 +21,68 @@ edition = "2018"
 
 [dependencies]
 shader_ast = {path="./shader_ast"}
-glutin = "0.19"
-gl = "0.11" 
 rand = "0.3"
-scoped_threadpool = "0.1"
-bitflags = "1"
-libc = "0.2"
-log = "0.4"
-block = "0.1.5"
-foreign-types = "0.3"
-winit = "0.18"
-sema = "0.1.4"
 
-[target.'cfg(target_os = "macos")'.dependencies]
-metal = "0.14"
-cocoa = "0.18"
-core-graphics = "0.17"
-objc-foundation = "0.1"
-objc_id = "0.1"
+[dependencies.glutin]
+version = "0.19"
+optional = true
 
-[target.'cfg(target_os = "macos")'.dependencies.objc]
+[dependencies.gl]
+version = "0.11"
+optional = true
+
+[dependencies.bitflags]
+version = "1"
+optional = true
+
+[dependencies.libc]
+version = "0.2"
+optional = true
+
+[dependencies.log]
+version = "0.4"
+optional = true
+
+[dependencies.block]
+version = "0.1.5"
+optional = true
+
+[dependencies.foreign-types]
+version = "0.3"
+optional = true
+
+[dependencies.winit]
+version = "0.18"
+optional = true
+
+[dependencies.sema]
+version = "0.1.4"
+optional = true
+
+[dependencies.time]
+version = "0.1.4"
+optional = true
+
+[dependencies.metal]
+version = "0.14"
+optional = true
+
+[dependencies.cocoa]
+version = "0.18"
+optional = true
+
+[dependencies.core-graphics]
+version = "0.17"
+optional = true
+
+[dependencies.objc-foundation]
+version = "0.1"
+optional = true
+
+[dependencies.objc_id]
+version = "0.1"
+optional = true
+
+[dependencies.objc]
 version = "0.2.3"
-features = ["objc_exception"]
+optional = true

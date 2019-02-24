@@ -35,9 +35,10 @@ impl Style for App{
 
 impl App{
     fn handle(&mut self, cx:&mut Cx, event:&Event){
+        if let Event::Redraw = event{return self.draw(cx);}
+
         if let ButtonEvent::Clicked = self.ok.handle(cx, event){
             // we got clicked!
-            
         }
     } 
 
@@ -86,9 +87,6 @@ fn main() {
     };
 
     cx.event_loop(|cx, ev|{
-        if let Event::Redraw = ev{
-            return app.draw(cx);
-        }
         app.handle(cx, &ev);
     });
 }

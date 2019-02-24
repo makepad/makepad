@@ -1,13 +1,17 @@
 [package]
-name = "makepad"
+name = "makepad_wasm"
 version = "0.1.0"
 authors = ["arc"]
 edition = "2018"
+
+[lib]
+path = "../src/main.rs"
+crate-type = ["cdylib"]
 
 [dependencies]
 rand = "*"
 
 [dependencies.shui]
-path="./shui"
+path="../shui"
 default-features = false
-features=["ogl"]
+features=["webgl"]

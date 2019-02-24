@@ -21,6 +21,19 @@ mod cxshaders;
 #[path="cxtextures_mtl.rs"]
 mod cxtextures;
 
+#[cfg(feature = "webgl")]
+#[path="cx_webgl.rs"]
+mod cx; 
+#[cfg(feature = "webgl")]
+#[path="cxshaders_webgl.rs"]
+mod cxshaders; 
+#[cfg(feature = "webgl")]
+#[path="cxtextures_webgl.rs"]
+mod cxtextures;
+
+#[cfg(any(feature = "webgl", feature = "ogl"))]
+mod cxshaders_gl; 
+
 mod cxshaders_shared;
 mod cx_shared;
 

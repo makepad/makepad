@@ -108,7 +108,7 @@ impl Text{
         }));
     }
 
-    pub fn draw_text(&mut self, cx:&mut Cx, x:Value, y:Value, text:&str)->Area{
+    pub fn draw_text(&mut self, cx:&mut Cx, _x:Value, _y:Value, text:&str)->Area{
         let dr = cx.drawing.instance_aligned(cx.shaders.get(self.shader_id), &mut cx.turtle);
         let font = cx.fonts.get(self.font_id);
 

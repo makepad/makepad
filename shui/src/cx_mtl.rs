@@ -8,7 +8,7 @@ use objc::runtime::YES;
 use objc::{msg_send, sel, sel_impl};
 use metal::*;
 use winit::os::macos::WindowExt;
-
+use time::precise_time_ns;
 pub use crate::cx_shared::*;
 use crate::cxdrawing::*;
 use crate::events::*;
@@ -149,7 +149,7 @@ impl Cx{
         let mut events_loop = winit::EventsLoop::new();
         let glutin_window = winit::WindowBuilder::new()
             .with_dimensions((800, 600).into())
-            .with_title(self.title.clone())
+            .with_title(format!("Metal - {}",self.title))
             .build(&events_loop).unwrap();
 
         let window: cocoa_id = unsafe { mem::transmute(glutin_window.get_nswindow()) };
@@ -175,16 +175,21 @@ impl Cx{
         glutin_window.set_position(winit::dpi::LogicalPosition::new(1920.0,400.0));
         
         self.shaders.compile_all_shaders(&device);
-
+        let start_time = precise_time_ns();
+        
         while self.running{
             // unfortunate duplication of code between poll and run_forever but i don't know how to put this in a closure
             // without borrowchecker hell
             events_loop.poll_events(|winit_event|{
+                self.cycle_id += 1;
+                //self.cycle_time = 
                 let event = self.map_winit_event(winit_event, &glutin_window);
                 if let Event::Resized(_) = &event{
                     self.resize_layer_to_turtle(&layer);
                     event_handler(self, event); 
+                    self.redraw_all();
                     event_handler(self, Event::Redraw);
+                    self.redraw_none();
                     self.repaint(&layer, &device, &command_queue);
                 }
                 else{
@@ -192,8 +197,9 @@ impl Cx{
                 }
             });
             // call redraw event
-            if let Some(area) = &self.redraw_area{
+            if let Some(_) = &self.redraw_area{
                 event_handler(self, Event::Redraw);
+                self.redraw_none();
                 self.repaint = true;
             }
             // repaint everything if we need to
@@ -204,6 +210,7 @@ impl Cx{
             // wait for the next event
             if self.animations.len() == 0{
                 events_loop.run_forever(|winit_event|{
+                    self.cycle_id += 1;
                     let event = self.map_winit_event(winit_event, &glutin_window);
                     if let Event::Resized(_) = &event{
                         self.resize_layer_to_turtle(&layer);

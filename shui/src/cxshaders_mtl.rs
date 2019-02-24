@@ -166,18 +166,7 @@ pub struct CxShaders{
 
 impl CxShaders{
 
-    pub fn get(&self, id:usize)->&CompiledShader{
-        &self.compiled_shaders[id]
-    }
-
-    pub fn add(&mut self, sh:Shader)->usize{
-        let id = self.shaders.len();
-        // lets compile this sh
-        self.shaders.push(sh);
-        id
-    }
-
-    pub fn compile_all_shaders(&mut self, device:&Device){
+     pub fn compile_all_shaders(&mut self, device:&Device){
         for sh in &self.shaders{
             let mtlsh = Self::compile_shader(&sh, device);
             if let Ok(mtlsh) = mtlsh{
@@ -194,7 +183,7 @@ impl CxShaders{
             }
         };
     }
-
+    
     pub fn type_to_packed_metal(ty:&str)->String{
         match ty.as_ref(){
             "float"=>"float".to_string(),

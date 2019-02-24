@@ -9,50 +9,33 @@ use crate::cxshaders_gl::*;
 
 #[derive(Default,Clone)]
 pub struct GLAttribute{
-    pub loc:gl::types::GLuint,
-    pub size:gl::types::GLsizei,
-    pub offset:gl::types::GLsizei,
-    pub stride:gl::types::GLsizei
+    pub loc:u32,
+    pub size:u32,
+    pub offset:u32,
+    pub stride:u32
 }
 
 #[derive(Default,Clone)]
 pub struct GLUniform{
-    pub loc:gl::types::GLint,
+    pub loc:u32,
     pub name:String,
     pub size:usize
 }
 
 #[derive(Default,Clone)]
 pub struct GLTextureSlot{
-    pub loc:gl::types::GLint,
+    pub loc:u32,
     pub name:String
-}
-
-#[derive(Default,Clone)]
-pub struct AssembledGLShader{
-    pub geometry_slots:usize,
-    pub instance_slots:usize,
-    pub geometry_attribs:usize,
-    pub instance_attribs:usize,
-
-    pub uniforms_dr: Vec<ShVar>,
-    pub uniforms_dl: Vec<ShVar>,
-    pub uniforms_cx: Vec<ShVar>,
-    pub texture_slots:Vec<ShVar>,
-
-    pub fragment:String,
-    pub vertex:String,
-    pub named_instance_props: NamedInstanceProps
 }
 
 #[derive(Default,Clone)]
 pub struct CompiledShader{
     pub shader_id: usize,
-    pub program: gl::types::GLuint,
+    pub program: u32,
     pub geom_attribs: Vec<GLAttribute>,
     pub inst_attribs: Vec<GLAttribute>,
-    pub geom_vb: gl::types::GLuint,
-    pub geom_ib: gl::types::GLuint,
+    pub geom_vb: u32,
+    pub geom_ib: u32,
     //pub assembled_shader: AssembledGLShader,
     pub instance_slots:usize,
     pub uniforms_dr: Vec<GLUniform>,
@@ -75,7 +58,6 @@ pub struct CxBuffers{
 pub struct DrawListBuffers{
 }
 
-
 #[derive(Default,Clone)]
 pub struct DrawBuffers{
 }
@@ -87,6 +69,7 @@ pub struct CxShaders{
 }
 
 impl CxShaders{
+
     pub fn compile_all_shaders(&mut self){
         for sh in &self.shaders{
             let glsh = Self::compile_shader(&sh);
@@ -105,7 +88,8 @@ impl CxShaders{
         };
     }
 
-    pub fn compile_has_shader_error(compile:bool, shader:gl::types::GLuint, source:&str)->Option<String>{
+    pub fn compile_has_shader_error(compile:bool, shader:u32, source:&str)->Option<String>{
+        /*
         unsafe{
             let mut success = i32::from(gl::FALSE);
            
@@ -145,11 +129,14 @@ impl CxShaders{
             else{
                 None
             }
-        }
+        }*/
+        None
     }
 
-    pub fn compile_get_attributes(program:gl::types::GLuint, prefix:&str, slots:usize, num_attr:usize)->Vec<GLAttribute>{
+    pub fn compile_get_attributes(program:u32, prefix:&str, slots:usize, num_attr:usize)->Vec<GLAttribute>{
+        
         let mut attribs = Vec::new();
+        /*
         let stride = (slots * mem::size_of::<f32>()) as gl::types::GLsizei;
         for i in 0..num_attr{
             let mut name = prefix.to_string();
@@ -170,12 +157,13 @@ impl CxShaders{
                     }
                 )
             }
-        }
+        }*/
         attribs
     }
 
-    pub fn compile_get_uniforms(program:gl::types::GLuint, sh:&Shader, unis:&Vec<ShVar>)->Vec<GLUniform>{
+    pub fn compile_get_uniforms(program:u32, sh:&Shader, unis:&Vec<ShVar>)->Vec<GLUniform>{
         let mut gl_uni = Vec::new();
+        /*
         for uni in unis{
             let mut name0 = "".to_string();
             name0.push_str(&uni.name);
@@ -187,12 +175,13 @@ impl CxShaders{
                     size:sh.get_type_slots(&uni.ty)
                 })
             }
-        }
+        }*/
         gl_uni
     }
 
-    pub fn compile_get_texture_slots(program:gl::types::GLuint, texture_slots:&Vec<ShVar>)->Vec<GLUniform>{
+    pub fn compile_get_texture_slots(program:u32, texture_slots:&Vec<ShVar>)->Vec<GLUniform>{
         let mut gl_texture_slots = Vec::new();
+        /*
         for slot in texture_slots{
             let mut name0 = "".to_string();
             name0.push_str(&slot.name);
@@ -205,14 +194,16 @@ impl CxShaders{
                     //,sampler:sam.sampler.clone()
                 })
             }
-        }
+        }*/
         gl_texture_slots
     }
 
     pub fn compile_shader(sh:&Shader)->Result<CompiledShader, SlErr>{
         let ash = gl_assemble_shader(sh)?;
+        Err(SlErr{msg:"hi".to_string()})
         // now we have a pixel and a vertex shader
         // so lets now pass it to GL
+        /*
         unsafe{
             
             let vs = gl::CreateShader(gl::VERTEX_SHADER);
@@ -279,11 +270,12 @@ impl CxShaders{
                 //assembled_shader:ash,
                 ..Default::default()
             })
-        }
+        }*/
     }
 
     pub fn create_vao(shgl:&CompiledShader)->GLInstanceVAO{
         // create the VAO
+        /*
         let mut vao;
         let mut vb;
         unsafe{
@@ -312,21 +304,24 @@ impl CxShaders{
             // bind the indexbuffer
             gl::BindBuffer(gl::ELEMENT_ARRAY_BUFFER, shgl.geom_ib);
             gl::BindVertexArray(0);
-        }
+            
+        }*/
         GLInstanceVAO{
-            vao:vao,
-            vb:vb
+            vao:0,
+            vb:0
         }
     }
 
     pub fn destroy_vao(glivao:&mut GLInstanceVAO){
+        /*
         unsafe{
             gl::DeleteVertexArrays(1, &mut glivao.vao);
             gl::DeleteBuffers(1, &mut glivao.vb);
-        }
+        }*/
     }
 
     pub fn set_uniform_buffer_fallback(locs:&Vec<GLUniform>, uni:&Vec<f32>){
+        /*
         let mut o = 0;
         for loc in locs{
             if loc.loc >=0 {
@@ -343,9 +338,11 @@ impl CxShaders{
             };
             o = o + loc.size;
         }
+        */
     }
 
     pub fn set_texture_slots(locs:&Vec<GLUniform>, texture_ids:&Vec<usize>, cxtex:&mut CxTextures){
+        /*
         let mut o = 0;
         for loc in locs{
             let id = texture_ids[o];
@@ -371,5 +368,6 @@ impl CxShaders{
             }
             o = o +1;
         }
+        */
     }
 }

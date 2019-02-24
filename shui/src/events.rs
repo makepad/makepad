@@ -1,4 +1,3 @@
-use crate::math::*;
 use crate::cx::*;
 use crate::cxdrawing::*;
 
@@ -41,15 +40,37 @@ impl Default for Event{
 }
 
 impl Event{
-    pub fn hits(&self, area:&Area, cx:&Cx)->bool{
+    pub fn hits(&self, area:&Area, cx:&Cx)->&Event{
         match self{
-            Event::CapturedMove(cm)=>{
-                cm.area == *area
+            Event::Animate=>{
+                for anim in &cx.animations{
+                    if anim.area == *area{
+                        return self
+                    }
+                }
             },
-            Event::FingerMove(fe)=>area.contains(&fe.pos,cx),
-            Event::FingerDown(fe)=>area.contains(&fe.pos,cx),
-            Event::FingerUp(fe)=>area.contains(&fe.pos,cx),
-            _=>false
-        }
+            Event::CapturedMove(cm)=>{
+                if cm.area == *area{
+                    return self;
+                }
+            },
+            Event::FingerMove(fe)=>{
+                if area.contains(&fe.pos,cx){
+                    return self;
+                }
+            },
+            Event::FingerDown(fe)=>{
+                if area.contains(&fe.pos,cx){
+                    return self;
+                }
+            },
+            Event::FingerUp(fe)=>{
+                if area.contains(&fe.pos,cx){
+                    return self;
+                }
+            },
+            _=>()
+        };
+        return &Event::None;
     }
 }
