@@ -112,10 +112,7 @@ pub extern "C" fn wasm_init()->u32{
             ..Style::style(&mut cx)
         }
     );
-    /*
     Box::into_raw(Box::new(Wasm{app:Box::into_raw(app),cx:Box::into_raw(cx)})) as u32
-    */
-    0
 }
 
 #[export_name = "wasm_msg"]

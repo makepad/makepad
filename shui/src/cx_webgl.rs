@@ -4,7 +4,7 @@ use std::ptr;
 pub use crate::cx_shared::*;
 use crate::cxshaders::*;
 use crate::events::*;
-
+use std::alloc;
 
 impl Cx{
      pub fn exec_draw_list(&mut self, id: usize){
@@ -74,7 +74,21 @@ impl Cx{
 
     // incoming wasm_msg
     pub fn wasm_msg<F>(&mut self, msg:u32, mut event_handler:F)->u32{
-        0
+        let mut wasm_recv = WasmRecv::own(msg);
+        let mut wasm_send = WasmSend::new();
+        let msg = wasm_recv.next_msg();
+        loop{
+            match msg{
+                WasmFn::Init=>{
+                    wasm_send.log("HELLO WORLD");
+                },
+                WasmFn::End=>{
+                    break;
+                }
+            }
+        };
+        // return the send message
+        wasm_send.end()
     }
 
     pub fn event_loop<F>(&mut self, mut event_handler:F)
@@ -165,20 +179,151 @@ impl Cx{
 
 }
 
-// for use with message passing
-#[export_name = "wasm_alloc"]
-pub unsafe extern "C" fn wasm_alloc(size:u32)->u32{
-    let total_size  = size + 4;
-    let buf = std::alloc::alloc(std::alloc::Layout::from_size_align(total_size as usize, mem::align_of::<u32>()).unwrap()) as u32;
-    // lets write the type and bytes at the head
-    let wr = buf as *mut u32;
-    std::ptr::write(wr, size);
-    buf
+
+pub struct WasmSend{
+    mu32:*mut u32,
+    mf32:*mut f32,
+    slots:usize,
+    used:isize
 }
 
-#[export_name = "wasm_free"]
-pub unsafe extern "C" fn wasm_free(buf:u32){
-    let wr = buf as *mut u32;
-    let total_size = std::ptr::read(wr) + 4;
-    std::alloc::dealloc(buf as *mut u8, std::alloc::Layout::from_size_align(total_size as usize, mem::align_of::<u32>()).unwrap());
+impl WasmSend{
+    pub fn new()->WasmSend{
+        unsafe{
+            let start_slots = 10242;
+            let buf = alloc::alloc(alloc::Layout::from_size_align((start_slots * mem::size_of::<u32>()) as usize, mem::align_of::<u32>()).unwrap()) as *mut u32;
+            (buf as *mut u32).write(start_slots as u32);
+            WasmSend{
+                mu32:buf as *mut u32,
+                mf32:buf as *mut f32,
+                slots:start_slots,
+                used:1
+            }
+        }
+    }
+
+    // ensure enough size for RPC structure with exponential alloc strategy
+    fn ensure(&mut self, slots:usize){
+        unsafe{
+            if self.used as usize + slots> self.slots{
+                let new_slots = usize::max(self.used as usize + slots, self.slots * 2);
+                let new_buf = alloc::alloc(alloc::Layout::from_size_align(new_slots * mem::size_of::<u32>(), mem::align_of::<u32>()).unwrap()) as *mut u32;
+                ptr::copy_nonoverlapping(self.mu32, new_buf, self.slots);
+                alloc::dealloc(self.mu32 as *mut u8, alloc::Layout::from_size_align(self.slots * mem::size_of::<u32>(), mem::align_of::<u32>()).unwrap());
+                self.slots = new_slots;
+                (new_buf as *mut u32).write(self.slots as u32);
+                self.mu32 = new_buf;
+                self.mf32 = new_buf as *mut f32;
+            }
+            self.used += slots as isize;
+        }
+    }
+
+    // forwarded API
+    pub fn log(&mut self, msg:&str){
+        unsafe{
+            let mu32 = self.mu32.offset(self.used);
+            let len = msg.chars().count();
+            self.ensure(len + 2);
+            mu32.write(1); 
+            mu32.offset(1).write(len as u32);
+            for (i,c) in msg.chars().enumerate(){
+                mu32.offset((i+1) as isize).write(c as u32);
+            }
+        }
+    }
+
+    pub fn end(&mut self) -> u32{
+        unsafe{
+            self.ensure(1);
+            let mu32 = self.mu32.offset(self.used);
+            mu32.write(0);
+            let ret = self.mu32 as u32;
+            // make buffer inaccessible
+            self.mu32 = 0 as *mut u32;
+            self.mf32 = 0 as *mut f32;
+            self.slots = 0;
+            self.used = 0;
+            ret
+        }
+    }
+}
+
+struct WasmRecv{
+    mu32:*mut u32,
+    mf32:*mut f32,
+    slots:usize,
+    parse:isize
+}
+
+enum WasmFn{
+    Init,
+    End
+}
+
+impl WasmRecv{
+    pub fn own(buf:u32)->WasmRecv{
+        unsafe{
+            WasmRecv{
+                mu32: buf as *mut u32,
+                mf32: buf as *mut f32,
+                parse: 1,
+                slots: (buf as *mut u32).read() as usize
+            }
+        }
+    }
+
+    pub fn next_msg(&mut self)->WasmFn{
+        unsafe{
+            let mu32 = self.mu32.offset(self.parse).read();
+            match mu32{
+                0=>{
+                    self.parse += 1;
+                    WasmFn::End
+                },
+                1=>{
+                    self.parse += 1;
+                    WasmFn::Init
+                },
+                _=>{
+                    panic!("Unknown message")
+                }
+            }
+        }
+    }
+}
+
+impl Drop for WasmRecv{
+    fn drop(&mut self){
+        unsafe{
+            alloc::dealloc(self.mu32 as *mut u8, alloc::Layout::from_size_align((self.slots * mem::size_of::<u32>()) as usize, mem::align_of::<u32>()).unwrap());
+        }
+    }
+}
+
+// for use with message passing
+#[export_name = "wasm_alloc"]
+pub unsafe extern "C" fn wasm_alloc(slots:u32)->u32{
+    let buf = std::alloc::alloc(std::alloc::Layout::from_size_align((slots as usize * mem::size_of::<u32>()) as usize, mem::align_of::<u32>()).unwrap()) as u32;
+    (buf as *mut u32).write(slots);
+    buf as u32
+}
+
+// for use with message passing
+#[export_name = "wasm_realloc"]
+pub unsafe extern "C" fn wasm_realloc(in_buf:u32, new_slots:u32)->u32{
+    let old_buf = in_buf as *mut u32;
+    let old_slots = old_buf.read() as usize ;
+    let new_buf = alloc::alloc(alloc::Layout::from_size_align((new_slots as usize * mem::size_of::<u32>()) as usize, mem::align_of::<u32>()).unwrap()) as *mut u32;
+    ptr::copy_nonoverlapping(old_buf, new_buf, old_slots );
+    alloc::dealloc(old_buf as *mut u8, alloc::Layout::from_size_align((old_slots * mem::size_of::<u32>()) as usize, mem::align_of::<u32>()).unwrap());
+    (new_buf as *mut u32).write(new_slots);
+    new_buf as u32
+}
+
+#[export_name = "wasm_dealloc"]
+pub unsafe extern "C" fn wasm_dealloc(in_buf:u32){
+    let buf = in_buf as *mut u32;
+    let slots = buf.read() as usize;
+    std::alloc::dealloc(buf as *mut u8, std::alloc::Layout::from_size_align((slots * mem::size_of::<u32>()) as usize, mem::align_of::<u32>()).unwrap());
 }
