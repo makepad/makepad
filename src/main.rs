@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use shui::*;
 mod button;
 use crate::button::*;
@@ -7,8 +5,8 @@ use crate::button::*;
 struct App{
     view:View,
     ok:Button,
-    oks:Elements<Button>,
-    rc:Quad,
+    //oks:Elements<Button>,
+    //rc:Quad,
     debug_qd:Quad,
     debug_tx:Text
 }
@@ -20,8 +18,8 @@ impl Style for App{
             ok:Button{
                 ..Style::style(cx)  
             }, 
-            oks:Elements::new(),
-            rc:Quad{..Style::style(cx)},
+            //oks:Elements::new(),
+            //rc:Quad{..Style::style(cx)},
             debug_qd:Quad{
                 ..Style::style(cx)
             },
@@ -76,7 +74,7 @@ impl App{
     }
 }
 
-//TODO do this with a macro to generate both entrypoints
+//TODO do this with a macro to generate both entrypoints for App and Cx
 pub fn main() {
     let mut cx = Cx{
         title:"Hi World".to_string(),
@@ -92,33 +90,26 @@ pub fn main() {
     });
 }
 
-struct Wasm{
-    app:*mut App,
-    cx:*mut Cx
-}
-
 #[export_name = "wasm_init"]
 pub extern "C" fn wasm_init()->u32{
-    
     let mut cx = Box::new(
          Cx{
             title:"Hi World".to_string(),
             ..Default::default()
         }
     );
-    
     let app = Box::new(
         App{
             ..Style::style(&mut cx)
         }
     );
-    Box::into_raw(Box::new(Wasm{app:Box::into_raw(app),cx:Box::into_raw(cx)})) as u32
+    Box::into_raw(Box::new((Box::into_raw(app),Box::into_raw(cx)))) as u32
 }
 
-#[export_name = "wasm_msg"]
-pub unsafe extern "C" fn wasm_msg(wasm:u32, msg:u32)->u32{
-    let wasm = &*(wasm as *mut Wasm);
-    (*wasm.cx).wasm_msg(msg,|cx, ev|{
-        (*wasm.app).handle(cx, &ev);
+#[export_name = "wasm_recv"]
+pub unsafe extern "C" fn wasm_recv(appcx:u32, msg:u32)->u32{
+    let appcx = &*(appcx as *mut (*mut App,*mut Cx));
+    (*appcx.1).wasm_recv(msg,|cx, ev|{
+        (*appcx.0).handle(cx, &ev);
     })
 }

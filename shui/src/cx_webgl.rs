@@ -73,19 +73,20 @@ impl Cx{
     }
 
     // incoming wasm_msg
-    pub fn wasm_msg<F>(&mut self, msg:u32, mut event_handler:F)->u32{
+    pub fn wasm_recv<F>(&mut self, msg:u32, mut event_handler:F)->u32{
         let mut wasm_recv = WasmRecv::own(msg);
         let mut wasm_send = WasmSend::new();
-        let msg = wasm_recv.next_msg();
+        let mut msg = wasm_recv.next_msg();
         loop{
             match msg{
-                WasmFn::Init=>{
-                    wasm_send.log("HELLO WORLD");
+                WasmMsg::Init=>{
+                    wasm_send.log("Hello world");
                 },
-                WasmFn::End=>{
+                WasmMsg::End=>{
                     break;
                 }
-            }
+            };
+            msg = wasm_recv.next_msg();
         };
         // return the send message
         wasm_send.end()
@@ -228,7 +229,7 @@ impl WasmSend{
             mu32.write(1); 
             mu32.offset(1).write(len as u32);
             for (i,c) in msg.chars().enumerate(){
-                mu32.offset((i+1) as isize).write(c as u32);
+                mu32.offset((i+2) as isize).write(c as u32);
             }
         }
     }
@@ -256,7 +257,7 @@ struct WasmRecv{
     parse:isize
 }
 
-enum WasmFn{
+enum WasmMsg{
     Init,
     End
 }
@@ -273,17 +274,16 @@ impl WasmRecv{
         }
     }
 
-    pub fn next_msg(&mut self)->WasmFn{
+    pub fn next_msg(&mut self)->WasmMsg{
         unsafe{
-            let mu32 = self.mu32.offset(self.parse).read();
-            match mu32{
+            let msgtype = self.mu32.offset(self.parse).read();
+            self.parse += 1;
+            match msgtype{
                 0=>{
-                    self.parse += 1;
-                    WasmFn::End
+                    WasmMsg::End
                 },
                 1=>{
-                    self.parse += 1;
-                    WasmFn::Init
+                    WasmMsg::Init
                 },
                 _=>{
                     panic!("Unknown message")
