@@ -115,7 +115,7 @@ pub struct DrawCall{
     pub instance:Vec<f32>,
     pub current_instance_offset:usize, // offset of current instance
     pub uniforms:Vec<f32>,  // draw uniforms
-    pub textures:Vec<usize>,
+    pub textures:Vec<u32>,
     pub update_frame_id: usize,
     pub resources:DrawCallResources,
     pub first:bool
@@ -181,7 +181,7 @@ impl DrawCall{
 
     pub fn texture(&mut self, _name: &str, texture_id: usize){
         // how do we store these?
-        self.textures.push(texture_id);
+        self.textures.push(texture_id as u32);
     }
 
     pub fn ufloat(&mut self, _name: &str, v:f32){

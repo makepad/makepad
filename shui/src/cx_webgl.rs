@@ -8,80 +8,84 @@ use crate::events::*;
 use std::alloc;
 
 impl Cx{
-     pub fn exec_draw_list(&mut self, id: usize){
+     pub fn exec_draw_list(&mut self, draw_list_id: usize){
         // tad ugly otherwise the borrow checker locks 'self' and we can't recur
-        for ci in 0..self.drawing.draw_lists[id].draw_calls_len{
-            let sub_list_id = self.drawing.draw_lists[id].draw_calls[ci].sub_list_id;
+        for draw_call_id in 0..self.drawing.draw_lists[draw_list_id].draw_calls_len{
+            let sub_list_id = self.drawing.draw_lists[draw_list_id].draw_calls[draw_call_id].sub_list_id;
             if sub_list_id != 0{
                 self.exec_draw_list(sub_list_id);
             }
             else{ 
-                let draw_list = &self.drawing.draw_lists[id];
-                let draw = &draw_list.draw_calls[ci];
-                if draw.update_frame_id == self.drawing.frame_id{
-                    // update the instance buffer data
-                }
+                let draw_list = &mut self.drawing.draw_lists[draw_list_id];
+                let draw_call = &mut draw_list.draw_calls[draw_call_id];
+                let csh = &self.shaders.compiled_shaders[draw_call.shader_id];
 
-                let sh = &self.shaders.shaders[draw.shader_id];
-                let shgl = &self.shaders.compiled_shaders[draw.shader_id];
-                /*
-                unsafe{
-                    gl::UseProgram(shgl.program);
-                    gl::BindVertexArray(draw.vao.vao);
-                    let instances = draw.instance.len() / shgl.instance_slots;
-                    let indices = sh.geometry_indices.len();
-                    CxShaders::set_uniform_buffer_fallback(&shgl.uniforms_cx, &self.uniforms);
-                    CxShaders::set_uniform_buffer_fallback(&shgl.uniforms_dl, &draw_list.uniforms);
-                    CxShaders::set_uniform_buffer_fallback(&shgl.uniforms_dr, &draw.uniforms);
-                    CxShaders::set_texture_slots(&shgl.texture_slots, &draw.textures, &mut self.textures);
-                    gl::DrawElementsInstanced(gl::TRIANGLES, indices as i32, gl::UNSIGNED_INT, ptr::null(), instances as i32);
+                if draw_call.update_frame_id == self.drawing.frame_id{
+                    // update the instance buffer data
+                    draw_call.resources.check_attached_vao(csh, &mut self.resources);
+
+                    self.resources.wasm_send.alloc_array_buffer(
+                        draw_call.resources.inst_vb_id,
+                        draw_call.instance.len(),
+                        draw_call.instance.as_ptr() as *const f32
+                    );
                 }
-                */
+                self.resources.wasm_send.draw_call(
+                    draw_call.shader_id,
+                    draw_call.resources.vao_id,
+                    &self.uniforms,
+                    self.drawing.frame_id, // update once a frame
+                    &draw_list.uniforms,
+                    draw_list_id, // update on drawlist change
+                    &draw_call.uniforms,
+                    draw_call.draw_call_id, // update on drawcall id change
+                    &draw_call.textures
+                );
             }
         }
     }
-    
-    pub fn repaint(&mut self/*, glutin_window:&glutin::GlWindow*/){
-        /*
-        unsafe{
-            gl::Clear(gl::COLOR_BUFFER_BIT|gl::DEPTH_BUFFER_BIT);
-        }*/
 
+    pub fn clear(&mut self, r:f32, g:f32, b:f32, a:f32){
+        self.resources.wasm_send.clear(r,g,b,a);
+    }
+    
+    pub fn repaint(&mut self){
         self.prepare_frame();        
         self.exec_draw_list(0);
-
-        //glutin_window.swap_buffers().unwrap();
-    }
-
-    fn resize_window_to_turtle(&mut self/*, glutin_window:&glutin::GlWindow*/){
-       // resize drawable
-        /*glutin_window.resize(PhysicalSize::new(
-            (self.turtle.target_size.x * self.turtle.target_dpi_factor) as f64,
-            (self.turtle.target_size.y * self.turtle.target_dpi_factor) as f64)
-        );*/
-        //gl_window.resize(logical_size.to_physical(dpi_factor));
-        //layer.set_drawable_size(CGSize::new(
-         //   (self.turtle.target_size.x * self.turtle.target_dpi_factor) as f64,
-          //   (self.turtle.target_size.y * self.turtle.target_dpi_factor) as f64));
     }
 
     // incoming wasm_msg
-    pub fn wasm_recv<F>(&mut self, msg:u32, mut event_handler:F)->u32{
+    pub fn wasm_recv<F>(&mut self, msg:u32, mut event_handler:F)->u32
+    where F: FnMut(&mut Cx, Event)
+    {
         let mut wasm_recv = WasmRecv::own(msg);
         self.resources.wasm_send = WasmSend::new();
-        let mut msg = wasm_recv.next_msg();
+
         loop{
-            match msg{
-                WasmMsg::Init=>{
+            let msg_type = wasm_recv.mu32();
+            match msg_type{
+                0=>{ // end
+                    break;
+                },
+                1=>{ // init
+                    // render our first pass
+                    self.turtle.target_size = vec2(wasm_recv.mf32(),wasm_recv.mf32());
+                    self.turtle.target_dpi_factor = wasm_recv.mf32();
+
                     // compile all the shaders
                     self.resources.wasm_send.log(&self.title);
                     self.shaders.compile_all_webgl_shaders(&mut self.resources);
+
+                    // do our initial redraw and repaint
+                    self.redraw_all();
+                    event_handler(self, Event::Redraw);
+                    self.redraw_none();
+                    self.repaint();
                 },
-                WasmMsg::End=>{
-                    break;
+                _=>{
+                    panic!("Message unknown")
                 }
             };
-            msg = wasm_recv.next_msg();
         };
         // return the send message
         self.resources.wasm_send.end()
@@ -89,89 +93,7 @@ impl Cx{
 
     pub fn event_loop<F>(&mut self, mut event_handler:F)
     where F: FnMut(&mut Cx, Event),
-    { /*
-        let gl_request = GlRequest::Latest;
-        let gl_profile = GlProfile::Core;
-
-        let mut events_loop = glutin::EventsLoop::new();
-        let window = glutin::WindowBuilder::new()
-            .with_title(self.title.clone())
-            .with_dimensions(LogicalSize::new(640.0, 480.0));
-        let context = glutin::ContextBuilder::new()
-            .with_vsync(true)
-            .with_gl(gl_request)
-            .with_gl_profile(gl_profile);
-        let glutin_window = glutin::GlWindow::new(window, context, &events_loop).unwrap();
-
-        unsafe {
-            glutin_window.make_current().unwrap();
-            gl::load_with(|symbol| glutin_window.get_proc_address(symbol) as *const _);
-            gl::ClearColor(0.3, 0.3, 0.3, 1.0);
-            gl::Enable(gl::DEPTH_TEST);
-            gl::DepthFunc(gl::LEQUAL);
-            gl::BlendEquationSeparate(gl::FUNC_ADD, gl::FUNC_ADD);
-            gl::BlendFuncSeparate(gl::ONE, gl::ONE_MINUS_SRC_ALPHA, gl::ONE, gl::ONE_MINUS_SRC_ALPHA);
-            gl::Enable(gl::BLEND);            
-
-            //let mut num_extensions = 0;
-            //gl::GetIntegerv(gl::NUM_EXTENSIONS, &mut num_extensions);
-            //let extensions: Vec<_> = (0 .. num_extensions).map(|num| {
-            //   Cx::gl_string(gl::GetStringi(gl::EXTENSIONS, num as gl::types::GLuint))
-            //}).collect();
-            //println!("Extensions   : {}", extensions.join(", "))
-        }*/
-
-        // lets compile all shaders
-        //self.shaders.compile_all_shaders();
-/*
-        while self.running{
-            /*
-            events_loop.poll_events(|winit_event|{
-                let event = self.map_winit_event(winit_event, &glutin_window);
-                if let Event::Resized(_) = &event{
-                    self.resize_window_to_turtle(&glutin_window);
-                    event_handler(self, event); 
-                    self.redraw_all();
-                    event_handler(self, Event::Redraw);
-                    self.redraw_clear();
-                    self.repaint(&glutin_window);
-                }
-                else{
-                    event_handler(self, event); 
-                }
-            });*/
-            // call redraw event
-            if let Some(_) = &self.redraw_area{
-                event_handler(self, Event::Redraw);
-                self.redraw_none();
-                self.repaint = true;
-            }
-            // repaint everything if we need to
-            if self.repaint{
-                self.repaint();
-                self.repaint = false;
-            }
-
-            // wait for the next event
-            if self.animations.len() == 0{
-                /*
-                events_loop.run_forever(|winit_event|{
-                    let event = self.map_winit_event(winit_event, &glutin_window);
-                    if let Event::Resized(_) = &event{
-                        self.resize_window_to_turtle(&glutin_window);
-                        event_handler(self, event); 
-                        event_handler(self, Event::Redraw);
-                        self.repaint(&glutin_window);
-                    }
-                    else{
-                        event_handler(self, event);
-                    }
-                    winit::ControlFlow::Break
-                })
-                */
-            }
-        }
-        */
+    { 
     }
 
 }
@@ -185,8 +107,8 @@ pub struct WasmSend{
     current:isize
 }
 
-impl Default for WasmSend{
-    fn default()->WasmSend{
+impl WasmSend{
+    pub fn zero()->WasmSend{
         WasmSend{
             mu32:0 as *mut u32,
             mf32:0 as *mut f32,
@@ -195,9 +117,6 @@ impl Default for WasmSend{
             current:0
         }
     }
-}
-
-impl WasmSend{
     pub fn new()->WasmSend{
         unsafe{
             let start_slots = 1024; 
@@ -284,11 +203,56 @@ impl WasmSend{
     }   
 
     pub fn alloc_array_buffer(&mut self, buffer_id:usize, len:usize, data:*const f32){
-
+        self.fit(4);
+        self.mu32(3);
+        self.mu32(buffer_id as u32);
+        self.mu32(len as u32);
+        self.mu32(data as u32);
     }
 
     pub fn alloc_index_buffer(&mut self, buffer_id:usize, len:usize, data:*const u32){
+        self.fit(4);
+        self.mu32(4);
+        self.mu32(buffer_id as u32);
+        self.mu32(len as u32);
+        self.mu32(data as u32);
+    }
 
+    pub fn alloc_vao(&mut self, shader_id:usize, vao_id:usize, geom_ib_id:usize, geom_vb_id:usize, inst_vb_id:usize){
+        self.fit(6);
+        self.mu32(5);
+        self.mu32(shader_id as u32);
+        self.mu32(vao_id as u32);
+        self.mu32(geom_ib_id as u32);
+        self.mu32(geom_vb_id as u32);
+        self.mu32(inst_vb_id as u32);
+    }
+
+    pub fn draw_call(&mut self, shader_id:usize, vao_id:usize, 
+        uniforms_cx:&Vec<f32>, uni_cx_update:usize, 
+        uniforms_dl:&Vec<f32>, uni_dl_update:usize,
+        uniforms_dr:&Vec<f32>, uni_dr_update:usize,
+        textures:&Vec<u32>){
+        self.fit(10);
+        self.mu32(6);
+        self.mu32(shader_id as u32);
+        self.mu32(vao_id as u32);
+        self.mu32(uniforms_cx.as_ptr() as u32);
+        self.mu32(uni_cx_update as u32);
+        self.mu32(uniforms_dl.as_ptr() as u32);
+        self.mu32(uni_dl_update as u32);
+        self.mu32(uniforms_dr.as_ptr() as u32);
+        self.mu32(uni_dr_update as u32);
+        self.mu32(textures.as_ptr() as u32);
+    }
+
+    pub fn clear(&mut self, r:f32, g:f32, b:f32, a:f32){
+        self.fit(5);
+        self.mu32(7);
+        self.mf32(r);
+        self.mf32(g);
+        self.mf32(b);
+        self.mf32(a);
     }
 
     fn add_string(&mut self, msg:&str){
@@ -319,11 +283,6 @@ struct WasmRecv{
     parse:isize
 }
 
-enum WasmMsg{
-    Init,
-    End
-}
-
 impl WasmRecv{
     pub fn own(buf:u32)->WasmRecv{
         unsafe{
@@ -336,23 +295,21 @@ impl WasmRecv{
         }
     }
 
-    pub fn next_msg(&mut self)->WasmMsg{
+    fn mu32(&mut self)->u32{
         unsafe{
-            let msgtype = self.mu32.offset(self.parse).read();
+            let ret = self.mu32.offset(self.parse).read();
             self.parse += 1;
-            match msgtype{
-                0=>{
-                    WasmMsg::End
-                },
-                1=>{
-                    WasmMsg::Init
-                },
-                _=>{
-                    panic!("Unknown message")
-                }
-            }
+            ret
         }
     }
+
+    fn mf32(&mut self)->f32{
+        unsafe{
+            let ret = self.mf32.offset(self.parse).read();
+            self.parse += 1;
+            ret
+        }
+    }   
 }
 
 impl Drop for WasmRecv{

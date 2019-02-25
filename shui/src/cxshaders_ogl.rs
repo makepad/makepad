@@ -203,9 +203,10 @@ impl CxShaders{
         }
     }
 
-    pub fn compile_get_attributes(program:gl::types::GLuint, prefix:&str, slots:usize, num_attr:usize)->Vec<GLAttribute>{
+    pub fn compile_get_attributes(program:gl::types::GLuint, prefix:&str, slots:usize)->Vec<GLAttribute>{
         let mut attribs = Vec::new();
         let stride = (slots * mem::size_of::<f32>()) as gl::types::GLsizei;
+        let num_attr = div_ceil4(slots)
         for i in 0..num_attr{
             let mut name = prefix.to_string();
             name.push_str(&i.to_string());

@@ -73,6 +73,7 @@ impl Cx{
     }
 
     pub fn prepare_frame(&mut self){
+        self.clear(0.3,0.3,0.3,1.0);
         let camera_projection = Mat4::ortho(
                 0.0, self.turtle.target_size.x, 0.0, self.turtle.target_size.y, -100.0, 100.0, 
                 1.0,1.0

@@ -55,11 +55,18 @@ impl Cx{
                                     .expect("gl_string: non-UTF8 string")
     }
     
-    pub fn repaint(&mut self, glutin_window:&glutin::GlWindow){
-        unsafe{
-            gl::Clear(gl::COLOR_BUFFER_BIT|gl::DEPTH_BUFFER_BIT);
-        }
+    fn clear(&mut self, r:f32, g:f32, b:f32, a:f32){
+        gl::Enable(gl::DEPTH_TEST);
+        gl::DepthFunc(gl::LEQUAL);
+        gl::BlendEquationSeparate(gl::FUNC_ADD, gl::FUNC_ADD);
+        gl::BlendFuncSeparate(gl::ONE, gl::ONE_MINUS_SRC_ALPHA, gl::ONE, gl::ONE_MINUS_SRC_ALPHA);
+        gl::Enable(gl::BLEND);
+        gl::ClearColor(r,g,b,a);
+        gl::Clear(gl::COLOR_BUFFER_BIT|gl::DEPTH_BUFFER_BIT);
+    }
 
+    pub fn repaint(&mut self, glutin_window:&glutin::GlWindow){
+        self.clear(0.3,0.3,0.3,1.0);
         self.prepare_frame();        
         self.exec_draw_list(0);
 
@@ -77,7 +84,7 @@ impl Cx{
          //   (self.turtle.target_size.x * self.turtle.target_dpi_factor) as f64,
           //   (self.turtle.target_size.y * self.turtle.target_dpi_factor) as f64));
     }
-
+    
     pub fn event_loop<F>(&mut self, mut event_handler:F)
     where F: FnMut(&mut Cx, Event),
     { 
@@ -97,12 +104,8 @@ impl Cx{
         unsafe {
             glutin_window.make_current().unwrap();
             gl::load_with(|symbol| glutin_window.get_proc_address(symbol) as *const _);
-            gl::ClearColor(0.3, 0.3, 0.3, 1.0);
-            gl::Enable(gl::DEPTH_TEST);
-            gl::DepthFunc(gl::LEQUAL);
-            gl::BlendEquationSeparate(gl::FUNC_ADD, gl::FUNC_ADD);
-            gl::BlendFuncSeparate(gl::ONE, gl::ONE_MINUS_SRC_ALPHA, gl::ONE, gl::ONE_MINUS_SRC_ALPHA);
-            gl::Enable(gl::BLEND);            
+
+           
 
             //let mut num_extensions = 0;
             //gl::GetIntegerv(gl::NUM_EXTENSIONS, &mut num_extensions);

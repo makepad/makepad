@@ -11,7 +11,8 @@ pub struct Button{
     pub bg_layout:Layout,
     pub text: Text,
     pub anim_states:Vec<AnimState>,
-    pub label:String
+    pub label:String,
+    pub event:ButtonEvent
 }
 
 impl Style for Button{
@@ -42,11 +43,13 @@ impl Style for Button{
                 color:color("gray"),
                 ..Style::style(cx)
             },
-            text:Text{..Style::style(cx)}
+            text:Text{..Style::style(cx)},
+            event:ButtonEvent::None
         }
     }
 }
 
+#[derive(Clone)]
 pub enum ButtonEvent{
     None,
     Clicked
@@ -59,7 +62,7 @@ impl Button{
                 cx.compute_animation("bg", &self.area, &self.anim_states, &self.area);
             },
             Event::FingerDown(_fe)=>{
-                return ButtonEvent::Clicked
+                self.event = ButtonEvent::Clicked
             },
             Event::FingerMove(_fe)=>{
                 // lets start an animation.
@@ -67,9 +70,11 @@ impl Button{
                 //cx.start_animation(&self.area, ANIM_OVER);
                 //println!("MOVE OVER");
             },
-            _=>()
-        }
-        ButtonEvent::None
+            _=>{
+                 self.event = ButtonEvent::None
+            }
+        };
+        self.event.clone()
    }
 
     pub fn draw_with_label(&mut self, cx:&mut Cx, label: &str){
@@ -79,7 +84,7 @@ impl Button{
         // however our turtle stack needs to remain independent
         self.bg.begin(cx, &self.bg_layout);
 
-        self.text.draw_text(cx, Computed, Computed, label);
+        //self.text.draw_text(cx, Computed, Computed, label);
         
         self.area = self.bg.end(cx);
 
