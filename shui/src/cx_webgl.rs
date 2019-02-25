@@ -2,7 +2,6 @@ use std::mem;
 use std::ptr;
 
 pub use crate::cx_shared::*;
-use crate::cxshaders::*;
 use crate::events::*;
 use std::alloc;
 
@@ -75,12 +74,14 @@ impl Cx{
     // incoming wasm_msg
     pub fn wasm_recv<F>(&mut self, msg:u32, mut event_handler:F)->u32{
         let mut wasm_recv = WasmRecv::own(msg);
-        let mut wasm_send = WasmSend::new();
+        self.buffers.wasm_send = WasmSend::new();
         let mut msg = wasm_recv.next_msg();
         loop{
             match msg{
                 WasmMsg::Init=>{
-                    wasm_send.log("Hello world");
+                    // compile all the shaders
+                    self.shaders.compile_all_shaders(self);
+                    self.buffers.wasm_send.log(&self.title);
                 },
                 WasmMsg::End=>{
                     break;
@@ -89,7 +90,7 @@ impl Cx{
             msg = wasm_recv.next_msg();
         };
         // return the send message
-        wasm_send.end()
+        self.buffers.wasm_send.end()
     }
 
     pub fn event_loop<F>(&mut self, mut event_handler:F)
@@ -127,8 +128,8 @@ impl Cx{
         }*/
 
         // lets compile all shaders
-        self.shaders.compile_all_shaders();
-
+        //self.shaders.compile_all_shaders();
+/*
         while self.running{
             /*
             events_loop.poll_events(|winit_event|{
@@ -176,35 +177,51 @@ impl Cx{
                 */
             }
         }
+        */
     }
 
 }
 
-
+#[derive(Clone)]
 pub struct WasmSend{
     mu32:*mut u32,
     mf32:*mut f32,
     slots:usize,
-    used:isize
+    used:isize,
+    current:isize
+}
+
+impl Default for WasmSend{
+    fn default()->WasmSend{
+        WasmSend{
+            mu32:0 as *mut u32,
+            mf32:0 as *mut f32,
+            slots:0,
+            used:0,
+            current:0
+        }
+    }
 }
 
 impl WasmSend{
     pub fn new()->WasmSend{
         unsafe{
-            let start_slots = 10242;
+            let start_slots = 1024; 
             let buf = alloc::alloc(alloc::Layout::from_size_align((start_slots * mem::size_of::<u32>()) as usize, mem::align_of::<u32>()).unwrap()) as *mut u32;
             (buf as *mut u32).write(start_slots as u32);
             WasmSend{
                 mu32:buf as *mut u32,
                 mf32:buf as *mut f32,
                 slots:start_slots,
-                used:1
+                used:1,
+                current:0
             }
         }
     }
 
-    // ensure enough size for RPC structure with exponential alloc strategy
-    fn ensure(&mut self, slots:usize){
+    // fit enough size for RPC structure with exponential alloc strategy
+    // returns position to write to
+    fn fit(&mut self, slots:usize){
         unsafe{
             if self.used as usize + slots> self.slots{
                 let new_slots = usize::max(self.used as usize + slots, self.slots * 2);
@@ -216,40 +233,58 @@ impl WasmSend{
                 self.mu32 = new_buf;
                 self.mf32 = new_buf as *mut f32;
             }
+            self.current = self.used;
             self.used += slots as isize;
         }
     }
 
-    // forwarded API
-    pub fn log(&mut self, msg:&str){
-        unsafe{
-            let mu32 = self.mu32.offset(self.used);
-            let len = msg.chars().count();
-            self.ensure(len + 2);
-            mu32.write(1); 
-            mu32.offset(1).write(len as u32);
-            for (i,c) in msg.chars().enumerate(){
-                mu32.offset((i+2) as isize).write(c as u32);
-            }
+    fn check(&mut self){
+        if self.current != self.used{
+            panic!("Unequal allocation and writes")
         }
     }
 
-    pub fn end(&mut self) -> u32{
+    fn mu32(&mut self, v:u32){
         unsafe{
-            self.ensure(1);
-            let mu32 = self.mu32.offset(self.used);
-            mu32.write(0);
-            let ret = self.mu32 as u32;
-            // make buffer inaccessible
-            self.mu32 = 0 as *mut u32;
-            self.mf32 = 0 as *mut f32;
-            self.slots = 0;
-            self.used = 0;
-            ret
+            self.mu32.offset(self.current).write(v);
+            self.current += 1;
         }
     }
+
+    fn mf32(&mut self, v:f32){
+        unsafe{
+            self.mf32.offset(self.current).write(v);
+            self.current += 1;
+        }
+    }   
+    
+    // end the block and return ownership of the pointer
+    pub fn end(&mut self) -> u32{
+        self.fit(1);
+        self.mu32(0);
+        self.mu32 as u32
+    }
+
+    pub fn compile_shader(csh:&CompiledShader){
+        
+    }
+
+    // log a string
+    pub fn log(&mut self, msg:&str){
+        let len = msg.chars().count();
+        self.fit(len + 2);
+        self.mu32(1);
+        self.mu32(len as u32);
+        for c in msg.chars(){
+            self.mu32(c as u32);
+        }
+        self.check();
+    }
+
+   
 }
 
+#[derive(Clone)]
 struct WasmRecv{
     mu32:*mut u32,
     mf32:*mut f32,

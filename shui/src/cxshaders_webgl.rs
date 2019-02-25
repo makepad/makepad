@@ -2,6 +2,7 @@ use std::mem;
 use std::ptr;
 
 use crate::shader::*;
+use crate::cx::*;
 use crate::cxtextures::*;
 use crate::cxdrawing::*;
 use crate::cxshaders_shared::*;
@@ -16,14 +17,14 @@ pub struct GLAttribute{
 }
 
 #[derive(Default,Clone)]
-pub struct GLUniform{
+pub struct WebGLUniform{
     pub loc:u32,
     pub name:String,
     pub size:usize
 }
 
 #[derive(Default,Clone)]
-pub struct GLTextureSlot{
+pub struct WebGLTextureSlot{
     pub loc:u32,
     pub name:String
 }
@@ -31,17 +32,14 @@ pub struct GLTextureSlot{
 #[derive(Default,Clone)]
 pub struct CompiledShader{
     pub shader_id: usize,
-    pub program: u32,
-    pub geom_attribs: Vec<GLAttribute>,
-    pub inst_attribs: Vec<GLAttribute>,
     pub geom_vb: u32,
     pub geom_ib: u32,
-    //pub assembled_shader: AssembledGLShader,
     pub instance_slots:usize,
-    pub uniforms_dr: Vec<GLUniform>,
-    pub uniforms_dl: Vec<GLUniform>,
-    pub uniforms_cx: Vec<GLUniform>,
-    pub texture_slots: Vec<GLUniform>,
+    pub geometry_slots:usize,
+    pub uniforms_dr: Vec<WebGLUniform>,
+    pub uniforms_dl: Vec<WebGLUniform>,
+    pub uniforms_cx: Vec<WebGLUniform>,
+    pub texture_slots: Vec<WebGLTextureSlot>,
     pub named_instance_props: NamedInstanceProps
 }
 
@@ -50,16 +48,22 @@ pub struct GLTexture2D{
     pub texture_id: usize
 }
 
+// storage buffers for graphics API related resources
 #[derive(Clone, Default)]
-pub struct CxBuffers{
+pub struct CxResources{
+    pub wasm_send:WasmSend,
+    pub vertex_buffers:usize,
+    pub vertex_buffers_free:Vec<usize>,
+    pub index_buffers:usize,
+    pub index_buffers_free:Vec<usize>
 }
 
 #[derive(Clone, Default)]
-pub struct DrawListBuffers{
+pub struct DrawListResources{
 }
 
 #[derive(Default,Clone)]
-pub struct DrawBuffers{
+pub struct DrawCallResources{
 }
 
 #[derive(Clone, Default)]
@@ -70,7 +74,7 @@ pub struct CxShaders{
 
 impl CxShaders{
 
-    pub fn compile_all_shaders(&mut self){
+    pub fn compile_all_shaders(&mut self, cx: &mut Cx){
         for sh in &self.shaders{
             let glsh = Self::compile_shader(&sh);
             if let Ok(glsh) = glsh{

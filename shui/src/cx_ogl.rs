@@ -19,30 +19,30 @@ impl Cx{
                 self.exec_draw_list(sub_list_id);
             }
             else{
-                let draw_list = &self.drawing.draw_lists[id];
-                let draw = &draw_list.draw_calls[ci];
-                if draw.update_frame_id == self.drawing.frame_id{
-                    // update the instance buffer data
-                    unsafe{
-                        gl::BindBuffer(gl::ARRAY_BUFFER, draw.vao.vb);
-                        gl::BufferData(gl::ARRAY_BUFFER,
-                                        (draw.instance.len() * mem::size_of::<f32>()) as gl::types::GLsizeiptr,
-                                        draw.instance.as_ptr() as *const _, gl::STATIC_DRAW);
-                    }
-                }
-
-                let sh = &self.shaders.shaders[draw.shader_id];
-                let shgl = &self.shaders.compiled_shaders[draw.shader_id];
+                let draw_list = &mut self.drawing.draw_lists[id];
+                let draw_call = &mut draw_list.draw_calls[ci];
+                let sh = &self.shaders.shaders[draw_call.shader_id];
+                let csh = &self.shaders.compiled_shaders[draw_call.shader_id];
 
                 unsafe{
-                    gl::UseProgram(shgl.program);
-                    gl::BindVertexArray(draw.vao.vao);
-                    let instances = draw.instance.len() / shgl.instance_slots;
+                    draw_call.resources.check_attached_vao(csh);
+
+                    if draw_call.update_frame_id == self.drawing.frame_id{
+                        // update the instance buffer data
+                            gl::BindBuffer(gl::ARRAY_BUFFER, draw_call.resources.vb);
+                            gl::BufferData(gl::ARRAY_BUFFER,
+                                            (draw_call.instance.len() * mem::size_of::<f32>()) as gl::types::GLsizeiptr,
+                                            draw_call.instance.as_ptr() as *const _, gl::STATIC_DRAW);
+                    }
+
+                    gl::UseProgram(csh.program);
+                    gl::BindVertexArray(draw_call.resources.vao);
+                    let instances = draw_call.instance.len() / csh.instance_slots;
                     let indices = sh.geometry_indices.len();
-                    CxShaders::set_uniform_buffer_fallback(&shgl.uniforms_cx, &self.uniforms);
-                    CxShaders::set_uniform_buffer_fallback(&shgl.uniforms_dl, &draw_list.uniforms);
-                    CxShaders::set_uniform_buffer_fallback(&shgl.uniforms_dr, &draw.uniforms);
-                    CxShaders::set_texture_slots(&shgl.texture_slots, &draw.textures, &mut self.textures);
+                    CxShaders::set_uniform_buffer_fallback(&csh.uniforms_cx, &self.uniforms);
+                    CxShaders::set_uniform_buffer_fallback(&csh.uniforms_dl, &draw_list.uniforms);
+                    CxShaders::set_uniform_buffer_fallback(&csh.uniforms_dr, &draw_call.uniforms);
+                    CxShaders::set_texture_slots(&csh.texture_slots, &draw_call.textures, &mut self.textures);
                     gl::DrawElementsInstanced(gl::TRIANGLES, indices as i32, gl::UNSIGNED_INT, ptr::null(), instances as i32);
                 }
             }
@@ -161,7 +161,7 @@ impl Cx{
         }
     }
 
-    pub fn wasm_msg<F>(&mut self, msg:u32, mut event_handler:F)->u32{
+    pub fn wasm_recv<F>(&mut self, msg:u32, mut event_handler:F)->u32{
         0
     }
 }

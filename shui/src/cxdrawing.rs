@@ -64,33 +64,23 @@ impl CxDrawing{
                 current_instance_offset:0,
                 first:true,
                 update_frame_id:self.frame_id,
-                vao:CxShaders::create_vao(sh),
-                buffers:DrawBuffers{..Default::default()}
+                resources:DrawCallResources{..Default::default()}
             });
-            return &mut draw_list.draw_calls[id];
+            
+            return &mut draw_list.draw_calls[id]
         }
 
         // reuse a draw
-        let draw = &mut draw_list.draw_calls[id];
-        // we used to be a sublist, construct vao
-        if draw.sub_list_id != 0{
-            draw.shader_id = sh.shader_id;
-            draw.vao = CxShaders::create_vao(sh);
-        }
-        // used to be another shader, destroy/construct vao
-        else if draw.shader_id != sh.shader_id{
-            CxShaders::destroy_vao(&mut draw.vao);
-            draw.vao = CxShaders::create_vao(sh);
-            draw.shader_id = sh.shader_id;
-        }
+        let dc = &mut draw_list.draw_calls[id];
+        dc.shader_id = sh.shader_id;
         // truncate buffers and set update frame
-        draw.instance.truncate(0);
-        draw.current_instance_offset = 0;
-        draw.uniforms.truncate(0);
-        draw.textures.truncate(0);
-        draw.update_frame_id = self.frame_id;
-        draw.first = true;
-        draw
+        dc.instance.truncate(0);
+        dc.current_instance_offset = 0;
+        dc.uniforms.truncate(0);
+        dc.textures.truncate(0);
+        dc.update_frame_id = self.frame_id;
+        dc.first = true;
+        dc
     }
 
     // push instance so it can be written to again in pop_instance
@@ -117,12 +107,6 @@ impl CxDrawing{
 }
 
 #[derive(Default,Clone)]
-pub struct GLInstanceVAO{
-    pub vao:u32,
-    pub vb:u32
-}
-
-#[derive(Default,Clone)]
 pub struct DrawCall{
     pub draw_call_id:usize,
     pub draw_list_id:usize,
@@ -133,8 +117,7 @@ pub struct DrawCall{
     pub uniforms:Vec<f32>,  // draw uniforms
     pub textures:Vec<usize>,
     pub update_frame_id: usize,
-    pub vao:GLInstanceVAO,
-    pub buffers:DrawBuffers,
+    pub resources:DrawCallResources,
     pub first:bool
 }
 
@@ -257,7 +240,7 @@ pub struct DrawList{
     pub draw_calls:Vec<DrawCall>,
     pub draw_calls_len: usize,
     pub uniforms:Vec<f32>, // cmdlist uniforms
-    pub buffers:DrawListBuffers
+    pub resources:DrawListResources
 }
 
 impl DrawList{
@@ -336,13 +319,7 @@ impl View{
             }
             else{// or reuse a sub list node
                 let draw = &mut parent_draw_list.draw_calls[id];
-                if draw.sub_list_id == 0{ // we used to be a drawcmd
-                    CxShaders::destroy_vao(&mut draw.vao);
-                    draw.sub_list_id = self.draw_list_id;
-                }
-                else{ // used to be a sublist
-                    draw.sub_list_id = self.draw_list_id;
-                }
+                draw.sub_list_id = self.draw_list_id;
             }
         }
 

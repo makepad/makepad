@@ -13,7 +13,7 @@
 			this.mu32 = new Uint32Array(this.exports.memory.buffer, this.pointer, this.slots);
 		}
 
-		ensure(new_slots){
+		fit(new_slots){
 			if(this.used + new_slots > this.slots){
 				let new_slots = Math.max(this.used+new_slots, this.slots * 2)
 				this.pointer = this.exports.wasm_realloc(this.pointer, new_slots);
@@ -21,18 +21,18 @@
 				this.mu32 = new Uint32Array(this.exports.memory.buffer, this.pointer, new_slots);
    				this.slots = new_slots
 			}
+			let pos = this.used;
 			this.used += new_slots;
+			return pos;
 		}
 
 		init(){
-			let pos = this.used;
-			this.ensure(1);
+			let pos = this.fit(1);
 			this.mu32[pos] = 1;
 		}
 
 		end(){
-			let pos = this.used;
-			this.ensure(1);
+			let pos = this.fit(1);
 			this.mu32[pos] = 0;
 		}
 

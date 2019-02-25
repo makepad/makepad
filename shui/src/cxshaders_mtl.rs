@@ -126,17 +126,17 @@ impl MetalBuffer{
 }
 
 #[derive(Clone, Default)]
-pub struct CxBuffers{
+pub struct CxResources{
      pub uni_cx:MetalBuffer
 }
 
 #[derive(Clone, Default)]
-pub struct DrawListBuffers{
+pub struct DrawListResources{
      pub uni_dl:MetalBuffer
 }
 
 #[derive(Default,Clone)]
-pub struct DrawBuffers{
+pub struct DrawCallResources{
     pub uni_dr:MetalBuffer,
     pub inst_vbuf:MetalBuffer
 }
@@ -146,7 +146,6 @@ pub struct CompiledShader{
     pub library:Option<metal::Library>,
     pub pipeline_state:Option<metal::RenderPipelineState>,
     pub shader_id: usize,
-//    pub assembled_shader: AssembledMtlShader,
     pub geom_vbuf:MetalBuffer,
     pub geom_ibuf:MetalBuffer,
     pub instance_slots:usize,
@@ -413,16 +412,5 @@ impl CxShaders{
                 }
             })
         }
-    }
-
-    // TODO clear this away
-    pub fn create_vao(_shgl:&CompiledShader)->GLInstanceVAO{
-        GLInstanceVAO{
-            vao:0,
-            vb:0
-        }
-    }
-
-    pub fn destroy_vao(_glivao:&mut GLInstanceVAO){
     }
 }

@@ -94,7 +94,7 @@ pub fn main() {
 pub extern "C" fn wasm_init()->u32{
     let mut cx = Box::new(
          Cx{
-            title:"Hi World".to_string(),
+            title:"Hi JS!".to_string(),
             ..Default::default()
         }
     );

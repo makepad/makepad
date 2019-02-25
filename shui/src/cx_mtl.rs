@@ -20,7 +20,7 @@ impl Cx{
         // update draw list uniforms
         {
             let draw_list = &mut self.drawing.draw_lists[id];
-            draw_list.buffers.uni_dl.update_with_f32_data(device, &draw_list.uniforms);
+            draw_list.resources.uni_dl.update_with_f32_data(device, &draw_list.uniforms);
         }
         // tad ugly otherwise the borrow checker locks 'self' and we can't recur
         for ci in 0..self.drawing.draw_lists[id].draw_calls_len{
@@ -37,8 +37,8 @@ impl Cx{
                 
                 if draw.update_frame_id == self.drawing.frame_id{
                     // update the instance buffer data
-                    draw.buffers.inst_vbuf.update_with_f32_data(device, &draw.instance);
-                    draw.buffers.uni_dr.update_with_f32_data(device, &draw.uniforms);
+                    draw.resources.inst_vbuf.update_with_f32_data(device, &draw.instance);
+                    draw.resources.uni_dr.update_with_f32_data(device, &draw.uniforms);
                 }
 
                 let instances = (draw.instance.len() / shc.instance_slots) as u64;
@@ -46,20 +46,20 @@ impl Cx{
                     encoder.set_render_pipeline_state(pipeline_state);
                     if let Some(buf) = &shc.geom_vbuf.buffer{encoder.set_vertex_buffer(0, Some(&buf), 0);}
                     else{println!("Drawing error: geom_vbuf None")}
-                    if let Some(buf) = &draw.buffers.inst_vbuf.buffer{encoder.set_vertex_buffer(1, Some(&buf), 0);}
+                    if let Some(buf) = &draw.resources.inst_vbuf.buffer{encoder.set_vertex_buffer(1, Some(&buf), 0);}
                     else{println!("Drawing error: inst_vbuf None")}
-                    if let Some(buf) = &self.buffers.uni_cx.buffer{encoder.set_vertex_buffer(2, Some(&buf), 0);}
+                    if let Some(buf) = &self.resources.uni_cx.buffer{encoder.set_vertex_buffer(2, Some(&buf), 0);}
                     else{println!("Drawing error: uni_cx None")}
-                    if let Some(buf) = &draw_list.buffers.uni_dl.buffer{encoder.set_vertex_buffer(3, Some(&buf), 0);}
+                    if let Some(buf) = &draw_list.resources.uni_dl.buffer{encoder.set_vertex_buffer(3, Some(&buf), 0);}
                     else{println!("Drawing error: uni_dl None")}
-                    if let Some(buf) = &draw.buffers.uni_dr.buffer{encoder.set_vertex_buffer(4, Some(&buf), 0);}
+                    if let Some(buf) = &draw.resources.uni_dr.buffer{encoder.set_vertex_buffer(4, Some(&buf), 0);}
                     else{println!("Drawing error: uni_dr None")}
 
-                    if let Some(buf) = &self.buffers.uni_cx.buffer{encoder.set_fragment_buffer(0, Some(&buf), 0);}
+                    if let Some(buf) = &self.resources.uni_cx.buffer{encoder.set_fragment_buffer(0, Some(&buf), 0);}
                     else{println!("Drawing error: uni_cx None")}
-                    if let Some(buf) = &draw_list.buffers.uni_dl.buffer{encoder.set_fragment_buffer(1, Some(&buf), 0);}
+                    if let Some(buf) = &draw_list.resources.uni_dl.buffer{encoder.set_fragment_buffer(1, Some(&buf), 0);}
                     else{println!("Drawing error: uni_dl None")}
-                    if let Some(buf) = &draw.buffers.uni_dr.buffer{encoder.set_fragment_buffer(2, Some(&buf), 0);}
+                    if let Some(buf) = &draw.resources.uni_dr.buffer{encoder.set_fragment_buffer(2, Some(&buf), 0);}
                     else{println!("Drawing error: uni_dr None")}
 
                     // lets set our textures
@@ -116,7 +116,7 @@ impl Cx{
             let parallel_encoder = command_buffer.new_parallel_render_command_encoder(&render_pass_descriptor);
             let encoder = parallel_encoder.render_command_encoder();
 
-            self.buffers.uni_cx.update_with_f32_data(&device, &self.uniforms);
+            self.resources.uni_cx.update_with_f32_data(&device, &self.uniforms);
 
             // ok now we should call our render thing
             self.turtle.align_list.truncate(0);
@@ -227,7 +227,7 @@ impl Cx{
         }
     }
 
-    pub fn wasm_msg<F>(&mut self, msg:u32, mut event_handler:F)->u32{
+    pub fn wasm_recv<F>(&mut self, msg:u32, mut event_handler:F)->u32{
         0
     }
 }

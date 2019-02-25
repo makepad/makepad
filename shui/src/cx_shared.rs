@@ -16,9 +16,9 @@ pub struct Cx{
     pub drawing:CxDrawing,
     pub fonts:CxFonts,
     pub textures:CxTextures,
-
     pub uniforms:Vec<f32>,
-    pub buffers:CxBuffers,
+    pub resources:CxResources,
+
     pub animations:Vec<AnimArea>,
     pub redraw_area:Option<Area>,
     pub repaint:bool,
@@ -41,7 +41,7 @@ impl Default for Cx{
             cycle_time:0.0,
             cycle_id:0,
             uniforms:uniforms,
-            buffers:CxBuffers{..Default::default()},
+            resources:CxResources{..Default::default()},
             animations:Vec::new(),
             redraw_area:Some(Area::zero()),
             repaint:true
