@@ -84,7 +84,7 @@ impl Button{
         // however our turtle stack needs to remain independent
         self.bg.begin(cx, &self.bg_layout);
 
-        //self.text.draw_text(cx, Computed, Computed, label);
+        self.text.draw_text(cx, Computed, Computed, label);
         
         self.area = self.bg.end(cx);
 

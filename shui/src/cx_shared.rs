@@ -20,6 +20,7 @@ pub struct Cx{
 
     pub animations:Vec<AnimArea>,
     pub redraw_area:Option<Area>,
+    pub binary_deps:Vec<BinaryDep>,
     pub repaint:bool,
     pub cycle_time:f64, // time in seconds in f64
     pub cycle_id:u64
@@ -42,6 +43,7 @@ impl Default for Cx{
             uniforms:uniforms,
             resources:CxResources{..Default::default()},
             animations:Vec::new(),
+            binary_deps:Vec::new(),
             redraw_area:Some(Area::zero()),
             repaint:true
         }
@@ -70,6 +72,13 @@ impl Cx{
         for i in 0..16{
             self.uniforms[CX_UNI_CAMERA_PROJECTION+i] = v.v[i];
         }
+    }
+
+    pub fn get_binary_dep(&self, name:&str)->Option<BinaryDep>{
+        if let Some(dep) = self.binary_deps.iter().find(|v| v.name == name){
+            return Some(dep.clone());
+        }
+        None
     }
 
     pub fn prepare_frame(&mut self){
@@ -318,5 +327,83 @@ where T:Clone
             self.len += 1;
             &mut self.elements[last]
         }
+    }
+}
+
+
+#[derive(Clone)]
+pub struct BinaryDep{
+    name:String,
+    buffer: *const u8,
+    pub parse:isize,
+    pub length:isize
+}
+
+impl BinaryDep{
+    pub fn new_from_wasm(name:String, wasm_ptr:u32)->BinaryDep{
+        BinaryDep{
+            name:name, 
+            buffer:wasm_ptr as *const u8,
+            parse:8,
+            length:unsafe{(wasm_ptr as *const u64).read() as isize}
+        }
+    }
+
+    pub fn u8(&mut self)->Result<u8, String>{
+        if self.parse + 1 > self.length{
+            return Err(format!("Eof on u8 file {} offset {}", self.name, self.parse))
+        }
+        unsafe{
+            let ret = self.buffer.offset(self.parse).read();
+            self.parse += 1;
+            Ok(ret)
+        }
+    }
+
+    pub fn u16(&mut self)->Result<u16, String>{
+        if self.parse+2 > self.length{
+            return Err(format!("Eof on u16 file {} offset {}", self.name, self.parse))
+        }
+        unsafe{
+            let ret = (self.buffer.offset(self.parse) as *const u16).read();
+            self.parse += 2;
+            Ok(ret)
+        }
+    }
+
+    pub fn u32(&mut self)->Result<u32, String>{
+        if self.parse+4 > self.length{
+            return Err(format!("Eof on u32 file {} offset {}", self.name, self.parse))
+        }
+        unsafe{
+            let ret = (self.buffer.offset(self.parse) as *const u32).read();
+            self.parse += 4;
+            Ok(ret)
+        }
+    }
+
+    pub fn f32(&mut self)->Result<f32, String>{
+        if self.parse+4 > self.length{
+            return Err(format!("Eof on f32 file {} offset {}", self.name, self.parse))
+        }
+        unsafe{
+            let ret = (self.buffer.offset(self.parse) as *const f32).read();
+            self.parse += 4;
+            Ok(ret)
+        }
+    }
+
+    pub fn read(&mut self, out:&mut [u8])->Result<usize, String>{
+        let len = out.len();
+        if self.parse + len as isize > self.length{
+             return Err(format!("Eof on read file {} len {} offset {}", self.name, out.len(), self.parse));
+        };
+        unsafe{
+            for i in 0..len{
+                out[i] = self.buffer.offset(self.parse + i as isize).read();
+            };
+            self.parse += len as isize;
+        }
+        Ok(len)
     }
 }

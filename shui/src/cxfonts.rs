@@ -1,11 +1,9 @@
-use std::fs::File;
-use std::io;
-use std::io::prelude::*;
-use std::mem;
 use crate::cxtextures::*;
+use crate::cx_shared::*;
 
 #[derive(Clone, Default)]
 pub struct CxFonts{
+    pub file_names:Vec<String>,
     pub fonts:Vec<Font>
 }
 
@@ -15,7 +13,31 @@ impl CxFonts{
         font
     }
 
-    pub fn load(&mut self, file_name: &str, tex:&mut CxTextures)->usize{
+    pub fn load(&mut self, file_name: &str)->usize{
+        let found = self.file_names.iter().position(|v| v == file_name);
+        if found.is_none(){
+            let font_id = self.file_names.len();
+            self.file_names.push(file_name.to_string());
+            return font_id
+        }
+        found.unwrap()
+    }
+
+    pub fn load_from_binary_dep(&mut self, bin_dep: &mut BinaryDep, cx_tex:&mut CxTextures)-> Result<(), String>{
+        let mut out_tex = cx_tex.add_empty();
+        let font = Font::from_binary_dep(bin_dep, &mut out_tex)?;
+        self.fonts.push(
+            Font{
+                font_id:self.fonts.len(),
+                texture_id: out_tex.texture_id,
+                ..font
+            }
+        );
+        Ok(())
+    }
+
+/*
+    pub fn 
         let font_id = self.fonts.len();
         let mut out_tex = tex.add_empty();
         if let Ok(font) = Font::read(file_name, &mut out_tex){
@@ -32,7 +54,7 @@ impl CxFonts{
             0
         }
     }
-
+*/
 }
 
 
@@ -77,18 +99,17 @@ pub struct Font{
 }
 
 impl Font{
-    pub fn read(inp: &str, tex:&mut crate::cxtextures::Texture) -> io::Result<Font> {
-        let mut file = File::open(inp)?;
-        let _type_id = file.read_u32le()?;
+    pub fn from_binary_dep(inp: &mut BinaryDep, tex:&mut crate::cxtextures::Texture) -> Result<Font, String> {
+        let _type_id = inp.u32()?;
 
         let mut ff = Font{
             font_id: 0,
-            width: file.read_u16le()? as usize,
-            height: file.read_u16le()? as usize,
-            slots: file.read_u32le()? as usize,
-            rgbsize: file.read_u32le()? as usize,
-            onesize: file.read_u32le()? as usize,
-            kernsize:file.read_u32le()? as usize,
+            width: inp.u16()? as usize,
+            height: inp.u16()? as usize,
+            slots: inp.u32()? as usize,
+            rgbsize: inp.u32()? as usize,
+            onesize: inp.u32()? as usize,
+            kernsize:inp.u32()? as usize,
             ..Default::default()
         };
         ff.unicodes.resize(65535, 0);
@@ -96,16 +117,16 @@ impl Font{
         ff.glyphs.reserve(ff.slots as usize);
         for _i in 0..(ff.slots as usize){
             ff.glyphs.push(Glyph{
-                unicode: file.read_u32le()?,
-                x1: file.read_f32le()?,
-                y1: file.read_f32le()?,
-                x2: file.read_f32le()?,
-                y2: file.read_f32le()?,
-                advance: file.read_f32le()?,
-                tsingle: file.read_u32le()? as usize,
-                toffset: file.read_u32le()? as usize,
-                tw: file.read_u32le()? as usize,
-                th: file.read_u32le()? as usize,
+                unicode: inp.u32()?,
+                x1: inp.f32()?,
+                y1: inp.f32()?,
+                x2: inp.f32()?,
+                y2: inp.f32()?,
+                advance: inp.f32()?,
+                tsingle: inp.u32()? as usize,
+                toffset: inp.u32()? as usize,
+                tw: inp.u32()? as usize,
+                th: inp.u32()? as usize,
                 tx1:0.0,
                 ty1:0.0,
                 tx2:0.0,
@@ -116,9 +137,9 @@ impl Font{
         ff.kerntable.reserve(ff.kernsize as usize);
         for _i in 0..(ff.kernsize){
             ff.kerntable.push(Kern{
-                i: file.read_u32le()?,
-                j: file.read_u32le()?,
-                kern: file.read_f32le()?
+                i: inp.u32()?,
+                j: inp.u32()?,
+                kern: inp.f32()?
             })
         }
 
@@ -137,10 +158,10 @@ impl Font{
         tex.resize(ff.width, ff.height);
 
         // ok lets read the different buffers
-        file.read(r_buf.as_mut_slice())?;
-        file.read(g_buf.as_mut_slice())?;
-        file.read(b_buf.as_mut_slice())?;
-        file.read(s_buf.as_mut_slice())?;
+        inp.read(r_buf.as_mut_slice())?;
+        inp.read(g_buf.as_mut_slice())?;
+        inp.read(b_buf.as_mut_slice())?;
+        inp.read(s_buf.as_mut_slice())?;
 
         let mut ox = 0;
         let mut oy = 0;
@@ -247,34 +268,3 @@ impl Font{
         Ok(ff)
     }
 }
-
-trait ReadBytes : Read{
-    #[inline]
-
-    fn read_u16le(&mut self) -> io::Result<u16> {
-        let mut x = [0;2];
-        self.read(&mut x)?;
-        let ret = (x[0] as u16) | (x[1] as u16) << 8;
-        Ok(ret)
-    }
-
-    fn read_u32le(&mut self) -> io::Result<u32> {
-        let mut x = [0;4];
-        self.read(&mut x)?;
-        let ret = (x[0] as u32) | ((x[1] as u32) << 8) | ((x[2] as u32) << 16) | ((x[3] as u32) << 24);
-        Ok(ret)
-    }
-
-    fn read_f32le(&mut self) -> io::Result<f32> {
-        let mut x = [0;4];
-        self.read(&mut x)?;
-        let ret = (x[0] as u32) | ((x[1] as u32) << 8) | ((x[2] as u32) << 16) | ((x[3] as u32) << 24);
-        unsafe{
-            let ret:f32 = mem::transmute(ret);
-            Ok(ret)
-        }
-    }
-}
-
-impl<W: Read> ReadBytes for W {}
-

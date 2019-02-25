@@ -1,22 +1,27 @@
 (function(root){
 
 	// message we can send to wasm
-	class WasmRecv{
+	class ToWasm{
 		constructor(wasm_app){
 			this.wasm_app = wasm_app;
 			this.exports = wasm_app.exports;
 			this.slots = 512;
-			this.used = 1;
+			this.used = 2;
 			// lets write 
-			this.pointer = this.exports.wasm_alloc(this.slots);
+			this.pointer = this.exports.alloc_wasm(this.slots * 4);
+			this.update_refs();
+		}
+
+		update_refs(){
 			this.mf32 = new Float32Array(this.exports.memory.buffer, this.pointer, this.slots);
 			this.mu32 = new Uint32Array(this.exports.memory.buffer, this.pointer, this.slots);
 		}
 
 		fit(new_slots){
+			this.update_refs();
 			if(this.used + new_slots > this.slots){
 				let new_slots = Math.max(this.used+new_slots, this.slots * 2)
-				this.pointer = this.exports.wasm_realloc(this.pointer, new_slots);
+				this.pointer = this.exports.realloc_wasm(this.pointer, new_slots * 4);
 				this.mf32 = new Float32Array(this.exports.memory.buffer, this.pointer, new_slots);
 				this.mu32 = new Uint32Array(this.exports.memory.buffer, this.pointer, new_slots);
    				this.slots = new_slots
@@ -26,12 +31,37 @@
 			return pos;
 		}
 
-		init(wasm_init){
-			let pos = this.fit(4);
+		init(){
+			let pos = this.fit(1);
 			this.mu32[pos++] = 1;
-			this.mf32[pos++] = wasm_init.width;
-			this.mf32[pos++] = wasm_init.height;
-			this.mf32[pos++] = wasm_init.dpi_factor;
+		}
+
+		send_string(str){
+			let pos = this.fit(str.length+1)
+			this.mu32[pos++] = str.length
+			for(let i = 0; i < str.length; i++){
+				this.mu32[pos++] = str.charCodeAt(i)
+			}
+		}
+
+		receive_deps(deps){
+			let pos = this.fit(2);
+			this.mu32[pos++] = 2
+			this.mu32[pos++] = deps.length
+			for(let i = 0; i < deps.length; i++){
+				let dep = deps[i];
+				this.send_string(dep.name);
+				pos = this.fit(1);
+				this.mu32[pos++] = dep.ptr
+			}
+		}
+
+		resize(info){
+			let pos = this.fit(4);
+			this.mu32[pos++] = 3;
+			this.mf32[pos++] = info.width;
+			this.mf32[pos++] = info.height;
+			this.mf32[pos++] = info.dpi_factor;
 		}
 
 		end(){
@@ -48,31 +78,92 @@
 			this.webasm = webasm;
 			this.exports = webasm.instance.exports;
 			this.memory = webasm.instance.exports.memory
-			// lets get the webgl context
-			this.init_webgl_context();
-			this.shaders = [];
-
-			// lets start
-			this.app = this.exports.wasm_init();
 			
-			var to_wasm = new WasmRecv(this)
-			to_wasm.init({
-				width:this.width,
-				height:this.height,
-				dpi_factor:this.dpi_factor
-			});
-			to_wasm.end();
-
-			this.next_recv = new WasmRecv(this);
-			this.new_send_pointer( this.exports.wasm_recv(this.app, to_wasm.pointer))
-
-			// object storage
+			// local webgl resources
 			this.shaders = [];
 			this.index_buffers = [];
 			this.array_buffers = [];
 			this.vaos = [];
+			this.textures = [];
+			this.resources = [];
 
-			this.parse_send()
+			this.init_webgl_context();
+
+			// lets create the wasm app and cx
+			this.app = this.exports.init_wasm();
+			
+			// create initial to_wasm
+			this.to_wasm = new ToWasm(this);
+			this.to_wasm.init();
+
+			this.do_wasm_io();
+
+			// ok now, we wait for our resources to load.
+			Promise.all(this.resources).then(results=>{
+				let deps = []
+				for(let i = 0; i < results.length; i++){
+					var result = results[i]
+					// allocate pointer
+					let output_ptr = this.exports.alloc_wasm(result.buffer.byteLength+8);
+					let array = new Uint32Array(this.memory.buffer, output_ptr);
+					this.copy_to_wasm(result.buffer, output_ptr);
+					deps.push({
+						name:result.name,
+						ptr:output_ptr
+					});
+				}
+				this.to_wasm.receive_deps(deps);
+				//console.log(this.to_wasm)
+			
+				this.to_wasm.resize({
+					width:this.width,
+					height:this.height,
+					dpi_factor:this.dpi_factor
+				})
+				
+				this.do_wasm_io();
+			})
+		}
+
+		do_wasm_io(){
+			this.to_wasm.end();
+			let from_wasm_ptr = this.exports.to_wasm(this.app, this.to_wasm.pointer)
+			this.to_wasm = new ToWasm(this);
+
+			this.parse = 2;
+			this.mf32 = new Float32Array(this.memory.buffer, from_wasm_ptr);
+			this.mu32 = new Uint32Array(this.memory.buffer, from_wasm_ptr);
+			this.basef32 = new Float32Array(this.memory.buffer);
+			this.baseu32 = new Uint32Array(this.memory.buffer);
+
+			// process all return messages
+			var send_fn_table = this.send_fn_table;
+			while(1){
+				let type = this.mu32[this.parse++];
+				if(send_fn_table[type](this)){
+					break;
+				}
+			}
+		}
+
+		// i forgot how to do memcpy with typed arrays. so, we'll do this.
+		copy_to_wasm(input_buffer, output_ptr){
+			let len = input_buffer.byteLength;
+			let f64len = len>>3; //8 bytes
+			var f64out = new Float64Array(this.memory.buffer, output_ptr + 8, f64len)
+			var f64in = new Float64Array(input_buffer);
+			for(let i = 0; i < f64len; i++){
+				f64out[i] = f64in[i];
+			}
+			let u8len = len&7;
+			if(u8len){ // copy remainder
+				let u8off = len - ((len>>3)<<3);
+				var u8out = new Uint8Array(this.memory.buffer, output_ptr + 8 + u8off, len)
+				var u8in = new Uint8Array(input_buffer, u8off);
+				for(let i = 0; i < u8len; i++){
+					u8out[i] = u8in[i];
+				}
+			}
 		}
 
 		on_screen_resize(){
@@ -98,25 +189,31 @@
 			this.height = canvas.offsetHeight;
 			// send the wasm a screenresize event
 		}
-
-		new_send_pointer(send_pointer){
-			this.send_pointer = send_pointer;
-			this.parse = 1;
-			this.mf32 = new Float32Array(this.memory.buffer, send_pointer);
-			this.mu32 = new Uint32Array(this.memory.buffer, send_pointer);
-		}
-
-		parse_send(){
-			this.basef32 = new Float32Array(this.memory.buffer);
-			var send_fn_table = this.send_fn_table;
-			while(1){
-				let type = this.mu32[this.parse++];
-				if(send_fn_table[type](this)){
-					break;
-				}
+		
+		load_deps(deps){
+			for(var i = 0; i < deps.length; i++){
+				let file_path = deps[i];
+				this.resources.push(new Promise(function(resolve, reject){
+					var req = new XMLHttpRequest()
+					req.addEventListener("error", function(){
+						reject(resource)
+					})
+					req.responseType = 'arraybuffer'
+					req.addEventListener("load", function(){
+						if(req.status !== 200){
+							return reject(req.status)
+						}
+						resolve({
+							name:file_path,
+							buffer:req.response
+						})
+					})
+					req.open("GET", file_path)
+					req.send()
+				}))
 			}
 		}
-		
+
 		parse_string(){
 			var str = "";
 			var len = this.mu32[this.parse++];
@@ -164,11 +261,12 @@
 				let uniform = uniforms[i];
 				uniform_locs.push({
 					name:uniform.name,
-					offset:offset,
+					offset:offset<<2,
 					ty:uniform.ty,
 					loc:gl.getUniformLocation(program, uniform.name),
 					fn:this.uniform_fn_table[uniform.ty]
 				});
+				
 				offset += this.uniform_size_table[uniform.ty]
 			}
 			return uniform_locs;
@@ -279,6 +377,22 @@
 			gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, array, gl.STATIC_DRAW);
 			this.index_buffers[index_buffer_id] = gl_buf;
 		}
+
+		alloc_texture(texture_id, width, height, data_ptr){
+			var gl = this.gl;
+			var gl_tex = this.textures[texture_id] || gl.createTexture()
+
+			gl.bindTexture(gl.TEXTURE_2D, gl_tex)
+			gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR)
+			gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR)
+			gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE)
+			gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE)
+			
+			let data = new Uint8Array(this.memory.buffer, data_ptr, width*height*4);
+			gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, width, height, 0, gl.RGBA, gl.UNSIGNED_BYTE, data);
+			//gl.bindTexture(gl.TEXTURE_2D,0);
+			this.textures[texture_id] = gl_tex;
+		}
 		
 		alloc_vao(shader_id, vao_id, geom_ib_id, geom_vb_id, inst_vb_id){
 			let gl = this.gl;
@@ -317,7 +431,7 @@
 		}
 
 		draw_call(shader_id, vao_id, uniforms_cx_ptr, uni_cx_update, uniforms_dl_ptr, uni_dl_update,
-			uniforms_dr_ptr, uni_dr_update, textures){
+			uniforms_dr_ptr, uni_dr_update, textures_ptr){
 			var gl = this.gl;
 
 			let shader = this.shaders[shader_id];
@@ -344,6 +458,16 @@
 				let uni = uniforms_dr[i];
 				uni.fn(this, uni.loc, uni.offset + uniforms_dr_ptr);
 			}
+			let texture_slots = shader.texture_slots;
+			for(let i = 0; i < texture_slots.length; i++){
+				let tex_slot = texture_slots[i];
+				let tex_id = this.baseu32[(textures_ptr>>2)+i];
+				let tex_obj = this.textures[tex_id];
+				gl.activeTexture(gl.TEXTURE0+i);
+				gl.bindTexture(gl.TEXTURE_2D, tex_obj);
+				gl.uniform1i(tex_slot.loc, i);
+			}
+
 			let indices = index_buffer.length;
 			let instances = instance_buffer.length / shader.instance_slots;
 			// lets do a drawcall!
@@ -427,6 +551,21 @@
 			let b = self.mf32[self.parse++];
 			let a = self.mf32[self.parse++];
 			self.clear(r,g,b,a);
+		},
+		function load_deps_8(self){
+			let deps = []
+			let num_deps = self.mu32[self.parse++];
+			for(let i = 0; i < num_deps; i++){
+				deps.push(self.parse_string());
+			}
+			self.load_deps(deps);
+		},
+		function alloc_texture_9(self){
+			let texture_id = self.mu32[self.parse++];
+			let width = self.mu32[self.parse++];
+			let height = self.mu32[self.parse++];
+			let data_ptr = self.mu32[self.parse++];
+			self.alloc_texture(texture_id, width, height, data_ptr);
 		}
 	]
 	

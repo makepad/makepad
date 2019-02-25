@@ -90,8 +90,8 @@ pub fn main() {
     });
 }
 
-#[export_name = "wasm_init"]
-pub extern "C" fn wasm_init()->u32{
+#[export_name = "init_wasm"]
+pub extern "C" fn init_wasm()->u32{
     let mut cx = Box::new(
          Cx{
             title:"Hi JS!".to_string(),
@@ -106,10 +106,10 @@ pub extern "C" fn wasm_init()->u32{
     Box::into_raw(Box::new((Box::into_raw(app),Box::into_raw(cx)))) as u32
 }
 
-#[export_name = "wasm_recv"]
-pub unsafe extern "C" fn wasm_recv(appcx:u32, msg:u32)->u32{
+#[export_name = "to_wasm"]
+pub unsafe extern "C" fn to_wasm(appcx:u32, msg:u32)->u32{
     let appcx = &*(appcx as *mut (*mut App,*mut Cx));
-    (*appcx.1).wasm_recv(msg,|cx, ev|{
+    (*appcx.1).to_wasm(msg,|cx, ev|{
         (*appcx.0).handle(cx, &ev);
     })
 }

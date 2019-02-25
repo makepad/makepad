@@ -24,13 +24,22 @@ impl Cx{
                     // update the instance buffer data
                     draw_call.resources.check_attached_vao(csh, &mut self.resources);
 
-                    self.resources.wasm_send.alloc_array_buffer(
+                    self.resources.from_wasm.alloc_array_buffer(
                         draw_call.resources.inst_vb_id,
                         draw_call.instance.len(),
                         draw_call.instance.as_ptr() as *const f32
                     );
                 }
-                self.resources.wasm_send.draw_call(
+
+                // update/alloc textures?
+                for tex_id in &draw_call.textures{
+                    let tex = &mut self.textures.textures[*tex_id as usize];
+                    if tex.dirty{
+                        tex.upload_to_device(&mut self.resources);
+                    }
+                }
+
+                self.resources.from_wasm.draw_call(
                     draw_call.shader_id,
                     draw_call.resources.vao_id,
                     &self.uniforms,
@@ -46,7 +55,7 @@ impl Cx{
     }
 
     pub fn clear(&mut self, r:f32, g:f32, b:f32, a:f32){
-        self.resources.wasm_send.clear(r,g,b,a);
+        self.resources.from_wasm.clear(r,g,b,a);
     }
     
     pub fn repaint(&mut self){
@@ -55,32 +64,70 @@ impl Cx{
     }
 
     // incoming wasm_msg
-    pub fn wasm_recv<F>(&mut self, msg:u32, mut event_handler:F)->u32
+    pub fn to_wasm<F>(&mut self, msg:u32, mut event_handler:F)->u32
     where F: FnMut(&mut Cx, Event)
     {
-        let mut wasm_recv = WasmRecv::own(msg);
-        self.resources.wasm_send = WasmSend::new();
+        let mut to_wasm = ToWasm::own(msg);
+        self.resources.from_wasm = FromWasm::new();
 
         loop{
-            let msg_type = wasm_recv.mu32();
+            let msg_type = to_wasm.mu32();
             match msg_type{
                 0=>{ // end
                     break;
                 },
                 1=>{ // init
-                    // render our first pass
-                    self.turtle.target_size = vec2(wasm_recv.mf32(),wasm_recv.mf32());
-                    self.turtle.target_dpi_factor = wasm_recv.mf32();
-
                     // compile all the shaders
-                    self.resources.wasm_send.log(&self.title);
-                    self.shaders.compile_all_webgl_shaders(&mut self.resources);
+                    self.resources.from_wasm.log(&self.title);
+                    
+                    // send the UI our deps, overlap with shadercompiler
+                    let mut load_deps = Vec::new();
+                    // add fonts
+                    load_deps.append(&mut self.fonts.file_names.clone());
+                    // other textures, things
+                    self.resources.from_wasm.load_deps(load_deps);
 
+                    self.shaders.compile_all_webgl_shaders(&mut self.resources);
+                },
+                2=>{ // resources loaded
+                    self.resources.from_wasm.log("Got deps!");
+                    let len = to_wasm.mu32();
+                    for _i in 0..len{
+                        let name = to_wasm.parse_string();
+                        let ptr = to_wasm.mu32();
+                        unsafe{
+                            let len = (ptr as *const u64).read();
+                        }
+                       self.binary_deps.push(BinaryDep::new_from_wasm(name, ptr))
+                    }
+                    
+                    // alright lets load all fonts
+                    let num_fonts = self.fonts.file_names.len();
+                    for i in 0..num_fonts{
+                        let font_file = self.fonts.file_names[i].clone();
+                        let bin_dep = self.get_binary_dep(&font_file);
+                        if let Some(mut bin_dep) = bin_dep{
+                            if let Err(msg) = self.fonts.load_from_binary_dep(&mut bin_dep, &mut self.textures){
+                                self.resources.from_wasm.log(&format!("Error loading font! {}", msg));
+                            }
+                        }
+                    }
+
+                },
+                3=>{ // resize
+
+                    self.turtle.target_size = vec2(to_wasm.mf32(),to_wasm.mf32());
+                    self.turtle.target_dpi_factor = to_wasm.mf32();
+                    
                     // do our initial redraw and repaint
                     self.redraw_all();
                     event_handler(self, Event::Redraw);
                     self.redraw_none();
                     self.repaint();
+                    
+                },
+                4=>{ // timer_tick (if we have anims, run an event)
+
                 },
                 _=>{
                     panic!("Message unknown")
@@ -88,7 +135,7 @@ impl Cx{
             };
         };
         // return the send message
-        self.resources.wasm_send.end()
+        self.resources.from_wasm.end()
     }
 
     pub fn event_loop<F>(&mut self, mut event_handler:F)
@@ -99,7 +146,7 @@ impl Cx{
 }
 
 #[derive(Clone)]
-pub struct WasmSend{
+pub struct FromWasm{
     mu32:*mut u32,
     mf32:*mut f32,
     slots:usize,
@@ -107,9 +154,9 @@ pub struct WasmSend{
     current:isize
 }
 
-impl WasmSend{
-    pub fn zero()->WasmSend{
-        WasmSend{
+impl FromWasm{
+    pub fn zero()->FromWasm{
+        FromWasm{
             mu32:0 as *mut u32,
             mf32:0 as *mut f32,
             slots:0,
@@ -117,16 +164,16 @@ impl WasmSend{
             current:0
         }
     }
-    pub fn new()->WasmSend{
+    pub fn new()->FromWasm{
         unsafe{
-            let start_slots = 1024; 
-            let buf = alloc::alloc(alloc::Layout::from_size_align((start_slots * mem::size_of::<u32>()) as usize, mem::align_of::<u32>()).unwrap()) as *mut u32;
-            (buf as *mut u32).write(start_slots as u32);
-            WasmSend{
+            let start_bytes = 4096; 
+            let buf = alloc::alloc(alloc::Layout::from_size_align(start_bytes as usize, mem::align_of::<u32>()).unwrap()) as *mut u32;
+            (buf as *mut u64).write(start_bytes as u64);
+            FromWasm{
                 mu32:buf as *mut u32,
                 mf32:buf as *mut f32,
-                slots:start_slots,
-                used:1,
+                slots:start_bytes>>2,
+                used:2,
                 current:0
             }
         }
@@ -138,11 +185,13 @@ impl WasmSend{
         unsafe{
             if self.used as usize + slots> self.slots{
                 let new_slots = usize::max(self.used as usize + slots, self.slots * 2);
-                let new_buf = alloc::alloc(alloc::Layout::from_size_align(new_slots * mem::size_of::<u32>(), mem::align_of::<u32>()).unwrap()) as *mut u32;
+                let new_bytes = new_slots<<2;
+                let old_bytes = self.slots<<2;
+                let new_buf = alloc::alloc(alloc::Layout::from_size_align(new_bytes as usize, mem::align_of::<u64>()).unwrap()) as *mut u32;
                 ptr::copy_nonoverlapping(self.mu32, new_buf, self.slots);
-                alloc::dealloc(self.mu32 as *mut u8, alloc::Layout::from_size_align(self.slots * mem::size_of::<u32>(), mem::align_of::<u32>()).unwrap());
+                alloc::dealloc(self.mu32 as *mut u8, alloc::Layout::from_size_align(old_bytes as usize, mem::align_of::<u64>()).unwrap());
                 self.slots = new_slots;
-                (new_buf as *mut u32).write(self.slots as u32);
+                (new_buf as *mut u64).write(new_bytes as u64);
                 self.mu32 = new_buf;
                 self.mf32 = new_buf as *mut f32;
             }
@@ -185,6 +234,13 @@ impl WasmSend{
             self.add_string(&shvar.ty);
             self.add_string(&shvar.name);
         }
+    }
+
+    // log a string
+    pub fn log(&mut self, msg:&str){
+        self.fit(1);
+        self.mu32(1);
+        self.add_string(msg);
     }
 
     pub fn compile_webgl_shader(&mut self, shader_id:usize, ash:&AssembledGLShader){
@@ -254,7 +310,26 @@ impl WasmSend{
         self.mf32(b);
         self.mf32(a);
     }
+   
+    pub fn load_deps(&mut self, deps:Vec<String>){
+        self.fit(1);
+        self.mu32(8);
+        self.fit(1);
+        self.mu32(deps.len() as u32);
+        for dep in deps{
+            self.add_string(&dep);
+        }
+    }
 
+    pub fn alloc_texture(&mut self, texture_id:usize, width:usize, height:usize, data:&Vec<u32>){
+        self.fit(5);
+        self.mu32(9);
+        self.mu32(texture_id as u32);
+        self.mu32(width as u32);
+        self.mu32(height as u32);
+        self.mu32(data.as_ptr() as u32)
+    }
+   
     fn add_string(&mut self, msg:&str){
         let len = msg.chars().count();
         self.fit(len + 1);
@@ -264,33 +339,25 @@ impl WasmSend{
         }
         self.check();
     }
-
-    // log a string
-    pub fn log(&mut self, msg:&str){
-        self.fit(1);
-        self.mu32(1);
-        self.add_string(msg);
-    }
-
-   
 }
 
 #[derive(Clone)]
-struct WasmRecv{
+struct ToWasm{
     mu32:*mut u32,
     mf32:*mut f32,
     slots:usize,
     parse:isize
 }
 
-impl WasmRecv{
-    pub fn own(buf:u32)->WasmRecv{
+impl ToWasm{
+    pub fn own(buf:u32)->ToWasm{
         unsafe{
-            WasmRecv{
+            let bytes = (buf as *mut u64).read() as usize;
+            ToWasm{
                 mu32: buf as *mut u32,
                 mf32: buf as *mut f32,
-                parse: 1,
-                slots: (buf as *mut u32).read() as usize
+                parse: 2,
+                slots: bytes>>2
             }
         }
     }
@@ -310,39 +377,50 @@ impl WasmRecv{
             ret
         }
     }   
+
+    fn parse_string(&mut self)->String{
+        let len = self.mu32();
+        let mut out = String::new();
+        for _i in 0..len{
+            if let Some(c) = std::char::from_u32(self.mu32()) {
+                out.push(c);
+            }
+        }
+        out
+    }
 }
 
-impl Drop for WasmRecv{
+impl Drop for ToWasm{
     fn drop(&mut self){
         unsafe{
-            alloc::dealloc(self.mu32 as *mut u8, alloc::Layout::from_size_align((self.slots * mem::size_of::<u32>()) as usize, mem::align_of::<u32>()).unwrap());
+            alloc::dealloc(self.mu32 as *mut u8, alloc::Layout::from_size_align((self.slots * mem::size_of::<u64>()) as usize, mem::align_of::<u32>()).unwrap());
         }
     }
 }
 
 // for use with message passing
-#[export_name = "wasm_alloc"]
-pub unsafe extern "C" fn wasm_alloc(slots:u32)->u32{
-    let buf = std::alloc::alloc(std::alloc::Layout::from_size_align((slots as usize * mem::size_of::<u32>()) as usize, mem::align_of::<u32>()).unwrap()) as u32;
-    (buf as *mut u32).write(slots);
+#[export_name = "alloc_wasm"]
+pub unsafe extern "C" fn alloc_wasm(bytes:u32)->u32{
+    let buf = std::alloc::alloc(std::alloc::Layout::from_size_align(bytes as usize, mem::align_of::<u64>()).unwrap()) as u32;
+    (buf as *mut u64).write(bytes as u64);
     buf as u32
 }
 
 // for use with message passing
-#[export_name = "wasm_realloc"]
-pub unsafe extern "C" fn wasm_realloc(in_buf:u32, new_slots:u32)->u32{
-    let old_buf = in_buf as *mut u32;
-    let old_slots = old_buf.read() as usize ;
-    let new_buf = alloc::alloc(alloc::Layout::from_size_align((new_slots as usize * mem::size_of::<u32>()) as usize, mem::align_of::<u32>()).unwrap()) as *mut u32;
-    ptr::copy_nonoverlapping(old_buf, new_buf, old_slots );
-    alloc::dealloc(old_buf as *mut u8, alloc::Layout::from_size_align((old_slots * mem::size_of::<u32>()) as usize, mem::align_of::<u32>()).unwrap());
-    (new_buf as *mut u32).write(new_slots);
+#[export_name = "realloc_wasm"]
+pub unsafe extern "C" fn realloc_wasm(in_buf:u32, new_bytes:u32)->u32{
+    let old_buf = in_buf as *mut u8;
+    let old_bytes = (old_buf as *mut u64).read() as usize;
+    let new_buf = alloc::alloc(alloc::Layout::from_size_align(new_bytes as usize, mem::align_of::<u64>()).unwrap()) as *mut u8;
+    ptr::copy_nonoverlapping(old_buf, new_buf, old_bytes );
+    alloc::dealloc(old_buf as *mut u8, alloc::Layout::from_size_align(old_bytes as usize, mem::align_of::<u64>()).unwrap());
+    (new_buf as *mut u64).write(new_bytes as u64);
     new_buf as u32
 }
 
-#[export_name = "wasm_dealloc"]
-pub unsafe extern "C" fn wasm_dealloc(in_buf:u32){
-    let buf = in_buf as *mut u32;
-    let slots = buf.read() as usize;
-    std::alloc::dealloc(buf as *mut u8, std::alloc::Layout::from_size_align((slots * mem::size_of::<u32>()) as usize, mem::align_of::<u32>()).unwrap());
+#[export_name = "dealloc_wasm"]
+pub unsafe extern "C" fn dealloc_wasm(in_buf:u32){
+    let buf = in_buf as *mut u8;
+    let bytes = buf.read() as usize;
+    std::alloc::dealloc(buf as *mut u8, std::alloc::Layout::from_size_align(bytes as usize, mem::align_of::<u64>()).unwrap());
 }

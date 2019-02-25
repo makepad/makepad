@@ -45,7 +45,7 @@ pub struct WebGLTexture2D{
 // storage buffers for graphics API related resources
 #[derive(Clone)]
 pub struct CxResources{
-    pub wasm_send:WasmSend,
+    pub from_wasm:FromWasm,
     pub vertex_buffers:usize,
     pub vertex_buffers_free:Vec<usize>,
     pub index_buffers:usize,
@@ -57,7 +57,7 @@ pub struct CxResources{
 impl Default for CxResources{
     fn default()->CxResources{
         CxResources{
-            wasm_send:WasmSend::zero(),
+            from_wasm:FromWasm::zero(),
             vertex_buffers:1,
             vertex_buffers_free:Vec::new(),
             index_buffers:1,
@@ -129,11 +129,11 @@ impl DrawCallResources{
             self.vao_id = resources.get_free_vao();
             self.inst_vb_id = resources.get_free_index_buffer();
 
-            resources.wasm_send.alloc_array_buffer(
+            resources.from_wasm.alloc_array_buffer(
                 self.inst_vb_id,0,0 as *const f32
             );
 
-            resources.wasm_send.alloc_vao(
+            resources.from_wasm.alloc_vao(
                 csh.shader_id,
                 self.vao_id,
                 csh.geom_ib_id,
@@ -200,7 +200,7 @@ impl CxShaders{
                 });
             }
             else if let Err(err) = csh{
-                resources.wasm_send.log(&format!("GOT ERROR: {}", err.msg));
+                resources.from_wasm.log(&format!("GOT ERROR: {}", err.msg));
                 self.compiled_shaders.push(
                     CompiledShader{..Default::default()}
                 )
@@ -211,19 +211,19 @@ impl CxShaders{
     pub fn compile_webgl_shader(&self, sh:&Shader, resources: &mut CxResources)->Result<CompiledShader, SlErr>{
         let ash = gl_assemble_shader(sh, GLShaderType::WebGL1)?;
         let shader_id = self.compiled_shaders.len();
-        resources.wasm_send.compile_webgl_shader(shader_id, &ash);
+        resources.from_wasm.compile_webgl_shader(shader_id, &ash);
 
         let geom_ib_id = resources.get_free_index_buffer();
         let geom_vb_id = resources.get_free_index_buffer();
 
         unsafe{
-            resources.wasm_send.alloc_array_buffer(
+            resources.from_wasm.alloc_array_buffer(
                 geom_vb_id,
                 sh.geometry_vertices.len(),
                 sh.geometry_vertices.as_ptr() as *const f32
             );
 
-            resources.wasm_send.alloc_index_buffer(
+            resources.from_wasm.alloc_index_buffer(
                 geom_ib_id,
                 sh.geometry_indices.len(),
                 sh.geometry_indices.as_ptr() as *const u32
