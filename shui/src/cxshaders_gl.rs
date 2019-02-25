@@ -13,6 +13,12 @@ impl<'a> SlCx<'a>{
             "sample2d"=>{
                 return MapCallResult::Rename("texture2D".to_string())
             },
+            "dfdx"=>{
+                return MapCallResult::Rename("dFdx".to_string())
+            },
+            "dfdy"=>{
+                return MapCallResult::Rename("dFdy".to_string())
+            },
             _=>return MapCallResult::None
         }
     }
@@ -51,8 +57,6 @@ impl<'a> SlCx<'a>{
 pub struct AssembledGLShader{
     pub geometry_slots:usize,
     pub instance_slots:usize,
-    pub geometry_attribs:usize,
-    pub instance_attribs:usize,
 
     pub uniforms_dr: Vec<ShVar>,
     pub uniforms_dl: Vec<ShVar>,
@@ -331,11 +335,45 @@ pub fn gl_assemble_pack(base: &str, slot:usize, total_slots:usize,sv:&ShVar)->St
     out
 }
 
-pub fn gl_assemble_shader(sh:&Shader)->Result<AssembledGLShader, SlErr>{
-    let mut vtx_out = "#version 100\nprecision highp float;\n".to_string();
-    // #extension GL_OES_standard_derivatives : enable
-    let mut pix_out = "#version 100\nprecision highp float;\n".to_string();
-    let compat_dfdxy = "vec2 dfdx(vec2 dummy){\nreturn vec2(0.05);\n}\nvec2 dfdy(vec2 dummy){\nreturn vec2(0.05);\n}\n";
+pub enum GLShaderType{
+    OpenGLNoPartialDeriv,
+    OpenGL,
+    WebGL1
+}
+
+pub fn gl_assemble_shader(sh:&Shader, shtype:GLShaderType)->Result<AssembledGLShader, SlErr>{
+    
+    let mut vtx_out = String::new();
+    let mut pix_out = String::new();
+    let mut pix_compat = String::new();
+    match shtype{
+        GLShaderType::OpenGLNoPartialDeriv=>{
+            vtx_out.push_str("#version 100\n");
+            pix_out.push_str("#version 100\n");
+            vtx_out.push_str("precision highp float;\n");
+            pix_out.push_str("precision highp float;\n");
+            vtx_out.push_str("precision highp int;\n");
+            pix_out.push_str("precision highp int;\n");
+            pix_compat.push_str("vec2 dfdx(vec2 dummy){\nreturn vec2(0.05);\n}\n");
+            pix_compat.push_str("vec2 dfdy(vec2 dummy){\nreturn vec2(0.05);\n}\n")
+        }
+        GLShaderType::OpenGL=>{
+            vtx_out.push_str("#version 100\n");
+            pix_out.push_str("#version 100\n");
+            pix_out.push_str("#extension GL_OES_standard_derivatives : enable\n");
+            vtx_out.push_str("precision highp float;\n");
+            pix_out.push_str("precision highp float;\n");
+            vtx_out.push_str("precision highp int;\n");
+            pix_out.push_str("precision highp int;\n");
+        },
+        GLShaderType::WebGL1=>{
+            pix_out.push_str("#extension GL_OES_standard_derivatives : enable\n");
+            vtx_out.push_str("precision highp float;\n");
+            pix_out.push_str("precision highp float;\n");
+            vtx_out.push_str("precision highp int;\n");
+            pix_out.push_str("precision highp int;\n");
+        }
+    }
     // ok now define samplers from our sh. 
     let texture_slots = sh.flat_vars(ShVarStore::Texture);
     let geometries = sh.flat_vars(ShVarStore::Geometry);
@@ -398,7 +436,7 @@ pub fn gl_assemble_shader(sh:&Shader)->Result<AssembledGLShader, SlErr>{
 
     pix_out.push_str(&shared);
 
-    pix_out.push_str(compat_dfdxy);
+    pix_out.push_str(&pix_compat);
 
     vtx_out.push_str(&shared);
 
@@ -470,8 +508,6 @@ pub fn gl_assemble_shader(sh:&Shader)->Result<AssembledGLShader, SlErr>{
     Ok(AssembledGLShader{
         geometry_slots:geometry_slots,
         instance_slots:instance_slots,
-        geometry_attribs:ceil_div4(geometry_slots),
-        instance_attribs:ceil_div4(instance_slots),
         uniforms_dr:uniforms_dr,
         uniforms_dl:uniforms_dl,
         uniforms_cx:uniforms_cx,

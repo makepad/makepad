@@ -174,7 +174,7 @@ impl Cx{
 
         glutin_window.set_position(winit::dpi::LogicalPosition::new(1920.0,400.0));
         
-        self.shaders.compile_all_shaders(&device);
+        self.shaders.compile_all_mtl_shaders(&device);
         let start_time = precise_time_ns();
         
         while self.running{

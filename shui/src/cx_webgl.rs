@@ -2,6 +2,8 @@ use std::mem;
 use std::ptr;
 
 pub use crate::cx_shared::*;
+use crate::shader::*;
+use crate::cxshaders_gl::*;
 use crate::events::*;
 use std::alloc;
 
@@ -18,14 +20,6 @@ impl Cx{
                 let draw = &draw_list.draw_calls[ci];
                 if draw.update_frame_id == self.drawing.frame_id{
                     // update the instance buffer data
-                   /* 
-                    unsafe{
-                        gl::BindBuffer(gl::ARRAY_BUFFER, draw.vao.vb);
-                        gl::BufferData(gl::ARRAY_BUFFER,
-                                        (draw.instance.len() * mem::size_of::<f32>()) as gl::types::GLsizeiptr,
-                                        draw.instance.as_ptr() as *const _, gl::STATIC_DRAW);
-                    }
-                    */
                 }
 
                 let sh = &self.shaders.shaders[draw.shader_id];
@@ -74,14 +68,14 @@ impl Cx{
     // incoming wasm_msg
     pub fn wasm_recv<F>(&mut self, msg:u32, mut event_handler:F)->u32{
         let mut wasm_recv = WasmRecv::own(msg);
-        self.buffers.wasm_send = WasmSend::new();
+        self.resources.wasm_send = WasmSend::new();
         let mut msg = wasm_recv.next_msg();
         loop{
             match msg{
                 WasmMsg::Init=>{
                     // compile all the shaders
-                    self.shaders.compile_all_shaders(self);
-                    self.buffers.wasm_send.log(&self.title);
+                    self.resources.wasm_send.log(&self.title);
+                    self.shaders.compile_all_webgl_shaders(&mut self.resources);
                 },
                 WasmMsg::End=>{
                     break;
@@ -90,7 +84,7 @@ impl Cx{
             msg = wasm_recv.next_msg();
         };
         // return the send message
-        self.buffers.wasm_send.end()
+        self.resources.wasm_send.end()
     }
 
     pub fn event_loop<F>(&mut self, mut event_handler:F)
@@ -265,20 +259,53 @@ impl WasmSend{
         self.mu32 as u32
     }
 
-    pub fn compile_shader(csh:&CompiledShader){
-        
+    fn add_shvarvec(&mut self, shvars:&Vec<ShVar>){
+        self.fit(1);
+        self.mu32(shvars.len() as u32);
+        for shvar in shvars{
+            self.add_string(&shvar.ty);
+            self.add_string(&shvar.name);
+        }
     }
 
-    // log a string
-    pub fn log(&mut self, msg:&str){
+    pub fn compile_webgl_shader(&mut self, shader_id:usize, ash:&AssembledGLShader){
+        self.fit(2);
+        self.mu32(2);
+        self.mu32(shader_id as u32);
+        self.add_string(&ash.fragment);
+        self.add_string(&ash.vertex);
+        self.fit(2);
+        self.mu32(ash.geometry_slots as u32);
+        self.mu32(ash.instance_slots as u32);
+        self.add_shvarvec(&ash.uniforms_cx);
+        self.add_shvarvec(&ash.uniforms_dl);
+        self.add_shvarvec(&ash.uniforms_dr);
+        self.add_shvarvec(&ash.texture_slots);
+    }   
+
+    pub fn alloc_array_buffer(&mut self, buffer_id:usize, len:usize, data:*const f32){
+
+    }
+
+    pub fn alloc_index_buffer(&mut self, buffer_id:usize, len:usize, data:*const u32){
+
+    }
+
+    fn add_string(&mut self, msg:&str){
         let len = msg.chars().count();
-        self.fit(len + 2);
-        self.mu32(1);
+        self.fit(len + 1);
         self.mu32(len as u32);
         for c in msg.chars(){
             self.mu32(c as u32);
         }
         self.check();
+    }
+
+    // log a string
+    pub fn log(&mut self, msg:&str){
+        self.fit(1);
+        self.mu32(1);
+        self.add_string(msg);
     }
 
    

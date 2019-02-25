@@ -165,9 +165,9 @@ pub struct CxShaders{
 
 impl CxShaders{
 
-     pub fn compile_all_shaders(&mut self, device:&Device){
+     pub fn compile_all_mtl_shaders(&mut self, device:&Device){
         for sh in &self.shaders{
-            let mtlsh = Self::compile_shader(&sh, device);
+            let mtlsh = Self::compile_mtl_shader(&sh, device);
             if let Ok(mtlsh) = mtlsh{
                 self.compiled_shaders.push(CompiledShader{
                     shader_id:self.compiled_shaders.len(),
@@ -369,7 +369,7 @@ impl CxShaders{
         })
     }
 
-    pub fn compile_shader(sh:&Shader, device: &Device)->Result<CompiledShader, SlErr>{
+    pub fn compile_mtl_shader(sh:&Shader, device: &Device)->Result<CompiledShader, SlErr>{
         let ash = Self::assemble_shader(sh)?;
 
         let options = CompileOptions::new();

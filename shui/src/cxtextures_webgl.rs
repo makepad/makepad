@@ -1,5 +1,3 @@
-use std::mem;
-
 #[derive(Default,Clone)]
 pub struct Texture{
     pub texture_id: usize,

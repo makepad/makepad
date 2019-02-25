@@ -142,9 +142,9 @@ pub struct CxShaders{
 }
 
 impl CxShaders{
-    pub fn compile_all_shaders(&mut self){
+    pub fn compile_all_ogl_shaders(&mut self){
         for sh in &self.shaders{
-            let glsh = Self::compile_shader(&sh);
+            let glsh = Self::compile_ogl_shader(&sh);
             if let Ok(glsh) = glsh{
                 self.compiled_shaders.push(CompiledShader{
                     shader_id:self.compiled_shaders.len(),
@@ -264,8 +264,8 @@ impl CxShaders{
         gl_texture_slots
     }
 
-    pub fn compile_shader(sh:&Shader)->Result<CompiledShader, SlErr>{
-        let ash = gl_assemble_shader(sh)?;
+    pub fn compile_ogl_shader(sh:&Shader)->Result<CompiledShader, SlErr>{
+        let ash = gl_assemble_shader(sh,GLShaderType::DesktopGLNoPartialDeriv)?;
         // now we have a pixel and a vertex shader
         // so lets now pass it to GL
         unsafe{

@@ -113,7 +113,7 @@ impl Cx{
         }
 
         // lets compile all shaders
-        self.shaders.compile_all_shaders();
+        self.shaders.compile_all_ogl_shaders();
 
         while self.running{
             events_loop.poll_events(|winit_event|{
