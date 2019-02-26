@@ -10,7 +10,7 @@ pub use crate::cxturtle::Value::Expression;
 pub struct CxDrawing{
     pub draw_lists: Vec<DrawList>,
     pub draw_lists_free: Vec<usize>,
-    pub instance_areas: Vec<Area>,
+    pub instance_area_stack: Vec<Area>,
     pub view_stack: Vec<View>,
     pub draw_list_id: usize,
     pub frame_id: usize
@@ -89,7 +89,7 @@ impl CxDrawing{
         let draw_call = &mut draw_list.draw_calls[draw_call_id];
 
         // store our current instance properties so we can update-patch it in pop instance
-        self.instance_areas.push(Area{
+        self.instance_area_stack.push(Area{
             draw_list_id: self.draw_list_id,
             draw_call_id:draw_call_id,
             instance_offset:draw_call.current_instance_offset,
@@ -100,7 +100,7 @@ impl CxDrawing{
 
     // pops instance patching the supplied geometry in the instancebuffer
     pub fn pop_instance(&mut self, shaders:&CxShaders, geom:Rect)->Area{
-        let area = self.instance_areas.pop().unwrap();
+        let area = self.instance_area_stack.pop().unwrap();
         area.set_rect_sep(self, shaders, &geom);
         area
     }

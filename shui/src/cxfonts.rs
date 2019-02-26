@@ -3,60 +3,53 @@ use crate::cx_shared::*;
 
 #[derive(Clone, Default)]
 pub struct CxFonts{
-    pub file_names:Vec<String>,
-    pub fonts:Vec<Font>
+    pub font_resources:Vec<FontResource>
 }
 
 impl CxFonts{
-    pub fn get(&mut self, id:usize)->&Font{
-        let font = &mut self.fonts[id];
-        font
+    pub fn get(&mut self, id:usize)->&Option<Font>{
+        // lets find this font id, falling back if not found
+        let font_resource = &mut self.font_resources[id];
+        &font_resource.font
     }
 
     pub fn load(&mut self, file_name: &str)->usize{
-        let found = self.file_names.iter().position(|v| v == file_name);
-        if found.is_none(){
-            let font_id = self.file_names.len();
-            self.file_names.push(file_name.to_string());
-            return font_id
+        let found = self.font_resources.iter().position(|v| v.name == file_name);
+        if !found.is_none(){
+            return found.unwrap()
         }
-        found.unwrap()
+        let font_id = self.font_resources.len();
+        self.font_resources.push(FontResource{
+            name:file_name.to_string(),
+            font:None
+        });
+        font_id
     }
 
     pub fn load_from_binary_dep(&mut self, bin_dep: &mut BinaryDep, cx_tex:&mut CxTextures)-> Result<(), String>{
         let mut out_tex = cx_tex.add_empty();
+        let found = self.font_resources.iter().position(|v| v.name == bin_dep.name);
+        if found.is_none(){
+            return Err("Binary dep not a font".to_string());
+        }
         let font = Font::from_binary_dep(bin_dep, &mut out_tex)?;
-        self.fonts.push(
+        let font_id = found.unwrap();
+        self.font_resources[font_id].font = Some(
             Font{
-                font_id:self.fonts.len(),
+                font_id:self.font_resources.len(),
                 texture_id: out_tex.texture_id,
                 ..font
             }
         );
         Ok(())
     }
-
-/*
-    pub fn 
-        let font_id = self.fonts.len();
-        let mut out_tex = tex.add_empty();
-        if let Ok(font) = Font::read(file_name, &mut out_tex){
-            self.fonts.push(
-                Font{
-                    font_id:font_id,
-                    texture_id: out_tex.texture_id,
-                    ..font
-                }
-            );
-            font_id
-        }
-        else{
-            0
-        }
-    }
-*/
 }
 
+#[derive(Default, Clone)]
+pub struct FontResource{
+    pub name:String,
+    pub font:Option<Font>
+}
 
 #[derive(Default, Clone)]
 pub struct Glyph{

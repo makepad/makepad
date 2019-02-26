@@ -30,7 +30,7 @@ impl Style for Text{
             font_id:cx.fonts.load("resources/ubuntu_regular_256.font"),
             text:"".to_string(),
             font_size:10.0,
-            line_spacing:1.3,
+            line_spacing:1.2,
             wrapping:Wrapping::Word,
             color:Vec4{x:1.0,y:1.0,z:1.0,w:1.0}
         }
@@ -108,8 +108,13 @@ impl Text{
     }
 
     pub fn draw_text(&mut self, cx:&mut Cx, _x:Value, _y:Value, text:&str)->Area{
+        let font_opt = cx.fonts.get(self.font_id);
+        if font_opt.is_none(){
+            return Area::zero()
+        }
+        let font = font_opt.as_ref().unwrap();
+
         let dr = cx.drawing.instance_aligned(cx.shaders.get(self.shader_id), &mut cx.turtle);
-        let font = cx.fonts.get(self.font_id);
 
         if dr.first{
             dr.texture("texture", font.texture_id);

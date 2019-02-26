@@ -10,7 +10,10 @@ use std::alloc;
 impl Cx{
      pub fn exec_draw_list(&mut self, draw_list_id: usize){
         // tad ugly otherwise the borrow checker locks 'self' and we can't recur
-        for draw_call_id in 0..self.drawing.draw_lists[draw_list_id].draw_calls_len{
+        let draw_calls_len = self.drawing.draw_lists[draw_list_id].draw_calls_len;
+
+        for draw_call_id in 0..draw_calls_len{
+
             let sub_list_id = self.drawing.draw_lists[draw_list_id].draw_calls[draw_call_id].sub_list_id;
             if sub_list_id != 0{
                 self.exec_draw_list(sub_list_id);
@@ -54,20 +57,18 @@ impl Cx{
         }
     }
 
-    pub fn clear(&mut self, r:f32, g:f32, b:f32, a:f32){
-        self.resources.from_wasm.clear(r,g,b,a);
-    }
-    
     pub fn repaint(&mut self){
+        self.resources.from_wasm.clear(self.clear_color.x, self.clear_color.y, self.clear_color.z, self.clear_color.w);
         self.prepare_frame();        
         self.exec_draw_list(0);
     }
 
-    // incoming wasm_msg
+    // incoming to_wasm. There is absolutely no other entrypoint
+    // to general rust codeflow than this function. Only the allocators and init
     pub fn to_wasm<F>(&mut self, msg:u32, mut event_handler:F)->u32
     where F: FnMut(&mut Cx, Event)
     {
-        let mut to_wasm = ToWasm::own(msg);
+        let mut to_wasm = ToWasm::from(msg);
         self.resources.from_wasm = FromWasm::new();
 
         loop{
@@ -82,8 +83,9 @@ impl Cx{
                     
                     // send the UI our deps, overlap with shadercompiler
                     let mut load_deps = Vec::new();
-                    // add fonts
-                    load_deps.append(&mut self.fonts.file_names.clone());
+                    for font_resource in &self.fonts.font_resources{
+                        load_deps.push(font_resource.name.clone());
+                    }
                     // other textures, things
                     self.resources.from_wasm.load_deps(load_deps);
 
@@ -95,16 +97,13 @@ impl Cx{
                     for _i in 0..len{
                         let name = to_wasm.parse_string();
                         let ptr = to_wasm.mu32();
-                        unsafe{
-                            let len = (ptr as *const u64).read();
-                        }
-                       self.binary_deps.push(BinaryDep::new_from_wasm(name, ptr))
+                        self.binary_deps.push(BinaryDep::new_from_wasm(name, ptr))
                     }
                     
-                    // alright lets load all fonts
-                    let num_fonts = self.fonts.file_names.len();
+                    // lets load the fonts from binary deps
+                    let num_fonts = self.fonts.font_resources.len();
                     for i in 0..num_fonts{
-                        let font_file = self.fonts.file_names[i].clone();
+                        let font_file = self.fonts.font_resources[i].name.clone();
                         let bin_dep = self.get_binary_dep(&font_file);
                         if let Some(mut bin_dep) = bin_dep{
                             if let Err(msg) = self.fonts.load_from_binary_dep(&mut bin_dep, &mut self.textures){
@@ -134,11 +133,19 @@ impl Cx{
                 }
             };
         };
-        // return the send message
-        self.resources.from_wasm.end()
+
+        // free the received message
+        to_wasm.dealloc();
+
+        // mark the end of the message
+        self.resources.from_wasm.end();
+
+        //return wasm pointer to caller
+        self.resources.from_wasm.wasm_ptr()
     }
 
-    pub fn event_loop<F>(&mut self, mut event_handler:F)
+    // empty stub
+    pub fn event_loop<F>(&mut self, mut _event_handler:F)
     where F: FnMut(&mut Cx, Event),
     { 
     }
@@ -221,9 +228,12 @@ impl FromWasm{
     }   
     
     // end the block and return ownership of the pointer
-    pub fn end(&mut self) -> u32{
+    pub fn end(&mut self){
         self.fit(1);
         self.mu32(0);
+    }
+
+    pub fn wasm_ptr(&self)->u32{
         self.mu32 as u32
     }
 
@@ -350,7 +360,16 @@ struct ToWasm{
 }
 
 impl ToWasm{
-    pub fn own(buf:u32)->ToWasm{
+
+    pub fn dealloc(&mut self){
+        unsafe{
+            alloc::dealloc(self.mu32 as *mut u8, alloc::Layout::from_size_align((self.slots * mem::size_of::<u64>()) as usize, mem::align_of::<u32>()).unwrap());
+            self.mu32 = 0 as *mut u32;
+            self.mf32 = 0 as *mut f32;
+        }
+    }
+
+    pub fn from(buf:u32)->ToWasm{
         unsafe{
             let bytes = (buf as *mut u64).read() as usize;
             ToWasm{
@@ -390,13 +409,6 @@ impl ToWasm{
     }
 }
 
-impl Drop for ToWasm{
-    fn drop(&mut self){
-        unsafe{
-            alloc::dealloc(self.mu32 as *mut u8, alloc::Layout::from_size_align((self.slots * mem::size_of::<u64>()) as usize, mem::align_of::<u32>()).unwrap());
-        }
-    }
-}
 
 // for use with message passing
 #[export_name = "alloc_wasm"]

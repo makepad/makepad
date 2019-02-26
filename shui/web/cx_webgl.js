@@ -6,7 +6,7 @@
 			this.wasm_app = wasm_app;
 			this.exports = wasm_app.exports;
 			this.slots = 512;
-			this.used = 2;
+			this.used = 2; // skip 8 byte header
 			// lets write 
 			this.pointer = this.exports.alloc_wasm(this.slots * 4);
 			this.update_refs();
@@ -18,10 +18,11 @@
 		}
 
 		fit(new_slots){
-			this.update_refs();
+			this.update_refs(); // its possible our mf32/mu32 refs are dead because of realloccing of wasm heap inbetween calls
 			if(this.used + new_slots > this.slots){
-				let new_slots = Math.max(this.used+new_slots, this.slots * 2)
-				this.pointer = this.exports.realloc_wasm(this.pointer, new_slots * 4);
+				let new_slots = Math.max(this.used+new_slots, this.slots * 2) // exp alloc algo
+				let new_bytes = new_slots * 4;
+				this.pointer = this.exports.realloc_wasm(this.pointer, new_bytes); // by
 				this.mf32 = new Float32Array(this.exports.memory.buffer, this.pointer, new_slots);
 				this.mu32 = new Uint32Array(this.exports.memory.buffer, this.pointer, new_slots);
    				this.slots = new_slots
@@ -101,9 +102,11 @@
 			// ok now, we wait for our resources to load.
 			Promise.all(this.resources).then(results=>{
 				let deps = []
+
+				// copy our reslts into wasm pointers
 				for(let i = 0; i < results.length; i++){
 					var result = results[i]
-					// allocate pointer
+					// allocate pointer, do +8 because of the u64 length at the head of the buffer
 					let output_ptr = this.exports.alloc_wasm(result.buffer.byteLength+8);
 					let array = new Uint32Array(this.memory.buffer, output_ptr);
 					this.copy_to_wasm(result.buffer, output_ptr);
@@ -112,9 +115,10 @@
 						ptr:output_ptr
 					});
 				}
+				// pass wasm the deps
 				this.to_wasm.receive_deps(deps);
-				//console.log(this.to_wasm)
-			
+				
+				// send wasm a first resize message to spawn up the UI
 				this.to_wasm.resize({
 					width:this.width,
 					height:this.height,
@@ -128,28 +132,32 @@
 		do_wasm_io(){
 			this.to_wasm.end();
 			let from_wasm_ptr = this.exports.to_wasm(this.app, this.to_wasm.pointer)
+			// get a clean to_wasm set up immediately
 			this.to_wasm = new ToWasm(this);
 
-			this.parse = 2;
+			// set up local shortcuts to the from_wasm memory chunk for faster parsing
+			this.parse = 2; // skip the 8 byte header
 			this.mf32 = new Float32Array(this.memory.buffer, from_wasm_ptr);
 			this.mu32 = new Uint32Array(this.memory.buffer, from_wasm_ptr);
 			this.basef32 = new Float32Array(this.memory.buffer);
 			this.baseu32 = new Uint32Array(this.memory.buffer);
 
-			// process all return messages
+			// process all messages
 			var send_fn_table = this.send_fn_table;
 			while(1){
-				let type = this.mu32[this.parse++];
-				if(send_fn_table[type](this)){
+				let msg_type = this.mu32[this.parse++];
+				if(send_fn_table[msg_type](this)){
 					break;
 				}
 			}
+			// destroy from_wasm_ptr object
+			this.exports.dealloc_wasm(from_wasm_ptr);
 		}
 
 		// i forgot how to do memcpy with typed arrays. so, we'll do this.
 		copy_to_wasm(input_buffer, output_ptr){
 			let len = input_buffer.byteLength;
-			let f64len = len>>3; //8 bytes
+			let f64len = len>>3; //8 bytes at a time. 
 			var f64out = new Float64Array(this.memory.buffer, output_ptr + 8, f64len)
 			var f64in = new Float64Array(input_buffer);
 			for(let i = 0; i < f64len; i++){
@@ -157,7 +165,7 @@
 			}
 			let u8len = len&7;
 			if(u8len){ // copy remainder
-				let u8off = len - ((len>>3)<<3);
+				let u8off = len - u8len;
 				var u8out = new Uint8Array(this.memory.buffer, output_ptr + 8 + u8off, len)
 				var u8in = new Uint8Array(input_buffer, u8off);
 				for(let i = 0; i < u8len; i++){
@@ -306,8 +314,8 @@
 					add_line_numbers_to_string(ash.fragment)
 				)
 			}
-			// lets fetch all uniforms
-			
+
+			// fetch all attribs and uniforms
  			this.shaders[ash.shader_id] = {
 				geom_attribs:this.get_attrib_locations(program, "geomattr", ash.geometry_slots),
             	inst_attribs:this.get_attrib_locations(program, "instattr", ash.instance_slots),
@@ -399,8 +407,12 @@
 
 			let shader = this.shaders[shader_id];
 
+			let old_vao =this.vaos[vao_id];
+			if(old_vao){
+				gl.OES_vertex_array_object.deleteVertexArrayOES(old_vao);
+			}
 			let vao = gl.OES_vertex_array_object.createVertexArrayOES();
-			this.vaos[vao_id] = vao
+			this.vaos[vao_id] = vao;
 
 			vao.geom_ib_id = geom_ib_id;
 			vao.geom_vb_id = geom_vb_id;
@@ -443,6 +455,7 @@
 			let index_buffer = this.index_buffers[vao.geom_ib_id];
 			let instance_buffer = this.array_buffers[vao.inst_vb_id];
 			// set up uniforms TODO do this a bit more incremental based on uniform layer
+			// also possibly use webGL2 uniform buffers. For now this will suffice for webGL 1 compat
 			let uniforms_cx = shader.uniforms_cx;
 			for(let i = 0; i < uniforms_cx.length; i++){
 				let uni = uniforms_cx[i];
@@ -473,7 +486,6 @@
 			// lets do a drawcall!
 			gl.ANGLE_instanced_arrays.drawElementsInstancedANGLE(gl.TRIANGLES, indices, gl.UNSIGNED_INT, 0, instances);
 		}
-		// now i have to do the drawcall
 
 		clear(r,g,b,a){
 			var gl = this.gl;
@@ -487,6 +499,7 @@
 		}
 	}
 
+	// array of function id's wasm can call on us, self is pointer to WasmApp
 	WasmApp.prototype.send_fn_table = [
 		function end_0(self){
 			return true;
@@ -590,10 +603,10 @@
 			self.gl.uniform4f(loc, basef32[slot], basef32[slot+1], basef32[slot+2], basef32[slot+3])
 		},
 		"mat2":function set_mat2(self, loc, off){
-			self.gl.uniformMatrix2fv(loc, false, new Float32Array(self.memory.buffer, off))
+			self.gl.uniformMatrix2fv(loc, false, new Float32Array(self.memory.buffer, off, 4))
 		},
 		"mat3":function set_mat3(self, loc, off){
-			self.gl.uniformMatrix3fv(loc, false, new Float32Array(self.memory.buffer, off))
+			self.gl.uniformMatrix3fv(loc, false, new Float32Array(self.memory.buffer, off, 9))
 		},
 		"mat4":function set_mat4(self, loc, off){
 			let mat4 = new Float32Array(self.memory.buffer, off, 16)

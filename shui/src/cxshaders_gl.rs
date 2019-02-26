@@ -354,8 +354,8 @@ pub fn gl_assemble_shader(sh:&Shader, shtype:GLShaderType)->Result<AssembledGLSh
             pix_out.push_str("precision highp float;\n");
             vtx_out.push_str("precision highp int;\n");
             pix_out.push_str("precision highp int;\n");
-            pix_compat.push_str("vec2 dfdx(vec2 dummy){\nreturn vec2(0.05);\n}\n");
-            pix_compat.push_str("vec2 dfdy(vec2 dummy){\nreturn vec2(0.05);\n}\n")
+            pix_compat.push_str("vec2 dFdx(vec2 dummy){\nreturn vec2(0.05);\n}\n");
+            pix_compat.push_str("vec2 dFdy(vec2 dummy){\nreturn vec2(0.05);\n}\n")
         }
         GLShaderType::OpenGL=>{
             vtx_out.push_str("#version 100\n");

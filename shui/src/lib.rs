@@ -34,6 +34,9 @@ mod cxtextures;
 #[cfg(any(feature = "webgl", feature = "ogl"))]
 mod cxshaders_gl; 
 
+#[cfg(any(feature = "mtl", feature = "ogl"))]
+mod cx_winit; 
+
 mod cxshaders_shared;
 mod cx_shared;
 

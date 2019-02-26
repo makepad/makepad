@@ -21,6 +21,8 @@ pub struct Cx{
     pub animations:Vec<AnimArea>,
     pub redraw_area:Option<Area>,
     pub binary_deps:Vec<BinaryDep>,
+
+    pub clear_color:Vec4,
     pub repaint:bool,
     pub cycle_time:f64, // time in seconds in f64
     pub cycle_id:u64
@@ -45,6 +47,7 @@ impl Default for Cx{
             animations:Vec::new(),
             binary_deps:Vec::new(),
             redraw_area:Some(Area::zero()),
+            clear_color:vec4(0.3,0.3,0.3,1.0),
             repaint:true
         }
     }
@@ -82,42 +85,12 @@ impl Cx{
     }
 
     pub fn prepare_frame(&mut self){
-        self.clear(0.3,0.3,0.3,1.0);
         let camera_projection = Mat4::ortho(
                 0.0, self.turtle.target_size.x, 0.0, self.turtle.target_size.y, -100.0, 100.0, 
                 1.0,1.0
         );
         self.uniform_camera_projection(camera_projection);
         self.turtle.align_list.truncate(0);
-    }
-
-    #[cfg(any(feature = "mtl", feature = "ogl"))]
-    pub fn map_winit_event(&mut self, winit_event:winit::Event, glutin_window:&winit::Window)->Event{
-        match winit_event{
-            winit::Event::WindowEvent{ event, .. } => match event {
-                winit::WindowEvent::CloseRequested =>{
-                    self.running = false;
-                    return Event::CloseRequested
-                },
-                winit::WindowEvent::Resized(logical_size) => {
-                    
-                    let dpi_factor = glutin_window.get_hidpi_factor();
-                    let old_dpi_factor = self.turtle.target_dpi_factor as f32;
-                    let old_size = self.turtle.target_size.clone();
-                    self.turtle.target_dpi_factor = dpi_factor as f32;
-                    self.turtle.target_size = vec2(logical_size.width as f32, logical_size.height as f32);
-                    return Event::Resized(ResizedEvent{
-                        old_size: old_size,
-                        old_dpi_factor: old_dpi_factor,
-                        new_size: self.turtle.target_size.clone(),
-                        new_dpi_factor: self.turtle.target_dpi_factor
-                    })
-                },
-                _ => ()
-            },
-            _ => ()
-        }
-        Event::None
     }
 
     // trigger a redraw on the UI
@@ -173,7 +146,7 @@ impl Cx{
         }
     }
 
-    pub fn compute_animation(&mut self, area_name:&str, id_area:&Area, states:&Vec<AnimState>, tgt_area:&Area){
+    pub fn compute_animation(&mut self, _area_name:&str, id_area:&Area, _states:&Vec<AnimState>, _tgt_area:&Area){
         // alright we need to compute an animation. 
         // ok so first we use the id area to fetch the animation
         // alright first we find area
@@ -181,7 +154,7 @@ impl Cx{
         if anim_opt.is_none(){
             return
         }
-        let anim = anim_opt.unwrap();
+        let _anim = anim_opt.unwrap();
     
         // so if the start is NAN we are the first time called.
 
@@ -333,7 +306,7 @@ where T:Clone
 
 #[derive(Clone)]
 pub struct BinaryDep{
-    name:String,
+    pub name:String,
     buffer: *const u8,
     pub parse:isize,
     pub length:isize
@@ -346,6 +319,15 @@ impl BinaryDep{
             buffer:wasm_ptr as *const u8,
             parse:8,
             length:unsafe{(wasm_ptr as *const u64).read() as isize}
+        }
+    }
+
+    pub fn new_from_vec(name:String, vec_ptr:&Vec<u8>)->BinaryDep{
+        BinaryDep{
+            name:name, 
+            buffer:vec_ptr.as_ptr() as *const u8,
+            parse:0,
+            length:vec_ptr.len() as isize
         }
     }
 

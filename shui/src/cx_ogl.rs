@@ -11,16 +11,18 @@ use crate::cxshaders::*;
 use crate::events::*;
 
 impl Cx{
-     pub fn exec_draw_list(&mut self, id: usize){
-        // tad ugly otherwise the borrow checker locks 'self' and we can't recur
-        for ci in 0..self.drawing.draw_lists[id].draw_calls_len{
-            let sub_list_id = self.drawing.draw_lists[id].draw_calls[ci].sub_list_id;
+     pub fn exec_draw_list(&mut self, draw_list_id: usize){
+
+        let draw_calls_len = self.drawing.draw_lists[draw_list_id].draw_calls_len;
+
+        for draw_call_id in 0..draw_calls_len{
+            let sub_list_id = self.drawing.draw_lists[draw_list_id].draw_calls[draw_call_id].sub_list_id;
             if sub_list_id != 0{
                 self.exec_draw_list(sub_list_id);
             }
             else{
-                let draw_list = &mut self.drawing.draw_lists[id];
-                let draw_call = &mut draw_list.draw_calls[ci];
+                let draw_list = &mut self.drawing.draw_lists[draw_list_id];
+                let draw_call = &mut draw_list.draw_calls[draw_call_id];
                 let sh = &self.shaders.shaders[draw_call.shader_id];
                 let csh = &self.shaders.compiled_shaders[draw_call.shader_id];
 
@@ -55,18 +57,17 @@ impl Cx{
                                     .expect("gl_string: non-UTF8 string")
     }
     
-    fn clear(&mut self, r:f32, g:f32, b:f32, a:f32){
-        gl::Enable(gl::DEPTH_TEST);
-        gl::DepthFunc(gl::LEQUAL);
-        gl::BlendEquationSeparate(gl::FUNC_ADD, gl::FUNC_ADD);
-        gl::BlendFuncSeparate(gl::ONE, gl::ONE_MINUS_SRC_ALPHA, gl::ONE, gl::ONE_MINUS_SRC_ALPHA);
-        gl::Enable(gl::BLEND);
-        gl::ClearColor(r,g,b,a);
-        gl::Clear(gl::COLOR_BUFFER_BIT|gl::DEPTH_BUFFER_BIT);
-    }
-
+  
     pub fn repaint(&mut self, glutin_window:&glutin::GlWindow){
-        self.clear(0.3,0.3,0.3,1.0);
+        unsafe{
+            gl::Enable(gl::DEPTH_TEST);
+            gl::DepthFunc(gl::LEQUAL);
+            gl::BlendEquationSeparate(gl::FUNC_ADD, gl::FUNC_ADD);
+            gl::BlendFuncSeparate(gl::ONE, gl::ONE_MINUS_SRC_ALPHA, gl::ONE, gl::ONE_MINUS_SRC_ALPHA);
+            gl::Enable(gl::BLEND);
+            gl::ClearColor(self.clear_color.x, self.clear_color.y, self.clear_color.z, self.clear_color.w);
+            gl::Clear(gl::COLOR_BUFFER_BIT|gl::DEPTH_BUFFER_BIT);
+        }
         self.prepare_frame();        
         self.exec_draw_list(0);
 
@@ -74,15 +75,10 @@ impl Cx{
     }
 
     fn resize_window_to_turtle(&mut self, glutin_window:&glutin::GlWindow){
-       // resize drawable
         glutin_window.resize(PhysicalSize::new(
             (self.turtle.target_size.x * self.turtle.target_dpi_factor) as f64,
             (self.turtle.target_size.y * self.turtle.target_dpi_factor) as f64)
         );
-        //gl_window.resize(logical_size.to_physical(dpi_factor));
-        //layer.set_drawable_size(CGSize::new(
-         //   (self.turtle.target_size.x * self.turtle.target_dpi_factor) as f64,
-          //   (self.turtle.target_size.y * self.turtle.target_dpi_factor) as f64));
     }
     
     pub fn event_loop<F>(&mut self, mut event_handler:F)
@@ -105,8 +101,6 @@ impl Cx{
             glutin_window.make_current().unwrap();
             gl::load_with(|symbol| glutin_window.get_proc_address(symbol) as *const _);
 
-           
-
             //let mut num_extensions = 0;
             //gl::GetIntegerv(gl::NUM_EXTENSIONS, &mut num_extensions);
             //let extensions: Vec<_> = (0 .. num_extensions).map(|num| {
@@ -117,6 +111,8 @@ impl Cx{
 
         // lets compile all shaders
         self.shaders.compile_all_ogl_shaders();
+
+        self.load_binary_deps_from_file();
 
         while self.running{
             events_loop.poll_events(|winit_event|{
@@ -164,7 +160,7 @@ impl Cx{
         }
     }
 
-    pub fn wasm_recv<F>(&mut self, msg:u32, mut event_handler:F)->u32{
+    pub fn to_wasm<F>(&mut self, _msg:u32, mut _event_handler:F)->u32{
         0
     }
 }

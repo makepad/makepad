@@ -3,7 +3,6 @@ use std::ptr;
 
 use crate::shader::*;
 use crate::cxtextures::*;
-use crate::cxdrawing::*;
 use crate::cxshaders_shared::*;
 use crate::cxshaders_gl::*;
 
@@ -206,7 +205,7 @@ impl CxShaders{
     pub fn compile_get_attributes(program:gl::types::GLuint, prefix:&str, slots:usize)->Vec<GLAttribute>{
         let mut attribs = Vec::new();
         let stride = (slots * mem::size_of::<f32>()) as gl::types::GLsizei;
-        let num_attr = div_ceil4(slots)
+        let num_attr = ceil_div4(slots);
         for i in 0..num_attr{
             let mut name = prefix.to_string();
             name.push_str(&i.to_string());
@@ -266,7 +265,7 @@ impl CxShaders{
     }
 
     pub fn compile_ogl_shader(sh:&Shader)->Result<CompiledShader, SlErr>{
-        let ash = gl_assemble_shader(sh,GLShaderType::DesktopGLNoPartialDeriv)?;
+        let ash = gl_assemble_shader(sh,GLShaderType::OpenGLNoPartialDeriv)?;
         // now we have a pixel and a vertex shader
         // so lets now pass it to GL
         unsafe{
@@ -301,8 +300,8 @@ impl CxShaders{
             gl::DeleteShader(vs);
             gl::DeleteShader(fs);
 
-            let geom_attribs = Self::compile_get_attributes(program, "geomattr", ash.geometry_slots, ash.geometry_attribs);
-            let inst_attribs = Self::compile_get_attributes(program, "instattr", ash.instance_slots, ash.instance_attribs);
+            let geom_attribs = Self::compile_get_attributes(program, "geomattr", ash.geometry_slots);
+            let inst_attribs = Self::compile_get_attributes(program, "instattr", ash.instance_slots);
 
             // lets create static geom and index buffers for this shader
             let mut geom_vb = mem::uninitialized();
@@ -358,16 +357,16 @@ impl CxShaders{
         }
     }
 
-    pub fn set_texture_slots(locs:&Vec<GLUniform>, texture_ids:&Vec<usize>, cxtex:&mut CxTextures){
+    pub fn set_texture_slots(locs:&Vec<GLUniform>, texture_ids:&Vec<u32>, cxtex:&mut CxTextures){
         let mut o = 0;
         for loc in locs{
-            let id = texture_ids[o];
+            let id = texture_ids[o] as usize;
             unsafe{
                 gl::ActiveTexture(gl::TEXTURE0 + o as u32);
             }        
             
             if loc.loc >=0{
-                let mut tex = &mut cxtex.textures[id];
+                let tex = &mut cxtex.textures[id];
                 if tex.dirty{
                     tex.upload_to_device();
                 }

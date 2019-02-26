@@ -1,5 +1,4 @@
 use crate::shader::*;
-use crate::cxdrawing::*;
 use crate::cxshaders_shared::*;
 
 use cocoa::foundation::{NSRange};

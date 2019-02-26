@@ -122,66 +122,28 @@ impl DrawCallResources{
             self.free(resources); // dont reuse vaos accross shader ids
         }
         // create the VAO
-        unsafe{
-            self.resource_shader_id = csh.shader_id;
+        self.resource_shader_id = csh.shader_id;
 
-            // get a free vao ID
-            self.vao_id = resources.get_free_vao();
-            self.inst_vb_id = resources.get_free_index_buffer();
+        // get a free vao ID
+        self.vao_id = resources.get_free_vao();
+        self.inst_vb_id = resources.get_free_index_buffer();
 
-            resources.from_wasm.alloc_array_buffer(
-                self.inst_vb_id,0,0 as *const f32
-            );
+        resources.from_wasm.alloc_array_buffer(
+            self.inst_vb_id,0,0 as *const f32
+        );
 
-            resources.from_wasm.alloc_vao(
-                csh.shader_id,
-                self.vao_id,
-                csh.geom_ib_id,
-                csh.geom_vb_id,
-                self.inst_vb_id,
-            );
-            /*
-            self.vao = mem::uninitialized();
-            gl::GenVertexArrays(1, &mut self.vao);
-            gl::BindVertexArray(self.vao);
-            
-            // bind the vertex and indexbuffers
-            gl::BindBuffer(gl::ARRAY_BUFFER, csh.geom_vb);
-            for attr in &csh.geom_attribs{
-                gl::VertexAttribPointer(attr.loc, attr.size, gl::FLOAT, 0, attr.stride, attr.offset as *const () as *const _);
-                gl::EnableVertexAttribArray(attr.loc);
-            }
-
-            // create and bind the instance buffer
-            self.vb = mem::uninitialized();
-            gl::GenBuffers(1, &mut self.vb);
-            gl::BindBuffer(gl::ARRAY_BUFFER, self.vb);
-            
-            for attr in &csh.inst_attribs{
-                gl::VertexAttribPointer(attr.loc, attr.size, gl::FLOAT, 0, attr.stride, attr.offset as *const () as *const _);
-                gl::EnableVertexAttribArray(attr.loc);
-                gl::VertexAttribDivisor(attr.loc, 1 as gl::types::GLuint);
-            }
-
-            // bind the indexbuffer
-            gl::BindBuffer(gl::ELEMENT_ARRAY_BUFFER, csh.geom_ib);
-            gl::BindVertexArray(0);
-            
-                        if self.vao != 0{
-                gl::DeleteVertexArrays(1, &mut self.vao);
-            }
-            if self.vb != 0{
-                gl::DeleteBuffers(1, &mut self.vb);
-            }
-            */
-        }
+        resources.from_wasm.alloc_vao(
+            csh.shader_id,
+            self.vao_id,
+            csh.geom_ib_id,
+            csh.geom_vb_id,
+            self.inst_vb_id,
+        );
     }
 
     fn free(&mut self, resources:&mut CxResources){
-        unsafe{
-            resources.vaos_free.push(self.vao_id);
-            resources.vertex_buffers_free.push(self.inst_vb_id);
-        }
+        resources.vaos_free.push(self.vao_id);
+        resources.vertex_buffers_free.push(self.inst_vb_id);
         self.vao_id = 0;
         self.inst_vb_id = 0;
     }
@@ -216,19 +178,17 @@ impl CxShaders{
         let geom_ib_id = resources.get_free_index_buffer();
         let geom_vb_id = resources.get_free_index_buffer();
 
-        unsafe{
-            resources.from_wasm.alloc_array_buffer(
-                geom_vb_id,
-                sh.geometry_vertices.len(),
-                sh.geometry_vertices.as_ptr() as *const f32
-            );
+        resources.from_wasm.alloc_array_buffer(
+            geom_vb_id,
+            sh.geometry_vertices.len(),
+            sh.geometry_vertices.as_ptr() as *const f32
+        );
 
-            resources.from_wasm.alloc_index_buffer(
-                geom_ib_id,
-                sh.geometry_indices.len(),
-                sh.geometry_indices.as_ptr() as *const u32
-            );
-        }
+        resources.from_wasm.alloc_index_buffer(
+            geom_ib_id,
+            sh.geometry_indices.len(),
+            sh.geometry_indices.as_ptr() as *const u32
+        );
 
         let csh = CompiledShader{
             shader_id:shader_id,

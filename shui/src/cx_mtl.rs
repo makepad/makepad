@@ -10,27 +10,27 @@ use metal::*;
 use winit::os::macos::WindowExt;
 use time::precise_time_ns;
 pub use crate::cx_shared::*;
-use crate::cxdrawing::*;
 use crate::events::*;
 
 impl Cx{
 
-    pub fn exec_draw_list(&mut self, id: usize, device:&Device, encoder:&RenderCommandEncoderRef){
+    pub fn exec_draw_list(&mut self, draw_list_id: usize, device:&Device, encoder:&RenderCommandEncoderRef){
         
         // update draw list uniforms
         {
-            let draw_list = &mut self.drawing.draw_lists[id];
+            let draw_list = &mut self.drawing.draw_lists[draw_list_id];
             draw_list.resources.uni_dl.update_with_f32_data(device, &draw_list.uniforms);
         }
         // tad ugly otherwise the borrow checker locks 'self' and we can't recur
-        for ci in 0..self.drawing.draw_lists[id].draw_calls_len{
-            let sub_list_id = self.drawing.draw_lists[id].draw_calls[ci].sub_list_id;
+        let draw_calls_len = self.drawing.draw_lists[draw_list_id].draw_calls_len;
+        for draw_call_id in 0..draw_calls_len{
+            let sub_list_id = self.drawing.draw_lists[draw_list_id].draw_calls[draw_call_id].sub_list_id;
             if sub_list_id != 0{
                 self.exec_draw_list(sub_list_id, device, encoder);
             }
             else{
-                let draw_list = &mut self.drawing.draw_lists[id];
-                let draw = &mut draw_list.draw_calls[ci];
+                let draw_list = &mut self.drawing.draw_lists[draw_list_id];
+                let draw = &mut draw_list.draw_calls[draw_call_id];
 
                 let sh = &self.shaders.shaders[draw.shader_id];
                 let shc = &self.shaders.compiled_shaders[draw.shader_id];
@@ -64,7 +64,7 @@ impl Cx{
 
                     // lets set our textures
                     for (i, texture_id) in draw.textures.iter().enumerate(){
-                        let tex = &mut self.textures.textures[*texture_id];
+                        let tex = &mut self.textures.textures[*texture_id as usize];
                         if tex.dirty{
                             tex.upload_to_device(device);
                         }
@@ -89,24 +89,22 @@ impl Cx{
             }
         }
     }
-
+ 
     pub fn repaint(&mut self,layer:&CoreAnimationLayer, device:&Device, command_queue:&CommandQueue){
         let pool = unsafe { NSAutoreleasePool::new(cocoa::base::nil) };
 
-        let camera_projection = Mat4::ortho(
-            0.0, self.turtle.target_size.x, 0.0, self.turtle.target_size.y, -100.0, 100.0, 
-            1.0,1.0, 
-        );
-
-        self.uniform_camera_projection(camera_projection);
        
         if let Some(drawable) = layer.next_drawable() {
+            self.prepare_frame();
+            
             let render_pass_descriptor = RenderPassDescriptor::new();
 
             let color_attachment = render_pass_descriptor.color_attachments().object_at(0).unwrap();
             color_attachment.set_texture(Some(drawable.texture()));
             color_attachment.set_load_action(MTLLoadAction::Clear);
-            color_attachment.set_clear_color(MTLClearColor::new(0.3, 0.3, 0.3, 1.0));
+            color_attachment.set_clear_color(MTLClearColor::new(
+                self.clear_color.x as f64, self.clear_color.y as f64, self.clear_color.z as f64, self.clear_color.w as f64
+            ));
             color_attachment.set_store_action(MTLStoreAction::Store);
 
             let command_buffer = command_queue.new_command_buffer();
@@ -119,7 +117,6 @@ impl Cx{
             self.resources.uni_cx.update_with_f32_data(&device, &self.uniforms);
 
             // ok now we should call our render thing
-            self.turtle.align_list.truncate(0);
             self.exec_draw_list(0, &device, encoder);
 
             encoder.end_encoding();
@@ -175,7 +172,10 @@ impl Cx{
         glutin_window.set_position(winit::dpi::LogicalPosition::new(1920.0,400.0));
         
         self.shaders.compile_all_mtl_shaders(&device);
-        let start_time = precise_time_ns();
+
+        self.load_binary_deps_from_file();
+
+        //let start_time = precise_time_ns();
         
         while self.running{
             // unfortunate duplication of code between poll and run_forever but i don't know how to put this in a closure
@@ -227,7 +227,7 @@ impl Cx{
         }
     }
 
-    pub fn wasm_recv<F>(&mut self, msg:u32, mut event_handler:F)->u32{
+    pub fn to_wasm<F>(&mut self, _msg:u32, mut _event_handler:F)->u32{
         0
     }
 }
