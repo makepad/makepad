@@ -389,3 +389,48 @@ impl BinaryDep{
         Ok(len)
     }
 }
+
+#[macro_export]
+macro_rules! main_app {
+    ($app:ident, $name:expr) => {
+        //TODO do this with a macro to generate both entrypoints for App and Cx
+        pub fn main() {
+            let mut cx = Cx{
+                title:$name.to_string(),
+                ..Default::default()
+            };
+
+            let mut app = $app{
+                ..Style::style(&mut cx)
+            };
+
+            cx.event_loop(|cx, ev|{
+                app.handle(cx, &ev);
+            });
+        }
+
+        #[export_name = "init_wasm"]
+        pub extern "C" fn init_wasm()->u32{
+            let mut cx = Box::new(
+                Cx{
+                    title:$name.to_string(),
+                    ..Default::default()
+                }
+            );
+            let app = Box::new(
+                $app{
+                    ..Style::style(&mut cx)
+                }
+            );
+            Box::into_raw(Box::new((Box::into_raw(app),Box::into_raw(cx)))) as u32
+        }
+
+        #[export_name = "to_wasm"]
+        pub unsafe extern "C" fn to_wasm(appcx:u32, msg:u32)->u32{
+            let appcx = &*(appcx as *mut (*mut $app,*mut Cx));
+            (*appcx.1).to_wasm(msg,|cx, ev|{
+                (*appcx.0).handle(cx, &ev);
+            })
+        }
+    };
+}

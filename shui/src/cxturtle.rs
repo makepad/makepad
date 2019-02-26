@@ -12,6 +12,24 @@ pub fn debug_pt(x:f32, y:f32, color:i32, s:&str){
     })
 }
 
+/*
+        debug_pts_store.with(|c|{
+            let mut store = c.borrow_mut();
+            for (x,y,col,s) in store.iter(){
+                self.debug_qd.color = match col{
+                    0=>color("red"),
+                    1=>color("green"),
+                    2=>color("blue"),
+                    _=>color("yellow")
+                };
+                self.debug_qd.draw_abs(cx, false, *x, *y,2.0,2.0);
+                if s.len() != 0{
+                    self.debug_tx.draw_text(cx, Fixed(*x), Fixed(*y), s);
+                }
+            }
+            store.truncate(0);
+        })*/
+
 #[derive(Clone)]
 pub enum Value{
     Computed,

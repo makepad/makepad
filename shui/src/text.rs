@@ -30,7 +30,7 @@ impl Style for Text{
             font_id:cx.fonts.load("resources/ubuntu_regular_256.font"),
             text:"".to_string(),
             font_size:10.0,
-            line_spacing:1.2,
+            line_spacing:1.1,
             wrapping:Wrapping::Word,
             color:Vec4{x:1.0,y:1.0,z:1.0,w:1.0}
         }

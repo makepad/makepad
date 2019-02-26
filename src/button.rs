@@ -21,8 +21,8 @@ impl Style for Button{
             view:View::new(),
             area:Area::zero(),
             layout:Layout{
-                w:Fixed(50.0),
-                h:Fixed(50.0),
+                //w:Fixed(50.0),
+                //h:Fixed(50.0),
                 ..Layout::new()
             },
             bg_layout:Layout{
@@ -79,7 +79,8 @@ impl Button{
 
     pub fn draw_with_label(&mut self, cx:&mut Cx, label: &str){
         // this marks a tree node.
-        if self.view.begin(cx, &self.layout){return};
+        //if 
+        self.view.begin(cx, &self.layout);//{return};
 
         // however our turtle stack needs to remain independent
         self.bg.begin(cx, &self.bg_layout);

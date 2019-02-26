@@ -92,7 +92,6 @@ impl Cx{
                     self.shaders.compile_all_webgl_shaders(&mut self.resources);
                 },
                 2=>{ // resources loaded
-                    self.resources.from_wasm.log("Got deps!");
                     let len = to_wasm.mu32();
                     for _i in 0..len{
                         let name = to_wasm.parse_string();
