@@ -70,7 +70,7 @@ impl Cx{
     {
         let mut to_wasm = ToWasm::from(msg);
         self.resources.from_wasm = FromWasm::new();
-
+        let mut is_animation_frame = false;
         loop{
             let msg_type = to_wasm.mu32();
             match msg_type{
@@ -110,31 +110,77 @@ impl Cx{
                             }
                         }
                     }
-
                 },
                 3=>{ // resize
-
                     self.turtle.target_size = vec2(to_wasm.mf32(),to_wasm.mf32());
                     self.turtle.target_dpi_factor = to_wasm.mf32();
                     
                     // do our initial redraw and repaint
                     self.redraw_all();
-                    event_handler(self, Event::Redraw);
-                    self.redraw_none();
-                    self.repaint();
-                    
                 },
-                4=>{ // timer_tick (if we have anims, run an event)
+                4=>{ // animation_frame
+                    is_animation_frame = true;
+                    let time = to_wasm.mf64();
+                    //log!(self, "{} o clock",time);
+                    event_handler(self, Event::Animate(AnimateEvent{time:time}));
+                },
+                5=>{ // finger messages
+                    let finger_event_type = to_wasm.mu32();
 
-                },
+                    let finger_event = FingerEvent{
+                        x:to_wasm.mf32(),
+                        y:to_wasm.mf32(),
+                        digit:to_wasm.mu32(),
+                        button:to_wasm.mu32(),
+                        touch:to_wasm.mu32()>0,
+                        x_wheel:to_wasm.mf32(),
+                        y_wheel:to_wasm.mf32()
+                    };
+                    let event = match finger_event_type{
+                        1=>Event::FingerDown(finger_event),
+                        2=>Event::FingerUp(finger_event),
+                        3=>Event::FingerMove(finger_event),
+                        4=>Event::FingerHover(finger_event),
+                        5=>Event::FingerWheel(finger_event),
+                        _=>Event::None
+                    };
+                    event_handler(self, event);
+                },  
                 _=>{
                     panic!("Message unknown")
                 }
             };
         };
 
+        // if we have to redraw self, do so, 
+        if let Some(_) = self.redraw_dirty{
+            self.redraw_area = self.redraw_dirty.clone();
+            self.redraw_none();
+            event_handler(self, Event::Redraw);
+            // processing a redraw makes paint dirty by default
+            self.paint_dirty = true;
+        }
+    
+        if is_animation_frame && self.paint_dirty{
+            self.paint_dirty = false;
+            self.repaint();
+        }
+
         // free the received message
         to_wasm.dealloc();
+        
+        // request animation frame if still need to redraw, or repaint
+        // we use request animation frame for that.
+        let mut req_anim_frame = false;
+        if let Some(_) = self.redraw_dirty{
+            req_anim_frame = true
+        }
+        else if self.animations.len()> 0 || self.paint_dirty{
+            req_anim_frame = true
+        }
+        if req_anim_frame{
+            self.resources.from_wasm.request_animation_frame();
+        }
 
         // mark the end of the message
         self.resources.from_wasm.end();
@@ -149,15 +195,20 @@ impl Cx{
     { 
     }
 
+    pub fn log(&mut self, val:&str){
+        self.resources.from_wasm.log(val)
+    }
+
 }
 
 #[derive(Clone)]
 pub struct FromWasm{
     mu32:*mut u32,
     mf32:*mut f32,
+    mf64:*mut f64,
     slots:usize,
     used:isize,
-    current:isize
+    offset:isize
 }
 
 impl FromWasm{
@@ -165,9 +216,10 @@ impl FromWasm{
         FromWasm{
             mu32:0 as *mut u32,
             mf32:0 as *mut f32,
+            mf64:0 as *mut f64,
             slots:0,
             used:0,
-            current:0
+            offset:0
         }
     }
     pub fn new()->FromWasm{
@@ -178,9 +230,10 @@ impl FromWasm{
             FromWasm{
                 mu32:buf as *mut u32,
                 mf32:buf as *mut f32,
+                mf64:buf as *mut f64,
                 slots:start_bytes>>2,
                 used:2,
-                current:0
+                offset:0
             }
         }
     }
@@ -190,7 +243,10 @@ impl FromWasm{
     fn fit(&mut self, slots:usize){
         unsafe{
             if self.used as usize + slots> self.slots{
-                let new_slots = usize::max(self.used as usize + slots, self.slots * 2);
+                let mut new_slots = usize::max(self.used as usize + slots, self.slots * 2);
+                if new_slots&1 != 0{ // f64 align
+                    new_slots += 1;
+                }
                 let new_bytes = new_slots<<2;
                 let old_bytes = self.slots<<2;
                 let new_buf = alloc::alloc(alloc::Layout::from_size_align(new_bytes as usize, mem::align_of::<u64>()).unwrap()) as *mut u32;
@@ -200,32 +256,43 @@ impl FromWasm{
                 (new_buf as *mut u64).write(new_bytes as u64);
                 self.mu32 = new_buf;
                 self.mf32 = new_buf as *mut f32;
+                self.mf64 = new_buf as *mut f64;
             }
-            self.current = self.used;
+            self.offset = self.used;
             self.used += slots as isize;
         }
     }
 
     fn check(&mut self){
-        if self.current != self.used{
+        if self.offset != self.used{
             panic!("Unequal allocation and writes")
         }
     }
 
     fn mu32(&mut self, v:u32){
         unsafe{
-            self.mu32.offset(self.current).write(v);
-            self.current += 1;
+            self.mu32.offset(self.offset).write(v);
+            self.offset += 1;
         }
     }
 
     fn mf32(&mut self, v:f32){
         unsafe{
-            self.mf32.offset(self.current).write(v);
-            self.current += 1;
+            self.mf32.offset(self.offset).write(v);
+            self.offset += 1;
         }
     }   
-    
+ 
+    fn mf64(&mut self, v:f64){
+        unsafe{
+            if self.offset&1 != 0{
+                self.offset += 1;
+            }
+            self.mf64.offset(self.offset>>1).write(v);
+            self.offset += 2;
+        }
+    }
+
     // end the block and return ownership of the pointer
     pub fn end(&mut self){
         self.fit(1);
@@ -348,14 +415,20 @@ impl FromWasm{
         }
         self.check();
     }
+
+    pub fn request_animation_frame(&mut self){
+        self.fit(1);
+        self.mu32(10);
+    }
 }
 
 #[derive(Clone)]
 struct ToWasm{
     mu32:*mut u32,
     mf32:*mut f32,
+    mf64:*mut f64,
     slots:usize,
-    parse:isize
+    offset:isize
 }
 
 impl ToWasm{
@@ -365,6 +438,7 @@ impl ToWasm{
             alloc::dealloc(self.mu32 as *mut u8, alloc::Layout::from_size_align((self.slots * mem::size_of::<u64>()) as usize, mem::align_of::<u32>()).unwrap());
             self.mu32 = 0 as *mut u32;
             self.mf32 = 0 as *mut f32;
+            self.mf64 = 0 as *mut f64;
         }
     }
 
@@ -374,7 +448,8 @@ impl ToWasm{
             ToWasm{
                 mu32: buf as *mut u32,
                 mf32: buf as *mut f32,
-                parse: 2,
+                mf64: buf as *mut f64,
+                offset: 2,
                 slots: bytes>>2
             }
         }
@@ -382,16 +457,27 @@ impl ToWasm{
 
     fn mu32(&mut self)->u32{
         unsafe{
-            let ret = self.mu32.offset(self.parse).read();
-            self.parse += 1;
+            let ret = self.mu32.offset(self.offset).read();
+            self.offset += 1;
             ret
         }
     }
 
     fn mf32(&mut self)->f32{
         unsafe{
-            let ret = self.mf32.offset(self.parse).read();
-            self.parse += 1;
+            let ret = self.mf32.offset(self.offset).read();
+            self.offset += 1;
+            ret
+        }
+    }   
+
+    fn mf64(&mut self)->f64{
+        unsafe{
+            if self.offset&1 != 0{
+                self.offset +=1;
+            }
+            let ret = self.mf64.offset(self.offset>>1).read();
+            self.offset += 2;
             ret
         }
     }   

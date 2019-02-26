@@ -15,20 +15,23 @@
 		update_refs(){
 			this.mf32 = new Float32Array(this.exports.memory.buffer, this.pointer, this.slots);
 			this.mu32 = new Uint32Array(this.exports.memory.buffer, this.pointer, this.slots);
+			this.mf64 = new Float64Array(this.exports.memory.buffer, this.pointer, this.slots>>1);
 		}
 
-		fit(new_slots){
+		fit(slots){
 			this.update_refs(); // its possible our mf32/mu32 refs are dead because of realloccing of wasm heap inbetween calls
-			if(this.used + new_slots > this.slots){
-				let new_slots = Math.max(this.used+new_slots, this.slots * 2) // exp alloc algo
+			if(this.used + slots > this.slots){
+				let new_slots = Math.max(this.used + slots, this.slots * 2) // exp alloc algo
+				if(new_slots&1)new_slots++; // float64 align it
 				let new_bytes = new_slots * 4;
 				this.pointer = this.exports.realloc_wasm(this.pointer, new_bytes); // by
 				this.mf32 = new Float32Array(this.exports.memory.buffer, this.pointer, new_slots);
 				this.mu32 = new Uint32Array(this.exports.memory.buffer, this.pointer, new_slots);
+				this.mf64 =  new Float64Array(this.exports.memory.buffer, this.pointer, new_slots>>1);
    				this.slots = new_slots
 			}
 			let pos = this.used;
-			this.used += new_slots;
+			this.used += slots;
 			return pos;
 		}
 
@@ -65,6 +68,62 @@
 			this.mf32[pos++] = info.dpi_factor;
 		}
 
+		animation_frame(time){
+			let pos = this.fit(3); // float64 uses 2 slots
+			this.mu32[pos++] = 4;
+			if(pos&1){ // float64 align, need to fit another
+				pos++;
+				this.fit(1);
+			}
+			this.mf64[pos>>1] = time;
+		}
+
+		add_finger(finger){
+			let pos = this.fit(7)
+			this.mf32[pos++] = finger.x
+			this.mf32[pos++] = finger.y
+			this.mu32[pos++] = finger.digit
+			this.mu32[pos++] = finger.button
+			this.mu32[pos++] = finger.touch?1:0
+			this.mf32[pos++] = finger.x_wheel || 0
+			this.mf32[pos++] = finger.y_wheel || 0
+		}
+
+		on_finger_down(finger){
+			let pos = this.fit(2);
+			this.mu32[pos++] = 5;
+			this.mu32[pos++] = 1;
+			this.add_finger(finger)
+		}
+
+		on_finger_up(finger){
+			let pos = this.fit(2); 
+			this.mu32[pos++] = 5;
+			this.mu32[pos++] = 2;
+			this.add_finger(finger)
+		}
+
+		on_finger_move(finger){
+			let pos = this.fit(2); 
+			this.mu32[pos++] = 5;
+			this.mu32[pos++] = 3;
+			this.add_finger(finger)
+		}
+
+		on_finger_hover(finger){
+			let pos = this.fit(2); 
+			this.mu32[pos++] = 5;
+			this.mu32[pos++] = 4;
+			this.add_finger(finger)
+		}
+		
+		on_finger_wheel(finger){
+			let pos = this.fit(2); 
+			this.mu32[pos++] = 5;
+			this.mu32[pos++] = 5;
+			this.add_finger(finger)
+		}
+
 		end(){
 			let pos = this.fit(1);
 			this.mu32[pos] = 0;
@@ -87,8 +146,13 @@
 			this.vaos = [];
 			this.textures = [];
 			this.resources = [];
+			this.req_anim_frame_id = 0;
+
+			this.finger_digit_map = {}
+			this.finger_digit_alloc = 0;
 
 			this.init_webgl_context();
+			this.bind_mouse_and_touch();
 
 			// lets create the wasm app and cx
 			this.app = this.exports.init_wasm();
@@ -139,8 +203,10 @@
 			this.parse = 2; // skip the 8 byte header
 			this.mf32 = new Float32Array(this.memory.buffer, from_wasm_ptr);
 			this.mu32 = new Uint32Array(this.memory.buffer, from_wasm_ptr);
+			this.mf64 = new Float64Array(this.memory.buffer, from_wasm_ptr);
 			this.basef32 = new Float32Array(this.memory.buffer);
 			this.baseu32 = new Uint32Array(this.memory.buffer);
+			this.basef64 = new Float64Array(this.memory.buffer);
 
 			// process all messages
 			var send_fn_table = this.send_fn_table;
@@ -152,6 +218,18 @@
 			}
 			// destroy from_wasm_ptr object
 			this.exports.dealloc_wasm(from_wasm_ptr);
+		}
+
+		request_animation_frame(){
+			if (this.req_anim_frame_id){
+				return;
+			}
+			this.req_anim_frame_id = window.requestAnimationFrame(time=>{
+				this.req_anim_frame_id = 0;
+				this.to_wasm.animation_frame(time);
+				this.do_wasm_io();
+			})
+			this.requ
 		}
 
 		// i forgot how to do memcpy with typed arrays. so, we'll do this.
@@ -368,6 +446,185 @@
 			this.on_screen_resize()
 		}
 
+		find_nearest_finger(x, y){
+			var near_dist = Infinity, near_digit = -1
+			for(let digit in this.finger_digit_map){
+				var finger = this.finger_digit_map[digit]
+				if(!finger) continue
+				var dx = x - finger.x, dy = y - finger.y
+				var len = Math.sqrt(dx*dx+dy*dy)
+				if(len < near_dist) near_dist = len, near_digit = digit
+			}
+			return this.finger_digit_map[near_digit]
+		}
+
+		on_finger_down(fingers){
+			for(let i = 0; i < fingers.length; i++){
+				var finger = fingers[i]
+	
+				// find an unused digit
+				for(var digit in this.finger_digit_map){
+					if(!this.finger_digit_map[digit]) break
+				}
+				// we need to alloc a new one
+				if(!digit || this.finger_digit_map[digit]) digit = this.finger_digit_alloc++
+				// store it					
+				this.finger_digit_map[digit] = finger
+				// assign a digit to finger
+				finger.digit = parseInt(digit)
+				
+				this.to_wasm.on_finger_down(finger)
+			}
+
+			this.do_wasm_io();
+		}
+
+		on_finger_up(fingers){
+			for(let i = 0; i < fingers.length; i++){
+				var finger = fingers[i]
+	
+				var old_finger = this.find_nearest_finger(finger.x, finger.y)
+	
+				if(!old_finger){
+					console.log("Undefined state in onfingerup");
+					continue
+				}
+				// copy over the digit
+				finger.digit = old_finger.digit;
+	
+				// remove digit mapping
+				this.finger_digit_map[old_finger.digit] = undefined
+				
+				this.to_wasm.on_finger_up(finger)
+			}
+
+			this.do_wasm_io();
+		}
+
+		on_finger_hover(fingers){
+			for(let i = 0; i < fingers.length; i++){
+				var finger = fingers[i]
+				this.to_wasm.on_finger_hover(finger);
+			}			
+
+			this.do_wasm_io();
+		}
+
+		on_finger_move(fingers){
+			for(let i = 0; i < fingers.length; i++){
+				var finger = fingers[i]
+				var old_finger = this.find_nearest_finger(finger.x, finger.y)
+	
+				if(!old_finger){
+					console.log("Undefined state in on_finger_move");
+					continue
+				}
+				// copy digit
+				finger.digit = old_finger.digit
+				this.to_wasm.on_finger_move(finger);
+			}
+
+			this.do_wasm_io();
+		}
+
+		on_finger_wheel(fingers){
+			for(let i = 0; i < fingers.length; i++){
+				var finger = fingers[i]
+				this.to_wasm.on_finger_wheel(finger)
+			}
+
+			this.do_wasm_io();
+		}
+
+		bind_mouse_and_touch(){
+			var canvas = this.canvas
+			function mouse_to_finger(e){
+				return [{
+					x:e.pageX,
+					y:e.pageY,
+					button: e.button === 0? 1: e.button===1? 3: 2,
+					touch: false
+				}]
+			}
+			function touch_to_finger(e){
+				var f = []
+				for(let i = 0; i < e.changedTouches.length; i++){
+					var t = e.changedTouches[i]
+					f.push({
+						x:t.pageX,
+						y:t.pageY,
+						button:1,
+						touch: true,
+					})
+				}
+				return f
+			}
+		
+			var mouse_is_down = false;
+			canvas.addEventListener('mousedown',e=>{
+				e.preventDefault();
+				mouse_is_down = true;
+				this.on_finger_down(mouse_to_finger(e))
+			})
+			window.addEventListener('mouseup',e=>{
+				e.preventDefault();
+				mouse_is_down = false;
+				this.on_finger_up(mouse_to_finger(e))
+			})
+			window.addEventListener('mousemove',e=>{
+				if(mouse_is_down){
+					this.on_finger_move(mouse_to_finger(e))
+				}
+				else{
+					this.on_finger_hover(mouse_to_finger(e))
+				}				
+			})
+			window.addEventListener('mouseout',e=>{
+				if(mouse_is_down){
+					this.on_finger_move(mouse_to_finger(e))
+				}
+				else{
+					this.on_finger_hover(mouse_to_finger(e))
+				}				
+			})
+			canvas.addEventListener('contextmenu',e=>{
+				e.preventDefault()
+				return false
+			})
+			window.addEventListener('touchstart', e=>{
+				e.preventDefault()
+				this.on_finger_down(touch_to_finger(e))
+			})
+			window.addEventListener('touchmove',e=>{
+				this.on_finger_move(touch_to_finger(e))
+			})
+			window.addEventListener('touchend', e=>{
+				e.preventDefault();
+				this.on_finger_up(touch_to_finger(e))
+			})
+			canvas.addEventListener('touchcancel', e=>{
+				e.preventDefault();
+				this.on_finger_up(touch_to_finger(e))
+			})
+			canvas.addEventListener('touchleave', e=>{
+				e.preventDefault();
+				this.on_finger_up(touch_to_finger(e))
+			})
+			canvas.addEventListener('wheel', e=>{
+				var fingers = mouse_to_finger(e)
+				e.preventDefault()
+				var fac = 1
+				if(e.deltaMode === 1) fac = 40
+				else if(e.deltaMode === 2) fac = window.offsetHeight
+		
+				fingers[0].x_wheel = e.deltaX * fac
+				fingers[0].y_wheel = e.deltaY * fac
+				this.on_finger_wheel(fingers)
+			})
+			//window.addEventListener('webkitmouseforcewillbegin', this.onCheckMacForce.bind(this), false)
+			//window.addEventListener('webkitmouseforcechanged', this.onCheckMacForce.bind(this), false)
+		}
+
 		alloc_array_buffer(array_buffer_id, array){
 			var gl = this.gl;
 			let gl_buf = this.array_buffers[array_buffer_id] || gl.createBuffer()
@@ -579,6 +836,9 @@
 			let height = self.mu32[self.parse++];
 			let data_ptr = self.mu32[self.parse++];
 			self.alloc_texture(texture_id, width, height, data_ptr);
+		},
+		function request_animation_frame(self){
+			self.request_animation_frame()
 		}
 	]
 	

@@ -58,10 +58,11 @@ pub enum ButtonEvent{
 impl Button{
     pub fn handle(&mut self, cx:&mut Cx, event:&Event)->ButtonEvent{
         match event.hits(&self.area, cx){
-            Event::Animate=>{
-                cx.compute_animation("bg", &self.area, &self.anim_states, &self.area);
+            Event::Animate(ae)=>{
+                cx.compute_animation(ae, "bg", &self.area, &self.anim_states, &self.area);
             },
             Event::FingerDown(_fe)=>{
+                log!(cx, "{}", self.label);
                 self.event = ButtonEvent::Clicked
             },
             Event::FingerMove(_fe)=>{
@@ -80,6 +81,7 @@ impl Button{
     pub fn draw_with_label(&mut self, cx:&mut Cx, label: &str){
         // this marks a tree node.
         //if 
+        self.label = label.to_string();
         self.view.begin(cx, &self.layout);//{return};
 
         // however our turtle stack needs to remain independent

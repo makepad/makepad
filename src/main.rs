@@ -24,18 +24,19 @@ impl App{
     fn handle(&mut self, cx:&mut Cx, event:&Event){
         if let Event::Redraw = event{return self.draw(cx);}
 
-        if let ButtonEvent::Clicked = self.ok.handle(cx, event){
-            // we got clicked!
+        for i in 0..500{
+            if let ButtonEvent::Clicked = self.oks.elements[i].handle(cx, event){
+                // we got clicked!
+            }
         }
     } 
 
     fn draw(&mut self, cx:&mut Cx){
         self.view.begin(cx, &Layout{
-            w:Percent(100.0),
             ..Layout::filled_padded(10.0)
         });
-
         //self.ok.draw_with_label(cx, "Live Rust");
+        log!(cx, "DRAWING");
         self.oks.reset();
         for i in 0..500{
             self.oks.add(&self.ok).draw_with_label(cx, &format!("OK{}",i));

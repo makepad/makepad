@@ -359,6 +359,9 @@ impl Area{
     }
 
     pub fn get_rect_sep(&self, drawing:&CxDrawing, shaders:&CxShaders)->Rect{
+        if self.instance_count == 0{
+            return Rect::zero()
+        }
         let draw_list = &drawing.draw_lists[self.draw_list_id];
         let draw = &draw_list.draw_calls[self.draw_call_id];
         let csh = &shaders.compiled_shaders[draw.shader_id];
@@ -406,10 +409,10 @@ impl Area{
         self.set_rect_sep(&mut cx.drawing, &cx.shaders, rect)
     }
 
-    pub fn contains(&self, what:&Vec2, cx:&Cx)->bool{
+    pub fn contains(&self, x:f32, y:f32, cx:&Cx)->bool{
         let rect = self.get_rect(cx);
 
-        return what.x >= rect.x && what.x <= rect.x + rect.w &&
-            what.y >= rect.y && what.y <= rect.y + rect.h;
+        return x >= rect.x && x <= rect.x + rect.w &&
+            y >= rect.y && y <= rect.y + rect.h;
     }
 }

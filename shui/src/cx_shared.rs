@@ -4,6 +4,7 @@ use crate::cxshaders::*;
 use crate::cxfonts::*;
 use crate::cxtextures::*;
 use crate::cxturtle::*;
+use crate::events::*;
 
 #[derive(Clone)]
 pub struct Cx{
@@ -19,13 +20,13 @@ pub struct Cx{
     pub resources:CxResources,
 
     pub animations:Vec<AnimArea>,
-    pub redraw_area:Option<Area>,
-    pub binary_deps:Vec<BinaryDep>,
 
+    pub redraw_dirty:Option<Area>,
+    pub redraw_area:Option<Area>,
+    pub paint_dirty:bool,
+
+    pub binary_deps:Vec<BinaryDep>,
     pub clear_color:Vec4,
-    pub repaint:bool,
-    pub cycle_time:f64, // time in seconds in f64
-    pub cycle_id:u64
 }
 
 impl Default for Cx{
@@ -40,15 +41,14 @@ impl Default for Cx{
             textures:CxTextures{..Default::default()},
             title:"Hello World".to_string(),
             running:true,
-            cycle_time:0.0,
-            cycle_id:0,
             uniforms:uniforms,
             resources:CxResources{..Default::default()},
             animations:Vec::new(),
             binary_deps:Vec::new(),
-            redraw_area:Some(Area::zero()),
+            redraw_area:None,
+            redraw_dirty:None,
             clear_color:vec4(0.3,0.3,0.3,1.0),
-            repaint:true
+            paint_dirty:false
         }
     }
 }
@@ -95,17 +95,17 @@ impl Cx{
 
     // trigger a redraw on the UI
     pub fn redraw_all(&mut self){ 
-        self.redraw_area = Some(Area::zero())
+        self.redraw_dirty = Some(Area::zero())
     }
 
     // trigger a redraw on the UI
     pub fn redraw_none(&mut self){ 
-        self.redraw_area = None
+        self.redraw_dirty = None
     }
 
     // trigger a redraw on the UI
     pub fn redraw(&mut self, area:&Area){ 
-        self.redraw_area = Some(area.clone())
+        self.redraw_dirty = Some(area.clone())
     }
 
     pub fn start_animation(&mut self, state_name:&str, area:&Area, states:&Vec<AnimState>){
@@ -138,7 +138,7 @@ impl Cx{
         else{
             self.animations.push(AnimArea{
                 area:area.clone(),
-                start:self.cycle_time,
+                start:std::f64::NAN,
                 duration:anim_state.duration,
                 current_state:state_name.to_string(),
                 next_state:"".to_string()
@@ -146,7 +146,7 @@ impl Cx{
         }
     }
 
-    pub fn compute_animation(&mut self, _area_name:&str, id_area:&Area, _states:&Vec<AnimState>, _tgt_area:&Area){
+    pub fn compute_animation(&mut self, _ae:&AnimateEvent, _area_name:&str, id_area:&Area, _states:&Vec<AnimState>, _tgt_area:&Area){
         // alright we need to compute an animation. 
         // ok so first we use the id area to fetch the animation
         // alright first we find area
@@ -388,6 +388,13 @@ impl BinaryDep{
         }
         Ok(len)
     }
+}
+
+#[macro_export]
+macro_rules! log {
+    ($cx:ident, $($arg:expr),+) => {
+        $cx.log(&format!($($arg),+))
+    };
 }
 
 #[macro_export]

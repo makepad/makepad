@@ -3,7 +3,13 @@ use crate::cxdrawing::*;
 
 #[derive(Clone, Default,Debug)]
 pub struct FingerEvent{
-    pub pos:Vec2
+    pub x:f32,
+    pub y:f32,
+    pub digit:u32,
+    pub button:u32,
+    pub touch:bool,
+    pub x_wheel:f32,
+    pub y_wheel:f32
 }
 
 #[derive(Clone, Default, Debug)]
@@ -20,17 +26,30 @@ pub struct ResizedEvent{
     pub new_dpi_factor:f32
 }
 
+#[derive(Clone, Default, Debug)]
+pub struct AnimateEvent{
+    pub time:f64
+}
+
+
+#[derive(Clone, Default, Debug)]
+pub struct RedrawEvent{
+    pub area:Area
+}
+
 #[derive(Clone,Debug)]
 pub enum Event{
     None,
     Redraw,
-    Animate,
+    Animate(AnimateEvent),
     CloseRequested,
     Resized(ResizedEvent),
     CapturedMove(CapturedEvent),
-    FingerMove(FingerEvent),
     FingerDown(FingerEvent),
+    FingerMove(FingerEvent),
+    FingerHover(FingerEvent),
     FingerUp(FingerEvent),
+    FingerWheel(FingerEvent)
 }
 
 impl Default for Event{
@@ -40,9 +59,9 @@ impl Default for Event{
 }
 
 impl Event{
-    pub fn hits(&self, area:&Area, cx:&Cx)->&Event{
+    pub fn hits(&self, area:&Area, cx:&mut Cx)->&Event{
         match self{
-            Event::Animate=>{
+            Event::Animate(_)=>{
                 for anim in &cx.animations{
                     if anim.area == *area{
                         return self
@@ -55,17 +74,17 @@ impl Event{
                 }
             },
             Event::FingerMove(fe)=>{
-                if area.contains(&fe.pos,cx){
+                if area.contains(fe.x, fe.y, cx){
                     return self;
                 }
             },
             Event::FingerDown(fe)=>{
-                if area.contains(&fe.pos,cx){
+                if area.contains(fe.x, fe.y, cx){
                     return self;
                 }
             },
             Event::FingerUp(fe)=>{
-                if area.contains(&fe.pos,cx){
+                if area.contains(fe.x, fe.y, cx){
                     return self;
                 }
             },
