@@ -44,7 +44,7 @@ mod cx_shared;
 mod cxdrawing;
 mod cxfonts;
 mod cxturtle;
-
+mod animation;
 mod math;
 mod colors;
 mod shader;
@@ -63,3 +63,4 @@ pub use crate::shader::*;
 pub use crate::quad::*;
 pub use crate::text::*;
 pub use crate::colors::*;
+pub use crate::animation::*;

@@ -10,9 +10,15 @@ pub struct Button{
     pub bg: Quad,
     pub bg_layout:Layout,
     pub text: Text,
-    pub anim_states:Vec<AnimState>,
+    pub anim_states:AnimStates<ButtonState>,
     pub label:String,
     pub event:ButtonEvent
+}
+
+#[derive(Clone)]
+pub enum ButtonState{
+    Default,
+    Over
 }
 
 impl Style for Button{
@@ -32,13 +38,17 @@ impl Style for Button{
                 ..Layout::filled_padded(10.0)
             },
             label:"OK".to_string(),
-            anim_states:vec![
-                AnimState::new("over", 0.1, AnimStart::Interrupt,vec![
-                    AnimKey::new(1.0,vec![
-                        AnimValue::color("bg", "color", "red")
-                    ])
-                ]) 
-            ],
+            anim_states:AnimStates::new(
+                ButtonState::Default,
+                vec![
+                    AnimState::new(
+                        ButtonState::Over,
+                        AnimDuration::Seconds(0.1), 
+                        AnimStart::Interrupt,
+                        vec![AnimKey::new(1.0,vec![AnimValue::color("bg", "color", "red")])]
+                    ) 
+                ]
+            ),
             bg:Quad{
                 color:color("gray"),
                 ..Style::style(cx)
@@ -59,17 +69,14 @@ impl Button{
     pub fn handle(&mut self, cx:&mut Cx, event:&Event)->ButtonEvent{
         match event.hits(&self.area, cx){
             Event::Animate(ae)=>{
-                cx.compute_animation(ae, "bg", &self.area, &self.anim_states, &self.area);
+                self.anim_states.animate(cx, "bg", &self.area, &self.area, ae);
             },
             Event::FingerDown(_fe)=>{
                 log!(cx, "{}", self.label);
-                self.event = ButtonEvent::Clicked
+                self.event = ButtonEvent::Clicked;
+                self.anim_states.set_state(cx, ButtonState::Over, &self.area);
             },
             Event::FingerMove(_fe)=>{
-                // lets start an animation.
-                cx.start_animation("over", &self.area, &self.anim_states);
-                //cx.start_animation(&self.area, ANIM_OVER);
-                //println!("MOVE OVER");
             },
             _=>{
                  self.event = ButtonEvent::None
