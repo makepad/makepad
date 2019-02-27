@@ -13,6 +13,9 @@ impl<'a> SlCx<'a>{
             "sample2d"=>{
                 return MapCallResult::Rename("texture2D".to_string())
             },
+            "fmod"=>{
+                return MapCallResult::Rename("mod".to_string())
+            },
             "dfdx"=>{
                 return MapCallResult::Rename("dFdx".to_string())
             },
@@ -65,7 +68,8 @@ pub struct AssembledGLShader{
 
     pub fragment:String,
     pub vertex:String,
-    pub named_instance_props: NamedInstanceProps
+    pub named_instance_props: NamedInstanceProps,
+    pub rect_instance_props: RectInstanceProps
 }
 
 pub fn gl_assemble_uniforms(unis:&Vec<ShVar>)->String{
@@ -514,6 +518,7 @@ pub fn gl_assemble_shader(sh:&Shader, shtype:GLShaderType)->Result<AssembledGLSh
         texture_slots:texture_slots,
         fragment:pix_out,
         vertex:vtx_out,
-        named_instance_props:NamedInstanceProps::construct(sh, &instances)
+        named_instance_props:NamedInstanceProps::construct(sh, &instances),
+        rect_instance_props:RectInstanceProps::construct(sh, &instances)
     })
 }

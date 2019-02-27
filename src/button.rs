@@ -10,12 +10,12 @@ pub struct Button{
     pub bg: Quad,
     pub bg_layout:Layout,
     pub text: Text,
-    pub anim_states:AnimStates<ButtonState>,
+    pub states:AnimStates<ButtonState>,
     pub label:String,
     pub event:ButtonEvent
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 pub enum ButtonState{
     Default,
     Over
@@ -23,33 +23,50 @@ pub enum ButtonState{
 
 impl Style for Button{
     fn style(cx:&mut Cx)->Self{
+/*
+        let mut sh = Shader::def(); 
+        Quad::def_shader(&mut sh);
+        sh.add_ast(shader_ast!(||{
+            fn pixel()->vec4{
+                df_viewport(pos*vec2(w,h));   
+                df_circle(w*0.5,h*0.5,0.5*min(w,h));
+                return df_fill(color); 
+            }
+        }));*/
+
         Self{
             view:View::new(),
             area:Area::zero(),
             layout:Layout{
+                w:Computed,
+                h:Computed,
                 //w:Fixed(50.0),
                 //h:Fixed(50.0),
                 ..Layout::new()
             },
             bg_layout:Layout{
+                //w:Fixed(50.0),
+                align:Align::center(),
                 w:Computed,
                 h:Computed,
                 margin:Margin::i32(1),
-                ..Layout::filled_padded(10.0)
+                ..Layout::padded(5.0)
             },
             label:"OK".to_string(),
-            anim_states:AnimStates::new(
+            states:AnimStates::new(
                 ButtonState::Default,
                 vec![
                     AnimState::new(
                         ButtonState::Over,
-                        AnimDuration::Seconds(0.1), 
-                        AnimStart::Interrupt,
-                        vec![AnimKey::new(1.0,vec![AnimValue::color("bg", "color", "red")])]
+                        AnimMode::Single{speed:1.0, len:1.0, cut:true}, 
+                        vec![
+                            AnimTrack::vec4("bg", "color", vec![ (1.0,color("red")) ])
+                        ]
                     ) 
                 ]
             ),
             bg:Quad{
+                //shader_id:cx.shaders.add(sh),
                 color:color("gray"),
                 ..Style::style(cx)
             },
@@ -59,7 +76,7 @@ impl Style for Button{
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 pub enum ButtonEvent{
     None,
     Clicked
@@ -69,12 +86,11 @@ impl Button{
     pub fn handle(&mut self, cx:&mut Cx, event:&Event)->ButtonEvent{
         match event.hits(&self.area, cx){
             Event::Animate(ae)=>{
-                self.anim_states.animate(cx, "bg", &self.area, &self.area, ae);
+                self.states.animate(cx, "bg", &self.area, &self.area, ae);
             },
             Event::FingerDown(_fe)=>{
-                log!(cx, "{}", self.label);
                 self.event = ButtonEvent::Clicked;
-                self.anim_states.set_state(cx, ButtonState::Over, &self.area);
+                self.states.change(cx, ButtonState::Over, &self.area);
             },
             Event::FingerMove(_fe)=>{
             },
@@ -87,9 +103,8 @@ impl Button{
 
     pub fn draw_with_label(&mut self, cx:&mut Cx, label: &str){
         // this marks a tree node.
-        //if 
         self.label = label.to_string();
-        self.view.begin(cx, &self.layout);//{return};
+        //self.view.begin(cx, &self.layout);//{return};
 
         // however our turtle stack needs to remain independent
         self.bg.begin(cx, &self.bg_layout);
@@ -98,7 +113,7 @@ impl Button{
         
         self.area = self.bg.end(cx);
 
-        self.view.end(cx);
+       // self.view.end(cx);
     }
 }
 

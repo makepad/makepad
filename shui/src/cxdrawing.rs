@@ -363,17 +363,17 @@ impl Area{
             return Rect::zero()
         }
         let draw_list = &drawing.draw_lists[self.draw_list_id];
-        let draw = &draw_list.draw_calls[self.draw_call_id];
-        let csh = &shaders.compiled_shaders[draw.shader_id];
+        let draw_call = &draw_list.draw_calls[self.draw_call_id];
+        let csh = &shaders.compiled_shaders[draw_call.shader_id];
         // ok now we have to patch x/y/w/h into it
-        if let Some(ix) = csh.named_instance_props.x{
-            let x = draw.instance[self.instance_offset + ix];
-            if let Some(iy) = csh.named_instance_props.y{
-                let y = draw.instance[self.instance_offset + iy];
-                if let Some(iw) = csh.named_instance_props.w{
-                    let w = draw.instance[self.instance_offset + iw];
-                    if let Some(ih) = csh.named_instance_props.h{
-                        let h = draw.instance[self.instance_offset + ih];
+        if let Some(ix) = csh.rect_instance_props.x{
+            let x = draw_call.instance[self.instance_offset + ix];
+            if let Some(iy) = csh.rect_instance_props.y{
+                let y = draw_call.instance[self.instance_offset + iy];
+                if let Some(iw) = csh.rect_instance_props.w{
+                    let w = draw_call.instance[self.instance_offset + iw];
+                    if let Some(ih) = csh.rect_instance_props.h{
+                        let h = draw_call.instance[self.instance_offset + ih];
                         return Rect{x:x,y:y,w:w,h:h}
                     }
                 }
@@ -388,21 +388,149 @@ impl Area{
 
     pub fn set_rect_sep(&self, drawing:&mut CxDrawing, shaders:&CxShaders, rect:&Rect){
         let draw_list = &mut drawing.draw_lists[self.draw_list_id];
-        let draw = &mut draw_list.draw_calls[self.draw_call_id];
-        let csh = &shaders.compiled_shaders[draw.shader_id];        // ok now we have to patch x/y/w/h into it
+        let draw_call = &mut draw_list.draw_calls[self.draw_call_id];
+        let csh = &shaders.compiled_shaders[draw_call.shader_id];        // ok now we have to patch x/y/w/h into it
 
-        if let Some(ix) = csh.named_instance_props.x{
-            draw.instance[self.instance_offset + ix] = rect.x;
+        if let Some(ix) = csh.rect_instance_props.x{
+            draw_call.instance[self.instance_offset + ix] = rect.x;
         }
-        if let Some(iy) = csh.named_instance_props.y{
-            draw.instance[self.instance_offset + iy] = rect.y;
+        if let Some(iy) = csh.rect_instance_props.y{
+            draw_call.instance[self.instance_offset + iy] = rect.y;
         }
-        if let Some(iw) = csh.named_instance_props.w{
-            draw.instance[self.instance_offset + iw] = rect.w;
+        if let Some(iw) = csh.rect_instance_props.w{
+            draw_call.instance[self.instance_offset + iw] = rect.w;
         }
-        if let Some(ih) = csh.named_instance_props.h{
-            draw.instance[self.instance_offset + ih] = rect.h;
+        if let Some(ih) = csh.rect_instance_props.h{
+            draw_call.instance[self.instance_offset + ih] = rect.h;
         }
+    }
+
+  pub fn write_prop_float(&self, cx:&mut Cx, prop_name:&str, value:f32){
+        let draw_list = &mut cx.drawing.draw_lists[self.draw_list_id];
+        let draw_call = &mut draw_list.draw_calls[self.draw_call_id];
+        let csh = &cx.shaders.compiled_shaders[draw_call.shader_id];
+
+        for prop in &csh.named_instance_props.props{
+            if prop.name == prop_name{
+                draw_call.instance[self.instance_offset + prop.offset] = value;
+                return
+            }
+        }
+    }
+
+    pub fn read_prop_float(&self, cx:&Cx, prop_name:&str)->f32{
+        let draw_list = &cx.drawing.draw_lists[self.draw_list_id];
+        let draw_call = &draw_list.draw_calls[self.draw_call_id];
+        let csh = &cx.shaders.compiled_shaders[draw_call.shader_id];
+
+        for prop in &csh.named_instance_props.props{
+            if prop.name == prop_name{
+                return draw_call.instance[self.instance_offset + prop.offset + 0]
+            }
+        }
+        return 0.0;
+    }
+
+   pub fn write_prop_vec2(&self, cx:&mut Cx, prop_name:&str, value:&Vec2){
+        let draw_list = &mut cx.drawing.draw_lists[self.draw_list_id];
+        let draw_call = &mut draw_list.draw_calls[self.draw_call_id];
+        let csh = &cx.shaders.compiled_shaders[draw_call.shader_id];
+
+        for prop in &csh.named_instance_props.props{
+            if prop.name == prop_name{
+                let off = self.instance_offset + prop.offset;
+                draw_call.instance[off + 0] = value.x;
+                draw_call.instance[off + 1] = value.y;
+                return
+            }
+        }
+    }
+
+    pub fn read_prop_vec2(&self, cx:&Cx, prop_name:&str)->Vec2{
+        let draw_list = &cx.drawing.draw_lists[self.draw_list_id];
+        let draw_call = &draw_list.draw_calls[self.draw_call_id];
+        let csh = &cx.shaders.compiled_shaders[draw_call.shader_id];
+
+        for prop in &csh.named_instance_props.props{
+            if prop.name == prop_name{
+                let off = self.instance_offset + prop.offset;
+                return Vec2{
+                    x:draw_call.instance[off + 0],
+                    y:draw_call.instance[off + 1]
+                }
+            }
+        }
+        return vec2(0.0,0.0);
+    }
+
+    pub fn write_prop_vec3(&self, cx:&mut Cx, prop_name:&str, value:&Vec3){
+        let draw_list = &mut cx.drawing.draw_lists[self.draw_list_id];
+        let draw_call = &mut draw_list.draw_calls[self.draw_call_id];
+        let csh = &cx.shaders.compiled_shaders[draw_call.shader_id];
+
+        for prop in &csh.named_instance_props.props{
+            if prop.name == prop_name{
+                let off = self.instance_offset + prop.offset;
+                draw_call.instance[off + 0] = value.x;
+                draw_call.instance[off + 1] = value.y;
+                draw_call.instance[off + 2] = value.z;
+                return
+            }
+        }
+    }
+
+    pub fn read_prop_vec3(&self, cx:&Cx, prop_name:&str)->Vec3{
+        let draw_list = &cx.drawing.draw_lists[self.draw_list_id];
+        let draw_call = &draw_list.draw_calls[self.draw_call_id];
+        let csh = &cx.shaders.compiled_shaders[draw_call.shader_id];
+
+        for prop in &csh.named_instance_props.props{
+            if prop.name == prop_name{
+                let off = self.instance_offset + prop.offset;
+                return Vec3{
+                    x:draw_call.instance[off + 0],
+                    y:draw_call.instance[off + 1],
+                    z:draw_call.instance[off + 2]
+                }
+            }
+        }
+        return vec3(0.0,0.0,0.0);
+    }
+
+    pub fn write_prop_vec4(&self, cx:&mut Cx, prop_name:&str, value:&Vec4){
+        let draw_list = &mut cx.drawing.draw_lists[self.draw_list_id];
+        let draw_call = &mut draw_list.draw_calls[self.draw_call_id];
+        let csh = &cx.shaders.compiled_shaders[draw_call.shader_id];
+
+        for prop in &csh.named_instance_props.props{
+            if prop.name == prop_name{
+                let off = self.instance_offset + prop.offset;
+                draw_call.instance[off + 0] = value.x;
+                draw_call.instance[off + 1] = value.y;
+                draw_call.instance[off + 2] = value.z;
+                draw_call.instance[off + 3] = value.w;
+                return
+            }
+        }
+    }
+
+    pub fn read_prop_vec4(&self, cx:&Cx, prop_name:&str)->Vec4{
+        let draw_list = &cx.drawing.draw_lists[self.draw_list_id];
+        let draw_call = &draw_list.draw_calls[self.draw_call_id];
+        let csh = &cx.shaders.compiled_shaders[draw_call.shader_id];
+
+        for prop in &csh.named_instance_props.props{
+            if prop.name == prop_name{
+                let off = self.instance_offset + prop.offset;
+                return Vec4{
+                    x:draw_call.instance[off + 0],
+                    y:draw_call.instance[off + 1],
+                    z:draw_call.instance[off + 2],
+                    w:draw_call.instance[off + 3]
+                }
+            }
+        }
+        return vec4(0.0,0.0,0.0,0.0);
     }
 
     pub fn set_rect(&self, cx:&mut Cx, rect:&Rect){

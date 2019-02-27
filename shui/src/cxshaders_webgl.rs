@@ -34,12 +34,19 @@ pub struct CompiledShader{
     pub uniforms_dl: Vec<ShVar>,
     pub uniforms_cx: Vec<ShVar>,
     pub texture_slots:Vec<ShVar>,
+    pub rect_instance_props: RectInstanceProps,
     pub named_instance_props: NamedInstanceProps
 }
 
 #[derive(Default,Clone)]
 pub struct WebGLTexture2D{
     pub texture_id: usize
+}
+
+#[derive(Clone, Default)]
+pub struct CxShaders{
+    pub compiled_shaders: Vec<CompiledShader>,
+    pub shaders: Vec<Shader>,
 }
 
 impl CxShaders{
@@ -92,6 +99,7 @@ impl CxShaders{
             uniforms_dl:ash.uniforms_dl.clone(),
             uniforms_dr:ash.uniforms_dr.clone(),
             texture_slots:ash.texture_slots.clone(),
+            rect_instance_props:ash.rect_instance_props.clone(),
             named_instance_props:ash.named_instance_props.clone(),
             //assembled_shader:ash,
             ..Default::default()

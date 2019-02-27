@@ -65,6 +65,7 @@ pub struct AssembledMtlShader{
     pub uniforms_dl: Vec<ShVar>,
     pub uniforms_cx: Vec<ShVar>,
     pub texture_slots:Vec<ShVar>,
+    pub rect_instance_props: RectInstanceProps,
     pub named_instance_props: NamedInstanceProps,
     pub mtlsl:String,
 }
@@ -132,7 +133,8 @@ pub struct CompiledShader{
     pub geom_vbuf:MetalBuffer,
     pub geom_ibuf:MetalBuffer,
     pub instance_slots:usize,
-    pub named_instance_props: NamedInstanceProps
+    pub rect_instance_props: RectInstanceProps,
+    pub named_instance_props: NamedInstanceProps,
 }
 
 #[derive(Default,Clone)]
@@ -347,6 +349,7 @@ impl CxShaders{
             uniforms_dl:uniforms_dl,
             uniforms_cx:uniforms_cx,
             texture_slots:texture_slots,
+            rect_instance_props:RectInstanceProps::construct(sh, &instances),
             named_instance_props:NamedInstanceProps::construct(sh, &instances),
             mtlsl:mtl_out
         })
@@ -382,6 +385,7 @@ impl CxShaders{
                 library:Some(library),
                 instance_slots:ash.instance_slots,
                 named_instance_props:ash.named_instance_props.clone(),
+                rect_instance_props:ash.rect_instance_props.clone(),
                 //assembled_shader:ash,
                 geom_ibuf:{
                     let mut geom_ibuf = MetalBuffer{..Default::default()};

@@ -46,10 +46,6 @@ impl Quad{
             let w:float<Instance>;
             let h:float<Instance>;
             let color:vec4<Instance>;
-            
-            fn my_fn(inv:vec4)->vec4{
-                return inv;
-            }
 
             fn vertex()->vec4{
                 return vec4(pos*vec2(w, h)+vec2(x, y),0.,1.) * camera_projection;

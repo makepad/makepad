@@ -3,6 +3,7 @@ use std::ptr;
 
 pub use crate::cx_shared::*;
 use crate::shader::*;
+use crate::cxshaders::*;
 use crate::cxshaders_gl::*;
 use crate::events::*;
 use std::alloc;
@@ -134,28 +135,62 @@ impl Cx{
                     //log!(self, "{} o clock",time);
                     event_handler(self, Event::Animate(AnimateEvent{time:time}));
                 },
-                6=>{ // finger messages
-                    let finger_event_type = to_wasm.mu32();
-
-                    let finger_event = FingerEvent{
+                6=>{ // finger down
+                    event_handler(self, Event::FingerDown(FingerDownEvent{
                         x:to_wasm.mf32(),
                         y:to_wasm.mf32(),
                         digit:to_wasm.mu32(),
-                        button:to_wasm.mu32(),
-                        touch:to_wasm.mu32()>0,
-                        x_wheel:to_wasm.mf32(),
-                        y_wheel:to_wasm.mf32()
-                    };
-                    let event = match finger_event_type{
-                        1=>Event::FingerDown(finger_event),
-                        2=>Event::FingerUp(finger_event),
-                        3=>Event::FingerMove(finger_event),
-                        4=>Event::FingerHover(finger_event),
-                        5=>Event::FingerWheel(finger_event),
-                        _=>Event::None
-                    };
-                    event_handler(self, event);
-                },  
+                        button:match to_wasm.mu32(){
+                            0=>MouseButton::Left,
+                            1=>MouseButton::Right,
+                            2=>MouseButton::Middle,
+                            v=>MouseButton::Other(v as u8)
+                        },
+                        is_touch:to_wasm.mu32()>0
+                    }));
+                },
+                7=>{ // finger up
+                    event_handler(self, Event::FingerUp(FingerUpEvent{
+                        x:to_wasm.mf32(),
+                        y:to_wasm.mf32(),
+                        digit:to_wasm.mu32(),
+                        button:match to_wasm.mu32(){
+                            0=>MouseButton::Left,
+                            1=>MouseButton::Right,
+                            2=>MouseButton::Middle,
+                            v=>MouseButton::Other(v as u8)
+                        },
+                        is_touch:to_wasm.mu32()>0
+                    }));
+                },
+                8=>{ // finger move
+                    event_handler(self, Event::FingerMove(FingerMoveEvent{
+                        x:to_wasm.mf32(),
+                        y:to_wasm.mf32(),
+                        digit:to_wasm.mu32(),
+                        button:match to_wasm.mu32(){
+                            0=>MouseButton::Left,
+                            1=>MouseButton::Right,
+                            2=>MouseButton::Middle,
+                            v=>MouseButton::Other(v as u8)
+                        },
+                        is_touch:to_wasm.mu32()>0
+                    }));
+                },
+                9=>{ // finger hover
+                    event_handler(self, Event::FingerHover(FingerHoverEvent{
+                        x:to_wasm.mf32(),
+                        y:to_wasm.mf32()
+                    }));
+                },
+                10=>{ // finger scroll
+                    event_handler(self, Event::FingerScroll(FingerScrollEvent{
+                        x:to_wasm.mf32(),
+                        y:to_wasm.mf32(),
+                        dx:to_wasm.mf32(),
+                        dy:to_wasm.mf32(),
+                    }));
+                },
                 _=>{
                     panic!("Message unknown")
                 }
@@ -169,6 +204,7 @@ impl Cx{
             event_handler(self, Event::Redraw);
             // processing a redraw makes paint dirty by default
             self.paint_dirty = true;
+            self.frame_id += 1;
         }
     
         if is_animation_frame && self.paint_dirty{
@@ -211,7 +247,6 @@ impl Cx{
 
 }
 
-
 // storage buffers for graphics API related resources
 #[derive(Clone)]
 pub struct CxResources{
@@ -239,7 +274,7 @@ impl Default for CxResources{
 }
 
 impl CxResources{
-    fn get_free_vertex_buffer(&mut self)->usize{
+    pub fn get_free_vertex_buffer(&mut self)->usize{
         if self.vertex_buffers_free.len() > 0{
             self.vertex_buffers_free.pop().unwrap()
         }
@@ -248,7 +283,7 @@ impl CxResources{
             self.vertex_buffers
         }
     }
-    fn get_free_index_buffer(&mut self)->usize{
+    pub fn get_free_index_buffer(&mut self)->usize{
         if self.index_buffers_free.len() > 0{
             self.index_buffers_free.pop().unwrap()
         }
@@ -257,7 +292,7 @@ impl CxResources{
             self.index_buffers
         }
     }
-     fn get_free_vao(&mut self)->usize{
+    pub fn get_free_vao(&mut self)->usize{
         if self.vaos_free.len() > 0{
             self.vaos_free.pop().unwrap()
         }
@@ -268,8 +303,6 @@ impl CxResources{
     }
 }
 
-
-
 #[derive(Clone, Default)]
 pub struct DrawListResources{
 }
@@ -279,12 +312,6 @@ pub struct DrawCallResources{
     pub resource_shader_id:usize,
     pub vao_id:usize,
     pub inst_vb_id:usize
-}
-
-#[derive(Clone, Default)]
-pub struct CxShaders{
-    pub compiled_shaders: Vec<CompiledShader>,
-    pub shaders: Vec<Shader>,
 }
 
 impl DrawCallResources{

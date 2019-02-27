@@ -5,7 +5,6 @@ use crate::cxshaders::*;
 use crate::cxfonts::*;
 use crate::cxtextures::*;
 use crate::cxturtle::*;
-use crate::events::*;
 use crate::animation::*;
 
 #[derive(Clone)]
@@ -26,7 +25,7 @@ pub struct Cx{
     pub redraw_dirty:Option<Area>,
     pub redraw_area:Option<Area>,
     pub paint_dirty:bool,
-
+    pub frame_id:u64,
     pub binary_deps:Vec<BinaryDep>,
     pub clear_color:Vec4,
 }
@@ -49,6 +48,7 @@ impl Default for Cx{
             binary_deps:Vec::new(),
             redraw_area:None,
             redraw_dirty:None,
+            frame_id:0,
             clear_color:vec4(0.3,0.3,0.3,1.0),
             paint_dirty:false
         }
@@ -108,44 +108,6 @@ impl Cx{
     // trigger a redraw on the UI
     pub fn redraw(&mut self, area:&Area){ 
         self.redraw_dirty = Some(area.clone())
-    }
-
-}
-
-pub struct Elements<T>{
-    pub elements:Vec<T>,
-    pub len:usize
-}
-
-impl<T> Elements<T>
-where T:Clone
-{
-    pub fn new()->Elements<T>{
-        Elements::<T>{
-            elements:Vec::new(),
-            len:0
-        }
-    }
-    pub fn len(&self)->usize{
-        self.len
-    }
-
-    pub fn reset(&mut self){
-        self.len = 0;
-    }
-
-    pub fn add(&mut self, clone:&T)->&mut T{
-        if self.len >= self.elements.len(){
-            self.elements.push(clone.clone());
-            self.len += 1;
-            self.elements.last_mut().unwrap()
-
-        }
-        else{
-            let last = self.len;
-            self.len += 1;
-            &mut self.elements[last]
-        }
     }
 }
 

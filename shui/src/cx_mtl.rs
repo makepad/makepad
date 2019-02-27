@@ -44,7 +44,8 @@ impl Cx{
                     draw.resources.uni_dr.update_with_f32_data(device, &draw.uniforms);
                 }
 
-                let instances = (draw.instance.len() / shc.instance_slots) as u64;
+                let instances = (draw.instance.len() / shc.instance_slots
+                ) as u64;
                 if let Some(pipeline_state) = &shc.pipeline_state{
                     encoder.set_render_pipeline_state(pipeline_state);
                     if let Some(buf) = &shc.geom_vbuf.buffer{encoder.set_vertex_buffer(0, Some(&buf), 0);}
@@ -96,7 +97,6 @@ impl Cx{
     pub fn repaint(&mut self,layer:&CoreAnimationLayer, device:&Device, command_queue:&CommandQueue){
         let pool = unsafe { NSAutoreleasePool::new(cocoa::base::nil) };
 
-       
         if let Some(drawable) = layer.next_drawable() {
             self.prepare_frame();
             
@@ -201,13 +201,14 @@ impl Cx{
             });
             if self.animations.len() != 0{
                 let time_now = precise_time_ns();
-                let time = (time_now - start_time) as f64 / 1000000.0; // keeps the error as low as possible
+                let time = (time_now - start_time) as f64 / 1_000_000_000.0; // keeps the error as low as possible
                 event_handler(self, Event::Animate(AnimateEvent{time:time}));                
             }
             // call redraw event
             if let Some(_) = &self.redraw_dirty{
                 self.redraw_area = self.redraw_dirty.clone();
                 self.redraw_none();
+                self.frame_id += 1;
                 event_handler(self, Event::Redraw);
                 self.paint_dirty = true;
             }
@@ -217,7 +218,7 @@ impl Cx{
                 self.repaint(&layer, &device, &command_queue);
             }
             // wait for the next event blockingly so it stops eating power
-            if self.animations.len() == 0{
+            if self.animations.len() == 0 && self.redraw_dirty.is_none(){
                 events_loop.run_forever(|winit_event|{
                     let event = self.map_winit_event(winit_event, &glutin_window);
                     if let Event::Resized(_) = &event{ // do this here because mac

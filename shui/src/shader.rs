@@ -472,7 +472,7 @@ impl Shader{
                     ShFn{name:"ceil".to_string(), args:vec![ShFnArg::new("x","T")], ret:"T".to_string(), block:None},
                     ShFn{name:"fract".to_string(), args:vec![ShFnArg::new("x","T")], ret:"T".to_string(), block:None},
 
-                    ShFn{name:"mod".to_string(), args:vec![ShFnArg::new("x","T"),ShFnArg::new("y","T")], ret:"T".to_string(), block:None},
+                    ShFn{name:"fmod".to_string(), args:vec![ShFnArg::new("x","T"),ShFnArg::new("y","T")], ret:"T".to_string(), block:None},
                     ShFn{name:"min".to_string(), args:vec![ShFnArg::new("x","T"),ShFnArg::new("y","T")], ret:"T".to_string(), block:None},
                     ShFn{name:"max".to_string(), args:vec![ShFnArg::new("x","T"),ShFnArg::new("y","T")], ret:"T".to_string(), block:None},
                     ShFn{name:"clamp".to_string(), args:vec![ShFnArg::new("x","T"),ShFnArg::new("mi","T"),ShFnArg::new("ma","T")], ret:"T".to_string(), block:None},

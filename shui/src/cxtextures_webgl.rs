@@ -1,4 +1,4 @@
-use crate::cxshaders::*;
+use crate::cx::*;
 
 #[derive(Default,Clone)]
 pub struct Texture{

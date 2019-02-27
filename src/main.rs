@@ -4,7 +4,6 @@ use crate::button::*;
 
 struct App{
     view:View,
-    ok:Button,
     oks:Elements<Button>,
 }
  
@@ -12,10 +11,9 @@ impl Style for App{
     fn style(cx:&mut Cx)->Self{
         Self{
             view:View::new(),
-            ok:Button{
+            oks:Elements::new(Button{
                 ..Style::style(cx)  
-            }, 
-            oks:Elements::new(),
+            }),
         }
     }
 }
@@ -29,20 +27,22 @@ impl App{
                 // we got clicked!
             }
         }
-    } 
+    }
 
     fn draw(&mut self, cx:&mut Cx){
         self.view.begin(cx, &Layout{
             ..Layout::filled_padded(10.0)
         });
         //self.ok.draw_with_label(cx, "Live Rust");
-        log!(cx, "DRAWING");
         self.oks.reset();
-        for i in 0..500{
-            self.oks.add(&self.ok).draw_with_label(cx, &format!("OK{}",i));
+        for i in 0..2000{
+            //let f = ((i+cx.frame_id)%250)as f32/250.0;
+            self.oks.add().draw_with_label(cx, &format!("{}",(i+cx.frame_id)%5000));
+            //self.oks.elements[i as usize].bg.color = vec4(f,1.0-f,f*0.5,1.0);
         }
 
         self.view.end(cx);
+        //cx.redraw_all();
     }
 }
 

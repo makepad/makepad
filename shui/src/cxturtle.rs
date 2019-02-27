@@ -414,10 +414,10 @@ impl CxTurtle{
 
             for i in 0..align_item.instance_count{
                 let csh = &walkwrap.shaders.compiled_shaders[draw_call.shader_id];
-                if let Some(x) = csh.named_instance_props.x{
+                if let Some(x) = csh.rect_instance_props.x{
                     draw_call.instance[align_item.instance_offset + x + i * csh.instance_slots] += dx;
                 }
-                if let Some(y) = csh.named_instance_props.y{
+                if let Some(y) = csh.rect_instance_props.y{
                     draw_call.instance[align_item.instance_offset + y+ i * csh.instance_slots] += dy;
                 }
             }

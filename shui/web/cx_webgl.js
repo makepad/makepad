@@ -86,50 +86,50 @@
 			this.mf64[pos>>1] = time;
 		}
 
-		add_finger(finger){
-			let pos = this.fit(7)
+		on_finger_down(finger){
+			let pos = this.fit(6);
+			this.mu32[pos++] = 6;
 			this.mf32[pos++] = finger.x
 			this.mf32[pos++] = finger.y
 			this.mu32[pos++] = finger.digit
 			this.mu32[pos++] = finger.button
 			this.mu32[pos++] = finger.touch?1:0
-			this.mf32[pos++] = finger.x_wheel || 0
-			this.mf32[pos++] = finger.y_wheel || 0
-		}
-
-		on_finger_down(finger){
-			let pos = this.fit(2);
-			this.mu32[pos++] = 6;
-			this.mu32[pos++] = 1;
-			this.add_finger(finger)
 		}
 
 		on_finger_up(finger){
-			let pos = this.fit(2); 
-			this.mu32[pos++] = 6;
-			this.mu32[pos++] = 2;
-			this.add_finger(finger)
+			let pos = this.fit(6);
+			this.mu32[pos++] = 7;
+			this.mf32[pos++] = finger.x
+			this.mf32[pos++] = finger.y
+			this.mu32[pos++] = finger.digit
+			this.mu32[pos++] = finger.button
+			this.mu32[pos++] = finger.touch?1:0
 		}
 
 		on_finger_move(finger){
-			let pos = this.fit(2); 
-			this.mu32[pos++] = 6;
-			this.mu32[pos++] = 3;
-			this.add_finger(finger)
+			let pos = this.fit(6);
+			this.mu32[pos++] = 8;
+			this.mf32[pos++] = finger.x
+			this.mf32[pos++] = finger.y
+			this.mu32[pos++] = finger.digit
+			this.mu32[pos++] = finger.button
+			this.mu32[pos++] = finger.touch?1:0
 		}
 
 		on_finger_hover(finger){
-			let pos = this.fit(2); 
-			this.mu32[pos++] = 6;
-			this.mu32[pos++] = 4;
-			this.add_finger(finger)
+			let pos = this.fit(3);
+			this.mu32[pos++] = 9;
+			this.mf32[pos++] = finger.x
+			this.mf32[pos++] = finger.y
 		}
 		
 		on_finger_wheel(finger){
-			let pos = this.fit(2); 
-			this.mu32[pos++] = 6;
-			this.mu32[pos++] = 5;
-			this.add_finger(finger)
+			let pos = this.fit(5);
+			this.mu32[pos++] = 10;
+			this.mf32[pos++] = finger.x
+			this.mf32[pos++] = finger.y
+			this.mf32[pos++] = finger.x_wheel
+			this.mf32[pos++] = finger.y_wheel
 		}
 
 		end(){
@@ -191,7 +191,6 @@
 				}
 				// pass wasm the deps
 				this.to_wasm.deps_loaded(deps);
-				
 				// initialize the application
 				this.to_wasm.init({
 					width:this.width,
@@ -236,7 +235,7 @@
 			}
 			this.req_anim_frame_id = window.requestAnimationFrame(time=>{
 				this.req_anim_frame_id = 0;
-				this.to_wasm.animation_frame(time);
+				this.to_wasm.animation_frame(time / 1000.0);
 				this.do_wasm_io();
 			})
 			this.requ
@@ -284,6 +283,15 @@
 			this.width = canvas.offsetWidth;
 			this.height = canvas.offsetHeight;
 			// send the wasm a screenresize event
+			if(this.to_wasm){
+				// initialize the application
+				this.to_wasm.resize({
+					width:this.width,
+					height:this.height,
+					dpi_factor:this.dpi_factor
+				})
+				this.request_animation_frame()
+			}
 		}
 		
 		load_deps(deps){

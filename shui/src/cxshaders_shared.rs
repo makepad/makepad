@@ -755,15 +755,15 @@ pub fn assemble_fn_and_deps(sh:&Shader, cx:&mut SlCx)->Result<String, SlErr>{
 }
 
 #[derive(Default,Clone)]
-pub struct NamedInstanceProps{
+pub struct RectInstanceProps{
     pub x: Option<usize>,
     pub y: Option<usize>,
     pub w: Option<usize>,
     pub h: Option<usize>,
 }
 
-impl NamedInstanceProps{
-    pub fn construct(sh:&Shader, instances:&Vec<ShVar>)->NamedInstanceProps{
+impl RectInstanceProps{
+    pub fn construct(sh:&Shader, instances:&Vec<ShVar>)->RectInstanceProps{
         let mut x = None;
         let mut y = None;
         let mut w = None;
@@ -779,8 +779,39 @@ impl NamedInstanceProps{
             }
             slot += sh.get_type_slots(&inst.ty);
         };
-        NamedInstanceProps{
+        RectInstanceProps{
             x:x,y:y,w:w,h:h
+        }
+    }
+}
+
+#[derive(Default,Clone)]
+pub struct NamedInstanceProp{
+    pub name: String,
+    pub offset: usize,
+    pub slots: usize
+}
+
+#[derive(Default,Clone)]
+pub struct NamedInstanceProps{
+    pub props: Vec<NamedInstanceProp>,
+}
+
+impl NamedInstanceProps{
+    pub fn construct(sh:&Shader, instances:&Vec<ShVar>)->NamedInstanceProps{
+        let mut slot = 0;
+        let mut props = Vec::new();
+        for inst in instances{
+            let slots = sh.get_type_slots(&inst.ty);
+            props.push(NamedInstanceProp{
+                name:inst.name.clone(),
+                offset:slot,
+                slots:slots
+            });
+            slot += slots
+        };
+        NamedInstanceProps{
+            props:props
         }
     }
 }
