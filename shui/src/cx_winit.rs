@@ -5,10 +5,72 @@ use std::fs::File;
 use std::io;
 use crate::math::*;
 
+#[derive(Clone, Default)]
+pub struct CxWinit{
+    pub last_x:f32,
+    pub last_y:f32
+}
+
 impl Cx{
     pub fn map_winit_event(&mut self, winit_event:winit::Event, glutin_window:&winit::Window)->Event{
+        //self.log(&format!("{:?}\n", winit_event));
         match winit_event{
             winit::Event::WindowEvent{ event, .. } => match event {
+                winit::WindowEvent::MouseWheel{delta, ..}=>{
+                    return Event::FingerScroll(FingerScrollEvent{
+                        x:self.resources.winit.last_x,
+                        y:self.resources.winit.last_y,
+                        dx:match delta{
+                            winit::MouseScrollDelta::LineDelta(dx,_dy)=>dx,
+                            winit::MouseScrollDelta::PixelDelta(pp)=>pp.x as f32
+                        },
+                        dy:match delta{
+                            winit::MouseScrollDelta::LineDelta(_dx,dy)=>dy,
+                            winit::MouseScrollDelta::PixelDelta(pp)=>pp.y as f32
+                        },
+                    })
+                },
+                winit::WindowEvent::CursorMoved{position,..}=>{
+                    self.resources.winit.last_x = position.x as f32;
+                    self.resources.winit.last_y = position.y as f32;
+                    return Event::FingerHover(FingerHoverEvent{
+                        x:self.resources.winit.last_x,
+                        y:self.resources.winit.last_y
+                    })
+                },
+                winit::WindowEvent::MouseInput{state,button,..}=>{
+                    match state{
+                        winit::ElementState::Pressed=>{
+                            return Event::FingerDown(FingerDownEvent{
+                                x:self.resources.winit.last_x,
+                                y:self.resources.winit.last_y,
+                                button:match button{
+                                    winit::MouseButton::Left=>MouseButton::Left,
+                                    winit::MouseButton::Right=>MouseButton::Right,
+                                    winit::MouseButton::Middle=>MouseButton::Middle,
+                                    winit::MouseButton::Other(id)=>MouseButton::Other(id)
+                                },
+                                digit:0,
+                                is_touch:false,
+                            })
+                        },
+                        winit::ElementState::Released=>{
+                            return Event::FingerUp(FingerUpEvent{
+                                x:self.resources.winit.last_x,
+                                y:self.resources.winit.last_y,
+                                button:match button{
+                                    winit::MouseButton::Left=>MouseButton::Left,
+                                    winit::MouseButton::Right=>MouseButton::Right,
+                                    winit::MouseButton::Middle=>MouseButton::Middle,
+                                    winit::MouseButton::Other(id)=>MouseButton::Other(id)
+                                },
+                                digit:0,
+                                is_touch:false,
+                            })
+                        }
+                    }
+                },
+               
                 winit::WindowEvent::CloseRequested =>{
                     self.running = false;
                     return Event::CloseRequested
@@ -63,6 +125,6 @@ impl Cx{
     pub fn log(&mut self, val:&str){
         let mut stdout = io::stdout();
         let _e = stdout.write(val.as_bytes());
-        stdout.flush();
+        let _e = stdout.flush();
     }
 }

@@ -11,6 +11,7 @@ use winit::os::macos::WindowExt;
 use time::precise_time_ns;
 use crate::cxturtle::*;
 pub use crate::cx_shared::*;
+use crate::cx_winit::*;
 use crate::events::*;
 
 impl Cx{
@@ -234,4 +235,21 @@ impl Cx{
             }
         }
     }
+}
+
+#[derive(Clone, Default)]
+pub struct CxResources{
+    pub uni_cx:MetalBuffer,
+    pub winit:CxWinit
+}
+
+#[derive(Clone, Default)]
+pub struct DrawListResources{
+     pub uni_dl:MetalBuffer
+}
+
+#[derive(Default,Clone)]
+pub struct DrawCallResources{
+    pub uni_dr:MetalBuffer,
+    pub inst_vbuf:MetalBuffer
 }

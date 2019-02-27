@@ -124,22 +124,6 @@ impl MetalBuffer{
     }
 }
 
-#[derive(Clone, Default)]
-pub struct CxResources{
-     pub uni_cx:MetalBuffer
-}
-
-#[derive(Clone, Default)]
-pub struct DrawListResources{
-     pub uni_dl:MetalBuffer
-}
-
-#[derive(Default,Clone)]
-pub struct DrawCallResources{
-    pub uni_dr:MetalBuffer,
-    pub inst_vbuf:MetalBuffer
-}
-
 #[derive(Default,Clone)]
 pub struct CompiledShader{
     pub library:Option<metal::Library>,

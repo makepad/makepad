@@ -1,21 +1,69 @@
 use crate::cx::*;
 use crate::cxdrawing::*;
 
+#[derive(Clone, Debug)]
+pub enum MouseButton{
+    None,
+    Left,
+    Right,
+    Middle,
+    Other(u8)
+}
+
+impl Default for MouseButton{
+    fn default()->MouseButton{
+        MouseButton::None
+    }
+}
+
 #[derive(Clone, Default,Debug)]
-pub struct FingerEvent{
+pub struct FingerDownEvent{
     pub x:f32,
     pub y:f32,
     pub digit:u32,
-    pub button:u32,
-    pub touch:bool,
-    pub x_wheel:f32,
-    pub y_wheel:f32
+    pub button:MouseButton,
+    pub is_touch:bool
+}
+
+#[derive(Clone, Default,Debug)]
+pub struct FingerMoveEvent{
+    pub x:f32,
+    pub y:f32,
+    pub digit:u32,
+    pub button:MouseButton,
+    pub is_touch:bool,
+}
+
+#[derive(Clone, Default,Debug)]
+pub struct FingerUpEvent{
+    pub x:f32,
+    pub y:f32,
+    pub digit:u32,
+    pub button:MouseButton,
+    pub is_touch:bool
+}
+
+#[derive(Clone, Default,Debug)]
+pub struct FingerHoverEvent{
+    pub x:f32,
+    pub y:f32
+}
+
+#[derive(Clone, Default,Debug)]
+pub struct FingerScrollEvent{
+    pub x:f32,
+    pub y:f32,
+    pub dx:f32,
+    pub dy:f32
 }
 
 #[derive(Clone, Default, Debug)]
-pub struct CapturedEvent{
+pub struct FingerCapturedEvent{
     pub area:Area,
-    pub pos:Vec2
+    pub x:f32,
+    pub y:f32,
+    pub dx:f32,
+    pub dy:f32
 }
 
 #[derive(Clone, Default, Debug)]
@@ -45,12 +93,12 @@ pub enum Event{
     Animate(AnimateEvent),
     CloseRequested,
     Resized(ResizedEvent),
-    CapturedMove(CapturedEvent),
-    FingerDown(FingerEvent),
-    FingerMove(FingerEvent),
-    FingerHover(FingerEvent),
-    FingerUp(FingerEvent),
-    FingerWheel(FingerEvent)
+    FingerCaptured(FingerCapturedEvent),
+    FingerDown(FingerDownEvent),
+    FingerMove(FingerMoveEvent),
+    FingerHover(FingerHoverEvent),
+    FingerUp(FingerUpEvent),
+    FingerScroll(FingerScrollEvent)
 }
 
 impl Default for Event{
@@ -69,8 +117,8 @@ impl Event{
                     }
                 }
             },
-            Event::CapturedMove(cm)=>{
-                if cm.area == *area{
+            Event::FingerCaptured(fc)=>{
+                if fc.area == *area{
                     return self;
                 }
             },

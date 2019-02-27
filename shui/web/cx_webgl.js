@@ -478,11 +478,12 @@
 				var finger = fingers[i]
 	
 				// find an unused digit
-				for(var digit in this.finger_digit_map){
+				var digit = undefined;
+				for(digit in this.finger_digit_map){
 					if(!this.finger_digit_map[digit]) break
 				}
 				// we need to alloc a new one
-				if(!digit || this.finger_digit_map[digit]) digit = this.finger_digit_alloc++
+				if(digit === undefined || this.finger_digit_map[digit]) digit = this.finger_digit_alloc++
 				// store it					
 				this.finger_digit_map[digit] = finger
 				// assign a digit to finger

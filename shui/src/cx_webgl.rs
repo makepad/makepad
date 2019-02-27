@@ -211,6 +211,117 @@ impl Cx{
 
 }
 
+
+// storage buffers for graphics API related resources
+#[derive(Clone)]
+pub struct CxResources{
+    pub from_wasm:FromWasm,
+    pub vertex_buffers:usize,
+    pub vertex_buffers_free:Vec<usize>,
+    pub index_buffers:usize,
+    pub index_buffers_free:Vec<usize>,
+    pub vaos:usize,
+    pub vaos_free:Vec<usize>
+}
+
+impl Default for CxResources{
+    fn default()->CxResources{
+        CxResources{
+            from_wasm:FromWasm::zero(),
+            vertex_buffers:1,
+            vertex_buffers_free:Vec::new(),
+            index_buffers:1,
+            index_buffers_free:Vec::new(),
+            vaos:1,
+            vaos_free:Vec::new()
+        }
+    }
+}
+
+impl CxResources{
+    fn get_free_vertex_buffer(&mut self)->usize{
+        if self.vertex_buffers_free.len() > 0{
+            self.vertex_buffers_free.pop().unwrap()
+        }
+        else{
+            self.vertex_buffers += 1;
+            self.vertex_buffers
+        }
+    }
+    fn get_free_index_buffer(&mut self)->usize{
+        if self.index_buffers_free.len() > 0{
+            self.index_buffers_free.pop().unwrap()
+        }
+        else{
+            self.index_buffers += 1;
+            self.index_buffers
+        }
+    }
+     fn get_free_vao(&mut self)->usize{
+        if self.vaos_free.len() > 0{
+            self.vaos_free.pop().unwrap()
+        }
+        else{
+            self.vaos += 1;
+            self.vaos
+        }
+    }
+}
+
+
+
+#[derive(Clone, Default)]
+pub struct DrawListResources{
+}
+
+#[derive(Default,Clone)]
+pub struct DrawCallResources{
+    pub resource_shader_id:usize,
+    pub vao_id:usize,
+    pub inst_vb_id:usize
+}
+
+#[derive(Clone, Default)]
+pub struct CxShaders{
+    pub compiled_shaders: Vec<CompiledShader>,
+    pub shaders: Vec<Shader>,
+}
+
+impl DrawCallResources{
+
+    pub fn check_attached_vao(&mut self, csh:&CompiledShader, resources:&mut CxResources){
+        if self.resource_shader_id != csh.shader_id{
+            self.free(resources); // dont reuse vaos accross shader ids
+        }
+        // create the VAO
+        self.resource_shader_id = csh.shader_id;
+
+        // get a free vao ID
+        self.vao_id = resources.get_free_vao();
+        self.inst_vb_id = resources.get_free_index_buffer();
+
+        resources.from_wasm.alloc_array_buffer(
+            self.inst_vb_id,0,0 as *const f32
+        );
+
+        resources.from_wasm.alloc_vao(
+            csh.shader_id,
+            self.vao_id,
+            csh.geom_ib_id,
+            csh.geom_vb_id,
+            self.inst_vb_id,
+        );
+    }
+
+    fn free(&mut self, resources:&mut CxResources){
+        resources.vaos_free.push(self.vao_id);
+        resources.vertex_buffers_free.push(self.inst_vb_id);
+        self.vao_id = 0;
+        self.inst_vb_id = 0;
+    }
+}
+
+
 #[derive(Clone)]
 pub struct FromWasm{
     mu32:*mut u32,
