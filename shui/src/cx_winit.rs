@@ -2,6 +2,7 @@ use crate::cx::*;
 use crate::events::*;
 use std::io::prelude::*;
 use std::fs::File;
+use std::io;
 use crate::math::*;
 
 impl Cx{
@@ -55,7 +56,13 @@ impl Cx{
         }
     }
 
-    pub fn log(val:&str){
-        println!("{}",val);
+    pub fn process_to_wasm<F>(&mut self, _msg:u32, mut _event_handler:F)->u32{
+        0
+    }
+
+    pub fn log(&mut self, val:&str){
+        let mut stdout = io::stdout();
+        let _e = stdout.write(val.as_bytes());
+        stdout.flush();
     }
 }

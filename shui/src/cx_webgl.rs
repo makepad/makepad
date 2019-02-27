@@ -65,7 +65,7 @@ impl Cx{
 
     // incoming to_wasm. There is absolutely no other entrypoint
     // to general rust codeflow than this function. Only the allocators and init
-    pub fn to_wasm<F>(&mut self, msg:u32, mut event_handler:F)->u32
+    pub fn process_to_wasm<F>(&mut self, msg:u32, mut event_handler:F)->u32
     where F: FnMut(&mut Cx, Event)
     {
         let mut to_wasm = ToWasm::from(msg);
@@ -77,7 +77,8 @@ impl Cx{
                 0=>{ // end
                     break;
                 },
-                1=>{ // init
+                1=>{ // fetch_deps
+                    self.resources.from_wasm.set_document_title(&self.title);
                     // compile all the shaders
                     self.resources.from_wasm.log(&self.title);
                     
@@ -91,7 +92,7 @@ impl Cx{
 
                     self.shaders.compile_all_webgl_shaders(&mut self.resources);
                 },
-                2=>{ // resources loaded
+                2=>{ // deps_loaded
                     let len = to_wasm.mu32();
                     for _i in 0..len{
                         let name = to_wasm.parse_string();
@@ -110,21 +111,30 @@ impl Cx{
                             }
                         }
                     }
+
                 },
-                3=>{ // resize
+                3=>{ // init
+                    
+
+                    self.turtle.target_size = vec2(to_wasm.mf32(),to_wasm.mf32());
+                    self.turtle.target_dpi_factor = to_wasm.mf32();
+                    event_handler(self, Event::Init); 
+                    self.redraw_all();
+                },
+                4=>{ // resize
                     self.turtle.target_size = vec2(to_wasm.mf32(),to_wasm.mf32());
                     self.turtle.target_dpi_factor = to_wasm.mf32();
                     
                     // do our initial redraw and repaint
                     self.redraw_all();
                 },
-                4=>{ // animation_frame
+                5=>{ // animation_frame
                     is_animation_frame = true;
                     let time = to_wasm.mf64();
                     //log!(self, "{} o clock",time);
                     event_handler(self, Event::Animate(AnimateEvent{time:time}));
                 },
-                5=>{ // finger messages
+                6=>{ // finger messages
                     let finger_event_type = to_wasm.mu32();
 
                     let finger_event = FingerEvent{
@@ -405,7 +415,18 @@ impl FromWasm{
         self.mu32(height as u32);
         self.mu32(data.as_ptr() as u32)
     }
-   
+
+    pub fn request_animation_frame(&mut self){
+        self.fit(1);
+        self.mu32(10);
+    }
+
+    pub fn set_document_title(&mut self, title:&str){
+        self.fit(1);
+        self.mu32(11);
+        self.add_string(title);
+   }
+
     fn add_string(&mut self, msg:&str){
         let len = msg.chars().count();
         self.fit(len + 1);
@@ -416,10 +437,6 @@ impl FromWasm{
         self.check();
     }
 
-    pub fn request_animation_frame(&mut self){
-        self.fit(1);
-        self.mu32(10);
-    }
 }
 
 #[derive(Clone)]
@@ -496,16 +513,16 @@ impl ToWasm{
 
 
 // for use with message passing
-#[export_name = "alloc_wasm"]
-pub unsafe extern "C" fn alloc_wasm(bytes:u32)->u32{
+#[export_name = "alloc_wasm_buffer"]
+pub unsafe extern "C" fn alloc_wasm_buffer(bytes:u32)->u32{
     let buf = std::alloc::alloc(std::alloc::Layout::from_size_align(bytes as usize, mem::align_of::<u64>()).unwrap()) as u32;
     (buf as *mut u64).write(bytes as u64);
     buf as u32
 }
 
 // for use with message passing
-#[export_name = "realloc_wasm"]
-pub unsafe extern "C" fn realloc_wasm(in_buf:u32, new_bytes:u32)->u32{
+#[export_name = "realloc_wasm_buffer"]
+pub unsafe extern "C" fn realloc_wasm_buffer(in_buf:u32, new_bytes:u32)->u32{
     let old_buf = in_buf as *mut u8;
     let old_bytes = (old_buf as *mut u64).read() as usize;
     let new_buf = alloc::alloc(alloc::Layout::from_size_align(new_bytes as usize, mem::align_of::<u64>()).unwrap()) as *mut u8;
@@ -515,8 +532,8 @@ pub unsafe extern "C" fn realloc_wasm(in_buf:u32, new_bytes:u32)->u32{
     new_buf as u32
 }
 
-#[export_name = "dealloc_wasm"]
-pub unsafe extern "C" fn dealloc_wasm(in_buf:u32){
+#[export_name = "dealloc_wasm_buffer"]
+pub unsafe extern "C" fn dealloc_wasm_buffer(in_buf:u32){
     let buf = in_buf as *mut u8;
     let bytes = buf.read() as usize;
     std::alloc::dealloc(buf as *mut u8, std::alloc::Layout::from_size_align(bytes as usize, mem::align_of::<u64>()).unwrap());

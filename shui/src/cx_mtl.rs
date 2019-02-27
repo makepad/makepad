@@ -9,6 +9,7 @@ use objc::{msg_send, sel, sel_impl};
 use metal::*;
 use winit::os::macos::WindowExt;
 use time::precise_time_ns;
+use crate::cxturtle::*;
 pub use crate::cx_shared::*;
 use crate::events::*;
 
@@ -175,46 +176,53 @@ impl Cx{
 
         self.load_binary_deps_from_file();
 
-        //let start_time = precise_time_ns();
+        let start_time = precise_time_ns();
         
+        event_handler(self, Event::Init); 
+
         while self.running{
             // unfortunate duplication of code between poll and run_forever but i don't know how to put this in a closure
             // without borrowchecker hell
             events_loop.poll_events(|winit_event|{
-                self.cycle_id += 1;
-                //self.cycle_time = 
                 let event = self.map_winit_event(winit_event, &glutin_window);
-                if let Event::Resized(_) = &event{
+                if let Event::Resized(_) = &event{ // do this here because mac
                     self.resize_layer_to_turtle(&layer);
                     event_handler(self, event); 
-                    self.redraw_all();
-                    event_handler(self, Event::Redraw);
+                    self.redraw_area = Some(Area::zero());
                     self.redraw_none();
+                    event_handler(self, Event::Redraw);
                     self.repaint(&layer, &device, &command_queue);
                 }
                 else{
                     event_handler(self, event); 
                 }
             });
+            if self.animations.len() != 0{
+                let time_now = precise_time_ns();
+                let time = (time_now - start_time) as f64 / 1000000.0; // keeps the error as low as possible
+                event_handler(self, Event::Animate(AnimateEvent{time:time}));                
+            }
             // call redraw event
-            if let Some(_) = &self.redraw_area{
-                event_handler(self, Event::Redraw);
+            if let Some(_) = &self.redraw_dirty{
+                self.redraw_area = self.redraw_dirty.clone();
                 self.redraw_none();
-                self.repaint = true;
+                event_handler(self, Event::Redraw);
+                self.paint_dirty = true;
             }
             // repaint everything if we need to
-            if self.repaint{
+            if self.paint_dirty{
+                self.paint_dirty = false;
                 self.repaint(&layer, &device, &command_queue);
-                self.repaint = false;
             }
-            // wait for the next event
+            // wait for the next event blockingly so it stops eating power
             if self.animations.len() == 0{
                 events_loop.run_forever(|winit_event|{
-                    self.cycle_id += 1;
                     let event = self.map_winit_event(winit_event, &glutin_window);
-                    if let Event::Resized(_) = &event{
+                    if let Event::Resized(_) = &event{ // do this here because mac
                         self.resize_layer_to_turtle(&layer);
                         event_handler(self, event); 
+                        self.redraw_area = Some(Area::zero());
+                        self.redraw_none();
                         event_handler(self, Event::Redraw);
                         self.repaint(&layer, &device, &command_queue);
                     }
@@ -225,9 +233,5 @@ impl Cx{
                 })
             }
         }
-    }
-
-    pub fn to_wasm<F>(&mut self, _msg:u32, mut _event_handler:F)->u32{
-        0
     }
 }

@@ -24,7 +24,7 @@ impl App{
     fn handle(&mut self, cx:&mut Cx, event:&Event){
         if let Event::Redraw = event{return self.draw(cx);}
 
-        for i in 0..500{
+        for i in 0..self.oks.elements.len(){
             if let ButtonEvent::Clicked = self.oks.elements[i].handle(cx, event){
                 // we got clicked!
             }

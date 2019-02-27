@@ -8,7 +8,7 @@
 			this.slots = 512;
 			this.used = 2; // skip 8 byte header
 			// lets write 
-			this.pointer = this.exports.alloc_wasm(this.slots * 4);
+			this.pointer = this.exports.alloc_wasm_buffer(this.slots * 4);
 			this.update_refs();
 		}
 
@@ -24,7 +24,7 @@
 				let new_slots = Math.max(this.used + slots, this.slots * 2) // exp alloc algo
 				if(new_slots&1)new_slots++; // float64 align it
 				let new_bytes = new_slots * 4;
-				this.pointer = this.exports.realloc_wasm(this.pointer, new_bytes); // by
+				this.pointer = this.exports.realloc_wasm_buffer(this.pointer, new_bytes); // by
 				this.mf32 = new Float32Array(this.exports.memory.buffer, this.pointer, new_slots);
 				this.mu32 = new Uint32Array(this.exports.memory.buffer, this.pointer, new_slots);
 				this.mf64 =  new Float64Array(this.exports.memory.buffer, this.pointer, new_slots>>1);
@@ -35,7 +35,7 @@
 			return pos;
 		}
 
-		init(){
+		fetch_deps(){
 			let pos = this.fit(1);
 			this.mu32[pos++] = 1;
 		}
@@ -48,7 +48,7 @@
 			}
 		}
 
-		receive_deps(deps){
+		deps_loaded(deps){
 			let pos = this.fit(2);
 			this.mu32[pos++] = 2
 			this.mu32[pos++] = deps.length
@@ -60,7 +60,7 @@
 			}
 		}
 
-		resize(info){
+		init(info){
 			let pos = this.fit(4);
 			this.mu32[pos++] = 3;
 			this.mf32[pos++] = info.width;
@@ -68,9 +68,17 @@
 			this.mf32[pos++] = info.dpi_factor;
 		}
 
+		resize(info){
+			let pos = this.fit(4);
+			this.mu32[pos++] = 4;
+			this.mf32[pos++] = info.width;
+			this.mf32[pos++] = info.height;
+			this.mf32[pos++] = info.dpi_factor;
+		}
+
 		animation_frame(time){
 			let pos = this.fit(3); // float64 uses 2 slots
-			this.mu32[pos++] = 4;
+			this.mu32[pos++] = 5;
 			if(pos&1){ // float64 align, need to fit another
 				pos++;
 				this.fit(1);
@@ -91,35 +99,35 @@
 
 		on_finger_down(finger){
 			let pos = this.fit(2);
-			this.mu32[pos++] = 5;
+			this.mu32[pos++] = 6;
 			this.mu32[pos++] = 1;
 			this.add_finger(finger)
 		}
 
 		on_finger_up(finger){
 			let pos = this.fit(2); 
-			this.mu32[pos++] = 5;
+			this.mu32[pos++] = 6;
 			this.mu32[pos++] = 2;
 			this.add_finger(finger)
 		}
 
 		on_finger_move(finger){
 			let pos = this.fit(2); 
-			this.mu32[pos++] = 5;
+			this.mu32[pos++] = 6;
 			this.mu32[pos++] = 3;
 			this.add_finger(finger)
 		}
 
 		on_finger_hover(finger){
 			let pos = this.fit(2); 
-			this.mu32[pos++] = 5;
+			this.mu32[pos++] = 6;
 			this.mu32[pos++] = 4;
 			this.add_finger(finger)
 		}
 		
 		on_finger_wheel(finger){
 			let pos = this.fit(2); 
-			this.mu32[pos++] = 5;
+			this.mu32[pos++] = 6;
 			this.mu32[pos++] = 5;
 			this.add_finger(finger)
 		}
@@ -155,11 +163,13 @@
 			this.bind_mouse_and_touch();
 
 			// lets create the wasm app and cx
-			this.app = this.exports.init_wasm();
+			this.app = this.exports.create_wasm_app();
 			
 			// create initial to_wasm
 			this.to_wasm = new ToWasm(this);
-			this.to_wasm.init();
+
+			// fetch dependencies
+			this.to_wasm.fetch_deps();
 
 			this.do_wasm_io();
 
@@ -171,7 +181,7 @@
 				for(let i = 0; i < results.length; i++){
 					var result = results[i]
 					// allocate pointer, do +8 because of the u64 length at the head of the buffer
-					let output_ptr = this.exports.alloc_wasm(result.buffer.byteLength+8);
+					let output_ptr = this.exports.alloc_wasm_buffer(result.buffer.byteLength+8);
 					let array = new Uint32Array(this.memory.buffer, output_ptr);
 					this.copy_to_wasm(result.buffer, output_ptr);
 					deps.push({
@@ -180,10 +190,10 @@
 					});
 				}
 				// pass wasm the deps
-				this.to_wasm.receive_deps(deps);
+				this.to_wasm.deps_loaded(deps);
 				
-				// send wasm a first resize message to spawn up the UI
-				this.to_wasm.resize({
+				// initialize the application
+				this.to_wasm.init({
 					width:this.width,
 					height:this.height,
 					dpi_factor:this.dpi_factor
@@ -195,7 +205,7 @@
 
 		do_wasm_io(){
 			this.to_wasm.end();
-			let from_wasm_ptr = this.exports.to_wasm(this.app, this.to_wasm.pointer)
+			let from_wasm_ptr = this.exports.process_to_wasm(this.app, this.to_wasm.pointer)
 			// get a clean to_wasm set up immediately
 			this.to_wasm = new ToWasm(this);
 
@@ -217,7 +227,7 @@
 				}
 			}
 			// destroy from_wasm_ptr object
-			this.exports.dealloc_wasm(from_wasm_ptr);
+			this.exports.dealloc_wasm_buffer(from_wasm_ptr);
 		}
 
 		request_animation_frame(){
@@ -444,6 +454,11 @@
 			//gl.OES_texture_float = gl.getExtension('OES_texture_float')
 			//gl.WEBGL_depth_texture = gl.getExtension("WEBGL_depth_texture") || gl.getExtension("WEBKIT_WEBGL_depth_texture")		
 			this.on_screen_resize()
+		}
+
+		set_document_title(title){
+			console.log("HERE!",title)
+			document.title = title
 		}
 
 		find_nearest_finger(x, y){
@@ -837,8 +852,11 @@
 			let data_ptr = self.mu32[self.parse++];
 			self.alloc_texture(texture_id, width, height, data_ptr);
 		},
-		function request_animation_frame(self){
+		function request_animation_frame_10(self){
 			self.request_animation_frame()
+		},
+		function set_document_title_11(self){
+			self.set_document_title(self.parse_string())
 		}
 	]
 	

@@ -283,6 +283,9 @@ where T:Clone
             len:0
         }
     }
+    pub fn len(&self)->usize{
+        self.len
+    }
 
     pub fn reset(&mut self){
         self.len = 0;
@@ -302,7 +305,6 @@ where T:Clone
         }
     }
 }
-
 
 #[derive(Clone)]
 pub struct BinaryDep{
@@ -393,7 +395,7 @@ impl BinaryDep{
 #[macro_export]
 macro_rules! log {
     ($cx:ident, $($arg:expr),+) => {
-        $cx.log(&format!($($arg),+))
+        $cx.log(&format!("[{}:{}] {}\n",file!(),line!(),&format!($($arg),+)))
     };
 }
 
@@ -416,8 +418,8 @@ macro_rules! main_app {
             });
         }
 
-        #[export_name = "init_wasm"]
-        pub extern "C" fn init_wasm()->u32{
+        #[export_name = "create_wasm_app"]
+        pub extern "C" fn create_wasm_app()->u32{
             let mut cx = Box::new(
                 Cx{
                     title:$name.to_string(),
@@ -432,10 +434,10 @@ macro_rules! main_app {
             Box::into_raw(Box::new((Box::into_raw(app),Box::into_raw(cx)))) as u32
         }
 
-        #[export_name = "to_wasm"]
-        pub unsafe extern "C" fn to_wasm(appcx:u32, msg:u32)->u32{
+        #[export_name = "process_to_wasm"]
+        pub unsafe extern "C" fn process_to_wasm(appcx:u32, msg:u32)->u32{
             let appcx = &*(appcx as *mut (*mut $app,*mut Cx));
-            (*appcx.1).to_wasm(msg,|cx, ev|{
+            (*appcx.1).process_to_wasm(msg,|cx, ev|{
                 (*appcx.0).handle(cx, &ev);
             })
         }
