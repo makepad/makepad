@@ -7,7 +7,10 @@ use std::ptr;
 use std::ffi::CStr;
 
 pub use crate::cx_shared::*;
+
+use crate::cxturtle::*;
 use crate::cxshaders::*;
+use crate::cx_winit::*;
 use crate::events::*;
 
 impl Cx{
@@ -120,7 +123,8 @@ impl Cx{
                 if let Event::Resized(_) = &event{
                     self.resize_window_to_turtle(&glutin_window);
                     event_handler(self, event); 
-                    self.redraw_all();
+                    self.redraw_area = Some(Area::zero());
+                    self.redraw_none();
                     event_handler(self, Event::Redraw);
                     self.redraw_none();
                     self.repaint(&glutin_window);
@@ -130,15 +134,16 @@ impl Cx{
                 }
             });
             // call redraw event
-            if let Some(_) = &self.redraw_area{
-                event_handler(self, Event::Redraw);
+            if let Some(_) = &self.redraw_dirty{
+                self.redraw_area = self.redraw_dirty.clone();
                 self.redraw_none();
-                self.repaint = true;
+                event_handler(self, Event::Redraw);
+                self.paint_dirty = true;
             }
             // repaint everything if we need to
-            if self.repaint{
+            if self.paint_dirty{
+                self.paint_dirty = false;
                 self.repaint(&glutin_window);
-                self.repaint = false;
             }
 
             // wait for the next event
@@ -148,6 +153,8 @@ impl Cx{
                     if let Event::Resized(_) = &event{
                         self.resize_window_to_turtle(&glutin_window);
                         event_handler(self, event); 
+                        self.redraw_area = Some(Area::zero());
+                        self.redraw_none();
                         event_handler(self, Event::Redraw);
                         self.repaint(&glutin_window);
                     }
@@ -163,7 +170,7 @@ impl Cx{
 
 #[derive(Clone, Default)]
 pub struct CxResources{
-    winit:CxWinit
+    pub winit:CxWinit
 }
 
 #[derive(Clone, Default)]

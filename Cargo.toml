@@ -10,4 +10,4 @@ rand = "*"
 [dependencies.shui]
 path="./shui"
 default-features = false
-features=["mtl"]
+features=["ogl"]
