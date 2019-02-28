@@ -1,8 +1,8 @@
-pub use crate::math::*;
-pub use std::cell::RefCell;
-pub use std::thread;
-pub use crate::cxdrawing::*;
-pub use crate::cxshaders::*;
+use crate::math::*;
+use std::cell::RefCell;
+use crate::cxdrawing::*;
+use crate::cxshaders::*;
+use crate::area::*;
 
 thread_local!(pub static debug_pts_store: RefCell<Vec<(f32,f32,i32,String)>> = RefCell::new(Vec::new()));
 pub fn debug_pt(x:f32, y:f32, color:i32, s:&str){
@@ -102,20 +102,6 @@ impl Align{
     pub fn left_bottom()->Align{Align{fx:0.,fy:1.0}}
     pub fn center_bottom()->Align{Align{fx:0.5,fy:1.0}}
     pub fn right_bottom()->Align{Align{fx:1.0,fy:1.0}}
-}
-
-#[derive(Clone, Default, Debug)]
-pub struct Rect{
-    pub x:f32,
-    pub y:f32,
-    pub w:f32,
-    pub h:f32
-}
-
-impl Rect{
-    pub fn zero()->Rect{
-        Rect{x:0.0,y:0.0,w:0.0,h:0.0}
-    }
 }
 
 #[derive(Clone, Default, Debug)]

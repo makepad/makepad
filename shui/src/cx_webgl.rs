@@ -1,7 +1,7 @@
 use std::mem;
 use std::ptr;
 
-pub use crate::cx_shared::*;
+use crate::cx_shared::*;
 use crate::shader::*;
 use crate::cxshaders::*;
 use crate::cxshaders_gl::*;

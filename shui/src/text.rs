@@ -1,6 +1,8 @@
 use crate::shader::*;
-use crate::cx::*;
+use crate::cx_shared::*;
 use crate::cxdrawing::*;
+use crate::area::*;
+use crate::cxturtle::*;
 
 #[derive(Clone)]
 pub enum Wrapping{
@@ -161,8 +163,8 @@ impl Text{
             if emit{
                 let height = self.font_size * self.line_spacing;
                 let mut geom = cx.turtle.walk_wh(
-                    Fixed(width), 
-                    Fixed(height), 
+                    Value::Fixed(width), 
+                    Value::Fixed(height), 
                     Margin::zero(),
                     None
                 );

@@ -1,5 +1,6 @@
-use crate::cxturtle::*;
-use crate::cx::*;
+use crate::cx_shared::*;
+use crate::area::*;
+use crate::math::*;
 
 #[derive(Clone,Debug)]
 pub struct AnimArea{
@@ -62,7 +63,6 @@ where T: std::cmp::PartialEq + std::clone::Clone
             }
         }
         else{ // its new
-         cx.log("ADDING NEW ANIM");
             self.current_id = self.states[state_index].id.clone();
             self.next_id = None;
             cx.animations.push(AnimArea{

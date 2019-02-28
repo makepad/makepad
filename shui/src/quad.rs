@@ -1,6 +1,8 @@
 use crate::shader::*;
-use crate::cx::*;
+use crate::cx_shared::*;
 use crate::cxdrawing::*;
+use crate::cxturtle::*;
+use crate::area::*;
 
 #[derive(Clone)]
 pub struct Quad{

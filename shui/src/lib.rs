@@ -49,12 +49,15 @@ mod elements;
 mod math;
 mod colors;
 mod shader;
+mod area;
+mod view;
 
 mod quad;
 mod text;
 mod events;
 
 pub use crate::cx::*;
+pub use crate::cx_shared::*;
 pub use crate::cxdrawing::*;
 pub use crate::cxturtle::*;
 pub use crate::cxshaders::*;
@@ -66,3 +69,10 @@ pub use crate::text::*;
 pub use crate::colors::*;
 pub use crate::elements::*;
 pub use crate::animation::*;
+pub use crate::area::*;
+pub use crate::view::*;
+
+pub use crate::cxturtle::Value::Computed;
+pub use crate::cxturtle::Value::Fixed;
+pub use crate::cxturtle::Value::Percent;
+pub use crate::cxturtle::Value::Expression;

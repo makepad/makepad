@@ -6,8 +6,7 @@ use std::mem;
 use std::ptr;
 use std::ffi::CStr;
 
-pub use crate::cx_shared::*;
-
+use crate::cx_shared::*;
 use crate::cxturtle::*;
 use crate::cxshaders::*;
 use crate::cx_winit::*;

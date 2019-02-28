@@ -6,6 +6,7 @@ use crate::cxfonts::*;
 use crate::cxtextures::*;
 use crate::cxturtle::*;
 use crate::animation::*;
+use crate::area::*;
 
 #[derive(Clone)]
 pub struct Cx{

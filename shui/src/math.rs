@@ -1,5 +1,19 @@
 
 #[derive(Clone, Default, Debug)]
+pub struct Rect{
+    pub x:f32,
+    pub y:f32,
+    pub w:f32,
+    pub h:f32
+}
+
+impl Rect{
+    pub fn zero()->Rect{
+        Rect{x:0.0,y:0.0,w:0.0,h:0.0}
+    }
+}
+
+#[derive(Clone, Default, Debug)]
 pub struct Mat4{
     pub v: [f32; 16],
 }
