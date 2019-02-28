@@ -32,7 +32,7 @@ mod cxdrawing;
 mod cxtextures;
 
 #[cfg(any(feature = "webgl", feature = "ogl"))]
-mod cxshaders_gl; 
+mod cxdrawing_gl; 
 
 #[cfg(any(feature = "mtl", feature = "ogl"))]
 mod cx_winit; 

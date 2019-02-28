@@ -6,11 +6,14 @@ use std::mem;
 use std::ptr;
 use std::ffi::CStr;
 
+use time::precise_time_ns;
+
 use crate::cx_shared::*;
-use crate::cxturtle::*;
-use crate::cxshaders::*;
 use crate::cx_winit::*;
+use crate::cxdrawing_shared::*;
+use crate::cxdrawing::*;
 use crate::events::*;
+use crate::area::*;
 
 impl Cx{
      pub fn exec_draw_list(&mut self, draw_list_id: usize){
@@ -25,8 +28,8 @@ impl Cx{
             else{
                 let draw_list = &mut self.drawing.draw_lists[draw_list_id];
                 let draw_call = &mut draw_list.draw_calls[draw_call_id];
-                let sh = &self.shaders.shaders[draw_call.shader_id];
-                let csh = &self.shaders.compiled_shaders[draw_call.shader_id];
+                let sh = &self.drawing.shaders[draw_call.shader_id];
+                let csh = &self.drawing.compiled_shaders[draw_call.shader_id];
 
                 unsafe{
                     draw_call.resources.check_attached_vao(csh);
@@ -43,10 +46,10 @@ impl Cx{
                     gl::BindVertexArray(draw_call.resources.vao);
                     let instances = draw_call.instance.len() / csh.instance_slots;
                     let indices = sh.geometry_indices.len();
-                    CxShaders::set_uniform_buffer_fallback(&csh.uniforms_cx, &self.uniforms);
-                    CxShaders::set_uniform_buffer_fallback(&csh.uniforms_dl, &draw_list.uniforms);
-                    CxShaders::set_uniform_buffer_fallback(&csh.uniforms_dr, &draw_call.uniforms);
-                    CxShaders::set_texture_slots(&csh.texture_slots, &draw_call.textures, &mut self.textures);
+                    CxDrawing::set_uniform_buffer_fallback(&csh.uniforms_cx, &self.uniforms);
+                    CxDrawing::set_uniform_buffer_fallback(&csh.uniforms_dl, &draw_list.uniforms);
+                    CxDrawing::set_uniform_buffer_fallback(&csh.uniforms_dr, &draw_call.uniforms);
+                    CxDrawing::set_texture_slots(&csh.texture_slots, &draw_call.textures, &mut self.textures);
                     gl::DrawElementsInstanced(gl::TRIANGLES, indices as i32, gl::UNSIGNED_INT, ptr::null(), instances as i32);
                 }
             }
@@ -67,7 +70,7 @@ impl Cx{
             gl::BlendEquationSeparate(gl::FUNC_ADD, gl::FUNC_ADD);
             gl::BlendFuncSeparate(gl::ONE, gl::ONE_MINUS_SRC_ALPHA, gl::ONE, gl::ONE_MINUS_SRC_ALPHA);
             gl::Enable(gl::BLEND);
-            gl::ClearColor(self.clear_color.x, self.clear_color.y, self.clear_color.z, self.clear_color.w);
+            gl::ClearColor(self.drawing.clear_color.x, self.drawing.clear_color.y, self.drawing.clear_color.z, self.drawing.clear_color.w);
             gl::Clear(gl::COLOR_BUFFER_BIT|gl::DEPTH_BUFFER_BIT);
         }
         self.prepare_frame();        
@@ -112,8 +115,10 @@ impl Cx{
         }
 
         // lets compile all shaders
-        self.shaders.compile_all_ogl_shaders();
+        self.drawing.compile_all_ogl_shaders();
 
+        let start_time = precise_time_ns();
+        
         self.load_binary_deps_from_file();
 
         while self.running{
@@ -122,38 +127,47 @@ impl Cx{
                 if let Event::Resized(_) = &event{
                     self.resize_window_to_turtle(&glutin_window);
                     event_handler(self, event); 
-                    self.redraw_area = Some(Area::zero());
-                    self.redraw_none();
+                    self.drawing.dirty_area = Area::Empty;
+                    self.drawing.redraw_area = Area::All;
                     event_handler(self, Event::Redraw);
-                    self.redraw_none();
                     self.repaint(&glutin_window);
                 }
                 else{
                     event_handler(self, event); 
                 }
             });
+            if self.drawing.animations.len() != 0{
+                let time_now = precise_time_ns();
+                let time = (time_now - start_time) as f64 / 1_000_000_000.0; // keeps the error as low as possible
+                event_handler(self, Event::Animate(AnimateEvent{time:time}));
+                self.check_ended_animations(time);
+                if self.drawing.ended_animations.len() > 0{
+                    event_handler(self, Event::AnimationEnded(AnimateEvent{time:time}));
+                }
+            }
             // call redraw event
-            if let Some(_) = &self.redraw_dirty{
-                self.redraw_area = self.redraw_dirty.clone();
-                self.redraw_none();
+            if !self.drawing.dirty_area.is_empty(){
+                self.drawing.dirty_area = Area::Empty;
+                self.drawing.redraw_area = self.drawing.dirty_area.clone();
+                self.drawing.frame_id += 1;
                 event_handler(self, Event::Redraw);
-                self.paint_dirty = true;
+                self.drawing.paint_dirty = true;
             }
             // repaint everything if we need to
-            if self.paint_dirty{
-                self.paint_dirty = false;
+            if self.drawing.paint_dirty{
+                self.drawing.paint_dirty = false;
                 self.repaint(&glutin_window);
             }
 
-            // wait for the next event
-            if self.animations.len() == 0{
+            // wait for the next event blockingly so it stops eating power
+            if self.drawing.animations.len() == 0 && self.drawing.dirty_area.is_empty(){
                 events_loop.run_forever(|winit_event|{
                     let event = self.map_winit_event(winit_event, &glutin_window);
                     if let Event::Resized(_) = &event{
                         self.resize_window_to_turtle(&glutin_window);
                         event_handler(self, event); 
-                        self.redraw_area = Some(Area::zero());
-                        self.redraw_none();
+                        self.drawing.dirty_area = Area::Empty;
+                        self.drawing.redraw_area = Area::All;
                         event_handler(self, Event::Redraw);
                         self.repaint(&glutin_window);
                     }

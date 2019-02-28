@@ -3,9 +3,10 @@ use std::ptr;
 
 use crate::cx_shared::*;
 use crate::shader::*;
-use crate::cxshaders::*;
-use crate::cxshaders_gl::*;
+use crate::cxdrawing::*;
+use crate::cxdrawing_gl::*;
 use crate::events::*;
+use crate::area::*;
 use std::alloc;
 
 impl Cx{
@@ -22,7 +23,7 @@ impl Cx{
             else{ 
                 let draw_list = &mut self.drawing.draw_lists[draw_list_id];
                 let draw_call = &mut draw_list.draw_calls[draw_call_id];
-                let csh = &self.shaders.compiled_shaders[draw_call.shader_id];
+                let csh = &self.drawing.compiled_shaders[draw_call.shader_id];
 
                 if draw_call.update_frame_id == self.drawing.frame_id{
                     // update the instance buffer data
@@ -47,7 +48,7 @@ impl Cx{
                     draw_call.shader_id,
                     draw_call.resources.vao_id,
                     &self.uniforms,
-                    self.drawing.frame_id, // update once a frame
+                    self.drawing.frame_id as usize, // update once a frame
                     &draw_list.uniforms,
                     draw_list_id, // update on drawlist change
                     &draw_call.uniforms,
@@ -59,7 +60,7 @@ impl Cx{
     }
 
     pub fn repaint(&mut self){
-        self.resources.from_wasm.clear(self.clear_color.x, self.clear_color.y, self.clear_color.z, self.clear_color.w);
+        self.resources.from_wasm.clear(self.drawing.clear_color.x, self.drawing.clear_color.y, self.drawing.clear_color.z, self.drawing.clear_color.w);
         self.prepare_frame();        
         self.exec_draw_list(0);
     }
@@ -91,7 +92,7 @@ impl Cx{
                     // other textures, things
                     self.resources.from_wasm.load_deps(load_deps);
 
-                    self.shaders.compile_all_webgl_shaders(&mut self.resources);
+                    self.drawing.compile_all_webgl_shaders(&mut self.resources);
                 },
                 2=>{ // deps_loaded
                     let len = to_wasm.mu32();
@@ -120,14 +121,14 @@ impl Cx{
                     self.turtle.target_size = vec2(to_wasm.mf32(),to_wasm.mf32());
                     self.turtle.target_dpi_factor = to_wasm.mf32();
                     event_handler(self, Event::Init); 
-                    self.redraw_all();
+                    self.drawing.dirty_area = Area::All;
                 },
                 4=>{ // resize
                     self.turtle.target_size = vec2(to_wasm.mf32(),to_wasm.mf32());
                     self.turtle.target_dpi_factor = to_wasm.mf32();
                     
                     // do our initial redraw and repaint
-                    self.redraw_all();
+                    self.drawing.dirty_area = Area::All;
                 },
                 5=>{ // animation_frame
                     is_animation_frame = true;
@@ -135,7 +136,7 @@ impl Cx{
                     //log!(self, "{} o clock",time);
                     event_handler(self, Event::Animate(AnimateEvent{time:time}));
                     self.check_ended_animations(time);
-                    if self.ended_animations.len() > 0{
+                    if self.drawing.ended_animations.len() > 0{
                         event_handler(self, Event::AnimationEnded(AnimateEvent{time:time}));
                     }
                 },
@@ -201,18 +202,16 @@ impl Cx{
             };
         };
 
-        // if we have to redraw self, do so, 
-        if let Some(_) = self.redraw_dirty{
-            self.redraw_area = self.redraw_dirty.clone();
-            self.redraw_none();
+        if !self.drawing.dirty_area.is_empty(){
+            self.drawing.dirty_area = Area::Empty;
+            self.drawing.redraw_area = self.drawing.dirty_area.clone();
+            self.drawing.frame_id += 1;
             event_handler(self, Event::Redraw);
-            // processing a redraw makes paint dirty by default
-            self.paint_dirty = true;
-            self.frame_id += 1;
+            self.drawing.paint_dirty = true;
         }
     
-        if is_animation_frame && self.paint_dirty{
-            self.paint_dirty = false;
+        if is_animation_frame && self.drawing.paint_dirty{
+                self.drawing.paint_dirty = false;
             self.repaint();
         }
 
@@ -222,10 +221,10 @@ impl Cx{
         // request animation frame if still need to redraw, or repaint
         // we use request animation frame for that.
         let mut req_anim_frame = false;
-        if let Some(_) = self.redraw_dirty{
+        if !self.drawing.dirty_area.is_empty(){
             req_anim_frame = true
         }
-        else if self.animations.len()> 0 || self.paint_dirty{
+        else if self.drawing.animations.len()> 0 || self.drawing.paint_dirty{
             req_anim_frame = true
         }
         if req_anim_frame{
