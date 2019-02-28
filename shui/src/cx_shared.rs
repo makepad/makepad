@@ -1,12 +1,11 @@
-use crate::shader::*;
 use crate::cx::*;
 use crate::cxdrawing::*;
-use crate::cxshaders::*;
+use crate::cxshaders_shared::*;
 use crate::cxfonts::*;
 use crate::cxtextures::*;
 use crate::cxturtle::*;
 use crate::animation::*;
-use crate::area::*;
+use crate::shader::*;
 
 #[derive(Clone)]
 pub struct Cx{
@@ -21,15 +20,8 @@ pub struct Cx{
     pub uniforms:Vec<f32>,
     pub resources:CxResources,
 
-    pub animations:Vec<AnimArea>,
-    pub ended_animations:Vec<AnimArea>,
-    pub dirty_area:Area,
-    pub redraw_area:Area,
-    pub paint_dirty:bool,
-    pub frame_id:u64,
-    pub binary_deps:Vec<BinaryDep>,
-    pub clear_color:Vec4,
-}
+    pub binary_deps:Vec<BinaryDep>
+ }
 
 impl Default for Cx{
     fn default()->Self{
@@ -45,14 +37,7 @@ impl Default for Cx{
             running:true,
             uniforms:uniforms,
             resources:CxResources{..Default::default()},
-            animations:Vec::new(),
-            ended_animations:Vec::new(),
-            binary_deps:Vec::new(),
-            redraw_area:Area::Empty,
-            dirty_area:Area::Empty,
-            frame_id:0,
-            clear_color:vec4(0.3,0.3,0.3,1.0),
-            paint_dirty:false
+            binary_deps:Vec::new()
         }
     }
 }
@@ -99,15 +84,15 @@ impl Cx{
 
     pub fn check_ended_animations(&mut self, time:f64){
         let mut i = 0;
-        self.ended_animations.truncate(0);
+        self.drawing.ended_animations.truncate(0);
         loop{
-            if i >= self.animations.len(){
+            if i >= self.drawing.animations.len(){
                 break
             }
-            let anim_start_time =self.animations[i].start_time;
-            let anim_duration =self.animations[i].duration;
+            let anim_start_time =self.drawing.animations[i].start_time;
+            let anim_duration =self.drawing.animations[i].duration;
             if time - anim_start_time >= anim_duration{
-                self.ended_animations.push(self.animations.remove(i));
+                self.drawing.ended_animations.push(self.drawing.animations.remove(i));
             }
             else{
                 i = i + 1;

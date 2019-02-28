@@ -96,7 +96,7 @@ impl Cx{
     }
 
     pub fn load_binary_deps_from_file(&mut self){
-        let mut fonts = &mut self.fonts;
+        let fonts = &mut self.fonts;
         let len = fonts.font_resources.len();
         for i in 0..len{
             let resource_name = &fonts.font_resources[i].name.clone();

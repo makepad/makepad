@@ -260,8 +260,7 @@ pub struct CxTurtle{
 
 pub struct WalkWrap<'a>{
     turtle:&'a Turtle,
-    drawing:&'a mut CxDrawing, 
-    shaders:&'a CxShaders
+    drawing:&'a mut CxDrawing 
 }
 
 impl CxTurtle{
@@ -397,12 +396,12 @@ impl CxTurtle{
         // shift all the items in the drawlist with dx/dy
         for i in walkwrap.turtle.align_start..self.align_list.len(){
             let align_item = &self.align_list[i];
-            align_item.move_xy(dx, dy, walkwrap.drawing, walkwrap.shaders);
+            align_item.move_xy(dx, dy, walkwrap.drawing);
         }
     }
 
     // end a turtle returning computed geometry
-    pub fn end(&mut self, drawing:&mut CxDrawing, shaders:&CxShaders)->Rect{
+    pub fn end(&mut self, drawing:&mut CxDrawing)->Rect{
         let old = self.turtles.pop().unwrap();
     
         let w = if old.width.is_nan(){
@@ -442,8 +441,7 @@ impl CxTurtle{
 
             self.do_align(dx, dy, WalkWrap{
                 turtle:&old,
-                drawing:drawing,
-                shaders:shaders
+                drawing:drawing
             });
         }
 
@@ -454,8 +452,7 @@ impl CxTurtle{
 
         return self.walk_wh(w, h, margin, Some(WalkWrap{
             turtle:&old,
-            drawing:drawing,
-            shaders:shaders
+            drawing:drawing
         }));
     }
 }

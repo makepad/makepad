@@ -1,5 +1,6 @@
 use crate::shader::*;
 use crate::cxshaders_shared::*;
+use crate::cx_shared::*;
 
 use cocoa::foundation::{NSRange};
 use metal::*;
@@ -142,32 +143,29 @@ pub struct GLTexture2D{
     pub texture_id: usize
 }
 
-#[derive(Clone, Default)]
-pub struct CxShaders{
-    pub compiled_shaders: Vec<CompiledShader>,
-    pub shaders: Vec<Shader>,
-}
 
-impl CxShaders{
-
-     pub fn compile_all_mtl_shaders(&mut self, device:&Device){
-        for sh in &self.shaders{
-            let mtlsh = Self::compile_mtl_shader(&sh, device);
+impl Cx{
+   pub fn compile_all_mtl_shaders(&mut self, device:&Device){
+        for sh in &self.drawing.shaders{
+            let mtlsh = CxShaders::compile_mtl_shader(&sh, device);
             if let Ok(mtlsh) = mtlsh{
-                self.compiled_shaders.push(CompiledShader{
-                    shader_id:self.compiled_shaders.len(),
+                self.drawing.compiled_shaders.push(CompiledShader{
+                    shader_id:self.drawing.compiled_shaders.len(),
                     ..mtlsh
                 });
             }
             else if let Err(err) = mtlsh{
                 println!("GOT ERROR: {}", err.msg);
-                self.compiled_shaders.push(
+                self.drawing.compiled_shaders.push(
                     CompiledShader{..Default::default()}
                 )
             }
         };
     }
-    
+}
+
+impl CxShaders{
+     
     pub fn type_to_packed_metal(ty:&str)->String{
         match ty.as_ref(){
             "float"=>"float".to_string(),

@@ -36,8 +36,8 @@ impl Cx{
                 let draw_list = &mut self.drawing.draw_lists[draw_list_id];
                 let draw = &mut draw_list.draw_calls[draw_call_id];
 
-                let sh = &self.shaders.shaders[draw.shader_id];
-                let shc = &self.shaders.compiled_shaders[draw.shader_id];
+                let sh = &self.drawing.shaders[draw.shader_id];
+                let shc = &self.drawing.compiled_shaders[draw.shader_id];
                 
                 if draw.update_frame_id == self.drawing.frame_id{
                     // update the instance buffer data
@@ -107,7 +107,7 @@ impl Cx{
             color_attachment.set_texture(Some(drawable.texture()));
             color_attachment.set_load_action(MTLLoadAction::Clear);
             color_attachment.set_clear_color(MTLClearColor::new(
-                self.clear_color.x as f64, self.clear_color.y as f64, self.clear_color.z as f64, self.clear_color.w as f64
+                self.drawing.clear_color.x as f64, self.drawing.clear_color.y as f64, self.drawing.clear_color.z as f64, self.drawing.clear_color.w as f64
             ));
             color_attachment.set_store_action(MTLStoreAction::Store);
 
@@ -175,7 +175,7 @@ impl Cx{
 
         glutin_window.set_position(winit::dpi::LogicalPosition::new(1920.0,400.0));
         
-        self.shaders.compile_all_mtl_shaders(&device);
+        self.compile_all_mtl_shaders(&device);
 
         self.load_binary_deps_from_file();
 
@@ -191,8 +191,8 @@ impl Cx{
                 if let Event::Resized(_) = &event{ // do this here because mac
                     self.resize_layer_to_turtle(&layer);
                     event_handler(self, event); 
-                    self.dirty_area = Area::Empty;
-                    self.redraw_area = Area::All;
+                    self.drawing.dirty_area = Area::Empty;
+                    self.drawing.redraw_area = Area::All;
                     event_handler(self, Event::Redraw);
                     self.repaint(&layer, &device, &command_queue);
                 }
@@ -200,38 +200,38 @@ impl Cx{
                     event_handler(self, event); 
                 }
             });
-            if self.animations.len() != 0{
+            if self.drawing.animations.len() != 0{
                 let time_now = precise_time_ns();
                 let time = (time_now - start_time) as f64 / 1_000_000_000.0; // keeps the error as low as possible
                 event_handler(self, Event::Animate(AnimateEvent{time:time}));
                 self.check_ended_animations(time);
-                if self.ended_animations.len() > 0{
+                if self.drawing.ended_animations.len() > 0{
                     event_handler(self, Event::AnimationEnded(AnimateEvent{time:time}));
                 }
             }
             // call redraw event
-            if !self.dirty_area.is_empty(){
-                self.dirty_area = Area::Empty;
-                self.redraw_area = self.dirty_area.clone();
-                self.frame_id += 1;
+            if !self.drawing.dirty_area.is_empty(){
+                self.drawing.dirty_area = Area::Empty;
+                self.drawing.redraw_area = self.drawing.dirty_area.clone();
+                self.drawing.frame_id += 1;
                 event_handler(self, Event::Redraw);
-                self.paint_dirty = true;
+                self.drawing.paint_dirty = true;
             }
             // repaint everything if we need to
-            if self.paint_dirty{
-                self.paint_dirty = false;
+            if self.drawing.paint_dirty{
+                self.drawing.paint_dirty = false;
                 self.repaint(&layer, &device, &command_queue);
             }
             
             // wait for the next event blockingly so it stops eating power
-            if self.animations.len() == 0 && self.dirty_area.is_empty(){
+            if self.drawing.animations.len() == 0 && self.drawing.dirty_area.is_empty(){
                 events_loop.run_forever(|winit_event|{
                     let event = self.map_winit_event(winit_event, &glutin_window);
                     if let Event::Resized(_) = &event{ // do this here because mac
                         self.resize_layer_to_turtle(&layer);
                         event_handler(self, event); 
-                        self.dirty_area = Area::Empty;
-                        self.redraw_area = Area::All;
+                        self.drawing.dirty_area = Area::Empty;
+                        self.drawing.redraw_area = Area::All;
                         event_handler(self, Event::Redraw);
                         self.repaint(&layer, &device, &command_queue);
                     }

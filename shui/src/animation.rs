@@ -1,4 +1,5 @@
 use crate::cx_shared::*;
+use crate::cxdrawing::*;
 use crate::area::*;
 use crate::math::*;
 
@@ -38,6 +39,7 @@ where T: std::cmp::PartialEq + std::clone::Clone
     }
 
     pub fn change_state(&mut self, cx:&mut Cx, state_id:T){
+        let cd = &mut cx.drawing;
         let state_index_op = self.states.iter().position(|v| v.id == state_id);
 
         if state_index_op.is_none(){
@@ -47,7 +49,7 @@ where T: std::cmp::PartialEq + std::clone::Clone
         let state_index = state_index_op.unwrap();
 
         // alright first we find area, it already exists
-        if let Some(anim) = cx.animations.iter_mut().find(|v| v.area == self.area){
+        if let Some(anim) = cd.animations.iter_mut().find(|v| v.area == self.area){
             //do we cut the animation in right now?
             if self.states[state_index].mode.cut(){
                 anim.start_time = std::f64::NAN;
@@ -65,7 +67,7 @@ where T: std::cmp::PartialEq + std::clone::Clone
         else{ // its new
             self.current_id = self.states[state_index].id.clone();
             self.next_id = None;
-            cx.animations.push(AnimArea{
+            cd.animations.push(AnimArea{
                 area:self.area.clone(),
                 start_time:std::f64::NAN,
                 duration:self.states[state_index].mode.duration()
@@ -81,32 +83,32 @@ where T: std::cmp::PartialEq + std::clone::Clone
         self.current_id.clone()
     }
 
-    pub fn set_area(&mut self, cx:&mut Cx, area:&Area){
+    pub fn set_area(&mut self, cd:&mut CxDrawing, area:&Area){
         // alright first we find area, it already exists
-        if let Some(anim) = cx.animations.iter_mut().find(|v| v.area == self.area){
+        if let Some(anim) = cd.animations.iter_mut().find(|v| v.area == self.area){
             anim.area = area.clone()
         }
         //TODO also update mousecaptures
         self.area = area.clone();
     }
 
-    fn fetch_calc_track(&mut self, cx: &mut Cx, ident:&str, time:f64)->Option<(f64,&mut AnimTrack)>{
+    fn fetch_calc_track(&mut self, cd:&mut CxDrawing, ident:&str, time:f64)->Option<(f64,&mut AnimTrack)>{
         // alright first we find area in running animations
-        let anim_index_opt = cx.animations.iter().position(|v| v.area == self.area);
+        let anim_index_opt = cd.animations.iter().position(|v| v.area == self.area);
         if anim_index_opt.is_none(){
             return None
         }
         let anim_index = anim_index_opt.unwrap();
         // initialize start time
-        if cx.animations[anim_index].start_time.is_nan(){
-            cx.animations[anim_index].start_time = time;
+        if cd.animations[anim_index].start_time.is_nan(){
+            cd.animations[anim_index].start_time = time;
         }
-        let start_time = cx.animations[anim_index].start_time;
+        let start_time = cd.animations[anim_index].start_time;
         
         // fetch current state
         let current_state_opt = self.find_state(self.current_id.clone());
         if current_state_opt.is_none(){  // remove anim
-            cx.animations.remove(anim_index);
+            cd.animations.remove(anim_index);
             return None
         }
         let current_state = current_state_opt.unwrap();
@@ -138,8 +140,8 @@ where T: std::cmp::PartialEq + std::clone::Clone
         None
     }
 
-    pub fn calc_float(&mut self, cx: &mut Cx, ident:&str, time:f64, init:f32)->f32{
-        if let Some((time,track)) = self.fetch_calc_track(cx, ident, time){
+    pub fn calc_float(&mut self, cd:&mut CxDrawing, ident:&str, time:f64, init:f32)->f32{
+        if let Some((time,track)) = self.fetch_calc_track(cd, ident, time){
             match track{
                 AnimTrack::Float(ft)=>{
                     let ret = AnimTrack::compute_track_value::<f32>(time, &ft.track, &mut ft.cut_init, init);
@@ -169,8 +171,8 @@ where T: std::cmp::PartialEq + std::clone::Clone
         return 0.0
     }
 
-    pub fn calc_vec2(&mut self, cx: &mut Cx, track_ident:&str, time:f64, init:Vec2)->Vec2{
-        if let Some((time,track)) = self.fetch_calc_track(cx, track_ident, time){
+    pub fn calc_vec2(&mut self, cd:&mut CxDrawing, track_ident:&str, time:f64, init:Vec2)->Vec2{
+        if let Some((time,track)) = self.fetch_calc_track(cd, track_ident, time){
             match track{
                 AnimTrack::Vec2(ft)=>{
                     let ret =  AnimTrack::compute_track_value::<Vec2>(time, &ft.track, &mut ft.cut_init, init);
@@ -200,8 +202,8 @@ where T: std::cmp::PartialEq + std::clone::Clone
         return vec2(0.0,0.0)
     }
 
-    pub fn calc_vec3(&mut self, cx: &mut Cx, area_name:&str, time:f64, init:Vec3)->Vec3{
-        if let Some((time,track)) = self.fetch_calc_track(cx, area_name, time){
+    pub fn calc_vec3(&mut self, cd:&mut CxDrawing, area_name:&str, time:f64, init:Vec3)->Vec3{
+        if let Some((time,track)) = self.fetch_calc_track(cd, area_name, time){
             match track{
                 AnimTrack::Vec3(ft)=>{
                     let ret =  AnimTrack::compute_track_value::<Vec3>(time, &ft.track, &mut ft.cut_init, init);
@@ -231,8 +233,8 @@ where T: std::cmp::PartialEq + std::clone::Clone
         return vec3(0.0,0.0,0.0)
     }
 
-    pub fn calc_vec4(&mut self, cx: &mut Cx, area_name:&str, time:f64, init:Vec4)->Vec4{
-        if let Some((time,track)) = self.fetch_calc_track(cx, area_name, time){
+    pub fn calc_vec4(&mut self, cd:&mut CxDrawing, area_name:&str, time:f64, init:Vec4)->Vec4{
+        if let Some((time,track)) = self.fetch_calc_track(cd, area_name, time){
             match track{
                 AnimTrack::Vec4(ft)=>{
                     let ret =  AnimTrack::compute_track_value::<Vec4>(time, &ft.track, &mut ft.cut_init, init);

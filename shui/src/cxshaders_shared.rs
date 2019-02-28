@@ -2,14 +2,19 @@
 
 use crate::shader::*;
 use crate::cxshaders::*;
+use crate::cxdrawing::*;
 
-impl CxShaders{
+#[derive(Clone, Default)]
+pub struct CxShaders{
+}
 
-    pub fn get(&self, id:usize)->&CompiledShader{
+impl CxDrawing{
+
+    pub fn get_shader(&self, id:usize)->&CompiledShader{
         &self.compiled_shaders[id]
     }
 
-    pub fn add(&mut self, sh:Shader)->usize{
+    pub fn add_shader(&mut self, sh:Shader)->usize{
         let id = self.shaders.len();
         // lets compile this sh
         self.shaders.push(sh);

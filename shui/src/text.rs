@@ -28,7 +28,7 @@ impl Style for Text{
         let mut sh = Shader::def(); 
         Self::def_shader(&mut sh);
         Self{
-            shader_id:cx.shaders.add(sh),
+            shader_id:cx.drawing.add_shader(sh),
             font_id:cx.load_font("resources/ubuntu_regular_256.font"),
             text:"".to_string(),
             font_size:10.0,
@@ -113,7 +113,8 @@ impl Text{
         let area = cx.new_aligned_instance(self.shader_id);
 
         let font_opt = cx.fonts.get(self.font_id);
-        let mut cd = &mut cx.drawing;
+        let cd = &mut cx.drawing;
+
         if font_opt.is_none(){
             return Area::Empty
         }

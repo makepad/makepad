@@ -108,10 +108,11 @@ impl Update for Button{ // called when updated
 
 impl Button{
     pub fn handle(&mut self, cx:&mut Cx, event:&Event)->ButtonEvent{
-        match event.hits(&self.bg_area, cx){
+        match event.hits(&self.bg_area, &cx.drawing){
             Event::Animate(ae)=>{
-                let color = self.anim.calc_vec4(cx, "bg.color", ae.time, self.bg_area.read_vec4(cx, "color"));
-                self.bg_area.write_vec4(cx, "color", color);
+                let cd = &mut cx.drawing;
+                let color = self.anim.calc_vec4(cd, "bg.color", ae.time, self.bg_area.read_vec4(cd, "color"));
+                self.bg_area.write_vec4(cd, "color", color);
             },
             Event::FingerDown(_fe)=>{
                
@@ -143,7 +144,7 @@ impl Button{
         
         self.bg_area = self.bg.end(cx);
 
-        self.anim.set_area(cx, &self.bg_area); // this changes our area to a new one
+        self.anim.set_area(&mut cx.drawing, &self.bg_area); // this changes our area to a new one
         // this also updates the capture area.
     }
 }

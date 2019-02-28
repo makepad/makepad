@@ -16,7 +16,7 @@ impl Style for Quad{
         let mut sh = Shader::def(); 
         Self::def_shader(&mut sh);
         Self{
-            shader_id:cx.shaders.add(sh),
+            shader_id:cx.drawing.add_shader(sh),
             id:0,
             color:color("green")
         }
@@ -81,8 +81,8 @@ impl Quad{
 
     pub fn draw_sized(&mut self, cx:&mut Cx, w:Value, h:Value, margin:Margin)->Area{
         let area = cx.new_aligned_instance(self.shader_id);
-
         let cd = &mut cx.drawing;
+
         self.set_uniforms(cd, &area);
         
         let geom = cx.turtle.walk_wh(w, h, margin, None);

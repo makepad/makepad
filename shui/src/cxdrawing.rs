@@ -4,6 +4,8 @@ use crate::cx_shared::*;
 use crate::area::*;
 use crate::view::*;
 use crate::cxturtle::*;
+use crate::cxshaders::*;
+use crate::animation::*;
 
 #[derive(Clone, Default)]
 pub struct CxDrawing{
@@ -12,14 +14,22 @@ pub struct CxDrawing{
     pub instance_area_stack: Vec<Area>,
     pub view_stack: Vec<View>,
     pub current_draw_list_id: usize,
-    pub frame_id: usize
+    pub compiled_shaders: Vec<CompiledShader>,
+    pub shaders: Vec<Shader>,
+    pub dirty_area:Area,
+    pub redraw_area:Area,
+    pub paint_dirty:bool,
+    pub clear_color:Vec4,
+    pub frame_id: u64,
+    pub animations:Vec<AnimArea>,
+    pub ended_animations:Vec<AnimArea>,
 }
 
 impl Cx{
 
     pub fn new_aligned_instance(&mut self, shader_id:usize)->Area{
         //let sh = &self.shaders.compiled_shaders[shader_id];
-        let draw_list_id = self.drawing.current_draw_list_id;
+        //let draw_list_id = self.drawing.current_draw_list_id;
         let area = self.new_instance(shader_id);
         self.turtle.align_list.push(area.clone());
         area/*
@@ -44,7 +54,7 @@ impl Cx{
     }
 
     pub fn new_instance(&mut self, shader_id:usize)->Area{
-        let sh = &self.shaders.compiled_shaders[shader_id];
+        let sh = &self.drawing.compiled_shaders[shader_id];
         let draw_list = &mut self.drawing.draw_lists[self.drawing.current_draw_list_id];
         
         // find our drawcall in the filled draws
@@ -104,8 +114,8 @@ impl Cx{
     // pops instance patching the supplied geometry in the instancebuffer
     pub fn end_instance(&mut self)->Area{
         let area = self.drawing.instance_area_stack.pop().unwrap();
-        let rect = self.turtle.end(&mut self.drawing ,&self.shaders);
-        area.set_rect(self, &rect);
+        let rect = self.turtle.end(&mut self.drawing);
+        area.set_rect(&mut self.drawing, &rect);
         area
     }
 }
@@ -120,7 +130,7 @@ pub struct DrawCall{
     pub current_instance_offset:usize, // offset of current instance
     pub uniforms:Vec<f32>,  // draw uniforms
     pub textures:Vec<u32>,
-    pub update_frame_id: usize,
+    pub update_frame_id: u64,
     pub resources:DrawCallResources,
     pub need_uniforms_now:bool
 }

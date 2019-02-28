@@ -2,7 +2,7 @@
 use crate::math::*;
 use crate::cx_shared::*;
 use crate::cxdrawing::*;
-use crate::cxshaders::*;
+use crate::cxshaders_shared::*;
 
 #[derive(Clone, Default, Debug, PartialEq)]
 pub struct InstanceArea{
@@ -40,15 +40,15 @@ impl Area{
         false
     }
 
-    pub fn get_rect_sep(&self, drawing:&CxDrawing, shaders:&CxShaders)->Rect{
+    pub fn get_rect(&self, cd:&CxDrawing)->Rect{
         return match self{
             Area::Instance(inst)=>{
                 if inst.instance_count == 0{
                     return Rect::zero()
                 }
-                let draw_list = &drawing.draw_lists[inst.draw_list_id];
+                let draw_list = &cd.draw_lists[inst.draw_list_id];
                 let draw_call = &draw_list.draw_calls[inst.draw_call_id];
-                let csh = &shaders.compiled_shaders[draw_call.shader_id];
+                let csh = &cd.compiled_shaders[draw_call.shader_id];
                 // ok now we have to patch x/y/w/h into it
                 if let Some(ix) = csh.rect_instance_props.x{
                     let x = draw_call.instance[inst.instance_offset + ix];
@@ -66,23 +66,19 @@ impl Area{
                 Rect::zero()
             },
             Area::DrawList(draw_list_area)=>{
-                let draw_list = &drawing.draw_lists[draw_list_area.draw_list_id];
+                let draw_list = &cd.draw_lists[draw_list_area.draw_list_id];
                 draw_list.rect.clone()
             },
             _=>Rect::zero(),
         }
     }
 
-    pub fn get_rect(&self, cx:&Cx)->Rect{
-        self.get_rect_sep(&cx.drawing, &cx.shaders)
-    }
-
-    pub fn set_rect_sep(&self, drawing:&mut CxDrawing, shaders:&CxShaders, rect:&Rect){
+    pub fn set_rect(&self, cd:&mut CxDrawing, rect:&Rect){
          match self{
             Area::Instance(inst)=>{
-                let draw_list = &mut drawing.draw_lists[inst.draw_list_id];
+                let draw_list = &mut cd.draw_lists[inst.draw_list_id];
                 let draw_call = &mut draw_list.draw_calls[inst.draw_call_id];
-                let csh = &shaders.compiled_shaders[draw_call.shader_id];        // ok now we have to patch x/y/w/h into it
+                let csh = &cd.compiled_shaders[draw_call.shader_id];        // ok now we have to patch x/y/w/h into it
 
                 if let Some(ix) = csh.rect_instance_props.x{
                     draw_call.instance[inst.instance_offset + ix] = rect.x;
@@ -98,22 +94,22 @@ impl Area{
                 }
             },
             Area::DrawList(draw_list_area)=>{
-                let draw_list = &mut drawing.draw_lists[draw_list_area.draw_list_id];
+                let draw_list = &mut cd.draw_lists[draw_list_area.draw_list_id];
                 draw_list.rect = rect.clone()
             },
             _=>()
          }
     }
 
-    pub fn move_xy(&self, dx:f32, dy:f32, drawing:&mut CxDrawing, shaders:&CxShaders){
+    pub fn move_xy(&self, dx:f32, dy:f32, cd:&mut CxDrawing){
         return match self{
             Area::Instance(inst)=>{
                 if inst.instance_count == 0{
                     return;
                 }
-                let draw_list = &mut drawing.draw_lists[inst.draw_list_id];
+                let draw_list = &mut cd.draw_lists[inst.draw_list_id];
                 let draw_call = &mut draw_list.draw_calls[inst.draw_call_id];
-                let csh = &shaders.compiled_shaders[draw_call.shader_id];
+                let csh = &cd.compiled_shaders[draw_call.shader_id];
 
                 for i in 0..inst.instance_count{
                     if let Some(x) = csh.rect_instance_props.x{
@@ -128,16 +124,16 @@ impl Area{
         }
     }
 
-    pub fn write_float(&self, cx:&mut Cx, prop_name:&str, value:f32){
+    pub fn write_float(&self, cd:&mut CxDrawing, prop_name:&str, value:f32){
         match self{
             Area::Instance(inst)=>{
-                let draw_list = &mut cx.drawing.draw_lists[inst.draw_list_id];
+                let draw_list = &mut cd.draw_lists[inst.draw_list_id];
                 let draw_call = &mut draw_list.draw_calls[inst.draw_call_id];
-                let csh = &cx.shaders.compiled_shaders[draw_call.shader_id];
+                let csh = &cd.compiled_shaders[draw_call.shader_id];
 
                 for prop in &csh.named_instance_props.props{
                     if prop.name == prop_name{
-                        cx.paint_dirty = true;
+                        cd.paint_dirty = true;
                         draw_call.instance[inst.instance_offset + prop.offset] = value;
                         return
                     }
@@ -147,12 +143,12 @@ impl Area{
         }
     }
 
-    pub fn read_float(&self, cx:&Cx, prop_name:&str)->f32{
+    pub fn read_float(&self, cd:&CxDrawing, prop_name:&str)->f32{
         match self{
             Area::Instance(inst)=>{
-                let draw_list = &cx.drawing.draw_lists[inst.draw_list_id];
+                let draw_list = &cd.draw_lists[inst.draw_list_id];
                 let draw_call = &draw_list.draw_calls[inst.draw_call_id];
-                let csh = &cx.shaders.compiled_shaders[draw_call.shader_id];
+                let csh = &cd.compiled_shaders[draw_call.shader_id];
 
                 for prop in &csh.named_instance_props.props{
                     if prop.name == prop_name{
@@ -165,16 +161,16 @@ impl Area{
         return 0.0;
     }
 
-   pub fn write_vec2(&self, cx:&mut Cx, prop_name:&str, value:Vec2){
+   pub fn write_vec2(&self, cd:&mut CxDrawing, prop_name:&str, value:Vec2){
         match self{
             Area::Instance(inst)=>{
-                let draw_list = &mut cx.drawing.draw_lists[inst.draw_list_id];
+                let draw_list = &mut cd.draw_lists[inst.draw_list_id];
                 let draw_call = &mut draw_list.draw_calls[inst.draw_call_id];
-                let csh = &cx.shaders.compiled_shaders[draw_call.shader_id];
+                let csh = &cd.compiled_shaders[draw_call.shader_id];
 
                 for prop in &csh.named_instance_props.props{
                     if prop.name == prop_name{
-                        cx.paint_dirty = true;
+                        cd.paint_dirty = true;
                         let off = inst.instance_offset + prop.offset;
                         draw_call.instance[off + 0] = value.x;
                         draw_call.instance[off + 1] = value.y;
@@ -186,12 +182,12 @@ impl Area{
         }
     }
 
-    pub fn read_vec2(&self, cx:&Cx, prop_name:&str)->Vec2{
+    pub fn read_vec2(&self, cd:&CxDrawing, prop_name:&str)->Vec2{
         match self{
             Area::Instance(inst)=>{
-                let draw_list = &cx.drawing.draw_lists[inst.draw_list_id];
+                let draw_list = &cd.draw_lists[inst.draw_list_id];
                 let draw_call = &draw_list.draw_calls[inst.draw_call_id];
-                let csh = &cx.shaders.compiled_shaders[draw_call.shader_id];
+                let csh = &cd.compiled_shaders[draw_call.shader_id];
 
                 for prop in &csh.named_instance_props.props{
                     if prop.name == prop_name{
@@ -208,16 +204,16 @@ impl Area{
         return vec2(0.0,0.0);
     }
 
-    pub fn write_vec3(&self, cx:&mut Cx, prop_name:&str, value:Vec3){
+    pub fn write_vec3(&self, cd:&mut CxDrawing, prop_name:&str, value:Vec3){
         match self{
             Area::Instance(inst)=>{
-                let draw_list = &mut cx.drawing.draw_lists[inst.draw_list_id];
+                let draw_list = &mut cd.draw_lists[inst.draw_list_id];
                 let draw_call = &mut draw_list.draw_calls[inst.draw_call_id];
-                let csh = &cx.shaders.compiled_shaders[draw_call.shader_id];
+                let csh = &cd.compiled_shaders[draw_call.shader_id];
 
                 for prop in &csh.named_instance_props.props{
                     if prop.name == prop_name{
-                        cx.paint_dirty = true;
+                        cd.paint_dirty = true;
                         let off = inst.instance_offset + prop.offset;
                         draw_call.instance[off + 0] = value.x;
                         draw_call.instance[off + 1] = value.y;
@@ -230,12 +226,12 @@ impl Area{
         }
     }
 
-    pub fn read_vec3(&self, cx:&Cx, prop_name:&str)->Vec3{
+    pub fn read_vec3(&self, cd:&CxDrawing, prop_name:&str)->Vec3{
         match self{
             Area::Instance(inst)=>{
-                let draw_list = &cx.drawing.draw_lists[inst.draw_list_id];
+                let draw_list = &cd.draw_lists[inst.draw_list_id];
                 let draw_call = &draw_list.draw_calls[inst.draw_call_id];
-                let csh = &cx.shaders.compiled_shaders[draw_call.shader_id];
+                let csh = &cd.compiled_shaders[draw_call.shader_id];
 
                 for prop in &csh.named_instance_props.props{
                     if prop.name == prop_name{
@@ -253,16 +249,16 @@ impl Area{
         return vec3(0.0,0.0,0.0);
     }
 
-    pub fn write_vec4(&self, cx:&mut Cx, prop_name:&str, value:Vec4){
+    pub fn write_vec4(&self, cd:&mut CxDrawing, prop_name:&str, value:Vec4){
         match self{
             Area::Instance(inst)=>{
-                let draw_list = &mut cx.drawing.draw_lists[inst.draw_list_id];
+                let draw_list = &mut cd.draw_lists[inst.draw_list_id];
                 let draw_call = &mut draw_list.draw_calls[inst.draw_call_id];
-                let csh = &cx.shaders.compiled_shaders[draw_call.shader_id];
+                let csh = &cd.compiled_shaders[draw_call.shader_id];
 
                 for prop in &csh.named_instance_props.props{
                     if prop.name == prop_name{
-                        cx.paint_dirty = true;
+                        cd.paint_dirty = true;
                         let off = inst.instance_offset + prop.offset;
                         draw_call.instance[off + 0] = value.x;
                         draw_call.instance[off + 1] = value.y;
@@ -276,12 +272,12 @@ impl Area{
         }
     }
 
-    pub fn read_vec4(&self, cx:&Cx, prop_name:&str)->Vec4{
+    pub fn read_vec4(&self, cd:&CxDrawing, prop_name:&str)->Vec4{
         match self{
             Area::Instance(inst)=>{
-                let draw_list = &cx.drawing.draw_lists[inst.draw_list_id];
+                let draw_list = &cd.draw_lists[inst.draw_list_id];
                 let draw_call = &draw_list.draw_calls[inst.draw_call_id];
-                let csh = &cx.shaders.compiled_shaders[draw_call.shader_id];
+                let csh = &cd.compiled_shaders[draw_call.shader_id];
 
                 for prop in &csh.named_instance_props.props{
                     if prop.name == prop_name{
@@ -300,10 +296,10 @@ impl Area{
         return vec4(0.0,0.0,0.0,0.0);
     }
 
-    pub fn append_data(&self, drawing:&mut CxDrawing, data:&[f32]){
+    pub fn append_data(&self, cd:&mut CxDrawing, data:&[f32]){
         match self{
             Area::Instance(inst)=>{
-                let draw_list = &mut drawing.draw_lists[inst.draw_list_id];
+                let draw_list = &mut cd.draw_lists[inst.draw_list_id];
                 let draw_call = &mut draw_list.draw_calls[inst.draw_call_id];
                 //let csh = &cx.shaders.compiled_shaders[draw_call.shader_id];
                 draw_call.instance.extend_from_slice(data);
@@ -312,10 +308,10 @@ impl Area{
         }
     }
  
-    pub fn need_uniforms_now(&self, drawing:&mut CxDrawing)->bool{
+    pub fn need_uniforms_now(&self, cd:&mut CxDrawing)->bool{
         match self{
             Area::Instance(inst)=>{
-                let draw_list = &mut drawing.draw_lists[inst.draw_list_id];
+                let draw_list = &mut cd.draw_lists[inst.draw_list_id];
                 let draw_call = &mut draw_list.draw_calls[inst.draw_call_id];
                 //let csh = &cx.shaders.compiled_shaders[draw_call.shader_id];
                 return draw_call.need_uniforms_now
@@ -325,10 +321,10 @@ impl Area{
         return false
     }
 
-   pub fn uniform_texture(&self, drawing:&mut CxDrawing, _name: &str, texture_id: usize){
+   pub fn uniform_texture(&self, cd:&mut CxDrawing, _name: &str, texture_id: usize){
         match self{
             Area::Instance(inst)=>{
-                let draw_list = &mut drawing.draw_lists[inst.draw_list_id];
+                let draw_list = &mut cd.draw_lists[inst.draw_list_id];
                 let draw_call = &mut draw_list.draw_calls[inst.draw_call_id]; 
                 draw_call.textures.push(texture_id as u32);
             },
@@ -336,10 +332,10 @@ impl Area{
         }
     }
 
-    pub fn uniform_float(&self, drawing:&mut CxDrawing, _name: &str, v:f32){
+    pub fn uniform_float(&self, cd:&mut CxDrawing, _name: &str, v:f32){
         match self{
             Area::Instance(inst)=>{
-                let draw_list = &mut drawing.draw_lists[inst.draw_list_id];
+                let draw_list = &mut cd.draw_lists[inst.draw_list_id];
                 let draw_call = &mut draw_list.draw_calls[inst.draw_call_id]; 
                 draw_call.uniforms.push(v);
             },
@@ -347,10 +343,10 @@ impl Area{
          }
     }
 
-    pub fn uniform_vec2f(&self, drawing:&mut CxDrawing, _name: &str, x:f32, y:f32){
+    pub fn uniform_vec2f(&self, cd:&mut CxDrawing, _name: &str, x:f32, y:f32){
         match self{
             Area::Instance(inst)=>{
-                let draw_list = &mut drawing.draw_lists[inst.draw_list_id];
+                let draw_list = &mut cd.draw_lists[inst.draw_list_id];
                 let draw_call = &mut draw_list.draw_calls[inst.draw_call_id]; 
                 draw_call.uniforms.push(x);
                 draw_call.uniforms.push(y);
@@ -359,10 +355,10 @@ impl Area{
          }
     }
 
-    pub fn uniform_vec3f(&mut self, drawing:&mut CxDrawing, _name: &str, x:f32, y:f32, z:f32){
+    pub fn uniform_vec3f(&mut self, cd:&mut CxDrawing, _name: &str, x:f32, y:f32, z:f32){
         match self{
             Area::Instance(inst)=>{
-                let draw_list = &mut drawing.draw_lists[inst.draw_list_id];
+                let draw_list = &mut cd.draw_lists[inst.draw_list_id];
                 let draw_call = &mut draw_list.draw_calls[inst.draw_call_id]; 
                 draw_call.uniforms.push(x);
                 draw_call.uniforms.push(y);
@@ -372,10 +368,10 @@ impl Area{
         }
     }
 
-    pub fn uniform_vec4f(&self, drawing:&mut CxDrawing, _name: &str, x:f32, y:f32, z:f32, w:f32){
+    pub fn uniform_vec4f(&self, cd:&mut CxDrawing, _name: &str, x:f32, y:f32, z:f32, w:f32){
         match self{
             Area::Instance(inst)=>{
-                let draw_list = &mut drawing.draw_lists[inst.draw_list_id];
+                let draw_list = &mut cd.draw_lists[inst.draw_list_id];
                 let draw_call = &mut draw_list.draw_calls[inst.draw_call_id]; 
                 draw_call.uniforms.push(x);
                 draw_call.uniforms.push(y);
@@ -386,10 +382,10 @@ impl Area{
         }
     }
 
-    pub fn uniform_mat4(&self, drawing:&mut CxDrawing, _name: &str, v:&Mat4){
+    pub fn uniform_mat4(&self, cd:&mut CxDrawing, _name: &str, v:&Mat4){
         match self{
             Area::Instance(inst)=>{
-                let draw_list = &mut drawing.draw_lists[inst.draw_list_id];
+                let draw_list = &mut cd.draw_lists[inst.draw_list_id];
                 let draw_call = &mut draw_list.draw_calls[inst.draw_call_id]; 
                 for i in 0..16{
                     draw_call.uniforms.push(v.v[i]);
@@ -399,12 +395,8 @@ impl Area{
         }
     }
 
-    pub fn set_rect(&self, cx:&mut Cx, rect:&Rect){
-        self.set_rect_sep(&mut cx.drawing, &cx.shaders, rect)
-    }
-
-    pub fn contains(&self, x:f32, y:f32, cx:&Cx)->bool{
-        let rect = self.get_rect(cx);
+    pub fn contains(&self, x:f32, y:f32, cd:&CxDrawing)->bool{
+        let rect = self.get_rect(cd);
 
         return x >= rect.x && x <= rect.x + rect.w &&
             y >= rect.y && y <= rect.y + rect.h;

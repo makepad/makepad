@@ -64,7 +64,7 @@ impl View{
             }
         }
 
-        cx.drawing.draw_list_id = self.draw_list_id;
+        cx.drawing.current_draw_list_id = self.draw_list_id;
         cx.drawing.view_stack.push(self.clone());
         
         cx.turtle.begin(layout);
@@ -80,7 +80,7 @@ impl View{
         // then we can incrementally redraw with that dx/dy
         // as long as we are a clipped area
         cx.drawing.view_stack.pop();
-        let rect = cx.turtle.end(&mut cx.drawing,&cx.shaders);
+        let rect = cx.turtle.end(&mut cx.drawing);
         let draw_list = &mut cx.drawing.draw_lists[self.draw_list_id];
         draw_list.rect = rect
     }
