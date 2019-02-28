@@ -300,6 +300,105 @@ impl Area{
         return vec4(0.0,0.0,0.0,0.0);
     }
 
+    pub fn append_data(&self, drawing:&mut CxDrawing, data:&[f32]){
+        match self{
+            Area::Instance(inst)=>{
+                let draw_list = &mut drawing.draw_lists[inst.draw_list_id];
+                let draw_call = &mut draw_list.draw_calls[inst.draw_call_id];
+                //let csh = &cx.shaders.compiled_shaders[draw_call.shader_id];
+                draw_call.instance.extend_from_slice(data);
+            },
+            _=>(),
+        }
+    }
+ 
+    pub fn need_uniforms_now(&self, drawing:&mut CxDrawing)->bool{
+        match self{
+            Area::Instance(inst)=>{
+                let draw_list = &mut drawing.draw_lists[inst.draw_list_id];
+                let draw_call = &mut draw_list.draw_calls[inst.draw_call_id];
+                //let csh = &cx.shaders.compiled_shaders[draw_call.shader_id];
+                return draw_call.need_uniforms_now
+            },
+            _=>(),
+        }
+        return false
+    }
+
+   pub fn uniform_texture(&self, drawing:&mut CxDrawing, _name: &str, texture_id: usize){
+        match self{
+            Area::Instance(inst)=>{
+                let draw_list = &mut drawing.draw_lists[inst.draw_list_id];
+                let draw_call = &mut draw_list.draw_calls[inst.draw_call_id]; 
+                draw_call.textures.push(texture_id as u32);
+            },
+            _=>()
+        }
+    }
+
+    pub fn uniform_float(&self, drawing:&mut CxDrawing, _name: &str, v:f32){
+        match self{
+            Area::Instance(inst)=>{
+                let draw_list = &mut drawing.draw_lists[inst.draw_list_id];
+                let draw_call = &mut draw_list.draw_calls[inst.draw_call_id]; 
+                draw_call.uniforms.push(v);
+            },
+            _=>()
+         }
+    }
+
+    pub fn uniform_vec2f(&self, drawing:&mut CxDrawing, _name: &str, x:f32, y:f32){
+        match self{
+            Area::Instance(inst)=>{
+                let draw_list = &mut drawing.draw_lists[inst.draw_list_id];
+                let draw_call = &mut draw_list.draw_calls[inst.draw_call_id]; 
+                draw_call.uniforms.push(x);
+                draw_call.uniforms.push(y);
+            },
+            _=>()
+         }
+    }
+
+    pub fn uniform_vec3f(&mut self, drawing:&mut CxDrawing, _name: &str, x:f32, y:f32, z:f32){
+        match self{
+            Area::Instance(inst)=>{
+                let draw_list = &mut drawing.draw_lists[inst.draw_list_id];
+                let draw_call = &mut draw_list.draw_calls[inst.draw_call_id]; 
+                draw_call.uniforms.push(x);
+                draw_call.uniforms.push(y);
+                draw_call.uniforms.push(z);
+            },
+            _=>()
+        }
+    }
+
+    pub fn uniform_vec4f(&self, drawing:&mut CxDrawing, _name: &str, x:f32, y:f32, z:f32, w:f32){
+        match self{
+            Area::Instance(inst)=>{
+                let draw_list = &mut drawing.draw_lists[inst.draw_list_id];
+                let draw_call = &mut draw_list.draw_calls[inst.draw_call_id]; 
+                draw_call.uniforms.push(x);
+                draw_call.uniforms.push(y);
+                draw_call.uniforms.push(z);
+                draw_call.uniforms.push(w);
+            },
+            _=>()
+        }
+    }
+
+    pub fn uniform_mat4(&self, drawing:&mut CxDrawing, _name: &str, v:&Mat4){
+        match self{
+            Area::Instance(inst)=>{
+                let draw_list = &mut drawing.draw_lists[inst.draw_list_id];
+                let draw_call = &mut draw_list.draw_calls[inst.draw_call_id]; 
+                for i in 0..16{
+                    draw_call.uniforms.push(v.v[i]);
+                }
+            },
+            _=>()
+        }
+    }
+
     pub fn set_rect(&self, cx:&mut Cx, rect:&Rect){
         self.set_rect_sep(&mut cx.drawing, &cx.shaders, rect)
     }

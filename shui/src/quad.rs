@@ -62,29 +62,28 @@ impl Quad{
         //sh.log =1;
     }
 
-    pub fn begin<'a>(&mut self, cx:&'a mut Cx, layout:&Layout)->&'a mut DrawCall{
-        let draw_call_id = self.draw_abs(cx, true, 0.0,0.0,0.0,0.0).draw_call_id;
-        cx.turtle.begin(layout);
-        cx.drawing.push_instance(draw_call_id)
+    pub fn begin(&mut self, cx:&mut Cx, layout:&Layout)->Area{
+        let area = self.draw_abs(cx, true, 0.0,0.0,0.0,0.0);
+        cx.begin_instance(&area, layout);
+        area
     }
 
     // write the rect instance
     pub fn end(&mut self, cx:&mut Cx)->Area{
-        let rect = cx.turtle.end(&mut cx.drawing ,&cx.shaders);
-        cx.drawing.pop_instance(&cx.shaders, rect)
+        cx.end_instance()
     }
 
-    pub fn set_uniforms(&mut self, dc:&mut DrawCall){
-        if dc.first{
-            dc.ufloat("fac", 1.0);
+    pub fn set_uniforms(&mut self, cd:&mut CxDrawing, area:&Area){
+        if area.need_uniforms_now(cd){
+            area.uniform_float(cd, "fac", 1.0);
         }
     }
 
-    pub fn draw_sized<'a>(&mut self, cx:&'a mut Cx, w:Value, h:Value, margin:Margin)->&'a mut DrawCall{
+    pub fn draw_sized(&mut self, cx:&mut Cx, w:Value, h:Value, margin:Margin)->Area{
+        let area = cx.new_aligned_instance(self.shader_id);
 
-        let dc = cx.drawing.instance_aligned(cx.shaders.get(self.shader_id), &mut cx.turtle);
-        
-        self.set_uniforms(dc);
+        let cd = &mut cx.drawing;
+        self.set_uniforms(cd, &area);
         
         let geom = cx.turtle.walk_wh(w, h, margin, None);
         
@@ -93,27 +92,27 @@ impl Quad{
             /*x,y,w,h*/geom.x,geom.y,geom.w,geom.h,
             /*color*/self.color.x,self.color.y,self.color.z,self.color.w
         ];
+        area.append_data(cd, &data);
 
-        dc.instance.extend_from_slice(&data);
-
-        dc
+        area
     }
 
-    pub fn draw_abs<'a>(&mut self, cx:&'a mut Cx, align:bool, x:f32, y:f32, w:f32, h:f32)->&'a mut DrawCall{
-        let dc = if align{
-           cx.drawing.instance_aligned(cx.shaders.get(self.shader_id), &mut cx.turtle)
+    pub fn draw_abs(&mut self, cx:&mut Cx, align:bool, x:f32, y:f32, w:f32, h:f32)->Area{
+        let area = if align{
+           cx.new_aligned_instance(self.shader_id)
         }
         else{
-           cx.drawing.instance(cx.shaders.get(self.shader_id))
+           cx.new_instance(self.shader_id)
         };
-        self.set_uniforms(dc);
+
+        let cd = &mut cx.drawing;
+        self.set_uniforms(cd, &area);
 
         let data = [
             /*x,y,w,h*/x,y,w,h,
             /*color*/self.color.x,self.color.y,self.color.z,self.color.w
         ];
-        dc.instance.extend_from_slice(&data);
-
-        dc
+        area.append_data(cd, &data);
+        area
     }
 }

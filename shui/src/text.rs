@@ -29,7 +29,7 @@ impl Style for Text{
         Self::def_shader(&mut sh);
         Self{
             shader_id:cx.shaders.add(sh),
-            font_id:cx.fonts.load("resources/ubuntu_regular_256.font"),
+            font_id:cx.load_font("resources/ubuntu_regular_256.font"),
             text:"".to_string(),
             font_size:10.0,
             line_spacing:1.1,
@@ -110,18 +110,19 @@ impl Text{
     }
 
     pub fn draw_text(&mut self, cx:&mut Cx, _x:Value, _y:Value, text:&str)->Area{
+        let area = cx.new_aligned_instance(self.shader_id);
+
         let font_opt = cx.fonts.get(self.font_id);
+        let mut cd = &mut cx.drawing;
         if font_opt.is_none(){
             return Area::Empty
         }
         let font = font_opt.as_ref().unwrap();
 
-        let dr = cx.drawing.instance_aligned(cx.shaders.get(self.shader_id), &mut cx.turtle);
-
-        if dr.first{
-            dr.texture("texture", font.texture_id);
-            dr.uvec2f("tex_size", font.width as f32, font.height as f32);
-            dr.uvec4f("list_clip", -50000.0,-50000.0,50000.0,50000.0);
+        if area.need_uniforms_now(cd){
+            area.uniform_texture(cd, "texture", font.texture_id);
+            area.uniform_vec2f(cd, "tex_size", font.width as f32, font.height as f32);
+            area.uniform_vec4f(cd, "list_clip", -50000.0,-50000.0,50000.0,50000.0);
         }
 
         let mut chunk = Vec::new();
@@ -185,7 +186,7 @@ impl Text{
                         /*font_size*/ self.font_size,
                         /*font_base*/ 1.0
                     ];
-                    dr.instance.extend_from_slice(&data);
+                    area.append_data(cd, &data);
 
                     geom.x += w;
                     count += 1;

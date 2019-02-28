@@ -1,10 +1,9 @@
 use crate::shader::*;
 use crate::cx::*;
 use crate::cx_shared::*;
-use crate::cxturtle::*;
 use crate::area::*;
 use crate::view::*;
-use crate::cxshaders::*;
+use crate::cxturtle::*;
 
 #[derive(Clone, Default)]
 pub struct CxDrawing{
@@ -12,30 +11,41 @@ pub struct CxDrawing{
     pub draw_lists_free: Vec<usize>,
     pub instance_area_stack: Vec<Area>,
     pub view_stack: Vec<View>,
-    pub draw_list_id: usize,
+    pub current_draw_list_id: usize,
     pub frame_id: usize
 }
 
-impl CxDrawing{
-    pub fn draw_list(&mut self)->&mut DrawList{
-        &mut self.draw_lists[self.draw_list_id]
-    }
+impl Cx{
 
-    pub fn instance_aligned(&mut self, sh:&CompiledShader, turtle:&mut CxTurtle)->&mut DrawCall{
-        let draw_list_id = self.draw_list_id;
-        let dc = self.instance(sh);
-        turtle.align_list.push(Area::Instance(InstanceArea{
+    pub fn new_aligned_instance(&mut self, shader_id:usize)->Area{
+        //let sh = &self.shaders.compiled_shaders[shader_id];
+        let draw_list_id = self.drawing.current_draw_list_id;
+        let area = self.new_instance(shader_id);
+        self.turtle.align_list.push(area.clone());
+        area/*
+        Area::Instance(InstanceArea{
             draw_list_id:draw_list_id,
             draw_call_id:dc.draw_call_id,
             instance_offset:dc.current_instance_offset,
             instance_count:1,
             instance_writer:0
         }));
-        dc
+        dc*/
     }
 
-    pub fn instance(&mut self, sh:&CompiledShader)->&mut DrawCall{
-        let draw_list = &mut self.draw_lists[self.draw_list_id];
+    fn draw_call_to_area(dc:&DrawCall)->Area{
+        Area::Instance(InstanceArea{
+            draw_list_id:dc.draw_list_id,
+            draw_call_id:dc.draw_call_id,
+            instance_offset:dc.current_instance_offset,
+            instance_count:1,
+            instance_writer:0
+        })
+    }
+
+    pub fn new_instance(&mut self, shader_id:usize)->Area{
+        let sh = &self.shaders.compiled_shaders[shader_id];
+        let draw_list = &mut self.drawing.draw_lists[self.drawing.current_draw_list_id];
         
         // find our drawcall in the filled draws
         for i in (0..draw_list.draw_calls_len).rev(){
@@ -43,8 +53,8 @@ impl CxDrawing{
                 // reuse this drawcmd.
                 let dc = &mut draw_list.draw_calls[i];
                 dc.current_instance_offset = dc.instance.len();
-                dc.first = false;
-                return dc
+                dc.need_uniforms_now = false;
+                return dc.get_current_area();
             }
         }
 
@@ -56,19 +66,19 @@ impl CxDrawing{
         if id >= draw_list.draw_calls.len(){
             draw_list.draw_calls.push(DrawCall{
                 draw_call_id:draw_list.draw_calls.len(),
-                draw_list_id:self.draw_list_id,
+                draw_list_id:self.drawing.current_draw_list_id,
                 sub_list_id:0,
                 shader_id:sh.shader_id,
                 instance:Vec::new(),
                 uniforms:Vec::new(),
                 textures:Vec::new(),
                 current_instance_offset:0,
-                first:true,
-                update_frame_id:self.frame_id,
+                need_uniforms_now:true,
+                update_frame_id:self.drawing.frame_id,
                 resources:DrawCallResources{..Default::default()}
             });
-            
-            return &mut draw_list.draw_calls[id]
+            let dc = &mut draw_list.draw_calls[id];
+            return dc.get_current_area();
         }
 
         // reuse a draw
@@ -79,31 +89,23 @@ impl CxDrawing{
         dc.current_instance_offset = 0;
         dc.uniforms.truncate(0);
         dc.textures.truncate(0);
-        dc.update_frame_id = self.frame_id;
-        dc.first = true;
-        dc
+        dc.update_frame_id = self.drawing.frame_id;
+        dc.need_uniforms_now = true;
+        return dc.get_current_area();
     }
 
-    // push instance so it can be written to again in pop_instance
-    pub fn push_instance(&mut self, draw_call_id:usize)->&mut DrawCall{
-        let draw_list = &mut self.draw_lists[self.draw_list_id];
-        let draw_call = &mut draw_list.draw_calls[draw_call_id];
 
-        // store our current instance properties so we can update-patch it in pop instance
-        self.instance_area_stack.push(Area::Instance(InstanceArea{
-            draw_list_id: self.draw_list_id,
-            draw_call_id:draw_call_id,
-            instance_offset:draw_call.current_instance_offset,
-            instance_count:1,
-            instance_writer:0
-        }));
-        draw_call
+    // push instance so it can be written to again in pop_instance
+    pub fn begin_instance(&mut self, area:&Area, layout:&Layout){
+        self.turtle.begin(layout);
+        self.drawing.instance_area_stack.push(area.clone());
     }
 
     // pops instance patching the supplied geometry in the instancebuffer
-    pub fn pop_instance(&mut self, shaders:&CxShaders, geom:Rect)->Area{
-        let area = self.instance_area_stack.pop().unwrap();
-        area.set_rect_sep(self, shaders, &geom);
+    pub fn end_instance(&mut self)->Area{
+        let area = self.drawing.instance_area_stack.pop().unwrap();
+        let rect = self.turtle.end(&mut self.drawing ,&self.shaders);
+        area.set_rect(self, &rect);
         area
     }
 }
@@ -120,7 +122,7 @@ pub struct DrawCall{
     pub textures:Vec<u32>,
     pub update_frame_id: usize,
     pub resources:DrawCallResources,
-    pub first:bool
+    pub need_uniforms_now:bool
 }
 
 impl DrawCall{
@@ -133,104 +135,6 @@ impl DrawCall{
             instance_count:1,
             instance_writer:0
         })
-    }
-
-    pub fn float(&mut self, _name: &str, v:f32){
-        self.instance.push(v);
-    }
-
-    pub fn rect(&mut self, _name: &str, rect:Rect){
-        self.instance.push(rect.x);
-        self.instance.push(rect.y);
-        self.instance.push(rect.w);
-        self.instance.push(rect.h);
-    }
-
-    pub fn vec2f(&mut self, _name: &str, x:f32, y:f32){
-        self.instance.push(x);
-        self.instance.push(y);
-    }
-
-    pub fn vec3f(&mut self, _name: &str, x:f32, y:f32, z:f32){
-        self.instance.push(x);
-        self.instance.push(y);
-        self.instance.push(z);
-    }
-
-    pub fn vec4f(&mut self, _name: &str, x:f32, y:f32, z:f32, w:f32){
-        self.instance.push(x);
-        self.instance.push(y);
-        self.instance.push(z);
-        self.instance.push(w);
-    }
-
-    pub fn vec2(&mut self, _name: &str, v:&Vec2){
-        self.instance.push(v.x);
-        self.instance.push(v.y);
-    }
-
-    pub fn vec3(&mut self, _name: &str, v:&Vec3){
-        self.instance.push(v.x);
-        self.instance.push(v.y);
-        self.instance.push(v.z);
-    }
-
-    pub fn vec4(&mut self, _name: &str, v:&Vec4){
-        self.instance.push(v.x);
-        self.instance.push(v.y);
-        self.instance.push(v.z);
-        self.instance.push(v.w);
-    }
-
-    pub fn texture(&mut self, _name: &str, texture_id: usize){
-        // how do we store these?
-        self.textures.push(texture_id as u32);
-    }
-
-    pub fn ufloat(&mut self, _name: &str, v:f32){
-        self.uniforms.push(v);
-    }
-
-    pub fn uvec2f(&mut self, _name: &str, x:f32, y:f32){
-        self.uniforms.push(x);
-        self.uniforms.push(y);
-    }
-
-    pub fn uvec3f(&mut self, _name: &str, x:f32, y:f32, z:f32){
-        self.uniforms.push(x);
-        self.uniforms.push(y);
-        self.uniforms.push(z);
-    }
-
-    pub fn uvec4f(&mut self, _name: &str, x:f32, y:f32, z:f32, w:f32){
-        self.uniforms.push(x);
-        self.uniforms.push(y);
-        self.uniforms.push(z);
-        self.uniforms.push(w);
-    }
-
-    pub fn uvec2(&mut self, _name: &str, v:&Vec2){
-        self.uniforms.push(v.x);
-        self.uniforms.push(v.y);
-    }
-
-    pub fn uvec3(&mut self, _name: &str, v:&Vec3){
-        self.uniforms.push(v.x);
-        self.uniforms.push(v.y);
-        self.uniforms.push(v.z);
-    }
-
-    pub fn uvec4(&mut self, _name: &str, v:&Vec4){
-        self.uniforms.push(v.x);
-        self.uniforms.push(v.y);
-        self.uniforms.push(v.z);
-        self.uniforms.push(v.w);
-    }
-
-    pub fn umat4(&mut self, _name: &str, v:&Mat4){
-        for i in 0..16{
-            self.uniforms.push(v.v[i]);
-        }
     }
 }
 

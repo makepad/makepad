@@ -6,24 +6,26 @@ pub struct CxFonts{
     pub font_resources:Vec<FontResource>
 }
 
-impl CxFonts{
-    pub fn get(&mut self, id:usize)->&Option<Font>{
-        // lets find this font id, falling back if not found
-        let font_resource = &mut self.font_resources[id];
-        &font_resource.font
-    }
-
-    pub fn load(&mut self, file_name: &str)->usize{
-        let found = self.font_resources.iter().position(|v| v.name == file_name);
+impl Cx{
+    pub fn load_font(&mut self, file_name: &str)->usize{
+        let found = self.fonts.font_resources.iter().position(|v| v.name == file_name);
         if !found.is_none(){
             return found.unwrap()
         }
-        let font_id = self.font_resources.len();
-        self.font_resources.push(FontResource{
+        let font_id = self.fonts.font_resources.len();
+        self.fonts.font_resources.push(FontResource{
             name:file_name.to_string(),
             font:None
         });
         font_id
+    }
+}
+
+impl CxFonts{
+    pub fn get(&self, id:usize)->&Option<Font>{
+        // lets find this font id, falling back if not found
+        let font_resource = &self.font_resources[id];
+        &font_resource.font
     }
 
     pub fn load_from_binary_dep(&mut self, bin_dep: &mut BinaryDep, cx_tex:&mut CxTextures)-> Result<(), String>{

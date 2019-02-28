@@ -96,8 +96,10 @@ impl Cx{
     }
 
     pub fn load_binary_deps_from_file(&mut self){
-        for i in 0..self.fonts.font_resources.len(){
-            let resource_name = &self.fonts.font_resources[i].name;
+        let mut fonts = &mut self.fonts;
+        let len = fonts.font_resources.len();
+        for i in 0..len{
+            let resource_name = &fonts.font_resources[i].name.clone();
             // lets turn a file into a binary dep
             let file_result = File::open(&resource_name);
             if let Ok(mut file) = file_result{
@@ -106,7 +108,7 @@ impl Cx{
                 if file.read_to_end(&mut buffer).is_ok(){
                     // store it in a bindep
                     let mut bin_dep = BinaryDep::new_from_vec(resource_name.clone(), &buffer);
-                    let _err = self.fonts.load_from_binary_dep(&mut bin_dep, &mut self.textures);
+                    let _err = fonts.load_from_binary_dep(&mut bin_dep, &mut self.textures);
 
                     //     println!("Error loading font {} ", resource_name);
                     //};
