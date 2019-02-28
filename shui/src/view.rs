@@ -1,6 +1,6 @@
 use crate::cx_shared::*;
 use crate::cxturtle::*;
-use crate::cxdrawing::*;
+use crate::cxdrawing_shared::*;
 
 #[derive(Default,Clone)]
 pub struct View{ // draw info per UI element

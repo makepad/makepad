@@ -1,10 +1,8 @@
 use crate::cx::*;
-use crate::cxdrawing::*;
-use crate::cxshaders_shared::*;
+use crate::cxdrawing_shared::*;
 use crate::cxfonts::*;
 use crate::cxtextures::*;
 use crate::cxturtle::*;
-use crate::animation::*;
 use crate::shader::*;
 
 #[derive(Clone)]
@@ -13,7 +11,6 @@ pub struct Cx{
     pub running:bool,
 
     pub turtle:CxTurtle,
-    pub shaders:CxShaders,
     pub drawing:CxDrawing,
     pub fonts:CxFonts,
     pub textures:CxTextures,
@@ -31,7 +28,6 @@ impl Default for Cx{
             turtle:CxTurtle{..Default::default()},
             fonts:CxFonts{..Default::default()},
             drawing:CxDrawing{..Default::default()},
-            shaders:CxShaders{..Default::default()},
             textures:CxTextures{..Default::default()},
             title:"Hello World".to_string(),
             running:true,

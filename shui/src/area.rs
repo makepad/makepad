@@ -1,8 +1,6 @@
 
 use crate::math::*;
-use crate::cx_shared::*;
-use crate::cxdrawing::*;
-use crate::cxshaders_shared::*;
+use crate::cxdrawing_shared::*;
 
 #[derive(Clone, Default, Debug, PartialEq)]
 pub struct InstanceArea{

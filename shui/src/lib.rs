@@ -5,8 +5,8 @@
 #[path="cx_ogl.rs"]
 mod cx; 
 #[cfg(feature = "ogl")]
-#[path="cxshaders_ogl.rs"]
-mod cxshaders; 
+#[path="cxdrawing_ogl.rs"]
+mod cxdrawing; 
 #[cfg(feature = "ogl")]
 #[path="cxtextures_ogl.rs"]
 mod cxtextures;
@@ -15,8 +15,8 @@ mod cxtextures;
 #[path="cx_mtl.rs"]
 mod cx; 
 #[cfg(feature = "mtl")]
-#[path="cxshaders_mtl.rs"]
-mod cxshaders; 
+#[path="cxdrawing_mtl.rs"]
+mod cxdrawing; 
 #[cfg(feature = "mtl")]
 #[path="cxtextures_mtl.rs"]
 mod cxtextures;
@@ -25,8 +25,8 @@ mod cxtextures;
 #[path="cx_webgl.rs"]
 mod cx; 
 #[cfg(feature = "webgl")]
-#[path="cxshaders_webgl.rs"]
-mod cxshaders; 
+#[path="cxdrawing_webgl.rs"]
+mod cxdrawing; 
 #[cfg(feature = "webgl")]
 #[path="cxtextures_webgl.rs"]
 mod cxtextures;
@@ -37,11 +37,10 @@ mod cxshaders_gl;
 #[cfg(any(feature = "mtl", feature = "ogl"))]
 mod cx_winit; 
 
-mod cxshaders_shared;
 mod cx_shared;
 
 // shared modules
-mod cxdrawing;
+mod cxdrawing_shared;
 mod cxfonts;
 mod cxturtle;
 mod animation;
@@ -51,7 +50,7 @@ mod colors;
 mod shader;
 mod area;
 mod view;
-
+mod shadergen;
 mod quad;
 mod text;
 mod events;
@@ -59,8 +58,8 @@ mod events;
 pub use crate::cx::*;
 pub use crate::cx_shared::*;
 pub use crate::cxdrawing::*;
+pub use crate::cxdrawing_shared::*;
 pub use crate::cxturtle::*;
-pub use crate::cxshaders::*;
 pub use crate::math::*;
 pub use crate::events::*;
 pub use crate::shader::*;

@@ -1,7 +1,6 @@
 use crate::math::*;
 use std::cell::RefCell;
-use crate::cxdrawing::*;
-use crate::cxshaders::*;
+use crate::cxdrawing_shared::*;
 use crate::area::*;
 
 thread_local!(pub static debug_pts_store: RefCell<Vec<(f32,f32,i32,String)>> = RefCell::new(Vec::new()));
