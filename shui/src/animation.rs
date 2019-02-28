@@ -32,7 +32,7 @@ where T: std::cmp::PartialEq + std::clone::Clone
         Animation{
             current_id:current_id,
             next_id:None,
-            area:Area::zero(),
+            area:Area::Empty,
             states:states
         }
     }

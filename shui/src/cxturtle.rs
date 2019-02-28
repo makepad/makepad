@@ -271,7 +271,9 @@ impl CxTurtle{
 
     pub fn instance_aligned_set_count(&mut self, instance_count:usize)->Area{
         let mut area =  self.align_list.last_mut().unwrap();
-        area.instance_count = instance_count;
+        if let Area::Instance(inst) = &mut area{
+            inst.instance_count = instance_count;
+        }
         area.clone()
     }
 
@@ -395,18 +397,7 @@ impl CxTurtle{
         // shift all the items in the drawlist with dx/dy
         for i in walkwrap.turtle.align_start..self.align_list.len(){
             let align_item = &self.align_list[i];
-            let draw_list = &mut walkwrap.drawing.draw_lists[align_item.draw_list_id];
-            let draw_call = &mut draw_list.draw_calls[align_item.draw_call_id];
-
-            for i in 0..align_item.instance_count{
-                let csh = &walkwrap.shaders.compiled_shaders[draw_call.shader_id];
-                if let Some(x) = csh.rect_instance_props.x{
-                    draw_call.instance[align_item.instance_offset + x + i * csh.instance_slots] += dx;
-                }
-                if let Some(y) = csh.rect_instance_props.y{
-                    draw_call.instance[align_item.instance_offset + y+ i * csh.instance_slots] += dy;
-                }
-            }
+            align_item.move_xy(dx, dy, walkwrap.drawing, walkwrap.shaders);
         }
     }
 

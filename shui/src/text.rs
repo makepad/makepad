@@ -112,7 +112,7 @@ impl Text{
     pub fn draw_text(&mut self, cx:&mut Cx, _x:Value, _y:Value, text:&str)->Area{
         let font_opt = cx.fonts.get(self.font_id);
         if font_opt.is_none(){
-            return Area::zero()
+            return Area::Empty
         }
         let font = font_opt.as_ref().unwrap();
 

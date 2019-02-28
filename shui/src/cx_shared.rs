@@ -23,8 +23,8 @@ pub struct Cx{
 
     pub animations:Vec<AnimArea>,
     pub ended_animations:Vec<AnimArea>,
-    pub redraw_dirty:Option<Area>,
-    pub redraw_area:Option<Area>,
+    pub dirty_area:Area,
+    pub redraw_area:Area,
     pub paint_dirty:bool,
     pub frame_id:u64,
     pub binary_deps:Vec<BinaryDep>,
@@ -48,8 +48,8 @@ impl Default for Cx{
             animations:Vec::new(),
             ended_animations:Vec::new(),
             binary_deps:Vec::new(),
-            redraw_area:None,
-            redraw_dirty:None,
+            redraw_area:Area::Empty,
+            dirty_area:Area::Empty,
             frame_id:0,
             clear_color:vec4(0.3,0.3,0.3,1.0),
             paint_dirty:false
@@ -95,21 +95,6 @@ impl Cx{
         );
         self.uniform_camera_projection(camera_projection);
         self.turtle.align_list.truncate(0);
-    }
-
-    // trigger a redraw on the UI
-    pub fn redraw_all(&mut self){ 
-        self.redraw_dirty = Some(Area::zero())
-    }
-
-    // trigger a redraw on the UI
-    pub fn redraw_none(&mut self){ 
-        self.redraw_dirty = None
-    }
-
-    // trigger a redraw on the UI
-    pub fn redraw(&mut self, area:&Area){ 
-        self.redraw_dirty = Some(area.clone())
     }
 
     pub fn check_ended_animations(&mut self, time:f64){

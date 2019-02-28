@@ -36,7 +36,7 @@ impl Style for Button{
 
         Self{
             view:View::new(),
-            bg_area:Area::zero(),
+            bg_area:Area::Empty,
             layout:Layout{
                 w:Computed,
                 h:Computed,
@@ -110,7 +110,6 @@ impl Button{
     pub fn handle(&mut self, cx:&mut Cx, event:&Event)->ButtonEvent{
         match event.hits(&self.bg_area, cx){
             Event::Animate(ae)=>{
-                // how would you write this nondeclaratively?
                 let color = self.anim.calc_vec4(cx, "bg.color", ae.time, self.bg_area.read_vec4(cx, "color"));
                 self.bg_area.write_vec4(cx, "color", color);
             },

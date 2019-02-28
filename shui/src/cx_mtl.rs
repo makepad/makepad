@@ -191,8 +191,8 @@ impl Cx{
                 if let Event::Resized(_) = &event{ // do this here because mac
                     self.resize_layer_to_turtle(&layer);
                     event_handler(self, event); 
-                    self.redraw_area = Some(Area::zero());
-                    self.redraw_none();
+                    self.dirty_area = Area::Empty;
+                    self.redraw_area = Area::All;
                     event_handler(self, Event::Redraw);
                     self.repaint(&layer, &device, &command_queue);
                 }
@@ -210,9 +210,9 @@ impl Cx{
                 }
             }
             // call redraw event
-            if let Some(_) = &self.redraw_dirty{
-                self.redraw_area = self.redraw_dirty.clone();
-                self.redraw_none();
+            if !self.dirty_area.is_empty(){
+                self.dirty_area = Area::Empty;
+                self.redraw_area = self.dirty_area.clone();
                 self.frame_id += 1;
                 event_handler(self, Event::Redraw);
                 self.paint_dirty = true;
@@ -224,14 +224,14 @@ impl Cx{
             }
             
             // wait for the next event blockingly so it stops eating power
-            if self.animations.len() == 0 && self.redraw_dirty.is_none(){
+            if self.animations.len() == 0 && self.dirty_area.is_empty(){
                 events_loop.run_forever(|winit_event|{
                     let event = self.map_winit_event(winit_event, &glutin_window);
                     if let Event::Resized(_) = &event{ // do this here because mac
                         self.resize_layer_to_turtle(&layer);
                         event_handler(self, event); 
-                        self.redraw_area = Some(Area::zero());
-                        self.redraw_none();
+                        self.dirty_area = Area::Empty;
+                        self.redraw_area = Area::All;
                         event_handler(self, Event::Redraw);
                         self.repaint(&layer, &device, &command_queue);
                     }

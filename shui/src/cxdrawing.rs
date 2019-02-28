@@ -24,12 +24,13 @@ impl CxDrawing{
     pub fn instance_aligned(&mut self, sh:&CompiledShader, turtle:&mut CxTurtle)->&mut DrawCall{
         let draw_list_id = self.draw_list_id;
         let dc = self.instance(sh);
-        turtle.align_list.push(Area{
+        turtle.align_list.push(Area::Instance(InstanceArea{
             draw_list_id:draw_list_id,
             draw_call_id:dc.draw_call_id,
             instance_offset:dc.current_instance_offset,
-            instance_count:1
-        });
+            instance_count:1,
+            instance_writer:0
+        }));
         dc
     }
 
@@ -89,12 +90,13 @@ impl CxDrawing{
         let draw_call = &mut draw_list.draw_calls[draw_call_id];
 
         // store our current instance properties so we can update-patch it in pop instance
-        self.instance_area_stack.push(Area{
+        self.instance_area_stack.push(Area::Instance(InstanceArea{
             draw_list_id: self.draw_list_id,
             draw_call_id:draw_call_id,
             instance_offset:draw_call.current_instance_offset,
-            instance_count:1
-        });
+            instance_count:1,
+            instance_writer:0
+        }));
         draw_call
     }
 
@@ -124,12 +126,13 @@ pub struct DrawCall{
 impl DrawCall{
 
     pub fn get_current_area(&self)->Area{
-        Area{
+        Area::Instance(InstanceArea{
             draw_list_id:self.draw_list_id,
             draw_call_id:self.draw_call_id,
             instance_offset:self.current_instance_offset,
-            instance_count:1
-        }
+            instance_count:1,
+            instance_writer:0
+        })
     }
 
     pub fn float(&mut self, _name: &str, v:f32){
@@ -240,7 +243,8 @@ pub struct DrawList{
     pub draw_calls:Vec<DrawCall>,
     pub draw_calls_len: usize,
     pub uniforms:Vec<f32>, // cmdlist uniforms
-    pub resources:DrawListResources
+    pub resources:DrawListResources,
+    pub rect:Rect
 }
 
 impl DrawList{
