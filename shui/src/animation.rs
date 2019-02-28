@@ -1,6 +1,5 @@
 use crate::cxturtle::*;
 use crate::cx::*;
-use crate::events::*;
 
 #[derive(Clone,Debug)]
 pub struct AnimArea{
@@ -17,25 +16,27 @@ pub struct AnimState<T>{
 }
 
 #[derive(Clone)]
-pub struct AnimStates<T>{
-    pub current_id:T,
-    pub next_id:Option<T>,
+pub struct Animation<T>{
+    current_id:T,
+    next_id:Option<T>,
+    area:Area,
     pub states:Vec<AnimState<T>>
 }
 
-impl<T> AnimStates<T>
+impl<T> Animation<T>
 where T: std::cmp::PartialEq + std::clone::Clone
 {
 
-    pub fn new(current_id:T, states:Vec<AnimState<T>>)->AnimStates<T>{
-        AnimStates{
+    pub fn new(current_id:T, states:Vec<AnimState<T>>)->Animation<T>{
+        Animation{
             current_id:current_id,
             next_id:None,
+            area:Area::zero(),
             states:states
         }
     }
 
-    pub fn change(&mut self, cx:&mut Cx, state_id:T, area:&Area){
+    pub fn change_state(&mut self, cx:&mut Cx, state_id:T){
         let state_index_op = self.states.iter().position(|v| v.id == state_id);
 
         if state_index_op.is_none(){
@@ -45,7 +46,7 @@ where T: std::cmp::PartialEq + std::clone::Clone
         let state_index = state_index_op.unwrap();
 
         // alright first we find area, it already exists
-        if let Some(anim) = cx.animations.iter_mut().find(|v| v.area == *area){
+        if let Some(anim) = cx.animations.iter_mut().find(|v| v.area == self.area){
             //do we cut the animation in right now?
             if self.states[state_index].mode.cut(){
                 anim.start_time = std::f64::NAN;
@@ -61,10 +62,11 @@ where T: std::cmp::PartialEq + std::clone::Clone
             }
         }
         else{ // its new
+         cx.log("ADDING NEW ANIM");
             self.current_id = self.states[state_index].id.clone();
             self.next_id = None;
             cx.animations.push(AnimArea{
-                area:area.clone(),
+                area:self.area.clone(),
                 start_time:std::f64::NAN,
                 duration:self.states[state_index].mode.duration()
             })
@@ -75,75 +77,222 @@ where T: std::cmp::PartialEq + std::clone::Clone
         self.states.iter_mut().find(|v| v.id == id)
     }
 
-    pub fn animate(&mut self, cx: &mut Cx, area_name:&str,  id_area:&Area, tgt_area:&Area, ae:&AnimateEvent){
+    pub fn state(&self)->T{
+        self.current_id.clone()
+    }
 
-        // alright first we find area
-        let anim_index_opt = cx.animations.iter().position(|v| v.area == *id_area);
+    pub fn set_area(&mut self, cx:&mut Cx, area:&Area){
+        // alright first we find area, it already exists
+        if let Some(anim) = cx.animations.iter_mut().find(|v| v.area == self.area){
+            anim.area = area.clone()
+        }
+        //TODO also update mousecaptures
+        self.area = area.clone();
+    }
+
+    fn fetch_calc_track(&mut self, cx: &mut Cx, ident:&str, time:f64)->Option<(f64,&mut AnimTrack)>{
+        // alright first we find area in running animations
+        let anim_index_opt = cx.animations.iter().position(|v| v.area == self.area);
         if anim_index_opt.is_none(){
-            return
+            return None
         }
         let anim_index = anim_index_opt.unwrap();
-        
-        // alright so now what.
-        // well if thing is nan, set it to our
+        // initialize start time
         if cx.animations[anim_index].start_time.is_nan(){
-            cx.animations[anim_index].start_time = ae.time;
+            cx.animations[anim_index].start_time = time;
         }
         let start_time = cx.animations[anim_index].start_time;
-
+        
+        // fetch current state
         let current_state_opt = self.find_state(self.current_id.clone());
         if current_state_opt.is_none(){  // remove anim
             cx.animations.remove(anim_index);
-            return
+            return None
+        }
+        let current_state = current_state_opt.unwrap();
+        // 
+        // then we need to compute the track time
+        let time = current_state.mode.compute_time(time - start_time);
+
+        for track in &mut current_state.tracks{
+            if track.ident() == ident{
+                return Some((time,track));
+            }
+        }
+        None
+    } 
+
+    fn fetch_last_track(&mut self, ident:&str)->Option<&AnimTrack>{
+         // fetch current state
+        let current_state_opt = self.find_state(self.current_id.clone());
+        if current_state_opt.is_none(){  // remove anim
+            return None
         }
         let current_state = current_state_opt.unwrap();
 
-        // then we need to compute the track time
-        let total_time = ae.time - start_time;
-
-        let (stop, time) = current_state.mode.compute_time(total_time);
-        if stop{
-            cx.animations.remove(anim_index);
-        }
-        for track in &mut current_state.tracks{
-            if track.area_name() == area_name{
-                track.compute_and_write(time, tgt_area, cx);
+        for track in &current_state.tracks{
+            if track.ident() == ident{
+                return Some(track);
             }
         }
-        cx.paint_dirty = true;
+        None
+    }
+
+    pub fn calc_float(&mut self, cx: &mut Cx, ident:&str, time:f64, init:f32)->f32{
+        if let Some((time,track)) = self.fetch_calc_track(cx, ident, time){
+            match track{
+                AnimTrack::Float(ft)=>{
+                    let ret = AnimTrack::compute_track_value::<f32>(time, &ft.track, &mut ft.cut_init, init);
+                    ft.last_calc = Some(ret);
+                    return ret
+                },
+                _=>()
+            }
+        }
+        return 0.0
+    } 
+
+    pub fn last_float(&mut self, ident:&str)->f32{
+        if let Some(track) = self.fetch_last_track(ident){
+            match track{
+                AnimTrack::Float(ft)=>{
+                    if let Some(last_calc) = ft.last_calc{
+                        return last_calc;
+                    }
+                    else if ft.track.len()>0{ // grab the last key in the track
+                        return ft.track.last().unwrap().1
+                    }
+                },
+                _=>()
+            }
+        }
+        return 0.0
+    }
+
+    pub fn calc_vec2(&mut self, cx: &mut Cx, track_ident:&str, time:f64, init:Vec2)->Vec2{
+        if let Some((time,track)) = self.fetch_calc_track(cx, track_ident, time){
+            match track{
+                AnimTrack::Vec2(ft)=>{
+                    let ret =  AnimTrack::compute_track_value::<Vec2>(time, &ft.track, &mut ft.cut_init, init);
+                    ft.last_calc = Some(ret.clone());
+                    return ret
+                },
+                _=>()
+            }
+        }
+        return vec2(0.0,0.0)
+    }
+
+    pub fn last_vec2(&mut self, ident:&str)->Vec2{
+        if let Some(track) = self.fetch_last_track(ident){
+            match track{
+                AnimTrack::Vec2(ft)=>{
+                    if let Some(last_calc) = &ft.last_calc{
+                        return last_calc.clone();
+                    }
+                    else if ft.track.len()>0{ // grab the last key in the track
+                        return ft.track.last().unwrap().1.clone()
+                    }
+                },
+                _=>()
+            }
+        }
+        return vec2(0.0,0.0)
+    }
+
+    pub fn calc_vec3(&mut self, cx: &mut Cx, area_name:&str, time:f64, init:Vec3)->Vec3{
+        if let Some((time,track)) = self.fetch_calc_track(cx, area_name, time){
+            match track{
+                AnimTrack::Vec3(ft)=>{
+                    let ret =  AnimTrack::compute_track_value::<Vec3>(time, &ft.track, &mut ft.cut_init, init);
+                    ft.last_calc = Some(ret.clone());
+                    return ret    
+                },
+                _=>()
+            }
+        }
+        return vec3(0.0,0.0,0.0)
+    }
+
+    pub fn last_vec3(&mut self, ident:&str)->Vec3{
+        if let Some(track) = self.fetch_last_track(ident){
+            match track{
+                AnimTrack::Vec3(ft)=>{
+                    if let Some(last_calc) = &ft.last_calc{
+                        return last_calc.clone();
+                    }
+                    else if ft.track.len()>0{ // grab the last key in the track
+                        return ft.track.last().unwrap().1.clone()
+                    }
+                },
+                _=>()
+            }
+        }
+        return vec3(0.0,0.0,0.0)
+    }
+
+    pub fn calc_vec4(&mut self, cx: &mut Cx, area_name:&str, time:f64, init:Vec4)->Vec4{
+        if let Some((time,track)) = self.fetch_calc_track(cx, area_name, time){
+            match track{
+                AnimTrack::Vec4(ft)=>{
+                    let ret =  AnimTrack::compute_track_value::<Vec4>(time, &ft.track, &mut ft.cut_init, init);
+                    ft.last_calc = Some(ret.clone());
+                    return ret                    
+                },
+                _=>()
+            }
+        }
+        return vec4(0.0,0.0,0.0,0.0)
+    }
+
+    pub fn last_vec4(&mut self, ident:&str)->Vec4{
+        if let Some(track) = self.fetch_last_track(ident){
+            match track{
+                AnimTrack::Vec4(ft)=>{
+                    if let Some(last_calc) =&ft.last_calc{
+                        return last_calc.clone();
+                    }
+                    else if ft.track.len()>0{ // grab the last key in the track
+                        return ft.track.last().unwrap().1.clone()
+                    }
+                },
+                _=>()
+            }
+        }
+        return vec4(0.0,0.0,0.0,0.0)
     }    
 }
 
 #[derive(Clone,Debug)]
 pub struct FloatTrack{
-    pub area_name:String,
-    pub prop_name:String,
-    pub first:Option<f32>,
+    pub ident:String,
+    pub cut_init:Option<f32>,
+    pub last_calc:Option<f32>,
     pub track:Vec<(f64, f32)>
 }
 
 #[derive(Clone,Debug)]
 pub struct Vec2Track{
-    pub area_name:String,
-    pub prop_name:String,
-    pub first:Option<Vec2>,
+    pub ident:String,
+    pub cut_init:Option<Vec2>,
+    pub last_calc:Option<Vec2>,
     pub track:Vec<(f64, Vec2)>
 }
 
 #[derive(Clone,Debug)]
 pub struct Vec3Track{
-    pub area_name:String,
-    pub prop_name:String,
-    pub first:Option<Vec3>,
+    pub ident:String,
+    pub cut_init:Option<Vec3>,
+    pub last_calc:Option<Vec3>,
     pub track:Vec<(f64, Vec3)>
 }
 
 #[derive(Clone,Debug)]
 
 pub struct Vec4Track{
-    pub area_name:String,
-    pub prop_name:String,
-    pub first:Option<Vec4>,
+    pub ident:String,
+    pub cut_init:Option<Vec4>,
+    pub last_calc:Option<Vec4>,
     pub track:Vec<(f64, Vec4)>
 }
 
@@ -156,104 +305,85 @@ pub enum AnimTrack{
 }
 
 impl AnimTrack{
-    pub fn float(area_name:&str, prop_name:&str, track:Vec<(f64,f32)>)->AnimTrack{
+    pub fn float(ident:&str, track:Vec<(f64,f32)>)->AnimTrack{
         AnimTrack::Float(FloatTrack{
-            first:None,
-            area_name:area_name.to_string(),
-            prop_name:prop_name.to_string(),
+            cut_init:None,
+            last_calc:None,
+            ident:ident.to_string(),
             track:track
         })
     }
 
-    pub fn vec2(area_name:&str, prop_name:&str, track:Vec<(f64,Vec2)>)->AnimTrack{
+    pub fn vec2(ident:&str, track:Vec<(f64,Vec2)>)->AnimTrack{
         AnimTrack::Vec2(Vec2Track{
-            first:None,
-            area_name:area_name.to_string(),
-            prop_name:prop_name.to_string(),
+            cut_init:None,
+            last_calc:None,
+            ident:ident.to_string(),
             track:track
         })
     }
 
-    pub fn vec3(area_name:&str, prop_name:&str, track:Vec<(f64,Vec3)>)->AnimTrack{
+    pub fn vec3(ident:&str, track:Vec<(f64,Vec3)>)->AnimTrack{
         AnimTrack::Vec3(Vec3Track{
-            first:None,
-            area_name:area_name.to_string(),
-            prop_name:prop_name.to_string(),
+            cut_init:None,
+            last_calc:None,
+            ident:ident.to_string(),
             track:track
         })
     }
 
-    pub fn vec4(area_name:&str, prop_name:&str, track:Vec<(f64,Vec4)>)->AnimTrack{
+    pub fn vec4(ident:&str, track:Vec<(f64,Vec4)>)->AnimTrack{
         AnimTrack::Vec4(Vec4Track{
-            first:None,
-            area_name:area_name.to_string(),
-            prop_name:prop_name.to_string(),
+            cut_init:None,
+            last_calc:None,
+            ident:ident.to_string(),
             track:track
         })
     }
 
-    fn compute_track_prop<T>(time:f64, prop_name:&str, area:&Area, cx:&mut Cx, track:&Vec<(f64,T)>, first:&mut Option<T>)
-    where T:AccessInstanceProp<T> + Clone
+    fn compute_track_value<T>(time:f64, track:&Vec<(f64,T)>, cut_init:&mut Option<T>, init:T) -> T
+    where T:ComputeTrackValue<T> + Clone
     {
-        if track.is_empty(){return }
+        if track.is_empty(){return init}
         // find the 2 keys we want
         for i in 0..track.len(){
             if time>= track[i].0{ // we found the left key
                 let val1 = &track[i];
                 if i == track.len() - 1{ // last key
-                    val1.1.write_prop(cx, area, prop_name);
-                    return
+                    return val1.1.clone()
                 }
                 let val2 = &track[i+1];
                 // lerp it
                 let f = ((time - val1.0)/(val2.0-val1.0)) as f32;
-                val1.1.lerp_prop(&val2.1, f).write_prop(cx, area, prop_name);
-                return
+                return val1.1.lerp_prop(&val2.1, f);
             }
         }
-        if first.is_none(){
-            *first = Some(T::read_prop(cx, area, prop_name));
+        if cut_init.is_none(){
+            *cut_init = Some(init);
         }
         let val2 = &track[0];
-        let val1 = first.as_mut().unwrap();
+        let val1 = cut_init.as_mut().unwrap();
         let f = (time/val2.0) as f32;
-        val1.lerp_prop(&val2.1, f).write_prop(cx, area, prop_name);
+        return  val1.lerp_prop(&val2.1, f)
     }
 
-    pub fn compute_and_write(&mut self, time:f64, area:&Area, cx:&mut Cx){
+    pub fn ident(&self)->&String{
         match self{
             AnimTrack::Float(ft)=>{
-                Self::compute_track_prop::<f32>(time, &ft.prop_name, area, cx, &ft.track, &mut ft.first);
+                &ft.ident
             },
             AnimTrack::Vec2(ft)=>{
-                Self::compute_track_prop::<Vec2>(time, &ft.prop_name, area, cx, &ft.track, &mut ft.first);
+                &ft.ident
             }
             AnimTrack::Vec3(ft)=>{
-                Self::compute_track_prop::<Vec3>(time, &ft.prop_name, area, cx, &ft.track, &mut ft.first);
+                &ft.ident
             }
             AnimTrack::Vec4(ft)=>{
-                Self::compute_track_prop::<Vec4>(time, &ft.prop_name, area, cx, &ft.track, &mut ft.first);
+                &ft.ident
             }
         }
     }
-
-    pub fn area_name(&mut self)->&String{
-        match self{
-            AnimTrack::Float(ft)=>{
-                &ft.area_name
-            },
-            AnimTrack::Vec2(ft)=>{
-                &ft.area_name
-            }
-            AnimTrack::Vec3(ft)=>{
-                &ft.area_name
-            }
-            AnimTrack::Vec4(ft)=>{
-                &ft.area_name
-            }
-        }
-    }
-
+/*
     fn duration(&self)->f64{
         match self{
             AnimTrack::Float(ft)=>{
@@ -293,7 +423,7 @@ impl AnimTrack{
                 }
             }
         }
-    }
+    }*/
 }
 
 impl<T> AnimState<T>{
@@ -368,91 +498,67 @@ impl AnimMode{
         }
     }
     
-    pub fn compute_time(&self, time:f64)->(bool,f64){
+    pub fn compute_time(&self, time:f64)->f64{
         match self{
-            AnimMode::Single{len,speed,..}=>{
-                let local_time = time * speed;
-                (local_time >= *len, local_time)
+            AnimMode::Single{speed,..}=>{
+                time * speed
             },
-            AnimMode::Loop{len,speed,repeats,..}=>{
-                let loops = (time / speed) / len;
-                let local_time = (time / speed)  % len;
-                (loops > *repeats, local_time)
+            AnimMode::Loop{len,speed,..}=>{
+                (time / speed)  % len
             },
-            AnimMode::Reverse{len,speed,repeats,..}=>{
-                let loops = (time / speed) / len;
-                let local_time = len - (time / speed)  % len;
-                (loops > *repeats, local_time)
+            AnimMode::Reverse{len,speed,..}=>{
+                len - (time / speed)  % len
             },
-            AnimMode::Bounce{len,speed,repeats,..}=>{
-                let loops = (time / speed) / len;
+            AnimMode::Bounce{len,speed,..}=>{ 
                 let mut local_time = (time / speed)  % (len*2.0);
                 if local_time > *len{
                     local_time = 2.0*len - local_time;
                 };
-                (loops > *repeats, local_time)
+                local_time
             },
             AnimMode::BounceForever{len,speed,..}=>{
                 let mut local_time = (time / speed)  % (len*2.0);
                 if local_time > *len{
                     local_time = 2.0*len - local_time;
                 };
-                (false, local_time)
+                local_time
             },
             AnimMode::Forever{speed,..}=>{
                 let local_time = time / speed;
-                (false, local_time)
+                local_time
             },
             AnimMode::LoopForever{len, speed, ..}=>{
                 let local_time = (time / speed)  % len;
-                (false, local_time)
+                local_time
             },
             AnimMode::ReverseForever{len, speed, ..}=>{
                 let local_time = len - (time / speed)  % len;
-                (false, local_time)
+                local_time
             },
         }
     }
 }
 
-trait AccessInstanceProp<T>{
+trait ComputeTrackValue<T>{
     fn lerp_prop(&self, b:&T, f:f32)->T;
-    fn write_prop(&self, cx:&mut Cx, area:&Area, prop_name:&str);
-    fn read_prop(cx:&Cx, area:&Area, prop_name:&str)->T;
 }
 
-impl AccessInstanceProp<f32> for f32{
+impl ComputeTrackValue<f32> for f32{
     fn lerp_prop(&self, b:&f32, f:f32)->f32{
         *self + (*b - *self) * f
     }
-
-    fn write_prop(&self, cx:&mut Cx, area:&Area, prop_name:&str){
-        area.write_prop_float(cx, prop_name, *self);
-    }
-
-    fn read_prop(cx:&Cx, area:&Area, prop_name:&str)->f32{
-        area.read_prop_float(cx, prop_name)
-    }
 }
 
-impl AccessInstanceProp<Vec2> for Vec2{
+impl ComputeTrackValue<Vec2> for Vec2{
     fn lerp_prop(&self, b:&Vec2, f:f32)->Vec2{
         Vec2{
             x:self.x + (b.x - self.x) * f,
             y:self.y + (b.y - self.y) * f
         }
     }
-
-    fn write_prop(&self, cx:&mut Cx, area:&Area, prop_name:&str){
-        area.write_prop_vec2(cx, prop_name, self);
-    }
-
-    fn read_prop(cx:&Cx, area:&Area, prop_name:&str)->Vec2{
-        area.read_prop_vec2(cx, prop_name)
-    }
 }
 
-impl AccessInstanceProp<Vec3> for Vec3{
+impl ComputeTrackValue<Vec3> for Vec3{
     fn lerp_prop(&self, b:&Vec3, f:f32)->Vec3{
         Vec3{
             x:self.x + (b.x - self.x) * f,
@@ -460,18 +566,9 @@ impl AccessInstanceProp<Vec3> for Vec3{
             z:self.z + (b.z - self.z) * f
         }
     }
-
-    fn write_prop(&self, cx:&mut Cx, area:&Area, prop_name:&str){
-        area.write_prop_vec3(cx, prop_name, self);
-    }
-
-    fn read_prop(cx:&Cx, area:&Area, prop_name:&str)->Vec3{
-        area.read_prop_vec3(cx, prop_name)
-    }
-
 }
 
-impl AccessInstanceProp<Vec4> for Vec4{
+impl ComputeTrackValue<Vec4> for Vec4{
     fn lerp_prop(&self, b:&Vec4, f:f32)->Vec4{
         let of = 1.0-f;
         Vec4{
@@ -480,13 +577,5 @@ impl AccessInstanceProp<Vec4> for Vec4{
             z:self.z * of + b.z * f,
             w:self.w * of + b.w * f
         }
-    }
-
-    fn write_prop(&self, cx:&mut Cx, area:&Area, prop_name:&str){
-        area.write_prop_vec4(cx, prop_name, self);
-    }
-
-    fn read_prop(cx:&Cx, area:&Area, prop_name:&str)->Vec4{
-        area.read_prop_vec4(cx, prop_name)
     }
 }

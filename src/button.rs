@@ -5,12 +5,12 @@ use shui::*;
 #[derive(Clone)]
 pub struct Button{
     pub view:View,
-    pub area:Area,
+    pub bg_area:Area,
     pub layout:Layout,
     pub bg: Quad,
     pub bg_layout:Layout,
     pub text: Text,
-    pub states:AnimStates<ButtonState>,
+    pub anim:Animation<ButtonState>,
     pub label:String,
     pub event:ButtonEvent
 }
@@ -36,7 +36,7 @@ impl Style for Button{
 
         Self{
             view:View::new(),
-            area:Area::zero(),
+            bg_area:Area::zero(),
             layout:Layout{
                 w:Computed,
                 h:Computed,
@@ -53,21 +53,26 @@ impl Style for Button{
                 ..Layout::padded(5.0)
             },
             label:"OK".to_string(),
-            states:AnimStates::new(
+            anim:Animation::new(
                 ButtonState::Default,
                 vec![
+                    AnimState::new(
+                        ButtonState::Default,
+                        AnimMode::Single{speed:1.0, len:1.0, cut:true}, 
+                        vec![
+                            AnimTrack::vec4("bg.color", vec![ (1.0,color("gray")) ])
+                        ]
+                    ),
                     AnimState::new(
                         ButtonState::Over,
                         AnimMode::Single{speed:1.0, len:1.0, cut:true}, 
                         vec![
-                            AnimTrack::vec4("bg", "color", vec![ (1.0,color("red")) ])
+                            AnimTrack::vec4("bg.color", vec![ (1.0,color("red")) ])
                         ]
                     ) 
                 ]
             ),
             bg:Quad{
-                //shader_id:cx.shaders.add(sh),
-                color:color("gray"),
                 ..Style::style(cx)
             },
             text:Text{..Style::style(cx)},
@@ -81,16 +86,40 @@ pub enum ButtonEvent{
     None,
     Clicked
 }
+/*
+// lifecycle traits we need to implement
+impl Construct for Button{ // called the first time its constructed
+    fn construct(&mut self, cx: &mut Cx){
+        self.handle(cx, Event::Construct);
+    }
+}
+
+impl Destruct for Button{ // called when destructed
+    fn destruct(&mut self, cx: &mut Cx){
+        self.handle(cx, Event::Destruct);
+    }
+}
+
+impl Update for Button{ // called when updated
+    fn update(&mut self, cx: &mut Cx){
+        self.handle(cx, Event::Update);
+    }
+}*/
 
 impl Button{
     pub fn handle(&mut self, cx:&mut Cx, event:&Event)->ButtonEvent{
-        match event.hits(&self.area, cx){
+        match event.hits(&self.bg_area, cx){
             Event::Animate(ae)=>{
-                self.states.animate(cx, "bg", &self.area, &self.area, ae);
+                // how would you write this nondeclaratively?
+                let color = self.anim.calc_vec4(cx, "bg.color", ae.time, self.bg_area.read_vec4(cx, "color"));
+                self.bg_area.write_vec4(cx, "color", color);
             },
             Event::FingerDown(_fe)=>{
+               
                 self.event = ButtonEvent::Clicked;
-                self.states.change(cx, ButtonState::Over, &self.area);
+                self.anim.change_state(cx, ButtonState::Over);
+                // how do we capture a finger?
+                //cx.capture_finger(&self.bg_area);
             },
             Event::FingerMove(_fe)=>{
             },
@@ -102,18 +131,21 @@ impl Button{
    }
 
     pub fn draw_with_label(&mut self, cx:&mut Cx, label: &str){
-        // this marks a tree node.
+        // pull the bg color from our animation system
+        self.bg.color = self.anim.last_vec4("bg.color");
+
+        // how do we make sure it uses the values?
         self.label = label.to_string();
         //self.view.begin(cx, &self.layout);//{return};
-
         // however our turtle stack needs to remain independent
         self.bg.begin(cx, &self.bg_layout);
 
         self.text.draw_text(cx, Computed, Computed, label);
         
-        self.area = self.bg.end(cx);
+        self.bg_area = self.bg.end(cx);
 
-       // self.view.end(cx);
+        self.anim.set_area(cx, &self.bg_area); // this changes our area to a new one
+        // this also updates the capture area.
     }
 }
 

@@ -79,7 +79,7 @@ impl Quad{
     }
 
     pub fn draw_sized<'a>(&mut self, cx:&'a mut Cx, w:Value, h:Value, margin:Margin)->&'a mut DrawCall{
-        
+
         let dc = cx.drawing.instance_aligned(cx.shaders.get(self.shader_id), &mut cx.turtle);
         
         self.set_uniforms(dc);

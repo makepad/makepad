@@ -134,6 +134,10 @@ impl Cx{
                     let time = to_wasm.mf64();
                     //log!(self, "{} o clock",time);
                     event_handler(self, Event::Animate(AnimateEvent{time:time}));
+                    self.check_ended_animations(time);
+                    if self.ended_animations.len() > 0{
+                        event_handler(self, Event::AnimationEnded(AnimateEvent{time:time}));
+                    }
                 },
                 6=>{ // finger down
                     event_handler(self, Event::FingerDown(FingerDownEvent{

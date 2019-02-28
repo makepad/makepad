@@ -21,7 +21,7 @@ pub struct Cx{
     pub resources:CxResources,
 
     pub animations:Vec<AnimArea>,
-
+    pub ended_animations:Vec<AnimArea>,
     pub redraw_dirty:Option<Area>,
     pub redraw_area:Option<Area>,
     pub paint_dirty:bool,
@@ -45,6 +45,7 @@ impl Default for Cx{
             uniforms:uniforms,
             resources:CxResources{..Default::default()},
             animations:Vec::new(),
+            ended_animations:Vec::new(),
             binary_deps:Vec::new(),
             redraw_area:None,
             redraw_dirty:None,
@@ -108,6 +109,24 @@ impl Cx{
     // trigger a redraw on the UI
     pub fn redraw(&mut self, area:&Area){ 
         self.redraw_dirty = Some(area.clone())
+    }
+
+    pub fn check_ended_animations(&mut self, time:f64){
+        let mut i = 0;
+        self.ended_animations.truncate(0);
+        loop{
+            if i >= self.animations.len(){
+                break
+            }
+            let anim_start_time =self.animations[i].start_time;
+            let anim_duration =self.animations[i].duration;
+            if time - anim_start_time >= anim_duration{
+                self.ended_animations.push(self.animations.remove(i));
+            }
+            else{
+                i = i + 1;
+            }
+        }
     }
 }
 

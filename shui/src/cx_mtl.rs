@@ -202,7 +202,11 @@ impl Cx{
             if self.animations.len() != 0{
                 let time_now = precise_time_ns();
                 let time = (time_now - start_time) as f64 / 1_000_000_000.0; // keeps the error as low as possible
-                event_handler(self, Event::Animate(AnimateEvent{time:time}));                
+                event_handler(self, Event::Animate(AnimateEvent{time:time}));
+                self.check_ended_animations(time);
+                if self.ended_animations.len() > 0{
+                    event_handler(self, Event::AnimationEnded(AnimateEvent{time:time}));
+                }
             }
             // call redraw event
             if let Some(_) = &self.redraw_dirty{
@@ -217,6 +221,7 @@ impl Cx{
                 self.paint_dirty = false;
                 self.repaint(&layer, &device, &command_queue);
             }
+            
             // wait for the next event blockingly so it stops eating power
             if self.animations.len() == 0 && self.redraw_dirty.is_none(){
                 events_loop.run_forever(|winit_event|{

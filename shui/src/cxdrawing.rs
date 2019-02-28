@@ -343,8 +343,10 @@ impl View{
     }
 }
 
-// area wraps a pointer into the geometry buffers
-// and reads the geometry right out of it
+// area is the general 'pointer' used in shui, you can use it to 
+// point to both a View and an Instance
+// and it allows access to the underlying geometry data via shader-provided
+// offsets 
 #[derive(Clone, Default, Debug, PartialEq)]
 pub struct Area{
     pub draw_list_id:usize,
@@ -360,6 +362,9 @@ impl Area{
 
     pub fn get_rect_sep(&self, drawing:&CxDrawing, shaders:&CxShaders)->Rect{
         if self.instance_count == 0{
+            if self.draw_list_id != 0{ // return a draw_list rect
+
+            }
             return Rect::zero()
         }
         let draw_list = &drawing.draw_lists[self.draw_list_id];
@@ -405,20 +410,21 @@ impl Area{
         }
     }
 
-  pub fn write_prop_float(&self, cx:&mut Cx, prop_name:&str, value:f32){
+  pub fn write_float(&self, cx:&mut Cx, prop_name:&str, value:f32){
         let draw_list = &mut cx.drawing.draw_lists[self.draw_list_id];
         let draw_call = &mut draw_list.draw_calls[self.draw_call_id];
         let csh = &cx.shaders.compiled_shaders[draw_call.shader_id];
 
         for prop in &csh.named_instance_props.props{
             if prop.name == prop_name{
+                cx.paint_dirty = true;
                 draw_call.instance[self.instance_offset + prop.offset] = value;
                 return
             }
         }
     }
 
-    pub fn read_prop_float(&self, cx:&Cx, prop_name:&str)->f32{
+    pub fn read_float(&self, cx:&Cx, prop_name:&str)->f32{
         let draw_list = &cx.drawing.draw_lists[self.draw_list_id];
         let draw_call = &draw_list.draw_calls[self.draw_call_id];
         let csh = &cx.shaders.compiled_shaders[draw_call.shader_id];
@@ -431,13 +437,14 @@ impl Area{
         return 0.0;
     }
 
-   pub fn write_prop_vec2(&self, cx:&mut Cx, prop_name:&str, value:&Vec2){
+   pub fn write_vec2(&self, cx:&mut Cx, prop_name:&str, value:Vec2){
         let draw_list = &mut cx.drawing.draw_lists[self.draw_list_id];
         let draw_call = &mut draw_list.draw_calls[self.draw_call_id];
         let csh = &cx.shaders.compiled_shaders[draw_call.shader_id];
 
         for prop in &csh.named_instance_props.props{
             if prop.name == prop_name{
+                cx.paint_dirty = true;
                 let off = self.instance_offset + prop.offset;
                 draw_call.instance[off + 0] = value.x;
                 draw_call.instance[off + 1] = value.y;
@@ -446,7 +453,7 @@ impl Area{
         }
     }
 
-    pub fn read_prop_vec2(&self, cx:&Cx, prop_name:&str)->Vec2{
+    pub fn read_vec2(&self, cx:&Cx, prop_name:&str)->Vec2{
         let draw_list = &cx.drawing.draw_lists[self.draw_list_id];
         let draw_call = &draw_list.draw_calls[self.draw_call_id];
         let csh = &cx.shaders.compiled_shaders[draw_call.shader_id];
@@ -463,13 +470,14 @@ impl Area{
         return vec2(0.0,0.0);
     }
 
-    pub fn write_prop_vec3(&self, cx:&mut Cx, prop_name:&str, value:&Vec3){
+    pub fn write_vec3(&self, cx:&mut Cx, prop_name:&str, value:Vec3){
         let draw_list = &mut cx.drawing.draw_lists[self.draw_list_id];
         let draw_call = &mut draw_list.draw_calls[self.draw_call_id];
         let csh = &cx.shaders.compiled_shaders[draw_call.shader_id];
 
         for prop in &csh.named_instance_props.props{
             if prop.name == prop_name{
+                cx.paint_dirty = true;
                 let off = self.instance_offset + prop.offset;
                 draw_call.instance[off + 0] = value.x;
                 draw_call.instance[off + 1] = value.y;
@@ -479,7 +487,7 @@ impl Area{
         }
     }
 
-    pub fn read_prop_vec3(&self, cx:&Cx, prop_name:&str)->Vec3{
+    pub fn read_vec3(&self, cx:&Cx, prop_name:&str)->Vec3{
         let draw_list = &cx.drawing.draw_lists[self.draw_list_id];
         let draw_call = &draw_list.draw_calls[self.draw_call_id];
         let csh = &cx.shaders.compiled_shaders[draw_call.shader_id];
@@ -497,13 +505,14 @@ impl Area{
         return vec3(0.0,0.0,0.0);
     }
 
-    pub fn write_prop_vec4(&self, cx:&mut Cx, prop_name:&str, value:&Vec4){
+    pub fn write_vec4(&self, cx:&mut Cx, prop_name:&str, value:Vec4){
         let draw_list = &mut cx.drawing.draw_lists[self.draw_list_id];
         let draw_call = &mut draw_list.draw_calls[self.draw_call_id];
         let csh = &cx.shaders.compiled_shaders[draw_call.shader_id];
 
         for prop in &csh.named_instance_props.props{
             if prop.name == prop_name{
+                cx.paint_dirty = true;
                 let off = self.instance_offset + prop.offset;
                 draw_call.instance[off + 0] = value.x;
                 draw_call.instance[off + 1] = value.y;
@@ -514,7 +523,7 @@ impl Area{
         }
     }
 
-    pub fn read_prop_vec4(&self, cx:&Cx, prop_name:&str)->Vec4{
+    pub fn read_vec4(&self, cx:&Cx, prop_name:&str)->Vec4{
         let draw_list = &cx.drawing.draw_lists[self.draw_list_id];
         let draw_call = &draw_list.draw_calls[self.draw_call_id];
         let csh = &cx.shaders.compiled_shaders[draw_call.shader_id];

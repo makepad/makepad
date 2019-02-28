@@ -90,6 +90,7 @@ pub enum Event{
     None,
     Init,
     Redraw,
+    AnimationEnded(AnimateEvent),
     Animate(AnimateEvent),
     CloseRequested,
     Resized(ResizedEvent),
@@ -112,6 +113,13 @@ impl Event{
         match self{
             Event::Animate(_)=>{
                 for anim in &cx.animations{
+                    if anim.area == *area{
+                        return self
+                    }
+                }
+            },
+            Event::AnimationEnded(_)=>{
+                for anim in &cx.ended_animations{
                     if anim.area == *area{
                         return self
                     }
