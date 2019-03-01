@@ -55,14 +55,14 @@ impl Style for Button{
                         ButtonState::Default,
                         AnimMode::Single{speed:1.0, len:1.0, cut:true}, 
                         vec![
-                            AnimTrack::vec4("bg.color", vec![ (1.0,color("gray")) ])
+                            AnimTrack::vec4("bg.color", vec![ (1.0,cx.style.bg_normal.clone()) ])
                         ]
                     ),
                     AnimState::new(
                         ButtonState::Over,
                         AnimMode::Single{speed:1.0, len:1.0, cut:true}, 
                         vec![
-                            AnimTrack::vec4("bg.color", vec![ (1.0,color("red")) ])
+                            AnimTrack::vec4("bg.color", vec![ (1.0,cx.style.bg_top.clone()) ])
                         ]
                     ) 
                 ]

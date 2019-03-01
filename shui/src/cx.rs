@@ -13,6 +13,7 @@ pub use crate::cx_turtle::Value::Computed;
 pub use crate::cx_turtle::Value::Fixed;
 pub use crate::cx_turtle::Value::Percent;
 pub use crate::cx_turtle::Value::Expression;
+pub use crate::style::*;
 
 #[cfg(feature = "ogl")]
 pub use crate::cx_ogl::*; 
@@ -64,6 +65,8 @@ pub struct Cx{
 
     pub resources:CxResources,
 
+    pub style:StyleSheet,
+
     pub binary_deps:Vec<BinaryDep>
  }
 
@@ -100,7 +103,7 @@ impl Default for Cx{
 
             animations:Vec::new(),
             ended_animations:Vec::new(),
-
+            style: StyleSheet{..Default::default()},
             resources:CxResources{..Default::default()},
             binary_deps:Vec::new()
         }

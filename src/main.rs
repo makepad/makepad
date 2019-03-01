@@ -40,4 +40,4 @@ impl App{
     }
 }
 
-main_app!(App, "My Application");
+main_app!(App, "My App");

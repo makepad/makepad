@@ -31,6 +31,7 @@ mod shadergen;
 mod quad;
 mod text;
 mod events;
+mod style;
 
 pub use crate::cx::*;
 pub use crate::quad::*;

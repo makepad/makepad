@@ -25,12 +25,12 @@ impl Style for Text{
         Self::def_shader(&mut sh);
         Self{
             shader_id:cx.add_shader(sh),
-            font_id:cx.load_font("resources/ubuntu_regular_256.font"),
+            font_id:cx.load_font(&cx.style.normal_font.clone()),
             text:"".to_string(),
-            font_size:10.0,
+            font_size:cx.style.font_size,
             line_spacing:1.1,
             wrapping:Wrapping::Word,
-            color:Vec4{x:1.0,y:1.0,z:1.0,w:1.0}
+            color:cx.style.text_normal.clone()
         }
     }
 }

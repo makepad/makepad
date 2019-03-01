@@ -48,7 +48,7 @@ where ID:std::cmp::Ord + Clone
         return Some(unsafe{std::mem::transmute(element)});
     }
 }
-
+/*
 // and we'll implement IntoIterator
 impl<'a, T, ID> IntoIterator for &'a mut Elements<T,ID>
 where ID:std::cmp::Ord + Clone
@@ -59,7 +59,7 @@ where ID:std::cmp::Ord + Clone
     fn into_iter(self) -> Self::IntoIter {
         ElementsIterator::new(self)
     }
-}
+}*/
 
 impl<T,ID> Elements<T,ID>
 where T:Clone + ElementLife, ID:std::cmp::Ord + Clone
@@ -160,7 +160,7 @@ impl<'a, T> Iterator for ElementIterator<'a, T>
         return Some(unsafe{std::mem::transmute(element.unwrap())});
     }
 }
-
+/*
 // and we'll implement IntoIterator
 impl<'a, T> IntoIterator for &'a mut Element<T>
 {
@@ -171,7 +171,7 @@ impl<'a, T> IntoIterator for &'a mut Element<T>
         ElementIterator::new(self)
     }
 }
-
+*/
 impl<T> Element<T>
 where T:Clone + ElementLife
 {
