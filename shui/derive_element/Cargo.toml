@@ -1,0 +1,16 @@
+[package]
+name = "derive_element"
+version = "0.1.0"
+authors = ["arc"]
+edition = "2018"
+
+[lib]
+proc-macro = true
+
+[dependencies]
+quote = "*"
+proc-macro2 = "*"
+
+[dependencies.syn]
+version = "*"
+features = ["full"]

@@ -20,8 +20,6 @@ impl Style for App{
 
 impl App{
     fn handle(&mut self, cx:&mut Cx, event:&Event){
-        if let Event::Redraw = event{return self.draw(cx);}
-
         for ok in self.ok.all(){
             if let ButtonEvent::Clicked = ok.handle(cx, event){
                 // we got clicked!

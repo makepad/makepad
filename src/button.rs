@@ -1,8 +1,6 @@
-//use crate::math::*;
-//use crate::shader::*;
 use shui::*;
 
-#[derive(Clone)]
+#[derive(Clone, Element)]
 pub struct Button{
     pub view:View,
     pub bg_area:Area,
@@ -87,20 +85,6 @@ pub enum ButtonEvent{
     Clicked
 }
 
-impl ElementLife for Button{
-    fn construct(&mut self, cx: &mut Cx){
-        self.handle(cx, &Event::Construct);
-    }
-
-    fn destruct(&mut self, cx: &mut Cx){
-        self.handle(cx, &Event::Destruct);
-    }
-
-    fn update(&mut self, cx: &mut Cx){
-        self.handle(cx, &Event::Update);
-    }
-}
-
 impl Button{
     pub fn handle(&mut self, cx:&mut Cx, event:&Event)->ButtonEvent{
         match event.hits(&self.bg_area, cx){
@@ -139,20 +123,3 @@ impl Button{
         // this also updates the capture area.
     }
 }
-
-
-
-/*
-//self.bg.draw_sized(cx, Fixed(40.0),Fixed(140.0),Margin::zero());
-self.time = self.time + 0.01;
-for i in 0..200000{
-    self.bg.color.x = 0.5+0.5*f32::sin(i as f32 / 10.0+self.time);
-    self.bg.color.y = 0.5+0.5*f32::cos(i as f32 / 10.0+self.time);
-    self.bg.color.z = 0.5+0.5*f32::cos(i as f32 / 10.0+1.5+self.time);
-    self.bg.draw_at(cx, 
-        f32::sin(i as f32 / 5.0+self.time), 
-        f32::cos(i as f32 / 3.2+self.time),
-        0.01, 0.01);
-self.text.draw_text(cx, "HELLO WORLD");
-}*/
- 
