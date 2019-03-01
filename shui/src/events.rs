@@ -1,6 +1,4 @@
-use crate::cxdrawing_shared::*;
-use crate::area::*;
-use crate::math::*;
+use crate::cx::*;
 
 #[derive(Clone, Debug)]
 pub enum MouseButton{
@@ -110,17 +108,17 @@ impl Default for Event{
 }
 
 impl Event{
-    pub fn hits(&self, area:&Area, cd:&CxDrawing)->&Event{
+    pub fn hits(&self, area:&Area, cx:&Cx)->&Event{
         match self{
             Event::Animate(_)=>{
-                for anim in &cd.animations{
+                for anim in &cx.animations{
                     if anim.area == *area{
                         return self
                     }
                 }
             },
             Event::AnimationEnded(_)=>{
-                for anim in &cd.ended_animations{
+                for anim in &cx.ended_animations{
                     if anim.area == *area{
                         return self
                     }
@@ -132,17 +130,17 @@ impl Event{
                 }
             },
             Event::FingerMove(fe)=>{
-                if area.contains(fe.x, fe.y, &cd){
+                if area.contains(fe.x, fe.y, &cx){
                     return self;
                 }
             },
             Event::FingerDown(fe)=>{
-                if area.contains(fe.x, fe.y, &cd){
+                if area.contains(fe.x, fe.y, &cx){
                     return self;
                 }
             },
             Event::FingerUp(fe)=>{
-                if area.contains(fe.x, fe.y, &cd){
+                if area.contains(fe.x, fe.y, &cx){
                     return self;
                 }
             },

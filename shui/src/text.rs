@@ -1,8 +1,4 @@
-use crate::shader::*;
-use crate::cx_shared::*;
-use crate::cxdrawing_shared::*;
-use crate::area::*;
-use crate::cxturtle::*;
+use crate::cx::*;
 
 #[derive(Clone)]
 pub enum Wrapping{
@@ -28,7 +24,7 @@ impl Style for Text{
         let mut sh = Shader::def(); 
         Self::def_shader(&mut sh);
         Self{
-            shader_id:cx.drawing.add_shader(sh),
+            shader_id:cx.add_shader(sh),
             font_id:cx.load_font("resources/ubuntu_regular_256.font"),
             text:"".to_string(),
             font_size:10.0,
@@ -110,20 +106,16 @@ impl Text{
     }
 
     pub fn draw_text(&mut self, cx:&mut Cx, _x:Value, _y:Value, text:&str)->Area{
-        let area = cx.new_aligned_instance(self.shader_id);
-
-        let font_opt = cx.fonts.get(self.font_id);
-        let cd = &mut cx.drawing;
-
-        if font_opt.is_none(){
+        if !cx.fonts[self.font_id].loaded{
             return Area::Empty
         }
-        let font = font_opt.as_ref().unwrap();
 
-        if area.need_uniforms_now(cd){
-            area.uniform_texture(cd, "texture", font.texture_id);
-            area.uniform_vec2f(cd, "tex_size", font.width as f32, font.height as f32);
-            area.uniform_vec4f(cd, "list_clip", -50000.0,-50000.0,50000.0,50000.0);
+        let area = cx.new_aligned_instance(self.shader_id);
+
+        if area.need_uniforms_now(cx){
+            area.uniform_texture_2d(cx, "texture", cx.fonts[self.font_id].texture_id);
+            area.uniform_vec2f(cx, "tex_size", cx.fonts[self.font_id].width as f32, cx.fonts[self.font_id].height as f32);
+            area.uniform_vec4f(cx, "list_clip", -50000.0,-50000.0,50000.0,50000.0);
         }
 
         let mut chunk = Vec::new();
@@ -134,11 +126,11 @@ impl Text{
             let mut emit = last;
 
             if c < '\u{10000}'{
-                slot = font.unicodes[c as usize];
+                slot = cx.fonts[self.font_id].unicodes[c as usize];
             }
 
             if slot != 0 {
-                let glyph = &font.glyphs[slot];
+                let glyph = &cx.fonts[self.font_id].glyphs[slot];
                 width += glyph.advance * self.font_size;
                 match self.wrapping{
                     Wrapping::Char=>{
@@ -164,15 +156,15 @@ impl Text{
             }
             if emit{
                 let height = self.font_size * self.line_spacing;
-                let mut geom = cx.turtle.walk_wh(
+                let mut geom = cx.walk_turtle(
                     Value::Fixed(width), 
                     Value::Fixed(height), 
                     Margin::zero(),
                     None
                 );
                 for wc in &chunk{
-                    let slot = font.unicodes[*wc as usize];
-                    let glyph = &font.glyphs[slot];
+                    let slot = cx.fonts[self.font_id].unicodes[*wc as usize];
+                    let glyph = &cx.fonts[self.font_id].glyphs[slot];
                     let w = glyph.advance * self.font_size;
                     
                     let data = [
@@ -187,7 +179,7 @@ impl Text{
                         /*font_size*/ self.font_size,
                         /*font_base*/ 1.0
                     ];
-                    area.append_data(cd, &data);
+                    area.append_data(cx, &data);
 
                     geom.x += w;
                     count += 1;
@@ -196,7 +188,7 @@ impl Text{
                 chunk.truncate(0);
             }
         }
-        cx.turtle.instance_aligned_set_count(count)
+        cx.instance_aligned_set_count(count)
     }
 }
 

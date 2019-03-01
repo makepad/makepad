@@ -1,9 +1,8 @@
-use crate::cx_shared::*;
-use crate::events::*;
+use crate::cx::*;
+
 use std::io::prelude::*;
 use std::fs::File;
 use std::io;
-use crate::math::*;
 
 #[derive(Clone, Default)]
 pub struct CxWinit{
@@ -77,15 +76,15 @@ impl Cx{
                 },
                 winit::WindowEvent::Resized(logical_size) => {
                     let dpi_factor = glutin_window.get_hidpi_factor();
-                    let old_dpi_factor = self.turtle.target_dpi_factor as f32;
-                    let old_size = self.turtle.target_size.clone();
-                    self.turtle.target_dpi_factor = dpi_factor as f32;
-                    self.turtle.target_size = vec2(logical_size.width as f32, logical_size.height as f32);
+                    let old_dpi_factor = self.target_dpi_factor as f32;
+                    let old_size = self.target_size.clone();
+                    self.target_dpi_factor = dpi_factor as f32;
+                    self.target_size = vec2(logical_size.width as f32, logical_size.height as f32);
                     return Event::Resized(ResizedEvent{
                         old_size: old_size,
                         old_dpi_factor: old_dpi_factor,
-                        new_size: self.turtle.target_size.clone(),
-                        new_dpi_factor: self.turtle.target_dpi_factor
+                        new_size: self.target_size.clone(),
+                        new_dpi_factor: self.target_dpi_factor
                     })
                 },
                 _ => ()
@@ -96,10 +95,9 @@ impl Cx{
     }
 
     pub fn load_binary_deps_from_file(&mut self){
-        let fonts = &mut self.fonts;
-        let len = fonts.font_resources.len();
+        let len = self.fonts.len();
         for i in 0..len{
-            let resource_name = &fonts.font_resources[i].name.clone();
+            let resource_name = &self.fonts[i].name.clone();
             // lets turn a file into a binary dep
             let file_result = File::open(&resource_name);
             if let Ok(mut file) = file_result{
@@ -108,7 +106,7 @@ impl Cx{
                 if file.read_to_end(&mut buffer).is_ok(){
                     // store it in a bindep
                     let mut bin_dep = BinaryDep::new_from_vec(resource_name.clone(), &buffer);
-                    let _err = fonts.load_from_binary_dep(&mut bin_dep, &mut self.textures);
+                    let _err = self.load_font_from_binary_dep(&mut bin_dep);
 
                     //     println!("Error loading font {} ", resource_name);
                     //};

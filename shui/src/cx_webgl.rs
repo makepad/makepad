@@ -1,31 +1,26 @@
 use std::mem;
 use std::ptr;
 
-use crate::cx_shared::*;
-use crate::shader::*;
-use crate::cxdrawing::*;
-use crate::cxdrawing_gl::*;
-use crate::events::*;
-use crate::area::*;
+use crate::cx::*;
 use std::alloc;
 
 impl Cx{
      pub fn exec_draw_list(&mut self, draw_list_id: usize){
         // tad ugly otherwise the borrow checker locks 'self' and we can't recur
-        let draw_calls_len = self.drawing.draw_lists[draw_list_id].draw_calls_len;
+        let draw_calls_len = self.draw_lists[draw_list_id].draw_calls_len;
 
         for draw_call_id in 0..draw_calls_len{
 
-            let sub_list_id = self.drawing.draw_lists[draw_list_id].draw_calls[draw_call_id].sub_list_id;
+            let sub_list_id = self.draw_lists[draw_list_id].draw_calls[draw_call_id].sub_list_id;
             if sub_list_id != 0{
                 self.exec_draw_list(sub_list_id);
             }
             else{ 
-                let draw_list = &mut self.drawing.draw_lists[draw_list_id];
+                let draw_list = &mut self.draw_lists[draw_list_id];
                 let draw_call = &mut draw_list.draw_calls[draw_call_id];
-                let csh = &self.drawing.compiled_shaders[draw_call.shader_id];
+                let csh = &self.compiled_shaders[draw_call.shader_id];
 
-                if draw_call.update_frame_id == self.drawing.frame_id{
+                if draw_call.update_frame_id == self.frame_id{
                     // update the instance buffer data
                     draw_call.resources.check_attached_vao(csh, &mut self.resources);
 
@@ -37,8 +32,8 @@ impl Cx{
                 }
 
                 // update/alloc textures?
-                for tex_id in &draw_call.textures{
-                    let tex = &mut self.textures.textures[*tex_id as usize];
+                for tex_id in &draw_call.textures_2d{
+                    let tex = &mut self.textures_2d[*tex_id as usize];
                     if tex.dirty{
                         tex.upload_to_device(&mut self.resources);
                     }
@@ -48,19 +43,19 @@ impl Cx{
                     draw_call.shader_id,
                     draw_call.resources.vao_id,
                     &self.uniforms,
-                    self.drawing.frame_id as usize, // update once a frame
+                    self.frame_id as usize, // update once a frame
                     &draw_list.uniforms,
                     draw_list_id, // update on drawlist change
                     &draw_call.uniforms,
                     draw_call.draw_call_id, // update on drawcall id change
-                    &draw_call.textures
+                    &draw_call.textures_2d
                 );
             }
         }
     }
 
     pub fn repaint(&mut self){
-        self.resources.from_wasm.clear(self.drawing.clear_color.x, self.drawing.clear_color.y, self.drawing.clear_color.z, self.drawing.clear_color.w);
+        self.resources.from_wasm.clear(self.clear_color.x, self.clear_color.y, self.clear_color.z, self.clear_color.w);
         self.prepare_frame();        
         self.exec_draw_list(0);
     }
@@ -86,13 +81,13 @@ impl Cx{
                     
                     // send the UI our deps, overlap with shadercompiler
                     let mut load_deps = Vec::new();
-                    for font_resource in &self.fonts.font_resources{
-                        load_deps.push(font_resource.name.clone());
+                    for font in &self.fonts{
+                        load_deps.push(font.name.clone());
                     }
                     // other textures, things
                     self.resources.from_wasm.load_deps(load_deps);
 
-                    self.drawing.compile_all_webgl_shaders(&mut self.resources);
+                    self.compile_all_webgl_shaders();
                 },
                 2=>{ // deps_loaded
                     let len = to_wasm.mu32();
@@ -103,12 +98,12 @@ impl Cx{
                     }
                     
                     // lets load the fonts from binary deps
-                    let num_fonts = self.fonts.font_resources.len();
+                    let num_fonts = self.fonts.len();
                     for i in 0..num_fonts{
-                        let font_file = self.fonts.font_resources[i].name.clone();
+                        let font_file = self.fonts[i].name.clone();
                         let bin_dep = self.get_binary_dep(&font_file);
                         if let Some(mut bin_dep) = bin_dep{
-                            if let Err(msg) = self.fonts.load_from_binary_dep(&mut bin_dep, &mut self.textures){
+                            if let Err(msg) = self.load_font_from_binary_dep(&mut bin_dep){
                                 self.resources.from_wasm.log(&format!("Error loading font! {}", msg));
                             }
                         }
@@ -118,17 +113,17 @@ impl Cx{
                 3=>{ // init
                     
 
-                    self.turtle.target_size = vec2(to_wasm.mf32(),to_wasm.mf32());
-                    self.turtle.target_dpi_factor = to_wasm.mf32();
+                    self.target_size = vec2(to_wasm.mf32(),to_wasm.mf32());
+                    self.target_dpi_factor = to_wasm.mf32();
                     event_handler(self, Event::Init); 
-                    self.drawing.dirty_area = Area::All;
+                    self.dirty_area = Area::All;
                 },
                 4=>{ // resize
-                    self.turtle.target_size = vec2(to_wasm.mf32(),to_wasm.mf32());
-                    self.turtle.target_dpi_factor = to_wasm.mf32();
+                    self.target_size = vec2(to_wasm.mf32(),to_wasm.mf32());
+                    self.target_dpi_factor = to_wasm.mf32();
                     
                     // do our initial redraw and repaint
-                    self.drawing.dirty_area = Area::All;
+                    self.dirty_area = Area::All;
                 },
                 5=>{ // animation_frame
                     is_animation_frame = true;
@@ -136,7 +131,7 @@ impl Cx{
                     //log!(self, "{} o clock",time);
                     event_handler(self, Event::Animate(AnimateEvent{time:time}));
                     self.check_ended_animations(time);
-                    if self.drawing.ended_animations.len() > 0{
+                    if self.ended_animations.len() > 0{
                         event_handler(self, Event::AnimationEnded(AnimateEvent{time:time}));
                     }
                 },
@@ -202,16 +197,16 @@ impl Cx{
             };
         };
 
-        if !self.drawing.dirty_area.is_empty(){
-            self.drawing.dirty_area = Area::Empty;
-            self.drawing.redraw_area = self.drawing.dirty_area.clone();
-            self.drawing.frame_id += 1;
+        if !self.dirty_area.is_empty(){
+            self.dirty_area = Area::Empty;
+            self.redraw_area = self.dirty_area.clone();
+            self.frame_id += 1;
             event_handler(self, Event::Redraw);
-            self.drawing.paint_dirty = true;
+            self.paint_dirty = true;
         }
     
-        if is_animation_frame && self.drawing.paint_dirty{
-                self.drawing.paint_dirty = false;
+        if is_animation_frame && self.paint_dirty{
+                self.paint_dirty = false;
             self.repaint();
         }
 
@@ -221,10 +216,10 @@ impl Cx{
         // request animation frame if still need to redraw, or repaint
         // we use request animation frame for that.
         let mut req_anim_frame = false;
-        if !self.drawing.dirty_area.is_empty(){
+        if !self.dirty_area.is_empty(){
             req_anim_frame = true
         }
-        else if self.drawing.animations.len()> 0 || self.drawing.paint_dirty{
+        else if self.animations.len()> 0 || self.paint_dirty{
             req_anim_frame = true
         }
         if req_anim_frame{
@@ -248,6 +243,90 @@ impl Cx{
         self.resources.from_wasm.log(val)
     }
 
+
+    pub fn compile_all_webgl_shaders(&mut self){
+        for sh in &self.shaders{
+            let csh = Self::compile_webgl_shader(self.compiled_shaders.len(), &sh, &mut self.resources);
+            if let Ok(csh) = csh{
+                self.compiled_shaders.push(CompiledShader{
+                    shader_id:self.compiled_shaders.len(),
+                    ..csh
+                });
+            }
+            else if let Err(err) = csh{
+                self.resources.from_wasm.log(&format!("GOT ERROR: {}", err.msg));
+                self.compiled_shaders.push(
+                    CompiledShader{..Default::default()}
+                )
+            }
+        };
+    }
+
+    pub fn compile_webgl_shader(shader_id:usize, sh:&Shader, resources:&mut CxResources)->Result<CompiledShader, SlErr>{
+        let ash = Self::gl_assemble_shader(sh, GLShaderType::WebGL1)?;
+        //let shader_id = self.compiled_shaders.len();
+        resources.from_wasm.compile_webgl_shader(shader_id, &ash);
+
+        let geom_ib_id = resources.get_free_index_buffer();
+        let geom_vb_id = resources.get_free_index_buffer();
+
+        resources.from_wasm.alloc_array_buffer(
+            geom_vb_id,
+            sh.geometry_vertices.len(),
+            sh.geometry_vertices.as_ptr() as *const f32
+        );
+
+        resources.from_wasm.alloc_index_buffer(
+            geom_ib_id,
+            sh.geometry_indices.len(),
+            sh.geometry_indices.as_ptr() as *const u32
+        );
+
+        let csh = CompiledShader{
+            shader_id:0,
+            geometry_slots:ash.geometry_slots,
+            instance_slots:ash.instance_slots,
+            geom_vb_id:geom_vb_id,
+            geom_ib_id:geom_ib_id,
+            uniforms_cx:ash.uniforms_cx.clone(),
+            uniforms_dl:ash.uniforms_dl.clone(),
+            uniforms_dr:ash.uniforms_dr.clone(),
+            texture_slots:ash.texture_slots.clone(),
+            rect_instance_props:ash.rect_instance_props.clone(),
+            named_instance_props:ash.named_instance_props.clone(),
+            //assembled_shader:ash,
+            ..Default::default()
+        };
+
+        Ok(csh)
+    }
+
+}
+
+#[derive(Default,Clone)]
+pub struct CompiledShader{
+    pub shader_id: usize,
+    pub geom_vb_id: usize,
+    pub geom_ib_id: usize,
+    pub instance_slots:usize,
+    pub geometry_slots:usize,
+    pub uniforms_dr: Vec<ShVar>,
+    pub uniforms_dl: Vec<ShVar>,
+    pub uniforms_cx: Vec<ShVar>,
+    pub texture_slots:Vec<ShVar>,
+    pub rect_instance_props: RectInstanceProps,
+    pub named_instance_props: NamedInstanceProps
+}
+
+#[derive(Default,Clone)]
+pub struct WebGLTexture2D{
+    pub texture_id: usize
+}
+
+#[derive(Clone, Default)]
+pub struct CxShaders{
+    pub compiled_shaders: Vec<CompiledShader>,
+    pub shaders: Vec<Shader>,
 }
 
 // storage buffers for graphics API related resources
@@ -350,6 +429,44 @@ impl DrawCallResources{
         self.inst_vb_id = 0;
     }
 }
+
+
+
+
+//  Texture
+
+
+
+#[derive(Default,Clone)]
+pub struct Texture2D{
+    pub texture_id: usize,
+    pub dirty:bool,
+    pub image: Vec<u32>,
+    pub width: usize,
+    pub height:usize
+}
+
+impl Texture2D{
+    pub fn resize(&mut self, width:usize, height:usize){
+        self.width = width;
+        self.height = height;
+        self.image.resize((width * height) as usize, 0);
+        self.dirty = true;
+    }
+
+    pub fn upload_to_device(&mut self, resources:&mut CxResources){
+        resources.from_wasm.alloc_texture(self.texture_id, self.width, self.height, &self.image);
+        self.dirty = false;
+    }
+}
+
+
+
+
+//  Wasm API
+
+
+
 
 
 #[derive(Clone)]

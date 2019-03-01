@@ -1,14 +1,8 @@
 // Shared shader-compiler code for generating GLSL and Metal shading language
 
-use crate::shader::*;
-use crate::cxdrawing::*;
-use crate::cxdrawing_shared::*;
+use crate::cx::*;
 
-#[derive(Clone, Default)]
-pub struct CxShaders{
-}
-
-impl CxDrawing{
+impl Cx{
 
     pub fn get_shader(&self, id:usize)->&CompiledShader{
         &self.compiled_shaders[id]

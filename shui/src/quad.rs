@@ -1,8 +1,4 @@
-use crate::shader::*;
-use crate::cx_shared::*;
-use crate::cxdrawing_shared::*;
-use crate::cxturtle::*;
-use crate::area::*;
+use crate::cx::*;
 
 #[derive(Clone)]
 pub struct Quad{
@@ -16,7 +12,7 @@ impl Style for Quad{
         let mut sh = Shader::def(); 
         Self::def_shader(&mut sh);
         Self{
-            shader_id:cx.drawing.add_shader(sh),
+            shader_id:cx.add_shader(sh),
             id:0,
             color:color("green")
         }
@@ -73,26 +69,25 @@ impl Quad{
         cx.end_instance()
     }
 
-    pub fn set_uniforms(&mut self, cd:&mut CxDrawing, area:&Area){
-        if area.need_uniforms_now(cd){
-            area.uniform_float(cd, "fac", 1.0);
+    pub fn set_uniforms(&mut self, cx:&mut Cx, area:&Area){
+        if area.need_uniforms_now(cx){
+            area.uniform_float(cx, "fac", 1.0);
         }
     }
 
     pub fn draw_sized(&mut self, cx:&mut Cx, w:Value, h:Value, margin:Margin)->Area{
         let area = cx.new_aligned_instance(self.shader_id);
-        let cd = &mut cx.drawing;
 
-        self.set_uniforms(cd, &area);
+        self.set_uniforms(cx, &area);
         
-        let geom = cx.turtle.walk_wh(w, h, margin, None);
+        let geom = cx.walk_turtle(w, h, margin, None);
         
         // lets store our instance onto the turtle
         let data = [
             /*x,y,w,h*/geom.x,geom.y,geom.w,geom.h,
             /*color*/self.color.x,self.color.y,self.color.z,self.color.w
         ];
-        area.append_data(cd, &data);
+        area.append_data(cx, &data);
 
         area
     }
@@ -105,14 +100,13 @@ impl Quad{
            cx.new_instance(self.shader_id)
         };
 
-        let cd = &mut cx.drawing;
-        self.set_uniforms(cd, &area);
+        self.set_uniforms(cx, &area);
 
         let data = [
             /*x,y,w,h*/x,y,w,h,
             /*color*/self.color.x,self.color.y,self.color.z,self.color.w
         ];
-        area.append_data(cd, &data);
+        area.append_data(cx, &data);
         area
     }
 }

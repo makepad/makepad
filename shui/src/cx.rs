@@ -1,0 +1,459 @@
+pub use crate::shadergen::*;
+pub use crate::cx_fonts::*;
+pub use crate::cx_turtle::*;
+pub use crate::math::*;
+pub use crate::events::*;
+pub use crate::shader::*;
+pub use crate::colors::*;
+pub use crate::elements::*;
+pub use crate::animation::*;
+pub use crate::area::*;
+pub use crate::view::*;
+pub use crate::cx_turtle::Value::Computed;
+pub use crate::cx_turtle::Value::Fixed;
+pub use crate::cx_turtle::Value::Percent;
+pub use crate::cx_turtle::Value::Expression;
+
+#[cfg(feature = "ogl")]
+pub use crate::cx_ogl::*; 
+
+#[cfg(feature = "mtl")]
+pub use crate::cx_mtl::*; 
+
+#[cfg(feature = "webgl")]
+pub use crate::cx_webgl::*; 
+
+#[cfg(any(feature = "webgl", feature = "ogl"))]
+pub use crate::cx_gl::*; 
+
+#[cfg(any(feature = "mtl", feature = "ogl"))]
+pub use crate::cx_winit::*; 
+
+#[derive(Clone)]
+pub struct Cx{
+    pub title:String,
+    pub running:bool,
+
+    pub fonts:Vec<Font>,
+    pub textures_2d:Vec<Texture2D>,
+    pub uniforms:Vec<f32>,
+
+    pub draw_lists: Vec<DrawList>,
+    pub draw_lists_free: Vec<usize>,
+    pub instance_area_stack: Vec<Area>,
+
+    pub view_stack: Vec<View>,
+    pub current_draw_list_id: usize,
+
+    pub compiled_shaders: Vec<CompiledShader>,
+    pub shaders: Vec<Shader>,
+
+    pub dirty_area:Area,
+    pub redraw_area:Area,
+    pub paint_dirty:bool,
+    pub clear_color:Vec4,
+    pub frame_id: u64,
+
+    pub turtles:Vec<Turtle>,
+    pub align_list:Vec<Area>,
+    pub target_size:Vec2,
+    pub target_dpi_factor:f32,
+
+    pub animations:Vec<AnimArea>,
+    pub ended_animations:Vec<AnimArea>,
+
+    pub resources:CxResources,
+
+    pub binary_deps:Vec<BinaryDep>
+ }
+
+impl Default for Cx{
+    fn default()->Self{
+        let mut uniforms = Vec::<f32>::new();
+        uniforms.resize(CX_UNI_SIZE, 0.0);
+        Self{
+            title:"Hello World".to_string(),
+            running: true,
+            fonts:Vec::new(),
+            textures_2d:Vec::new(),
+            uniforms:Vec::new(),
+
+            draw_lists:Vec::new(),
+            draw_lists_free:Vec::new(),
+            instance_area_stack:Vec::new(),
+            view_stack:Vec::new(),
+            current_draw_list_id:0,
+
+            compiled_shaders:Vec::new(),
+            shaders:Vec::new(),
+
+            dirty_area:Area::All,
+            redraw_area:Area::Empty,
+            paint_dirty:true,
+            clear_color:vec4(0.3,0.3,0.3,1.0),
+            frame_id:0,
+
+            turtles:Vec::new(),
+            align_list:Vec::new(),
+            target_size:vec2(0.0,0.0),
+            target_dpi_factor:0.0,
+
+            animations:Vec::new(),
+            ended_animations:Vec::new(),
+
+            resources:CxResources{..Default::default()},
+            binary_deps:Vec::new()
+        }
+    }
+}
+
+const CX_UNI_CAMERA_PROJECTION:usize = 0;
+const CX_UNI_SIZE:usize = 16;
+
+impl Cx{
+    pub fn def_shader(sh:&mut Shader){
+        Shader::def_builtins(sh);
+        Shader::def_df(sh);
+        Cx::def_uniforms(sh);
+        DrawList::def_uniforms(sh);
+    }
+
+    pub fn def_uniforms(sh: &mut Shader){
+        sh.add_ast(shader_ast!(||{
+            let camera_projection:mat4<UniformCx>;
+        }));
+    }
+
+    pub fn uniform_camera_projection(&mut self, v:Mat4){
+        //dump in uniforms
+        self.uniforms.resize(CX_UNI_SIZE, 0.0);
+        for i in 0..16{
+            self.uniforms[CX_UNI_CAMERA_PROJECTION+i] = v.v[i];
+        }
+    }
+
+    pub fn get_binary_dep(&self, name:&str)->Option<BinaryDep>{
+        if let Some(dep) = self.binary_deps.iter().find(|v| v.name == name){
+            return Some(dep.clone());
+        }
+        None
+    }
+
+    pub fn new_empty_texture_2d(&mut self)->&mut Texture2D{
+        //let id = self.textures.len();
+        let id = self.textures_2d.len();
+        self.textures_2d.push(
+            Texture2D{
+                texture_id:id,
+                ..Default::default()
+            }
+        );
+        &mut self.textures_2d[id]
+    }
+
+    pub fn prepare_frame(&mut self){
+        let camera_projection = Mat4::ortho(
+                0.0, self.target_size.x, 0.0, self.target_size.y, -100.0, 100.0, 
+                1.0,1.0
+        );
+        self.uniform_camera_projection(camera_projection);
+        self.align_list.truncate(0);
+    }
+
+    pub fn check_ended_animations(&mut self, time:f64){
+        let mut i = 0;
+        self.ended_animations.truncate(0);
+        loop{
+            if i >= self.animations.len(){
+                break
+            }
+            let anim_start_time =self.animations[i].start_time;
+            let anim_duration =self.animations[i].duration;
+            if time - anim_start_time >= anim_duration{
+                self.ended_animations.push(self.animations.remove(i));
+            }
+            else{
+                i = i + 1;
+            }
+        }
+    }
+
+    pub fn new_aligned_instance(&mut self, shader_id:usize)->Area{
+        let area = self.new_instance(shader_id);
+        self.align_list.push(area.clone());
+        area
+    }
+
+    fn draw_call_to_area(dc:&DrawCall)->Area{
+        Area::Instance(InstanceArea{
+            draw_list_id:dc.draw_list_id,
+            draw_call_id:dc.draw_call_id,
+            instance_offset:dc.current_instance_offset,
+            instance_count:1,
+            instance_writer:0
+        })
+    }
+
+    pub fn new_instance(&mut self, shader_id:usize)->Area{
+        let sh = &self.compiled_shaders[shader_id];
+        let draw_list = &mut self.draw_lists[self.current_draw_list_id];
+        
+        // find our drawcall in the filled draws
+        for i in (0..draw_list.draw_calls_len).rev(){
+            if draw_list.draw_calls[i].shader_id == sh.shader_id{
+                // reuse this drawcmd.
+                let dc = &mut draw_list.draw_calls[i];
+                dc.current_instance_offset = dc.instance.len();
+                dc.need_uniforms_now = false;
+                return dc.get_current_area();
+            }
+        }
+
+        // we need a new draw
+        let id = draw_list.draw_calls_len;
+        draw_list.draw_calls_len = draw_list.draw_calls_len + 1;
+        
+        // see if we need to add a new one
+        if id >= draw_list.draw_calls.len(){
+            draw_list.draw_calls.push(DrawCall{
+                draw_call_id:draw_list.draw_calls.len(),
+                draw_list_id:self.current_draw_list_id,
+                sub_list_id:0,
+                shader_id:sh.shader_id,
+                instance:Vec::new(),
+                uniforms:Vec::new(),
+                textures_2d:Vec::new(),
+                current_instance_offset:0,
+                need_uniforms_now:true,
+                update_frame_id:self.frame_id,
+                resources:DrawCallResources{..Default::default()}
+            });
+            let dc = &mut draw_list.draw_calls[id];
+            return dc.get_current_area();
+        }
+
+        // reuse a draw
+        let dc = &mut draw_list.draw_calls[id];
+        dc.shader_id = sh.shader_id;
+        // truncate buffers and set update frame
+        dc.instance.truncate(0);
+        dc.current_instance_offset = 0;
+        dc.uniforms.truncate(0);
+        dc.textures_2d.truncate(0);
+        dc.update_frame_id = self.frame_id;
+        dc.need_uniforms_now = true;
+        return dc.get_current_area();
+    }
+
+
+    // push instance so it can be written to again in pop_instance
+    pub fn begin_instance(&mut self, area:&Area, layout:&Layout){
+        self.begin_turtle(layout);
+        self.instance_area_stack.push(area.clone());
+    }
+
+    // pops instance patching the supplied geometry in the instancebuffer
+    pub fn end_instance(&mut self)->Area{
+        let area = self.instance_area_stack.pop().unwrap();
+        let rect = self.end_turtle();
+        area.set_rect(self, &rect);
+        area
+    }
+}
+
+#[derive(Default,Clone)]
+pub struct DrawCall{
+    pub draw_call_id:usize,
+    pub draw_list_id:usize,
+    pub sub_list_id:usize, // if not 0, its a subnode
+    pub shader_id:usize, // if shader_id changed, delete gl vao
+    pub instance:Vec<f32>,
+    pub current_instance_offset:usize, // offset of current instance
+    pub uniforms:Vec<f32>,  // draw uniforms
+    pub textures_2d:Vec<u32>,
+    pub update_frame_id: u64,
+    pub resources:DrawCallResources,
+    pub need_uniforms_now:bool
+}
+
+impl DrawCall{
+
+    pub fn get_current_area(&self)->Area{
+        Area::Instance(InstanceArea{
+            draw_list_id:self.draw_list_id,
+            draw_call_id:self.draw_call_id,
+            instance_offset:self.current_instance_offset,
+            instance_count:1,
+            instance_writer:0
+        })
+    }
+}
+
+// CX and DL uniforms
+const DL_UNI_PROP2:usize = 0;
+const DL_UNI_SIZE:usize = 1;
+
+#[derive(Default,Clone)]
+pub struct DrawList{
+    pub draw_calls:Vec<DrawCall>,
+    pub draw_calls_len: usize,
+    pub uniforms:Vec<f32>, // cmdlist uniforms
+    pub resources:DrawListResources,
+    pub rect:Rect
+}
+
+impl DrawList{
+    pub fn initialize(&mut self){
+        self.uniforms.resize(DL_UNI_SIZE, 0.0);
+    }
+    
+    pub fn def_uniforms(_sh:&mut Shader){
+        //sh.dl_uniform("prop2", Kind::Float);
+    }
+
+    pub fn uniform_prop2(&mut self, v:f32){
+        self.uniforms[DL_UNI_PROP2] = v;
+    }
+}
+
+pub trait Style{
+    fn style(cx:&mut Cx) -> Self;
+}
+
+#[derive(Clone)]
+pub struct BinaryDep{
+    pub name:String,
+    buffer: *const u8,
+    pub parse:isize,
+    pub length:isize
+}
+
+impl BinaryDep{
+    pub fn new_from_wasm(name:String, wasm_ptr:u32)->BinaryDep{
+        BinaryDep{
+            name:name, 
+            buffer:wasm_ptr as *const u8,
+            parse:8,
+            length:unsafe{(wasm_ptr as *const u64).read() as isize}
+        }
+    }
+
+    pub fn new_from_vec(name:String, vec_ptr:&Vec<u8>)->BinaryDep{
+        BinaryDep{
+            name:name, 
+            buffer:vec_ptr.as_ptr() as *const u8,
+            parse:0,
+            length:vec_ptr.len() as isize
+        }
+    }
+
+    pub fn u8(&mut self)->Result<u8, String>{
+        if self.parse + 1 > self.length{
+            return Err(format!("Eof on u8 file {} offset {}", self.name, self.parse))
+        }
+        unsafe{
+            let ret = self.buffer.offset(self.parse).read();
+            self.parse += 1;
+            Ok(ret)
+        }
+    }
+
+    pub fn u16(&mut self)->Result<u16, String>{
+        if self.parse+2 > self.length{
+            return Err(format!("Eof on u16 file {} offset {}", self.name, self.parse))
+        }
+        unsafe{
+            let ret = (self.buffer.offset(self.parse) as *const u16).read();
+            self.parse += 2;
+            Ok(ret)
+        }
+    }
+
+    pub fn u32(&mut self)->Result<u32, String>{
+        if self.parse+4 > self.length{
+            return Err(format!("Eof on u32 file {} offset {}", self.name, self.parse))
+        }
+        unsafe{
+            let ret = (self.buffer.offset(self.parse) as *const u32).read();
+            self.parse += 4;
+            Ok(ret)
+        }
+    }
+
+    pub fn f32(&mut self)->Result<f32, String>{
+        if self.parse+4 > self.length{
+            return Err(format!("Eof on f32 file {} offset {}", self.name, self.parse))
+        }
+        unsafe{
+            let ret = (self.buffer.offset(self.parse) as *const f32).read();
+            self.parse += 4;
+            Ok(ret)
+        }
+    }
+
+    pub fn read(&mut self, out:&mut [u8])->Result<usize, String>{
+        let len = out.len();
+        if self.parse + len as isize > self.length{
+             return Err(format!("Eof on read file {} len {} offset {}", self.name, out.len(), self.parse));
+        };
+        unsafe{
+            for i in 0..len{
+                out[i] = self.buffer.offset(self.parse + i as isize).read();
+            };
+            self.parse += len as isize;
+        }
+        Ok(len)
+    }
+}
+
+#[macro_export]
+macro_rules! log {
+    ($cx:ident, $($arg:expr),+) => {
+        $cx.log(&format!("[{}:{}] {}\n",file!(),line!(),&format!($($arg),+)))
+    };
+}
+
+#[macro_export]
+macro_rules! main_app {
+    ($app:ident, $name:expr) => {
+        //TODO do this with a macro to generate both entrypoints for App and Cx
+        pub fn main() {
+            let mut cx = Cx{
+                title:$name.to_string(),
+                ..Default::default()
+            };
+
+            let mut app = $app{
+                ..Style::style(&mut cx)
+            };
+
+            cx.event_loop(|cx, ev|{
+                app.handle(cx, &ev);
+            });
+        }
+
+        #[export_name = "create_wasm_app"]
+        pub extern "C" fn create_wasm_app()->u32{
+            let mut cx = Box::new(
+                Cx{
+                    title:$name.to_string(),
+                    ..Default::default()
+                }
+            );
+            let app = Box::new(
+                $app{
+                    ..Style::style(&mut cx)
+                }
+            );
+            Box::into_raw(Box::new((Box::into_raw(app),Box::into_raw(cx)))) as u32
+        }
+
+        #[export_name = "process_to_wasm"]
+        pub unsafe extern "C" fn process_to_wasm(appcx:u32, msg:u32)->u32{
+            let appcx = &*(appcx as *mut (*mut $app,*mut Cx));
+            (*appcx.1).process_to_wasm(msg,|cx, ev|{
+                (*appcx.0).handle(cx, &ev);
+            })
+        }
+    };
+}

@@ -1,56 +1,37 @@
-use crate::cxtextures::*;
-use crate::cx_shared::*;
-
-#[derive(Clone, Default)]
-pub struct CxFonts{
-    pub font_resources:Vec<FontResource>
-}
+use crate::cx::*;
 
 impl Cx{
     pub fn load_font(&mut self, file_name: &str)->usize{
-        let found = self.fonts.font_resources.iter().position(|v| v.name == file_name);
+        let found = self.fonts.iter().position(|v| v.name == file_name);
         if !found.is_none(){
             return found.unwrap()
         }
-        let font_id = self.fonts.font_resources.len();
-        self.fonts.font_resources.push(FontResource{
+        let font_id = self.fonts.len();
+        self.fonts.push(Font{
             name:file_name.to_string(),
-            font:None
+            loaded:false,
+            ..Default::default()
         });
         font_id
     }
-}
 
-impl CxFonts{
-    pub fn get(&self, id:usize)->&Option<Font>{
-        // lets find this font id, falling back if not found
-        let font_resource = &self.font_resources[id];
-        &font_resource.font
-    }
-
-    pub fn load_from_binary_dep(&mut self, bin_dep: &mut BinaryDep, cx_tex:&mut CxTextures)-> Result<(), String>{
-        let mut out_tex = cx_tex.add_empty();
-        let found = self.font_resources.iter().position(|v| v.name == bin_dep.name);
+    pub fn load_font_from_binary_dep(&mut self, bin_dep: &mut BinaryDep)-> Result<(), String>{
+        let found = self.fonts.iter().position(|v| v.name == bin_dep.name);
         if found.is_none(){
             return Err("Binary dep not a font".to_string());
         }
-        let font = Font::from_binary_dep(bin_dep, &mut out_tex)?;
-        let font_id = found.unwrap();
-        self.font_resources[font_id].font = Some(
-            Font{
-                font_id:self.font_resources.len(),
-                texture_id: out_tex.texture_id,
-                ..font
-            }
-        );
+        let (font,font_id, texture_id)={
+            let mut out_tex = self.new_empty_texture_2d();
+            (Font::from_binary_dep(bin_dep, &mut out_tex)?, found.unwrap(), out_tex.texture_id)
+        };
+        self.fonts[font_id] = Font{
+            font_id:self.fonts.len(),
+            texture_id: texture_id,
+            loaded:true,
+            ..font
+        };
         Ok(())
     }
-}
-
-#[derive(Default, Clone)]
-pub struct FontResource{
-    pub name:String,
-    pub font:Option<Font>
 }
 
 #[derive(Default, Clone)]
@@ -80,6 +61,8 @@ pub struct Kern{
 
 #[derive(Default, Clone)]
 pub struct Font{
+    pub name:String,
+    pub loaded:bool,
     pub font_id:usize,   
     pub width:usize,
     pub height:usize,
@@ -94,7 +77,7 @@ pub struct Font{
 }
 
 impl Font{
-    pub fn from_binary_dep(inp: &mut BinaryDep, tex:&mut crate::cxtextures::Texture) -> Result<Font, String> {
+    pub fn from_binary_dep(inp: &mut BinaryDep, tex:&mut Texture2D) -> Result<Font, String> {
         let _type_id = inp.u32()?;
 
         let mut ff = Font{
