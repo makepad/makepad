@@ -33,15 +33,10 @@ impl App{
         });
 
         for i in 0..2000{
-            //let f = ((i+cx.frame_id)%250)as f32/250.0;
-            // we add a button with a certain ID 
-            //self.ok.get(cx, i).draw_with_label(cx, &format!("{}",(i+cx.frame_id)%5000));
             self.ok.get(cx, i).draw_with_label(cx, &format!("{}",(i as u64 + cx.frame_id)%5000));
-            //self.oks.elements[i as usize].bg.color = vec4(f,1.0-f,f*0.5,1.0);
         }
 
         self.view.end(cx);
-        //cx.redraw_all();
     }
 }
 

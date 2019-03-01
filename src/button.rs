@@ -38,12 +38,9 @@ impl Style for Button{
             layout:Layout{
                 w:Computed,
                 h:Computed,
-                //w:Fixed(50.0),
-                //h:Fixed(50.0),
                 ..Layout::new()
             },
             bg_layout:Layout{
-                //w:Fixed(50.0),
                 align:Align::center(),
                 w:Computed,
                 h:Computed,
@@ -106,20 +103,15 @@ impl Button{
    }
 
     pub fn draw_with_label(&mut self, cx:&mut Cx, label: &str){
-        // pull the bg color from our animation system
+        // pull the bg color from our animation system, uses 'default' value otherwise
         self.bg.color = self.anim.last_vec4("bg.color");
 
-        // how do we make sure it uses the values?
-        self.label = label.to_string();
-        //self.view.begin(cx, &self.layout);//{return};
-        // however our turtle stack needs to remain independent
         self.bg.begin(cx, &self.bg_layout);
 
         self.text.draw_text(cx, Computed, Computed, label);
         
         self.bg_area = self.bg.end(cx);
 
-        self.anim.set_area(cx, &self.bg_area); // this changes our area to a new one
-        // this also updates the capture area.
+        self.anim.set_area(cx, &self.bg_area); // if our area changed, update animation
     }
 }
