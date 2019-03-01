@@ -86,25 +86,20 @@ pub enum ButtonEvent{
     None,
     Clicked
 }
-/*
-// lifecycle traits we need to implement
-impl Construct for Button{ // called the first time its constructed
+
+impl ElementLife for Button{
     fn construct(&mut self, cx: &mut Cx){
-        self.handle(cx, Event::Construct);
+        self.handle(cx, &Event::Construct);
     }
-}
 
-impl Destruct for Button{ // called when destructed
     fn destruct(&mut self, cx: &mut Cx){
-        self.handle(cx, Event::Destruct);
+        self.handle(cx, &Event::Destruct);
+    }
+
+    fn update(&mut self, cx: &mut Cx){
+        self.handle(cx, &Event::Update);
     }
 }
-
-impl Update for Button{ // called when updated
-    fn update(&mut self, cx: &mut Cx){
-        self.handle(cx, Event::Update);
-    }
-}*/
 
 impl Button{
     pub fn handle(&mut self, cx:&mut Cx, event:&Event)->ButtonEvent{
@@ -114,11 +109,8 @@ impl Button{
                 self.bg_area.write_vec4(cx, "color", color);
             },
             Event::FingerDown(_fe)=>{
-               
                 self.event = ButtonEvent::Clicked;
                 self.anim.change_state(cx, ButtonState::Over);
-                // how do we capture a finger?
-                //cx.capture_finger(&self.bg_area);
             },
             Event::FingerMove(_fe)=>{
             },

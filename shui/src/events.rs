@@ -87,7 +87,10 @@ pub struct RedrawEvent{
 #[derive(Clone,Debug)]
 pub enum Event{
     None,
-    Init,
+    AppInit,
+    Construct,
+    Destruct,
+    Update,
     Redraw,
     AnimationEnded(AnimateEvent),
     Animate(AnimateEvent),

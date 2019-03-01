@@ -35,3 +35,4 @@ mod events;
 pub use crate::cx::*;
 pub use crate::quad::*;
 pub use crate::text::*;
+pub use crate::elements::*;

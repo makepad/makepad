@@ -176,7 +176,7 @@ impl Cx{
 
         let start_time = precise_time_ns();
         
-        event_handler(self, Event::Init); 
+        event_handler(self, Event::AppInit); 
 
         while self.running{
             // unfortunate duplication of code between poll and run_forever but i don't know how to put this in a closure
