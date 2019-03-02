@@ -105,9 +105,14 @@ where T: std::cmp::PartialEq + std::clone::Clone
             return None
         }
         let current_state = current_state_opt.unwrap();
-        // 
+
         // then we need to compute the track time
         let time = current_state.mode.compute_time(time - start_time);
+        
+        if time >=  current_state.mode.duration(){ // we are still here, check if we have a next state
+
+        }
+
 
         for track in &mut current_state.tracks{
             if track.ident() == ident{
@@ -620,13 +625,13 @@ impl AnimMode{
     pub fn compute_time(&self, time:f64)->f64{
         match self{
             AnimMode::Cut{duration,..}=>{
-                time * duration
+                time / duration
             },
             AnimMode::Chain{duration,..}=>{
-                time * duration
+                time / duration
             },
             AnimMode::Single{duration,..}=>{
-                time * duration
+                time / duration
             },
             AnimMode::Loop{end,duration,..}=>{
                 (time / duration)  % end

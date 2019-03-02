@@ -153,6 +153,7 @@ impl Event{
                         return self.clone();
                     }
                     else{
+                        *hit_state = false;
                         return Event::FingerHover(FingerHoverEvent{
                             state:HitState::Out,
                             ..fe.clone()
@@ -161,6 +162,7 @@ impl Event{
                 }
                 else{
                     if area.contains(fe.x, fe.y, &cx){
+                        *hit_state = true;
                         return Event::FingerHover(FingerHoverEvent{
                             state:HitState::In,
                             ..fe.clone()

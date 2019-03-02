@@ -185,6 +185,7 @@ impl Cx{
             }
             let anim_start_time =self.animations[i].start_time;
             let anim_total_time =self.animations[i].total_time;
+            
             if time - anim_start_time >= anim_total_time{
                 self.ended_animations.push(self.animations.remove(i));
             }

@@ -132,6 +132,8 @@ impl Button{
     pub fn handle(&mut self, cx:&mut Cx, event:&Event)->ButtonEvent{
         match event.hits(cx, self.bg_area, &mut self.hit_state){
             Event::Animate(ae)=>{
+                //let value = self.anim.calc_vec4(cx, "bg.color", ae.time, vec4(0.0,0.0,0.0,0.0));
+                //println!("{:?} {}", value, ae.time);
                 self.anim.calc(cx, "bg.color", ae.time, self.bg_area);
                 self.anim.calc(cx, "bg.border_color", ae.time, self.bg_area);
                 self.anim.calc(cx, "bg.glow_size", ae.time, self.bg_area);
@@ -139,6 +141,17 @@ impl Button{
             Event::FingerDown(_fe)=>{
                 self.event = ButtonEvent::Clicked;
                 self.anim.change_state(cx, ButtonState::Down);
+            },
+            Event::FingerHover(fe)=>{
+                match fe.state{
+                    HitState::In=>{
+                        self.anim.change_state(cx, ButtonState::Over);
+                    },
+                    HitState::Out=>{
+                        self.anim.change_state(cx, ButtonState::Default);
+                    },
+                    _=>()
+                }
             },
             Event::FingerMove(_fe)=>{
             },
