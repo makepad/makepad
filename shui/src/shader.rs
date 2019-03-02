@@ -310,7 +310,7 @@ impl Shader{
     // flatten our
     pub fn flat_vars(&self, store:ShVarStore)->Vec<ShVar>{
         let mut ret = Vec::new();
-        for ast in self.asts.iter().rev(){
+        for ast in self.asts.iter(){
             for shvar in &ast.vars{
                 // abusing an enum with flags complicates flattening a bit
                 if shvar.store == store{
@@ -322,19 +322,14 @@ impl Shader{
     }
 
     // flatten our
-    pub fn flat_consts(&self, store:ShVarStore)->Vec<ShVar>{
-        Vec::new()
-        /*
+    pub fn flat_consts(&self)->Vec<ShConst>{
         let mut ret = Vec::new();
         for ast in self.asts.iter().rev(){
-            for shvar in &ast.consts{
-                // abusing an enum with flags complicates flattening a bit
-                if shvar.store == store{
-                    ret.push(shvar.clone());
-                }
+            for shconst in &ast.consts{
+                ret.push(shconst.clone());
             }
-        }
-        ret*/
+        };
+        ret
     }
 
     // find a function
@@ -462,6 +457,7 @@ impl Shader{
                     // B - bool-vector (bvecn)
 
                     ShFn{name:"sizeof".to_string(), args:vec![ShFnArg::new("type","T")], ret:"int".to_string(), block:None},
+                    ShFn{name:"color".to_string(), args:vec![ShFnArg::new("color","string")], ret:"vec4".to_string(), block:None},
 
                     ShFn{name:"radians".to_string(), args:vec![ShFnArg::new("x","T")], ret:"T".to_string(), block:None},
                     ShFn{name:"degrees".to_string(), args:vec![ShFnArg::new("x","T")], ret:"T".to_string(), block:None},
@@ -540,15 +536,15 @@ impl Shader{
 
     pub fn def_df(&mut self){
         self.add_ast(shader_ast!({
-            const PI:f32 = 3.141592653589793;
-        	const E:f32 =  2.718281828459045;
-            const LN2:f32 = 0.6931471805599453;
-            const LN10:f32 = 2.302585092994046;
-            const LOG2E:f32 = 1.4426950408889634;
-            const LOG10E:f32 = 0.4342944819032518;
-            const SQRT1_2:f32 = 0.70710678118654757;
-            const TORAD:f32 = 0.017453292519943295;
-            const GOLDEN:f32 = 1.618033988749895;
+            const PI:float = 3.141592653589793;
+        	const E:float =  2.718281828459045;
+            const LN2:float = 0.6931471805599453;
+            const LN10:float = 2.302585092994046;
+            const LOG2E:float = 1.4426950408889634;
+            const LOG10E:float = 0.4342944819032518;
+            const SQRT1_2:float = 0.70710678118654757;
+            const TORAD:float = 0.017453292519943295;
+            const GOLDEN:float = 1.618033988749895;
 
             let df_pos:vec2<Local>;
             let df_result:vec4<Local>;
@@ -608,11 +604,12 @@ impl Shader{
                 return wa * wb;
             }
             
-            fn df_fill_keep(color:vec4) {
+            fn df_fill_keep(color:vec4)->vec4{
                 let f:float = df_calc_blur(df_shape);
                 let source:vec4 = vec4(color.rgb * color.a, color.a);
                 let dest:vec4 = df_result;
                 df_result = source * f + dest * (1. - source.a * f);
+                return df_result;
             }
 
             fn df_fill(color:vec4)->vec4 {
@@ -621,11 +618,12 @@ impl Shader{
                 return df_result;
             }
 
-            fn df_stroke_keep(color:vec4, width:float) {
+            fn df_stroke_keep(color:vec4, width:float)->vec4{
                 let f:float = df_calc_blur(abs(df_shape) - width / df_scale);
                 let source:vec4 = vec4(color.rgb * color.a, color.a);
                 let dest:vec4 = df_result;
                 df_result = source * f + dest * (1.0 - source.a * f);
+                return df_result;
             }
 
             fn df_stroke(color:vec4, width:float)->vec4{
@@ -634,16 +632,18 @@ impl Shader{
                 return df_result;
             }
 
-            fn df_glow_keep(color:vec4, width:float) {
+            fn df_glow_keep(color:vec4, width:float)->vec4{
                 let f:float = df_calc_blur(abs(df_shape) - width / df_scale);
                 let source:vec4 = vec4(color.rgb * color.a, color.a);
                 let dest:vec4 = df_result;
                 df_result = vec4(source.rgb * f, 0.) + dest;
+                return df_result;
             }
 
-            fn df_glow(color:vec4, width:float) {
+            fn df_glow(color:vec4, width:float)->vec4 {
                 df_glow_keep(color, width);
                 df_old_shape = df_shape = 1e+20;
+                return df_result;
             }
 
             fn df_union(){

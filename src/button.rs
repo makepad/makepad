@@ -116,7 +116,7 @@ impl Button{
             const border_width:float = 1.0;
 
             fn pixel()->vec4{
-				df_viewport(pos * vec2(w, h));
+                df_viewport(pos * vec2(w, h));
                 df_box(0., 0., w, h, border_radius);
                 df_shape += 3.;
                 df_fill_keep(color);
@@ -132,10 +132,12 @@ impl Button{
         match event.hits(self.bg_area, cx){
             Event::Animate(ae)=>{
                 self.anim.calc(cx, "bg.color", ae.time, self.bg_area);
+                self.anim.calc(cx, "bg.border_color", ae.time, self.bg_area);
+                self.anim.calc(cx, "bg.glow_size", ae.time, self.bg_area);
             },
             Event::FingerDown(_fe)=>{
                 self.event = ButtonEvent::Clicked;
-                self.anim.change_state(cx, ButtonState::Over);
+                self.anim.change_state(cx, ButtonState::Down);
             },
             Event::FingerMove(_fe)=>{
             },
@@ -152,8 +154,8 @@ impl Button{
         self.bg.color = self.anim.last_vec4("bg.color");
         self.bg_area = self.bg.begin(cx, &self.bg_layout);
         // push the 2 vars we added to bg shader
-        self.bg_area.push_anim_last(cx, "bg.border_color", &self.anim);
-        self.bg_area.push_anim_last(cx, "bg.glow_size", &self.anim);
+        self.anim.last_push(cx, "bg.border_color", self.bg_area);
+        self.anim.last_push(cx, "bg.glow_size", self.bg_area);
 
         self.text.draw_text(cx, Computed, Computed, label);
         

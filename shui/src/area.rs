@@ -370,49 +370,6 @@ impl Area{
         }
     }
 
-    pub fn push_anim_last<T>(&self, cx: &mut Cx, area_name:&str, anim:&Animation<T>)
-    where T: std::cmp::PartialEq + std::clone::Clone
-    {
-        if let Some(dot) = area_name.find('.'){
-            let field = area_name.get((dot+1)..area_name.len()).unwrap();
-            if let Some(track) = anim.fetch_last_track(area_name){
-                match track{
-                    AnimTrack::Vec4(ft)=>{
-                        if let Some(last_calc) = ft.last_calc{
-                            self.push_vec4(cx, field, last_calc);
-                        }
-                        else if ft.track.len()>0{ // grab the last key in the track
-                            self.push_vec4(cx, field, ft.track.last().unwrap().1);
-                        }
-                    },
-                    AnimTrack::Vec3(ft)=>{
-                        if let Some(last_calc) = ft.last_calc{
-                            self.push_vec3(cx, field, last_calc);
-                        }
-                        else if ft.track.len()>0{ // grab the last key in the track
-                            self.push_vec3(cx, field, ft.track.last().unwrap().1);
-                        }
-                    },
-                    AnimTrack::Vec2(ft)=>{
-                        if let Some(last_calc) = ft.last_calc{
-                            self.push_vec2(cx, field, last_calc);
-                        }
-                        else if ft.track.len()>0{ // grab the last key in the track
-                            self.push_vec2(cx, field, ft.track.last().unwrap().1);
-                        }
-                    },
-                    AnimTrack::Float(ft)=>{
-                        if let Some(last_calc) = ft.last_calc{
-                            self.push_float(cx, field, last_calc);
-                        }
-                        else if ft.track.len()>0{ // grab the last key in the track
-                            self.push_float(cx, field, ft.track.last().unwrap().1);
-                        }
-                    }
-                }
-            }
-        }
-    }
 
     pub fn need_uniforms_now(&self, cx:&mut Cx)->bool{
         match self{

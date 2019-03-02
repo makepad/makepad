@@ -291,6 +291,50 @@ where T: std::cmp::PartialEq + std::clone::Clone
         }
     }
 
+
+    pub fn last_push(&self, cx: &mut Cx, area_name:&str, area:Area){
+        if let Some(dot) = area_name.find('.'){
+            let field = area_name.get((dot+1)..area_name.len()).unwrap();
+            if let Some(track) = self.fetch_last_track(area_name){
+                match track{
+                    AnimTrack::Vec4(ft)=>{
+                        if let Some(last_calc) = ft.last_calc{
+                            area.push_vec4(cx, field, last_calc);
+                        }
+                        else if ft.track.len()>0{ // grab the last key in the track
+                            area.push_vec4(cx, field, ft.track.last().unwrap().1);
+                           // area.push_vec4(cx, field, vec);
+                        }
+                    },
+                    AnimTrack::Vec3(ft)=>{
+                        if let Some(last_calc) = ft.last_calc{
+                            area.push_vec3(cx, field, last_calc);
+                        }
+                        else if ft.track.len()>0{ // grab the last key in the track
+                            area.push_vec3(cx, field, ft.track.last().unwrap().1);
+                        }
+                    },
+                    AnimTrack::Vec2(ft)=>{
+                        if let Some(last_calc) = ft.last_calc{
+                            area.push_vec2(cx, field, last_calc);
+                        }
+                        else if ft.track.len()>0{ // grab the last key in the track
+                            area.push_vec2(cx, field, ft.track.last().unwrap().1);
+                        }
+                    },
+                    AnimTrack::Float(ft)=>{
+                        if let Some(last_calc) = ft.last_calc{
+                            area.push_float(cx, field, last_calc);
+                        }
+                        else if ft.track.len()>0{ // grab the last key in the track
+                            area.push_float(cx, field, ft.track.last().unwrap().1);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
 }
 
 #[derive(Clone,Debug)]

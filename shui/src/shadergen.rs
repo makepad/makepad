@@ -21,7 +21,8 @@ pub struct SlDecl{
 #[derive(Clone)]
 pub enum SlTarget{
     Pixel,
-    Vertex
+    Vertex,
+    Constant
 }
 
 pub struct SlCx<'a>{
@@ -111,7 +112,7 @@ impl ShLit{
                 Ok(Sl{sl:format!("{}", val), ty:"int".to_string()})
             }
             ShLit::Str(val)=>{
-                Ok(Sl{sl:format!("\"{}\"", val), ty:"string".to_string()})
+                Ok(Sl{sl:format!("{}", val), ty:"string".to_string()})
             }
             ShLit::Float(val)=>{
                 if val.ceil() == *val{
@@ -370,10 +371,13 @@ impl ShCall{
         let mut out = String::new();
         if let Some(shfn) = cx.shader.find_fn(&self.call){
             let mut defargs_call = "".to_string();
+
             if let Some(_block) = &shfn.block{ // not internal, so its a dep
-                if cx.fn_deps.iter().find(|i| **i == self.call).is_none(){
-                    cx.fn_deps.push(self.call.clone());
+                let index = cx.fn_deps.iter().position(|i| **i == self.call);
+                if let Some(index) = index{
+                    cx.fn_deps.remove(index);
                 }
+                cx.fn_deps.push(self.call.clone());
                 defargs_call = cx.defargs_call.to_string();
                 out.push_str(&cx.call_prefix);
             };
@@ -713,12 +717,13 @@ pub fn assemble_fn_and_deps(sh:&Shader, cx:&mut SlCx)->Result<String, SlErr>{
         });
         // do that dep.
         if let Some(fn_not_done) = fn_not_done{
-            let fn_to_do = sh.find_fn(fn_not_done);
+            let fn_name = fn_not_done.clone();
+            let fn_to_do = sh.find_fn(&fn_name);
             if let Some(fn_to_do) = fn_to_do{
                 cx.scope.clear();
                 let result = fn_to_do.sl(cx)?;
                 cx.fn_done.push(result.clone());
-                fn_local.push(result);
+                fn_local.push((fn_name,result.clone()));
             }
             else{
                 return Err(SlErr{msg:format!("Cannot find entry function {}", fn_not_done)})
@@ -730,13 +735,24 @@ pub fn assemble_fn_and_deps(sh:&Shader, cx:&mut SlCx)->Result<String, SlErr>{
     }
     // ok lets reverse concatinate it
     let mut out = String::new();
-    for fnd in fn_local.iter().rev(){
-        out.push_str(&fnd.sl);
-        out.push_str("\n");
-    }
-
+    for dep in cx.fn_deps.iter().rev(){
+        if let Some((_,fnd)) = fn_local.iter().find(|(name,_)| name == dep){
+            out.push_str(&fnd.sl);
+            out.push_str("\n");
+        }
+    };
     Ok(out)
 }
+
+pub fn assemble_const_init(cnst:&ShConst, cx:&mut SlCx)->Result<String, SlErr>{
+    // lets process the expr of a constant
+    let result = cnst.value.sl(cx)?;
+    if cx.fn_deps.len() > 0{
+        return Err(SlErr{msg:"Const cant have function call deps".to_string()});
+    }
+    return Ok(result.sl)
+}
+
 
 #[derive(Default,Clone)]
 pub struct RectInstanceProps{

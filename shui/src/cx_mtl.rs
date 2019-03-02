@@ -351,8 +351,28 @@ impl Cx{
 
         // we need to figure out which texture slots exist 
        // mtl_out.push_str(&Self::assemble_constants(&texture_slots));
-
-
+        let mut const_cx = SlCx{
+            depth:0,
+            target:SlTarget::Constant,
+            defargs_fn:"".to_string(),
+            defargs_call:"".to_string(),
+            call_prefix:"_".to_string(),
+            shader:sh,
+            scope:Vec::new(),
+            fn_deps:Vec::new(),
+            fn_done:Vec::new(),
+            auto_vary:Vec::new()
+        };
+        let consts = sh.flat_consts();
+        for cnst in &consts{
+            let const_init = assemble_const_init(cnst, &mut const_cx)?;
+            mtl_out.push_str("#define ");
+            mtl_out.push_str(" ");
+            mtl_out.push_str(&cnst.name);
+            mtl_out.push_str("  ");
+            mtl_out.push_str(&const_init);
+            mtl_out.push_str("\n");
+        }
 
         let mut vtx_cx = SlCx{
             depth:0,
@@ -525,6 +545,13 @@ impl<'a> SlCx<'a>{
                     "vec4".to_string()
                 )
             },
+            "color"=>{
+                let vec4 = color(&args[0].sl);
+                return MapCallResult::Rewrite(
+                    format!("float4({},{},{},{})", vec4.x,vec4.y,vec4.z,vec4.w),
+                    "vec4".to_string()
+                );
+            }
             _=>return MapCallResult::None
         }
     }    
