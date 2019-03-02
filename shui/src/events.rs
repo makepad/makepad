@@ -42,10 +42,24 @@ pub struct FingerUpEvent{
     pub is_touch:bool
 }
 
+#[derive(Clone,Debug)]
+pub enum HitState{
+    In,
+    Over,
+    Out
+}
+
+impl Default for HitState{
+    fn default()->HitState{
+        HitState::Over
+    }
+}
+
 #[derive(Clone, Default,Debug)]
 pub struct FingerHoverEvent{
     pub x:f32,
-    pub y:f32
+    pub y:f32,
+    pub state:HitState
 }
 
 #[derive(Clone, Default,Debug)]
@@ -111,44 +125,67 @@ impl Default for Event{
 }
 
 impl Event{
-    pub fn hits(&self, area:Area, cx:&Cx)->&Event{
+    pub fn hits(&self, cx:&Cx, area:Area, hit_state:&mut bool)->Event{
         match self{
             Event::Animate(_)=>{
                 for anim in &cx.animations{
                     if anim.area == area{
-                        return self
+                        return self.clone()
                     }
                 }
             },
             Event::AnimationEnded(_)=>{
                 for anim in &cx.ended_animations{
                     if anim.area == area{
-                        return self
+                        return self.clone()
                     }
                 }
             },
             Event::FingerCaptured(fc)=>{
                 if fc.area == area{
-                    return self;
+                    return self.clone();
                 }
+            },
+            
+            Event::FingerHover(fe)=>{
+                if *hit_state{
+                    if area.contains(fe.x, fe.y, &cx){
+                        return self.clone();
+                    }
+                    else{
+                        return Event::FingerHover(FingerHoverEvent{
+                            state:HitState::Out,
+                            ..fe.clone()
+                        })
+                    }
+                }
+                else{
+                    if area.contains(fe.x, fe.y, &cx){
+                        return Event::FingerHover(FingerHoverEvent{
+                            state:HitState::In,
+                            ..fe.clone()
+                        })
+                    }
+                }
+
             },
             Event::FingerMove(fe)=>{
                 if area.contains(fe.x, fe.y, &cx){
-                    return self;
+                    return self.clone();
                 }
             },
             Event::FingerDown(fe)=>{
                 if area.contains(fe.x, fe.y, &cx){
-                    return self;
+                    return self.clone();
                 }
             },
             Event::FingerUp(fe)=>{
                 if area.contains(fe.x, fe.y, &cx){
-                    return self;
+                    return self.clone();
                 }
             },
             _=>()
         };
-        return &Event::None;
+        return Event::None;
     }
 }

@@ -34,7 +34,8 @@ impl Cx{
                     self.resources.winit.last_y = position.y as f32;
                     return Event::FingerHover(FingerHoverEvent{
                         x:self.resources.winit.last_x,
-                        y:self.resources.winit.last_y
+                        y:self.resources.winit.last_y,
+                        state:HitState::Over
                     })
                 },
                 winit::WindowEvent::MouseInput{state,button,..}=>{

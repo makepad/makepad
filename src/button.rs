@@ -3,6 +3,7 @@ use shui::*;
 #[derive(Clone, Element)]
 pub struct Button{
     pub view:View,
+    pub hit_state:bool,
     pub bg_area:Area,
     pub layout:Layout,
     pub bg: Quad,
@@ -31,7 +32,7 @@ impl Style for Button{
                 margin:Margin::i32(1),
                 ..Layout::paddedf(6.0,14.0,6.0,14.0)
             },
-
+            hit_state:false,
             view:View::new(),
             bg_area:Area::Empty,
             layout:Layout{
@@ -129,7 +130,7 @@ impl Button{
     }
 
     pub fn handle(&mut self, cx:&mut Cx, event:&Event)->ButtonEvent{
-        match event.hits(self.bg_area, cx){
+        match event.hits(cx, self.bg_area, &mut self.hit_state){
             Event::Animate(ae)=>{
                 self.anim.calc(cx, "bg.color", ae.time, self.bg_area);
                 self.anim.calc(cx, "bg.border_color", ae.time, self.bg_area);
