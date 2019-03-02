@@ -1,8 +1,9 @@
 
 use crate::math::*;
 use crate::cx::*; 
+use crate::animation::*;
 
-#[derive(Clone, Default, Debug, PartialEq)]
+#[derive(Clone, Default, Debug, PartialEq, Copy)]
 pub struct InstanceArea{
     pub draw_list_id:usize,
     pub draw_call_id:usize,
@@ -11,12 +12,12 @@ pub struct InstanceArea{
     pub instance_writer:usize
 }
 
-#[derive(Clone, Default, Debug, PartialEq)]
+#[derive(Clone, Default, Debug, PartialEq, Copy)]
 pub struct DrawListArea{
     pub draw_list_id:usize
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Copy)]
 pub enum Area{
     Empty,
     All,
@@ -302,7 +303,7 @@ impl Area{
         return vec4(0.0,0.0,0.0,0.0);
     }
 
-    pub fn append_data(&self, cx:&mut Cx, data:&[f32]){
+    pub fn push_data(&self, cx:&mut Cx, data:&[f32]){
         match self{
             Area::Instance(inst)=>{
                 let draw_list = &mut cx.draw_lists[inst.draw_list_id];
@@ -313,7 +314,106 @@ impl Area{
             _=>(),
         }
     }
- 
+
+    pub fn push_float(&self, cx:&mut Cx, _name:&str, value:f32){
+        match self{
+            Area::Instance(inst)=>{
+                let draw_list = &mut cx.draw_lists[inst.draw_list_id];
+                let draw_call = &mut draw_list.draw_calls[inst.draw_call_id];
+                //let csh = &cx.shaders.compiled_shaders[draw_call.shader_id];
+                draw_call.instance.push(value);
+            },
+            _=>(),
+        }
+    }
+
+
+    pub fn push_vec2(&self, cx:&mut Cx, _name:&str, value:Vec2){
+        match self{
+            Area::Instance(inst)=>{
+                let draw_list = &mut cx.draw_lists[inst.draw_list_id];
+                let draw_call = &mut draw_list.draw_calls[inst.draw_call_id];
+                //let csh = &cx.shaders.compiled_shaders[draw_call.shader_id];
+                draw_call.instance.push(value.x);
+                draw_call.instance.push(value.y);
+            },
+            _=>(),
+        }
+    }
+
+
+    pub fn push_vec3(&self, cx:&mut Cx, _name:&str, value:Vec3){
+        match self{
+            Area::Instance(inst)=>{
+                let draw_list = &mut cx.draw_lists[inst.draw_list_id];
+                let draw_call = &mut draw_list.draw_calls[inst.draw_call_id];
+                draw_call.instance.push(value.x);
+                draw_call.instance.push(value.y);
+                draw_call.instance.push(value.z);
+            },
+            _=>(),
+        }
+    }
+
+
+    pub fn push_vec4(&self, cx:&mut Cx, _name:&str, value:Vec4){
+        match self{
+            Area::Instance(inst)=>{
+                let draw_list = &mut cx.draw_lists[inst.draw_list_id];
+                let draw_call = &mut draw_list.draw_calls[inst.draw_call_id];
+                draw_call.instance.push(value.x);
+                draw_call.instance.push(value.y);
+                draw_call.instance.push(value.z);
+                draw_call.instance.push(value.z);
+            },
+            _=>(),
+        }
+    }
+
+    pub fn push_anim_last<T>(&self, cx: &mut Cx, area_name:&str, anim:&Animation<T>)
+    where T: std::cmp::PartialEq + std::clone::Clone
+    {
+        if let Some(dot) = area_name.find('.'){
+            let field = area_name.get((dot+1)..area_name.len()).unwrap();
+            if let Some(track) = anim.fetch_last_track(area_name){
+                match track{
+                    AnimTrack::Vec4(ft)=>{
+                        if let Some(last_calc) = ft.last_calc{
+                            self.push_vec4(cx, field, last_calc);
+                        }
+                        else if ft.track.len()>0{ // grab the last key in the track
+                            self.push_vec4(cx, field, ft.track.last().unwrap().1);
+                        }
+                    },
+                    AnimTrack::Vec3(ft)=>{
+                        if let Some(last_calc) = ft.last_calc{
+                            self.push_vec3(cx, field, last_calc);
+                        }
+                        else if ft.track.len()>0{ // grab the last key in the track
+                            self.push_vec3(cx, field, ft.track.last().unwrap().1);
+                        }
+                    },
+                    AnimTrack::Vec2(ft)=>{
+                        if let Some(last_calc) = ft.last_calc{
+                            self.push_vec2(cx, field, last_calc);
+                        }
+                        else if ft.track.len()>0{ // grab the last key in the track
+                            self.push_vec2(cx, field, ft.track.last().unwrap().1);
+                        }
+                    },
+                    AnimTrack::Float(ft)=>{
+                        if let Some(last_calc) = ft.last_calc{
+                            self.push_float(cx, field, last_calc);
+                        }
+                        else if ft.track.len()>0{ // grab the last key in the track
+                            self.push_float(cx, field, ft.track.last().unwrap().1);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     pub fn need_uniforms_now(&self, cx:&mut Cx)->bool{
         match self{
             Area::Instance(inst)=>{

@@ -21,8 +21,7 @@ pub struct Text{
 
 impl Style for Text{
     fn style(cx:&mut Cx)->Self{
-        let mut sh = Shader::def(); 
-        Self::def_shader(&mut sh);
+        let sh = Self::def_shader(cx);
         Self{
             shader_id:cx.add_shader(sh),
             font_id:cx.load_font(&cx.style.normal_font.clone()),
@@ -36,9 +35,9 @@ impl Style for Text{
 }
 
 impl Text{
-    pub fn def_shader(sh: &mut Shader){
+    pub fn def_shader(cx:&mut Cx)->Shader{
         // lets add the draw shader lib
-        Cx::def_shader(sh);
+        let mut sh = cx.new_shader();
         sh.geometry_vertices = vec![
             0.0,0.0,
             1.0,0.0,
@@ -50,7 +49,7 @@ impl Text{
             0,3,2
         ];
 
-        sh.add_ast(shader_ast!(||{
+        sh.add_ast(shader_ast!({
             let geom:vec2<Geometry>;
             let texture:texture2d<Texture>;
             let tex_size:vec2<Uniform>;
@@ -103,6 +102,7 @@ impl Text{
                 return vec4(clipped,0.,1.) * camera_projection;
             }
         }));
+        sh
     }
 
     pub fn draw_text(&mut self, cx:&mut Cx, _x:Value, _y:Value, text:&str)->Area{
@@ -179,7 +179,7 @@ impl Text{
                         /*font_size*/ self.font_size,
                         /*font_base*/ 1.0
                     ];
-                    area.append_data(cx, &data);
+                    area.push_data(cx, &data);
 
                     geom.x += w;
                     count += 1;

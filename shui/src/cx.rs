@@ -114,15 +114,28 @@ const CX_UNI_CAMERA_PROJECTION:usize = 0;
 const CX_UNI_SIZE:usize = 16;
 
 impl Cx{
-    pub fn def_shader(sh:&mut Shader){
-        Shader::def_builtins(sh);
-        Shader::def_df(sh);
-        Cx::def_uniforms(sh);
-        DrawList::def_uniforms(sh);
+    pub fn new_shader(&mut self)->Shader{
+        let mut sh = Shader{..Default::default()};
+        Shader::def_builtins(&mut sh);
+        Shader::def_df(&mut sh);
+        Cx::def_uniforms(&mut sh);
+        DrawList::def_uniforms(&mut sh);
+        sh
+    }
+
+    pub fn get_shader(&self, id:usize)->&CompiledShader{
+        &self.compiled_shaders[id]
+    }
+
+    pub fn add_shader(&mut self, sh:Shader)->usize{
+        let id = self.shaders.len();
+        // lets compile this sh
+        self.shaders.push(sh);
+        id
     }
 
     pub fn def_uniforms(sh: &mut Shader){
-        sh.add_ast(shader_ast!(||{
+        sh.add_ast(shader_ast!({
             let camera_projection:mat4<UniformCx>;
         }));
     }
@@ -171,8 +184,8 @@ impl Cx{
                 break
             }
             let anim_start_time =self.animations[i].start_time;
-            let anim_duration =self.animations[i].duration;
-            if time - anim_start_time >= anim_duration{
+            let anim_total_time =self.animations[i].total_time;
+            if time - anim_start_time >= anim_total_time{
                 self.ended_animations.push(self.animations.remove(i));
             }
             else{
@@ -250,7 +263,7 @@ impl Cx{
 
 
     // push instance so it can be written to again in pop_instance
-    pub fn begin_instance(&mut self, area:&Area, layout:&Layout){
+    pub fn begin_instance(&mut self, area:Area, layout:&Layout){
         self.begin_turtle(layout);
         self.instance_area_stack.push(area.clone());
     }

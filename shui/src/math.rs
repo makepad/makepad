@@ -1,5 +1,5 @@
 
-#[derive(Clone, Default, Debug)]
+#[derive(Clone, Copy, Default, Debug)]
 pub struct Rect{
     pub x:f32,
     pub y:f32,
@@ -13,12 +13,12 @@ impl Rect{
     }
 }
 
-#[derive(Clone, Default, Debug)]
+#[derive(Clone, Copy, Default, Debug)]
 pub struct Mat4{
     pub v: [f32; 16],
 }
 
-#[derive(Clone, Default, Debug)]
+#[derive(Clone, Copy, Default, Debug)]
 pub struct Vec2{
     pub x: f32,
     pub y: f32,
@@ -28,7 +28,7 @@ pub fn vec2(x:f32, y:f32)->Vec2{
     Vec2{x:x, y:y}
 }
 
-#[derive(Clone, Default, Debug)]
+#[derive(Clone, Copy, Default, Debug)]
 pub struct Vec3{
     pub x: f32,
     pub y: f32,
@@ -39,7 +39,7 @@ pub fn vec3(x:f32, y:f32, z:f32)->Vec3{
     Vec3{x:x, y:y, z:z}
 }
 
-#[derive(Clone, Default, Debug)]
+#[derive(Clone, Copy, Default, Debug)]
 pub struct Vec4{
     pub x: f32,
     pub y: f32,

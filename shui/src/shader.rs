@@ -321,6 +321,22 @@ impl Shader{
         ret
     }
 
+    // flatten our
+    pub fn flat_consts(&self, store:ShVarStore)->Vec<ShVar>{
+        Vec::new()
+        /*
+        let mut ret = Vec::new();
+        for ast in self.asts.iter().rev(){
+            for shvar in &ast.consts{
+                // abusing an enum with flags complicates flattening a bit
+                if shvar.store == store{
+                    ret.push(shvar.clone());
+                }
+            }
+        }
+        ret*/
+    }
+
     // find a function
     pub fn find_fn(&self, name:&str)->Option<&ShFn>{
         for ast in self.asts.iter().rev(){
@@ -523,7 +539,7 @@ impl Shader{
     }
 
     pub fn def_df(&mut self){
-        self.add_ast(shader_ast!(||{
+        self.add_ast(shader_ast!({
             const PI:f32 = 3.141592653589793;
         	const E:f32 =  2.718281828459045;
             const LN2:f32 = 0.6931471805599453;

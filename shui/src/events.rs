@@ -111,24 +111,24 @@ impl Default for Event{
 }
 
 impl Event{
-    pub fn hits(&self, area:&Area, cx:&Cx)->&Event{
+    pub fn hits(&self, area:Area, cx:&Cx)->&Event{
         match self{
             Event::Animate(_)=>{
                 for anim in &cx.animations{
-                    if anim.area == *area{
+                    if anim.area == area{
                         return self
                     }
                 }
             },
             Event::AnimationEnded(_)=>{
                 for anim in &cx.ended_animations{
-                    if anim.area == *area{
+                    if anim.area == area{
                         return self
                     }
                 }
             },
             Event::FingerCaptured(fc)=>{
-                if fc.area == *area{
+                if fc.area == area{
                     return self;
                 }
             },

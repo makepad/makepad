@@ -1,6 +1,7 @@
 
 use crate::math::*;
 
+
 pub fn color(name:&str)->Vec4{
     match name.to_lowercase().as_ref(){
         "aliceblue"=>Vec4{x:0.9411764705882353,y:0.9725490196078431,z:1.0,w:1.0},
@@ -403,6 +404,57 @@ pub fn color(name:&str)->Vec4{
         "bluegrey700"=>Vec4{x:0.27058823529411763,y:0.35294117647058826,z:0.39215686274509803,w:1.0},
         "bluegrey800"=>Vec4{x:0.21568627450980393,y:0.2784313725490196,z:0.30980392156862746,w:1.0},
         "bluegrey900"=>Vec4{x:0.14901960784313725,y:0.19607843137254902,z:0.2196078431372549,w:1.0},
-        _=>Vec4{x:1.0,y:1.0,z:1.0,w:1.0}
+        color=>{
+            let bytes = color.as_bytes();
+            if bytes[0] == '#' as u8{
+                match bytes.len(){
+                    2=>{ // #c
+                        let val = hex_to_int(bytes[1] as u32) as f32 / 15.0;
+                        return vec4(val,val,val,1.0)
+                    },
+                    4=>{ // #abc
+                        let r = hex_to_int(bytes[1] as u32) as f32 / 15.0;
+                        let g = hex_to_int(bytes[2] as u32) as f32 / 15.0;
+                        let b = hex_to_int(bytes[3] as u32) as f32 / 15.0;
+                        return vec4(r,g,b,1.0)
+                    },
+                    5=>{ // #abcd
+                        let r = hex_to_int(bytes[1] as u32) as f32 / 15.0;
+                        let g = hex_to_int(bytes[2] as u32) as f32 / 15.0;
+                        let b = hex_to_int(bytes[3] as u32) as f32 / 15.0;
+                        let a = hex_to_int(bytes[4] as u32) as f32 / 15.0;
+                        return vec4(r,g,b,a)
+                    },
+                    7=>{ // #aabbcc
+                        let r = ((hex_to_int(bytes[1] as u32)<<8)+hex_to_int(bytes[2] as u32)) as f32 / 255.0;
+                        let g = ((hex_to_int(bytes[3] as u32)<<8)+hex_to_int(bytes[4] as u32)) as f32 / 255.0;
+                        let b = ((hex_to_int(bytes[5] as u32)<<8)+hex_to_int(bytes[6] as u32)) as f32 / 255.0;
+                        return vec4(r,g,b,1.0)
+                    },
+                    9=>{
+                        let r = ((hex_to_int(bytes[1] as u32)<<8)+hex_to_int(bytes[2] as u32)) as f32 / 255.0;
+                        let g = ((hex_to_int(bytes[3] as u32)<<8)+hex_to_int(bytes[4] as u32)) as f32 / 255.0;
+                        let b = ((hex_to_int(bytes[5] as u32)<<8)+hex_to_int(bytes[6] as u32)) as f32 / 255.0;
+                        let a = ((hex_to_int(bytes[7] as u32)<<8)+hex_to_int(bytes[8] as u32)) as f32 / 255.0;
+                        return vec4(r,g,b,a)
+                    }
+                    _=>()
+                }
+            };
+            return Vec4{x:1.0,y:1.0,z:1.0,w:1.0}            
+        }
     }
+}
+
+fn hex_to_int(c:u32)->u32{
+    if c>=48 && c <=57{
+        return c - 48
+    }
+    if c>=65 && c <=70{
+        return c - 65 + 10
+    }
+    if c>=97 && c <=102{
+        return c - 97 + 10
+    }
+    return 0
 }

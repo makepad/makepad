@@ -9,8 +9,7 @@ pub struct Quad{
 
 impl Style for Quad{
     fn style(cx:&mut Cx)->Self{
-        let mut sh = Shader::def(); 
-        Self::def_shader(&mut sh);
+        let sh = Self::def_shader(cx);
         Self{
             shader_id:cx.add_shader(sh),
             id:0,
@@ -20,9 +19,9 @@ impl Style for Quad{
 }
 
 impl Quad{
-    pub fn def_shader(sh: &mut Shader){
+    pub fn def_shader(cx:&mut Cx)->Shader{
         // lets add the draw shader lib
-        Cx::def_shader(sh);
+        let mut sh = cx.new_shader();
 
         sh.geometry_vertices = vec![
             0.0,0.0,
@@ -35,7 +34,7 @@ impl Quad{
             2,3,0
         ];
 
-        sh.add_ast(shader_ast!(||{
+        sh.add_ast(shader_ast!({
             
             let pos:vec2<Geometry>;
             let fac:float<Uniform>;
@@ -54,13 +53,12 @@ impl Quad{
             }
 
         }));
-
-        //sh.log =1;
+        sh
     }
 
     pub fn begin(&mut self, cx:&mut Cx, layout:&Layout)->Area{
         let area = self.draw_abs(cx, true, 0.0,0.0,0.0,0.0);
-        cx.begin_instance(&area, layout);
+        cx.begin_instance(area, layout);
         area
     }
 
@@ -69,7 +67,7 @@ impl Quad{
         cx.end_instance()
     }
 
-    pub fn set_uniforms(&mut self, cx:&mut Cx, area:&Area){
+    pub fn set_uniforms(&mut self, cx:&mut Cx, area:Area){
         if area.need_uniforms_now(cx){
             area.uniform_float(cx, "fac", 1.0);
         }
@@ -78,7 +76,7 @@ impl Quad{
     pub fn draw_sized(&mut self, cx:&mut Cx, w:Value, h:Value, margin:Margin)->Area{
         let area = cx.new_aligned_instance(self.shader_id);
 
-        self.set_uniforms(cx, &area);
+        self.set_uniforms(cx, area);
         
         let geom = cx.walk_turtle(w, h, margin, None);
         
@@ -87,7 +85,7 @@ impl Quad{
             /*x,y,w,h*/geom.x,geom.y,geom.w,geom.h,
             /*color*/self.color.x,self.color.y,self.color.z,self.color.w
         ];
-        area.append_data(cx, &data);
+        area.push_data(cx, &data);
 
         area
     }
@@ -100,13 +98,13 @@ impl Quad{
            cx.new_instance(self.shader_id)
         };
 
-        self.set_uniforms(cx, &area);
+        self.set_uniforms(cx, area);
 
         let data = [
             /*x,y,w,h*/x,y,w,h,
             /*color*/self.color.x,self.color.y,self.color.z,self.color.w
         ];
-        area.append_data(cx, &data);
+        area.push_data(cx, &data);
         area
     }
 }

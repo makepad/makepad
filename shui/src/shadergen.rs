@@ -2,21 +2,6 @@
 
 use crate::cx::*;
 
-impl Cx{
-
-    pub fn get_shader(&self, id:usize)->&CompiledShader{
-        &self.compiled_shaders[id]
-    }
-
-    pub fn add_shader(&mut self, sh:Shader)->usize{
-        let id = self.shaders.len();
-        // lets compile this sh
-        self.shaders.push(sh);
-        id
-    }
-
-}
-
 #[derive(Clone)]
 pub struct Sl{
     pub sl:String,

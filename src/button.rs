@@ -16,23 +16,22 @@ pub struct Button{
 #[derive(Clone, PartialEq)]
 pub enum ButtonState{
     Default,
-    Over
+    Over,
+    Down
 }
 
 impl Style for Button{
     fn style(cx:&mut Cx)->Self{
-/*
-        let mut sh = Shader::def(); 
-        Quad::def_shader(&mut sh);
-        sh.add_ast(shader_ast!(||{
-            fn pixel()->vec4{
-                df_viewport(pos*vec2(w,h));   
-                df_circle(w*0.5,h*0.5,0.5*min(w,h));
-                return df_fill(color); 
-            }
-        }));*/
-
+        let bg_sh = Self::def_bg_shader(cx);
         Self{
+            bg_layout:Layout{
+                align:Align::center(),
+                w:Computed,
+                h:Computed,
+                margin:Margin::i32(1),
+                ..Layout::paddedf(6.0,14.0,6.0,14.0)
+            },
+
             view:View::new(),
             bg_area:Area::Empty,
             layout:Layout{
@@ -40,34 +39,56 @@ impl Style for Button{
                 h:Computed,
                 ..Layout::new()
             },
-            bg_layout:Layout{
-                align:Align::center(),
-                w:Computed,
-                h:Computed,
-                margin:Margin::i32(1),
-                ..Layout::padded(5.0)
-            },
             label:"OK".to_string(),
             anim:Animation::new(
                 ButtonState::Default,
                 vec![
                     AnimState::new(
                         ButtonState::Default,
-                        AnimMode::Single{speed:1.0, len:1.0, cut:true}, 
+                        AnimMode::Chain{duration:0.1}, 
                         vec![
-                            AnimTrack::vec4("bg.color", vec![ (1.0,cx.style.bg_normal.clone()) ])
+                            AnimTrack::to_vec4("bg.color",cx.style.bg_normal),
+                            AnimTrack::to_float("bg.glow_size",0.0),
+                            AnimTrack::to_vec4("bg.border_color",cx.style.text_lo),
+                            AnimTrack::to_vec4("text.color",cx.style.text_med),
+                            AnimTrack::to_vec4("icon.color",cx.style.text_med),
                         ]
                     ),
                     AnimState::new(
                         ButtonState::Over,
-                        AnimMode::Single{speed:1.0, len:1.0, cut:true}, 
+                        AnimMode::Chain{duration:0.05}, 
                         vec![
-                            AnimTrack::vec4("bg.color", vec![ (1.0,cx.style.bg_top.clone()) ])
+                            AnimTrack::to_vec4("bg.color", cx.style.bg_top),
+                            AnimTrack::to_vec4("bg.border_color", color("white")),
+                            AnimTrack::to_float("bg.glow_size", 1.0)
+                        ]
+                    ),
+                    AnimState::new(
+                        ButtonState::Down,
+                        AnimMode::Cut{duration:0.2}, 
+                        vec![
+                            AnimTrack::vec4("bg.border_color", vec![
+                                (0.0, color("white")),
+                                (1.0, color("white"))
+                            ]),
+                            AnimTrack::vec4("bg.color", vec![
+                                (0.0, color("#f")),
+                                (1.0, color("#6"))
+                            ]),
+                            AnimTrack::float("bg.glow_size", vec![
+                                (0.0, 1.0),
+                                (1.0, 1.0)
+                            ]),
+                            AnimTrack::vec4("icon.color", vec![
+                                (0.0, color("#0")),
+                                (1.0, color("#f")),
+                            ]),
                         ]
                     ) 
                 ]
             ),
             bg:Quad{
+                shader_id:cx.add_shader(bg_sh),
                 ..Style::style(cx)
             },
             text:Text{..Style::style(cx)},
@@ -83,11 +104,34 @@ pub enum ButtonEvent{
 }
 
 impl Button{
+    pub fn def_bg_shader(cx:&mut Cx)->Shader{
+        let mut sh = Quad::def_shader(cx);
+        sh.add_ast(shader_ast!({
+
+            let border_color:vec4<Instance>;
+            let glow_size:float<Instance>;
+
+            const glow_color:vec4 = color("#30f");
+            const border_radius:float = 6.5;
+            const border_width:float = 1.0;
+
+            fn pixel()->vec4{
+				df_viewport(pos * vec2(w, h));
+                df_box(0., 0., w, h, border_radius);
+                df_shape += 3.;
+                df_fill_keep(color);
+                df_stroke_keep(border_color, border_width);
+                df_blur = 2.;
+                return df_glow(glow_color, glow_size);
+            }
+        }));
+        sh
+    }
+
     pub fn handle(&mut self, cx:&mut Cx, event:&Event)->ButtonEvent{
-        match event.hits(&self.bg_area, cx){
+        match event.hits(self.bg_area, cx){
             Event::Animate(ae)=>{
-                let color = self.anim.calc_vec4(cx, "bg.color", ae.time, self.bg_area.read_vec4(cx, "color"));
-                self.bg_area.write_vec4(cx, "color", color);
+                self.anim.calc(cx, "bg.color", ae.time, self.bg_area);
             },
             Event::FingerDown(_fe)=>{
                 self.event = ButtonEvent::Clicked;
@@ -103,15 +147,18 @@ impl Button{
    }
 
     pub fn draw_with_label(&mut self, cx:&mut Cx, label: &str){
+
         // pull the bg color from our animation system, uses 'default' value otherwise
         self.bg.color = self.anim.last_vec4("bg.color");
-
-        self.bg.begin(cx, &self.bg_layout);
+        self.bg_area = self.bg.begin(cx, &self.bg_layout);
+        // push the 2 vars we added to bg shader
+        self.bg_area.push_anim_last(cx, "bg.border_color", &self.anim);
+        self.bg_area.push_anim_last(cx, "bg.glow_size", &self.anim);
 
         self.text.draw_text(cx, Computed, Computed, label);
         
-        self.bg_area = self.bg.end(cx);
+        self.bg.end(cx);
 
-        self.anim.set_area(cx, &self.bg_area); // if our area changed, update animation
+        self.anim.set_area(cx, self.bg_area); // if our area changed, update animation
     }
 }

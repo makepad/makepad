@@ -4,7 +4,7 @@ use crate::cx::*;
 pub struct AnimArea{
     pub area:Area,
     pub start_time:f64,
-    pub duration:f64
+    pub total_time:f64
 }
 
 #[derive(Clone,Debug)]
@@ -51,13 +51,13 @@ where T: std::cmp::PartialEq + std::clone::Clone
                 anim.start_time = std::f64::NAN;
                 self.current_id = self.states[state_index].id.clone();
                 self.next_id = None;
-                anim.duration = self.states[state_index].mode.duration();
+                anim.total_time = self.states[state_index].mode.total_time();
             }
             else{ // queue it
                 self.next_id = Some(self.states[state_index].id.clone());
-                let prev_anim_state = self.find_state(self.current_id.clone()).unwrap();
+                let prev_anim_state = self.states.iter().find(|v| v.id == self.current_id).unwrap();
                 // lets ask an animation state how long it is
-                anim.duration = prev_anim_state.mode.duration() + self.states[state_index].mode.duration()
+                anim.total_time = prev_anim_state.mode.total_time() + self.states[state_index].mode.total_time()
             }
         }
         else{ // its new
@@ -66,20 +66,16 @@ where T: std::cmp::PartialEq + std::clone::Clone
             cx.animations.push(AnimArea{
                 area:self.area.clone(),
                 start_time:std::f64::NAN,
-                duration:self.states[state_index].mode.duration()
+                total_time:self.states[state_index].mode.total_time()
             })
         }
-    }
-
-    pub fn find_state(&mut self, id:T)->Option<&mut AnimState<T>>{
-        self.states.iter_mut().find(|v| v.id == id)
     }
 
     pub fn state(&self)->T{
         self.current_id.clone()
     }
 
-    pub fn set_area(&mut self, cx:&mut Cx, area:&Area){
+    pub fn set_area(&mut self, cx:&mut Cx, area:Area){
         // alright first we find area, it already exists
         if let Some(anim) = cx.animations.iter_mut().find(|v| v.area == self.area){
             anim.area = area.clone()
@@ -88,7 +84,7 @@ where T: std::cmp::PartialEq + std::clone::Clone
         self.area = area.clone();
     }
 
-    fn fetch_calc_track(&mut self, cx:&mut Cx, ident:&str, time:f64)->Option<(f64,&mut AnimTrack)>{
+    pub fn fetch_calc_track(&mut self, cx:&mut Cx, ident:&str, time:f64)->Option<(f64,&mut AnimTrack)>{
         // alright first we find area in running animations
         let anim_index_opt = cx.animations.iter().position(|v| v.area == self.area);
         if anim_index_opt.is_none(){
@@ -102,7 +98,8 @@ where T: std::cmp::PartialEq + std::clone::Clone
         let start_time = cx.animations[anim_index].start_time;
         
         // fetch current state
-        let current_state_opt = self.find_state(self.current_id.clone());
+        let current_id = self.current_id.clone();
+        let current_state_opt = self.states.iter_mut().find(|v| v.id == current_id);
         if current_state_opt.is_none(){  // remove anim
             cx.animations.remove(anim_index);
             return None
@@ -120,9 +117,9 @@ where T: std::cmp::PartialEq + std::clone::Clone
         None
     } 
 
-    fn fetch_last_track(&mut self, ident:&str)->Option<&AnimTrack>{
+    pub fn fetch_last_track(&self, ident:&str)->Option<&AnimTrack>{
          // fetch current state
-        let current_state_opt = self.find_state(self.current_id.clone());
+        let current_state_opt = self.states.iter().find(|v| v.id == self.current_id);
         if current_state_opt.is_none(){  // remove anim
             return None
         }
@@ -258,7 +255,42 @@ where T: std::cmp::PartialEq + std::clone::Clone
             }
         }
         return vec4(0.0,0.0,0.0,0.0)
-    }    
+    }
+
+    pub fn calc(&mut self, cx:&mut Cx, area_name:&str, time:f64, area:Area){
+        if let Some(dot) = area_name.find('.'){
+            let field = area_name.get((dot+1)..area_name.len()).unwrap();
+            if let Some((time,track)) = self.fetch_calc_track(cx, area_name, time){
+                match track{
+                    AnimTrack::Vec4(ft)=>{
+                        let init = area.read_vec4(cx, field);
+                        let ret =  AnimTrack::compute_track_value::<Vec4>(time, &ft.track, &mut ft.cut_init, init);
+                        ft.last_calc = Some(ret);
+                        area.write_vec4(cx, field, ret);
+                    },
+                    AnimTrack::Vec3(ft)=>{
+                        let init = area.read_vec3(cx, field);
+                        let ret =  AnimTrack::compute_track_value::<Vec3>(time, &ft.track, &mut ft.cut_init, init);
+                        ft.last_calc = Some(ret);
+                        area.write_vec3(cx, field, ret);
+                    },
+                    AnimTrack::Vec2(ft)=>{
+                        let init = area.read_vec2(cx, area_name);
+                        let ret =  AnimTrack::compute_track_value::<Vec2>(time, &ft.track, &mut ft.cut_init, init);
+                        ft.last_calc = Some(ret);
+                        area.write_vec2(cx, field, ret);
+                    },
+                    AnimTrack::Float(ft)=>{
+                        let init = area.read_float(cx, area_name);
+                        let ret =  AnimTrack::compute_track_value::<f32>(time, &ft.track, &mut ft.cut_init, init);
+                        ft.last_calc = Some(ret);
+                        area.write_float(cx, field, ret);
+                    }
+                }
+            }
+        }
+    }
+
 }
 
 #[derive(Clone,Debug)]
@@ -312,12 +344,30 @@ impl AnimTrack{
         })
     }
 
+    pub fn to_float(ident:&str, value:f32)->AnimTrack{
+        AnimTrack::Float(FloatTrack{
+            cut_init:None,
+            last_calc:None,
+            ident:ident.to_string(),
+            track:vec![(1.0,value)]
+        })
+    }
+
     pub fn vec2(ident:&str, track:Vec<(f64,Vec2)>)->AnimTrack{
         AnimTrack::Vec2(Vec2Track{
             cut_init:None,
             last_calc:None,
             ident:ident.to_string(),
             track:track
+        })
+    }
+    
+    pub fn to_vec2(ident:&str, value:Vec2)->AnimTrack{
+        AnimTrack::Vec2(Vec2Track{
+            cut_init:None,
+            last_calc:None,
+            ident:ident.to_string(),
+            track:vec![(1.0,value)]
         })
     }
 
@@ -329,6 +379,15 @@ impl AnimTrack{
             track:track
         })
     }
+    
+    pub fn to_vec3(ident:&str, value:Vec3)->AnimTrack{
+        AnimTrack::Vec3(Vec3Track{
+            cut_init:None,
+            last_calc:None,
+            ident:ident.to_string(),
+            track:vec![(1.0,value)]
+        })
+    }
 
     pub fn vec4(ident:&str, track:Vec<(f64,Vec4)>)->AnimTrack{
         AnimTrack::Vec4(Vec4Track{
@@ -336,6 +395,14 @@ impl AnimTrack{
             last_calc:None,
             ident:ident.to_string(),
             track:track
+        })
+    }
+    pub fn to_vec4(ident:&str, value:Vec4)->AnimTrack{
+        AnimTrack::Vec4(Vec4Track{
+            cut_init:None,
+            last_calc:None,
+            ident:ident.to_string(),
+            track:vec![(1.0,value)]
         })
     }
 
@@ -436,35 +503,41 @@ impl<T> AnimState<T>{
 
 #[derive(Clone,Debug)]
 pub enum AnimMode{
-    Single{speed:f64, cut:bool, len:f64},
-    Loop{speed:f64, cut:bool, repeats:f64,len:f64},
-    Reverse{speed:f64, cut:bool, repeats:f64,len:f64},
-    Bounce{speed:f64, cut:bool, repeats:f64,len:f64},
-    Forever{speed:f64, cut:bool},
-    LoopForever{speed:f64, cut:bool, len:f64},
-    ReverseForever{speed:f64, cut:bool, len:f64},
-    BounceForever{speed:f64, cut:bool, len:f64},
+    Chain{duration:f64},
+    Cut{duration:f64},
+    Single{duration:f64, cut:bool, end:f64},
+    Loop{duration:f64, cut:bool, repeats:f64,end:f64},
+    Reverse{duration:f64, cut:bool, repeats:f64,end:f64},
+    Bounce{duration:f64, cut:bool, repeats:f64,end:f64},
+    Forever{duration:f64, cut:bool},
+    LoopForever{duration:f64, cut:bool, end:f64},
+    ReverseForever{duration:f64, cut:bool, end:f64},
+    BounceForever{duration:f64, cut:bool, end:f64},
 }
 
 impl AnimMode{
-    pub fn speed(&self)->f64{
-        match self{
-            AnimMode::Single{speed,..}=>*speed,
-            AnimMode::Loop{speed,..}=>*speed,
-            AnimMode::Reverse{speed,..}=>*speed,
-            AnimMode::Bounce{speed,..}=>*speed,
-            AnimMode::BounceForever{speed,..}=>*speed,
-            AnimMode::Forever{speed,..}=>*speed,
-            AnimMode::LoopForever{speed,..}=>*speed,
-            AnimMode::ReverseForever{speed,..}=>*speed,
-        }
-    }
     pub fn duration(&self)->f64{
         match self{
-            AnimMode::Single{len,speed,..}=>len*speed,
-            AnimMode::Loop{len,speed,repeats,..}=>len*speed*repeats,
-            AnimMode::Reverse{len,speed,repeats,..}=>len*speed*repeats,
-            AnimMode::Bounce{len,speed,repeats,..}=>len*speed*repeats,
+            AnimMode::Chain{duration,..}=>*duration,
+            AnimMode::Cut{duration,..}=>*duration,
+            AnimMode::Single{duration,..}=>*duration,
+            AnimMode::Loop{duration,..}=>*duration,
+            AnimMode::Reverse{duration,..}=>*duration,
+            AnimMode::Bounce{duration,..}=>*duration,
+            AnimMode::BounceForever{duration,..}=>*duration,
+            AnimMode::Forever{duration,..}=>*duration,
+            AnimMode::LoopForever{duration,..}=>*duration,
+            AnimMode::ReverseForever{duration,..}=>*duration,
+        }
+    }
+    pub fn total_time(&self)->f64{
+        match self{
+            AnimMode::Chain{duration,..}=>*duration,
+            AnimMode::Cut{duration,..}=>*duration,
+            AnimMode::Single{end,duration,..}=>end*duration,
+            AnimMode::Loop{end,duration,repeats,..}=>end*duration*repeats,
+            AnimMode::Reverse{end,duration,repeats,..}=>end*duration*repeats,
+            AnimMode::Bounce{end,duration,repeats,..}=>end*duration*repeats,
             AnimMode::BounceForever{..}=>std::f64::INFINITY,
             AnimMode::Forever{..}=>std::f64::INFINITY,
             AnimMode::LoopForever{..}=>std::f64::INFINITY,
@@ -473,6 +546,8 @@ impl AnimMode{
     }    
     pub fn cut(&self)->bool{
         match self{
+            AnimMode::Cut{..}=>true,
+            AnimMode::Chain{..}=>false,
             AnimMode::Single{cut,..}=>*cut,
             AnimMode::Loop{cut,..}=>*cut,
             AnimMode::Reverse{cut,..}=>*cut,
@@ -485,6 +560,8 @@ impl AnimMode{
     }
     pub fn repeats(&self)->f64{
         match self{
+            AnimMode::Chain{..}=>1.0,
+            AnimMode::Cut{..}=>1.0,
             AnimMode::Single{..}=>1.0,
             AnimMode::Loop{repeats,..}=>*repeats,
             AnimMode::Reverse{repeats,..}=>*repeats,
@@ -498,39 +575,45 @@ impl AnimMode{
     
     pub fn compute_time(&self, time:f64)->f64{
         match self{
-            AnimMode::Single{speed,..}=>{
-                time * speed
+            AnimMode::Cut{duration,..}=>{
+                time * duration
             },
-            AnimMode::Loop{len,speed,..}=>{
-                (time / speed)  % len
+            AnimMode::Chain{duration,..}=>{
+                time * duration
             },
-            AnimMode::Reverse{len,speed,..}=>{
-                len - (time / speed)  % len
+            AnimMode::Single{duration,..}=>{
+                time * duration
             },
-            AnimMode::Bounce{len,speed,..}=>{ 
-                let mut local_time = (time / speed)  % (len*2.0);
-                if local_time > *len{
-                    local_time = 2.0*len - local_time;
+            AnimMode::Loop{end,duration,..}=>{
+                (time / duration)  % end
+            },
+            AnimMode::Reverse{end,duration,..}=>{
+                end - (time / duration)  % end
+            },
+            AnimMode::Bounce{end,duration,..}=>{ 
+                let mut local_time = (time / duration)  % (end*2.0);
+                if local_time > *end{
+                    local_time = 2.0*end - local_time;
                 };
                 local_time
             },
-            AnimMode::BounceForever{len,speed,..}=>{
-                let mut local_time = (time / speed)  % (len*2.0);
-                if local_time > *len{
-                    local_time = 2.0*len - local_time;
+            AnimMode::BounceForever{end,duration,..}=>{
+                let mut local_time = (time / duration)  % (end*2.0);
+                if local_time > *end{
+                    local_time = 2.0*end - local_time;
                 };
                 local_time
             },
-            AnimMode::Forever{speed,..}=>{
-                let local_time = time / speed;
+            AnimMode::Forever{duration,..}=>{
+                let local_time = time / duration;
                 local_time
             },
-            AnimMode::LoopForever{len, speed, ..}=>{
-                let local_time = (time / speed)  % len;
+            AnimMode::LoopForever{end, duration, ..}=>{
+                let local_time = (time / duration)  % end;
                 local_time
             },
-            AnimMode::ReverseForever{len, speed, ..}=>{
-                let local_time = len - (time / speed)  % len;
+            AnimMode::ReverseForever{end, duration, ..}=>{
+                let local_time = end - (time / duration)  % end;
                 local_time
             },
         }

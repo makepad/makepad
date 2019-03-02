@@ -32,9 +32,11 @@ impl App{
             ..Layout::filled_padded(10.0)
         });
 
+        //self.ok.mark();
         for i in 0..2000{
             self.ok.get(cx, i).draw_with_label(cx, &format!("{}",(i as u64 + cx.frame_id)%5000));
         }
+        //self.ok.sweep(cx);
 
         self.view.end(cx);
     }

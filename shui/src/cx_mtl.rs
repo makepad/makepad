@@ -349,6 +349,11 @@ impl Cx{
         // we need to figure out which texture slots exist 
         mtl_out.push_str(&Self::assemble_texture_slots(&texture_slots));
 
+        // we need to figure out which texture slots exist 
+       // mtl_out.push_str(&Self::assemble_constants(&texture_slots));
+
+
+
         let mut vtx_cx = SlCx{
             depth:0,
             target:SlTarget::Vertex,

@@ -511,55 +511,50 @@ fn generate_root(expr:Expr)->TokenStream{
     let mut consts = Vec::new();
     let mut structs = Vec::new();
     match expr {
-        Expr::Closure(expr)=>{
-            if let Expr::Block(expr) = *expr.body{
-                for stmt in expr.block.stmts{
-                    match stmt{
-                        Stmt::Local(stmt)=>{
-                            vars.push(generate_shvar_defs(stmt));
-                        }
-                        Stmt::Item(stmt)=>{
-                            match stmt{
-                                Item::Struct(item)=>{
-                                    structs.push(generate_struct_def(item));
-                                }
-                                Item::Const(item)=>{
-                                    consts.push(generate_const_def(item));
-                                }
-                                Item::Fn(item)=>{
-                                    fns.push(generate_fn_def(item));
-                                }
-                                _=>{
-                                    return error(stmt.span(), "Unexpected statement")
-                                }
+        Expr::Block(expr)=>{
+            for stmt in expr.block.stmts{
+                match stmt{
+                    Stmt::Local(stmt)=>{
+                        vars.push(generate_shvar_defs(stmt));
+                    }
+                    Stmt::Item(stmt)=>{
+                        match stmt{
+                            Item::Struct(item)=>{
+                                structs.push(generate_struct_def(item));
+                            }
+                            Item::Const(item)=>{
+                                consts.push(generate_const_def(item));
+                            }
+                            Item::Fn(item)=>{
+                                fns.push(generate_fn_def(item));
+                            }
+                            _=>{
+                                return error(stmt.span(), "Unexpected statement")
                             }
                         }
-                        Stmt::Expr(stmt)=>{
-                             return error(stmt.span(), "Expression not expected here")
-                        }
-                        Stmt::Semi(stmt, _tok)=>{
-                             return error(stmt.span(), "Statement not expected here")
-                        }
+                    }
+                    Stmt::Expr(stmt)=>{
+                            return error(stmt.span(), "Expression not expected here")
+                    }
+                    Stmt::Semi(stmt, _tok)=>{
+                            return error(stmt.span(), "Statement not expected here")
                     }
                 }
             }
-            else{
-               return error(expr.span(),"Expecting closure with block")
-            }
-
-            quote!{ 
-                ShAst{
-                    types:Vec::new(),//{let mut v=Vec::new();#(v.push(#types);)*v},
-                    vars:{let mut v=Vec::new();#(v.push(#vars);)*v},
-                    consts:{let mut v=Vec::new();#(v.push(#consts);)*v},
-                    fns:{let mut v=Vec::new();#(v.push(#fns);)*v}
-                }
-            }
-        }
+        },
         _=>{
-            error(expr.span(), "Expecting closure")
+            return error(expr.span(), "Expecting block")
+        }
+    };
+    quote!{ 
+        ShAst{
+            types:Vec::new(),//{let mut v=Vec::new();#(v.push(#types);)*v},
+            vars:{let mut v=Vec::new();#(v.push(#vars);)*v},
+            consts:{let mut v=Vec::new();#(v.push(#consts);)*v},
+            fns:{let mut v=Vec::new();#(v.push(#fns);)*v}
         }
     }
+
 }
 
 // The actual macro
