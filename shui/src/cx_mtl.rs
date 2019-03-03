@@ -550,7 +550,7 @@ impl<'a> SlCx<'a>{
                     format!("float4({},{},{},{})", vec4.x,vec4.y,vec4.z,vec4.w),
                     "vec4".to_string()
                 );
-            }
+            },
             _=>return MapCallResult::None
         }
     }    

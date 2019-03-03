@@ -48,6 +48,38 @@ where ID:std::cmp::Ord + Clone
         return Some(unsafe{std::mem::transmute(element)});
     }
 }
+
+
+pub struct ElementsIteratorNamed<'a, T, ID>{
+    elements:&'a mut Elements<T, ID>,
+    counter:usize 
+}
+
+impl<'a, T, ID> ElementsIteratorNamed<'a, T, ID>{
+    fn new(elements:&'a mut Elements<T, ID>)->Self{
+        ElementsIteratorNamed{
+            elements:elements,
+            counter:0
+        }
+    }
+}
+
+impl<'a, T, ID> Iterator for ElementsIteratorNamed<'a, T, ID>
+where ID:std::cmp::Ord + Clone
+{
+    type Item = (&'a ID, &'a mut T);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.counter >= self.elements.element_list.len(){
+            return None
+        }
+        let element_id = &self.elements.element_list[self.counter].1;
+        let element = self.elements.element_map.get_mut(&element_id).unwrap();
+        self.counter += 1;
+        return Some((unsafe{std::mem::transmute(element_id)}, unsafe{std::mem::transmute(element)}));
+    }
+}
+
 /*
 // and we'll implement IntoIterator
 impl<'a, T, ID> IntoIterator for &'a mut Elements<T,ID>
@@ -100,6 +132,10 @@ where T:Clone + ElementLife, ID:std::cmp::Ord + Clone
     
     pub fn all<'a>(&'a mut self)->ElementsIterator<'a, T, ID>{
         return ElementsIterator::new(self)
+    }
+
+    pub fn ids<'a>(&'a mut self)->ElementsIteratorNamed<'a, T, ID>{
+        return ElementsIteratorNamed::new(self)
     }
 
     pub fn get(&mut self, cx: &mut Cx, index:ID)->&mut T{
@@ -187,7 +223,7 @@ where T:Clone + ElementLife
         return ElementIterator::new(self)
     }
  
-    pub fn one(&mut self, cx:&mut Cx)->&mut T{
+    pub fn get(&mut self, cx:&mut Cx)->&mut T{
         if self.frame_id == cx.frame_id{
             cx.log("WARNING Item is called multiple times in a single drawpass!\n");
         }

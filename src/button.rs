@@ -132,6 +132,7 @@ impl Button{
     }
 
     pub fn handle(&mut self, cx:&mut Cx, event:&Event)->ButtonEvent{
+        self.event = ButtonEvent::None;
         match event.hits(cx, self.bg_area, &mut self.hit_state){
             Event::Animate(ae)=>{
 
@@ -144,7 +145,7 @@ impl Button{
                 cx.dirty_area = Area::All;
             },
             Event::FingerDown(fe)=>{
-                self.event = ButtonEvent::Clicked;
+               
                 self.anim.change_state(cx, ButtonState::Down);
                 cx.captured_fingers[fe.digit] = self.bg_area;
             },
@@ -160,19 +161,18 @@ impl Button{
                 }
             },
             Event::FingerUp(fe)=>{
+                cx.captured_fingers[fe.digit] = Area::Empty;
                 if fe.is_over{
                     self.anim.change_state(cx, ButtonState::Over);
+                    self.event = ButtonEvent::Clicked;
                 }
                 else{
                     self.anim.change_state(cx, ButtonState::Default);
                 }
-                cx.captured_fingers[fe.digit] = Area::Empty;
             },
             Event::FingerMove(_fe)=>{
             },
-            _=>{
-                 self.event = ButtonEvent::None
-            }
+            _=>()
         };
         self.event.clone()
    }

@@ -20,9 +20,10 @@ impl Style for App{
 
 impl App{
     fn handle(&mut self, cx:&mut Cx, event:&Event){
-        for ok in self.ok.all(){
+        for (id,ok) in self.ok.ids(){
             if let ButtonEvent::Clicked = ok.handle(cx, event){
                 // we got clicked!
+                log!(cx, "GOT CLICKED BY {}", id);
             }
         }
     }

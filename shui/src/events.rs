@@ -203,9 +203,6 @@ impl Event{
                         ..fe.clone()
                     })
                 }
-                //if area.contains(fe.x, fe.y, &cx){
-                //    return self.clone();
-               // }
             },
             _=>()
         };
