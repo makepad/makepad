@@ -5,7 +5,7 @@ var Url = require('url')
 var Os = require('os')
 var NodeWebSocket = require('./devwebsocket')
 var server_port = 2001
-var server_interface = '127.0.0.1'
+var server_interface = '0.0.0.0'
 
 var mimetable = {
 	'.map':'application/json',

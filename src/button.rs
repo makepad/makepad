@@ -143,9 +143,10 @@ impl Button{
 
                 cx.dirty_area = Area::All;
             },
-            Event::FingerDown(_fe)=>{
+            Event::FingerDown(fe)=>{
                 self.event = ButtonEvent::Clicked;
                 self.anim.change_state(cx, ButtonState::Down);
+                cx.captured_fingers[fe.digit] = self.bg_area;
             },
             Event::FingerHover(fe)=>{
                 match fe.hover_state{
@@ -157,6 +158,10 @@ impl Button{
                     },
                     _=>()
                 }
+            },
+            Event::FingerUp(fe)=>{
+                self.anim.change_state(cx, ButtonState::Default);
+                cx.captured_fingers[fe.digit] = Area::Empty;
             },
             Event::FingerMove(_fe)=>{
             },

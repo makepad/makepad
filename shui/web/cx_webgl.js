@@ -266,8 +266,9 @@
 			var w, h;
 			var canvas = this.canvas;
 	  		if(canvas.getAttribute("fullpage")){
-				w = document.body.offsetWidth; 
-				h = document.body.offsetHeight;
+				console.log(w)
+				w = window.innerWidth;//ocument.body.offsetWidth; 
+				h = window.innerHeight;//document.body.offsetHeight;
 			}
 			else{
 				w = canvas.offsetWidth;
@@ -618,21 +619,27 @@
 			window.addEventListener('touchstart', e=>{
 				e.preventDefault()
 				this.on_finger_down(touch_to_finger(e))
+				return false
 			})
 			window.addEventListener('touchmove',e=>{
+				e.preventDefault();
 				this.on_finger_move(touch_to_finger(e))
-			})
+				return false
+			},{passive:false})
 			window.addEventListener('touchend', e=>{
 				e.preventDefault();
 				this.on_finger_up(touch_to_finger(e))
+				return false
 			})
 			canvas.addEventListener('touchcancel', e=>{
 				e.preventDefault();
 				this.on_finger_up(touch_to_finger(e))
+				return false
 			})
 			canvas.addEventListener('touchleave', e=>{
 				e.preventDefault();
 				this.on_finger_up(touch_to_finger(e))
+				return false
 			})
 			canvas.addEventListener('wheel', e=>{
 				var fingers = mouse_to_finger(e)

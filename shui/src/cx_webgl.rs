@@ -139,7 +139,7 @@ impl Cx{
                     event_handler(self, Event::FingerDown(FingerDownEvent{
                         x:to_wasm.mf32(),
                         y:to_wasm.mf32(),
-                        digit:to_wasm.mu32(),
+                        digit:to_wasm.mu32() as usize,
                         button:match to_wasm.mu32(){
                             0=>MouseButton::Left,
                             1=>MouseButton::Right,
@@ -153,7 +153,7 @@ impl Cx{
                     event_handler(self, Event::FingerUp(FingerUpEvent{
                         x:to_wasm.mf32(),
                         y:to_wasm.mf32(),
-                        digit:to_wasm.mu32(),
+                        digit:to_wasm.mu32() as usize,
                         button:match to_wasm.mu32(){
                             0=>MouseButton::Left,
                             1=>MouseButton::Right,
@@ -167,7 +167,7 @@ impl Cx{
                     event_handler(self, Event::FingerMove(FingerMoveEvent{
                         x:to_wasm.mf32(),
                         y:to_wasm.mf32(),
-                        digit:to_wasm.mu32(),
+                        digit:to_wasm.mu32() as usize,
                         button:match to_wasm.mu32(){
                             0=>MouseButton::Left,
                             1=>MouseButton::Right,

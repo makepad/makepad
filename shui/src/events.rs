@@ -19,7 +19,7 @@ impl Default for MouseButton{
 pub struct FingerDownEvent{
     pub x:f32,
     pub y:f32,
-    pub digit:u32,
+    pub digit:usize,
     pub button:MouseButton,
     pub is_touch:bool
 }
@@ -28,7 +28,7 @@ pub struct FingerDownEvent{
 pub struct FingerMoveEvent{
     pub x:f32,
     pub y:f32,
-    pub digit:u32,
+    pub digit:usize,
     pub button:MouseButton,
     pub is_touch:bool,
 }
@@ -37,7 +37,7 @@ pub struct FingerMoveEvent{
 pub struct FingerUpEvent{
     pub x:f32,
     pub y:f32,
-    pub digit:u32,
+    pub digit:usize,
     pub button:MouseButton,
     pub is_touch:bool
 }
@@ -185,7 +185,8 @@ impl Event{
 
             },
             Event::FingerMove(fe)=>{
-                if area.contains(fe.x, fe.y, &cx){
+                // check wether our digit is captured, otherwise don't send
+                if cx.captured_fingers[fe.digit] == area{
                     return self.clone();
                 }
             },
@@ -195,9 +196,12 @@ impl Event{
                 }
             },
             Event::FingerUp(fe)=>{
-                if area.contains(fe.x, fe.y, &cx){
+                if cx.captured_fingers[fe.digit] == area{
                     return self.clone();
                 }
+                //if area.contains(fe.x, fe.y, &cx){
+                //    return self.clone();
+               // }
             },
             _=>()
         };

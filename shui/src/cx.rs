@@ -62,6 +62,7 @@ pub struct Cx{
 
     pub animations:Vec<AnimArea>,
     pub ended_animations:Vec<AnimArea>,
+    pub captured_fingers:Vec<Area>,
 
     pub resources:CxResources,
 
@@ -74,6 +75,10 @@ impl Default for Cx{
     fn default()->Self{
         let mut uniforms = Vec::<f32>::new();
         uniforms.resize(CX_UNI_SIZE, 0.0);
+        let mut captured_fingers = Vec::new();
+        for _i in 0..10{
+            captured_fingers.push(Area::Empty);
+        }
         Self{
             title:"Hello World".to_string(),
             running: true,
@@ -95,12 +100,12 @@ impl Default for Cx{
             paint_dirty:true,
             clear_color:vec4(0.3,0.3,0.3,1.0),
             frame_id:0,
-
             turtles:Vec::new(),
             align_list:Vec::new(),
             target_size:vec2(0.0,0.0),
             target_dpi_factor:0.0,
 
+            captured_fingers:captured_fingers,
             animations:Vec::new(),
             ended_animations:Vec::new(),
             style: StyleSheet{..Default::default()},
