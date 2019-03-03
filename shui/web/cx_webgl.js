@@ -140,8 +140,7 @@
 	}
 
 	class WasmApp{
-		constructor(canvas, webasm){
-
+		constructor(canvas, webasm){		
 			this.canvas = canvas;
 			this.webasm = webasm;
 			this.exports = webasm.instance.exports;

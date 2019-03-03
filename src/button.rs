@@ -103,7 +103,8 @@ impl Style for Button{
 #[derive(Clone, PartialEq)]
 pub enum ButtonEvent{
     None,
-    Clicked
+    Clicked,
+    Down
 }
 
 impl Button{
@@ -145,7 +146,7 @@ impl Button{
                 cx.dirty_area = Area::All;
             },
             Event::FingerDown(fe)=>{
-               
+                self.event = ButtonEvent::Down;
                 self.anim.change_state(cx, ButtonState::Down);
                 cx.captured_fingers[fe.digit] = self.bg_area;
             },
@@ -162,7 +163,7 @@ impl Button{
             },
             Event::FingerUp(fe)=>{
                 cx.captured_fingers[fe.digit] = Area::Empty;
-                if fe.is_over{
+                if fe.is_over && !fe.is_touch{
                     self.anim.change_state(cx, ButtonState::Over);
                     self.event = ButtonEvent::Clicked;
                 }
