@@ -265,10 +265,16 @@
 			var dpi_factor = window.devicePixelRatio;
 			var w, h;
 			var canvas = this.canvas;
-	  		if(canvas.getAttribute("fullpage")){
-				console.log(w)
-				w = window.innerWidth;//ocument.body.offsetWidth; 
-				h = window.innerHeight;//document.body.offsetHeight;
+
+			if(canvas.getAttribute("fullpage")){
+				if(window.orientation == 90 || window.orientation == -90){
+					h = screen.width;//ocument.body.offsetWidth; 
+					w = screen.height;//document.body.offsetHeight;
+				}
+				else{
+					w = screen.width;//ocument.body.offsetWidth; 
+					h = screen.height;//document.body.offsetHeight;
+				}
 			}
 			else{
 				w = canvas.offsetWidth;
@@ -427,9 +433,15 @@
 		}
 
 		init_webgl_context(){
-			window.addEventListener('resize', function(){
+			window.addEventListener('resize', _=>{
 				this.on_screen_resize()
-			}.bind(this))
+			})
+
+			window.addEventListener('orientationchange', _=>{
+				console.log("HERE");
+				this.on_screen_resize()
+			})
+			
 			var canvas = this.canvas
 			var options = {
 				alpha: canvas.getAttribute("alpha")?true:false,
