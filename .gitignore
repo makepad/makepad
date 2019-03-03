@@ -15,3 +15,5 @@ Cargo.lock
 
 /shui/fontencoder/fontencoder
 /shui/fontencoder/ttf/
+
+/webgl/target/wasm32-unknown-unknown/release/makepad_webgl.wasm
