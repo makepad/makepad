@@ -368,9 +368,9 @@ impl Cx{
             mtl_out.push_str("#define ");
             mtl_out.push_str(" ");
             mtl_out.push_str(&cnst.name);
-            mtl_out.push_str("  ");
+            mtl_out.push_str(" (");
             mtl_out.push_str(&const_init);
-            mtl_out.push_str("\n");
+            mtl_out.push_str(")\n");
         }
 
         let mut vtx_cx = SlCx{

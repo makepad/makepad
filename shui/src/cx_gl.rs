@@ -1,7 +1,7 @@
 use crate::cx::*;
 
 impl<'a> SlCx<'a>{
-    pub fn map_call(&self, name:&str, _args:&Vec<Sl>)->MapCallResult{
+    pub fn map_call(&self, name:&str, args:&Vec<Sl>)->MapCallResult{
         match name{
             "matrix_comp_mult"=>return MapCallResult::Rename("matrixCompMult".to_string()),
             "less_than"=>return MapCallResult::Rename("less_than".to_string()),
@@ -20,6 +20,13 @@ impl<'a> SlCx<'a>{
             },
             "dfdy"=>{
                 return MapCallResult::Rename("dFdy".to_string())
+            },
+            "color"=>{
+                let vec4 = color(&args[0].sl);
+                return MapCallResult::Rewrite(
+                    format!("vec4({},{},{},{})", vec4.x,vec4.y,vec4.z,vec4.w),
+                    "vec4".to_string()
+                );
             },
             _=>return MapCallResult::None
         }
@@ -389,6 +396,32 @@ impl Cx{
         let uniforms_dl = sh.flat_vars(ShVarStore::UniformDl);
         let uniforms_dr = sh.flat_vars(ShVarStore::Uniform);
 
+        let mut const_cx = SlCx{
+            depth:0,
+            target:SlTarget::Constant,
+            defargs_fn:"".to_string(),
+            defargs_call:"".to_string(),
+            call_prefix:"_".to_string(),
+            shader:sh,
+            scope:Vec::new(),
+            fn_deps:Vec::new(),
+            fn_done:Vec::new(),
+            auto_vary:Vec::new()
+        };
+        let consts = sh.flat_consts();
+        let mut consts_out = String::new();
+        for cnst in &consts{
+            let const_init = assemble_const_init(cnst, &mut const_cx)?;
+            consts_out.push_str("const ");
+            consts_out.push_str(" ");
+            consts_out.push_str(&cnst.ty);
+            consts_out.push_str(" ");
+            consts_out.push_str(&cnst.name);
+            consts_out.push_str(" = ");
+            consts_out.push_str(&const_init);
+            consts_out.push_str(";\n");
+        }
+
         let mut vtx_cx = SlCx{
             depth:0,
             target:SlTarget::Vertex,
@@ -426,6 +459,8 @@ impl Cx{
         let instance_slots = sh.compute_slot_total(&instances);
         let varying_slots = sh.compute_slot_total(&varyings);
         let mut shared = String::new();
+        shared.push_str("// Consts\n");
+        shared.push_str(&consts_out);
         shared.push_str("//Context uniforms\n");
         shared.push_str(&Self::gl_assemble_uniforms(&uniforms_cx));
         shared.push_str("//DrawList uniforms\n");

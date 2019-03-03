@@ -58,12 +58,12 @@ impl Style for Button{
                     ),
                     AnimState::new(
                         ButtonState::Over,
-                        AnimMode::Cut{duration:0.5}, 
+                        AnimMode::Cut{duration:0.05}, 
                         vec![
                             AnimTrack::to_vec4("bg.color", cx.style.bg_top),
                             AnimTrack::to_vec4("bg.border_color", color("white")),
                             AnimTrack::to_float("bg.glow_size", 1.0),
-                            AnimTrack::float("width", Ease::OutBounce, vec![(1.0,140.0)])
+                            AnimTrack::float("width", Ease::Linear, vec![(1.0,140.0)])
                         ]
                     ),
                     AnimState::new(
@@ -134,14 +134,11 @@ impl Button{
     pub fn handle(&mut self, cx:&mut Cx, event:&Event)->ButtonEvent{
         match event.hits(cx, self.bg_area, &mut self.hit_state){
             Event::Animate(ae)=>{
-                //let value = self.anim.calc_vec4(cx, "bg.color", ae.time, vec4(0.0,0.0,0.0,0.0));
-                //println!("{:?} {}", value, ae.time);
+
                 self.anim.calc_area(cx, "bg.color", ae.time, self.bg_area);
                 self.anim.calc_area(cx, "bg.border_color", ae.time, self.bg_area);
                 self.anim.calc_area(cx, "bg.glow_size", ae.time, self.bg_area);
 
-                //let width = self.anim.last_float("width");
-                //println!("{}", width);
                 self.anim.calc_float(cx, "width", ae.time);
 
                 cx.dirty_area = Area::All;

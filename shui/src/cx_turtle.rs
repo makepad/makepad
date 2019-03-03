@@ -128,6 +128,19 @@ impl Cx{
         ret
     }
 
+    pub fn new_line(&mut self){
+        if let Some(turtle) = self.turtles.last_mut(){
+            match turtle.layout.direction{
+                Direction::Right=>{
+                    turtle.walk_x = turtle.start_x + turtle.layout.padding.l;
+                    turtle.walk_y += turtle.biggest;
+                    turtle.biggest = 0.0;
+                },
+                _=>()
+            }
+        }
+    }
+
     fn do_align(&mut self, dx:f32, dy:f32, turtle:&Turtle){
 
         for i in turtle.align_start..self.align_list.len(){

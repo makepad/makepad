@@ -29,12 +29,16 @@ impl App{
 
     fn draw(&mut self, cx:&mut Cx){
         self.view.begin(cx, &Layout{
+            nowrap:true,
             ..Layout::filled_padded(10.0)
         });
 
         //self.ok.mark();
-        for i in 0..2000{
+        for i in 0..200{
             self.ok.get(cx, i).draw_with_label(cx, &format!("OK {}",(i as u64 )%5000));
+            if i%6 == 5{
+                cx.new_line();
+            }
         }
         //self.ok.sweep(cx);
 

@@ -115,7 +115,7 @@ impl Cx{
 
                     self.target_size = vec2(to_wasm.mf32(),to_wasm.mf32());
                     self.target_dpi_factor = to_wasm.mf32();
-                    event_handler(self, Event::Init); 
+                    event_handler(self, Event::AppInit); 
                     self.dirty_area = Area::All;
                 },
                 4=>{ // resize
@@ -180,7 +180,8 @@ impl Cx{
                 9=>{ // finger hover
                     event_handler(self, Event::FingerHover(FingerHoverEvent{
                         x:to_wasm.mf32(),
-                        y:to_wasm.mf32()
+                        y:to_wasm.mf32(),
+                        hover_state:HoverState::Over
                     }));
                 },
                 10=>{ // finger scroll
