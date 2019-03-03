@@ -43,15 +43,28 @@ pub struct FingerUpEvent{
 }
 
 #[derive(Clone,Debug)]
-pub enum HitState{
+pub enum HoverState{
     In,
     Over,
     Out
 }
 
-impl Default for HitState{
-    fn default()->HitState{
-        HitState::Over
+impl Default for HoverState{
+    fn default()->HoverState{
+        HoverState::Over
+    }
+}
+
+#[derive(Clone,Debug)]
+pub struct HitState{
+    was_over_last_call:bool
+}
+
+impl HitState{
+    pub fn new()->HitState{
+        HitState{
+            was_over_last_call: false
+        }
     }
 }
 
@@ -59,7 +72,7 @@ impl Default for HitState{
 pub struct FingerHoverEvent{
     pub x:f32,
     pub y:f32,
-    pub state:HitState
+    pub hover_state:HoverState
 }
 
 #[derive(Clone, Default,Debug)]
@@ -125,7 +138,7 @@ impl Default for Event{
 }
 
 impl Event{
-    pub fn hits(&self, cx:&Cx, area:Area, hit_state:&mut bool)->Event{
+    pub fn hits(&self, cx:&Cx, area:Area, hit_state:&mut HitState)->Event{
         match self{
             Event::Animate(_)=>{
                 for anim in &cx.animations{
@@ -148,23 +161,23 @@ impl Event{
             },
             
             Event::FingerHover(fe)=>{
-                if *hit_state{
+                if hit_state.was_over_last_call{
                     if area.contains(fe.x, fe.y, &cx){
                         return self.clone();
                     }
                     else{
-                        *hit_state = false;
+                        hit_state.was_over_last_call = false;
                         return Event::FingerHover(FingerHoverEvent{
-                            state:HitState::Out,
+                            hover_state:HoverState::Out,
                             ..fe.clone()
                         })
                     }
                 }
                 else{
                     if area.contains(fe.x, fe.y, &cx){
-                        *hit_state = true;
+                        hit_state.was_over_last_call = true;
                         return Event::FingerHover(FingerHoverEvent{
-                            state:HitState::In,
+                            hover_state:HoverState::In,
                             ..fe.clone()
                         })
                     }

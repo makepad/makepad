@@ -3,7 +3,7 @@ use shui::*;
 #[derive(Clone, Element)]
 pub struct Button{
     pub view:View,
-    pub hit_state:bool,
+    pub hit_state:HitState,
     pub bg_area:Area,
     pub layout:Layout,
     pub bg: Quad,
@@ -30,9 +30,9 @@ impl Style for Button{
                 w:Computed,
                 h:Computed,
                 margin:Margin::i32(1),
-                ..Layout::paddedf(6.0,14.0,6.0,14.0)
+                ..Layout::paddedf(16.0,14.0,16.0,14.0)
             },
-            hit_state:false,
+            hit_state:HitState::new(),
             view:View::new(),
             bg_area:Area::Empty,
             layout:Layout{
@@ -46,41 +46,43 @@ impl Style for Button{
                 vec![
                     AnimState::new(
                         ButtonState::Default,
-                        AnimMode::Chain{duration:0.1}, 
+                        AnimMode::Cut{duration:0.5}, 
                         vec![
                             AnimTrack::to_vec4("bg.color",cx.style.bg_normal),
                             AnimTrack::to_float("bg.glow_size",0.0),
                             AnimTrack::to_vec4("bg.border_color",cx.style.text_lo),
                             AnimTrack::to_vec4("text.color",cx.style.text_med),
                             AnimTrack::to_vec4("icon.color",cx.style.text_med),
+                            AnimTrack::to_float("width", 80.0)
                         ]
                     ),
                     AnimState::new(
                         ButtonState::Over,
-                        AnimMode::Chain{duration:0.05}, 
+                        AnimMode::Cut{duration:0.5}, 
                         vec![
                             AnimTrack::to_vec4("bg.color", cx.style.bg_top),
                             AnimTrack::to_vec4("bg.border_color", color("white")),
-                            AnimTrack::to_float("bg.glow_size", 1.0)
+                            AnimTrack::to_float("bg.glow_size", 1.0),
+                            AnimTrack::float("width", Ease::OutBounce, vec![(1.0,140.0)])
                         ]
                     ),
                     AnimState::new(
                         ButtonState::Down,
                         AnimMode::Cut{duration:0.2}, 
                         vec![
-                            AnimTrack::vec4("bg.border_color", vec![
+                            AnimTrack::vec4("bg.border_color", Ease::Linear, vec![
                                 (0.0, color("white")),
                                 (1.0, color("white"))
                             ]),
-                            AnimTrack::vec4("bg.color", vec![
+                            AnimTrack::vec4("bg.color", Ease::Linear, vec![
                                 (0.0, color("#f")),
                                 (1.0, color("#6"))
                             ]),
-                            AnimTrack::float("bg.glow_size", vec![
+                            AnimTrack::float("bg.glow_size", Ease::Linear, vec![
                                 (0.0, 1.0),
                                 (1.0, 1.0)
                             ]),
-                            AnimTrack::vec4("icon.color", vec![
+                            AnimTrack::vec4("icon.color", Ease::Linear, vec![
                                 (0.0, color("#0")),
                                 (1.0, color("#f")),
                             ]),
@@ -134,20 +136,26 @@ impl Button{
             Event::Animate(ae)=>{
                 //let value = self.anim.calc_vec4(cx, "bg.color", ae.time, vec4(0.0,0.0,0.0,0.0));
                 //println!("{:?} {}", value, ae.time);
-                self.anim.calc(cx, "bg.color", ae.time, self.bg_area);
-                self.anim.calc(cx, "bg.border_color", ae.time, self.bg_area);
-                self.anim.calc(cx, "bg.glow_size", ae.time, self.bg_area);
+                self.anim.calc_area(cx, "bg.color", ae.time, self.bg_area);
+                self.anim.calc_area(cx, "bg.border_color", ae.time, self.bg_area);
+                self.anim.calc_area(cx, "bg.glow_size", ae.time, self.bg_area);
+
+                //let width = self.anim.last_float("width");
+                //println!("{}", width);
+                self.anim.calc_float(cx, "width", ae.time);
+
+                cx.dirty_area = Area::All;
             },
             Event::FingerDown(_fe)=>{
                 self.event = ButtonEvent::Clicked;
                 self.anim.change_state(cx, ButtonState::Down);
             },
             Event::FingerHover(fe)=>{
-                match fe.state{
-                    HitState::In=>{
+                match fe.hover_state{
+                    HoverState::In=>{
                         self.anim.change_state(cx, ButtonState::Over);
                     },
-                    HitState::Out=>{
+                    HoverState::Out=>{
                         self.anim.change_state(cx, ButtonState::Default);
                     },
                     _=>()
@@ -166,7 +174,10 @@ impl Button{
 
         // pull the bg color from our animation system, uses 'default' value otherwise
         self.bg.color = self.anim.last_vec4("bg.color");
-        self.bg_area = self.bg.begin(cx, &self.bg_layout);
+        self.bg_area = self.bg.begin(cx, &Layout{
+            w:Value::Fixed(self.anim.last_float("width")),
+            ..self.bg_layout.clone()
+        });
         // push the 2 vars we added to bg shader
         self.anim.last_push(cx, "bg.border_color", self.bg_area);
         self.anim.last_push(cx, "bg.glow_size", self.bg_area);
