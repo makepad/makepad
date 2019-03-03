@@ -160,7 +160,12 @@ impl Button{
                 }
             },
             Event::FingerUp(fe)=>{
-                self.anim.change_state(cx, ButtonState::Default);
+                if fe.is_over{
+                    self.anim.change_state(cx, ButtonState::Over);
+                }
+                else{
+                    self.anim.change_state(cx, ButtonState::Default);
+                }
                 cx.captured_fingers[fe.digit] = Area::Empty;
             },
             Event::FingerMove(_fe)=>{

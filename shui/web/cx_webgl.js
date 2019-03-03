@@ -268,12 +268,12 @@
 
 			if(canvas.getAttribute("fullpage")){
 				if(window.orientation == 90 || window.orientation == -90){
-					h = screen.width;//ocument.body.offsetWidth; 
-					w = screen.height;//document.body.offsetHeight;
+					h = screen.width;
+					w = screen.height;
 				}
 				else{
-					w = screen.width;//ocument.body.offsetWidth; 
-					h = screen.height;//document.body.offsetHeight;
+					w = screen.width;
+					h = screen.height;
 				}
 			}
 			else{
@@ -958,12 +958,6 @@
 			// load this wasm file
 		}
 	}
-
-	root.isWindows = typeof navigator !== 'undefined' && navigator.appVersion.indexOf("Win") > -1
-	root.isIPad = navigator.userAgent.match(/iPad/)
-	root.isIOSDevice = navigator.userAgent.match(/(iPod|iPhone|iPad)/) && navigator.userAgent.match(/AppleWebKit/)
-	root.isTouchDevice = ('ontouchstart' in window || navigator.maxTouchPoints)
-	root.locationSearch = location.search
 
 	var canvasses =	document.getElementsByClassName('cx_webgl')
 	document.addEventListener('DOMContentLoaded', init)

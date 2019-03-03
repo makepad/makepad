@@ -160,6 +160,7 @@ impl Cx{
                             2=>MouseButton::Middle,
                             v=>MouseButton::Other(v as u8)
                         },
+                        is_over:false,
                         is_touch:to_wasm.mu32()>0
                     }));
                 },

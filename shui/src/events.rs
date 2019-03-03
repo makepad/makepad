@@ -39,6 +39,7 @@ pub struct FingerUpEvent{
     pub y:f32,
     pub digit:usize,
     pub button:MouseButton,
+    pub is_over:bool,
     pub is_touch:bool
 }
 
@@ -197,7 +198,10 @@ impl Event{
             },
             Event::FingerUp(fe)=>{
                 if cx.captured_fingers[fe.digit] == area{
-                    return self.clone();
+                    return Event::FingerUp(FingerUpEvent{
+                        is_over:area.contains(fe.x, fe.y, &cx),
+                        ..fe.clone()
+                    })
                 }
                 //if area.contains(fe.x, fe.y, &cx){
                 //    return self.clone();

@@ -65,6 +65,7 @@ impl Cx{
                                     winit::MouseButton::Other(id)=>MouseButton::Other(id)
                                 },
                                 digit:0,
+                                is_over:false,
                                 is_touch:false,
                             })
                         }
