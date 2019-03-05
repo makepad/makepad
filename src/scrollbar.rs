@@ -240,12 +240,9 @@ impl ScrollBarLike<ScrollBar> for ScrollBar{
             match event.hits(cx, self.sb_area, &mut self.hit_state){
                 Event::Animate(ae)=>{
                     self.anim.calc_area(cx, "sb.color", ae.time, self.sb_area);
-                    //self.anim.calc_area(cx, "bg.handle_color", ae.time, self.sb_area);
                 },
                 Event::FingerDown(fe)=>{
                     self.anim.change_state(cx, ScrollBarState::Scrolling);
-                    // so where are we 'down'? 
-                    //let click_pos; // the position in the view area we clicked
 
                     match self.orientation{
                         ScrollBarOrientation::Horizontal=>{

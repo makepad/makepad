@@ -144,7 +144,7 @@ impl Button{
 
                 cx.dirty_area = Area::All;
             },
-            Event::FingerDown(fe)=>{
+            Event::FingerDown(_fe)=>{
                 self.event = ButtonEvent::Down;
                 self.is_down = true;
                 self.anim.change_state(cx, ButtonState::Down);

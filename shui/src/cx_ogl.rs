@@ -22,6 +22,9 @@ impl Cx{
             }
             else{
                 let draw_list = &mut self.draw_lists[draw_list_id];
+
+                draw_list.set_clipping_uniforms();
+
                 let draw_call = &mut draw_list.draw_calls[draw_call_id];
                 let sh = &self.shaders[draw_call.shader_id];
                 let csh = &self.compiled_shaders[draw_call.shader_id];
@@ -31,16 +34,17 @@ impl Cx{
 
                     if draw_call.update_frame_id == self.frame_id{
                         // update the instance buffer data
-                            gl::BindBuffer(gl::ARRAY_BUFFER, draw_call.resources.vb);
-                            gl::BufferData(gl::ARRAY_BUFFER,
-                                            (draw_call.instance.len() * mem::size_of::<f32>()) as gl::types::GLsizeiptr,
-                                            draw_call.instance.as_ptr() as *const _, gl::STATIC_DRAW);
-                    }
+                        gl::BindBuffer(gl::ARRAY_BUFFER, draw_call.resources.vb);
+                        gl::BufferData(gl::ARRAY_BUFFER,
+                                        (draw_call.instance.len() * mem::size_of::<f32>()) as gl::types::GLsizeiptr,
+                                        draw_call.instance.as_ptr() as *const _, gl::STATIC_DRAW);
+                   }
 
                     gl::UseProgram(csh.program);
                     gl::BindVertexArray(draw_call.resources.vao);
                     let instances = draw_call.instance.len() / csh.instance_slots;
                     let indices = sh.geometry_indices.len();
+
                     Cx::set_uniform_buffer_fallback(&csh.uniforms_cx, &self.uniforms);
                     Cx::set_uniform_buffer_fallback(&csh.uniforms_dl, &draw_list.uniforms);
                     Cx::set_uniform_buffer_fallback(&csh.uniforms_dr, &draw_call.uniforms);
@@ -72,6 +76,7 @@ impl Cx{
         self.exec_draw_list(0);
 
         glutin_window.swap_buffers().unwrap();
+        self.frame_id += 1;
     }
 
     fn resize_window_to_turtle(&mut self, glutin_window:&glutin::GlWindow){
@@ -82,7 +87,7 @@ impl Cx{
     }
     
     pub fn event_loop<F>(&mut self, mut event_handler:F)
-    where F: FnMut(&mut Cx, Event),
+    where F: FnMut(&mut Cx, &mut Event),
     { 
         let gl_request = GlRequest::Latest;
         let gl_profile = GlProfile::Core;
@@ -118,34 +123,38 @@ impl Cx{
 
         while self.running{
             events_loop.poll_events(|winit_event|{
-                let event = self.map_winit_event(winit_event, &glutin_window);
-                if let Event::Resized(_) = &event{
-                    self.resize_window_to_turtle(&glutin_window);
-                    event_handler(self, event); 
-                    self.dirty_area = Area::Empty;
-                    self.redraw_area = Area::All;
-                    event_handler(self, Event::Redraw);
-                    self.repaint(&glutin_window);
-                }
-                else{
-                    event_handler(self, event); 
+                let mut events = self.map_winit_event(winit_event, &glutin_window);
+                for mut event in &mut events{
+                    match &event{
+                        Event::Resized(_)=>{ // do thi
+                            self.resize_window_to_turtle(&glutin_window);
+                            event_handler(self, &mut event); 
+                            self.dirty_area = Area::Empty;
+                            self.redraw_area = Area::All;
+                            event_handler(self, &mut Event::Redraw);
+                            self.repaint(&glutin_window);
+                        },
+                        Event::None=>{},
+                        _=>{
+                            event_handler(self, &mut event); 
+                        }
+                    }
                 }
             });
             if self.animations.len() != 0{
                 let time_now = precise_time_ns();
                 let time = (time_now - start_time) as f64 / 1_000_000_000.0; // keeps the error as low as possible
-                event_handler(self, Event::Animate(AnimateEvent{time:time}));
+                event_handler(self, &mut Event::Animate(AnimateEvent{time:time}));
                 self.check_ended_animations(time);
                 if self.ended_animations.len() > 0{
-                    event_handler(self, Event::AnimationEnded(AnimateEvent{time:time}));
+                    event_handler(self, &mut Event::AnimationEnded(AnimateEvent{time:time}));
                 }
             }
             // call redraw event
             if !self.dirty_area.is_empty(){
                 self.dirty_area = Area::Empty;
                 self.redraw_area = self.dirty_area.clone();
-                self.frame_id += 1;
-                event_handler(self, Event::Redraw);
+                event_handler(self, &mut Event::Redraw);
                 self.paint_dirty = true;
             }
             // repaint everything if we need to
@@ -157,17 +166,22 @@ impl Cx{
             // wait for the next event blockingly so it stops eating power
             if self.animations.len() == 0 && self.dirty_area.is_empty(){
                 events_loop.run_forever(|winit_event|{
-                    let event = self.map_winit_event(winit_event, &glutin_window);
-                    if let Event::Resized(_) = &event{
-                        self.resize_window_to_turtle(&glutin_window);
-                        event_handler(self, event); 
-                        self.dirty_area = Area::Empty;
-                        self.redraw_area = Area::All;
-                        event_handler(self, Event::Redraw);
-                        self.repaint(&glutin_window);
-                    }
-                    else{
-                        event_handler(self, event);
+                    let mut events = self.map_winit_event(winit_event, &glutin_window);
+                    for mut event in &mut events{
+                        match &event{
+                            Event::Resized(_)=>{ // do thi
+                                self.resize_window_to_turtle(&glutin_window);
+                                event_handler(self, &mut event); 
+                                self.dirty_area = Area::Empty;
+                                self.redraw_area = Area::All;
+                                event_handler(self, &mut Event::Redraw);
+                                self.repaint(&glutin_window);
+                            },
+                            Event::None=>{},
+                            _=>{
+                                event_handler(self, &mut event); 
+                            }
+                        }
                     }
                     winit::ControlFlow::Break
                 })
@@ -501,7 +515,7 @@ pub struct DrawListResources{
 
 #[derive(Default,Clone)]
 pub struct DrawCallResources{
-    pub resource_shader_id:usize,
+    pub resource_shader_id:Option<usize>,
     pub vao:gl::types::GLuint,
     pub vb:gl::types::GLuint
 }
@@ -509,37 +523,37 @@ pub struct DrawCallResources{
 impl DrawCallResources{
 
     pub fn check_attached_vao(&mut self, csh:&CompiledShader){
-        if self.resource_shader_id != csh.shader_id{
+        if self.resource_shader_id.is_none() || self.resource_shader_id.unwrap() != csh.shader_id{
             self.free();
-        }
-        // create the VAO
-        unsafe{
-            self.resource_shader_id = csh.shader_id;
-            self.vao = mem::uninitialized();
-            gl::GenVertexArrays(1, &mut self.vao);
-            gl::BindVertexArray(self.vao);
-            
-            // bind the vertex and indexbuffers
-            gl::BindBuffer(gl::ARRAY_BUFFER, csh.geom_vb);
-            for attr in &csh.geom_attribs{
-                gl::VertexAttribPointer(attr.loc, attr.size, gl::FLOAT, 0, attr.stride, attr.offset as *const () as *const _);
-                gl::EnableVertexAttribArray(attr.loc);
-            }
+            // create the VAO
+            unsafe{
+                self.resource_shader_id = Some(csh.shader_id);
+                self.vao = mem::uninitialized();
+                gl::GenVertexArrays(1, &mut self.vao);
+                gl::BindVertexArray(self.vao);
+                
+                // bind the vertex and indexbuffers
+                gl::BindBuffer(gl::ARRAY_BUFFER, csh.geom_vb);
+                for attr in &csh.geom_attribs{
+                    gl::VertexAttribPointer(attr.loc, attr.size, gl::FLOAT, 0, attr.stride, attr.offset as *const () as *const _);
+                    gl::EnableVertexAttribArray(attr.loc);
+                }
 
-            // create and bind the instance buffer
-            self.vb = mem::uninitialized();
-            gl::GenBuffers(1, &mut self.vb);
-            gl::BindBuffer(gl::ARRAY_BUFFER, self.vb);
-            
-            for attr in &csh.inst_attribs{
-                gl::VertexAttribPointer(attr.loc, attr.size, gl::FLOAT, 0, attr.stride, attr.offset as *const () as *const _);
-                gl::EnableVertexAttribArray(attr.loc);
-                gl::VertexAttribDivisor(attr.loc, 1 as gl::types::GLuint);
-            }
+                // create and bind the instance buffer
+                self.vb = mem::uninitialized();
+                gl::GenBuffers(1, &mut self.vb);
+                gl::BindBuffer(gl::ARRAY_BUFFER, self.vb);
+                
+                for attr in &csh.inst_attribs{
+                    gl::VertexAttribPointer(attr.loc, attr.size, gl::FLOAT, 0, attr.stride, attr.offset as *const () as *const _);
+                    gl::EnableVertexAttribArray(attr.loc);
+                    gl::VertexAttribDivisor(attr.loc, 1 as gl::types::GLuint);
+                }
 
-            // bind the indexbuffer
-            gl::BindBuffer(gl::ELEMENT_ARRAY_BUFFER, csh.geom_ib);
-            gl::BindVertexArray(0);
+                // bind the indexbuffer
+                gl::BindBuffer(gl::ELEMENT_ARRAY_BUFFER, csh.geom_ib);
+                gl::BindVertexArray(0);
+            }
         }
     }
 

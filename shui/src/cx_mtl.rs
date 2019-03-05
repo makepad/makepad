@@ -30,40 +30,40 @@ impl Cx{
             else{
                 let draw_list = &mut self.draw_lists[draw_list_id];
                 draw_list.set_clipping_uniforms();
-                let draw = &mut draw_list.draw_calls[draw_call_id];
-                let sh = &self.shaders[draw.shader_id];
-                let shc = &self.compiled_shaders[draw.shader_id];
+                let draw_call = &mut draw_list.draw_calls[draw_call_id];
+                let sh = &self.shaders[draw_call.shader_id];
+                let shc = &self.compiled_shaders[draw_call.shader_id];
                 
-                if draw.update_frame_id == self.frame_id{
+                if draw_call.update_frame_id == self.frame_id{
                     // update the instance buffer data
-                    draw.resources.inst_vbuf.update_with_f32_data(device, &draw.instance);
-                    draw.resources.uni_dr.update_with_f32_data(device, &draw.uniforms);
+                    draw_call.resources.inst_vbuf.update_with_f32_data(device, &draw_call.instance);
+                    draw_call.resources.uni_dr.update_with_f32_data(device, &draw_call.uniforms);
                 }
 
-                let instances = (draw.instance.len() / shc.instance_slots
+                let instances = (draw_call.instance.len() / shc.instance_slots
                 ) as u64;
                 if let Some(pipeline_state) = &shc.pipeline_state{
                     encoder.set_render_pipeline_state(pipeline_state);
                     if let Some(buf) = &shc.geom_vbuf.buffer{encoder.set_vertex_buffer(0, Some(&buf), 0);}
                     else{println!("Drawing error: geom_vbuf None")}
-                    if let Some(buf) = &draw.resources.inst_vbuf.buffer{encoder.set_vertex_buffer(1, Some(&buf), 0);}
+                    if let Some(buf) = &draw_call.resources.inst_vbuf.buffer{encoder.set_vertex_buffer(1, Some(&buf), 0);}
                     else{println!("Drawing error: inst_vbuf None")}
                     if let Some(buf) = &self.resources.uni_cx.buffer{encoder.set_vertex_buffer(2, Some(&buf), 0);}
                     else{println!("Drawing error: uni_cx None")}
                     if let Some(buf) = &draw_list.resources.uni_dl.buffer{encoder.set_vertex_buffer(3, Some(&buf), 0);}
                     else{println!("Drawing error: uni_dl None")}
-                    if let Some(buf) = &draw.resources.uni_dr.buffer{encoder.set_vertex_buffer(4, Some(&buf), 0);}
+                    if let Some(buf) = &draw_call.resources.uni_dr.buffer{encoder.set_vertex_buffer(4, Some(&buf), 0);}
                     else{println!("Drawing error: uni_dr None")}
 
                     if let Some(buf) = &self.resources.uni_cx.buffer{encoder.set_fragment_buffer(0, Some(&buf), 0);}
                     else{println!("Drawing error: uni_cx None")}
                     if let Some(buf) = &draw_list.resources.uni_dl.buffer{encoder.set_fragment_buffer(1, Some(&buf), 0);}
                     else{println!("Drawing error: uni_dl None")}
-                    if let Some(buf) = &draw.resources.uni_dr.buffer{encoder.set_fragment_buffer(2, Some(&buf), 0);}
+                    if let Some(buf) = &draw_call.resources.uni_dr.buffer{encoder.set_fragment_buffer(2, Some(&buf), 0);}
                     else{println!("Drawing error: uni_dr None")}
 
                     // lets set our textures
-                    for (i, texture_id) in draw.textures_2d.iter().enumerate(){
+                    for (i, texture_id) in draw_call.textures_2d.iter().enumerate(){
                         let tex = &mut self.textures_2d[*texture_id as usize];
                         if tex.dirty{
                             tex.upload_to_device(device);
