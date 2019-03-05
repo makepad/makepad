@@ -744,13 +744,13 @@ pub fn assemble_fn_and_deps(sh:&Shader, cx:&mut SlCx)->Result<String, SlErr>{
     Ok(out)
 }
 
-pub fn assemble_const_init(cnst:&ShConst, cx:&mut SlCx)->Result<String, SlErr>{
+pub fn assemble_const_init(cnst:&ShConst, cx:&mut SlCx)->Result<Sl, SlErr>{
     // lets process the expr of a constant
     let result = cnst.value.sl(cx)?;
     if cx.fn_deps.len() > 0{
         return Err(SlErr{msg:"Const cant have function call deps".to_string()});
     }
-    return Ok(result.sl)
+    return Ok(result)
 }
 
 

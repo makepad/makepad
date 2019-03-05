@@ -43,7 +43,7 @@ pub struct Cx{
     pub draw_lists_free: Vec<usize>,
     pub instance_area_stack: Vec<Area>,
 
-    pub view_stack: Vec<View>,
+    pub draw_list_stack: Vec<usize>,
     pub current_draw_list_id: usize,
 
     pub compiled_shaders: Vec<CompiledShader>,
@@ -89,7 +89,7 @@ impl Default for Cx{
             draw_lists:Vec::new(),
             draw_lists_free:Vec::new(),
             instance_area_stack:Vec::new(),
-            view_stack:Vec::new(),
+            draw_list_stack:Vec::new(),
             current_draw_list_id:0,
 
             compiled_shaders:Vec::new(),
@@ -98,8 +98,8 @@ impl Default for Cx{
             dirty_area:Area::All,
             redraw_area:Area::Empty,
             paint_dirty:true,
-            clear_color:vec4(0.3,0.3,0.3,1.0),
-            frame_id:0,
+            clear_color:vec4(0.2,0.2,0.2,1.0),
+            frame_id:1,
             turtles:Vec::new(),
             align_list:Vec::new(),
             target_size:vec2(0.0,0.0),
@@ -449,9 +449,9 @@ macro_rules! main_app {
                 ..Style::style(&mut cx)
             };
 
-            cx.event_loop(|cx, event|{
+            cx.event_loop(|cx, mut event|{
                 if let Event::Redraw = event{return app.draw(cx);}
-                app.handle(cx, &event);
+                app.handle(cx, &mut event);
             });
         }
 
@@ -474,9 +474,9 @@ macro_rules! main_app {
         #[export_name = "process_to_wasm"]
         pub unsafe extern "C" fn process_to_wasm(appcx:u32, msg:u32)->u32{
             let appcx = &*(appcx as *mut (*mut $app,*mut Cx));
-            (*appcx.1).process_to_wasm(msg,|cx, event|{
+            (*appcx.1).process_to_wasm(msg,|cx, mut event|{
                 if let Event::Redraw = event{return (*appcx.0).draw(cx);}
-                (*appcx.0).handle(cx, &event);
+                (*appcx.0).handle(cx, &mut event);
             })
         }
     };

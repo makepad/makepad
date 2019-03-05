@@ -412,13 +412,16 @@ impl Cx{
         let mut consts_out = String::new();
         for cnst in &consts{
             let const_init = assemble_const_init(cnst, &mut const_cx)?;
+            if cnst.ty != const_init.ty{
+                return Err(SlErr{msg:format!("Constant {} init value {} is not the right type {}", cnst.name, const_init.sl, cnst.ty)})
+            }
             consts_out.push_str("const ");
             consts_out.push_str(" ");
             consts_out.push_str(&cnst.ty);
             consts_out.push_str(" ");
             consts_out.push_str(&cnst.name);
             consts_out.push_str(" = ");
-            consts_out.push_str(&const_init);
+            consts_out.push_str(&const_init.sl);
             consts_out.push_str(";\n");
         }
 

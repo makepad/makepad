@@ -63,7 +63,7 @@ impl Cx{
     // incoming to_wasm. There is absolutely no other entrypoint
     // to general rust codeflow than this function. Only the allocators and init
     pub fn process_to_wasm<F>(&mut self, msg:u32, mut event_handler:F)->u32
-    where F: FnMut(&mut Cx, Event)
+    where F: FnMut(&mut Cx, &mut Event)
     {
         let mut to_wasm = ToWasm::from(msg);
         self.resources.from_wasm = FromWasm::new();
@@ -115,7 +115,7 @@ impl Cx{
 
                     self.target_size = vec2(to_wasm.mf32(),to_wasm.mf32());
                     self.target_dpi_factor = to_wasm.mf32();
-                    event_handler(self, Event::AppInit); 
+                    event_handler(self, &mut Event::AppInit); 
                     self.dirty_area = Area::All;
                 },
                 4=>{ // resize
@@ -129,16 +129,17 @@ impl Cx{
                     is_animation_frame = true;
                     let time = to_wasm.mf64();
                     //log!(self, "{} o clock",time);
-                    event_handler(self, Event::Animate(AnimateEvent{time:time}));
+                    event_handler(self, &mut Event::Animate(AnimateEvent{time:time}));
                     self.check_ended_animations(time);
                     if self.ended_animations.len() > 0{
-                        event_handler(self, Event::AnimationEnded(AnimateEvent{time:time}));
+                        event_handler(self, &mut Event::AnimationEnded(AnimateEvent{time:time}));
                     }
                 },
                 6=>{ // finger down
-                    event_handler(self, Event::FingerDown(FingerDownEvent{
+                    event_handler(self, &mut Event::FingerDown(FingerDownEvent{
                         x:to_wasm.mf32(),
                         y:to_wasm.mf32(),
+                        handled:false,
                         digit:to_wasm.mu32() as usize,
                         button:match to_wasm.mu32(){
                             0=>MouseButton::Left,
@@ -150,9 +151,11 @@ impl Cx{
                     }));
                 },
                 7=>{ // finger up
-                    event_handler(self, Event::FingerUp(FingerUpEvent{
+                    event_handler(self, &mut Event::FingerUp(FingerUpEvent{
                         x:to_wasm.mf32(),
                         y:to_wasm.mf32(),
+                        start_x:0.,
+                        start_y:0.,
                         digit:to_wasm.mu32() as usize,
                         button:match to_wasm.mu32(){
                             0=>MouseButton::Left,
@@ -165,9 +168,11 @@ impl Cx{
                     }));
                 },
                 8=>{ // finger move
-                    event_handler(self, Event::FingerMove(FingerMoveEvent{
+                    event_handler(self, &mut Event::FingerMove(FingerMoveEvent{
                         x:to_wasm.mf32(),
                         y:to_wasm.mf32(),
+                        start_x:0.,
+                        start_y:0.,
                         digit:to_wasm.mu32() as usize,
                         button:match to_wasm.mu32(){
                             0=>MouseButton::Left,
@@ -179,16 +184,18 @@ impl Cx{
                     }));
                 },
                 9=>{ // finger hover
-                    event_handler(self, Event::FingerHover(FingerHoverEvent{
+                    event_handler(self, &mut Event::FingerHover(FingerHoverEvent{
                         x:to_wasm.mf32(),
                         y:to_wasm.mf32(),
+                        handled:false,
                         hover_state:HoverState::Over
                     }));
                 },
                 10=>{ // finger scroll
-                    event_handler(self, Event::FingerScroll(FingerScrollEvent{
+                    event_handler(self, &mut Event::FingerScroll(FingerScrollEvent{
                         x:to_wasm.mf32(),
                         y:to_wasm.mf32(),
+                        handled:false,
                         dx:to_wasm.mf32(),
                         dy:to_wasm.mf32(),
                     }));
@@ -203,7 +210,7 @@ impl Cx{
             self.dirty_area = Area::Empty;
             self.redraw_area = self.dirty_area.clone();
             self.frame_id += 1;
-            event_handler(self, Event::Redraw);
+            event_handler(self, &mut Event::Redraw);
             self.paint_dirty = true;
         }
     

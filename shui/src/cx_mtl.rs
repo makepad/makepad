@@ -138,7 +138,7 @@ impl Cx{
     }
 
     pub fn event_loop<F>(&mut self, mut event_handler:F)
-    where F: FnMut(&mut Cx, Event),
+    where F: FnMut(&mut Cx, &mut Event),
     { 
 
         let mut events_loop = winit::EventsLoop::new();
@@ -175,32 +175,32 @@ impl Cx{
 
         let start_time = precise_time_ns();
         
-        event_handler(self, Event::AppInit); 
+        event_handler(self, &mut Event::AppInit); 
 
         while self.running{
             // unfortunate duplication of code between poll and run_forever but i don't know how to put this in a closure
             // without borrowchecker hell
             events_loop.poll_events(|winit_event|{
-                let event = self.map_winit_event(winit_event, &glutin_window);
+                let mut event = self.map_winit_event(winit_event, &glutin_window);
                 if let Event::Resized(_) = &event{ // do this here because mac
                     self.resize_layer_to_turtle(&layer);
-                    event_handler(self, event); 
+                    event_handler(self, &mut event); 
                     self.dirty_area = Area::Empty;
                     self.redraw_area = Area::All;
-                    event_handler(self, Event::Redraw);
+                    event_handler(self, &mut Event::Redraw);
                     self.repaint(&layer, &device, &command_queue);
                 }
                 else{
-                    event_handler(self, event); 
+                    event_handler(self, &mut event); 
                 }
             });
             if self.animations.len() != 0{
                 let time_now = precise_time_ns();
                 let time = (time_now - start_time) as f64 / 1_000_000_000.0; // keeps the error as low as possible
-                event_handler(self, Event::Animate(AnimateEvent{time:time}));
+                event_handler(self, &mut Event::Animate(AnimateEvent{time:time}));
                 self.check_ended_animations(time);
                 if self.ended_animations.len() > 0{
-                    event_handler(self, Event::AnimationEnded(AnimateEvent{time:time}));
+                    event_handler(self, &mut Event::AnimationEnded(AnimateEvent{time:time}));
                 }
             }
             // call redraw event
@@ -208,7 +208,7 @@ impl Cx{
                 self.dirty_area = Area::Empty;
                 self.redraw_area = self.dirty_area.clone();
                 self.frame_id += 1;
-                event_handler(self, Event::Redraw);
+                event_handler(self, &mut Event::Redraw);
                 self.paint_dirty = true;
             }
             // repaint everything if we need to
@@ -220,17 +220,17 @@ impl Cx{
             // wait for the next event blockingly so it stops eating power
             if self.animations.len() == 0 && self.dirty_area.is_empty(){
                 events_loop.run_forever(|winit_event|{
-                    let event = self.map_winit_event(winit_event, &glutin_window);
+                    let mut event = self.map_winit_event(winit_event, &glutin_window);
                     if let Event::Resized(_) = &event{ // do this here because mac
                         self.resize_layer_to_turtle(&layer);
-                        event_handler(self, event); 
+                        event_handler(self, &mut event); 
                         self.dirty_area = Area::Empty;
                         self.redraw_area = Area::All;
-                        event_handler(self, Event::Redraw);
+                        event_handler(self, &mut Event::Redraw);
                         self.repaint(&layer, &device, &command_queue);
                     }
                     else{
-                        event_handler(self, event);
+                        event_handler(self, &mut event);
                     }
                     winit::ControlFlow::Break
                 })

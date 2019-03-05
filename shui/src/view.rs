@@ -1,46 +1,96 @@
 use crate::cx::*;
 
-#[derive(Default,Clone)]
-pub struct View{ // draw info per UI element
-    pub id:usize,
-    pub frame_id:usize,
-    pub initialized:bool,
-    // the set of shader_id + 
-    pub draw_list_id:usize
+#[derive(Clone)]
+pub enum ScrollBarsActive{
+    None,
+    Horizontal,
+    Vertical,
+    Both
 }
 
-impl View{
-    pub fn new()->Self{
+#[derive(Clone)]
+pub enum ScrollBarOrientation{
+    Horizontal,
+    Vertical,
+}
+
+impl Default for ScrollBarsActive{
+    fn default()->Self{
+        ScrollBarsActive::None
+    }
+}
+
+pub trait ScrollBarLike<T>{
+    fn new(cx:&mut Cx, orientation:ScrollBarOrientation)->T;
+    fn draw_with_view_size(&mut self, cx:&mut Cx, view_rect:Rect, total_size:Vec2);
+    fn handle(&mut self, cx:&mut Cx, event:&mut Event)->ScrollBarEvent;
+}
+
+#[derive(Clone, PartialEq)]
+pub enum ScrollBarEvent{
+    None,
+    ScrollHorizontal{scroll_pos:f32, view_total:f32, view_visible:f32},
+    ScrollVertical{scroll_pos:f32, view_total:f32, view_visible:f32},
+    ScrollDone
+}
+
+#[derive(Clone)]
+pub struct View<T>
+where T: ScrollBarLike<T> + Clone + ElementLife
+{ // draw info per UI element
+    pub draw_list_id:Option<usize>,
+    pub scroll_active: ScrollBarsActive,
+    pub scroll_h:Element<T>,
+    pub scroll_v:Element<T>,
+}
+
+impl<T> Style for View<T>
+where T: ScrollBarLike<T> + Clone + ElementLife
+{
+    fn style(cx:&mut Cx)->Self{
         Self{
-            ..Default::default()
+            draw_list_id:None,
+            scroll_h:Element::<T>::new(T::new(cx, ScrollBarOrientation::Horizontal)),
+            scroll_v:Element::<T>::new(T::new(cx, ScrollBarOrientation::Vertical)),
+            scroll_active:ScrollBarsActive::None,
+        }
+    }
+}
+
+impl<T> View<T>
+where T: ScrollBarLike<T> + Clone + ElementLife
+{
+    pub fn new(cx: &mut Cx,scroll_active:ScrollBarsActive)->Self{
+        Self{
+            scroll_active:scroll_active,
+            ..Style::style(cx)
         }
     }
 
     pub fn begin(&mut self, cx:&mut Cx, layout:&Layout)->bool{
         // cx will have a path to a drawlist
         
-        if !self.initialized{ // draw node needs initialization
+        if self.draw_list_id.is_none(){ // draw node needs initialization
             if cx.draw_lists_free.len() != 0{
-                self.draw_list_id = cx.draw_lists_free.pop().unwrap();
+                self.draw_list_id = Some(cx.draw_lists_free.pop().unwrap());
             }
             else{
-                self.draw_list_id = cx.draw_lists.len();
+                self.draw_list_id =  Some(cx.draw_lists.len());
                 cx.draw_lists.push(DrawList{..Default::default()});
             }
-            self.initialized = true;
-            let draw_list = &mut cx.draw_lists[self.draw_list_id];
+            let draw_list = &mut cx.draw_lists[self.draw_list_id.unwrap()];
             draw_list.initialize();
         }
         else{
             // set len to 0
-            let draw_list = &mut cx.draw_lists[self.draw_list_id];
+            let draw_list = &mut cx.draw_lists[self.draw_list_id.unwrap()];
             draw_list.draw_calls_len = 0;
         }
         // push ourselves up the parent draw_stack
-        if let Some(parent_view) = cx.view_stack.last(){
+        if let Some(parent_draw_list_id) = cx.draw_list_stack.last(){
 
             // we need a new draw
-            let parent_draw_list = &mut cx.draw_lists[parent_view.draw_list_id];
+            let parent_draw_list = &mut cx.draw_lists[*parent_draw_list_id];
 
             let id = parent_draw_list.draw_calls_len;
             parent_draw_list.draw_calls_len = parent_draw_list.draw_calls_len + 1;
@@ -50,19 +100,19 @@ impl View{
                 parent_draw_list.draw_calls.push({
                     DrawCall{
                         draw_call_id:parent_draw_list.draw_calls.len(),
-                        sub_list_id:self.draw_list_id,
+                        sub_list_id:self.draw_list_id.unwrap(),
                         ..Default::default()
                     }
                 })
             }
             else{// or reuse a sub list node
                 let draw = &mut parent_draw_list.draw_calls[id];
-                draw.sub_list_id = self.draw_list_id;
+                draw.sub_list_id = self.draw_list_id.unwrap();
             }
         }
 
-        cx.current_draw_list_id = self.draw_list_id;
-        cx.view_stack.push(self.clone());
+        cx.current_draw_list_id = self.draw_list_id.unwrap();
+        cx.draw_list_stack.push(self.draw_list_id.unwrap());
         
         cx.begin_turtle(layout);
 
@@ -71,10 +121,39 @@ impl View{
         //cx.turtle.y = 0.0;
     }
 
+    pub fn handle_scroll(&mut self, cx:&mut Cx, event:&mut Event)->ScrollBarEvent{
+        let mut ret_h = ScrollBarEvent::None;
+        let mut ret_v = ScrollBarEvent::None;
+        for scroll_h in self.scroll_h.all(){
+            ret_h = scroll_h.handle(cx, event);
+        }
+        for scroll_v in self.scroll_v.all(){
+            ret_v = scroll_v.handle(cx, event);
+        }
+        match ret_h{
+            ScrollBarEvent::None=>(),
+            _=>{return ret_h;}
+        };
+        match ret_v{
+            ScrollBarEvent::None=>(),
+            _=>{return ret_v;}
+        };
+        ScrollBarEvent::None
+    }
+
     pub fn end(&mut self, cx:&mut Cx){
-        cx.view_stack.pop();
+        // do scrollbars if need be
+        cx.draw_list_stack.pop();
+        // lets ask the turtle our actual bounds
+        let view_total = cx.turtle_bounds();   
+        let rect_now =  cx.turtle_rect();
+
+        self.scroll_h.get(cx).draw_with_view_size(cx, rect_now, view_total);
+        self.scroll_v.get(cx).draw_with_view_size(cx, rect_now, view_total);
+
         let rect = cx.end_turtle();
-        let draw_list = &mut cx.draw_lists[self.draw_list_id];
+
+        let draw_list = &mut cx.draw_lists[self.draw_list_id.unwrap()];
         draw_list.rect = rect
     }
 }

@@ -19,6 +19,7 @@ impl Cx{
                     return Event::FingerScroll(FingerScrollEvent{
                         x:self.resources.winit.last_x,
                         y:self.resources.winit.last_y,
+                        handled:false,
                         dx:match delta{
                             winit::MouseScrollDelta::LineDelta(dx,_dy)=>dx,
                             winit::MouseScrollDelta::PixelDelta(pp)=>pp.x as f32
@@ -35,6 +36,7 @@ impl Cx{
                     return Event::FingerHover(FingerHoverEvent{
                         x:self.resources.winit.last_x,
                         y:self.resources.winit.last_y,
+                        handled:false,
                         hover_state:HoverState::Over
                     })
                 },
@@ -50,6 +52,7 @@ impl Cx{
                                     winit::MouseButton::Middle=>MouseButton::Middle,
                                     winit::MouseButton::Other(id)=>MouseButton::Other(id)
                                 },
+                                handled:false,
                                 digit:0,
                                 is_touch:false,
                             })
@@ -64,6 +67,8 @@ impl Cx{
                                     winit::MouseButton::Middle=>MouseButton::Middle,
                                     winit::MouseButton::Other(id)=>MouseButton::Other(id)
                                 },
+                                start_x:0.,
+                                start_y:0.,
                                 digit:0,
                                 is_over:false,
                                 is_touch:false,

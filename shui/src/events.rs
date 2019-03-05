@@ -21,6 +21,7 @@ pub struct FingerDownEvent{
     pub y:f32,
     pub digit:usize,
     pub button:MouseButton,
+    pub handled:bool,
     pub is_touch:bool
 }
 
@@ -28,6 +29,8 @@ pub struct FingerDownEvent{
 pub struct FingerMoveEvent{
     pub x:f32,
     pub y:f32,
+    pub start_x:f32,
+    pub start_y:f32,
     pub digit:usize,
     pub button:MouseButton,
     pub is_touch:bool,
@@ -37,6 +40,8 @@ pub struct FingerMoveEvent{
 pub struct FingerUpEvent{
     pub x:f32,
     pub y:f32,
+    pub start_x:f32,
+    pub start_y:f32,
     pub digit:usize,
     pub button:MouseButton,
     pub is_over:bool,
@@ -58,12 +63,14 @@ impl Default for HoverState{
 
 #[derive(Clone,Debug)]
 pub struct HitState{
+    finger_down_start:Vec<Vec2>,
     was_over_last_call:bool
 }
 
 impl HitState{
     pub fn new()->HitState{
         HitState{
+            finger_down_start:Vec::new(),
             was_over_last_call: false
         }
     }
@@ -73,6 +80,7 @@ impl HitState{
 pub struct FingerHoverEvent{
     pub x:f32,
     pub y:f32,
+    pub handled:bool,
     pub hover_state:HoverState
 }
 
@@ -81,16 +89,8 @@ pub struct FingerScrollEvent{
     pub x:f32,
     pub y:f32,
     pub dx:f32,
-    pub dy:f32
-}
-
-#[derive(Clone, Default, Debug)]
-pub struct FingerCapturedEvent{
-    pub area:Area,
-    pub x:f32,
-    pub y:f32,
-    pub dx:f32,
-    pub dy:f32
+    pub dy:f32,
+    pub handled:bool,
 }
 
 #[derive(Clone, Default, Debug)]
@@ -124,7 +124,6 @@ pub enum Event{
     Animate(AnimateEvent),
     CloseRequested,
     Resized(ResizedEvent),
-    FingerCaptured(FingerCapturedEvent),
     FingerDown(FingerDownEvent),
     FingerMove(FingerMoveEvent),
     FingerHover(FingerHoverEvent),
@@ -139,7 +138,37 @@ impl Default for Event{
 }
 
 impl Event{
-    pub fn hits(&self, cx:&Cx, area:Area, hit_state:&mut HitState)->Event{
+    pub fn set_handled(&mut self, set:bool){
+        match self{
+            Event::FingerHover(fe)=>{
+                fe.handled = set;
+            },
+            Event::FingerScroll(fe)=>{
+                fe.handled = set;
+            },
+            Event::FingerDown(fe)=>{
+                fe.handled = set;
+            },
+            _=>()
+        }
+    }
+
+    pub fn handled(&self)->bool{
+        match self{
+            Event::FingerHover(fe)=>{
+                fe.handled
+            },
+            Event::FingerScroll(fe)=>{
+                fe.handled
+            },
+            Event::FingerDown(fe)=>{
+                fe.handled
+            }, 
+            _=>false
+        }
+    }
+
+    pub fn hits(&mut self, cx:&mut Cx, area:Area, hit_state:&mut HitState)->Event{
         match self{
             Event::Animate(_)=>{
                 for anim in &cx.animations{
@@ -155,15 +184,11 @@ impl Event{
                     }
                 }
             },
-            Event::FingerCaptured(fc)=>{
-                if fc.area == area{
-                    return self.clone();
-                }
-            },
-            
+           
             Event::FingerHover(fe)=>{
                 if hit_state.was_over_last_call{
-                    if area.contains(fe.x, fe.y, &cx){
+                    if area.contains(fe.x, fe.y, &cx) && !fe.handled{
+                        fe.handled = true;
                         return self.clone();
                     }
                     else{
@@ -175,7 +200,8 @@ impl Event{
                     }
                 }
                 else{
-                    if area.contains(fe.x, fe.y, &cx){
+                    if area.contains(fe.x, fe.y, &cx) && !fe.handled{
+                        fe.handled = true;
                         hit_state.was_over_last_call = true;
                         return Event::FingerHover(FingerHoverEvent{
                             hover_state:HoverState::In,
@@ -183,23 +209,39 @@ impl Event{
                         })
                     }
                 }
-
             },
             Event::FingerMove(fe)=>{
                 // check wether our digit is captured, otherwise don't send
                 if cx.captured_fingers[fe.digit] == area{
-                    return self.clone();
+                    return Event::FingerMove(FingerMoveEvent{
+                        start_x: hit_state.finger_down_start[fe.digit].x,
+                        start_y: hit_state.finger_down_start[fe.digit].y,
+                        ..fe.clone()
+                    })
                 }
             },
             Event::FingerDown(fe)=>{
-                if area.contains(fe.x, fe.y, &cx){
+                if !fe.handled && area.contains(fe.x, fe.y, &cx){
+                    cx.captured_fingers[fe.digit] = area;
+                    // store the start point, make room in the vector for the digit.
+                    if hit_state.finger_down_start.len() < fe.digit+1{
+                        for _i in hit_state.finger_down_start.len()..(fe.digit+1){
+                            hit_state.finger_down_start.push(vec2(0.,0.));
+                        }
+                    }
+                    hit_state.finger_down_start[fe.digit] = vec2(fe.x, fe.y);
+                    fe.handled = true;
                     return self.clone();
                 }
             },
             Event::FingerUp(fe)=>{
                 if cx.captured_fingers[fe.digit] == area{
+                    cx.captured_fingers[fe.digit] = Area::Empty;
+                    let start = &hit_state.finger_down_start[fe.digit];
                     return Event::FingerUp(FingerUpEvent{
                         is_over:area.contains(fe.x, fe.y, &cx),
+                        start_x: start.x,
+                        start_y: start.y,
                         ..fe.clone()
                     })
                 }

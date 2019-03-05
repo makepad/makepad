@@ -10,21 +10,23 @@ pub trait ElementLife{
 
 
 // Multiple elements
-
-
-pub struct Elements<T, ID>{
+#[derive(Clone, Default)]
+pub struct Elements<T, ID>
+where ID:std::cmp::Ord {
     pub template:T,
     pub element_list:Vec<(bool,ID)>,
     pub element_map:BTreeMap<ID,T>,
     pub len:usize
 }
 
-pub struct ElementsIterator<'a, T, ID>{
+pub struct ElementsIterator<'a, T, ID>
+where ID:std::cmp::Ord {
     elements:&'a mut Elements<T, ID>,
     counter:usize 
 }
 
-impl<'a, T, ID> ElementsIterator<'a, T, ID>{
+impl<'a, T, ID> ElementsIterator<'a, T, ID>
+where ID:std::cmp::Ord {
     fn new(elements:&'a mut Elements<T, ID>)->Self{
         ElementsIterator{
             elements:elements,
@@ -50,12 +52,14 @@ where ID:std::cmp::Ord + Clone
 }
 
 
-pub struct ElementsIteratorNamed<'a, T, ID>{
+pub struct ElementsIteratorNamed<'a, T, ID>
+where ID:std::cmp::Ord {
     elements:&'a mut Elements<T, ID>,
     counter:usize 
 }
 
-impl<'a, T, ID> ElementsIteratorNamed<'a, T, ID>{
+impl<'a, T, ID> ElementsIteratorNamed<'a, T, ID>
+where ID:std::cmp::Ord {
     fn new(elements:&'a mut Elements<T, ID>)->Self{
         ElementsIteratorNamed{
             elements:elements,
@@ -159,7 +163,7 @@ where T:Clone + ElementLife, ID:std::cmp::Ord + Clone
 // Single element
 
 
-
+#[derive(Clone, Default)]
 pub struct Element<T>{
     pub template:T,
     pub frame_id:u64,

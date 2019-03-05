@@ -178,6 +178,25 @@ impl Cx{
         }
     }
 
+    pub fn turtle_rect(&self)->Rect{
+        if let Some(turtle) = self.turtles.last(){
+            return Rect{
+                x:turtle.start_x,
+                y:turtle.start_y,
+                w:turtle.width,
+                h:turtle.height
+            }
+        };
+        return Rect::zero();
+    }
+
+    pub fn turtle_bounds(&self)->Vec2{
+        if let Some(turtle) = self.turtles.last(){
+            return vec2(turtle.bound_x2, turtle.bound_y2);
+        }
+        return vec2(0.0,0.0)        
+    }
+
     // end a turtle returning computed geometry
     pub fn end_turtle(&mut self)->Rect{
         let old = self.turtles.pop().unwrap();

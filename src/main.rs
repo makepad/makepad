@@ -1,16 +1,18 @@
 use shui::*;
 mod button;
 use crate::button::*;
+mod scrollbar;
+use crate::scrollbar::*;
 
 struct App{
-    view:View,
+    view:View<ScrollBar>,
     ok:Elements<Button, usize>,
 }
  
 impl Style for App{
     fn style(cx:&mut Cx)->Self{
         Self{
-            view:View::new(),
+            view:View::new(cx, ScrollBarsActive::Both),
             ok:Elements::new(Button{
                 ..Style::style(cx)  
             }),
@@ -19,7 +21,10 @@ impl Style for App{
 }
 
 impl App{
-    fn handle(&mut self, cx:&mut Cx, event:&Event){
+    fn handle(&mut self, cx:&mut Cx, event:&mut Event){
+
+        self.view.handle_scroll(cx, event);
+
         for (id,ok) in self.ok.ids(){
             if let ButtonEvent::Clicked = ok.handle(cx, event){
                 // we got clicked!
@@ -41,8 +46,8 @@ impl App{
                 cx.new_line();
             }
         }
-        //self.ok.sweep(cx);
 
+        // draw scroll bars
         self.view.end(cx);
     }
 }

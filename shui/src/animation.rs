@@ -790,8 +790,7 @@ impl Ease{
                 }
                 
                 return ((ay * u + by) * u + cy) * u;
-            },
-            _=>{return 0.0},
+            }
         }
     }
 }

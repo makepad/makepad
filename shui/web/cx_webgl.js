@@ -1,4 +1,6 @@
 (function(root){
+	var user_agent = window.navigator.userAgent;
+	var is_mobile_safari = user_agent.match(/Mobile\/\w+ Safari/i);
 
 	// message we can send to wasm
 	class ToWasm{
@@ -266,13 +268,19 @@
 			var canvas = this.canvas;
 
 			if(canvas.getAttribute("fullpage")){
-				if(window.orientation == 90 || window.orientation == -90){
-					h = screen.width;
-					w = screen.height;
+				if(is_mobile_safari){
+					if(window.orientation == 90 || window.orientation == -90){
+						h = screen.width;
+						w = screen.height;
+					}
+					else{
+						w = screen.width;
+						h = screen.height;
+					}
 				}
 				else{
-					w = screen.width;
-					h = screen.height;
+					w = window.innerWidth;
+					h = window.innerHeight;
 				}
 			}
 			else{

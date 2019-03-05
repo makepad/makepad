@@ -12,15 +12,15 @@ pub fn elements_derive_macro(input: proc_macro::TokenStream) -> proc_macro::Toke
         let ts = proc_macro::TokenStream::from(quote!{
             impl ElementLife for #ident{
                 fn construct(&mut self, cx: &mut Cx){
-                    self.handle(cx, &Event::Construct);
+                    self.handle(cx, &mut Event::Construct);
                 }
 
                 fn destruct(&mut self, cx: &mut Cx){
-                    self.handle(cx, &Event::Destruct);
+                    self.handle(cx, &mut Event::Destruct);
                 }
 
                 fn update(&mut self, cx: &mut Cx){
-                    self.handle(cx, &Event::Update);
+                    self.handle(cx, &mut Event::Update);
                 }
             }
         });
