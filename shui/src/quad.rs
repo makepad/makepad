@@ -36,16 +36,26 @@ impl Quad{
 
         sh.add_ast(shader_ast!({
             
-            let pos:vec2<Geometry>;
-            let fac:float<Uniform>;
+            let geom:vec2<Geometry>;
+
             let x:float<Instance>;
             let y:float<Instance>;
             let w:float<Instance>;
             let h:float<Instance>;
             let color:vec4<Instance>;
+            let pos:vec2<Varying>;
 
             fn vertex()->vec4{
-                return vec4(pos*vec2(w, h)+vec2(x, y),0.,1.) * camera_projection;
+                let shift:vec2 = -draw_list_scroll;
+                let clipped:vec2 = clamp(
+                    geom*vec2(w, h) + vec2(x, y) + shift,
+                    draw_list_clip.xy,
+                    draw_list_clip.zw
+                );
+                pos = (clipped - shift - vec2(x,y)) / vec2(w, h);
+                // only pass the clipped position forward
+                //pos = clipped;
+                return vec4(clipped,0.,1.) * camera_projection;
             }
 
             fn pixel()->vec4{
@@ -67,17 +77,9 @@ impl Quad{
         cx.end_instance()
     }
 
-    pub fn set_uniforms(&mut self, cx:&mut Cx, area:Area){
-        if area.need_uniforms_now(cx){
-            area.uniform_float(cx, "fac", 1.0);
-        }
-    }
-
     pub fn draw_sized(&mut self, cx:&mut Cx, w:Value, h:Value, margin:Margin)->Area{
         let area = cx.new_aligned_instance(self.shader_id);
 
-        self.set_uniforms(cx, area);
-        
         let geom = cx.walk_turtle(w, h, margin, None);
         
         // lets store our instance onto the turtle
@@ -97,8 +99,6 @@ impl Quad{
         else{
            cx.new_instance(self.shader_id)
         };
-
-        self.set_uniforms(cx, area);
 
         let data = [
             /*x,y,w,h*/x,y,w,h,

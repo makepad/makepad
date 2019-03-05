@@ -29,8 +29,8 @@ impl Cx{
             }
             else{
                 let draw_list = &mut self.draw_lists[draw_list_id];
+                draw_list.set_clipping_uniforms();
                 let draw = &mut draw_list.draw_calls[draw_call_id];
-
                 let sh = &self.shaders[draw.shader_id];
                 let shc = &self.compiled_shaders[draw.shader_id];
                 
@@ -248,7 +248,7 @@ impl Cx{
         }
     }
 
-       pub fn compile_all_mtl_shaders(&mut self, device:&Device){
+    pub fn compile_all_mtl_shaders(&mut self, device:&Device){
         for sh in &self.shaders{
             let mtlsh = Self::compile_mtl_shader(&sh, device);
             if let Ok(mtlsh) = mtlsh{

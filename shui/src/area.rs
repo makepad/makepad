@@ -459,8 +459,6 @@ impl Area{
 
     pub fn contains(&self, x:f32, y:f32, cx:&Cx)->bool{
         let rect = self.get_rect(cx);
-
-        return x >= rect.x && x <= rect.x + rect.w &&
-            y >= rect.y && y <= rect.y + rect.h;
+        rect.contains(x, y)
     }
 }

@@ -312,8 +312,9 @@ impl DrawCall{
 }
 
 // CX and DL uniforms
-const DL_UNI_PROP2:usize = 0;
-const DL_UNI_SIZE:usize = 1;
+const DL_UNI_SCROLL:usize = 0;
+const DL_UNI_CLIP:usize = 2;
+const DL_UNI_SIZE:usize = 6;
 
 #[derive(Default,Clone)]
 pub struct DrawList{
@@ -321,20 +322,46 @@ pub struct DrawList{
     pub draw_calls_len: usize,
     pub uniforms:Vec<f32>, // cmdlist uniforms
     pub resources:DrawListResources,
-    pub rect:Rect
+    pub rect:Rect,
+    pub clipped:bool
 }
 
 impl DrawList{
-    pub fn initialize(&mut self){
+    pub fn initialize(&mut self, clipped:bool){
+        self.clipped = clipped;
         self.uniforms.resize(DL_UNI_SIZE, 0.0);
     }
-    
-    pub fn def_uniforms(_sh:&mut Shader){
-        //sh.dl_uniform("prop2", Kind::Float);
+
+    pub fn set_clipping_uniforms(&mut self){
+        if self.clipped{
+            self.uniform_draw_list_clip(self.rect.x, self.rect.y, self.rect.x+self.rect.w, self.rect.y+self.rect.h);
+        }
+        else{
+            self.uniform_draw_list_clip(-50000.0,-50000.0,50000.0,50000.0);
+        }
     }
 
-    pub fn uniform_prop2(&mut self, v:f32){
-        self.uniforms[DL_UNI_PROP2] = v;
+    pub fn def_uniforms(sh:&mut Shader){
+        sh.add_ast(shader_ast!({
+            let draw_list_scroll:vec2<UniformDl>;
+            let draw_list_clip:vec4<UniformDl>;
+        }));
+    }
+
+    pub fn set_scroll_x(&mut self, x:f32){
+        self.uniforms[DL_UNI_SCROLL+0] = x;
+    }
+
+    pub fn set_scroll_y(&mut self, y:f32){
+        self.uniforms[DL_UNI_SCROLL+1] = y;
+    }
+
+    pub fn uniform_draw_list_clip(&mut self, min_x:f32, min_y:f32, max_x:f32, max_y:f32){
+        
+        self.uniforms[DL_UNI_CLIP+0] = min_x;
+        self.uniforms[DL_UNI_CLIP+1] = min_y;
+        self.uniforms[DL_UNI_CLIP+2] = max_x;
+        self.uniforms[DL_UNI_CLIP+3] = max_y;
     }
 }
 

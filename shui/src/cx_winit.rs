@@ -23,6 +23,8 @@ impl Cx{
                     x:self.resources.winit.last_x,
                     y:self.resources.winit.last_y,
                     digit:i,
+                    rx:self.resources.winit.last_x,
+                    ry:self.resources.winit.last_y,
                     start_x:0.,
                     start_y:0.,
                     is_over:false,
@@ -66,6 +68,8 @@ impl Cx{
                     return vec![Event::FingerScroll(FingerScrollEvent{
                         x:self.resources.winit.last_x,
                         y:self.resources.winit.last_y,
+                        rx:self.resources.winit.last_x,
+                        ry:self.resources.winit.last_y,
                         handled:false,
                         dx:match delta{
                             winit::MouseScrollDelta::LineDelta(dx,_dy)=>dx,
@@ -85,6 +89,8 @@ impl Cx{
                     events.push(Event::FingerHover(FingerHoverEvent{
                         x:self.resources.winit.last_x,
                         y:self.resources.winit.last_y,
+                        rx:self.resources.winit.last_x,
+                        ry:self.resources.winit.last_y,
                         handled:false,
                         hover_state:HoverState::Over
                     }));
@@ -103,6 +109,8 @@ impl Cx{
                     return vec![Event::FingerHover(FingerHoverEvent{
                         x:self.resources.winit.last_x,
                         y:self.resources.winit.last_y,
+                        rx:self.resources.winit.last_x,
+                        ry:self.resources.winit.last_y,
                         handled:false,
                         hover_state:HoverState::Out
                     })]
@@ -124,6 +132,8 @@ impl Cx{
                             return vec![Event::FingerDown(FingerDownEvent{
                                 x:self.resources.winit.last_x,
                                 y:self.resources.winit.last_y,
+                                rx:self.resources.winit.last_x,
+                                ry:self.resources.winit.last_y,
                                 handled:false,
                                 digit:digit,
                                 is_touch:false,
@@ -143,6 +153,8 @@ impl Cx{
                             return vec![Event::FingerUp(FingerUpEvent{
                                 x:self.resources.winit.last_x,
                                 y:self.resources.winit.last_y,
+                                rx:self.resources.winit.last_x,
+                                ry:self.resources.winit.last_y,
                                 start_x:0.,
                                 start_y:0.,
                                 digit:digit,

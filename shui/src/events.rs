@@ -4,6 +4,8 @@ use crate::cx::*;
 pub struct FingerDownEvent{
     pub x:f32,
     pub y:f32,
+    pub rx:f32,
+    pub ry:f32,
     pub digit:usize,
     pub handled:bool,
     pub is_touch:bool
@@ -13,6 +15,8 @@ pub struct FingerDownEvent{
 pub struct FingerMoveEvent{
     pub x:f32,
     pub y:f32,
+    pub rx:f32,
+    pub ry:f32,
     pub start_x:f32,
     pub start_y:f32,
     pub is_over:bool,
@@ -24,6 +28,8 @@ pub struct FingerMoveEvent{
 pub struct FingerUpEvent{
     pub x:f32,
     pub y:f32,
+    pub rx:f32,
+    pub ry:f32,
     pub start_x:f32,
     pub start_y:f32,
     pub digit:usize,
@@ -63,6 +69,8 @@ impl HitState{
 pub struct FingerHoverEvent{
     pub x:f32,
     pub y:f32,
+    pub rx:f32,
+    pub ry:f32,
     pub handled:bool,
     pub hover_state:HoverState
 }
@@ -71,6 +79,8 @@ pub struct FingerHoverEvent{
 pub struct FingerScrollEvent{
     pub x:f32,
     pub y:f32,
+    pub rx:f32,
+    pub ry:f32,
     pub dx:f32,
     pub dy:f32,
     pub handled:bool,
@@ -175,27 +185,37 @@ impl Event{
             },
            
             Event::FingerHover(fe)=>{
+                let rect = area.get_rect(&cx);
                 if hit_state.was_over_last_call{
-                    if area.contains(fe.x, fe.y, &cx) && !fe.handled{
+
+                    if !fe.handled && rect.contains(fe.x, fe.y){
                         fe.handled = true;
                         if let HoverState::Out = fe.hover_state{
                             hit_state.was_over_last_call = false;
                         }
-                        return self.clone();
+                        return Event::FingerHover(FingerHoverEvent{
+                            rx:fe.x - rect.x,
+                            ry:fe.y - rect.y,
+                            ..fe.clone()
+                        })
                     }
                     else{
                         hit_state.was_over_last_call = false;
                         return Event::FingerHover(FingerHoverEvent{
+                            rx:fe.x - rect.x,
+                            ry:fe.y - rect.y,
                             hover_state:HoverState::Out,
                             ..fe.clone()
                         })
                     }
                 }
                 else{
-                    if area.contains(fe.x, fe.y, &cx) && !fe.handled{
+                    if !fe.handled && rect.contains(fe.x, fe.y){
                         fe.handled = true;
                         hit_state.was_over_last_call = true;
                         return Event::FingerHover(FingerHoverEvent{
+                            rx:fe.x - rect.x,
+                            ry:fe.y - rect.y,
                             hover_state:HoverState::In,
                             ..fe.clone()
                         })
@@ -211,34 +231,44 @@ impl Event{
                     else{
                         hit_state.finger_down_start[fe.digit]
                     };
+                    let rect = area.get_rect(&cx);
                     return Event::FingerMove(FingerMoveEvent{
                         start_x: start.x,
                         start_y: start.y,
-                        is_over:area.contains(fe.x, fe.y, &cx),
+                        rx:fe.x - rect.x,
+                        ry:fe.y - rect.y,
+                        is_over:rect.contains(fe.x, fe.y),
                         ..fe.clone()
                     })
                 }
             },
             Event::FingerDown(fe)=>{
-                if !fe.handled && area.contains(fe.x, fe.y, &cx){
-                    // scan if any of the fingers already captured this area
-                    if let HitTouch::Single = hit_touch{
-                        for fin_area in &cx.captured_fingers{
-                            if *fin_area == area{
-                                return Event::None;
+                if !fe.handled{
+                    let rect = area.get_rect(&cx);
+                    if rect.contains(fe.x, fe.y){
+                        // scan if any of the fingers already captured this area
+                        if let HitTouch::Single = hit_touch{
+                            for fin_area in &cx.captured_fingers{
+                                if *fin_area == area{
+                                    return Event::None;
+                                }
                             }
                         }
-                    }
-                    cx.captured_fingers[fe.digit] = area;
-                    // store the start point, make room in the vector for the digit.
-                    if hit_state.finger_down_start.len() < fe.digit+1{
-                        for _i in hit_state.finger_down_start.len()..(fe.digit+1){
-                            hit_state.finger_down_start.push(vec2(0.,0.));
+                        cx.captured_fingers[fe.digit] = area;
+                        // store the start point, make room in the vector for the digit.
+                        if hit_state.finger_down_start.len() < fe.digit+1{
+                            for _i in hit_state.finger_down_start.len()..(fe.digit+1){
+                                hit_state.finger_down_start.push(vec2(0.,0.));
+                            }
                         }
+                        hit_state.finger_down_start[fe.digit] = vec2(fe.x, fe.y);
+                        fe.handled = true;
+                        return Event::FingerDown(FingerDownEvent{
+                            rx:fe.x - rect.x,
+                            ry:fe.y - rect.y,
+                            ..fe.clone()
+                        })
                     }
-                    hit_state.finger_down_start[fe.digit] = vec2(fe.x, fe.y);
-                    fe.handled = true;
-                    return self.clone();
                 }
             },
             Event::FingerUp(fe)=>{
@@ -250,10 +280,13 @@ impl Event{
                     else{
                         hit_state.finger_down_start[fe.digit]
                     };
+                    let rect = area.get_rect(&cx);
                     return Event::FingerUp(FingerUpEvent{
-                        is_over:area.contains(fe.x, fe.y, &cx),
+                        is_over:rect.contains(fe.x, fe.y),
                         start_x: start.x,
                         start_y: start.y,
+                        rx:fe.x - rect.x,
+                        ry:fe.y - rect.y,
                         ..fe.clone()
                     })
                 }

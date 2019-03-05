@@ -17,6 +17,9 @@ impl Cx{
             }
             else{ 
                 let draw_list = &mut self.draw_lists[draw_list_id];
+
+                draw_list.set_clipping_uniforms();
+
                 let draw_call = &mut draw_list.draw_calls[draw_call_id];
                 let csh = &self.compiled_shaders[draw_call.shader_id];
 
@@ -136,18 +139,26 @@ impl Cx{
                     }
                 },
                 6=>{ // finger down
+                    let x = to_wasm.mf32();
+                    let y = to_wasm.mf32();
                     event_handler(self, &mut Event::FingerDown(FingerDownEvent{
-                        x:to_wasm.mf32(),
-                        y:to_wasm.mf32(),
+                        x:x, 
+                        y:y,
+                        rx:x,
+                        ry:y,
                         handled:false,
                         digit:to_wasm.mu32() as usize,
                         is_touch:to_wasm.mu32()>0
                     }));
                 },
                 7=>{ // finger up
+                    let x = to_wasm.mf32();
+                    let y = to_wasm.mf32();
                     event_handler(self, &mut Event::FingerUp(FingerUpEvent{
-                        x:to_wasm.mf32(),
-                        y:to_wasm.mf32(),
+                        x:x, 
+                        y:y,
+                        rx:x,
+                        ry:y,
                         start_x:0.,
                         start_y:0.,
                         digit:to_wasm.mu32() as usize,
@@ -156,9 +167,13 @@ impl Cx{
                     }));
                 },
                 8=>{ // finger move
+                    let x = to_wasm.mf32();
+                    let y = to_wasm.mf32();
                     event_handler(self, &mut Event::FingerMove(FingerMoveEvent{
-                        x:to_wasm.mf32(),
-                        y:to_wasm.mf32(),
+                        x:x, 
+                        y:y,
+                        rx:x,
+                        ry:y,
                         start_x:0.,
                         start_y:0.,
                         is_over:false,
@@ -167,17 +182,25 @@ impl Cx{
                     }));
                 },
                 9=>{ // finger hover
+                    let x = to_wasm.mf32();
+                    let y = to_wasm.mf32();
                     event_handler(self, &mut Event::FingerHover(FingerHoverEvent{
-                        x:to_wasm.mf32(),
-                        y:to_wasm.mf32(),
+                        x:x, 
+                        y:y,
+                        rx:x,
+                        ry:y,
                         handled:false,
                         hover_state:HoverState::Over
                     }));
                 },
                 10=>{ // finger scroll
+                    let x = to_wasm.mf32();
+                    let y = to_wasm.mf32();
                     event_handler(self, &mut Event::FingerScroll(FingerScrollEvent{
-                        x:to_wasm.mf32(),
-                        y:to_wasm.mf32(),
+                        x:x, 
+                        y:y,
+                        rx:x,
+                        ry:y,
                         handled:false,
                         dx:to_wasm.mf32(),
                         dy:to_wasm.mf32(),

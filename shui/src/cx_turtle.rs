@@ -111,7 +111,7 @@ impl Cx{
             }
         }
         else{
-             Rect{
+            Rect{
                 x:0.0,
                 y:0.0,
                 w:w,
@@ -240,9 +240,9 @@ impl Cx{
         }
 
         // now well walk the top turtle with our old geometry and margins
-        if self.turtles.len() == 0{
-            return Rect::zero();
-        }
+        //if self.turtles.len() == 0{
+        //    return Rect{x:0.0, y:0.0, w:old.width, h:old.height};
+       // }
 
         return self.walk_turtle(w, h, margin, Some(&old))
     }

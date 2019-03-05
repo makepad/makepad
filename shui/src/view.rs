@@ -39,6 +39,7 @@ pub struct View<T>
 where T: ScrollBarLike<T> + Clone + ElementLife
 { // draw info per UI element
     pub draw_list_id:Option<usize>,
+    pub clipped:bool,
     pub scroll_active: ScrollBarsActive,
     pub scroll_h:Element<T>,
     pub scroll_v:Element<T>,
@@ -49,6 +50,7 @@ where T: ScrollBarLike<T> + Clone + ElementLife
 {
     fn style(cx:&mut Cx)->Self{
         Self{
+            clipped:true,
             draw_list_id:None,
             scroll_h:Element::<T>::new(T::new(cx, ScrollBarOrientation::Horizontal)),
             scroll_v:Element::<T>::new(T::new(cx, ScrollBarOrientation::Vertical)),
@@ -79,7 +81,7 @@ where T: ScrollBarLike<T> + Clone + ElementLife
                 cx.draw_lists.push(DrawList{..Default::default()});
             }
             let draw_list = &mut cx.draw_lists[self.draw_list_id.unwrap()];
-            draw_list.initialize();
+            draw_list.initialize(self.clipped);
         }
         else{
             // set len to 0
@@ -132,10 +134,18 @@ where T: ScrollBarLike<T> + Clone + ElementLife
         }
         match ret_h{
             ScrollBarEvent::None=>(),
+            ScrollBarEvent::ScrollHorizontal{scroll_pos,..}=>{
+                let draw_list = &mut cx.draw_lists[self.draw_list_id.unwrap()];
+                draw_list.set_scroll_x(scroll_pos);
+            },
             _=>{return ret_h;}
         };
         match ret_v{
             ScrollBarEvent::None=>(),
+            ScrollBarEvent::ScrollVertical{scroll_pos,..}=>{
+                let draw_list = &mut cx.draw_lists[self.draw_list_id.unwrap()];
+                draw_list.set_scroll_y(scroll_pos);
+            },
             _=>{return ret_v;}
         };
         ScrollBarEvent::None

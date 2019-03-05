@@ -53,8 +53,8 @@ impl Text{
             let geom:vec2<Geometry>;
             let texture:texture2d<Texture>;
             let tex_size:vec2<Uniform>;
-            let list_clip:vec4<Uniform>;
-            let draw_clip:vec4<Instance>;
+            //let list_clip:vec4<Uniform>;
+            let draw_call_clip:vec4<Instance>;
             let font_geom:vec4<Instance>;
             let font_tc:vec4<Instance>;
             let color:vec4<Instance>;
@@ -76,7 +76,7 @@ impl Text{
             }
             
             fn vertex()->vec4{
-                let shift:vec2 = vec2(0.0,0.0);
+                let shift:vec2 = -draw_list_scroll;
                 let min_pos:vec2 = vec2(
                     x + font_size * font_geom.x,
                     y - font_size * font_geom.y + font_size * font_base
@@ -88,8 +88,8 @@ impl Text{
                 
                 let clipped:vec2 = clamp(
                     mix(min_pos, max_pos, geom) + shift,
-                    max(draw_clip.xy, list_clip.xy),
-                    min(draw_clip.zw, list_clip.zw)
+                    max(draw_call_clip.xy, draw_list_clip.xy),
+                    min(draw_call_clip.zw, draw_list_clip.zw)
                 );
                 let normalized:vec2 = (clipped - min_pos - shift) / (max_pos - min_pos);
 

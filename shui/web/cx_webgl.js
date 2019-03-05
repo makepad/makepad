@@ -479,7 +479,6 @@
 		}
 
 		set_document_title(title){
-			console.log("HERE!",title)
 			document.title = title
 		}
 
@@ -495,7 +494,6 @@
 		on_finger_up(fingers){
 			for(let i = 0; i < fingers.length; i++){
 				var finger = fingers[i]
-				console.log("FINGER UP")
 				this.to_wasm.on_finger_up(finger)
 			}
 
