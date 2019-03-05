@@ -141,12 +141,6 @@ impl Cx{
                         y:to_wasm.mf32(),
                         handled:false,
                         digit:to_wasm.mu32() as usize,
-                        button:match to_wasm.mu32(){
-                            0=>MouseButton::Left,
-                            1=>MouseButton::Right,
-                            2=>MouseButton::Middle,
-                            v=>MouseButton::Other(v as u8)
-                        },
                         is_touch:to_wasm.mu32()>0
                     }));
                 },
@@ -157,12 +151,6 @@ impl Cx{
                         start_x:0.,
                         start_y:0.,
                         digit:to_wasm.mu32() as usize,
-                        button:match to_wasm.mu32(){
-                            0=>MouseButton::Left,
-                            1=>MouseButton::Right,
-                            2=>MouseButton::Middle,
-                            v=>MouseButton::Other(v as u8)
-                        },
                         is_over:false,
                         is_touch:to_wasm.mu32()>0
                     }));
@@ -173,13 +161,8 @@ impl Cx{
                         y:to_wasm.mf32(),
                         start_x:0.,
                         start_y:0.,
+                        is_over:false,
                         digit:to_wasm.mu32() as usize,
-                        button:match to_wasm.mu32(){
-                            0=>MouseButton::Left,
-                            1=>MouseButton::Right,
-                            2=>MouseButton::Middle,
-                            v=>MouseButton::Other(v as u8)
-                        },
                         is_touch:to_wasm.mu32()>0
                     }));
                 },

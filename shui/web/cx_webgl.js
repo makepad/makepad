@@ -89,32 +89,29 @@
 		}
 
 		on_finger_down(finger){
-			let pos = this.fit(6);
+			let pos = this.fit(5);
 			this.mu32[pos++] = 6;
 			this.mf32[pos++] = finger.x
 			this.mf32[pos++] = finger.y
 			this.mu32[pos++] = finger.digit
-			this.mu32[pos++] = finger.button
 			this.mu32[pos++] = finger.touch?1:0
 		}
 
 		on_finger_up(finger){
-			let pos = this.fit(6);
+			let pos = this.fit(5);
 			this.mu32[pos++] = 7;
 			this.mf32[pos++] = finger.x
 			this.mf32[pos++] = finger.y
 			this.mu32[pos++] = finger.digit
-			this.mu32[pos++] = finger.button
 			this.mu32[pos++] = finger.touch?1:0
 		}
 
 		on_finger_move(finger){
-			let pos = this.fit(6);
+			let pos = this.fit(5);
 			this.mu32[pos++] = 8;
 			this.mf32[pos++] = finger.x
 			this.mf32[pos++] = finger.y
 			this.mu32[pos++] = finger.digit
-			this.mu32[pos++] = finger.button
 			this.mu32[pos++] = finger.touch?1:0
 		}
 
@@ -156,9 +153,6 @@
 			this.textures = [];
 			this.resources = [];
 			this.req_anim_frame_id = 0;
-
-			this.finger_digit_map = {}
-			this.finger_digit_alloc = 0;
 
 			this.init_webgl_context();
 			this.bind_mouse_and_touch();
@@ -489,35 +483,10 @@
 			document.title = title
 		}
 
-		find_nearest_finger(x, y){
-			var near_dist = Infinity, near_digit = -1
-			for(let digit in this.finger_digit_map){
-				var finger = this.finger_digit_map[digit]
-				if(!finger) continue
-				var dx = x - finger.x, dy = y - finger.y
-				var len = Math.sqrt(dx*dx+dy*dy)
-				if(len < near_dist) near_dist = len, near_digit = digit
-			}
-			return this.finger_digit_map[near_digit]
-		}
-
 		on_finger_down(fingers){
 			for(let i = 0; i < fingers.length; i++){
-				var finger = fingers[i]
-	
-				// find an unused digit
-				var digit = undefined;
-				for(digit in this.finger_digit_map){
-					if(!this.finger_digit_map[digit]) break
-				}
-				// we need to alloc a new one
-				if(digit === undefined || this.finger_digit_map[digit]) digit = this.finger_digit_alloc++
-				// store it					
-				this.finger_digit_map[digit] = finger
-				// assign a digit to finger
-				finger.digit = parseInt(digit)
-				
-				this.to_wasm.on_finger_down(finger)
+				var finger = fingers[i]	
+					this.to_wasm.on_finger_down(finger)
 			}
 
 			this.do_wasm_io();
@@ -526,19 +495,7 @@
 		on_finger_up(fingers){
 			for(let i = 0; i < fingers.length; i++){
 				var finger = fingers[i]
-	
-				var old_finger = this.find_nearest_finger(finger.x, finger.y)
-	
-				if(!old_finger){
-					console.log("Undefined state in onfingerup");
-					continue
-				}
-				// copy over the digit
-				finger.digit = old_finger.digit;
-	
-				// remove digit mapping
-				this.finger_digit_map[old_finger.digit] = undefined
-				
+				console.log("FINGER UP")
 				this.to_wasm.on_finger_up(finger)
 			}
 
@@ -557,17 +514,8 @@
 		on_finger_move(fingers){
 			for(let i = 0; i < fingers.length; i++){
 				var finger = fingers[i]
-				var old_finger = this.find_nearest_finger(finger.x, finger.y)
-	
-				if(!old_finger){
-					console.log("Undefined state in on_finger_move");
-					continue
-				}
-				// copy digit
-				finger.digit = old_finger.digit
 				this.to_wasm.on_finger_move(finger);
 			}
-
 			this.do_wasm_io();
 		}
 
@@ -576,88 +524,153 @@
 				var finger = fingers[i]
 				this.to_wasm.on_finger_wheel(finger)
 			}
-
 			this.do_wasm_io();
 		}
-
+		
 		bind_mouse_and_touch(){
 			var canvas = this.canvas
 			function mouse_to_finger(e){
 				return [{
 					x:e.pageX,
 					y:e.pageY,
-					button: e.button === 0? 1: e.button===1? 3: 2,
+					digit: e.button,
 					touch: false
 				}]
 			}
-			function touch_to_finger(e){
+
+			var digit_map = {}
+			var digit_alloc = 0;
+
+			function touch_to_finger_alloc(e){
+				var f = []
+				for(let i = 0; i < e.changedTouches.length; i++){
+					var t = e.changedTouches[i]
+
+					// find an unused digit
+					var digit = undefined;
+					for(digit in digit_map){
+						if(!digit_map[digit]) break
+					}
+					// we need to alloc a new one
+					if(digit === undefined || digit_map[digit]) digit = digit_alloc++;
+					// store it					
+					digit_map[digit] = {x:t.pageX, y:t.pageY};
+					// return allocated digit
+					digit = parseInt(digit);
+
+					f.push({
+						x:t.pageX,
+						y:t.pageY,
+						digit:digit,
+						touch: true,
+					})
+				}
+				return f
+			}
+
+			function lookup_digit(x, y){
+				var near_dist = Infinity, near_digit = -1
+				for(let digit in digit_map){
+					var digit_pos = digit_map[digit]
+					if(!digit_pos) continue
+					var dx = x - digit_pos.x, dy = y - digit_pos.y
+					var len = Math.sqrt(dx*dx+dy*dy)
+					if(len < near_dist) near_dist = len, near_digit = digit
+				}
+				return near_digit;
+			}
+
+			function touch_to_finger_lookup(e){
 				var f = []
 				for(let i = 0; i < e.changedTouches.length; i++){
 					var t = e.changedTouches[i]
 					f.push({
 						x:t.pageX,
 						y:t.pageY,
-						button:1,
+						digit:lookup_digit(t.pageX, t.pageY),
+						touch: true,
+					})
+				}
+				return f
+			}
+
+			function touch_to_finger_free(e){
+				var f = []
+				for(let i = 0; i < e.changedTouches.length; i++){
+					var t = e.changedTouches[i]
+					var digit = lookup_digit(t.pageX, t.pageY)
+					if(!digit){
+						console.log("Undefined state in free_digit");
+						digit = 0
+					}
+					else{
+						digit_map[digit] = undefined
+					}
+					
+					f.push({
+						x:t.pageX,
+						y:t.pageY,
+						digit:digit,
 						touch: true,
 					})
 				}
 				return f
 			}
 		
-			var mouse_is_down = false;
+			var mouse_buttons_down = [];
 			canvas.addEventListener('mousedown',e=>{
 				e.preventDefault();
-				mouse_is_down = true;
+				mouse_buttons_down[e.button] = true;
 				this.on_finger_down(mouse_to_finger(e))
 			})
 			window.addEventListener('mouseup',e=>{
 				e.preventDefault();
-				mouse_is_down = false;
+				mouse_buttons_down[e.button] = false;
 				this.on_finger_up(mouse_to_finger(e))
 			})
-			window.addEventListener('mousemove',e=>{
-				if(mouse_is_down){
-					this.on_finger_move(mouse_to_finger(e))
+			let mouse_move = e=>{
+				let move_fingers = [];
+				for(var i = 0; i < mouse_buttons_down.length; i++){
+					if(mouse_buttons_down[i]){
+						move_fingers.push({
+							x:e.pageX,
+							y:e.pageY,
+							digit:i
+						})
+					}
 				}
-				else{
-					this.on_finger_hover(mouse_to_finger(e))
-				}				
-			})
-			window.addEventListener('mouseout',e=>{
-				if(mouse_is_down){
-					this.on_finger_move(mouse_to_finger(e))
-				}
-				else{
-					this.on_finger_hover(mouse_to_finger(e))
-				}				
-			})
+				this.on_finger_move(move_fingers);
+				this.on_finger_hover(mouse_to_finger(e));
+			}
+			window.addEventListener('mousemove',mouse_move);
+			window.addEventListener('mouseout',mouse_move);
 			canvas.addEventListener('contextmenu',e=>{
 				e.preventDefault()
 				return false
 			})
 			window.addEventListener('touchstart', e=>{
 				e.preventDefault()
-				this.on_finger_down(touch_to_finger(e))
+				this.on_finger_down(touch_to_finger_alloc(e))
 				return false
 			})
 			window.addEventListener('touchmove',e=>{
 				e.preventDefault();
-				this.on_finger_move(touch_to_finger(e))
+				this.on_finger_move(touch_to_finger_lookup(e))
 				return false
 			},{passive:false})
 			window.addEventListener('touchend', e=>{
 				e.preventDefault();
-				this.on_finger_up(touch_to_finger(e))
+				this.on_finger_up(touch_to_finger_free(e))
 				return false
 			})
 			canvas.addEventListener('touchcancel', e=>{
 				e.preventDefault();
-				this.on_finger_up(touch_to_finger(e))
+				this.on_finger_up(touch_to_finger_free(e))
 				return false
 			})
 			canvas.addEventListener('touchleave', e=>{
 				e.preventDefault();
-				this.on_finger_up(touch_to_finger(e))
+				this.on_finger_up(touch_to_finger_free(e))
 				return false
 			})
 			canvas.addEventListener('wheel', e=>{

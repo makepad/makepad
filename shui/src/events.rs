@@ -1,26 +1,10 @@
 use crate::cx::*;
 
-#[derive(Clone, Debug)]
-pub enum MouseButton{
-    None,
-    Left,
-    Right,
-    Middle,
-    Other(u8)
-}
-
-impl Default for MouseButton{
-    fn default()->MouseButton{
-        MouseButton::None
-    }
-}
-
 #[derive(Clone, Default,Debug)]
 pub struct FingerDownEvent{
     pub x:f32,
     pub y:f32,
     pub digit:usize,
-    pub button:MouseButton,
     pub handled:bool,
     pub is_touch:bool
 }
@@ -31,8 +15,8 @@ pub struct FingerMoveEvent{
     pub y:f32,
     pub start_x:f32,
     pub start_y:f32,
+    pub is_over:bool,
     pub digit:usize,
-    pub button:MouseButton,
     pub is_touch:bool,
 }
 
@@ -43,7 +27,6 @@ pub struct FingerUpEvent{
     pub start_x:f32,
     pub start_y:f32,
     pub digit:usize,
-    pub button:MouseButton,
     pub is_over:bool,
     pub is_touch:bool
 }
@@ -120,6 +103,7 @@ pub enum Event{
     Destruct,
     Update,
     Redraw,
+    AppFocus(bool),
     AnimationEnded(AnimateEvent),
     Animate(AnimateEvent),
     CloseRequested,
@@ -135,6 +119,11 @@ impl Default for Event{
     fn default()->Event{
         Event::None
     }
+}
+
+pub enum HitTouch{
+    Single,
+    Multi
 }
 
 impl Event{
@@ -168,7 +157,7 @@ impl Event{
         }
     }
 
-    pub fn hits(&mut self, cx:&mut Cx, area:Area, hit_state:&mut HitState)->Event{
+    pub fn hits(&mut self, cx:&mut Cx, area:Area, hit_state:&mut HitState, hit_touch:HitTouch)->Event{
         match self{
             Event::Animate(_)=>{
                 for anim in &cx.animations{
@@ -189,6 +178,9 @@ impl Event{
                 if hit_state.was_over_last_call{
                     if area.contains(fe.x, fe.y, &cx) && !fe.handled{
                         fe.handled = true;
+                        if let HoverState::Out = fe.hover_state{
+                            hit_state.was_over_last_call = false;
+                        }
                         return self.clone();
                     }
                     else{
@@ -213,15 +205,30 @@ impl Event{
             Event::FingerMove(fe)=>{
                 // check wether our digit is captured, otherwise don't send
                 if cx.captured_fingers[fe.digit] == area{
+                    let start = if hit_state.finger_down_start.len() <= fe.digit{
+                        vec2(0.,0.)
+                    }
+                    else{
+                        hit_state.finger_down_start[fe.digit]
+                    };
                     return Event::FingerMove(FingerMoveEvent{
-                        start_x: hit_state.finger_down_start[fe.digit].x,
-                        start_y: hit_state.finger_down_start[fe.digit].y,
+                        start_x: start.x,
+                        start_y: start.y,
+                        is_over:area.contains(fe.x, fe.y, &cx),
                         ..fe.clone()
                     })
                 }
             },
             Event::FingerDown(fe)=>{
                 if !fe.handled && area.contains(fe.x, fe.y, &cx){
+                    // scan if any of the fingers already captured this area
+                    if let HitTouch::Single = hit_touch{
+                        for fin_area in &cx.captured_fingers{
+                            if *fin_area == area{
+                                return Event::None;
+                            }
+                        }
+                    }
                     cx.captured_fingers[fe.digit] = area;
                     // store the start point, make room in the vector for the digit.
                     if hit_state.finger_down_start.len() < fe.digit+1{
@@ -237,7 +244,12 @@ impl Event{
             Event::FingerUp(fe)=>{
                 if cx.captured_fingers[fe.digit] == area{
                     cx.captured_fingers[fe.digit] = Area::Empty;
-                    let start = &hit_state.finger_down_start[fe.digit];
+                    let start = if hit_state.finger_down_start.len() <= fe.digit{
+                        vec2(0.,0.)
+                    }
+                    else{
+                        hit_state.finger_down_start[fe.digit]
+                    };
                     return Event::FingerUp(FingerUpEvent{
                         is_over:area.contains(fe.x, fe.y, &cx),
                         start_x: start.x,

@@ -7,16 +7,63 @@ use std::io;
 #[derive(Clone, Default)]
 pub struct CxWinit{
     pub last_x:f32,
-    pub last_y:f32
+    pub last_y:f32,
+    pub is_cursor_in_window:bool,
+    pub mouse_buttons_down:Vec<bool>
 }
 
 impl Cx{
-    pub fn map_winit_event(&mut self, winit_event:winit::Event, glutin_window:&winit::Window)->Event{
+
+    fn make_mouse_move_events(&self)->Vec<Event>{
+        let mut out = Vec::new();
+        for i in 0..self.resources.winit.mouse_buttons_down.len(){
+            let down = self.resources.winit.mouse_buttons_down[i];
+            if down{
+                out.push(Event::FingerMove(FingerMoveEvent{
+                    x:self.resources.winit.last_x,
+                    y:self.resources.winit.last_y,
+                    digit:i,
+                    start_x:0.,
+                    start_y:0.,
+                    is_over:false,
+                    is_touch:false
+                }))
+            }
+        };
+        return out;
+    }
+
+    pub fn map_winit_event(&mut self, winit_event:winit::Event, glutin_window:&winit::Window)->Vec<Event>{
         //self.log(&format!("{:?}\n", winit_event));
+        
+        if self.resources.winit.mouse_buttons_down.len()<self.captured_fingers.len(){
+            for _i in 0..self.captured_fingers.len(){
+                self.resources.winit.mouse_buttons_down.push(false);
+            }
+        }
+
         match winit_event{
+            winit::Event::DeviceEvent{ event, .. } => match event {
+                winit::DeviceEvent::MouseMotion{delta,..}=>{
+                    if self.resources.winit.is_cursor_in_window{
+                        return vec![Event::None]
+                    }
+                    self.resources.winit.last_x += delta.0 as f32;//position.x as f32;
+                    self.resources.winit.last_y += delta.1 as f32;//position.y as f32;
+                    
+                    return self.make_mouse_move_events();/*vec![Event::FingerHover(FingerHoverEvent{
+                        x:self.resources.winit.last_x,
+                        y:self.resources.winit.last_y,
+                        handled:false,
+                        hover_state:HoverState::Over
+                    })]*/
+
+                },
+                _=>()
+            },
             winit::Event::WindowEvent{ event, .. } => match event {
                 winit::WindowEvent::MouseWheel{delta, ..}=>{
-                    return Event::FingerScroll(FingerScrollEvent{
+                    return vec![Event::FingerScroll(FingerScrollEvent{
                         x:self.resources.winit.last_x,
                         y:self.resources.winit.last_y,
                         handled:false,
@@ -28,58 +75,87 @@ impl Cx{
                             winit::MouseScrollDelta::LineDelta(_dx,dy)=>dy,
                             winit::MouseScrollDelta::PixelDelta(pp)=>pp.y as f32
                         },
-                    })
+                    })]
                 },
                 winit::WindowEvent::CursorMoved{position,..}=>{
                     self.resources.winit.last_x = position.x as f32;
                     self.resources.winit.last_y = position.y as f32;
-                    return Event::FingerHover(FingerHoverEvent{
+
+                    let mut events = self.make_mouse_move_events();
+                    events.push(Event::FingerHover(FingerHoverEvent{
                         x:self.resources.winit.last_x,
                         y:self.resources.winit.last_y,
                         handled:false,
                         hover_state:HoverState::Over
-                    })
+                    }));
+                    return events;
+                },
+                winit::WindowEvent::CursorEntered{..}=>{
+                    self.resources.winit.is_cursor_in_window = true;
+                },
+                winit::WindowEvent::Focused(state)=>{
+                    return vec![Event::AppFocus(state)]
+                },
+                winit::WindowEvent::CursorLeft{..}=>{
+                    self.resources.winit.is_cursor_in_window = false;
+                   
+                   // fire a hover out on our last known mouse position
+                    return vec![Event::FingerHover(FingerHoverEvent{
+                        x:self.resources.winit.last_x,
+                        y:self.resources.winit.last_y,
+                        handled:false,
+                        hover_state:HoverState::Out
+                    })]
+
                 },
                 winit::WindowEvent::MouseInput{state,button,..}=>{
                     match state{
                         winit::ElementState::Pressed=>{
-                            return Event::FingerDown(FingerDownEvent{
+                            let mut digit = match button{// this makes sure that single touch mode doesnt allow multiple mousedowns
+                                winit::MouseButton::Left=>0,
+                                winit::MouseButton::Right=>1,
+                                winit::MouseButton::Middle=>2,
+                                winit::MouseButton::Other(id)=>id as usize
+                            };
+                            if digit >= self.captured_fingers.len(){
+                                digit = 0;
+                            };
+                            self.resources.winit.mouse_buttons_down[digit] = true;
+                            return vec![Event::FingerDown(FingerDownEvent{
                                 x:self.resources.winit.last_x,
                                 y:self.resources.winit.last_y,
-                                button:match button{
-                                    winit::MouseButton::Left=>MouseButton::Left,
-                                    winit::MouseButton::Right=>MouseButton::Right,
-                                    winit::MouseButton::Middle=>MouseButton::Middle,
-                                    winit::MouseButton::Other(id)=>MouseButton::Other(id)
-                                },
                                 handled:false,
-                                digit:0,
+                                digit:digit,
                                 is_touch:false,
-                            })
+                            })]
                         },
                         winit::ElementState::Released=>{
-                            return Event::FingerUp(FingerUpEvent{
+                            let mut digit = match button{// this makes sure that single touch mode doesnt allow multiple mousedowns
+                                winit::MouseButton::Left=>0,
+                                winit::MouseButton::Right=>1,
+                                winit::MouseButton::Middle=>2,
+                                winit::MouseButton::Other(id)=>id as usize
+                            };
+                            if digit >= self.captured_fingers.len(){
+                                digit = 0;
+                            };
+                            self.resources.winit.mouse_buttons_down[digit] = false;
+                            return vec![Event::FingerUp(FingerUpEvent{
                                 x:self.resources.winit.last_x,
                                 y:self.resources.winit.last_y,
-                                button:match button{
-                                    winit::MouseButton::Left=>MouseButton::Left,
-                                    winit::MouseButton::Right=>MouseButton::Right,
-                                    winit::MouseButton::Middle=>MouseButton::Middle,
-                                    winit::MouseButton::Other(id)=>MouseButton::Other(id)
-                                },
                                 start_x:0.,
                                 start_y:0.,
-                                digit:0,
+                                digit:digit,
                                 is_over:false,
                                 is_touch:false,
-                            })
+                            })]
                         }
                     }
                 },
                
                 winit::WindowEvent::CloseRequested =>{
                     self.running = false;
-                    return Event::CloseRequested
+                    return vec![Event::CloseRequested]
                 },
                 winit::WindowEvent::Resized(logical_size) => {
                     let dpi_factor = glutin_window.get_hidpi_factor();
@@ -87,18 +163,18 @@ impl Cx{
                     let old_size = self.target_size.clone();
                     self.target_dpi_factor = dpi_factor as f32;
                     self.target_size = vec2(logical_size.width as f32, logical_size.height as f32);
-                    return Event::Resized(ResizedEvent{
+                    return vec![Event::Resized(ResizedEvent{
                         old_size: old_size,
                         old_dpi_factor: old_dpi_factor,
                         new_size: self.target_size.clone(),
                         new_dpi_factor: self.target_dpi_factor
-                    })
+                    })]
                 },
                 _ => ()
             },
             _ => ()
         }
-        Event::None
+        vec![Event::None]
     }
 
     pub fn load_binary_deps_from_file(&mut self){

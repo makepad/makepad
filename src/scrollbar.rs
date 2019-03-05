@@ -65,7 +65,7 @@ impl Style for ScrollBar{
                     ),
                     AnimState::new(
                         ScrollBarState::Scrolling,
-                        AnimMode::Cut{duration:0.2}, 
+                        AnimMode::Cut{duration:0.05}, 
                         vec![
                             AnimTrack::to_vec4("sb.color",color("#9"))
                         ]
@@ -144,7 +144,7 @@ impl ScrollBarLike<ScrollBar> for ScrollBar{
             return self.event.clone();
         }
 
-        match event.hits(cx, self.sb_area, &mut self.hit_state){
+        match event.hits(cx, self.sb_area, &mut self.hit_state, HitTouch::Single){
             Event::Animate(ae)=>{
                 self.anim.calc_area(cx, "sb.color", ae.time, self.sb_area);
                 //self.anim.calc_area(cx, "bg.handle_color", ae.time, self.sb_area);
@@ -166,7 +166,6 @@ impl ScrollBarLike<ScrollBar> for ScrollBar{
             },
             Event::FingerUp(fe)=>{
                 self.event = ScrollBarEvent::ScrollDone;
-                cx.captured_fingers[fe.digit] = Area::Empty;
                 if fe.is_over{
                     if !fe.is_touch{
                         self.anim.change_state(cx, ScrollBarState::Over);

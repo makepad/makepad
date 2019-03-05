@@ -11,7 +11,7 @@ pub struct Button{
     pub text: Text,
 
     pub anim:Animation<ButtonState>,
-
+    pub is_down:bool,
     pub label:String,
     pub event:ButtonEvent
 }
@@ -28,6 +28,7 @@ impl Style for Button{
         let bg_sh = Self::def_bg_shader(cx);
         Self{
             hit_state:HitState::new(),
+            is_down:false,
             bg_area:Area::Empty,
             bg_layout:Layout{
                 align:Align::center(),
@@ -130,7 +131,7 @@ impl Button{
 
     pub fn handle(&mut self, cx:&mut Cx, event:&mut Event)->ButtonEvent{
         self.event = ButtonEvent::None;
-        match event.hits(cx, self.bg_area, &mut self.hit_state){
+        match event.hits(cx, self.bg_area, &mut self.hit_state, HitTouch::Single){
             Event::Animate(ae)=>{
 
                 self.anim.calc_area(cx, "bg.color", ae.time, self.bg_area);
@@ -143,13 +144,18 @@ impl Button{
             },
             Event::FingerDown(fe)=>{
                 self.event = ButtonEvent::Down;
+                self.is_down = true;
                 self.anim.change_state(cx, ButtonState::Down);
-                //cx.captured_fingers[fe.digit] = self.bg_area;
             },
             Event::FingerHover(fe)=>{
                 match fe.hover_state{
                     HoverState::In=>{
-                        self.anim.change_state(cx, ButtonState::Over);
+                        if self.is_down{
+                            self.anim.change_state(cx, ButtonState::Down);
+                        }
+                        else{
+                            self.anim.change_state(cx, ButtonState::Over);
+                        }
                     },
                     HoverState::Out=>{
                         self.anim.change_state(cx, ButtonState::Default);
@@ -158,7 +164,7 @@ impl Button{
                 }
             },
             Event::FingerUp(fe)=>{
-                //cx.captured_fingers[fe.digit] = Area::Empty;
+                self.is_down = false;
                 if fe.is_over{
                     if !fe.is_touch{
                         self.anim.change_state(cx, ButtonState::Over);
@@ -171,8 +177,6 @@ impl Button{
                 else{
                     self.anim.change_state(cx, ButtonState::Default);
                 }
-            },
-            Event::FingerMove(_fe)=>{
             },
             _=>()
         };

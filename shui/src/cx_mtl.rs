@@ -181,17 +181,22 @@ impl Cx{
             // unfortunate duplication of code between poll and run_forever but i don't know how to put this in a closure
             // without borrowchecker hell
             events_loop.poll_events(|winit_event|{
-                let mut event = self.map_winit_event(winit_event, &glutin_window);
-                if let Event::Resized(_) = &event{ // do this here because mac
-                    self.resize_layer_to_turtle(&layer);
-                    event_handler(self, &mut event); 
-                    self.dirty_area = Area::Empty;
-                    self.redraw_area = Area::All;
-                    event_handler(self, &mut Event::Redraw);
-                    self.repaint(&layer, &device, &command_queue);
-                }
-                else{
-                    event_handler(self, &mut event); 
+                let mut events = self.map_winit_event(winit_event, &glutin_window);
+                for mut event in &mut events{
+                    match &event{
+                        Event::Resized(_)=>{ // do this here because mac
+                            self.resize_layer_to_turtle(&layer);
+                            event_handler(self, &mut event); 
+                            self.dirty_area = Area::Empty;
+                            self.redraw_area = Area::All;
+                            event_handler(self, &mut Event::Redraw);
+                            self.repaint(&layer, &device, &command_queue);
+                        },
+                        Event::None=>{},
+                        _=>{
+                            event_handler(self, &mut event);
+                        }
+                    }
                 }
             });
             if self.animations.len() != 0{
@@ -220,17 +225,22 @@ impl Cx{
             // wait for the next event blockingly so it stops eating power
             if self.animations.len() == 0 && self.dirty_area.is_empty(){
                 events_loop.run_forever(|winit_event|{
-                    let mut event = self.map_winit_event(winit_event, &glutin_window);
-                    if let Event::Resized(_) = &event{ // do this here because mac
-                        self.resize_layer_to_turtle(&layer);
-                        event_handler(self, &mut event); 
-                        self.dirty_area = Area::Empty;
-                        self.redraw_area = Area::All;
-                        event_handler(self, &mut Event::Redraw);
-                        self.repaint(&layer, &device, &command_queue);
-                    }
-                    else{
-                        event_handler(self, &mut event);
+                    let mut events = self.map_winit_event(winit_event, &glutin_window);
+                    for mut event in &mut events{
+                        match &event{
+                            Event::Resized(_)=>{ // do this here because mac
+                                self.resize_layer_to_turtle(&layer);
+                                event_handler(self, &mut event); 
+                                self.dirty_area = Area::Empty;
+                                self.redraw_area = Area::All;
+                                event_handler(self, &mut Event::Redraw);
+                                self.repaint(&layer, &device, &command_queue);
+                            },
+                            Event::None=>{},
+                            _=>{
+                                event_handler(self, &mut event);
+                            }
+                        }
                     }
                     winit::ControlFlow::Break
                 })
@@ -369,7 +379,7 @@ impl Cx{
             mtl_out.push_str(" ");
             mtl_out.push_str(&cnst.name);
             mtl_out.push_str(" (");
-            mtl_out.push_str(&const_init);
+            mtl_out.push_str(&const_init.sl);
             mtl_out.push_str(")\n");
         }
 
