@@ -148,6 +148,7 @@ impl Area{
                 for prop in &csh.named_instance_props.props{
                     if prop.name == prop_name{
                         cx.paint_dirty = true;
+                        draw_call.update_frame_id = cx.frame_id;
                         draw_call.instance[inst.instance_offset + prop.offset] = value;
                         return
                     }
@@ -185,6 +186,7 @@ impl Area{
                 for prop in &csh.named_instance_props.props{
                     if prop.name == prop_name{
                         cx.paint_dirty = true;
+                        draw_call.update_frame_id = cx.frame_id;
                         let off = inst.instance_offset + prop.offset;
                         draw_call.instance[off + 0] = value.x;
                         draw_call.instance[off + 1] = value.y;
@@ -228,6 +230,7 @@ impl Area{
                 for prop in &csh.named_instance_props.props{
                     if prop.name == prop_name{
                         cx.paint_dirty = true;
+                        draw_call.update_frame_id = cx.frame_id;
                         let off = inst.instance_offset + prop.offset;
                         draw_call.instance[off + 0] = value.x;
                         draw_call.instance[off + 1] = value.y;
@@ -273,6 +276,7 @@ impl Area{
                 for prop in &csh.named_instance_props.props{
                     if prop.name == prop_name{
                         cx.paint_dirty = true;
+                        draw_call.update_frame_id = cx.frame_id;
                         let off = inst.instance_offset + prop.offset;
                         draw_call.instance[off + 0] = value.x;
                         draw_call.instance[off + 1] = value.y;

@@ -133,7 +133,8 @@ impl ScrollBar{
         sh
     }
 
-    fn get_normalized_sizes(&self)->(f32,f32){
+    // reads back normalized scroll position info
+    fn get_normalized_scroll_pos(&self)->(f32,f32){
         // computed handle size normalized
         let vy = self.view_visible / self.view_total;
         if !self.visible{
@@ -144,20 +145,29 @@ impl ScrollBar{
         return (norm_scroll, norm_handle)
     }
 
-    fn set_scroll_pos_from_finger(&mut self, finger:f32)->bool{
+    // sets the scroll pos from finger position
+    fn set_scroll_pos_from_finger(&mut self, cx:&mut Cx, finger:f32){
         let vy = self.view_visible / self.view_total;
         let norm_handle = vy.max(self.min_handle_size/self.scroll_size);
         let new_scroll_pos = ((self.view_total * (1.-vy) * (finger / self.scroll_size)) / (1.-norm_handle)).max(0.).min(self.view_total - self.view_visible);
         let changed = self.scroll_pos != new_scroll_pos;
         self.scroll_pos = new_scroll_pos;
-        changed
+        if changed{
+            self.update_shader_scroll_pos(cx);
+            self.make_scroll_event();
+        }
     }
 
-    fn do_scroll_event(&mut self, cx:&mut Cx){
+    // writes the norm_scroll value into the shader
+    fn update_shader_scroll_pos(&mut self, cx:&mut Cx){
+        let (norm_scroll, _) = self.get_normalized_scroll_pos();
+        self.sb_area.write_float(cx,"norm_scroll", norm_scroll);
+    }
+
+    // turns scroll_pos into an event on this.event
+    fn make_scroll_event(&mut self){
         match self.orientation{
             ScrollBarOrientation::Horizontal=>{
-                let (norm_scroll, _) = self.get_normalized_sizes();
-                self.sb_area.write_float(cx,"norm_scroll", norm_scroll);
                 self.event = ScrollBarEvent::ScrollHorizontal{
                         scroll_pos:self.scroll_pos,
                         view_total:self.view_total,
@@ -165,8 +175,6 @@ impl ScrollBar{
                 };
             },
             ScrollBarOrientation::Vertical=>{
-                let (norm_scroll, _) = self.get_normalized_sizes();
-                self.sb_area.write_float(cx,"norm_scroll", norm_scroll);
                 self.event = ScrollBarEvent::ScrollVertical{
                         scroll_pos:self.scroll_pos,
                         view_total:self.view_total,
@@ -175,23 +183,9 @@ impl ScrollBar{
             }
         }
     }
+   
 
-    fn do_scroll_from_finger(&mut self, cx:&mut Cx, x:f32, y:f32){
-        match self.orientation{
-            ScrollBarOrientation::Horizontal=>{
-                let actual_pos = x - self.drag_point;
-                if self.set_scroll_pos_from_finger(actual_pos){
-                    self.do_scroll_event(cx);
-                }
-            },
-            ScrollBarOrientation::Vertical=>{
-                let actual_pos = y - self.drag_point;
-                if self.set_scroll_pos_from_finger(actual_pos){
-                    self.do_scroll_event(cx);
-                }
-            }
-        }
-    }
+    // public facing API
 
     pub fn get_scroll_pos(&self)->f32{
         return self.scroll_pos;
@@ -202,7 +196,7 @@ impl ScrollBar{
         let scroll_pos = scroll_pos.min(self.view_total - self.view_visible).max(0.); 
         if self.scroll_pos != scroll_pos{
             self.scroll_pos = scroll_pos;
-            self.do_scroll_event(cx);
+            self.update_shader_scroll_pos(cx);
         }
     }
 }
@@ -229,11 +223,13 @@ impl ScrollBarLike<ScrollBar> for ScrollBar{
                     match self.orientation{
                         ScrollBarOrientation::Horizontal=>{
                             let scroll_pos= self.get_scroll_pos();
-                            self.set_scroll_pos(cx, scroll_pos + fe.scroll_x)
+                            self.set_scroll_pos(cx, scroll_pos + fe.scroll_x);
+                            self.make_scroll_event();
                         },
                         ScrollBarOrientation::Vertical=>{
                             let scroll_pos= self.get_scroll_pos();
-                            self.set_scroll_pos(cx, scroll_pos + fe.scroll_y)
+                            self.set_scroll_pos(cx, scroll_pos + fe.scroll_y);
+                            self.make_scroll_event();
                         }
                     }        
                 }
@@ -254,12 +250,12 @@ impl ScrollBarLike<ScrollBar> for ScrollBar{
                     match self.orientation{
                         ScrollBarOrientation::Horizontal=>{
                             //drag_start
-                            let (norm_scroll, norm_handle) = self.get_normalized_sizes();
+                            let (norm_scroll, norm_handle) = self.get_normalized_scroll_pos();
                             let bar_x = norm_scroll * self.scroll_size;
                             let bar_w = norm_handle * self.scroll_size;
                             if fe.rel_x < bar_x || fe.rel_x > bar_w + bar_x{ // clicked below
                                 self.drag_point = bar_w * 0.5;
-                                self.do_scroll_from_finger(cx, fe.rel_x, fe.rel_y);
+                                self.set_scroll_pos_from_finger(cx, fe.rel_x - self.drag_point);
                             }
                             else{ // clicked on
                                 self.drag_point = fe.rel_x - bar_x; // store the drag delta
@@ -267,12 +263,12 @@ impl ScrollBarLike<ScrollBar> for ScrollBar{
                         },
                         ScrollBarOrientation::Vertical=>{
                             // computed handle size normalized
-                            let (norm_scroll, norm_handle) = self.get_normalized_sizes();
+                            let (norm_scroll, norm_handle) = self.get_normalized_scroll_pos();
                             let bar_y = norm_scroll * self.scroll_size;
                             let bar_h = norm_handle * self.scroll_size;
                             if fe.rel_y < bar_y || fe.rel_y > bar_h + bar_y{ // clicked below or above
                                 self.drag_point = bar_h * 0.5;
-                                self.do_scroll_from_finger(cx, fe.rel_x, fe.rel_y);
+                                self.set_scroll_pos_from_finger(cx, fe.rel_y - self.drag_point);
                             }
                             else{ // clicked on
                                 self.drag_point = fe.rel_y - bar_y; // store the drag delta
@@ -308,7 +304,15 @@ impl ScrollBarLike<ScrollBar> for ScrollBar{
                     }
                 },
                 Event::FingerMove(fe)=>{
-                    self.do_scroll_from_finger(cx, fe.rel_x, fe.rel_y);
+                     // helper called by event code to scroll from a finger 
+                    match self.orientation{
+                        ScrollBarOrientation::Horizontal=>{
+                            self.set_scroll_pos_from_finger(cx, fe.rel_x - self.drag_point);
+                        },
+                        ScrollBarOrientation::Vertical=>{
+                            self.set_scroll_pos_from_finger(cx, fe.rel_y - self.drag_point);
+                        }
+                    }
                 },
                 _=>()
             };
@@ -317,7 +321,8 @@ impl ScrollBarLike<ScrollBar> for ScrollBar{
         let clamped_pos = self.scroll_pos.min(self.view_total - self.view_visible).max(0.); 
         if clamped_pos != self.scroll_pos{
             self.scroll_pos = clamped_pos;
-            self.do_scroll_event(cx);
+            self.make_scroll_event();
+            self.update_shader_scroll_pos(cx);
         }
 
         self.event.clone()
@@ -374,7 +379,7 @@ impl ScrollBarLike<ScrollBar> for ScrollBar{
         }
         
         // compute normalized sizes for the sahder
-        let (norm_scroll, norm_handle) = self.get_normalized_sizes();
+        let (norm_scroll, norm_handle) = self.get_normalized_scroll_pos();
         // push the var added to the sb shader
         self.sb_area.push_float(cx, "norm_handle", norm_handle);
         self.sb_area.push_float(cx, "norm_scroll", norm_scroll);

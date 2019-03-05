@@ -98,7 +98,7 @@ impl Default for Cx{
             dirty_area:Area::All,
             redraw_area:Area::Empty,
             paint_dirty:true,
-            clear_color:vec4(0.2,0.2,0.2,1.0),
+            clear_color:vec4(0.1,0.1,0.1,1.0),
             frame_id:1,
             turtles:Vec::new(),
             align_list:Vec::new(),

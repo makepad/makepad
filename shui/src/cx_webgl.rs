@@ -61,6 +61,7 @@ impl Cx{
         self.resources.from_wasm.clear(self.clear_color.x, self.clear_color.y, self.clear_color.z, self.clear_color.w);
         self.prepare_frame();        
         self.exec_draw_list(0);
+        self.frame_id += 1;
     }
 
     // incoming to_wasm. There is absolutely no other entrypoint
@@ -215,13 +216,12 @@ impl Cx{
         if !self.dirty_area.is_empty(){
             self.dirty_area = Area::Empty;
             self.redraw_area = self.dirty_area.clone();
-            self.frame_id += 1;
             event_handler(self, &mut Event::Redraw);
             self.paint_dirty = true;
         }
     
         if is_animation_frame && self.paint_dirty{
-                self.paint_dirty = false;
+            self.paint_dirty = false;
             self.repaint();
         }
 

@@ -22,7 +22,8 @@ impl Style for App{
 
 impl App{
     fn handle(&mut self, cx:&mut Cx, event:&mut Event){
-
+        
+        // what do we do here? we could theoretically remap an event here.
         self.view.handle_scroll(cx, event);
 
         for (id,ok) in self.ok.ids(){
@@ -42,7 +43,7 @@ impl App{
         //self.ok.mark();
         for i in 0..200{
             self.ok.get(cx, i).draw_with_label(cx, &format!("OK {}",(i as u64 )%5000));
-            if i%6 == 5{
+            if i%7 == 6{
                 cx.new_line();
             }
         }
