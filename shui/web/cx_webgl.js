@@ -262,20 +262,8 @@
 			var canvas = this.canvas;
 
 			if(canvas.getAttribute("fullpage")){
-				if(is_mobile_safari){
-					if(window.orientation == 90 || window.orientation == -90){
-						h = screen.width;
-						w = screen.height;
-					}
-					else{
-						w = screen.width;
-						h = screen.height;
-					}
-				}
-				else{
-					w = window.innerWidth;
-					h = window.innerHeight;
-				}
+				w = window.innerWidth;
+				h = window.innerHeight;
 			}
 			else{
 				w = canvas.offsetWidth;

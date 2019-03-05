@@ -142,10 +142,10 @@ impl Cx{
                     let x = to_wasm.mf32();
                     let y = to_wasm.mf32();
                     event_handler(self, &mut Event::FingerDown(FingerDownEvent{
-                        x:x, 
-                        y:y,
-                        rx:x,
-                        ry:y,
+                        abs_x:x, 
+                        abs_y:y,
+                        rel_x:x,
+                        rel_y:y,
                         handled:false,
                         digit:to_wasm.mu32() as usize,
                         is_touch:to_wasm.mu32()>0
@@ -155,10 +155,10 @@ impl Cx{
                     let x = to_wasm.mf32();
                     let y = to_wasm.mf32();
                     event_handler(self, &mut Event::FingerUp(FingerUpEvent{
-                        x:x, 
-                        y:y,
-                        rx:x,
-                        ry:y,
+                        abs_x:x, 
+                        abs_y:y,
+                        rel_x:x,
+                        rel_y:y,
                         start_x:0.,
                         start_y:0.,
                         digit:to_wasm.mu32() as usize,
@@ -170,10 +170,10 @@ impl Cx{
                     let x = to_wasm.mf32();
                     let y = to_wasm.mf32();
                     event_handler(self, &mut Event::FingerMove(FingerMoveEvent{
-                        x:x, 
-                        y:y,
-                        rx:x,
-                        ry:y,
+                        abs_x:x, 
+                        abs_y:y,
+                        rel_x:x,
+                        rel_y:y,
                         start_x:0.,
                         start_y:0.,
                         is_over:false,
@@ -185,10 +185,10 @@ impl Cx{
                     let x = to_wasm.mf32();
                     let y = to_wasm.mf32();
                     event_handler(self, &mut Event::FingerHover(FingerHoverEvent{
-                        x:x, 
-                        y:y,
-                        rx:x,
-                        ry:y,
+                        abs_x:x, 
+                        abs_y:y,
+                        rel_x:x,
+                        rel_y:y,
                         handled:false,
                         hover_state:HoverState::Over
                     }));
@@ -197,13 +197,13 @@ impl Cx{
                     let x = to_wasm.mf32();
                     let y = to_wasm.mf32();
                     event_handler(self, &mut Event::FingerScroll(FingerScrollEvent{
-                        x:x, 
-                        y:y,
-                        rx:x,
-                        ry:y,
+                        abs_x:x, 
+                        abs_y:y,
+                        rel_x:x,
+                        rel_y:y,
                         handled:false,
-                        dx:to_wasm.mf32(),
-                        dy:to_wasm.mf32(),
+                        scroll_x:to_wasm.mf32(),
+                        scroll_y:to_wasm.mf32(),
                     }));
                 },
                 _=>{

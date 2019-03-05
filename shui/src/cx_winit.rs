@@ -20,11 +20,11 @@ impl Cx{
             let down = self.resources.winit.mouse_buttons_down[i];
             if down{
                 out.push(Event::FingerMove(FingerMoveEvent{
-                    x:self.resources.winit.last_x,
-                    y:self.resources.winit.last_y,
+                    abs_x:self.resources.winit.last_x,
+                    abs_y:self.resources.winit.last_y,
                     digit:i,
-                    rx:self.resources.winit.last_x,
-                    ry:self.resources.winit.last_y,
+                    rel_x:self.resources.winit.last_x,
+                    rel_y:self.resources.winit.last_y,
                     start_x:0.,
                     start_y:0.,
                     is_over:false,
@@ -66,17 +66,17 @@ impl Cx{
             winit::Event::WindowEvent{ event, .. } => match event {
                 winit::WindowEvent::MouseWheel{delta, ..}=>{
                     return vec![Event::FingerScroll(FingerScrollEvent{
-                        x:self.resources.winit.last_x,
-                        y:self.resources.winit.last_y,
-                        rx:self.resources.winit.last_x,
-                        ry:self.resources.winit.last_y,
+                        abs_x:self.resources.winit.last_x,
+                        abs_y:self.resources.winit.last_y,
+                        rel_x:self.resources.winit.last_x,
+                        rel_y:self.resources.winit.last_y,
                         handled:false,
-                        dx:match delta{
-                            winit::MouseScrollDelta::LineDelta(dx,_dy)=>dx,
+                        scroll_x:match delta{
+                            winit::MouseScrollDelta::LineDelta(dx,_dy)=>dx*32.0,
                             winit::MouseScrollDelta::PixelDelta(pp)=>pp.x as f32
                         },
-                        dy:match delta{
-                            winit::MouseScrollDelta::LineDelta(_dx,dy)=>dy,
+                        scroll_y:match delta{
+                            winit::MouseScrollDelta::LineDelta(_dx,dy)=>dy*32.0,
                             winit::MouseScrollDelta::PixelDelta(pp)=>pp.y as f32
                         },
                     })]
@@ -87,10 +87,10 @@ impl Cx{
 
                     let mut events = self.make_mouse_move_events();
                     events.push(Event::FingerHover(FingerHoverEvent{
-                        x:self.resources.winit.last_x,
-                        y:self.resources.winit.last_y,
-                        rx:self.resources.winit.last_x,
-                        ry:self.resources.winit.last_y,
+                        abs_x:self.resources.winit.last_x,
+                        abs_y:self.resources.winit.last_y,
+                        rel_x:self.resources.winit.last_x,
+                        rel_y:self.resources.winit.last_y,
                         handled:false,
                         hover_state:HoverState::Over
                     }));
@@ -107,10 +107,10 @@ impl Cx{
                    
                    // fire a hover out on our last known mouse position
                     return vec![Event::FingerHover(FingerHoverEvent{
-                        x:self.resources.winit.last_x,
-                        y:self.resources.winit.last_y,
-                        rx:self.resources.winit.last_x,
-                        ry:self.resources.winit.last_y,
+                        abs_x:self.resources.winit.last_x,
+                        abs_y:self.resources.winit.last_y,
+                        rel_x:self.resources.winit.last_x,
+                        rel_y:self.resources.winit.last_y,
                         handled:false,
                         hover_state:HoverState::Out
                     })]
@@ -130,10 +130,10 @@ impl Cx{
                             };
                             self.resources.winit.mouse_buttons_down[digit] = true;
                             return vec![Event::FingerDown(FingerDownEvent{
-                                x:self.resources.winit.last_x,
-                                y:self.resources.winit.last_y,
-                                rx:self.resources.winit.last_x,
-                                ry:self.resources.winit.last_y,
+                                abs_x:self.resources.winit.last_x,
+                                abs_y:self.resources.winit.last_y,
+                                rel_x:self.resources.winit.last_x,
+                                rel_y:self.resources.winit.last_y,
                                 handled:false,
                                 digit:digit,
                                 is_touch:false,
@@ -151,10 +151,10 @@ impl Cx{
                             };
                             self.resources.winit.mouse_buttons_down[digit] = false;
                             return vec![Event::FingerUp(FingerUpEvent{
-                                x:self.resources.winit.last_x,
-                                y:self.resources.winit.last_y,
-                                rx:self.resources.winit.last_x,
-                                ry:self.resources.winit.last_y,
+                                abs_x:self.resources.winit.last_x,
+                                abs_y:self.resources.winit.last_y,
+                                rel_x:self.resources.winit.last_x,
+                                rel_y:self.resources.winit.last_y,
                                 start_x:0.,
                                 start_y:0.,
                                 digit:digit,

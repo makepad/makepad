@@ -5,6 +5,7 @@ pub struct ScrollBar{
     pub hit_state:HitState,
     pub bar_size:f32,
     pub sb_area:Area,
+    pub view_area:Area,
     pub sb_layout:Layout,
     pub sb: Quad,
 
@@ -37,8 +38,8 @@ impl Style for ScrollBar{
             bar_size:12.0,
             visible:false,
             
-
             // scrollbars
+            view_area:Area::Empty,
             view_total:0.0,
             view_visible:0.0,
             scroll_size:0.0,
@@ -48,7 +49,10 @@ impl Style for ScrollBar{
             drag_point:0.0,
 
             orientation:ScrollBarOrientation::Horizontal,
-            hit_state:HitState::new(),
+            hit_state:HitState{
+                no_scrolling:true,
+                ..Default::default()
+            },
             sb_area:Area::Empty,
             sb_layout:Layout{
                 align:Align::center(),
@@ -137,13 +141,66 @@ impl ScrollBar{
         return (norm_scroll, norm_handle)
     }
 
-    fn set_scroll_pos_from_mouse(&mut self, mouse:f32)->bool{
+    fn set_scroll_pos_from_finger(&mut self, finger:f32)->bool{
         let vy = self.view_visible / self.view_total;
         let norm_handle = vy.max(self.min_handle_size/self.scroll_size);
-        let new_scroll_pos = ((self.view_total * (1.-vy) * (mouse / self.scroll_size)) / (1.-norm_handle)).max(0.).min(self.view_total - self.view_visible);
+        let new_scroll_pos = ((self.view_total * (1.-vy) * (finger / self.scroll_size)) / (1.-norm_handle)).max(0.).min(self.view_total - self.view_visible);
         let changed = self.scroll_pos != new_scroll_pos;
         self.scroll_pos = new_scroll_pos;
         changed
+    }
+
+    fn do_scroll_event(&mut self, cx:&mut Cx){
+        match self.orientation{
+            ScrollBarOrientation::Horizontal=>{
+                let (norm_scroll, _) = self.get_normalized_sizes();
+                self.sb_area.write_float(cx,"norm_scroll", norm_scroll);
+                self.event = ScrollBarEvent::ScrollHorizontal{
+                        scroll_pos:self.scroll_pos,
+                        view_total:self.view_total,
+                        view_visible:self.view_visible
+                };
+            },
+            ScrollBarOrientation::Vertical=>{
+                let (norm_scroll, _) = self.get_normalized_sizes();
+                self.sb_area.write_float(cx,"norm_scroll", norm_scroll);
+                self.event = ScrollBarEvent::ScrollVertical{
+                        scroll_pos:self.scroll_pos,
+                        view_total:self.view_total,
+                        view_visible:self.view_visible
+                };
+            }
+        }
+    }
+
+    fn do_scroll_from_finger(&mut self, cx:&mut Cx, x:f32, y:f32){
+        match self.orientation{
+            ScrollBarOrientation::Horizontal=>{
+                let actual_pos = x - self.drag_point;
+                if self.set_scroll_pos_from_finger(actual_pos){
+                    self.do_scroll_event(cx);
+                }
+            },
+            ScrollBarOrientation::Vertical=>{
+                let actual_pos = y - self.drag_point;
+                if self.set_scroll_pos_from_finger(actual_pos){
+                    self.do_scroll_event(cx);
+                }
+            }
+        }
+    }
+
+    pub fn get_scroll_pos(&self)->f32{
+        return self.scroll_pos;
+    }
+
+    pub fn set_scroll_pos(&mut self, cx:&mut Cx, scroll_pos:f32){
+        // clamp scroll_pos to
+        let scroll_pos = scroll_pos.min(self.view_total - self.view_visible).max(0.); 
+        if self.scroll_pos != scroll_pos{
+            self.scroll_pos = scroll_pos;
+            self.do_scroll_event(cx);
+        }
     }
 }
 
@@ -162,10 +219,29 @@ impl ScrollBarLike<ScrollBar> for ScrollBar{
         if !self.visible{
             return self.event.clone();
         }
-        // todo process 2 finger scroll on the area of these scrollbars.
+        
+        // lets check if our view-area gets a mouse-scroll.
+        match event{
+            Event::FingerScroll(fe)=>{
+                let rect = self.view_area.get_rect(cx, false);
+                if rect.contains(fe.abs_x, fe.abs_y){ // handle mousewheel
+                    // we should scroll in either x or y
+                    match self.orientation{
+                        ScrollBarOrientation::Horizontal=>{
+                            let scroll_pos= self.get_scroll_pos();
+                            self.set_scroll_pos(cx, scroll_pos + fe.scroll_x)
+                        },
+                        ScrollBarOrientation::Vertical=>{
+                            let scroll_pos= self.get_scroll_pos();
+                            self.set_scroll_pos(cx, scroll_pos + fe.scroll_y)
+                        }
+                    }        
+                }
+            },
+            _=>()
+        };
 
-
-        match event.hits(cx, self.sb_area, &mut self.hit_state, HitTouch::Single){
+        match event.hits(cx, self.sb_area, &mut self.hit_state){
             Event::Animate(ae)=>{
                 self.anim.calc_area(cx, "sb.color", ae.time, self.sb_area);
                 //self.anim.calc_area(cx, "bg.handle_color", ae.time, self.sb_area);
@@ -181,14 +257,12 @@ impl ScrollBarLike<ScrollBar> for ScrollBar{
                         let (norm_scroll, norm_handle) = self.get_normalized_sizes();
                         let bar_x = norm_scroll * self.scroll_size;
                         let bar_w = norm_handle * self.scroll_size;
-                        if fe.rx < bar_x{ // clicked above
-
-                        }
-                        else if fe.rx > bar_w + bar_x{ // clicked below
-                            log!(cx,"CLICKED LEFT");
+                        if fe.rel_x < bar_x || fe.rel_x > bar_w + bar_x{ // clicked below
+                            self.drag_point = bar_w * 0.5;
+                            self.do_scroll_from_finger(cx, fe.rel_x, fe.rel_y);
                         }
                         else{ // clicked on
-                            self.drag_point = fe.rx - bar_x; // store the drag delta
+                            self.drag_point = fe.rel_x - bar_x; // store the drag delta
                         }
                     },
                     ScrollBarOrientation::Vertical=>{
@@ -196,14 +270,12 @@ impl ScrollBarLike<ScrollBar> for ScrollBar{
                         let (norm_scroll, norm_handle) = self.get_normalized_sizes();
                         let bar_y = norm_scroll * self.scroll_size;
                         let bar_h = norm_handle * self.scroll_size;
-                        if fe.ry < bar_y{ // clicked above
-
-                        }
-                        else if fe.ry > bar_h + bar_y{ // clicked below
-                            log!(cx,"CLICKED BELOW");
+                        if fe.rel_y < bar_y || fe.rel_y > bar_h + bar_y{ // clicked below or above
+                            self.drag_point = bar_h * 0.5;
+                            self.do_scroll_from_finger(cx, fe.rel_x, fe.rel_y);
                         }
                         else{ // clicked on
-                            self.drag_point = fe.ry - bar_y; // store the drag delta
+                            self.drag_point = fe.rel_y - bar_y; // store the drag delta
                         }
                     }
                 }        
@@ -236,44 +308,17 @@ impl ScrollBarLike<ScrollBar> for ScrollBar{
                 }
             },
             Event::FingerMove(fe)=>{
-                // ok so. we have a total area,
-                // and a visible area
-                // normally the scrollbar is 
-                match self.orientation{
-                    ScrollBarOrientation::Horizontal=>{
-                        let actual_pos = fe.rx - self.drag_point;
-                        if self.set_scroll_pos_from_mouse(actual_pos){
-                            let (norm_scroll, _) = self.get_normalized_sizes();
-                            self.sb_area.write_float(cx,"norm_scroll", norm_scroll);
-                            self.event = ScrollBarEvent::ScrollHorizontal{
-                                    scroll_pos:self.scroll_pos,
-                                    view_total:self.view_total,
-                                    view_visible:self.view_visible
-                            };
-                        }
-                    },
-                    ScrollBarOrientation::Vertical=>{
-                        let actual_pos = fe.ry - self.drag_point;
-                        if self.set_scroll_pos_from_mouse(actual_pos){
-                            let (norm_scroll, _) = self.get_normalized_sizes();
-                            self.sb_area.write_float(cx,"norm_scroll", norm_scroll);
-                            self.event = ScrollBarEvent::ScrollVertical{
-                                    scroll_pos:self.scroll_pos,
-                                    view_total:self.view_total,
-                                    view_visible:self.view_visible
-                            };
-                        }
-                    }
-                }        
+                self.do_scroll_from_finger(cx, fe.rel_x, fe.rel_y);
             },
             _=>()
         };
         self.event.clone()
     }
 
-    fn draw_with_view_size(&mut self, cx:&mut Cx, view_rect:Rect, view_total:Vec2){
+    fn draw_with_view_size(&mut self, cx:&mut Cx, view_area:Area, view_rect:Rect, view_total:Vec2){
         // pull the bg color from our animation system, uses 'default' value otherwise
         self.sb.color = self.anim.last_vec4("sb.color");
+        self.view_area = view_area;
 
         match self.orientation{
              ScrollBarOrientation::Horizontal=>{

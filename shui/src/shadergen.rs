@@ -226,6 +226,8 @@ impl ShIndex{
 
 impl ShAssign{
     pub fn sl(&self, cx:&mut SlCx)->Result<Sl,SlErr>{
+        // if we are assigning to a geom 
+
         let left = self.left.sl(cx)?;
         let right = self.right.sl(cx)?;
         if left.ty != right.ty{

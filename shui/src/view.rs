@@ -22,7 +22,7 @@ impl Default for ScrollBarsActive{
 
 pub trait ScrollBarLike<T>{
     fn new(cx:&mut Cx, orientation:ScrollBarOrientation)->T;
-    fn draw_with_view_size(&mut self, cx:&mut Cx, view_rect:Rect, total_size:Vec2);
+    fn draw_with_view_size(&mut self, cx:&mut Cx, view_area:Area, view_rect:Rect, total_size:Vec2);
     fn handle(&mut self, cx:&mut Cx, event:&mut Event)->ScrollBarEvent;
 }
 
@@ -151,19 +151,23 @@ where T: ScrollBarLike<T> + Clone + ElementLife
         ScrollBarEvent::None
     }
 
-    pub fn end(&mut self, cx:&mut Cx){
+    pub fn end(&mut self, cx:&mut Cx)->Area{
         // do scrollbars if need be
         cx.draw_list_stack.pop();
+
+        let draw_list_id = self.draw_list_id.unwrap();
+        let view_area = Area::DrawList(DrawListArea{draw_list_id:draw_list_id});
+
         // lets ask the turtle our actual bounds
         let view_total = cx.turtle_bounds();   
         let rect_now =  cx.turtle_rect();
 
-        self.scroll_h.get(cx).draw_with_view_size(cx, rect_now, view_total);
-        self.scroll_v.get(cx).draw_with_view_size(cx, rect_now, view_total);
+        self.scroll_h.get(cx).draw_with_view_size(cx, view_area, rect_now, view_total);
+        self.scroll_v.get(cx).draw_with_view_size(cx, view_area, rect_now, view_total);
 
         let rect = cx.end_turtle();
-
-        let draw_list = &mut cx.draw_lists[self.draw_list_id.unwrap()];
-        draw_list.rect = rect
+        let draw_list = &mut cx.draw_lists[draw_list_id];
+        draw_list.rect = rect;
+        return view_area
     }
 }

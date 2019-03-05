@@ -38,7 +38,7 @@ impl Area{
         false
     }
 
-    pub fn get_rect(&self, cx:&Cx)->Rect{
+    pub fn get_rect(&self, cx:&Cx, no_scrolling:bool)->Rect{
         return match self{
             Area::Instance(inst)=>{
                 if inst.instance_count == 0{
@@ -56,7 +56,13 @@ impl Area{
                             let w = draw_call.instance[inst.instance_offset + iw];
                             if let Some(ih) = csh.rect_instance_props.h{
                                 let h = draw_call.instance[inst.instance_offset + ih];
-                                return Rect{x:x,y:y,w:w,h:h}
+                                if no_scrolling{
+                                    return Rect{x:x,y:y,w:w,h:h}
+                                }
+                                else{
+                                    let scroll = draw_list.get_scroll();
+                                    return Rect{x:x - scroll.x,y:y - scroll.y,w:w,h:h}
+                                }
                             }
                         }
                     }
@@ -65,6 +71,8 @@ impl Area{
             },
             Area::DrawList(draw_list_area)=>{
                 let draw_list = &cx.draw_lists[draw_list_area.draw_list_id];
+                //draw_list.get_scroll();
+                //let mut rect = 
                 draw_list.rect.clone()
             },
             _=>Rect::zero(),
@@ -455,10 +463,5 @@ impl Area{
             },
             _=>()
         }
-    }
-
-    pub fn contains(&self, x:f32, y:f32, cx:&Cx)->bool{
-        let rect = self.get_rect(cx);
-        rect.contains(x, y)
     }
 }

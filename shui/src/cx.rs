@@ -356,6 +356,10 @@ impl DrawList{
         self.uniforms[DL_UNI_SCROLL+1] = y;
     }
 
+    pub fn get_scroll(&self)->Vec2{
+        return vec2(self.uniforms[DL_UNI_SCROLL+0],self.uniforms[DL_UNI_SCROLL+1])
+    }
+
     pub fn uniform_draw_list_clip(&mut self, min_x:f32, min_y:f32, max_x:f32, max_y:f32){
         
         self.uniforms[DL_UNI_CLIP+0] = min_x;

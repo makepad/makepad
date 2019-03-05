@@ -27,7 +27,9 @@ impl Style for Button{
     fn style(cx:&mut Cx)->Self{
         let bg_sh = Self::def_bg_shader(cx);
         Self{
-            hit_state:HitState::new(),
+            hit_state:HitState{
+                ..Default::default()
+            },
             is_down:false,
             bg_area:Area::Empty,
             bg_layout:Layout{
@@ -131,7 +133,7 @@ impl Button{
 
     pub fn handle(&mut self, cx:&mut Cx, event:&mut Event)->ButtonEvent{
         self.event = ButtonEvent::None;
-        match event.hits(cx, self.bg_area, &mut self.hit_state, HitTouch::Single){
+        match event.hits(cx, self.bg_area, &mut self.hit_state){
             Event::Animate(ae)=>{
 
                 self.anim.calc_area(cx, "bg.color", ae.time, self.bg_area);
