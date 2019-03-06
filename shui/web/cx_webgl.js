@@ -838,7 +838,6 @@
 				gl.bindTexture(gl.TEXTURE_2D, tex_obj);
 				gl.uniform1i(tex_slot.loc, i);
 			}
-
 			let indices = index_buffer.length;
 			let instances = instance_buffer.length / shader.instance_slots;
 			// lets do a drawcall!

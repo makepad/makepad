@@ -34,7 +34,8 @@ impl Cx{
                 let sh = &self.shaders[draw_call.shader_id];
                 let shc = &self.compiled_shaders[draw_call.shader_id];
                 
-                if draw_call.update_frame_id == self.frame_id{
+                if draw_call.instance_dirty{
+                    draw_call.instance_dirty = false;
                     // update the instance buffer data
                     draw_call.resources.inst_vbuf.update_with_f32_data(device, &draw_call.instance);
                     draw_call.resources.uni_dr.update_with_f32_data(device, &draw_call.uniforms);

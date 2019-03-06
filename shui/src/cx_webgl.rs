@@ -23,7 +23,8 @@ impl Cx{
                 let draw_call = &mut draw_list.draw_calls[draw_call_id];
                 let csh = &self.compiled_shaders[draw_call.shader_id];
 
-                if draw_call.update_frame_id == self.frame_id{
+                if draw_call.instance_dirty{
+                    draw_call.instance_dirty = false;
                     // update the instance buffer data
                     draw_call.resources.check_attached_vao(csh, &mut self.resources);
 
@@ -41,7 +42,6 @@ impl Cx{
                         tex.upload_to_device(&mut self.resources);
                     }
                 }
-
                 self.resources.from_wasm.draw_call(
                     draw_call.shader_id,
                     draw_call.resources.vao_id,
@@ -61,7 +61,6 @@ impl Cx{
         self.resources.from_wasm.clear(self.clear_color.x, self.clear_color.y, self.clear_color.z, self.clear_color.w);
         self.prepare_frame();        
         self.exec_draw_list(0);
-        self.frame_id += 1;
     }
 
     // incoming to_wasm. There is absolutely no other entrypoint
@@ -234,6 +233,7 @@ impl Cx{
         if !self.dirty_area.is_empty(){
             self.dirty_area = Area::Empty;
             self.redraw_area = self.dirty_area.clone();
+            self.frame_id += 1;
             event_handler(self, &mut Event::Redraw);
             self.paint_dirty = true;
         }
@@ -424,7 +424,7 @@ pub struct DrawListResources{
 
 #[derive(Default,Clone)]
 pub struct DrawCallResources{
-    pub resource_shader_id:usize,
+    pub resource_shader_id:Option<usize>,
     pub vao_id:usize,
     pub inst_vb_id:usize
 }
@@ -432,32 +432,38 @@ pub struct DrawCallResources{
 impl DrawCallResources{
 
     pub fn check_attached_vao(&mut self, csh:&CompiledShader, resources:&mut CxResources){
-        if self.resource_shader_id != csh.shader_id{
+        if self.resource_shader_id.is_none() || self.resource_shader_id.unwrap() != csh.shader_id{
             self.free(resources); // dont reuse vaos accross shader ids
+            
+            // create the VAO
+            self.resource_shader_id = Some(csh.shader_id);
+
+            // get a free vao ID
+            self.vao_id = resources.get_free_vao();
+            self.inst_vb_id = resources.get_free_index_buffer();
+
+            resources.from_wasm.alloc_array_buffer(
+                self.inst_vb_id,0,0 as *const f32
+            );
+
+            resources.from_wasm.alloc_vao(
+                csh.shader_id,
+                self.vao_id,
+                csh.geom_ib_id,
+                csh.geom_vb_id,
+                self.inst_vb_id,
+            );
         }
-        // create the VAO
-        self.resource_shader_id = csh.shader_id;
-
-        // get a free vao ID
-        self.vao_id = resources.get_free_vao();
-        self.inst_vb_id = resources.get_free_index_buffer();
-
-        resources.from_wasm.alloc_array_buffer(
-            self.inst_vb_id,0,0 as *const f32
-        );
-
-        resources.from_wasm.alloc_vao(
-            csh.shader_id,
-            self.vao_id,
-            csh.geom_ib_id,
-            csh.geom_vb_id,
-            self.inst_vb_id,
-        );
     }
 
     fn free(&mut self, resources:&mut CxResources){
-        resources.vaos_free.push(self.vao_id);
-        resources.vertex_buffers_free.push(self.inst_vb_id);
+        
+        if self.vao_id != 0{
+            resources.vaos_free.push(self.vao_id);
+        }
+        if self.inst_vb_id != 0{
+            resources.vertex_buffers_free.push(self.inst_vb_id);
+        }
         self.vao_id = 0;
         self.inst_vb_id = 0;
     }

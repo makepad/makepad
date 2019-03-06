@@ -271,7 +271,7 @@ impl Cx{
                 textures_2d:Vec::new(),
                 current_instance_offset:0,
                 need_uniforms_now:true,
-                update_frame_id:self.frame_id,
+                instance_dirty:true,
                 resources:DrawCallResources{..Default::default()}
             });
             let dc = &mut draw_list.draw_calls[id];
@@ -286,7 +286,7 @@ impl Cx{
         dc.current_instance_offset = 0;
         dc.uniforms.truncate(0);
         dc.textures_2d.truncate(0);
-        dc.update_frame_id = self.frame_id;
+        dc.instance_dirty = true;
         dc.need_uniforms_now = true;
         return dc.get_current_area();
     }
@@ -317,7 +317,7 @@ pub struct DrawCall{
     pub current_instance_offset:usize, // offset of current instance
     pub uniforms:Vec<f32>,  // draw uniforms
     pub textures_2d:Vec<u32>,
-    pub update_frame_id: u64,
+    pub instance_dirty:bool,
     pub resources:DrawCallResources,
     pub need_uniforms_now:bool
 }
