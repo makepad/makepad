@@ -142,19 +142,26 @@ impl Cx{
                 6=>{ // finger down
                     let x = to_wasm.mf32();
                     let y = to_wasm.mf32();
+                    let digit = to_wasm.mu32() as usize;
+                    self.fingers_down[digit] = true;
                     event_handler(self, &mut Event::FingerDown(FingerDownEvent{
                         abs_x:x, 
                         abs_y:y,
                         rel_x:x,
                         rel_y:y,
                         handled:false,
-                        digit:to_wasm.mu32() as usize,
+                        digit:digit,
                         is_touch:to_wasm.mu32()>0
                     }));
                 },
                 7=>{ // finger up
                     let x = to_wasm.mf32();
                     let y = to_wasm.mf32();
+                    let digit = to_wasm.mu32() as usize;
+                    self.fingers_down[digit] = false;
+                    if !self.any_fingers_down(){
+                        self.down_mouse_cursor = None;
+                    }
                     event_handler(self, &mut Event::FingerUp(FingerUpEvent{
                         abs_x:x, 
                         abs_y:y,
@@ -162,7 +169,7 @@ impl Cx{
                         rel_y:y,
                         start_x:0.,
                         start_y:0.,
-                        digit:to_wasm.mu32() as usize,
+                        digit:digit,
                         is_over:false,
                         is_touch:to_wasm.mu32()>0
                     }));
@@ -185,6 +192,7 @@ impl Cx{
                 9=>{ // finger hover
                     let x = to_wasm.mf32();
                     let y = to_wasm.mf32();
+                    self.hover_mouse_cursor = None;
                     event_handler(self, &mut Event::FingerHover(FingerHoverEvent{
                         abs_x:x, 
                         abs_y:y,
@@ -212,6 +220,16 @@ impl Cx{
                 }
             };
         };
+
+        // check if we need to send a cursor
+        if !self.down_mouse_cursor.is_none(){
+            self.resources.from_wasm.set_mouse_cursor(self.down_mouse_cursor.as_ref().unwrap().clone())
+        }
+        else if !self.hover_mouse_cursor.is_none(){
+            self.resources.from_wasm.set_mouse_cursor(self.hover_mouse_cursor.as_ref().unwrap().clone())
+        }else{
+            self.resources.from_wasm.set_mouse_cursor(MouseCursor::Default);
+        }
 
         if !self.dirty_area.is_empty(){
             self.dirty_area = Area::Empty;
@@ -699,6 +717,51 @@ impl FromWasm{
         self.mu32(11);
         self.add_string(title);
    }
+
+    pub fn set_mouse_cursor(&mut self, mouse_cursor:MouseCursor){
+        self.fit(2);
+        self.mu32(12);
+        let cursor_id = match mouse_cursor{
+			MouseCursor::Hidden=>0,
+			MouseCursor::Default=>1,
+            MouseCursor::Crosshair=>2,
+            MouseCursor::Hand=>3,
+            MouseCursor::Arrow=>4,
+            MouseCursor::Move=>5,
+            MouseCursor::Text=>6,
+            MouseCursor::Wait=>7,
+            MouseCursor::Help=>8,
+            MouseCursor::Progress=>9,
+            MouseCursor::NotAllowed=>10,
+            MouseCursor::ContextMenu=>11,
+            MouseCursor::Cell=>12,
+            MouseCursor::VerticalText=>13,
+            MouseCursor::Alias=>14,
+            MouseCursor::Copy=>15,
+            MouseCursor::NoDrop=>16,
+            MouseCursor::Grab=>17,
+            MouseCursor::Grabbing=>18,
+            MouseCursor::AllScroll=>19,
+            MouseCursor::ZoomIn=>20,
+            MouseCursor::ZoomOut=>21,
+            MouseCursor::NResize=>22,
+            MouseCursor::NeResize=>23,
+            MouseCursor::EResize=>24,
+            MouseCursor::SeResize=>25,
+            MouseCursor::SResize=>26,
+            MouseCursor::SwResize=>27,
+            MouseCursor::WResize=>28,
+            MouseCursor::NwResize=>29,
+            MouseCursor::NsResize=>30,
+            MouseCursor::NeswResize=>31,
+            MouseCursor::EwResize=>32,
+            MouseCursor::NwseResize=>33,
+            MouseCursor::ColResize=>34,
+			MouseCursor::RowResize=>35,
+
+        };
+        self.mu32(cursor_id);
+    }
 
     fn add_string(&mut self, msg:&str){
         let len = msg.chars().count();

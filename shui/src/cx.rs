@@ -1,6 +1,7 @@
 pub use crate::shadergen::*;
 pub use crate::cx_fonts::*;
 pub use crate::cx_turtle::*;
+pub use crate::cx_mouse_cursor::*;
 pub use crate::math::*;
 pub use crate::events::*;
 pub use crate::shader::*;
@@ -42,7 +43,6 @@ pub struct Cx{
     pub draw_lists: Vec<DrawList>,
     pub draw_lists_free: Vec<usize>,
     pub instance_area_stack: Vec<Area>,
-
     pub draw_list_stack: Vec<usize>,
     pub current_draw_list_id: usize,
 
@@ -60,9 +60,13 @@ pub struct Cx{
     pub target_size:Vec2,
     pub target_dpi_factor:f32,
 
+    pub down_mouse_cursor:Option<MouseCursor>,
+    pub hover_mouse_cursor:Option<MouseCursor>,
+    pub captured_fingers:Vec<Area>,
+    pub fingers_down:Vec<bool>,
+
     pub animations:Vec<AnimArea>,
     pub ended_animations:Vec<AnimArea>,
-    pub captured_fingers:Vec<Area>,
 
     pub resources:CxResources,
 
@@ -76,12 +80,15 @@ impl Default for Cx{
         let mut uniforms = Vec::<f32>::new();
         uniforms.resize(CX_UNI_SIZE, 0.0);
         let mut captured_fingers = Vec::new();
+        let mut fingers_down = Vec::new();
         for _i in 0..10{
             captured_fingers.push(Area::Empty);
+            fingers_down.push(false);
         }
         Self{
             title:"Hello World".to_string(),
             running: true,
+
             fonts:Vec::new(),
             textures_2d:Vec::new(),
             uniforms:Vec::new(),
@@ -100,16 +107,24 @@ impl Default for Cx{
             paint_dirty:true,
             clear_color:vec4(0.1,0.1,0.1,1.0),
             frame_id:1,
+
             turtles:Vec::new(),
             align_list:Vec::new(),
             target_size:vec2(0.0,0.0),
             target_dpi_factor:0.0,
 
+            down_mouse_cursor:None,
+            hover_mouse_cursor:None,
             captured_fingers:captured_fingers,
+            fingers_down:fingers_down,
+
             animations:Vec::new(),
             ended_animations:Vec::new(),
+
             style: StyleSheet{..Default::default()},
+
             resources:CxResources{..Default::default()},
+
             binary_deps:Vec::new()
         }
     }
@@ -198,6 +213,15 @@ impl Cx{
                 i = i + 1;
             }
         }
+    }
+
+    pub fn any_fingers_down(&mut self)->bool{
+		for down in &self.fingers_down{
+            if *down{
+                return true
+            }
+		}
+        return false
     }
 
     pub fn new_aligned_instance(&mut self, shader_id:usize)->Area{

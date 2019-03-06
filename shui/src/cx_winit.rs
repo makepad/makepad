@@ -8,16 +8,15 @@ use std::io;
 pub struct CxWinit{
     pub last_x:f32,
     pub last_y:f32,
-    pub is_cursor_in_window:bool,
-    pub mouse_buttons_down:Vec<bool>
+    pub is_cursor_in_window:bool
 }
 
 impl Cx{
 
     fn make_mouse_move_events(&self)->Vec<Event>{
         let mut out = Vec::new();
-        for i in 0..self.resources.winit.mouse_buttons_down.len(){
-            let down = self.resources.winit.mouse_buttons_down[i];
+        for i in 0..self.fingers_down.len(){
+            let down = self.fingers_down[i];
             if down{
                 out.push(Event::FingerMove(FingerMoveEvent{
                     abs_x:self.resources.winit.last_x,
@@ -35,14 +34,51 @@ impl Cx{
         return out;
     }
 
+    pub fn set_winit_mouse_cursor(&mut self, window:&winit::Window, mouse_cursor:MouseCursor){
+        let (hide, cursor) = match mouse_cursor{
+                MouseCursor::Hidden=>(true,winit::MouseCursor::Default),
+                MouseCursor::Default=>(false,winit::MouseCursor::Default),
+                MouseCursor::Crosshair=>(false,winit::MouseCursor::Crosshair),
+                MouseCursor::Hand=>(false,winit::MouseCursor::Hand),
+                MouseCursor::Arrow=>(false,winit::MouseCursor::Arrow),
+                MouseCursor::Move=>(false,winit::MouseCursor::Move),
+                MouseCursor::Text=>(false,winit::MouseCursor::Text),
+                MouseCursor::Wait=>(false,winit::MouseCursor::Wait),
+                MouseCursor::Help=>(false,winit::MouseCursor::Help),
+                MouseCursor::Progress=>(false,winit::MouseCursor::Progress),
+                MouseCursor::NotAllowed=>(false,winit::MouseCursor::NotAllowed),
+                MouseCursor::ContextMenu=>(false,winit::MouseCursor::ContextMenu),
+                MouseCursor::Cell=>(false,winit::MouseCursor::Cell),
+                MouseCursor::VerticalText=>(false,winit::MouseCursor::VerticalText),
+                MouseCursor::Alias=>(false,winit::MouseCursor::Alias),
+                MouseCursor::Copy=>(false,winit::MouseCursor::Copy),
+                MouseCursor::NoDrop=>(false,winit::MouseCursor::NoDrop),
+                MouseCursor::Grab=>(false,winit::MouseCursor::Grab),
+                MouseCursor::Grabbing=>(false,winit::MouseCursor::Grabbing),
+                MouseCursor::AllScroll=>(false,winit::MouseCursor::AllScroll),
+                MouseCursor::ZoomIn=>(false,winit::MouseCursor::ZoomIn),
+                MouseCursor::ZoomOut=>(false,winit::MouseCursor::ZoomOut),
+                MouseCursor::NResize=>(false,winit::MouseCursor::NResize),
+                MouseCursor::NeResize=>(false,winit::MouseCursor::NeResize),
+                MouseCursor::EResize=>(false,winit::MouseCursor::EResize),
+                MouseCursor::SeResize=>(false,winit::MouseCursor::SeResize),
+                MouseCursor::SResize=>(false,winit::MouseCursor::SResize),
+                MouseCursor::SwResize=>(false,winit::MouseCursor::SwResize),
+                MouseCursor::WResize=>(false,winit::MouseCursor::WResize),
+                MouseCursor::NwResize=>(false,winit::MouseCursor::NwResize),
+                MouseCursor::NsResize=>(false,winit::MouseCursor::NsResize),
+                MouseCursor::NeswResize=>(false,winit::MouseCursor::NeswResize),
+                MouseCursor::EwResize=>(false,winit::MouseCursor::EwResize),
+                MouseCursor::NwseResize=>(false,winit::MouseCursor::NwseResize),
+                MouseCursor::ColResize=>(false,winit::MouseCursor::ColResize),
+                MouseCursor::RowResize=>(false,winit::MouseCursor::RowResize),
+        };
+        window.set_cursor(cursor);
+        window.hide_cursor(hide);
+    }
+
     pub fn map_winit_event(&mut self, winit_event:winit::Event, glutin_window:&winit::Window)->Vec<Event>{
         //self.log(&format!("{:?}\n", winit_event));
-        
-        if self.resources.winit.mouse_buttons_down.len()<self.captured_fingers.len(){
-            for _i in 0..self.captured_fingers.len(){
-                self.resources.winit.mouse_buttons_down.push(false);
-            }
-        }
 
         match winit_event{
             winit::Event::DeviceEvent{ event, .. } => match event {
@@ -84,7 +120,7 @@ impl Cx{
                 winit::WindowEvent::CursorMoved{position,..}=>{
                     self.resources.winit.last_x = position.x as f32;
                     self.resources.winit.last_y = position.y as f32;
-
+                    self.hover_mouse_cursor = None;
                     let mut events = self.make_mouse_move_events();
                     events.push(Event::FingerHover(FingerHoverEvent{
                         abs_x:self.resources.winit.last_x,
@@ -104,7 +140,7 @@ impl Cx{
                 },
                 winit::WindowEvent::CursorLeft{..}=>{
                     self.resources.winit.is_cursor_in_window = false;
-                   
+                    self.hover_mouse_cursor = None;
                    // fire a hover out on our last known mouse position
                     return vec![Event::FingerHover(FingerHoverEvent{
                         abs_x:self.resources.winit.last_x,
@@ -128,7 +164,7 @@ impl Cx{
                             if digit >= self.captured_fingers.len(){
                                 digit = 0;
                             };
-                            self.resources.winit.mouse_buttons_down[digit] = true;
+                            self.fingers_down[digit] = true;
                             return vec![Event::FingerDown(FingerDownEvent{
                                 abs_x:self.resources.winit.last_x,
                                 abs_y:self.resources.winit.last_y,
@@ -140,6 +176,7 @@ impl Cx{
                             })]
                         },
                         winit::ElementState::Released=>{
+
                             let mut digit = match button{// this makes sure that single touch mode doesnt allow multiple mousedowns
                                 winit::MouseButton::Left=>0,
                                 winit::MouseButton::Right=>1,
@@ -149,7 +186,10 @@ impl Cx{
                             if digit >= self.captured_fingers.len(){
                                 digit = 0;
                             };
-                            self.resources.winit.mouse_buttons_down[digit] = false;
+                            self.fingers_down[digit] = false;
+                            if !self.any_fingers_down(){
+                                self.down_mouse_cursor = None;
+                            }
                             return vec![Event::FingerUp(FingerUpEvent{
                                 abs_x:self.resources.winit.last_x,
                                 abs_y:self.resources.winit.last_y,

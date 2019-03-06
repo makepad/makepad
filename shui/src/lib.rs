@@ -20,6 +20,7 @@ mod cx_winit;
 mod cx; 
 mod cx_turtle;
 mod cx_fonts;
+mod cx_mouse_cursor;
 mod animation;
 mod elements;
 mod math;

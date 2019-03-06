@@ -514,6 +514,46 @@
 		}
 		
 		bind_mouse_and_touch(){
+			
+			this.cursor_map = [
+				"none",//Hidden=>0
+				"default",//Default=>1,
+				"crosshair",//CrossHair=>2,
+				"pointer",//Hand=>3,
+				"default",//Arrow=>4,
+				"move",//Move=>5,
+				"text",//Text=>6,
+				"wait",//Wait=>7,
+				"help",//Help=>8,
+				"progress",//Progress=>9,
+				"not-allowed",//NotAllowed=>10,
+				"context-menu",//ContextMenu=>11,
+				"cell",//Cell=>12,
+				"vertical-text",//VerticalText=>13,
+				"alias",//Alias=>14,
+				"copy",//Copy=>15,
+				"no-drop",//NoDrop=>16,
+				"grab",//Grab=>17,
+				"grabbing",//Grabbing=>18,
+				"all-scroll",//AllScroll=>19,
+				"zoom-in",//ZoomIn=>20,
+				"zoom-out",//ZoomOut=>21,
+				"n-resize",//NResize=>22,
+				"ne-resize",//NeResize=>23,
+				"e-resize",//EResize=>24,
+				"se-resize",//SeResize=>25,
+				"s-resize",//SResize=>26,
+				"sw-resize",//SwResize=>27,
+				"w-resize",//WResize=>28,
+				"nw-resize",//NwResize=>29,
+				"ns-resize",//NsResize=>30,
+				"nesw-resize",//NeswResize=>31,
+				"ew-resize",//EwResize=>32,
+				"nwse-resize",//NwseResize=>33,
+				"col-resize",//ColResize=>34,
+				"row-resize",//RowResize=>35,
+			]
+
 			var canvas = this.canvas
 			function mouse_to_finger(e){
 				return [{
@@ -803,6 +843,10 @@
 			gl.clearColor(r,g,b,a);
 			gl.clear(gl.COLOR_BUFFER_BIT|gl.DEPTH_BUFFER_BIT);			
 		}
+
+		set_mouse_cursor(id){
+			document.body.style.cursor = this.cursor_map[id] || 'default'
+		}
 	}
 
 	// array of function id's wasm can call on us, self is pointer to WasmApp
@@ -891,6 +935,9 @@
 		},
 		function set_document_title_11(self){
 			self.set_document_title(self.parse_string())
+		},
+		function set_mouse_cursor_12(self){
+			self.set_mouse_cursor(self.mu32[self.parse++]);
 		}
 	]
 	

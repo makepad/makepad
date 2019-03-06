@@ -148,8 +148,11 @@ impl Button{
                 self.event = ButtonEvent::Down;
                 self.is_down = true;
                 self.anim.change_state(cx, ButtonState::Down);
+                cx.set_down_mouse_cursor(MouseCursor::Crosshair);
             },
             Event::FingerHover(fe)=>{
+                cx.set_hover_mouse_cursor(MouseCursor::Hand);
+
                 match fe.hover_state{
                     HoverState::In=>{
                         if self.is_down{

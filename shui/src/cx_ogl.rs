@@ -157,6 +157,17 @@ impl Cx{
                 event_handler(self, &mut Event::Redraw);
                 self.paint_dirty = true;
             }
+
+            // set a cursor
+            if !self.down_mouse_cursor.is_none(){
+                self.set_winit_mouse_cursor(&glutin_window, self.down_mouse_cursor.as_ref().unwrap().clone())
+            }
+            else if !self.hover_mouse_cursor.is_none(){
+                self.set_winit_mouse_cursor(&glutin_window, self.hover_mouse_cursor.as_ref().unwrap().clone())
+            }else{
+                self.set_winit_mouse_cursor(&glutin_window, MouseCursor::Default);
+            }
+            
             // repaint everything if we need to
             if self.paint_dirty{
                 self.paint_dirty = false;
