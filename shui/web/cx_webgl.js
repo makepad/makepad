@@ -1,7 +1,8 @@
 (function(root){
 	var user_agent = window.navigator.userAgent;
 	var is_mobile_safari = user_agent.match(/Mobile\/\w+ Safari/i);
-
+	var is_add_to_homescreen_safari = is_mobile_safari && navigator.standalone;
+	console.log(navigator.standalone)
 	// message we can send to wasm
 	class ToWasm{
 		constructor(wasm_app){
@@ -262,8 +263,20 @@
 			var canvas = this.canvas;
 
 			if(canvas.getAttribute("fullpage")){
-				w = window.innerWidth;
-				h = window.innerHeight;
+				if(is_add_to_homescreen_safari){ // extremely ugly. but whatever.
+					if(window.orientation == 90 || window.orientation == -90){
+						h = screen.width;
+						w = screen.height-90;
+					}
+					else{
+						w = screen.width;
+						h = screen.height-80;
+					}
+				}
+				else{
+					w = window.innerWidth;
+					h = window.innerHeight;
+				}
 			}
 			else{
 				w = canvas.offsetWidth;
@@ -427,7 +440,6 @@
 			})
 
 			window.addEventListener('orientationchange', _=>{
-				console.log("HERE");
 				this.on_screen_resize()
 			})
 			
