@@ -10,10 +10,6 @@ pub use crate::elements::*;
 pub use crate::animation::*;
 pub use crate::area::*;
 pub use crate::view::*;
-pub use crate::cx_turtle::Value::Computed;
-pub use crate::cx_turtle::Value::Fixed;
-pub use crate::cx_turtle::Value::Percent;
-pub use crate::cx_turtle::Value::Expression;
 pub use crate::style::*;
 
 #[cfg(feature = "ogl")]
@@ -53,7 +49,7 @@ pub struct Cx{
     pub redraw_area:Area,
     pub paint_dirty:bool,
     pub clear_color:Vec4,
-    pub frame_id: u64,
+    pub redraw_id: u64,
 
     pub turtles:Vec<Turtle>,
     pub align_list:Vec<Area>,
@@ -106,7 +102,7 @@ impl Default for Cx{
             redraw_area:Area::Empty,
             paint_dirty:true,
             clear_color:vec4(0.1,0.1,0.1,1.0),
-            frame_id:1,
+            redraw_id:1,
 
             turtles:Vec::new(),
             align_list:Vec::new(),

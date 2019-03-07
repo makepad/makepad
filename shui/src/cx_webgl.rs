@@ -46,7 +46,7 @@ impl Cx{
                     draw_call.shader_id,
                     draw_call.resources.vao_id,
                     &self.uniforms,
-                    self.frame_id as usize, // update once a frame
+                    self.redraw_id as usize, // update once a frame
                     &draw_list.uniforms,
                     draw_list_id, // update on drawlist change
                     &draw_call.uniforms,
@@ -233,7 +233,7 @@ impl Cx{
         if !self.dirty_area.is_empty(){
             self.dirty_area = Area::Empty;
             self.redraw_area = self.dirty_area.clone();
-            self.frame_id += 1;
+            self.redraw_id += 1;
             event_handler(self, &mut Event::Redraw);
             self.paint_dirty = true;
         }

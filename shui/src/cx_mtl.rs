@@ -129,7 +129,6 @@ impl Cx{
                 //pool = NSAutoreleasePool::new(cocoa::base::nil);
             }
         }
-        self.frame_id += 1;
     }
 
     fn resize_layer_to_turtle(&mut self, layer:&CoreAnimationLayer){
@@ -191,6 +190,7 @@ impl Cx{
                             event_handler(self, &mut event); 
                             self.dirty_area = Area::Empty;
                             self.redraw_area = Area::All;
+                            self.redraw_id += 1;
                             event_handler(self, &mut Event::Redraw);
                             self.repaint(&layer, &device, &command_queue);
                         },
@@ -214,6 +214,7 @@ impl Cx{
             if !self.dirty_area.is_empty(){
                 self.dirty_area = Area::Empty;
                 self.redraw_area = self.dirty_area.clone();
+                self.redraw_id += 1;               
                 event_handler(self, &mut Event::Redraw);
                 self.paint_dirty = true;
             }
@@ -245,6 +246,7 @@ impl Cx{
                                 event_handler(self, &mut event); 
                                 self.dirty_area = Area::Empty;
                                 self.redraw_area = Area::All;
+                                self.redraw_id += 1;       
                                 event_handler(self, &mut Event::Redraw);
                                 self.repaint(&layer, &device, &command_queue);
                             },

@@ -105,7 +105,7 @@ impl Text{
         sh
     }
 
-    pub fn draw_text(&mut self, cx:&mut Cx, _x:Value, _y:Value, text:&str)->Area{
+    pub fn draw_text(&mut self, cx:&mut Cx, text:&str)->Area{
         if !cx.fonts[self.font_id].loaded{
             return Area::Empty
         }
@@ -157,8 +157,8 @@ impl Text{
             if emit{
                 let height = self.font_size * self.line_spacing;
                 let mut geom = cx.walk_turtle(
-                    Value::Fixed(width), 
-                    Value::Fixed(height), 
+                    Bounds::Fix(width), 
+                    Bounds::Fix(height), 
                     Margin::zero(),
                     None
                 );

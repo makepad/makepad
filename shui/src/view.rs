@@ -1,28 +1,7 @@
 use crate::cx::*;
 
-#[derive(Clone)]
-pub enum ScrollBarsActive{
-    None,
-    Horizontal,
-    Vertical,
-    Both
-}
-
-#[derive(Clone)]
-pub enum ScrollBarOrientation{
-    Horizontal,
-    Vertical,
-}
-
-impl Default for ScrollBarsActive{
-    fn default()->Self{
-        ScrollBarsActive::None
-    }
-}
-
 pub trait ScrollBarLike<T>{
-    fn new(cx:&mut Cx, orientation:ScrollBarOrientation)->T;
-    fn draw_with_view_size(&mut self, cx:&mut Cx, view_area:Area, view_rect:Rect, total_size:Vec2);
+    fn draw_with_view_size(&mut self, cx:&mut Cx, orientation:Orientation, view_area:Area, view_rect:Rect, total_size:Vec2);
     fn handle(&mut self, cx:&mut Cx, event:&mut Event)->ScrollBarEvent;
 }
 
@@ -40,9 +19,8 @@ where T: ScrollBarLike<T> + Clone + ElementLife
 { // draw info per UI element
     pub draw_list_id:Option<usize>,
     pub clipped:bool,
-    pub scroll_active: ScrollBarsActive,
-    pub scroll_h:Element<T>,
-    pub scroll_v:Element<T>,
+    pub scroll_h:Option<Element<T>>,
+    pub scroll_v:Option<Element<T>>,
 }
 
 impl<T> Style for View<T>
@@ -52,9 +30,8 @@ where T: ScrollBarLike<T> + Clone + ElementLife
         Self{
             clipped:true,
             draw_list_id:None,
-            scroll_h:Element::<T>::new(T::new(cx, ScrollBarOrientation::Horizontal)),
-            scroll_v:Element::<T>::new(T::new(cx, ScrollBarOrientation::Vertical)),
-            scroll_active:ScrollBarsActive::None,
+            scroll_h:None,
+            scroll_v:None
         }
     }
 }
@@ -62,13 +39,6 @@ where T: ScrollBarLike<T> + Clone + ElementLife
 impl<T> View<T>
 where T: ScrollBarLike<T> + Clone + ElementLife
 {
-    pub fn new(cx: &mut Cx,scroll_active:ScrollBarsActive)->Self{
-        Self{
-            scroll_active:scroll_active,
-            ..Style::style(cx)
-        }
-    }
-
     pub fn begin(&mut self, cx:&mut Cx, layout:&Layout)->bool{
         // cx will have a path to a drawlist
         
@@ -126,11 +96,16 @@ where T: ScrollBarLike<T> + Clone + ElementLife
     pub fn handle_scroll(&mut self, cx:&mut Cx, event:&mut Event)->ScrollBarEvent{
         let mut ret_h = ScrollBarEvent::None;
         let mut ret_v = ScrollBarEvent::None;
-        for scroll_h in self.scroll_h.all(){
-            ret_h = scroll_h.handle(cx, event);
+
+        if let Some(scroll_h) = &mut self.scroll_h{
+            for scroll_h in scroll_h.all(){
+                ret_h = scroll_h.handle(cx, event);
+            }
         }
-        for scroll_v in self.scroll_v.all(){
-            ret_v = scroll_v.handle(cx, event);
+        if let Some(scroll_v) = &mut self.scroll_v{
+            for scroll_v in  scroll_v.all(){
+                ret_v = scroll_v.handle(cx, event);
+            }
         }
         match ret_h{
             ScrollBarEvent::None=>(),
@@ -162,9 +137,13 @@ where T: ScrollBarLike<T> + Clone + ElementLife
         let view_total = cx.turtle_bounds();   
         let rect_now =  cx.turtle_rect();
 
-        self.scroll_h.get(cx).draw_with_view_size(cx, view_area, rect_now, view_total);
-        self.scroll_v.get(cx).draw_with_view_size(cx, view_area, rect_now, view_total);
-
+        if let Some(scroll_h) = &mut self.scroll_h{
+            scroll_h.get(cx).draw_with_view_size(cx, Orientation::Horizontal, view_area, rect_now, view_total);
+        }
+        if let Some(scroll_v) = &mut self.scroll_v{
+            scroll_v.get(cx).draw_with_view_size(cx, Orientation::Vertical,view_area, rect_now, view_total);
+        }
+        
         let rect = cx.end_turtle();
         let draw_list = &mut cx.draw_lists[draw_list_id];
         draw_list.rect = rect;

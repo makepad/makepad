@@ -77,7 +77,7 @@ impl Quad{
         cx.end_instance()
     }
 
-    pub fn draw_sized(&mut self, cx:&mut Cx, w:Value, h:Value, margin:Margin)->Area{
+    pub fn draw_sized(&mut self, cx:&mut Cx, w:Bounds, h:Bounds, margin:Margin)->Area{
         let area = cx.new_aligned_instance(self.shader_id);
 
         let geom = cx.walk_turtle(w, h, margin, None);

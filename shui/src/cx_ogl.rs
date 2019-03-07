@@ -76,7 +76,6 @@ impl Cx{
         self.exec_draw_list(0);
 
         glutin_window.swap_buffers().unwrap();
-        self.frame_id += 1;
     }
 
     fn resize_window_to_turtle(&mut self, glutin_window:&glutin::GlWindow){
@@ -131,6 +130,7 @@ impl Cx{
                             event_handler(self, &mut event); 
                             self.dirty_area = Area::Empty;
                             self.redraw_area = Area::All;
+                            self.redraw_id += 1;
                             event_handler(self, &mut Event::Redraw);
                             self.repaint(&glutin_window);
                         },
@@ -154,6 +154,7 @@ impl Cx{
             if !self.dirty_area.is_empty(){
                 self.dirty_area = Area::Empty;
                 self.redraw_area = self.dirty_area.clone();
+                self.redraw_id += 1;
                 event_handler(self, &mut Event::Redraw);
                 self.paint_dirty = true;
             }
@@ -185,6 +186,7 @@ impl Cx{
                                 event_handler(self, &mut event); 
                                 self.dirty_area = Area::Empty;
                                 self.redraw_area = Area::All;
+                                self.redraw_id += 1;
                                 event_handler(self, &mut Event::Redraw);
                                 self.repaint(&glutin_window);
                             },

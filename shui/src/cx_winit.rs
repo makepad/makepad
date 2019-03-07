@@ -108,11 +108,11 @@ impl Cx{
                         rel_y:self.resources.winit.last_y,
                         handled:false,
                         scroll_x:match delta{
-                            winit::MouseScrollDelta::LineDelta(dx,_dy)=>dx*32.0,
+                            winit::MouseScrollDelta::LineDelta(dx,_dy)=>-dx*32.0,
                             winit::MouseScrollDelta::PixelDelta(pp)=>pp.x as f32
                         },
                         scroll_y:match delta{
-                            winit::MouseScrollDelta::LineDelta(_dx,dy)=>dy*32.0,
+                            winit::MouseScrollDelta::LineDelta(_dx,dy)=>-dy*32.0,
                             winit::MouseScrollDelta::PixelDelta(pp)=>pp.y as f32
                         },
                     })]

@@ -166,7 +166,7 @@ where T:Clone + ElementLife, ID:std::cmp::Ord + Clone
 #[derive(Clone, Default)]
 pub struct Element<T>{
     pub template:T,
-    pub frame_id:u64,
+    pub redraw_id:u64,
     pub element:Option<T>
 }
 
@@ -218,7 +218,7 @@ where T:Clone + ElementLife
     pub fn new(template:T)->Element<T>{
         Element::<T>{
             template:template,
-            frame_id:0,
+            redraw_id:0,
             element:None
         }
     }
@@ -228,10 +228,10 @@ where T:Clone + ElementLife
     }
  
     pub fn get(&mut self, cx:&mut Cx)->&mut T{
-        if self.frame_id == cx.frame_id{
+        if self.redraw_id == cx.redraw_id{
             cx.log("WARNING Item is called multiple times in a single drawpass!\n");
         }
-        self.frame_id = cx.frame_id;
+        self.redraw_id = cx.redraw_id;
         if self.element.is_none(){
             self.element = Some(self.template.clone());
             let element = self.element.as_mut().unwrap();

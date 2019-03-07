@@ -16,16 +16,27 @@ impl Cx{
     // begin a new turtle with a layout
     pub fn begin_turtle(&mut self, layout:&Layout){
 
-        let x = layout.x.eval_width(self);
-        let y = layout.y.eval_height(self);
-        let (start_x,start_y) = if let Some(parent) = self.turtles.last(){
-            // when we have a parent we use the walking position
-            (if x.is_nan(){parent.walk_x} else {x},
-            if y.is_nan(){parent.walk_y} else {y})
+        let start_x = if layout.x_abs.is_none(){
+            if let Some(parent) = self.turtles.last(){
+                parent.walk_x
+            }
+            else{
+                0.0
+            }
         }
-        else{ // we don't have a parent, set to 0
-            (if x.is_nan(){0.0} else {x},
-            if y.is_nan(){0.0} else {y})
+        else{
+            layout.x_abs.unwrap()
+        };
+        let start_y = if layout.y_abs.is_none(){
+            if let Some(parent) = self.turtles.last(){
+                parent.walk_y
+            }
+            else{
+                0.0
+            }
+        }
+        else{
+            layout.y_abs.unwrap()
         };
 
         let width = layout.w.eval_width(self);
@@ -50,7 +61,7 @@ impl Cx{
     }
 
     // walk the turtle with a 'w/h' and a margin
-    pub fn walk_turtle(&mut self, vw:Value, vh:Value, margin:Margin, old_turtle:Option<&Turtle>)->Rect{
+    pub fn walk_turtle(&mut self, vw:Bounds, vh:Bounds, margin:Margin, old_turtle:Option<&Turtle>)->Rect{
         let w = nan_clamp_neg(vw.eval_width(self));
         let h = nan_clamp_neg(vh.eval_height(self));
         let mut do_align = false;
@@ -203,26 +214,26 @@ impl Cx{
     
         let w = if old.width.is_nan(){
             if old.bound_x2 == std::f32::NEG_INFINITY{ // nothing happened, use padding
-                Value::Fixed(old.layout.padding.l + old.layout.padding.r)
+                Bounds::Fix(old.layout.padding.l + old.layout.padding.r)
             }
             else{ // use the bounding box
-                Value::Fixed(nan_clamp_neg(old.bound_x2 - old.start_x + old.layout.padding.r))
+                Bounds::Fix(nan_clamp_neg(old.bound_x2 - old.start_x + old.layout.padding.r))
             }
         }
         else{
-            Value::Fixed(old.width)
+            Bounds::Fix(old.width)
         };
 
         let h = if old.height.is_nan(){
             if old.bound_y2 == std::f32::NEG_INFINITY{ // nothing happened use the padding
-                Value::Fixed(old.layout.padding.t + old.layout.padding.b)
+                Bounds::Fix(old.layout.padding.t + old.layout.padding.b)
             }
             else{ // use the bounding box
-                Value::Fixed(nan_clamp_neg(old.bound_y2 - old.start_y + old.layout.padding.b))
+                Bounds::Fix(nan_clamp_neg(old.bound_y2 - old.start_y + old.layout.padding.b))
             }
         }
         else{
-            Value::Fixed(old.height)
+            Bounds::Fix(old.height)
         };
 
         let margin = old.layout.margin.clone();
@@ -274,32 +285,49 @@ pub fn debug_pt(x:f32, y:f32, color:i32, s:&str){
             store.truncate(0);
         })*/
 
+
 #[derive(Clone)]
-pub enum Value{
-    Computed,
-    Fixed(f32),
-    Expression(String),
-    Percent(f32)
+pub enum Bounds{
+    Compute,
+    Fix(f32),
+    Scale(f32),
+    ScalePad(f32, f32),
+    Fill
 }
 
-impl Default for Value{
+impl Default for Bounds{
     fn default()->Self{
-        Value::Computed
+        Bounds::Compute
     }
 }
 
-impl Value{
+impl Bounds{
     pub fn eval_width(&self, cx: &Cx)->f32{
         match self{
-            Value::Computed=>std::f32::NAN,
-            Value::Fixed(v)=>*v,
-            Value::Expression(_v)=>0.0,
-            Value::Percent(v)=>{
+            Bounds::Compute=>std::f32::NAN,
+            Bounds::Fix(v)=>*v,
+            Bounds::Scale(v)=>{
                 if let Some(turtle) = cx.turtles.last(){
-                    nan_clamp_neg(turtle.width - (turtle.layout.padding.l+turtle.layout.padding.r)) * (v * 0.01)
+                    nan_clamp_neg(turtle.width - (turtle.layout.padding.l+turtle.layout.padding.r)) * v
                 }
                 else{
-                    cx.target_size.x * (v * 0.01)
+                    cx.target_size.x * v
+                }
+            },
+            Bounds::ScalePad(v, p)=>{
+                if let Some(turtle) = cx.turtles.last(){
+                    nan_clamp_neg(turtle.width - (turtle.layout.padding.l+turtle.layout.padding.r)) * v - p
+                }
+                else{
+                    cx.target_size.x * v - p
+                }
+            },
+            Bounds::Fill=>{
+                if let Some(turtle) = cx.turtles.last(){
+                    nan_clamp_neg(turtle.width - (turtle.layout.padding.l+turtle.layout.padding.r)) 
+                }
+                else{
+                    cx.target_size.x 
                 }
             }
         }
@@ -307,27 +335,34 @@ impl Value{
 
     pub fn eval_height(&self, cx: &Cx)->f32{
         match self{
-            Value::Computed=>std::f32::NAN,
-            Value::Fixed(v)=>*v,
-            Value::Expression(_v)=>0.0,
-            Value::Percent(v)=>{
+            Bounds::Compute=>std::f32::NAN,
+            Bounds::Fix(v)=>*v,
+            Bounds::Scale(v)=>{
                 if let Some(turtle) = cx.turtles.last(){
-                    nan_clamp_neg(turtle.height - (turtle.layout.padding.t+turtle.layout.padding.b))* (v * 0.01)
+                    nan_clamp_neg(turtle.height - (turtle.layout.padding.t+turtle.layout.padding.b))* v  
                 }
                 else{
-                    cx.target_size.y * (v * 0.01)
+                    cx.target_size.y * v
+                }
+            },
+            Bounds::ScalePad(v, p)=>{
+                if let Some(turtle) = cx.turtles.last(){
+                    nan_clamp_neg(turtle.height - (turtle.layout.padding.t+turtle.layout.padding.b))* v  - p
+                }
+                else{
+                    cx.target_size.y * v - p
+                }
+            },
+            Bounds::Fill=>{
+                if let Some(turtle) = cx.turtles.last(){
+                    nan_clamp_neg(turtle.height - (turtle.layout.padding.t+turtle.layout.padding.b))
+                }
+                else{
+                    cx.target_size.y 
                 }
             }
         }
     }
-}
-
-pub fn percent(v:f32)->Value{
-    Value::Percent(v)
-}
-
-pub fn fixed(v:f32)->Value{
-    Value::Fixed(v)
 }
 
 #[derive(Clone, Default, Debug)]
@@ -360,8 +395,9 @@ impl Margin{
     pub fn zero()->Margin{
         Margin{l:0.0,t:0.0,r:0.0,b:0.0}
     }
-    pub fn i32(v:i32)->Margin{
-        Margin{l:v as f32,t:v as f32,r:v as f32,b:v as f32}
+
+    pub fn all(v:f32)->Margin{
+        Margin{l:v,t:v,r:v,b:v}
     }
 }
 
@@ -377,8 +413,8 @@ impl Padding{
     pub fn zero()->Padding{
         Padding{l:0.0,t:0.0,r:0.0,b:0.0}
     }
-    pub fn i32(v:i32)->Padding{
-        Padding{l:v as f32,t:v as f32,r:v as f32,b:v as f32}
+    pub fn all(v:f32)->Padding{
+        Padding{l:v,t:v,r:v,b:v}
     }
 }
 
@@ -397,6 +433,18 @@ impl Default for Direction{
     }
 }
 
+#[derive(Clone)]
+pub enum Orientation{
+    Horizontal,
+    Vertical
+}
+
+impl Default for Orientation{
+    fn default()->Self{
+        Orientation::Horizontal
+    }
+}
+
 #[derive(Clone, Default)]
 pub struct Layout{
     pub margin:Margin,
@@ -404,69 +452,15 @@ pub struct Layout{
     pub align:Align,
     pub direction:Direction,
     pub nowrap:bool,
-    pub x:Value,
-    pub y:Value,
-    pub w:Value,
-    pub h:Value,
+    pub x_abs:Option<f32>,
+    pub y_abs:Option<f32>,
+    pub w:Bounds,
+    pub h:Bounds,
 }
 
 impl Layout{
-    pub fn filled()->Layout{
-        Layout{
-            w:Value::Percent(100.0),
-            h:Value::Percent(100.0),
-            ..Default::default()
-        }
-    }
-
-    pub fn filled_padded(around:f32)->Layout{
-        Layout{
-            w:Value::Percent(100.0),
-            h:Value::Percent(100.0),
-            padding:Padding{
-                l:around,t:around,r:around,b:around
-            },
-            ..Default::default()
-        }
-    }
-
-    pub fn filled_paddedf(l:f32,t:f32,r:f32,b:f32)->Layout{
-        Layout{
-            w:Value::Percent(100.0),
-            h:Value::Percent(100.0),
-            padding:Padding{
-                l:l,t:t,r:r,b:b
-            },
-            ..Default::default()
-        }
-    }
-
     pub fn new()->Layout{
-        Layout{..Default::default()}
-    }
-
-    pub fn padded(around:f32)->Layout{
         Layout{
-            padding:Padding{
-                l:around,t:around,r:around,b:around
-            },
-            ..Default::default()
-        }
-    }
-
-    pub fn paddedf(l:f32,t:f32,r:f32,b:f32)->Layout{
-        Layout{
-            padding:Padding{
-                l:l,t:t,r:r,b:b
-            },
-            ..Default::default()
-        }
-    }
-
-    pub fn sized(w:f32, h:f32)->Layout{
-        Layout{
-            w:Value::Fixed(w),
-            h:Value::Fixed(h),
             ..Default::default()
         }
     }

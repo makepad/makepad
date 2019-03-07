@@ -5,15 +5,14 @@ pub struct Button{
     pub hit_state:HitState,
 
     pub bg_area:Area,
-    pub bg_layout:Layout,
+    pub layout:Layout,
     pub bg: Quad,
 
     pub text: Text,
 
     pub anim:Animation<ButtonState>,
     pub is_down:bool,
-    pub label:String,
-    pub event:ButtonEvent
+    pub label:String
 }
 
 #[derive(Clone, PartialEq)]
@@ -32,12 +31,13 @@ impl Style for Button{
             },
             is_down:false,
             bg_area:Area::Empty,
-            bg_layout:Layout{
+            layout:Layout{
                 align:Align::center(),
-                w:Computed,
-                h:Computed,
-                margin:Margin::i32(1),
-                ..Layout::paddedf(16.0,14.0,16.0,14.0)
+                w:Bounds::Compute,
+                h:Bounds::Compute,
+                margin:Margin::all(1.0),
+                padding:Padding{l:16.0,t:14.0,r:16.0,b:14.0},
+                ..Layout::new()
             },
             label:"OK".to_string(),
             anim:Animation::new(
@@ -93,8 +93,7 @@ impl Style for Button{
                 shader_id:cx.add_shader(bg_sh),
                 ..Style::style(cx)
             },
-            text:Text{..Style::style(cx)},
-            event:ButtonEvent::None
+            text:Text{..Style::style(cx)}
         }
     }
 }
@@ -132,12 +131,13 @@ impl Button{
     }
 
     pub fn handle(&mut self, cx:&mut Cx, event:&mut Event)->ButtonEvent{
-        self.event = ButtonEvent::None;
+        let mut ret_event = ButtonEvent::None;
         match event.hits(cx, self.bg_area, &mut self.hit_state){
             Event::Animate(ae)=>{
 
                 self.anim.calc_area(cx, "bg.color", ae.time, self.bg_area);
                 self.anim.calc_area(cx, "bg.border_color", ae.time, self.bg_area);
+                
                 self.anim.calc_area(cx, "bg.glow_size", ae.time, self.bg_area);
 
                 self.anim.calc_float(cx, "width", ae.time);
@@ -145,7 +145,7 @@ impl Button{
                 cx.dirty_area = Area::All;
             },
             Event::FingerDown(_fe)=>{
-                self.event = ButtonEvent::Down;
+                ret_event = ButtonEvent::Down;
                 self.is_down = true;
                 self.anim.change_state(cx, ButtonState::Down);
                 cx.set_down_mouse_cursor(MouseCursor::Crosshair);
@@ -177,7 +177,7 @@ impl Button{
                     else{
                         self.anim.change_state(cx, ButtonState::Default);
                     }
-                    self.event = ButtonEvent::Clicked;
+                    ret_event = ButtonEvent::Clicked;
                 }
                 else{
                     self.anim.change_state(cx, ButtonState::Default);
@@ -185,7 +185,7 @@ impl Button{
             },
             _=>()
         };
-        self.event.clone()
+        ret_event
    }
 
     pub fn draw_with_label(&mut self, cx:&mut Cx, label: &str){
@@ -193,14 +193,14 @@ impl Button{
         // pull the bg color from our animation system, uses 'default' value otherwise
         self.bg.color = self.anim.last_vec4("bg.color");
         self.bg_area = self.bg.begin(cx, &Layout{
-            w:Value::Fixed(self.anim.last_float("width")),
-            ..self.bg_layout.clone()
+            w:Bounds::Fix(self.anim.last_float("width")),
+            ..self.layout.clone()
         });
         // push the 2 vars we added to bg shader
         self.anim.last_push(cx, "bg.border_color", self.bg_area);
         self.anim.last_push(cx, "bg.glow_size", self.bg_area);
 
-        self.text.draw_text(cx, Computed, Computed, label);
+        self.text.draw_text(cx, label);
         
         self.bg.end(cx);
 

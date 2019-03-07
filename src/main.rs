@@ -3,19 +3,37 @@ mod button;
 use crate::button::*;
 mod scrollbar;
 use crate::scrollbar::*;
+mod splitter;
+use crate::splitter::*;
 
 struct App{
     view:View<ScrollBar>,
+    splitter:Element<Splitter>,
     ok:Elements<Button, usize>,
+    fill:Quad
 }
  
 impl Style for App{
     fn style(cx:&mut Cx)->Self{
         Self{
-            view:View::new(cx, ScrollBarsActive::Both),
+            view:View{
+                scroll_h:Some(Element::new(ScrollBar{
+                    ..Style::style(cx)
+                })),
+                scroll_v:Some(Element::new(ScrollBar{
+                    ..Style::style(cx)
+                })),
+                ..Style::style(cx)
+            },
+            splitter:Element::new(Splitter{
+                ..Style::style(cx)
+            }),
             ok:Elements::new(Button{
                 ..Style::style(cx)  
             }),
+            fill:Quad{
+                ..Style::style(cx)
+            }
         }
     }
 }
@@ -37,10 +55,24 @@ impl App{
     fn draw(&mut self, cx:&mut Cx){
         self.view.begin(cx, &Layout{
             nowrap:true,
-            ..Layout::filled_padded(10.0)
+            w:Bounds::Fill,
+            h:Bounds::Fill,
+            padding:Padding::all(10.0),
+            ..Layout::new()
         });
-
-        //self.ok.mark();
+/*
+        // grab a splitter
+        let split = self.splitter.get(cx);
+        split.begin(SplitterOrientation::Vertical);
+        self.fill.color = color("orange");
+        self.fill.draw_sized(cx, Bounds::Fill, Bounds::Fill, Margin::zero());
+        // do left.
+        split.split();
+        self.fill.color = color("purple");
+        self.fill.draw_sized(cx, Bounds::Fill, Bounds::Fill ,Margin::zero());
+        // do right
+        split.end();*/
+        
         for i in 0..200{
             self.ok.get(cx, i).draw_with_label(cx, &format!("OK {}",(i as u64 )%5000));
             if i%7 == 6{
