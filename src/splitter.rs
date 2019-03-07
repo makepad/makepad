@@ -5,7 +5,7 @@ pub struct Splitter{
     pub hit_state:HitState,
     pub bg_area:Area,
     pub bg: Quad,
-    pub orientation:SplitterOrientation,
+    pub orientation:Orientation,
     pub anim:Animation<SplitterState>,
     pub is_moving:bool
 }
@@ -17,11 +17,6 @@ pub enum SplitterState{
     Moving
 }
 
-#[derive(Clone, PartialEq)]
-pub enum SplitterOrientation{
-    Horizontal,
-    Vertical,}
-
 impl Style for Splitter{
     fn style(cx:&mut Cx)->Self{
         let bg_sh = Self::def_bg_shader(cx);
@@ -30,7 +25,7 @@ impl Style for Splitter{
                 ..Default::default()
             },
             is_moving:false,
-            orientation:SplitterOrientation::Horizontal,
+            orientation:Orientation::Horizontal,
             bg_area:Area::Empty,
             /*
             layout:Layout{
@@ -100,7 +95,7 @@ impl Splitter{
         sh
     }
 
-    pub fn handle(&mut self, cx:&mut Cx, event:&mut Event)->SplitterEvent{
+    pub fn handle_splitter(&mut self, cx:&mut Cx, event:&mut Event)->SplitterEvent{
         let mut ret_event = SplitterEvent::None;
         match event.hits(cx, self.bg_area, &mut self.hit_state){
             Event::Animate(ae)=>{
@@ -147,6 +142,18 @@ impl Splitter{
             _=>()
         };
         ret_event
+   }
+
+   pub fn begin_splitter(&mut self, cx:&mut Cx, orientation:Orientation){
+
+   }
+
+   pub fn mid_splitter(&mut self, cx:&mut Cx){
+
+   }
+
+   pub fn end_splitter(&mut self, cx:&mut Cx){
+       
    }
 /*
     pub fn draw_with_label(&mut self, cx:&mut Cx, label: &str){

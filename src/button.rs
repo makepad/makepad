@@ -130,7 +130,7 @@ impl Button{
         sh
     }
 
-    pub fn handle(&mut self, cx:&mut Cx, event:&mut Event)->ButtonEvent{
+    pub fn handle_button(&mut self, cx:&mut Cx, event:&mut Event)->ButtonEvent{
         let mut ret_event = ButtonEvent::None;
         match event.hits(cx, self.bg_area, &mut self.hit_state){
             Event::Animate(ae)=>{
@@ -188,7 +188,7 @@ impl Button{
         ret_event
    }
 
-    pub fn draw_with_label(&mut self, cx:&mut Cx, label: &str){
+    pub fn draw_button_with_label(&mut self, cx:&mut Cx, label: &str){
 
         // pull the bg color from our animation system, uses 'default' value otherwise
         self.bg.color = self.anim.last_vec4("bg.color");

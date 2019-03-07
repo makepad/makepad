@@ -198,7 +198,7 @@ impl ScrollBar{
 
 impl ScrollBarLike<ScrollBar> for ScrollBar{
 
-    fn handle(&mut self, cx:&mut Cx, event:&mut Event)->ScrollBarEvent{
+    fn handle_scroll_bar(&mut self, cx:&mut Cx, event:&mut Event)->ScrollBarEvent{
 
         let mut ret_event = ScrollBarEvent::None;
         // lets check if our view-area gets a mouse-scroll.
@@ -312,7 +312,7 @@ impl ScrollBarLike<ScrollBar> for ScrollBar{
         ret_event
     }
 
-    fn draw_with_view_size(&mut self, cx:&mut Cx, orientation:Orientation, view_area:Area, view_rect:Rect, view_total:Vec2){
+    fn draw_scroll_bar(&mut self, cx:&mut Cx, orientation:Orientation, view_area:Area, view_rect:Rect, view_total:Vec2){
         // pull the bg color from our animation system, uses 'default' value otherwise
         self.sb.color = self.anim.last_vec4("sb.color");
         self.view_area = view_area;

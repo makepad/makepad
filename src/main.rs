@@ -39,49 +39,50 @@ impl Style for App{
 }
 
 impl App{
-    fn handle(&mut self, cx:&mut Cx, event:&mut Event){
+    fn handle_app(&mut self, cx:&mut Cx, event:&mut Event){
         
         // what do we do here? we could theoretically remap an event here.
-        self.view.handle_scroll(cx, event);
+        self.view.handle_scroll_bars(cx, event);
 
-        for (id,ok) in self.ok.ids(){
-            if let ButtonEvent::Clicked = ok.handle(cx, event){
+       for (id,ok) in self.ok.ids(){
+            if let ButtonEvent::Clicked = ok.handle_button(cx, event){
                 // we got clicked!
                 log!(cx, "GOT CLICKED BY {}", id);
             }
         }
+
     }
 
-    fn draw(&mut self, cx:&mut Cx){
-        self.view.begin(cx, &Layout{
+    fn draw_app(&mut self, cx:&mut Cx){
+        self.view.begin_view(cx, &Layout{
             nowrap:true,
             w:Bounds::Fill,
             h:Bounds::Fill,
             padding:Padding::all(10.0),
             ..Layout::new()
         });
-/*
+        /*
         // grab a splitter
         let split = self.splitter.get(cx);
-        split.begin(SplitterOrientation::Vertical);
+        split.begin_split(SplitterOrientation::Vertical);
         self.fill.color = color("orange");
         self.fill.draw_sized(cx, Bounds::Fill, Bounds::Fill, Margin::zero());
         // do left.
-        split.split();
+        split.mid_split();
         self.fill.color = color("purple");
         self.fill.draw_sized(cx, Bounds::Fill, Bounds::Fill ,Margin::zero());
         // do right
-        split.end();*/
-        
+        split.end_split();
+        */
         for i in 0..200{
-            self.ok.get(cx, i).draw_with_label(cx, &format!("OK {}",(i as u64 )%5000));
+            self.ok.get(cx, i).draw_button_with_label(cx, &format!("OK {}",(i as u64 )%5000));
             if i%7 == 6{
                 cx.new_line();
             }
         }
 
         // draw scroll bars
-        self.view.end(cx);
+        self.view.end_view(cx);
     }
 }
 

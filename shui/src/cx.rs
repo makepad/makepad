@@ -501,8 +501,8 @@ macro_rules! main_app {
             };
 
             cx.event_loop(|cx, mut event|{
-                if let Event::Redraw = event{return app.draw(cx);}
-                app.handle(cx, &mut event);
+                if let Event::Redraw = event{return app.draw_app(cx);}
+                app.handle_app(cx, &mut event);
             });
         }
 
@@ -526,8 +526,8 @@ macro_rules! main_app {
         pub unsafe extern "C" fn process_to_wasm(appcx:u32, msg:u32)->u32{
             let appcx = &*(appcx as *mut (*mut $app,*mut Cx));
             (*appcx.1).process_to_wasm(msg,|cx, mut event|{
-                if let Event::Redraw = event{return (*appcx.0).draw(cx);}
-                (*appcx.0).handle(cx, &mut event);
+                if let Event::Redraw = event{return (*appcx.0).draw_app(cx);}
+                (*appcx.0).handle_app(cx, &mut event);
             })
         }
     };
