@@ -55,8 +55,7 @@ where TItem: Clone,
 {
     pub fn handle_walk(&'a mut self, cx: &mut Cx, event: &mut Event)->Option<&'a mut TItem>{
         // lets get the current item on the stack
-
-        if let Some(stack_top) = self.stack.last_mut(){
+        let push_or_pop = if let Some(stack_top) = self.stack.last_mut(){
             // return item 'count'
             match stack_top.item{
                 DockItem::Single(item)=>{
@@ -64,11 +63,17 @@ where TItem: Clone,
                         stack_top.counter += 1;
                         return Some(unsafe{mem::transmute(item)});
                     }
+                    else{
+                        None
+                    }
                 },
                 DockItem::Tabbed{current_tab, tabs}=>{
                     if stack_top.counter == 0{
                         stack_top.counter += 1;
                         return Some(unsafe{mem::transmute(&mut tabs[*current_tab])});
+                    }
+                    else{
+                        None
                     }
                 },
                 DockItem::Split{left, right, ..}=>{
@@ -79,18 +84,26 @@ where TItem: Clone,
                         let split = self.splitters.get(cx, stack_top.uid);
                         split.handle_splitter(cx, event);
                         // update state in our splitter level
-                        self.stack.push(DockStackLevel{counter:0, uid:0, item:left});
-                        return self.handle_walk(cx, event);
+                        Some(DockStackLevel{counter:0, uid:0, item:left})
                     }
                     else if stack_top.counter == 1{
-                        stack_top.counter +=1 ;
-                        self.stack.push(DockStackLevel{counter:0, uid:0, item:right});
-                        return self.handle_walk(cx, event);
+                        stack_top.counter +=1;
+                        Some(DockStackLevel{counter:0, uid:0, item:right})
+                    }
+                    else{
+                        None
                     }
                 }
-            };
+            }
         }
-        if self.stack.len() > 0{
+        else{
+            return None;
+        };
+        if let Some(item) = push_or_pop{
+            self.stack.push(item);
+            return self.handle_walk(cx, event);
+        }
+        else if self.stack.len() > 0{
             self.stack.pop();
             return self.handle_walk(cx, event);
         }
@@ -99,7 +112,7 @@ where TItem: Clone,
 
     pub fn draw_walk(&'a mut self, cx: &mut Cx)->Option<&'a mut TItem>{
         // lets get the current item on the stack
-        if let Some(stack_top) = self.stack.last_mut(){
+         let push_or_pop = if let Some(stack_top) = self.stack.last_mut(){
             // return item 'count'
             match stack_top.item{
                 DockItem::Single(item)=>{
@@ -108,9 +121,7 @@ where TItem: Clone,
                         return Some(item);
                     }
                     else{
-                        // pop the stack and recur
-                        self.stack.pop();
-                        return self.draw_walk(cx);
+                        None
                     }
                 },
                 DockItem::Tabbed{current_tab, tabs}=>{
@@ -119,8 +130,7 @@ where TItem: Clone,
                         return Some(&mut tabs[*current_tab]);
                     }
                     else{
-                        self.stack.pop();
-                        return self.draw_walk(cx);
+                        None
                     }
                 },
                 DockItem::Split{split_mode, split_pos, axis,  left, right}=>{
@@ -131,32 +141,36 @@ where TItem: Clone,
                         // begin a split
                         let split = self.splitters.get(cx, stack_top.uid);
                         
-                        split.begin_splitter(cx, *split_mode, *split_pos, *axis);
-
-                        self.stack.push(DockStackLevel{counter:0, uid:0, item:left});
-                        return self.draw_walk(cx);
+                        split.begin_splitter(cx, split_mode.clone(), *split_pos, axis.clone());
+                        Some(DockStackLevel{counter:0, uid:0, item:left})
                     }
                     else if stack_top.counter == 1{
                         stack_top.counter +=1 ;
 
                         let split = self.splitters.get(cx, stack_top.uid);
                         split.mid_splitter(cx);
-
-                        self.stack.push(DockStackLevel{counter:0, uid:0, item:right});
-                        return self.draw_walk(cx);
+                        Some(DockStackLevel{counter:0, uid:0, item:right})
                     }
                     else{
                         let split = self.splitters.get(cx, stack_top.uid);
                         split.end_splitter(cx);
-                        self.stack.pop();
-                        return self.draw_walk(cx);
+                        None
                     }
                 }
             }
         }
         else{
-            None
+            return None
+        };
+        if let Some(item) = push_or_pop{
+            self.stack.push(item);
+            return self.draw_walk(cx);
         }
+        else if self.stack.len() > 0{
+            self.stack.pop();
+            return self.draw_walk(cx);
+        }
+        None
     }
 }
 
