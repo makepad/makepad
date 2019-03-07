@@ -33,11 +33,11 @@ impl Style for Button{
             bg_area:Area::Empty,
             layout:Layout{
                 align:Align::center(),
-                w:Bounds::Compute,
-                h:Bounds::Compute,
+                width:Bounds::Compute,
+                height:Bounds::Compute,
                 margin:Margin::all(1.0),
                 padding:Padding{l:16.0,t:14.0,r:16.0,b:14.0},
-                ..Layout::new()
+                ..Default::default()
             },
             label:"OK".to_string(),
             anim:Animation::new(
@@ -107,7 +107,7 @@ pub enum ButtonEvent{
 
 impl Button{
     pub fn def_bg_shader(cx:&mut Cx)->Shader{
-        let mut sh = Quad::def_shader(cx);
+        let mut sh = Quad::def_quad_shader(cx);
         sh.add_ast(shader_ast!({
 
             let border_color:vec4<Instance>;
@@ -192,8 +192,8 @@ impl Button{
 
         // pull the bg color from our animation system, uses 'default' value otherwise
         self.bg.color = self.anim.last_vec4("bg.color");
-        self.bg_area = self.bg.begin(cx, &Layout{
-            w:Bounds::Fix(self.anim.last_float("width")),
+        self.bg_area = self.bg.begin_quad(cx, &Layout{
+            width: Bounds::Fix(self.anim.last_float("width")),
             ..self.layout.clone()
         });
         // push the 2 vars we added to bg shader
@@ -202,7 +202,7 @@ impl Button{
 
         self.text.draw_text(cx, label);
         
-        self.bg.end(cx);
+        self.bg.end_quad(cx);
 
         self.anim.set_area(cx, self.bg_area); // if our area changed, update animation
     }

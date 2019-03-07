@@ -21,7 +21,7 @@ pub struct Text{
 
 impl Style for Text{
     fn style(cx:&mut Cx)->Self{
-        let sh = Self::def_shader(cx);
+        let sh = Self::def_text_shader(cx);
         Self{
             shader_id:cx.add_shader(sh),
             font_id:cx.load_font(&cx.style.normal_font.clone()),
@@ -35,7 +35,7 @@ impl Style for Text{
 }
 
 impl Text{
-    pub fn def_shader(cx:&mut Cx)->Shader{
+    pub fn def_text_shader(cx:&mut Cx)->Shader{
         // lets add the draw shader lib
         let mut sh = cx.new_shader();
         sh.geometry_vertices = vec![

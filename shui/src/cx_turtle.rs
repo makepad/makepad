@@ -16,7 +16,7 @@ impl Cx{
     // begin a new turtle with a layout
     pub fn begin_turtle(&mut self, layout:&Layout){
 
-        let start_x = if layout.x_abs.is_none(){
+        let start_x = if layout.abs_x.is_none(){
             if let Some(parent) = self.turtles.last(){
                 parent.walk_x
             }
@@ -25,9 +25,9 @@ impl Cx{
             }
         }
         else{
-            layout.x_abs.unwrap()
+            layout.abs_x.unwrap()
         };
-        let start_y = if layout.y_abs.is_none(){
+        let start_y = if layout.abs_y.is_none(){
             if let Some(parent) = self.turtles.last(){
                 parent.walk_y
             }
@@ -36,11 +36,11 @@ impl Cx{
             }
         }
         else{
-            layout.y_abs.unwrap()
+            layout.abs_y.unwrap()
         };
 
-        let width = layout.w.eval_width(self);
-        let height = layout.h.eval_height(self);
+        let width = layout.width.eval_width(self);
+        let height = layout.height.eval_height(self);
 
         self.turtles.push(Turtle{
             align_start:self.align_list.len(),
@@ -70,7 +70,7 @@ impl Cx{
         let ret = if let Some(turtle) = self.turtles.last_mut(){
             let (x,y) = match turtle.layout.direction{
                 Direction::Right=>{
-                    if !turtle.layout.nowrap && (turtle.walk_x + margin.l + w) >
+                    if !turtle.layout.no_wrap && (turtle.walk_x + margin.l + w) >
                         (turtle.start_x + turtle.width - turtle.layout.padding.r){
                         // what is the move delta. 
                         let old_x = turtle.walk_x;
@@ -139,7 +139,7 @@ impl Cx{
         ret
     }
 
-    pub fn new_line(&mut self){
+    pub fn turtle_newline(&mut self){
         if let Some(turtle) = self.turtles.last_mut(){
             match turtle.layout.direction{
                 Direction::Right=>{
@@ -434,14 +434,14 @@ impl Default for Direction{
 }
 
 #[derive(Clone)]
-pub enum Orientation{
+pub enum Axis{
     Horizontal,
     Vertical
 }
 
-impl Default for Orientation{
+impl Default for Axis{
     fn default()->Self{
-        Orientation::Horizontal
+        Axis::Horizontal
     }
 }
 
@@ -451,19 +451,11 @@ pub struct Layout{
     pub padding:Padding,
     pub align:Align,
     pub direction:Direction,
-    pub nowrap:bool,
-    pub x_abs:Option<f32>,
-    pub y_abs:Option<f32>,
-    pub w:Bounds,
-    pub h:Bounds,
-}
-
-impl Layout{
-    pub fn new()->Layout{
-        Layout{
-            ..Default::default()
-        }
-    }
+    pub no_wrap:bool,
+    pub abs_x:Option<f32>,
+    pub abs_y:Option<f32>,
+    pub width:Bounds,
+    pub height:Bounds,
 }
 
 #[derive(Clone, Default)]

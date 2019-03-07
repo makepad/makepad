@@ -5,16 +5,33 @@ pub struct Splitter{
     pub hit_state:HitState,
     pub bg_area:Area,
     pub bg: Quad,
-    pub orientation:Orientation,
+    pub axis:Axis,
+    pub split_mode:SplitterMode,
+    pub split_pos:f32,
     pub anim:Animation<SplitterState>,
     pub is_moving:bool
 }
+
+#[derive(Clone, PartialEq)]
+pub enum SplitterMode{
+    AlignBegin,
+    AlignEnd,
+    Factor
+}
+
 
 #[derive(Clone, PartialEq)]
 pub enum SplitterState{
     Default,
     Over,
     Moving
+}
+
+pub trait SplitterLike{
+    fn handle_splitter(&mut self, cx:&mut Cx, event:&mut Event)->SplitterEvent;
+    fn begin_splitter(&mut self, cx:&mut Cx, split_mode:SplitterMode, split_pos:f32, axis:Axis);
+    fn mid_splitter(&mut self, cx:&mut Cx);
+    fn end_splitter(&mut self, cx:&mut Cx);
 }
 
 impl Style for Splitter{
@@ -24,17 +41,11 @@ impl Style for Splitter{
             hit_state:HitState{
                 ..Default::default()
             },
+            split_mode:SplitterMode::AlignBegin,
+            split_pos:50.0,
             is_moving:false,
-            orientation:Orientation::Horizontal,
+            axis:Axis::Horizontal,
             bg_area:Area::Empty,
-            /*
-            layout:Layout{
-                w:Bounds::Fill,
-                h:Bounds::Fill,
-                margin:Margin::all(1),
-                padding:Padding{l:16.0,t:14.0,r:16.0,b:14.0},
-                ..Layout::new()
-            },*/
             anim:Animation::new(
                 SplitterState::Default,
                 vec![
@@ -81,7 +92,7 @@ pub enum SplitterEvent{
 
 impl Splitter{
     pub fn def_bg_shader(cx:&mut Cx)->Shader{
-        let mut sh = Quad::def_shader(cx);
+        let mut sh = Quad::def_quad_shader(cx);
         sh.add_ast(shader_ast!({
 
             const border_radius:float = 1.5;
@@ -94,8 +105,10 @@ impl Splitter{
         }));
         sh
     }
+}
 
-    pub fn handle_splitter(&mut self, cx:&mut Cx, event:&mut Event)->SplitterEvent{
+impl SplitterLike for Splitter{
+    fn handle_splitter(&mut self, cx:&mut Cx, event:&mut Event)->SplitterEvent{
         let mut ret_event = SplitterEvent::None;
         match event.hits(cx, self.bg_area, &mut self.hit_state){
             Event::Animate(ae)=>{
@@ -144,16 +157,16 @@ impl Splitter{
         ret_event
    }
 
-   pub fn begin_splitter(&mut self, cx:&mut Cx, orientation:Orientation){
+   fn begin_splitter(&mut self, cx:&mut Cx, split_mode:SplitterMode, split_pos:f32, axis:Axis){
 
    }
 
-   pub fn mid_splitter(&mut self, cx:&mut Cx){
+   fn mid_splitter(&mut self, cx:&mut Cx){
 
    }
 
-   pub fn end_splitter(&mut self, cx:&mut Cx){
-       
+   fn end_splitter(&mut self, cx:&mut Cx){
+
    }
 /*
     pub fn draw_with_label(&mut self, cx:&mut Cx, label: &str){

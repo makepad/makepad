@@ -1,7 +1,7 @@
 use crate::cx::*;
 
 pub trait ScrollBarLike<ScrollBarT>{
-    fn draw_scroll_bar(&mut self, cx:&mut Cx, orientation:Orientation, view_area:Area, view_rect:Rect, total_size:Vec2);
+    fn draw_scroll_bar(&mut self, cx:&mut Cx, axis:Axis, view_area:Area, view_rect:Rect, total_size:Vec2);
     fn handle_scroll_bar(&mut self, cx:&mut Cx, event:&mut Event)->ScrollBarEvent;
 }
 
@@ -138,10 +138,10 @@ where TScrollBar: ScrollBarLike<TScrollBar> + Clone + ElementLife
         let rect_now =  cx.turtle_rect();
 
         if let Some(scroll_h) = &mut self.scroll_h{
-            scroll_h.get(cx).draw_scroll_bar(cx, Orientation::Horizontal, view_area, rect_now, view_total);
+            scroll_h.get(cx).draw_scroll_bar(cx, Axis::Horizontal, view_area, rect_now, view_total);
         }
         if let Some(scroll_v) = &mut self.scroll_v{
-            scroll_v.get(cx).draw_scroll_bar(cx, Orientation::Vertical,view_area, rect_now, view_total);
+            scroll_v.get(cx).draw_scroll_bar(cx, Axis::Vertical,view_area, rect_now, view_total);
         }
         
         let rect = cx.end_turtle();

@@ -9,7 +9,7 @@ pub struct Quad{
 
 impl Style for Quad{
     fn style(cx:&mut Cx)->Self{
-        let sh = Self::def_shader(cx);
+        let sh = Self::def_quad_shader(cx);
         Self{
             shader_id:cx.add_shader(sh),
             id:0,
@@ -19,7 +19,7 @@ impl Style for Quad{
 }
 
 impl Quad{
-    pub fn def_shader(cx:&mut Cx)->Shader{
+    pub fn def_quad_shader(cx:&mut Cx)->Shader{
         // lets add the draw shader lib
         let mut sh = cx.new_shader();
 
@@ -66,18 +66,18 @@ impl Quad{
         sh
     }
 
-    pub fn begin(&mut self, cx:&mut Cx, layout:&Layout)->Area{
-        let area = self.draw_abs(cx, true, 0.0,0.0,0.0,0.0);
+    pub fn begin_quad(&mut self, cx:&mut Cx, layout:&Layout)->Area{
+        let area = self.draw_quad_abs(cx, true, 0.0,0.0,0.0,0.0);
         cx.begin_instance(area, layout);
         area
     }
 
     // write the rect instance
-    pub fn end(&mut self, cx:&mut Cx)->Area{
+    pub fn end_quad(&mut self, cx:&mut Cx)->Area{
         cx.end_instance()
     }
 
-    pub fn draw_sized(&mut self, cx:&mut Cx, w:Bounds, h:Bounds, margin:Margin)->Area{
+    pub fn draw_quad(&mut self, cx:&mut Cx, w:Bounds, h:Bounds, margin:Margin)->Area{
         let area = cx.new_aligned_instance(self.shader_id);
 
         let geom = cx.walk_turtle(w, h, margin, None);
@@ -92,7 +92,7 @@ impl Quad{
         area
     }
 
-    pub fn draw_abs(&mut self, cx:&mut Cx, align:bool, x:f32, y:f32, w:f32, h:f32)->Area{
+    pub fn draw_quad_abs(&mut self, cx:&mut Cx, align:bool, x:f32, y:f32, w:f32, h:f32)->Area{
         let area = if align{
            cx.new_aligned_instance(self.shader_id)
         }

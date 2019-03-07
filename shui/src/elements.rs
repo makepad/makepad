@@ -5,7 +5,6 @@ use std::collections::BTreeMap;
 pub trait ElementLife{
     fn construct(&mut self, cx: &mut Cx);
     fn destruct(&mut self, cx: &mut Cx);
-    fn update(&mut self, cx: &mut Cx);
 }
 
 
@@ -152,7 +151,6 @@ where T:Clone + ElementLife, ID:std::cmp::Ord + Clone
         }
         else{
             let elem = self.element_map.get_mut(&index).unwrap();
-            elem.update(cx);
             elem
         }
     }
@@ -239,7 +237,6 @@ where T:Clone + ElementLife
             return element
         }
         let element = self.element.as_mut().unwrap();
-        element.update(cx);
         return element
     }
 }

@@ -9,7 +9,7 @@ pub struct ScrollBar{
 
     pub sb: Quad,
 
-    pub orientation:Orientation,
+    pub axis:Axis,
     pub anim:Animation<ScrollBarState>,
     pub event:ScrollBarEvent,
     // state
@@ -48,7 +48,7 @@ impl Style for ScrollBar{
             min_handle_size:140.0,
             drag_point:0.0,
 
-            orientation:Orientation::Horizontal,
+            axis:Axis::Horizontal,
             hit_state:HitState{
                 no_scrolling:true,
                 ..Default::default()
@@ -92,7 +92,7 @@ impl Style for ScrollBar{
 
 impl ScrollBar{
     pub fn def_shader(cx:&mut Cx)->Shader{
-        let mut sh = Quad::def_shader(cx);
+        let mut sh = Quad::def_quad_shader(cx);
         sh.add_ast(shader_ast!({
 
             let is_vertical:float<Instance>;
@@ -160,15 +160,15 @@ impl ScrollBar{
 
     // turns scroll_pos into an event on this.event
     fn make_scroll_event(&mut self)->ScrollBarEvent{
-        match self.orientation{
-            Orientation::Horizontal=>{
+        match self.axis{
+            Axis::Horizontal=>{
                 ScrollBarEvent::ScrollHorizontal{
                         scroll_pos:self.scroll_pos,
                         view_total:self.view_total,
                         view_visible:self.view_visible
                 }
             },
-            Orientation::Vertical=>{
+            Axis::Vertical=>{
                 ScrollBarEvent::ScrollVertical{
                         scroll_pos:self.scroll_pos,
                         view_total:self.view_total,
@@ -207,13 +207,13 @@ impl ScrollBarLike<ScrollBar> for ScrollBar{
                 let rect = self.view_area.get_rect(cx, false);
                 if rect.contains(fe.abs_x, fe.abs_y){ // handle mousewheel
                     // we should scroll in either x or y
-                    match self.orientation{
-                        Orientation::Horizontal=>{
+                    match self.axis{
+                        Axis::Horizontal=>{
                             let scroll_pos= self.get_scroll_pos();
                             self.set_scroll_pos(cx, scroll_pos + fe.scroll_x);
                             ret_event = self.make_scroll_event();
                         },
-                        Orientation::Vertical=>{
+                        Axis::Vertical=>{
                             let scroll_pos= self.get_scroll_pos();
                             self.set_scroll_pos(cx, scroll_pos + fe.scroll_y);
                             ret_event = self.make_scroll_event();
@@ -231,8 +231,8 @@ impl ScrollBarLike<ScrollBar> for ScrollBar{
                 Event::FingerDown(fe)=>{
                     self.anim.change_state(cx, ScrollBarState::Scrolling);
 
-                    match self.orientation{
-                        Orientation::Horizontal=>{
+                    match self.axis{
+                        Axis::Horizontal=>{
                             //drag_start
                             let (norm_scroll, norm_handle) = self.get_normalized_scroll_pos();
                             let bar_x = norm_scroll * self.scroll_size;
@@ -245,7 +245,7 @@ impl ScrollBarLike<ScrollBar> for ScrollBar{
                                 self.drag_point = fe.rel_x - bar_x; // store the drag delta
                             }
                         },
-                        Orientation::Vertical=>{
+                        Axis::Vertical=>{
                             // computed handle size normalized
                             let (norm_scroll, norm_handle) = self.get_normalized_scroll_pos();
                             let bar_y = norm_scroll * self.scroll_size;
@@ -289,11 +289,11 @@ impl ScrollBarLike<ScrollBar> for ScrollBar{
                 },
                 Event::FingerMove(fe)=>{
                      // helper called by event code to scroll from a finger 
-                    match self.orientation{
-                        Orientation::Horizontal=>{
+                    match self.axis{
+                        Axis::Horizontal=>{
                             ret_event = self.set_scroll_pos_from_finger(cx, fe.rel_x - self.drag_point);
                         },
-                        Orientation::Vertical=>{
+                        Axis::Vertical=>{
                             ret_event = self.set_scroll_pos_from_finger(cx, fe.rel_y - self.drag_point);
                         }
                     }
@@ -312,14 +312,14 @@ impl ScrollBarLike<ScrollBar> for ScrollBar{
         ret_event
     }
 
-    fn draw_scroll_bar(&mut self, cx:&mut Cx, orientation:Orientation, view_area:Area, view_rect:Rect, view_total:Vec2){
+    fn draw_scroll_bar(&mut self, cx:&mut Cx, axis:Axis, view_area:Area, view_rect:Rect, view_total:Vec2){
         // pull the bg color from our animation system, uses 'default' value otherwise
         self.sb.color = self.anim.last_vec4("sb.color");
         self.view_area = view_area;
-        self.orientation = orientation;
+        self.axis = axis;
 
-        match self.orientation{
-             Orientation::Horizontal=>{
+        match self.axis{
+             Axis::Horizontal=>{
                 self.visible = view_total.x > view_rect.w;
                 self.scroll_size = if view_total.y > view_rect.h{
                     view_rect.w - self.bar_size
@@ -331,7 +331,7 @@ impl ScrollBarLike<ScrollBar> for ScrollBar{
                 self.view_total = view_total.x;
                 self.view_visible = view_rect.w;
                 
-                self.sb_area = self.sb.draw_abs(
+                self.sb_area = self.sb.draw_quad_abs(
                     cx, true,   
                     view_rect.x, 
                     view_rect.y + view_rect.h - self.bar_size, 
@@ -340,7 +340,7 @@ impl ScrollBarLike<ScrollBar> for ScrollBar{
                 );
                 self.sb_area.push_float(cx, "is_vertical", 0.0);
              },
-             Orientation::Vertical=>{
+             Axis::Vertical=>{
                 // compute if we need a horizontal one
                 self.visible = view_total.y > view_rect.h;
                 self.scroll_size = if view_total.x > view_rect.w{
@@ -352,7 +352,7 @@ impl ScrollBarLike<ScrollBar> for ScrollBar{
                 self.view_total = view_total.y;
                 self.view_visible = view_rect.h;
                 
-                self.sb_area = self.sb.draw_abs(
+                self.sb_area = self.sb.draw_quad_abs(
                     cx, true,   
                     view_rect.x + view_rect.w - self.bar_size, 
                     view_rect.y, 

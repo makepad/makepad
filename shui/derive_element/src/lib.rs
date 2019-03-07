@@ -31,10 +31,6 @@ pub fn elements_derive_macro(input: proc_macro::TokenStream) -> proc_macro::Toke
                 fn destruct(&mut self, cx: &mut Cx){
                     self.#handle_ident(cx, &mut Event::Destruct);
                 }
-
-                fn update(&mut self, cx: &mut Cx){
-                    self.#handle_ident(cx, &mut Event::Update);
-                }
             }
         });
         return ts;
