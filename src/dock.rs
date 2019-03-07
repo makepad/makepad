@@ -53,7 +53,7 @@ impl<'a, TItem, TSplitter> DockWalker<'a, TItem, TSplitter>
 where TItem: Clone, 
       TSplitter: Clone + ElementLife + SplitterLike
 {
-    pub fn handle_walk(&'a mut self, cx: &mut Cx, event: &mut Event)->Option<&'a mut TItem>{
+    pub fn handle_walk(&mut self, cx: &mut Cx, event: &mut Event)->Option<&'a mut TItem>{
         // lets get the current item on the stack
         let push_or_pop = if let Some(stack_top) = self.stack.last_mut(){
             // return item 'count'
@@ -110,7 +110,7 @@ where TItem: Clone,
         return None;
     }
 
-    pub fn draw_walk(&'a mut self, cx: &mut Cx)->Option<&'a mut TItem>{
+    pub fn draw_walk(&mut self, cx: &mut Cx)->Option<&'a mut TItem>{
         // lets get the current item on the stack
          let push_or_pop = if let Some(stack_top) = self.stack.last_mut(){
             // return item 'count'
