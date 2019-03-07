@@ -47,7 +47,7 @@ impl Style for App{
                 item_root:DockItem::Split{
                     axis:Axis::Vertical,
                     split_mode:SplitterMode::AlignBegin,
-                    split_pos:50.0,
+                    split_pos:150.0,
                     left:Box::new(DockItem::Single(
                         MyItem::Color(color("red"))
                     )),

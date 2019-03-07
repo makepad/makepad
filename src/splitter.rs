@@ -167,13 +167,13 @@ impl SplitterLike for Splitter{
             Axis::Horizontal=>{
                 cx.begin_turtle(&Layout{
                     width:Bounds::Fill,
-                    height:Bounds::Fix(split_pos - self.split_size * 0.5),
+                    height:Bounds::Fix(self.split_pos - self.split_size * 0.5),
                     ..Default::default()
                 })
             },
             Axis::Vertical=>{
                 cx.begin_turtle(&Layout{
-                    width:Bounds::Fix(split_pos - self.split_size * 0.5),
+                    width:Bounds::Fix(self.split_pos - self.split_size * 0.5),
                     height:Bounds::Fill,
                     ..Default::default()
                 })
@@ -185,7 +185,7 @@ impl SplitterLike for Splitter{
         match self.axis{
             Axis::Horizontal=>{
                 cx.end_turtle();
-                cx.move_turtle(0.0,self.split_size);
+                cx.turtle_move(0.0,self.split_pos + self.split_size * 0.5);
                 cx.begin_turtle(&Layout{
                     width:Bounds::Fill,
                     height:Bounds::Fill,
@@ -194,7 +194,7 @@ impl SplitterLike for Splitter{
             },
             Axis::Vertical=>{
                 cx.end_turtle();
-                cx.move_turtle(self.split_size, 0.0);
+                cx.turtle_move(self.split_pos + self.split_size * 0.5, 0.0);
                 cx.begin_turtle(&Layout{
                     width:Bounds::Fill,
                     height:Bounds::Fill,
