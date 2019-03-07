@@ -6,6 +6,7 @@ pub struct Splitter{
     pub bg_area:Area,
     pub bg: Quad,
     pub axis:Axis,
+    pub split_size:f32,
     pub split_mode:SplitterMode,
     pub split_pos:f32,
     pub anim:Animation<SplitterState>,
@@ -43,6 +44,7 @@ impl Style for Splitter{
             },
             split_mode:SplitterMode::AlignBegin,
             split_pos:50.0,
+            split_size:8.0,
             is_moving:false,
             axis:Axis::Horizontal,
             bg_area:Area::Empty,
@@ -157,16 +159,53 @@ impl SplitterLike for Splitter{
         ret_event
    }
 
-   fn begin_splitter(&mut self, _cx:&mut Cx, _split_mode:SplitterMode, _split_pos:f32, _axis:Axis){
-
+   fn begin_splitter(&mut self, cx:&mut Cx, split_mode:SplitterMode, split_pos:f32, axis:Axis){
+       self.axis = axis;
+       self.split_mode = split_mode;
+       self.split_pos = split_pos;
+       match self.axis{
+            Axis::Horizontal=>{
+                cx.begin_turtle(&Layout{
+                    width:Bounds::Fill,
+                    height:Bounds::Fix(split_pos - self.split_size * 0.5),
+                    ..Default::default()
+                })
+            },
+            Axis::Vertical=>{
+                cx.begin_turtle(&Layout{
+                    width:Bounds::Fix(split_pos - self.split_size * 0.5),
+                    height:Bounds::Fill,
+                    ..Default::default()
+                })
+            }
+       }
    }
 
-   fn mid_splitter(&mut self, _cx:&mut Cx){
-
+   fn mid_splitter(&mut self, cx:&mut Cx){
+        match self.axis{
+            Axis::Horizontal=>{
+                cx.end_turtle();
+                cx.move_turtle(0.0,self.split_size);
+                cx.begin_turtle(&Layout{
+                    width:Bounds::Fill,
+                    height:Bounds::Fill,
+                    ..Default::default()
+                })
+            },
+            Axis::Vertical=>{
+                cx.end_turtle();
+                cx.move_turtle(self.split_size, 0.0);
+                cx.begin_turtle(&Layout{
+                    width:Bounds::Fill,
+                    height:Bounds::Fill,
+                    ..Default::default()
+                })
+            }
+       }
    }
 
-   fn end_splitter(&mut self, _cx:&mut Cx){
-
+   fn end_splitter(&mut self, cx:&mut Cx){
+       cx.end_turtle();
    }
 /*
     pub fn draw_with_label(&mut self, cx:&mut Cx, label: &str){

@@ -114,11 +114,9 @@ impl Cx{
 
                 },
                 3=>{ // init
-                    
-
                     self.target_size = vec2(to_wasm.mf32(),to_wasm.mf32());
                     self.target_dpi_factor = to_wasm.mf32();
-                    event_handler(self, &mut Event::AppInit); 
+                    event_handler(self, &mut Event::Construct); 
                     self.dirty_area = Area::All;
                 },
                 4=>{ // resize

@@ -18,7 +18,6 @@ enum MyItem{
 struct App{
     view:View<ScrollBar>,
     dock:Dock<MyItem, Splitter>,
-    splitter:Element<Splitter>,
     ok:Elements<Button, usize>,
     fill:Quad
 }
@@ -35,9 +34,6 @@ impl Style for App{
                 })),
                 ..Style::style(cx)
             },
-            splitter:Element::new(Splitter{
-                ..Style::style(cx)
-            }),
             ok:Elements::new(Button{
                 ..Style::style(cx)  
             }),
@@ -49,15 +45,23 @@ impl Style for App{
                     ..Style::style(cx)
                 }),
                 item_root:DockItem::Split{
-                    axis:Axis::Horizontal,
+                    axis:Axis::Vertical,
                     split_mode:SplitterMode::AlignBegin,
                     split_pos:50.0,
                     left:Box::new(DockItem::Single(
                         MyItem::Color(color("red"))
                     )),
-                    right:Box::new(DockItem::Single(
-                        MyItem::Color(color("green"))
-                    ))
+                    right:Box::new(DockItem::Split{
+                        axis:Axis::Horizontal,
+                        split_mode:SplitterMode::AlignBegin,
+                        split_pos:150.0,
+                        left:Box::new(DockItem::Single(
+                            MyItem::Color(color("purple"))
+                        )),
+                        right:Box::new(DockItem::Single(
+                            MyItem::Color(color("orange"))
+                        ))
+                    })
                 }
             }
         }
@@ -69,9 +73,14 @@ impl App{
         
         self.view.handle_scroll_bars(cx, event);
 
-        for split in self.splitter.all(){
-
+         // recursive item iteration        
+        let mut dock_walker = self.dock.walker();
+        while let Some(item) = dock_walker.handle_walk(cx, event){
+            match item{
+                MyItem::Color(_)=>{}
+            }
         }
+
         for (id,ok) in self.ok.ids(){
             if let ButtonEvent::Clicked = ok.handle_button(cx, event){
                 // we got clicked!

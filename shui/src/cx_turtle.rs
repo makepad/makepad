@@ -208,6 +208,13 @@ impl Cx{
         return vec2(0.0,0.0)        
     }
 
+    pub fn move_turtle(&mut self, x:f32, y:f32){
+        if let Some(turtle) = self.turtles.last_mut(){
+            turtle.walk_x += x;
+            turtle.walk_y += x;
+        }
+    }
+
     // end a turtle returning computed geometry
     pub fn end_turtle(&mut self)->Rect{
         let old = self.turtles.pop().unwrap();
@@ -324,7 +331,8 @@ impl Bounds{
             },
             Bounds::Fill=>{
                 if let Some(turtle) = cx.turtles.last(){
-                    nan_clamp_neg(turtle.width - (turtle.layout.padding.l+turtle.layout.padding.r)) 
+                    // use turtle.walk_x
+                    nan_clamp_neg(turtle.width - turtle.walk_x) 
                 }
                 else{
                     cx.target_size.x 
@@ -355,7 +363,7 @@ impl Bounds{
             },
             Bounds::Fill=>{
                 if let Some(turtle) = cx.turtles.last(){
-                    nan_clamp_neg(turtle.height - (turtle.layout.padding.t+turtle.layout.padding.b))
+                    nan_clamp_neg(turtle.height - turtle.walk_y)
                 }
                 else{
                     cx.target_size.y 
