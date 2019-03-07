@@ -53,7 +53,7 @@ impl<'a, TItem, TSplitter> DockWalker<'a, TItem, TSplitter>
 where TItem: Clone, 
       TSplitter: Clone + ElementLife + SplitterLike
 {
-    pub fn handle_walk(&mut self, cx: &mut Cx, event: &mut Event)->Option<&'a mut TItem>{
+    pub fn handle_walk(&mut self, cx: &mut Cx, event: &mut Event)->Option<&mut TItem>{
         // lets get the current item on the stack
         let push_or_pop = if let Some(stack_top) = self.stack.last_mut(){
             // return item 'count'
@@ -84,11 +84,11 @@ where TItem: Clone,
                         let split = self.splitters.get(cx, stack_top.uid);
                         split.handle_splitter(cx, event);
                         // update state in our splitter level
-                        Some(DockStackLevel{counter:0, uid:0, item:left})
+                        Some(DockStackLevel{counter:0, uid:0, item:unsafe{mem::transmute(left.as_mut())}})
                     }
                     else if stack_top.counter == 1{
                         stack_top.counter +=1;
-                        Some(DockStackLevel{counter:0, uid:0, item:right})
+                        Some(DockStackLevel{counter:0, uid:0, item:unsafe{mem::transmute(right.as_mut())}})
                     }
                     else{
                         None
@@ -118,7 +118,7 @@ where TItem: Clone,
                 DockItem::Single(item)=>{
                     if stack_top.counter == 0{
                         stack_top.counter += 1;
-                        return Some(item);
+                        return Some(unsafe{mem::transmute(item)});
                     }
                     else{
                         None
@@ -127,7 +127,7 @@ where TItem: Clone,
                 DockItem::Tabbed{current_tab, tabs}=>{
                     if stack_top.counter == 0{
                         stack_top.counter += 1;
-                        return Some(&mut tabs[*current_tab]);
+                        return Some(unsafe{mem::transmute(&mut tabs[*current_tab])});
                     }
                     else{
                         None
@@ -142,14 +142,14 @@ where TItem: Clone,
                         let split = self.splitters.get(cx, stack_top.uid);
                         
                         split.begin_splitter(cx, split_mode.clone(), *split_pos, axis.clone());
-                        Some(DockStackLevel{counter:0, uid:0, item:left})
+                        Some(DockStackLevel{counter:0, uid:0, item:unsafe{mem::transmute(left.as_mut())}})
                     }
                     else if stack_top.counter == 1{
                         stack_top.counter +=1 ;
 
                         let split = self.splitters.get(cx, stack_top.uid);
                         split.mid_splitter(cx);
-                        Some(DockStackLevel{counter:0, uid:0, item:right})
+                        Some(DockStackLevel{counter:0, uid:0, item:unsafe{mem::transmute(right.as_mut())}})
                     }
                     else{
                         let split = self.splitters.get(cx, stack_top.uid);
