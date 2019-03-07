@@ -157,15 +157,15 @@ impl SplitterLike for Splitter{
         ret_event
    }
 
-   fn begin_splitter(&mut self, cx:&mut Cx, split_mode:SplitterMode, split_pos:f32, axis:Axis){
+   fn begin_splitter(&mut self, _cx:&mut Cx, _split_mode:SplitterMode, _split_pos:f32, _axis:Axis){
 
    }
 
-   fn mid_splitter(&mut self, cx:&mut Cx){
+   fn mid_splitter(&mut self, _cx:&mut Cx){
 
    }
 
-   fn end_splitter(&mut self, cx:&mut Cx){
+   fn end_splitter(&mut self, _cx:&mut Cx){
 
    }
 /*

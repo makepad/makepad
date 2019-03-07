@@ -32,7 +32,8 @@ impl Cx{
                 unsafe{
                     draw_call.resources.check_attached_vao(csh);
 
-                    if draw_call.update_frame_id == self.frame_id{
+                    if draw_call.instance_dirty{
+                        draw_call.instance_dirty = false;
                         // update the instance buffer data
                         gl::BindBuffer(gl::ARRAY_BUFFER, draw_call.resources.vb);
                         gl::BufferData(gl::ARRAY_BUFFER,

@@ -91,7 +91,7 @@ impl App{
         });
 
         // recursive item iteration        
-        let dock_walker = self.dock.walker();
+        let mut dock_walker = self.dock.walker();
         while let Some(item) = dock_walker.draw_walk(cx){
             match item{
                 MyItem::Color(color)=>{
