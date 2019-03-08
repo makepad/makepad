@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 pub use crate::shadergen::*;
 pub use crate::cx_fonts::*;
 pub use crate::cx_turtle::*;
@@ -44,6 +46,7 @@ pub struct Cx{
 
     pub compiled_shaders: Vec<CompiledShader>,
     pub shaders: Vec<Shader>,
+    pub shader_map: HashMap<Shader, usize>,
 
     pub dirty_area:Area,
     pub redraw_area:Area,
@@ -97,6 +100,7 @@ impl Default for Cx{
 
             compiled_shaders:Vec::new(),
             shaders:Vec::new(),
+            shader_map:HashMap::new(),
 
             dirty_area:Area::All,
             redraw_area:Area::Empty,
@@ -144,10 +148,12 @@ impl Cx{
     }
 
     pub fn add_shader(&mut self, sh:Shader)->usize{
-        let id = self.shaders.len();
-        // lets compile this sh
-        self.shaders.push(sh);
-        id
+        let next_id = self.shaders.len();
+        let store_id = self.shader_map.entry(sh.clone()).or_insert(next_id);
+        if *store_id == next_id{
+            self.shaders.push(sh);
+        }
+        *store_id
     }
 
     pub fn def_uniforms(sh: &mut Shader){

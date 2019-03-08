@@ -70,7 +70,6 @@ impl Style for App{
 
 impl App{
     fn handle_app(&mut self, cx:&mut Cx, event:&mut Event){
-        
         self.view.handle_scroll_bars(cx, event);
 
          // recursive item iteration        
@@ -87,7 +86,6 @@ impl App{
                 log!(cx, "GOT CLICKED BY {}", id);
             }
         }
-
     }
 
     fn draw_app(&mut self, cx:&mut Cx){

@@ -4,9 +4,10 @@
 pub use shader_ast::*;
 pub use crate::math::*;
 pub use crate::colors::*;
+use std::hash::{Hash, Hasher};
 
 // The AST block
-#[derive(Clone)]
+#[derive(Clone, Hash, PartialEq)]
 pub struct ShAst{
     pub types:Vec<ShType>,
     pub vars:Vec<ShVar>,
@@ -14,7 +15,7 @@ pub struct ShAst{
     pub fns:Vec<ShFn>
 }
 
-#[derive(Clone)]
+#[derive(Clone, Hash, PartialEq)]
 pub struct ShFnArg{
     pub name:String,
     pub ty:String
@@ -29,7 +30,7 @@ impl ShFnArg{
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Hash, PartialEq)]
 pub struct ShFn{
     pub name:String,
     pub args:Vec<ShFnArg>,
@@ -37,7 +38,7 @@ pub struct ShFn{
     pub block:Option<ShBlock>,
 }
 
-#[derive(Clone, PartialEq)]
+#[derive(Clone, Hash, PartialEq)]
 pub enum ShVarStore{
     Uniform,
     UniformDl,
@@ -49,21 +50,21 @@ pub enum ShVarStore{
     Varying,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Hash, PartialEq)]
 pub struct ShVar{
     pub name:String,
     pub ty:String,
     pub store:ShVarStore
 }
 
-#[derive(Clone)]
+#[derive(Clone, Hash, PartialEq)]
 pub struct ShConst{
     pub name:String,
     pub ty:String,
     pub value:ShExpr
 }
 
-#[derive(Clone)]
+#[derive(Clone, Hash, PartialEq)]
 pub struct ShTypeField{
     pub name:String,
     pub ty:String,
@@ -78,7 +79,7 @@ impl ShTypeField{
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Hash, PartialEq)]
 pub struct ShType{
     pub name:String,
     pub slots:usize,
@@ -88,7 +89,7 @@ pub struct ShType{
 
 // AST tree nodes
 
-#[derive(Clone)]
+#[derive(Clone, Hash, PartialEq)]
 pub enum ShExpr{
     ShId(ShId),
     ShLit(ShLit),
@@ -109,7 +110,7 @@ pub enum ShExpr{
     ShContinue(ShContinue)
 }
 
-#[derive(Clone)]
+#[derive(Clone, Hash, PartialEq)]
 pub enum ShBinOp{
     Add,Sub,Mul,Div,
     Rem,
@@ -156,7 +157,7 @@ impl ShBinOp{
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Hash, PartialEq)]
 pub struct ShId{
     pub name:String
 }
@@ -169,39 +170,73 @@ pub enum ShLit{
     Bool(bool)
 }
 
-#[derive(Clone)]
+impl Hash for ShLit{
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        match self{
+            ShLit::Int(iv)=>iv.hash(state),
+            ShLit::Float(fv)=>fv.to_bits().hash(state),
+            ShLit::Str(sv)=>sv.hash(state),
+            ShLit::Bool(bv)=>bv.hash(state)
+        }
+    }
+}
+
+impl PartialEq for ShLit{
+    fn eq(&self, other:&ShLit)->bool {
+        match self{
+            ShLit::Int(iv)=>match other{
+                ShLit::Int(ov)=>iv == ov,
+                _=>false
+            },
+            ShLit::Float(iv)=>match other{
+                ShLit::Float(ov)=>iv.to_bits() == ov.to_bits(),
+                _=>false
+            },
+            ShLit::Str(iv)=>match other{
+                ShLit::Str(ov)=>iv == ov,
+                _=>false
+            },
+            ShLit::Bool(iv)=>match other{
+                ShLit::Bool(ov)=>iv == ov,
+                _=>false
+            },
+        }
+    }
+}
+
+#[derive(Clone, Hash, PartialEq)]
 pub struct ShField{
     pub base:Box<ShExpr>,
     pub member:String
 }
 
-#[derive(Clone)]
+#[derive(Clone, Hash, PartialEq)]
 pub struct ShIndex{
     pub base:Box<ShExpr>,
     pub index:Box<ShExpr>
 }
 
-#[derive(Clone)]
+#[derive(Clone, Hash, PartialEq)]
 pub struct ShAssign{
     pub left:Box<ShExpr>,
     pub right:Box<ShExpr>
 }
 
-#[derive(Clone)]
+#[derive(Clone, Hash, PartialEq)]
 pub struct ShAssignOp{
     pub left:Box<ShExpr>,
     pub right:Box<ShExpr>,
     pub op:ShBinOp
 }
 
-#[derive(Clone)]
+#[derive(Clone, Hash, PartialEq)]
 pub struct ShBinary{
     pub left:Box<ShExpr>,
     pub right:Box<ShExpr>,
     pub op:ShBinOp
 }
 
-#[derive(Clone)]
+#[derive(Clone, Hash, PartialEq)]
 pub enum ShUnaryOp{
     Not, Neg
 }
@@ -215,49 +250,49 @@ impl ShUnaryOp{
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Hash, PartialEq)]
 pub struct ShUnary{
     pub expr:Box<ShExpr>,
     pub op:ShUnaryOp
 }
 
-#[derive(Clone)]
+#[derive(Clone, Hash, PartialEq)]
 pub struct ShParen{
     pub expr:Box<ShExpr>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Hash, PartialEq)]
 pub enum ShStmt{
     ShLet(ShLet),
     ShExpr(ShExpr),
     ShSemi(ShExpr)
 }
 
-#[derive(Clone)]
+#[derive(Clone, Hash, PartialEq)]
 pub struct ShBlock{
     pub stmts:Vec<Box<ShStmt>>
 }
 
-#[derive(Clone)]
+#[derive(Clone, Hash, PartialEq)]
 pub struct ShCall{
     pub call:String,
     pub args:Vec<Box<ShExpr>>
 }
 
-#[derive(Clone)]
+#[derive(Clone, Hash, PartialEq)]
 pub struct ShIf{
     pub cond:Box<ShExpr>,
     pub then_branch:ShBlock,
     pub else_branch:Option<Box<ShExpr>>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Hash, PartialEq)]
 pub struct ShWhile{
     pub cond:Box<ShExpr>,
     pub body:ShBlock,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Hash, PartialEq)]
 pub struct ShForLoop{
     pub iter:String,
     pub from:Box<ShExpr>,
@@ -265,34 +300,45 @@ pub struct ShForLoop{
     pub body:ShBlock
 }
 
-#[derive(Clone)]
+#[derive(Clone, Hash, PartialEq)]
 pub struct ShReturn{
     pub expr:Option<Box<ShExpr>>
 }
 
-#[derive(Clone)]
+#[derive(Clone, Hash, PartialEq)]
 pub struct ShBreak{
 }
 
-#[derive(Clone)]
+#[derive(Clone, Hash, PartialEq)]
 pub struct ShContinue{
 }
 
-#[derive(Clone)]
+#[derive(Clone, Hash, PartialEq)]
 pub struct ShLet{
     pub name:String,
     pub ty:String,
     pub init:Box<ShExpr>
 }
 
-
-
-#[derive(Default,Clone)]
+#[derive(Default,Clone, PartialEq)]
 pub struct Shader{
     pub log:i32,
     pub geometry_vertices:Vec<f32>,
     pub geometry_indices:Vec<u32>,
     pub asts:Vec<ShAst>
+}
+
+impl Eq for Shader{}
+
+impl Hash for Shader{
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.log.hash(state);
+        self.geometry_indices.hash(state);
+        for vertex in &self.geometry_vertices{
+            vertex.to_bits().hash(state);
+        }
+        self.asts.hash(state);
+    }
 }
 
 impl Shader{
