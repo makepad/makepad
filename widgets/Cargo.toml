@@ -4,10 +4,14 @@ version = "0.1.0"
 authors = ["makepaddev"]
 edition = "2018"
 
+[features]
+mtl = ["render/mtl"]
+ogl = ["render/ogl"]
+webgl = ["render/webgl"]
+
 [dependencies]
 rand = "*"
 
 [dependencies.render]
 path="./render"
 default-features = false
-features=["ogl"]

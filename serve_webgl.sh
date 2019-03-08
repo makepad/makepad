@@ -1,1 +1,1 @@
-node ./shui/web/devserver.js
+node ./widgets/render/web/devserver.js

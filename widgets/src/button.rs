@@ -17,7 +17,7 @@ pub struct Button{
 
 #[derive(Clone, PartialEq)]
 pub enum ButtonState{
-    Default,
+    Default, 
     Over,
     Down
 }

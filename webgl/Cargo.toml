@@ -11,7 +11,7 @@ crate-type = ["cdylib"]
 [dependencies]
 rand = "*"
 
-[dependencies.shui]
-path="../shui"
+[dependencies.widgets]
+path="../widgets"
 default-features = false
 features=["webgl"]

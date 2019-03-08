@@ -55,7 +55,7 @@ impl Style for App{
                             MyItem::Color(color("purple"))
                         )),
                         last:Box::new(DockItem::Single(
-                            MyItem::Color(color("orange"))
+                            MyItem::Color(color("blue"))
                         ))
                     })
                 }
@@ -94,7 +94,7 @@ impl App{
             ..Default::default()
         });
 
-/*
+
         // recursive item iteration        
         let mut dock_walker = self.dock.walker();
         while let Some(item) = dock_walker.walk_draw_dock(cx){
@@ -105,14 +105,14 @@ impl App{
                 }
             }
         }
-        */
+        /*
 
         self.quad.color = color("pink");
         self.quad.draw_quad(cx, 250.,250.,100.,100.);
 
         self.triangle.color = color("orange");
         self.triangle.draw_triangle(cx, 70.,70.,70.,150.,150.,150.);
-      
+      */
 
         // draw scroll bars
         self.view.end_view(cx);
