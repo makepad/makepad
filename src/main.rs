@@ -53,7 +53,7 @@ impl Style for App{
                     )),
                     last:Box::new(DockItem::Split{
                         axis:Axis::Horizontal,
-                        align:SplitterAlign::First,
+                        align:SplitterAlign::Last,
                         pos:150.0,
                         first:Box::new(DockItem::Single(
                             MyItem::Color(color("purple"))

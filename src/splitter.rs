@@ -9,6 +9,7 @@ pub struct Splitter{
     pub draw_size:f32,
     pub align:SplitterAlign,
     pub pos:f32,
+    pub calc_pos:f32,
     pub anim:Animation<SplitterState>,
     pub is_moving:bool,
     pub drag_point:f32,
@@ -49,6 +50,7 @@ impl Style for Splitter{
             },
             align:SplitterAlign::First,
             pos:50.0,
+            calc_pos:0.0,
             min_pos_offset:25.0,
             drag_max_pos:0.0,
             draw_size:8.0,
@@ -163,25 +165,25 @@ impl SplitterLike for Splitter{
                     else{
                         self.anim.change_state(cx, SplitterState::Default);
                     }
-                    //ret_event = SplitterEvent::Moved;
                 }
                 else{
                     self.anim.change_state(cx, SplitterState::Default);
                 }
             },
             Event::FingerMove(fe)=>{
-                // alright we have our position relative to the slider in rel_x/rel_y
-                // however. how do we do this
-                // we kinda need a dx/dy
-                let mut pos = match self.axis{
+
+                let delta = match self.axis{
                     Axis::Horizontal=>{
-                        let dy = fe.start_y - fe.abs_y;
-                        self.drag_pos_start - dy
+                        fe.start_y - fe.abs_y
                     },
                     Axis::Vertical=>{
-                        let dx = fe.start_x - fe.abs_x;
-                        self.drag_pos_start - dx
+                        fe.start_x - fe.abs_x
                     }
+                };
+                let mut pos = match self.align{
+                    SplitterAlign::First=>self.drag_pos_start - delta,
+                    SplitterAlign::Last=>self.drag_pos_start + delta,
+                    SplitterAlign::Weighted=>self.drag_pos_start * self.drag_max_pos - delta
                 };
                 if pos > self.drag_max_pos - self.min_pos_offset{
                     pos = self.drag_max_pos - self.min_pos_offset
@@ -189,8 +191,22 @@ impl SplitterLike for Splitter{
                 else if pos < self.min_pos_offset{
                     pos = self.min_pos_offset
                 };
-                if pos != self.pos{
-                    self.pos = pos;
+                let calc_pos = match self.align{
+                    SplitterAlign::First=>{
+                        self.pos = pos;
+                        pos
+                    },
+                    SplitterAlign::Last=>{
+                        self.pos = pos;
+                        self.drag_max_pos - pos
+                    },
+                    SplitterAlign::Weighted=>{
+                        self.pos = pos / self.drag_max_pos;
+                        pos
+                    }
+                };
+                if calc_pos != self.calc_pos{
+                    self.calc_pos = calc_pos;
                     ret_event = SplitterEvent::Moving{new_pos:self.pos};
                     cx.dirty_area = self.split_area;
                 }
@@ -207,17 +223,29 @@ impl SplitterLike for Splitter{
    }
 
    fn begin_splitter(&mut self, cx:&mut Cx){
+       let rect = cx.turtle_rect();
+       self.calc_pos = match self.align{
+           SplitterAlign::First=>self.pos,
+           SplitterAlign::Last=>match self.axis{
+               Axis::Horizontal=>rect.h - self.pos,
+               Axis::Vertical=>rect.w - self.pos
+           },
+           SplitterAlign::Weighted=>self.pos * match self.axis{
+               Axis::Horizontal=>rect.h,
+               Axis::Vertical=>rect.w 
+           }
+       };
        match self.axis{
             Axis::Horizontal=>{
                 cx.begin_turtle(&Layout{
                     width:Bounds::Fill,
-                    height:Bounds::Fix(self.pos),
+                    height:Bounds::Fix(self.calc_pos),
                     ..Default::default()
                 })
             },
             Axis::Vertical=>{
                 cx.begin_turtle(&Layout{
-                    width:Bounds::Fix(self.pos),
+                    width:Bounds::Fix(self.calc_pos),
                     height:Bounds::Fill,
                     ..Default::default()
                 })
@@ -229,10 +257,10 @@ impl SplitterLike for Splitter{
         cx.end_turtle();
         match self.axis{
             Axis::Horizontal=>{
-                cx.move_turtle(0.0,self.pos + self.draw_size);
+                cx.move_turtle(0.0,self.calc_pos + self.draw_size);
             },
             Axis::Vertical=>{
-                cx.move_turtle(self.pos + self.draw_size, 0.0);
+                cx.move_turtle(self.calc_pos + self.draw_size, 0.0);
             }
        };
        cx.begin_turtle(&Layout{
@@ -249,34 +277,14 @@ impl SplitterLike for Splitter{
         self.split.color = self.anim.last_vec4("split.color");
         match self.axis{
             Axis::Horizontal=>{
-                self.split_area = self.split.draw_quad_abs(cx, true, rect.x, rect.y + self.pos, rect.w, self.draw_size);
+                self.split_area = self.split.draw_quad_abs(cx, true, rect.x, rect.y + self.calc_pos, rect.w, self.draw_size);
                 self.drag_max_pos = rect.h;
             },
             Axis::Vertical=>{
-                self.split_area = self.split.draw_quad_abs(cx, true, rect.x+ self.pos, rect.y, self.draw_size, rect.h);
+                self.split_area = self.split.draw_quad_abs(cx, true, rect.x+ self.calc_pos, rect.y, self.draw_size, rect.h);
                 self.drag_max_pos = rect.w;
             }
        };
        self.anim.set_area(cx, self.split_area);
     }
-/*
-    pub fn draw_with_label(&mut self, cx:&mut Cx, label: &str){
-        
-        // pull the bg color from our animation system, uses 'default' value otherwise
-        self.bg.color = self.anim.last_vec4("bg.color");
-        self.bg_area = self.bg.begin(cx, &Layout{
-            w:Value::Fixed(self.anim.last_float("width")),
-            ..self.bg_layout.clone()
-        });
-        // push the 2 vars we added to bg shader
-        self.anim.last_push(cx, "bg.border_color", self.bg_area);
-        self.anim.last_push(cx, "bg.glow_size", self.bg_area);
-
-        self.text.draw_text(cx, Computed, Computed, label);
-        
-        self.bg.end(cx);
-
-        self.anim.set_area(cx, self.bg_area); // if our area changed, update animation
-    }
-    */
 }
