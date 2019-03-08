@@ -3,15 +3,18 @@ use shui::*;
 #[derive(Clone, Element)]
 pub struct Splitter{
     pub hit_state:HitState,
-    pub bg_area:Area,
-    pub bg: Quad,
+    pub split_area:Area,
+    pub split: Quad,
     pub axis:Axis,
     pub draw_size:f32,
     pub align:SplitterAlign,
-    pub finger_size:Option<f32>,
     pub pos:f32,
     pub anim:Animation<SplitterState>,
-    pub is_moving:bool
+    pub is_moving:bool,
+    pub drag_point:f32,
+    pub drag_pos_start:f32,
+    pub drag_max_pos:f32,
+    pub min_pos_offset:f32
 }
 
 #[derive(Clone, PartialEq)]
@@ -31,25 +34,29 @@ pub enum SplitterState{
 
 pub trait SplitterLike{
     fn handle_splitter(&mut self, cx:&mut Cx, event:&mut Event)->SplitterEvent;
-    fn begin_splitter(&mut self, cx:&mut Cx, align:SplitterAlign, pos:f32, axis:Axis);
+    fn set_splitter_state(&mut self, align:SplitterAlign, pos:f32, axis:Axis);
+    fn begin_splitter(&mut self, cx:&mut Cx);
     fn mid_splitter(&mut self, cx:&mut Cx);
     fn end_splitter(&mut self, cx:&mut Cx);
 }
 
 impl Style for Splitter{
     fn style(cx:&mut Cx)->Self{
-        let bg_sh = Self::def_bg_shader(cx);
+        let split_sh = Self::def_split_shader(cx);
         Self{
             hit_state:HitState{
                 ..Default::default()
             },
             align:SplitterAlign::First,
             pos:50.0,
+            min_pos_offset:25.0,
+            drag_max_pos:0.0,
             draw_size:8.0,
-            finger_size:Some(8.0),
             is_moving:false,
             axis:Axis::Horizontal,
-            bg_area:Area::Empty,
+            split_area:Area::Empty,
+            drag_point:0.,
+            drag_pos_start:0.,
             anim:Animation::new(
                 SplitterState::Default,
                 vec![
@@ -57,21 +64,21 @@ impl Style for Splitter{
                         SplitterState::Default,
                         AnimMode::Cut{duration:0.5}, 
                         vec![
-                            AnimTrack::to_vec4("bg.color",cx.style.bg_normal),
+                            AnimTrack::to_vec4("split.color",cx.style.bg_normal),
                         ]
                     ),
                     AnimState::new(
                         SplitterState::Over,
                         AnimMode::Cut{duration:0.05}, 
                         vec![
-                            AnimTrack::to_vec4("bg.color", cx.style.bg_top),
+                            AnimTrack::to_vec4("split.color", color("#5")),
                         ]
                     ),
                     AnimState::new(
                         SplitterState::Moving,
                         AnimMode::Cut{duration:0.2}, 
                         vec![
-                            AnimTrack::vec4("bg.color", Ease::Linear, vec![
+                            AnimTrack::vec4("split.color", Ease::Linear, vec![
                                 (0.0, color("#f")),
                                 (1.0, color("#6"))
                             ]),
@@ -79,8 +86,8 @@ impl Style for Splitter{
                     ) 
                 ]
             ),
-            bg:Quad{
-                shader_id:cx.add_shader(bg_sh),
+            split:Quad{
+                shader_id:cx.add_shader(split_sh),
                 ..Style::style(cx)
             }
         }
@@ -90,12 +97,11 @@ impl Style for Splitter{
 #[derive(Clone, PartialEq)]
 pub enum SplitterEvent{
     None,
-    Moving,
-    Moved
+    Moving{new_pos:f32},
 }
 
 impl Splitter{
-    pub fn def_bg_shader(cx:&mut Cx)->Shader{
+    pub fn def_split_shader(cx:&mut Cx)->Shader{
         let mut sh = Quad::def_quad_shader(cx);
         sh.add_ast(shader_ast!({
 
@@ -103,7 +109,7 @@ impl Splitter{
 
             fn pixel()->vec4{
                 df_viewport(pos * vec2(w, h));
-                df_box(0., 0., w, h, border_radius);
+                df_box(0., 0., w, h, 0.5);
                 return df_fill(color);
             }
         }));
@@ -114,31 +120,38 @@ impl Splitter{
 impl SplitterLike for Splitter{
     fn handle_splitter(&mut self, cx:&mut Cx, event:&mut Event)->SplitterEvent{
         let mut ret_event = SplitterEvent::None;
-        match event.hits(cx, self.bg_area, &mut self.hit_state){
+        match event.hits(cx, self.split_area, &mut self.hit_state){
             Event::Animate(ae)=>{
-                self.anim.calc_area(cx, "bg.color", ae.time, self.bg_area);
+                self.anim.calc_area(cx, "split.color", ae.time, self.split_area);
             },
-            Event::FingerDown(_fe)=>{
-                ret_event = SplitterEvent::Moving;
+            Event::FingerDown(fe)=>{
                 self.is_moving = true;
                 self.anim.change_state(cx, SplitterState::Moving);
-                cx.set_down_mouse_cursor(MouseCursor::Crosshair);
+                match self.axis{
+                    Axis::Horizontal=>cx.set_down_mouse_cursor(MouseCursor::RowResize),
+                    Axis::Vertical=>cx.set_down_mouse_cursor(MouseCursor::ColResize)
+                };
+                self.drag_pos_start = self.pos;
+                self.drag_point = match self.axis{
+                    Axis::Horizontal=>{fe.rel_y},
+                    Axis::Vertical=>{fe.rel_x}
+                }
             },
             Event::FingerHover(fe)=>{
-                cx.set_hover_mouse_cursor(MouseCursor::Hand);
-                match fe.hover_state{
-                    HoverState::In=>{
-                        if self.is_moving{
-                            self.anim.change_state(cx, SplitterState::Moving);
-                        }
-                        else{
+                match self.axis{
+                    Axis::Horizontal=>cx.set_hover_mouse_cursor(MouseCursor::RowResize),
+                    Axis::Vertical=>cx.set_hover_mouse_cursor(MouseCursor::ColResize)
+                };
+                if !self.is_moving{
+                    match fe.hover_state{
+                        HoverState::In=>{
                             self.anim.change_state(cx, SplitterState::Over);
-                        }
-                    },
-                    HoverState::Out=>{
-                        self.anim.change_state(cx, SplitterState::Default);
-                    },
-                    _=>()
+                        },
+                        HoverState::Out=>{
+                            self.anim.change_state(cx, SplitterState::Default);
+                        },
+                        _=>()
+                    }
                 }
             },
             Event::FingerUp(fe)=>{
@@ -150,32 +163,61 @@ impl SplitterLike for Splitter{
                     else{
                         self.anim.change_state(cx, SplitterState::Default);
                     }
-                    ret_event = SplitterEvent::Moved;
+                    //ret_event = SplitterEvent::Moved;
                 }
                 else{
                     self.anim.change_state(cx, SplitterState::Default);
                 }
             },
+            Event::FingerMove(fe)=>{
+                // alright we have our position relative to the slider in rel_x/rel_y
+                // however. how do we do this
+                // we kinda need a dx/dy
+                let mut pos = match self.axis{
+                    Axis::Horizontal=>{
+                        let dy = fe.start_y - fe.abs_y;
+                        self.drag_pos_start - dy
+                    },
+                    Axis::Vertical=>{
+                        let dx = fe.start_x - fe.abs_x;
+                        self.drag_pos_start - dx
+                    }
+                };
+                if pos > self.drag_max_pos - self.min_pos_offset{
+                    pos = self.drag_max_pos - self.min_pos_offset
+                }
+                else if pos < self.min_pos_offset{
+                    pos = self.min_pos_offset
+                };
+                if pos != self.pos{
+                    self.pos = pos;
+                    ret_event = SplitterEvent::Moving{new_pos:self.pos};
+                    cx.dirty_area = self.split_area;
+                }
+            }
             _=>()
         };
         ret_event
    }
 
-   fn begin_splitter(&mut self, cx:&mut Cx, align:SplitterAlign, pos:f32, axis:Axis){
+   fn set_splitter_state(&mut self, align:SplitterAlign, pos:f32, axis:Axis){
        self.axis = axis;
        self.align = align;
        self.pos = pos;
+   }
+
+   fn begin_splitter(&mut self, cx:&mut Cx){
        match self.axis{
             Axis::Horizontal=>{
                 cx.begin_turtle(&Layout{
                     width:Bounds::Fill,
-                    height:Bounds::Fix(self.pos - self.draw_size * 0.5),
+                    height:Bounds::Fix(self.pos),
                     ..Default::default()
                 })
             },
             Axis::Vertical=>{
                 cx.begin_turtle(&Layout{
-                    width:Bounds::Fix(self.pos - self.draw_size * 0.5),
+                    width:Bounds::Fix(self.pos),
                     height:Bounds::Fill,
                     ..Default::default()
                 })
@@ -184,33 +226,39 @@ impl SplitterLike for Splitter{
    }
 
    fn mid_splitter(&mut self, cx:&mut Cx){
+        cx.end_turtle();
         match self.axis{
             Axis::Horizontal=>{
-                cx.end_turtle();
-                cx.move_turtle(0.0,self.pos + self.draw_size * 0.5);
-                cx.begin_turtle(&Layout{
-                    width:Bounds::Fill,
-                    height:Bounds::Fill,
-                    ..Default::default()
-                })
+                cx.move_turtle(0.0,self.pos + self.draw_size);
             },
             Axis::Vertical=>{
-                cx.end_turtle();
-                cx.move_turtle(self.pos + self.draw_size * 0.5, 0.0);
-                cx.begin_turtle(&Layout{
-                    width:Bounds::Fill,
-                    height:Bounds::Fill,
-                    ..Default::default()
-                })
+                cx.move_turtle(self.pos + self.draw_size, 0.0);
             }
-       }
+       };
+       cx.begin_turtle(&Layout{
+            width:Bounds::Fill,
+            height:Bounds::Fill,
+            ..Default::default()
+       });
    }
 
    fn end_splitter(&mut self, cx:&mut Cx){
-       cx.end_turtle();
-       // draw the splitter in the middle of the turtle
-
-   }
+        cx.end_turtle();
+        // draw the splitter in the middle of the turtle
+        let rect = cx.turtle_rect();
+        self.split.color = self.anim.last_vec4("split.color");
+        match self.axis{
+            Axis::Horizontal=>{
+                self.split_area = self.split.draw_quad_abs(cx, true, rect.x, rect.y + self.pos, rect.w, self.draw_size);
+                self.drag_max_pos = rect.h;
+            },
+            Axis::Vertical=>{
+                self.split_area = self.split.draw_quad_abs(cx, true, rect.x+ self.pos, rect.y, self.draw_size, rect.h);
+                self.drag_max_pos = rect.w;
+            }
+       };
+       self.anim.set_area(cx, self.split_area);
+    }
 /*
     pub fn draw_with_label(&mut self, cx:&mut Cx, label: &str){
         

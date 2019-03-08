@@ -75,7 +75,7 @@ impl App{
 
          // recursive item iteration        
         let mut dock_walker = self.dock.walker();
-        while let Some(item) = dock_walker.event_walk(cx, event){
+        while let Some(item) = dock_walker.walk_handle_dock(cx, event){
             match item{
                 MyItem::Color(_)=>{}
             }
@@ -101,7 +101,7 @@ impl App{
 
         // recursive item iteration        
         let mut dock_walker = self.dock.walker();
-        while let Some(item) = dock_walker.draw_walk(cx){
+        while let Some(item) = dock_walker.walk_draw_dock(cx){
             match item{
                 MyItem::Color(color)=>{
                     self.fill.color = *color;
@@ -114,7 +114,7 @@ impl App{
         // lets do a <b> c
         // how do we do this? align right c
         // then align left a then fill b
-        
+
 
 /*
         // grab a splitter

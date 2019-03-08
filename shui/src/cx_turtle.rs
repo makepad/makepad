@@ -39,8 +39,8 @@ impl Cx{
             layout.abs_y.unwrap()
         };
 
-        let width = layout.width.eval_width(self, &layout.margin);
-        let height = layout.height.eval_height(self, &layout.margin);
+        let width = layout.width.eval_width(self, layout.margin);
+        let height = layout.height.eval_height(self, layout.margin);
 
         self.turtles.push(Turtle{
             align_start:self.align_list.len(),
@@ -64,8 +64,8 @@ impl Cx{
 
     // walk the turtle with a 'w/h' and a margin
     pub fn walk_turtle(&mut self, vw:Bounds, vh:Bounds, margin:Margin, old_turtle:Option<&Turtle>)->Rect{
-        let w = nan_clamp_neg(vw.eval_width(self, &margin));
-        let h = nan_clamp_neg(vh.eval_height(self, &margin));
+        let w = nan_clamp_neg(vw.eval_width(self, margin));
+        let h = nan_clamp_neg(vh.eval_height(self, margin));
         let mut align_dx = 0.0;
         let mut align_dy = 0.0;
         let ret = if let Some(turtle) = self.turtles.last_mut(){
@@ -203,7 +203,14 @@ impl Cx{
         }
         return vec2(0.0,0.0)        
     }
-
+/*
+    pub fn turtle_start_pos(&self)->Vec2{
+        if let Some(turtle) = self.turtles.last(){
+            return vec2(turtle.start_x, turtle.start_y);
+        }
+        return vec2(0.0,0.0);
+    }
+*/
     pub fn move_turtle(&mut self, rel_x:f32, rel_y:f32){
         if let Some(turtle) = self.turtles.last_mut(){
             turtle.walk_x = rel_x + turtle.start_x;
@@ -349,7 +356,7 @@ impl Default for Bounds{
 }
 
 impl Bounds{
-    pub fn eval_width(&self, cx: &Cx, margin:&Margin)->f32{
+    pub fn eval_width(&self, cx: &Cx, margin:Margin)->f32{
         match self{
             Bounds::Compute=>std::f32::NAN,
             Bounds::Fix(v)=>*v,
@@ -408,7 +415,7 @@ impl Bounds{
         }
     }
 
-    pub fn eval_height(&self, cx: &Cx, margin:&Margin)->f32{
+    pub fn eval_height(&self, cx: &Cx, margin:Margin)->f32{
         match self{
             Bounds::Compute=>std::f32::NAN,
             Bounds::Fix(v)=>*v,
@@ -464,7 +471,7 @@ impl Bounds{
     }
 }
 
-#[derive(Clone, Default, Debug)]
+#[derive(Clone, Copy, Default, Debug)]
 pub struct Align{
     pub fx:f32,
     pub fy:f32
@@ -482,7 +489,7 @@ impl Align{
     pub fn right_bottom()->Align{Align{fx:1.0,fy:1.0}}
 }
 
-#[derive(Clone, Default, Debug)]
+#[derive(Clone, Copy, Default, Debug)]
 pub struct Margin{
     pub l:f32,
     pub t:f32,
@@ -500,7 +507,7 @@ impl Margin{
     }
 }
 
-#[derive(Clone, Default, Debug)]
+#[derive(Clone, Copy, Default, Debug)]
 pub struct Padding{
     pub l:f32,
     pub t:f32,
