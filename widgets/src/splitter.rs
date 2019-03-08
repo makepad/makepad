@@ -33,6 +33,12 @@ pub enum SplitterState{
     Moving
 }
 
+#[derive(Clone, PartialEq)]
+pub enum SplitterEvent{
+    None,
+    Moving{new_pos:f32},
+}
+
 pub trait SplitterLike{
     fn handle_splitter(&mut self, cx:&mut Cx, event:&mut Event)->SplitterEvent;
     fn set_splitter_state(&mut self, align:SplitterAlign, pos:f32, axis:Axis);
@@ -94,12 +100,6 @@ impl Style for Splitter{
             }
         }
     }
-}
-
-#[derive(Clone, PartialEq)]
-pub enum SplitterEvent{
-    None,
-    Moving{new_pos:f32},
 }
 
 impl Splitter{

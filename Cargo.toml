@@ -10,4 +10,4 @@ rand = "*"
 [dependencies.widgets]
 path="./widgets"
 default-features = false
-features=["webgl"]
+features=["mtl"]

@@ -2,17 +2,26 @@ use std::mem;
 
 use render::*;
 use crate::splitter::*;
+use crate::tabcontrol::*;
+
+#[derive(Clone)]
+pub struct DockTab<TItem>
+where TItem: Clone
+{
+    pub title:String,
+    pub item:TItem
+}
 
 #[derive(Clone)]
 pub enum DockItem<TItem>
 where TItem: Clone
 {
     Single(TItem),
-    Tabbed{
-        current_tab:usize,
-        tabs:Vec<TItem>,
+    TabControl{
+        current:usize,
+        tabs:Vec<DockTab<TItem>>,
     },
-    Split{
+    Splitter{
         align:SplitterAlign,
         pos:f32,
         axis:Axis,
@@ -22,12 +31,14 @@ where TItem: Clone
 }
 
 #[derive(Clone)]
-pub struct Dock<TItem, TSplitter>
+pub struct Dock<TItem, TSplitter, TTabControl>
 where TItem: Clone, 
-      TSplitter: Clone + ElementLife + SplitterLike
+      TSplitter: Clone + ElementLife + SplitterLike,
+      TTabControl: Clone + ElementLife + TabControlLike
 {
     pub dock_items: DockItem<TItem>,
-    pub splitters: Elements<TSplitter, usize>
+    pub splitters: Elements<TSplitter, usize>,
+    pub tab_controls: Elements<TTabControl, usize>
 }
 
 struct DockStackLevel<'a, TItem>
@@ -38,20 +49,23 @@ where TItem: Clone
     item:&'a mut DockItem<TItem>
 }
 
-pub struct DockWalker<'a, TItem, TSplitter>
+pub struct DockWalker<'a, TItem, TSplitter, TTabControl>
 where TItem: Clone, 
-      TSplitter: Clone + ElementLife + SplitterLike
+      TSplitter: Clone + ElementLife + SplitterLike,
+      TTabControl: Clone + ElementLife + TabControlLike
 {
     walk_uid:usize,
     splitters:&'a mut Elements<TSplitter, usize>,
+    tab_controls:&'a mut Elements<TTabControl, usize>,
     stack:Vec<DockStackLevel<'a, TItem>>,
 }
 
 
 
-impl<'a, TItem, TSplitter> DockWalker<'a, TItem, TSplitter>
+impl<'a, TItem, TSplitter, TTabbed> DockWalker<'a, TItem, TSplitter, TTabbed>
 where TItem: Clone, 
-      TSplitter: Clone + ElementLife + SplitterLike
+      TSplitter: Clone + ElementLife + SplitterLike,
+      TTabbed: Clone + ElementLife + TabControlLike
 {
     pub fn walk_handle_dock(&mut self, cx: &mut Cx, event: &mut Event)->Option<&mut TItem>{
         // lets get the current item on the stack
@@ -67,16 +81,16 @@ where TItem: Clone,
                         None
                     }
                 },
-                DockItem::Tabbed{current_tab, tabs}=>{
+                DockItem::TabControl{current, tabs}=>{
                     if stack_top.counter == 0{
                         stack_top.counter += 1;
-                        return Some(unsafe{mem::transmute(&mut tabs[*current_tab])});
+                        return Some(unsafe{mem::transmute(&mut tabs[*current].item)});
                     }
                     else{
                         None
                     }
                 },
-                DockItem::Split{first, last, pos, ..}=>{
+                DockItem::Splitter{first, last, pos, ..}=>{
                     if stack_top.counter == 0{
                         stack_top.counter += 1;
                         stack_top.uid = self.walk_uid;
@@ -129,16 +143,16 @@ where TItem: Clone,
                         None
                     }
                 },
-                DockItem::Tabbed{current_tab, tabs}=>{
+                DockItem::TabControl{current, tabs}=>{
                     if stack_top.counter == 0{
                         stack_top.counter += 1;
-                        return Some(unsafe{mem::transmute(&mut tabs[*current_tab])});
+                        return Some(unsafe{mem::transmute(&mut tabs[*current].item)});
                     }
                     else{
                         None
                     }
                 },
-                DockItem::Split{align, pos, axis, first, last}=>{
+                DockItem::Splitter{align, pos, axis, first, last}=>{
                     if stack_top.counter == 0{
                         stack_top.counter += 1;
                         stack_top.uid = self.walk_uid;
@@ -179,16 +193,18 @@ where TItem: Clone,
     }
 }
 
-impl<TItem, TSplitter> Dock<TItem, TSplitter>
+impl<TItem, TSplitter, TTabbed> Dock<TItem, TSplitter, TTabbed>
 where TItem: Clone,
-      TSplitter: Clone + ElementLife + SplitterLike
+      TSplitter: Clone + ElementLife + SplitterLike,
+      TTabbed: Clone + ElementLife + TabControlLike
 {
-    pub fn walker<'a>(&'a mut self)->DockWalker<'a, TItem, TSplitter>{
+    pub fn walker<'a>(&'a mut self)->DockWalker<'a, TItem, TSplitter, TTabbed>{
         let mut stack = Vec::new();
         stack.push(DockStackLevel{counter:0, uid:0, item:&mut self.dock_items});
         DockWalker{
             walk_uid:0,
             splitters:&mut self.splitters,
+            tab_controls:&mut self.tab_controls,
             stack:stack
         }
     }
