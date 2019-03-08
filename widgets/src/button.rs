@@ -1,4 +1,4 @@
-use shui::*;
+use render::*;
 
 #[derive(Clone, Element)]
 pub struct Button{
@@ -51,8 +51,7 @@ impl Style for Button{
                             AnimTrack::to_float("bg.glow_size",0.0),
                             AnimTrack::to_vec4("bg.border_color",cx.style.text_lo),
                             AnimTrack::to_vec4("text.color",cx.style.text_med),
-                            AnimTrack::to_vec4("icon.color",cx.style.text_med),
-                            AnimTrack::to_float("width", 80.0)
+                            AnimTrack::to_vec4("icon.color",cx.style.text_med)
                         ]
                     ),
                     AnimState::new(
@@ -61,8 +60,7 @@ impl Style for Button{
                         vec![
                             AnimTrack::to_vec4("bg.color", cx.style.bg_top),
                             AnimTrack::to_vec4("bg.border_color", color("white")),
-                            AnimTrack::to_float("bg.glow_size", 1.0),
-                            AnimTrack::float("width", Ease::Linear, vec![(1.0,140.0)])
+                            AnimTrack::to_float("bg.glow_size", 1.0)
                         ]
                     ),
                     AnimState::new(
@@ -139,10 +137,6 @@ impl Button{
                 self.anim.calc_area(cx, "bg.border_color", ae.time, self.bg_area);
                 
                 self.anim.calc_area(cx, "bg.glow_size", ae.time, self.bg_area);
-
-                self.anim.calc_float(cx, "width", ae.time);
-
-                cx.dirty_area = Area::All;
             },
             Event::FingerDown(_fe)=>{
                 ret_event = ButtonEvent::Down;
@@ -192,10 +186,7 @@ impl Button{
 
         // pull the bg color from our animation system, uses 'default' value otherwise
         self.bg.color = self.anim.last_vec4("bg.color");
-        self.bg_area = self.bg.begin_quad(cx, &Layout{
-            width: Bounds::Fix(self.anim.last_float("width")),
-            ..self.layout.clone()
-        });
+        self.bg_area = self.bg.begin_quad(cx, &self.layout);
         // push the 2 vars we added to bg shader
         self.anim.last_push(cx, "bg.border_color", self.bg_area);
         self.anim.last_push(cx, "bg.glow_size", self.bg_area);

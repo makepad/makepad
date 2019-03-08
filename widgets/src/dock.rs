@@ -1,6 +1,6 @@
 use std::mem;
 
-use shui::*;
+use render::*;
 use crate::splitter::*;
 
 #[derive(Clone)]

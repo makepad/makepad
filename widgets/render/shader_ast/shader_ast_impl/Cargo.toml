@@ -1,7 +1,7 @@
 [package]
 name = "shader_ast_impl"
 version = "0.1.0"
-authors = ["arc"]
+authors = ["makepaddev"]
 edition = "2018"
 
 [lib]

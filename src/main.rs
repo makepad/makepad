@@ -1,12 +1,4 @@
-use shui::*;
-mod button;
-use crate::button::*;
-mod scrollbar;
-use crate::scrollbar::*;
-mod splitter;
-use crate::splitter::*;
-mod dock;
-use crate::dock::*;
+use widgets::*;
 
 #[derive(Clone)]
 enum MyItem{
@@ -119,7 +111,7 @@ impl App{
         self.quad.draw_quad(cx, 250.,250.,100.,100.);
 
         self.triangle.color = color("orange");
-        self.triangle.draw_triangle(cx,70.,70.,70.,150.,150.,150.);
+        self.triangle.draw_triangle(cx, 70.,70.,70.,150.,150.,150.);
       
 
         // draw scroll bars
