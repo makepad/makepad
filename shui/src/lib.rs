@@ -30,11 +30,13 @@ mod area;
 mod view;
 mod shadergen;
 mod quad;
+mod triangle;
 mod text;
 mod events;
 mod style;
 
 pub use crate::cx::*;
 pub use crate::quad::*;
+pub use crate::triangle::*;
 pub use crate::text::*;
 pub use crate::elements::*;

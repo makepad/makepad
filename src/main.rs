@@ -19,7 +19,8 @@ struct App{
     view:View<ScrollBar>,
     dock:Dock<MyItem, Splitter>,
     ok:Elements<Button, usize>,
-    fill:Quad
+    quad:Quad,
+    triangle:Triangle
 }
  
 impl Style for App{
@@ -37,7 +38,10 @@ impl Style for App{
             ok:Elements::new(Button{
                 ..Style::style(cx)  
             }),
-            fill:Quad{
+            quad:Quad{
+                ..Style::style(cx)
+            },
+            triangle:Triangle{
                 ..Style::style(cx)
             },
             dock:Dock{
@@ -71,7 +75,7 @@ impl Style for App{
 impl App{
     fn handle_app(&mut self, cx:&mut Cx, event:&mut Event){
         self.view.handle_scroll_bars(cx, event);
-
+        /*
          // recursive item iteration        
         let mut dock_walker = self.dock.walker();
         while let Some(item) = dock_walker.walk_handle_dock(cx, event){
@@ -86,6 +90,7 @@ impl App{
                 log!(cx, "GOT CLICKED BY {}", id);
             }
         }
+        */
     }
 
     fn draw_app(&mut self, cx:&mut Cx){
@@ -97,6 +102,14 @@ impl App{
             ..Default::default()
         });
 
+
+        self.quad.color = color("red");
+        self.quad.draw_quad_abs(cx, false, 250.,250.,100.,100.);
+
+        self.triangle.color = color("orange");
+        self.triangle.draw_triangle_abs(cx, false, 70.,70.,70.,150.,150.,150.);
+
+        /*
         // recursive item iteration        
         let mut dock_walker = self.dock.walker();
         while let Some(item) = dock_walker.walk_draw_dock(cx){
@@ -107,36 +120,8 @@ impl App{
                 }
             }
         }
+        */
 
-
-        // lets do a <b> c
-        // how do we do this? align right c
-        // then align left a then fill b
-
-
-/*
-        // grab a splitter
-        let split = self.splitter.get(cx);
-        split.begin_splitter(cx, Axis::Vertical);
-        self.fill.color = color("orange");
-        self.fill.draw_quad(cx, Bounds::Fill, Bounds::Fill, Margin::zero());
-        // do left.
-        split.mid_splitter(cx);
-        self.fill.color = color("purple");
-        self.fill.draw_quad(cx, Bounds::Fill, Bounds::Fill ,Margin::zero());
-        // do right
-        split.end_splitter(cx);
-*/
-        // ok so, a 'dock' has a memory state. 
-
-
-        /*
-        for i in 0..200{
-            self.ok.get(cx, i).draw_button_with_label(cx, &format!("OK {}",(i as u64 )%5000));
-            if i%7 == 6{
-                cx.turtle_newline();
-            }
-        }*/
 
         // draw scroll bars
         self.view.end_view(cx);
