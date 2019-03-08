@@ -6,18 +6,19 @@ pub struct Splitter{
     pub bg_area:Area,
     pub bg: Quad,
     pub axis:Axis,
-    pub split_size:f32,
-    pub split_mode:SplitterMode,
-    pub split_pos:f32,
+    pub draw_size:f32,
+    pub align:SplitterAlign,
+    pub finger_size:Option<f32>,
+    pub pos:f32,
     pub anim:Animation<SplitterState>,
     pub is_moving:bool
 }
 
 #[derive(Clone, PartialEq)]
-pub enum SplitterMode{
-    AlignBegin,
-    AlignEnd,
-    Factor
+pub enum SplitterAlign{
+    First,
+    Last,
+    Weighted
 }
 
 
@@ -30,7 +31,7 @@ pub enum SplitterState{
 
 pub trait SplitterLike{
     fn handle_splitter(&mut self, cx:&mut Cx, event:&mut Event)->SplitterEvent;
-    fn begin_splitter(&mut self, cx:&mut Cx, split_mode:SplitterMode, split_pos:f32, axis:Axis);
+    fn begin_splitter(&mut self, cx:&mut Cx, align:SplitterAlign, pos:f32, axis:Axis);
     fn mid_splitter(&mut self, cx:&mut Cx);
     fn end_splitter(&mut self, cx:&mut Cx);
 }
@@ -42,9 +43,10 @@ impl Style for Splitter{
             hit_state:HitState{
                 ..Default::default()
             },
-            split_mode:SplitterMode::AlignBegin,
-            split_pos:50.0,
-            split_size:8.0,
+            align:SplitterAlign::First,
+            pos:50.0,
+            draw_size:8.0,
+            finger_size:Some(8.0),
             is_moving:false,
             axis:Axis::Horizontal,
             bg_area:Area::Empty,
@@ -159,21 +161,21 @@ impl SplitterLike for Splitter{
         ret_event
    }
 
-   fn begin_splitter(&mut self, cx:&mut Cx, split_mode:SplitterMode, split_pos:f32, axis:Axis){
+   fn begin_splitter(&mut self, cx:&mut Cx, align:SplitterAlign, pos:f32, axis:Axis){
        self.axis = axis;
-       self.split_mode = split_mode;
-       self.split_pos = split_pos;
+       self.align = align;
+       self.pos = pos;
        match self.axis{
             Axis::Horizontal=>{
                 cx.begin_turtle(&Layout{
                     width:Bounds::Fill,
-                    height:Bounds::Fix(self.split_pos - self.split_size * 0.5),
+                    height:Bounds::Fix(self.pos - self.draw_size * 0.5),
                     ..Default::default()
                 })
             },
             Axis::Vertical=>{
                 cx.begin_turtle(&Layout{
-                    width:Bounds::Fix(self.split_pos - self.split_size * 0.5),
+                    width:Bounds::Fix(self.pos - self.draw_size * 0.5),
                     height:Bounds::Fill,
                     ..Default::default()
                 })
@@ -185,7 +187,7 @@ impl SplitterLike for Splitter{
         match self.axis{
             Axis::Horizontal=>{
                 cx.end_turtle();
-                cx.turtle_move(0.0,self.split_pos + self.split_size * 0.5);
+                cx.move_turtle(0.0,self.pos + self.draw_size * 0.5);
                 cx.begin_turtle(&Layout{
                     width:Bounds::Fill,
                     height:Bounds::Fill,
@@ -194,7 +196,7 @@ impl SplitterLike for Splitter{
             },
             Axis::Vertical=>{
                 cx.end_turtle();
-                cx.turtle_move(self.split_pos + self.split_size * 0.5, 0.0);
+                cx.move_turtle(self.pos + self.draw_size * 0.5, 0.0);
                 cx.begin_turtle(&Layout{
                     width:Bounds::Fill,
                     height:Bounds::Fill,
@@ -206,6 +208,8 @@ impl SplitterLike for Splitter{
 
    fn end_splitter(&mut self, cx:&mut Cx){
        cx.end_turtle();
+       // draw the splitter in the middle of the turtle
+
    }
 /*
     pub fn draw_with_label(&mut self, cx:&mut Cx, label: &str){

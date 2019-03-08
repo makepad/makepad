@@ -44,21 +44,21 @@ impl Style for App{
                 splitters:Elements::new(Splitter{
                     ..Style::style(cx)
                 }),
-                item_root:DockItem::Split{
+                dock_items:DockItem::Split{
                     axis:Axis::Vertical,
-                    split_mode:SplitterMode::AlignBegin,
-                    split_pos:150.0,
-                    left:Box::new(DockItem::Single(
+                    align:SplitterAlign::First,
+                    pos:150.0,
+                    first:Box::new(DockItem::Single(
                         MyItem::Color(color("red"))
                     )),
-                    right:Box::new(DockItem::Split{
+                    last:Box::new(DockItem::Split{
                         axis:Axis::Horizontal,
-                        split_mode:SplitterMode::AlignBegin,
-                        split_pos:150.0,
-                        left:Box::new(DockItem::Single(
+                        align:SplitterAlign::First,
+                        pos:150.0,
+                        first:Box::new(DockItem::Single(
                             MyItem::Color(color("purple"))
                         )),
-                        right:Box::new(DockItem::Single(
+                        last:Box::new(DockItem::Single(
                             MyItem::Color(color("orange"))
                         ))
                     })
@@ -75,7 +75,7 @@ impl App{
 
          // recursive item iteration        
         let mut dock_walker = self.dock.walker();
-        while let Some(item) = dock_walker.handle_walk(cx, event){
+        while let Some(item) = dock_walker.event_walk(cx, event){
             match item{
                 MyItem::Color(_)=>{}
             }
@@ -109,6 +109,13 @@ impl App{
                 }
             }
         }
+
+
+        // lets do a <b> c
+        // how do we do this? align right c
+        // then align left a then fill b
+        
+
 /*
         // grab a splitter
         let split = self.splitter.get(cx);

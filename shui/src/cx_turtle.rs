@@ -5,7 +5,7 @@ impl Cx{
         //self.debug_pts.borrow_mut().push((x,y,color));
     //}
 
-    pub fn instance_aligned_set_count(&mut self, instance_count:usize)->Area{
+    pub fn set_count_of_aligned_instance(&mut self, instance_count:usize)->Area{
         let mut area =  self.align_list.last_mut().unwrap();
         if let Area::Instance(inst) = &mut area{
             inst.instance_count = instance_count;
@@ -16,7 +16,7 @@ impl Cx{
     // begin a new turtle with a layout
     pub fn begin_turtle(&mut self, layout:&Layout){
 
-        let start_x = if layout.abs_x.is_none(){
+        let start_x = layout.margin.l +if layout.abs_x.is_none(){
             if let Some(parent) = self.turtles.last(){
                 parent.walk_x
             }
@@ -27,7 +27,7 @@ impl Cx{
         else{
             layout.abs_x.unwrap()
         };
-        let start_y = if layout.abs_y.is_none(){
+        let start_y = layout.margin.t + if layout.abs_y.is_none(){
             if let Some(parent) = self.turtles.last(){
                 parent.walk_y
             }
@@ -39,13 +39,13 @@ impl Cx{
             layout.abs_y.unwrap()
         };
 
-        let width = layout.width.eval_width(self);
-        let height = layout.height.eval_height(self);
+        let width = layout.width.eval_width(self, &layout.margin);
+        let height = layout.height.eval_height(self, &layout.margin);
 
         self.turtles.push(Turtle{
             align_start:self.align_list.len(),
             layout:layout.clone(),
-            start_x:start_x,
+            start_x:start_x ,
             start_y:start_y,
             walk_x:start_x + layout.padding.l,
             walk_y:start_y + layout.padding.t,
@@ -56,15 +56,16 @@ impl Cx{
             bound_y2:std::f32::NEG_INFINITY,
             width:width,
             height:height,
+            width_used:0.,
+            height_used:0.,
             ..Default::default()
         });
     }
 
     // walk the turtle with a 'w/h' and a margin
     pub fn walk_turtle(&mut self, vw:Bounds, vh:Bounds, margin:Margin, old_turtle:Option<&Turtle>)->Rect{
-        let w = nan_clamp_neg(vw.eval_width(self));
-        let h = nan_clamp_neg(vh.eval_height(self));
-        let mut do_align = false;
+        let w = nan_clamp_neg(vw.eval_width(self, &margin));
+        let h = nan_clamp_neg(vh.eval_height(self, &margin));
         let mut align_dx = 0.0;
         let mut align_dy = 0.0;
         let ret = if let Some(turtle) = self.turtles.last_mut(){
@@ -78,10 +79,10 @@ impl Cx{
                         turtle.walk_x = turtle.start_x + turtle.layout.padding.l;
                         turtle.walk_y += turtle.biggest;
                         turtle.biggest = 0.0;
-                        do_align = true;
                         align_dx = turtle.walk_x - old_x;
                         align_dy = turtle.walk_y - old_y;
                     }
+
                     let x = turtle.walk_x + margin.l;
                     let y = turtle.walk_y + margin.t;
                     // walk it normally
@@ -130,9 +131,9 @@ impl Cx{
             }
         };
 
-        if do_align{
+        if align_dx != 0.0 || align_dy != 0.0{
             if let Some(old_turtle) = old_turtle{
-                self.do_align(align_dx, align_dy, old_turtle);
+                self.do_align(align_dx, align_dy, old_turtle.align_start);
             }
         };
 
@@ -152,15 +153,10 @@ impl Cx{
         }
     }
 
-    fn do_align(&mut self, dx:f32, dy:f32, turtle:&Turtle){
+    fn do_align(&mut self, dx:f32, dy:f32, align_start:usize){
 
-        for i in turtle.align_start..self.align_list.len(){
+        for i in align_start..self.align_list.len(){
             let align_item = &self.align_list[i];
-            // please note, this is supposed to be move_xy IN area but
-            // the rust borrowchecker won't let me. This is because the 'cd' arg
-            // locks the whole thing, but i just need a few subprops
-            // this is a shortcoming in the rust borrowchecker imho, but its the only one in this
-            // new arrangement of everything on cxdrawing. so whatever.
             return match align_item{
                 Area::Instance(inst)=>{
                     if inst.instance_count == 0{
@@ -208,14 +204,56 @@ impl Cx{
         return vec2(0.0,0.0)        
     }
 
-    pub fn turtle_move(&mut self, rel_x:f32, rel_y:f32){
+    pub fn move_turtle(&mut self, rel_x:f32, rel_y:f32){
         if let Some(turtle) = self.turtles.last_mut(){
             turtle.walk_x = rel_x + turtle.start_x;
             turtle.walk_y = rel_y + turtle.start_y;
         }
     }
 
-    pub fn turtle_delta(&mut self, dx:f32, dy:f32){
+    fn compute_align_turtle(turtle:&Turtle)->Vec2{
+        if turtle.layout.align.fx > 0.0 || turtle.layout.align.fy > 0.0{
+
+            let mut dx = turtle.layout.align.fx * 
+                ((turtle.width - turtle.width_used - (turtle.layout.padding.l + turtle.layout.padding.r)) - (turtle.bound_x2 - (turtle.start_x + turtle.layout.padding.l)));
+            let mut dy = turtle.layout.align.fy * 
+                ((turtle.height - turtle.height_used - (turtle.layout.padding.t + turtle.layout.padding.b)) - (turtle.bound_y2 - (turtle.start_y + turtle.layout.padding.t)));
+            if dx.is_nan(){dx = 0.0}
+            if dy.is_nan(){dy = 0.0}
+            vec2(dx, dy)
+        }
+        else{
+            vec2(0.,0.)
+        }
+    }
+
+    // restarts the turtle with a new alignment, used for a<b>c layouts
+    pub fn realign_turtle(&mut self, align:Align){
+        let (align_delta, align_start) = if let Some(turtle) = self.turtles.last_mut(){
+            (Self::compute_align_turtle(&turtle), turtle.align_start)
+        }
+        else{
+            (vec2(0.,0.), 0)
+        };
+        if align_delta.x > 0.0 || align_delta.y > 0.0{
+            self.do_align(align_delta.x, align_delta.y, align_start);
+        }
+        // reset turtle props
+        if let Some(turtle) = self.turtles.last_mut(){
+            // restart align_list for the next pass
+            turtle.align_start = self.align_list.len();
+            // subtract used size so 'fill' works
+            turtle.layout.align = align; 
+            turtle.width_used = turtle.bound_x2 - turtle.start_x;
+            turtle.height_used = turtle.bound_y2 - turtle.start_y;
+            turtle.bound_x1 = std::f32::INFINITY;
+            turtle.bound_x2 = std::f32::NEG_INFINITY;
+            turtle.bound_y1 = std::f32::INFINITY;
+            turtle.bound_y2 = std::f32::NEG_INFINITY;
+        }
+    }
+
+    pub fn delta_turtle(&mut self, dx:f32, dy:f32){
         if let Some(turtle) = self.turtles.last_mut(){
             turtle.walk_x += dx;
             turtle.walk_y += dy;
@@ -251,16 +289,9 @@ impl Cx{
 
         let margin = old.layout.margin.clone();
         // if we have alignment set, we should now align our childnodes
-        if old.layout.align.fx > 0.0 || old.layout.align.fy > 0.0{
-
-            let mut dx = old.layout.align.fx * 
-                ((old.width - (old.layout.padding.l + old.layout.padding.r)) - (old.bound_x2 - (old.start_x + old.layout.padding.l)));
-            let mut dy = old.layout.align.fy * 
-                ((old.height - (old.layout.padding.t + old.layout.padding.b)) - (old.bound_y2 - (old.start_y + old.layout.padding.t)));
-            if dx.is_nan(){dx = 0.0}
-            if dy.is_nan(){dy = 0.0}
-
-            self.do_align(dx, dy, &old);
+        let align_delta = Self::compute_align_turtle(&old);
+        if align_delta.x > 0.0 || align_delta.y > 0.0{
+            self.do_align(align_delta.x, align_delta.y, old.align_start);
         }
 
         // now well walk the top turtle with our old geometry and margins
@@ -305,7 +336,10 @@ pub enum Bounds{
     Fix(f32),
     Scale(f32),
     ScalePad(f32, f32),
-    Fill
+    Fill,
+    FillPad(f32),
+    FillScale(f32),
+    FillScalePad(f32,f32)
 }
 
 impl Default for Bounds{
@@ -315,66 +349,117 @@ impl Default for Bounds{
 }
 
 impl Bounds{
-    pub fn eval_width(&self, cx: &Cx)->f32{
+    pub fn eval_width(&self, cx: &Cx, margin:&Margin)->f32{
         match self{
             Bounds::Compute=>std::f32::NAN,
             Bounds::Fix(v)=>*v,
             Bounds::Scale(v)=>{
                 if let Some(turtle) = cx.turtles.last(){
-                    nan_clamp_neg(turtle.width - (turtle.layout.padding.l+turtle.layout.padding.r)) * v
+                    nan_clamp_neg(turtle.width - (turtle.layout.padding.l+turtle.layout.padding.r)) * v - (margin.l + margin.r)
                 }
                 else{
-                    cx.target_size.x * v
+                    cx.target_size.x * v - (margin.l + margin.r)
                 }
             },
             Bounds::ScalePad(v, p)=>{
                 if let Some(turtle) = cx.turtles.last(){
-                    nan_clamp_neg(turtle.width - (turtle.layout.padding.l+turtle.layout.padding.r)) * v - p
+                    nan_clamp_neg(turtle.width - (turtle.layout.padding.l+turtle.layout.padding.r)) * v - p - (margin.l + margin.r)
                 }
                 else{
-                    cx.target_size.x * v - p
+                    cx.target_size.x * v - p - (margin.l + margin.r)
                 }
             },
             Bounds::Fill=>{
                 if let Some(turtle) = cx.turtles.last(){
                     // use turtle.walk_x
-                    nan_clamp_neg(turtle.width - (turtle.walk_x -turtle.start_x)) 
+                    nan_clamp_neg(turtle.width - turtle.width_used - (turtle.walk_x -turtle.start_x)) - (margin.l + margin.r) 
                 }
                 else{
-                    cx.target_size.x 
+                    cx.target_size.x - (margin.l + margin.r)
                 }
-            }
+            },
+            Bounds::FillPad(p)=>{
+                if let Some(turtle) = cx.turtles.last(){
+                    // use turtle.walk_x
+                    nan_clamp_neg(turtle.width - turtle.width_used - (turtle.walk_x -turtle.start_x)) - p - (margin.l + margin.r)
+                }
+                else{
+                    cx.target_size.x - p - (margin.l + margin.r)
+                }
+            },
+            Bounds::FillScale(v)=>{
+                if let Some(turtle) = cx.turtles.last(){
+                    // use turtle.walk_x
+                    nan_clamp_neg(turtle.width - turtle.width_used - (turtle.walk_x -turtle.start_x) ) * v - (margin.l + margin.r)
+                }
+                else{
+                    cx.target_size.x * v - (margin.l + margin.r)
+                }
+            },
+            Bounds::FillScalePad(v, p)=>{
+                if let Some(turtle) = cx.turtles.last(){
+                    // use turtle.walk_x
+                    nan_clamp_neg(turtle.width - turtle.width_used - (turtle.walk_x -turtle.start_x)) * v - p - (margin.l + margin.r)
+                }
+                else{
+                    cx.target_size.x * v - p - (margin.l + margin.r)
+                }
+            }                
         }
     }
 
-    pub fn eval_height(&self, cx: &Cx)->f32{
+    pub fn eval_height(&self, cx: &Cx, margin:&Margin)->f32{
         match self{
             Bounds::Compute=>std::f32::NAN,
             Bounds::Fix(v)=>*v,
             Bounds::Scale(v)=>{
                 if let Some(turtle) = cx.turtles.last(){
-                    nan_clamp_neg(turtle.height - (turtle.layout.padding.t+turtle.layout.padding.b))* v  
+                    nan_clamp_neg(turtle.height - (turtle.layout.padding.t+turtle.layout.padding.b))* v - (margin.t + margin.b)
                 }
                 else{
-                    cx.target_size.y * v
+                    cx.target_size.y * v - (margin.t + margin.b)
                 }
             },
             Bounds::ScalePad(v, p)=>{
                 if let Some(turtle) = cx.turtles.last(){
-                    nan_clamp_neg(turtle.height - (turtle.layout.padding.t+turtle.layout.padding.b))* v  - p
+                    nan_clamp_neg(turtle.height - (turtle.layout.padding.t+turtle.layout.padding.b))* v  - p - (margin.t + margin.b)
                 }
                 else{
-                    cx.target_size.y * v - p
+                    cx.target_size.y * v - p - (margin.t + margin.b)
                 }
             },
             Bounds::Fill=>{
                 if let Some(turtle) = cx.turtles.last(){
-                    nan_clamp_neg(turtle.height - (turtle.walk_y -turtle.start_y))
+                    nan_clamp_neg(turtle.height - turtle.height_used - (turtle.walk_y -turtle.start_y) ) - (margin.t + margin.b)
                 }
                 else{
-                    cx.target_size.y 
+                    cx.target_size.y - (margin.t + margin.b)
                 }
-            }
+            },
+            Bounds::FillPad(p)=>{
+                if let Some(turtle) = cx.turtles.last(){
+                    nan_clamp_neg(turtle.height - turtle.height_used - (turtle.walk_y -turtle.start_y)) - p - (margin.t + margin.b)
+                }
+                else{
+                    cx.target_size.y - p - (margin.t + margin.b)
+                }
+            },
+            Bounds::FillScale(v)=>{
+                if let Some(turtle) = cx.turtles.last(){
+                    nan_clamp_neg(turtle.height - turtle.height_used - (turtle.walk_y -turtle.start_y)) * v - (margin.t + margin.b)
+                }
+                else{
+                    cx.target_size.y - (margin.t + margin.b)
+                }
+            },
+            Bounds::FillScalePad(v, p)=>{
+                if let Some(turtle) = cx.turtles.last(){
+                    nan_clamp_neg(turtle.height - turtle.height_used - (turtle.walk_y -turtle.start_y)) * v  - p - (margin.t + margin.b)
+                }
+                else{
+                    cx.target_size.y * v - p - (margin.t + margin.b)
+                }
+            },            
         }
     }
 }
@@ -485,6 +570,8 @@ pub struct Turtle{
     pub bound_y2:f32,
     pub width:f32,
     pub height:f32,
+    pub width_used:f32,
+    pub height_used:f32,
     pub biggest:f32,
     pub layout:Layout
 } 

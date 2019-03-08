@@ -188,7 +188,7 @@ impl Text{
                 chunk.truncate(0);
             }
         }
-        cx.instance_aligned_set_count(count)
+        cx.set_count_of_aligned_instance(count)
     }
 }
 
