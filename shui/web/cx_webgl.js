@@ -583,7 +583,6 @@
 				var f = []
 				for(let i = 0; i < e.changedTouches.length; i++){
 					var t = e.changedTouches[i]
-
 					// find an unused digit
 					var digit = undefined;
 					for(digit in digit_map){
@@ -592,7 +591,7 @@
 					// we need to alloc a new one
 					if(digit === undefined || digit_map[digit]) digit = digit_alloc++;
 					// store it					
-					digit_map[digit] = {x:t.pageX, y:t.pageY};
+					digit_map[digit] = {identifier:t.identifier};
 					// return allocated digit
 					digit = parseInt(digit);
 
@@ -606,16 +605,14 @@
 				return f
 			}
 
-			function lookup_digit(x, y){
-				var near_dist = Infinity, near_digit = -1
+			function lookup_digit(identifier){
 				for(let digit in digit_map){
-					var digit_pos = digit_map[digit]
-					if(!digit_pos) continue
-					var dx = x - digit_pos.x, dy = y - digit_pos.y
-					var len = Math.sqrt(dx*dx+dy*dy)
-					if(len < near_dist) near_dist = len, near_digit = digit
+					var digit_id = digit_map[digit]
+					if(!digit_id) continue
+					if(digit_id.identifier == identifier){
+						return digit
+					}
 				}
-				return near_digit;
 			}
 
 			function touch_to_finger_lookup(e){
@@ -625,7 +622,7 @@
 					f.push({
 						x:t.pageX,
 						y:t.pageY,
-						digit:lookup_digit(t.pageX, t.pageY),
+						digit:lookup_digit(t.identifier),
 						touch: true,
 					})
 				}
@@ -636,7 +633,7 @@
 				var f = []
 				for(let i = 0; i < e.changedTouches.length; i++){
 					var t = e.changedTouches[i]
-					var digit = lookup_digit(t.pageX, t.pageY)
+					var digit = lookup_digit(t.identifier)
 					if(!digit){
 						console.log("Undefined state in free_digit");
 						digit = 0
