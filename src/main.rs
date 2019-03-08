@@ -75,7 +75,7 @@ impl Style for App{
 impl App{
     fn handle_app(&mut self, cx:&mut Cx, event:&mut Event){
         self.view.handle_scroll_bars(cx, event);
-        /*
+        
          // recursive item iteration        
         let mut dock_walker = self.dock.walker();
         while let Some(item) = dock_walker.walk_handle_dock(cx, event){
@@ -90,7 +90,7 @@ impl App{
                 log!(cx, "GOT CLICKED BY {}", id);
             }
         }
-        */
+        
     }
 
     fn draw_app(&mut self, cx:&mut Cx){
@@ -102,26 +102,25 @@ impl App{
             ..Default::default()
         });
 
-
-        self.quad.color = color("red");
-        self.quad.draw_quad_abs(cx, false, 250.,250.,100.,100.);
-
-        self.triangle.color = color("orange");
-        self.triangle.draw_triangle_abs(cx, false, 70.,70.,70.,150.,150.,150.);
-
-        /*
+/*
         // recursive item iteration        
         let mut dock_walker = self.dock.walker();
         while let Some(item) = dock_walker.walk_draw_dock(cx){
             match item{
                 MyItem::Color(color)=>{
-                    self.fill.color = *color;
-                    self.fill.draw_quad(cx, Bounds::Fill, Bounds::Fill, Margin::zero());
+                    self.quad.color = *color;
+                    self.quad.draw_quad_walk(cx, Bounds::Fill, Bounds::Fill, Margin::zero());
                 }
             }
         }
         */
 
+        self.quad.color = color("pink");
+        self.quad.draw_quad(cx, 250.,250.,100.,100.);
+
+        self.triangle.color = color("orange");
+        self.triangle.draw_triangle(cx,70.,70.,70.,150.,150.,150.);
+      
 
         // draw scroll bars
         self.view.end_view(cx);

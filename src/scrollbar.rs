@@ -331,10 +331,10 @@ impl ScrollBarLike<ScrollBar> for ScrollBar{
                 self.view_total = view_total.x;
                 self.view_visible = view_rect.w;
                 
-                self.sb_area = self.sb.draw_quad_abs(
-                    cx, true,   
-                    view_rect.x, 
-                    view_rect.y + view_rect.h - self.bar_size, 
+                self.sb_area = self.sb.draw_quad(
+                    cx,  
+                    0., 
+                    view_rect.h - self.bar_size, 
                     self.scroll_size,
                     self.bar_size, 
                 );
@@ -352,10 +352,10 @@ impl ScrollBarLike<ScrollBar> for ScrollBar{
                 self.view_total = view_total.y;
                 self.view_visible = view_rect.h;
                 
-                self.sb_area = self.sb.draw_quad_abs(
-                    cx, true,   
-                    view_rect.x + view_rect.w - self.bar_size, 
-                    view_rect.y, 
+                self.sb_area = self.sb.draw_quad(
+                    cx,   
+                    view_rect.w - self.bar_size, 
+                    0., 
                     self.bar_size,
                     self.scroll_size
                 );

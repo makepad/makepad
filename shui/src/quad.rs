@@ -67,7 +67,7 @@ impl Quad{
     }
 
     pub fn begin_quad(&mut self, cx:&mut Cx, layout:&Layout)->Area{
-        let area = self.draw_quad_abs(cx, true, 0.0,0.0,0.0,0.0);
+        let area = self.draw_quad(cx, 0.0,0.0,0.0,0.0);
         cx.begin_instance(area, layout);
         area
     }
@@ -77,9 +77,8 @@ impl Quad{
         cx.end_instance()
     }
 
-    pub fn draw_quad(&mut self, cx:&mut Cx, w:Bounds, h:Bounds, margin:Margin)->Area{
+    pub fn draw_quad_walk(&mut self, cx:&mut Cx, w:Bounds, h:Bounds, margin:Margin)->Area{
         let area = cx.new_aligned_instance(self.shader_id);
-
         let geom = cx.walk_turtle(w, h, margin, None);
         
         // lets store our instance onto the turtle
@@ -92,16 +91,11 @@ impl Quad{
         area
     }
 
-    pub fn draw_quad_abs(&mut self, cx:&mut Cx, align:bool, x:f32, y:f32, w:f32, h:f32)->Area{
-        let area = if align{
-           cx.new_aligned_instance(self.shader_id)
-        }
-        else{
-           cx.new_instance(self.shader_id)
-        };
-
+    pub fn draw_quad(&mut self, cx:&mut Cx, x:f32, y:f32, w:f32, h:f32)->Area{
+        let area = cx.new_aligned_instance(self.shader_id);
+        let pos = cx.turtle_origin();
         let data = [
-            /*x,y,w,h*/x,y,w,h,
+            /*x,y,w,h*/pos.x+x,pos.y+y,w,h,
             /*color*/self.color.x,self.color.y,self.color.z,self.color.w
         ];
         area.push_data(cx, &data);

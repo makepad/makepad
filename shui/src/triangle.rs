@@ -67,19 +67,11 @@ impl Triangle{
         sh
     }
 
-    pub fn draw_triangle_abs(
-        &mut self, cx:&mut Cx, align:bool, 
-        x1:f32, y1:f32, x2:f32, y2:f32, x3:f32, y3:f32
-        )->Area{
-        let area = if align{
-           cx.new_aligned_instance(self.shader_id)
-        }
-        else{
-           cx.new_instance(self.shader_id)
-        };
-
+    pub fn draw_triangle(&mut self, cx:&mut Cx, x1:f32, y1:f32, x2:f32, y2:f32, x3:f32, y3:f32)->Area{
+        let area = cx.new_aligned_instance(self.shader_id);
+        let pos = cx.turtle_origin();
         let data = [
-            /*x,y,w,h*/x1,y1,x2,y2,x3,y3,
+            /*x,y,w,h*/pos.x+x1,pos.y+y1,pos.x+x2,pos.y+y2,pos.x+x3,pos.y+y3,
             /*color*/self.color.x,self.color.y,self.color.z,self.color.w
         ];
         area.push_data(cx, &data);

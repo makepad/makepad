@@ -203,14 +203,14 @@ impl Cx{
         }
         return vec2(0.0,0.0)        
     }
-/*
-    pub fn turtle_start_pos(&self)->Vec2{
+
+    pub fn turtle_origin(&self)->Vec2{
         if let Some(turtle) = self.turtles.last(){
             return vec2(turtle.start_x, turtle.start_y);
         }
         return vec2(0.0,0.0);
     }
-*/
+
     pub fn move_turtle(&mut self, rel_x:f32, rel_y:f32){
         if let Some(turtle) = self.turtles.last_mut(){
             turtle.walk_x = rel_x + turtle.start_x;
