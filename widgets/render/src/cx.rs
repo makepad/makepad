@@ -198,7 +198,7 @@ impl Cx{
         self.align_list.truncate(0);
     }
 
-    pub fn check_ended_animations(&mut self, time:f64){
+    pub fn check_ended_anim_areas(&mut self, time:f64){
         let mut i = 0;
         self.ended_anim_areas.truncate(0);
         loop{
@@ -252,6 +252,10 @@ impl Cx{
                 // reuse this drawcmd.
                 let dc = &mut draw_list.draw_calls[i];
                 dc.current_instance_offset = dc.instance.len();
+                let slot_align = dc.instance.len() % sh.instance_slots;
+                if slot_align != 0{
+                    panic!("Instance offset disaligned! shader: {} misalign: {} slots: {}", shader_id, slot_align, sh.instance_slots);
+                }
                 dc.need_uniforms_now = false;
                 return dc.get_current_area();
             }

@@ -11,8 +11,7 @@ struct App{
     view:View<ScrollBar>,
     dock:Dock<MyItem, Splitter, TabControl>,
     ok:Elements<Button, usize>,
-    quad:Quad,
-    triangle:Triangle
+    quad:Quad
 }
  
 impl Style for App{
@@ -27,13 +26,11 @@ impl Style for App{
                 })),
                 ..Style::style(cx)
             },
+
             ok:Elements::new(Button{
                 ..Style::style(cx)  
             }),
             quad:Quad{
-                ..Style::style(cx)
-            },
-            triangle:Triangle{
                 ..Style::style(cx)
             },
             dock:Dock{
@@ -64,7 +61,11 @@ impl Style for App{
                                 DockTab{
                                     title:"BlueTab".to_string(),
                                     item:MyItem::Color(color("blue"))
-                                }
+                                },
+                                DockTab{
+                                    title:"GreenTab".to_string(),
+                                    item:MyItem::Color(color("green"))
+                                }      
                             ],
                         }),
                         last:Box::new(DockItem::Single(
@@ -81,7 +82,8 @@ impl App{
     fn handle_app(&mut self, cx:&mut Cx, event:&mut Event){
         self.view.handle_scroll_bars(cx, event);
         
-         // recursive item iteration        
+         // recursive item iteration        \
+         
         let mut dock_walker = self.dock.walker();
         while let Some(item) = dock_walker.walk_handle_dock(cx, event){
             match item{
@@ -109,8 +111,31 @@ impl App{
             ..Default::default()
         });
 
+/*
+        self.view1.begin_view(cx, &Layout{
+            width:Bounds::Scale(0.5),
+            height:Bounds::Scale(0.5),
+            ..Default::default()
+        });
 
-        // recursive item iteration        
+            self.quad.color = color("orange");
+            self.quad.draw_quad_walk(cx, Bounds::Fill, Bounds::Fill, Margin::zero());
+
+            self.view2.begin_view(cx, &Layout{
+                width:Bounds::Scale(0.5),
+                height:Bounds::Scale(0.5),
+                ..Default::default()
+            });
+            self.quad.color = color("pink");
+            self.quad.draw_quad_walk(cx, Bounds::Fill, Bounds::Fill, Margin::zero());
+
+            self.view2.end_view(cx);
+                println!("END");
+
+        self.view1.end_view(cx);
+*/
+        // recursive item iteration       
+        
         let mut dock_walker = self.dock.walker();
         while let Some(item) = dock_walker.walk_draw_dock(cx){
             match item{
@@ -123,6 +148,7 @@ impl App{
             }
         }
         
+        
 
        // self.quad.color = color("pink");
        // self.quad.draw_quad(cx, 250.,250.,100.,100.);
@@ -132,6 +158,7 @@ impl App{
 
         // draw scroll bars
         self.view.end_view(cx);
+       
     }
 }
 

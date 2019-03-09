@@ -131,8 +131,8 @@ impl Cx{
                     let time = to_wasm.mf64();
                     //log!(self, "{} o clock",time);
                     event_handler(self, &mut Event::Animate(AnimateEvent{time:time}));
-                    self.check_ended_animations(time);
-                    if self.ended_animations.len() > 0{
+                    self.check_ended_anim_areas(time);
+                    if self.ended_anim_areas.len() > 0{
                         event_handler(self, &mut Event::AnimationEnded(AnimateEvent{time:time}));
                     }
                 },
@@ -250,7 +250,7 @@ impl Cx{
         if !self.dirty_area.is_empty(){
             req_anim_frame = true
         }
-        else if self.animations.len()> 0 || self.paint_dirty{
+        else if self.playing_anim_areas.len()> 0 || self.paint_dirty{
             req_anim_frame = true
         }
         if req_anim_frame{

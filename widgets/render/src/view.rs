@@ -83,8 +83,8 @@ where TScrollBar: ScrollBarLike<TScrollBar> + Clone + ElementLife
             }
         }
 
+        cx.draw_list_stack.push(cx.current_draw_list_id);
         cx.current_draw_list_id = self.draw_list_id.unwrap();
-        cx.draw_list_stack.push(self.draw_list_id.unwrap());
         
         cx.begin_turtle(layout);
 
@@ -127,9 +127,6 @@ where TScrollBar: ScrollBarLike<TScrollBar> + Clone + ElementLife
     }
 
     pub fn end_view(&mut self, cx:&mut Cx)->Area{
-        // do scrollbars if need be
-        cx.draw_list_stack.pop();
-
         let draw_list_id = self.draw_list_id.unwrap();
         let view_area = Area::DrawList(DrawListArea{draw_list_id:draw_list_id});
 
@@ -147,6 +144,11 @@ where TScrollBar: ScrollBarLike<TScrollBar> + Clone + ElementLife
         let rect = cx.end_turtle();
         let draw_list = &mut cx.draw_lists[draw_list_id];
         draw_list.rect = rect;
+
+        // only now pop the drawlist
+        
+        cx.current_draw_list_id = cx.draw_list_stack.pop().unwrap();
+
         return view_area
     }
 }

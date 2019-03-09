@@ -84,6 +84,10 @@ where TItem: Clone,
                 DockItem::TabControl{current, tabs}=>{
                     if stack_top.counter == 0{
                         stack_top.counter += 1;
+                        stack_top.uid = self.walk_uid;
+                        self.walk_uid += 1;
+                        let tab_control = self.tab_controls.get(cx, stack_top.uid);
+                        tab_control.handle_tab_control(cx, event);
                         return Some(unsafe{mem::transmute(&mut tabs[*current].item)});
                     }
                     else{
@@ -132,6 +136,7 @@ where TItem: Clone,
     pub fn walk_draw_dock(&mut self, cx: &mut Cx)->Option<&'a mut TItem>{
         // lets get the current item on the stack
          let push_or_pop = if let Some(stack_top) = self.stack.last_mut(){
+           
             // return item 'count'
             match stack_top.item{
                 DockItem::Single(item)=>{
@@ -146,9 +151,20 @@ where TItem: Clone,
                 DockItem::TabControl{current, tabs}=>{
                     if stack_top.counter == 0{
                         stack_top.counter += 1;
+                        stack_top.uid = self.walk_uid;
+                        self.walk_uid += 1;
+                        let tab_control = self.tab_controls.get(cx, stack_top.uid);
+                        tab_control.begin_tabs(cx);
+                        for tab in tabs.iter(){
+                            tab_control.draw_tab(cx, &tab.title, false);
+                        }
+                        tab_control.end_tabs(cx);
+                        tab_control.begin_tab_page(cx);
                         return Some(unsafe{mem::transmute(&mut tabs[*current].item)});
                     }
                     else{
+                        let tab_control = self.tab_controls.get(cx, stack_top.uid);
+                        tab_control.end_tab_page(cx);
                         None
                     }
                 },

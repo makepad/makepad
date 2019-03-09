@@ -159,7 +159,6 @@ impl Tab{
         self.animator.last_push(cx, "bg.glow_size", self._bg_area);
 
         self.text.draw_text(cx, label);
-        
         self.bg.end_quad(cx);
 
         self.animator.set_area(cx, self._bg_area); // if our area changed, update animation

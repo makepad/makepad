@@ -146,7 +146,7 @@ impl Cx{
         ret
     }
 
-    pub fn turtle_newline(&mut self){
+    pub fn turtle_new_line(&mut self){
         if let Some(turtle) = self.turtles.last_mut(){
             match turtle.layout.direction{
                 Direction::Right=>{

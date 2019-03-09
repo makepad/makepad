@@ -41,6 +41,7 @@ impl Cx{
                     draw_call.resources.uni_dr.update_with_f32_data(device, &draw_call.uniforms);
                 }
 
+                // lets verify our instance_offset is not disaligned
                 let instances = (draw_call.instance.len() / shc.instance_slots
                 ) as u64;
                 if let Some(pipeline_state) = &shc.pipeline_state{
@@ -205,7 +206,7 @@ impl Cx{
                 let time_now = precise_time_ns();
                 let time = (time_now - start_time) as f64 / 1_000_000_000.0; // keeps the error as low as possible
                 event_handler(self, &mut Event::Animate(AnimateEvent{time:time}));
-                self.check_ended_animations(time);
+                self.check_ended_anim_areas(time);
                 if self.ended_anim_areas.len() > 0{
                     event_handler(self, &mut Event::AnimationEnded(AnimateEvent{time:time}));
                 }
