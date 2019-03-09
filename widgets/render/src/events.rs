@@ -162,14 +162,14 @@ impl Event{
     pub fn hits(&mut self, cx:&mut Cx, area:Area, hit_state:&mut HitState)->Event{
         match self{
             Event::Animate(_)=>{
-                for anim in &cx.animations{
+                for anim in &cx.playing_anim_areas{
                     if anim.area == area{
                         return self.clone()
                     }
                 }
             },
             Event::AnimationEnded(_)=>{
-                for anim in &cx.ended_animations{
+                for anim in &cx.ended_anim_areas{
                     if anim.area == area{
                         return self.clone()
                     }

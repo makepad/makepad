@@ -88,6 +88,8 @@ impl App{
                 MyItem::Color(_)=>{}
             }
         }
+        // lets fetch the docks events
+        //self.dock.handle_dock(cx, event)
 
         for (id,ok) in self.ok.ids(){
             if let ButtonEvent::Clicked = ok.handle_button(cx, event){
@@ -100,7 +102,7 @@ impl App{
 
     fn draw_app(&mut self, cx:&mut Cx){
         self.view.begin_view(cx, &Layout{
-            no_wrap:false,
+            line_wrap:LineWrap::None,
             width:Bounds::Fill,
             height:Bounds::Fill,
             padding:Padding::all(0.0),

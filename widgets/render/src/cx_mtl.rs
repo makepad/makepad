@@ -201,12 +201,12 @@ impl Cx{
                     }
                 }
             });
-            if self.animations.len() != 0{
+            if self.playing_anim_areas.len() != 0{
                 let time_now = precise_time_ns();
                 let time = (time_now - start_time) as f64 / 1_000_000_000.0; // keeps the error as low as possible
                 event_handler(self, &mut Event::Animate(AnimateEvent{time:time}));
                 self.check_ended_animations(time);
-                if self.ended_animations.len() > 0{
+                if self.ended_anim_areas.len() > 0{
                     event_handler(self, &mut Event::AnimationEnded(AnimateEvent{time:time}));
                 }
             }
@@ -236,7 +236,7 @@ impl Cx{
             }
             
             // wait for the next event blockingly so it stops eating power
-            if self.animations.len() == 0 && self.dirty_area.is_empty(){
+            if self.playing_anim_areas.len() == 0 && self.dirty_area.is_empty(){
                 events_loop.run_forever(|winit_event|{
                     let mut events = self.map_winit_event(winit_event, &glutin_window);
                     for mut event in &mut events{

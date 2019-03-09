@@ -9,36 +9,31 @@ pub struct AnimArea{
 }
 
 #[derive(Clone,Debug)]
-pub struct AnimState<T>{
-    pub id:T,
+pub struct Anim{
     pub mode:AnimMode,
     pub tracks:Vec<AnimTrack>
 }
 
 #[derive(Clone)]
-pub struct Animation<T>{
-    default_id:T,
-    current_id:T,
-    next_id:Option<T>,
+pub struct Anims{
+    pub default:Anim,
+    current:Option<Anim>,
+    next:Option<Anim>,
     area:Area,
-    pub last_float:Vec<(String, f32)>,
-    pub last_vec2:Vec<(String, Vec2)>,
-    pub last_vec3:Vec<(String, Vec3)>,
-    pub last_vec4:Vec<(String, Vec4)>,
-    pub states:Vec<AnimState<T>>
+    last_float:Vec<(String, f32)>,
+    last_vec2:Vec<(String, Vec2)>,
+    last_vec3:Vec<(String, Vec3)>,
+    last_vec4:Vec<(String, Vec4)>,
 }
 
-impl<T> Animation<T>
-where T: std::cmp::PartialEq + std::clone::Clone
-{
+impl Anims{
 
-    pub fn new(current_id:T, states:Vec<AnimState<T>>)->Animation<T>{
-        Animation{
-            default_id:current_id.clone(),
-            current_id:current_id.clone(),
-            next_id:None,
+    pub fn new(default:Anim)->Anims{
+        Anims{
+            default:default,
+            current:None,
+            next:None,
             area:Area::Empty,
-            states:states,
             last_float:Vec::new(),
             last_vec2:Vec::new(),
             last_vec3:Vec::new(),
@@ -46,110 +41,87 @@ where T: std::cmp::PartialEq + std::clone::Clone
         }
     }
 
-    pub fn change_state(&mut self, cx:&mut Cx, state_id:T){
-        let state_index_op = self.states.iter().position(|v| v.id == state_id);
-
-        if state_index_op.is_none(){
-            println!("Starting animation state does not exist in states");
-            return;
-        }
-        let state_index = state_index_op.unwrap();
-
-        for track in &mut self.states[state_index].tracks{
-           track.reset_cut_init();
-        }
-
+    pub fn play_anim(&mut self, cx:&mut Cx, anim:Anim){
+        
         // alright first we find area, it already exists
-        if let Some(anim) = cx.animations.iter_mut().find(|v| v.area == self.area){
+        if let Some(anim_area) = cx.playing_anim_areas.iter_mut().find(|v| v.area == self.area){
             //do we cut the animation in right now?
-            if self.states[state_index].mode.cut(){
-                anim.start_time = std::f64::NAN;
-                self.current_id = self.states[state_index].id.clone();
-                self.next_id = None;
-                anim.total_time = self.states[state_index].mode.total_time();
+            if anim.mode.cut(){
+                self.current = Some(anim);
+                anim_area.start_time = std::f64::NAN;
+                self.next = None;
+                anim_area.total_time = self.current.as_ref().unwrap().mode.total_time();
             }
             else{ // queue it
-                self.next_id = Some(self.states[state_index].id.clone());
-                let prev_anim_state = self.states.iter().find(|v| v.id == self.current_id).unwrap();
-                // lets ask an animation state how long it is
-                anim.total_time = prev_anim_state.mode.total_time() + self.states[state_index].mode.total_time()
+                self.next = Some(anim);
+                // lets ask an animation anim how long it is
+                anim_area.total_time = self.current.as_ref().unwrap().mode.total_time() + self.next.as_ref().unwrap().mode.total_time()
             }
         }
         else{ // its new
-            self.current_id = self.states[state_index].id.clone();
-            self.next_id = None;
-            cx.animations.push(AnimArea{
+            self.current = Some(anim);
+            self.next = None;
+            cx.playing_anim_areas.push(AnimArea{
                 area:self.area.clone(),
                 start_time:std::f64::NAN,
-                total_time:self.states[state_index].mode.total_time()
+                total_time:self.current.as_ref().unwrap().mode.total_time()
             })
         }
     }
 
-    pub fn state(&self)->T{
-        self.current_id.clone()
-    }
-
     pub fn set_area(&mut self, cx:&mut Cx, area:Area){
         // alright first we find area, it already exists
-        if let Some(anim) = cx.animations.iter_mut().find(|v| v.area == self.area){
+        if let Some(anim) = cx.playing_anim_areas.iter_mut().find(|v| v.area == self.area){
             anim.area = area.clone()
         }
         //TODO also update mousecaptures
         self.area = area.clone();
     }
 
-    pub fn fetch_calc_track(&mut self, cx:&mut Cx, ident:&str, time:f64)->Option<(f64,usize, usize)>{
+    pub fn fetch_calc_track(&mut self, cx:&mut Cx, ident:&str, time:f64)->Option<(f64, usize)>{
         // alright first we find area in running animations
-        let anim_index_opt = cx.animations.iter().position(|v| v.area == self.area);
+        let anim_index_opt = cx.playing_anim_areas.iter().position(|v| v.area == self.area);
         if anim_index_opt.is_none(){
             return None
         }
         let anim_index = anim_index_opt.unwrap();
 
         // initialize start time
-        if cx.animations[anim_index].start_time.is_nan(){
-            cx.animations[anim_index].start_time = time;
+        if cx.playing_anim_areas[anim_index].start_time.is_nan(){
+            cx.playing_anim_areas[anim_index].start_time = time;
         }
-        let mut start_time = cx.animations[anim_index].start_time;
+        let mut start_time = cx.playing_anim_areas[anim_index].start_time;
         
-        // fetch current state
-        let current_id = self.current_id.clone();
-        let current_index_opt = self.states.iter().position(|v| v.id == current_id);
-        if current_index_opt.is_none(){  // remove anim
-            cx.animations.remove(anim_index);
+        // fetch current anim
+        if self.current.is_none(){  // remove anim
+            cx.playing_anim_areas.remove(anim_index);
             return None
         }
-        let mut current_index = current_index_opt.unwrap();
         
-        let current_total_time = self.states[current_index].mode.total_time();
+        let current_total_time = self.current.as_ref().unwrap().mode.total_time();
 
         let current_time;
          
         // process queueing
-        if time - start_time >=  current_total_time && !self.next_id.is_none(){ // we are still here, check if we have a next state
-            let next_id = self.next_id.clone().unwrap();
-            let next_index = self.states.iter().position(|v| v.id == next_id).unwrap();
-            
-            self.current_id = next_id.clone();
-            self.next_id = None;
+        if time - start_time >=  current_total_time && !self.next.is_none(){ // we are still here, check if we have a next anim
+            self.current = self.next.clone();
+            self.next = None;
             // update animation slot
             start_time += current_total_time;
-            if let Some(anim) = cx.animations.iter_mut().find(|v| v.area == self.area){
+            if let Some(anim) = cx.playing_anim_areas.iter_mut().find(|v| v.area == self.area){
                 anim.start_time = start_time;
                 anim.total_time -= current_total_time;
             }
-            current_time = self.states[next_index].mode.compute_time(time - start_time);
-            current_index = next_index;
+            current_time = self.current.as_ref().unwrap().mode.compute_time(time - start_time);
         }
         else{
-            current_time = self.states[current_index].mode.compute_time(time - start_time);
+            current_time = self.current.as_ref().unwrap().mode.compute_time(time - start_time);
         }
 
         // find our track
-        for (track_index, track) in &mut self.states[current_index].tracks.iter().enumerate(){
+        for (track_index, track) in &mut self.current.as_ref().unwrap().tracks.iter().enumerate(){
             if track.ident() == ident{
-                return Some((current_time, current_index, track_index));
+                return Some((current_time, track_index));
             }
         }
         None
@@ -158,8 +130,8 @@ where T: std::cmp::PartialEq + std::clone::Clone
     pub fn calc_float(&mut self, cx:&mut Cx, ident:&str, time:f64)->f32{
         let last = self.last_float(ident);
         let mut ret = last;
-        if let Some((time, state_index, track_index)) = self.fetch_calc_track(cx, ident, time){
-            if let AnimTrack::Float(ft) = &mut self.states[state_index].tracks[track_index]{
+        if let Some((time, track_index)) = self.fetch_calc_track(cx, ident, time){
+            if let AnimTrack::Float(ft) = &mut self.current.as_mut().unwrap().tracks[track_index]{
                 ret = AnimTrack::compute_track_value::<f32>(time, &ft.track, &mut ft.cut_init, last, &ft.ease);
             }
         }
@@ -172,14 +144,10 @@ where T: std::cmp::PartialEq + std::clone::Clone
             return *v;
         }
         // we dont have a last float, find it in the tracks
-        let current_state_opt = self.states.iter().find(|v| v.id == self.default_id);
-        if !current_state_opt.is_none(){ 
-            let current_state = current_state_opt.unwrap();
-            if let Some(track) = current_state.tracks.iter().find(|tr| tr.ident() == ident){
-                if let AnimTrack::Float(ft) = track{
-                    if ft.track.len()>0{ // grab the last key in the track
-                        return ft.track.last().unwrap().1
-                    }
+        if let Some(track) = self.default.tracks.iter().find(|tr| tr.ident() == ident){
+            if let AnimTrack::Float(ft) = track{
+                if ft.track.len()>0{ // grab the last key in the track
+                    return ft.track.last().unwrap().1
                 }
             }
         }
@@ -198,8 +166,8 @@ where T: std::cmp::PartialEq + std::clone::Clone
     pub fn calc_vec2(&mut self, cx:&mut Cx, ident:&str, time:f64)->Vec2{
         let last = self.last_vec2(ident);
         let mut ret = last;
-        if let Some((time, state_index, track_index)) = self.fetch_calc_track(cx, ident, time){
-            if let AnimTrack::Vec2(ft) = &mut self.states[state_index].tracks[track_index]{
+        if let Some((time, track_index)) = self.fetch_calc_track(cx, ident, time){
+            if let AnimTrack::Vec2(ft) = &mut self.current.as_mut().unwrap().tracks[track_index]{
                 ret =  AnimTrack::compute_track_value::<Vec2>(time, &ft.track, &mut ft.cut_init, last, &ft.ease);
             }
         }
@@ -212,14 +180,10 @@ where T: std::cmp::PartialEq + std::clone::Clone
             return *v;
         }
         // we dont have a last float, find it in the tracks
-        let current_state_opt = self.states.iter().find(|v| v.id == self.default_id);
-        if !current_state_opt.is_none(){ 
-            let current_state = current_state_opt.unwrap();
-            if let Some(track) = current_state.tracks.iter().find(|tr| tr.ident() == ident){
-                if let AnimTrack::Vec2(ft) = track{
-                    if ft.track.len()>0{ // grab the last key in the track
-                        return ft.track.last().unwrap().1
-                    }
+        if let Some(track) = self.default.tracks.iter().find(|tr| tr.ident() == ident){
+            if let AnimTrack::Vec2(ft) = track{
+                if ft.track.len()>0{ // grab the last key in the track
+                    return ft.track.last().unwrap().1
                 }
             }
         }
@@ -238,8 +202,8 @@ where T: std::cmp::PartialEq + std::clone::Clone
     pub fn calc_vec3(&mut self, cx:&mut Cx, ident:&str, time:f64)->Vec3{
         let last = self.last_vec3(ident);
         let mut ret = last;
-        if let Some((time, state_index, track_index)) = self.fetch_calc_track(cx, ident, time){
-            if let AnimTrack::Vec3(ft) = &mut self.states[state_index].tracks[track_index]{
+        if let Some((time, track_index)) = self.fetch_calc_track(cx, ident, time){
+            if let AnimTrack::Vec3(ft) = &mut self.current.as_mut().unwrap().tracks[track_index]{
                 ret =  AnimTrack::compute_track_value::<Vec3>(time, &ft.track, &mut ft.cut_init, last, &ft.ease);
             }
         }
@@ -252,14 +216,10 @@ where T: std::cmp::PartialEq + std::clone::Clone
             return *v;
         }
         // we dont have a last float, find it in the tracks
-        let current_state_opt = self.states.iter().find(|v| v.id == self.default_id);
-        if !current_state_opt.is_none(){ 
-            let current_state = current_state_opt.unwrap();
-            if let Some(track) = current_state.tracks.iter().find(|tr| tr.ident() == ident){
-                if let AnimTrack::Vec3(ft) = track{
-                    if ft.track.len()>0{ // grab the last key in the track
-                        return ft.track.last().unwrap().1
-                    }
+        if let Some(track) = self.default.tracks.iter().find(|tr| tr.ident() == ident){
+            if let AnimTrack::Vec3(ft) = track{
+                if ft.track.len()>0{ // grab the last key in the track
+                    return ft.track.last().unwrap().1
                 }
             }
         }
@@ -278,8 +238,8 @@ where T: std::cmp::PartialEq + std::clone::Clone
     pub fn calc_vec4(&mut self, cx:&mut Cx, ident:&str, time:f64)->Vec4{
         let last = self.last_vec4(ident);
         let mut ret = last;
-        if let Some((time, state_index, track_index)) = self.fetch_calc_track(cx, ident, time){
-            if let AnimTrack::Vec4(ft) = &mut self.states[state_index].tracks[track_index]{
+        if let Some((time, track_index)) = self.fetch_calc_track(cx, ident, time){
+            if let AnimTrack::Vec4(ft) = &mut self.current.as_mut().unwrap().tracks[track_index]{
                 ret =  AnimTrack::compute_track_value::<Vec4>(time, &ft.track, &mut ft.cut_init, last, &ft.ease);
             }
         }
@@ -292,14 +252,10 @@ where T: std::cmp::PartialEq + std::clone::Clone
             return *v;
         }
         // we dont have a last float, find it in the tracks
-        let current_state_opt = self.states.iter().find(|v| v.id == self.default_id);
-        if !current_state_opt.is_none(){ 
-            let current_state = current_state_opt.unwrap();
-            if let Some(track) = current_state.tracks.iter().find(|tr| tr.ident() == ident){
-                if let AnimTrack::Vec4(ft) = track{
-                    if ft.track.len()>0{ // grab the last key in the track
-                        return ft.track.last().unwrap().1
-                    }
+        if let Some(track) = self.default.tracks.iter().find(|tr| tr.ident() == ident){
+            if let AnimTrack::Vec4(ft) = track{
+                if ft.track.len()>0{ // grab the last key in the track
+                    return ft.track.last().unwrap().1
                 }
             }
         }
@@ -319,17 +275,17 @@ where T: std::cmp::PartialEq + std::clone::Clone
         if let Some(dot) = ident.find('.'){
             let field = ident.get((dot+1)..ident.len()).unwrap();
 
-            if let Some((time, state_index, track_index)) = self.fetch_calc_track(cx, ident, time){
-                let slots = match &mut self.states[state_index].tracks[track_index]{
-                    AnimTrack::Vec4(_)=>{4}
-                    AnimTrack::Vec3(_)=>{3}
-                    AnimTrack::Vec2(_)=>{2}
-                    AnimTrack::Float(_)=>{1}
+            if let Some((time, track_index)) = self.fetch_calc_track(cx, ident, time){
+                let slots = match &mut self.current.as_mut().unwrap().tracks[track_index]{
+                    AnimTrack::Vec4(_)=>4,
+                    AnimTrack::Vec3(_)=>3,
+                    AnimTrack::Vec2(_)=>2,
+                    AnimTrack::Float(_)=>1
                 };
                 match slots {
                     4=>{
                         let init = self.last_vec4(ident);
-                        let ret = if let AnimTrack::Vec4(ft) = &mut self.states[state_index].tracks[track_index]{
+                        let ret = if let AnimTrack::Vec4(ft) = &mut self.current.as_mut().unwrap().tracks[track_index]{
                             AnimTrack::compute_track_value::<Vec4>(time, &ft.track, &mut ft.cut_init, init, &ft.ease)
                         }
                         else{
@@ -340,7 +296,7 @@ where T: std::cmp::PartialEq + std::clone::Clone
                     },
                     3=>{
                         let init = self.last_vec3(ident);
-                        let ret = if let AnimTrack::Vec3(ft) = &mut self.states[state_index].tracks[track_index]{
+                        let ret = if let AnimTrack::Vec3(ft) = &mut self.current.as_mut().unwrap().tracks[track_index]{
                             AnimTrack::compute_track_value::<Vec3>(time, &ft.track, &mut ft.cut_init, init, &ft.ease)
                         }
                         else{
@@ -351,7 +307,7 @@ where T: std::cmp::PartialEq + std::clone::Clone
                     },
                     2=>{
                         let init = self.last_vec2(ident);
-                        let ret = if let AnimTrack::Vec2(ft) = &mut self.states[state_index].tracks[track_index]{
+                        let ret = if let AnimTrack::Vec2(ft) = &mut self.current.as_mut().unwrap().tracks[track_index]{
                             AnimTrack::compute_track_value::<Vec2>(time, &ft.track, &mut ft.cut_init, init, &ft.ease)
                         }
                         else{
@@ -362,7 +318,7 @@ where T: std::cmp::PartialEq + std::clone::Clone
                     },
                     1=>{
                         let init = self.last_float(ident);
-                        let ret = if let AnimTrack::Float(ft) = &mut self.states[state_index].tracks[track_index]{
+                        let ret = if let AnimTrack::Float(ft) = &mut self.current.as_mut().unwrap().tracks[track_index]{
                             AnimTrack::compute_track_value::<f32>(time, &ft.track, &mut ft.cut_init, init, &ft.ease)
                         }
                         else{
@@ -382,13 +338,11 @@ where T: std::cmp::PartialEq + std::clone::Clone
         if let Some(dot) = area_name.find('.'){
             let field = area_name.get((dot+1)..area_name.len()).unwrap();
 
-            let current_state_opt = self.states.iter().find(|v| v.id == self.current_id);
-            if current_state_opt.is_none(){
+            if self.current.is_none(){
                 return;
             }
-            let current_state = current_state_opt.unwrap();
 
-            for track in &current_state.tracks{
+            for track in &self.current.as_ref().unwrap().tracks{
                 if track.ident() == area_name{
                     match track{
                         AnimTrack::Vec4(_)=>{
@@ -986,10 +940,9 @@ impl AnimTrack{
     }
 }
 
-impl<T> AnimState<T>{
-    pub fn new(id:T, mode:AnimMode, tracks:Vec<AnimTrack>)->AnimState<T>{
-        AnimState{
-            id:id,
+impl Anim{
+    pub fn new(mode:AnimMode, tracks:Vec<AnimTrack>)->Anim{
+        Anim{
             mode:mode,
             tracks:tracks
         }

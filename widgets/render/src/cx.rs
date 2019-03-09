@@ -9,7 +9,7 @@ pub use crate::events::*;
 pub use crate::shader::*;
 pub use crate::colors::*;
 pub use crate::elements::*;
-pub use crate::animation::*;
+pub use crate::anims::*;
 pub use crate::area::*;
 pub use crate::view::*;
 pub use crate::style::*;
@@ -64,8 +64,8 @@ pub struct Cx{
     pub captured_fingers:Vec<Area>,
     pub fingers_down:Vec<bool>,
 
-    pub animations:Vec<AnimArea>,
-    pub ended_animations:Vec<AnimArea>,
+    pub playing_anim_areas:Vec<AnimArea>,
+    pub ended_anim_areas:Vec<AnimArea>,
 
     pub resources:CxResources,
 
@@ -118,8 +118,8 @@ impl Default for Cx{
             captured_fingers:captured_fingers,
             fingers_down:fingers_down,
 
-            animations:Vec::new(),
-            ended_animations:Vec::new(),
+            playing_anim_areas:Vec::new(),
+            ended_anim_areas:Vec::new(),
 
             style: StyleSheet{..Default::default()},
 
@@ -200,16 +200,16 @@ impl Cx{
 
     pub fn check_ended_animations(&mut self, time:f64){
         let mut i = 0;
-        self.ended_animations.truncate(0);
+        self.ended_anim_areas.truncate(0);
         loop{
-            if i >= self.animations.len(){
+            if i >= self.playing_anim_areas.len(){
                 break
             }
-            let anim_start_time =self.animations[i].start_time;
-            let anim_total_time =self.animations[i].total_time;
+            let anim_start_time =self.playing_anim_areas[i].start_time;
+            let anim_total_time =self.playing_anim_areas[i].total_time;
             
             if time - anim_start_time >= anim_total_time{
-                self.ended_animations.push(self.animations.remove(i));
+                self.ended_anim_areas.push(self.playing_anim_areas.remove(i));
             }
             else{
                 i = i + 1;

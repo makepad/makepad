@@ -2,36 +2,28 @@ use render::*;
 
 #[derive(Clone, Element)]
 pub struct Button{
-    pub hit_state:HitState,
-
-    pub bg_area:Area,
-    pub layout:Layout,
     pub bg: Quad,
-
+    pub bg_layout:Layout,
     pub text: Text,
 
-    pub anim:Animation<ButtonState>,
-    pub is_down:bool,
-    pub label:String
-}
+    pub anims:Anims,
+    pub anim_over:Anim,
+    pub anim_down:Anim,
 
-#[derive(Clone, PartialEq)]
-pub enum ButtonState{
-    Default, 
-    Over,
-    Down
+    pub _hit_state:HitState,
+    pub _is_down:bool,
+    pub _bg_area:Area,
 }
 
 impl Style for Button{
     fn style(cx:&mut Cx)->Self{
         let bg_sh = Self::def_bg_shader(cx);
         Self{
-            hit_state:HitState{
-                ..Default::default()
+            bg:Quad{
+                shader_id:cx.add_shader(bg_sh),
+                ..Style::style(cx)
             },
-            is_down:false,
-            bg_area:Area::Empty,
-            layout:Layout{
+            bg_layout:Layout{
                 align:Align::center(),
                 width:Bounds::Compute,
                 height:Bounds::Compute,
@@ -39,59 +31,38 @@ impl Style for Button{
                 padding:Padding{l:16.0,t:14.0,r:16.0,b:14.0},
                 ..Default::default()
             },
-            label:"OK".to_string(),
-            anim:Animation::new(
-                ButtonState::Default,
-                vec![
-                    AnimState::new(
-                        ButtonState::Default,
-                        AnimMode::Cut{duration:0.5}, 
-                        vec![
-                            AnimTrack::to_vec4("bg.color",cx.style.bg_normal),
-                            AnimTrack::to_float("bg.glow_size",0.0),
-                            AnimTrack::to_vec4("bg.border_color",cx.style.text_lo),
-                            AnimTrack::to_vec4("text.color",cx.style.text_med),
-                            AnimTrack::to_vec4("icon.color",cx.style.text_med)
-                        ]
-                    ),
-                    AnimState::new(
-                        ButtonState::Over,
-                        AnimMode::Cut{duration:0.05}, 
-                        vec![
-                            AnimTrack::to_vec4("bg.color", cx.style.bg_top),
-                            AnimTrack::to_vec4("bg.border_color", color("white")),
-                            AnimTrack::to_float("bg.glow_size", 1.0)
-                        ]
-                    ),
-                    AnimState::new(
-                        ButtonState::Down,
-                        AnimMode::Cut{duration:0.2}, 
-                        vec![
-                            AnimTrack::vec4("bg.border_color", Ease::Linear, vec![
-                                (0.0, color("white")),
-                                (1.0, color("white"))
-                            ]),
-                            AnimTrack::vec4("bg.color", Ease::Linear, vec![
-                                (0.0, color("#f")),
-                                (1.0, color("#6"))
-                            ]),
-                            AnimTrack::float("bg.glow_size", Ease::Linear, vec![
-                                (0.0, 1.0),
-                                (1.0, 1.0)
-                            ]),
-                            AnimTrack::vec4("icon.color", Ease::Linear, vec![
-                                (0.0, color("#0")),
-                                (1.0, color("#f")),
-                            ]),
-                        ]
-                    ) 
-                ]
-            ),
-            bg:Quad{
-                shader_id:cx.add_shader(bg_sh),
-                ..Style::style(cx)
-            },
-            text:Text{..Style::style(cx)}
+            text:Text{..Style::style(cx)},
+
+            anims:Anims::new(Anim::new(AnimMode::Cut{duration:0.5}, vec![
+                AnimTrack::to_vec4("bg.color", cx.style.bg_normal),
+                AnimTrack::to_float("bg.glow_size", 0.0),
+                AnimTrack::to_vec4("bg.border_color", cx.style.text_lo),
+                AnimTrack::to_vec4("text.color", cx.style.text_med),
+                AnimTrack::to_vec4("icon.color", cx.style.text_med)
+            ])),
+            anim_over:Anim::new(AnimMode::Cut{duration:0.05}, vec![
+                AnimTrack::to_vec4("bg.color", cx.style.bg_top),
+                AnimTrack::to_vec4("bg.border_color", color("white")),
+                AnimTrack::to_float("bg.glow_size", 1.0)
+            ]),
+            anim_down:Anim::new(AnimMode::Cut{duration:0.2}, vec![
+                AnimTrack::vec4("bg.border_color", Ease::Linear, vec![
+                    (0.0, color("white")),(1.0, color("white"))
+                ]),
+                AnimTrack::vec4("bg.color", Ease::Linear, vec![
+                    (0.0, color("#f")),(1.0, color("#6"))
+                ]),
+                AnimTrack::float("bg.glow_size", Ease::Linear, vec![
+                    (0.0, 1.0),(1.0, 1.0)
+                ]),
+                AnimTrack::vec4("icon.color", Ease::Linear, vec![
+                    (0.0, color("#0")),(1.0, color("#f")),
+                ]),
+            ]),
+
+            _hit_state:HitState{..Default::default()},
+            _is_down:false,
+            _bg_area:Area::Empty,
         }
     }
 }
@@ -130,18 +101,18 @@ impl Button{
 
     pub fn handle_button(&mut self, cx:&mut Cx, event:&mut Event)->ButtonEvent{
         let mut ret_event = ButtonEvent::None;
-        match event.hits(cx, self.bg_area, &mut self.hit_state){
+        match event.hits(cx, self._bg_area, &mut self._hit_state){
             Event::Animate(ae)=>{
 
-                self.anim.calc_area(cx, "bg.color", ae.time, self.bg_area);
-                self.anim.calc_area(cx, "bg.border_color", ae.time, self.bg_area);
+                self.anims.calc_area(cx, "bg.color", ae.time, self._bg_area);
+                self.anims.calc_area(cx, "bg.border_color", ae.time, self._bg_area);
                 
-                self.anim.calc_area(cx, "bg.glow_size", ae.time, self.bg_area);
+                self.anims.calc_area(cx, "bg.glow_size", ae.time, self._bg_area);
             },
             Event::FingerDown(_fe)=>{
                 ret_event = ButtonEvent::Down;
-                self.is_down = true;
-                self.anim.change_state(cx, ButtonState::Down);
+                self._is_down = true;
+                self.anims.play_anim(cx, self.anim_down.clone());
                 cx.set_down_mouse_cursor(MouseCursor::Crosshair);
             },
             Event::FingerHover(fe)=>{
@@ -149,32 +120,32 @@ impl Button{
 
                 match fe.hover_state{
                     HoverState::In=>{
-                        if self.is_down{
-                            self.anim.change_state(cx, ButtonState::Down);
+                        if self._is_down{
+                            self.anims.play_anim(cx, self.anim_down.clone());
                         }
                         else{
-                            self.anim.change_state(cx, ButtonState::Over);
+                            self.anims.play_anim(cx, self.anim_over.clone());
                         }
                     },
                     HoverState::Out=>{
-                        self.anim.change_state(cx, ButtonState::Default);
+                        self.anims.play_anim(cx, self.anims.default.clone());
                     },
                     _=>()
                 }
             },
             Event::FingerUp(fe)=>{
-                self.is_down = false;
+                self._is_down = false;
                 if fe.is_over{
                     if !fe.is_touch{
-                        self.anim.change_state(cx, ButtonState::Over);
+                        self.anims.play_anim(cx, self.anim_over.clone());
                     }
                     else{
-                        self.anim.change_state(cx, ButtonState::Default);
+                        self.anims.play_anim(cx, self.anims.default.clone());
                     }
                     ret_event = ButtonEvent::Clicked;
                 }
                 else{
-                    self.anim.change_state(cx, ButtonState::Default);
+                    self.anims.play_anim(cx, self.anims.default.clone());
                 }
             },
             _=>()
@@ -185,16 +156,16 @@ impl Button{
     pub fn draw_button_with_label(&mut self, cx:&mut Cx, label: &str){
 
         // pull the bg color from our animation system, uses 'default' value otherwise
-        self.bg.color = self.anim.last_vec4("bg.color");
-        self.bg_area = self.bg.begin_quad(cx, &self.layout);
+        self.bg.color = self.anims.last_vec4("bg.color");
+        self._bg_area = self.bg.begin_quad(cx, &self.bg_layout);
         // push the 2 vars we added to bg shader
-        self.anim.last_push(cx, "bg.border_color", self.bg_area);
-        self.anim.last_push(cx, "bg.glow_size", self.bg_area);
+        self.anims.last_push(cx, "bg.border_color", self._bg_area);
+        self.anims.last_push(cx, "bg.glow_size", self._bg_area);
 
         self.text.draw_text(cx, label);
         
         self.bg.end_quad(cx);
 
-        self.anim.set_area(cx, self.bg_area); // if our area changed, update animation
+        self.anims.set_area(cx, self._bg_area); // if our area changed, update animation
     }
 }

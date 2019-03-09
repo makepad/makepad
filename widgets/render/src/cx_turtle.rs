@@ -71,16 +71,22 @@ impl Cx{
         let ret = if let Some(turtle) = self.turtles.last_mut(){
             let (x,y) = match turtle.layout.direction{
                 Direction::Right=>{
-                    if !turtle.layout.no_wrap && (turtle.walk_x + margin.l + w) >
-                        (turtle.start_x + turtle.width - turtle.layout.padding.r){
-                        // what is the move delta. 
-                        let old_x = turtle.walk_x;
-                        let old_y = turtle.walk_y;
-                        turtle.walk_x = turtle.start_x + turtle.layout.padding.l;
-                        turtle.walk_y += turtle.biggest;
-                        turtle.biggest = 0.0;
-                        align_dx = turtle.walk_x - old_x;
-                        align_dy = turtle.walk_y - old_y;
+                    match turtle.layout.line_wrap{
+                        LineWrap::NewLine=>{
+                             if (turtle.walk_x + margin.l + w) >
+                                (turtle.start_x + turtle.width - turtle.layout.padding.r){
+                                // what is the move delta. 
+                                let old_x = turtle.walk_x;
+                                let old_y = turtle.walk_y;
+                                turtle.walk_x = turtle.start_x + turtle.layout.padding.l;
+                                turtle.walk_y += turtle.biggest;
+                                turtle.biggest = 0.0;
+                                align_dx = turtle.walk_x - old_x;
+                                align_dy = turtle.walk_y - old_y;
+                            }
+                        },
+                        LineWrap::None=>{
+                        }
                     }
 
                     let x = turtle.walk_x + margin.l;
@@ -551,13 +557,24 @@ impl Default for Axis{
     }
 }
 
+#[derive(Clone)]
+pub enum LineWrap{
+    None,
+    NewLine
+}
+impl Default for LineWrap{
+    fn default()->Self{
+        LineWrap::None
+    }
+}
+
 #[derive(Clone, Default)]
 pub struct Layout{
     pub margin:Margin,
     pub padding:Padding,
     pub align:Align,
     pub direction:Direction,
-    pub no_wrap:bool,
+    pub line_wrap:LineWrap,
     pub abs_x:Option<f32>,
     pub abs_y:Option<f32>,
     pub width:Bounds,
