@@ -9,7 +9,7 @@ pub struct TabControl{
     pub tabs:Elements<Tab, String>,
     pub drag_tab:Element<Tab>,
     pub hover:Quad,
-    pub anims:Anims,
+    pub animator:Animator,
 
     pub tab_dock_height:f32
 }
@@ -56,7 +56,7 @@ impl Style for TabControl{
                 color:color("purple"),
                 ..Style::style(cx)
             },
-            anims:Anims::new(Anim::new(AnimMode::Cut{duration:0.5}, vec![])),
+            animator:Animator::new(Anim::new(AnimMode::Cut{duration:0.5}, vec![])),
         }
     }
 }

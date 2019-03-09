@@ -21,7 +21,7 @@ mod cx;
 mod cx_turtle;
 mod cx_fonts;
 mod cx_mouse_cursor;
-mod anims;
+mod animator;
 mod elements;
 mod math;
 mod colors;

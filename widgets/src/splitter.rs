@@ -9,7 +9,7 @@ pub struct Splitter{
     pub min_size:f32,
     pub split_size:f32,
     pub split: Quad,
-    pub anims:Anims,
+    pub animator:Animator,
     pub anim_over:Anim,
     pub anim_moving:Anim,
 
@@ -68,7 +68,7 @@ impl Style for Splitter{
                 ..Style::style(cx)
             },
 
-            anims:Anims::new(Anim::new(AnimMode::Cut{duration:0.5},vec![
+            animator:Animator::new(Anim::new(AnimMode::Cut{duration:0.5},vec![
                 AnimTrack::to_vec4("split.color",cx.style.bg_normal),
             ])),
             anim_over:Anim::new(AnimMode::Cut{duration:0.05}, vec![
@@ -108,11 +108,11 @@ impl SplitterLike for Splitter{
         let mut ret_event = SplitterEvent::None;
         match event.hits(cx, self._split_area, &mut self._hit_state){
             Event::Animate(ae)=>{
-                self.anims.calc_area(cx, "split.color", ae.time, self._split_area);
+                self.animator.calc_area(cx, "split.color", ae.time, self._split_area);
             },
             Event::FingerDown(fe)=>{
                 self._is_moving = true;
-                self.anims.play_anim(cx, self.anim_moving.clone());
+                self.animator.play_anim(cx, self.anim_moving.clone());
                 match self.axis{
                     Axis::Horizontal=>cx.set_down_mouse_cursor(MouseCursor::RowResize),
                     Axis::Vertical=>cx.set_down_mouse_cursor(MouseCursor::ColResize)
@@ -131,10 +131,10 @@ impl SplitterLike for Splitter{
                 if !self._is_moving{
                     match fe.hover_state{
                         HoverState::In=>{
-                            self.anims.play_anim(cx, self.anim_over.clone());
+                            self.animator.play_anim(cx, self.anim_over.clone());
                         },
                         HoverState::Out=>{
-                            self.anims.play_anim(cx, self.anims.default.clone());
+                            self.animator.play_anim(cx, self.animator.default.clone());
                         },
                         _=>()
                     }
@@ -144,14 +144,14 @@ impl SplitterLike for Splitter{
                 self._is_moving = false;
                 if fe.is_over{
                     if !fe.is_touch{
-                        self.anims.play_anim(cx, self.anim_over.clone());
+                        self.animator.play_anim(cx, self.anim_over.clone());
                     }
                     else{
-                        self.anims.play_anim(cx, self.anims.default.clone());
+                        self.animator.play_anim(cx, self.animator.default.clone());
                     }
                 }
                 else{
-                    self.anims.play_anim(cx, self.anims.default.clone());
+                    self.animator.play_anim(cx, self.animator.default.clone());
                 }
             },
             Event::FingerMove(fe)=>{
@@ -258,7 +258,7 @@ impl SplitterLike for Splitter{
         cx.end_turtle();
         // draw the splitter in the middle of the turtle
         let rect = cx.turtle_rect();
-        self.split.color = self.anims.last_vec4("split.color");
+        self.split.color = self.animator.last_vec4("split.color");
         match self.axis{
             Axis::Horizontal=>{
                 self._split_area = self.split.draw_quad(cx, 0., self._calc_pos, rect.w, self.split_size);
@@ -269,6 +269,6 @@ impl SplitterLike for Splitter{
                 self._drag_max_pos = rect.w;
             }
        };
-       self.anims.set_area(cx, self._split_area);
+       self.animator.set_area(cx, self._split_area);
     }
 }

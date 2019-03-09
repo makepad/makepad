@@ -9,7 +9,7 @@ pub use crate::events::*;
 pub use crate::shader::*;
 pub use crate::colors::*;
 pub use crate::elements::*;
-pub use crate::anims::*;
+pub use crate::animator::*;
 pub use crate::area::*;
 pub use crate::view::*;
 pub use crate::style::*;

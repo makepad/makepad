@@ -7,7 +7,7 @@ pub struct ScrollBar{
     pub bar_size:f32,
     pub min_handle_size:f32, //minimum size of the handle in pixels
     pub axis:Axis,
-    pub anims:Anims,
+    pub animator:Animator,
     pub anim_over:Anim,
     pub anim_scrolling:Anim,
 
@@ -30,7 +30,7 @@ impl Style for ScrollBar{
             min_handle_size:140.0,
 
             axis:Axis::Horizontal,
-            anims:Anims::new(Anim::new(AnimMode::Cut{duration:0.5}, vec![
+            animator:Animator::new(Anim::new(AnimMode::Cut{duration:0.5}, vec![
                 AnimTrack::to_vec4("sb.color",color("#5"))
             ])),
             anim_over:Anim::new(AnimMode::Cut{duration:0.05}, vec![
@@ -201,10 +201,10 @@ impl ScrollBarLike<ScrollBar> for ScrollBar{
         if self._visible{
             match event.hits(cx, self._sb_area, &mut self._hit_state){
                 Event::Animate(ae)=>{
-                    self.anims.calc_area(cx, "sb.color", ae.time, self._sb_area);
+                    self.animator.calc_area(cx, "sb.color", ae.time, self._sb_area);
                 },
                 Event::FingerDown(fe)=>{
-                    self.anims.play_anim(cx, self.anim_scrolling.clone());
+                    self.animator.play_anim(cx, self.anim_scrolling.clone());
 
                     match self.axis{
                         Axis::Horizontal=>{
@@ -239,10 +239,10 @@ impl ScrollBarLike<ScrollBar> for ScrollBar{
                     if self._drag_point.is_none(){
                         match fe.hover_state{
                             HoverState::In=>{
-                                self.anims.play_anim(cx, self.anim_over.clone());
+                                self.animator.play_anim(cx, self.anim_over.clone());
                             },
                             HoverState::Out=>{
-                                self.anims.play_anim(cx, self.anims.default.clone());
+                                self.animator.play_anim(cx, self.animator.default.clone());
                             },
                             _=>()
                         }
@@ -253,14 +253,14 @@ impl ScrollBarLike<ScrollBar> for ScrollBar{
                     self._drag_point = None;
                     if fe.is_over{
                         if !fe.is_touch{
-                            self.anims.play_anim(cx, self.anim_over.clone());
+                            self.animator.play_anim(cx, self.anim_over.clone());
                         }
                         else{
-                            self.anims.play_anim(cx, self.anims.default.clone());
+                            self.animator.play_anim(cx, self.animator.default.clone());
                         }
                     }
                     else{
-                        self.anims.play_anim(cx, self.anims.default.clone());
+                        self.animator.play_anim(cx, self.animator.default.clone());
                     }
                 },
                 Event::FingerMove(fe)=>{
@@ -296,7 +296,7 @@ impl ScrollBarLike<ScrollBar> for ScrollBar{
 
     fn draw_scroll_bar(&mut self, cx:&mut Cx, axis:Axis, view_area:Area, view_rect:Rect, view_total:Vec2){
         // pull the bg color from our animation system, uses 'default' value otherwise
-        self.sb.color = self.anims.last_vec4("sb.color");
+        self.sb.color = self.animator.last_vec4("sb.color");
         self._view_area = view_area;
         self.axis = axis;
 
@@ -351,6 +351,6 @@ impl ScrollBarLike<ScrollBar> for ScrollBar{
         self._sb_area.push_float(cx, "norm_handle", norm_handle);
         self._sb_area.push_float(cx, "norm_scroll", norm_scroll);
 
-        self.anims.set_area(cx, self._sb_area); // if our area changed, update animation
+        self.animator.set_area(cx, self._sb_area); // if our area changed, update animation
     }
 }

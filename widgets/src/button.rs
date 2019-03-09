@@ -6,7 +6,7 @@ pub struct Button{
     pub bg_layout:Layout,
     pub text: Text,
 
-    pub anims:Anims,
+    pub animator:Animator,
     pub anim_over:Anim,
     pub anim_down:Anim,
 
@@ -33,7 +33,7 @@ impl Style for Button{
             },
             text:Text{..Style::style(cx)},
 
-            anims:Anims::new(Anim::new(AnimMode::Cut{duration:0.5}, vec![
+            animator:Animator::new(Anim::new(AnimMode::Cut{duration:0.5}, vec![
                 AnimTrack::to_vec4("bg.color", cx.style.bg_normal),
                 AnimTrack::to_float("bg.glow_size", 0.0),
                 AnimTrack::to_vec4("bg.border_color", cx.style.text_lo),
@@ -104,15 +104,15 @@ impl Button{
         match event.hits(cx, self._bg_area, &mut self._hit_state){
             Event::Animate(ae)=>{
 
-                self.anims.calc_area(cx, "bg.color", ae.time, self._bg_area);
-                self.anims.calc_area(cx, "bg.border_color", ae.time, self._bg_area);
+                self.animator.calc_area(cx, "bg.color", ae.time, self._bg_area);
+                self.animator.calc_area(cx, "bg.border_color", ae.time, self._bg_area);
                 
-                self.anims.calc_area(cx, "bg.glow_size", ae.time, self._bg_area);
+                self.animator.calc_area(cx, "bg.glow_size", ae.time, self._bg_area);
             },
             Event::FingerDown(_fe)=>{
                 ret_event = ButtonEvent::Down;
                 self._is_down = true;
-                self.anims.play_anim(cx, self.anim_down.clone());
+                self.animator.play_anim(cx, self.anim_down.clone());
                 cx.set_down_mouse_cursor(MouseCursor::Crosshair);
             },
             Event::FingerHover(fe)=>{
@@ -121,14 +121,14 @@ impl Button{
                 match fe.hover_state{
                     HoverState::In=>{
                         if self._is_down{
-                            self.anims.play_anim(cx, self.anim_down.clone());
+                            self.animator.play_anim(cx, self.anim_down.clone());
                         }
                         else{
-                            self.anims.play_anim(cx, self.anim_over.clone());
+                            self.animator.play_anim(cx, self.anim_over.clone());
                         }
                     },
                     HoverState::Out=>{
-                        self.anims.play_anim(cx, self.anims.default.clone());
+                        self.animator.play_anim(cx, self.animator.default.clone());
                     },
                     _=>()
                 }
@@ -137,15 +137,15 @@ impl Button{
                 self._is_down = false;
                 if fe.is_over{
                     if !fe.is_touch{
-                        self.anims.play_anim(cx, self.anim_over.clone());
+                        self.animator.play_anim(cx, self.anim_over.clone());
                     }
                     else{
-                        self.anims.play_anim(cx, self.anims.default.clone());
+                        self.animator.play_anim(cx, self.animator.default.clone());
                     }
                     ret_event = ButtonEvent::Clicked;
                 }
                 else{
-                    self.anims.play_anim(cx, self.anims.default.clone());
+                    self.animator.play_anim(cx, self.animator.default.clone());
                 }
             },
             _=>()
@@ -156,16 +156,16 @@ impl Button{
     pub fn draw_button_with_label(&mut self, cx:&mut Cx, label: &str){
 
         // pull the bg color from our animation system, uses 'default' value otherwise
-        self.bg.color = self.anims.last_vec4("bg.color");
+        self.bg.color = self.animator.last_vec4("bg.color");
         self._bg_area = self.bg.begin_quad(cx, &self.bg_layout);
         // push the 2 vars we added to bg shader
-        self.anims.last_push(cx, "bg.border_color", self._bg_area);
-        self.anims.last_push(cx, "bg.glow_size", self._bg_area);
+        self.animator.last_push(cx, "bg.border_color", self._bg_area);
+        self.animator.last_push(cx, "bg.glow_size", self._bg_area);
 
         self.text.draw_text(cx, label);
         
         self.bg.end_quad(cx);
 
-        self.anims.set_area(cx, self._bg_area); // if our area changed, update animation
+        self.animator.set_area(cx, self._bg_area); // if our area changed, update animation
     }
 }
