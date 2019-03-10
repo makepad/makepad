@@ -15,6 +15,7 @@ pub struct Tab{
     pub _hit_state:HitState,
     pub _bg_area:Area,
     pub _is_down:bool,
+    pub _is_drag:bool
 }
 
 impl Style for Tab{
@@ -64,6 +65,7 @@ impl Style for Tab{
             ]),
             _hit_state:HitState{..Default::default()},
             _is_down:false,
+            _is_drag:false,
             _bg_area:Area::Empty,
         }
     }
@@ -112,6 +114,7 @@ impl Tab{
             },
             Event::FingerDown(_fe)=>{
                 self._is_down = true;
+                self._is_drag = false;
                 self.animator.play_anim(cx, self.anim_down.clone());
                 ret_event = TabEvent::Clicked;
             },
@@ -147,9 +150,20 @@ impl Tab{
                 else{
                     self.animator.play_anim(cx, self.animator.default.clone());
                 }
+                if self._is_drag{
+                    self._is_drag = false;
+                    ret_event = TabEvent::DragEnd(fe);
+                }
             },
             Event::FingerMove(fe)=>{
-                ret_event = TabEvent::DragMove(fe);
+                if !self._is_drag{
+                    if (fe.abs_start_x - fe.abs_x).abs() + (fe.abs_start_y - fe.abs_y).abs() > 10.{
+                        self._is_drag = true;
+                    }
+                }
+                if self._is_drag{
+                    ret_event = TabEvent::DragMove(fe);
+                }
                 //self.animator.play_anim(cx, self.animator.default.clone());
             },
             _=>()

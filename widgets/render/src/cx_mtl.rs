@@ -131,8 +131,7 @@ impl Cx{
 
             command_buffer.present_drawable(&drawable);
             command_buffer.commit();
-
-      
+            //command_buffer.wait_until_completed();
             unsafe { 
                 msg_send![pool, release];
                 //pool = NSAutoreleasePool::new(cocoa::base::nil);
@@ -163,6 +162,13 @@ impl Cx{
         layer.set_device(&device);
         layer.set_pixel_format(MTLPixelFormat::BGRA8Unorm);
         layer.set_presents_with_transaction(false);
+
+        unsafe{
+            //msg_send![layer, displaySyncEnabled:false];
+            let count:u64 = 2;
+            msg_send![layer, setMaximumDrawableCount:count];
+            msg_send![layer, setDisplaySyncEnabled:false];
+        }
 
         unsafe {
             let view = window.contentView();
@@ -201,7 +207,7 @@ impl Cx{
                             self.call_event_handler(&mut event_handler, &mut event); 
                             self.call_draw_event(&mut event_handler, &mut root_view);
                             self.repaint(&layer, &device, &command_queue);
-                            do_lazy_layer_resize = true;
+                            self.resize_layer_to_turtle(&layer);
                         },
                         Event::None=>{},
                         _=>{
@@ -232,11 +238,6 @@ impl Cx{
                 self.set_winit_mouse_cursor(&glutin_window, MouseCursor::Default);
             }
 
-            if do_lazy_layer_resize{
-                do_lazy_layer_resize = false;
-                self.resize_layer_to_turtle(&layer);
-                self.paint_dirty = true;
-            }
             // repaint everything if we need to
             if self.paint_dirty{
                 self.paint_dirty = false;
@@ -253,7 +254,7 @@ impl Cx{
                                 self.call_event_handler(&mut event_handler, &mut event); 
                                 self.call_draw_event(&mut event_handler, &mut root_view);
                                 self.repaint(&layer, &device, &command_queue);
-                                do_lazy_layer_resize = true;
+                                self.resize_layer_to_turtle(&layer);
                             },
                             Event::None=>{},
                             _=>{

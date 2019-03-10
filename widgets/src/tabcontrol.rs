@@ -88,7 +88,8 @@ impl TabControlLike for TabControl{
                     cx.dirty_area = self.tabs_view.get_view_area();
                 },
                 TabEvent::DragEnd(fe)=>{
-                    self._dragging_tab = None
+                    self._dragging_tab = None;
+                    cx.dirty_area = self.tabs_view.get_view_area();
                 }
                 _=>()
             }
