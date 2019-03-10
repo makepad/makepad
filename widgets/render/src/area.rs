@@ -374,7 +374,7 @@ impl Area{
                 draw_call.instance.push(value.x);
                 draw_call.instance.push(value.y);
                 draw_call.instance.push(value.z);
-                draw_call.instance.push(value.z);
+                draw_call.instance.push(value.w);
             },
             _=>(),
         }

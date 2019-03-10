@@ -176,11 +176,10 @@ impl Tab{
         self.bg.color = self.animator.last_vec4("bg.color");
         self._bg_area = self.bg.begin_quad(cx, &self.bg_layout);
         // push the 2 vars we added to bg shader
-        self.animator.last_push(cx, "bg.border_color", self._bg_area);
-        self.animator.last_push(cx, "bg.glow_size", self._bg_area);
-
         self.text.draw_text(cx, &self.label);
         self.bg.end_quad(cx);
+        self.animator.last_push(cx, "bg.border_color", self._bg_area);
+        self.animator.last_push(cx, "bg.glow_size", self._bg_area);
 
         self.animator.set_area(cx, self._bg_area); // if our area changed, update animation
     }

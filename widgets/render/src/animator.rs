@@ -348,16 +348,20 @@ impl Animator{
                 if track.ident() == area_name{
                     match track{
                         AnimTrack::Vec4(_)=>{
-                            area.push_vec4(cx, field, self.last_vec4(area_name));
+                            let v4 = self.last_vec4(area_name);
+                            area.push_vec4(cx, field, v4);
                         },
                         AnimTrack::Vec3(_)=>{
-                            area.push_vec3(cx, field, self.last_vec3(area_name));
+                            let v3 = self.last_vec3(area_name);
+                            area.push_vec3(cx, field, v3);
                         },
                         AnimTrack::Vec2(_)=>{
-                            area.push_vec2(cx, field, self.last_vec2(area_name));
+                            let v2 = self.last_vec2(area_name);
+                            area.push_vec2(cx, field, v2);
                         },
                         AnimTrack::Float(_)=>{
-                            area.push_float(cx, field, self.last_float(area_name));
+                            let fl =  self.last_float(area_name);
+                            area.push_float(cx, field, fl);
                         }
                     }
                     return

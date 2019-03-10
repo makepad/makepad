@@ -46,22 +46,22 @@ impl Cx{
                 ) as u64;
                 if let Some(pipeline_state) = &shc.pipeline_state{
                     encoder.set_render_pipeline_state(pipeline_state);
-                    if let Some(buf) = &shc.geom_vbuf.buffer{encoder.set_vertex_buffer(0, Some(&buf), 0);}
+                    if let Some(buf) = &shc.geom_vbuf.multi_buffer_read().buffer{encoder.set_vertex_buffer(0, Some(&buf), 0);}
                     else{println!("Drawing error: geom_vbuf None")}
-                    if let Some(buf) = &draw_call.resources.inst_vbuf.buffer{encoder.set_vertex_buffer(1, Some(&buf), 0);}
+                    if let Some(buf) = &draw_call.resources.inst_vbuf.multi_buffer_read().buffer{encoder.set_vertex_buffer(1, Some(&buf), 0);}
                     else{println!("Drawing error: inst_vbuf None")}
-                    if let Some(buf) = &self.resources.uni_cx.buffer{encoder.set_vertex_buffer(2, Some(&buf), 0);}
+                    if let Some(buf) = &self.resources.uni_cx.multi_buffer_read().buffer{encoder.set_vertex_buffer(2, Some(&buf), 0);}
                     else{println!("Drawing error: uni_cx None")}
-                    if let Some(buf) = &draw_list.resources.uni_dl.buffer{encoder.set_vertex_buffer(3, Some(&buf), 0);}
+                    if let Some(buf) = &draw_list.resources.uni_dl.multi_buffer_read().buffer{encoder.set_vertex_buffer(3, Some(&buf), 0);}
                     else{println!("Drawing error: uni_dl None")}
-                    if let Some(buf) = &draw_call.resources.uni_dr.buffer{encoder.set_vertex_buffer(4, Some(&buf), 0);}
+                    if let Some(buf) = &draw_call.resources.uni_dr.multi_buffer_read().buffer{encoder.set_vertex_buffer(4, Some(&buf), 0);}
                     else{println!("Drawing error: uni_dr None")}
 
-                    if let Some(buf) = &self.resources.uni_cx.buffer{encoder.set_fragment_buffer(0, Some(&buf), 0);}
+                    if let Some(buf) = &self.resources.uni_cx.multi_buffer_read().buffer{encoder.set_fragment_buffer(0, Some(&buf), 0);}
                     else{println!("Drawing error: uni_cx None")}
-                    if let Some(buf) = &draw_list.resources.uni_dl.buffer{encoder.set_fragment_buffer(1, Some(&buf), 0);}
+                    if let Some(buf) = &draw_list.resources.uni_dl.multi_buffer_read().buffer{encoder.set_fragment_buffer(1, Some(&buf), 0);}
                     else{println!("Drawing error: uni_dl None")}
-                    if let Some(buf) = &draw_call.resources.uni_dr.buffer{encoder.set_fragment_buffer(2, Some(&buf), 0);}
+                    if let Some(buf) = &draw_call.resources.uni_dr.multi_buffer_read().buffer{encoder.set_fragment_buffer(2, Some(&buf), 0);}
                     else{println!("Drawing error: uni_dr None")}
 
                     // lets set our textures
@@ -76,7 +76,7 @@ impl Cx{
                         }
                     }
 
-                    if let Some(buf) = &shc.geom_ibuf.buffer{
+                    if let Some(buf) = &shc.geom_ibuf.multi_buffer_read().buffer{
                         encoder.draw_indexed_primitives_instanced(
                             MTLPrimitiveType::Triangle,
                             sh.geometry_indices.len() as u64, // Index Count
@@ -167,7 +167,7 @@ impl Cx{
             //msg_send![layer, displaySyncEnabled:false];
             let count:u64 = 2;
             msg_send![layer, setMaximumDrawableCount:count];
-            msg_send![layer, setDisplaySyncEnabled:false];
+            msg_send![layer, setDisplaySyncEnabled:true];
         }
 
         unsafe {
@@ -637,57 +637,84 @@ pub struct AssembledMtlShader{
 }
 
 #[derive(Default,Clone)]
-pub struct MetalBuffer{
+pub struct MultiMetalBuffer{
     pub buffer:Option<metal::Buffer>,
     pub size:usize,
     pub used:usize
 }
 
+#[derive(Default,Clone)]
+pub struct MetalBuffer{
+    pub last_written:usize,
+    pub multi1:MultiMetalBuffer,
+    pub multi2:MultiMetalBuffer,
+    pub multi3:MultiMetalBuffer,
+}
+
 impl MetalBuffer{
-    pub fn update_with_f32_data(&mut self, device:&Device, data:&Vec<f32>){
-        if self.size < data.len(){
-            self.buffer = None;
+    pub fn multi_buffer_read(&self)->&MultiMetalBuffer{
+        match self.last_written{
+            0=>&self.multi1,
+            1=>&self.multi2,
+            _=>&self.multi3,
         }
-        if let None = &self.buffer{
-            self.buffer = Some(
+    }
+
+    pub fn multi_buffer_write(&mut self)->&mut MultiMetalBuffer{
+        self.last_written = (self.last_written+1)%3;
+        match self.last_written{
+            0=>&mut self.multi1,
+            1=>&mut self.multi2,
+            _=>&mut self.multi3,
+        }
+    }
+
+    pub fn update_with_f32_data(&mut self, device:&Device, data:&Vec<f32>){
+        let elem = self.multi_buffer_write();
+        if elem.size < data.len(){
+            elem.buffer = None;
+        }
+        if let None = &elem.buffer{
+            elem.buffer = Some(
                 device.new_buffer(
                     (data.len() * std::mem::size_of::<f32>()) as u64,
                     MTLResourceOptions::CPUCacheModeDefaultCache
                 )
             );
-            self.size = data.len()
+            elem.size = data.len()
         }
-        if let Some(buffer) = &self.buffer{
+        if let Some(buffer) = &elem.buffer{
             let p = buffer.contents(); 
             unsafe {
                 std::ptr::copy(data.as_ptr(), p as *mut f32, data.len());
             }
             buffer.did_modify_range(NSRange::new(0 as u64, (data.len() * std::mem::size_of::<f32>()) as u64));
         }
-        self.used = data.len()
+        elem.used = data.len()
     }
 
     pub fn update_with_u32_data(&mut self, device:&Device, data:&Vec<u32>){
-        if self.size < data.len(){
-            self.buffer = None;
+        let elem = self.multi_buffer_write();
+        if elem.size < data.len(){
+            elem.buffer = None;
         }
-        if let None = &self.buffer{
-            self.buffer = Some(
+        if let None = &elem.buffer{
+            elem.buffer = Some(
                 device.new_buffer(
                     (data.len() * std::mem::size_of::<u32>()) as u64,
                     MTLResourceOptions::CPUCacheModeDefaultCache
                 )
             );
-            self.size = data.len()
+            elem.size = data.len()
         }
-        if let Some(buffer) = &self.buffer{
+        if let Some(buffer) = &elem.buffer{
             let p = buffer.contents(); 
             unsafe {
                 std::ptr::copy(data.as_ptr(), p as *mut u32, data.len());
             }
             buffer.did_modify_range(NSRange::new(0 as u64, (data.len() * std::mem::size_of::<u32>()) as u64));
         }
-        self.used = data.len()
+        elem.used = data.len()
     }
 }
 
