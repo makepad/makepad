@@ -59,6 +59,7 @@ pub struct HitState{
     pub use_multi_touch:bool,
     pub no_scrolling:bool,
     pub finger_down_abs_start:Vec<Vec2>,
+    pub finger_down_rel_start:Vec<Vec2>,
     pub was_over_last_call:bool
 }
 
@@ -227,14 +228,20 @@ impl Event{
                     else{
                         hit_state.finger_down_abs_start[fe.digit]
                     };
+                    let rel_start = if hit_state.finger_down_rel_start.len() <= fe.digit{
+                        vec2(0.,0.)
+                    }
+                    else{
+                        hit_state.finger_down_rel_start[fe.digit]
+                    };
                     let rect = area.get_rect(&cx, hit_state.no_scrolling);
                     return Event::FingerMove(FingerMoveEvent{
                         abs_start_x: abs_start.x,
                         abs_start_y: abs_start.y,
                         rel_x:fe.abs_x - rect.x,
                         rel_y:fe.abs_y - rect.y,
-                        rel_start_x: abs_start.x - rect.x,
-                        rel_start_y: abs_start.y - rect.y,
+                        rel_start_x: rel_start.x,
+                        rel_start_y: rel_start.y,
                         is_over:rect.contains(fe.abs_x, fe.abs_y),
                         ..fe.clone()
                     })
@@ -259,7 +266,13 @@ impl Event{
                                 hit_state.finger_down_abs_start.push(vec2(0.,0.));
                             }
                         }
+                        if hit_state.finger_down_rel_start.len() < fe.digit+1{
+                            for _i in hit_state.finger_down_rel_start.len()..(fe.digit+1){
+                                hit_state.finger_down_rel_start.push(vec2(0.,0.));
+                            }
+                        }
                         hit_state.finger_down_abs_start[fe.digit] = vec2(fe.abs_x, fe.abs_y);
+                        hit_state.finger_down_rel_start[fe.digit] = vec2(fe.abs_x - rect.x, fe.abs_y - rect.y);
                         fe.handled = true;
                         return Event::FingerDown(FingerDownEvent{
                             rel_x:fe.abs_x - rect.x,
@@ -278,13 +291,19 @@ impl Event{
                     else{
                         hit_state.finger_down_abs_start[fe.digit]
                     };
+                    let rel_start = if hit_state.finger_down_rel_start.len() <= fe.digit{
+                        vec2(0.,0.)
+                    }
+                    else{
+                        hit_state.finger_down_rel_start[fe.digit]
+                    };
                     let rect = area.get_rect(&cx, hit_state.no_scrolling);
                     return Event::FingerUp(FingerUpEvent{
                         is_over:rect.contains(fe.abs_x, fe.abs_y),
                         abs_start_x: abs_start.x,
                         abs_start_y: abs_start.y,
-                        rel_start_x: abs_start.x - rect.x,
-                        rel_start_y: abs_start.y - rect.y,
+                        rel_start_x: rel_start.x,
+                        rel_start_y: rel_start.y,
                         rel_x:fe.abs_x - rect.x,
                         rel_y:fe.abs_y - rect.y,
                         ..fe.clone()
