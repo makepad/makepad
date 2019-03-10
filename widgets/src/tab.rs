@@ -6,6 +6,8 @@ pub struct Tab{
     pub bg: Quad,
     pub text: Text,
 
+    pub label:String,
+
     pub animator:Animator,
     pub anim_over:Anim,
     pub anim_down:Anim,
@@ -19,16 +21,17 @@ impl Style for Tab{
     fn style(cx:&mut Cx)->Self{
         let bg_sh = Self::def_bg_shader(cx);
         Self{
+            label:"Tab".to_string(),
             bg:Quad{
-                shader_id:cx.add_shader(bg_sh),
+                shader_id:cx.add_shader(bg_sh,"Tab.bg"),
                 ..Style::style(cx)
             },
             bg_layout:Layout{
                 align:Align::center(),
                 width:Bounds::Compute,
                 height:Bounds::Compute,
-                margin:Margin::all(1.0),
-                padding:Padding{l:16.0,t:14.0,r:16.0,b:14.0},
+                margin:Margin::all(0.),
+                padding:Padding{l:16.0,t:10.0,r:16.0,b:10.0},
                 ..Default::default()
             },
             text:Text{..Style::style(cx)},
@@ -36,7 +39,7 @@ impl Style for Tab{
             animator:Animator::new(Anim::new(AnimMode::Cut{duration:0.5}, vec![
                 AnimTrack::to_vec4("bg.color", cx.style.bg_normal),
                 AnimTrack::to_float("bg.glow_size", 0.0),
-                AnimTrack::to_vec4("bg.border_color", cx.style.text_lo),
+                AnimTrack::to_vec4("bg.border_color", cx.style.bg_normal),
                 AnimTrack::to_vec4("text.color", cx.style.text_med),
                 AnimTrack::to_vec4("icon.color", cx.style.text_med)
             ])),
@@ -69,8 +72,9 @@ impl Style for Tab{
 #[derive(Clone, PartialEq)]
 pub enum TabEvent{
     None,
+    DragMove(FingerMoveEvent),
+    DragEnd(FingerUpEvent),
     Clicked,
-    Down
 }
 
 impl Tab{
@@ -82,13 +86,13 @@ impl Tab{
             let glow_size:float<Instance>;
 
             const glow_color:vec4 = color("#30f");
-            const border_radius:float = 6.5;
+            const border_radius:float = 1.0;
             const border_width:float = 1.0;
 
             fn pixel()->vec4{
                 df_viewport(pos * vec2(w, h));
                 df_box(0., 0., w, h, border_radius);
-                df_shape += 3.;
+                df_shape += 1.;
                 df_fill_keep(color);
                 df_stroke_keep(border_color, border_width);
                 df_blur = 2.;
@@ -107,9 +111,9 @@ impl Tab{
                 self.animator.calc_area(cx, "bg.glow_size", ae.time, self._bg_area);
             },
             Event::FingerDown(_fe)=>{
-                ret_event = TabEvent::Down;
                 self._is_down = true;
                 self.animator.play_anim(cx, self.anim_down.clone());
+                ret_event = TabEvent::Clicked;
             },
             Event::FingerHover(fe)=>{
                 cx.set_hover_mouse_cursor(MouseCursor::Hand);
@@ -144,13 +148,16 @@ impl Tab{
                     self.animator.play_anim(cx, self.animator.default.clone());
                 }
             },
+            Event::FingerMove(fe)=>{
+                ret_event = TabEvent::DragMove(fe);
+                //self.animator.play_anim(cx, self.animator.default.clone());
+            },
             _=>()
         };
         ret_event
    }
 
-    pub fn draw_tab(&mut self, cx:&mut Cx, label: &str){
-
+    pub fn draw_tab(&mut self, cx:&mut Cx){
         // pull the bg color from our animation system, uses 'default' value otherwise
         self.bg.color = self.animator.last_vec4("bg.color");
         self._bg_area = self.bg.begin_quad(cx, &self.bg_layout);
@@ -158,9 +165,10 @@ impl Tab{
         self.animator.last_push(cx, "bg.border_color", self._bg_area);
         self.animator.last_push(cx, "bg.glow_size", self._bg_area);
 
-        self.text.draw_text(cx, label);
+        self.text.draw_text(cx, &self.label);
         self.bg.end_quad(cx);
 
         self.animator.set_area(cx, self._bg_area); // if our area changed, update animation
     }
+
 }

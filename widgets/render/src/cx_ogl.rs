@@ -118,8 +118,12 @@ impl Cx{
         self.compile_all_ogl_shaders();
 
         let start_time = precise_time_ns();
-        
+        let mut root_view = View::<NoScrollBar>{
+            ..Style::style(self)
+        };
         self.load_binary_deps_from_file();
+ 
+        self.call_event_handler(&mut event_handler, &mut Event::Construct);
 
         while self.running{
             events_loop.poll_events(|winit_event|{
@@ -128,16 +132,13 @@ impl Cx{
                     match &event{
                         Event::Resized(_)=>{ // do thi
                             self.resize_window_to_turtle(&glutin_window);
-                            event_handler(self, &mut event); 
-                            self.dirty_area = Area::Empty;
-                            self.redraw_area = Area::All;
-                            self.redraw_id += 1;
-                            event_handler(self, &mut Event::Redraw);
+                            self.call_event_handler(&mut event_handler, &mut event); 
+                            self.call_draw_event(&mut event_handler, &mut root_view);
                             self.repaint(&glutin_window);
                         },
                         Event::None=>{},
                         _=>{
-                            event_handler(self, &mut event); 
+                            self.call_event_handler(&mut event_handler, &mut event); 
                         }
                     }
                 }
@@ -145,18 +146,12 @@ impl Cx{
             if self.playing_anim_areas.len() != 0{
                 let time_now = precise_time_ns();
                 let time = (time_now - start_time) as f64 / 1_000_000_000.0; // keeps the error as low as possible
-                event_handler(self, &mut Event::Animate(AnimateEvent{time:time}));
-                self.check_ended_anim_areas(time);
-                if self.ended_anim_areas.len() > 0{
-                    event_handler(self, &mut Event::AnimationEnded(AnimateEvent{time:time}));
-                }
+                self.call_animation_event(&mut event_handler, time);
             }
+
             // call redraw event
             if !self.dirty_area.is_empty(){
-                self.dirty_area = Area::Empty;
-                self.redraw_area = self.dirty_area.clone();
-                self.redraw_id += 1;
-                event_handler(self, &mut Event::Redraw);
+                self.call_draw_event(&mut event_handler, &mut root_view);
                 self.paint_dirty = true;
             }
 
@@ -177,23 +172,20 @@ impl Cx{
             }
 
             // wait for the next event blockingly so it stops eating power
-            if self.animations.len() == 0 && self.dirty_area.is_empty(){
+            if self.playing_anim_areas.len() == 0 && self.dirty_area.is_empty(){
                 events_loop.run_forever(|winit_event|{
                     let mut events = self.map_winit_event(winit_event, &glutin_window);
                     for mut event in &mut events{
                         match &event{
                             Event::Resized(_)=>{ // do thi
                                 self.resize_window_to_turtle(&glutin_window);
-                                event_handler(self, &mut event); 
-                                self.dirty_area = Area::Empty;
-                                self.redraw_area = Area::All;
-                                self.redraw_id += 1;
-                                event_handler(self, &mut Event::Redraw);
+                                self.call_event_handler(&mut event_handler, &mut event); 
+                                self.call_draw_event(&mut event_handler, &mut root_view);
                                 self.repaint(&glutin_window);
                             },
                             Event::None=>{},
                             _=>{
-                                event_handler(self, &mut event); 
+                                self.call_event_handler(&mut event_handler, &mut event);
                             }
                         }
                     }

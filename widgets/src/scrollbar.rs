@@ -40,7 +40,7 @@ impl Style for ScrollBar{
                 AnimTrack::to_vec4("sb.color",color("#9"))
             ]),
             sb:Quad{
-                shader_id:cx.add_shader(sh),
+                shader_id:cx.add_shader(sh, "ScrollBar.sb"),
                 ..Style::style(cx)
             },
 

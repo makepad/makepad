@@ -23,11 +23,11 @@ impl Style for Text{
     fn style(cx:&mut Cx)->Self{
         let sh = Self::def_text_shader(cx);
         Self{
-            shader_id:cx.add_shader(sh),
+            shader_id:cx.add_shader(sh, "Text"),
             font_id:cx.load_font(&cx.style.normal_font.clone()),
             text:"".to_string(),
             font_size:cx.style.font_size,
-            line_spacing:1.1,
+            line_spacing:1.15,
             wrapping:Wrapping::Word,
             color:cx.style.text_normal.clone()
         }
@@ -54,7 +54,7 @@ impl Text{
             let texture:texture2d<Texture>;
             let tex_size:vec2<Uniform>;
             //let list_clip:vec4<Uniform>;
-            let draw_call_clip:vec4<Instance>;
+            //let instance_clip:vec4<Instance>;
             let font_geom:vec4<Instance>;
             let font_tc:vec4<Instance>;
             let color:vec4<Instance>;
@@ -88,8 +88,8 @@ impl Text{
                 
                 let clipped:vec2 = clamp(
                     mix(min_pos, max_pos, geom) + shift,
-                    max(draw_call_clip.xy, draw_list_clip.xy),
-                    min(draw_call_clip.zw, draw_list_clip.zw)
+                    draw_list_clip.xy,
+                    draw_list_clip.zw
                 );
                 let normalized:vec2 = (clipped - min_pos - shift) / (max_pos - min_pos);
 
@@ -168,7 +168,7 @@ impl Text{
                     let w = glyph.advance * self.font_size;
                     
                     let data = [
-                        /*draw_clip*/ -50000.0,-50000.0,50000.0,50000.0,
+                        ///*draw_clip*/ -50000.0,-50000.0,50000.0,50000.0,
                         /*font_geom*/ glyph.x1 ,glyph.y1 ,glyph.x2 ,glyph.y2,
                         /*font_tc*/ glyph.tx1 ,glyph.ty1 ,glyph.tx2 ,glyph.ty2,
                         /*color*/ 1.0,1.0,1.0,1.0,

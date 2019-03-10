@@ -54,6 +54,8 @@ pub struct Cx{
     pub clear_color:Vec4,
     pub redraw_id: u64,
 
+    pub debug_area:Area,
+
     pub turtles:Vec<Turtle>,
     pub align_list:Vec<Area>,
     pub target_size:Vec2,
@@ -63,6 +65,8 @@ pub struct Cx{
     pub hover_mouse_cursor:Option<MouseCursor>,
     pub captured_fingers:Vec<Area>,
     pub fingers_down:Vec<bool>,
+
+    pub user_events:Vec<Event>,
 
     pub playing_anim_areas:Vec<AnimArea>,
     pub ended_anim_areas:Vec<AnimArea>,
@@ -112,11 +116,15 @@ impl Default for Cx{
             align_list:Vec::new(),
             target_size:vec2(0.0,0.0),
             target_dpi_factor:0.0,
+            
+            debug_area:Area::Empty,
 
             down_mouse_cursor:None,
             hover_mouse_cursor:None,
             captured_fingers:captured_fingers,
             fingers_down:fingers_down,
+
+            user_events:Vec::new(),
 
             playing_anim_areas:Vec::new(),
             ended_anim_areas:Vec::new(),
@@ -147,11 +155,14 @@ impl Cx{
         &self.compiled_shaders[id]
     }
 
-    pub fn add_shader(&mut self, sh:Shader)->usize{
+    pub fn add_shader(&mut self, sh:Shader, name:&str)->usize{
         let next_id = self.shaders.len();
         let store_id = self.shader_map.entry(sh.clone()).or_insert(next_id);
         if *store_id == next_id{
-            self.shaders.push(sh);
+            self.shaders.push(Shader{
+                name:name.to_string(),
+                ..sh
+            });
         }
         *store_id
     }
@@ -237,8 +248,7 @@ impl Cx{
             draw_list_id:dc.draw_list_id,
             draw_call_id:dc.draw_call_id,
             instance_offset:dc.current_instance_offset,
-            instance_count:1,
-            instance_writer:0
+            instance_count:1
         })
     }
 
@@ -297,19 +307,114 @@ impl Cx{
         return dc.get_current_area();
     }
 
-
     // push instance so it can be written to again in pop_instance
-    pub fn begin_instance(&mut self, area:Area, layout:&Layout){
-        self.begin_turtle(layout);
+    pub fn push_instance_area_stack(&mut self, area:Area){
         self.instance_area_stack.push(area.clone());
     }
 
     // pops instance patching the supplied geometry in the instancebuffer
-    pub fn end_instance(&mut self)->Area{
-        let area = self.instance_area_stack.pop().unwrap();
-        let rect = self.end_turtle();
-        area.set_rect(self, &rect);
-        area
+    pub fn pop_instance_area_stack(&mut self)->Area{
+        self.instance_area_stack.pop().unwrap()
+    }
+
+    // event handler wrappers
+
+    pub fn call_event_handler<F>(&mut self, mut event_handler:F, event:&mut Event)
+    where F: FnMut(&mut Cx, &mut Event)
+    { 
+        event_handler(self, event);
+        // check any user events and send them
+        if self.user_events.len() > 0{
+            let user_events = self.user_events.clone();
+            self.user_events.truncate(0);
+            for mut user_event in user_events{
+                event_handler(self, &mut user_event);
+            }
+        }
+    }
+
+    pub fn call_draw_event<F, T>(&mut self, mut event_handler:F, root_view:&mut View<T>)
+    where F: FnMut(&mut Cx, &mut Event), T: ScrollBarLike<T> + Clone + ElementLife
+    { 
+        root_view.begin_view(self, &Layout{..Default::default()});
+
+        self.redraw_area = self.dirty_area.clone();
+        self.dirty_area = Area::Empty;
+        self.redraw_id += 1;
+        self.call_event_handler(&mut event_handler, &mut Event::Draw);
+
+        root_view.end_view(self);
+    }
+
+    pub fn call_animation_event<F>(&mut self, mut event_handler:F, time:f64)
+    where F: FnMut(&mut Cx, &mut Event)
+    { 
+        self.call_event_handler(&mut event_handler, &mut Event::Animate(AnimateEvent{time:time}));
+        self.check_ended_anim_areas(time);
+        if self.ended_anim_areas.len() > 0{
+            self.call_event_handler(&mut event_handler, &mut Event::AnimationEnded(AnimateEvent{time:time}));
+        }
+    }
+
+    pub fn debug_draw_tree_recur(&mut self, draw_list_id: usize, depth:usize){
+        if draw_list_id >= self.draw_lists.len(){
+            println!("---------- Drawlist still empty ---------");
+            return
+        }
+        let mut indent = String::new();
+        for _i in 0..depth{
+            indent.push_str("  ");
+        }
+        let draw_calls_len = self.draw_lists[draw_list_id].draw_calls_len;
+        if draw_list_id == 0{
+            println!("---------- Begin Debug draw tree for redraw_id: {} ---------", self.redraw_id)
+        }
+        println!("{}list {}: len:{} rect:{:?}", indent, draw_list_id, draw_calls_len, self.draw_lists[draw_list_id].rect);        
+        indent.push_str("  ");
+        for draw_call_id in 0..draw_calls_len{
+            let sub_list_id = self.draw_lists[draw_list_id].draw_calls[draw_call_id].sub_list_id;
+            if sub_list_id != 0{
+                self.debug_draw_tree_recur(sub_list_id, depth + 1);
+            }
+            else{
+                let draw_list = &mut self.draw_lists[draw_list_id];
+                let draw_call = &mut draw_list.draw_calls[draw_call_id];
+                let sh = &self.shaders[draw_call.shader_id];
+                let shc = &self.compiled_shaders[draw_call.shader_id];
+                let slots = shc.instance_slots;
+                let instances = draw_call.instance.len() / slots;
+                println!("{}call {}: {}({}) x:{}", indent, draw_call_id, sh.name, draw_call.shader_id, instances);        
+                // lets dump the instance geometry
+                for inst in 0..instances{
+                    let mut out = String::new();
+                    let mut off = 0;
+                    for prop in &shc.named_instance_props.props{
+                        match prop.slots{
+                            1=>out.push_str(&format!("{}:{} ", prop.name, 
+                                draw_call.instance[inst*slots + off])),
+                            2=>out.push_str(&format!("{}:v2({},{}) ", prop.name, 
+                                draw_call.instance[inst*slots+ off], 
+                                draw_call.instance[inst*slots+1+ off])),
+                            3=>out.push_str(&format!("{}:v3({},{},{}) ", prop.name, 
+                                draw_call.instance[inst*slots+ off], 
+                                draw_call.instance[inst*slots+1+ off], 
+                                draw_call.instance[inst*slots+1+ off])),
+                            4=>out.push_str(&format!("{}:v4({},{},{},{}) ", prop.name, 
+                                draw_call.instance[inst*slots+ off], 
+                                draw_call.instance[inst*slots+1+ off], 
+                                draw_call.instance[inst*slots+2+ off], 
+                                draw_call.instance[inst*slots+3+ off])),
+                            _=>{}
+                        }
+                        off += prop.slots;
+                    }
+                    println!("  {}instance {}: {}", indent, inst, out);        
+                }
+            }
+        }
+        if draw_list_id == 0{
+            println!("---------- End Debug draw tree for redraw_id: {} ---------", self.redraw_id)
+        }
     }
 }
 
@@ -335,8 +440,7 @@ impl DrawCall{
             draw_list_id:self.draw_list_id,
             draw_call_id:self.draw_call_id,
             instance_offset:self.current_instance_offset,
-            instance_count:1,
-            instance_writer:0
+            instance_count:1
         })
     }
 }
@@ -348,6 +452,7 @@ const DL_UNI_SIZE:usize = 6;
 
 #[derive(Default,Clone)]
 pub struct DrawList{
+    pub nesting_draw_list_id:usize, // the id of the parent we nest in, codeflow wise
     pub draw_calls:Vec<DrawCall>,
     pub draw_calls_len: usize,
     pub uniforms:Vec<f32>, // cmdlist uniforms
@@ -511,7 +616,7 @@ macro_rules! main_app {
             };
 
             cx.event_loop(|cx, mut event|{
-                if let Event::Redraw = event{return app.draw_app(cx);}
+                if let Event::Draw = event{return app.draw_app(cx);}
                 app.handle_app(cx, &mut event);
             });
         }
@@ -536,7 +641,7 @@ macro_rules! main_app {
         pub unsafe extern "C" fn process_to_wasm(appcx:u32, msg:u32)->u32{
             let appcx = &*(appcx as *mut (*mut $app,*mut Cx));
             (*appcx.1).process_to_wasm(msg,|cx, mut event|{
-                if let Event::Redraw = event{return (*appcx.0).draw_app(cx);}
+                if let Event::Draw = event{return (*appcx.0).draw_app(cx);}
                 (*appcx.0).handle_app(cx, &mut event);
             })
         }

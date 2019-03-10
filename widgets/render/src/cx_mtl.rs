@@ -119,12 +119,20 @@ impl Cx{
             // ok now we should call our render thing
             self.exec_draw_list(0, &device, encoder);
 
+            match &self.debug_area{
+                Area::All=>self.debug_draw_tree_recur(0,0),
+                Area::Instance(ia)=>self.debug_draw_tree_recur(ia.draw_list_id,0),
+                Area::DrawList(dl)=>self.debug_draw_tree_recur(dl.draw_list_id,0),
+                _=>()
+            }
+
             encoder.end_encoding();
             parallel_encoder.end_encoding();
 
             command_buffer.present_drawable(&drawable);
             command_buffer.commit();
-        
+
+      
             unsafe { 
                 msg_send![pool, release];
                 //pool = NSAutoreleasePool::new(cocoa::base::nil);
@@ -133,10 +141,9 @@ impl Cx{
     }
 
     fn resize_layer_to_turtle(&mut self, layer:&CoreAnimationLayer){
-        // resize drawable
         layer.set_drawable_size(CGSize::new(
             (self.target_size.x * self.target_dpi_factor) as f64,
-             (self.target_size.y * self.target_dpi_factor) as f64));
+            (self.target_size.y * self.target_dpi_factor) as f64));
     }
 
     pub fn event_loop<F>(&mut self, mut event_handler:F)
@@ -176,9 +183,13 @@ impl Cx{
         self.load_binary_deps_from_file();
 
         let start_time = precise_time_ns();
-        
-        event_handler(self, &mut Event::Construct); 
+        let mut root_view = View::<NoScrollBar>{
+            ..Style::style(self)
+        };
 
+        self.call_event_handler(&mut event_handler, &mut Event::Construct);
+
+        let mut do_lazy_layer_resize = false; // cool mac feature we need. cough.
         while self.running{
             // unfortunate duplication of code between poll and run_forever but i don't know how to put this in a closure
             // without borrowchecker hell
@@ -187,36 +198,27 @@ impl Cx{
                 for mut event in &mut events{
                     match &event{
                         Event::Resized(_)=>{ // do this here because mac
-                            self.resize_layer_to_turtle(&layer);
-                            event_handler(self, &mut event); 
-                            self.dirty_area = Area::Empty;
-                            self.redraw_area = Area::All;
-                            self.redraw_id += 1;
-                            event_handler(self, &mut Event::Redraw);
+                            self.call_event_handler(&mut event_handler, &mut event); 
+                            self.call_draw_event(&mut event_handler, &mut root_view);
                             self.repaint(&layer, &device, &command_queue);
+                            do_lazy_layer_resize = true;
                         },
                         Event::None=>{},
                         _=>{
-                            event_handler(self, &mut event);
+                            self.call_event_handler(&mut event_handler, &mut event); 
                         }
                     }
                 }
             });
+            
             if self.playing_anim_areas.len() != 0{
                 let time_now = precise_time_ns();
                 let time = (time_now - start_time) as f64 / 1_000_000_000.0; // keeps the error as low as possible
-                event_handler(self, &mut Event::Animate(AnimateEvent{time:time}));
-                self.check_ended_anim_areas(time);
-                if self.ended_anim_areas.len() > 0{
-                    event_handler(self, &mut Event::AnimationEnded(AnimateEvent{time:time}));
-                }
+                self.call_animation_event(&mut event_handler, time);
             }
             // call redraw event
             if !self.dirty_area.is_empty(){
-                self.dirty_area = Area::Empty;
-                self.redraw_area = self.dirty_area.clone();
-                self.redraw_id += 1;               
-                event_handler(self, &mut Event::Redraw);
+                self.call_draw_event(&mut event_handler, &mut root_view);
                 self.paint_dirty = true;
             }
 
@@ -230,6 +232,11 @@ impl Cx{
                 self.set_winit_mouse_cursor(&glutin_window, MouseCursor::Default);
             }
 
+            if do_lazy_layer_resize{
+                do_lazy_layer_resize = false;
+                self.resize_layer_to_turtle(&layer);
+                self.paint_dirty = true;
+            }
             // repaint everything if we need to
             if self.paint_dirty{
                 self.paint_dirty = false;
@@ -243,17 +250,14 @@ impl Cx{
                     for mut event in &mut events{
                         match &event{
                             Event::Resized(_)=>{ // do this here because mac
-                                self.resize_layer_to_turtle(&layer);
-                                event_handler(self, &mut event); 
-                                self.dirty_area = Area::Empty;
-                                self.redraw_area = Area::All;
-                                self.redraw_id += 1;       
-                                event_handler(self, &mut Event::Redraw);
+                                self.call_event_handler(&mut event_handler, &mut event); 
+                                self.call_draw_event(&mut event_handler, &mut root_view);
                                 self.repaint(&layer, &device, &command_queue);
+                                do_lazy_layer_resize = true;
                             },
                             Event::None=>{},
                             _=>{
-                                event_handler(self, &mut event);
+                                self.call_event_handler(&mut event_handler, &mut event);
                             }
                         }
                     }

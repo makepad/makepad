@@ -9,11 +9,13 @@ pub struct TabControl{
 
     pub tabs_view:View<ScrollBar>,
     pub tabs:Elements<Tab, usize>,
+    pub drag_tab_view:View<NoScrollBar>,
     pub drag_tab:Element<Tab>,
     pub hover:Quad,
     pub animator:Animator,
 
-    pub _tab_id:usize
+    pub _dragging_tab:Option<(FingerMoveEvent,usize)>,
+    pub _tab_id_alloc:usize
 }
 
 pub trait TabControlLike{
@@ -34,7 +36,7 @@ pub enum TabControlState{
 #[derive(Clone, PartialEq)]
 pub enum TabControlEvent{
     None,
-    Select{new_tab:usize},
+    Select{tab:usize},
 }
 
 impl Style for TabControl{
@@ -55,13 +57,17 @@ impl Style for TabControl{
             drag_tab:Element::new(Tab{
                 ..Style::style(cx)
             }),
+            drag_tab_view:View{
+                is_overlay:true,
+                ..Style::style(cx)
+            },
             hover:Quad{
                 color:color("purple"),
                 ..Style::style(cx)
             },
             animator:Animator::new(Anim::new(AnimMode::Cut{duration:0.5}, vec![])),
-
-            _tab_id:0,
+            _dragging_tab:None,
+            _tab_id_alloc:0,
         }
     }
 }
@@ -69,8 +75,23 @@ impl Style for TabControl{
 impl TabControlLike for TabControl{
     fn handle_tab_control(&mut self, cx:&mut Cx, event:&mut Event)->TabControlEvent{
         let mut ret_event = TabControlEvent::None;
-        for tab in self.tabs.all(){
-            tab.handle_tab(cx, event);
+        for (id, tab) in self.tabs.ids(){
+            match tab.handle_tab(cx, event){
+                TabEvent::Clicked=>{
+
+                },
+                TabEvent::DragMove(fe)=>{
+                    // alright we wanna start a tab drag,
+                    self._dragging_tab = Some((fe, *id));
+                    // flag our view as dirty, to trigger
+                    // an incremental draw
+                    cx.dirty_area = self.tabs_view.get_view_area();
+                },
+                TabEvent::DragEnd(fe)=>{
+                    self._dragging_tab = None
+                }
+                _=>()
+            }
         }
         //match event.hits(cx, self.split_area, &mut self.hit_state){
         //    Event::Animate(ae)=>{
@@ -89,27 +110,47 @@ impl TabControlLike for TabControl{
            ..Default::default()
         });
         //self.tabs.mark();
-        self._tab_id = 0;
+        self._tab_id_alloc = 0;
     }
 
-    fn draw_tab(&mut self, cx:&mut Cx, title:&str, selected:bool){
-        let tab = self.tabs.get(cx, self._tab_id);
-        self._tab_id += 1;
-        tab.draw_tab(cx, title);
+    fn draw_tab(&mut self, cx:&mut Cx, label:&str, selected:bool){
+        let tab = self.tabs.get(cx, self._tab_id_alloc);
+        self._tab_id_alloc += 1;
+        tab.label = label.to_string();
+        tab.draw_tab(cx);
     }
 
     fn end_tabs(&mut self, cx:&mut Cx){
         self.tabs_view.end_view(cx);
+
+        if let Some((fe, id)) = &self._dragging_tab{
+            self.drag_tab_view.begin_view(cx, &Layout{
+                abs_x:Some(0.),
+                abs_y:Some(0.),
+                ..Default::default()
+            });
+            
+            let drag_tab = self.drag_tab.get(cx);
+            drag_tab.bg_layout.abs_x = Some(fe.abs_x - fe.rel_start_x);
+            drag_tab.bg_layout.abs_y = Some(fe.abs_y - fe.rel_start_y);
+
+            let origin_tab = self.tabs.get(cx, *id);
+            drag_tab.label = origin_tab.label.clone();
+
+            drag_tab.draw_tab(cx);
+
+            self.drag_tab_view.end_view(cx);
+        }
     }
+
     fn begin_tab_page(&mut self, cx:&mut Cx){
         cx.turtle_new_line();
-        cx.begin_turtle(&Layout{
-            width:Bounds::Fill,
-            height:Bounds::Fill,
-            ..Default::default()
-        })
+        cx.begin_turtle(&Layout{..Default::default()}, Area::Empty)
     }
+
     fn end_tab_page(&mut self, cx:&mut Cx){
-        cx.end_turtle();
+        cx.end_turtle(Area::Empty);
+        // if we are in draggable tab state,
+        // draw our draggable tab
     }
 }

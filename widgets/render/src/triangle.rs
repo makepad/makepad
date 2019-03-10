@@ -11,7 +11,7 @@ impl Style for Triangle{
     fn style(cx:&mut Cx)->Self{
         let sh = Self::def_triangle_shader(cx);
         Self{
-            shader_id:cx.add_shader(sh),
+            shader_id:cx.add_shader(sh, "Triangle"),
             id:0,
             color:color("green")
         }

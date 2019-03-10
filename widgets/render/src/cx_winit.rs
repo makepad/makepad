@@ -11,6 +11,7 @@ pub struct CxWinit{
     pub is_cursor_in_window:bool
 }
 
+
 impl Cx{
 
     fn make_mouse_move_events(&self)->Vec<Event>{
@@ -24,8 +25,10 @@ impl Cx{
                     digit:i,
                     rel_x:self.resources.winit.last_x,
                     rel_y:self.resources.winit.last_y,
-                    start_x:0.,
-                    start_y:0.,
+                    abs_start_x:0.,
+                    abs_start_y:0.,
+                    rel_start_x:0.,
+                    rel_start_y:0.,
                     is_over:false,
                     is_touch:false
                 }))
@@ -195,8 +198,10 @@ impl Cx{
                                 abs_y:self.resources.winit.last_y,
                                 rel_x:self.resources.winit.last_x,
                                 rel_y:self.resources.winit.last_y,
-                                start_x:0.,
-                                start_y:0.,
+                                abs_start_x:0.,
+                                abs_start_y:0.,
+                                rel_start_x:0.,
+                                rel_start_y:0.,
                                 digit:digit,
                                 is_over:false,
                                 is_touch:false,

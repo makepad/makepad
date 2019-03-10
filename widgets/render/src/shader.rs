@@ -323,6 +323,7 @@ pub struct ShLet{
 #[derive(Default,Clone, PartialEq)]
 pub struct Shader{
     pub log:i32,
+    pub name:String,
     pub geometry_vertices:Vec<f32>,
     pub geometry_indices:Vec<u32>,
     pub asts:Vec<ShAst>
@@ -333,6 +334,7 @@ impl Eq for Shader{}
 impl Hash for Shader{
     fn hash<H: Hasher>(&self, state: &mut H) {
         self.log.hash(state);
+        self.name.hash(state);
         self.geometry_indices.hash(state);
         for vertex in &self.geometry_vertices{
             vertex.to_bits().hash(state);

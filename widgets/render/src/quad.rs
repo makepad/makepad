@@ -11,7 +11,7 @@ impl Style for Quad{
     fn style(cx:&mut Cx)->Self{
         let sh = Self::def_quad_shader(cx);
         Self{
-            shader_id:cx.add_shader(sh),
+            shader_id:cx.add_shader(sh, "Quad"),
             id:0,
             color:color("green")
         }
@@ -22,7 +22,6 @@ impl Quad{
     pub fn def_quad_shader(cx:&mut Cx)->Shader{
         // lets add the draw shader lib
         let mut sh = cx.new_shader();
-
         sh.geometry_vertices = vec![
             0.0,0.0,
             1.0,0.0,
@@ -68,13 +67,17 @@ impl Quad{
 
     pub fn begin_quad(&mut self, cx:&mut Cx, layout:&Layout)->Area{
         let area = self.draw_quad(cx, 0.0,0.0,0.0,0.0);
-        cx.begin_instance(area, layout);
+        cx.begin_turtle(layout, area);
+        cx.push_instance_area_stack(area.clone());
         area
     }
 
     // write the rect instance
     pub fn end_quad(&mut self, cx:&mut Cx)->Area{
-        cx.end_instance()
+        let area = cx.pop_instance_area_stack();
+        let rect = cx.end_turtle(area);
+        area.set_rect(cx, &rect);
+        area
     }
 
     pub fn draw_quad_walk(&mut self, cx:&mut Cx, w:Bounds, h:Bounds, margin:Margin)->Area{

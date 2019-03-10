@@ -20,7 +20,7 @@ impl Style for Button{
         let bg_sh = Self::def_bg_shader(cx);
         Self{
             bg:Quad{
-                shader_id:cx.add_shader(bg_sh),
+                shader_id:cx.add_shader(bg_sh, "Button.bg"),
                 ..Style::style(cx)
             },
             bg_layout:Layout{

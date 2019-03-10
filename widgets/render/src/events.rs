@@ -1,6 +1,6 @@
 use crate::cx::*;
 
-#[derive(Clone, Default,Debug)]
+#[derive(Clone, Default,Debug, PartialEq)]
 pub struct FingerDownEvent{
     pub abs_x:f32,
     pub abs_y:f32,
@@ -11,33 +11,37 @@ pub struct FingerDownEvent{
     pub is_touch:bool
 }
 
-#[derive(Clone, Default,Debug)]
+#[derive(Clone, Default,Debug, PartialEq)]
 pub struct FingerMoveEvent{
     pub abs_x:f32,
     pub abs_y:f32,
+    pub abs_start_x:f32,
+    pub abs_start_y:f32,
     pub rel_x:f32,
     pub rel_y:f32,
-    pub start_x:f32,
-    pub start_y:f32,
+    pub rel_start_x:f32,
+    pub rel_start_y:f32,
     pub is_over:bool,
     pub digit:usize,
     pub is_touch:bool,
 }
 
-#[derive(Clone, Default,Debug)]
+#[derive(Clone, Default,Debug, PartialEq)]
 pub struct FingerUpEvent{
     pub abs_x:f32,
     pub abs_y:f32,
+    pub abs_start_x:f32,
+    pub abs_start_y:f32,
     pub rel_x:f32,
     pub rel_y:f32,
-    pub start_x:f32,
-    pub start_y:f32,
+    pub rel_start_x:f32,
+    pub rel_start_y:f32,
     pub digit:usize,
     pub is_over:bool,
     pub is_touch:bool
 }
 
-#[derive(Clone,Debug)]
+#[derive(Clone,Debug, PartialEq)]
 pub enum HoverState{
     In,
     Over,
@@ -54,11 +58,11 @@ impl Default for HoverState{
 pub struct HitState{
     pub use_multi_touch:bool,
     pub no_scrolling:bool,
-    pub finger_down_start:Vec<Vec2>,
+    pub finger_down_abs_start:Vec<Vec2>,
     pub was_over_last_call:bool
 }
 
-#[derive(Clone, Default,Debug)]
+#[derive(Clone, Default,Debug, PartialEq)]
 pub struct FingerHoverEvent{
     pub abs_x:f32,
     pub abs_y:f32,
@@ -68,7 +72,7 @@ pub struct FingerHoverEvent{
     pub hover_state:HoverState
 }
 
-#[derive(Clone, Default,Debug)]
+#[derive(Clone, Default,Debug, PartialEq)]
 pub struct FingerScrollEvent{
     pub abs_x:f32,
     pub abs_y:f32,
@@ -79,7 +83,7 @@ pub struct FingerScrollEvent{
     pub handled:bool,
 }
 
-#[derive(Clone, Default, Debug)]
+#[derive(Clone, Default, Debug, PartialEq)]
 pub struct ResizedEvent{
     pub old_size:Vec2,
     pub old_dpi_factor:f32,
@@ -87,7 +91,7 @@ pub struct ResizedEvent{
     pub new_dpi_factor:f32
 }
 
-#[derive(Clone, Default, Debug)]
+#[derive(Clone, Default, Debug, PartialEq)]
 pub struct AnimateEvent{
     pub time:f64
 }
@@ -98,12 +102,12 @@ pub struct RedrawEvent{
     pub area:Area
 }
 
-#[derive(Clone,Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum Event{
     None,
     Construct,
     Destruct,
-    Redraw,
+    Draw,
     AppFocus(bool),
     AnimationEnded(AnimateEvent),
     Animate(AnimateEvent),
@@ -217,18 +221,20 @@ impl Event{
             Event::FingerMove(fe)=>{
                 // check wether our digit is captured, otherwise don't send
                 if cx.captured_fingers[fe.digit] == area{
-                    let start = if hit_state.finger_down_start.len() <= fe.digit{
+                    let abs_start = if hit_state.finger_down_abs_start.len() <= fe.digit{
                         vec2(0.,0.)
                     }
                     else{
-                        hit_state.finger_down_start[fe.digit]
+                        hit_state.finger_down_abs_start[fe.digit]
                     };
                     let rect = area.get_rect(&cx, hit_state.no_scrolling);
                     return Event::FingerMove(FingerMoveEvent{
-                        start_x: start.x,
-                        start_y: start.y,
+                        abs_start_x: abs_start.x,
+                        abs_start_y: abs_start.y,
                         rel_x:fe.abs_x - rect.x,
                         rel_y:fe.abs_y - rect.y,
+                        rel_start_x: abs_start.x - rect.x,
+                        rel_start_y: abs_start.y - rect.y,
                         is_over:rect.contains(fe.abs_x, fe.abs_y),
                         ..fe.clone()
                     })
@@ -248,12 +254,12 @@ impl Event{
                         }
                         cx.captured_fingers[fe.digit] = area;
                         // store the start point, make room in the vector for the digit.
-                        if hit_state.finger_down_start.len() < fe.digit+1{
-                            for _i in hit_state.finger_down_start.len()..(fe.digit+1){
-                                hit_state.finger_down_start.push(vec2(0.,0.));
+                        if hit_state.finger_down_abs_start.len() < fe.digit+1{
+                            for _i in hit_state.finger_down_abs_start.len()..(fe.digit+1){
+                                hit_state.finger_down_abs_start.push(vec2(0.,0.));
                             }
                         }
-                        hit_state.finger_down_start[fe.digit] = vec2(fe.abs_x, fe.abs_y);
+                        hit_state.finger_down_abs_start[fe.digit] = vec2(fe.abs_x, fe.abs_y);
                         fe.handled = true;
                         return Event::FingerDown(FingerDownEvent{
                             rel_x:fe.abs_x - rect.x,
@@ -266,17 +272,19 @@ impl Event{
             Event::FingerUp(fe)=>{
                 if cx.captured_fingers[fe.digit] == area{
                     cx.captured_fingers[fe.digit] = Area::Empty;
-                    let start = if hit_state.finger_down_start.len() <= fe.digit{
+                    let abs_start = if hit_state.finger_down_abs_start.len() <= fe.digit{
                         vec2(0.,0.)
                     }
                     else{
-                        hit_state.finger_down_start[fe.digit]
+                        hit_state.finger_down_abs_start[fe.digit]
                     };
                     let rect = area.get_rect(&cx, hit_state.no_scrolling);
                     return Event::FingerUp(FingerUpEvent{
                         is_over:rect.contains(fe.abs_x, fe.abs_y),
-                        start_x: start.x,
-                        start_y: start.y,
+                        abs_start_x: abs_start.x,
+                        abs_start_y: abs_start.y,
+                        rel_start_x: abs_start.x - rect.x,
+                        rel_start_y: abs_start.y - rect.y,
                         rel_x:fe.abs_x - rect.x,
                         rel_y:fe.abs_y - rect.y,
                         ..fe.clone()

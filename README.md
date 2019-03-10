@@ -1,2 +1,4 @@
 # makepad
 Livecoding Rust for 2D CAD
+
+This repo is for developing Makepad, a livecoding Rust IDE for 2D CAD design. The goal of the containing code is to be a Code Editor / UI kit for the Makepad application and will change without notice to suit that goal. The aim is to have the Code Editor and UI Kit always be open, but we may close-source and sell the final resulting design-tool since we also need to feed our family. All the code in this repo is MIT / Apache2 and if you find use for it feel free to do whatever but be aware that you are forking your own version to maintain. We are not accepting pull requests or feature requests or bug reports or documenting, you are on your own. If at some point we do think it is useful or necessary to develop this into a real open source(TM) library this readme will reflect that intent. Until then, have fun with the code and play around. Programming is fun.

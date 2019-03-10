@@ -14,9 +14,9 @@ impl Cx{
     }
 
     // begin a new turtle with a layout
-    pub fn begin_turtle(&mut self, layout:&Layout){
+    pub fn begin_turtle(&mut self, layout:&Layout, guard_area:Area){
 
-        let start_x = layout.margin.l +if layout.abs_x.is_none(){
+        let start_x = layout.margin.l + if layout.abs_x.is_none(){
             if let Some(parent) = self.turtles.last(){
                 parent.walk_x
             }
@@ -39,9 +39,9 @@ impl Cx{
             layout.abs_y.unwrap()
         };
 
-        let width = layout.width.eval_width(self, layout.margin);
-        let height = layout.height.eval_height(self, layout.margin);
-
+        let width = layout.width.eval_width(self, layout.margin, !layout.abs_x.is_none());
+        let height = layout.height.eval_height(self, layout.margin, !layout.abs_y.is_none());
+        
         self.turtles.push(Turtle{
             align_start:self.align_list.len(),
             layout:layout.clone(),
@@ -58,14 +58,15 @@ impl Cx{
             height:height,
             width_used:0.,
             height_used:0.,
+            guard_area:guard_area,
             ..Default::default()
         });
     }
 
     // walk the turtle with a 'w/h' and a margin
     pub fn walk_turtle(&mut self, vw:Bounds, vh:Bounds, margin:Margin, old_turtle:Option<&Turtle>)->Rect{
-        let w = nan_clamp_neg(vw.eval_width(self, margin));
-        let h = nan_clamp_neg(vh.eval_height(self, margin));
+        let w = nan_clamp_neg(vw.eval_width(self, margin, false));
+        let h = nan_clamp_neg(vh.eval_height(self, margin, false));
         let mut align_dx = 0.0;
         let mut align_dy = 0.0;
         let ret = if let Some(turtle) = self.turtles.last_mut(){
@@ -273,9 +274,12 @@ impl Cx{
         }
     }
     // end a turtle returning computed geometry
-    pub fn end_turtle(&mut self)->Rect{
+    pub fn end_turtle(&mut self, guard_area:Area)->Rect{
         let old = self.turtles.pop().unwrap();
-    
+        if guard_area != old.guard_area{
+            panic!("End turtle guard area misaligned!, begin/end pair not matched")
+        }
+
         let w = if old.width.is_nan(){
             if old.bound_x2 == std::f32::NEG_INFINITY{ // nothing happened, use padding
                 Bounds::Fix(old.layout.padding.l + old.layout.padding.r)
@@ -306,8 +310,16 @@ impl Cx{
         if align_delta.x > 0.0 || align_delta.y > 0.0{
             self.do_align(align_delta.x, align_delta.y, old.align_start);
         }
+        
+        // when a turtle is x-abs / y-abs you dont walk the parent
+        if !old.layout.abs_x.is_none() || !old.layout.abs_y.is_none(){
+            let x = if let Some(abs_x) = old.layout.abs_x{abs_x} else {0.};
+            let y = if let Some(abs_y) = old.layout.abs_y{abs_y} else {0.};
+            let w = if let Bounds::Fix(vw) = w{vw} else {0.};
+            let h = if let Bounds::Fix(vh) = h{vh} else {0.};
+            return Rect{x:x, y:y, w:w, h:h};
+        }
 
-        // now well walk the top turtle with our old geometry and margins
         //if self.turtles.len() == 0{
         //    return Rect{x:0.0, y:0.0, w:old.width, h:old.height};
        // }
@@ -345,133 +357,129 @@ pub fn debug_pt(x:f32, y:f32, color:i32, s:&str){
 
 #[derive(Clone)]
 pub enum Bounds{
-    Compute,
-    Fix(f32),
-    Scale(f32),
-    ScalePad(f32, f32),
     Fill,
+    Fix(f32),
+    Compute,
     FillPad(f32),
     FillScale(f32),
-    FillScalePad(f32,f32)
+    FillScalePad(f32,f32),
+    Scale(f32),
+    ScalePad(f32, f32),
 }
 
 impl Default for Bounds{
     fn default()->Self{
-        Bounds::Compute
+        Bounds::Fill
     }
 }
 
 impl Bounds{
-    pub fn eval_width(&self, cx: &Cx, margin:Margin)->f32{
+    pub fn eval_width(&self, cx: &Cx, margin:Margin, abs:bool)->f32{
         match self{
             Bounds::Compute=>std::f32::NAN,
             Bounds::Fix(v)=>*v,
             Bounds::Scale(v)=>{
-                if let Some(turtle) = cx.turtles.last(){
-                    nan_clamp_neg(turtle.width - (turtle.layout.padding.l+turtle.layout.padding.r)) * v - (margin.l + margin.r)
-                }
-                else{
-                    cx.target_size.x * v - (margin.l + margin.r)
-                }
+                if !abs{
+                    if let Some(turtle) = cx.turtles.last(){
+                        return nan_clamp_neg(turtle.width - (turtle.layout.padding.l+turtle.layout.padding.r)) * v - (margin.l + margin.r)
+                    }
+                };
+                cx.target_size.x * v - (margin.l + margin.r)
             },
             Bounds::ScalePad(v, p)=>{
-                if let Some(turtle) = cx.turtles.last(){
-                    nan_clamp_neg(turtle.width - (turtle.layout.padding.l+turtle.layout.padding.r)) * v - p - (margin.l + margin.r)
+                if !abs{
+                    if let Some(turtle) = cx.turtles.last(){
+                        return nan_clamp_neg(turtle.width - (turtle.layout.padding.l+turtle.layout.padding.r)) * v - p - (margin.l + margin.r)
+                    }
                 }
-                else{
-                    cx.target_size.x * v - p - (margin.l + margin.r)
-                }
+                cx.target_size.x * v - p - (margin.l + margin.r)
             },
             Bounds::Fill=>{
-                if let Some(turtle) = cx.turtles.last(){
-                    // use turtle.walk_x
-                    nan_clamp_neg(turtle.width - turtle.width_used - (turtle.walk_x -turtle.start_x)) - (margin.l + margin.r) 
+                if !abs{
+                    if let Some(turtle) = cx.turtles.last(){
+                        return nan_clamp_neg(turtle.width - turtle.width_used - (turtle.walk_x -turtle.start_x)) - (margin.l + margin.r) 
+                    }
                 }
-                else{
-                    cx.target_size.x - (margin.l + margin.r)
-                }
+                cx.target_size.x - (margin.l + margin.r)
             },
             Bounds::FillPad(p)=>{
-                if let Some(turtle) = cx.turtles.last(){
-                    // use turtle.walk_x
-                    nan_clamp_neg(turtle.width - turtle.width_used - (turtle.walk_x -turtle.start_x)) - p - (margin.l + margin.r)
+                if !abs{
+                    if let Some(turtle) = cx.turtles.last(){
+                        return nan_clamp_neg(turtle.width - turtle.width_used - (turtle.walk_x -turtle.start_x)) - p - (margin.l + margin.r)
+                    }
                 }
-                else{
-                    cx.target_size.x - p - (margin.l + margin.r)
-                }
+                cx.target_size.x - p - (margin.l + margin.r)
             },
             Bounds::FillScale(v)=>{
-                if let Some(turtle) = cx.turtles.last(){
-                    // use turtle.walk_x
-                    nan_clamp_neg(turtle.width - turtle.width_used - (turtle.walk_x -turtle.start_x) ) * v - (margin.l + margin.r)
+                if !abs{
+                    if let Some(turtle) = cx.turtles.last(){
+                        return nan_clamp_neg(turtle.width - turtle.width_used - (turtle.walk_x -turtle.start_x) ) * v - (margin.l + margin.r)
+                    }
                 }
-                else{
-                    cx.target_size.x * v - (margin.l + margin.r)
-                }
+                cx.target_size.x * v - (margin.l + margin.r)
             },
             Bounds::FillScalePad(v, p)=>{
-                if let Some(turtle) = cx.turtles.last(){
-                    // use turtle.walk_x
-                    nan_clamp_neg(turtle.width - turtle.width_used - (turtle.walk_x -turtle.start_x)) * v - p - (margin.l + margin.r)
+                if !abs{
+                    if let Some(turtle) = cx.turtles.last(){
+                        return nan_clamp_neg(turtle.width - turtle.width_used - (turtle.walk_x -turtle.start_x)) * v - p - (margin.l + margin.r)
+                    }
                 }
-                else{
-                    cx.target_size.x * v - p - (margin.l + margin.r)
-                }
+                cx.target_size.x * v - p - (margin.l + margin.r)
             }                
         }
     }
 
-    pub fn eval_height(&self, cx: &Cx, margin:Margin)->f32{
+    pub fn eval_height(&self, cx: &Cx, margin:Margin, abs:bool)->f32{
         match self{
             Bounds::Compute=>std::f32::NAN,
             Bounds::Fix(v)=>*v,
             Bounds::Scale(v)=>{
-                if let Some(turtle) = cx.turtles.last(){
-                    nan_clamp_neg(turtle.height - (turtle.layout.padding.t+turtle.layout.padding.b))* v - (margin.t + margin.b)
+                if !abs{
+                    if let Some(turtle) = cx.turtles.last(){
+                        return nan_clamp_neg(turtle.height - (turtle.layout.padding.t+turtle.layout.padding.b))* v - (margin.t + margin.b)
+                    }
                 }
-                else{
-                    cx.target_size.y * v - (margin.t + margin.b)
-                }
+                cx.target_size.y * v - (margin.t + margin.b)
             },
             Bounds::ScalePad(v, p)=>{
-                if let Some(turtle) = cx.turtles.last(){
-                    nan_clamp_neg(turtle.height - (turtle.layout.padding.t+turtle.layout.padding.b))* v  - p - (margin.t + margin.b)
+                if !abs{
+                    if let Some(turtle) = cx.turtles.last(){
+                        return nan_clamp_neg(turtle.height - (turtle.layout.padding.t+turtle.layout.padding.b))* v  - p - (margin.t + margin.b)
+                    }
                 }
-                else{
-                    cx.target_size.y * v - p - (margin.t + margin.b)
-                }
+                cx.target_size.y * v - p - (margin.t + margin.b)
             },
             Bounds::Fill=>{
-                if let Some(turtle) = cx.turtles.last(){
-                    nan_clamp_neg(turtle.height - turtle.height_used - (turtle.walk_y -turtle.start_y) ) - (margin.t + margin.b)
+                if !abs{
+                    if let Some(turtle) = cx.turtles.last(){
+                        return nan_clamp_neg(turtle.height - turtle.height_used - (turtle.walk_y -turtle.start_y) ) - (margin.t + margin.b)
+                    }
                 }
-                else{
-                    cx.target_size.y - (margin.t + margin.b)
-                }
+                cx.target_size.y - (margin.t + margin.b)
             },
             Bounds::FillPad(p)=>{
-                if let Some(turtle) = cx.turtles.last(){
-                    nan_clamp_neg(turtle.height - turtle.height_used - (turtle.walk_y -turtle.start_y)) - p - (margin.t + margin.b)
+                if !abs{
+                    if let Some(turtle) = cx.turtles.last(){
+                        return nan_clamp_neg(turtle.height - turtle.height_used - (turtle.walk_y -turtle.start_y)) - p - (margin.t + margin.b)
+                    }
                 }
-                else{
-                    cx.target_size.y - p - (margin.t + margin.b)
-                }
+                cx.target_size.y - p - (margin.t + margin.b)
             },
             Bounds::FillScale(v)=>{
-                if let Some(turtle) = cx.turtles.last(){
-                    nan_clamp_neg(turtle.height - turtle.height_used - (turtle.walk_y -turtle.start_y)) * v - (margin.t + margin.b)
-                }
-                else{
-                    cx.target_size.y - (margin.t + margin.b)
-                }
+                if !abs{
+                    if let Some(turtle) = cx.turtles.last(){
+                        return nan_clamp_neg(turtle.height - turtle.height_used - (turtle.walk_y -turtle.start_y)) * v - (margin.t + margin.b)
+                    }
+                }   
+                cx.target_size.y - (margin.t + margin.b)
             },
             Bounds::FillScalePad(v, p)=>{
-                if let Some(turtle) = cx.turtles.last(){
-                    nan_clamp_neg(turtle.height - turtle.height_used - (turtle.walk_y -turtle.start_y)) * v  - p - (margin.t + margin.b)
+                if !abs{
+                    if let Some(turtle) = cx.turtles.last(){
+                        return nan_clamp_neg(turtle.height - turtle.height_used - (turtle.walk_y -turtle.start_y)) * v  - p - (margin.t + margin.b)
+                    }
                 }
-                else{
-                    cx.target_size.y * v - p - (margin.t + margin.b)
-                }
+                cx.target_size.y * v - p - (margin.t + margin.b)
             },            
         }
     }
@@ -597,7 +605,8 @@ pub struct Turtle{
     pub width_used:f32,
     pub height_used:f32,
     pub biggest:f32,
-    pub layout:Layout
+    pub layout:Layout,
+    pub guard_area:Area
 } 
 //#[derive(Clone, Default)]
 //pub struct CxTurtle{

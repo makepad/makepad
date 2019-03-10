@@ -7,8 +7,7 @@ pub struct InstanceArea{
     pub draw_list_id:usize,
     pub draw_call_id:usize,
     pub instance_offset:usize,
-    pub instance_count:usize,
-    pub instance_writer:usize
+    pub instance_count:usize
 }
 
 #[derive(Clone, Default, Debug, PartialEq, Copy)]

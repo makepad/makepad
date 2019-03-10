@@ -64,7 +64,7 @@ impl Style for Splitter{
             split_size:8.0,
             min_size:25.0,
             split:Quad{
-                shader_id:cx.add_shader(split_sh),
+                shader_id:cx.add_shader(split_sh,"Splitter.split"),
                 ..Style::style(cx)
             },
 
@@ -158,10 +158,10 @@ impl SplitterLike for Splitter{
 
                 let delta = match self.axis{
                     Axis::Horizontal=>{
-                        fe.start_y - fe.abs_y
+                        fe.abs_start_y - fe.abs_y
                     },
                     Axis::Vertical=>{
-                        fe.start_x - fe.abs_x
+                        fe.abs_start_x - fe.abs_x
                     }
                 };
                 let mut pos = match self.align{
@@ -225,20 +225,20 @@ impl SplitterLike for Splitter{
                     width:Bounds::Fill,
                     height:Bounds::Fix(self._calc_pos),
                     ..Default::default()
-                })
+                }, Area::Empty)
             },
             Axis::Vertical=>{
                 cx.begin_turtle(&Layout{
                     width:Bounds::Fix(self._calc_pos),
                     height:Bounds::Fill,
                     ..Default::default()
-                })
+                }, Area::Empty)
             }
        }
    }
 
    fn mid_splitter(&mut self, cx:&mut Cx){
-        cx.end_turtle();
+        cx.end_turtle(Area::Empty);
         match self.axis{
             Axis::Horizontal=>{
                 cx.move_turtle(0.0,self._calc_pos + self.split_size);
@@ -247,15 +247,11 @@ impl SplitterLike for Splitter{
                 cx.move_turtle(self._calc_pos + self.split_size, 0.0);
             }
        };
-       cx.begin_turtle(&Layout{
-            width:Bounds::Fill,
-            height:Bounds::Fill,
-            ..Default::default()
-       });
+       cx.begin_turtle(&Layout{..Default::default()},Area::Empty);
    }
 
    fn end_splitter(&mut self, cx:&mut Cx){
-        cx.end_turtle();
+        cx.end_turtle(Area::Empty);
         // draw the splitter in the middle of the turtle
         let rect = cx.turtle_rect();
         self.split.color = self.animator.last_vec4("split.color");

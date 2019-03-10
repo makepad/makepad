@@ -103,14 +103,10 @@ impl App{
     }
 
     fn draw_app(&mut self, cx:&mut Cx){
-        self.view.begin_view(cx, &Layout{
-            line_wrap:LineWrap::None,
-            width:Bounds::Fill,
-            height:Bounds::Fill,
-            padding:Padding::all(0.0),
-            ..Default::default()
-        });
+        
+       // cx.debug_area = Area::Instance(InstanceArea{draw_list_id:3,draw_call_id:0,instance_offset:0,instance_count:0});
 
+        self.view.begin_view(cx, &Layout{..Default::default()});
 /*
         self.view1.begin_view(cx, &Layout{
             width:Bounds::Scale(0.5),
@@ -158,7 +154,6 @@ impl App{
 
         // draw scroll bars
         self.view.end_view(cx);
-       
     }
 }
 

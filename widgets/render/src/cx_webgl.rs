@@ -68,6 +68,14 @@ impl Cx{
     pub fn process_to_wasm<F>(&mut self, msg:u32, mut event_handler:F)->u32
     where F: FnMut(&mut Cx, &mut Event)
     {
+        // store our view root somewhere
+        if self.resources.root_view_ptr == 0{
+            self.resources.root_view_ptr = Box::into_raw(
+                Box::new(View::<NoScrollBar>{..Style::style(self)})
+            ) as u32
+        }
+        let root_view = unsafe{&mut *(self.resources.root_view_ptr as *mut View<NoScrollBar>)};
+        
         let mut to_wasm = ToWasm::from(msg);
         self.resources.from_wasm = FromWasm::new();
         let mut is_animation_frame = false;
@@ -116,7 +124,7 @@ impl Cx{
                 3=>{ // init
                     self.target_size = vec2(to_wasm.mf32(),to_wasm.mf32());
                     self.target_dpi_factor = to_wasm.mf32();
-                    event_handler(self, &mut Event::Construct); 
+                    self.call_event_handler(&mut event_handler, &mut Event::Construct); 
                     self.dirty_area = Area::All;
                 },
                 4=>{ // resize
@@ -130,18 +138,14 @@ impl Cx{
                     is_animation_frame = true;
                     let time = to_wasm.mf64();
                     //log!(self, "{} o clock",time);
-                    event_handler(self, &mut Event::Animate(AnimateEvent{time:time}));
-                    self.check_ended_anim_areas(time);
-                    if self.ended_anim_areas.len() > 0{
-                        event_handler(self, &mut Event::AnimationEnded(AnimateEvent{time:time}));
-                    }
+                    self.call_animation_event(&mut event_handler, time);
                 },
                 6=>{ // finger down
                     let x = to_wasm.mf32();
                     let y = to_wasm.mf32();
                     let digit = to_wasm.mu32() as usize;
                     self.fingers_down[digit] = true;
-                    event_handler(self, &mut Event::FingerDown(FingerDownEvent{
+                    self.call_event_handler(&mut event_handler, &mut Event::FingerDown(FingerDownEvent{
                         abs_x:x, 
                         abs_y:y,
                         rel_x:x,
@@ -159,13 +163,15 @@ impl Cx{
                     if !self.any_fingers_down(){
                         self.down_mouse_cursor = None;
                     }
-                    event_handler(self, &mut Event::FingerUp(FingerUpEvent{
+                    self.call_event_handler(&mut event_handler, &mut Event::FingerUp(FingerUpEvent{
                         abs_x:x, 
                         abs_y:y,
                         rel_x:x,
                         rel_y:y,
-                        start_x:0.,
-                        start_y:0.,
+                        abs_start_x:0.,
+                        abs_start_y:0.,
+                        rel_start_x:0.,
+                        rel_start_y:0.,
                         digit:digit,
                         is_over:false,
                         is_touch:to_wasm.mu32()>0
@@ -174,13 +180,15 @@ impl Cx{
                 8=>{ // finger move
                     let x = to_wasm.mf32();
                     let y = to_wasm.mf32();
-                    event_handler(self, &mut Event::FingerMove(FingerMoveEvent{
+                    self.call_event_handler(&mut event_handler, &mut Event::FingerMove(FingerMoveEvent{
                         abs_x:x, 
                         abs_y:y,
                         rel_x:x,
                         rel_y:y,
-                        start_x:0.,
-                        start_y:0.,
+                        abs_start_x:0.,
+                        abs_start_y:0.,
+                        rel_start_x:0.,
+                        rel_start_y:0.,
                         is_over:false,
                         digit:to_wasm.mu32() as usize,
                         is_touch:to_wasm.mu32()>0
@@ -190,7 +198,7 @@ impl Cx{
                     let x = to_wasm.mf32();
                     let y = to_wasm.mf32();
                     self.hover_mouse_cursor = None;
-                    event_handler(self, &mut Event::FingerHover(FingerHoverEvent{
+                    self.call_event_handler(&mut event_handler, &mut Event::FingerHover(FingerHoverEvent{
                         abs_x:x, 
                         abs_y:y,
                         rel_x:x,
@@ -202,7 +210,7 @@ impl Cx{
                 10=>{ // finger scroll
                     let x = to_wasm.mf32();
                     let y = to_wasm.mf32();
-                    event_handler(self, &mut Event::FingerScroll(FingerScrollEvent{
+                    self.call_event_handler(&mut event_handler, &mut Event::FingerScroll(FingerScrollEvent{
                         abs_x:x, 
                         abs_y:y,
                         rel_x:x,
@@ -218,6 +226,11 @@ impl Cx{
             };
         };
 
+        if !self.dirty_area.is_empty(){
+            self.call_draw_event(&mut event_handler, root_view);
+            self.paint_dirty = true;
+        }
+
         // check if we need to send a cursor
         if !self.down_mouse_cursor.is_none(){
             self.resources.from_wasm.set_mouse_cursor(self.down_mouse_cursor.as_ref().unwrap().clone())
@@ -228,14 +241,6 @@ impl Cx{
             self.resources.from_wasm.set_mouse_cursor(MouseCursor::Default);
         }
 
-        if !self.dirty_area.is_empty(){
-            self.dirty_area = Area::Empty;
-            self.redraw_area = self.dirty_area.clone();
-            self.redraw_id += 1;
-            event_handler(self, &mut Event::Redraw);
-            self.paint_dirty = true;
-        }
-    
         if is_animation_frame && self.paint_dirty{
             self.paint_dirty = false;
             self.repaint();
@@ -354,6 +359,7 @@ pub struct WebGLTexture2D{
     pub texture_id: usize
 }
 
+
 #[derive(Clone, Default)]
 pub struct CxShaders{
     pub compiled_shaders: Vec<CompiledShader>,
@@ -369,7 +375,8 @@ pub struct CxResources{
     pub index_buffers:usize,
     pub index_buffers_free:Vec<usize>,
     pub vaos:usize,
-    pub vaos_free:Vec<usize>
+    pub vaos_free:Vec<usize>,
+    pub root_view_ptr:u32
 }
 
 impl Default for CxResources{
@@ -381,7 +388,8 @@ impl Default for CxResources{
             index_buffers:1,
             index_buffers_free:Vec::new(),
             vaos:1,
-            vaos_free:Vec::new()
+            vaos_free:Vec::new(),
+            root_view_ptr:0
         }
     }
 }
