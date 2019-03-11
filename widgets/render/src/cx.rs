@@ -273,27 +273,28 @@ impl Cx{
         
         // find our drawcall in the filled draws
         for i in (0..draw_list.draw_calls_len).rev(){
-            if draw_list.draw_calls[i].shader_id == sh.shader_id{
-                // reuse this drawcmd.
-                let dc = &mut draw_list.draw_calls[i];
+            let dc = &mut draw_list.draw_calls[i];
+            if dc.sub_list_id == 0 && dc.shader_id == sh.shader_id{
+                // reuse this drawcmd and add an instance
                 dc.current_instance_offset = dc.instance.len();
                 let slot_align = dc.instance.len() % sh.instance_slots;
                 if slot_align != 0{
                     panic!("Instance offset disaligned! shader: {} misalign: {} slots: {}", shader_id, slot_align, sh.instance_slots);
                 }
                 dc.need_uniforms_now = false;
+                
                 return dc.get_current_area();
             }
         }
 
         // we need a new draw
-        let id = draw_list.draw_calls_len;
+        let draw_call_id = draw_list.draw_calls_len;
         draw_list.draw_calls_len = draw_list.draw_calls_len + 1;
         
         // see if we need to add a new one
-        if id >= draw_list.draw_calls.len(){
+        if draw_call_id >= draw_list.draw_calls.len(){
             draw_list.draw_calls.push(DrawCall{
-                draw_call_id:draw_list.draw_calls.len(),
+                draw_call_id:draw_call_id,
                 draw_list_id:self.current_draw_list_id,
                 sub_list_id:0,
                 shader_id:sh.shader_id,
@@ -305,13 +306,14 @@ impl Cx{
                 instance_dirty:true,
                 resources:DrawCallResources{..Default::default()}
             });
-            let dc = &mut draw_list.draw_calls[id];
-            return dc.get_current_area();
+            let dc = &mut draw_list.draw_calls[draw_call_id];
+           return dc.get_current_area();
         }
 
         // reuse a draw
-        let dc = &mut draw_list.draw_calls[id];
+        let dc = &mut draw_list.draw_calls[draw_call_id];
         dc.shader_id = sh.shader_id;
+        dc.sub_list_id = 0; // make sure its recognised as a draw call
         // truncate buffers and set update frame
         dc.instance.truncate(0);
         dc.current_instance_offset = 0;
@@ -431,7 +433,7 @@ impl Cx{
                 let instances = draw_call.instance.len() / slots;
                 println!("{}call {}: {}({}) x:{}", indent, draw_call_id, sh.name, draw_call.shader_id, instances);        
                 // lets dump the instance geometry
-                for inst in 0..instances{
+                for inst in 0..instances.min(1){
                     let mut out = String::new();
                     let mut off = 0;
                     for prop in &shc.named_instance_props.props{

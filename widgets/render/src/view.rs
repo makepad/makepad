@@ -83,12 +83,8 @@ where TScrollBar: ScrollBarLike<TScrollBar> + Clone + ElementLife
         }
         let draw_list_id = self.draw_list_id.unwrap();
         
-        let nesting_draw_list_id = if let Some(last_dlid) = cx.draw_list_stack.last(){
-            *last_dlid
-        } else{
-            0
-        };
-
+        let nesting_draw_list_id = cx.current_draw_list_id;
+       
         let parent_draw_list_id = if self.is_overlay{
             0
         }
@@ -109,6 +105,7 @@ where TScrollBar: ScrollBarLike<TScrollBar> + Clone + ElementLife
             if parent_draw_list.draw_calls_len > parent_draw_list.draw_calls.len(){
                 parent_draw_list.draw_calls.push({
                     DrawCall{
+                        draw_list_id:parent_draw_list_id,
                         draw_call_id:parent_draw_list.draw_calls.len(),
                         sub_list_id:draw_list_id,
                         ..Default::default()
@@ -127,7 +124,7 @@ where TScrollBar: ScrollBarLike<TScrollBar> + Clone + ElementLife
  
         cx.draw_list_stack.push(cx.current_draw_list_id);
         cx.current_draw_list_id = draw_list_id;
-        
+
         cx.begin_turtle(layout, Area::DrawList(DrawListArea{draw_list_id:draw_list_id}));
 
         false

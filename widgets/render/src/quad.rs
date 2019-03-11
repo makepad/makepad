@@ -94,6 +94,7 @@ impl Quad{
 
     pub fn draw_quad(&mut self, cx:&mut Cx, x:f32, y:f32, w:f32, h:f32)->Area{
         let area = cx.new_aligned_instance(self.shader_id);
+        //println!("{:?} {}", area, cx.current_draw_list_id);
         let pos = cx.turtle_origin();
         let data = [
             /*x,y,w,h*/pos.x+x,pos.y+y,w,h,

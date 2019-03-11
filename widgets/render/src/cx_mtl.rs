@@ -224,7 +224,7 @@ impl Cx{
                 self.call_animation_event(&mut event_handler, time);
             }
             // call redraw event
-            if !self.redraw_areas.len()>0{
+            if self.redraw_areas.len()>0{
                 self.call_draw_event(&mut event_handler, &mut root_view);
                 self.paint_dirty = true;
             }
@@ -556,7 +556,7 @@ pub struct DrawListResources{
      pub uni_dl:MetalBuffer
 }
 
-#[derive(Default,Clone)]
+#[derive(Default,Clone,Debug)]
 pub struct DrawCallResources{
     pub uni_dr:MetalBuffer,
     pub inst_vbuf:MetalBuffer
@@ -637,14 +637,14 @@ pub struct AssembledMtlShader{
     pub mtlsl:String,
 }
 
-#[derive(Default,Clone)]
+#[derive(Default,Clone,Debug)]
 pub struct MultiMetalBuffer{
     pub buffer:Option<metal::Buffer>,
     pub size:usize,
     pub used:usize
 }
 
-#[derive(Default,Clone)]
+#[derive(Default,Clone,Debug)]
 pub struct MetalBuffer{
     pub last_written:usize,
     pub multi1:MultiMetalBuffer,
