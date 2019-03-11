@@ -11,3 +11,5 @@ mod tabcontrol;
 pub use crate::tabcontrol::*;
 mod dock;
 pub use crate::dock::*;
+mod style;
+pub use crate::style::*;

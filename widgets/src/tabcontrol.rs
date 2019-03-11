@@ -18,15 +18,6 @@ pub struct TabControl{
     pub _tab_id_alloc:usize
 }
 
-pub trait TabControlLike{
-    fn handle_tab_control(&mut self, cx:&mut Cx, event:&mut Event)->TabControlEvent;
-    fn begin_tabs(&mut self, cx:&mut Cx);
-    fn draw_tab(&mut self, cx:&mut Cx, title:&str, selected:bool);
-    fn end_tabs(&mut self, cx:&mut Cx);
-    fn begin_tab_page(&mut self, cx:&mut Cx);
-    fn end_tab_page(&mut self, cx:&mut Cx);
-}
-
 #[derive(Clone, PartialEq)]
 pub enum TabControlState{
     Default,
@@ -72,8 +63,8 @@ impl Style for TabControl{
     }
 }
 
-impl TabControlLike for TabControl{
-    fn handle_tab_control(&mut self, cx:&mut Cx, event:&mut Event)->TabControlEvent{
+impl TabControl{
+    pub fn handle_tab_control(&mut self, cx:&mut Cx, event:&mut Event)->TabControlEvent{
         let mut ret_event = TabControlEvent::None;
         for (id, tab) in self.tabs.ids(){
             match tab.handle_tab(cx, event){
@@ -100,10 +91,10 @@ impl TabControlLike for TabControl{
         //    _=>()
         //};
         ret_event
-   }
+    }
 
     // data free APIs for the win!
-    fn begin_tabs(&mut self, cx:&mut Cx){
+    pub fn begin_tabs(&mut self, cx:&mut Cx){
         //cx.begin_turtle(&Layout{
         self.tabs_view.begin_view(cx, &Layout{
             width:Bounds::Fill,
@@ -114,14 +105,14 @@ impl TabControlLike for TabControl{
         self._tab_id_alloc = 0;
     }
 
-    fn draw_tab(&mut self, cx:&mut Cx, label:&str, selected:bool){
+    pub fn draw_tab(&mut self, cx:&mut Cx, label:&str, selected:bool){
         let tab = self.tabs.get(cx, self._tab_id_alloc);
         self._tab_id_alloc += 1;
         tab.label = label.to_string();
         tab.draw_tab(cx);
     }
 
-    fn end_tabs(&mut self, cx:&mut Cx){
+    pub fn end_tabs(&mut self, cx:&mut Cx){
         self.tabs_view.end_view(cx);
 
         if let Some((fe, id)) = &self._dragging_tab{
@@ -144,12 +135,12 @@ impl TabControlLike for TabControl{
         }
     }
 
-    fn begin_tab_page(&mut self, cx:&mut Cx){
+    pub fn begin_tab_page(&mut self, cx:&mut Cx){
         cx.turtle_new_line();
         cx.begin_turtle(&Layout{..Default::default()}, Area::Empty)
     }
 
-    fn end_tab_page(&mut self, cx:&mut Cx){
+    pub fn end_tab_page(&mut self, cx:&mut Cx){
         cx.end_turtle(Area::Empty);
         // if we are in draggable tab state,
         // draw our draggable tab

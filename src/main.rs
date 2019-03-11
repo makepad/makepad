@@ -9,13 +9,14 @@ enum MyItem{
 
 struct App{
     view:View<ScrollBar>,
-    dock:Dock<MyItem, Splitter, TabControl>,
+    dock:Dock<MyItem>,
     ok:Elements<Button, usize>,
     quad:Quad
 }
  
 impl Style for App{
     fn style(cx:&mut Cx)->Self{
+        set_dark_style(cx);
         Self{
             view:View{
                 scroll_h:Some(Element::new(ScrollBar{

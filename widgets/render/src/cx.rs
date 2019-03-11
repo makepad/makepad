@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 pub use crate::shadergen::*;
 pub use crate::cx_fonts::*;
@@ -73,7 +74,7 @@ pub struct Cx{
 
     pub resources:CxResources,
 
-    pub style:StyleSheet,
+    pub style_values:BTreeMap<String, StyleValue>,
 
     pub binary_deps:Vec<BinaryDep>
  }
@@ -126,10 +127,10 @@ impl Default for Cx{
 
             user_events:Vec::new(),
 
+            style_values:BTreeMap::new(),
+
             playing_anim_areas:Vec::new(),
             ended_anim_areas:Vec::new(),
-
-            style: StyleSheet{..Default::default()},
 
             resources:CxResources{..Default::default()},
 
@@ -307,6 +308,38 @@ impl Cx{
         return dc.get_current_area();
     }
 
+    pub fn style_color(&self, name:&str)->Vec4{
+        if let Some(StyleValue::Color(val)) = self.style_values.get(name){
+            return *val;
+        }
+        panic!("Cannot find style color key {}", name);
+    }
+
+    pub fn style_font(&self, name:&str)->String{
+        if let Some(StyleValue::Font(val)) = self.style_values.get(name){
+            return val.clone();
+        }
+        panic!("Cannot find style font key {}", name);
+    }
+
+    pub fn style_size(&self, name:&str)->f64{
+        if let Some(StyleValue::Size(val)) = self.style_values.get(name){
+            return *val;
+        }
+        panic!("Cannot find style size key {}", name);
+    }
+
+    pub fn set_style_color(&mut self, name:&str, val:Vec4){
+        self.style_values.insert(name.to_string(), StyleValue::Color(val));
+    }
+
+    pub fn set_style_font(&mut self, name:&str, val:&str){
+        self.style_values.insert(name.to_string(), StyleValue::Font(val.to_string()));
+    }
+
+    pub fn set_style_size(&mut self, name:&str, val:f64){
+        self.style_values.insert(name.to_string(), StyleValue::Size(val));
+    }
     // push instance so it can be written to again in pop_instance
     pub fn push_instance_area_stack(&mut self, area:Area){
         self.instance_area_stack.push(area.clone());
@@ -416,6 +449,13 @@ impl Cx{
             println!("---------- End Debug draw tree for redraw_id: {} ---------", self.redraw_id)
         }
     }
+}
+
+#[derive(Clone)]
+pub enum StyleValue{
+    Color(Vec4),
+    Font(String),
+    Size(f64)
 }
 
 #[derive(Default,Clone)]

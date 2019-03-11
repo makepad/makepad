@@ -36,14 +36,6 @@ pub enum SplitterEvent{
     Moving{new_pos:f32},
 }
 
-pub trait SplitterLike{
-    fn handle_splitter(&mut self, cx:&mut Cx, event:&mut Event)->SplitterEvent;
-    fn set_splitter_state(&mut self, align:SplitterAlign, pos:f32, axis:Axis);
-    fn begin_splitter(&mut self, cx:&mut Cx);
-    fn mid_splitter(&mut self, cx:&mut Cx);
-    fn end_splitter(&mut self, cx:&mut Cx);
-}
-
 impl Style for Splitter{
     fn style(cx:&mut Cx)->Self{
         let split_sh = Self::def_split_shader(cx);
@@ -69,7 +61,7 @@ impl Style for Splitter{
             },
 
             animator:Animator::new(Anim::new(AnimMode::Cut{duration:0.5},vec![
-                AnimTrack::to_vec4("split.color",cx.style.bg_normal),
+                AnimTrack::to_vec4("split.color",cx.style_color("bg_normal")),
             ])),
             anim_over:Anim::new(AnimMode::Cut{duration:0.05}, vec![
                 AnimTrack::to_vec4("split.color", color("#5")),
@@ -86,7 +78,6 @@ impl Style for Splitter{
 
 impl Splitter{
 
-
     pub fn def_split_shader(cx:&mut Cx)->Shader{
         let mut sh = Quad::def_quad_shader(cx);
         sh.add_ast(shader_ast!({
@@ -101,10 +92,8 @@ impl Splitter{
         }));
         sh
     }
-}
 
-impl SplitterLike for Splitter{
-    fn handle_splitter(&mut self, cx:&mut Cx, event:&mut Event)->SplitterEvent{
+    pub fn handle_splitter(&mut self, cx:&mut Cx, event:&mut Event)->SplitterEvent{
         let mut ret_event = SplitterEvent::None;
         match event.hits(cx, self._split_area, &mut self._hit_state){
             Event::Animate(ae)=>{
@@ -198,15 +187,15 @@ impl SplitterLike for Splitter{
             _=>()
         };
         ret_event
-   }
+    }
 
-   fn set_splitter_state(&mut self, align:SplitterAlign, pos:f32, axis:Axis){
+    pub fn set_splitter_state(&mut self, align:SplitterAlign, pos:f32, axis:Axis){
        self.axis = axis;
        self.align = align;
        self.pos = pos;
-   }
+    }
 
-   fn begin_splitter(&mut self, cx:&mut Cx){
+    pub fn begin_splitter(&mut self, cx:&mut Cx){
        let rect = cx.turtle_rect();
        self._calc_pos = match self.align{
            SplitterAlign::First=>self.pos,
@@ -237,7 +226,7 @@ impl SplitterLike for Splitter{
        }
    }
 
-   fn mid_splitter(&mut self, cx:&mut Cx){
+    pub fn mid_splitter(&mut self, cx:&mut Cx){
         cx.end_turtle(Area::Empty);
         match self.axis{
             Axis::Horizontal=>{
@@ -250,7 +239,7 @@ impl SplitterLike for Splitter{
        cx.begin_turtle(&Layout{..Default::default()},Area::Empty);
    }
 
-   fn end_splitter(&mut self, cx:&mut Cx){
+    pub fn end_splitter(&mut self, cx:&mut Cx){
         cx.end_turtle(Area::Empty);
         // draw the splitter in the middle of the turtle
         let rect = cx.turtle_rect();

@@ -34,14 +34,14 @@ impl Style for Button{
             text:Text{..Style::style(cx)},
 
             animator:Animator::new(Anim::new(AnimMode::Cut{duration:0.5}, vec![
-                AnimTrack::to_vec4("bg.color", cx.style.bg_normal),
+                AnimTrack::to_vec4("bg.color", cx.style_color("bg_normal")),
                 AnimTrack::to_float("bg.glow_size", 0.0),
-                AnimTrack::to_vec4("bg.border_color", cx.style.text_lo),
-                AnimTrack::to_vec4("text.color", cx.style.text_med),
-                AnimTrack::to_vec4("icon.color", cx.style.text_med)
+                AnimTrack::to_vec4("bg.border_color", cx.style_color("text_lo")),
+                AnimTrack::to_vec4("text.color", cx.style_color("text_med")),
+                AnimTrack::to_vec4("icon.color", cx.style_color("text_med"))
             ])),
             anim_over:Anim::new(AnimMode::Cut{duration:0.05}, vec![
-                AnimTrack::to_vec4("bg.color", cx.style.bg_top),
+                AnimTrack::to_vec4("bg.color", cx.style_color("bg_top")),
                 AnimTrack::to_vec4("bg.border_color", color("white")),
                 AnimTrack::to_float("bg.glow_size", 1.0)
             ]),

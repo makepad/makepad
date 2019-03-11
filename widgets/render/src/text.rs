@@ -24,12 +24,12 @@ impl Style for Text{
         let sh = Self::def_text_shader(cx);
         Self{
             shader_id:cx.add_shader(sh, "Text"),
-            font_id:cx.load_font(&cx.style.normal_font.clone()),
+            font_id:cx.load_font(&cx.style_font("normal_font")),
             text:"".to_string(),
-            font_size:cx.style.font_size,
+            font_size:cx.style_size("font_size") as f32,
             line_spacing:1.15,
             wrapping:Wrapping::Word,
-            color:cx.style.text_normal.clone()
+            color:cx.style_color("text_normal")
         }
     }
 }
