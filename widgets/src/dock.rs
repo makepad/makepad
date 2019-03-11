@@ -5,6 +5,44 @@ use crate::splitter::*;
 use crate::tabcontrol::*;
 
 #[derive(Clone)]
+pub struct Dock<TItem>
+where TItem: Clone
+{
+    pub dock_items: Option<DockItem<TItem>>,
+    pub splitters: Elements<Splitter, usize>,
+    pub tab_controls: Elements<TabControl, usize>,
+
+    pub drop_quad: Quad,
+    pub drop_quad_view:View<NoScrollBar>,
+    pub _drop_quad_where: Option<FingerMoveEvent>
+}
+
+impl<TItem> Style for Dock<TItem>
+where TItem: Clone
+{
+    fn style(cx: &mut Cx)->Dock<TItem>{
+        Dock{
+            dock_items:None,
+            drop_quad:Quad{
+                color:cx.style_color("accent_normal"),
+                ..Style::style(cx)
+            },
+            splitters:Elements::new(Splitter{
+                ..Style::style(cx)
+            }),
+            tab_controls:Elements::new(TabControl{
+                ..Style::style(cx)
+            }),
+            drop_quad_view:View{
+                is_overlay:true,
+                ..Style::style(cx)
+            },
+            _drop_quad_where:None
+        }
+    }
+}
+
+#[derive(Clone)]
 pub struct DockTab<TItem>
 where TItem: Clone
 {
@@ -30,16 +68,7 @@ where TItem: Clone
     }
 }
 
-#[derive(Clone)]
-pub struct Dock<TItem>
-where TItem: Clone
-{
-    pub dock_items: DockItem<TItem>,
-    pub splitters: Elements<Splitter, usize>,
-    pub tab_controls: Elements<TabControl, usize>
-}
-
-struct DockStackLevel<'a, TItem>
+struct DockWalkStack<'a, TItem>
 where TItem: Clone
 {
     counter:usize,
@@ -51,9 +80,12 @@ pub struct DockWalker<'a, TItem>
 where TItem: Clone
 {
     walk_uid:usize,
+    stack:Vec<DockWalkStack<'a, TItem>>,
+    // forwards for Dock
     splitters:&'a mut Elements<Splitter, usize>,
     tab_controls:&'a mut Elements<TabControl, usize>,
-    stack:Vec<DockStackLevel<'a, TItem>>,
+    drop_quad_view:&'a mut View<NoScrollBar>,
+    _drop_quad_where:&'a mut Option<FingerMoveEvent>
 }
 
 impl<'a, TItem> DockWalker<'a, TItem>
@@ -81,7 +113,15 @@ where TItem: Clone
                         let tab_control = self.tab_controls.get(cx, stack_top.uid);
                         
                         // ok so this one returns 'DragTab(x,y)
-                        tab_control.handle_tab_control(cx, event);
+                        match tab_control.handle_tab_control(cx, event){
+                            TabControlEvent::TabDragMove{fe, tab_id}=>{
+                               *self._drop_quad_where = Some(fe);
+                               self.drop_quad_view.redraw_view_area(cx);
+                            },
+                            //TabControlEvent::TabDragEnd{_fe, _tab_id}=>{
+                            //}
+                            _=>()
+                        }
 
                         return Some(unsafe{mem::transmute(&mut tabs[*current].item)});
                     }
@@ -102,11 +142,11 @@ where TItem: Clone
                             _=>()
                         };
                         // update state in our splitter level
-                        Some(DockStackLevel{counter:0, uid:0, item:unsafe{mem::transmute(first.as_mut())}})
+                        Some(DockWalkStack{counter:0, uid:0, item:unsafe{mem::transmute(first.as_mut())}})
                     }
                     else if stack_top.counter == 1{
                         stack_top.counter +=1;
-                        Some(DockStackLevel{counter:0, uid:0, item:unsafe{mem::transmute(last.as_mut())}})
+                        Some(DockWalkStack{counter:0, uid:0, item:unsafe{mem::transmute(last.as_mut())}})
                     }
                     else{
                         None
@@ -172,14 +212,14 @@ where TItem: Clone
                         let split = self.splitters.get(cx, stack_top.uid);
                         split.set_splitter_state(align.clone(), *pos, axis.clone());
                         split.begin_splitter(cx);
-                        Some(DockStackLevel{counter:0, uid:0, item:unsafe{mem::transmute(first.as_mut())}})
+                        Some(DockWalkStack{counter:0, uid:0, item:unsafe{mem::transmute(first.as_mut())}})
                     }
                     else if stack_top.counter == 1{
                         stack_top.counter +=1 ;
 
                         let split = self.splitters.get(cx, stack_top.uid);
                         split.mid_splitter(cx);
-                        Some(DockStackLevel{counter:0, uid:0, item:unsafe{mem::transmute(last.as_mut())}})
+                        Some(DockWalkStack{counter:0, uid:0, item:unsafe{mem::transmute(last.as_mut())}})
                     }
                     else{
                         let split = self.splitters.get(cx, stack_top.uid);
@@ -207,14 +247,43 @@ where TItem: Clone
 impl<TItem> Dock<TItem>
 where TItem: Clone
 {
+    pub fn draw_dock_drags(&mut self, cx: &mut Cx){
+        // lets draw our hover layer if need be
+        if let Some(fe) = &self._drop_quad_where{
+            self.drop_quad_view.begin_view(cx, &Layout{
+                abs_x:Some(0.),
+                abs_y:Some(0.),
+                ..Default::default()
+            });
+
+            // alright so now, what do i need to do
+            // well lets for shits n giggles find all the tab areas 
+            // you know, we have a list eh
+            for tab_control in self.tab_controls.all(){
+                // ok now, we ask the tab_controls rect
+                let cdr = tab_control.get_content_drop_rect(cx);
+                if cdr.contains(fe.abs_x, fe.abs_y){
+                    self.drop_quad.draw_quad(cx, cdr.x, cdr.y, cdr.w, cdr.h);
+                }
+            }
+            //self.drop_quad.draw_quad()
+
+            self.drop_quad_view.end_view(cx);
+        }
+    }
+
     pub fn walker<'a>(&'a mut self)->DockWalker<'a, TItem>{
         let mut stack = Vec::new();
-        stack.push(DockStackLevel{counter:0, uid:0, item:&mut self.dock_items});
+        if !self.dock_items.is_none(){
+            stack.push(DockWalkStack{counter:0, uid:0, item:self.dock_items.as_mut().unwrap()});
+        }
         DockWalker{
             walk_uid:0,
+            stack:stack,
             splitters:&mut self.splitters,
             tab_controls:&mut self.tab_controls,
-            stack:stack
+            _drop_quad_where:&mut self._drop_quad_where,
+            drop_quad_view:&mut self.drop_quad_view,
         }
     }
 }

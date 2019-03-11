@@ -195,7 +195,8 @@ impl Cx{
 
         self.call_event_handler(&mut event_handler, &mut Event::Construct);
 
-        let mut do_lazy_layer_resize = false; // cool mac feature we need. cough.
+        self.redraw_area(Area::All);
+
         while self.running{
             // unfortunate duplication of code between poll and run_forever but i don't know how to put this in a closure
             // without borrowchecker hell
@@ -223,7 +224,7 @@ impl Cx{
                 self.call_animation_event(&mut event_handler, time);
             }
             // call redraw event
-            if !self.dirty_area.is_empty(){
+            if !self.redraw_areas.len()>0{
                 self.call_draw_event(&mut event_handler, &mut root_view);
                 self.paint_dirty = true;
             }
@@ -245,7 +246,7 @@ impl Cx{
             }
             
             // wait for the next event blockingly so it stops eating power
-            if self.playing_anim_areas.len() == 0 && self.dirty_area.is_empty(){
+            if self.playing_anim_areas.len() == 0 && self.redraw_areas.len() == 0{
                 events_loop.run_forever(|winit_event|{
                     let mut events = self.map_winit_event(winit_event, &glutin_window);
                     for mut event in &mut events{

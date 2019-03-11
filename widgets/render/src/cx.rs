@@ -49,8 +49,8 @@ pub struct Cx{
     pub shaders: Vec<Shader>,
     pub shader_map: HashMap<Shader, usize>,
 
-    pub dirty_area:Area,
-    pub redraw_area:Area,
+    pub redraw_areas:Vec<Area>,
+    pub incr_areas:Vec<Area>,
     pub paint_dirty:bool,
     pub clear_color:Vec4,
     pub redraw_id: u64,
@@ -107,8 +107,8 @@ impl Default for Cx{
             shaders:Vec::new(),
             shader_map:HashMap::new(),
 
-            dirty_area:Area::All,
-            redraw_area:Area::Empty,
+            redraw_areas:Vec::new(),
+            incr_areas:Vec::new(),
             paint_dirty:true,
             clear_color:vec4(0.1,0.1,0.1,1.0),
             redraw_id:1,
@@ -172,6 +172,20 @@ impl Cx{
         sh.add_ast(shader_ast!({
             let camera_projection:mat4<UniformCx>;
         }));
+    }
+
+    pub fn redraw_area(&mut self, area:Area){
+        // if we are redrawing all, clear the rest
+        if area == Area::All{
+            self.redraw_areas.truncate(0);
+        }
+        // check if we are already redrawing all
+        else if self.redraw_areas.len() == 1 &&  self.redraw_areas[0] == Area::All{
+            return;
+        };
+        // TODO check if the area already has a 
+        // parent in our redraw areas
+        self.redraw_areas.push(area);
     }
 
     pub fn uniform_camera_projection(&mut self, v:Mat4){
@@ -370,9 +384,8 @@ impl Cx{
     where F: FnMut(&mut Cx, &mut Event), T: ScrollBarLike<T> + Clone + ElementLife
     { 
         root_view.begin_view(self, &Layout{..Default::default()});
-
-        self.redraw_area = self.dirty_area.clone();
-        self.dirty_area = Area::Empty;
+        self.incr_areas = self.redraw_areas.clone();
+        self.redraw_areas.truncate(0);
         self.redraw_id += 1;
         self.call_event_handler(&mut event_handler, &mut Event::Draw);
 

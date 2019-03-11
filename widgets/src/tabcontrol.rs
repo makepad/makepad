@@ -15,19 +15,16 @@ pub struct TabControl{
     pub animator:Animator,
 
     pub _dragging_tab:Option<(FingerMoveEvent,usize)>,
-    pub _tab_id_alloc:usize
-}
-
-#[derive(Clone, PartialEq)]
-pub enum TabControlState{
-    Default,
-    Hovering
+    pub _tab_id_alloc:usize,
+    pub _page_rect:Rect
 }
 
 #[derive(Clone, PartialEq)]
 pub enum TabControlEvent{
     None,
-    Select{tab:usize},
+    TabDragMove{fe:FingerMoveEvent, tab_id:usize},
+    TabDragEnd{fe:FingerUpEvent, tab_id:usize},
+    TabSelect{tab_id:usize},
 }
 
 impl Style for TabControl{
@@ -59,38 +56,48 @@ impl Style for TabControl{
             animator:Animator::new(Anim::new(AnimMode::Cut{duration:0.5}, vec![])),
             _dragging_tab:None,
             _tab_id_alloc:0,
+            _page_rect:Rect::zero()
         }
     }
 }
 
 impl TabControl{
     pub fn handle_tab_control(&mut self, cx:&mut Cx, event:&mut Event)->TabControlEvent{
-        let mut ret_event = TabControlEvent::None;
         for (id, tab) in self.tabs.ids(){
             match tab.handle_tab(cx, event){
                 TabEvent::Clicked=>{
 
                 },
                 TabEvent::DragMove(fe)=>{
-                    // alright we wanna start a tab drag,
-                    self._dragging_tab = Some((fe, *id));
+                    self._dragging_tab = Some((fe.clone(), *id));
                     // flag our view as dirty, to trigger
-                    // an incremental draw
-                    cx.dirty_area = self.tabs_view.get_view_area();
+                    cx.redraw_area(self.tabs_view.get_view_area());
+                    return TabControlEvent::TabDragMove{fe:fe, tab_id:*id};
                 },
                 TabEvent::DragEnd(fe)=>{
                     self._dragging_tab = None;
-                    cx.dirty_area = self.tabs_view.get_view_area();
+                    cx.redraw_area(self.tabs_view.get_view_area());
+                    return TabControlEvent::TabDragEnd{fe, tab_id:*id};
                 }
                 _=>()
             }
         }
-        //match event.hits(cx, self.split_area, &mut self.hit_state){
-        //    Event::Animate(ae)=>{
-        //    },
-        //    _=>()
-        //};
-        ret_event
+        TabControlEvent::None
+    }
+
+    pub fn get_tab_drop_rect(&mut self, cx:&Cx)->Rect{
+        self.tabs_view.get_view_area().get_rect(cx, true)
+    }
+
+    pub fn get_content_drop_rect(&mut self, cx:&Cx)->Rect{
+        let rc = self.tabs_view.get_view_area().get_rect(cx, true);
+        // we now need to change the y and the new height
+        Rect{
+            x:rc.x,
+            y:rc.y + rc.h,
+            w:self._page_rect.w,
+            h:self._page_rect.h
+        }
     }
 
     // data free APIs for the win!
@@ -137,7 +144,8 @@ impl TabControl{
 
     pub fn begin_tab_page(&mut self, cx:&mut Cx){
         cx.turtle_new_line();
-        cx.begin_turtle(&Layout{..Default::default()}, Area::Empty)
+        cx.begin_turtle(&Layout{..Default::default()}, Area::Empty);
+        self._page_rect = cx.turtle_rect();
     }
 
     pub fn end_tab_page(&mut self, cx:&mut Cx){

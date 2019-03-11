@@ -100,7 +100,7 @@ impl Button{
     }
 
     pub fn handle_button(&mut self, cx:&mut Cx, event:&mut Event)->ButtonEvent{
-        let mut ret_event = ButtonEvent::None;
+        //let mut ret_event = ButtonEvent::None;
         match event.hits(cx, self._bg_area, &mut self._hit_state){
             Event::Animate(ae)=>{
 
@@ -110,10 +110,10 @@ impl Button{
                 self.animator.calc_area(cx, "bg.glow_size", ae.time, self._bg_area);
             },
             Event::FingerDown(_fe)=>{
-                ret_event = ButtonEvent::Down;
                 self._is_down = true;
                 self.animator.play_anim(cx, self.anim_down.clone());
                 cx.set_down_mouse_cursor(MouseCursor::Crosshair);
+                return ButtonEvent::Down;
             },
             Event::FingerHover(fe)=>{
                 cx.set_hover_mouse_cursor(MouseCursor::Hand);
@@ -142,7 +142,7 @@ impl Button{
                     else{
                         self.animator.play_anim(cx, self.animator.default.clone());
                     }
-                    ret_event = ButtonEvent::Clicked;
+                    return ButtonEvent::Clicked;
                 }
                 else{
                     self.animator.play_anim(cx, self.animator.default.clone());
@@ -150,7 +150,7 @@ impl Button{
             },
             _=>()
         };
-        ret_event
+        ButtonEvent::None
    }
 
     pub fn draw_button_with_label(&mut self, cx:&mut Cx, label: &str){

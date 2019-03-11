@@ -105,7 +105,6 @@ impl Tab{
     }
 
     pub fn handle_tab(&mut self, cx:&mut Cx, event:&mut Event)->TabEvent{
-        let mut ret_event = TabEvent::None;
         match event.hits(cx, self._bg_area, &mut self._hit_state){
             Event::Animate(ae)=>{
                 self.animator.calc_area(cx, "bg.color", ae.time, self._bg_area);
@@ -117,7 +116,7 @@ impl Tab{
                 self._is_down = true;
                 self._is_drag = false;
                 self.animator.play_anim(cx, self.anim_down.clone());
-                ret_event = TabEvent::Clicked;
+                return TabEvent::Clicked;
             },
             Event::FingerHover(fe)=>{
                 cx.set_hover_mouse_cursor(MouseCursor::Hand);
@@ -139,6 +138,7 @@ impl Tab{
             },
             Event::FingerUp(fe)=>{
                 self._is_down = false;
+
                 if fe.is_over{
                     if !fe.is_touch{
                         self.animator.play_anim(cx, self.anim_over.clone());
@@ -146,14 +146,13 @@ impl Tab{
                     else{
                         self.animator.play_anim(cx, self.animator.default.clone());
                     }
-                    ret_event = TabEvent::Clicked;
                 }
                 else{
                     self.animator.play_anim(cx, self.animator.default.clone());
                 }
                 if self._is_drag{
                     self._is_drag = false;
-                    ret_event = TabEvent::DragEnd(fe);
+                    return TabEvent::DragEnd(fe);
                 }
             },
             Event::FingerMove(fe)=>{
@@ -163,13 +162,13 @@ impl Tab{
                     }
                 }
                 if self._is_drag{
-                    ret_event = TabEvent::DragMove(fe);
+                    return TabEvent::DragMove(fe);
                 }
                 //self.animator.play_anim(cx, self.animator.default.clone());
             },
             _=>()
         };
-        ret_event
+        TabEvent::None
    }
 
     pub fn draw_tab(&mut self, cx:&mut Cx){

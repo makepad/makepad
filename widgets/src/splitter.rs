@@ -94,7 +94,6 @@ impl Splitter{
     }
 
     pub fn handle_splitter(&mut self, cx:&mut Cx, event:&mut Event)->SplitterEvent{
-        let mut ret_event = SplitterEvent::None;
         match event.hits(cx, self._split_area, &mut self._hit_state){
             Event::Animate(ae)=>{
                 self.animator.calc_area(cx, "split.color", ae.time, self._split_area);
@@ -180,13 +179,13 @@ impl Splitter{
                 };
                 if calc_pos != self._calc_pos{
                     self._calc_pos = calc_pos;
-                    ret_event = SplitterEvent::Moving{new_pos:self.pos};
-                    cx.dirty_area = self._split_area;
+                    cx.redraw_area(self._split_area);
+                    return SplitterEvent::Moving{new_pos:self.pos};
                 }
             }
             _=>()
         };
-        ret_event
+        SplitterEvent::None
     }
 
     pub fn set_splitter_state(&mut self, align:SplitterAlign, pos:f32, axis:Axis){

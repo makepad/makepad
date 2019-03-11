@@ -35,19 +35,19 @@ impl Style for App{
                 ..Style::style(cx)
             },
             dock:Dock{
-                splitters:Elements::new(Splitter{
-                    ..Style::style(cx)
-                }),
-                tab_controls:Elements::new(TabControl{
-                    ..Style::style(cx)
-                }),
-                dock_items:DockItem::Splitter{
+                dock_items:Some(DockItem::Splitter{
                     axis:Axis::Vertical,
                     align:SplitterAlign::First,
                     pos:150.0,
-                    first:Box::new(DockItem::Single(
-                        MyItem::Color(color("red"))
-                    )),
+                    first:Box::new(DockItem::TabControl{
+                        current:0,
+                        tabs:vec![
+                            DockTab{
+                                title:"OrangeTab".to_string(),
+                                item:MyItem::Color(color("orange"))
+                            }
+                        ]
+                    }),
                     last:Box::new(DockItem::Splitter{
                         axis:Axis::Horizontal,
                         align:SplitterAlign::Last,
@@ -69,11 +69,18 @@ impl Style for App{
                                 }      
                             ],
                         }),
-                        last:Box::new(DockItem::Single(
-                            MyItem::Color(color("orange"))
-                        ))
+                        last:Box::new(DockItem::TabControl{
+                            current:0,
+                            tabs:vec![
+                                DockTab{
+                                    title:"PurpleTab".to_string(),
+                                    item:MyItem::Color(color("purple"))
+                                }
+                            ]
+                        })
                     })
-                }
+                }),
+                ..Style::style(cx)
             }
         }
     }
@@ -132,7 +139,8 @@ impl App{
         self.view1.end_view(cx);
 */
         // recursive item iteration       
-        
+        self.dock.draw_dock_drags(cx);
+
         let mut dock_walker = self.dock.walker();
         while let Some(item) = dock_walker.walk_draw_dock(cx){
             match item{
@@ -144,7 +152,6 @@ impl App{
                 }
             }
         }
-        
         
 
        // self.quad.color = color("pink");

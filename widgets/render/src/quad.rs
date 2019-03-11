@@ -72,7 +72,6 @@ impl Quad{
         area
     }
 
-    // write the rect instance
     pub fn end_quad(&mut self, cx:&mut Cx)->Area{
         let area = cx.pop_instance_area_stack();
         let rect = cx.end_turtle(area);
@@ -84,7 +83,6 @@ impl Quad{
         let area = cx.new_aligned_instance(self.shader_id);
         let geom = cx.walk_turtle(w, h, margin, None);
         
-        // lets store our instance onto the turtle
         let data = [
             /*x,y,w,h*/geom.x,geom.y,geom.w,geom.h,
             /*color*/self.color.x,self.color.y,self.color.z,self.color.w

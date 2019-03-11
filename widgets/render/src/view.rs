@@ -194,6 +194,15 @@ where TScrollBar: ScrollBarLike<TScrollBar> + Clone + ElementLife
        return view_area
     }
 
+    pub fn redraw_view_area(&self, cx:&mut Cx){
+        if let Some(draw_list_id) = self.draw_list_id{
+            cx.redraw_area(Area::DrawList(DrawListArea{draw_list_id:draw_list_id}))
+        }
+        else{
+            cx.redraw_area(Area::All)
+        }
+    }
+
     pub fn get_view_area(&self)->Area{
         if let Some(draw_list_id) = self.draw_list_id{
             Area::DrawList(DrawListArea{draw_list_id:draw_list_id})
