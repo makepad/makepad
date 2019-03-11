@@ -118,8 +118,10 @@ where TItem: Clone
                                *self._drop_quad_where = Some(fe);
                                self.drop_quad_view.redraw_view_area(cx);
                             },
-                            //TabControlEvent::TabDragEnd{_fe, _tab_id}=>{
-                            //}
+                            TabControlEvent::TabDragEnd{fe, tab_id}=>{
+                                *self._drop_quad_where = None;
+                                self.drop_quad_view.redraw_view_area(cx);
+                            }
                             _=>()
                         }
 

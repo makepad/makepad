@@ -125,14 +125,14 @@ impl Cx{
                     self.target_size = vec2(to_wasm.mf32(),to_wasm.mf32());
                     self.target_dpi_factor = to_wasm.mf32();
                     self.call_event_handler(&mut event_handler, &mut Event::Construct); 
-                    self.dirty_area = Area::All;
+                    self.redraw_area(Area::All);
                 },
                 4=>{ // resize
                     self.target_size = vec2(to_wasm.mf32(),to_wasm.mf32());
                     self.target_dpi_factor = to_wasm.mf32();
                     
                     // do our initial redraw and repaint
-                    self.dirty_area = Area::All;
+                    self.redraw_area(Area::All);
                 },
                 5=>{ // animation_frame
                     is_animation_frame = true;
@@ -226,7 +226,7 @@ impl Cx{
             };
         };
 
-        if !self.dirty_area.is_empty(){
+        if !self.redraw_areas.len()>0{
             self.call_draw_event(&mut event_handler, root_view);
             self.paint_dirty = true;
         }
@@ -251,14 +251,7 @@ impl Cx{
         
         // request animation frame if still need to redraw, or repaint
         // we use request animation frame for that.
-        let mut req_anim_frame = false;
-        if !self.dirty_area.is_empty(){
-            req_anim_frame = true
-        }
-        else if self.playing_anim_areas.len()> 0 || self.paint_dirty{
-            req_anim_frame = true
-        }
-        if req_anim_frame{
+        if self.redraw_areas.len() > 0 || self.playing_anim_areas.len()> 0 || self.paint_dirty{
             self.resources.from_wasm.request_animation_frame();
         }
 
