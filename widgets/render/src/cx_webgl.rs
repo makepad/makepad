@@ -220,6 +220,19 @@ impl Cx{
                         scroll_y:to_wasm.mf32(),
                     }));
                 },
+                11=>{
+                    // finger out
+                    let x = to_wasm.mf32();
+                    let y = to_wasm.mf32();
+                    self.call_event_handler(&mut event_handler, &mut Event::FingerHover(FingerHoverEvent{
+                        abs_x:x, 
+                        abs_y:y,
+                        rel_x:x,
+                        rel_y:y,
+                        handled:false,
+                        hover_state:HoverState::Out
+                    }));
+                }
                 _=>{
                     panic!("Message unknown")
                 }

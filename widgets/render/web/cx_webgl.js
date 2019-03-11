@@ -132,6 +132,13 @@
 			this.mf32[pos++] = finger.y_wheel
 		}
 
+		on_finger_out(x, y){
+			let pos = this.fit(3);
+			this.mu32[pos++] = 11;
+			this.mf32[pos++] = x
+			this.mf32[pos++] = y
+		}
+
 		end(){
 			let pos = this.fit(1);
 			this.mu32[pos] = 0;
@@ -524,6 +531,11 @@
 			}
 			this.do_wasm_io();
 		}
+
+		on_finger_out(x, y){
+			this.to_wasm.on_finger_out(x, y);
+			this.do_wasm_io();
+		}
 		
 		bind_mouse_and_touch(){
 			
@@ -678,7 +690,9 @@
 				this.on_finger_hover(mouse_to_finger(e));
 			}
 			window.addEventListener('mousemove',mouse_move);
-			window.addEventListener('mouseout',mouse_move);
+			window.addEventListener('mouseout',e=>{
+				this.on_finger_out(e.pageX, e.pageY);
+			});
 			canvas.addEventListener('contextmenu',e=>{
 				e.preventDefault()
 				return false

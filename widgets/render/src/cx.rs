@@ -307,7 +307,7 @@ impl Cx{
                 resources:DrawCallResources{..Default::default()}
             });
             let dc = &mut draw_list.draw_calls[draw_call_id];
-           return dc.get_current_area();
+            return dc.get_current_area();
         }
 
         // reuse a draw
