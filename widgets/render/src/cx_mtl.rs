@@ -1,14 +1,19 @@
 use std::mem;
 
-use cocoa::base::id as cocoa_id;
-use cocoa::foundation::{NSAutoreleasePool,NSUInteger, NSRange};
-use cocoa::appkit::{NSWindow, NSView};
+use cocoa::base::{id};
+use cocoa::appkit::{NSWindow, NSView, CGFloat};
+use cocoa::foundation::{NSAutoreleasePool,NSUInteger, NSRange, NSSize};
 use core_graphics::geometry::CGSize;
-use objc::runtime::YES;
 use objc::{msg_send, sel, sel_impl};
+use objc::runtime::YES;
 use metal::*;
-use winit::os::macos::WindowExt;
+
+use std::io::prelude::*;
+use std::fs::File;
+use std::io;
+
 use time::precise_time_ns;
+use crate::cx_cocoa::*;
 use crate::cx::*;
 
 impl Cx{
@@ -132,10 +137,9 @@ impl Cx{
             command_buffer.present_drawable(&drawable);
             command_buffer.commit();
             //command_buffer.wait_until_completed();
-            unsafe { 
-                msg_send![pool, release];
-                //pool = NSAutoreleasePool::new(cocoa::base::nil);
-            }
+        }
+        unsafe { 
+            msg_send![pool, release];
         }
     }
 
@@ -148,14 +152,12 @@ impl Cx{
     pub fn event_loop<F>(&mut self, mut event_handler:F)
     where F: FnMut(&mut Cx, &mut Event),
     { 
+        CocoaWindow::CocoaAppInit();
 
-        let mut events_loop = winit::EventsLoop::new();
-        let glutin_window = winit::WindowBuilder::new()
-            .with_dimensions((800, 600).into())
-            .with_title(format!("Metal - {}",self.title))
-            .build(&events_loop).unwrap();
+        let mut cocoa_window = CocoaWindow{..Default::default()};
 
-        let window: cocoa_id = unsafe { mem::transmute(glutin_window.get_nswindow()) };
+        cocoa_window.init("Hello World");
+
         let device = Device::system_default();
 
         let layer = CoreAnimationLayer::new();
@@ -171,18 +173,30 @@ impl Cx{
         }
 
         unsafe {
-            let view = window.contentView();
+            let view = cocoa_window.window.unwrap().contentView();
             view.setWantsBestResolutionOpenGLSurface_(YES);
             view.setWantsLayer(YES);
             view.setLayer(mem::transmute(layer.as_ref()));
         }
 
-        let draw_size = glutin_window.get_inner_size().unwrap();
-        layer.set_drawable_size(CGSize::new(draw_size.width as f64, draw_size.height as f64));
+        // ok get_inner_size eh. lets do this
 
+        let draw_size = cocoa_window.get_inner_size();
+
+        self.target_size = draw_size;
+        self.target_dpi_factor = 2.;
+        
+        layer.set_drawable_size(CGSize::new(
+            (self.target_size.x * self.target_dpi_factor) as f64,
+            (self.target_size.y * self.target_dpi_factor) as f64));
+        //unsafe{
+        //NSWindow::setContentSize_(cocoa_window.window_id.unwrap(), NSSize::new((draw_size.x*2.) as CGFloat, draw_size.y as CGFloat));
+        //}
+        println!("{:?}", draw_size);
         let command_queue = device.new_command_queue();
 
-        glutin_window.set_position(winit::dpi::LogicalPosition::new(1920.0,400.0));
+        // lets do this one too
+        //glutin_window.set_position(winit::dpi::LogicalPosition::new(1920.0,400.0));
         
         self.compile_all_mtl_shaders(&device);
 
@@ -200,23 +214,25 @@ impl Cx{
         while self.running{
             // unfortunate duplication of code between poll and run_forever but i don't know how to put this in a closure
             // without borrowchecker hell
-            events_loop.poll_events(|winit_event|{
-                let mut events = self.map_winit_event(winit_event, &glutin_window);
-                for mut event in &mut events{
-                    match &event{
-                        Event::Resized(_)=>{ // do this here because mac
-                            self.call_event_handler(&mut event_handler, &mut event); 
-                            self.call_draw_event(&mut event_handler, &mut root_view);
-                            self.repaint(&layer, &device, &command_queue);
-                            self.resize_layer_to_turtle(&layer);
-                        },
-                        Event::None=>{},
-                        _=>{
-                            self.call_event_handler(&mut event_handler, &mut event); 
+            cocoa_window.poll_events(
+                self.playing_anim_areas.len() == 0 && self.redraw_areas.len() == 0,
+                |events|{
+                    for mut event in events{
+                        match &event{
+                            Event::Resized(_)=>{ // do this here because mac
+                                self.call_event_handler(&mut event_handler, &mut event); 
+                                self.call_draw_event(&mut event_handler, &mut root_view);
+                                self.repaint(&layer, &device, &command_queue);
+                                self.resize_layer_to_turtle(&layer);
+                            },
+                            Event::None=>{},
+                            _=>{
+                                self.call_event_handler(&mut event_handler, &mut event); 
+                            }
                         }
                     }
                 }
-            });
+            );
             
             if self.playing_anim_areas.len() != 0{
                 let time_now = precise_time_ns();
@@ -231,40 +247,20 @@ impl Cx{
 
             // set a cursor
             if !self.down_mouse_cursor.is_none(){
-                self.set_winit_mouse_cursor(&glutin_window, self.down_mouse_cursor.as_ref().unwrap().clone())
+                //self.set_winit_mouse_cursor(&glutin_window, self.down_mouse_cursor.as_ref().unwrap().clone())
             }
             else if !self.hover_mouse_cursor.is_none(){
-                self.set_winit_mouse_cursor(&glutin_window, self.hover_mouse_cursor.as_ref().unwrap().clone())
+                //self.set_winit_mouse_cursor(&glutin_window, self.hover_mouse_cursor.as_ref().unwrap().clone())
             }else{
-                self.set_winit_mouse_cursor(&glutin_window, MouseCursor::Default);
+                //self.set_winit_mouse_cursor(&glutin_window, MouseCursor::Default);
             }
 
             // repaint everything if we need to
             if self.paint_dirty{
-                self.paint_dirty = false;
+                self.debug_area = Area::All;
+                println!("REPAINTING");
+                //self.paint_dirty = false;
                 self.repaint(&layer, &device, &command_queue);
-            }
-            
-            // wait for the next event blockingly so it stops eating power
-            if self.playing_anim_areas.len() == 0 && self.redraw_areas.len() == 0{
-                events_loop.run_forever(|winit_event|{
-                    let mut events = self.map_winit_event(winit_event, &glutin_window);
-                    for mut event in &mut events{
-                        match &event{
-                            Event::Resized(_)=>{ // do this here because mac
-                                self.call_event_handler(&mut event_handler, &mut event); 
-                                self.call_draw_event(&mut event_handler, &mut root_view);
-                                self.repaint(&layer, &device, &command_queue);
-                                self.resize_layer_to_turtle(&layer);
-                            },
-                            Event::None=>{},
-                            _=>{
-                                self.call_event_handler(&mut event_handler, &mut event);
-                            }
-                        }
-                    }
-                    winit::ControlFlow::Break
-                })
             }
         }
     }
@@ -543,12 +539,48 @@ impl Cx{
             })
         }
     }
+
+
+    pub fn load_binary_deps_from_file(&mut self){
+        let len = self.fonts.len();
+        for i in 0..len{
+            let resource_name = &self.fonts[i].name.clone();
+            // lets turn a file into a binary dep
+            let file_result = File::open(&resource_name);
+            if let Ok(mut file) = file_result{
+                let mut buffer = Vec::new();
+                // read the whole file
+                if file.read_to_end(&mut buffer).is_ok(){
+                    // store it in a bindep
+                    let mut bin_dep = BinaryDep::new_from_vec(resource_name.clone(), &buffer);
+                    let _err = self.load_font_from_binary_dep(&mut bin_dep);
+
+                    //     println!("Error loading font {} ", resource_name);
+                    //};
+                }
+            }
+            else{
+                println!("Error loading font {} ", resource_name);
+            }
+        }
+    }
+
+    pub fn process_to_wasm<F>(&mut self, _msg:u32, mut _event_handler:F)->u32{
+        0
+    }
+
+    pub fn log(&mut self, val:&str){
+        let mut stdout = io::stdout();
+        let _e = stdout.write(val.as_bytes());
+        let _e = stdout.flush();
+    }
+
 }
 
 #[derive(Clone, Default)]
 pub struct CxResources{
     pub uni_cx:MetalBuffer,
-    pub winit:CxWinit
+    pub cocoa_window:Option<id>
 }
 
 #[derive(Clone, Default)]
@@ -561,8 +593,6 @@ pub struct DrawCallResources{
     pub uni_dr:MetalBuffer,
     pub inst_vbuf:MetalBuffer
 }
-
-
 
 impl<'a> SlCx<'a>{
     pub fn map_call(&self, name:&str, args:&Vec<Sl>)->MapCallResult{

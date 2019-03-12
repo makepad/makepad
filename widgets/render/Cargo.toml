@@ -5,8 +5,8 @@ ogl = [
     "winit","sema","time"
 ]
 mtl = [
-    "glutin","gl","bitflags","libc","log","block","foreign-types",
-    "winit","sema","time","metal","cocoa","core-graphics",
+    "bitflags","libc","log","block","foreign-types",
+    "sema","time","metal","cocoa","core-graphics",
     "objc-foundation","objc_id","objc"
 ]
 webgl = [

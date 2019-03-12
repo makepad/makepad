@@ -27,7 +27,7 @@ pub use crate::cx_webgl::*;
 #[cfg(any(feature = "webgl", feature = "ogl"))]
 pub use crate::cx_gl::*; 
 
-#[cfg(any(feature = "mtl", feature = "ogl"))]
+#[cfg(any(feature = "ogl"))]
 pub use crate::cx_winit::*; 
 
 #[derive(Clone)]
@@ -669,7 +669,7 @@ macro_rules! main_app {
             let mut app = $app{
                 ..Style::style(&mut cx)
             };
-
+ 
             cx.event_loop(|cx, mut event|{
                 if let Event::Draw = event{return app.draw_app(cx);}
                 app.handle_app(cx, &mut event);

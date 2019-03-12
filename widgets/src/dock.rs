@@ -319,20 +319,21 @@ where TItem: Clone
                         (rect,0.25)
                     }
                     else{
-                        let mut rc = self._tweening_drop_quad.unwrap().1.clone();
+                        let (id, old_rc, old_alpha) = self._tweening_drop_quad.unwrap();
                         let move_speed = 0.7;
                         let alpha_speed = 0.9;
-                        let alpha = (self._tweening_drop_quad.unwrap().2 * alpha_speed + (1.-alpha_speed));
-                        rc.x = rc.x*move_speed + rect.x * (1.-move_speed);
-                        rc.y = rc.y*move_speed + rect.y * (1.-move_speed);
-                        rc.w = rc.w*move_speed + rect.w * (1.-move_speed);
-                        rc.h = rc.h*move_speed+ rect.h* (1.-move_speed);
-
+                        let alpha = old_alpha * alpha_speed + (1.-alpha_speed);
+                        let rc = Rect{
+                            x:old_rc.x*move_speed + rect.x * (1.-move_speed),
+                            y:old_rc.y*move_speed + rect.y * (1.-move_speed),
+                            w:old_rc.w*move_speed + rect.w * (1.-move_speed),
+                            h:old_rc.h*move_speed+ rect.h* (1.-move_speed)
+                        };
                         let dist = (rc.x-rect.x).abs().max((rc.y-rect.y).abs()).max((rc.w-rect.w).abs()).max((rc.h-rect.h).abs()).max(100.-alpha*100.);
-                        if dist>0.5{
+                        if dist>0.5{ // keep redrawing until we are close
                             self.drop_quad_view.redraw_view_area(cx);
                         }
-                        self._tweening_drop_quad = Some((*id,rc,alpha));
+                        self._tweening_drop_quad = Some((id,rc,alpha));
                         (rc, alpha)
                     };
                     self.drop_quad.color = self.drop_quad_color;

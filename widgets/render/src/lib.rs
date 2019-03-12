@@ -13,8 +13,11 @@ mod cx_webgl;
 #[cfg(any(feature = "webgl", feature = "ogl"))]
 mod cx_gl; 
 
-#[cfg(any(feature = "mtl", feature = "ogl"))]
+#[cfg(any(feature = "ogl"))]
 mod cx_winit; 
+
+#[cfg(feature = "mtl")]
+mod cx_cocoa; 
 
 // shared modules
 mod cx; 
