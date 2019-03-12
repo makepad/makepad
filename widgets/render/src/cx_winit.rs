@@ -116,6 +116,7 @@ impl Cx{
                     })]
                 },
                 winit::WindowEvent::CursorMoved{position,..}=>{
+                    self.resources.winit.is_cursor_in_window = true;
                     self.resources.winit.last_mouse_pos = vec2(position.x as f32, position.y as f32);
                     self.hover_mouse_cursor = None;
                     let mut events = self.make_mouse_move_events();

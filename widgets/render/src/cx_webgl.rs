@@ -146,10 +146,8 @@ impl Cx{
                     let digit = to_wasm.mu32() as usize;
                     self.fingers_down[digit] = true;
                     self.call_event_handler(&mut event_handler, &mut Event::FingerDown(FingerDownEvent{
-                        abs_x:x, 
-                        abs_y:y,
-                        rel_x:x,
-                        rel_y:y,
+                        abs:vec2(x,y), 
+                        rel:vec2(x,y),
                         handled:false,
                         digit:digit,
                         is_touch:to_wasm.mu32()>0
@@ -164,14 +162,10 @@ impl Cx{
                         self.down_mouse_cursor = None;
                     }
                     self.call_event_handler(&mut event_handler, &mut Event::FingerUp(FingerUpEvent{
-                        abs_x:x, 
-                        abs_y:y,
-                        rel_x:x,
-                        rel_y:y,
-                        abs_start_x:0.,
-                        abs_start_y:0.,
-                        rel_start_x:0.,
-                        rel_start_y:0.,
+                        abs:vec2(x,y), 
+                        rel:vec2(x,y),
+                        abs_start:vec2(0.,0.),
+                        rel_start:vec2(0.,0.),
                         digit:digit,
                         is_over:false,
                         is_touch:to_wasm.mu32()>0
@@ -181,14 +175,10 @@ impl Cx{
                     let x = to_wasm.mf32();
                     let y = to_wasm.mf32();
                     self.call_event_handler(&mut event_handler, &mut Event::FingerMove(FingerMoveEvent{
-                        abs_x:x, 
-                        abs_y:y,
-                        rel_x:x,
-                        rel_y:y,
-                        abs_start_x:0.,
-                        abs_start_y:0.,
-                        rel_start_x:0.,
-                        rel_start_y:0.,
+                        abs:vec2(x,y) ,
+                        rel:vec2(x,y),
+                        abs_start:vec2(0.,0.),
+                        rel_start:vec2(0.,0.),
                         is_over:false,
                         digit:to_wasm.mu32() as usize,
                         is_touch:to_wasm.mu32()>0
@@ -199,10 +189,8 @@ impl Cx{
                     let y = to_wasm.mf32();
                     self.hover_mouse_cursor = None;
                     self.call_event_handler(&mut event_handler, &mut Event::FingerHover(FingerHoverEvent{
-                        abs_x:x, 
-                        abs_y:y,
-                        rel_x:x,
-                        rel_y:y,
+                        abs:vec2(x,y) ,
+                        rel:vec2(x,y),
                         handled:false,
                         hover_state:HoverState::Over
                     }));
@@ -211,13 +199,10 @@ impl Cx{
                     let x = to_wasm.mf32();
                     let y = to_wasm.mf32();
                     self.call_event_handler(&mut event_handler, &mut Event::FingerScroll(FingerScrollEvent{
-                        abs_x:x, 
-                        abs_y:y,
-                        rel_x:x,
-                        rel_y:y,
+                        abs:vec2(x,y) ,
+                        rel:vec2(x,y),
                         handled:false,
-                        scroll_x:to_wasm.mf32(),
-                        scroll_y:to_wasm.mf32(),
+                        scroll:vec2(to_wasm.mf32(),to_wasm.mf32()),
                     }));
                 },
                 11=>{
@@ -225,10 +210,8 @@ impl Cx{
                     let x = to_wasm.mf32();
                     let y = to_wasm.mf32();
                     self.call_event_handler(&mut event_handler, &mut Event::FingerHover(FingerHoverEvent{
-                        abs_x:x, 
-                        abs_y:y,
-                        rel_x:x,
-                        rel_y:y,
+                        abs:vec2(x,y) ,
+                        rel:vec2(x,y),
                         handled:false,
                         hover_state:HoverState::Out
                     }));
