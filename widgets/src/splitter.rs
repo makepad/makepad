@@ -107,8 +107,8 @@ impl Splitter{
                 };
                 self._drag_pos_start = self.pos;
                 self._drag_point = match self.axis{
-                    Axis::Horizontal=>{fe.rel_y},
-                    Axis::Vertical=>{fe.rel_x}
+                    Axis::Horizontal=>{fe.rel.y},
+                    Axis::Vertical=>{fe.rel.x}
                 }
             },
             Event::FingerHover(fe)=>{
@@ -146,10 +146,10 @@ impl Splitter{
 
                 let delta = match self.axis{
                     Axis::Horizontal=>{
-                        fe.abs_start_y - fe.abs_y
+                        fe.abs_start.y - fe.abs.y
                     },
                     Axis::Vertical=>{
-                        fe.abs_start_x - fe.abs_x
+                        fe.abs_start.x - fe.abs.x
                     }
                 };
                 let mut pos = match self.align{

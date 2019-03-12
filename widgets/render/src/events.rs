@@ -2,10 +2,8 @@ use crate::cx::*;
 
 #[derive(Clone, Default,Debug, PartialEq)]
 pub struct FingerDownEvent{
-    pub abs_x:f32,
-    pub abs_y:f32,
-    pub rel_x:f32,
-    pub rel_y:f32,
+    pub abs:Vec2,
+    pub rel:Vec2,
     pub digit:usize,
     pub handled:bool,
     pub is_touch:bool
@@ -13,14 +11,10 @@ pub struct FingerDownEvent{
 
 #[derive(Clone, Default,Debug, PartialEq)]
 pub struct FingerMoveEvent{
-    pub abs_x:f32,
-    pub abs_y:f32,
-    pub abs_start_x:f32,
-    pub abs_start_y:f32,
-    pub rel_x:f32,
-    pub rel_y:f32,
-    pub rel_start_x:f32,
-    pub rel_start_y:f32,
+    pub abs:Vec2,
+    pub abs_start:Vec2,
+    pub rel:Vec2,
+    pub rel_start:Vec2,
     pub is_over:bool,
     pub digit:usize,
     pub is_touch:bool,
@@ -28,14 +22,10 @@ pub struct FingerMoveEvent{
 
 #[derive(Clone, Default,Debug, PartialEq)]
 pub struct FingerUpEvent{
-    pub abs_x:f32,
-    pub abs_y:f32,
-    pub abs_start_x:f32,
-    pub abs_start_y:f32,
-    pub rel_x:f32,
-    pub rel_y:f32,
-    pub rel_start_x:f32,
-    pub rel_start_y:f32,
+    pub abs:Vec2,
+    pub abs_start:Vec2,
+    pub rel:Vec2,
+    pub rel_start:Vec2,
     pub digit:usize,
     pub is_over:bool,
     pub is_touch:bool
@@ -65,22 +55,17 @@ pub struct HitState{
 
 #[derive(Clone, Default,Debug, PartialEq)]
 pub struct FingerHoverEvent{
-    pub abs_x:f32,
-    pub abs_y:f32,
-    pub rel_x:f32,
-    pub rel_y:f32,
+    pub abs:Vec2,
+    pub rel:Vec2,
     pub handled:bool,
     pub hover_state:HoverState
 }
 
 #[derive(Clone, Default,Debug, PartialEq)]
 pub struct FingerScrollEvent{
-    pub abs_x:f32,
-    pub abs_y:f32,
-    pub rel_x:f32,
-    pub rel_y:f32,
-    pub scroll_x:f32,
-    pub scroll_y:f32,
+    pub abs:Vec2,
+    pub rel:Vec2,
+    pub scroll:Vec2,
     pub handled:bool,
 }
 
@@ -185,34 +170,31 @@ impl Event{
                 let rect = area.get_rect(&cx, hit_state.no_scrolling);
                 if hit_state.was_over_last_call{
 
-                    if !fe.handled && rect.contains(fe.abs_x, fe.abs_y){
+                    if !fe.handled && rect.contains(fe.abs.x, fe.abs.y){
                         fe.handled = true;
                         if let HoverState::Out = fe.hover_state{
                             hit_state.was_over_last_call = false;
                         }
                         return Event::FingerHover(FingerHoverEvent{
-                            rel_x:fe.abs_x - rect.x,
-                            rel_y:fe.abs_y - rect.y,
+                            rel:vec2(fe.abs.x - rect.x, fe.abs.y - rect.y),
                             ..fe.clone()
                         })
                     }
                     else{
                         hit_state.was_over_last_call = false;
                         return Event::FingerHover(FingerHoverEvent{
-                            rel_x:fe.abs_x - rect.x,
-                            rel_y:fe.abs_y - rect.y,
+                            rel:vec2(fe.abs.x - rect.x, fe.abs.y - rect.y),
                             hover_state:HoverState::Out,
                             ..fe.clone()
                         })
                     }
                 }
                 else{
-                    if !fe.handled && rect.contains(fe.abs_x, fe.abs_y){
+                    if !fe.handled && rect.contains(fe.abs.x, fe.abs.y){
                         fe.handled = true;
                         hit_state.was_over_last_call = true;
                         return Event::FingerHover(FingerHoverEvent{
-                            rel_x:fe.abs_x - rect.x,
-                            rel_y:fe.abs_y - rect.y,
+                            rel:vec2(fe.abs.x - rect.x, fe.abs.y - rect.y),
                             hover_state:HoverState::In,
                             ..fe.clone()
                         })
@@ -236,13 +218,10 @@ impl Event{
                     };
                     let rect = area.get_rect(&cx, hit_state.no_scrolling);
                     return Event::FingerMove(FingerMoveEvent{
-                        abs_start_x: abs_start.x,
-                        abs_start_y: abs_start.y,
-                        rel_x:fe.abs_x - rect.x,
-                        rel_y:fe.abs_y - rect.y,
-                        rel_start_x: rel_start.x,
-                        rel_start_y: rel_start.y,
-                        is_over:rect.contains(fe.abs_x, fe.abs_y),
+                        abs_start: abs_start,
+                        rel:vec2(fe.abs.x - rect.x, fe.abs.y - rect.y),
+                        rel_start: rel_start,
+                        is_over:rect.contains(fe.abs.x, fe.abs.y),
                         ..fe.clone()
                     })
                 }
@@ -250,7 +229,7 @@ impl Event{
             Event::FingerDown(fe)=>{
                 if !fe.handled{
                     let rect = area.get_rect(&cx, hit_state.no_scrolling);
-                    if rect.contains(fe.abs_x, fe.abs_y){
+                    if rect.contains(fe.abs.x, fe.abs.y){
                         // scan if any of the fingers already captured this area
                         if !hit_state.use_multi_touch{
                             for fin_area in &cx.captured_fingers{
@@ -271,12 +250,11 @@ impl Event{
                                 hit_state.finger_down_rel_start.push(vec2(0.,0.));
                             }
                         }
-                        hit_state.finger_down_abs_start[fe.digit] = vec2(fe.abs_x, fe.abs_y);
-                        hit_state.finger_down_rel_start[fe.digit] = vec2(fe.abs_x - rect.x, fe.abs_y - rect.y);
+                        hit_state.finger_down_abs_start[fe.digit] = fe.abs;
+                        hit_state.finger_down_rel_start[fe.digit] = vec2(fe.abs.x - rect.x, fe.abs.y - rect.y);
                         fe.handled = true;
                         return Event::FingerDown(FingerDownEvent{
-                            rel_x:fe.abs_x - rect.x,
-                            rel_y:fe.abs_y - rect.y,
+                            rel:vec2(fe.abs.x - rect.x, fe.abs.y - rect.y),
                             ..fe.clone()
                         })
                     }
@@ -299,13 +277,10 @@ impl Event{
                     };
                     let rect = area.get_rect(&cx, hit_state.no_scrolling);
                     return Event::FingerUp(FingerUpEvent{
-                        is_over:rect.contains(fe.abs_x, fe.abs_y),
-                        abs_start_x: abs_start.x,
-                        abs_start_y: abs_start.y,
-                        rel_start_x: rel_start.x,
-                        rel_start_y: rel_start.y,
-                        rel_x:fe.abs_x - rect.x,
-                        rel_y:fe.abs_y - rect.y,
+                        is_over:rect.contains(fe.abs.x, fe.abs.y),
+                        abs_start: abs_start,
+                        rel_start: rel_start,
+                        rel:vec2(fe.abs.x - rect.x, fe.abs.y - rect.y),
                         ..fe.clone()
                     })
                 }

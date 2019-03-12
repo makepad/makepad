@@ -178,17 +178,17 @@ impl ScrollBarLike<ScrollBar> for ScrollBar{
         match event{
             Event::FingerScroll(fe)=>{
                 let rect = self._view_area.get_rect(cx, false);
-                if rect.contains(fe.abs_x, fe.abs_y){ // handle mousewheel
+                if rect.contains(fe.abs.x, fe.abs.y){ // handle mousewheel
                     // we should scroll in either x or y
                     match self.axis{
                         Axis::Horizontal=>{
                             let scroll_pos= self.get_scroll_pos();
-                            self.set_scroll_pos(cx, scroll_pos + fe.scroll_x);
+                            self.set_scroll_pos(cx, scroll_pos + fe.scroll.x);
                             return self.make_scroll_event();
                         },
                         Axis::Vertical=>{
                             let scroll_pos= self.get_scroll_pos();
-                            self.set_scroll_pos(cx, scroll_pos + fe.scroll_y);
+                            self.set_scroll_pos(cx, scroll_pos + fe.scroll.y);
                             return self.make_scroll_event();
                         }
                     }        
@@ -210,12 +210,12 @@ impl ScrollBarLike<ScrollBar> for ScrollBar{
                             let (norm_scroll, norm_handle) = self.get_normalized_scroll_pos();
                             let bar_x = norm_scroll * self._scroll_size;
                             let bar_w = norm_handle * self._scroll_size;
-                            if fe.rel_x < bar_x || fe.rel_x > bar_w + bar_x{ // clicked below
+                            if fe.rel.x < bar_x || fe.rel.x > bar_w + bar_x{ // clicked below
                                 self._drag_point = Some(bar_w * 0.5);
-                                return self.set_scroll_pos_from_finger(cx, fe.rel_x - self._drag_point.unwrap());
+                                return self.set_scroll_pos_from_finger(cx, fe.rel.x - self._drag_point.unwrap());
                             }
                             else{ // clicked on
-                                self._drag_point = Some(fe.rel_x - bar_x); // store the drag delta
+                                self._drag_point = Some(fe.rel.x - bar_x); // store the drag delta
                             }
                         },
                         Axis::Vertical=>{
@@ -223,12 +223,12 @@ impl ScrollBarLike<ScrollBar> for ScrollBar{
                             let (norm_scroll, norm_handle) = self.get_normalized_scroll_pos();
                             let bar_y = norm_scroll * self._scroll_size;
                             let bar_h = norm_handle * self._scroll_size;
-                            if fe.rel_y < bar_y || fe.rel_y > bar_h + bar_y{ // clicked below or above
+                            if fe.rel.y < bar_y || fe.rel.y > bar_h + bar_y{ // clicked below or above
                                 self._drag_point = Some(bar_h * 0.5);
-                                return self.set_scroll_pos_from_finger(cx, fe.rel_y - self._drag_point.unwrap());
+                                return self.set_scroll_pos_from_finger(cx, fe.rel.y - self._drag_point.unwrap());
                             }
                             else{ // clicked on
-                                self._drag_point = Some(fe.rel_y - bar_y); // store the drag delta
+                                self._drag_point = Some(fe.rel.y - bar_y); // store the drag delta
                             }
                         }
                     }        
@@ -270,10 +270,10 @@ impl ScrollBarLike<ScrollBar> for ScrollBar{
                     else{
                         match self.axis{
                             Axis::Horizontal=>{
-                                return self.set_scroll_pos_from_finger(cx, fe.rel_x - self._drag_point.unwrap());
+                                return self.set_scroll_pos_from_finger(cx, fe.rel.x - self._drag_point.unwrap());
                             },
                             Axis::Vertical=>{
-                                return self.set_scroll_pos_from_finger(cx, fe.rel_y - self._drag_point.unwrap());
+                                return self.set_scroll_pos_from_finger(cx, fe.rel.y - self._drag_point.unwrap());
                             }
                         }
                     }

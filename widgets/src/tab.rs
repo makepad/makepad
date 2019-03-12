@@ -157,7 +157,7 @@ impl Tab{
             },
             Event::FingerMove(fe)=>{
                 if !self._is_drag{
-                    if (fe.abs_start_x - fe.abs_x).abs() + (fe.abs_start_y - fe.abs_y).abs() > 10.{
+                    if (fe.abs_start.x - fe.abs.x).abs() + (fe.abs_start.y - fe.abs.y).abs() > 10.{
                         self._is_drag = true;
                     }
                 }

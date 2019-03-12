@@ -249,12 +249,15 @@ where TItem: Clone
 impl<TItem> Dock<TItem>
 where TItem: Clone
 {
+    pub fn get_drop_area()->(usize, Rect){
+        (0,Rect::zero())
+    }
+
     pub fn draw_dock_drags(&mut self, cx: &mut Cx){
         // lets draw our hover layer if need be
         if let Some(fe) = &self._drop_quad_where{
             self.drop_quad_view.begin_view(cx, &Layout{
-                abs_x:Some(0.),
-                abs_y:Some(0.),
+                abs_start:Some(vec2(0.,0.)),
                 ..Default::default()
             });
 
@@ -264,7 +267,9 @@ where TItem: Clone
             for tab_control in self.tab_controls.all(){
                 // ok now, we ask the tab_controls rect
                 let cdr = tab_control.get_content_drop_rect(cx);
-                if cdr.contains(fe.abs_x, fe.abs_y){
+                // alright we need a drop area
+
+                if cdr.contains(fe.abs.x, fe.abs.y){
                     self.drop_quad.draw_quad(cx, cdr.x, cdr.y, cdr.w, cdr.h);
                 }
             }

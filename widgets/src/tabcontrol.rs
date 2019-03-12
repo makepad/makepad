@@ -124,14 +124,12 @@ impl TabControl{
 
         if let Some((fe, id)) = &self._dragging_tab{
             self.drag_tab_view.begin_view(cx, &Layout{
-                abs_x:Some(0.),
-                abs_y:Some(0.),
+                abs_start:Some(vec2(0.,0.)),
                 ..Default::default()
             });
             
             let drag_tab = self.drag_tab.get(cx);
-            drag_tab.bg_layout.abs_x = Some(fe.abs_x - fe.rel_start_x);
-            drag_tab.bg_layout.abs_y = Some(fe.abs_y - fe.rel_start_y);
+            drag_tab.bg_layout.abs_start = Some(vec2(fe.abs.x - fe.rel_start.x, fe.abs.y - fe.rel_start.y));
 
             let origin_tab = self.tabs.get(cx, *id);
             drag_tab.label = origin_tab.label.clone();
