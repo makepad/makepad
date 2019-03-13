@@ -1,5 +1,5 @@
 // Life is too short for leaky abstractions.
-// Gleaned/learned/templated from https://github.com/tomaka/winit/blob/master/src/platform/macos/util/cursor.rs
+// Gleaned/learned/templated from https://github.com/tomaka/winit/blob/master/src/platform/macos/
 
 use std::collections::HashMap;
 

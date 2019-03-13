@@ -72,7 +72,10 @@ impl Cx{
         if self.resources.root_view_ptr == 0{
             self.resources.root_view_ptr = Box::into_raw(
                 Box::new(View::<NoScrollBar>{..Style::style(self)})
-            ) as u32
+            ) as u32;
+            for _i in 0..10{
+                self.resources.fingers_down.push(false);
+            }
         }
         let root_view = unsafe{&mut *(self.resources.root_view_ptr as *mut View<NoScrollBar>)};
         
@@ -144,7 +147,7 @@ impl Cx{
                     let x = to_wasm.mf32();
                     let y = to_wasm.mf32();
                     let digit = to_wasm.mu32() as usize;
-                    self.fingers_down[digit] = true;
+                    self.resources.fingers_down[digit] = true;
                     self.call_event_handler(&mut event_handler, &mut Event::FingerDown(FingerDownEvent{
                         abs:vec2(x,y), 
                         rel:vec2(x,y),
@@ -157,8 +160,8 @@ impl Cx{
                     let x = to_wasm.mf32();
                     let y = to_wasm.mf32();
                     let digit = to_wasm.mu32() as usize;
-                    self.fingers_down[digit] = false;
-                    if !self.any_fingers_down(){
+                    self.resources.fingers_down[digit] = false;
+                    if !self.resources.fingers_down.iter().any(|down| *down){
                         self.down_mouse_cursor = None;
                     }
                     self.call_event_handler(&mut event_handler, &mut Event::FingerUp(FingerUpEvent{
@@ -365,7 +368,8 @@ pub struct CxResources{
     pub index_buffers_free:Vec<usize>,
     pub vaos:usize,
     pub vaos_free:Vec<usize>,
-    pub root_view_ptr:u32
+    pub root_view_ptr:u32,
+    pub fingers_down:Vec<bool>
 }
 
 impl Default for CxResources{
@@ -378,7 +382,8 @@ impl Default for CxResources{
             index_buffers_free:Vec::new(),
             vaos:1,
             vaos_free:Vec::new(),
-            root_view_ptr:0
+            root_view_ptr:0,
+            fingers_down:Vec::new()
         }
     }
 }

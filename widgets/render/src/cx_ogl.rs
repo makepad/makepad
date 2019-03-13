@@ -91,7 +91,7 @@ impl Cx{
     pub fn event_loop<F>(&mut self, mut event_handler:F)
     where F: FnMut(&mut Cx, &mut Event),
     { 
-        for let finger in 0..10{
+        for _i in 0..10{
              self.resources.fingers_down.push(false);
         }
 
