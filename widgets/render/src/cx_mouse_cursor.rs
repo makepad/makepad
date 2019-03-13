@@ -1,6 +1,6 @@
 use crate::cx::*;
 
-#[derive(Clone, PartialEq)]
+#[derive(Clone, Debug, Hash, PartialEq)]
 pub enum MouseCursor{
 	// don't show the cursor
 	Hidden,	
@@ -243,4 +243,11 @@ impl Cx{
 		// the down mouse cursor gets removed when there are no captured fingers
         self.hover_mouse_cursor = Some(mouse_cursor);
     }
+}
+
+impl Eq for MouseCursor{}
+impl Default for MouseCursor{
+	fn default()->MouseCursor{
+		MouseCursor::Default
+	}
 }

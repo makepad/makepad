@@ -7,16 +7,16 @@ use std::io;
 #[derive(Clone, Default)]
 pub struct CxWinit{
     pub last_mouse_pos:Vec2,
-    pub is_cursor_in_window:bool
+    pub is_cursor_in_window:bool,
+    pub fingers_down:Vec<bool>
 }
-
 
 impl Cx{
 
     fn make_mouse_move_events(&self)->Vec<Event>{
         let mut out = Vec::new();
-        for i in 0..self.fingers_down.len(){
-            let down = self.fingers_down[i];
+        for i in 0..self.resources.fingers_down.len(){
+            let down = self.resources.fingers_down[i];
             if down{
                 out.push(Event::FingerMove(FingerMoveEvent{
                     abs:self.resources.winit.last_mouse_pos,
@@ -73,6 +73,15 @@ impl Cx{
         };
         window.set_cursor(cursor);
         window.hide_cursor(hide);
+    }
+
+    pub fn any_fingers_down(&mut self)->bool{
+		for down in &self.resources.fingers_down{
+            if *down{
+                return true
+            }
+		}
+        return false
     }
 
     pub fn map_winit_event(&mut self, winit_event:winit::Event, glutin_window:&winit::Window)->Vec<Event>{
@@ -158,7 +167,7 @@ impl Cx{
                             if digit >= self.captured_fingers.len(){
                                 digit = 0;
                             };
-                            self.fingers_down[digit] = true;
+                            self.resources.fingers_down[digit] = true;
                             return vec![Event::FingerDown(FingerDownEvent{
                                 abs:self.resources.winit.last_mouse_pos,
                                 rel:self.resources.winit.last_mouse_pos,
@@ -178,8 +187,9 @@ impl Cx{
                             if digit >= self.captured_fingers.len(){
                                 digit = 0;
                             };
-                            self.fingers_down[digit] = false;
-                            if !self.any_fingers_down(){
+                            self.resources.fingers_down[digit] = false;
+
+                            if !self.resources.fingers_down.iter().any(|down| *down){
                                 self.down_mouse_cursor = None;
                             }
                             return vec![Event::FingerUp(FingerUpEvent{

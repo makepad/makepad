@@ -1,8 +1,8 @@
 use std::mem;
 
 use cocoa::base::{id};
-use cocoa::appkit::{NSWindow, NSView, CGFloat};
-use cocoa::foundation::{NSAutoreleasePool,NSUInteger, NSRange, NSSize};
+use cocoa::appkit::{NSWindow, NSView};
+use cocoa::foundation::{NSAutoreleasePool,NSUInteger, NSRange};
 use core_graphics::geometry::CGSize;
 use objc::{msg_send, sel, sel_impl};
 use objc::runtime::YES;
@@ -125,9 +125,9 @@ impl Cx{
             self.exec_draw_list(0, &device, encoder);
 
             match &self.debug_area{
-                Area::All=>self.debug_draw_tree_recur(0,0),
-                Area::Instance(ia)=>self.debug_draw_tree_recur(ia.draw_list_id,0),
-                Area::DrawList(dl)=>self.debug_draw_tree_recur(dl.draw_list_id,0),
+                Area::All=>self.debug_draw_tree_recur(0, 0),
+                Area::Instance(ia)=>self.debug_draw_tree_recur(ia.draw_list_id, 0),
+                Area::DrawList(dl)=>self.debug_draw_tree_recur(dl.draw_list_id, 0),
                 _=>()
             }
 
@@ -152,7 +152,7 @@ impl Cx{
     pub fn event_loop<F>(&mut self, mut event_handler:F)
     where F: FnMut(&mut Cx, &mut Event),
     { 
-        CocoaWindow::CocoaAppInit();
+        CocoaWindow::cocoa_app_init();
 
         let mut cocoa_window = CocoaWindow{..Default::default()};
 
@@ -189,10 +189,7 @@ impl Cx{
         layer.set_drawable_size(CGSize::new(
             (self.target_size.x * self.target_dpi_factor) as f64,
             (self.target_size.y * self.target_dpi_factor) as f64));
-        //unsafe{
-        //NSWindow::setContentSize_(cocoa_window.window_id.unwrap(), NSSize::new((draw_size.x*2.) as CGFloat, draw_size.y as CGFloat));
-        //}
-        println!("{:?}", draw_size);
+
         let command_queue = device.new_command_queue();
 
         // lets do this one too
@@ -219,13 +216,29 @@ impl Cx{
                 |events|{
                     for mut event in events{
                         match &event{
-                            Event::Resized(_)=>{ // do this here because mac
+                            Event::FingerHover(_)=>{ 
+                              self.hover_mouse_cursor = None;
+                            },
+                            Event::FingerUp(_) =>{
+                               self.down_mouse_cursor = None;
+                            },
+                            Event::CloseRequested=>{
+                                self.running = false
+                            },
+                            _=>()
+                        };
+                        match &event{
+                            Event::Resized(re)=>{ // do this here because mac
+                                self.target_dpi_factor = re.new_dpi_factor;
+                                self.target_size = re.new_size; 
                                 self.call_event_handler(&mut event_handler, &mut event); 
                                 self.call_draw_event(&mut event_handler, &mut root_view);
                                 self.repaint(&layer, &device, &command_queue);
                                 self.resize_layer_to_turtle(&layer);
                             },
-                            Event::None=>{},
+                            Event::None=>{
+                                
+                            },
                             _=>{
                                 self.call_event_handler(&mut event_handler, &mut event); 
                             }
@@ -247,19 +260,18 @@ impl Cx{
 
             // set a cursor
             if !self.down_mouse_cursor.is_none(){
-                //self.set_winit_mouse_cursor(&glutin_window, self.down_mouse_cursor.as_ref().unwrap().clone())
+                cocoa_window.set_mouse_cursor(self.down_mouse_cursor.as_ref().unwrap().clone())
             }
             else if !self.hover_mouse_cursor.is_none(){
-                //self.set_winit_mouse_cursor(&glutin_window, self.hover_mouse_cursor.as_ref().unwrap().clone())
-            }else{
-                //self.set_winit_mouse_cursor(&glutin_window, MouseCursor::Default);
+                cocoa_window.set_mouse_cursor(self.hover_mouse_cursor.as_ref().unwrap().clone())
+            }
+            else{
+                cocoa_window.set_mouse_cursor(MouseCursor::Default)
             }
 
             // repaint everything if we need to
             if self.paint_dirty{
-                self.debug_area = Area::All;
-                println!("REPAINTING");
-                //self.paint_dirty = false;
+                self.paint_dirty = false;
                 self.repaint(&layer, &device, &command_queue);
             }
         }

@@ -112,7 +112,7 @@ impl TabControl{
         self._tab_id_alloc = 0;
     }
 
-    pub fn draw_tab(&mut self, cx:&mut Cx, label:&str, selected:bool){
+    pub fn draw_tab(&mut self, cx:&mut Cx, label:&str, _selected:bool){
         let tab = self.tabs.get(cx, self._tab_id_alloc);
         self._tab_id_alloc += 1;
         tab.label = label.to_string();

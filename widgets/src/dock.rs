@@ -119,11 +119,11 @@ where TItem: Clone
                         
                         // ok so this one returns 'DragTab(x,y)
                         match tab_control.handle_tab_control(cx, event){
-                            TabControlEvent::TabDragMove{fe, tab_id}=>{
+                            TabControlEvent::TabDragMove{fe, ..}=>{
                                *self._drop_quad_where = Some(fe);
                                self.drop_quad_view.redraw_view_area(cx);
                             },
-                            TabControlEvent::TabDragEnd{fe, tab_id}=>{
+                            TabControlEvent::TabDragEnd{..}=>{
                                 *self._drop_quad_where = None;
                                 self.drop_quad_view.redraw_view_area(cx);
                             }
@@ -307,7 +307,7 @@ where TItem: Clone
                 // alright we need a drop area
 
                 if cdr.contains(fe.abs.x, fe.abs.y){
-                    let (kind, rect) = Self::get_drop_kind(fe.abs, self.drop_size, cdr);
+                    let (_kind, rect) = Self::get_drop_kind(fe.abs, self.drop_size, cdr);
 
                     if !self._tweening_drop_quad.is_none() && self._tweening_drop_quad.unwrap().0 != *id{
                         self._tweening_drop_quad = None;

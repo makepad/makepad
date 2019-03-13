@@ -65,7 +65,6 @@ pub struct Cx{
     pub down_mouse_cursor:Option<MouseCursor>,
     pub hover_mouse_cursor:Option<MouseCursor>,
     pub captured_fingers:Vec<Area>,
-    pub fingers_down:Vec<bool>,
 
     pub user_events:Vec<Event>,
 
@@ -84,11 +83,11 @@ impl Default for Cx{
         let mut uniforms = Vec::<f32>::new();
         uniforms.resize(CX_UNI_SIZE, 0.0);
         let mut captured_fingers = Vec::new();
-        let mut fingers_down = Vec::new();
+
         for _i in 0..10{
             captured_fingers.push(Area::Empty);
-            fingers_down.push(false);
         }
+
         Self{
             title:"Hello World".to_string(),
             running: true,
@@ -123,7 +122,6 @@ impl Default for Cx{
             down_mouse_cursor:None,
             hover_mouse_cursor:None,
             captured_fingers:captured_fingers,
-            fingers_down:fingers_down,
 
             user_events:Vec::new(),
 
@@ -241,15 +239,6 @@ impl Cx{
                 i = i + 1;
             }
         }
-    }
-
-    pub fn any_fingers_down(&mut self)->bool{
-		for down in &self.fingers_down{
-            if *down{
-                return true
-            }
-		}
-        return false
     }
 
     pub fn new_aligned_instance(&mut self, shader_id:usize)->Area{

@@ -168,7 +168,6 @@ impl Text{
                     let w = glyph.advance * self.font_size;
                     
                     let data = [
-                        ///*draw_clip*/ -50000.0,-50000.0,50000.0,50000.0,
                         /*font_geom*/ glyph.x1 ,glyph.y1 ,glyph.x2 ,glyph.y2,
                         /*font_tc*/ glyph.tx1 ,glyph.ty1 ,glyph.tx2 ,glyph.ty2,
                         /*color*/ 1.0,1.0,1.0,1.0,

@@ -1,7 +1,12 @@
+// Life is too short for leaky abstractions.
+// Gleaned/learned/templated from https://github.com/tomaka/winit/blob/master/src/platform/macos/util/cursor.rs
+
+use std::collections::HashMap;
+
 use cocoa::base::{id, nil};
 use cocoa::{appkit, foundation};
-use cocoa::appkit::{NSApplication, NSEvent, NSWindow, NSView,NSEventMask,NSRunningApplication};
-use cocoa::foundation::{ NSRange, NSPoint, NSRect, NSSize, NSUInteger,NSInteger};
+use cocoa::appkit::{NSApplication, NSImage, NSEvent, NSWindow, NSView,NSEventMask,NSRunningApplication};
+use cocoa::foundation::{ NSRange, NSPoint, NSDictionary, NSRect, NSSize, NSUInteger,NSInteger};
 use cocoa::foundation::{NSAutoreleasePool, NSString};
 use objc::runtime::{Class, Object, Protocol, Sel, BOOL, YES, NO};
 use objc::declare::ClassDecl;
@@ -15,11 +20,19 @@ use crate::cx::*;
 pub struct CocoaWindow{
     pub window_delegate:Option<id>,
     pub view:Option<id>,
-    pub window:Option<id>
+    pub window:Option<id>,
+    pub init_resize:bool,
+    pub last_size:Vec2,
+    pub last_dpi_factor:f32,
+    pub fingers_down:Vec<bool>,
+    pub cursors:HashMap<MouseCursor, id>,
+    pub current_cursor:MouseCursor,
+    pub last_mouse_pos:Vec2,
+    pub event_callback:Option<*mut FnMut(&mut Vec<Event>)>
 }
 
 impl CocoaWindow{
-    pub fn CocoaAppInit(){
+    pub fn cocoa_app_init(){
         unsafe{
             let ns_app = appkit::NSApp();
             if ns_app == nil {
@@ -32,15 +45,30 @@ impl CocoaWindow{
         }
     }
 
+    pub fn set_mouse_cursor(&mut self, cursor:MouseCursor){
+        if self.current_cursor != cursor{
+            self.current_cursor = cursor;
+            unsafe{
+                let _: () = msg_send![
+                    self.window.unwrap(),
+                    invalidateCursorRectsForView:self.view.unwrap()
+                ];
+            }
+        }
+    }
+
     pub fn init(&mut self, title:&str){
         unsafe{
+            for _i in 0..10{
+                self.fingers_down.push(false);
+            }
             let autoreleasepool = NSAutoreleasePool::new(nil);
             // construct a window with our class
             let window_class = define_cocoa_window_class();
             let window:id = msg_send![window_class, alloc];
             //let window_id:id = msg_send![window_class, alloc];
             
-            let window_frame =  NSRect::new(NSPoint::new(0., 0.), NSSize::new(800., 600.));
+            let window_frame = NSRect::new(NSPoint::new(0., 0.), NSSize::new(800., 600.));
             let window_masks = appkit::NSWindowStyleMask::NSClosableWindowMask |
                 appkit::NSWindowStyleMask::NSMiniaturizableWindowMask |
                 appkit::NSWindowStyleMask::NSResizableWindowMask |
@@ -60,7 +88,7 @@ impl CocoaWindow{
     
             msg_send![window, setDelegate:window_delegate];            
 
-            let title = NSString::alloc(nil).init_str("HELLO WORLD");
+            let title = NSString::alloc(nil).init_str(title);
             window.setReleasedWhenClosed_(NO);
             window.setTitle_(title);
             window.setAcceptsMouseMovedEvents_(YES);
@@ -78,90 +106,51 @@ impl CocoaWindow{
             self.window_delegate = Some(window_delegate);
             self.window = Some(window);
             self.view = Some(view);
-
+            self.last_size = self.get_inner_size();
+            self.last_dpi_factor = self.get_dpi_factor();
             let _: () = msg_send![autoreleasepool, drain];
         }
-        
     }
 
     pub fn get_inner_size(&self)->Vec2{
+        if self.view.is_none(){
+            return vec2(0.,0.);
+        }
         let view_frame = unsafe { NSView::frame(self.view.unwrap()) };
         vec2(view_frame.size.width as f32, view_frame.size.height as f32)
     }
 
-    unsafe fn ns_event_to_event(&mut self, ns_event: cocoa::base::id) -> Option<Event> {
+    pub fn get_dpi_factor(&self)->f32{
+        if self.window.is_none(){
+            return 1.0;
+        }
+        unsafe{NSWindow::backingScaleFactor(self.window.unwrap()) as f32}
+    }
+
+     unsafe fn ns_event_to_event(&mut self, ns_event: cocoa::base::id) -> Option<Event> {
         if ns_event == cocoa::base::nil {
             return None;
         }
 
-        // FIXME: Despite not being documented anywhere, an `NSEvent` is produced when a user opens
-        // Spotlight while the NSApplication is in focus. This `NSEvent` produces a `NSEventType`
-        // with value `21`. This causes a SEGFAULT as soon as we try to match on the `NSEventType`
-        // enum as there is no variant associated with the value. Thus, we return early if this
-        // sneaky event occurs. If someone does find some documentation on this, please fix this by
-        // adding an appropriate variant to the `NSEventType` enum in the cocoa-rs crate.
-        if ns_event.eventType() as u64 == 21 {
+        if ns_event.eventType() as u64 == 21 { // some missing event from cocoa-rs crate
             return None;
         }
-        let event_type = ns_event.eventType();
-        let ns_window = ns_event.window();
-        //let window_id = super::window::get_window_id(ns_window);
-        appkit::NSApp().sendEvent_(ns_event);
+
+        //let event_type = ns_event.eventType();
+        //let ns_window = ns_event.window();
         
-        //event_handler(vec![Event::None]);
+        appkit::NSApp().sendEvent_(ns_event);
 
         match ns_event.eventType(){
-            appkit::NSKeyUp  => {
-                            },
-            // similar to above, but for `<Cmd-.>`, the keyDown is suppressed instead of the
-            // KeyUp, and the above trick does not appear to work.
-            appkit::NSKeyDown => {
-                /*
-                let flags = unsafe {
-                    NSEvent::modifierFlags(event)
-                };
-                ModifiersState {
-                    shift: flags.contains(NSEventModifierFlags::NSShiftKeyMask),
-                    ctrl: flags.contains(NSEventModifierFlags::NSControlKeyMask),
-                    alt: flags.contains(NSEventModifierFlags::NSAlternateKeyMask),
-                    logo: flags.contains(NSEventModifierFlags::NSCommandKeyMask),
-                }*/
-                //let keycode = NSEvent::keyCode(ns_event);
-                //if modifiers.logo && keycode == 47 {
-                //    modifier_event(ns_event, NSEventModifierFlags::NSCommandKeyMask, false)
-                //       .map(into_event)
-            },
-            appkit::NSFlagsChanged => {
-                
-            },
-
-            appkit::NSMouseEntered => {
-                /*
-                let window_point = ns_event.locationInWindow();
-                let view_point = if ns_window == cocoa::base::nil {
-                    let ns_size = foundation::NSSize::new(0.0, 0.0);
-                    let ns_rect = foundation::NSRect::new(window_point, ns_size);
-                    let window_rect = window.window.convertRectFromScreen_(ns_rect);
-                    window.view.convertPoint_fromView_(window_rect.origin, cocoa::base::nil)
-                } else {
-                    window.view.convertPoint_fromView_(window_point, cocoa::base::nil)
-                };
-
-                let view_rect = NSView::frame(*window.view);
-                let x = view_point.x as f64;
-                let y = (view_rect.size.height - view_point.y) as f64;
-                // event with x/y
-                */
-            },
-            appkit::NSMouseExited => {
-
-            },
+            appkit::NSKeyUp => {},
+            appkit::NSKeyDown => {},
+            appkit::NSFlagsChanged => {},
+            appkit::NSMouseEntered => {},
+            appkit::NSMouseExited => {},
             appkit::NSMouseMoved |
             appkit::NSLeftMouseDragged |
             appkit::NSOtherMouseDragged |
-            appkit::NSRightMouseDragged => {
-                //do studff
-            },
+            appkit::NSRightMouseDragged => {},
             appkit::NSScrollWheel => {
                 /*
                 let delta = if ns_event.hasPreciseScrollingDeltas() == cocoa::base::YES {
@@ -183,12 +172,7 @@ impl CocoaWindow{
                     _ => TouchPhase::Moved,
                 };*/
             },
-
-            appkit::NSEventTypePressure => {
-                let pressure = ns_event.pressure();
-                let stage = ns_event.stage();
-            },
-
+            appkit::NSEventTypePressure => {},
             appkit::NSApplicationDefined => match ns_event.subtype() {
                 appkit::NSEventSubtype::NSApplicationActivatedEventType => {
                 },
@@ -196,8 +180,6 @@ impl CocoaWindow{
             },
             _=>(),
         }
-
-
         None
     }
 
@@ -206,6 +188,13 @@ impl CocoaWindow{
     {   
         let mut do_first_block = first_block;
         unsafe{
+            self.event_callback = Some(&mut event_handler as *const FnMut(&mut Vec<Event>) as *mut FnMut(&mut Vec<Event>));
+
+            if !self.init_resize{
+                self.init_resize = true;
+                self.send_resize_event();
+            }
+
             loop{
                 let pool = foundation::NSAutoreleasePool::new(cocoa::base::nil);
 
@@ -233,7 +222,90 @@ impl CocoaWindow{
                     event_handler(&mut vec![event.unwrap()])
                 }
             }
+            self.event_callback = None;
         }
+    }
+
+    pub fn do_callback(&mut self, events:&mut Vec<Event>){
+        unsafe{
+            if self.event_callback.is_none(){
+                return
+            };
+            let callback = self.event_callback.unwrap();
+            (*callback)(events);
+        }
+    }
+
+    pub fn send_resize_event(&mut self){
+        let new_dpi_factor = self.get_dpi_factor();
+        let new_size = self.get_inner_size(); 
+        let old_dpi_factor = self.last_dpi_factor;
+        let old_size = self.last_size;
+        self.last_dpi_factor = new_dpi_factor;
+        self.last_size = new_size;
+        self.do_callback(&mut vec![Event::Resized(ResizedEvent{
+            old_size:old_size,
+            old_dpi_factor:old_dpi_factor,
+            new_size:new_size,
+            new_dpi_factor:new_dpi_factor
+        })]);
+    }
+
+    pub fn send_focus_event(&mut self, focus:bool){
+        self.do_callback(&mut vec![Event::AppFocus(focus)]);
+    }
+
+    pub fn send_finger_down(&mut self, digit:usize){
+        self.fingers_down[digit] = true;
+        self.do_callback(&mut vec![Event::FingerDown(FingerDownEvent{
+            abs:self.last_mouse_pos,
+            rel:self.last_mouse_pos,
+            digit:digit,
+            handled:false,
+            is_touch:false
+        })]);
+    }
+
+    pub fn send_finger_up(&mut self, digit:usize){
+        self.fingers_down[digit] = false;
+        self.do_callback(&mut vec![Event::FingerUp(FingerUpEvent{
+            abs:self.last_mouse_pos,
+            rel:self.last_mouse_pos,
+            abs_start:vec2(0., 0.),
+            rel_start:vec2(0., 0.),
+            digit:digit,
+            is_over:false,
+            is_touch:false
+        })]);
+    }
+
+    pub fn send_finger_hover_and_move(&mut self, pos:Vec2){
+        self.last_mouse_pos = pos;
+        let mut events = Vec::new();
+        for (digit, down) in self.fingers_down.iter().enumerate(){
+            if *down{
+                events.push(Event::FingerMove(FingerMoveEvent{
+                    abs:pos,
+                    rel:pos,
+                    digit:digit,
+                    abs_start:vec2(0.,0.),
+                    rel_start:vec2(0.,0.),
+                    is_over:false,
+                    is_touch:false
+                }));
+            }
+        };
+        events.push(Event::FingerHover(FingerHoverEvent{
+            abs:pos,
+            rel:pos,
+            handled:false,
+            hover_state:HoverState::Over,
+        }));
+        self.do_callback(&mut events);
+    }
+
+    pub fn send_close_requested_event(&mut self){
+        self.do_callback(&mut vec![Event::CloseRequested])
     }
 }
 
@@ -249,76 +321,48 @@ pub fn define_cocoa_window_delegate()->*const Class{
     use std::os::raw::c_void;
     
     extern fn window_should_close(this: &Object, _: Sel, _: id) -> BOOL {
-        let _cocoa_window = get_cocoa_window(this);
+        let cw = get_cocoa_window(this);
+        cw.send_close_requested_event();
         NO
     }
 
     extern fn window_will_close(this: &Object, _: Sel, _: id) {
-        let _cocoa_window = get_cocoa_window(this);
+        let _cw = get_cocoa_window(this);
     }
 
     extern fn window_did_resize(this: &Object, _: Sel, _: id) {
-        let _cocoa_window = get_cocoa_window(this);
-        //WindowDelegate::emit_resize_event(state);
-        // WindowDelegate::emit_move_event(state);
+        let cw = get_cocoa_window(this);
+        cw.send_resize_event();
     }
 
     // This won't be triggered if the move was part of a resize.
     extern fn window_did_move(this: &Object, _: Sel, _: id) {
-        let _cocoa_window = get_cocoa_window(this);
-        //WindowDelegate::emit_move_event(state);
+        let _cw = get_cocoa_window(this);
     }
 
     extern fn window_did_change_screen(this: &Object, _: Sel, _: id) {
-        let _cocoa_window = get_cocoa_window(this);
-        //let dpi_factor = NSWindow::backingScaleFactor(*state.window) as f64;
-        //if state.previous_dpi_factor != dpi_factor {
-        //    state.previous_dpi_factor = dpi_factor;
-        //    WindowDelegate::emit_event(state, WindowEvent::HiDpiFactorChanged(dpi_factor));
-        //    WindowDelegate::emit_resize_event(state);
-        //}
+        let cw = get_cocoa_window(this);
+        cw.send_resize_event();
     }
 
     // This will always be called before `window_did_change_screen`.
     extern fn window_did_change_backing_properties(this: &Object, _:Sel, _:id) {
-        let _cocoa_window = get_cocoa_window(this);
-        /*
-        let dpi_factor = NSWindow::backingScaleFactor(*state.window) as f64;
-        if state.previous_dpi_factor != dpi_factor {
-            state.previous_dpi_factor = dpi_factor;
-            WindowDelegate::emit_event(state, WindowEvent::HiDpiFactorChanged(dpi_factor));
-            WindowDelegate::emit_resize_event(state);
-        }
-        }*/
+        let cw = get_cocoa_window(this);
+        cw.send_resize_event();
     }
 
     extern fn window_did_become_key(this: &Object, _: Sel, _: id) {
-        let _cocoa_window = get_cocoa_window(this);
-        //WindowDelegate::emit_event(state, WindowEvent::Focused(true));
+        let cw = get_cocoa_window(this);
+        cw.send_focus_event(true);
     }
 
     extern fn window_did_resign_key(this: &Object, _: Sel, _: id) {
-        let _cocoa_window = get_cocoa_window(this);
-        //WindowDelegate::emit_event(state, WindowEvent::Focused(false));
+        let cw = get_cocoa_window(this);
+        cw.send_focus_event(false);
     }
 
     // Invoked when the dragged image enters destination bounds or frame
-    extern fn dragging_entered(this: &Object, _: Sel, sender: id) -> BOOL {/*
-        use cocoa::appkit::NSPasteboard;
-        use cocoa::foundation::NSFastEnumeration;
-        use std::path::PathBuf;
-
-        let pb: id = unsafe { msg_send![sender, draggingPasteboard] };
-        let filenames = unsafe { NSPasteboard::propertyListForType(pb, appkit::NSFilenamesPboardType) };
-
-        for file in unsafe { filenames.iter() } {
-            use cocoa::foundation::NSString;
-            use std::ffi::CStr;
-            let f = NSString::UTF8String(file);
-            let path = CStr::from_ptr(f).to_string_lossy().into_owned();
-            let cocoa_window = get_cocoa_window(this);
-            WindowDelegate::emit_event(state, WindowEvent::HoveredFile(PathBuf::from(path)));
-        };*/
+    extern fn dragging_entered(_this: &Object, _: Sel, _sender: id) -> BOOL {
         YES
     }
 
@@ -328,27 +372,7 @@ pub fn define_cocoa_window_delegate()->*const Class{
     }
 
     // Invoked after the released image has been removed from the screen
-    extern fn perform_drag_operation(this: &Object, _: Sel, sender: id) -> BOOL {/*
-        use cocoa::appkit::NSPasteboard;
-        use cocoa::foundation::NSFastEnumeration;
-        use std::path::PathBuf;
-
-        let pb: id = unsafe { msg_send![sender, draggingPasteboard] };
-        let filenames = unsafe { NSPasteboard::propertyListForType(pb, appkit::NSFilenamesPboardType) };
-
-        for file in unsafe { filenames.iter() } {
-            use cocoa::foundation::NSString;
-            use std::ffi::CStr;
-
-            unsafe {
-                let f = NSString::UTF8String(file);
-                let path = CStr::from_ptr(f).to_string_lossy().into_owned();
-
-                let state: *mut c_void = *this.get_ivar("winitState");
-                let state = &mut *(state as *mut DelegateState);
-                WindowDelegate::emit_event(state, WindowEvent::DroppedFile(PathBuf::from(path)));
-            }
-        };*/
+    extern fn perform_drag_operation(_this: &Object, _: Sel, _sender: id) -> BOOL {
         YES
     }
 
@@ -357,28 +381,28 @@ pub fn define_cocoa_window_delegate()->*const Class{
 
     // Invoked when the dragging operation is cancelled
     extern fn dragging_exited(this: &Object, _: Sel, _: id) {
-        let _cocoa_window = get_cocoa_window(this);
+        let _cw = get_cocoa_window(this);
         //WindowDelegate::emit_event(state, WindowEvent::HoveredFileCancelled);
     }
 
     // Invoked when entered fullscreen
     extern fn window_did_enter_fullscreen(this: &Object, _: Sel, _: id){
-        let _cocoa_window = get_cocoa_window(this);
-        //state.win_attribs.borrow_mut().fullscreen = Some(get_current_monitor(*state.window));
-        //state.handle_with_fullscreen = false;
+        let cw = get_cocoa_window(this);
+        cw.send_resize_event();
     }
 
     // Invoked when before enter fullscreen
     extern fn window_will_enter_fullscreen(this: &Object, _: Sel, _: id) {
-        let _cocoa_window = get_cocoa_window(this);
+        let _cw = get_cocoa_window(this);
     }
 
     // Invoked when exited fullscreen
     extern fn window_did_exit_fullscreen(this: &Object, _: Sel, _: id){
-        let _cocoa_window = get_cocoa_window(this);
+        let cw = get_cocoa_window(this);
+        cw.send_resize_event();
     }
 
-    extern fn window_did_fail_to_enter_fullscreen(this: &Object, _: Sel, _: id) {
+    extern fn window_did_fail_to_enter_fullscreen(_this: &Object, _: Sel, _: id) {
     }
 
     let superclass = class!(NSObject);
@@ -434,8 +458,6 @@ pub fn define_cocoa_view_class()->*const Class{
         unsafe {
             let marked_text: id = *this.get_ivar("markedText");
             let _: () = msg_send![marked_text, release];
-            //let state: *mut c_void = *this.get_ivar("winitState");
-            //Box::from_raw(state as *mut ViewState);
         }
     }
 
@@ -453,47 +475,91 @@ pub fn define_cocoa_view_class()->*const Class{
         }
     }
 
+    extern fn mouse_down(this: &Object, _sel: Sel, _event: id) {
+        let cw = get_cocoa_window(this);
+        cw.send_finger_down(0);
+    }
+
+    extern fn mouse_up(this: &Object, _sel: Sel, _event: id) {
+        let cw = get_cocoa_window(this);
+        cw.send_finger_up(0);
+    }
+
+    extern fn right_mouse_down(this: &Object, _sel: Sel, _event: id) {
+        let cw = get_cocoa_window(this);
+        cw.send_finger_down(1);
+    }
+
+    extern fn right_mouse_up(this: &Object, _sel: Sel, _event: id) {
+        let cw = get_cocoa_window(this);
+        cw.send_finger_up(1);
+    }
+
+    extern fn other_mouse_down(this: &Object, _sel: Sel, _event: id) {
+        let cw = get_cocoa_window(this);
+        cw.send_finger_down(2);
+    }
+
+    extern fn other_mouse_up(this: &Object, _sel: Sel, _event: id) {
+        let cw = get_cocoa_window(this);
+        cw.send_finger_up(2);
+    }
+
+    fn mouse_pos_from_event(this: &Object, event: id)->Vec2{
+        // We have to do this to have access to the `NSView` trait...
+        unsafe{
+            let view: id = this as *const _ as *mut _;
+            let window_point = event.locationInWindow();
+            let view_point = view.convertPoint_fromView_(window_point, nil);
+            let view_rect = NSView::frame(view);
+            vec2(view_point.x as f32, view_rect.size.height as f32 - view_point.y as f32)
+        }
+    }
+
+    fn mouse_motion(this: &Object, event: id) {
+        let cw = get_cocoa_window(this);
+        let pos = mouse_pos_from_event(this, event);
+        cw.send_finger_hover_and_move(pos);
+    }
+
+    extern fn mouse_moved(this: &Object, _sel: Sel, event: id) {
+        mouse_motion(this, event);
+    }
+
+    extern fn mouse_dragged(this: &Object, _sel: Sel, event: id) {
+        mouse_motion(this, event);
+    }
+
+    extern fn right_mouse_dragged(this: &Object, _sel: Sel, event: id) {
+        mouse_motion(this, event);
+    }
+
+    extern fn other_mouse_dragged(this: &Object, _sel: Sel, event: id) {
+        mouse_motion(this, event);
+    }
+
     extern fn draw_rect(this: &Object, _sel: Sel, rect: NSRect) {
-        let cocoa_window = get_cocoa_window(this);
+        let _cw = get_cocoa_window(this);
         unsafe {
-            //TODO, do a redraw?
             let superclass = superclass(this);
             let () = msg_send![super(this, superclass), drawRect:rect];
         }
     }
 
     extern fn reset_cursor_rects(this: &Object, _sel: Sel) {
-        let cocoa_window = get_cocoa_window(this);
+        let cw = get_cocoa_window(this);
+        let current_cursor = cw.current_cursor.clone();
+        let cursor_id =  *cw.cursors.entry(current_cursor.clone()).or_insert_with(||{
+           load_mouse_cursor(current_cursor.clone())
+        });
         unsafe {
             let bounds: NSRect = msg_send![this, bounds];
-            //let cursor = state.cursor.lock().unwrap().load();
-            //let _: () = msg_send![this,
-             //   addCursorRect:bounds
-             //   cursor:cursor
-            //];
+            let _: () = msg_send![this,
+              addCursorRect:bounds
+              cursor:cursor_id
+            ];
         }
     }
-/*
-    extern fn has_marked_text(this: &Object, _sel: Sel) -> BOOL {
-        //println!("hasMarkedText");
-        unsafe {
-            let marked_text: id = *this.get_ivar("markedText");
-            (marked_text.length() > 0) as i8
-        }
-    }
-
-    extern fn marked_range(this: &Object, _sel: Sel) -> NSRange {
-        //println!("markedRange");
-        unsafe {
-            let marked_text: id = *this.get_ivar("markedText");
-            let length = marked_text.length();
-            if length > 0 {
-                NSRange::new(0, length - 1)
-            } else {
-                util::EMPTY_RANGE
-            }
-        }
-    }*/
 
     extern fn selected_range(_this: &Object, _sel: Sel) -> NSRange {
         //println!("selectedRange");
@@ -504,44 +570,18 @@ pub fn define_cocoa_view_class()->*const Class{
     }
 
     extern fn set_marked_text(
-        this: &mut Object,
+        _this: &mut Object,
         _sel: Sel,
-        string: id,
+        _string: id,
         _selected_range: NSRange,
         _replacement_range: NSRange,
     ) {
-        /*
-        //println!("setMarkedText");
-        unsafe {
-            let marked_text_ref: &mut id = this.get_mut_ivar("markedText");
-            let _: () = msg_send![(*marked_text_ref), release];
-            let marked_text = NSMutableAttributedString::alloc(nil);
-            let has_attr = msg_send![string, isKindOfClass:class!(NSAttributedString)];
-            if has_attr {
-                marked_text.initWithAttributedString(string);
-            } else {
-                marked_text.initWithString(string);
-            };
-            *marked_text_ref = marked_text;
-        }
-        */
     }
 
-    extern fn unmark_text(this: &Object, _sel: Sel) {
-        /*
-        //println!("unmarkText");
-        unsafe {
-            let marked_text: id = *this.get_ivar("markedText");
-            let mutable_string = marked_text.mutableString();
-            let _: () = msg_send![mutable_string, setString:""];
-            let input_context: id = msg_send![this, inputContext];
-            let _: () = msg_send![input_context, discardMarkedText];
-        }
-        */
+    extern fn unmark_text(_this: &Object, _sel: Sel) {
     }
 
     extern fn valid_attributes_for_marked_text(_this: &Object, _sel: Sel) -> id {
-        //println!("validAttributesForMarkedText");
         unsafe { msg_send![class!(NSArray), array] }
     }
 
@@ -551,224 +591,35 @@ pub fn define_cocoa_view_class()->*const Class{
         _range: NSRange,
         _actual_range: *mut c_void, // *mut NSRange
     ) -> id {
-        //println!("attributedSubstringForProposedRange");
         nil
     }
 
     extern fn character_index_for_point(_this: &Object, _sel: Sel, _point: NSPoint) -> NSUInteger {
-        //println!("characterIndexForPoint");
         0
     }
 
     extern fn first_rect_for_character_range(this: &Object, _sel: Sel, _range: NSRange, _actual_range: *mut c_void) -> NSRect {
-        let cocoa_window = get_cocoa_window(this);
-        unsafe {
-            /*
-            let (x, y) = state.ime_spot.unwrap_or_else(|| {
-                let content_rect = NSWindow::contentRectForFrameRect_(
-                    state.window,
-                    NSWindow::frame(state.window),
-                );
-                let x = content_rect.origin.x;
-                let y = util::bottom_left_to_top_left(content_rect);
-                (x, y)
-            });
-            let content_rect = NSWindow::contentRectForFrameRect_(
-                cx.resources.cocoa_window,
-                NSWindow::frame(cx.resources.cocoa_window),
-            );
-            let x = content_rect.origin.x;
-            let y = bottom_left_to_top_left(content_rect);*/
+        let _cw = get_cocoa_window(this);
             NSRect::new(
                 NSPoint::new(0.0, 0.0),// as _, y as _),
                 NSSize::new(0.0, 0.0),
             )
-        }
     }
 
-    extern fn insert_text(this: &Object, _sel: Sel, string: id, _replacement_range: NSRange) {
-        //println!("insertText");
-        let cocoa_window = get_cocoa_window(this);
-        unsafe {
-            /*
-            let has_attr = msg_send![string, isKindOfClass:class!(NSAttributedString)];
-            let characters = if has_attr {
-                // This is a *mut NSAttributedString
-                msg_send![string, string]
-            } else {
-                // This is already a *mut NSString
-                string
-            };
-
-            let slice = slice::from_raw_parts(
-                characters.UTF8String() as *const c_uchar,
-                characters.len(),
-            );
-            let string = str::from_utf8_unchecked(slice);
-            */
-            /*
-            state.is_key_down = true;
-            let mut events = VecDeque::with_capacity(characters.len());
-            for character in string.chars() {
-                events.push_back(Event::WindowEvent {
-                    window_id: WindowId(get_window_id(state.window)),
-                    event: WindowEvent::ReceivedCharacter(character),
-                });
-            }*/
-        }
+    extern fn insert_text(this: &Object, _sel: Sel, _string: id, _replacement_range: NSRange) {
+        let _cw = get_cocoa_window(this);
     }
 
-    extern fn do_command_by_selector(this: &Object, _sel: Sel, command: Sel) {
-        //println!("doCommandBySelector");
-        // Basically, we're sent this message whenever a keyboard event that doesn't generate a "human readable" character
-        // happens, i.e. newlines, tabs, and Ctrl+C.
-        let _cocoa_window = get_cocoa_window(this);
-        /*
-        unsafe {
-            if command == sel!(insertNewline:) {
-                // The `else` condition would emit the same character, but I'm keeping this here both...
-                // 1) as a reminder for how `doCommandBySelector` works
-                // 2) to make our use of carriage return explicit
-                //events.push_back(Event::WindowEvent {
-                //    window_id: WindowId(get_window_id(state.window)),
-                //    event: WindowEvent::ReceivedCharacter('\r'),
-                //});
-            } else {
-                let raw_characters = state.raw_characters.take();
-                if let Some(raw_characters) = raw_characters {
-                    for character in raw_characters.chars() {
-                        //events.push_back(Event::WindowEvent {
-                        //    window_id: WindowId(get_window_id(state.window)),
-                        //    event: WindowEvent::ReceivedCharacter(character),
-                        //});
-                    }
-                }
-            };
-        //0}*/
-    }
-/*
-    fn get_characters(event: id, ignore_modifiers: bool) -> String {
-        unsafe {
-            let characters: id = if ignore_modifiers {
-                msg_send![event, charactersIgnoringModifiers]
-            } else {
-                msg_send![event, characters]
-            };
-
-            assert_ne!(characters, nil);
-            let slice = slice::from_raw_parts(
-                characters.UTF8String() as *const c_uchar,
-                characters.len(),
-            );
-
-            let string = str::from_utf8_unchecked(slice);
-
-            string.to_owned()
-        }
-    }
-*/
-    // Retrieves a layout-independent keycode given an event.
-    /*
-    fn retrieve_keycode(event: id) -> Option<events::VirtualKeyCode> {
-        #[inline]
-        fn get_code(ev: id, raw: bool) -> Option<events::VirtualKeyCode> {
-            let characters = get_characters(ev, raw);
-            characters.chars().next().map_or(None, |c| char_to_keycode(c))
-        }
-
-        // Cmd switches Roman letters for Dvorak-QWERTY layout, so we try modified characters first.
-        // If we don't get a match, then we fall back to unmodified characters.
-        let code = get_code(event, false)
-            .or_else(|| {
-                get_code(event, true)
-            });
-
-        // We've checked all layout related keys, so fall through to scancode.
-        // Reaching this code means that the key is layout-independent (e.g. Backspace, Return).
-        //
-        // We're additionally checking here for F21-F24 keys, since their keycode
-        // can vary, but we know that they are encoded
-        // in characters property.
-        code.or_else(|| {
-            let scancode = get_scancode(event);
-            scancode_to_keycode(scancode)
-                .or_else(|| {
-                    check_function_keys(&get_characters(event, true))
-                })
-        })
-    }*/
-
-    extern fn key_down(this: &Object, _sel: Sel, event: id) {
-        let _cocoa_window = get_cocoa_window(this);
-        //println!("keyDown");
-        unsafe {
-            //let state_ptr: *mut c_void = *this.get_ivar("winitState");
-            //let state = &mut *(state_ptr as *mut ViewState);
-            //let window_id = WindowId(get_window_id(state.window));
-            //let characters = get_characters(event, false);
-
-           // state.raw_characters = Some(characters.clone());
-
-            //let scancode = get_scancode(event) as u32;
-            //let virtual_keycode = retrieve_keycode(event);
-           // let is_repeat = msg_send![event, isARepeat];
-
-            /*
-            let window_event = Event::WindowEvent {
-                window_id,
-                event: WindowEvent::KeyboardInput {
-                    device_id: DEVICE_ID,
-                    input: KeyboardInput {
-                        state: ElementState::Pressed,
-                        scancode,
-                        virtual_keycode,
-                        modifiers: event_mods(event),
-                    },
-                },
-            };
-            if is_repeat && state.is_key_down{
-                for character in characters.chars() {
-                    let window_event = Event::WindowEvent {
-                        window_id,
-                        event: WindowEvent::ReceivedCharacter(character),
-                    };
-                }
-            } else {
-                // Some keys (and only *some*, with no known reason) don't trigger `insertText`, while others do...
-                // So, we don't give repeats the opportunity to trigger that, since otherwise our hack will cause some
-                // keys to generate twice as many characters.
-                let array: id = msg_send![class!(NSArray), arrayWithObject:event];
-                let (): _ = msg_send![this, interpretKeyEvents:array];
-            }*/
-        }
+    extern fn do_command_by_selector(this: &Object, _sel: Sel, _command: Sel) {
+        let _cw = get_cocoa_window(this);
     }
 
-    extern fn key_up(this: &Object, _sel: Sel, event: id) {
-        let _cocoa_window = get_cocoa_window(this);
-        //println!("keyUp");
-        unsafe {
-            //let state_ptr: *mut c_void = *this.get_ivar("winitState");
-            //let state = &mut *(state_ptr as *mut ViewState);
-            /*
-            state.is_key_down = false;
+    extern fn key_down(this: &Object, _sel: Sel, _event: id) {
+        let _cw = get_cocoa_window(this);
+    }
 
-            let scancode = get_scancode(event) as u32;
-            let virtual_keycode = retrieve_keycode(event);
-
-            let window_event = Event::WindowEvent {
-                window_id: WindowId(get_window_id(state.window)),
-                event: WindowEvent::KeyboardInput {
-                    device_id: DEVICE_ID,
-                    input: KeyboardInput {
-                        state: ElementState::Released,
-                        scancode,
-                        virtual_keycode,
-                        modifiers: event_mods(event),
-                    },
-                },
-            };
-            */
-        }
+    extern fn key_up(this: &Object, _sel: Sel, _event: id) {
+        let _cw = get_cocoa_window(this);
     }
 
     extern fn insert_tab(this: &Object, _sel: Sel, _sender: id) {
@@ -791,84 +642,6 @@ pub fn define_cocoa_view_class()->*const Class{
                 let (): _ = msg_send![window, selectPreviousKeyView:this];
             }
         }
-    }
-
-    fn mouse_click(this: &Object, event: id, button: usize, button_state: usize) {
-        let _cocoa_window = get_cocoa_window(this);
-        unsafe {
-            /*
-            let window_event = Event::WindowEvent {
-                window_id: WindowId(get_window_id(state.window)),
-                event: WindowEvent::MouseInput {
-                    device_id: DEVICE_ID,
-                    state: button_state,
-                    button,
-                },
-            };*/
-        }
-    }
-
-    extern fn mouse_down(this: &Object, _sel: Sel, event: id) {
-        //mouse_click(this, event, MouseButton::Left, ElementState::Pressed);
-    }
-
-    extern fn mouse_up(this: &Object, _sel: Sel, event: id) {
-        //mouse_click(this, event, MouseButton::Left, ElementState::Released);
-    }
-
-    extern fn right_mouse_down(this: &Object, _sel: Sel, event: id) {
-        //mouse_click(this, event, MouseButton::Right, ElementState::Pressed);
-    }
-
-    extern fn right_mouse_up(this: &Object, _sel: Sel, event: id) {
-        //mouse_click(this, event, MouseButton::Right, ElementState::Released);
-    }
-
-    extern fn other_mouse_down(this: &Object, _sel: Sel, event: id) {
-        //mouse_click(this, event, MouseButton::Middle, ElementState::Pressed);
-    }
-
-    extern fn other_mouse_up(this: &Object, _sel: Sel, event: id) {
-        //mouse_click(this, event, MouseButton::Middle, ElementState::Released);
-    }
-
-    fn mouse_motion(this: &Object, event: id) {
-        let _cocoa_window = get_cocoa_window(this);
-        unsafe {
-            // We have to do this to have access to the `NSView` trait...
-            let view: id = this as *const _ as *mut _;
-
-            //let window_point = event.locationInWindow();
-            //let view_point = view.convertPoint_fromView_(window_point, nil);
-            //let view_rect = NSView::frame(view);
-            /*
-            if view_point.x.is_sign_negative()
-            || view_point.y.is_sign_negative()
-            || view_point.x > view_rect.size.width
-            || view_point.y > view_rect.size.height {
-                // Point is outside of the client area (view)
-                return;
-            }*/
-            //let x = view_point.x as f64;
-            //let y = view_rect.size.height as f64 - view_point.y as f64;
-            // use x,y
-        }
-    }
-
-    extern fn mouse_moved(this: &Object, _sel: Sel, event: id) {
-        mouse_motion(this, event);
-    }
-
-    extern fn mouse_dragged(this: &Object, _sel: Sel, event: id) {
-        mouse_motion(this, event);
-    }
-
-    extern fn right_mouse_dragged(this: &Object, _sel: Sel, event: id) {
-        mouse_motion(this, event);
-    }
-
-    extern fn other_mouse_dragged(this: &Object, _sel: Sel, event: id) {
-        mouse_motion(this, event);
     }
 
     extern fn wants_key_down_for_event(_this: &Object, _se: Sel, _event: id) -> BOOL {
@@ -931,7 +704,6 @@ pub fn define_cocoa_view_class()->*const Class{
     return decl.register();
 }
 
-
 pub unsafe fn superclass<'a>(this: &'a Object) -> &'a Class {
     let superclass: id = msg_send![this, superclass];
     &*(superclass as *const _)
@@ -939,4 +711,103 @@ pub unsafe fn superclass<'a>(this: &'a Object) -> &'a Class {
 
 pub fn bottom_left_to_top_left(rect: NSRect) -> f64 {
     CGDisplay::main().pixels_high() as f64 - (rect.origin.y + rect.size.height)
+}
+
+fn load_mouse_cursor(cursor:MouseCursor)->id{
+    match cursor {
+        MouseCursor::Arrow | MouseCursor::Default | MouseCursor::Hidden => load_native_cursor("arrowCursor"),
+        MouseCursor::Hand => load_native_cursor("pointingHandCursor"),
+        MouseCursor::Grabbing | MouseCursor::Grab => load_native_cursor("closedHandCursor"),
+        MouseCursor::Text => load_native_cursor("IBeamCursor"),
+        MouseCursor::VerticalText => load_native_cursor("IBeamCursorForVerticalLayout"),
+        MouseCursor::Copy => load_native_cursor("dragCopyCursor"),
+        MouseCursor::Alias => load_native_cursor("dragLinkCursor"),
+        MouseCursor::NotAllowed | MouseCursor::NoDrop => load_native_cursor("operationNotAllowedCursor"),
+        MouseCursor::ContextMenu => load_native_cursor("contextualMenuCursor"),
+        MouseCursor::Crosshair => load_native_cursor("crosshairCursor"),
+        MouseCursor::EResize => load_native_cursor("resizeRightCursor"),
+        MouseCursor::NResize => load_native_cursor("resizeUpCursor"),
+        MouseCursor::WResize => load_native_cursor("resizeLeftCursor"),
+        MouseCursor::SResize => load_native_cursor("resizeDownCursor"),
+        MouseCursor::EwResize | MouseCursor::ColResize => load_native_cursor("resizeLeftRightCursor"),
+        MouseCursor::NsResize | MouseCursor::RowResize => load_native_cursor("resizeUpDownCursor"),
+
+        // Undocumented cursors: https://stackoverflow.com/a/46635398/5435443
+        MouseCursor::Help => load_undocumented_cursor("_helpCursor"),
+        MouseCursor::ZoomIn => load_undocumented_cursor("_zoomInCursor"),
+        MouseCursor::ZoomOut => load_undocumented_cursor("_zoomOutCursor"),
+        MouseCursor::NeResize => load_undocumented_cursor("_windowResizeNorthEastCursor"),
+        MouseCursor::NwResize => load_undocumented_cursor("_windowResizeNorthWestCursor"),
+        MouseCursor::SeResize => load_undocumented_cursor("_windowResizeSouthEastCursor"),
+        MouseCursor::SwResize => load_undocumented_cursor("_windowResizeSouthWestCursor"),
+        MouseCursor::NeswResize => load_undocumented_cursor("_windowResizeNorthEastSouthWestCursor"),
+        MouseCursor::NwseResize => load_undocumented_cursor("_windowResizeNorthWestSouthEastCursor"),
+
+        // While these are available, the former just loads a white arrow,
+        // and the latter loads an ugly deflated beachball!
+        // MouseCursor::Move => Cursor::Undocumented("_moveCursor"),
+        // MouseCursor::Wait => Cursor::Undocumented("_waitCursor"),
+        // An even more undocumented cursor...
+        // https://bugs.eclipse.org/bugs/show_bug.cgi?id=522349
+        // This is the wrong semantics for `Wait`, but it's the same as
+        // what's used in Safari and Chrome.
+        MouseCursor::Wait | MouseCursor::Progress => load_undocumented_cursor("busyButClickableCursor"),
+
+        // For the rest, we can just snatch the cursors from WebKit...
+        // They fit the style of the native cursors, and will seem
+        // completely standard to macOS users.
+        // https://stackoverflow.com/a/21786835/5435443
+        MouseCursor::Move | MouseCursor::AllScroll => load_webkit_cursor("move"),
+        MouseCursor::Cell => load_webkit_cursor("cell"),
+    }
+}
+
+fn load_native_cursor(cursor_name:&str)->id{
+    let sel = Sel::register(cursor_name);
+    let id:id = unsafe{msg_send![class!(NSCursor), performSelector:sel]};
+    id
+}
+
+fn load_undocumented_cursor(cursor_name:&str)->id{
+    unsafe{
+        let class = class!(NSCursor);
+        let sel = Sel::register(cursor_name);
+        let sel = msg_send![class, respondsToSelector:sel];
+        let id:id = msg_send![class, performSelector:sel];
+        id
+    }
+}
+
+fn load_webkit_cursor(cursor_name_str: &str) -> id {
+    unsafe{
+        static CURSOR_ROOT: &'static str = "/System/Library/Frameworks/ApplicationServices.framework/Versions/A/Frameworks/HIServices.framework/Versions/A/Resources/cursors";
+        let cursor_root = NSString::alloc(nil).init_str(CURSOR_ROOT);
+        let cursor_name = NSString::alloc(nil).init_str(cursor_name_str);
+        let cursor_pdf = NSString::alloc(nil).init_str("cursor.pdf");
+        let cursor_plist = NSString::alloc(nil).init_str("info.plist");
+        let key_x = NSString::alloc(nil).init_str("hotx");
+        let key_y = NSString::alloc(nil).init_str("hoty");
+
+        let cursor_path: id = msg_send![cursor_root,
+            stringByAppendingPathComponent:cursor_name
+        ];
+        let pdf_path: id = msg_send![cursor_path,
+            stringByAppendingPathComponent:cursor_pdf
+        ];
+        let info_path: id = msg_send![cursor_path,
+            stringByAppendingPathComponent:cursor_plist
+        ];
+
+        let image = NSImage::alloc(nil).initByReferencingFile_(pdf_path);
+        let info = NSDictionary::dictionaryWithContentsOfFile_(nil, info_path);
+
+        let x = info.valueForKey_(key_x);
+        let y = info.valueForKey_(key_y);
+        let point = NSPoint::new(
+            msg_send![x, doubleValue],
+            msg_send![y, doubleValue],
+        );
+        let cursor: id = msg_send![class!(NSCursor), alloc];
+        msg_send![cursor, initWithImage:image hotSpot:point]
+    }
 }
