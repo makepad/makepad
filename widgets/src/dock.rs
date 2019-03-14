@@ -293,6 +293,8 @@ where TItem: Clone
 }
 
 enum DockDropKind{
+    Tab(usize),
+    TabsView,
     Left,
     Top,
     Right,
@@ -303,34 +305,7 @@ enum DockDropKind{
 impl<TItem> Dock<TItem>
 where TItem: Clone
 {
-    fn get_drop_kind(pos:Vec2, drop_size:Vec2, rect:Rect)->(DockDropKind, Rect){
-        // this is how the drop areas look
-        //    |-------------------------------|
-        //    |      |     Top        |       |
-        //    |      |----------------|       |
-        //    |      |                |       |
-        //    |      |                |       |
-        //    | Left |    Center      | Right |
-        //    |      |                |       |
-        //    |      |                |       |
-        //    |      |----------------|       |
-        //    |      |    Bottom      |       |
-        //    ---------------------------------
-        if pos.x < rect.x + drop_size.x{
-            return (DockDropKind::Left, Rect{x:rect.x, y:rect.y, w:0.5 * rect.w, h:rect.h})
-        }
-        if pos.x > rect.x + rect.w - drop_size.x{
-            return (DockDropKind::Right, Rect{x:rect.x + 0.5 * rect.w, y:rect.y, w:0.5 * rect.w, h:rect.h})
-        }
-        if pos.y < rect.y + drop_size.y{
-            return (DockDropKind::Top, Rect{x:rect.x, y:rect.y, w:rect.w, h:0.5*rect.h})
-        }
-        if pos.y > rect.y + rect.h - drop_size.y{
-            return (DockDropKind::Bottom, Rect{x:rect.x, y:rect.y + 0.5 * rect.h, w:rect.w, h:0.5*rect.h})
-        }
-        (DockDropKind::Center, rect.clone())
-    }
-
+  
     fn recur_remove_tab(dock_walk:&mut DockItem<TItem>, control_id:usize, tab_id:usize, counter:&mut usize)->Option<DockTab<TItem>>
     where TItem: Clone
     {
@@ -393,6 +368,9 @@ where TItem: Clone
                 *counter += 1;
                 if id == control_id{
                     match kind{
+                        DockDropKind::Tab(id)=>{
+                            tabs.insert(*id, item.clone());
+                        },
                         DockDropKind::Left=>{
                             *dock_walk = DockItem::Splitter{
                                 align:SplitterAlign::Weighted, pos:0.5,
@@ -425,6 +403,7 @@ where TItem: Clone
                                 last:Box::new(DockItem::TabControl{current:0,tabs:vec![item.clone()]})
                             };                            
                         },
+                        DockDropKind::TabsView |
                         DockDropKind::Center=>{
                             tabs.push(item.clone());
                         }
@@ -463,17 +442,55 @@ where TItem: Clone
             }
         }
     }*/
+  fn get_drop_kind(pos:Vec2, drop_size:Vec2, tvr:Rect, cdr:Rect, tab_rects:Vec<Rect>)->(DockDropKind, Rect){
+        // this is how the drop areas look
+        //    |            Tab                |
+        //    |-------------------------------|
+        //    |      |     Top        |       |
+        //    |      |----------------|       |
+        //    |      |                |       |
+        //    |      |                |       |
+        //    | Left |    Center      | Right |
+        //    |      |                |       |
+        //    |      |                |       |
+        //    |      |----------------|       |
+        //    |      |    Bottom      |       |
+        //    ---------------------------------
+        if tvr.contains(pos.x, pos.y){
+            for (id, tr) in tab_rects.iter().enumerate(){
+                if tr.contains(pos.x, pos.y){
+                    return (DockDropKind::Tab(id), *tr)
+                }
+            }
+            return (DockDropKind::TabsView, tvr)
+        }
+        if pos.x < cdr.x + drop_size.x{
+            return (DockDropKind::Left, Rect{x:cdr.x, y:cdr.y, w:0.5 * cdr.w, h:cdr.h})
+        }
+        if pos.x > cdr.x + cdr.w - drop_size.x{
+            return (DockDropKind::Right, Rect{x:cdr.x + 0.5 * cdr.w, y:cdr.y, w:0.5 * cdr.w, h:cdr.h})
+        }
+        if pos.y < cdr.y + drop_size.y{
+            return (DockDropKind::Top, Rect{x:cdr.x, y:cdr.y, w:cdr.w, h:0.5*cdr.h})
+        }
+        if pos.y > cdr.y + cdr.h - drop_size.y{
+            return (DockDropKind::Bottom, Rect{x:cdr.x, y:cdr.y + 0.5 * cdr.h, w:cdr.w, h:0.5*cdr.h})
+        }
+        (DockDropKind::Center, cdr.clone())
+    }
 
     pub fn handle_dock(&mut self, cx: &mut Cx, _event:&mut Event)->DockEvent{
         if let Some(drag_end) = self._drag_end.clone(){
             self._drag_end = None;
             let fe = drag_end.finger_up_event;
-            for (target_id,tab_control) in self.tab_controls.enumerate(){
-                // ok now, we ask the tab_controls rect
+            for (target_id, tab_control) in self.tab_controls.enumerate(){
+                
                 let cdr = tab_control.get_content_drop_rect(cx);
-                // alright we need a drop area
-                if cdr.contains(fe.abs.x, fe.abs.y){
-                    let (kind, _rect) = Self::get_drop_kind(fe.abs, self.drop_size, cdr);
+                let tvr = tab_control.get_tabs_view_rect(cx);
+                if tvr.contains(fe.abs.x, fe.abs.y) || cdr.contains(fe.abs.x, fe.abs.y){ // we might got dropped elsewhere
+                    // ok now, we ask the tab_controls rect
+                    let tab_rects = tab_control.get_tab_rects(cx);
+                    let (kind, _rect) = Self::get_drop_kind(fe.abs, self.drop_size, tvr, cdr, tab_rects);
                     // we have a kind!
                     let item = Self::recur_remove_tab(self.dock_items.as_mut().unwrap(), drag_end.tab_control_id, drag_end.tab_id, &mut 0);
                     // alright we have a kind. 
@@ -504,32 +521,29 @@ where TItem: Clone
                 abs_start:Some(vec2(0.,0.)),
                 ..Default::default()
             });
-
-            // alright so now, what do i need to do
-            // well lets for shits n giggles find all the tab areas 
-            // you know, we have a list eh
+            let mut found_drop_zone = false;
             for (id,tab_control) in self.tab_controls.enumerate(){
-                // ok now, we ask the tab_controls rect
-                let cdr = tab_control.get_content_drop_rect(cx);
-                // alright we need a drop area
 
-                if cdr.contains(fe.abs.x, fe.abs.y){
-                    let (_kind, rect) = Self::get_drop_kind(fe.abs, self.drop_size, cdr);
+                let cdr = tab_control.get_content_drop_rect(cx);
+                let tvr = tab_control.get_tabs_view_rect(cx);
+                if tvr.contains(fe.abs.x, fe.abs.y) || cdr.contains(fe.abs.x, fe.abs.y){
+                    let tab_rects = tab_control.get_tab_rects(cx);
+                    let (_kind, rect) = Self::get_drop_kind(fe.abs, self.drop_size, tvr, cdr, tab_rects);
 
                     if !self._tweening_quad.is_none() && self._tweening_quad.unwrap().0 != *id{
                         // restarts the animation by removing drop_quad
                         self._tweening_quad = None;
                     }
 
-                    // alright so we have to animate our draw rect towards it
+                    // yay, i can finally do these kinds of animations!
                     let (dr, alpha) = if self._tweening_quad.is_none(){
-                        self._tweening_quad = Some((*id,rect,0.25));
-                        (rect,0.25)
+                        self._tweening_quad = Some((*id,rect,0.));
+                        (rect,0.)
                     }
                     else{
                         let (id, old_rc, old_alpha) = self._tweening_quad.unwrap();
                         let move_speed = 0.7;
-                        let alpha_speed = 0.9;
+                        let alpha_speed = 0.8;
                         let alpha = old_alpha * alpha_speed + (1.-alpha_speed);
                         let rc = Rect{
                             x:old_rc.x*move_speed + rect.x * (1.-move_speed),
@@ -545,12 +559,14 @@ where TItem: Clone
                         (rc, alpha)
                     };
                     self.drop_quad.color = self.drop_quad_color;
-                    self.drop_quad_color.w = alpha*0.8;
+                    self.drop_quad.color.w = alpha*0.8;
+                    found_drop_zone = true;
                     self.drop_quad.draw_quad(cx, dr.x, dr.y, dr.w, dr.h);
                 }
             }
-            //self.drop_quad.draw_quad()
-
+            if !found_drop_zone{
+                self._tweening_quad = None;
+            }
             self.drop_quad_view.end_view(cx);
         }
     }

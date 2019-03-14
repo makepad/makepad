@@ -82,8 +82,16 @@ impl TabControl{
         }
         TabControlEvent::None
     }
+    
+    pub fn get_tab_rects(&mut self, cx:&Cx)->Vec<Rect>{
+        let mut rects = Vec::new();
+        for tab in self.tabs.iter(){
+            rects.push(tab.get_tab_rect(cx))
+        }
+        return rects
+    }
 
-    pub fn get_tab_drop_rect(&mut self, cx:&Cx)->Rect{
+    pub fn get_tabs_view_rect(&mut self, cx:&Cx)->Rect{
         self.tabs_view.get_view_area().get_rect(cx, true)
     }
 

@@ -103,4 +103,5 @@ impl Quad{
         area.push_data(cx, &data);
         area
     }
+
 }

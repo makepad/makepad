@@ -171,6 +171,10 @@ impl Tab{
         TabEvent::None
    }
 
+    pub fn get_tab_rect(&mut self, cx:&Cx)->Rect{
+        self._bg_area.get_rect(cx, false)
+    }
+
     pub fn draw_tab(&mut self, cx:&mut Cx){
         // pull the bg color from our animation system, uses 'default' value otherwise
         self.bg.color = self.animator.last_vec4("bg.color");

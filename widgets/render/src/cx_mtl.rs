@@ -132,7 +132,6 @@ impl Cx{
 
             command_buffer.present_drawable(&drawable);
             command_buffer.commit();
-            //command_buffer.wait_until_completed();
         }
         unsafe { 
             msg_send![pool, release];
@@ -687,6 +686,9 @@ pub struct MetalBuffer{
     pub multi1:MultiMetalBuffer,
     pub multi2:MultiMetalBuffer,
     pub multi3:MultiMetalBuffer,
+    pub multi4:MultiMetalBuffer,
+    pub multi5:MultiMetalBuffer,
+    pub multi6:MultiMetalBuffer,
 }
 
 impl MetalBuffer{
