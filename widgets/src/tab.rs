@@ -93,7 +93,7 @@ impl Tab{
 
             fn pixel()->vec4{
                 df_viewport(pos * vec2(w, h));
-                df_box(0., 0., w, h, border_radius);
+                df_box(0., 0., w, h, border_radius*2.);
                 df_shape += 1.;
                 df_fill_keep(color);
                 df_stroke_keep(border_color, border_width);
@@ -120,7 +120,6 @@ impl Tab{
             },
             Event::FingerHover(fe)=>{
                 cx.set_hover_mouse_cursor(MouseCursor::Hand);
-
                 match fe.hover_state{
                     HoverState::In=>{
                         if self._is_down{

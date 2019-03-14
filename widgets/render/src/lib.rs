@@ -23,7 +23,7 @@ mod cx_cocoa;
 mod cx; 
 mod cx_turtle;
 mod cx_fonts;
-mod cx_mouse_cursor;
+mod cx_cursor;
 mod animator;
 mod elements;
 mod math;

@@ -20,12 +20,7 @@ impl Cx{
 
     pub fn exec_draw_list(&mut self, draw_list_id: usize, device:&Device, encoder:&RenderCommandEncoderRef){
         
-        // update draw list uniforms
-        {
-            let draw_list = &mut self.draw_lists[draw_list_id];
-            draw_list.resources.uni_dl.update_with_f32_data(device, &draw_list.uniforms);
-        }
-        // tad ugly otherwise the borrow checker locks 'self' and we can't recur
+         // tad ugly otherwise the borrow checker locks 'self' and we can't recur
         let draw_calls_len = self.draw_lists[draw_list_id].draw_calls_len;
         for draw_call_id in 0..draw_calls_len{
             let sub_list_id = self.draw_lists[draw_list_id].draw_calls[draw_call_id].sub_list_id;
@@ -35,6 +30,7 @@ impl Cx{
             else{
                 let draw_list = &mut self.draw_lists[draw_list_id];
                 draw_list.set_clipping_uniforms();
+                draw_list.resources.uni_dl.update_with_f32_data(device, &draw_list.uniforms);
                 let draw_call = &mut draw_list.draw_calls[draw_call_id];
                 let sh = &self.shaders[draw_call.shader_id];
                 let shc = &self.compiled_shaders[draw_call.shader_id];
@@ -192,9 +188,9 @@ impl Cx{
 
         let command_queue = device.new_command_queue();
 
-        // lets do this one too
-        //glutin_window.set_position(winit::dpi::LogicalPosition::new(1920.0,400.0));
-        
+        // move it to my second screen. livecompile.
+        cocoa_window.set_position(vec2(1920.0,400.0));
+
         self.compile_all_mtl_shaders(&device);
 
         self.load_binary_deps_from_file();
@@ -209,8 +205,6 @@ impl Cx{
         self.redraw_area(Area::All);
 
         while self.running{
-            // unfortunate duplication of code between poll and run_forever but i don't know how to put this in a closure
-            // without borrowchecker hell
             cocoa_window.poll_events(
                 self.playing_anim_areas.len() == 0 && self.redraw_areas.len() == 0,
                 |events|{

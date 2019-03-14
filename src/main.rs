@@ -90,16 +90,19 @@ impl App{
     fn handle_app(&mut self, cx:&mut Cx, event:&mut Event){
         self.view.handle_scroll_bars(cx, event);
         
-         // recursive item iteration        \
-         
         let mut dock_walker = self.dock.walker();
         while let Some(item) = dock_walker.walk_handle_dock(cx, event){
             match item{
                 MyItem::Color(_)=>{}
             }
         }
-        // lets fetch the docks events
-        //self.dock.handle_dock(cx, event)
+
+        // handle the dock events        
+        match self.dock.handle_dock(cx){
+            DockEvent::DockChanged=>{
+            },         
+            _=>()
+        }
 
         for (id,ok) in self.ok.ids(){
             if let ButtonEvent::Clicked = ok.handle_button(cx, event){
@@ -115,31 +118,8 @@ impl App{
         //cx.debug_area = Area::Instance(InstanceArea{draw_list_id:0,draw_call_id:0,instance_offset:0,instance_count:0});
 
         self.view.begin_view(cx, &Layout{..Default::default()});
-/*
-        self.view1.begin_view(cx, &Layout{
-            width:Bounds::Scale(0.5),
-            height:Bounds::Scale(0.5),
-            ..Default::default()
-        });
-
-            self.quad.color = color("orange");
-            self.quad.draw_quad_walk(cx, Bounds::Fill, Bounds::Fill, Margin::zero());
-
-            self.view2.begin_view(cx, &Layout{
-                width:Bounds::Scale(0.5),
-                height:Bounds::Scale(0.5),
-                ..Default::default()
-            });
-            self.quad.color = color("pink");
-            self.quad.draw_quad_walk(cx, Bounds::Fill, Bounds::Fill, Margin::zero());
-
-            self.view2.end_view(cx);
-                println!("END");
-
-        self.view1.end_view(cx);
-*/
         // recursive item iteration       
-        self.dock.draw_dock_drags(cx);
+        self.dock.draw_dock(cx);
 
         let mut dock_walker = self.dock.walker();
         while let Some(item) = dock_walker.walk_draw_dock(cx){
@@ -147,19 +127,12 @@ impl App{
                 MyItem::Color(color2)=>{
                     self.quad.color = *color2;
                     self.quad.draw_quad_walk(cx, Bounds::Fill, Bounds::Fill, Margin::zero());
-                    //self.triangle.color = color("pink");
-                    //self.triangle.draw_triangle(cx, 70.,70.,70.,150.,150.,150.);
                 }
             }
         }
+
+        //self.ok.get(cx, 0).draw_button_with_label(cx, "HI");
         
-
-       // self.quad.color = color("pink");
-       // self.quad.draw_quad(cx, 250.,250.,100.,100.);
-
-       
-      
-
         // draw scroll bars
         self.view.end_view(cx);
     }

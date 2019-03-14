@@ -5,8 +5,6 @@ use crate::tab::*;
 
 #[derive(Clone, Element)]
 pub struct TabControl{
-    pub tab_dock_height:f32,
-
     pub tabs_view:View<ScrollBar>,
     pub tabs:Elements<Tab, usize>,
     pub drag_tab_view:View<NoScrollBar>,
@@ -30,8 +28,6 @@ pub enum TabControlEvent{
 impl Style for TabControl{
     fn style(cx:&mut Cx)->Self{
         Self{
-            tab_dock_height:30.0,
-
             tabs_view:View{
                 scroll_h:Some(Element::new(ScrollBar{
                     bar_size:4.0,
@@ -66,17 +62,19 @@ impl TabControl{
         for (id, tab) in self.tabs.ids(){
             match tab.handle_tab(cx, event){
                 TabEvent::Clicked=>{
-
+                    
                 },
                 TabEvent::DragMove(fe)=>{
                     self._dragging_tab = Some((fe.clone(), *id));
                     // flag our view as dirty, to trigger
                     cx.redraw_area(self.tabs_view.get_view_area());
+
                     return TabControlEvent::TabDragMove{fe:fe, tab_id:*id};
                 },
                 TabEvent::DragEnd(fe)=>{
                     self._dragging_tab = None;
                     cx.redraw_area(self.tabs_view.get_view_area());
+                    
                     return TabControlEvent::TabDragEnd{fe, tab_id:*id};
                 }
                 _=>()

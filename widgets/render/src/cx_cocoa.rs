@@ -112,6 +112,13 @@ impl CocoaWindow{
         }
     }
 
+    pub fn set_position(&mut self, pos:Vec2){
+        let ns_point =  NSPoint::new(pos.x as f64,CGDisplay::main().pixels_high() as f64 - pos.y as f64);
+        unsafe {
+            NSWindow::setFrameTopLeftPoint_(self.window.unwrap(), ns_point);
+        }        
+    }
+
     pub fn get_inner_size(&self)->Vec2{
         if self.view.is_none(){
             return vec2(0.,0.);

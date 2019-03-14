@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 pub use crate::shadergen::*;
 pub use crate::cx_fonts::*;
 pub use crate::cx_turtle::*;
-pub use crate::cx_mouse_cursor::*;
+pub use crate::cx_cursor::*;
 pub use crate::math::*;
 pub use crate::events::*;
 pub use crate::shader::*;
@@ -513,6 +513,7 @@ impl DrawList{
 
     pub fn set_clipping_uniforms(&mut self){
         if self.clipped{
+            //println!("SET CLIPPING {} {} {} {} {}", self.draw_list_id, self.rect.x, self.rect.y, self.rect.x+self.rect.w, self.rect.y+self.rect.h);
             self.uniform_draw_list_clip(self.rect.x, self.rect.y, self.rect.x+self.rect.w, self.rect.y+self.rect.h);
         }
         else{

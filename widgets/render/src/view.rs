@@ -183,6 +183,7 @@ where TScrollBar: ScrollBarLike<TScrollBar> + Clone + ElementLife
         let rect = cx.end_turtle(Area::DrawList(DrawListArea{draw_list_id:draw_list_id}));
 
         let draw_list = &mut cx.draw_lists[draw_list_id];
+
         draw_list.rect = rect;
 
         // only now pop the drawlist
