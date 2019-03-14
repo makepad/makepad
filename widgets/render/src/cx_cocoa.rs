@@ -194,6 +194,7 @@ impl CocoaWindow{
     where F: FnMut(&mut Vec<Event>),
     {   
         let mut do_first_block = first_block;
+
         unsafe{
             self.event_callback = Some(&mut event_handler as *const FnMut(&mut Vec<Event>) as *mut FnMut(&mut Vec<Event>));
 

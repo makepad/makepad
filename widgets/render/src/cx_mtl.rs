@@ -189,7 +189,7 @@ impl Cx{
         let command_queue = device.new_command_queue();
 
         // move it to my second screen. livecompile.
-        cocoa_window.set_position(vec2(1920.0,400.0));
+        //cocoa_window.set_position(vec2(1920.0,400.0));
 
         self.compile_all_mtl_shaders(&device);
 
@@ -205,6 +205,7 @@ impl Cx{
         self.redraw_area(Area::All);
 
         while self.running{
+            //println!("{}{} ",self.playing_anim_areas.len(), self.redraw_areas.len());
             cocoa_window.poll_events(
                 self.playing_anim_areas.len() == 0 && self.redraw_areas.len() == 0,
                 |events|{

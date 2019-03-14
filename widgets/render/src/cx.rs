@@ -231,8 +231,7 @@ impl Cx{
             }
             let anim_start_time =self.playing_anim_areas[i].start_time;
             let anim_total_time =self.playing_anim_areas[i].total_time;
-            
-            if time - anim_start_time >= anim_total_time{
+            if  anim_start_time.is_nan() || time - anim_start_time >= anim_total_time{
                 self.ended_anim_areas.push(self.playing_anim_areas.remove(i));
             }
             else{
