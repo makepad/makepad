@@ -105,6 +105,7 @@ impl Tab{
     }
 
     pub fn handle_tab(&mut self, cx:&mut Cx, event:&mut Event)->TabEvent{
+
         match event.hits(cx, self._bg_area, &mut self._hit_state){
             Event::Animate(ae)=>{
                 self.animator.calc_area(cx, "bg.color", ae.time, self._bg_area);

@@ -59,7 +59,7 @@ impl Style for TabControl{
 
 impl TabControl{
     pub fn handle_tab_control(&mut self, cx:&mut Cx, event:&mut Event)->TabControlEvent{
-        for (id, tab) in self.tabs.ids(){
+        for (id, tab) in self.tabs.handle_ids(){
             match tab.handle_tab(cx, event){
                 TabEvent::Clicked=>{
                     
@@ -74,7 +74,7 @@ impl TabControl{
                 TabEvent::DragEnd(fe)=>{
                     self._dragging_tab = None;
                     cx.redraw_area(self.tabs_view.get_view_area());
-                    
+
                     return TabControlEvent::TabDragEnd{fe, tab_id:*id};
                 }
                 _=>()
@@ -111,7 +111,7 @@ impl TabControl{
     }
 
     pub fn draw_tab(&mut self, cx:&mut Cx, label:&str, _selected:bool){
-        let tab = self.tabs.get(cx, self._tab_id_alloc);
+        let tab = self.tabs.draw(cx, self._tab_id_alloc);
         self._tab_id_alloc += 1;
         tab.label = label.to_string();
         tab.draw_tab(cx);
@@ -119,17 +119,17 @@ impl TabControl{
 
     pub fn end_tabs(&mut self, cx:&mut Cx){
         self.tabs_view.end_view(cx);
-
+        self.tabs.sweep(cx);
         if let Some((fe, id)) = &self._dragging_tab{
             self.drag_tab_view.begin_view(cx, &Layout{
                 abs_start:Some(vec2(0.,0.)),
                 ..Default::default()
             });
             
-            let drag_tab = self.drag_tab.get(cx);
+            let drag_tab = self.drag_tab.draw(cx);
             drag_tab.bg_layout.abs_start = Some(vec2(fe.abs.x - fe.rel_start.x, fe.abs.y - fe.rel_start.y));
 
-            let origin_tab = self.tabs.get(cx, *id);
+            let origin_tab = self.tabs.draw(cx, *id);
             drag_tab.label = origin_tab.label.clone();
 
             drag_tab.draw_tab(cx);

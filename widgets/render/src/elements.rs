@@ -7,15 +7,21 @@ pub trait ElementLife{
     fn destruct(&mut self, cx: &mut Cx);
 }
 
+// Multiple elements
+#[derive(Clone, Default)]
+pub struct ElementsPair<T>{
+    redraw_id:u64,
+    item:T
+}
 
 // Multiple elements
 #[derive(Clone, Default)]
 pub struct Elements<T, ID>
 where ID:std::cmp::Ord {
     pub template:T,
-    pub element_list:Vec<(bool,ID)>,
-    pub element_map:BTreeMap<ID,T>,
-    pub len:usize
+    pub element_list:Vec<ID>,
+    pub element_map:BTreeMap<ID,ElementsPair<T>>,
+    pub redraw_id:u64
 }
 
 pub struct ElementsIterator<'a, T, ID>
@@ -40,13 +46,17 @@ where ID:std::cmp::Ord + Clone
     type Item = &'a mut T;
 
     fn next(&mut self) -> Option<Self::Item> {
-        if self.counter >= self.elements.element_list.len(){
-            return None
+        loop{
+            if self.counter >= self.elements.element_list.len(){
+                return None
+            }
+            let element_id = &self.elements.element_list[self.counter];
+            let element = self.elements.element_map.get_mut(&element_id).unwrap();
+            self.counter += 1;
+            if element.redraw_id == self.elements.redraw_id{
+                return Some(unsafe{std::mem::transmute(&mut element.item)});
+            }
         }
-        let element_id = &self.elements.element_list[self.counter].1;
-        let element = self.elements.element_map.get_mut(&element_id).unwrap();
-        self.counter += 1;
-        return Some(unsafe{std::mem::transmute(element)});
     }
 }
 
@@ -73,13 +83,17 @@ where ID:std::cmp::Ord + Clone
     type Item = (&'a ID, &'a mut T);
 
     fn next(&mut self) -> Option<Self::Item> {
-        if self.counter >= self.elements.element_list.len(){
-            return None
+        loop{
+            if self.counter >= self.elements.element_list.len(){
+                return None
+            }
+            let element_id = &mut self.elements.element_list[self.counter];
+            let element = self.elements.element_map.get_mut(&element_id).unwrap();
+            self.counter += 1;
+            if element.redraw_id == self.elements.redraw_id{
+                return Some((unsafe{std::mem::transmute(element_id)}, unsafe{std::mem::transmute(&mut element.item)}));
+            }
         }
-        let element_id = &self.elements.element_list[self.counter].1;
-        let element = self.elements.element_map.get_mut(&element_id).unwrap();
-        self.counter += 1;
-        return Some((unsafe{std::mem::transmute(element_id)}, unsafe{std::mem::transmute(element)}));
     }
 }
 
@@ -102,16 +116,9 @@ where T:Clone + ElementLife, ID:std::cmp::Ord + Clone
     pub fn new(template:T)->Elements<T,ID>{
         Elements::<T,ID>{
             template:template,
+            redraw_id:0,
             element_list:Vec::new(),
             element_map:BTreeMap::new(),
-            len:0
-        }
-    }
-
-    // gc'ing your element sets
-    pub fn mark(&mut self){
-        for (mark, _elem_id) in &mut self.element_list{
-            *mark = true;
         }
     }
 
@@ -121,11 +128,12 @@ where T:Clone + ElementLife, ID:std::cmp::Ord + Clone
             if i >= self.element_list.len(){
                 break;
             }
-            if self.element_list[i].0{
-                let elem_id = self.element_list[i].1.clone();
+            let elem_id = self.element_list[i].clone();
+            let elem = self.element_map.get(&elem_id).unwrap();
+            if elem.redraw_id != self.redraw_id{
                 self.element_list.remove(i);
                 let mut elem = self.element_map.remove(&elem_id).unwrap();
-                elem.destruct(cx);
+                elem.item.destruct(cx);
             }
             else{
                 i = i + 1;
@@ -133,25 +141,45 @@ where T:Clone + ElementLife, ID:std::cmp::Ord + Clone
         }
     }
     
-    pub fn all<'a>(&'a mut self)->ElementsIterator<'a, T, ID>{
+    pub fn handle<'a>(&'a mut self)->ElementsIterator<'a, T, ID>{
         return ElementsIterator::new(self)
     }
 
-    pub fn ids<'a>(&'a mut self)->ElementsIteratorNamed<'a, T, ID>{
+    pub fn handle_ids<'a>(&'a mut self)->ElementsIteratorNamed<'a, T, ID>{
         return ElementsIteratorNamed::new(self)
     }
 
-    pub fn get(&mut self, cx: &mut Cx, index:ID)->&mut T{
+    pub fn handle_id<'a>(&'a mut self, index:ID)->Option<&mut T>{
         if !self.element_map.contains_key(&index){
-            self.element_map.insert(index.clone(), self.template.clone());
-            self.element_list.push((false, index.clone()));
-            let elem = self.element_map.get_mut(&index).unwrap();
-            elem.construct(cx);
-            elem
+            return None
         }
         else{
             let elem = self.element_map.get_mut(&index).unwrap();
-            elem
+            if elem.redraw_id != self.redraw_id{
+                return None
+            }
+            Some(&mut elem.item)
+        }
+    }
+
+    pub fn draw(&mut self, cx: &mut Cx, index:ID)->&mut T{
+        // store redraw id.
+        self.redraw_id = cx.redraw_id;
+
+        if !self.element_map.contains_key(&index){
+            self.element_map.insert(index.clone(), ElementsPair{
+                redraw_id:self.redraw_id,
+                item:self.template.clone()
+            });
+            self.element_list.push(index.clone());
+            let elem = self.element_map.get_mut(&index).unwrap();
+            elem.item.construct(cx);
+            &mut elem.item
+        }
+        else{
+            let elem = self.element_map.get_mut(&index).unwrap();
+            elem.redraw_id = self.redraw_id;
+            &mut elem.item
         }
     }
 }
@@ -221,11 +249,11 @@ where T:Clone + ElementLife
         }
     }
 
-    pub fn all<'a>(&'a mut self)->ElementIterator<'a,T>{
+    pub fn handle<'a>(&'a mut self)->ElementIterator<'a,T>{
         return ElementIterator::new(self)
     }
  
-    pub fn get(&mut self, cx:&mut Cx)->&mut T{
+    pub fn draw(&mut self, cx:&mut Cx)->&mut T{
         if self.redraw_id == cx.redraw_id{
             cx.log("WARNING Item is called multiple times in a single drawpass!\n");
         }

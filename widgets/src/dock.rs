@@ -21,6 +21,18 @@ where TItem: Clone
     pub _tweening_quad: Option<(usize,Rect,f32)>
 }
 
+impl<TItem> ElementLife for Dock<TItem>
+where TItem: Clone
+{
+    fn construct(&mut self, cx: &mut Cx){
+        self.handle_dock(cx, &mut Event::Construct);
+    }
+
+    fn destruct(&mut self, cx: &mut Cx){
+        self.handle_dock(cx, &mut Event::Destruct);
+    }
+}
+
 impl<TItem> Style for Dock<TItem>
 where TItem: Clone
 {
@@ -130,25 +142,25 @@ where TItem: Clone
                         stack_top.counter += 1;
                         stack_top.uid = self.walk_uid;
                         self.walk_uid += 1;
-                        let tab_control = self.tab_controls.get(cx, stack_top.uid);
-                        
-                        // ok so this one returns 'DragTab(x,y)
-                        match tab_control.handle_tab_control(cx, event){
-                            TabControlEvent::TabDragMove{fe, ..}=>{
-                               *self._drag_move = Some(fe);
-                               *self._drag_end = None;
-                               self.drop_quad_view.redraw_view_area(cx);
-                            },
-                            TabControlEvent::TabDragEnd{fe,tab_id}=>{
-                                *self._drag_move = None;
-                                *self._drag_end = Some(DockDragEnd{
-                                    finger_up_event:fe, 
-                                    tab_control_id:stack_top.uid, 
-                                    tab_id:tab_id
-                                });
+                        let tab_control = self.tab_controls.handle_id(stack_top.uid);
+                        if !tab_control.is_none(){
+                            match tab_control.unwrap().handle_tab_control(cx, event){
+                                TabControlEvent::TabDragMove{fe, ..}=>{
+                                *self._drag_move = Some(fe);
+                                *self._drag_end = None;
                                 self.drop_quad_view.redraw_view_area(cx);
-                            },
-                            _=>()
+                                },
+                                TabControlEvent::TabDragEnd{fe,tab_id}=>{
+                                    *self._drag_move = None;
+                                    *self._drag_end = Some(DockDragEnd{
+                                        finger_up_event:fe, 
+                                        tab_control_id:stack_top.uid, 
+                                        tab_id:tab_id
+                                    });
+                                    self.drop_quad_view.redraw_view_area(cx);
+                                },
+                                _=>()
+                            }
                         }
                         if *current < tabs.len(){
                             return Some(unsafe{mem::transmute(&mut tabs[*current].item)});
@@ -164,13 +176,15 @@ where TItem: Clone
                         stack_top.counter += 1;
                         stack_top.uid = self.walk_uid;
                         self.walk_uid += 1;
-                        let split = self.splitters.get(cx, stack_top.uid);
-                        match split.handle_splitter(cx, event){
-                            SplitterEvent::Moving{new_pos}=>{
-                                *pos = new_pos;
-                            },
-                            _=>()
-                        };
+                        let split = self.splitters.handle_id(stack_top.uid);
+                        if !split.is_none(){
+                            match split.unwrap().handle_splitter(cx, event){
+                                SplitterEvent::Moving{new_pos}=>{
+                                    *pos = new_pos;
+                                },
+                                _=>()
+                            };
+                        }
                         // update state in our splitter level
                         Some(DockWalkStack{counter:0, uid:0, item:unsafe{mem::transmute(first.as_mut())}})
                     }
@@ -218,7 +232,7 @@ where TItem: Clone
                         stack_top.counter += 1;
                         stack_top.uid = self.walk_uid;
                         self.walk_uid += 1;
-                        let tab_control = self.tab_controls.get(cx, stack_top.uid);
+                        let tab_control = self.tab_controls.draw(cx, stack_top.uid);
                         tab_control.begin_tabs(cx);
                         for tab in tabs.iter(){
                             tab_control.draw_tab(cx, &tab.title, false);
@@ -232,7 +246,7 @@ where TItem: Clone
                         None
                     }
                     else{
-                        let tab_control = self.tab_controls.get(cx, stack_top.uid);
+                        let tab_control = self.tab_controls.draw(cx, stack_top.uid);
                         tab_control.end_tab_page(cx);
                         None
                     }
@@ -243,7 +257,7 @@ where TItem: Clone
                         stack_top.uid = self.walk_uid;
                         self.walk_uid += 1;
                         // begin a split
-                        let split = self.splitters.get(cx, stack_top.uid);
+                        let split = self.splitters.draw(cx, stack_top.uid);
                         split.set_splitter_state(align.clone(), *pos, axis.clone());
                         split.begin_splitter(cx);
                         Some(DockWalkStack{counter:0, uid:0, item:unsafe{mem::transmute(first.as_mut())}})
@@ -251,12 +265,12 @@ where TItem: Clone
                     else if stack_top.counter == 1{
                         stack_top.counter +=1 ;
 
-                        let split = self.splitters.get(cx, stack_top.uid);
+                        let split = self.splitters.draw(cx, stack_top.uid);
                         split.mid_splitter(cx);
                         Some(DockWalkStack{counter:0, uid:0, item:unsafe{mem::transmute(last.as_mut())}})
                     }
                     else{
-                        let split = self.splitters.get(cx, stack_top.uid);
+                        let split = self.splitters.draw(cx, stack_top.uid);
                         split.end_splitter(cx);
                         None
                     }
@@ -450,19 +464,18 @@ where TItem: Clone
         }
     }*/
 
-    pub fn handle_dock(&mut self, cx: &mut Cx)->DockEvent{
+    pub fn handle_dock(&mut self, cx: &mut Cx, _event:&mut Event)->DockEvent{
         if let Some(drag_end) = self._drag_end.clone(){
             self._drag_end = None;
-
-            let item = Self::recur_remove_tab(self.dock_items.as_mut().unwrap(), drag_end.tab_control_id, drag_end.tab_id, &mut 0);
             let fe = drag_end.finger_up_event;
-            for (target_id,tab_control) in self.tab_controls.ids(){
+            for (target_id,tab_control) in self.tab_controls.handle_ids(){
                 // ok now, we ask the tab_controls rect
                 let cdr = tab_control.get_content_drop_rect(cx);
                 // alright we need a drop area
                 if cdr.contains(fe.abs.x, fe.abs.y){
                     let (kind, _rect) = Self::get_drop_kind(fe.abs, self.drop_size, cdr);
-
+                    // we have a kind!
+                    let item = Self::recur_remove_tab(self.dock_items.as_mut().unwrap(), drag_end.tab_control_id, drag_end.tab_id, &mut 0);
                     // alright we have a kind. 
                     if !item.is_none(){
                         Self::recur_split_dock(
@@ -495,7 +508,7 @@ where TItem: Clone
             // alright so now, what do i need to do
             // well lets for shits n giggles find all the tab areas 
             // you know, we have a list eh
-            for (id,tab_control) in self.tab_controls.ids(){
+            for (id,tab_control) in self.tab_controls.handle_ids(){
                 // ok now, we ask the tab_controls rect
                 let cdr = tab_control.get_content_drop_rect(cx);
                 // alright we need a drop area

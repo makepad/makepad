@@ -9,7 +9,7 @@ enum MyItem{
 
 struct App{
     view:View<ScrollBar>,
-    dock:Dock<MyItem>,
+    dock:Element<Dock<MyItem>>,
     ok:Elements<Button, usize>,
     quad:Quad
 }
@@ -34,7 +34,7 @@ impl Style for App{
             quad:Quad{
                 ..Style::style(cx)
             },
-            dock:Dock{
+            dock:Element::new(Dock{
                 dock_items:Some(DockItem::Splitter{
                     axis:Axis::Vertical,
                     align:SplitterAlign::First,
@@ -81,7 +81,7 @@ impl Style for App{
                     })
                 }),
                 ..Style::style(cx)
-            }
+            })
         }
     }
 }
@@ -90,21 +90,23 @@ impl App{
     fn handle_app(&mut self, cx:&mut Cx, event:&mut Event){
         self.view.handle_scroll_bars(cx, event);
         
-        let mut dock_walker = self.dock.walker();
-        while let Some(item) = dock_walker.walk_handle_dock(cx, event){
-            match item{
-                MyItem::Color(_)=>{}
+        for dock in self.dock.handle(){
+            let mut dock_walker = dock.walker();
+            while let Some(item) = dock_walker.walk_handle_dock(cx, event){
+                match item{
+                    MyItem::Color(_)=>{}
+                }
+            }
+
+            // handle the dock events        
+            match dock.handle_dock(cx, event){
+                DockEvent::DockChanged=>{
+                },         
+                _=>()
             }
         }
 
-        // handle the dock events        
-        match self.dock.handle_dock(cx){
-            DockEvent::DockChanged=>{
-            },         
-            _=>()
-        }
-
-        for (id,ok) in self.ok.ids(){
+        for (id,ok) in self.ok.handle_ids(){
             if let ButtonEvent::Clicked = ok.handle_button(cx, event){
                 // we got clicked!
                 log!(cx, "GOT CLICKED BY {}", id);
@@ -119,9 +121,11 @@ impl App{
 
         self.view.begin_view(cx, &Layout{..Default::default()});
         // recursive item iteration       
-        self.dock.draw_dock(cx);
+        let dock = self.dock.draw(cx);
 
-        let mut dock_walker = self.dock.walker();
+        dock.draw_dock(cx);
+
+        let mut dock_walker = dock.walker();
         while let Some(item) = dock_walker.walk_draw_dock(cx){
             match item{
                 MyItem::Color(color2)=>{
