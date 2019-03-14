@@ -137,12 +137,12 @@ where TScrollBar: ScrollBarLike<TScrollBar> + Clone + ElementLife
         let mut ret_v = ScrollBarEvent::None;
 
         if let Some(scroll_h) = &mut self.scroll_h{
-            for scroll_h in scroll_h.handle(){
+            if let Some(scroll_h) = &mut scroll_h.element{
                 ret_h = scroll_h.handle_scroll_bar(cx, event);
             }
         }
         if let Some(scroll_v) = &mut self.scroll_v{
-            for scroll_v in  scroll_v.handle(){
+           if let Some(scroll_v) = &mut scroll_v.element{
                 ret_v = scroll_v.handle_scroll_bar(cx, event);
             }
         }
@@ -174,10 +174,10 @@ where TScrollBar: ScrollBarLike<TScrollBar> + Clone + ElementLife
         let rect_now =  cx.turtle_rect();
 
         if let Some(scroll_h) = &mut self.scroll_h{
-            scroll_h.draw(cx).draw_scroll_bar(cx, Axis::Horizontal, view_area, rect_now, view_total);
+            scroll_h.get_draw(cx).draw_scroll_bar(cx, Axis::Horizontal, view_area, rect_now, view_total);
         }
         if let Some(scroll_v) = &mut self.scroll_v{
-            scroll_v.draw(cx).draw_scroll_bar(cx, Axis::Vertical,view_area, rect_now, view_total);
+            scroll_v.get_draw(cx).draw_scroll_bar(cx, Axis::Vertical,view_area, rect_now, view_total);
         }
         
         let rect = cx.end_turtle(Area::DrawList(DrawListArea{draw_list_id:draw_list_id}));

@@ -39,7 +39,7 @@ where TItem: Clone
     fn style(cx: &mut Cx)->Dock<TItem>{
         Dock{
             dock_items:None,
-            drop_size:vec2(50.,50.),
+            drop_size:vec2(70.,70.),
             drop_quad_color:color("#a"),
             drop_quad:Quad{
                 ..Style::style(cx)
@@ -142,7 +142,7 @@ where TItem: Clone
                         stack_top.counter += 1;
                         stack_top.uid = self.walk_uid;
                         self.walk_uid += 1;
-                        let tab_control = self.tab_controls.handle_id(stack_top.uid);
+                        let tab_control = self.tab_controls.get(stack_top.uid);
                         if !tab_control.is_none(){
                             match tab_control.unwrap().handle_tab_control(cx, event){
                                 TabControlEvent::TabDragMove{fe, ..}=>{
@@ -176,7 +176,7 @@ where TItem: Clone
                         stack_top.counter += 1;
                         stack_top.uid = self.walk_uid;
                         self.walk_uid += 1;
-                        let split = self.splitters.handle_id(stack_top.uid);
+                        let split = self.splitters.get(stack_top.uid);
                         if !split.is_none(){
                             match split.unwrap().handle_splitter(cx, event){
                                 SplitterEvent::Moving{new_pos}=>{
@@ -232,7 +232,7 @@ where TItem: Clone
                         stack_top.counter += 1;
                         stack_top.uid = self.walk_uid;
                         self.walk_uid += 1;
-                        let tab_control = self.tab_controls.draw(cx, stack_top.uid);
+                        let tab_control = self.tab_controls.get_draw(cx, stack_top.uid);
                         tab_control.begin_tabs(cx);
                         for tab in tabs.iter(){
                             tab_control.draw_tab(cx, &tab.title, false);
@@ -246,7 +246,7 @@ where TItem: Clone
                         None
                     }
                     else{
-                        let tab_control = self.tab_controls.draw(cx, stack_top.uid);
+                        let tab_control = self.tab_controls.get_draw(cx, stack_top.uid);
                         tab_control.end_tab_page(cx);
                         None
                     }
@@ -257,7 +257,7 @@ where TItem: Clone
                         stack_top.uid = self.walk_uid;
                         self.walk_uid += 1;
                         // begin a split
-                        let split = self.splitters.draw(cx, stack_top.uid);
+                        let split = self.splitters.get_draw(cx, stack_top.uid);
                         split.set_splitter_state(align.clone(), *pos, axis.clone());
                         split.begin_splitter(cx);
                         Some(DockWalkStack{counter:0, uid:0, item:unsafe{mem::transmute(first.as_mut())}})
@@ -265,12 +265,12 @@ where TItem: Clone
                     else if stack_top.counter == 1{
                         stack_top.counter +=1 ;
 
-                        let split = self.splitters.draw(cx, stack_top.uid);
+                        let split = self.splitters.get_draw(cx, stack_top.uid);
                         split.mid_splitter(cx);
                         Some(DockWalkStack{counter:0, uid:0, item:unsafe{mem::transmute(last.as_mut())}})
                     }
                     else{
-                        let split = self.splitters.draw(cx, stack_top.uid);
+                        let split = self.splitters.get_draw(cx, stack_top.uid);
                         split.end_splitter(cx);
                         None
                     }
@@ -362,7 +362,7 @@ where TItem: Clone
    where TItem: Clone
    {
         match dock_walk{
-            DockItem::Single(item)=>{},
+            DockItem::Single(_)=>{},
             DockItem::TabControl{tabs,..}=>{
                 return tabs.len() == 0
             },
@@ -387,7 +387,7 @@ where TItem: Clone
     where TItem: Clone
     {
         match dock_walk{
-            DockItem::Single(item)=>{},
+            DockItem::Single(_)=>{},
             DockItem::TabControl{tabs,..}=>{
                 let id = *counter;
                 *counter += 1;
@@ -468,7 +468,7 @@ where TItem: Clone
         if let Some(drag_end) = self._drag_end.clone(){
             self._drag_end = None;
             let fe = drag_end.finger_up_event;
-            for (target_id,tab_control) in self.tab_controls.handle_ids(){
+            for (target_id,tab_control) in self.tab_controls.enumerate(){
                 // ok now, we ask the tab_controls rect
                 let cdr = tab_control.get_content_drop_rect(cx);
                 // alright we need a drop area
@@ -508,7 +508,7 @@ where TItem: Clone
             // alright so now, what do i need to do
             // well lets for shits n giggles find all the tab areas 
             // you know, we have a list eh
-            for (id,tab_control) in self.tab_controls.handle_ids(){
+            for (id,tab_control) in self.tab_controls.enumerate(){
                 // ok now, we ask the tab_controls rect
                 let cdr = tab_control.get_content_drop_rect(cx);
                 // alright we need a drop area

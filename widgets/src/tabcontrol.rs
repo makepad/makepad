@@ -59,7 +59,7 @@ impl Style for TabControl{
 
 impl TabControl{
     pub fn handle_tab_control(&mut self, cx:&mut Cx, event:&mut Event)->TabControlEvent{
-        for (id, tab) in self.tabs.handle_ids(){
+        for (id, tab) in self.tabs.enumerate(){
             match tab.handle_tab(cx, event){
                 TabEvent::Clicked=>{
                     
@@ -111,7 +111,7 @@ impl TabControl{
     }
 
     pub fn draw_tab(&mut self, cx:&mut Cx, label:&str, _selected:bool){
-        let tab = self.tabs.draw(cx, self._tab_id_alloc);
+        let tab = self.tabs.get_draw(cx, self._tab_id_alloc);
         self._tab_id_alloc += 1;
         tab.label = label.to_string();
         tab.draw_tab(cx);
@@ -126,10 +126,10 @@ impl TabControl{
                 ..Default::default()
             });
             
-            let drag_tab = self.drag_tab.draw(cx);
+            let drag_tab = self.drag_tab.get_draw(cx);
             drag_tab.bg_layout.abs_start = Some(vec2(fe.abs.x - fe.rel_start.x, fe.abs.y - fe.rel_start.y));
 
-            let origin_tab = self.tabs.draw(cx, *id);
+            let origin_tab = self.tabs.get_draw(cx, *id);
             drag_tab.label = origin_tab.label.clone();
 
             drag_tab.draw_tab(cx);

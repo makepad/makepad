@@ -141,15 +141,15 @@ where T:Clone + ElementLife, ID:std::cmp::Ord + Clone
         }
     }
     
-    pub fn handle<'a>(&'a mut self)->ElementsIterator<'a, T, ID>{
+    pub fn iter<'a>(&'a mut self)->ElementsIterator<'a, T, ID>{
         return ElementsIterator::new(self)
     }
 
-    pub fn handle_ids<'a>(&'a mut self)->ElementsIteratorNamed<'a, T, ID>{
+    pub fn enumerate<'a>(&'a mut self)->ElementsIteratorNamed<'a, T, ID>{
         return ElementsIteratorNamed::new(self)
     }
 
-    pub fn handle_id<'a>(&'a mut self, index:ID)->Option<&mut T>{
+    pub fn get<'a>(&'a mut self, index:ID)->Option<&mut T>{
         if !self.element_map.contains_key(&index){
             return None
         }
@@ -162,7 +162,7 @@ where T:Clone + ElementLife, ID:std::cmp::Ord + Clone
         }
     }
 
-    pub fn draw(&mut self, cx: &mut Cx, index:ID)->&mut T{
+    pub fn get_draw(&mut self, cx: &mut Cx, index:ID)->&mut T{
         // store redraw id.
         self.redraw_id = cx.redraw_id;
 
@@ -196,48 +196,6 @@ pub struct Element<T>{
     pub element:Option<T>
 }
 
-pub struct ElementIterator<'a, T>{
-    element:&'a mut Element<T>,
-    done:bool 
-}
-
-impl<'a, T> ElementIterator<'a, T>{
-    fn new(element:&'a mut Element<T>)->Self{
-        ElementIterator{
-            element:element,
-            done:false
-        }
-    }
-}
-
-impl<'a, T> Iterator for ElementIterator<'a, T>
-{
-    type Item = &'a mut T;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        if self.done{
-            return None;
-        }
-        self.done = true;
-        let element = self.element.element.as_mut();
-        if element.is_none(){
-            return None
-        }
-        return Some(unsafe{std::mem::transmute(element.unwrap())});
-    }
-}
-/*
-// and we'll implement IntoIterator
-impl<'a, T> IntoIterator for &'a mut Element<T>
-{
-    type Item = &'a mut T;
-    type IntoIter = ElementIterator<'a,T>;
-
-    fn into_iter(self) -> Self::IntoIter {
-        ElementIterator::new(self)
-    }
-}
-*/
 impl<T> Element<T>
 where T:Clone + ElementLife
 {
@@ -248,12 +206,8 @@ where T:Clone + ElementLife
             element:None
         }
     }
-
-    pub fn handle<'a>(&'a mut self)->ElementIterator<'a,T>{
-        return ElementIterator::new(self)
-    }
  
-    pub fn draw(&mut self, cx:&mut Cx)->&mut T{
+    pub fn get_draw(&mut self, cx:&mut Cx)->&mut T{
         if self.redraw_id == cx.redraw_id{
             cx.log("WARNING Item is called multiple times in a single drawpass!\n");
         }

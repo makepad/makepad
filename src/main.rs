@@ -90,7 +90,7 @@ impl App{
     fn handle_app(&mut self, cx:&mut Cx, event:&mut Event){
         self.view.handle_scroll_bars(cx, event);
         
-        for dock in self.dock.handle(){
+        if let Some(dock) = &mut self.dock.element{
             let mut dock_walker = dock.walker();
             while let Some(item) = dock_walker.walk_handle_dock(cx, event){
                 match item{
@@ -106,7 +106,7 @@ impl App{
             }
         }
 
-        for (id,ok) in self.ok.handle_ids(){
+        for (id,ok) in self.ok.enumerate(){
             if let ButtonEvent::Clicked = ok.handle_button(cx, event){
                 // we got clicked!
                 log!(cx, "GOT CLICKED BY {}", id);
@@ -121,7 +121,7 @@ impl App{
 
         self.view.begin_view(cx, &Layout{..Default::default()});
         // recursive item iteration       
-        let dock = self.dock.draw(cx);
+        let dock = self.dock.get_draw(cx);
 
         dock.draw_dock(cx);
 
