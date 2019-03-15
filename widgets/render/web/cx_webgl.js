@@ -451,10 +451,10 @@
 				span.innerHTML = "Sorry, makepad needs browser support for WebGL to run<br/>Please update your browser to a more modern one<br/>Update to atleast iOS 10, Safari 10, latest Chrome, Edge or Firefox<br/>Go and update and come back, your browser will be better, faster and more secure!<br/>If you are using chrome on OSX on a 2011/2012 mac please enable your GPU at: Override software rendering list:Enable (the top item) in: <a href='about://flags'>about://flags</a>. Or switch to Firefox or Safari."
 				return
 			}
-			gl.OES_standard_derivatives = gl.getExtension('OES' +'_standard'+'_deri' +'vatives')
-			gl.OES_vertex_array_object = gl.getExtension('OES_ver' +'tex_array_ob' +'ject')
-			gl.OES_element_index_uint = gl.getExtension('OES_e' +'lement_inde' +'x_uint')
-			gl.ANGLE_instanced_arrays = gl.getExtension('ANGLE_i' +'nstance' +'_arrays')
+			gl.OES_standard_derivatives = gl.getExtension('OES_s'+'tandard_'+'derivatives')
+			gl.OES_vertex_array_object = gl.getExtension('OES_ver'+'tex_arra'+'y_object')
+			gl.OES_element_index_uint = gl.getExtension('OES_elem'+'ent_ind'+'ex_uint')
+			gl.ANGLE_instanced_arrays = gl.getExtension('ANG'+'LE_instan'+'ced_arrays')
 			this.on_screen_resize()
 		}
 
