@@ -54,6 +54,7 @@ pub struct Cx{
     pub paint_dirty:bool,
     pub clear_color:Vec4,
     pub redraw_id: u64,
+    pub is_in_redraw_cycle:bool,
 
     pub debug_area:Area,
 
@@ -111,7 +112,7 @@ impl Default for Cx{
             paint_dirty:true,
             clear_color:vec4(0.1,0.1,0.1,1.0),
             redraw_id:1,
-
+            is_in_redraw_cycle:false,
             turtles:Vec::new(),
             align_list:Vec::new(),
             target_size:vec2(0.0,0.0),
@@ -257,6 +258,10 @@ impl Cx{
     }*/
 
     pub fn new_instance(&mut self, shader_id:usize)->Area{
+        if !self.is_in_redraw_cycle{
+            panic!("calling get_instance outside of redraw cycle is not possible!");
+        }
+
         let sh = &self.compiled_shaders[shader_id];
         let draw_list = &mut self.draw_lists[self.current_draw_list_id];
         
@@ -376,13 +381,14 @@ impl Cx{
     pub fn call_draw_event<F, T>(&mut self, mut event_handler:F, root_view:&mut View<T>)
     where F: FnMut(&mut Cx, &mut Event), T: ScrollBarLike<T> + Clone + ElementLife
     { 
+        self.is_in_redraw_cycle = true;
         self.redraw_id += 1;
         root_view.begin_view(self, &Layout{..Default::default()});
         self.incr_areas = self.redraw_areas.clone();
         self.redraw_areas.truncate(0);
         self.call_event_handler(&mut event_handler, &mut Event::Draw);
-
         root_view.end_view(self);
+        self.is_in_redraw_cycle = false;
     }
 
     pub fn call_animation_event<F>(&mut self, mut event_handler:F, time:f64)

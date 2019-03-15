@@ -15,6 +15,10 @@ impl Cx{
 
     // begin a new turtle with a layout
     pub fn begin_turtle(&mut self, layout:&Layout, guard_area:Area){
+        if !self.is_in_redraw_cycle{
+            panic!("calling begin_turtle outside of redraw cycle is not possible!");
+        }
+
         let is_abs = !layout.abs_start.is_none();
 
         let start = if is_abs{

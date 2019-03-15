@@ -270,20 +270,8 @@
 			var canvas = this.canvas;
 
 			if(canvas.getAttribute("fullpage")){
-				if(is_add_to_homescreen_safari){ // extremely ugly. but whatever.
-					if(window.orientation == 90 || window.orientation == -90){
-						h = screen.width;
-						w = screen.height-90;
-					}
-					else{
-						w = screen.width;
-						h = screen.height-80;
-					}
-				}
-				else{
 					w = window.innerWidth;
 					h = window.innerHeight;
-				}
 			}
 			else{
 				w = canvas.offsetWidth;

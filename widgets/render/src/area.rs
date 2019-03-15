@@ -546,7 +546,6 @@ impl Area{
         match self{
             Area::Instance(inst)=>{
                 let draw_list = &mut cx.draw_lists[inst.draw_list_id];
-                let draw_list = &mut cx.draw_lists[inst.draw_list_id];
                 if draw_list.redraw_id != inst.redraw_id {
                     println!("uniform_mat4 called on invalid area pointer, use mark/sweep correctly!");
                     return

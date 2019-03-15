@@ -143,11 +143,17 @@ where T:Clone + ElementLife, ID:std::cmp::Ord + Clone
     // if you don't atleast get_draw 1 item
     // you have to call mark for sweep to work
     pub fn mark(&mut self, cx:&Cx){
+        if !cx.is_in_redraw_cycle{
+            panic!("Cannot call mark outside of redraw cycle!")
+        }
         self.redraw_id = cx.redraw_id;
     }
 
     // destructs all the items that didn't get a mark/get_draw call this time
     pub fn sweep(&mut self, cx:&mut Cx){
+        if !cx.is_in_redraw_cycle{
+            panic!("Cannot call sweep outside of redraw cycle!")
+        }
         let mut i = 0;
         loop{
             if i >= self.element_list.len(){
@@ -193,6 +199,9 @@ where T:Clone + ElementLife, ID:std::cmp::Ord + Clone
     // gets a UI item, if you call it atleast once
     // can be considered as an automatic call to mark
     pub fn get_draw(&mut self, cx: &mut Cx, index:ID)->&mut T{
+        if !cx.is_in_redraw_cycle{
+            panic!("Cannot call get_draw outside of redraw cycle!")
+        }
         self.mark(cx);
 
         if !self.element_map.contains_key(&index){
@@ -249,10 +258,16 @@ where T:Clone + ElementLife
     
     // if you have 0 or 1 item, you can use mark/sweep
     pub fn mark(&mut self, cx:&Cx){
+        if !cx.is_in_redraw_cycle{
+            panic!("Cannot call mark outside of redraw cycle!")
+        }
         self.mark_redraw_id = cx.redraw_id;
     }
 
     pub fn sweep(&mut self, cx:&mut Cx){
+        if !cx.is_in_redraw_cycle{
+            panic!("Cannot call sweep outside of redraw cycle!")
+        }
         if !self.element.is_none() && self.mark_redraw_id != self.get_redraw_id{
             let element = self.element.as_mut().unwrap();
             element.destruct(cx);
@@ -261,6 +276,9 @@ where T:Clone + ElementLife
     }
 
     pub fn get_draw(&mut self, cx:&mut Cx)->&mut T{
+        if !cx.is_in_redraw_cycle{
+            panic!("Cannot call get_draw outside of redraw cycle!")
+        }
         self.mark(cx);
         self.get_redraw_id = cx.redraw_id;
         if self.element.is_none(){

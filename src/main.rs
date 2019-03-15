@@ -118,7 +118,7 @@ impl App{
     fn draw_app(&mut self, cx:&mut Cx){
         
         
-        //cx.debug_area = Area::Instance(InstanceArea{draw_list_id:5,draw_call_id:0,instance_offset:0,instance_count:0});
+        //cx.debug_area = Area::Instance(InstanceArea{draw_list_id:0,draw_call_id:0,instance_offset:0,instance_count:0,redraw_id:0});
 
         self.view.begin_view(cx, &Layout{..Default::default()});
         // recursive item iteration       
@@ -143,4 +143,4 @@ impl App{
     }
 }
 
-main_app!(App, "My App");
+main_app!(App, "My App!");

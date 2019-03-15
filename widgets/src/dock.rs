@@ -543,7 +543,7 @@ where TItem: Clone
                     else{
                         let (id, old_rc, old_alpha) = self._tweening_quad.unwrap();
                         let move_speed = 0.7;
-                        let alpha_speed = 0.8;
+                        let alpha_speed = 0.90;
                         let alpha = old_alpha * alpha_speed + (1.-alpha_speed);
                         let rc = Rect{
                             x:old_rc.x*move_speed + rect.x * (1.-move_speed),

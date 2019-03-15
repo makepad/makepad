@@ -63,7 +63,9 @@ where TScrollBar: ScrollBarLike<TScrollBar> + Clone + ElementLife
 
     pub fn begin_view(&mut self, cx:&mut Cx, layout:&Layout)->bool{
         // do a dirty check
-
+        if !cx.is_in_redraw_cycle{
+            panic!("calling begin_view outside of redraw cycle is not possible!");
+        }
         
         if self.draw_list_id.is_none(){ // draw node needs initialization
             if cx.draw_lists_free.len() != 0{
