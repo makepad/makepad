@@ -265,14 +265,9 @@
 			var w, h;
 			var canvas = this.canvas;
 
-			if(canvas.getAttribute("fullpage")){
-					w = window.innerWidth;
-					h = window.innerHeight;
-			}
-			else{
-				w = canvas.offsetWidth;
-				h = canvas.offsetHeight;
-			}
+			w = 400;
+			h = 300;
+		
 			var sw = canvas.width = w * dpi_factor;
 			var sh = canvas.height = h * dpi_factor;
 			canvas.style.width = w + 'px';
