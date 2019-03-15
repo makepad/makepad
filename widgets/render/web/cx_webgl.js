@@ -1,8 +1,4 @@
 (function(root){
-	var user_agent = window.navigator.userAgent;
-	var is_mobile_safari = user_agent.match(/Mobile\/\w+ Safari/i);
-	var is_add_to_homescreen_safari = is_mobile_safari && navigator.standalone;
-	console.log(navigator.standalone)
 	// message we can send to wasm
 	class ToWasm{
 		constructor(wasm_app){
