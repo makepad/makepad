@@ -7,12 +7,14 @@ pub struct InstanceArea{
     pub draw_list_id:usize,
     pub draw_call_id:usize,
     pub instance_offset:usize,
-    pub instance_count:usize
+    pub instance_count:usize,
+    pub redraw_id:u64
 }
 
 #[derive(Clone, Default, Debug, PartialEq, Copy)]
 pub struct DrawListArea{
-    pub draw_list_id:usize
+    pub draw_list_id:usize,
+    pub redraw_id:u64
 }
 
 #[derive(Clone, Debug, PartialEq, Copy)]
@@ -41,9 +43,14 @@ impl Area{
         return match self{
             Area::Instance(inst)=>{
                 if inst.instance_count == 0{
+                    println!("get_rect called on instance_count ==0 area pointer, use mark/sweep correctly!");
                     return Rect::zero()
                 }
                 let draw_list = &cx.draw_lists[inst.draw_list_id];
+                if draw_list.redraw_id != inst.redraw_id {
+                    println!("get_rect called on invalid area pointer, use mark/sweep correctly!");
+                    return Rect::zero();
+                }
                 let draw_call = &draw_list.draw_calls[inst.draw_call_id];
                 let csh = &cx.compiled_shaders[draw_call.shader_id];
                 // ok now we have to patch x/y/w/h into it
@@ -82,6 +89,10 @@ impl Area{
          match self{
             Area::Instance(inst)=>{
                 let draw_list = &mut cx.draw_lists[inst.draw_list_id];
+                if draw_list.redraw_id != inst.redraw_id {
+                    println!("set_rect called on invalid area pointer, use mark/sweep correctly!");
+                    return;
+                }
                 let draw_call = &mut draw_list.draw_calls[inst.draw_call_id];
                 let csh = &cx.compiled_shaders[draw_call.shader_id];        // ok now we have to patch x/y/w/h into it
 
@@ -141,7 +152,12 @@ impl Area{
         match self{
             Area::Instance(inst)=>{
                 let draw_list = &mut cx.draw_lists[inst.draw_list_id];
+                if draw_list.redraw_id != inst.redraw_id {
+                    println!("write_float called on invalid area pointer, use mark/sweep correctly!");
+                    return;
+                }
                 let draw_call = &mut draw_list.draw_calls[inst.draw_call_id];
+
                 let csh = &cx.compiled_shaders[draw_call.shader_id];
 
                 for prop in &csh.named_instance_props.props{
@@ -162,6 +178,10 @@ impl Area{
             Area::Instance(inst)=>{
                 let draw_list = &cx.draw_lists[inst.draw_list_id];
                 let draw_call = &draw_list.draw_calls[inst.draw_call_id];
+                if draw_list.redraw_id != inst.redraw_id {
+                    println!("read_float called on invalid area pointer, use mark/sweep correctly!");
+                    return 0.0;
+                }
                 let csh = &cx.compiled_shaders[draw_call.shader_id];
 
                 for prop in &csh.named_instance_props.props{
@@ -179,9 +199,12 @@ impl Area{
         match self{
             Area::Instance(inst)=>{
                 let draw_list = &mut cx.draw_lists[inst.draw_list_id];
+                if draw_list.redraw_id != inst.redraw_id {
+                    println!("write_vec2 called on invalid area pointer, use mark/sweep correctly!");
+                    return;
+                }
                 let draw_call = &mut draw_list.draw_calls[inst.draw_call_id];
                 let csh = &cx.compiled_shaders[draw_call.shader_id];
-
                 for prop in &csh.named_instance_props.props{
                     if prop.name == prop_name{
                         cx.paint_dirty = true;
@@ -201,6 +224,10 @@ impl Area{
         match self{
             Area::Instance(inst)=>{
                 let draw_list = &cx.draw_lists[inst.draw_list_id];
+                if draw_list.redraw_id != inst.redraw_id {
+                    println!("read_vec2 called on invalid area pointer, use mark/sweep correctly!");
+                    return vec2(0.0,0.0)
+                }
                 let draw_call = &draw_list.draw_calls[inst.draw_call_id];
                 let csh = &cx.compiled_shaders[draw_call.shader_id];
 
@@ -223,6 +250,10 @@ impl Area{
         match self{
             Area::Instance(inst)=>{
                 let draw_list = &mut cx.draw_lists[inst.draw_list_id];
+                if draw_list.redraw_id != inst.redraw_id {
+                    println!("write_vec3 called on invalid area pointer, use mark/sweep correctly!");
+                    return
+                }
                 let draw_call = &mut draw_list.draw_calls[inst.draw_call_id];
                 let csh = &cx.compiled_shaders[draw_call.shader_id];
 
@@ -247,6 +278,10 @@ impl Area{
             Area::Instance(inst)=>{
                 let draw_list = &cx.draw_lists[inst.draw_list_id];
                 let draw_call = &draw_list.draw_calls[inst.draw_call_id];
+                if draw_list.redraw_id != inst.redraw_id {
+                    println!("read_vec3 called on invalid area pointer, use mark/sweep correctly!");
+                    return vec3(0.,0.,0.)
+                }
                 let csh = &cx.compiled_shaders[draw_call.shader_id];
 
                 for prop in &csh.named_instance_props.props{
@@ -269,6 +304,10 @@ impl Area{
         match self{
             Area::Instance(inst)=>{
                 let draw_list = &mut cx.draw_lists[inst.draw_list_id];
+                if draw_list.redraw_id != inst.redraw_id {
+                    println!("write_vec4 called on invalid area pointer, use mark/sweep correctly!");
+                    return
+                }
                 let draw_call = &mut draw_list.draw_calls[inst.draw_call_id];
                 let csh = &cx.compiled_shaders[draw_call.shader_id];
 
@@ -293,6 +332,10 @@ impl Area{
         match self{
             Area::Instance(inst)=>{
                 let draw_list = &cx.draw_lists[inst.draw_list_id];
+                if draw_list.redraw_id != inst.redraw_id {
+                    println!("read_vec4 called on invalid area pointer, use mark/sweep correctly!");
+                    return vec4(0.,0.,0.,0.)
+                }
                 let draw_call = &draw_list.draw_calls[inst.draw_call_id];
                 let csh = &cx.compiled_shaders[draw_call.shader_id];
 
@@ -317,6 +360,10 @@ impl Area{
         match self{
             Area::Instance(inst)=>{
                 let draw_list = &mut cx.draw_lists[inst.draw_list_id];
+                if draw_list.redraw_id != inst.redraw_id {
+                    println!("push_data called on invalid area pointer, use mark/sweep correctly!");
+                    return
+                }
                 let draw_call = &mut draw_list.draw_calls[inst.draw_call_id];
                 //let csh = &cx.shaders.compiled_shaders[draw_call.shader_id];
                 draw_call.instance.extend_from_slice(data);
@@ -329,6 +376,10 @@ impl Area{
         match self{
             Area::Instance(inst)=>{
                 let draw_list = &mut cx.draw_lists[inst.draw_list_id];
+                if draw_list.redraw_id != inst.redraw_id {
+                    println!("push_float called on invalid area pointer, use mark/sweep correctly!");
+                    return
+                }
                 let draw_call = &mut draw_list.draw_calls[inst.draw_call_id];
                 //let csh = &cx.shaders.compiled_shaders[draw_call.shader_id];
                 draw_call.instance.push(value);
@@ -342,6 +393,10 @@ impl Area{
         match self{
             Area::Instance(inst)=>{
                 let draw_list = &mut cx.draw_lists[inst.draw_list_id];
+                if draw_list.redraw_id != inst.redraw_id {
+                    println!("push_vec2 called on invalid area pointer, use mark/sweep correctly!");
+                    return
+                }
                 let draw_call = &mut draw_list.draw_calls[inst.draw_call_id];
                 //let csh = &cx.shaders.compiled_shaders[draw_call.shader_id];
                 draw_call.instance.push(value.x);
@@ -356,6 +411,10 @@ impl Area{
         match self{
             Area::Instance(inst)=>{
                 let draw_list = &mut cx.draw_lists[inst.draw_list_id];
+                if draw_list.redraw_id != inst.redraw_id {
+                    println!("push_vec3 called on invalid area pointer, use mark/sweep correctly!");
+                    return
+                }
                 let draw_call = &mut draw_list.draw_calls[inst.draw_call_id];
                 draw_call.instance.push(value.x);
                 draw_call.instance.push(value.y);
@@ -370,6 +429,10 @@ impl Area{
         match self{
             Area::Instance(inst)=>{
                 let draw_list = &mut cx.draw_lists[inst.draw_list_id];
+                if draw_list.redraw_id != inst.redraw_id {
+                    println!("push_vec4 called on invalid area pointer, use mark/sweep correctly!");
+                    return
+                }
                 let draw_call = &mut draw_list.draw_calls[inst.draw_call_id];
                 draw_call.instance.push(value.x);
                 draw_call.instance.push(value.y);
@@ -385,6 +448,10 @@ impl Area{
         match self{
             Area::Instance(inst)=>{
                 let draw_list = &mut cx.draw_lists[inst.draw_list_id];
+                if draw_list.redraw_id != inst.redraw_id {
+                    println!("need_uniforms_now called on invalid area pointer, use mark/sweep correctly!");
+                    return false
+                }
                 let draw_call = &mut draw_list.draw_calls[inst.draw_call_id];
                 //let csh = &cx.shaders.compiled_shaders[draw_call.shader_id];
                 return draw_call.need_uniforms_now
@@ -398,6 +465,10 @@ impl Area{
         match self{
             Area::Instance(inst)=>{
                 let draw_list = &mut cx.draw_lists[inst.draw_list_id];
+                if draw_list.redraw_id != inst.redraw_id {
+                    println!("uniform_texture_2d called on invalid area pointer, use mark/sweep correctly!");
+                    return
+                }
                 let draw_call = &mut draw_list.draw_calls[inst.draw_call_id]; 
                 draw_call.textures_2d.push(texture_id as u32);
             },
@@ -409,6 +480,10 @@ impl Area{
         match self{
             Area::Instance(inst)=>{
                 let draw_list = &mut cx.draw_lists[inst.draw_list_id];
+                if draw_list.redraw_id != inst.redraw_id {
+                    println!("uniform_float called on invalid area pointer, use mark/sweep correctly!");
+                    return
+                }
                 let draw_call = &mut draw_list.draw_calls[inst.draw_call_id]; 
                 draw_call.uniforms.push(v);
             },
@@ -420,6 +495,10 @@ impl Area{
         match self{
             Area::Instance(inst)=>{
                 let draw_list = &mut cx.draw_lists[inst.draw_list_id];
+                if draw_list.redraw_id != inst.redraw_id {
+                    println!("uniform_vec2f called on invalid area pointer, use mark/sweep correctly!");
+                    return
+                }
                 let draw_call = &mut draw_list.draw_calls[inst.draw_call_id]; 
                 draw_call.uniforms.push(x);
                 draw_call.uniforms.push(y);
@@ -432,6 +511,10 @@ impl Area{
         match self{
             Area::Instance(inst)=>{
                 let draw_list = &mut cx.draw_lists[inst.draw_list_id];
+                if draw_list.redraw_id != inst.redraw_id {
+                    println!("uniform_vec3f called on invalid area pointer, use mark/sweep correctly!");
+                    return
+                }
                 let draw_call = &mut draw_list.draw_calls[inst.draw_call_id]; 
                 draw_call.uniforms.push(x);
                 draw_call.uniforms.push(y);
@@ -445,6 +528,10 @@ impl Area{
         match self{
             Area::Instance(inst)=>{
                 let draw_list = &mut cx.draw_lists[inst.draw_list_id];
+                if draw_list.redraw_id != inst.redraw_id {
+                    println!("uniform_vec4f called on invalid area pointer, use mark/sweep correctly!");
+                    return
+                }
                 let draw_call = &mut draw_list.draw_calls[inst.draw_call_id]; 
                 draw_call.uniforms.push(x);
                 draw_call.uniforms.push(y);
@@ -459,6 +546,11 @@ impl Area{
         match self{
             Area::Instance(inst)=>{
                 let draw_list = &mut cx.draw_lists[inst.draw_list_id];
+                let draw_list = &mut cx.draw_lists[inst.draw_list_id];
+                if draw_list.redraw_id != inst.redraw_id {
+                    println!("uniform_mat4 called on invalid area pointer, use mark/sweep correctly!");
+                    return
+                }
                 let draw_call = &mut draw_list.draw_calls[inst.draw_call_id]; 
                 for i in 0..16{
                     draw_call.uniforms.push(v.v[i]);

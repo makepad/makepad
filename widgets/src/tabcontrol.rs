@@ -67,13 +67,13 @@ impl TabControl{
                 TabEvent::DragMove(fe)=>{
                     self._dragging_tab = Some((fe.clone(), *id));
                     // flag our view as dirty, to trigger
-                    cx.redraw_area(self.tabs_view.get_view_area());
+                    cx.redraw_area(self.tabs_view.get_view_area(cx));
 
                     return TabControlEvent::TabDragMove{fe:fe, tab_id:*id};
                 },
                 TabEvent::DragEnd(fe)=>{
                     self._dragging_tab = None;
-                    cx.redraw_area(self.tabs_view.get_view_area());
+                    cx.redraw_area(self.tabs_view.get_view_area(cx));
 
                     return TabControlEvent::TabDragEnd{fe, tab_id:*id};
                 }
@@ -92,11 +92,11 @@ impl TabControl{
     }
 
     pub fn get_tabs_view_rect(&mut self, cx:&Cx)->Rect{
-        self.tabs_view.get_view_area().get_rect(cx, true)
+        self.tabs_view.get_view_area(cx).get_rect(cx, true)
     }
 
     pub fn get_content_drop_rect(&mut self, cx:&Cx)->Rect{
-        let rc = self.tabs_view.get_view_area().get_rect(cx, true);
+        let rc = self.tabs_view.get_view_area(cx).get_rect(cx, true);
         // we now need to change the y and the new height
         Rect{
             x:rc.x,

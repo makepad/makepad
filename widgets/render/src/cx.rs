@@ -245,15 +245,16 @@ impl Cx{
         self.align_list.push(area.clone());
         area
     }
-
+/*
     fn draw_call_to_area(dc:&DrawCall)->Area{
         Area::Instance(InstanceArea{
             draw_list_id:dc.draw_list_id,
             draw_call_id:dc.draw_call_id,
+            redraw_id:dc.
             instance_offset:dc.current_instance_offset,
             instance_count:1
         })
-    }
+    }*/
 
     pub fn new_instance(&mut self, shader_id:usize)->Area{
         let sh = &self.compiled_shaders[shader_id];
@@ -284,6 +285,7 @@ impl Cx{
             draw_list.draw_calls.push(DrawCall{
                 draw_call_id:draw_call_id,
                 draw_list_id:self.current_draw_list_id,
+                redraw_id:self.redraw_id,
                 sub_list_id:0,
                 shader_id:sh.shader_id,
                 instance:Vec::new(),
@@ -303,6 +305,7 @@ impl Cx{
         dc.shader_id = sh.shader_id;
         dc.sub_list_id = 0; // make sure its recognised as a draw call
         // truncate buffers and set update frame
+        dc.redraw_id = self.redraw_id;
         dc.instance.truncate(0);
         dc.current_instance_offset = 0;
         dc.uniforms.truncate(0);
@@ -373,10 +376,10 @@ impl Cx{
     pub fn call_draw_event<F, T>(&mut self, mut event_handler:F, root_view:&mut View<T>)
     where F: FnMut(&mut Cx, &mut Event), T: ScrollBarLike<T> + Clone + ElementLife
     { 
+        self.redraw_id += 1;
         root_view.begin_view(self, &Layout{..Default::default()});
         self.incr_areas = self.redraw_areas.clone();
         self.redraw_areas.truncate(0);
-        self.redraw_id += 1;
         self.call_event_handler(&mut event_handler, &mut Event::Draw);
 
         root_view.end_view(self);
@@ -465,6 +468,7 @@ pub enum StyleValue{
 pub struct DrawCall{
     pub draw_call_id:usize,
     pub draw_list_id:usize,
+    pub redraw_id:u64,
     pub sub_list_id:usize, // if not 0, its a subnode
     pub shader_id:usize, // if shader_id changed, delete gl vao
     pub instance:Vec<f32>,
@@ -482,6 +486,7 @@ impl DrawCall{
         Area::Instance(InstanceArea{
             draw_list_id:self.draw_list_id,
             draw_call_id:self.draw_call_id,
+            redraw_id:self.redraw_id,
             instance_offset:self.current_instance_offset,
             instance_count:1
         })
@@ -496,6 +501,7 @@ const DL_UNI_SIZE:usize = 6;
 #[derive(Default,Clone)]
 pub struct DrawList{
     pub nesting_draw_list_id:usize, // the id of the parent we nest in, codeflow wise
+    pub redraw_id:u64,
     pub draw_calls:Vec<DrawCall>,
     pub draw_calls_len: usize,
     pub uniforms:Vec<f32>, // cmdlist uniforms
@@ -505,8 +511,9 @@ pub struct DrawList{
 }
 
 impl DrawList{
-    pub fn initialize(&mut self, clipped:bool){
+    pub fn initialize(&mut self, clipped:bool, redraw_id:u64){
         self.clipped = clipped;
+        self.redraw_id = redraw_id;
         self.uniforms.resize(DL_UNI_SIZE, 0.0);
     }
 

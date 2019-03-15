@@ -70,11 +70,17 @@ impl Animator{
     }
 
     pub fn set_area(&mut self, cx:&mut Cx, area:Area){
-        // alright first we find area, it already exists
-        if let Some(anim) = cx.playing_anim_areas.iter_mut().find(|v| v.area == self.area){
-            anim.area = area.clone()
+        if self.area != Area::Empty{
+            // alright first we find area, it already exists
+            if let Some(anim_anim) = cx.playing_anim_areas.iter_mut().find(|v| v.area == self.area){
+                anim_anim.area = area.clone()
+            }
+            //Update mouse capture areas
+            if let Some(digit_area) = cx.captured_fingers.iter_mut().find(|v| **v == self.area){
+                *digit_area = area.clone()
+            }
         }
-        //TODO also update mousecaptures
+
         self.area = area.clone();
     }
 

@@ -90,7 +90,7 @@ impl App{
     fn handle_app(&mut self, cx:&mut Cx, event:&mut Event){
         self.view.handle_scroll_bars(cx, event);
         
-        if let Some(dock) = &mut self.dock.element{
+        if let Some(dock) = self.dock.get(){
             let mut dock_walker = dock.walker();
             while let Some(item) = dock_walker.walk_handle_dock(cx, event){
                 match item{

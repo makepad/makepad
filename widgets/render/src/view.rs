@@ -74,11 +74,12 @@ where TScrollBar: ScrollBarLike<TScrollBar> + Clone + ElementLife
                 cx.draw_lists.push(DrawList{..Default::default()});
             }
             let draw_list = &mut cx.draw_lists[self.draw_list_id.unwrap()];
-            draw_list.initialize(self.is_clipped);
+            draw_list.initialize(self.is_clipped, cx.redraw_id);
         }
         else{
             // set len to 0
             let draw_list = &mut cx.draw_lists[self.draw_list_id.unwrap()];
+            draw_list.redraw_id = cx.redraw_id;
             draw_list.draw_calls_len = 0;
         }
         let draw_list_id = self.draw_list_id.unwrap();
@@ -107,6 +108,7 @@ where TScrollBar: ScrollBarLike<TScrollBar> + Clone + ElementLife
                     DrawCall{
                         draw_list_id:parent_draw_list_id,
                         draw_call_id:parent_draw_list.draw_calls.len(),
+                        redraw_id:cx.redraw_id,
                         sub_list_id:draw_list_id,
                         ..Default::default()
                     }
@@ -115,17 +117,20 @@ where TScrollBar: ScrollBarLike<TScrollBar> + Clone + ElementLife
             else{// or reuse a sub list node
                 let draw = &mut parent_draw_list.draw_calls[id];
                 draw.sub_list_id = draw_list_id;
+                draw.redraw_id = cx.redraw_id;
             }
         }
  
         // set nesting draw list id for incremental repaint scanning
         let draw_list = &mut cx.draw_lists[self.draw_list_id.unwrap()];
         draw_list.nesting_draw_list_id = nesting_draw_list_id;
- 
         cx.draw_list_stack.push(cx.current_draw_list_id);
         cx.current_draw_list_id = draw_list_id;
 
-        cx.begin_turtle(layout, Area::DrawList(DrawListArea{draw_list_id:draw_list_id}));
+        cx.begin_turtle(layout, Area::DrawList(DrawListArea{
+            draw_list_id:draw_list_id,
+            redraw_id:cx.redraw_id
+        }));
 
         false
         //cx.turtle.x = 0.0;
@@ -167,7 +172,7 @@ where TScrollBar: ScrollBarLike<TScrollBar> + Clone + ElementLife
 
     pub fn end_view(&mut self, cx:&mut Cx)->Area{
         let draw_list_id = self.draw_list_id.unwrap();
-        let view_area = Area::DrawList(DrawListArea{draw_list_id:draw_list_id});
+        let view_area = Area::DrawList(DrawListArea{draw_list_id:draw_list_id, redraw_id:cx.redraw_id});
 
         // lets ask the turtle our actual bounds
         let view_total = cx.turtle_bounds();   
@@ -180,7 +185,7 @@ where TScrollBar: ScrollBarLike<TScrollBar> + Clone + ElementLife
             scroll_v.get_draw(cx).draw_scroll_bar(cx, Axis::Vertical,view_area, rect_now, view_total);
         }
         
-        let rect = cx.end_turtle(Area::DrawList(DrawListArea{draw_list_id:draw_list_id}));
+        let rect = cx.end_turtle(view_area);
 
         let draw_list = &mut cx.draw_lists[draw_list_id];
 
@@ -193,17 +198,18 @@ where TScrollBar: ScrollBarLike<TScrollBar> + Clone + ElementLife
     }
 
     pub fn redraw_view_area(&self, cx:&mut Cx){
-        if let Some(draw_list_id) = self.draw_list_id{
-            cx.redraw_area(Area::DrawList(DrawListArea{draw_list_id:draw_list_id}))
+        if let Some(_) = self.draw_list_id{
+            cx.redraw_area(self.get_view_area(cx))
         }
         else{
             cx.redraw_area(Area::All)
         }
     }
 
-    pub fn get_view_area(&self)->Area{
+    pub fn get_view_area(&self, cx:&Cx)->Area{
         if let Some(draw_list_id) = self.draw_list_id{
-            Area::DrawList(DrawListArea{draw_list_id:draw_list_id})
+            let draw_list = &cx.draw_lists[draw_list_id];
+            Area::DrawList(DrawListArea{draw_list_id:draw_list_id, redraw_id:draw_list.redraw_id})
         }
         else{
             Area::Empty

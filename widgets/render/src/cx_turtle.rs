@@ -260,7 +260,7 @@ impl Cx{
     pub fn end_turtle(&mut self, guard_area:Area)->Rect{
         let old = self.turtles.pop().unwrap();
         if guard_area != old.guard_area{
-            panic!("End turtle guard area misaligned!, begin/end pair not matched")
+            panic!("End turtle guard area misaligned!, begin/end pair not matched begin {:?} end {:?}", old.guard_area,  guard_area)
         }
 
         let w = if old.width.is_nan(){
