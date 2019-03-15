@@ -265,8 +265,8 @@
 			var w, h;
 			var canvas = this.canvas;
 
-			w = 400;
-			h = 300;
+			w = 800;
+			h = 600;
 		
 			var sw = canvas.width = w * dpi_factor;
 			var sh = canvas.height = h * dpi_factor;
