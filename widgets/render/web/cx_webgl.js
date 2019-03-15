@@ -1,4 +1,8 @@
 (function(root){
+	var user_agent = window.navigator.userAgent;
+	var is_mobile_safari = user_agent.match(/Mobile\/\w+ Safari/i);
+	var is_add_to_homescreen_safari = is_mobile_safari && navigator.standalone;
+	console.log(navigator.standalone)
 	// message we can send to wasm
 	class ToWasm{
 		constructor(wasm_app){
@@ -265,9 +269,26 @@
 			var w, h;
 			var canvas = this.canvas;
 
-			w = 800;
-			h = 600;
-		
+			if(canvas.getAttribute("fullpage")){
+				if(is_add_to_homescreen_safari){ // extremely ugly. but whatever.
+					if(window.orientation == 90 || window.orientation == -90){
+						h = screen.width;
+						w = screen.height-90;
+					}
+					else{
+						w = screen.width;
+						h = screen.height-80;
+					}
+				}
+				else{
+					w = window.innerWidth;
+					h = window.innerHeight;
+				}
+			}
+			else{
+				w = canvas.offsetWidth;
+				h = canvas.offsetHeight;
+			}
 			var sw = canvas.width = w * dpi_factor;
 			var sh = canvas.height = h * dpi_factor;
 			canvas.style.width = w + 'px';
@@ -451,10 +472,16 @@
 				span.innerHTML = "Sorry, makepad needs browser support for WebGL to run<br/>Please update your browser to a more modern one<br/>Update to atleast iOS 10, Safari 10, latest Chrome, Edge or Firefox<br/>Go and update and come back, your browser will be better, faster and more secure!<br/>If you are using chrome on OSX on a 2011/2012 mac please enable your GPU at: Override software rendering list:Enable (the top item) in: <a href='about://flags'>about://flags</a>. Or switch to Firefox or Safari."
 				return
 			}
-			gl.OES_standard_derivatives = gl.getExtension('OES_s'+'tandard_'+'derivatives')
-			gl.OES_vertex_array_object = gl.getExtension('OES_ver'+'tex_arra'+'y_object')
-			gl.OES_element_index_uint = gl.getExtension('OES_elem'+'ent_ind'+'ex_uint')
-			gl.ANGLE_instanced_arrays = gl.getExtension('ANG'+'LE_instan'+'ced_arrays')
+			gl.OES_standard_derivatives = gl.getExtension('OES_standard_derivatives')
+			gl.OES_vertex_array_object = gl.getExtension('OES_vertex_array_object')
+			gl.OES_element_index_uint = gl.getExtension("OES_element_index_uint")
+			gl.ANGLE_instanced_arrays = gl.getExtension('ANGLE_instanced_arrays')
+			//gl.EXT_blend_minmax = gl.getExtension('EXT_blend_minmax')
+			//gl.OES_texture_half_float_linear = gl.getExtension('OES_texture_half_float_linear')
+			//gl.OES_texture_float_linear = gl.getExtension('OES_texture_float_linear')
+			//gl.OES_texture_half_float = gl.getExtension('OES_texture_half_float')
+			//gl.OES_texture_float = gl.getExtension('OES_texture_float')
+			//gl.WEBGL_depth_texture = gl.getExtension("WEBGL_depth_texture") || gl.getExtension("WEBKIT_WEBGL_depth_texture")		
 			this.on_screen_resize()
 		}
 
@@ -1010,4 +1037,25 @@
 	var canvasses =	document.getElementsByClassName('cx_webgl')
 	document.addEventListener('DOMContentLoaded', init)
 
+	function watchFileChange(){
+		var req = new XMLHttpRequest()
+		req.timeout = 60000
+		req.addEventListener("error", function(){
+
+			setTimeout(function(){
+				location.href = location.href
+			}, 500)
+		})
+		req.responseType = 'text'
+		req.addEventListener("load", function(){
+			if(req.response === '{continue:true}') return watchFileChange()
+			if(req.status === 200){
+			// do something with data, or not
+				location.href = location.href
+			}
+		})
+		req.open("GET", "/$watch?"+(''+Math.random()).slice(2))
+		req.send()
+	}
+	watchFileChange()
 })({})
