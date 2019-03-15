@@ -1010,25 +1010,4 @@
 	var canvasses =	document.getElementsByClassName('cx_webgl')
 	document.addEventListener('DOMContentLoaded', init)
 
-	function watchFileChange(){
-		var req = new XMLHttpRequest()
-		req.timeout = 60000
-		req.addEventListener("error", function(){
-
-			setTimeout(function(){
-				location.href = location.href
-			}, 500)
-		})
-		req.responseType = 'text'
-		req.addEventListener("load", function(){
-			if(req.response === '{continue:true}') return watchFileChange()
-			if(req.status === 200){
-			// do something with data, or not
-				location.href = location.href
-			}
-		})
-		req.open("GET", "/$watch?"+(''+Math.random()).slice(2))
-		req.send()
-	}
-	watchFileChange()
 })({})
