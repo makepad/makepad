@@ -62,7 +62,8 @@ impl TabControl{
         for (id, tab) in self.tabs.enumerate(){
             match tab.handle_tab(cx, event){
                 TabEvent::Clicked=>{
-                    
+                    // lets set focus to this tab
+                    //return TabControlEvent::TabSelected{tab_id:}
                 },
                 TabEvent::DragMove(fe)=>{
                     self._dragging_tab = Some((fe.clone(), *id));
