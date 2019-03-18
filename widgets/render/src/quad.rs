@@ -34,9 +34,8 @@ impl Quad{
         ];
 
         sh.add_ast(shader_ast!({
-            
-            let geom:vec2<Geometry>;
 
+            let geom:vec2<Geometry>;
             let x:float<Instance>;
             let y:float<Instance>;
             let w:float<Instance>;

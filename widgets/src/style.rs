@@ -5,6 +5,8 @@ pub fn set_dark_style(cx:&mut Cx){
     cx.set_style_font("icon_font", "resources/fontawesome.font");
     cx.set_style_size("font_size", 10.0);
 
+    cx.set_style_color("bg_split", color256(25,25,25));
+
     cx.set_style_color("bg_selected", color256(40,40,40));
     cx.set_style_color("bg_normal", color256(52,52,52));
 

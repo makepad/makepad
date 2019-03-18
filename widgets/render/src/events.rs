@@ -48,6 +48,7 @@ impl Default for HoverState{
 pub struct HitState{
     pub use_multi_touch:bool,
     pub no_scrolling:bool,
+    pub margin:Option<Margin>,
     pub finger_down_abs_start:Vec<Vec2>,
     pub finger_down_rel_start:Vec<Vec2>,
     pub was_over_last_call:bool
@@ -170,7 +171,7 @@ impl Event{
                 let rect = area.get_rect(&cx, hit_state.no_scrolling);
                 if hit_state.was_over_last_call{
 
-                    if !fe.handled && rect.contains(fe.abs.x, fe.abs.y){
+                    if !fe.handled && rect.contains_with_margin(fe.abs.x, fe.abs.y, &hit_state.margin){
                         fe.handled = true;
                         if let HoverState::Out = fe.hover_state{
                             hit_state.was_over_last_call = false;
@@ -190,7 +191,7 @@ impl Event{
                     }
                 }
                 else{
-                    if !fe.handled && rect.contains(fe.abs.x, fe.abs.y){
+                    if !fe.handled && rect.contains_with_margin(fe.abs.x, fe.abs.y, &hit_state.margin){
                         fe.handled = true;
                         hit_state.was_over_last_call = true;
                         return Event::FingerHover(FingerHoverEvent{
@@ -229,7 +230,7 @@ impl Event{
             Event::FingerDown(fe)=>{
                 if !fe.handled{
                     let rect = area.get_rect(&cx, hit_state.no_scrolling);
-                    if rect.contains(fe.abs.x, fe.abs.y){
+                    if rect.contains_with_margin(fe.abs.x, fe.abs.y, &hit_state.margin){
                         // scan if any of the fingers already captured this area
                         if !hit_state.use_multi_touch{
                             for fin_area in &cx.captured_fingers{

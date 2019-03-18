@@ -54,7 +54,7 @@ impl Style for TabControl{
                 ..Style::style(cx)
             },
             tab_fill:Quad{
-                color:color("purple"),
+                color:cx.style_color("bg_normal"),
                 ..Style::style(cx)
             },
             animator:Animator::new(Anim::new(AnimMode::Cut{duration:0.5}, vec![])),
@@ -151,6 +151,7 @@ impl TabControl{
     }
 
     pub fn end_tabs(&mut self, cx:&mut Cx){
+        self.tab_fill.draw_quad_walk(cx, Bounds::Fill, Bounds::Fill, Margin::zero());
         self.tabs_view.end_view(cx);
         self.tabs.sweep(cx);
         if let Some((fe, id)) = &self._dragging_tab{

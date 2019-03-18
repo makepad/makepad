@@ -46,14 +46,16 @@ impl Style for Splitter{
             pos:0.0,
 
             _split_area:Area::Empty,
-            _hit_state:HitState{..Default::default()},
+            _hit_state:HitState{
+                ..Default::default()
+            },
             _calc_pos:0.0,
             _is_moving:false,
             _drag_point:0.,
             _drag_pos_start:0.,
             _drag_max_pos:0.0,
 
-            split_size:8.0,
+            split_size:2.0,
             min_size:25.0,
             split:Quad{
                 shader_id:cx.add_shader(split_sh,"Splitter.split"),
@@ -61,7 +63,7 @@ impl Style for Splitter{
             },
 
             animator:Animator::new(Anim::new(AnimMode::Cut{duration:0.5},vec![
-                AnimTrack::to_vec4("split.color",cx.style_color("bg_normal")),
+                AnimTrack::to_vec4("split.color",cx.style_color("bg_split")),
             ])),
             anim_over:Anim::new(AnimMode::Cut{duration:0.05}, vec![
                 AnimTrack::to_vec4("split.color", color("#5")),
@@ -192,6 +194,18 @@ impl Splitter{
        self.axis = axis;
        self.align = align;
        self.pos = pos;
+       match self.axis{
+            Axis::Horizontal=>{
+                self._hit_state.margin = Some(Margin{
+                    l:0., t:5., r:0., b:5.,
+                })
+            },
+            Axis::Vertical=>{
+                self._hit_state.margin = Some(Margin{
+                    l:5., t:0., r:5., b:0.,
+                })
+            }
+       }
     }
 
     pub fn begin_splitter(&mut self, cx:&mut Cx){
