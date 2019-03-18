@@ -5,6 +5,17 @@ pub fn set_dark_style(cx:&mut Cx){
     cx.set_style_font("icon_font", "resources/fontawesome.font");
     cx.set_style_size("font_size", 10.0);
 
+    cx.set_style_color("bg_selected", color256(40,40,40));
+    cx.set_style_color("bg_normal", color256(52,52,52));
+
+    cx.set_style_color("over_border", color256(255,255,255));
+
+    cx.set_style_color("text_selected_focus", color256(255,255,255));
+    cx.set_style_color("text_deselected_focus", color256(157,157,157));
+    cx.set_style_color("text_selected_defocus", color256(157,157,157));
+    cx.set_style_color("text_deselected_defocus", color256(130,130,130));
+
+
     cx.set_style_color("text_select",color("Purple900"));
     
     cx.set_style_color("accent_normal", color("Purple900"));

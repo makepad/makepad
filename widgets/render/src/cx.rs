@@ -13,7 +13,6 @@ pub use crate::elements::*;
 pub use crate::animator::*;
 pub use crate::area::*;
 pub use crate::view::*;
-pub use crate::style::*;
 
 #[cfg(feature = "ogl")]
 pub use crate::cx_ogl::*; 

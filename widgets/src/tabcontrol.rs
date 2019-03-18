@@ -9,12 +9,13 @@ pub struct TabControl{
     pub tabs:Elements<Tab, usize>,
     pub drag_tab_view:View<NoScrollBar>,
     pub drag_tab:Element<Tab>,
+    pub page_view:View<NoScrollBar>,
     pub hover:Quad,
+    pub tab_fill:Quad,
     pub animator:Animator,
 
     pub _dragging_tab:Option<(FingerMoveEvent,usize)>,
-    pub _tab_id_alloc:usize,
-    pub _page_rect:Rect
+    pub _tab_id_alloc:usize
 }
 
 #[derive(Clone, PartialEq)]
@@ -35,6 +36,9 @@ impl Style for TabControl{
                 })),
                 ..Style::style(cx)
             },
+            page_view:View{
+                ..Style::style(cx)
+            },
             tabs:Elements::new(Tab{
                 ..Style::style(cx)
             }),
@@ -49,39 +53,52 @@ impl Style for TabControl{
                 color:color("purple"),
                 ..Style::style(cx)
             },
+            tab_fill:Quad{
+                color:color("purple"),
+                ..Style::style(cx)
+            },
             animator:Animator::new(Anim::new(AnimMode::Cut{duration:0.5}, vec![])),
             _dragging_tab:None,
-            _tab_id_alloc:0,
-            _page_rect:Rect::zero()
+            _tab_id_alloc:0
         }
     }
 }
 
 impl TabControl{
     pub fn handle_tab_control(&mut self, cx:&mut Cx, event:&mut Event)->TabControlEvent{
+        let mut tab_control_event = TabControlEvent::None;
         for (id, tab) in self.tabs.enumerate(){
             match tab.handle_tab(cx, event){
-                TabEvent::Clicked=>{
-                    // lets set focus to this tab
-                    //return TabControlEvent::TabSelected{tab_id:}
+                TabEvent::Select=>{
+                   self.page_view.redraw_view_area(cx);
+                    // deselect the other tabs
+                   tab_control_event = TabControlEvent::TabSelect{tab_id:*id}
                 },
                 TabEvent::DragMove(fe)=>{
                     self._dragging_tab = Some((fe.clone(), *id));
                     // flag our view as dirty, to trigger
                     cx.redraw_area(self.tabs_view.get_view_area(cx));
 
-                    return TabControlEvent::TabDragMove{fe:fe, tab_id:*id};
+                    tab_control_event = TabControlEvent::TabDragMove{fe:fe, tab_id:*id};
                 },
                 TabEvent::DragEnd(fe)=>{
                     self._dragging_tab = None;
                     cx.redraw_area(self.tabs_view.get_view_area(cx));
 
-                    return TabControlEvent::TabDragEnd{fe, tab_id:*id};
+                    tab_control_event = TabControlEvent::TabDragEnd{fe, tab_id:*id};
                 }
                 _=>()
             }
-        }
-        TabControlEvent::None
+        };
+        if let TabControlEvent::TabSelect{tab_id} = tab_control_event{
+            for (id, tab) in self.tabs.enumerate(){
+                if tab_id != *id{
+                    tab.set_tab_selected(cx, false);
+                    tab.set_tab_focus(cx, true);
+                }
+            }
+        };
+        tab_control_event
     }
     
     pub fn get_tab_rects(&mut self, cx:&Cx)->Vec<Rect>{
@@ -92,18 +109,24 @@ impl TabControl{
         return rects
     }
 
+    pub fn set_tab_control_focus(&mut self, cx:&mut Cx, focus:bool){
+        for tab in self.tabs.iter(){
+            tab.set_tab_focus(cx, focus);
+        }
+    }
+
     pub fn get_tabs_view_rect(&mut self, cx:&Cx)->Rect{
         self.tabs_view.get_view_area(cx).get_rect(cx, true)
     }
 
     pub fn get_content_drop_rect(&mut self, cx:&Cx)->Rect{
-        let rc = self.tabs_view.get_view_area(cx).get_rect(cx, true);
+        let pr = self.page_view.get_view_area(cx).get_rect(cx, false);
         // we now need to change the y and the new height
         Rect{
-            x:rc.x,
-            y:rc.y + rc.h,
-            w:self._page_rect.w,
-            h:self._page_rect.h
+            x:pr.x,
+            y:pr.y,
+            w:pr.w,
+            h:pr.h
         }
     }
 
@@ -119,11 +142,12 @@ impl TabControl{
         self._tab_id_alloc = 0;
     }
 
-    pub fn draw_tab(&mut self, cx:&mut Cx, label:&str, _selected:bool){
+    pub fn draw_tab(&mut self, cx:&mut Cx, label:&str, selected:bool){
         let tab = self.tabs.get_draw(cx, self._tab_id_alloc);
         self._tab_id_alloc += 1;
         tab.label = label.to_string();
         tab.draw_tab(cx);
+        tab.set_tab_selected(cx, selected);
     }
 
     pub fn end_tabs(&mut self, cx:&mut Cx){
@@ -149,12 +173,12 @@ impl TabControl{
 
     pub fn begin_tab_page(&mut self, cx:&mut Cx){
         cx.turtle_new_line();
-        cx.begin_turtle(&Layout{..Default::default()}, Area::Empty);
-        self._page_rect = cx.turtle_rect();
+        self.page_view.begin_view(cx, &Layout{..Default::default()});
     }
 
     pub fn end_tab_page(&mut self, cx:&mut Cx){
-        cx.end_turtle(Area::Empty);
+        self.page_view.end_view(cx);
+        //cx.end_turtle(Area::Empty);
         // if we are in draggable tab state,
         // draw our draggable tab
     }

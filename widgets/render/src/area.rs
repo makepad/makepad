@@ -164,7 +164,11 @@ impl Area{
                     if prop.name == prop_name{
                         cx.paint_dirty = true;
                         draw_call.instance_dirty = true;
-                        draw_call.instance[inst.instance_offset + prop.offset] = value;
+                        let mut off = inst.instance_offset + prop.offset;
+                        for _i in 0..inst.instance_count{
+                            draw_call.instance[off + 0] = value;
+                            off += csh.instance_slots;
+                        }
                         return
                     }
                 }
@@ -209,9 +213,12 @@ impl Area{
                     if prop.name == prop_name{
                         cx.paint_dirty = true;
                         draw_call.instance_dirty = true;
-                        let off = inst.instance_offset + prop.offset;
-                        draw_call.instance[off + 0] = value.x;
-                        draw_call.instance[off + 1] = value.y;
+                        let mut off = inst.instance_offset + prop.offset;
+                        for _i in 0..inst.instance_count{
+                            draw_call.instance[off + 0] = value.x;
+                            draw_call.instance[off + 1] = value.y;
+                            off += csh.instance_slots;
+                        }
                         return
                     }
                 }
@@ -261,10 +268,13 @@ impl Area{
                     if prop.name == prop_name{
                         cx.paint_dirty = true;
                         draw_call.instance_dirty = true;
-                        let off = inst.instance_offset + prop.offset;
-                        draw_call.instance[off + 0] = value.x;
-                        draw_call.instance[off + 1] = value.y;
-                        draw_call.instance[off + 2] = value.z;
+                        let mut off = inst.instance_offset + prop.offset;
+                        for _i in 0..inst.instance_count{
+                            draw_call.instance[off + 0] = value.x;
+                            draw_call.instance[off + 1] = value.y;
+                            draw_call.instance[off + 2] = value.z;
+                            off += csh.instance_slots;
+                        }
                         return
                     }
                 }
@@ -315,11 +325,14 @@ impl Area{
                     if prop.name == prop_name{
                         cx.paint_dirty = true;
                         draw_call.instance_dirty = true;
-                        let off = inst.instance_offset + prop.offset;
-                        draw_call.instance[off + 0] = value.x;
-                        draw_call.instance[off + 1] = value.y;
-                        draw_call.instance[off + 2] = value.z;
-                        draw_call.instance[off + 3] = value.w;
+                        let mut off = inst.instance_offset + prop.offset;
+                        for _i in 0..inst.instance_count{
+                            draw_call.instance[off + 0] = value.x;
+                            draw_call.instance[off + 1] = value.y;
+                            draw_call.instance[off + 2] = value.z;
+                            draw_call.instance[off + 3] = value.w;
+                            off += csh.instance_slots;
+                        }
                         return
                     }
                 }

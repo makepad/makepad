@@ -170,7 +170,7 @@ impl Text{
                     let data = [
                         /*font_geom*/ glyph.x1 ,glyph.y1 ,glyph.x2 ,glyph.y2,
                         /*font_tc*/ glyph.tx1 ,glyph.ty1 ,glyph.tx2 ,glyph.ty2,
-                        /*color*/ 1.0,1.0,1.0,1.0,
+                        /*color*/ self.color.x, self.color.y, self.color.z, self.color.w,
                         /*x*/ geom.x,
                         /*y*/ geom.y,
                         /*w*/ w,

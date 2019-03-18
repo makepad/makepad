@@ -143,12 +143,18 @@ where TItem: Clone
                         stack_top.uid = self.walk_uid;
                         self.walk_uid += 1;
                         let tab_control = self.tab_controls.get(stack_top.uid);
+                        let mut defocus = false;
                         if !tab_control.is_none(){
                             match tab_control.unwrap().handle_tab_control(cx, event){
+                                TabControlEvent::TabSelect{tab_id}=>{
+                                    *current = tab_id;
+                                    // lets defocus all the other tab controls
+                                    defocus = true;
+                                },
                                 TabControlEvent::TabDragMove{fe, ..}=>{
-                                *self._drag_move = Some(fe);
-                                *self._drag_end = None;
-                                self.drop_quad_view.redraw_view_area(cx);
+                                    *self._drag_move = Some(fe);
+                                    *self._drag_end = None;
+                                    self.drop_quad_view.redraw_view_area(cx);
                                 },
                                 TabControlEvent::TabDragEnd{fe,tab_id}=>{
                                     *self._drag_move = None;
@@ -160,6 +166,13 @@ where TItem: Clone
                                     self.drop_quad_view.redraw_view_area(cx);
                                 },
                                 _=>()
+                            }
+                        }
+                        if defocus{
+                            for (id, tab_control) in self.tab_controls.enumerate(){
+                                if *id != stack_top.uid{
+                                    tab_control.set_tab_control_focus(cx, false);
+                                }
                             }
                         }
                         if *current < tabs.len(){
@@ -234,8 +247,8 @@ where TItem: Clone
                         self.walk_uid += 1;
                         let tab_control = self.tab_controls.get_draw(cx, stack_top.uid);
                         tab_control.begin_tabs(cx);
-                        for tab in tabs.iter(){
-                            tab_control.draw_tab(cx, &tab.title, false);
+                        for (id,tab) in tabs.iter().enumerate(){
+                            tab_control.draw_tab(cx, &tab.title, *current == id);
                         }
                         tab_control.end_tabs(cx);
                         tab_control.begin_tab_page(cx);
@@ -311,10 +324,13 @@ where TItem: Clone
     {
         match dock_walk{
             DockItem::Single(_)=>{},
-            DockItem::TabControl{tabs,..}=>{
+            DockItem::TabControl{tabs, current}=>{
                 let id = *counter;
                 *counter += 1;
                 if id == control_id{
+                    if *current >= 1 && *current == tabs.len() - 1{
+                        *current -= 1;
+                    }
                     return Some(tabs.remove(tab_id));
                 }
             },
@@ -331,7 +347,7 @@ where TItem: Clone
             }
         }
         None
-    }   
+    }
 
    fn recur_collapse_empty(dock_walk:&mut DockItem<TItem>)->bool
    where TItem: Clone

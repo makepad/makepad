@@ -36,7 +36,6 @@ mod quad;
 mod triangle;
 mod text;
 mod events;
-mod style;
 
 pub use crate::cx::*;
 pub use crate::quad::*;

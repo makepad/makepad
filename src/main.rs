@@ -10,7 +10,7 @@ enum MyItem{
 struct App{
     view:View<ScrollBar>,
     dock:Element<Dock<MyItem>>,
-    ok:Elements<Button, usize>,
+    ok:Elements<Button, u64>,
     quad:Quad
 }
  

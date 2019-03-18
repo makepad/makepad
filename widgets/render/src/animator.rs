@@ -58,7 +58,7 @@ impl Animator{
                 anim_area.total_time = self.current.as_ref().unwrap().mode.total_time() + self.next.as_ref().unwrap().mode.total_time()
             }
         }
-        else{ // its new
+        else if self.area != Area::Empty{ // its new
             self.current = Some(anim);
             self.next = None;
             cx.playing_anim_areas.push(AnimArea{
@@ -957,6 +957,13 @@ impl Anim{
         Anim{
             mode:mode,
             tracks:tracks
+        }
+    }
+
+    pub fn empty()->Anim{
+        Anim{
+            mode:AnimMode::Cut{duration:0.},
+            tracks:vec![]
         }
     }
 }

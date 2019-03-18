@@ -1,6 +1,9 @@
 
 use crate::math::*;
 
+pub fn color256(r:i32, g:i32, b:i32)->Vec4{
+    vec4(r as f32 / 255., g as f32 / 255., b as f32 / 255., 1.)
+}
 
 pub fn color(name:&str)->Vec4{
     match name.to_lowercase().as_ref(){
