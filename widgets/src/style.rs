@@ -3,7 +3,7 @@ use render::*;
 pub fn set_dark_style(cx:&mut Cx){
     cx.set_style_font("normal_font", "resources/ubuntu_regular_256.font");
     cx.set_style_font("icon_font", "resources/fontawesome.font");
-    cx.set_style_size("font_size", 10.0);
+    cx.set_style_size("font_size", 11.0);
 
     cx.set_style_color("bg_split", color256(25,25,25));
 

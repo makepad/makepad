@@ -379,13 +379,14 @@ where TItem: Clone
     {
         match dock_walk{
             DockItem::Single(_)=>{},
-            DockItem::TabControl{tabs,..}=>{
+            DockItem::TabControl{tabs,current}=>{
                 let id = *counter;
                 *counter += 1;
                 if id == control_id{
                     match kind{
                         DockDropKind::Tab(id)=>{
                             tabs.insert(*id, item.clone());
+                            *current = *id;
                         },
                         DockDropKind::Left=>{
                             *dock_walk = DockItem::Splitter{
@@ -421,6 +422,7 @@ where TItem: Clone
                         },
                         DockDropKind::TabsView |
                         DockDropKind::Center=>{
+                            *current = tabs.len();
                             tabs.push(item.clone());
                         }
                     }
