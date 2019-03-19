@@ -54,7 +54,7 @@ impl Style for TabControl{
                 ..Style::style(cx)
             },
             tab_fill:Quad{
-                color:cx.style_color("bg_normal"),
+                color:cx.color("bg_normal"),
                 ..Style::style(cx)
             },
             animator:Animator::new(Anim::new(AnimMode::Cut{duration:0.5}, vec![])),

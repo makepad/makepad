@@ -63,28 +63,28 @@ impl Tab{
 
     pub fn get_bg_color(&self, cx:&Cx)->Vec4{
         if self._is_selected{
-            cx.style_color("bg_selected")
+            cx.color("bg_selected")
         } 
         else {
-            cx.style_color("bg_normal")
+            cx.color("bg_normal")
         }
     }
 
     pub fn get_text_color(&self, cx:&Cx)->Vec4{
         if self._is_selected{
             if self._is_focussed{
-                cx.style_color("text_selected_focus")
+                cx.color("text_selected_focus")
             }
             else{
-                cx.style_color("text_selected_defocus")
+                cx.color("text_selected_defocus")
             } 
         }
         else{
             if self._is_focussed{
-                cx.style_color("text_deselected_focus")
+                cx.color("text_deselected_focus")
             }
             else{
-                cx.style_color("text_deselected_defocus")
+                cx.color("text_deselected_defocus")
             }
         }
     }
@@ -92,7 +92,7 @@ impl Tab{
     pub fn anim_default(&self, cx:&Cx)->Anim{
         Anim::new(AnimMode::Cut{duration:0.5}, vec![
             AnimTrack::to_vec4("bg.color", self.get_bg_color(cx)),
-            AnimTrack::to_vec4("bg.border_color", cx.style_color("bg_selected")),
+            AnimTrack::to_vec4("bg.border_color", cx.color("bg_selected")),
             AnimTrack::to_vec4("text.color", self.get_text_color(cx)),
             AnimTrack::to_vec4("icon.color", self.get_text_color(cx))
         ])
@@ -101,7 +101,7 @@ impl Tab{
     pub fn anim_over(&self, cx:&Cx)->Anim{
         Anim::new(AnimMode::Cut{duration:0.5}, vec![
             AnimTrack::to_vec4("bg.color", self.get_bg_color(cx)),
-            AnimTrack::to_vec4("bg.border_color", cx.style_color("bg_selected")),
+            AnimTrack::to_vec4("bg.border_color", cx.color("bg_selected")),
             AnimTrack::to_vec4("text.color", self.get_text_color(cx)),
             AnimTrack::to_vec4("icon.color", self.get_text_color(cx))
         ])
@@ -110,7 +110,7 @@ impl Tab{
     pub fn anim_down(&self, cx:&Cx)->Anim{
         Anim::new(AnimMode::Cut{duration:0.05}, vec![
             AnimTrack::to_vec4("bg.color", self.get_bg_color(cx)),
-            AnimTrack::to_vec4("bg.border_color", cx.style_color("over_border")),
+            AnimTrack::to_vec4("bg.border_color", cx.color("over_border")),
             AnimTrack::to_float("bg.glow_size", 2.0),
             AnimTrack::to_vec4("text.color", self.get_text_color(cx)),
             AnimTrack::to_vec4("icon.color", self.get_text_color(cx))            

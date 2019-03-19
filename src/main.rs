@@ -1,16 +1,18 @@
 use widgets::*;
 
 #[derive(Clone)]
-enum MyItem{
-    Color(Vec4)
+enum Panel{
+    Color(Vec4),
+    FileTree,
     //Editor(String),
     //LogView(String),
 }
 
 struct App{
     view:View<ScrollBar>,
-    dock:Element<Dock<MyItem>>,
+    dock:Element<Dock<Panel>>,
     ok:Elements<Button, u64>,
+    file_tree:Element<TreeControl>,
     quad:Quad
 }
  
@@ -27,13 +29,15 @@ impl Style for App{
                 })),
                 ..Style::style(cx)
             },
-
             ok:Elements::new(Button{
                 ..Style::style(cx)  
             }),
             quad:Quad{
                 ..Style::style(cx)
             },
+            file_tree:Element::new(FileTree{
+                ..Style::style(cx)
+            }),
             dock:Element::new(Dock{
                 dock_items:Some(DockItem::Splitter{
                     axis:Axis::Vertical,
@@ -43,8 +47,8 @@ impl Style for App{
                         current:0,
                         tabs:vec![
                             DockTab{
-                                title:"OrangeTab".to_string(),
-                                item:MyItem::Color(color("orange"))
+                                title:"Files".to_string(),
+                                item:Panel::FileTree
                             }
                         ]
                     }),
@@ -57,15 +61,15 @@ impl Style for App{
                             tabs:vec![
                                 DockTab{
                                     title:"PinkTab".to_string(),
-                                    item:MyItem::Color(color("pink"))
+                                    item:Panel::Color(color("pink"))
                                 },
                                 DockTab{
                                     title:"BlueTab".to_string(),
-                                    item:MyItem::Color(color("blue"))
+                                    item:Panel::Color(color("blue"))
                                 },
                                 DockTab{
                                     title:"GreenTab".to_string(),
-                                    item:MyItem::Color(color("green"))
+                                    item:Panel::Color(color("green"))
                                 }      
                             ],
                         }),
@@ -74,7 +78,7 @@ impl Style for App{
                             tabs:vec![
                                 DockTab{
                                     title:"PurpleTab".to_string(),
-                                    item:MyItem::Color(color("purple"))
+                                    item:Panel::Color(color("purple"))
                                 }
                             ]
                         })
@@ -94,7 +98,10 @@ impl App{
             let mut dock_walker = dock.walker();
             while let Some(item) = dock_walker.walk_handle_dock(cx, event){
                 match item{
-                    MyItem::Color(_)=>{}
+                    Panel::Color(_)=>{}
+                    Panel::FileTree=>{
+
+                    }
                 }
             }
 
@@ -129,9 +136,12 @@ impl App{
         let mut dock_walker = dock.walker();
         while let Some(item) = dock_walker.walk_draw_dock(cx){
             match item{
-                MyItem::Color(color2)=>{
+                Panel::Color(color2)=>{
                     self.quad.color = *color2;
                     self.quad.draw_quad_walk(cx, Bounds::Fill, Bounds::Fill, Margin::zero());
+                },
+                Panel::FileTree=>{
+                    self.file_tree.get_draw(cx).draw_file_tree(cx);
                 }
             }
         }

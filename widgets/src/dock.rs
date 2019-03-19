@@ -184,7 +184,7 @@ where TItem: Clone
                         None
                     }
                 },
-                DockItem::Splitter{first, last, pos, ..}=>{
+                DockItem::Splitter{first, last, pos, align, ..}=>{
                     if stack_top.counter == 0{
                         stack_top.counter += 1;
                         stack_top.uid = self.walk_uid;
@@ -193,6 +193,10 @@ where TItem: Clone
                         if !split.is_none(){
                             match split.unwrap().handle_splitter(cx, event){
                                 SplitterEvent::Moving{new_pos}=>{
+                                    *pos = new_pos;
+                                },
+                                SplitterEvent::MovingEnd{new_align, new_pos}=>{
+                                    *align = new_align;
                                     *pos = new_pos;
                                 },
                                 _=>()

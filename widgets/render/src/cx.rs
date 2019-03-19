@@ -319,36 +319,36 @@ impl Cx{
         return dc.get_current_area();
     }
 
-    pub fn style_color(&self, name:&str)->Vec4{
+    pub fn color(&self, name:&str)->Vec4{
         if let Some(StyleValue::Color(val)) = self.style_values.get(name){
             return *val;
         }
         panic!("Cannot find style color key {}", name);
     }
 
-    pub fn style_font(&self, name:&str)->String{
+    pub fn font(&self, name:&str)->String{
         if let Some(StyleValue::Font(val)) = self.style_values.get(name){
             return val.clone();
         }
         panic!("Cannot find style font key {}", name);
     }
 
-    pub fn style_size(&self, name:&str)->f64{
+    pub fn size(&self, name:&str)->f64{
         if let Some(StyleValue::Size(val)) = self.style_values.get(name){
             return *val;
         }
         panic!("Cannot find style size key {}", name);
     }
 
-    pub fn set_style_color(&mut self, name:&str, val:Vec4){
+    pub fn set_color(&mut self, name:&str, val:Vec4){
         self.style_values.insert(name.to_string(), StyleValue::Color(val));
     }
 
-    pub fn set_style_font(&mut self, name:&str, val:&str){
+    pub fn set_font(&mut self, name:&str, val:&str){
         self.style_values.insert(name.to_string(), StyleValue::Font(val.to_string()));
     }
 
-    pub fn set_style_size(&mut self, name:&str, val:f64){
+    pub fn set_size(&mut self, name:&str, val:f64){
         self.style_values.insert(name.to_string(), StyleValue::Size(val));
     }
     // push instance so it can be written to again in pop_instance

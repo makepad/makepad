@@ -12,6 +12,7 @@ pub struct Splitter{
     pub animator:Animator,
     pub anim_over:Anim,
     pub anim_moving:Anim,
+    pub realign_dist:f32,
 
     pub _split_area:Area,
     pub _hit_state:HitState,
@@ -34,6 +35,7 @@ pub enum SplitterAlign{
 pub enum SplitterEvent{
     None,
     Moving{new_pos:f32},
+    MovingEnd{new_align:SplitterAlign, new_pos:f32}
 }
 
 impl Style for Splitter{
@@ -54,7 +56,7 @@ impl Style for Splitter{
             _drag_point:0.,
             _drag_pos_start:0.,
             _drag_max_pos:0.0,
-
+            realign_dist:30.,
             split_size:2.0,
             min_size:25.0,
             split:Quad{
@@ -63,7 +65,7 @@ impl Style for Splitter{
             },
 
             animator:Animator::new(Anim::new(AnimMode::Cut{duration:0.5},vec![
-                AnimTrack::to_vec4("split.color",cx.style_color("bg_split")),
+                AnimTrack::to_vec4("split.color",cx.color("bg_split")),
             ])),
             anim_over:Anim::new(AnimMode::Cut{duration:0.05}, vec![
                 AnimTrack::to_vec4("split.color", color("#5")),
@@ -142,6 +144,28 @@ impl Splitter{
                 }
                 else{
                     self.animator.play_anim(cx, self.animator.default.clone());
+                }
+                // we should change our mode based on which edge we are closest to
+                // the rule is center - 30 + 30
+                let center = self._drag_max_pos * 0.5;
+                if self._calc_pos > center - self.realign_dist &&  
+                   self._calc_pos < center + self.realign_dist{
+                   self.align = SplitterAlign::Weighted;
+                   self.pos = self._calc_pos / self._drag_max_pos;
+                }
+                else if self._calc_pos < center - self.realign_dist{
+                    
+                   self.align = SplitterAlign::First;
+                   self.pos = self._calc_pos;
+                }
+                else{
+                   self.align = SplitterAlign::Last;
+                   self.pos = self._drag_max_pos - self._calc_pos;
+                }
+
+                return SplitterEvent::MovingEnd{
+                    new_align:self.align.clone(),
+                    new_pos:self.pos
                 }
             },
             Event::FingerMove(fe)=>{
