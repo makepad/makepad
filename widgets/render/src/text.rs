@@ -15,6 +15,7 @@ pub struct Text{
     pub text:String,
     pub color: Vec4,
     pub font_size:f32,
+    pub boldness:f32,
     pub line_spacing:f32,
     pub wrapping:Wrapping,
 }
@@ -28,6 +29,7 @@ impl Style for Text{
             text:"".to_string(),
             font_size:cx.size("font_size") as f32,
             line_spacing:1.15,
+            boldness:0.,
             wrapping:Wrapping::Word,
             color:color("white")
         }
@@ -64,6 +66,7 @@ impl Text{
             let h:float<Instance>;
             let font_size:float<Instance>;
             let font_base:float<Instance>;
+            let boldness:float<Instance>;
             let tex_coord:vec2<Varying>;
 
             fn pixel()->vec4{
@@ -72,6 +75,7 @@ impl Text{
 
                 df_viewport(tex_coord * tex_size * 0.07);
                 df_shape = -sig_dist - 0.5 / df_aa;
+                df_shape -= boldness;
                 return df_fill(color); 
             }
             
@@ -176,7 +180,8 @@ impl Text{
                         /*w*/ w,
                         /*h*/ height,
                         /*font_size*/ self.font_size,
-                        /*font_base*/ 1.0
+                        /*font_base*/ 1.0,
+                        /*boldness*/ self.boldness
                     ];
                     area.push_data(cx, &data);
 

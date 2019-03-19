@@ -9,7 +9,8 @@ pub struct FileTree{
     pub node_bg_even:Vec4,
     pub node_bg_odd:Vec4,
     pub filler:Quad,
-    pub label_text:Text,
+    pub file_text:Text,
+    pub folder_text:Text,
     pub root_node:FileNode,
     pub animator:Animator
 }
@@ -114,9 +115,15 @@ impl Style for FileTree{
                 shader_id:cx.add_shader(filler_sh, "FileTree.filler"),
                 ..Style::style(cx)
             },
-            label_text:Text{
+            file_text:Text{
                 color:cx.color("text_deselected_focus"),
                 font_size:11.0,
+                ..Style::style(cx)
+            },
+            folder_text:Text{
+                color:cx.color("text_selected_focus"),
+                font_size:11.0,
+                boldness:0.07,
                 ..Style::style(cx)
             },
             view:View{
@@ -211,12 +218,11 @@ impl FileTree{
                     area.push_vec2(cx, "line_vec", vec2(0.,0.));
                     area.push_float(cx, "anim_pos", 1.);
                     cx.realign_turtle(Align::left_center(), false);
-
-                    self.label_text.draw_text(cx, name);
+                    self.folder_text.draw_text(cx, name);
                 },
                 FileNode::File{name,..}=>{
                     cx.realign_turtle(Align::left_center(), false);
-                    self.label_text.draw_text(cx, name);
+                    self.file_text.draw_text(cx, name);
                 }
             }
 
