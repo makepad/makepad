@@ -157,8 +157,8 @@ impl FileTree{
                     return df_stroke(color, 1.);
                 }
                 else{ // its a folder
-                    df_box(0.*w, 0.42*h, 0.87*w, 0.39*h, 0.75);
-                    df_box(0.*w, 0.35*h, 0.5*w, 0.3*h, 1.);
+                    df_box(0.*w, 0.39*h, 0.87*w, 0.39*h, 0.75);
+                    df_box(0.*w, 0.32*h, 0.5*w, 0.3*h, 1.);
                     df_union();
                     // ok so. 
                     return df_fill(color);
@@ -186,7 +186,7 @@ impl FileTree{
                 width:Bounds::Fill,
                 height:Bounds::Fix(20.),
                 align:Align::left_center(),
-                padding:Padding{l:5.,t:0.,r:0.,b:0.},
+                padding:Padding{l:5.,t:0.,r:0.,b:1.},
                 ..Default::default()
             });
 
