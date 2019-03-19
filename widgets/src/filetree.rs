@@ -6,8 +6,6 @@ use crate::scrollbar::*;
 pub struct FileTree{
     pub view:View<ScrollBar>,
     pub node_bg:Quad,
-    pub node_bg_even:Vec4,
-    pub node_bg_odd:Vec4,
     pub filler:Quad,
     pub file_text:Text,
     pub folder_text:Text,
@@ -29,9 +27,24 @@ pub enum NodeState{
 }
 
 #[derive(Clone)]
+pub struct NodeDraw{
+    hit_state:HitState,
+    animator:Animator
+}
+
+#[derive(Clone)]
 pub enum FileNode{
-    File{name:String, area:Area},
-    Folder{name:String, area:Area, state:NodeState, folder:Vec<FileNode>}
+    File{name:String, draw:Option<NodeDraw>},
+    Folder{name:String, draw:Option<NodeDraw>, state:NodeState, folder:Vec<FileNode>}
+}
+
+impl FileNode{
+    fn get_draw<'a>(&'a mut self)->&'a mut Option<NodeDraw>{
+        match self{
+            FileNode::File{draw,..}=>draw,
+            FileNode::Folder{draw,..}=>draw
+        }
+    }
 }
 
 struct StackEntry<'a>{
@@ -48,6 +61,10 @@ pub struct FileWalker<'a>
 
 // this flattens out recursion into an iterator. unfortunately needs unsafe. come on. thats not nice
 impl<'a> FileWalker<'a>{
+    pub fn new(root_node: &'a mut FileNode)->FileWalker<'a>{
+        return FileWalker{stack:vec![StackEntry{counter:1, index:0, len:0, node:root_node}]};
+    }
+
     pub fn walk(&mut self)->Option<(usize, usize, usize, &mut FileNode)>{
         // lets get the current item on the stack
         let stack_len = self.stack.len();
@@ -98,15 +115,17 @@ impl Style for FileTree{
     fn style(cx:&mut Cx)->Self{
         let filler_sh = Self::def_filler_shader(cx);
         Self{
-            root_node:FileNode::Folder{name:"".to_string(), state:NodeState::Open, area:Area::Empty, folder:vec![
-                FileNode::File{name:"helloworld.jpg".to_string(), area:Area::Empty},
-                FileNode::Folder{name:"mydirectory".to_string(), state:NodeState::Open, area:Area::Empty, folder:vec![
-                    FileNode::File{name:"helloworld.rs".to_string(), area:Area::Empty},
-                    FileNode::File{name:"other.rs".to_string(), area:Area::Empty}
-                ]}
+            root_node:FileNode::Folder{name:"".to_string(), state:NodeState::Open, draw:None, folder:vec![
+                FileNode::File{name:"helloworld.jpg".to_string(), draw:None},
+                FileNode::Folder{name:"mydirectory".to_string(), state:NodeState::Open, draw:None, folder:{
+                    let mut vec = Vec::new();
+                    for i in 0..10{
+                        vec.push(FileNode::File{name:format!("hello{}.rs",i), draw:None})
+                    }
+                    vec.push(FileNode::Folder{name:"sub_folder".to_string(), state:NodeState::Open, folder:vec.clone(), draw:None});
+                    vec
+                }}
             ]},
-            node_bg_even:cx.color("bg_selected"),
-            node_bg_odd:cx.color("bg_odd"),
             node_bg:Quad{
                 ..Style::style(cx)
             },
@@ -167,22 +186,60 @@ impl FileTree{
         }));
         sh
     }
+
+    pub fn get_default_anim(cx:&Cx, index:usize)->Anim{
+        Anim::new(AnimMode::Cut{duration:0.05}, vec![
+            AnimTrack::to_vec4("bg.color", 
+                if index&1==0{cx.color("bg_selected")}else{cx.color("bg_odd")}
+            )
+        ])
+    }
+
     pub fn handle_file_tree(&mut self, cx:&mut Cx, event:&mut Event)->FileTreeEvent{
+        // alright. someone clicking on the tree items.
+        let mut file_walker = FileWalker::new(&mut self.root_node);
+        let mut counter = 0;
+        // todo, optimize this so events are not passed through 'all' of our tree elements
+        // but filtered out somewhat based on a bounding rect
+        while let Some((_depth, _index, _len, node)) = file_walker.walk(){
+            // alright we haz a node. so now what.
+            let node_draw = if let Some(node_draw) = node.get_draw(){node_draw}else{continue};
+
+            match event.hits(cx, node_draw.animator.area, &mut node_draw.hit_state){
+                Event::Animate(ae)=>{
+                },
+                Event::FingerDown(_fe)=>{
+                },
+                Event::FingerHover(_fe)=>{
+                    cx.set_hover_mouse_cursor(MouseCursor::Hand);
+                },
+                _=>()
+            }
+            counter += 1;
+        }   
         FileTreeEvent::None
     }
 
     pub fn draw_file_tree(&mut self, cx:&mut Cx){
         self.view.begin_view(cx, &Layout{..Default::default()});
-
-        let mut file_walker = FileWalker{stack:vec![StackEntry{counter:1, index:0, len:0, node:&mut self.root_node}]};
+        let mut file_walker = FileWalker::new(&mut self.root_node);
         
         // lets draw the filetree
         let mut counter = 0;
         while let Some((depth, index, len, node)) = file_walker.walk(){
             // lets store the bg area in the tree
-            self.node_bg.color = if counter&1 == 0{self.node_bg_even} else {self.node_bg_odd};
+            let node_draw = node.get_draw();
+            if node_draw.is_none(){
+                *node_draw = Some(NodeDraw{
+                    hit_state:HitState{..Default::default()},
+                    animator:Animator::new(Self::get_default_anim(cx, index))
+                })
+            }
+            let node_draw = node_draw.as_mut().unwrap();
 
-            self.node_bg.begin_quad(cx, &Layout{
+            self.node_bg.color = node_draw.animator.last_vec4("bg.color");// if counter&1 == 0{self.node_bg_even} else {self.node_bg_odd};
+
+            let area = self.node_bg.begin_quad(cx, &Layout{
                 width:Bounds::Fill,
                 height:Bounds::Fix(20.),
                 align:Align::left_center(),
@@ -190,8 +247,8 @@ impl FileTree{
                 ..Default::default()
             });
 
-            // lets draw the indent lines and icon
-            println!("{}", depth);
+            node_draw.animator.set_area(cx, area); 
+
             for _i in 0..(depth-2){
                 let area = self.filler.draw_quad_walk(cx, Bounds::Fix(10.), Bounds::Fill, Margin{l:1.,t:0.,r:4.,b:0.});
                 if index == 0{ // first

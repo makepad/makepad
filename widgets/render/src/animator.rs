@@ -19,7 +19,7 @@ pub struct Animator{
     pub default:Anim,
     current:Option<Anim>,
     next:Option<Anim>,
-    area:Area,
+    pub area:Area,
     last_float:Vec<(String, f32)>,
     last_vec2:Vec<(String, Vec2)>,
     last_vec3:Vec<(String, Vec3)>,
