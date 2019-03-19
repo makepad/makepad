@@ -213,7 +213,14 @@ impl Cx{
             turtle.walk.y = rel_y + turtle.start.y;
         }
     }
-
+/*
+    pub fn reset_turtle_bounds(&mut self){
+        if let Some(turtle) = self.turtles.last_mut(){
+            turtle.bound_left_top = vec2(std::f32::INFINITY,std::f32::INFINITY);
+            turtle.bound_right_bottom = vec2(std::f32::NEG_INFINITY, std::f32::NEG_INFINITY);
+        }
+    }
+*/
     fn compute_align_turtle(turtle:&Turtle)->Vec2{
         if turtle.layout.align.fx > 0.0 || turtle.layout.align.fy > 0.0{
 
@@ -231,7 +238,7 @@ impl Cx{
     }
 
     // restarts the turtle with a new alignment, used for a<b>c layouts
-    pub fn realign_turtle(&mut self, align:Align){
+    pub fn realign_turtle(&mut self, align:Align, set_used:bool){
         let (align_delta, align_start) = if let Some(turtle) = self.turtles.last_mut(){
             (Self::compute_align_turtle(&turtle), turtle.align_start)
         }
@@ -247,8 +254,10 @@ impl Cx{
             turtle.align_start = self.align_list.len();
             // subtract used size so 'fill' works
             turtle.layout.align = align; 
-            turtle.width_used = turtle.bound_right_bottom.x - turtle.start.x;
-            turtle.height_used = turtle.bound_right_bottom.y - turtle.start.y;
+            if set_used{
+                turtle.width_used = turtle.bound_right_bottom.x - turtle.start.x;
+                turtle.height_used = turtle.bound_right_bottom.y - turtle.start.y;
+            }
             turtle.bound_left_top = vec2(std::f32::INFINITY,std::f32::INFINITY);
             turtle.bound_right_bottom = vec2(std::f32::NEG_INFINITY, std::f32::NEG_INFINITY);
         }

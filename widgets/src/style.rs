@@ -8,30 +8,33 @@ pub fn set_dark_style(cx:&mut Cx){
     cx.set_color("bg_split", color256(25,25,25));
 
     cx.set_color("bg_selected", color256(40,40,40));
+    cx.set_color("bg_odd", color256(37,37,37));
     cx.set_color("bg_normal", color256(52,52,52));
 
     cx.set_color("over_border", color256(255,255,255));
+
+    cx.set_color("icon_color", color256(127,127,127));
+
 
     cx.set_color("text_selected_focus", color256(255,255,255));
     cx.set_color("text_deselected_focus", color256(157,157,157));
     cx.set_color("text_selected_defocus", color256(157,157,157));
     cx.set_color("text_deselected_defocus", color256(130,130,130));
 
-    cx.set_color("text_select",color("Purple900"));
-    
-    cx.set_color("accent_normal", color("Purple900"));
-    cx.set_color("accent_down", color("Purple500"));
-    cx.set_color("accent_gray", color("Grey700"));
+    //cx.set_color("text_select",color("Purple900"));
+    //cx.set_color("accent_normal", color("Purple900"));
+    //cx.set_color("accent_down", color("Purple500"));
+    //cx.set_color("accent_gray", color("Grey700"));
 
-    cx.set_color("bg_top", color("Grey900"));
-    cx.set_color("bg_normal", color("Grey850"));
-    cx.set_color("bg_hi", color("Grey800"));
+    //cx.set_color("bg_top", color("Grey900"));
+    //cx.set_color("bg_normal", color("Grey850"));
+    //cx.set_color("bg_hi", color("Grey800"));
 
-    cx.set_color("text_normal", color("Grey300"));
-    cx.set_color("text_accent", color("Grey400"));
-    cx.set_color("text_med", color("Grey500"));
-    cx.set_color("text_hi", color("Grey300"));
-    cx.set_color("text_lo", color("Grey700"));
+    //cx.set_color("text_normal", color("Grey300"));
+    //cx.set_color("text_accent", color("Grey400"));
+    //cx.set_color("text_med", color("Grey500"));
+    //cx.set_color("text_hi", color("Grey300"));
+    //cx.set_color("text_lo", color("Grey700"));
 
     cx.set_color("code_bg", color("Grey900"));
     cx.set_color("code_class", color("Pink300"));

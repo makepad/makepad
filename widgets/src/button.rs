@@ -36,12 +36,12 @@ impl Style for Button{
             animator:Animator::new(Anim::new(AnimMode::Cut{duration:0.5}, vec![
                 AnimTrack::to_vec4("bg.color", cx.color("bg_normal")),
                 AnimTrack::to_float("bg.glow_size", 0.0),
-                AnimTrack::to_vec4("bg.border_color", cx.color("text_lo")),
-                AnimTrack::to_vec4("text.color", cx.color("text_med")),
-                AnimTrack::to_vec4("icon.color", cx.color("text_med"))
+                AnimTrack::to_vec4("bg.border_color", color("white")),
+                AnimTrack::to_vec4("text.color", color("white")),
+                AnimTrack::to_vec4("icon.color", color("white"))
             ])),
             anim_over:Anim::new(AnimMode::Cut{duration:0.05}, vec![
-                AnimTrack::to_vec4("bg.color", cx.color("bg_top")),
+                AnimTrack::to_vec4("bg.color", color("white")),
                 AnimTrack::to_vec4("bg.border_color", color("white")),
                 AnimTrack::to_float("bg.glow_size", 1.0)
             ]),
@@ -100,6 +100,7 @@ impl Button{
     }
 
     pub fn handle_button(&mut self, cx:&mut Cx, event:&mut Event)->ButtonEvent{
+        
         //let mut ret_event = ButtonEvent::None;
         match event.hits(cx, self._bg_area, &mut self._hit_state){
             Event::Animate(ae)=>{

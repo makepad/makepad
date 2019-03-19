@@ -188,7 +188,7 @@ impl Cx{
         let command_queue = device.new_command_queue();
 
         // move it to my second screen. livecompile.
-        //cocoa_window.set_position(vec2(1920.0,400.0));
+        cocoa_window.set_position(vec2(1920.0,400.0));
 
         self.compile_all_mtl_shaders(&device);
 

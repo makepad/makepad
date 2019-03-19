@@ -12,7 +12,7 @@ struct App{
     view:View<ScrollBar>,
     dock:Element<Dock<Panel>>,
     ok:Elements<Button, u64>,
-    file_tree:Element<TreeControl>,
+    file_tree:Element<FileTree>,
     quad:Quad
 }
  

@@ -29,7 +29,7 @@ impl Style for Text{
             font_size:cx.size("font_size") as f32,
             line_spacing:1.15,
             wrapping:Wrapping::Word,
-            color:cx.color("text_normal")
+            color:color("white")
         }
     }
 }
