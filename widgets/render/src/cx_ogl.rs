@@ -5,7 +5,9 @@ use glutin::GlProfile;
 use std::mem;
 use std::ptr;
 use std::ffi::CStr;
-
+use std::fs::File;
+use std::io;
+use std::io::prelude::*;
 use time::precise_time_ns;
 
 use crate::cx::*;
@@ -130,6 +132,8 @@ impl Cx{
         self.load_binary_deps_from_file();
  
         self.call_event_handler(&mut event_handler, &mut Event::Construct);
+        
+        self.redraw_area(Area::All);
 
         while self.running{
             events_loop.poll_events(|winit_event|{
@@ -156,7 +160,7 @@ impl Cx{
             }
 
             // call redraw event
-            if !self.dirty_area.is_empty(){
+            if self.redraw_areas.len()>0{
                 self.call_draw_event(&mut event_handler, &mut root_view);
                 self.paint_dirty = true;
             }
@@ -178,7 +182,7 @@ impl Cx{
             }
 
             // wait for the next event blockingly so it stops eating power
-            if self.playing_anim_areas.len() == 0 && self.dirty_area.is_empty(){
+            if self.playing_anim_areas.len() == 0 && self.redraw_areas.len() == 0{
                 events_loop.run_forever(|winit_event|{
                     let mut events = self.map_winit_event(winit_event, &glutin_window);
                     for mut event in &mut events{
@@ -758,7 +762,7 @@ pub struct CxShaders{
 
 #[derive(Clone, Default)]
 pub struct CxResources{
-    pub fingers_down:Vec<bool>
+    pub fingers_down:Vec<bool>,
     pub last_mouse_pos:Vec2,
     pub is_cursor_in_window:bool
 }

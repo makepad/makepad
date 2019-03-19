@@ -36,7 +36,7 @@ pub struct FileWalker<'a>
 
 // this flattens out recursion into an iterator. unfortunately needs unsafe. ugh.
 impl<'a> FileWalker<'a>{
-    pub fn walk(&mut self)->Option<(usize, &'a mut FileNode)>{
+    pub fn walk(&mut self)->Option<(usize, &mut FileNode)>{
         // lets get the current item on the stack
         let stack_len = self.stack.len();
         let push_or_pop = if let Some(stack_top) = self.stack.last_mut(){

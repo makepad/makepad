@@ -26,9 +26,6 @@ pub use crate::cx_webgl::*;
 #[cfg(any(feature = "webgl", feature = "ogl"))]
 pub use crate::cx_gl::*; 
 
-#[cfg(any(feature = "ogl"))]
-pub use crate::cx_winit::*; 
-
 #[derive(Clone)]
 pub struct Cx{
     pub title:String,
