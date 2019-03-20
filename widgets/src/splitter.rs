@@ -221,12 +221,12 @@ impl Splitter{
        match self.axis{
             Axis::Horizontal=>{
                 self._hit_state.margin = Some(Margin{
-                    l:0., t:5., r:0., b:5.,
+                    l:0., t:3., r:0., b:7.,
                 })
             },
             Axis::Vertical=>{
                 self._hit_state.margin = Some(Margin{
-                    l:5., t:0., r:5., b:0.,
+                    l:3., t:0., r:7., b:0.,
                 })
             }
        }

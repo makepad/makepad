@@ -195,6 +195,14 @@ impl FileTree{
         ])
     }
 
+    pub fn get_over_anim(cx:&Cx, index:usize)->Anim{
+        Anim::new(AnimMode::Cut{duration:0.05}, vec![
+            AnimTrack::to_vec4("bg.color", 
+                if index&1==0{cx.color("bg_selected")}else{cx.color("bg_odd")}
+            )
+        ])
+    }
+
     pub fn handle_file_tree(&mut self, cx:&mut Cx, event:&mut Event)->FileTreeEvent{
         // alright. someone clicking on the tree items.
         let mut file_walker = FileWalker::new(&mut self.root_node);
@@ -209,11 +217,21 @@ impl FileTree{
 
             match event.hits(cx, node_draw.animator.area, &mut node_draw.hit_state){
                 Event::Animate(ae)=>{
+                    self.animator.calc_area(cx, "bg.color", ae.time, node_draw.animator.area);
                 },
                 Event::FingerDown(_fe)=>{
                 },
-                Event::FingerHover(_fe)=>{
+                Event::FingerHover(fe)=>{
                     cx.set_hover_mouse_cursor(MouseCursor::Hand);
+                    match fe.hover_state{
+                        HoverState::In=>{
+                            node_draw.animator.play_anim(cx, Self::get_over_anim(cx, counter));
+                        },
+                        HoverState::Out=>{
+                            node_draw.animator.play_anim(cx, Self::get_default_anim(cx, counter));
+                        },
+                        _=>()
+                    }
                 },
                 _=>()
             }

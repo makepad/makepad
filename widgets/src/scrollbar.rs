@@ -86,10 +86,10 @@ impl ScrollBar{
             fn pixel()->vec4{
                 df_viewport(pos * vec2(w, h));
                 if is_vertical > 0.5{
-                    df_box(0., h*norm_scroll, w*0.5, h*norm_handle, border_radius);
+                    df_box(1., h*norm_scroll, w*0.5, h*norm_handle, border_radius);
                 }
                 else{
-                    df_box(w*norm_scroll, 0., w*norm_handle, h*0.5, border_radius);
+                    df_box(w*norm_scroll, 1., w*norm_handle, h*0.5, border_radius);
                 }
                 return df_fill_keep(color);
             }

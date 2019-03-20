@@ -168,6 +168,7 @@ where TItem: Clone
                                 _=>()
                             }
                         }
+                       
                         if defocus{
                             for (id, tab_control) in self.tab_controls.enumerate(){
                                 if *id != stack_top.uid{

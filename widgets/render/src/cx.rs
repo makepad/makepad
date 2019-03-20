@@ -548,6 +548,22 @@ impl DrawList{
         return vec2(self.uniforms[DL_UNI_SCROLL+0],self.uniforms[DL_UNI_SCROLL+1])
     }
 
+    pub fn clip_and_scroll_rect(&self, x:f32, y:f32, w:f32, h:f32)->Rect{
+        let mut x1 = x - self.uniforms[DL_UNI_SCROLL+0];
+        let mut y1 = y - self.uniforms[DL_UNI_SCROLL+1];
+        let mut x2 = x1 + w;
+        let mut y2 = y1 + h; 
+        let min_x = self.uniforms[DL_UNI_CLIP+0];
+        let min_y = self.uniforms[DL_UNI_CLIP+1];
+        let max_x = self.uniforms[DL_UNI_CLIP+2];
+        let max_y = self.uniforms[DL_UNI_CLIP+3];
+        x1 = min_x.max(x1).min(max_x);
+        y1 = min_y.max(y1).min(max_y);
+        x2 = min_x.max(x2).min(max_x);
+        y2 = min_y.max(y2).min(max_y);
+        return Rect{x:x1, y:y1, w:x2-x1, h:y2-y1};
+    }
+
     pub fn uniform_draw_list_clip(&mut self, min_x:f32, min_y:f32, max_x:f32, max_y:f32){
         
         self.uniforms[DL_UNI_CLIP+0] = min_x;

@@ -66,8 +66,10 @@ impl Area{
                                     return Rect{x:x,y:y,w:w,h:h}
                                 }
                                 else{
-                                    let scroll = draw_list.get_scroll();
-                                    return Rect{x:x - scroll.x,y:y - scroll.y,w:w,h:h}
+                                    return draw_list.clip_and_scroll_rect(x,y,w,h);
+                                    //let scroll = draw_list.get_scroll();
+                                    // also clip it 
+                                    //return Rect{x:x - scroll.x,y:y - scroll.y,w:w,h:h}
                                 }
                             }
                         }
