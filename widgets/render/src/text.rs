@@ -126,12 +126,13 @@ impl Text{
         let mut width = 0.0;
         let mut count = 0;
         for (last,c) in text.chars().identify_last(){
-            let mut slot = 0;
-            let mut emit = last;
 
-            if c < '\u{10000}'{
-                slot = cx.fonts[self.font_id].unicodes[c as usize];
-            }
+            let mut emit = last;
+            let slot = if c < '\u{10000}'{
+                cx.fonts[self.font_id].unicodes[c as usize]
+            } else{
+                0
+            };
 
             if slot != 0 {
                 let glyph = &cx.fonts[self.font_id].glyphs[slot];

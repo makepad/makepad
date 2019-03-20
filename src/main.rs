@@ -100,7 +100,9 @@ impl App{
                 match item{
                     Panel::Color(_)=>{}
                     Panel::FileTree=>{
-
+                        if let Some(file_tree) = &mut self.file_tree.element{
+                            file_tree.handle_file_tree(cx, event);
+                        }
                     }
                 }
             }

@@ -119,7 +119,7 @@ impl Style for FileTree{
                 FileNode::File{name:"helloworld.jpg".to_string(), draw:None},
                 FileNode::Folder{name:"mydirectory".to_string(), state:NodeState::Open, draw:None, folder:{
                     let mut vec = Vec::new();
-                    for i in 0..10{
+                    for i in 0..100{
                         vec.push(FileNode::File{name:format!("hello{}.rs",i), draw:None})
                     }
                     vec.push(FileNode::Folder{name:"sub_folder".to_string(), state:NodeState::Open, folder:vec.clone(), draw:None});
@@ -199,6 +199,8 @@ impl FileTree{
         // alright. someone clicking on the tree items.
         let mut file_walker = FileWalker::new(&mut self.root_node);
         let mut counter = 0;
+
+        self.view.handle_scroll_bars(cx, event);
         // todo, optimize this so events are not passed through 'all' of our tree elements
         // but filtered out somewhat based on a bounding rect
         while let Some((_depth, _index, _len, node)) = file_walker.walk(){
@@ -237,7 +239,7 @@ impl FileTree{
             }
             let node_draw = node_draw.as_mut().unwrap();
 
-            self.node_bg.color = node_draw.animator.last_vec4("bg.color");// if counter&1 == 0{self.node_bg_even} else {self.node_bg_odd};
+            self.node_bg.color = node_draw.animator.last_vec4("bg.color");
 
             let area = self.node_bg.begin_quad(cx, &Layout{
                 width:Bounds::Fill,
