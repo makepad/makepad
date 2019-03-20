@@ -295,9 +295,12 @@ impl FileTree{
 
             node_draw.animator.set_area(cx, area); 
 
-            for _i in 0..(depth-1){
+            for i in 0..(depth-1){
                 let area = self.filler.draw_quad_walk(cx, Bounds::Fix(10.), Bounds::Fill, Margin{l:1.,t:0.,r:4.,b:0.});
-                if index == 0{ // first
+                if i < depth - 1{
+                    area.push_vec2(cx, "line_vec", vec2(-0.1,1.1));
+                }
+                else if index == 0{ // first
                     if index == len - 1{ // and last
                         area.push_vec2(cx, "line_vec", vec2(0.15,0.75));
                     }
@@ -323,6 +326,7 @@ impl FileTree{
                     cx.realign_turtle(Align::left_center(), false);
                     self.folder_text.font_size = 11. * scale as f32;
                     self.folder_text.draw_text(cx, name);
+
                     let (new_scale, new_state) = match state{
                         NodeState::Opening(fac)=>{
                             self.view.redraw_view_area(cx);
