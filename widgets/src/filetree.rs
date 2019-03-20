@@ -123,7 +123,9 @@ impl Style for FileTree{
                     for i in 0..20{
                         vec.push(FileNode::File{name:format!("hello{}.rs",i), draw:None})
                     }
-                    vec.push(FileNode::Folder{name:"sub_folder".to_string(), state:NodeState::Open, folder:vec.clone(), draw:None});
+                    vec.push(FileNode::Folder{name:"sub_folder1".to_string(), state:NodeState::Open, folder:vec.clone(), draw:None});
+                    vec.push(FileNode::Folder{name:"sub_folder1".to_string(), state:NodeState::Open, folder:vec.clone(), draw:None});
+                    vec.push(FileNode::Folder{name:"sub_folder2".to_string(), state:NodeState::Open, folder:vec.clone(), draw:None});
                     vec
                 }}
             ]},
@@ -143,7 +145,7 @@ impl Style for FileTree{
             folder_text:Text{
                 color:cx.color("text_selected_focus"),
                 font_size:11.0,
-                boldness:0.07,
+                boldness:0.0,
                 ..Style::style(cx)
             },
             view:View{
@@ -265,12 +267,19 @@ impl FileTree{
         
         // lets draw the filetree
         let mut counter = 0;
+        
         let mut scale_stack = Vec::new();
         scale_stack.push(1.0f64);
+        let mut last_stack = Vec::new();
+
         while let Some((depth, index, len, node)) = file_walker.walk(){
+
+            let is_first = index == 0;
+            let is_last = index == len - 1;
 
             while depth < scale_stack.len(){
                 scale_stack.pop();
+                last_stack.pop();
             }
             let scale = scale_stack[depth - 1];
 
@@ -295,26 +304,38 @@ impl FileTree{
 
             node_draw.animator.set_area(cx, area); 
 
+            // what do we know.
             for i in 0..(depth-1){
-                let area = self.filler.draw_quad_walk(cx, Bounds::Fix(10.), Bounds::Fill, Margin{l:1.,t:0.,r:4.,b:0.});
-                if i < depth - 1{
-                    area.push_vec2(cx, "line_vec", vec2(-0.1,1.1));
-                }
-                else if index == 0{ // first
-                    if index == len - 1{ // and last
-                        area.push_vec2(cx, "line_vec", vec2(0.15,0.75));
+                let quad_margin = Margin{l:1.,t:0.,r:4.,b:0.};
+                if i == depth - 2 { // our own thread. 
+                    let area = self.filler.draw_quad_walk(cx, Bounds::Fix(10.), Bounds::Fill, quad_margin);
+                    if is_last { 
+                        if is_first{
+                            area.push_vec2(cx, "line_vec", vec2(0.3,0.7))
+                        }
+                        else{
+                            area.push_vec2(cx, "line_vec", vec2(-0.2,0.7))
+                        }
                     }
-                    else{ // not last
-                        area.push_vec2(cx, "line_vec", vec2(0.15,1.0));
+                    else if is_first{
+                        area.push_vec2(cx, "line_vec", vec2(0.3,1.2))
+                    }
+                    else{
+                        area.push_vec2(cx, "line_vec", vec2(-0.2,1.2));
+                    }
+                    area.push_float(cx, "anim_pos", -1.);
+                }
+                else{
+                    let here_last = if last_stack.len()>1{ last_stack[i+1] } else {false};
+                    if here_last{
+                        cx.walk_turtle(Bounds::Fix(10.), Bounds::Fill, quad_margin, None);
+                    }
+                    else{
+                        let area = self.filler.draw_quad_walk(cx, Bounds::Fix(10.), Bounds::Fill, quad_margin);
+                        area.push_vec2(cx, "line_vec", vec2(-0.2,1.2));
+                        area.push_float(cx, "anim_pos", -1.);
                     }
                 }
-                else if index == len - 1{ // just last
-                    area.push_vec2(cx, "line_vec", vec2(-0.1,0.8));
-                }
-                else { // middle
-                    area.push_vec2(cx, "line_vec", vec2(-0.1,1.1));
-                };
-                area.push_float(cx, "anim_pos", -1.);
             };
 
             match node{
@@ -354,6 +375,7 @@ impl FileTree{
                         }
                     };
                     *state = new_state;
+                    last_stack.push(is_last);
                     scale_stack.push(scale * new_scale);
                 },
                 FileNode::File{name,..}=>{
