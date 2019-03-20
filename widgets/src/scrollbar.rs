@@ -282,19 +282,10 @@ impl ScrollBarLike<ScrollBar> for ScrollBar{
             };
         }
 
-       /* 
-        // see if we need to clamp
-        let clamped_pos = self._scroll_pos.min(self._view_total - self._view_visible).max(0.); 
-        if clamped_pos != self._scroll_pos{
-            self._scroll_pos = clamped_pos;
-            ret_event = self.make_scroll_event();
-            self.update_shader_scroll_pos(cx);
-        }*/
-
         ScrollBarEvent::None
     }
 
-    fn draw_scroll_bar(&mut self, cx:&mut Cx, axis:Axis, view_area:Area, view_rect:Rect, view_total:Vec2){
+    fn draw_scroll_bar(&mut self, cx:&mut Cx, axis:Axis, view_area:Area, view_rect:Rect, view_total:Vec2)->f32{
         // pull the bg color from our animation system, uses 'default' value otherwise
         self.sb.color = self.animator.last_vec4("sb.color");
         self._sb_area = Area::Empty;
@@ -349,11 +340,20 @@ impl ScrollBarLike<ScrollBar> for ScrollBar{
         }
         // compute normalized sizes for the sahder
         let (norm_scroll, norm_handle) = self.get_normalized_scroll_pos();
+
+        // see if we need to clamp
+        let clamped_pos = self._scroll_pos.min(self._view_total - self._view_visible).max(0.); 
+        if clamped_pos != self._scroll_pos{
+            self._scroll_pos = clamped_pos;
+        }
+
         // push the var added to the sb shader
         if self._visible{
             self._sb_area.push_float(cx, "norm_handle", norm_handle);
             self._sb_area.push_float(cx, "norm_scroll", norm_scroll);
             self.animator.set_area(cx, self._sb_area); // if our area changed, update animation
         }
+
+        self._scroll_pos
     }
 }

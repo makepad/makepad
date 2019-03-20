@@ -2,7 +2,7 @@ use crate::cx::*;
 
 pub trait ScrollBarLike<ScrollBarT>{
 
-    fn draw_scroll_bar(&mut self, cx:&mut Cx, axis:Axis, view_area:Area, view_rect:Rect, total_size:Vec2);
+    fn draw_scroll_bar(&mut self, cx:&mut Cx, axis:Axis, view_area:Area, view_rect:Rect, total_size:Vec2)->f32;
     fn handle_scroll_bar(&mut self, cx:&mut Cx, event:&mut Event)->ScrollBarEvent;
 }
 
@@ -50,7 +50,7 @@ impl NoScrollBar{
 }
 
 impl ScrollBarLike<NoScrollBar> for NoScrollBar{
-    fn draw_scroll_bar(&mut self, _cx:&mut Cx, _axis:Axis, _view_area:Area, _view_rect:Rect, _total_size:Vec2){}
+    fn draw_scroll_bar(&mut self, _cx:&mut Cx, _axis:Axis, _view_area:Area, _view_rect:Rect, _total_size:Vec2)->f32{0.}
     fn handle_scroll_bar(&mut self, _cx:&mut Cx, _event:&mut Event)->ScrollBarEvent{
         ScrollBarEvent::None
     }
@@ -181,10 +181,12 @@ where TScrollBar: ScrollBarLike<TScrollBar> + Clone + ElementLife
         let rect_now =  cx.turtle_rect();
 
         if let Some(scroll_h) = &mut self.scroll_h{
-            scroll_h.get_draw(cx).draw_scroll_bar(cx, Axis::Horizontal, view_area, rect_now, view_total);
+            let scroll_pos = scroll_h.get_draw(cx).draw_scroll_bar(cx, Axis::Horizontal, view_area, rect_now, view_total);
+            cx.draw_lists[draw_list_id].set_scroll_x(scroll_pos);
         }
         if let Some(scroll_v) = &mut self.scroll_v{
-            scroll_v.get_draw(cx).draw_scroll_bar(cx, Axis::Vertical,view_area, rect_now, view_total);
+            let scroll_pos = scroll_v.get_draw(cx).draw_scroll_bar(cx, Axis::Vertical,view_area, rect_now, view_total);
+            cx.draw_lists[draw_list_id].set_scroll_y(scroll_pos);
         }
         
         let rect = cx.end_turtle(view_area);

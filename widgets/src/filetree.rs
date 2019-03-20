@@ -304,7 +304,6 @@ impl FileTree{
 
             node_draw.animator.set_area(cx, area); 
 
-            // what do we know.
             for i in 0..(depth-1){
                 let quad_margin = Margin{l:1.,t:0.,r:4.,b:0.};
                 if i == depth - 2 { // our own thread. 
