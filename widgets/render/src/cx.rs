@@ -178,8 +178,10 @@ impl Cx{
         else if self.redraw_areas.len() == 1 &&  self.redraw_areas[0] == Area::All{
             return;
         };
-        // TODO check if the area already has a 
-        // parent in our redraw areas
+        // only add it if we dont have it already
+        if let Some(_) = self.redraw_areas.iter().position(|a| *a == area){
+            return;
+        }
         self.redraw_areas.push(area);
     }
 

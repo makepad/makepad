@@ -22,6 +22,7 @@ pub enum FileTreeEvent{
 #[derive(Clone)]
 pub enum NodeState{
     Open,
+    Opening(f64),
     Closing(f64),
     Closed
 }
@@ -67,7 +68,7 @@ impl<'a> FileWalker<'a>{
 
     pub fn walk(&mut self)->Option<(usize, usize, usize, &mut FileNode)>{
         // lets get the current item on the stack
-        let stack_len = self.stack.len();
+        let stack_len = self.stack.len() - 1;
         let push_or_pop = if let Some(stack_top) = self.stack.last_mut(){
             // return item 'count'
             match stack_top.node{
@@ -119,7 +120,7 @@ impl Style for FileTree{
                 FileNode::File{name:"helloworld.jpg".to_string(), draw:None},
                 FileNode::Folder{name:"mydirectory".to_string(), state:NodeState::Open, draw:None, folder:{
                     let mut vec = Vec::new();
-                    for i in 0..100{
+                    for i in 0..20{
                         vec.push(FileNode::File{name:format!("hello{}.rs",i), draw:None})
                     }
                     vec.push(FileNode::Folder{name:"sub_folder".to_string(), state:NodeState::Open, folder:vec.clone(), draw:None});
@@ -187,18 +188,18 @@ impl FileTree{
         sh
     }
 
-    pub fn get_default_anim(cx:&Cx, index:usize)->Anim{
+    pub fn get_default_anim(cx:&Cx, counter:usize)->Anim{
         Anim::new(AnimMode::Cut{duration:0.05}, vec![
             AnimTrack::to_vec4("bg.color", 
-                if index&1==0{cx.color("bg_selected")}else{cx.color("bg_odd")}
+                if counter&1==0{cx.color("bg_selected")}else{cx.color("bg_odd")}
             )
         ])
     }
 
-    pub fn get_over_anim(cx:&Cx, index:usize)->Anim{
+    pub fn get_over_anim(cx:&Cx, counter:usize)->Anim{
         Anim::new(AnimMode::Cut{duration:0.05}, vec![
             AnimTrack::to_vec4("bg.color", 
-                if index&1==0{cx.color("bg_selected")}else{cx.color("bg_odd")}
+                if counter&1==0{cx.color("bg_selected_over")}else{cx.color("bg_odd_over")}
             )
         ])
     }
@@ -217,9 +218,27 @@ impl FileTree{
 
             match event.hits(cx, node_draw.animator.area, &mut node_draw.hit_state){
                 Event::Animate(ae)=>{
-                    self.animator.calc_area(cx, "bg.color", ae.time, node_draw.animator.area);
+                    node_draw.animator.calc_area(cx, "bg.color", ae.time, node_draw.animator.area);
                 },
                 Event::FingerDown(_fe)=>{
+                    if let FileNode::Folder{state,..} = node{
+                        *state = match state{
+                            NodeState::Opening(fac)=>{
+                                NodeState::Closing(1.0 - *fac)
+                            },
+                            NodeState::Closing(fac)=>{
+                                NodeState::Opening(1.0 - *fac)
+                            },
+                            NodeState::Open=>{
+                                NodeState::Closing(1.0)
+                            },
+                            NodeState::Closed=>{
+                                NodeState::Opening(1.0)
+                            }
+                        };
+                        // start the redraw loop
+                        self.view.redraw_view_area(cx);
+                    }
                 },
                 Event::FingerHover(fe)=>{
                     cx.set_hover_mouse_cursor(MouseCursor::Hand);
@@ -246,7 +265,15 @@ impl FileTree{
         
         // lets draw the filetree
         let mut counter = 0;
+        let mut scale_stack = Vec::new();
+        scale_stack.push(1.0f64);
         while let Some((depth, index, len, node)) = file_walker.walk(){
+
+            while depth < scale_stack.len(){
+                scale_stack.pop();
+            }
+            let scale = scale_stack[depth - 1];
+
             // lets store the bg area in the tree
             let node_draw = node.get_draw();
             if node_draw.is_none(){
@@ -256,12 +283,11 @@ impl FileTree{
                 })
             }
             let node_draw = node_draw.as_mut().unwrap();
-
             self.node_bg.color = node_draw.animator.last_vec4("bg.color");
 
             let area = self.node_bg.begin_quad(cx, &Layout{
                 width:Bounds::Fill,
-                height:Bounds::Fix(20.),
+                height:Bounds::Fix(20.*scale as f32),
                 align:Align::left_center(),
                 padding:Padding{l:5.,t:0.,r:0.,b:1.},
                 ..Default::default()
@@ -269,7 +295,7 @@ impl FileTree{
 
             node_draw.animator.set_area(cx, area); 
 
-            for _i in 0..(depth-2){
+            for _i in 0..(depth-1){
                 let area = self.filler.draw_quad_walk(cx, Bounds::Fix(10.), Bounds::Fill, Margin{l:1.,t:0.,r:4.,b:0.});
                 if index == 0{ // first
                     if index == len - 1{ // and last
@@ -278,10 +304,10 @@ impl FileTree{
                     else{ // not last
                         area.push_vec2(cx, "line_vec", vec2(0.15,1.0));
                     }
-                } 
+                }
                 else if index == len - 1{ // just last
                     area.push_vec2(cx, "line_vec", vec2(-0.1,0.8));
-                } 
+                }
                 else { // middle
                     area.push_vec2(cx, "line_vec", vec2(-0.1,1.1));
                 };
@@ -289,16 +315,46 @@ impl FileTree{
             };
 
             match node{
-                FileNode::Folder{name,..}=>{
+                FileNode::Folder{name, state, ..}=>{
                     // draw the folder icon
                     let area = self.filler.draw_quad_walk(cx, Bounds::Fix(14.), Bounds::Fill, Margin{l:0.,t:0.,r:2.,b:0.});
                     area.push_vec2(cx, "line_vec", vec2(0.,0.));
                     area.push_float(cx, "anim_pos", 1.);
                     cx.realign_turtle(Align::left_center(), false);
+                    self.folder_text.font_size = 11. * scale as f32;
                     self.folder_text.draw_text(cx, name);
+                    let (new_scale, new_state) = match state{
+                        NodeState::Opening(fac)=>{
+                            self.view.redraw_view_area(cx);
+                            if *fac < 0.001{
+                                (1.0, NodeState::Open)
+                            }
+                            else{
+                                (1.0 - *fac, NodeState::Opening(*fac * 0.8))
+                            }
+                        },
+                        NodeState::Closing(fac)=>{
+                            self.view.redraw_view_area(cx);
+                            if *fac < 0.001{
+                                (0.0, NodeState::Closed)
+                            }
+                            else{
+                                (*fac, NodeState::Closing(*fac * 0.8))
+                            }
+                        },
+                        NodeState::Open=>{
+                            (1.0, NodeState::Open)
+                        },
+                        NodeState::Closed=>{
+                            (1.0, NodeState::Closed)
+                        }
+                    };
+                    *state = new_state;
+                    scale_stack.push(scale * new_scale);
                 },
                 FileNode::File{name,..}=>{
                     cx.realign_turtle(Align::left_center(), false);
+                    self.file_text.font_size = 11. * scale as f32;;
                     self.file_text.draw_text(cx, name);
                 }
             }
