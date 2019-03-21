@@ -195,7 +195,10 @@ impl Cx{
 
     pub fn turtle_bounds(&self)->Vec2{
         if let Some(turtle) = self.turtles.last(){
-            return vec2(turtle.bound_right_bottom.x + turtle.layout.padding.r, turtle.bound_right_bottom.y + turtle.layout.padding.b);
+            return vec2(
+                turtle.bound_right_bottom.x + turtle.layout.padding.r - turtle.start.x, 
+                turtle.bound_right_bottom.y + turtle.layout.padding.b - turtle.start.y
+            );
         }
         return vec2(0.0,0.0)        
     }

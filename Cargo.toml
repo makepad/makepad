@@ -6,6 +6,7 @@ edition = "2018"
 
 [dependencies]
 rand = "*"
+serde_json = "*"
 
 [dependencies.widgets]
 path="./widgets"

@@ -10,7 +10,9 @@ pub struct FileTree{
     pub file_text:Text,
     pub folder_text:Text,
     pub root_node:FileNode,
-    pub animator:Animator
+    pub animator:Animator,
+    pub row_height:f32,
+    pub row_padding:Padding
 }
 
 #[derive(Clone, PartialEq)]
@@ -116,6 +118,8 @@ impl Style for FileTree{
     fn style(cx:&mut Cx)->Self{
         let filler_sh = Self::def_filler_shader(cx);
         Self{
+            row_height:20.,
+            row_padding:Padding{l:5.,t:0.,r:0.,b:1.},
             root_node:FileNode::Folder{name:"".to_string(), state:NodeState::Open, draw:None, folder:vec![
                 FileNode::File{name:"helloworld.jpg".to_string(), draw:None},
                 FileNode::Folder{name:"mydirectory".to_string(), state:NodeState::Open, draw:None, folder:{
@@ -296,9 +300,9 @@ impl FileTree{
 
             let area = self.node_bg.begin_quad(cx, &Layout{
                 width:Bounds::Fill,
-                height:Bounds::Fix(20.*scale as f32),
+                height:Bounds::Fix(self.row_height*scale as f32),
                 align:Align::left_center(),
-                padding:Padding{l:5.,t:0.,r:0.,b:1.},
+                padding:self.row_padding,
                 ..Default::default()
             });
 
@@ -317,7 +321,7 @@ impl FileTree{
                         }
                     }
                     else if is_first{
-                        area.push_vec2(cx, "line_vec", vec2(0.3,1.2))
+                        area.push_vec2(cx, "line_vec", vec2(-0.3,1.2))
                     }
                     else{
                         area.push_vec2(cx, "line_vec", vec2(-0.2,1.2));
@@ -386,9 +390,28 @@ impl FileTree{
 
             self.node_bg.end_quad(cx);
             cx.turtle_new_line();
-            counter += 1;
+            if scale >= 0.99{
+                counter += 1;
+            }
         }
 
+        // draw filler nodes
+        let view_total = cx.turtle_bounds();   
+        let rect_now =  cx.turtle_rect();
+        let bg_even = cx.color("bg_selected");
+        let bg_odd = cx.color("bg_odd");
+        let mut y = view_total.y;
+        while y < rect_now.h{
+            self.node_bg.color = if counter&1 == 0{bg_even}else{bg_odd};
+            self.node_bg.draw_quad_walk(cx,
+                Bounds::Fill,
+                Bounds::Fix( (rect_now.h - y).min(self.row_height) ),
+                Margin::zero()
+            );
+            cx.turtle_new_line();
+            y += self.row_height;
+            counter += 1;
+        } 
         self.view.end_view(cx);
     }
 }

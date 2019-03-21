@@ -14,6 +14,7 @@ pub struct ScrollBar{
     pub _visible:bool,
     pub _hit_state:HitState,
     pub _sb_area:Area,
+    pub _bar_side_margin:f32,
     pub _view_area:Area,
     pub _view_total:f32, // the total view area
     pub _view_visible:f32, // the visible view area
@@ -48,6 +49,7 @@ impl Style for ScrollBar{
             _view_area:Area::Empty,
             _view_total:0.0,
             _view_visible:0.0,
+            _bar_side_margin:6.0,
             _scroll_size:0.0,
             _scroll_pos:0.0,
             _drag_point:None,
@@ -191,7 +193,7 @@ impl ScrollBarLike<ScrollBar> for ScrollBar{
                             self.set_scroll_pos(cx, scroll_pos + fe.scroll.y);
                             return self.make_scroll_event();
                         }
-                    }        
+                    }
                 }
             },
             _=>()
@@ -300,14 +302,14 @@ impl ScrollBarLike<ScrollBar> for ScrollBar{
                 }
                 else{
                     view_rect.w
-                };
+                } - self._bar_side_margin*2.;
                 self._view_total = view_total.x;
                 self._view_visible = view_rect.w;
 
                 if self._visible{
                     self._sb_area = self.sb.draw_quad(
                         cx,  
-                        0., 
+                        self._bar_side_margin, 
                         view_rect.h - self.bar_size, 
                         self._scroll_size,
                         self.bar_size, 
@@ -323,14 +325,14 @@ impl ScrollBarLike<ScrollBar> for ScrollBar{
                 }
                 else{
                     view_rect.h
-                };
+                } - self._bar_side_margin*2.;
                 self._view_total = view_total.y;
                 self._view_visible = view_rect.h;
                 if self._visible{
                     self._sb_area = self.sb.draw_quad(
                         cx,   
                         view_rect.w - self.bar_size, 
-                        0., 
+                        self._bar_side_margin, 
                         self.bar_size,
                         self._scroll_size
                     );
