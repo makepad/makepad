@@ -26,10 +26,10 @@ impl Cx{
                 if draw_call.instance_dirty{
                     draw_call.instance_dirty = false;
                     // update the instance buffer data
-                    draw_call.resources.check_attached_vao(csh, &mut self.resources);
+                    draw_call.platform.check_attached_vao(csh, &mut self.platform);
 
-                    self.resources.from_wasm.alloc_array_buffer(
-                        draw_call.resources.inst_vb_id,
+                    self.platform.from_wasm.alloc_array_buffer(
+                        draw_call.platform.inst_vb_id,
                         draw_call.instance.len(),
                         draw_call.instance.as_ptr() as *const f32
                     );
@@ -39,12 +39,12 @@ impl Cx{
                 for tex_id in &draw_call.textures_2d{
                     let tex = &mut self.textures_2d[*tex_id as usize];
                     if tex.dirty{
-                        tex.upload_to_device(&mut self.resources);
+                        tex.upload_to_device(&mut self.platform);
                     }
                 }
-                self.resources.from_wasm.draw_call(
+                self.platform.from_wasm.draw_call(
                     draw_call.shader_id,
-                    draw_call.resources.vao_id,
+                    draw_call.platform.vao_id,
                     &self.uniforms,
                     self.redraw_id as usize, // update once a frame
                     &draw_list.uniforms,
@@ -58,7 +58,7 @@ impl Cx{
     }
 
     pub fn repaint(&mut self){
-        self.resources.from_wasm.clear(self.clear_color.x, self.clear_color.y, self.clear_color.z, self.clear_color.w);
+        self.platform.from_wasm.clear(self.clear_color.x, self.clear_color.y, self.clear_color.z, self.clear_color.w);
         self.prepare_frame();        
         self.exec_draw_list(0);
     }
@@ -69,18 +69,18 @@ impl Cx{
     where F: FnMut(&mut Cx, &mut Event)
     {
         // store our view root somewhere
-        if self.resources.root_view_ptr == 0{
-            self.resources.root_view_ptr = Box::into_raw(
+        if self.platform.root_view_ptr == 0{
+            self.platform.root_view_ptr = Box::into_raw(
                 Box::new(View::<NoScrollBar>{..Style::style(self)})
             ) as u32;
             for _i in 0..10{
-                self.resources.fingers_down.push(false);
+                self.platform.fingers_down.push(false);
             }
         }
-        let root_view = unsafe{&mut *(self.resources.root_view_ptr as *mut View<NoScrollBar>)};
+        let root_view = unsafe{&mut *(self.platform.root_view_ptr as *mut View<NoScrollBar>)};
         
         let mut to_wasm = ToWasm::from(msg);
-        self.resources.from_wasm = FromWasm::new();
+        self.platform.from_wasm = FromWasm::new();
         let mut is_animation_frame = false;
         loop{
             let msg_type = to_wasm.mu32();
@@ -89,9 +89,9 @@ impl Cx{
                     break;
                 },
                 1=>{ // fetch_deps
-                    self.resources.from_wasm.set_document_title(&self.title);
+                    self.platform.from_wasm.set_document_title(&self.title);
                     // compile all the shaders
-                    self.resources.from_wasm.log(&self.title);
+                    self.platform.from_wasm.log(&self.title);
                     
                     // send the UI our deps, overlap with shadercompiler
                     let mut load_deps = Vec::new();
@@ -99,7 +99,7 @@ impl Cx{
                         load_deps.push(font.name.clone());
                     }
                     // other textures, things
-                    self.resources.from_wasm.load_deps(load_deps);
+                    self.platform.from_wasm.load_deps(load_deps);
 
                     self.compile_all_webgl_shaders();
                 },
@@ -118,7 +118,7 @@ impl Cx{
                         let bin_dep = self.get_binary_dep(&font_file);
                         if let Some(mut bin_dep) = bin_dep{
                             if let Err(msg) = self.load_font_from_binary_dep(&mut bin_dep){
-                                self.resources.from_wasm.log(&format!("Error loading font! {}", msg));
+                                self.platform.from_wasm.log(&format!("Error loading font! {}", msg));
                             }
                         }
                     }
@@ -147,7 +147,7 @@ impl Cx{
                     let x = to_wasm.mf32();
                     let y = to_wasm.mf32();
                     let digit = to_wasm.mu32() as usize;
-                    self.resources.fingers_down[digit] = true;
+                    self.platform.fingers_down[digit] = true;
                     self.call_event_handler(&mut event_handler, &mut Event::FingerDown(FingerDownEvent{
                         abs:vec2(x,y), 
                         rel:vec2(x,y),
@@ -160,8 +160,8 @@ impl Cx{
                     let x = to_wasm.mf32();
                     let y = to_wasm.mf32();
                     let digit = to_wasm.mu32() as usize;
-                    self.resources.fingers_down[digit] = false;
-                    if !self.resources.fingers_down.iter().any(|down| *down){
+                    self.platform.fingers_down[digit] = false;
+                    if !self.platform.fingers_down.iter().any(|down| *down){
                         self.down_mouse_cursor = None;
                     }
                     self.call_event_handler(&mut event_handler, &mut Event::FingerUp(FingerUpEvent{
@@ -232,12 +232,12 @@ impl Cx{
 
         // check if we need to send a cursor
         if !self.down_mouse_cursor.is_none(){
-            self.resources.from_wasm.set_mouse_cursor(self.down_mouse_cursor.as_ref().unwrap().clone())
+            self.platform.from_wasm.set_mouse_cursor(self.down_mouse_cursor.as_ref().unwrap().clone())
         }
         else if !self.hover_mouse_cursor.is_none(){
-            self.resources.from_wasm.set_mouse_cursor(self.hover_mouse_cursor.as_ref().unwrap().clone())
+            self.platform.from_wasm.set_mouse_cursor(self.hover_mouse_cursor.as_ref().unwrap().clone())
         }else{
-            self.resources.from_wasm.set_mouse_cursor(MouseCursor::Default);
+            self.platform.from_wasm.set_mouse_cursor(MouseCursor::Default);
         }
 
         if is_animation_frame && self.paint_dirty{
@@ -251,14 +251,14 @@ impl Cx{
         // request animation frame if still need to redraw, or repaint
         // we use request animation frame for that.
         if self.redraw_areas.len() > 0 || self.playing_anim_areas.len()> 0 || self.paint_dirty{
-            self.resources.from_wasm.request_animation_frame();
+            self.platform.from_wasm.request_animation_frame();
         }
 
         // mark the end of the message
-        self.resources.from_wasm.end();
+        self.platform.from_wasm.end();
 
         //return wasm pointer to caller
-        self.resources.from_wasm.wasm_ptr()
+        self.platform.from_wasm.wasm_ptr()
     }
 
     // empty stub
@@ -268,13 +268,16 @@ impl Cx{
     }
 
     pub fn log(&mut self, val:&str){
-        self.resources.from_wasm.log(val)
+        self.platform.from_wasm.log(val)
     }
 
+    pub fn read_file(&mut self, path:&str)->u64{
+        0
+    }
 
     pub fn compile_all_webgl_shaders(&mut self){
         for sh in &self.shaders{
-            let csh = Self::compile_webgl_shader(self.compiled_shaders.len(), &sh, &mut self.resources);
+            let csh = Self::compile_webgl_shader(self.compiled_shaders.len(), &sh, &mut self.platform);
             if let Ok(csh) = csh{
                 self.compiled_shaders.push(CompiledShader{
                     shader_id:self.compiled_shaders.len(),
@@ -282,7 +285,7 @@ impl Cx{
                 });
             }
             else if let Err(err) = csh{
-                self.resources.from_wasm.log(&format!("GOT ERROR: {}", err.msg));
+                self.platform.from_wasm.log(&format!("GOT ERROR: {}", err.msg));
                 self.compiled_shaders.push(
                     CompiledShader{..Default::default()}
                 )
@@ -290,21 +293,21 @@ impl Cx{
         };
     }
 
-    pub fn compile_webgl_shader(shader_id:usize, sh:&Shader, resources:&mut CxResources)->Result<CompiledShader, SlErr>{
+    pub fn compile_webgl_shader(shader_id:usize, sh:&Shader, platform:&mut CxPlatform)->Result<CompiledShader, SlErr>{
         let ash = Self::gl_assemble_shader(sh, GLShaderType::WebGL1)?;
         //let shader_id = self.compiled_shaders.len();
-        resources.from_wasm.compile_webgl_shader(shader_id, &ash);
+        platform.from_wasm.compile_webgl_shader(shader_id, &ash);
 
-        let geom_ib_id = resources.get_free_index_buffer();
-        let geom_vb_id = resources.get_free_index_buffer();
+        let geom_ib_id = platform.get_free_index_buffer();
+        let geom_vb_id = platform.get_free_index_buffer();
 
-        resources.from_wasm.alloc_array_buffer(
+        platform.from_wasm.alloc_array_buffer(
             geom_vb_id,
             sh.geometry_vertices.len(),
             sh.geometry_vertices.as_ptr() as *const f32
         );
 
-        resources.from_wasm.alloc_index_buffer(
+        platform.from_wasm.alloc_index_buffer(
             geom_ib_id,
             sh.geometry_indices.len(),
             sh.geometry_indices.as_ptr() as *const u32
@@ -358,9 +361,9 @@ pub struct CxShaders{
     pub shaders: Vec<Shader>,
 }
 
-// storage buffers for graphics API related resources
+// storage buffers for graphics API related platform
 #[derive(Clone)]
-pub struct CxResources{
+pub struct CxPlatform{
     pub from_wasm:FromWasm,
     pub vertex_buffers:usize,
     pub vertex_buffers_free:Vec<usize>,
@@ -372,9 +375,9 @@ pub struct CxResources{
     pub fingers_down:Vec<bool>
 }
 
-impl Default for CxResources{
-    fn default()->CxResources{
-        CxResources{
+impl Default for CxPlatform{
+    fn default()->CxPlatform{
+        CxPlatform{
             from_wasm:FromWasm::zero(),
             vertex_buffers:1,
             vertex_buffers_free:Vec::new(),
@@ -388,7 +391,7 @@ impl Default for CxResources{
     }
 }
 
-impl CxResources{
+impl CxPlatform{
     pub fn get_free_vertex_buffer(&mut self)->usize{
         if self.vertex_buffers_free.len() > 0{
             self.vertex_buffers_free.pop().unwrap()
@@ -419,34 +422,34 @@ impl CxResources{
 }
 
 #[derive(Clone, Default)]
-pub struct DrawListResources{
+pub struct DrawListPlatform{
 }
 
 #[derive(Default,Clone)]
-pub struct DrawCallResources{
+pub struct DrawCallPlatform{
     pub resource_shader_id:Option<usize>,
     pub vao_id:usize,
     pub inst_vb_id:usize
 }
 
-impl DrawCallResources{
+impl DrawCallPlatform{
 
-    pub fn check_attached_vao(&mut self, csh:&CompiledShader, resources:&mut CxResources){
+    pub fn check_attached_vao(&mut self, csh:&CompiledShader, platform:&mut CxPlatform){
         if self.resource_shader_id.is_none() || self.resource_shader_id.unwrap() != csh.shader_id{
-            self.free(resources); // dont reuse vaos accross shader ids
+            self.free(platform); // dont reuse vaos accross shader ids
             
             // create the VAO
             self.resource_shader_id = Some(csh.shader_id);
 
             // get a free vao ID
-            self.vao_id = resources.get_free_vao();
-            self.inst_vb_id = resources.get_free_index_buffer();
+            self.vao_id = platform.get_free_vao();
+            self.inst_vb_id = platform.get_free_index_buffer();
 
-            resources.from_wasm.alloc_array_buffer(
+            platform.from_wasm.alloc_array_buffer(
                 self.inst_vb_id,0,0 as *const f32
             );
 
-            resources.from_wasm.alloc_vao(
+            platform.from_wasm.alloc_vao(
                 csh.shader_id,
                 self.vao_id,
                 csh.geom_ib_id,
@@ -456,13 +459,13 @@ impl DrawCallResources{
         }
     }
 
-    fn free(&mut self, resources:&mut CxResources){
+    fn free(&mut self, platform:&mut CxPlatform){
         
         if self.vao_id != 0{
-            resources.vaos_free.push(self.vao_id);
+            platform.vaos_free.push(self.vao_id);
         }
         if self.inst_vb_id != 0{
-            resources.vertex_buffers_free.push(self.inst_vb_id);
+            platform.vertex_buffers_free.push(self.inst_vb_id);
         }
         self.vao_id = 0;
         self.inst_vb_id = 0;
@@ -493,8 +496,8 @@ impl Texture2D{
         self.dirty = true;
     }
 
-    pub fn upload_to_device(&mut self, resources:&mut CxResources){
-        resources.from_wasm.alloc_texture(self.texture_id, self.width, self.height, &self.image);
+    pub fn upload_to_device(&mut self, platform:&mut CxPlatform){
+        platform.from_wasm.alloc_texture(self.texture_id, self.width, self.height, &self.image);
         self.dirty = false;
     }
 }

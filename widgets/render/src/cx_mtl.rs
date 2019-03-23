@@ -8,10 +8,6 @@ use objc::{msg_send, sel, sel_impl};
 use objc::runtime::YES;
 use metal::*;
 
-use std::io::prelude::*;
-use std::fs::File;
-use std::io;
-
 use time::precise_time_ns;
 use crate::cx_cocoa::*;
 use crate::cx::*;
@@ -30,7 +26,7 @@ impl Cx{
             else{
                 let draw_list = &mut self.draw_lists[draw_list_id];
                 draw_list.set_clipping_uniforms();
-                draw_list.resources.uni_dl.update_with_f32_data(device, &draw_list.uniforms);
+                draw_list.platform.uni_dl.update_with_f32_data(device, &draw_list.uniforms);
                 let draw_call = &mut draw_list.draw_calls[draw_call_id];
                 let sh = &self.shaders[draw_call.shader_id];
                 let shc = &self.compiled_shaders[draw_call.shader_id];
@@ -38,8 +34,8 @@ impl Cx{
                 if draw_call.instance_dirty{
                     draw_call.instance_dirty = false;
                     // update the instance buffer data
-                    draw_call.resources.inst_vbuf.update_with_f32_data(device, &draw_call.instance);
-                    draw_call.resources.uni_dr.update_with_f32_data(device, &draw_call.uniforms);
+                    draw_call.platform.inst_vbuf.update_with_f32_data(device, &draw_call.instance);
+                    draw_call.platform.uni_dr.update_with_f32_data(device, &draw_call.uniforms);
                 }
 
                 // lets verify our instance_offset is not disaligned
@@ -49,20 +45,20 @@ impl Cx{
                     encoder.set_render_pipeline_state(pipeline_state);
                     if let Some(buf) = &shc.geom_vbuf.multi_buffer_read().buffer{encoder.set_vertex_buffer(0, Some(&buf), 0);}
                     else{println!("Drawing error: geom_vbuf None")}
-                    if let Some(buf) = &draw_call.resources.inst_vbuf.multi_buffer_read().buffer{encoder.set_vertex_buffer(1, Some(&buf), 0);}
+                    if let Some(buf) = &draw_call.platform.inst_vbuf.multi_buffer_read().buffer{encoder.set_vertex_buffer(1, Some(&buf), 0);}
                     else{println!("Drawing error: inst_vbuf None")}
-                    if let Some(buf) = &self.resources.uni_cx.multi_buffer_read().buffer{encoder.set_vertex_buffer(2, Some(&buf), 0);}
+                    if let Some(buf) = &self.platform.uni_cx.multi_buffer_read().buffer{encoder.set_vertex_buffer(2, Some(&buf), 0);}
                     else{println!("Drawing error: uni_cx None")}
-                    if let Some(buf) = &draw_list.resources.uni_dl.multi_buffer_read().buffer{encoder.set_vertex_buffer(3, Some(&buf), 0);}
+                    if let Some(buf) = &draw_list.platform.uni_dl.multi_buffer_read().buffer{encoder.set_vertex_buffer(3, Some(&buf), 0);}
                     else{println!("Drawing error: uni_dl None")}
-                    if let Some(buf) = &draw_call.resources.uni_dr.multi_buffer_read().buffer{encoder.set_vertex_buffer(4, Some(&buf), 0);}
+                    if let Some(buf) = &draw_call.platform.uni_dr.multi_buffer_read().buffer{encoder.set_vertex_buffer(4, Some(&buf), 0);}
                     else{println!("Drawing error: uni_dr None")}
 
-                    if let Some(buf) = &self.resources.uni_cx.multi_buffer_read().buffer{encoder.set_fragment_buffer(0, Some(&buf), 0);}
+                    if let Some(buf) = &self.platform.uni_cx.multi_buffer_read().buffer{encoder.set_fragment_buffer(0, Some(&buf), 0);}
                     else{println!("Drawing error: uni_cx None")}
-                    if let Some(buf) = &draw_list.resources.uni_dl.multi_buffer_read().buffer{encoder.set_fragment_buffer(1, Some(&buf), 0);}
+                    if let Some(buf) = &draw_list.platform.uni_dl.multi_buffer_read().buffer{encoder.set_fragment_buffer(1, Some(&buf), 0);}
                     else{println!("Drawing error: uni_dl None")}
-                    if let Some(buf) = &draw_call.resources.uni_dr.multi_buffer_read().buffer{encoder.set_fragment_buffer(2, Some(&buf), 0);}
+                    if let Some(buf) = &draw_call.platform.uni_dr.multi_buffer_read().buffer{encoder.set_fragment_buffer(2, Some(&buf), 0);}
                     else{println!("Drawing error: uni_dr None")}
 
                     // lets set our textures
@@ -115,7 +111,7 @@ impl Cx{
             let parallel_encoder = command_buffer.new_parallel_render_command_encoder(&render_pass_descriptor);
             let encoder = parallel_encoder.render_command_encoder();
 
-            self.resources.uni_cx.update_with_f32_data(&device, &self.uniforms);
+            self.platform.uni_cx.update_with_f32_data(&device, &self.uniforms);
 
             // ok now we should call our render thing
             self.exec_draw_list(0, &device, encoder);
@@ -251,6 +247,8 @@ impl Cx{
                 self.call_draw_event(&mut event_handler, &mut root_view);
                 self.paint_dirty = true;
             }
+
+            self.process_desktop_file_read_requests(&mut event_handler);
 
             // set a cursor
             if !self.down_mouse_cursor.is_none(){
@@ -545,57 +543,22 @@ impl Cx{
             })
         }
     }
-
-
-    pub fn load_binary_deps_from_file(&mut self){
-        let len = self.fonts.len();
-        for i in 0..len{
-            let resource_name = &self.fonts[i].name.clone();
-            // lets turn a file into a binary dep
-            let file_result = File::open(&resource_name);
-            if let Ok(mut file) = file_result{
-                let mut buffer = Vec::new();
-                // read the whole file
-                if file.read_to_end(&mut buffer).is_ok(){
-                    // store it in a bindep
-                    let mut bin_dep = BinaryDep::new_from_vec(resource_name.clone(), &buffer);
-                    let _err = self.load_font_from_binary_dep(&mut bin_dep);
-
-                    //     println!("Error loading font {} ", resource_name);
-                    //};
-                }
-            }
-            else{
-                println!("Error loading font {} ", resource_name);
-            }
-        }
-    }
-
-    pub fn process_to_wasm<F>(&mut self, _msg:u32, mut _event_handler:F)->u32{
-        0
-    }
-
-    pub fn log(&mut self, val:&str){
-        let mut stdout = io::stdout();
-        let _e = stdout.write(val.as_bytes());
-        let _e = stdout.flush();
-    }
-
 }
 
 #[derive(Clone, Default)]
-pub struct CxResources{
+pub struct CxPlatform{
     pub uni_cx:MetalBuffer,
-    pub cocoa_window:Option<id>
+    pub cocoa_window:Option<id>,
+    pub desktop:CxDesktop
 }
 
 #[derive(Clone, Default)]
-pub struct DrawListResources{
+pub struct DrawListPlatform{
      pub uni_dl:MetalBuffer
 }
 
 #[derive(Default,Clone,Debug)]
-pub struct DrawCallResources{
+pub struct DrawCallPlatform{
     pub uni_dr:MetalBuffer,
     pub inst_vbuf:MetalBuffer
 }

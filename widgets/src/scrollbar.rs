@@ -297,7 +297,7 @@ impl ScrollBarLike<ScrollBar> for ScrollBar{
         match self.axis{
              Axis::Horizontal=>{
                 self._visible = view_total.x > view_rect.w;
-                self._scroll_size = if view_total.y > view_rect.h{
+                self._scroll_size = if view_total.y > view_rect.h + 0.05{
                     view_rect.w - self.bar_size
                 }
                 else{
@@ -320,7 +320,7 @@ impl ScrollBarLike<ScrollBar> for ScrollBar{
              Axis::Vertical=>{
                 // compute if we need a horizontal one
                 self._visible = view_total.y > view_rect.h;
-                self._scroll_size = if view_total.x > view_rect.w{
+                self._scroll_size = if view_total.x > view_rect.w +0.05{
                     view_rect.h - self.bar_size
                 }
                 else{

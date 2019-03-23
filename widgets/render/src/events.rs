@@ -90,6 +90,18 @@ pub struct RedrawEvent{
 }
 
 #[derive(Clone, Debug, PartialEq)]
+pub struct FileReadEvent{
+    pub id:u64,
+    pub data:Result<Vec<u8>, String>
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct FileWriteEvent{
+    id:u64,
+    error:Option<String>
+}
+
+#[derive(Clone, Debug, PartialEq)]
 pub enum Event{
     None,
     Construct,
@@ -104,7 +116,9 @@ pub enum Event{
     FingerMove(FingerMoveEvent),
     FingerHover(FingerHoverEvent),
     FingerUp(FingerUpEvent),
-    FingerScroll(FingerScrollEvent)
+    FingerScroll(FingerScrollEvent),
+    FileRead(FileReadEvent),
+    FileWrite(FileWriteEvent)
 }
 
 impl Default for Event{

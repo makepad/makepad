@@ -34,19 +34,19 @@ impl Cx{
                 let csh = &self.compiled_shaders[draw_call.shader_id];
 
                 unsafe{
-                    draw_call.resources.check_attached_vao(csh);
+                    draw_call.platform.check_attached_vao(csh);
 
                     if draw_call.instance_dirty{
                         draw_call.instance_dirty = false;
                         // update the instance buffer data
-                        gl::BindBuffer(gl::ARRAY_BUFFER, draw_call.resources.vb);
+                        gl::BindBuffer(gl::ARRAY_BUFFER, draw_call.platform.vb);
                         gl::BufferData(gl::ARRAY_BUFFER,
                                         (draw_call.instance.len() * mem::size_of::<f32>()) as gl::types::GLsizeiptr,
                                         draw_call.instance.as_ptr() as *const _, gl::STATIC_DRAW);
                    }
 
                     gl::UseProgram(csh.program);
-                    gl::BindVertexArray(draw_call.resources.vao);
+                    gl::BindVertexArray(draw_call.platform.vao);
                     let instances = draw_call.instance.len() / csh.instance_slots;
                     let indices = sh.geometry_indices.len();
 
@@ -94,7 +94,7 @@ impl Cx{
     where F: FnMut(&mut Cx, &mut Event),
     { 
         for _i in 0..10{
-             self.resources.fingers_down.push(false);
+             self.platform.fingers_down.push(false);
         }
 
         let gl_request = GlRequest::Latest;
@@ -207,13 +207,13 @@ impl Cx{
 
     fn make_mouse_move_events(&self)->Vec<Event>{
         let mut out = Vec::new();
-        for i in 0..self.resources.fingers_down.len(){
-            let down = self.resources.fingers_down[i];
+        for i in 0..self.platform.fingers_down.len(){
+            let down = self.platform.fingers_down[i];
             if down{
                 out.push(Event::FingerMove(FingerMoveEvent{
-                    abs:self.resources.last_mouse_pos,
+                    abs:self.platform.last_mouse_pos,
                     digit:i,
-                    rel:self.resources.last_mouse_pos,
+                    rel:self.platform.last_mouse_pos,
                     abs_start:vec2(0.,0.),
                     rel_start:vec2(0.,0.),
                     is_over:false,
@@ -273,15 +273,15 @@ impl Cx{
         match winit_event{
             winit::Event::DeviceEvent{ event, .. } => match event {
                 winit::DeviceEvent::MouseMotion{delta,..}=>{
-                    if self.resources.is_cursor_in_window{
+                    if self.platform.is_cursor_in_window{
                         return vec![Event::None]
                     }
-                    self.resources.last_mouse_pos.x += delta.0 as f32;//position.x as f32;
-                    self.resources.last_mouse_pos.y += delta.1 as f32;//position.y as f32;
+                    self.platform.last_mouse_pos.x += delta.0 as f32;//position.x as f32;
+                    self.platform.last_mouse_pos.y += delta.1 as f32;//position.y as f32;
                     
                     return self.make_mouse_move_events();/*vec![Event::FingerHover(FingerHoverEvent{
-                        x:self.resources.last_x,
-                        y:self.resources.last_y,
+                        x:self.platform.last_x,
+                        y:self.platform.last_y,
                         handled:false,
                         hover_state:HoverState::Over
                     })]*/
@@ -292,8 +292,8 @@ impl Cx{
             winit::Event::WindowEvent{ event, .. } => match event {
                 winit::WindowEvent::MouseWheel{delta, ..}=>{
                     return vec![Event::FingerScroll(FingerScrollEvent{
-                        abs:self.resources.last_mouse_pos,
-                        rel:self.resources.last_mouse_pos,
+                        abs:self.platform.last_mouse_pos,
+                        rel:self.platform.last_mouse_pos,
                         handled:false,
                         scroll:vec2(
                             match delta{
@@ -308,31 +308,31 @@ impl Cx{
                     })]
                 },
                 winit::WindowEvent::CursorMoved{position,..}=>{
-                    self.resources.is_cursor_in_window = true;
-                    self.resources.last_mouse_pos = vec2(position.x as f32, position.y as f32);
+                    self.platform.is_cursor_in_window = true;
+                    self.platform.last_mouse_pos = vec2(position.x as f32, position.y as f32);
                     self.hover_mouse_cursor = None;
                     let mut events = self.make_mouse_move_events();
                     events.push(Event::FingerHover(FingerHoverEvent{
-                        abs:self.resources.last_mouse_pos,
-                        rel:self.resources.last_mouse_pos,
+                        abs:self.platform.last_mouse_pos,
+                        rel:self.platform.last_mouse_pos,
                         handled:false,
                         hover_state:HoverState::Over
                     }));
                     return events;
                 },
                 winit::WindowEvent::CursorEntered{..}=>{
-                    self.resources.is_cursor_in_window = true;
+                    self.platform.is_cursor_in_window = true;
                 },
                 winit::WindowEvent::Focused(state)=>{
                     return vec![Event::AppFocus(state)]
                 },
                 winit::WindowEvent::CursorLeft{..}=>{
-                    self.resources.is_cursor_in_window = false;
+                    self.platform.is_cursor_in_window = false;
                     self.hover_mouse_cursor = None;
                    // fire a hover out on our last known mouse position
                     return vec![Event::FingerHover(FingerHoverEvent{
-                        abs:self.resources.last_mouse_pos,
-                        rel:self.resources.last_mouse_pos,
+                        abs:self.platform.last_mouse_pos,
+                        rel:self.platform.last_mouse_pos,
                         handled:false,
                         hover_state:HoverState::Out
                     })]
@@ -350,10 +350,10 @@ impl Cx{
                             if digit >= self.captured_fingers.len(){
                                 digit = 0;
                             };
-                            self.resources.fingers_down[digit] = true;
+                            self.platform.fingers_down[digit] = true;
                             return vec![Event::FingerDown(FingerDownEvent{
-                                abs:self.resources.last_mouse_pos,
-                                rel:self.resources.last_mouse_pos,
+                                abs:self.platform.last_mouse_pos,
+                                rel:self.platform.last_mouse_pos,
                                 handled:false,
                                 digit:digit,
                                 is_touch:false,
@@ -370,14 +370,14 @@ impl Cx{
                             if digit >= self.captured_fingers.len(){
                                 digit = 0;
                             };
-                            self.resources.fingers_down[digit] = false;
+                            self.platform.fingers_down[digit] = false;
 
-                            if !self.resources.fingers_down.iter().any(|down| *down){
+                            if !self.platform.fingers_down.iter().any(|down| *down){
                                 self.down_mouse_cursor = None;
                             }
                             return vec![Event::FingerUp(FingerUpEvent{
-                                abs:self.resources.last_mouse_pos,
-                                rel:self.resources.last_mouse_pos,
+                                abs:self.platform.last_mouse_pos,
+                                rel:self.platform.last_mouse_pos,
                                 abs_start:vec2(0.,0.),
                                 rel_start:vec2(0.,0.),
                                 digit:digit,
@@ -412,39 +412,6 @@ impl Cx{
         vec![Event::None]
     }
 
-    pub fn load_binary_deps_from_file(&mut self){
-        let len = self.fonts.len();
-        for i in 0..len{
-            let resource_name = &self.fonts[i].name.clone();
-            // lets turn a file into a binary dep
-            let file_result = File::open(&resource_name);
-            if let Ok(mut file) = file_result{
-                let mut buffer = Vec::new();
-                // read the whole file
-                if file.read_to_end(&mut buffer).is_ok(){
-                    // store it in a bindep
-                    let mut bin_dep = BinaryDep::new_from_vec(resource_name.clone(), &buffer);
-                    let _err = self.load_font_from_binary_dep(&mut bin_dep);
-
-                    //     println!("Error loading font {} ", resource_name);
-                    //};
-                }
-            }
-            else{
-                println!("Error loading font {} ", resource_name);
-            }
-        }
-    }
-
-    pub fn process_to_wasm<F>(&mut self, _msg:u32, mut _event_handler:F)->u32{
-        0
-    }
-
-    pub fn log(&mut self, val:&str){
-        let mut stdout = io::stdout();
-        let _e = stdout.write(val.as_bytes());
-        let _e = stdout.flush();
-    }
 
     pub fn compile_all_ogl_shaders(&mut self){
         for sh in &self.shaders{
@@ -761,25 +728,26 @@ pub struct CxShaders{
 }
 
 #[derive(Clone, Default)]
-pub struct CxResources{
+pub struct CxPlatform{
     pub fingers_down:Vec<bool>,
     pub last_mouse_pos:Vec2,
-    pub is_cursor_in_window:bool
+    pub is_cursor_in_window:bool,
+    pub desktop:CxDesktop
 }
 
 #[derive(Clone, Default)]
-pub struct DrawListResources{
+pub struct DrawListPlatform{
 }
 
 
 #[derive(Default,Clone)]
-pub struct DrawCallResources{
+pub struct DrawCallPlatform{
     pub resource_shader_id:Option<usize>,
     pub vao:gl::types::GLuint,
     pub vb:gl::types::GLuint
 }
 
-impl DrawCallResources{
+impl DrawCallPlatform{
 
     pub fn check_attached_vao(&mut self, csh:&CompiledShader){
         if self.resource_shader_id.is_none() || self.resource_shader_id.unwrap() != csh.shader_id{

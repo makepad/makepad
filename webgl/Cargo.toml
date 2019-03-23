@@ -14,6 +14,7 @@ opt-level = 'z'
 
 [dependencies]
 rand = "*"
+syn = "*"
 
 [dependencies.widgets]
 path="../widgets"

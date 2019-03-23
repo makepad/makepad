@@ -16,6 +16,9 @@ mod cx_gl;
 #[cfg(feature = "mtl")]
 mod cx_cocoa; 
 
+#[cfg(any(feature = "ogl", feature="mtl"))]
+mod cx_desktop; 
+
 // shared modules
 mod cx; 
 mod cx_turtle;

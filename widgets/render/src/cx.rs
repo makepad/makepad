@@ -26,6 +26,9 @@ pub use crate::cx_webgl::*;
 #[cfg(any(feature = "webgl", feature = "ogl"))]
 pub use crate::cx_gl::*; 
 
+#[cfg(any(feature = "ogl", feature="mtl"))]
+pub use crate::cx_desktop::*; 
+
 #[derive(Clone)]
 pub struct Cx{
     pub title:String,
@@ -68,7 +71,7 @@ pub struct Cx{
     pub playing_anim_areas:Vec<AnimArea>,
     pub ended_anim_areas:Vec<AnimArea>,
 
-    pub resources:CxResources,
+    pub platform:CxPlatform,
 
     pub style_values:BTreeMap<String, StyleValue>,
 
@@ -127,7 +130,7 @@ impl Default for Cx{
             playing_anim_areas:Vec::new(),
             ended_anim_areas:Vec::new(),
 
-            resources:CxResources{..Default::default()},
+            platform:CxPlatform{..Default::default()},
 
             binary_deps:Vec::new()
         }
@@ -297,7 +300,7 @@ impl Cx{
                 current_instance_offset:0,
                 need_uniforms_now:true,
                 instance_dirty:true,
-                resources:DrawCallResources{..Default::default()}
+                platform:DrawCallPlatform{..Default::default()}
             });
             let dc = &mut draw_list.draw_calls[draw_call_id];
             return dc.get_current_area();
@@ -480,7 +483,7 @@ pub struct DrawCall{
     pub uniforms:Vec<f32>,  // draw uniforms
     pub textures_2d:Vec<u32>,
     pub instance_dirty:bool,
-    pub resources:DrawCallResources,
+    pub platform:DrawCallPlatform,
     pub need_uniforms_now:bool
 }
 
@@ -509,7 +512,7 @@ pub struct DrawList{
     pub draw_calls:Vec<DrawCall>,
     pub draw_calls_len: usize,
     pub uniforms:Vec<f32>, // cmdlist uniforms
-    pub resources:DrawListResources,
+    pub platform:DrawListPlatform,
     pub rect:Rect,
     pub clipped:bool
 }

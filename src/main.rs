@@ -13,6 +13,7 @@ struct App{
     dock:Element<Dock<Panel>>,
     ok:Elements<Button, u64>,
     file_tree:Element<FileTree>,
+    tree_load_id:u64,
     quad:Quad
 }
  
@@ -38,6 +39,7 @@ impl Style for App{
             file_tree:Element::new(FileTree{
                 ..Style::style(cx)
             }),
+            tree_load_id:0,
             dock:Element::new(Dock{
                 dock_items:Some(DockItem::Splitter{
                     axis:Axis::Vertical,
@@ -92,6 +94,18 @@ impl Style for App{
 
 impl App{
     fn handle_app(&mut self, cx:&mut Cx, event:&mut Event){
+        match event{
+            Event::Construct=>{
+                self.tree_load_id = cx.read_file("files.json");
+            },
+            Event::FileRead(fr)=>{
+                if fr.id == self.tree_load_id{
+                    // do something with the result.
+                }   
+            }
+            _=>()
+        }
+
         self.view.handle_scroll_bars(cx, event);
         
         if let Some(dock) = self.dock.get(){
@@ -126,7 +140,10 @@ impl App{
 
     fn draw_app(&mut self, cx:&mut Cx){
         
-        
+        use syn::{Expr, Result};
+        let code = "assert_eq!(u8::max_value(), 255)";
+        let expr = syn::parse_str::<Expr>(code);
+
         //cx.debug_area = Area::Instance(InstanceArea{draw_list_id:0,draw_call_id:0,instance_offset:0,instance_count:0,redraw_id:0});
 
         self.view.begin_view(cx, &Layout{..Default::default()});
