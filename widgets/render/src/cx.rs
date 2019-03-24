@@ -585,69 +585,58 @@ pub trait Style{
 #[derive(Clone)]
 pub struct BinaryDep{
     pub name:String,
-    buffer: *const u8,
-    pub parse:isize,
-    pub length:isize
+    pub vec_obj:Vec<u8>,
+    pub parse:isize
 }
 
 impl BinaryDep{
-    pub fn new_from_wasm(name:String, wasm_ptr:u32)->BinaryDep{
+    pub fn new_from_vec(name:String, vec_obj:Vec<u8>)->BinaryDep{
         BinaryDep{
             name:name, 
-            buffer:wasm_ptr as *const u8,
-            parse:8,
-            length:unsafe{(wasm_ptr as *const u64).read() as isize}
-        }
-    }
-
-    pub fn new_from_vec(name:String, vec_ptr:&Vec<u8>)->BinaryDep{
-        BinaryDep{
-            name:name, 
-            buffer:vec_ptr.as_ptr() as *const u8,
-            parse:0,
-            length:vec_ptr.len() as isize
+            vec_obj:vec_obj,
+            parse:0
         }
     }
 
     pub fn u8(&mut self)->Result<u8, String>{
-        if self.parse + 1 > self.length{
+        if self.parse + 1 > self.vec_obj.len() as isize{
             return Err(format!("Eof on u8 file {} offset {}", self.name, self.parse))
         }
         unsafe{
-            let ret = self.buffer.offset(self.parse).read();
+            let ret = (self.vec_obj.as_ptr().offset(self.parse) as *const u8).read();
             self.parse += 1;
             Ok(ret)
         }
     }
 
     pub fn u16(&mut self)->Result<u16, String>{
-        if self.parse+2 > self.length{
+        if self.parse+2 > self.vec_obj.len() as isize{
             return Err(format!("Eof on u16 file {} offset {}", self.name, self.parse))
         }
         unsafe{
-            let ret = (self.buffer.offset(self.parse) as *const u16).read();
+            let ret = (self.vec_obj.as_ptr().offset(self.parse) as *const u16).read();
             self.parse += 2;
             Ok(ret)
         }
     }
 
     pub fn u32(&mut self)->Result<u32, String>{
-        if self.parse+4 > self.length{
+        if self.parse+4 > self.vec_obj.len() as isize{
             return Err(format!("Eof on u32 file {} offset {}", self.name, self.parse))
         }
         unsafe{
-            let ret = (self.buffer.offset(self.parse) as *const u32).read();
+            let ret = (self.vec_obj.as_ptr().offset(self.parse) as *const u32).read();
             self.parse += 4;
             Ok(ret)
         }
     }
 
     pub fn f32(&mut self)->Result<f32, String>{
-        if self.parse+4 > self.length{
+        if self.parse+4 > self.vec_obj.len() as isize{
             return Err(format!("Eof on f32 file {} offset {}", self.name, self.parse))
         }
         unsafe{
-            let ret = (self.buffer.offset(self.parse) as *const f32).read();
+            let ret = (self.vec_obj.as_ptr().offset(self.parse) as *const f32).read();
             self.parse += 4;
             Ok(ret)
         }
@@ -655,12 +644,12 @@ impl BinaryDep{
 
     pub fn read(&mut self, out:&mut [u8])->Result<usize, String>{
         let len = out.len();
-        if self.parse + len as isize > self.length{
+        if self.parse + len as isize > self.vec_obj.len() as isize{
              return Err(format!("Eof on read file {} len {} offset {}", self.name, out.len(), self.parse));
         };
         unsafe{
             for i in 0..len{
-                out[i] = self.buffer.offset(self.parse + i as isize).read();
+                out[i] = self.vec_obj[self.parse as usize + i];
             };
             self.parse += len as isize;
         }
@@ -712,9 +701,9 @@ macro_rules! main_app {
         }
 
         #[export_name = "process_to_wasm"]
-        pub unsafe extern "C" fn process_to_wasm(appcx:u32, msg:u32)->u32{
+        pub unsafe extern "C" fn process_to_wasm(appcx:u32, msg_bytes:u32)->u32{
             let appcx = &*(appcx as *mut (*mut $app,*mut Cx));
-            (*appcx.1).process_to_wasm(msg,|cx, mut event|{
+            (*appcx.1).process_to_wasm(msg_bytes,|cx, mut event|{
                 if let Event::Draw = event{return (*appcx.0).draw_app(cx);}
                 (*appcx.0).handle_app(cx, &mut event);
             })

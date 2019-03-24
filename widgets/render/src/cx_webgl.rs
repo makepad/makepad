@@ -107,8 +107,10 @@ impl Cx{
                     let len = to_wasm.mu32();
                     for _i in 0..len{
                         let name = to_wasm.parse_string();
-                        let ptr = to_wasm.mu32();
-                        self.binary_deps.push(BinaryDep::new_from_wasm(name, ptr))
+                        let vec_ptr = to_wasm.mu32() as *mut u8;
+                        let vec_len = to_wasm.mu32() as usize;
+                        let vec_rec = unsafe{Vec::<u8>::from_raw_parts(vec_ptr, vec_len, vec_len)};
+                        self.binary_deps.push(BinaryDep::new_from_vec(name, vec_rec))
                     }
                     
                     // lets load the fonts from binary deps
@@ -218,6 +220,20 @@ impl Cx{
                         handled:false,
                         hover_state:HoverState::Out
                     }));
+                },
+                12=>{ // file read data
+                    let id = to_wasm.mu32();
+                    let buf_ptr = to_wasm.mu32() as *mut u8;
+                    let buf_len = to_wasm.mu32() as usize;
+                    let vec_buf = unsafe{Vec::<u8>::from_raw_parts(buf_ptr, buf_len, buf_len)};
+
+                    self.call_event_handler(&mut event_handler, &mut Event::FileRead(FileReadEvent{
+                        id: id as u64,
+                        data:Ok(vec_buf)
+                    }));
+                },
+                13=>{ // file read error
+
                 }
                 _=>{
                     panic!("Message unknown")
@@ -272,7 +288,10 @@ impl Cx{
     }
 
     pub fn read_file(&mut self, path:&str)->u64{
-        0
+        let id = self.platform.file_read_id;
+        self.platform.from_wasm.read_file(id as u32, path);
+        self.platform.file_read_id += 1;
+        id
     }
 
     pub fn compile_all_webgl_shaders(&mut self){
@@ -372,7 +391,8 @@ pub struct CxPlatform{
     pub vaos:usize,
     pub vaos_free:Vec<usize>,
     pub root_view_ptr:u32,
-    pub fingers_down:Vec<bool>
+    pub fingers_down:Vec<bool>,
+    pub file_read_id:u64,
 }
 
 impl Default for CxPlatform{
@@ -386,6 +406,7 @@ impl Default for CxPlatform{
             vaos:1,
             vaos_free:Vec::new(),
             root_view_ptr:0,
+            file_read_id:1,
             fingers_down:Vec::new()
         }
     }
@@ -725,7 +746,7 @@ impl FromWasm{
         self.fit(1);
         self.mu32(11);
         self.add_string(title);
-   }
+    }
 
     pub fn set_mouse_cursor(&mut self, mouse_cursor:MouseCursor){
         self.fit(2);
@@ -770,6 +791,13 @@ impl FromWasm{
 
         };
         self.mu32(cursor_id);
+    }
+
+    pub fn read_file(&mut self, id:u32, path:&str){
+        self.fit(2);
+        self.mu32(13);
+        self.mu32(id);
+        self.add_string(path);
     }
 
     fn add_string(&mut self, msg:&str){
@@ -856,18 +884,27 @@ impl ToWasm{
     }
 }
 
+// for use with sending wasm vec data
+#[export_name = "alloc_wasm_vec"]
+pub unsafe extern "C" fn alloc_wasm_vec(bytes:u32)->u32{
+    let mut vec = Vec::<u8>::with_capacity(bytes as usize);
+    vec.resize(bytes as usize, 0);
+    let ptr = vec.as_mut_ptr();
+    mem::forget(vec);
+    return ptr as u32
+}
 
 // for use with message passing
-#[export_name = "alloc_wasm_buffer"]
-pub unsafe extern "C" fn alloc_wasm_buffer(bytes:u32)->u32{
+#[export_name = "alloc_wasm_message"]
+pub unsafe extern "C" fn alloc_wasm_message(bytes:u32)->u32{
     let buf = std::alloc::alloc(std::alloc::Layout::from_size_align(bytes as usize, mem::align_of::<u64>()).unwrap()) as u32;
     (buf as *mut u64).write(bytes as u64);
     buf as u32
 }
 
 // for use with message passing
-#[export_name = "realloc_wasm_buffer"]
-pub unsafe extern "C" fn realloc_wasm_buffer(in_buf:u32, new_bytes:u32)->u32{
+#[export_name = "realloc_wasm_message"]
+pub unsafe extern "C" fn realloc_wasm_message(in_buf:u32, new_bytes:u32)->u32{
     let old_buf = in_buf as *mut u8;
     let old_bytes = (old_buf as *mut u64).read() as usize;
     let new_buf = alloc::alloc(alloc::Layout::from_size_align(new_bytes as usize, mem::align_of::<u64>()).unwrap()) as *mut u8;
@@ -877,8 +914,8 @@ pub unsafe extern "C" fn realloc_wasm_buffer(in_buf:u32, new_bytes:u32)->u32{
     new_buf as u32
 }
 
-#[export_name = "dealloc_wasm_buffer"]
-pub unsafe extern "C" fn dealloc_wasm_buffer(in_buf:u32){
+#[export_name = "dealloc_wasm_message"]
+pub unsafe extern "C" fn dealloc_wasm_message(in_buf:u32){
     let buf = in_buf as *mut u8;
     let bytes = buf.read() as usize;
     std::alloc::dealloc(buf as *mut u8, std::alloc::Layout::from_size_align(bytes as usize, mem::align_of::<u64>()).unwrap());

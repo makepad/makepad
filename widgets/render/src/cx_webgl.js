@@ -11,7 +11,7 @@
 			this.slots = 512;
 			this.used = 2; // skip 8 byte header
 			// lets write 
-			this.pointer = this.exports.alloc_wasm_buffer(this.slots * 4);
+			this.pointer = this.exports.alloc_wasm_message(this.slots * 4);
 			this.update_refs();
 		}
 
@@ -27,7 +27,7 @@
 				let new_slots = Math.max(this.used + slots, this.slots * 2) // exp alloc algo
 				if(new_slots&1)new_slots++; // float64 align it
 				let new_bytes = new_slots * 4;
-				this.pointer = this.exports.realloc_wasm_buffer(this.pointer, new_bytes); // by
+				this.pointer = this.exports.realloc_wasm_message(this.pointer, new_bytes); // by
 				this.mf32 = new Float32Array(this.exports.memory.buffer, this.pointer, new_slots);
 				this.mu32 = new Uint32Array(this.exports.memory.buffer, this.pointer, new_slots);
 				this.mf64 =  new Float64Array(this.exports.memory.buffer, this.pointer, new_slots>>1);
@@ -58,8 +58,9 @@
 			for(let i = 0; i < deps.length; i++){
 				let dep = deps[i];
 				this.send_string(dep.name);
-				pos = this.fit(1);
-				this.mu32[pos++] = dep.ptr
+				pos = this.fit(2);
+				this.mu32[pos++] = dep.vec_ptr
+				this.mu32[pos++] = dep.vec_len
 			}
 		}
 
@@ -139,6 +140,14 @@
 			this.mf32[pos++] = y
 		}
 
+		read_file_data(id, buf_ptr, buf_len){
+			let pos = this.fit(4);
+			this.mu32[pos++] = 12;
+			this.mu32[pos++] = id;
+			this.mu32[pos++] = buf_ptr;
+			this.mu32[pos++] = buf_len;
+		}
+
 		end(){
 			let pos = this.fit(1);
 			this.mu32[pos] = 0;
@@ -184,12 +193,13 @@
 				for(let i = 0; i < results.length; i++){
 					var result = results[i]
 					// allocate pointer, do +8 because of the u64 length at the head of the buffer
-					let output_ptr = this.exports.alloc_wasm_buffer(result.buffer.byteLength+8);
-					let array = new Uint32Array(this.memory.buffer, output_ptr);
-					this.copy_to_wasm(result.buffer, output_ptr);
+					let vec_len = result.buffer.byteLength;
+					let vec_ptr = this.exports.alloc_wasm_vec(vec_len);
+					this.copy_to_wasm(result.buffer, vec_ptr);
 					deps.push({
 						name:result.name,
-						ptr:output_ptr
+						vec_ptr:vec_ptr,
+						vec_len:vec_len
 					});
 				}
 				// pass wasm the deps
@@ -229,7 +239,7 @@
 				}
 			}
 			// destroy from_wasm_ptr object
-			this.exports.dealloc_wasm_buffer(from_wasm_ptr);
+			this.exports.dealloc_wasm_message(from_wasm_ptr);
 		}
 
 		request_animation_frame(){
@@ -246,20 +256,28 @@
 
 		// i forgot how to do memcpy with typed arrays. so, we'll do this.
 		copy_to_wasm(input_buffer, output_ptr){
-			let len = input_buffer.byteLength;
-			let f64len = len>>3; //8 bytes at a time. 
-			var f64out = new Float64Array(this.memory.buffer, output_ptr + 8, f64len)
-			var f64in = new Float64Array(input_buffer);
-			for(let i = 0; i < f64len; i++){
-				f64out[i] = f64in[i];
-			}
-			let u8len = len&7;
-			if(u8len){ // copy remainder
-				let u8off = len - u8len;
-				var u8out = new Uint8Array(this.memory.buffer, output_ptr + 8 + u8off, len)
-				var u8in = new Uint8Array(input_buffer, u8off);
+			let u8len = input_buffer.byteLength;
+			if(u8len&3!= 0){ // not u32 aligned, do a byte copy
+				var u8out = new Uint8Array(this.memory.buffer, output_ptr, u8len)
+				var u8in = new Uint8Array(input_buffer);
 				for(let i = 0; i < u8len; i++){
 					u8out[i] = u8in[i];
+				}
+			}
+			else if(u8len&7!= 0){ // not f64 aligned, do a u32 copy
+				let u32len = u8len>>2; //4 bytes at a time. 
+				var u32out = new Uint32Array(this.memory.buffer, output_ptr, u32len)
+				var u32in = new Uint32Array(input_buffer);
+				for(let i = 0; i < u32len; i++){
+					u32out[i] = u32in[i];
+				}
+			}
+			else{ // f64 aligned, use f64 copy
+				let f64len = u8len>>3; //8 bytes at a time. 
+				var f64out = new Float64Array(this.memory.buffer, output_ptr, f64len)
+				var f64in = new Float64Array(input_buffer);
+				for(let i = 0; i < f64len; i++){
+					f64out[i] = f64in[i];
 				}
 			}
 		}
@@ -313,24 +331,7 @@
 		load_deps(deps){
 			for(var i = 0; i < deps.length; i++){
 				let file_path = deps[i];
-				this.resources.push(new Promise(function(resolve, reject){
-					var req = new XMLHttpRequest()
-					req.addEventListener("error", function(){
-						reject(resource)
-					})
-					req.responseType = 'arraybuffer'
-					req.addEventListener("load", function(){
-						if(req.status !== 200){
-							return reject(req.status)
-						}
-						resolve({
-							name:file_path,
-							buffer:req.response
-						})
-					})
-					req.open("GET", file_path)
-					req.send()
-				}))
+				this.resources.push(fetch_path(file_path))
 			}
 		}
 
@@ -869,6 +870,17 @@
 		set_mouse_cursor(id){
 			document.body.style.cursor = this.cursor_map[id] || 'default'
 		}
+
+		read_file(id, file_path){
+			fetch_path(file_path).then(result=>{
+				let byte_len = result.buffer.byteLength
+				let output_ptr = this.exports.alloc_wasm_vec(byte_len);
+				this.copy_to_wasm(result.buffer, output_ptr);
+				this.to_wasm.read_file_data(id, output_ptr, byte_len)
+				this.do_wasm_io();
+			}, err=>{
+			})
+		}
 	}
 
 	// array of function id's wasm can call on us, self is pointer to WasmApp
@@ -960,6 +972,9 @@
 		},
 		function set_mouse_cursor_12(self){
 			self.set_mouse_cursor(self.mu32[self.parse++]);
+		},
+		function read_file_13(self){
+			self.read_file(self.mu32[self.parse++], self.parse_string());
 		}
 	]
 	
@@ -1036,6 +1051,27 @@
 
 	var canvasses =	document.getElementsByClassName('cx_webgl')
 	document.addEventListener('DOMContentLoaded', init)
+
+	function fetch_path(file_path){
+		return new Promise(function(resolve, reject){
+			var req = new XMLHttpRequest()
+			req.addEventListener("error", function(){
+				reject(resource)
+			})
+			req.responseType = 'arraybuffer'
+			req.addEventListener("load", function(){
+				if(req.status !== 200){
+					return reject(req.status)
+				}
+				resolve({
+					name:file_path,
+					buffer:req.response
+				})
+			})
+			req.open("GET", file_path)
+			req.send()
+		})
+	}
 
 	function watchFileChange(){
 		var req = new XMLHttpRequest()

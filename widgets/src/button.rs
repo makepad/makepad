@@ -104,10 +104,8 @@ impl Button{
         //let mut ret_event = ButtonEvent::None;
         match event.hits(cx, self._bg_area, &mut self._hit_state){
             Event::Animate(ae)=>{
-
                 self.animator.calc_area(cx, "bg.color", ae.time, self._bg_area);
                 self.animator.calc_area(cx, "bg.border_color", ae.time, self._bg_area);
-                
                 self.animator.calc_area(cx, "bg.glow_size", ae.time, self._bg_area);
             },
             Event::FingerDown(_fe)=>{
@@ -118,7 +116,6 @@ impl Button{
             },
             Event::FingerHover(fe)=>{
                 cx.set_hover_mouse_cursor(MouseCursor::Hand);
-
                 match fe.hover_state{
                     HoverState::In=>{
                         if self._is_down{

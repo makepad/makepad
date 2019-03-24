@@ -1,6 +1,7 @@
 use render::*;
-
 use crate::scrollbar::*;
+use serde_json::{Result, Value};
+use serde::*;
 
 #[derive(Clone, Element)]
 pub struct FileTree{
@@ -121,17 +122,7 @@ impl Style for FileTree{
             row_height:20.,
             row_padding:Padding{l:5.,t:0.,r:0.,b:1.},
             root_node:FileNode::Folder{name:"".to_string(), state:NodeState::Open, draw:None, folder:vec![
-                FileNode::File{name:"helloworld.jpg".to_string(), draw:None},
-                FileNode::Folder{name:"mydirectory".to_string(), state:NodeState::Open, draw:None, folder:{
-                    let mut vec = Vec::new();
-                    for i in 0..20{
-                        vec.push(FileNode::File{name:format!("hello{}.rs",i), draw:None})
-                    }
-                    vec.push(FileNode::Folder{name:"sub_folder1".to_string(), state:NodeState::Open, folder:vec.clone(), draw:None});
-                    vec.push(FileNode::Folder{name:"sub_folder1".to_string(), state:NodeState::Open, folder:vec.clone(), draw:None});
-                    vec.push(FileNode::Folder{name:"sub_folder2".to_string(), state:NodeState::Open, folder:vec.clone(), draw:None});
-                    vec
-                }}
+                FileNode::File{name:"loading...".to_string(), draw:None},
             ]},
             node_bg:Quad{
                 ..Style::style(cx)
@@ -166,7 +157,47 @@ impl Style for FileTree{
     }
 }
 
+#[derive(Deserialize, Debug)]
+struct JsonFolder{
+    name:String,
+    open:bool,
+    files:Vec<JsonFile>,
+    folders:Vec<JsonFolder>
+}
+
+#[derive(Deserialize, Debug)]
+struct JsonFile{
+    name:String
+}
+
 impl FileTree{
+
+    fn json_to_file_node(node:JsonFolder)->FileNode{
+        let mut out = Vec::new();
+        for folder in node.folders{
+            out.push(Self::json_to_file_node(folder));
+        }
+        for file in node.files{
+            out.push(FileNode::File{
+                name:file.name,
+                draw:None
+            })
+        };
+        FileNode::Folder{
+            name:node.name,
+            state:if node.open{NodeState::Open} else {NodeState::Closed},
+            draw:None,
+            folder:out
+        }
+    } 
+
+    pub fn load_from_json(&mut self, cx:&mut Cx, json_data:&str){
+        let value:Result<JsonFolder> = serde_json::from_str(json_data); 
+        if let Ok(value) = value{
+            self.root_node = Self::json_to_file_node(value);
+        }
+        self.view.redraw_view_area(cx);
+    }
 
     pub fn def_filler_shader(cx:&mut Cx)->Shader{
         let mut sh = Quad::def_quad_shader(cx);

@@ -1,1 +1,1 @@
-cargo-watch watch -x 'build --target=wasm32-unknown-unknown --release --manifest-path="./webgl/Cargo.toml"' -s 'cp ./webgl/target/wasm32-unknown-unknown/release/makepad_webgl.wasm ./webgl/target/wasm32-unknown-unknown/release/makepad_webgl.webassembly' -s 'node ./build_json.js'
+cargo-watch watch -x 'build --target=wasm32-unknown-unknown --release --manifest-path="./webgl/Cargo.toml"' -s 'cp ./webgl/target/wasm32-unknown-unknown/release/makepad_webgl.wasm ./webgl/target/wasm32-unknown-unknown/release/makepad_webgl.webassembly' -s 'node ./build_index.js'

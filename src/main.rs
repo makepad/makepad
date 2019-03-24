@@ -1,5 +1,6 @@
 use widgets::*;
 
+
 #[derive(Clone)]
 enum Panel{
     Color(Vec4),
@@ -92,15 +93,22 @@ impl Style for App{
     }
 }
 
+
 impl App{
     fn handle_app(&mut self, cx:&mut Cx, event:&mut Event){
         match event{
             Event::Construct=>{
-                self.tree_load_id = cx.read_file("files.json");
+                self.tree_load_id = cx.read_file("./index.json");
             },
             Event::FileRead(fr)=>{
                 if fr.id == self.tree_load_id{
-                    // do something with the result.
+                    if let Ok(str_data) = &fr.data{
+                        if let Ok(json_data) = std::str::from_utf8(&str_data){
+                            if let Some(file_tree) = &mut self.file_tree.element{
+                                file_tree.load_from_json(cx, json_data);
+                            }
+                        }
+                    }
                 }   
             }
             _=>()

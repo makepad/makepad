@@ -6,10 +6,9 @@ edition = "2018"
 
 [dependencies]
 rand = "*"
-serde_json = "*"
 syn = "*"
 
 [dependencies.widgets]
 path="./widgets"
 default-features = false
-features=["mtl"]
+features=["webgl"]
