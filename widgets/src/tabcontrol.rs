@@ -152,7 +152,6 @@ impl TabControl{
 
     pub fn end_tabs(&mut self, cx:&mut Cx){
         self.tab_fill.draw_quad_walk(cx, Bounds::Fill, Bounds::Fill, Margin::zero());
-        self.tabs_view.end_view(cx);
         self.tabs.sweep(cx);
         if let Some((fe, id)) = &self._dragging_tab{
             self.drag_tab_view.begin_view(cx, &Layout{
@@ -170,6 +169,7 @@ impl TabControl{
 
             self.drag_tab_view.end_view(cx);
         }
+        self.tabs_view.end_view(cx);
     }
 
     pub fn begin_tab_page(&mut self, cx:&mut Cx){

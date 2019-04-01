@@ -20,6 +20,12 @@ pub struct FingerMoveEvent{
     pub is_touch:bool,
 }
 
+impl FingerMoveEvent{
+    pub fn move_distance(&self)->f32{
+        ((self.abs_start.x - self.abs.x).powf(2.) + (self.abs_start.y - self.abs.y).powf(2.)).sqrt()
+    }
+}
+
 #[derive(Clone, Default,Debug, PartialEq)]
 pub struct FingerUpEvent{
     pub abs:Vec2,

@@ -9,9 +9,15 @@ pub fn set_dark_style(cx:&mut Cx){
 
     cx.set_color("bg_selected", color256(40,40,40));
     cx.set_color("bg_odd", color256(37,37,37));
+
     cx.set_color("bg_normal", color256(52,52,52));
+
     cx.set_color("bg_selected_over", color256(61,61,61));
     cx.set_color("bg_odd_over", color256(56,56,56));
+
+    cx.set_color("bg_marked", color256(17,70,110));
+    cx.set_color("bg_marked_over", color256(17,70,110));
+
 
     cx.set_color("over_border", color256(255,255,255));
 

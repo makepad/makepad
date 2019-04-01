@@ -41,8 +41,58 @@ impl Animator{
         }
     }
 
+    pub fn set_anim_as_last_values(&mut self, anim:&Anim){
+        for track in &anim.tracks{
+            // we dont have a last float, find it in the tracks
+            let ident = track.ident();
+            match track{
+                AnimTrack::Vec4(ft)=>{
+                    let val = if ft.track.len()>0{ft.track.last().unwrap().1}else{vec4(0.,0.,0.,0.)};
+                    if let Some((_name, v)) = self.last_vec4.iter_mut().find(|(name,_v)| name == ident){
+                        *v = val;
+                    }
+                    else{ 
+                        self.last_vec4.push((ident.clone(), val));
+                    }
+                },
+                AnimTrack::Vec3(ft)=>{
+                    let val = if ft.track.len()>0{ft.track.last().unwrap().1}else{vec3(0.,0.,0.)};
+                    if let Some((_name, v)) = self.last_vec3.iter_mut().find(|(name,_v)| name == ident){
+                        *v = val;
+                    }
+                    else{ 
+                        self.last_vec3.push((ident.clone(), val));
+                    }
+                },
+                AnimTrack::Vec2(ft)=>{
+                    let val = if ft.track.len()>0{ft.track.last().unwrap().1}else{vec2(0.,0.)};
+                    if let Some((_name, v)) = self.last_vec2.iter_mut().find(|(name,_v)| name == ident){
+                        *v = val;
+                    }
+                    else{ 
+                        self.last_vec2.push((ident.clone(), val));
+                    }
+                },
+                AnimTrack::Float(ft)=>{
+                    let val = if ft.track.len()>0{ft.track.last().unwrap().1}else{0.};
+                    if let Some((_name, v)) = self.last_float.iter_mut().find(|(name,_v)| name == ident){
+                        *v = val;
+                    }
+                    else{ 
+                        self.last_float.push((ident.clone(), val));
+                    }
+                }                
+            }
+        }
+    }
+
     pub fn play_anim(&mut self, cx:&mut Cx, anim:Anim){
-        
+        // if our area is invalid, we should just set our default value 
+        if !self.area.is_valid(cx){
+            self.set_anim_as_last_values(&anim);
+            self.current = Some(anim);
+            return
+        }
         // alright first we find area, it already exists
         if let Some(anim_area) = cx.playing_anim_areas.iter_mut().find(|v| v.area == self.area){
             //do we cut the animation in right now?

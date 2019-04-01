@@ -39,6 +39,29 @@ impl Area{
         false
     }
 
+    pub fn is_valid(&self, cx:&Cx)->bool{
+        return match self{
+            Area::Instance(inst)=>{
+                if inst.instance_count == 0{
+                    return false
+                }
+                let draw_list = &cx.draw_lists[inst.draw_list_id];
+                if draw_list.redraw_id != inst.redraw_id {
+                    return false
+                }
+                return true
+            },
+            Area::DrawList(draw_list_area)=>{
+                let draw_list = &cx.draw_lists[draw_list_area.draw_list_id];
+                if draw_list.redraw_id != draw_list_area.redraw_id {
+                    return false
+                }
+                return true
+            },
+            _=>false,
+        }
+    }
+
     pub fn get_rect(&self, cx:&Cx, no_scrolling:bool)->Rect{
         return match self{
             Area::Instance(inst)=>{
@@ -48,7 +71,8 @@ impl Area{
                 }
                 let draw_list = &cx.draw_lists[inst.draw_list_id];
                 if draw_list.redraw_id != inst.redraw_id {
-                    println!("get_rect called on invalid area pointer, use mark/sweep correctly!");
+                    //panic!("get_rect called on invalid area pointer, use mark/sweep correctly!");
+                    //println!("get_rect called on invalid area pointer, use mark/sweep correctly!");
                     return Rect::zero();
                 }
                 let draw_call = &draw_list.draw_calls[inst.draw_call_id];

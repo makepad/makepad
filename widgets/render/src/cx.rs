@@ -53,6 +53,7 @@ pub struct Cx{
     pub paint_dirty:bool,
     pub clear_color:Vec4,
     pub redraw_id: u64,
+    pub event_id: u64,
     pub is_in_redraw_cycle:bool,
 
     pub debug_area:Area,
@@ -111,6 +112,7 @@ impl Default for Cx{
             paint_dirty:true,
             clear_color:vec4(0.1,0.1,0.1,1.0),
             redraw_id:1,
+            event_id:1,
             is_in_redraw_cycle:false,
             turtles:Vec::new(),
             align_list:Vec::new(),
@@ -368,6 +370,7 @@ impl Cx{
     pub fn call_event_handler<F>(&mut self, mut event_handler:F, event:&mut Event)
     where F: FnMut(&mut Cx, &mut Event)
     { 
+        self.event_id += 1;
         event_handler(self, event);
         // check any user events and send them
         if self.user_events.len() > 0{

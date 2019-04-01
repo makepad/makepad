@@ -89,11 +89,11 @@ impl Cx{
             // lets turn a file into a binary dep
             let file_result = File::open(&resource_name);
             if let Ok(mut file) = file_result{
-                let mut buffer = Vec::new();
+                let mut buffer = Vec::<u8>::new();
                 // read the whole file
                 if file.read_to_end(&mut buffer).is_ok(){
                     // store it in a bindep
-                    let mut bin_dep = BinaryDep::new_from_vec(resource_name.clone(), &buffer);
+                    let mut bin_dep = BinaryDep::new_from_vec(resource_name.clone(), buffer);
                     let _err = self.load_font_from_binary_dep(&mut bin_dep);
 
                     //     println!("Error loading font {} ", resource_name);
