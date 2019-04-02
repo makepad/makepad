@@ -90,7 +90,7 @@ impl Tab{
     }
 
     pub fn anim_default(&self, cx:&Cx)->Anim{
-        Anim::new(AnimMode::Cut{duration:0.5}, vec![
+        Anim::new(AnimMode::Cut{duration:0.05}, vec![
             AnimTrack::to_vec4("bg.color", self.get_bg_color(cx)),
             AnimTrack::to_vec4("bg.border_color", cx.color("bg_selected")),
             AnimTrack::to_vec4("text.color", self.get_text_color(cx)),
@@ -99,7 +99,7 @@ impl Tab{
     }
 
     pub fn anim_over(&self, cx:&Cx)->Anim{
-        Anim::new(AnimMode::Cut{duration:0.5}, vec![
+        Anim::new(AnimMode::Cut{duration:0.01}, vec![
             AnimTrack::to_vec4("bg.color", self.get_bg_color(cx)),
             AnimTrack::to_vec4("bg.border_color", cx.color("bg_selected")),
             AnimTrack::to_vec4("text.color", self.get_text_color(cx)),
@@ -108,7 +108,7 @@ impl Tab{
     }
 
     pub fn anim_down(&self, cx:&Cx)->Anim{
-        Anim::new(AnimMode::Cut{duration:0.05}, vec![
+        Anim::new(AnimMode::Cut{duration:0.01}, vec![
             AnimTrack::to_vec4("bg.color", self.get_bg_color(cx)),
             AnimTrack::to_vec4("bg.border_color", cx.color("over_border")),
             AnimTrack::to_float("bg.glow_size", 2.0),
