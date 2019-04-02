@@ -500,7 +500,8 @@ impl FileTree{
             });
 
             node_draw.animator.set_area(cx, area); 
-
+            let is_marked = node_draw.marked != 0;
+            
             for i in 0..(depth-1){
                 let quad_margin = Margin{l:1.,t:0.,r:4.,b:0.};
                 if i == depth - 2 { // our own thread. 
@@ -579,7 +580,12 @@ impl FileTree{
                 },
                 FileNode::File{name,..}=>{
                     cx.realign_turtle(Align::left_center(), false);
-                    self.tree_text.color = self.tree_file_color;
+                    self.tree_text.color = if is_marked{
+                        self.tree_folder_color
+                    }
+                    else{
+                        self.tree_file_color
+                    };
                     self.tree_text.draw_text(cx, name);
                 }
             }
