@@ -291,7 +291,7 @@ impl FileTree{
 
 
     pub fn get_default_anim(cx:&Cx, counter:usize, marked:bool)->Anim{
-        Anim::new(AnimMode::Cut{duration:0.01}, vec![
+        Anim::new(AnimMode::Chain{duration:0.01}, vec![
             AnimTrack::to_vec4("bg.color", 
                 if marked{cx.color("bg_marked")}  else if counter&1==0{cx.color("bg_selected")}else{cx.color("bg_odd")}
             )
@@ -299,10 +299,11 @@ impl FileTree{
     }
 
     pub fn get_over_anim(cx:&Cx, counter:usize, marked:bool)->Anim{
-        Anim::new(AnimMode::Cut{duration:0.01}, vec![
-            AnimTrack::to_vec4("bg.color", 
-                if marked{cx.color("bg_marked_over")} else if counter&1==0{cx.color("bg_selected_over")}else{cx.color("bg_odd_over")}
-            )
+        let over_color = if marked{cx.color("bg_marked_over")} else if counter&1==0{cx.color("bg_selected_over")}else{cx.color("bg_odd_over")};
+        Anim::new(AnimMode::Cut{duration:0.02}, vec![
+            AnimTrack::vec4("bg.color", Ease::Linear, vec![
+                (0.0, over_color),(1.0, over_color)
+            ])
         ])
     }
 
@@ -501,7 +502,7 @@ impl FileTree{
 
             node_draw.animator.set_area(cx, area); 
             let is_marked = node_draw.marked != 0;
-            
+
             for i in 0..(depth-1){
                 let quad_margin = Margin{l:1.,t:0.,r:4.,b:0.};
                 if i == depth - 2 { // our own thread. 
