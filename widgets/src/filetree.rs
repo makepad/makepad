@@ -291,7 +291,7 @@ impl FileTree{
 
 
     pub fn get_default_anim(cx:&Cx, counter:usize, marked:bool)->Anim{
-        Anim::new(AnimMode::Cut{duration:0.1}, vec![
+        Anim::new(AnimMode::Cut{duration:0.01}, vec![
             AnimTrack::to_vec4("bg.color", 
                 if marked{cx.color("bg_marked")}  else if counter&1==0{cx.color("bg_selected")}else{cx.color("bg_odd")}
             )

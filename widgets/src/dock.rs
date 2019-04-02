@@ -39,7 +39,7 @@ where TItem: Clone
     fn style(cx: &mut Cx)->Dock<TItem>{
         Dock{
             dock_items:None,
-            drop_size:vec2(70.,70.),
+            drop_size:vec2(50.,70.),
             drop_quad_color:color("#a"),
             drop_quad:Quad{
                 ..Style::style(cx)
@@ -552,17 +552,17 @@ where TItem: Clone
             }
             return (DockDropKind::TabsView, tvr)
         }
-        if pos.x < cdr.x + drop_size.x{
-            return (DockDropKind::Left, Rect{x:cdr.x, y:cdr.y, w:0.5 * cdr.w, h:cdr.h})
-        }
-        if pos.x > cdr.x + cdr.w - drop_size.x{
-            return (DockDropKind::Right, Rect{x:cdr.x + 0.5 * cdr.w, y:cdr.y, w:0.5 * cdr.w, h:cdr.h})
-        }
         if pos.y < cdr.y + drop_size.y{
             return (DockDropKind::Top, Rect{x:cdr.x, y:cdr.y, w:cdr.w, h:0.5*cdr.h})
         }
         if pos.y > cdr.y + cdr.h - drop_size.y{
             return (DockDropKind::Bottom, Rect{x:cdr.x, y:cdr.y + 0.5 * cdr.h, w:cdr.w, h:0.5*cdr.h})
+        }
+        if pos.x < cdr.x + drop_size.x{
+            return (DockDropKind::Left, Rect{x:cdr.x, y:cdr.y, w:0.5 * cdr.w, h:cdr.h})
+        }
+        if pos.x > cdr.x + cdr.w - drop_size.x{
+            return (DockDropKind::Right, Rect{x:cdr.x + 0.5 * cdr.w, y:cdr.y, w:0.5 * cdr.w, h:cdr.h})
         }
         (DockDropKind::Center, cdr.clone())
     }
