@@ -543,8 +543,10 @@ impl FileTree{
                     area.push_float(cx, "anim_pos", 1.);
                     cx.realign_turtle(Align::left_center(), false);
                     self.tree_text.color = self.tree_folder_color;
+                    let wleft = Bounds::Fill.eval_width_left(cx, false) - 10.;
+                    self.tree_text.wrapping = Wrapping::Ellipsis(wleft);
                     self.tree_text.draw_text(cx, name);
-
+                    
                     let (new_scale, new_state) = match state{
                         NodeState::Opening(fac)=>{
                             self.view.redraw_view_area(cx);

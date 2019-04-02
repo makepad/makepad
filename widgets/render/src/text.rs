@@ -5,7 +5,8 @@ pub enum Wrapping{
     Char,
     Word,
     Line,
-    None
+    None,
+    Ellipsis(f32)
 }
 
 #[derive(Clone)]
@@ -125,6 +126,7 @@ impl Text{
         let mut chunk = Vec::new();
         let mut width = 0.0;
         let mut count = 0;
+        let mut elipct = 0;
         for (last,c) in text.chars().identify_last(){
 
             let mut emit = last;
@@ -156,6 +158,17 @@ impl Text{
                     },
                     Wrapping::None=>{
                         chunk.push(c);
+                    },
+                    Wrapping::Ellipsis(ellipsis_width)=>{
+                        if width>ellipsis_width{ // output ...
+                            if elipct < 3{
+                                chunk.push('.');
+                                elipct += 1;
+                            }
+                        }
+                        else{
+                            chunk.push(c)
+                        }
                     }
                 }
             }
@@ -171,7 +184,6 @@ impl Text{
                     let slot = cx.fonts[self.font_id].unicodes[*wc as usize];
                     let glyph = &cx.fonts[self.font_id].glyphs[slot];
                     let w = glyph.advance * self.font_size;
-                    
                     let data = [
                         /*font_geom*/ glyph.x1 ,glyph.y1 ,glyph.x2 ,glyph.y2,
                         /*font_tc*/ glyph.tx1 ,glyph.ty1 ,glyph.tx2 ,glyph.ty2,

@@ -164,9 +164,6 @@ impl App{
                         })
                     }
                     dock.dock_drag_end(cx, fe, tabs);
-                    // ok so.. what now. we have this set of paths
-                    // that will end up being tabs.
-                    // so how do we do those things
                 },
                 FileTreeEvent::SelectFile{path}=>{
                     // search for the tabcontrol with the maximum amount of editors

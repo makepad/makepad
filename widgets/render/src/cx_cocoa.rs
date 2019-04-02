@@ -159,25 +159,27 @@ impl CocoaWindow{
             appkit::NSOtherMouseDragged |
             appkit::NSRightMouseDragged => {},
             appkit::NSScrollWheel => {
-                /*
-                let delta = if ns_event.hasPreciseScrollingDeltas() == cocoa::base::YES {
-                    PixelDelta((
-                        ns_event.scrollingDeltaX() as f64,
-                        ns_event.scrollingDeltaY() as f64,
-                    ).into())
+                return if ns_event.hasPreciseScrollingDeltas() == cocoa::base::YES {
+                    Some(Event::FingerScroll(FingerScrollEvent{
+                        scroll:vec2(
+                            ns_event.scrollingDeltaX() as f32,
+                            -ns_event.scrollingDeltaY() as f32
+                        ),
+                        abs:vec2(self.last_mouse_pos.x, self.last_mouse_pos.y),
+                        rel:vec2(0.,0.),
+                        handled:false
+                    }))
                 } else {
-                    // TODO: This is probably wrong
-                    LineDelta(
-                        ns_event.scrollingDeltaX() as f32,
-                        ns_event.scrollingDeltaY() as f32,
-                    )
-                };
-                
-                let phase = match ns_event.phase() {
-                    NSEventPhase::NSEventPhaseMayBegin | NSEventPhase::NSEventPhaseBegan => TouchPhase::Started,
-                    NSEventPhase::NSEventPhaseEnded => TouchPhase::Ended,
-                    _ => TouchPhase::Moved,
-                };*/
+                    Some(Event::FingerScroll(FingerScrollEvent{
+                        scroll:vec2(
+                            ns_event.scrollingDeltaX() as f32 * 32.,
+                            -ns_event.scrollingDeltaY() as f32 * 32.
+                        ),
+                        abs:vec2(self.last_mouse_pos.x, self.last_mouse_pos.y),
+                        rel:vec2(0.,0.),
+                        handled:false
+                    }))
+                }
             },
             appkit::NSEventTypePressure => {},
             appkit::NSApplicationDefined => match ns_event.subtype() {
