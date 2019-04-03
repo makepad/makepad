@@ -23,7 +23,7 @@ impl Style for TabClose{
                 shader_id:cx.add_shader(bg_sh, "TabClose.bg"),
 
                 ..Style::style(cx)
-            },
+            }, 
             bg_layout:Layout{
                 align:Align::center(),
                 width:Bounds::Compute,
@@ -34,7 +34,7 @@ impl Style for TabClose{
             },
             text:Text{..Style::style(cx)},
             animator:Animator::new(Anim::new(AnimMode::Cut{duration:0.2}, vec![
-                AnimTrack::to_vec4("bg.color", color("#f")),
+                AnimTrack::to_vec4("bg.color", color("#a")),
                 AnimTrack::to_float("bg.hover", 0.),
                 AnimTrack::to_float("bg.down", 0.),
             ])),
@@ -79,7 +79,7 @@ impl TabClose{
             let down:float<Instance>;
             fn pixel()->vec4{
                 df_viewport(pos * vec2(w, h));
-                let hover_max:float = hover*0.6;
+                let hover_max:float = (hover*0.5+0.5)*0.8;
                 let hover_min:float = 1. - hover_max;
                 let c:vec2 = vec2(w,h) * 0.5;
                 df_rotate(down, c.x,c.y);
@@ -89,7 +89,7 @@ impl TabClose{
                 df_line_to(c.x*hover_min, c.y+c.y*hover_max);
                 //df_circle(0.5*w,0.5*h,0.5*w);
                 df_stroke_keep(color,1.+down*0.2);
-                df_circle(0.5*w,0.5*h,0.5*w*(1.-hover));
+                //df_circle(0.5*w,0.5*h,0.5*w*(1.-hover));
                 return df_fill(color);
             }
         }));
