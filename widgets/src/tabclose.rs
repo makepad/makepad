@@ -79,7 +79,7 @@ impl TabClose{
             let down:float<Instance>;
             fn pixel()->vec4{
                 df_viewport(pos * vec2(w, h));
-                let hover_max:float = (hover*0.5+0.5)*0.8;
+                let hover_max:float = (hover*0.2+0.8)*0.5;
                 let hover_min:float = 1. - hover_max;
                 let c:vec2 = vec2(w,h) * 0.5;
                 df_rotate(down, c.x,c.y);
