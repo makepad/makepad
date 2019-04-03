@@ -8,7 +8,7 @@ pub struct TabControl{
     pub tabs_view:View<ScrollBar>,
     pub tabs:Elements<Tab, usize>,
     pub drag_tab_view:View<NoScrollBar>,
-    pub drag_tab:Element<Tab>,
+    pub drag_tab:Tab,
     pub page_view:View<NoScrollBar>,
     pub hover:Quad,
     pub tab_fill:Quad,
@@ -30,10 +30,10 @@ impl Style for TabControl{
     fn style(cx:&mut Cx)->Self{
         Self{
             tabs_view:View{
-                scroll_h:Some(Element::new(ScrollBar{
+                scroll_h:Some(ScrollBar{
                     bar_size:8.0,
                     ..Style::style(cx)
-                })),
+                }),
                 ..Style::style(cx)
             },
             page_view:View{
@@ -42,9 +42,9 @@ impl Style for TabControl{
             tabs:Elements::new(Tab{
                 ..Style::style(cx)
             }),
-            drag_tab:Element::new(Tab{
+            drag_tab:Tab{
                 ..Style::style(cx)
-            }),
+            },
             drag_tab_view:View{
                 is_overlay:true,
                 ..Style::style(cx)
@@ -162,13 +162,11 @@ impl TabControl{
                 ..Default::default()
             });
             
-            let drag_tab = self.drag_tab.get_draw(cx);
-            drag_tab.bg_layout.abs_start = Some(vec2(fe.abs.x - fe.rel_start.x, fe.abs.y - fe.rel_start.y));
-
+            self.drag_tab.bg_layout.abs_start = Some(vec2(fe.abs.x - fe.rel_start.x, fe.abs.y - fe.rel_start.y));
             let origin_tab = self.tabs.get_draw(cx, *id);
-            drag_tab.label = origin_tab.label.clone();
+            self.drag_tab.label = origin_tab.label.clone();
 
-            drag_tab.draw_tab(cx);
+            self.drag_tab.draw_tab(cx);
 
             self.drag_tab_view.end_view(cx);
         }

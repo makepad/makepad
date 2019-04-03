@@ -191,12 +191,12 @@ impl Style for FileTree{
                 ..Style::style(cx)
             },
             view:View{
-                scroll_h:Some(Element::new(ScrollBar{
+                scroll_h:Some(ScrollBar{
                     ..Style::style(cx)
-                })),
-                scroll_v:Some(Element::new(ScrollBar{
+                }),
+                scroll_v:Some(ScrollBar{
                     ..Style::style(cx)
-                })),
+                }),
                 ..Style::style(cx)
             },
             drag_view:View{

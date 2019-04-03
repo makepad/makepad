@@ -7,6 +7,8 @@ mod splitter;
 pub use crate::splitter::*;
 mod tab;
 pub use crate::tab::*;
+mod tabclose;
+pub use crate::tabclose::*;
 mod tabcontrol;
 pub use crate::tabcontrol::*;
 mod dock;

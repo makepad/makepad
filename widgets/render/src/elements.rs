@@ -225,7 +225,7 @@ where T:Clone + ElementLife, ID:std::cmp::Ord + Clone
 
 
 // Single element
-
+/*
 
 #[derive(Clone, Default)]
 pub struct Element<T>{
@@ -290,4 +290,4 @@ where T:Clone + ElementLife
         let element = self.element.as_mut().unwrap();
         return element
     }
-}
+}*/

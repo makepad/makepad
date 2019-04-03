@@ -1,11 +1,12 @@
 use render::*;
+use crate::tabclose::*;
 
 #[derive(Clone, Element)]
 pub struct Tab{
     pub bg_layout:Layout,
     pub bg: Quad,
     pub text: Text,
-
+    pub tab_close: TabClose,
     pub label:String,
 
     pub animator:Animator,
@@ -33,8 +34,12 @@ impl Style for Tab{
                 width:Bounds::Compute,
                 height:Bounds::Compute,
                 margin:Margin::all(0.),
-                padding:Padding{l:16.0,t:12.0,r:16.0,b:12.0},
+                padding:Padding{l:16.0,t:12.0,r:8.0,b:12.0},
                 ..Default::default()
+            },
+            tab_close:TabClose{
+                margin:Margin{l:4.,t:2.,r:0.,b:0.},
+                ..Style::style(cx)
             },
             text:Text{..Style::style(cx)},
             animator:Animator::new(Anim::empty()),
@@ -170,6 +175,9 @@ impl Tab{
     }
 
     pub fn handle_tab(&mut self, cx:&mut Cx, event:&mut Event)->TabEvent{
+
+        self.tab_close.handle_tab_close(cx, event);
+
         match event.hits(cx, self._bg_area, &mut self._hit_state){
             Event::Animate(ae)=>{
                 self.animator.calc_area(cx, "bg.color", ae.time, self._bg_area);
@@ -249,6 +257,9 @@ impl Tab{
         // push the 2 vars we added to bg shader
         self.text.color = self.animator.last_vec4("text.color");
         self._text_area = self.text.draw_text(cx, &self.label);
+
+        self.tab_close.draw_tab_close(cx);
+
         self.bg.end_quad(cx);
         self.animator.last_push(cx, "bg.border_color", self._bg_area);
         //self.animator.last_push(cx, "bg.glow_size", self._bg_area);

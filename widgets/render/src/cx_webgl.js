@@ -251,7 +251,6 @@
 				this.to_wasm.animation_frame(time / 1000.0);
 				this.do_wasm_io();
 			})
-			this.requ
 		}
 
 		// i forgot how to do memcpy with typed arrays. so, we'll do this.
@@ -260,7 +259,7 @@
 			
 			if((u8len&3)!= 0 || (output_ptr&3)!=0){ // not u32 aligned, do a byte copy
 				var u8out = new Uint8Array(this.memory.buffer, output_ptr, u8len)
-				var u8in = new Uint8Array(input_buffer);
+				var u8in = new Uint8Array(input_buffer)
 				for(let i = 0; i < u8len; i++){
 					u8out[i] = u8in[i];
 				}
@@ -268,7 +267,7 @@
 			else if((u8len&7)!= 0 || (output_ptr&7)!=0){ // not f64 aligned, do a u32 copy
 				let u32len = u8len>>2; //4 bytes at a time. 
 				var u32out = new Uint32Array(this.memory.buffer, output_ptr, u32len)
-				var u32in = new Uint32Array(input_buffer);
+				var u32in = new Uint32Array(input_buffer)
 				for(let i = 0; i < u32len; i++){
 					u32out[i] = u32in[i];
 				}
@@ -276,7 +275,7 @@
 			else{ // both f64 aligned, use f64 copy
 				let f64len = u8len>>3; //8 bytes at a time. 
 				var f64out = new Float64Array(this.memory.buffer, output_ptr, f64len)
-				var f64in = new Float64Array(input_buffer);
+				var f64in = new Float64Array(input_buffer)
 				for(let i = 0; i < f64len; i++){
 					f64out[i] = f64in[i];
 				}

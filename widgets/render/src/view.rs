@@ -21,8 +21,8 @@ where TScrollBar: ScrollBarLike<TScrollBar> + Clone + ElementLife
     pub draw_list_id:Option<usize>,
     pub is_clipped:bool,
     pub is_overlay:bool,// this view is an overlay, rendered last
-    pub scroll_h:Option<Element<TScrollBar>>,
-    pub scroll_v:Option<Element<TScrollBar>>,
+    pub scroll_h:Option<TScrollBar>,
+    pub scroll_v:Option<TScrollBar>,
 }
 
 impl<TScrollBar> Style for View<TScrollBar>
@@ -144,14 +144,14 @@ where TScrollBar: ScrollBarLike<TScrollBar> + Clone + ElementLife
         let mut ret_v = ScrollBarEvent::None;
 
         if let Some(scroll_h) = &mut self.scroll_h{
-            if let Some(scroll_h) = &mut scroll_h.element{
-                ret_h = scroll_h.handle_scroll_bar(cx, event);
-            }
+            //if let Some(scroll_h) = &mut scroll_h.element{
+            ret_h = scroll_h.handle_scroll_bar(cx, event);
+            //}
         }
         if let Some(scroll_v) = &mut self.scroll_v{
-           if let Some(scroll_v) = &mut scroll_v.element{
-                ret_v = scroll_v.handle_scroll_bar(cx, event);
-            }
+            //if let Some(scroll_v) = &mut scroll_v.element{
+            ret_v = scroll_v.handle_scroll_bar(cx, event);
+            //}
         }
         match ret_h{
             ScrollBarEvent::None=>(),
@@ -187,11 +187,11 @@ where TScrollBar: ScrollBarLike<TScrollBar> + Clone + ElementLife
         }
 
         if let Some(scroll_h) = &mut self.scroll_h{
-            let scroll_pos = scroll_h.get_draw(cx).draw_scroll_bar(cx, Axis::Horizontal, view_area, rect_now, view_total);
+            let scroll_pos = scroll_h.draw_scroll_bar(cx, Axis::Horizontal, view_area, rect_now, view_total);
             cx.draw_lists[draw_list_id].set_scroll_x(scroll_pos);
         }
         if let Some(scroll_v) = &mut self.scroll_v{
-            let scroll_pos = scroll_v.get_draw(cx).draw_scroll_bar(cx, Axis::Vertical,view_area, rect_now, view_total);
+            let scroll_pos = scroll_v.draw_scroll_bar(cx, Axis::Vertical,view_area, rect_now, view_total);
             cx.draw_lists[draw_list_id].set_scroll_y(scroll_pos);
         }
         
