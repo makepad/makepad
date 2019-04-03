@@ -33,7 +33,7 @@ impl Style for TabClose{
                 ..Default::default()
             },
             text:Text{..Style::style(cx)},
-            animator:Animator::new(Anim::new(AnimMode::Cut{duration:0.5}, vec![
+            animator:Animator::new(Anim::new(AnimMode::Cut{duration:0.2}, vec![
                 AnimTrack::to_vec4("bg.color", color("#f")),
                 AnimTrack::to_float("bg.hover", 0.),
                 AnimTrack::to_float("bg.down", 0.),
