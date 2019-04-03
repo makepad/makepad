@@ -178,7 +178,13 @@ where TScrollBar: ScrollBarLike<TScrollBar> + Clone + ElementLife
 
         // lets ask the turtle our actual bounds
         let view_total = cx.turtle_bounds();   
-        let rect_now =  cx.turtle_rect();
+        let mut rect_now =  cx.turtle_rect();
+        if rect_now.h.is_nan(){
+            rect_now.h = view_total.y;
+        }
+        if rect_now.w.is_nan(){
+            rect_now.w = view_total.x;
+        }
 
         if let Some(scroll_h) = &mut self.scroll_h{
             let scroll_pos = scroll_h.get_draw(cx).draw_scroll_bar(cx, Axis::Horizontal, view_area, rect_now, view_total);

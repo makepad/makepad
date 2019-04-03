@@ -28,7 +28,7 @@ impl Style for ScrollBar{
         let sh = Self::def_shader(cx);
         Self{
             bar_size:12.0,
-            min_handle_size:140.0,
+            min_handle_size:30.0,
 
             axis:Axis::Horizontal,
             animator:Animator::new(Anim::new(AnimMode::Cut{duration:0.5}, vec![
@@ -296,19 +296,19 @@ impl ScrollBarLike<ScrollBar> for ScrollBar{
 
         match self.axis{
              Axis::Horizontal=>{
-                self._visible = view_total.x > view_rect.w+0.1;
-                self._scroll_size = if view_total.y > view_rect.h{
+                self._visible = view_total.x > view_rect.w + 0.1;
+                self._scroll_size = if view_total.y > view_rect.h + 0.1{
                     view_rect.w - self.bar_size
                 }
                 else{
                     view_rect.w
-                } - self._bar_side_margin*2.;
+                } - self._bar_side_margin * 2.;
                 self._view_total = view_total.x;
                 self._view_visible = view_rect.w;
 
                 if self._visible{
                     self._sb_area = self.sb.draw_quad(
-                        cx,  
+                        cx,
                         self._bar_side_margin, 
                         view_rect.h - self.bar_size, 
                         self._scroll_size,
@@ -319,8 +319,8 @@ impl ScrollBarLike<ScrollBar> for ScrollBar{
              },
              Axis::Vertical=>{
                 // compute if we need a horizontal one
-                self._visible = view_total.y > view_rect.h+0.1;
-                self._scroll_size = if view_total.x > view_rect.w {
+                self._visible = view_total.y > view_rect.h + 0.1;
+                self._scroll_size = if view_total.x > view_rect.w + 0.1 {
                     view_rect.h - self.bar_size
                 }
                 else{

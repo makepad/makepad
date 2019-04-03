@@ -556,7 +556,7 @@ impl FileTree{
                                 (1.0, NodeState::Open)
                             }
                             else{
-                                (1.0 - *fac, NodeState::Opening(*fac * 0.8))
+                                (1.0 - *fac, NodeState::Opening(*fac * 0.7))
                             }
                         },
                         NodeState::Closing(fac)=>{
@@ -565,7 +565,7 @@ impl FileTree{
                                 (0.0, NodeState::Closed)
                             }
                             else{
-                                (*fac, NodeState::Closing(*fac * 0.8))
+                                (*fac, NodeState::Closing(*fac * 0.7))
                             }
                         },
                         NodeState::Open=>{

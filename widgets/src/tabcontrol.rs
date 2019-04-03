@@ -31,7 +31,7 @@ impl Style for TabControl{
         Self{
             tabs_view:View{
                 scroll_h:Some(Element::new(ScrollBar{
-                    bar_size:4.0,
+                    bar_size:8.0,
                     ..Style::style(cx)
                 })),
                 ..Style::style(cx)
@@ -67,6 +67,9 @@ impl Style for TabControl{
 impl TabControl{
     pub fn handle_tab_control(&mut self, cx:&mut Cx, event:&mut Event)->TabControlEvent{
         let mut tab_control_event = TabControlEvent::None;
+
+        self.tabs_view.handle_scroll_bars(cx, event);
+
         for (id, tab) in self.tabs.enumerate(){
             match tab.handle_tab(cx, event){
                 TabEvent::Select=>{
