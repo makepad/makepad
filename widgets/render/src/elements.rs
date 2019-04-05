@@ -193,15 +193,12 @@ where T:Clone + ElementLife, ID:std::cmp::Ord + Clone
 
     // gets a particular item. Returns None when not created (yet)
     pub fn get<'a>(&'a mut self, index:ID)->Option<&mut T>{
-        if !self.element_map.contains_key(&index){
-            return None
+        let elem = self.element_map.get_mut(&index);
+        if let Some(elem) = elem{
+            return Some(&mut elem.item)
         }
         else{
-            let elem = self.element_map.get_mut(&index).unwrap();
-            if elem.redraw_id != self.redraw_id{
-                return None
-            }
-            Some(&mut elem.item)
+            return None
         }
     }
     

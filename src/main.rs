@@ -190,12 +190,12 @@ impl App{
                     while let Some(dock_item) = dock_walker.walk_dock_item(){
                         if ctrl_id == target_ctrl_id{
                             if let DockItem::TabControl{current, tabs} = dock_item{
-                                tabs.push(DockTab{
+                                tabs.insert(*current+1, DockTab{
                                     closeable:true,
                                     title:path_file_name(&path),
                                     item:Panel::Editor(path.clone())
                                 });
-                                *current = tabs.len() - 1;
+                                *current = *current + 1;//tabs.len() - 1;
                                 cx.redraw_area(Area::All);
                             }
                         }

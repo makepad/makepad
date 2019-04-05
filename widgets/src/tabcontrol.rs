@@ -15,7 +15,8 @@ pub struct TabControl{
     pub animator:Animator,
 
     pub _dragging_tab:Option<(FingerMoveEvent,usize)>,
-    pub _tab_id_alloc:usize
+    pub _tab_id_alloc:usize,
+    pub _focussed:bool
 }
 
 #[derive(Clone, PartialEq)]
@@ -60,6 +61,7 @@ impl Style for TabControl{
             },
             animator:Animator::new(Anim::new(Play::Cut{duration:0.5}, vec![])),
             _dragging_tab:None,
+            _focussed:false,
             _tab_id_alloc:0
         }
     }
@@ -92,7 +94,20 @@ impl TabControl{
                     tab_control_event = TabControlEvent::TabDragEnd{fe, tab_id:*id};
                 },
                 TabEvent::Closing=>{ // this tab is closing. select the visible one
-                    
+                    let next_sel = if *id == self._tab_id_alloc - 1{ // last id
+                        if *id > 0{
+                            *id - 1
+                        }
+                        else{
+                            *id
+                        }
+                    }
+                    else{
+                        *id + 1
+                    };
+                    if *id != next_sel{
+                        tab_control_event = TabControlEvent::TabSelect{tab_id:next_sel};
+                    }
                 },
                 TabEvent::Close=>{
                     // Sooooo someone wants to close the tab
@@ -103,6 +118,7 @@ impl TabControl{
         };
         match tab_control_event{
             TabControlEvent::TabSelect{tab_id}=>{
+                self._focussed = true;
                 for (id, tab) in self.tabs.enumerate(){
                     if tab_id != *id{
                         tab.set_tab_selected(cx, false);
@@ -127,6 +143,7 @@ impl TabControl{
     }
 
     pub fn set_tab_control_focus(&mut self, cx:&mut Cx, focus:bool){
+        self._focussed = focus;
         for tab in self.tabs.iter(){
             tab.set_tab_focus(cx, focus);
         }
@@ -160,11 +177,17 @@ impl TabControl{
     }
 
     pub fn draw_tab(&mut self, cx:&mut Cx, label:&str, selected:bool, closeable:bool){
+        let new_tab = self.tabs.get(self._tab_id_alloc).is_none();
         let tab = self.tabs.get_draw(cx, self._tab_id_alloc);
         self._tab_id_alloc += 1;
         tab.label = label.to_string();
         tab.is_closeable = closeable;
-        tab.set_tab_selected(cx, selected);
+        if new_tab{
+            tab.set_tab_state(cx, selected, self._focussed);
+        }
+        else{ // animate the tabstate
+            tab.set_tab_selected(cx, selected);
+        }
         tab.draw_tab(cx);
     }
 

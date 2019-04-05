@@ -238,6 +238,10 @@ where TItem: Clone
                                         tab_control_id:stack_top.uid, 
                                         tab_id:tab_id
                                     });
+                                    // if tab_id < current, subtract current if >0
+                                    if tab_id < *current && *current > 0{
+                                        *current -= 1; 
+                                    }
                                     self.drop_quad_view.redraw_view_area(cx);
                                 },
                                 _=>()

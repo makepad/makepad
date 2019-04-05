@@ -120,7 +120,7 @@ impl Tab{
     pub fn anim_down(&self, cx:&Cx)->Anim{
         Anim::new(Play::Cut{duration:0.01}, vec![
             Track::vec4("bg.color", Ease::Lin, vec![(1.0, self.get_bg_color(cx))]),
-            Track::vec4("bg.border_color", Ease::Lin, vec![(1.0, cx.color("over_border"))]),
+            Track::vec4("bg.border_color", Ease::Lin, vec![(1.0, cx.color("bg_selected"))]),
             Track::vec4("text.color", Ease::Lin, vec![(1.0, self.get_text_color(cx))]),
             Track::vec4("icon.color", Ease::Lin, vec![(1.0, self.get_text_color(cx))])            
         ])
@@ -163,8 +163,14 @@ impl Tab{
     pub fn set_tab_selected(&mut self, cx:&mut Cx, selected:bool){
         if selected != self._is_selected{
             self._is_selected = selected;
-            self.animator.set_anim_as_last_values(&self.anim_default(cx));
+            self.animator.play_anim(cx, self.anim_default(cx));
         }
+    }
+
+    pub fn set_tab_state(&mut self, cx:&mut Cx, selected:bool, focus:bool){
+        self._is_selected = selected;
+        self._is_focussed = focus;
+        self.animator.set_anim_as_last_values(&self.anim_default(cx));
     }
 
     pub fn handle_tab(&mut self, cx:&mut Cx, event:&mut Event)->TabEvent{
