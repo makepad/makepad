@@ -86,7 +86,7 @@ impl Quad{
             /*x,y,w,h*/geom.x,geom.y,geom.w,geom.h,
             /*color*/self.color.x,self.color.y,self.color.z,self.color.w
         ];
-        area.push_data(cx, &data);
+        area.push_slice(cx, &data);
 
         area
     }
@@ -99,7 +99,7 @@ impl Quad{
             /*x,y,w,h*/pos.x+x,pos.y+y,w,h,
             /*color*/self.color.x,self.color.y,self.color.z,self.color.w
         ];
-        area.push_data(cx, &data);
+        area.push_slice(cx, &data);
         area
     }
 

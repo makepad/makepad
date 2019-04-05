@@ -62,7 +62,7 @@ impl Area{
         }
     }
 
-    pub fn get_rect(&self, cx:&Cx, no_scrolling:bool)->Rect{
+    pub fn get_rect(&self, cx:&Cx)->Rect{
         return match self{
             Area::Instance(inst)=>{
                 if inst.instance_count == 0{
@@ -71,8 +71,6 @@ impl Area{
                 }
                 let draw_list = &cx.draw_lists[inst.draw_list_id];
                 if draw_list.redraw_id != inst.redraw_id {
-                    //panic!("get_rect called on invalid area pointer, use mark/sweep correctly!");
-                    //println!("get_rect called on invalid area pointer, use mark/sweep correctly!");
                     return Rect::zero();
                 }
                 let draw_call = &draw_list.draw_calls[inst.draw_call_id];
@@ -86,15 +84,7 @@ impl Area{
                             let w = draw_call.instance[inst.instance_offset + iw];
                             if let Some(ih) = csh.rect_instance_props.h{
                                 let h = draw_call.instance[inst.instance_offset + ih];
-                                if no_scrolling{
-                                    return Rect{x:x,y:y,w:w,h:h}
-                                }
-                                else{
-                                    return draw_list.clip_and_scroll_rect(x,y,w,h);
-                                    //let scroll = draw_list.get_scroll();
-                                    // also clip it 
-                                    //return Rect{x:x - scroll.x,y:y - scroll.y,w:w,h:h}
-                                }
+                                return draw_list.clip_and_scroll_rect(x,y,w,h);
                             }
                         }
                     }
@@ -103,8 +93,44 @@ impl Area{
             },
             Area::DrawList(draw_list_area)=>{
                 let draw_list = &cx.draw_lists[draw_list_area.draw_list_id];
-                //draw_list.get_scroll();
-                //let mut rect = 
+                draw_list.rect.clone()
+            },
+            _=>Rect::zero(),
+        }
+    }
+
+
+    pub fn get_rect_no_scrolling(&self, cx:&Cx)->Rect{
+        return match self{
+            Area::Instance(inst)=>{
+                if inst.instance_count == 0{
+                    println!("get_rect called on instance_count ==0 area pointer, use mark/sweep correctly!");
+                    return Rect::zero()
+                }
+                let draw_list = &cx.draw_lists[inst.draw_list_id];
+                if draw_list.redraw_id != inst.redraw_id {
+                    return Rect::zero();
+                }
+                let draw_call = &draw_list.draw_calls[inst.draw_call_id];
+                let csh = &cx.compiled_shaders[draw_call.shader_id];
+                // ok now we have to patch x/y/w/h into it
+                if let Some(ix) = csh.rect_instance_props.x{
+                    let x = draw_call.instance[inst.instance_offset + ix];
+                    if let Some(iy) = csh.rect_instance_props.y{
+                        let y = draw_call.instance[inst.instance_offset + iy];
+                        if let Some(iw) = csh.rect_instance_props.w{
+                            let w = draw_call.instance[inst.instance_offset + iw];
+                            if let Some(ih) = csh.rect_instance_props.h{
+                                let h = draw_call.instance[inst.instance_offset + ih];
+                                return Rect{x:x,y:y,w:w,h:h}
+                            }
+                        }
+                    }
+                }
+                Rect::zero()
+            },
+            Area::DrawList(draw_list_area)=>{
+                let draw_list = &cx.draw_lists[draw_list_area.draw_list_id];
                 draw_list.rect.clone()
             },
             _=>Rect::zero(),
@@ -179,7 +205,7 @@ impl Area{
             Area::Instance(inst)=>{
                 let draw_list = &mut cx.draw_lists[inst.draw_list_id];
                 if draw_list.redraw_id != inst.redraw_id {
-                    println!("write_float called on invalid area pointer, use mark/sweep correctly!");
+                    println!("write_float {}  called on invalid area pointer, use mark/sweep correctly!", prop_name);
                     return;
                 }
                 let draw_call = &mut draw_list.draw_calls[inst.draw_call_id];
@@ -209,7 +235,7 @@ impl Area{
                 let draw_list = &cx.draw_lists[inst.draw_list_id];
                 let draw_call = &draw_list.draw_calls[inst.draw_call_id];
                 if draw_list.redraw_id != inst.redraw_id {
-                    println!("read_float called on invalid area pointer, use mark/sweep correctly!");
+                    println!("read_float {} called on invalid area pointer, use mark/sweep correctly!", prop_name);
                     return 0.0;
                 }
                 let csh = &cx.compiled_shaders[draw_call.shader_id];
@@ -230,7 +256,7 @@ impl Area{
             Area::Instance(inst)=>{
                 let draw_list = &mut cx.draw_lists[inst.draw_list_id];
                 if draw_list.redraw_id != inst.redraw_id {
-                    println!("write_vec2 called on invalid area pointer, use mark/sweep correctly!");
+                    println!("write_vec2 {} called on invalid area pointer, use mark/sweep correctly!",prop_name);
                     return;
                 }
                 let draw_call = &mut draw_list.draw_calls[inst.draw_call_id];
@@ -258,7 +284,7 @@ impl Area{
             Area::Instance(inst)=>{
                 let draw_list = &cx.draw_lists[inst.draw_list_id];
                 if draw_list.redraw_id != inst.redraw_id {
-                    println!("read_vec2 called on invalid area pointer, use mark/sweep correctly!");
+                    println!("read_vec2 {} called on invalid area pointer, use mark/sweep correctly!",prop_name);
                     return vec2(0.0,0.0)
                 }
                 let draw_call = &draw_list.draw_calls[inst.draw_call_id];
@@ -284,7 +310,7 @@ impl Area{
             Area::Instance(inst)=>{
                 let draw_list = &mut cx.draw_lists[inst.draw_list_id];
                 if draw_list.redraw_id != inst.redraw_id {
-                    println!("write_vec3 called on invalid area pointer, use mark/sweep correctly!");
+                    println!("write_vec3 {} called on invalid area pointer, use mark/sweep correctly!",prop_name);
                     return
                 }
                 let draw_call = &mut draw_list.draw_calls[inst.draw_call_id];
@@ -315,7 +341,7 @@ impl Area{
                 let draw_list = &cx.draw_lists[inst.draw_list_id];
                 let draw_call = &draw_list.draw_calls[inst.draw_call_id];
                 if draw_list.redraw_id != inst.redraw_id {
-                    println!("read_vec3 called on invalid area pointer, use mark/sweep correctly!");
+                    println!("read_vec3 {} called on invalid area pointer, use mark/sweep correctly!",prop_name);
                     return vec3(0.,0.,0.)
                 }
                 let csh = &cx.compiled_shaders[draw_call.shader_id];
@@ -341,7 +367,7 @@ impl Area{
             Area::Instance(inst)=>{
                 let draw_list = &mut cx.draw_lists[inst.draw_list_id];
                 if draw_list.redraw_id != inst.redraw_id {
-                    println!("write_vec4 called on invalid area pointer, use mark/sweep correctly!");
+                    println!("write_vec4 {} called on invalid area pointer, use mark/sweep correctly!",prop_name);
                     return
                 }
                 let draw_call = &mut draw_list.draw_calls[inst.draw_call_id];
@@ -372,7 +398,7 @@ impl Area{
             Area::Instance(inst)=>{
                 let draw_list = &cx.draw_lists[inst.draw_list_id];
                 if draw_list.redraw_id != inst.redraw_id {
-                    println!("read_vec4 called on invalid area pointer, use mark/sweep correctly!");
+                    println!("read_vec4 {} called on invalid area pointer, use mark/sweep correctly!", prop_name);
                     return vec4(0.,0.,0.,0.)
                 }
                 let draw_call = &draw_list.draw_calls[inst.draw_call_id];
@@ -395,7 +421,7 @@ impl Area{
         return vec4(0.0,0.0,0.0,0.0);
     }
 
-    pub fn push_data(&self, cx:&mut Cx, data:&[f32]){
+    pub fn push_slice(&self, cx:&mut Cx, data:&[f32]){
         match self{
             Area::Instance(inst)=>{
                 let draw_list = &mut cx.draw_lists[inst.draw_list_id];
@@ -411,7 +437,7 @@ impl Area{
         }
     }
 
-    pub fn push_float(&self, cx:&mut Cx, _name:&str, value:f32){
+    pub fn push_float(&self, cx:&mut Cx, value:f32){
         match self{
             Area::Instance(inst)=>{
                 let draw_list = &mut cx.draw_lists[inst.draw_list_id];
@@ -428,7 +454,7 @@ impl Area{
     }
 
 
-    pub fn push_vec2(&self, cx:&mut Cx, _name:&str, value:Vec2){
+    pub fn push_vec2(&self, cx:&mut Cx, value:Vec2){
         match self{
             Area::Instance(inst)=>{
                 let draw_list = &mut cx.draw_lists[inst.draw_list_id];
@@ -446,7 +472,7 @@ impl Area{
     }
 
 
-    pub fn push_vec3(&self, cx:&mut Cx, _name:&str, value:Vec3){
+    pub fn push_vec3(&self, cx:&mut Cx, value:Vec3){
         match self{
             Area::Instance(inst)=>{
                 let draw_list = &mut cx.draw_lists[inst.draw_list_id];
@@ -464,7 +490,7 @@ impl Area{
     }
 
 
-    pub fn push_vec4(&self, cx:&mut Cx, _name:&str, value:Vec4){
+    pub fn push_vec4(&self, cx:&mut Cx, value:Vec4){
         match self{
             Area::Instance(inst)=>{
                 let draw_list = &mut cx.draw_lists[inst.draw_list_id];
@@ -500,7 +526,7 @@ impl Area{
         return false
     }
 
-   pub fn uniform_texture_2d(&self, cx:&mut Cx, _name: &str, texture_id: usize){
+   pub fn push_uniform_texture_2d(&self, cx:&mut Cx,texture_id: usize){
         match self{
             Area::Instance(inst)=>{
                 let draw_list = &mut cx.draw_lists[inst.draw_list_id];
@@ -515,7 +541,7 @@ impl Area{
         }
     }
 
-    pub fn uniform_float(&self, cx:&mut Cx, _name: &str, v:f32){
+    pub fn push_uniform_float(&self, cx:&mut Cx, v:f32){
         match self{
             Area::Instance(inst)=>{
                 let draw_list = &mut cx.draw_lists[inst.draw_list_id];
@@ -530,7 +556,7 @@ impl Area{
          }
     }
 
-    pub fn uniform_vec2f(&self, cx:&mut Cx, _name: &str, x:f32, y:f32){
+    pub fn push_uniform_vec2f(&self, cx:&mut Cx,  x:f32, y:f32){
         match self{
             Area::Instance(inst)=>{
                 let draw_list = &mut cx.draw_lists[inst.draw_list_id];
@@ -546,7 +572,7 @@ impl Area{
          }
     }
 
-    pub fn uniform_vec3f(&mut self, cx:&mut Cx, _name: &str, x:f32, y:f32, z:f32){
+    pub fn push_uniform_vec3f(&mut self, cx:&mut Cx, x:f32, y:f32, z:f32){
         match self{
             Area::Instance(inst)=>{
                 let draw_list = &mut cx.draw_lists[inst.draw_list_id];
@@ -563,7 +589,7 @@ impl Area{
         }
     }
 
-    pub fn uniform_vec4f(&self, cx:&mut Cx, _name: &str, x:f32, y:f32, z:f32, w:f32){
+    pub fn push_uniform_vec4f(&self, cx:&mut Cx, x:f32, y:f32, z:f32, w:f32){
         match self{
             Area::Instance(inst)=>{
                 let draw_list = &mut cx.draw_lists[inst.draw_list_id];
@@ -581,7 +607,7 @@ impl Area{
         }
     }
 
-    pub fn uniform_mat4(&self, cx:&mut Cx, _name: &str, v:&Mat4){
+    pub fn push_uniform_mat4(&self, cx:&mut Cx, v:&Mat4){
         match self{
             Area::Instance(inst)=>{
                 let draw_list = &mut cx.draw_lists[inst.draw_list_id];

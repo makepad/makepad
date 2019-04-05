@@ -89,13 +89,13 @@ impl Cx{
                     if biggest > turtle.biggest{
                         turtle.biggest = biggest;
                     }
-                    // update x2 bounds
-                    let bound_x2 = x + w; 
+                    // update x2 bounds (margin right is only added if its negative)
+                    let bound_x2 = x + w + if margin.r < 0.{margin.r} else{0.};
                     if bound_x2 > turtle.bound_right_bottom.x{
                         turtle.bound_right_bottom.x = bound_x2;
                     }
-                    // update y2 bounds (does not include item margin bottom)
-                    let bound_y2 = turtle.walk.y + h + margin.t;
+                    // update y2 bounds (margin bottom is only added if its negative)
+                    let bound_y2 = turtle.walk.y + h + margin.t + if margin.b < 0.{margin.b} else{0.};
                     if bound_y2 > turtle.bound_right_bottom.y{
                         turtle.bound_right_bottom.y = bound_y2;
                     }

@@ -230,7 +230,10 @@ impl Cx{
                                 
                             },
                             _=>{
+                                //let time_now = precise_time_ns();
                                 self.call_event_handler(&mut event_handler, &mut event); 
+                                //let time_now_next = precise_time_ns();
+                                //println!("Animation took: {}", ((time_now_next - time_now) as f64) / 1_000_000_000.0);
                             }
                         }
                     }
@@ -241,6 +244,8 @@ impl Cx{
                 let time_now = precise_time_ns();
                 let time = (time_now - start_time) as f64 / 1_000_000_000.0; // keeps the error as low as possible
                 self.call_animation_event(&mut event_handler, time);
+                //let time_now_next = precise_time_ns();
+                //println!("Animation took: {}", ((time_now_next - time_now) as f64) / 1_000_000_000.0);
             }
             // call redraw event
             if self.redraw_areas.len()>0{

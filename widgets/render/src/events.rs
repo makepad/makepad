@@ -188,7 +188,12 @@ impl Event{
             },
            
             Event::FingerHover(fe)=>{
-                let rect = area.get_rect(&cx, hit_state.no_scrolling);
+                let rect = if hit_state.no_scrolling{
+                    area.get_rect_no_scrolling(&cx)
+                }
+                else{
+                    area.get_rect(&cx)
+                };
                 if hit_state.was_over_last_call{
 
                     if !fe.handled && rect.contains_with_margin(fe.abs.x, fe.abs.y, &hit_state.margin){
@@ -237,7 +242,12 @@ impl Event{
                     else{
                         hit_state.finger_down_rel_start[fe.digit]
                     };
-                    let rect = area.get_rect(&cx, hit_state.no_scrolling);
+                    let rect = if hit_state.no_scrolling{
+                        area.get_rect_no_scrolling(&cx)
+                    }
+                    else{
+                        area.get_rect(&cx)
+                    };
                     return Event::FingerMove(FingerMoveEvent{
                         abs_start: abs_start,
                         rel:vec2(fe.abs.x - rect.x, fe.abs.y - rect.y),
@@ -249,7 +259,12 @@ impl Event{
             },
             Event::FingerDown(fe)=>{
                 if !fe.handled{
-                    let rect = area.get_rect(&cx, hit_state.no_scrolling);
+                    let rect = if hit_state.no_scrolling{
+                        area.get_rect_no_scrolling(&cx)
+                    }
+                    else{
+                        area.get_rect(&cx)
+                    };
                     if rect.contains_with_margin(fe.abs.x, fe.abs.y, &hit_state.margin){
                         // scan if any of the fingers already captured this area
                         if !hit_state.use_multi_touch{
@@ -296,7 +311,12 @@ impl Event{
                     else{
                         hit_state.finger_down_rel_start[fe.digit]
                     };
-                    let rect = area.get_rect(&cx, hit_state.no_scrolling);
+                    let rect = if hit_state.no_scrolling{
+                        area.get_rect_no_scrolling(&cx)
+                    }
+                    else{
+                        area.get_rect(&cx)
+                    };
                     return Event::FingerUp(FingerUpEvent{
                         is_over:rect.contains(fe.abs.x, fe.abs.y),
                         abs_start: abs_start,

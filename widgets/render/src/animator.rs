@@ -10,8 +10,8 @@ pub struct AnimArea{
 
 #[derive(Clone,Debug)]
 pub struct Anim{
-    pub mode:AnimMode,
-    pub tracks:Vec<AnimTrack>
+    pub mode:Play,
+    pub tracks:Vec<Track>
 }
 
 #[derive(Clone)]
@@ -46,7 +46,7 @@ impl Animator{
             // we dont have a last float, find it in the tracks
             let ident = track.ident();
             match track{
-                AnimTrack::Vec4(ft)=>{
+                Track::Vec4(ft)=>{
                     let val = if ft.track.len()>0{ft.track.last().unwrap().1}else{vec4(0.,0.,0.,0.)};
                     if let Some((_name, v)) = self.last_vec4.iter_mut().find(|(name,_v)| name == ident){
                         *v = val;
@@ -55,7 +55,7 @@ impl Animator{
                         self.last_vec4.push((ident.clone(), val));
                     }
                 },
-                AnimTrack::Vec3(ft)=>{
+                Track::Vec3(ft)=>{
                     let val = if ft.track.len()>0{ft.track.last().unwrap().1}else{vec3(0.,0.,0.)};
                     if let Some((_name, v)) = self.last_vec3.iter_mut().find(|(name,_v)| name == ident){
                         *v = val;
@@ -64,7 +64,7 @@ impl Animator{
                         self.last_vec3.push((ident.clone(), val));
                     }
                 },
-                AnimTrack::Vec2(ft)=>{
+                Track::Vec2(ft)=>{
                     let val = if ft.track.len()>0{ft.track.last().unwrap().1}else{vec2(0.,0.)};
                     if let Some((_name, v)) = self.last_vec2.iter_mut().find(|(name,_v)| name == ident){
                         *v = val;
@@ -73,7 +73,7 @@ impl Animator{
                         self.last_vec2.push((ident.clone(), val));
                     }
                 },
-                AnimTrack::Float(ft)=>{
+                Track::Float(ft)=>{
                     let val = if ft.track.len()>0{ft.track.last().unwrap().1}else{0.};
                     if let Some((_name, v)) = self.last_float.iter_mut().find(|(name,_v)| name == ident){
                         *v = val;
@@ -86,8 +86,21 @@ impl Animator{
         }
     }
 
+    pub fn term_anim_playing(&mut self)->bool{
+        if let Some(current) = &self.current{
+            return current.mode.term();
+        }
+        return false
+    }
+
     pub fn play_anim(&mut self, cx:&mut Cx, anim:Anim){
         // if our area is invalid, we should just set our default value 
+        if let Some(current) = &self.current{
+            if current.mode.term(){ // can't override a term anim
+                return
+            }    
+        }
+
         if !self.area.is_valid(cx){
             self.set_anim_as_last_values(&anim);
             self.current = Some(anim);
@@ -187,8 +200,8 @@ impl Animator{
         let last = self.last_float(ident);
         let mut ret = last;
         if let Some((time, track_index)) = self.fetch_calc_track(cx, ident, time){
-            if let AnimTrack::Float(ft) = &mut self.current.as_mut().unwrap().tracks[track_index]{
-                ret = AnimTrack::compute_track_value::<f32>(time, &ft.track, &mut ft.cut_init, last, &ft.ease);
+            if let Track::Float(ft) = &mut self.current.as_mut().unwrap().tracks[track_index]{
+                ret = Track::compute_track_value::<f32>(time, &ft.track, &mut ft.cut_init, last, &ft.ease);
             }
         }
         self.set_last_float(ident, ret);
@@ -201,7 +214,7 @@ impl Animator{
         }
         // we dont have a last float, find it in the tracks
         if let Some(track) = self.default.tracks.iter().find(|tr| tr.ident() == ident){
-            if let AnimTrack::Float(ft) = track{
+            if let Track::Float(ft) = track{
                 if ft.track.len()>0{ // grab the last key in the track
                     return ft.track.last().unwrap().1
                 }
@@ -223,8 +236,8 @@ impl Animator{
         let last = self.last_vec2(ident);
         let mut ret = last;
         if let Some((time, track_index)) = self.fetch_calc_track(cx, ident, time){
-            if let AnimTrack::Vec2(ft) = &mut self.current.as_mut().unwrap().tracks[track_index]{
-                ret =  AnimTrack::compute_track_value::<Vec2>(time, &ft.track, &mut ft.cut_init, last, &ft.ease);
+            if let Track::Vec2(ft) = &mut self.current.as_mut().unwrap().tracks[track_index]{
+                ret =  Track::compute_track_value::<Vec2>(time, &ft.track, &mut ft.cut_init, last, &ft.ease);
             }
         }
         self.set_last_vec2(ident, ret);
@@ -237,7 +250,7 @@ impl Animator{
         }
         // we dont have a last float, find it in the tracks
         if let Some(track) = self.default.tracks.iter().find(|tr| tr.ident() == ident){
-            if let AnimTrack::Vec2(ft) = track{
+            if let Track::Vec2(ft) = track{
                 if ft.track.len()>0{ // grab the last key in the track
                     return ft.track.last().unwrap().1
                 }
@@ -259,8 +272,8 @@ impl Animator{
         let last = self.last_vec3(ident);
         let mut ret = last;
         if let Some((time, track_index)) = self.fetch_calc_track(cx, ident, time){
-            if let AnimTrack::Vec3(ft) = &mut self.current.as_mut().unwrap().tracks[track_index]{
-                ret =  AnimTrack::compute_track_value::<Vec3>(time, &ft.track, &mut ft.cut_init, last, &ft.ease);
+            if let Track::Vec3(ft) = &mut self.current.as_mut().unwrap().tracks[track_index]{
+                ret =  Track::compute_track_value::<Vec3>(time, &ft.track, &mut ft.cut_init, last, &ft.ease);
             }
         }
         self.set_last_vec3(ident, ret);
@@ -273,7 +286,7 @@ impl Animator{
         }
         // we dont have a last float, find it in the tracks
         if let Some(track) = self.default.tracks.iter().find(|tr| tr.ident() == ident){
-            if let AnimTrack::Vec3(ft) = track{
+            if let Track::Vec3(ft) = track{
                 if ft.track.len()>0{ // grab the last key in the track
                     return ft.track.last().unwrap().1
                 }
@@ -295,8 +308,8 @@ impl Animator{
         let last = self.last_vec4(ident);
         let mut ret = last;
         if let Some((time, track_index)) = self.fetch_calc_track(cx, ident, time){
-            if let AnimTrack::Vec4(ft) = &mut self.current.as_mut().unwrap().tracks[track_index]{
-                ret =  AnimTrack::compute_track_value::<Vec4>(time, &ft.track, &mut ft.cut_init, last, &ft.ease);
+            if let Track::Vec4(ft) = &mut self.current.as_mut().unwrap().tracks[track_index]{
+                ret =  Track::compute_track_value::<Vec4>(time, &ft.track, &mut ft.cut_init, last, &ft.ease);
             }
         }
         self.set_last_vec4(ident, ret);
@@ -309,7 +322,7 @@ impl Animator{
         }
         // we dont have a last float, find it in the tracks
         if let Some(track) = self.default.tracks.iter().find(|tr| tr.ident() == ident){
-            if let AnimTrack::Vec4(ft) = track{
+            if let Track::Vec4(ft) = track{
                 if ft.track.len()>0{ // grab the last key in the track
                     return ft.track.last().unwrap().1
                 }
@@ -327,22 +340,22 @@ impl Animator{
         }
     }
     
-    pub fn calc_area(&mut self, cx:&mut Cx, ident:&str, time:f64, area:Area){
+    pub fn calc_write(&mut self, cx:&mut Cx, ident:&str, time:f64, area:Area){
         if let Some(dot) = ident.find('.'){
             let field = ident.get((dot+1)..ident.len()).unwrap();
 
             if let Some((time, track_index)) = self.fetch_calc_track(cx, ident, time){
                 let slots = match &mut self.current.as_mut().unwrap().tracks[track_index]{
-                    AnimTrack::Vec4(_)=>4,
-                    AnimTrack::Vec3(_)=>3,
-                    AnimTrack::Vec2(_)=>2,
-                    AnimTrack::Float(_)=>1
+                    Track::Vec4(_)=>4,
+                    Track::Vec3(_)=>3,
+                    Track::Vec2(_)=>2,
+                    Track::Float(_)=>1
                 };
                 match slots {
                     4=>{
                         let init = self.last_vec4(ident);
-                        let ret = if let AnimTrack::Vec4(ft) = &mut self.current.as_mut().unwrap().tracks[track_index]{
-                            AnimTrack::compute_track_value::<Vec4>(time, &ft.track, &mut ft.cut_init, init, &ft.ease)
+                        let ret = if let Track::Vec4(ft) = &mut self.current.as_mut().unwrap().tracks[track_index]{
+                            Track::compute_track_value::<Vec4>(time, &ft.track, &mut ft.cut_init, init, &ft.ease)
                         }
                         else{
                             vec4(0.0,0.0,0.0,0.0)
@@ -352,8 +365,8 @@ impl Animator{
                     },
                     3=>{
                         let init = self.last_vec3(ident);
-                        let ret = if let AnimTrack::Vec3(ft) = &mut self.current.as_mut().unwrap().tracks[track_index]{
-                            AnimTrack::compute_track_value::<Vec3>(time, &ft.track, &mut ft.cut_init, init, &ft.ease)
+                        let ret = if let Track::Vec3(ft) = &mut self.current.as_mut().unwrap().tracks[track_index]{
+                            Track::compute_track_value::<Vec3>(time, &ft.track, &mut ft.cut_init, init, &ft.ease)
                         }
                         else{
                             vec3(0.0,0.0,0.0)
@@ -363,8 +376,8 @@ impl Animator{
                     },
                     2=>{
                         let init = self.last_vec2(ident);
-                        let ret = if let AnimTrack::Vec2(ft) = &mut self.current.as_mut().unwrap().tracks[track_index]{
-                            AnimTrack::compute_track_value::<Vec2>(time, &ft.track, &mut ft.cut_init, init, &ft.ease)
+                        let ret = if let Track::Vec2(ft) = &mut self.current.as_mut().unwrap().tracks[track_index]{
+                            Track::compute_track_value::<Vec2>(time, &ft.track, &mut ft.cut_init, init, &ft.ease)
                         }
                         else{
                             vec2(0.0,0.0)
@@ -374,8 +387,8 @@ impl Animator{
                     },
                     1=>{
                         let init = self.last_float(ident);
-                        let ret = if let AnimTrack::Float(ft) = &mut self.current.as_mut().unwrap().tracks[track_index]{
-                            AnimTrack::compute_track_value::<f32>(time, &ft.track, &mut ft.cut_init, init, &ft.ease)
+                        let ret = if let Track::Float(ft) = &mut self.current.as_mut().unwrap().tracks[track_index]{
+                            Track::compute_track_value::<f32>(time, &ft.track, &mut ft.cut_init, init, &ft.ease)
                         }
                         else{
                             0.0
@@ -389,7 +402,7 @@ impl Animator{
         }
     }
 
-
+/*
     pub fn last_push(&self, cx: &mut Cx, area_name:&str, area:Area){
         if let Some(dot) = area_name.find('.'){
             let field = area_name.get((dot+1)..area_name.len()).unwrap();
@@ -403,19 +416,19 @@ impl Animator{
             for track in &anim.tracks{
                 if track.ident() == area_name{
                     match track{
-                        AnimTrack::Vec4(_)=>{
+                        Track::Vec4(_)=>{
                             let v4 = self.last_vec4(area_name);
                             area.push_vec4(cx, field, v4);
                         },
-                        AnimTrack::Vec3(_)=>{
+                        Track::Vec3(_)=>{
                             let v3 = self.last_vec3(area_name);
                             area.push_vec3(cx, field, v3);
                         },
-                        AnimTrack::Vec2(_)=>{
+                        Track::Vec2(_)=>{
                             let v2 = self.last_vec2(area_name);
                             area.push_vec2(cx, field, v2);
                         },
-                        AnimTrack::Float(_)=>{
+                        Track::Float(_)=>{
                             let fl =  self.last_float(area_name);
                             area.push_float(cx, field, fl);
                         }
@@ -423,14 +436,15 @@ impl Animator{
                     return
                 }
             }
+
         }
-    }
+    }*/
 
 }
 
 #[derive(Clone,Debug)]
 pub enum Ease{
-    Linear,
+    Lin,
     InQuad,
     OutQuad,
     InOutQuad,
@@ -446,9 +460,9 @@ pub enum Ease{
     InSine,
     OutSine,
     InOutSine,
-    InExpo,
-    OutExpo,
-    InOutExpo,
+    InExp,
+    OutExp,
+    InOutExp,
     InCirc,
     OutCirc,
     InOutCirc,
@@ -473,7 +487,7 @@ pub enum Ease{
 impl Ease{
     fn map(&self, t:f64)->f64{
         match self{
-            Ease::Linear=>{
+            Ease::Lin=>{
                 return t.max(0.0).min(1.0);
             },
             Ease::Pow{begin, end}=>{
@@ -565,7 +579,7 @@ impl Ease{
             Ease::InOutSine=>{
                 return -0.5 * ( (t * PI).cos() - 1.);
             },
-            Ease::InExpo=>{
+            Ease::InExp=>{
                 if t < 0.001{
                     return 0.;
                 }
@@ -573,7 +587,7 @@ impl Ease{
                     return 2.0f64.powf(10. * (t - 1.));
                 }
             },
-            Ease::OutExpo=>{
+            Ease::OutExp=>{
                 if t > 0.999{
                     return 1.;
                 }
@@ -581,7 +595,7 @@ impl Ease{
                     return -(2.0f64.powf(-10. * t)) + 1.;
                 }
             },
-            Ease::InOutExpo=>{
+            Ease::InOutExp=>{
                 if t<0.001{
                     return 0.;
                 }
@@ -845,84 +859,84 @@ pub struct Vec4Track{
 }
 
 #[derive(Clone,Debug)]
-pub enum AnimTrack{
+pub enum Track{
     Float(FloatTrack),
     Vec2(Vec2Track),
     Vec3(Vec3Track),
     Vec4(Vec4Track),
 }
 
-impl AnimTrack{
-    pub fn float(ident:&str, ease:Ease, track:Vec<(f64,f32)>)->AnimTrack{
-        AnimTrack::Float(FloatTrack{
+impl Track{
+    pub fn float(ident:&str, ease:Ease, track:Vec<(f64,f32)>)->Track{
+        Track::Float(FloatTrack{
             cut_init:None,
             ease:ease,
             ident:ident.to_string(),
             track:track
         })
     }
-
-    pub fn to_float(ident:&str, value:f32)->AnimTrack{
-        AnimTrack::Float(FloatTrack{
+/*
+    pub fn to_float(ident:&str, value:f32)->Track{
+        Track::Float(FloatTrack{
             cut_init:None,
             ease:Ease::Linear,
             ident:ident.to_string(),
             track:vec![(1.0,value)]
         })
-    }
+    }*/
 
-    pub fn vec2(ident:&str, ease:Ease, track:Vec<(f64,Vec2)>)->AnimTrack{
-        AnimTrack::Vec2(Vec2Track{
+    pub fn vec2(ident:&str, ease:Ease, track:Vec<(f64,Vec2)>)->Track{
+        Track::Vec2(Vec2Track{
             cut_init:None,
             ease:ease,
             ident:ident.to_string(),
             track:track
         })
     }
-    
-    pub fn to_vec2(ident:&str, value:Vec2)->AnimTrack{
-        AnimTrack::Vec2(Vec2Track{
+    /*
+    pub fn to_vec2(ident:&str, value:Vec2)->Track{
+        Track::Vec2(Vec2Track{
             cut_init:None,
             ease:Ease::Linear,
             ident:ident.to_string(),
             track:vec![(1.0,value)]
         })
-    }
+    }*/
 
-    pub fn vec3(ident:&str, ease:Ease, track:Vec<(f64,Vec3)>)->AnimTrack{
-        AnimTrack::Vec3(Vec3Track{
+    pub fn vec3(ident:&str, ease:Ease, track:Vec<(f64,Vec3)>)->Track{
+        Track::Vec3(Vec3Track{
             cut_init:None,
             ease:ease,
             ident:ident.to_string(),
             track:track
         })
     }
-    
-    pub fn to_vec3(ident:&str, value:Vec3)->AnimTrack{
-        AnimTrack::Vec3(Vec3Track{
+    /*
+    pub fn to_vec3(ident:&str, value:Vec3)->Track{
+        Track::Vec3(Vec3Track{
             cut_init:None,
             ease:Ease::Linear,
             ident:ident.to_string(),
             track:vec![(1.0,value)]
         })
-    }
+    }*/
 
-    pub fn vec4(ident:&str, ease:Ease, track:Vec<(f64,Vec4)>)->AnimTrack{
-        AnimTrack::Vec4(Vec4Track{
+    pub fn vec4(ident:&str, ease:Ease, track:Vec<(f64,Vec4)>)->Track{
+        Track::Vec4(Vec4Track{
             cut_init:None,
             ease:ease,
             ident:ident.to_string(),
             track:track
         })
-    }
-    pub fn to_vec4(ident:&str, value:Vec4)->AnimTrack{
-        AnimTrack::Vec4(Vec4Track{
+    }/*
+    pub fn to_vec4(ident:&str, value:Vec4)->Track{
+        Track::Vec4(Vec4Track{
             cut_init:None,
             ease:Ease::Linear,
             ident:ident.to_string(),
             track:vec![(1.0,value)]
         })
-    }
+    }*/
 
     fn compute_track_value<T>(time:f64, track:&Vec<(f64,T)>, cut_init:&mut Option<T>, init:T, ease:&Ease) -> T
     where T:ComputeTrackValue<T> + Clone
@@ -952,16 +966,16 @@ impl AnimTrack{
 
     pub fn ident(&self)->&String{
         match self{
-            AnimTrack::Float(ft)=>{
+            Track::Float(ft)=>{
                 &ft.ident
             },
-            AnimTrack::Vec2(ft)=>{
+            Track::Vec2(ft)=>{
                 &ft.ident
             }
-            AnimTrack::Vec3(ft)=>{
+            Track::Vec3(ft)=>{
                 &ft.ident
             }
-            AnimTrack::Vec4(ft)=>{
+            Track::Vec4(ft)=>{
                 &ft.ident
             }
         }
@@ -969,16 +983,16 @@ impl AnimTrack{
 
     pub fn reset_cut_init(&mut self){
         match self{
-            AnimTrack::Vec4(at)=>{
+            Track::Vec4(at)=>{
                 at.cut_init = None;
             },
-            AnimTrack::Vec3(at)=>{
+            Track::Vec3(at)=>{
                 at.cut_init = None;
             },
-            AnimTrack::Vec2(at)=>{
+            Track::Vec2(at)=>{
                 at.cut_init = None;
             },
-            AnimTrack::Float(at)=>{
+            Track::Float(at)=>{
                 at.cut_init = None;
             }
         }
@@ -986,16 +1000,16 @@ impl AnimTrack{
 
     pub fn ease(&self)->&Ease{
         match self{
-            AnimTrack::Float(ft)=>{
+            Track::Float(ft)=>{
                 &ft.ease
             },
-            AnimTrack::Vec2(ft)=>{
+            Track::Vec2(ft)=>{
                 &ft.ease
             }
-            AnimTrack::Vec3(ft)=>{
+            Track::Vec3(ft)=>{
                 &ft.ease
             }
-            AnimTrack::Vec4(ft)=>{
+            Track::Vec4(ft)=>{
                 &ft.ease
             }
         }
@@ -1003,7 +1017,7 @@ impl AnimTrack{
 }
 
 impl Anim{
-    pub fn new(mode:AnimMode, tracks:Vec<AnimTrack>)->Anim{
+    pub fn new(mode:Play, tracks:Vec<Track>)->Anim{
         Anim{
             mode:mode,
             tracks:tracks
@@ -1012,124 +1026,141 @@ impl Anim{
 
     pub fn empty()->Anim{
         Anim{
-            mode:AnimMode::Cut{duration:0.},
+            mode:Play::Cut{duration:0.},
             tracks:vec![]
         }
     }
 }
 
 #[derive(Clone,Debug)]
-pub enum AnimMode{
+pub enum Play{
     Chain{duration:f64},
     Cut{duration:f64},
-    Single{duration:f64, cut:bool, end:f64},
-    Loop{duration:f64, cut:bool, repeats:f64,end:f64},
-    Reverse{duration:f64, cut:bool, repeats:f64,end:f64},
-    Bounce{duration:f64, cut:bool, repeats:f64,end:f64},
-    Forever{duration:f64, cut:bool},
-    LoopForever{duration:f64, cut:bool, end:f64},
-    ReverseForever{duration:f64, cut:bool, end:f64},
-    BounceForever{duration:f64, cut:bool, end:f64},
+    Single{duration:f64, cut:bool, term:bool, end:f64},
+    Loop{duration:f64, cut:bool, term:bool, repeats:f64,end:f64},
+    Reverse{duration:f64, cut:bool, term:bool, repeats:f64,end:f64},
+    Bounce{duration:f64, cut:bool, term:bool, repeats:f64,end:f64},
+    Forever{duration:f64, cut:bool, term:bool},
+    LoopForever{duration:f64, cut:bool, term:bool, end:f64},
+    ReverseForever{duration:f64, cut:bool, term:bool, end:f64},
+    BounceForever{duration:f64, cut:bool, term:bool, end:f64},
 }
 
-impl AnimMode{
+impl Play{
     pub fn duration(&self)->f64{
         match self{
-            AnimMode::Chain{duration,..}=>*duration,
-            AnimMode::Cut{duration,..}=>*duration,
-            AnimMode::Single{duration,..}=>*duration,
-            AnimMode::Loop{duration,..}=>*duration,
-            AnimMode::Reverse{duration,..}=>*duration,
-            AnimMode::Bounce{duration,..}=>*duration,
-            AnimMode::BounceForever{duration,..}=>*duration,
-            AnimMode::Forever{duration,..}=>*duration,
-            AnimMode::LoopForever{duration,..}=>*duration,
-            AnimMode::ReverseForever{duration,..}=>*duration,
+            Play::Chain{duration,..}=>*duration,
+            Play::Cut{duration,..}=>*duration,
+            Play::Single{duration,..}=>*duration,
+            Play::Loop{duration,..}=>*duration,
+            Play::Reverse{duration,..}=>*duration,
+            Play::Bounce{duration,..}=>*duration,
+            Play::BounceForever{duration,..}=>*duration,
+            Play::Forever{duration,..}=>*duration,
+            Play::LoopForever{duration,..}=>*duration,
+            Play::ReverseForever{duration,..}=>*duration,
         }
     }
     pub fn total_time(&self)->f64{
         match self{
-            AnimMode::Chain{duration,..}=>*duration,
-            AnimMode::Cut{duration,..}=>*duration,
-            AnimMode::Single{end,duration,..}=>end*duration,
-            AnimMode::Loop{end,duration,repeats,..}=>end*duration*repeats,
-            AnimMode::Reverse{end,duration,repeats,..}=>end*duration*repeats,
-            AnimMode::Bounce{end,duration,repeats,..}=>end*duration*repeats,
-            AnimMode::BounceForever{..}=>std::f64::INFINITY,
-            AnimMode::Forever{..}=>std::f64::INFINITY,
-            AnimMode::LoopForever{..}=>std::f64::INFINITY,
-            AnimMode::ReverseForever{..}=>std::f64::INFINITY,
+            Play::Chain{duration,..}=>*duration,
+            Play::Cut{duration,..}=>*duration,
+            Play::Single{end,duration,..}=>end*duration,
+            Play::Loop{end,duration,repeats,..}=>end*duration*repeats,
+            Play::Reverse{end,duration,repeats,..}=>end*duration*repeats,
+            Play::Bounce{end,duration,repeats,..}=>end*duration*repeats,
+            Play::BounceForever{..}=>std::f64::INFINITY,
+            Play::Forever{..}=>std::f64::INFINITY,
+            Play::LoopForever{..}=>std::f64::INFINITY,
+            Play::ReverseForever{..}=>std::f64::INFINITY,
         }
     }    
+
     pub fn cut(&self)->bool{
         match self{
-            AnimMode::Cut{..}=>true,
-            AnimMode::Chain{..}=>false,
-            AnimMode::Single{cut,..}=>*cut,
-            AnimMode::Loop{cut,..}=>*cut,
-            AnimMode::Reverse{cut,..}=>*cut,
-            AnimMode::Bounce{cut,..}=>*cut,
-            AnimMode::BounceForever{cut,..}=>*cut,
-            AnimMode::Forever{cut,..}=>*cut,
-            AnimMode::LoopForever{cut,..}=>*cut,
-            AnimMode::ReverseForever{cut,..}=>*cut,
+            Play::Cut{..}=>true,
+            Play::Chain{..}=>false,
+            Play::Single{cut,..}=>*cut,
+            Play::Loop{cut,..}=>*cut,
+            Play::Reverse{cut,..}=>*cut,
+            Play::Bounce{cut,..}=>*cut,
+            Play::BounceForever{cut,..}=>*cut,
+            Play::Forever{cut,..}=>*cut,
+            Play::LoopForever{cut,..}=>*cut,
+            Play::ReverseForever{cut,..}=>*cut,
         }
     }
+
     pub fn repeats(&self)->f64{
         match self{
-            AnimMode::Chain{..}=>1.0,
-            AnimMode::Cut{..}=>1.0,
-            AnimMode::Single{..}=>1.0,
-            AnimMode::Loop{repeats,..}=>*repeats,
-            AnimMode::Reverse{repeats,..}=>*repeats,
-            AnimMode::Bounce{repeats,..}=>*repeats,
-            AnimMode::BounceForever{..}=>std::f64::INFINITY,
-            AnimMode::Forever{..}=>std::f64::INFINITY,
-            AnimMode::LoopForever{..}=>std::f64::INFINITY,
-            AnimMode::ReverseForever{..}=>std::f64::INFINITY,
+            Play::Chain{..}=>1.0,
+            Play::Cut{..}=>1.0,
+            Play::Single{..}=>1.0,
+            Play::Loop{repeats,..}=>*repeats,
+            Play::Reverse{repeats,..}=>*repeats,
+            Play::Bounce{repeats,..}=>*repeats,
+            Play::BounceForever{..}=>std::f64::INFINITY,
+            Play::Forever{..}=>std::f64::INFINITY,
+            Play::LoopForever{..}=>std::f64::INFINITY,
+            Play::ReverseForever{..}=>std::f64::INFINITY,
         }
     }
-    
+
+    pub fn term(&self)->bool{
+        match self{
+            Play::Cut{..}=>false,
+            Play::Chain{..}=>false,
+            Play::Single{term,..}=>*term,
+            Play::Loop{term,..}=>*term,
+            Play::Reverse{term,..}=>*term,
+            Play::Bounce{term,..}=>*term,
+            Play::BounceForever{term,..}=>*term,
+            Play::Forever{term,..}=>*term,
+            Play::LoopForever{term,..}=>*term,
+            Play::ReverseForever{term,..}=>*term,
+        }
+    }
+
     pub fn compute_time(&self, time:f64)->f64{
         match self{
-            AnimMode::Cut{duration,..}=>{
+            Play::Cut{duration,..}=>{
                 time / duration
             },
-            AnimMode::Chain{duration,..}=>{
+            Play::Chain{duration,..}=>{
                 time / duration
             },
-            AnimMode::Single{duration,..}=>{
+            Play::Single{duration,..}=>{
                 time / duration
             },
-            AnimMode::Loop{end,duration,..}=>{
+            Play::Loop{end,duration,..}=>{
                 (time / duration)  % end
             },
-            AnimMode::Reverse{end,duration,..}=>{
+            Play::Reverse{end,duration,..}=>{
                 end - (time / duration)  % end
             },
-            AnimMode::Bounce{end,duration,..}=>{ 
+            Play::Bounce{end,duration,..}=>{ 
                 let mut local_time = (time / duration)  % (end*2.0);
                 if local_time > *end{
                     local_time = 2.0*end - local_time;
                 };
                 local_time
             },
-            AnimMode::BounceForever{end,duration,..}=>{
+            Play::BounceForever{end,duration,..}=>{
                 let mut local_time = (time / duration)  % (end*2.0);
                 if local_time > *end{
                     local_time = 2.0*end - local_time;
                 };
                 local_time
             },
-            AnimMode::Forever{duration,..}=>{
+            Play::Forever{duration,..}=>{
                 let local_time = time / duration;
                 local_time
             },
-            AnimMode::LoopForever{end, duration, ..}=>{
+            Play::LoopForever{end, duration, ..}=>{
                 let local_time = (time / duration)  % end;
                 local_time
             },
-            AnimMode::ReverseForever{end, duration, ..}=>{
+            Play::ReverseForever{end, duration, ..}=>{
                 let local_time = end - (time / duration)  % end;
                 local_time
             },

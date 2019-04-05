@@ -63,15 +63,14 @@ impl Style for Splitter{
                 shader_id:cx.add_shader(split_sh,"Splitter.split"),
                 ..Style::style(cx)
             },
-
-            animator:Animator::new(Anim::new(AnimMode::Cut{duration:0.5},vec![
-                AnimTrack::to_vec4("split.color",cx.color("bg_split")),
+            animator:Animator::new(Anim::new(Play::Cut{duration:0.5},vec![
+                Track::vec4("split.color", Ease::Lin, vec![(1.0, cx.color("bg_split"))]),
             ])),
-            anim_over:Anim::new(AnimMode::Cut{duration:0.05}, vec![
-                AnimTrack::to_vec4("split.color", color("#5")),
+            anim_over:Anim::new(Play::Cut{duration:0.05}, vec![
+                Track::vec4("split.color", Ease::Lin, vec![(1.0, color("#5"))]),
             ]),
-            anim_moving:Anim::new(AnimMode::Cut{duration:0.2}, vec![
-                AnimTrack::vec4("split.color", Ease::Linear, vec![
+            anim_moving:Anim::new(Play::Cut{duration:0.2}, vec![
+                Track::vec4("split.color", Ease::Lin, vec![
                     (0.0, color("#f")),
                     (1.0, color("#6"))
                 ]),
@@ -100,7 +99,7 @@ impl Splitter{
     pub fn handle_splitter(&mut self, cx:&mut Cx, event:&mut Event)->SplitterEvent{
         match event.hits(cx, self._split_area, &mut self._hit_state){
             Event::Animate(ae)=>{
-                self.animator.calc_area(cx, "split.color", ae.time, self._split_area);
+                self.animator.calc_write(cx, "split.color", ae.time, self._split_area);
             },
             Event::FingerDown(fe)=>{
                 self._is_moving = true;

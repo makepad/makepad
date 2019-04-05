@@ -118,9 +118,12 @@ impl Text{
         let area = cx.new_aligned_instance(self.shader_id);
 
         if area.need_uniforms_now(cx){
-            area.uniform_texture_2d(cx, "texture", cx.fonts[self.font_id].texture_id);
-            area.uniform_vec2f(cx, "tex_size", cx.fonts[self.font_id].width as f32, cx.fonts[self.font_id].height as f32);
-            area.uniform_vec4f(cx, "list_clip", -50000.0,-50000.0,50000.0,50000.0);
+            //texture,
+            area.push_uniform_texture_2d(cx, cx.fonts[self.font_id].texture_id);
+            //tex_size
+            area.push_uniform_vec2f(cx, cx.fonts[self.font_id].width as f32, cx.fonts[self.font_id].height as f32);
+            //list_clip
+            //area.push_uniform_vec4f(cx, -50000.0,-50000.0,50000.0,50000.0);
         }
 
         let mut chunk = Vec::new();
@@ -196,7 +199,7 @@ impl Text{
                         /*font_base*/ 1.0,
                         /*boldness*/ self.boldness
                     ];
-                    area.push_data(cx, &data);
+                    area.push_slice(cx, &data);
 
                     geom.x += w;
                     count += 1;

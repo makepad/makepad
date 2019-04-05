@@ -18,7 +18,14 @@ where TItem: Clone
     pub drop_quad_color:Vec4,
     pub _drag_move: Option<FingerMoveEvent>,
     pub _drag_end: Option<DockDragEnd<TItem>>,
+    pub _close_tab: Option<DockTabIdent>,
     pub _tweening_quad: Option<(usize,Rect,f32)>
+}
+
+#[derive(Clone)]
+pub struct DockTabIdent{
+    tab_control_id:usize, 
+    tab_id:usize
 }
 
 impl<TItem> ElementLife for Dock<TItem>
@@ -54,6 +61,7 @@ where TItem: Clone
                 is_overlay:true,
                 ..Style::style(cx)
             },
+            _close_tab:None,
             _drag_move:None,
             _drag_end:None,
             _tweening_quad:None
@@ -64,7 +72,7 @@ where TItem: Clone
 #[derive(Clone)]
 pub enum DockDragEnd<TItem>
 where TItem: Clone{
-    OldTab{fe:FingerUpEvent, tab_control_id:usize, tab_id:usize},
+    OldTab{fe:FingerUpEvent, ident:DockTabIdent},
     NewItems{fe:FingerUpEvent, items:Vec<DockTab<TItem>>}
 }
 
@@ -72,6 +80,7 @@ where TItem: Clone{
 pub struct DockTab<TItem>
 where TItem: Clone
 {
+    pub closeable:bool,
     pub title:String,
     pub item:TItem
 }
@@ -117,7 +126,8 @@ where TItem: Clone
     tab_controls:&'a mut Elements<TabControl, usize>,
     drop_quad_view:&'a mut View<NoScrollBar>,
     _drag_move:&'a mut Option<FingerMoveEvent>,
-    _drag_end:&'a mut Option<DockDragEnd<TItem>>
+    _drag_end:&'a mut Option<DockDragEnd<TItem>>,
+    _close_tab:&'a mut Option<DockTabIdent>
 }
 
 impl<'a, TItem> DockWalker<'a, TItem>
@@ -216,6 +226,15 @@ where TItem: Clone
                                     *self._drag_move = None;
                                     *self._drag_end = Some(DockDragEnd::OldTab{
                                         fe:fe, 
+                                        ident:DockTabIdent{
+                                            tab_control_id:stack_top.uid, 
+                                            tab_id:tab_id
+                                        }
+                                    });
+                                    self.drop_quad_view.redraw_view_area(cx);
+                                },
+                                TabControlEvent::TabClose{tab_id}=>{
+                                    *self._close_tab = Some(DockTabIdent{
                                         tab_control_id:stack_top.uid, 
                                         tab_id:tab_id
                                     });
@@ -309,7 +328,7 @@ where TItem: Clone
                         let tab_control = self.tab_controls.get_draw(cx, stack_top.uid);
                         tab_control.begin_tabs(cx);
                         for (id,tab) in tabs.iter().enumerate(){
-                            tab_control.draw_tab(cx, &tab.title, *current == id);
+                            tab_control.draw_tab(cx, &tab.title, *current == id, tab.closeable);
                         }
                         tab_control.end_tabs(cx);
                         tab_control.begin_tab_page(cx);
@@ -586,6 +605,11 @@ where TItem: Clone
     }
 
     pub fn handle_dock(&mut self, cx: &mut Cx, _event:&mut Event)->DockEvent{
+        if let Some(close_tab) = &self._close_tab{
+            Self::recur_remove_tab(self.dock_items.as_mut().unwrap(), close_tab.tab_control_id, close_tab.tab_id, &mut 0);
+            self._close_tab = None;
+            return DockEvent::DockChanged
+        }
         if let Some(drag_end) = self._drag_end.clone(){
             self._drag_end = None;
             let fe = match &drag_end{ DockDragEnd::OldTab{fe,..}=>fe, DockDragEnd::NewItems{fe,..}=>fe};
@@ -603,8 +627,8 @@ where TItem: Clone
                     // or its a new Item
                     // we have a kind!
                     let items = match &drag_end{
-                        DockDragEnd::OldTab{tab_control_id, tab_id,..}=>{
-                            let item = Self::recur_remove_tab(self.dock_items.as_mut().unwrap(), *tab_control_id, *tab_id, &mut 0);
+                        DockDragEnd::OldTab{ident,..}=>{
+                            let item = Self::recur_remove_tab(self.dock_items.as_mut().unwrap(), ident.tab_control_id, ident.tab_id, &mut 0);
                             if let Some(item) = item{
                                 vec![item]
                             }
@@ -706,6 +730,7 @@ where TItem: Clone
             tab_controls:&mut self.tab_controls,
             _drag_move:&mut self._drag_move,
             _drag_end:&mut self._drag_end,
+            _close_tab:&mut self._close_tab,
             drop_quad_view:&mut self.drop_quad_view,
         }
     }

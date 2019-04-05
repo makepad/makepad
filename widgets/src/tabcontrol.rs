@@ -24,6 +24,7 @@ pub enum TabControlEvent{
     TabDragMove{fe:FingerMoveEvent, tab_id:usize},
     TabDragEnd{fe:FingerUpEvent, tab_id:usize},
     TabSelect{tab_id:usize},
+    TabClose{tab_id:usize}
 }
 
 impl Style for TabControl{
@@ -57,7 +58,7 @@ impl Style for TabControl{
                 color:cx.color("bg_normal"),
                 ..Style::style(cx)
             },
-            animator:Animator::new(Anim::new(AnimMode::Cut{duration:0.5}, vec![])),
+            animator:Animator::new(Anim::new(Play::Cut{duration:0.5}, vec![])),
             _dragging_tab:None,
             _tab_id_alloc:0
         }
@@ -89,17 +90,30 @@ impl TabControl{
                     cx.redraw_area(self.tabs_view.get_view_area(cx));
 
                     tab_control_event = TabControlEvent::TabDragEnd{fe, tab_id:*id};
-                }
+                },
+                TabEvent::Closing=>{ // this tab is closing. select the visible one
+                    
+                },
+                TabEvent::Close=>{
+                    // Sooooo someone wants to close the tab
+                    tab_control_event = TabControlEvent::TabClose{tab_id:*id};
+                },
                 _=>()
             }
         };
-        if let TabControlEvent::TabSelect{tab_id} = tab_control_event{
-            for (id, tab) in self.tabs.enumerate(){
-                if tab_id != *id{
-                    tab.set_tab_selected(cx, false);
-                    tab.set_tab_focus(cx, true);
+        match tab_control_event{
+            TabControlEvent::TabSelect{tab_id}=>{
+                for (id, tab) in self.tabs.enumerate(){
+                    if tab_id != *id{
+                        tab.set_tab_selected(cx, false);
+                        tab.set_tab_focus(cx, true);
+                    }
                 }
-            }
+            },
+            TabControlEvent::TabClose{..}=>{ // needed to clear animation state
+                self.tabs.clear(cx);
+            },
+            _=>()
         };
         tab_control_event
     }
@@ -119,11 +133,11 @@ impl TabControl{
     }
 
     pub fn get_tabs_view_rect(&mut self, cx:&Cx)->Rect{
-        self.tabs_view.get_view_area(cx).get_rect(cx, true)
+        self.tabs_view.get_view_area(cx).get_rect(cx)
     }
 
     pub fn get_content_drop_rect(&mut self, cx:&Cx)->Rect{
-        let pr = self.page_view.get_view_area(cx).get_rect(cx, false);
+        let pr = self.page_view.get_view_area(cx).get_rect(cx);
         // we now need to change the y and the new height
         Rect{
             x:pr.x,
@@ -145,12 +159,13 @@ impl TabControl{
         self._tab_id_alloc = 0;
     }
 
-    pub fn draw_tab(&mut self, cx:&mut Cx, label:&str, selected:bool){
+    pub fn draw_tab(&mut self, cx:&mut Cx, label:&str, selected:bool, closeable:bool){
         let tab = self.tabs.get_draw(cx, self._tab_id_alloc);
         self._tab_id_alloc += 1;
         tab.label = label.to_string();
-        tab.draw_tab(cx);
+        tab.is_closeable = closeable;
         tab.set_tab_selected(cx, selected);
+        tab.draw_tab(cx);
     }
 
     pub fn end_tabs(&mut self, cx:&mut Cx){
@@ -165,7 +180,7 @@ impl TabControl{
             self.drag_tab.bg_layout.abs_start = Some(vec2(fe.abs.x - fe.rel_start.x, fe.abs.y - fe.rel_start.y));
             let origin_tab = self.tabs.get_draw(cx, *id);
             self.drag_tab.label = origin_tab.label.clone();
-
+            self.drag_tab.is_closeable = origin_tab.is_closeable;
             self.drag_tab.draw_tab(cx);
 
             self.drag_tab_view.end_view(cx);

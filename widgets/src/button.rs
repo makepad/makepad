@@ -33,29 +33,29 @@ impl Style for Button{
             },
             text:Text{..Style::style(cx)},
 
-            animator:Animator::new(Anim::new(AnimMode::Cut{duration:0.5}, vec![
-                AnimTrack::to_vec4("bg.color", cx.color("bg_normal")),
-                AnimTrack::to_float("bg.glow_size", 0.0),
-                AnimTrack::to_vec4("bg.border_color", color("white")),
-                AnimTrack::to_vec4("text.color", color("white")),
-                AnimTrack::to_vec4("icon.color", color("white"))
+            animator:Animator::new(Anim::new(Play::Cut{duration:0.5}, vec![
+                Track::vec4("bg.color", Ease::Lin, vec![(1., cx.color("bg_normal"))]),
+                Track::float("bg.glow_size", Ease::Lin, vec![(1., 0.0)]),
+                Track::vec4("bg.border_color", Ease::Lin, vec![(1., color("white"))]),
+                Track::vec4("text.color", Ease::Lin, vec![(1., color("white"))]),
+                Track::vec4("icon.color", Ease::Lin, vec![(1., color("white"))])
             ])),
-            anim_over:Anim::new(AnimMode::Cut{duration:0.05}, vec![
-                AnimTrack::to_vec4("bg.color", color("white")),
-                AnimTrack::to_vec4("bg.border_color", color("white")),
-                AnimTrack::to_float("bg.glow_size", 1.0)
+            anim_over:Anim::new(Play::Cut{duration:0.05}, vec![
+                Track::vec4("bg.color", Ease::Lin, vec![(1., color("white"))]),
+                Track::vec4("bg.border_color", Ease::Lin, vec![(1., color("white"))]),
+                Track::float("bg.glow_size", Ease::Lin, vec![(1., 1.0)])
             ]),
-            anim_down:Anim::new(AnimMode::Cut{duration:0.2}, vec![
-                AnimTrack::vec4("bg.border_color", Ease::Linear, vec![
+            anim_down:Anim::new(Play::Cut{duration:0.2}, vec![
+                Track::vec4("bg.border_color", Ease::Lin, vec![
                     (0.0, color("white")),(1.0, color("white"))
                 ]),
-                AnimTrack::vec4("bg.color", Ease::Linear, vec![
+                Track::vec4("bg.color", Ease::Lin, vec![
                     (0.0, color("#f")),(1.0, color("#6"))
                 ]),
-                AnimTrack::float("bg.glow_size", Ease::Linear, vec![
+                Track::float("bg.glow_size", Ease::Lin, vec![
                     (0.0, 1.0),(1.0, 1.0)
                 ]),
-                AnimTrack::vec4("icon.color", Ease::Linear, vec![
+                Track::vec4("icon.color", Ease::Lin, vec![
                     (0.0, color("#0")),(1.0, color("#f")),
                 ]),
             ]),
@@ -104,9 +104,9 @@ impl Button{
         //let mut ret_event = ButtonEvent::None;
         match event.hits(cx, self._bg_area, &mut self._hit_state){
             Event::Animate(ae)=>{
-                self.animator.calc_area(cx, "bg.color", ae.time, self._bg_area);
-                self.animator.calc_area(cx, "bg.border_color", ae.time, self._bg_area);
-                self.animator.calc_area(cx, "bg.glow_size", ae.time, self._bg_area);
+                self.animator.calc_write(cx, "bg.color", ae.time, self._bg_area);
+                self.animator.calc_write(cx, "bg.border_color", ae.time, self._bg_area);
+                self.animator.calc_write(cx, "bg.glow_size", ae.time, self._bg_area);
             },
             Event::FingerDown(_fe)=>{
                 self._is_down = true;
@@ -157,8 +157,8 @@ impl Button{
         self.bg.color = self.animator.last_vec4("bg.color");
         self._bg_area = self.bg.begin_quad(cx, &self.bg_layout);
         // push the 2 vars we added to bg shader
-        self.animator.last_push(cx, "bg.border_color", self._bg_area);
-        self.animator.last_push(cx, "bg.glow_size", self._bg_area);
+        self._bg_area.push_vec4(cx, self.animator.last_vec4("bg.border_color"));
+        self._bg_area.push_float(cx, self.animator.last_float("bg.border_color"));
 
         self.text.draw_text(cx, label);
         

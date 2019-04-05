@@ -291,18 +291,18 @@ impl FileTree{
 
 
     pub fn get_default_anim(cx:&Cx, counter:usize, marked:bool)->Anim{
-        Anim::new(AnimMode::Chain{duration:0.01}, vec![
-            AnimTrack::to_vec4("bg.color", 
+        Anim::new(Play::Chain{duration:0.01}, vec![
+            Track::vec4("bg.color", Ease::Lin, vec![(1.0,
                 if marked{cx.color("bg_marked")}  else if counter&1==0{cx.color("bg_selected")}else{cx.color("bg_odd")}
-            )
+            )])
         ])
     }
 
     pub fn get_over_anim(cx:&Cx, counter:usize, marked:bool)->Anim{
         let over_color = if marked{cx.color("bg_marked_over")} else if counter&1==0{cx.color("bg_selected_over")}else{cx.color("bg_odd_over")};
-        Anim::new(AnimMode::Cut{duration:0.02}, vec![
-            AnimTrack::vec4("bg.color", Ease::Linear, vec![
-                (0.0, over_color),(1.0, over_color)
+        Anim::new(Play::Cut{duration:0.02}, vec![
+            Track::vec4("bg.color", Ease::Lin, vec![
+                (0., over_color),(1., over_color)
             ])
         ])
     }
@@ -339,7 +339,7 @@ impl FileTree{
 
             match event.hits(cx, node_draw.animator.area, &mut node_draw.hit_state){
                 Event::Animate(ae)=>{
-                    node_draw.animator.calc_area(cx, "bg.color", ae.time, node_draw.animator.area);
+                    node_draw.animator.calc_write(cx, "bg.color", ae.time, node_draw.animator.area);
                 },
                 Event::FingerDown(_fe)=>{
                     // mark ourselves, unmark others
@@ -509,19 +509,24 @@ impl FileTree{
                     let area = self.filler.draw_quad_walk(cx, Bounds::Fix(10.), Bounds::Fill, quad_margin);
                     if is_last { 
                         if is_first{
-                            area.push_vec2(cx, "line_vec", vec2(0.3,0.7))
+                            //line_vec
+                            area.push_vec2(cx, vec2(0.3,0.7))
                         }
                         else{
-                            area.push_vec2(cx, "line_vec", vec2(-0.2,0.7))
+                            //line_vec
+                            area.push_vec2(cx,vec2(-0.2,0.7))
                         }
                     }
                     else if is_first{
-                        area.push_vec2(cx, "line_vec", vec2(-0.3,1.2))
+                        //line_vec
+                        area.push_vec2(cx, vec2(-0.3,1.2))
                     }
                     else{
-                        area.push_vec2(cx, "line_vec", vec2(-0.2,1.2));
+                        //line_vec
+                        area.push_vec2(cx, vec2(-0.2,1.2));
                     }
-                    area.push_float(cx, "anim_pos", -1.);
+                    //anim_pos
+                    area.push_float(cx, -1.);
                 }
                 else{
                     let here_last = if last_stack.len()>1{ last_stack[i+1] } else {false};
@@ -530,8 +535,10 @@ impl FileTree{
                     }
                     else{
                         let area = self.filler.draw_quad_walk(cx, Bounds::Fix(10.), Bounds::Fill, quad_margin);
-                        area.push_vec2(cx, "line_vec", vec2(-0.2,1.2));
-                        area.push_float(cx, "anim_pos", -1.);
+                        //line_vec
+                        area.push_vec2(cx, vec2(-0.2,1.2));
+                        //anim_pos
+                        area.push_float(cx, -1.);
                     }
                 }
             };
@@ -541,8 +548,8 @@ impl FileTree{
                 FileNode::Folder{name, state, ..}=>{
                     // draw the folder icon
                     let area = self.filler.draw_quad_walk(cx, Bounds::Fix(14.), Bounds::Fill, Margin{l:0.,t:0.,r:2.,b:0.});
-                    area.push_vec2(cx, "line_vec", vec2(0.,0.));
-                    area.push_float(cx, "anim_pos", 1.);
+                    area.push_vec2(cx, vec2(0.,0.));
+                    area.push_float(cx, 1.);
                     cx.realign_turtle(Align::left_center(), false);
                     self.tree_text.color = self.tree_folder_color;
                     let wleft = Bounds::Fill.eval_width_left(cx, false) - 10.;

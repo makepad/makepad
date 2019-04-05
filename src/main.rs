@@ -4,6 +4,7 @@ use widgets::*;
 enum Panel{
     Color(Vec4),
     FileTree,
+    EditorTarget,
     Editor(String)
     //Editor(String),
     //LogView(String),
@@ -52,6 +53,7 @@ impl Style for App{
                         current:0,
                         tabs:vec![
                             DockTab{
+                                closeable:false,
                                 title:"Files".to_string(),
                                 item:Panel::FileTree
                             }
@@ -65,23 +67,17 @@ impl Style for App{
                             current:0,
                             tabs:vec![
                                 DockTab{
-                                    title:"RedTab".to_string(),
-                                    item:Panel::Color(color("pink"))
+                                    closeable:false,
+                                    title:"Edit".to_string(),
+                                    item:Panel::EditorTarget
                                 },
-                                DockTab{
-                                    title:"BlueTab".to_string(),
-                                    item:Panel::Color(color("blue"))
-                                },
-                                DockTab{
-                                    title:"GreenTab".to_string(),
-                                    item:Panel::Color(color("green"))
-                                }      
                             ],
                         }),
                         last:Box::new(DockItem::TabControl{
                             current:0,
                             tabs:vec![
                                 DockTab{
+                                    closeable:true,
                                     title:"PurpleTab".to_string(),
                                     item:Panel::Color(color("purple"))
                                 }
@@ -129,6 +125,7 @@ impl App{
         while let Some(item) = dock_walker.walk_handle_dock(cx, event){
             match item{
                 Panel::Color(_)=>{}
+                Panel::EditorTarget=>{},
                 Panel::FileTree=>{
                     file_tree_event = self.file_tree.handle_file_tree(cx, event);
                 },
@@ -150,6 +147,7 @@ impl App{
                 let mut tabs = Vec::new();
                 for path in paths{
                     tabs.push(DockTab{
+                        closeable:true,
                         title:path_file_name(&path),
                         item:Panel::Editor(path)
                     })
@@ -158,33 +156,27 @@ impl App{
             },
             FileTreeEvent::SelectFile{path}=>{
                 // search for the tabcontrol with the maximum amount of editors
-                let mut max_editors = 0;
-                let mut max_ctrl_id = 0;
+                let mut target_ctrl_id = 0;
                 let mut dock_walker = self.dock.walker();
                 let mut ctrl_id = 1;
                 'outer: while let Some(dock_item) = dock_walker.walk_dock_item(){
                     match dock_item{
                         DockItem::TabControl{current, tabs}=>{
-                            let mut editor_count = 0;
                             for (id,tab) in tabs.iter().enumerate(){
                                 match &tab.item{
                                     Panel::Editor(edit_path)=>{
                                         if *edit_path == path{
                                             *current = id; // focus this one
-                                            max_ctrl_id = 0; // already open
+                                            target_ctrl_id = 0; // already open
                                             cx.redraw_area(Area::All);
                                             break 'outer;
                                         }
-                                        else{
-                                            editor_count += 1;
-                                        }
+                                    },
+                                    Panel::EditorTarget=>{
+                                        target_ctrl_id = ctrl_id;
                                     },
                                     _=>()
                                 }
-                            }
-                            if editor_count >= max_editors{
-                                max_editors = editor_count;
-                                max_ctrl_id = ctrl_id;
                             }
                         },
                         _=>()
@@ -192,13 +184,14 @@ impl App{
                     ctrl_id += 1;
                 }
                 
-                if max_ctrl_id != 0{ // found a control to append to
+                if target_ctrl_id != 0{ // found a control to append to
                     let mut dock_walker = self.dock.walker();
                     let mut ctrl_id = 1;
                     while let Some(dock_item) = dock_walker.walk_dock_item(){
-                        if ctrl_id == max_ctrl_id{
+                        if ctrl_id == target_ctrl_id{
                             if let DockItem::TabControl{current, tabs} = dock_item{
                                 tabs.push(DockTab{
+                                    closeable:true,
                                     title:path_file_name(&path),
                                     item:Panel::Editor(path.clone())
                                 });
@@ -241,6 +234,8 @@ impl App{
                 Panel::Color(color2)=>{
                     self.quad.color = *color2;
                     self.quad.draw_quad_walk(cx, Bounds::Fill, Bounds::Fill, Margin::zero());
+                },
+                Panel::EditorTarget=>{
                 },
                 Panel::FileTree=>{
                     self.file_tree.draw_file_tree(cx);

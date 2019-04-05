@@ -31,14 +31,14 @@ impl Style for ScrollBar{
             min_handle_size:30.0,
 
             axis:Axis::Horizontal,
-            animator:Animator::new(Anim::new(AnimMode::Cut{duration:0.5}, vec![
-                AnimTrack::to_vec4("sb.color",color("#5"))
+            animator:Animator::new(Anim::new(Play::Cut{duration:0.5}, vec![
+                Track::vec4("sb.color", Ease::Lin, vec![(1.0, color("#5"))])
             ])),
-            anim_over:Anim::new(AnimMode::Cut{duration:0.05}, vec![
-                AnimTrack::to_vec4("sb.color",color("#7"))
+            anim_over:Anim::new(Play::Cut{duration:0.05}, vec![
+                Track::vec4("sb.color", Ease::Lin, vec![(1.0, color("#7"))])
             ]),
-            anim_scrolling:Anim::new(AnimMode::Cut{duration:0.05}, vec![
-                AnimTrack::to_vec4("sb.color",color("#9"))
+            anim_scrolling:Anim::new(Play::Cut{duration:0.05}, vec![
+                Track::vec4("sb.color", Ease::Lin, vec![(1.0, color("#9"))])
             ]),
             sb:Quad{
                 shader_id:cx.add_shader(sh, "ScrollBar.sb"),
@@ -179,7 +179,7 @@ impl ScrollBarLike<ScrollBar> for ScrollBar{
         // lets check if our view-area gets a mouse-scroll.
         match event{
             Event::FingerScroll(fe)=>{
-                let rect = self._view_area.get_rect(cx, false);
+                let rect = self._view_area.get_rect(cx);
                 if rect.contains(fe.abs.x, fe.abs.y){ // handle mousewheel
                     // we should scroll in either x or y
                     match self.axis{
@@ -201,7 +201,7 @@ impl ScrollBarLike<ScrollBar> for ScrollBar{
         if self._visible{
             match event.hits(cx, self._sb_area, &mut self._hit_state){
                 Event::Animate(ae)=>{
-                    self.animator.calc_area(cx, "sb.color", ae.time, self._sb_area);
+                    self.animator.calc_write(cx, "sb.color", ae.time, self._sb_area);
                 },
                 Event::FingerDown(fe)=>{
                     self.animator.play_anim(cx, self.anim_scrolling.clone());
@@ -314,7 +314,8 @@ impl ScrollBarLike<ScrollBar> for ScrollBar{
                         self._scroll_size,
                         self.bar_size, 
                     );
-                    self._sb_area.push_float(cx, "is_vertical", 0.0);
+                    //is_vertical
+                    self._sb_area.push_float(cx, 0.0);
                 }
              },
              Axis::Vertical=>{
@@ -336,7 +337,8 @@ impl ScrollBarLike<ScrollBar> for ScrollBar{
                         self.bar_size,
                         self._scroll_size
                     );
-                    self._sb_area.push_float(cx, "is_vertical", 1.0);
+                    //is_vertical
+                    self._sb_area.push_float(cx, 1.0);
                 }
             }
         }
@@ -351,8 +353,10 @@ impl ScrollBarLike<ScrollBar> for ScrollBar{
 
         // push the var added to the sb shader
         if self._visible{
-            self._sb_area.push_float(cx, "norm_handle", norm_handle);
-            self._sb_area.push_float(cx, "norm_scroll", norm_scroll);
+            //norm_handle
+            self._sb_area.push_float(cx, norm_handle);
+            //norm_scroll
+            self._sb_area.push_float(cx, norm_scroll);
             self.animator.set_area(cx, self._sb_area); // if our area changed, update animation
         }
 

@@ -172,6 +172,15 @@ where T:Clone + ElementLife, ID:std::cmp::Ord + Clone
         }
     }
     
+    // clear all the items
+    pub fn clear(&mut self, cx:&mut Cx){
+        for elem_id in &self.element_list{
+            let mut elem = self.element_map.remove(&elem_id).unwrap();
+            elem.item.destruct(cx);
+        }
+        self.element_list.truncate(0);
+    }
+
     // iterate the set of 'last drawn' items
     pub fn iter<'a>(&'a mut self)->ElementsIterator<'a, T, ID>{
         return ElementsIterator::new(self)
