@@ -40,7 +40,7 @@ impl Style for Tab{
                 ..Default::default()
             },
             tab_close:TabClose{
-                margin:Margin{l:4.,t:2.,r:-6.,b:0.},
+                margin:Margin{l:-4.,t:3.,r:4.,b:0.},
                 ..Style::style(cx)
             },
             text:Text{..Style::style(cx)},
@@ -285,13 +285,12 @@ impl Tab{
             self._bg_area = self.bg.begin_quad(cx, &self.bg_layout);
             self._bg_area.push_vec4(cx, self.animator.last_vec4("bg.border_color"));
 
-            // push the 2 vars we added to bg shader
-            self.text.color = self.animator.last_vec4("text.color");
-            self._text_area = self.text.draw_text(cx, &self.label);
-
             if self.is_closeable{
                 self.tab_close.draw_tab_close(cx);
             }
+            // push the 2 vars we added to bg shader
+            self.text.color = self.animator.last_vec4("text.color");
+            self._text_area = self.text.draw_text(cx, &self.label);
 
             self.bg.end_quad(cx);
         }
