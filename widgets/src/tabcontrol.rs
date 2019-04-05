@@ -94,19 +94,21 @@ impl TabControl{
                     tab_control_event = TabControlEvent::TabDragEnd{fe, tab_id:*id};
                 },
                 TabEvent::Closing=>{ // this tab is closing. select the visible one
-                    let next_sel = if *id == self._tab_id_alloc - 1{ // last id
-                        if *id > 0{
-                            *id - 1
+                    if tab._is_selected{ // only do anything if we are selected
+                        let next_sel = if *id == self._tab_id_alloc - 1{ // last id
+                            if *id > 0{
+                                *id - 1
+                            }
+                            else{
+                                *id
+                            }
                         }
                         else{
-                            *id
+                            *id + 1
+                        };
+                        if *id != next_sel{
+                            tab_control_event = TabControlEvent::TabSelect{tab_id:next_sel};
                         }
-                    }
-                    else{
-                        *id + 1
-                    };
-                    if *id != next_sel{
-                        tab_control_event = TabControlEvent::TabSelect{tab_id:next_sel};
                     }
                 },
                 TabEvent::Close=>{
