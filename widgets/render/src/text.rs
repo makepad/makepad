@@ -206,6 +206,13 @@ impl Text{
                 }
                 width = 0.0;
                 chunk.truncate(0);
+                match self.wrapping{
+                    Wrapping::Line=>{
+                        cx.turtle_new_line();
+                    },
+                    _=>()
+                    
+                }
             }
         }
         cx.set_count_of_aligned_instance(count)

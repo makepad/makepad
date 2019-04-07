@@ -17,5 +17,7 @@ mod style;
 pub use crate::style::*;
 mod filetree;
 pub use crate::filetree::*;
+mod textbuffer;
+pub use crate::textbuffer::*;
 mod editor;
 pub use crate::editor::*;

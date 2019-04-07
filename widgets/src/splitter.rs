@@ -1,6 +1,6 @@
 use render::*;
 
-#[derive(Clone, Element)]
+#[derive(Clone)]
 pub struct Splitter{
     pub axis:Axis,
     pub align:SplitterAlign,
@@ -22,6 +22,11 @@ pub struct Splitter{
     pub _drag_pos_start:f32,
     pub _drag_max_pos:f32,
 
+}
+
+impl ElementLife for Splitter{
+    fn construct(&mut self, _cx:&mut Cx){}
+    fn destruct(&mut self, _cx:&mut Cx){}
 }
 
 #[derive(Clone, PartialEq)]

@@ -1,7 +1,7 @@
 use render::*;
 use crate::tabclose::*;
 
-#[derive(Clone, Element)]
+#[derive(Clone)]
 pub struct Tab{
     pub bg_layout:Layout,
     pub bg: Quad,
@@ -19,6 +19,11 @@ pub struct Tab{
     pub _close_anim_rect:Rect,
     pub _is_down:bool,
     pub _is_drag:bool
+}
+
+impl ElementLife for Tab{
+    fn construct(&mut self, _cx:&mut Cx){}
+    fn destruct(&mut self, _cx:&mut Cx){}
 }
 
 impl Style for Tab{

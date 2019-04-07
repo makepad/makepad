@@ -3,7 +3,7 @@ use crate::scrollbar::*;
 use serde_json::{Result, Value};
 use serde::*;
 
-#[derive(Clone, Element)]
+#[derive(Clone)]
 pub struct FileTree{
     pub view:View<ScrollBar>,
     pub drag_view:View<NoScrollBar>,
@@ -19,6 +19,11 @@ pub struct FileTree{
     pub animator:Animator,
     pub row_height:f32,
     pub row_padding:Padding
+}
+
+impl ElementLife for FileTree{
+    fn construct(&mut self, _cx:&mut Cx){}
+    fn destruct(&mut self, _cx:&mut Cx){}
 }
 
 #[derive(Clone, PartialEq)]

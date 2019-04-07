@@ -9,8 +9,8 @@ pub struct Dock<TItem>
 where TItem: Clone
 {
     pub dock_items: Option<DockItem<TItem>>,
-    pub splitters: Elements<Splitter, usize>,
-    pub tab_controls: Elements<TabControl, usize>,
+    pub splitters: Elements<usize, Splitter>,
+    pub tab_controls: Elements<usize, TabControl>,
 
     pub drop_size:Vec2,
     pub drop_quad: Quad,
@@ -122,8 +122,8 @@ where TItem: Clone
     walk_uid:usize,
     stack:Vec<DockWalkStack<'a, TItem>>,
     // forwards for Dock
-    splitters:&'a mut Elements<Splitter, usize>,
-    tab_controls:&'a mut Elements<TabControl, usize>,
+    splitters:&'a mut Elements<usize, Splitter>,
+    tab_controls:&'a mut Elements<usize, TabControl>,
     drop_quad_view:&'a mut View<NoScrollBar>,
     _drag_move:&'a mut Option<FingerMoveEvent>,
     _drag_end:&'a mut Option<DockDragEnd<TItem>>,

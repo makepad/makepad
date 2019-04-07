@@ -1,6 +1,6 @@
 use render::*;
 
-#[derive(Clone, Element)]
+#[derive(Clone)]
 pub struct TabClose{
     pub bg: Quad,
     pub text: Text,
@@ -12,6 +12,11 @@ pub struct TabClose{
     pub _hit_state:HitState,
     pub _is_down:bool,
     pub _bg_area:Area,
+}
+
+impl ElementLife for TabClose{
+    fn construct(&mut self, _cx:&mut Cx){}
+    fn destruct(&mut self, _cx:&mut Cx){}
 }
 
 impl Style for TabClose{
@@ -39,7 +44,12 @@ impl Style for TabClose{
                 Track::float("bg.down", Ease::OutExp, vec![(0.0, 0.0),(1.0, 3.1415*0.5)]),
             ]),
             margin:Margin::zero(),
-            _hit_state:HitState{..Default::default()},
+            _hit_state:HitState{
+                margin:Some(Margin{
+                    l:5.,t:5.,r:5.,b:5.
+                }),
+                ..Default::default()
+            },
             _is_down:false,
             _bg_area:Area::Empty,
         }

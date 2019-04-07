@@ -2,6 +2,7 @@ use render::*;
 
 pub fn set_dark_style(cx:&mut Cx){
     cx.set_font("normal_font", "resources/ubuntu_regular_256.font");
+    cx.set_font("mono_font", "resources/ubuntu_mono_256.font");
     cx.set_font("icon_font", "resources/fontawesome.font");
     cx.set_size("font_size", 11.0);
 
@@ -17,12 +18,9 @@ pub fn set_dark_style(cx:&mut Cx){
 
     cx.set_color("bg_marked", color256(17,70,110));
     cx.set_color("bg_marked_over", color256(17,70,110));
-
-
     cx.set_color("over_border", color256(255,255,255));
 
     cx.set_color("icon_color", color256(127,127,127));
-
 
     cx.set_color("text_selected_focus", color256(255,255,255));
     cx.set_color("text_deselected_focus", color256(157,157,157));

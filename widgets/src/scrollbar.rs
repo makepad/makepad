@@ -1,6 +1,6 @@
 use render::*;
 
-#[derive(Clone, Element)]
+#[derive(Clone)]
 pub struct ScrollBar{
 
     pub sb: Quad,
@@ -21,6 +21,11 @@ pub struct ScrollBar{
     pub _scroll_size:f32, // the size of the scrollbar
     pub _scroll_pos:f32, // scrolling position non normalised
     pub _drag_point:Option<f32>, // the point in pixels where we are dragging
+}
+
+impl ElementLife for ScrollBar{
+    fn construct(&mut self, _cx:&mut Cx){}
+    fn destruct(&mut self, _cx:&mut Cx){}
 }
 
 impl Style for ScrollBar{

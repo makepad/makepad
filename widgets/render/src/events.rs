@@ -252,7 +252,7 @@ impl Event{
                         abs_start: abs_start,
                         rel:vec2(fe.abs.x - rect.x, fe.abs.y - rect.y),
                         rel_start: rel_start,
-                        is_over:rect.contains(fe.abs.x, fe.abs.y),
+                        is_over:rect.contains_with_margin(fe.abs.x, fe.abs.y, &hit_state.margin),
                         ..fe.clone()
                     })
                 }

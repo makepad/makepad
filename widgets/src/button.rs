@@ -1,6 +1,6 @@
 use render::*;
 
-#[derive(Clone, Element)]
+#[derive(Clone)]
 pub struct Button{
     pub bg: Quad,
     pub bg_layout:Layout,
@@ -13,6 +13,11 @@ pub struct Button{
     pub _hit_state:HitState,
     pub _is_down:bool,
     pub _bg_area:Area,
+}
+
+impl ElementLife for Button{
+    fn construct(&mut self, _cx:&mut Cx){}
+    fn destruct(&mut self, _cx:&mut Cx){}
 }
 
 impl Style for Button{

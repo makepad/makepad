@@ -3,10 +3,10 @@ use render::*;
 use crate::scrollbar::*;
 use crate::tab::*;
 
-#[derive(Clone, Element)]
+#[derive(Clone)]
 pub struct TabControl{
     pub tabs_view:View<ScrollBar>,
-    pub tabs:Elements<Tab, usize>,
+    pub tabs:Elements<usize, Tab>,
     pub drag_tab_view:View<NoScrollBar>,
     pub drag_tab:Tab,
     pub page_view:View<NoScrollBar>,
@@ -17,6 +17,11 @@ pub struct TabControl{
     pub _dragging_tab:Option<(FingerMoveEvent,usize)>,
     pub _tab_id_alloc:usize,
     pub _focussed:bool
+}
+
+impl ElementLife for TabControl{
+    fn construct(&mut self, _cx:&mut Cx){}
+    fn destruct(&mut self, _cx:&mut Cx){}
 }
 
 #[derive(Clone, PartialEq)]

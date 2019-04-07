@@ -39,7 +39,7 @@ where TScrollBar: ScrollBarLike<TScrollBar> + Clone + ElementLife
     }
 }
 
-#[derive(Clone, Element)]
+#[derive(Clone)]
 pub struct NoScrollBar{
 }
 
@@ -47,6 +47,11 @@ impl NoScrollBar{
     fn handle_no_scroll_bar(&mut self, _cx:&mut Cx, _event:&mut Event)->ScrollBarEvent{
         ScrollBarEvent::None
     }
+}
+
+impl ElementLife for NoScrollBar{
+    fn construct(&mut self, _cx:&mut Cx){}
+    fn destruct(&mut self, _cx:&mut Cx){}
 }
 
 impl ScrollBarLike<NoScrollBar> for NoScrollBar{

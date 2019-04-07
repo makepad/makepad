@@ -939,3 +939,4 @@ pub fn get_icon_unicode(name:&str)->String{
         "yin-yang"=>"\u{f6ad}",
         _=>""
     }.to_string()
+}

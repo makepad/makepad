@@ -21,7 +21,6 @@ edition = "2018"
 
 [dependencies]
 shader_ast = {path="./shader_ast"}
-derive_element = {path="./derive_element"}
 
 [dependencies.glutin]
 version = "0.19"
