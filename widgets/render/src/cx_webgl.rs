@@ -124,7 +124,6 @@ impl Cx{
                             }
                         }
                     }
-
                 },
                 3=>{ // init
                     self.target_size = vec2(to_wasm.mf32(),to_wasm.mf32());
@@ -241,7 +240,7 @@ impl Cx{
             };
         };
 
-        if !self.redraw_areas.len()>0{
+        if self.redraw_areas.len()>0{
             self.call_draw_event(&mut event_handler, root_view);
             self.paint_dirty = true;
         }

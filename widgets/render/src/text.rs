@@ -111,6 +111,7 @@ impl Text{
     }
 
     pub fn draw_text(&mut self, cx:&mut Cx, text:&str)->Area{
+
         if !cx.fonts[self.font_id].loaded{
             return Area::Empty
         }

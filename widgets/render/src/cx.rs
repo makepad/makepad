@@ -109,7 +109,7 @@ impl Default for Cx{
 
             redraw_areas:Vec::new(),
             incr_areas:Vec::new(),
-            paint_dirty:true,
+            paint_dirty:false,
             clear_color:vec4(0.1,0.1,0.1,1.0),
             redraw_id:1,
             event_id:1,

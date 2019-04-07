@@ -181,9 +181,10 @@
 
 			// fetch dependencies
 			this.to_wasm.fetch_deps();
-
+			
 			this.do_wasm_io();
-
+			
+			this.do_wasm_block = true;
 			// ok now, we wait for our resources to load.
 			Promise.all(this.resources).then(results=>{
 				let deps = []
@@ -209,12 +210,15 @@
 					height:this.height,
 					dpi_factor:this.dpi_factor
 				})
-				
+				this.do_wasm_block = false;
 				this.do_wasm_io();
 			})
 		}
 
 		do_wasm_io(){
+			if(this.do_wasm_block){
+				return
+			}
 			this.to_wasm.end();
 			let from_wasm_ptr = this.exports.process_to_wasm(this.app, this.to_wasm.pointer)
 			// get a clean to_wasm set up immediately
@@ -495,7 +499,7 @@
 					this.to_wasm.on_finger_down(finger)
 			}
 
-			this.do_wasm_io();
+			//this.do_wasm_io();
 		}
 
 		on_finger_up(fingers){
@@ -504,7 +508,7 @@
 				this.to_wasm.on_finger_up(finger)
 			}
 
-			this.do_wasm_io();
+			//this.do_wasm_io();
 		}
 
 		on_finger_hover(fingers){
@@ -513,7 +517,7 @@
 				this.to_wasm.on_finger_hover(finger);
 			}			
 
-			this.do_wasm_io();
+			//this.do_wasm_io();
 		}
 
 		on_finger_move(fingers){
@@ -521,7 +525,7 @@
 				var finger = fingers[i]
 				this.to_wasm.on_finger_move(finger);
 			}
-			this.do_wasm_io();
+			//this.do_wasm_io();
 		}
 
 		on_finger_wheel(fingers){
@@ -529,12 +533,12 @@
 				var finger = fingers[i]
 				this.to_wasm.on_finger_wheel(finger)
 			}
-			this.do_wasm_io();
+			//this.do_wasm_io();
 		}
 
 		on_finger_out(x, y){
 			this.to_wasm.on_finger_out(x, y);
-			this.do_wasm_io();
+			//this.do_wasm_io();
 		}
 		
 		bind_mouse_and_touch(){
@@ -669,11 +673,13 @@
 				e.preventDefault();
 				mouse_buttons_down[e.button] = true;
 				this.on_finger_down(mouse_to_finger(e))
+				this.do_wasm_io();
 			})
 			window.addEventListener('mouseup',e=>{
 				e.preventDefault();
 				mouse_buttons_down[e.button] = false;
-				this.on_finger_up(mouse_to_finger(e))
+				this.on_finger_up(mouse_to_finger(e));
+				this.do_wasm_io();
 			})
 			let mouse_move = e=>{
 				let move_fingers = [];
@@ -688,10 +694,12 @@
 				}
 				this.on_finger_move(move_fingers);
 				this.on_finger_hover(mouse_to_finger(e));
+				this.do_wasm_io();
 			}
 			window.addEventListener('mousemove',mouse_move);
 			window.addEventListener('mouseout',e=>{
 				this.on_finger_out(e.pageX, e.pageY);
+				this.do_wasm_io();
 			});
 			canvas.addEventListener('contextmenu',e=>{
 				e.preventDefault()
@@ -700,26 +708,31 @@
 			window.addEventListener('touchstart', e=>{
 				e.preventDefault()
 				this.on_finger_down(touch_to_finger_alloc(e))
+				this.do_wasm_io();
 				return false
 			})
 			window.addEventListener('touchmove',e=>{
 				e.preventDefault();
 				this.on_finger_move(touch_to_finger_lookup(e))
+				this.do_wasm_io();
 				return false
 			},{passive:false})
 			window.addEventListener('touchend', e=>{
 				e.preventDefault();
 				this.on_finger_up(touch_to_finger_free(e))
+				this.do_wasm_io();
 				return false
 			})
 			canvas.addEventListener('touchcancel', e=>{
 				e.preventDefault();
 				this.on_finger_up(touch_to_finger_free(e))
+				this.do_wasm_io();
 				return false
 			})
 			canvas.addEventListener('touchleave', e=>{
 				e.preventDefault();
 				this.on_finger_up(touch_to_finger_free(e))
+				this.do_wasm_io();
 				return false
 			})
 			canvas.addEventListener('wheel', e=>{
@@ -732,6 +745,7 @@
 				fingers[0].x_wheel = e.deltaX * fac
 				fingers[0].y_wheel = e.deltaY * fac
 				this.on_finger_wheel(fingers)
+				this.do_wasm_io();
 			})
 			//window.addEventListener('webkitmouseforcewillbegin', this.onCheckMacForce.bind(this), false)
 			//window.addEventListener('webkitmouseforcechanged', this.onCheckMacForce.bind(this), false)
