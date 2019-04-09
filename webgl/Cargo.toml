@@ -9,12 +9,12 @@ path = "../src/main.rs"
 crate-type = ["cdylib"]
 
 [profile.release]
-#lto = true
-#opt-level = 'z'
+lto = true
+opt-level = 'z'
 
 [dependencies]
 rand = "*"
-syn = "*"
+#syn = "*"
 
 [dependencies.widgets]
 path="../widgets"
