@@ -168,8 +168,8 @@ impl Text{
         }        
     }
   
-    pub fn end_chunks(&mut self, cx:&mut Cx, count:usize){
-        cx.set_count_of_aligned_instance(count);
+    pub fn end_chunks(&mut self, cx:&mut Cx, count:usize)->Area{
+        cx.set_count_of_aligned_instance(count)
     }
 
     pub fn draw_text(&mut self, cx:&mut Cx, text:&str)->Area{
@@ -252,7 +252,6 @@ impl Text{
                 }
             }
         }
-        self.end_chunks(cx, count);
-        return area
+        self.end_chunks(cx, count)
     }
 }
