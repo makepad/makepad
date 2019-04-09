@@ -6,7 +6,6 @@ edition = "2018"
 
 [dependencies]
 rand = "*"
-syn = "*"
 
 [dependencies.widgets]
 path="./widgets"

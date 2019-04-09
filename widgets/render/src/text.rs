@@ -1,4 +1,5 @@
 use crate::cx::*;
+use std::iter::Peekable;
 
 #[derive(Clone)]
 pub enum Wrapping{
@@ -63,11 +64,10 @@ impl Text{
             let color:vec4<Instance>;
             let x:float<Instance>;
             let y:float<Instance>;
-            let w:float<Instance>;
-            let h:float<Instance>;
+            //let w:float<Instance>;
+            //let h:float<Instance>;
             let font_size:float<Instance>;
-            let font_base:float<Instance>;
-            let boldness:float<Instance>;
+            //let font_base:float<Instance>;
             let tex_coord:vec2<Varying>;
 
             fn pixel()->vec4{
@@ -76,7 +76,6 @@ impl Text{
 
                 df_viewport(tex_coord * tex_size * 0.07);
                 df_shape = -sig_dist - 0.5 / df_aa;
-                df_shape -= boldness;
                 return df_fill(color); 
             }
             
@@ -84,11 +83,11 @@ impl Text{
                 let shift:vec2 = -draw_list_scroll;
                 let min_pos:vec2 = vec2(
                     x + font_size * font_geom.x,
-                    y - font_size * font_geom.y + font_size * font_base
+                    y - font_size * font_geom.y + font_size// * font_base
                 );
                 let max_pos:vec2 = vec2(
                     x + font_size * font_geom.z,
-                    y - font_size * font_geom.w + font_size * font_base
+                    y - font_size * font_geom.w + font_size// * font_base
                 );
                 
                 let clipped:vec2 = clamp(
@@ -110,14 +109,11 @@ impl Text{
         sh
     }
 
-    pub fn draw_text(&mut self, cx:&mut Cx, text:&str)->Area{
-
+    pub fn begin_chunks(&mut self, cx:&mut Cx)->Area{
         if !cx.fonts[self.font_id].loaded{
             return Area::Empty
         }
-
         let area = cx.new_aligned_instance(self.shader_id);
-
         if area.need_uniforms_now(cx){
             //texture,
             area.push_uniform_texture_2d(cx, cx.fonts[self.font_id].texture_id);
@@ -126,12 +122,70 @@ impl Text{
             //list_clip
             //area.push_uniform_vec4f(cx, -50000.0,-50000.0,50000.0,50000.0);
         }
+        return area
+    }
+
+    pub fn draw_chunk(&mut self, cx:&mut Cx, geom_x:f32, geom_y:f32, area:&Area, chunk:&[char]){
+        let mut geom_x = geom_x;
+        let unicodes = &cx.fonts[self.font_id].unicodes;
+        let glyphs = &cx.fonts[self.font_id].glyphs;
+        let instance = match area{
+            Area::Instance(inst)=>{
+                let draw_list = &mut cx.draw_lists[inst.draw_list_id];
+                let draw_call = &mut draw_list.draw_calls[inst.draw_call_id];
+                &mut draw_call.instance
+            },
+            _=>{
+                let draw_list = &mut cx.draw_lists[0];
+                let draw_call = &mut draw_list.draw_calls[0];
+                &mut draw_call.instance
+            }
+        };
+
+        for wc in chunk{
+            let slot = unicodes[*wc as usize];
+            let glyph = &glyphs[slot];
+            let w = glyph.advance * self.font_size;
+            
+            let data = [
+                /*font_geom*/ glyph.x1 ,glyph.y1 ,glyph.x2 ,glyph.y2,
+                /*font_tc*/ glyph.tx1 ,glyph.ty1 ,glyph.tx2 ,glyph.ty2,
+                /*color*/ self.color.x, self.color.y, self.color.z, self.color.w,
+                /*x*/ geom_x,
+                /*y*/ geom_y,
+                // /*w*/ w,
+                // /*h*/ height,
+                /*font_size*/ self.font_size
+                // /*font_base*/ 1.0
+            ];
+            instance.extend_from_slice(&data);
+            /*
+            for i in 0..15{
+                instance.push(0.)
+            }*/
+            geom_x += w;
+            //count += 1;
+        }        
+    }
+  
+    pub fn end_chunks(&mut self, cx:&mut Cx, count:usize){
+        cx.set_count_of_aligned_instance(count);
+    }
+
+    pub fn draw_text(&mut self, cx:&mut Cx, text:&str)->Area{
+        let area = self.begin_chunks(cx);
+        if let Area::Empty = area{
+            return area
+        }
 
         let mut chunk = Vec::new();
         let mut width = 0.0;
         let mut count = 0;
         let mut elipct = 0;
-        for (last,c) in text.chars().identify_last(){
+        let font_size = self.font_size;
+        let mut iter = text.chars().peekable();
+        while let Some(c) = iter.next(){
+            let last = iter.peek().is_none();
 
             let mut emit = last;
             let slot = if c < '\u{10000}'{
@@ -177,34 +231,16 @@ impl Text{
                 }
             }
             if emit{
-                let height = self.font_size * self.line_spacing;
-                let mut geom = cx.walk_turtle(
+                let height = font_size * self.line_spacing;
+                let geom = cx.walk_turtle(
                     Bounds::Fix(width), 
                     Bounds::Fix(height), 
                     Margin::zero(),
                     None
                 );
-                for wc in &chunk{
-                    let slot = cx.fonts[self.font_id].unicodes[*wc as usize];
-                    let glyph = &cx.fonts[self.font_id].glyphs[slot];
-                    let w = glyph.advance * self.font_size;
-                    let data = [
-                        /*font_geom*/ glyph.x1 ,glyph.y1 ,glyph.x2 ,glyph.y2,
-                        /*font_tc*/ glyph.tx1 ,glyph.ty1 ,glyph.tx2 ,glyph.ty2,
-                        /*color*/ self.color.x, self.color.y, self.color.z, self.color.w,
-                        /*x*/ geom.x,
-                        /*y*/ geom.y,
-                        /*w*/ w,
-                        /*h*/ height,
-                        /*font_size*/ self.font_size,
-                        /*font_base*/ 1.0,
-                        /*boldness*/ self.boldness
-                    ];
-                    area.push_slice(cx, &data);
 
-                    geom.x += w;
-                    count += 1;
-                }
+                self.draw_chunk(cx, geom.x, geom.y, &area, &chunk);
+                count += chunk.len();
                 width = 0.0;
                 chunk.truncate(0);
                 match self.wrapping{
@@ -216,46 +252,7 @@ impl Text{
                 }
             }
         }
-        cx.set_count_of_aligned_instance(count)
-    }
-}
-
-// identifying last item in iterator
-
-trait IdentifyLast: Iterator + Sized {
-    fn identify_last(self) -> Iter<Self>;
-}
-
-impl<T> IdentifyLast for T where T: Iterator {
-    fn identify_last(mut self) -> Iter<Self> {
-        let e = self.next();
-        Iter {
-            iter: self,
-            buffer: e,
-        }
-    }
-}
-
-struct Iter<T> where T: Iterator {
-    iter: T,
-    buffer: Option<T::Item>,
-}
-
-impl<T> Iterator for Iter<T> where T: Iterator {
-    type Item = (bool, T::Item);
-
-    fn next(&mut self) -> Option<Self::Item> {
-        match self.buffer.take() {
-            None => None,
-            Some(e) => {
-                match self.iter.next() {
-                    None => Some((true, e)),
-                    Some(f) => {
-                        self.buffer = Some(f);
-                        Some((false, e))
-                    },
-                }
-            },
-        }
+        self.end_chunks(cx, count);
+        return area
     }
 }

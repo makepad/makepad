@@ -267,20 +267,12 @@
 					u8out[i] = u8in[i];
 				}
 			}
-			else if((u8len&7)!= 0 || (output_ptr&7)!=0){ // not f64 aligned, do a u32 copy
+			else{ // not f64 aligned, do a u32 copy
 				let u32len = u8len>>2; //4 bytes at a time. 
 				var u32out = new Uint32Array(this.memory.buffer, output_ptr, u32len)
 				var u32in = new Uint32Array(input_buffer)
 				for(let i = 0; i < u32len; i++){
 					u32out[i] = u32in[i];
-				}
-			}
-			else{ // both f64 aligned, use f64 copy
-				let f64len = u8len>>3; //8 bytes at a time. 
-				var f64out = new Float64Array(this.memory.buffer, output_ptr, f64len)
-				var f64in = new Float64Array(input_buffer)
-				for(let i = 0; i < f64len; i++){
-					f64out[i] = f64in[i];
 				}
 			}
 		}
@@ -694,7 +686,10 @@
 				}
 				this.on_finger_move(move_fingers);
 				this.on_finger_hover(mouse_to_finger(e));
+				var begin = performance.now();
 				this.do_wasm_io();
+				var end = performance.now();
+				//console.log("Redraw cycle "+(end-begin)+" ms");
 			}
 			window.addEventListener('mousemove',mouse_move);
 			window.addEventListener('mouseout',e=>{

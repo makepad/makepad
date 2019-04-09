@@ -385,6 +385,7 @@ impl Cx{
     pub fn call_draw_event<F, T>(&mut self, mut event_handler:F, root_view:&mut View<T>)
     where F: FnMut(&mut Cx, &mut Event), T: ScrollBarLike<T> + Clone + ElementLife
     { 
+        //for i in 0..10{
         self.is_in_redraw_cycle = true;
         self.redraw_id += 1;
         root_view.begin_view(self, &Layout{..Default::default()});
@@ -393,6 +394,7 @@ impl Cx{
         self.call_event_handler(&mut event_handler, &mut Event::Draw);
         root_view.end_view(self);
         self.is_in_redraw_cycle = false;
+        //}
     }
 
     pub fn call_animation_event<F>(&mut self, mut event_handler:F, time:f64)

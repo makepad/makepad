@@ -1,6 +1,8 @@
 use render::*;
 use crate::textbuffer::*;
 use crate::scrollbar::*;
+use proc_macro2::TokenStream;
+use std::str::FromStr;
 
 #[derive(Clone)]
 pub struct Editor{
@@ -8,9 +10,22 @@ pub struct Editor{
     pub view:View<ScrollBar>,
     pub bg_layout:Layout,
     pub bg: Quad,
+    pub tab:Quad,
     pub text: Text,
     pub _hit_state:HitState,
     pub _bg_area:Area,
+
+    pub col_keyword:Vec4,
+    pub col_flow_keyword:Vec4,
+    pub col_identifier:Vec4,
+    pub col_operator:Vec4,
+    pub col_function:Vec4,
+    pub col_number:Vec4,
+    pub col_paren:Vec4,
+    pub col_comment:Vec4,
+    pub col_string:Vec4,
+    pub col_delim:Vec4,
+    pub col_type:Vec4
 }
 
 impl ElementLife for Editor{
@@ -20,7 +35,13 @@ impl ElementLife for Editor{
 
 impl Style for Editor{
     fn style(cx:&mut Cx)->Self{
-        let tab = Self{
+        let tab_sh = Self::def_tab_shader(cx);
+        let editor = Self{
+            tab:Quad{
+                color:color("#5"),
+                shader_id:cx.add_shader(tab_sh, "Editor.tab"),
+                ..Style::style(cx)
+            },
             path:"".to_string(),
             view:View{
                 scroll_h:Some(ScrollBar{
@@ -32,7 +53,7 @@ impl Style for Editor{
                 ..Style::style(cx)
             },
             bg:Quad{
-                color:color("#2"),
+                color:color("#1"),
                 ..Style::style(cx)
             },
             bg_layout:Layout{
@@ -45,14 +66,27 @@ impl Style for Editor{
             text:Text{
                 font_id:cx.load_font(&cx.font("mono_font")),
                 font_size:12.0,
+                line_spacing:1.3,
                 wrapping:Wrapping::Line,
                 ..Style::style(cx)
             },
             _hit_state:HitState{..Default::default()},
-            _bg_area:Area::Empty
+            _bg_area:Area::Empty,
+            // syntax highlighting colors
+            col_keyword:color256(91,155,211),
+            col_flow_keyword:color256(196,133,190),
+            col_identifier:color256(212,212,212),
+            col_operator:color256(212,212,212),
+            col_function:color256(220,220,174),
+            col_type:color256(86,201,177),
+            col_number:color256(182,206,170),
+            col_comment:color256(99,141,84),
+            col_paren:color256(212,212,212),
+            col_string:color256(204,145,123),
+            col_delim:color256(212,212,212)            
         };
         //tab.animator.default = tab.anim_default(cx);
-        tab
+        editor
     }
 }
 
@@ -62,7 +96,460 @@ pub enum EditorEvent{
     Change
 }
 
+macro_rules! next_char{
+    ($x:ident) =>{
+        if let Some(c) = $x.next(){c}else{0 as char}
+    }
+}
+
+macro_rules! match_keyword{
+    ($nc:ident, $iter:ident, $chunk:ident, $( $chars:literal ),*) =>{
+        $(
+        if $nc == $chars{
+            $chunk.push($nc);
+            $nc = if let Some(c) = $iter.next(){c}else{0 as char};
+            true
+        }
+        else{
+            false
+        }
+        ) &&*
+    }
+}
+
 impl Editor{
+
+    pub fn def_tab_shader(cx:&mut Cx)->Shader{
+        let mut sh = Quad::def_quad_shader(cx);
+        sh.add_ast(shader_ast!({
+            fn pixel()->vec4{
+                df_viewport(pos * vec2(w, h));
+                df_move_to(1.,-1.);
+                df_line_to(1.,h+1.);
+                return df_stroke(color, 0.8);
+            }
+        }));
+        sh
+    }
+
+    pub fn draw_rust(&mut self, cx:&mut Cx, text:&str)->Area{
+        let area = self.text.begin_chunks(cx);
+        if let Area::Empty = area{
+            return area
+        }
+
+        let mut chunk = Vec::new();
+        let mut width = 0.0;
+        let mut count = 0;
+        let font_size = self.text.font_size;
+        let mut iter = text.chars();
+        let mut c:char;
+        let mut nc = next_char!(iter);
+        let glyph = &cx.fonts[self.text.font_id].glyphs[65];
+        let fixed_width = glyph.advance * self.text.font_size;
+        let line_height = self.text.font_size * self.text.line_spacing;
+        let mut after_newline = true;
+        let mut last_tabs = 0;
+        let mut newline_tabs = 0;
+        loop{
+            let mut do_newline = false;
+            c = nc; nc = next_char!(iter);
+            if c == 0 as char{
+                break;
+            }           
+            match c{
+                ' '=>{ // eat as many spaces as possible
+                    if after_newline{ // consume spaces in groups of 4
+                        let mut counter = 1;
+                        while nc == ' '{
+                            counter += 1;
+                            nc = next_char!(iter);
+                        }
+                        let tabs = counter >> 2;
+                        let left = counter & 3;
+                        last_tabs = tabs;
+                        newline_tabs = tabs;
+                        for _i in 0..tabs{
+                            self.tab.draw_quad_walk(cx, Bounds::Fix(fixed_width*4.), Bounds::Fix(line_height), Margin::zero());
+                        }
+                        for _i in 0..left{
+                            chunk.push(' ');
+                        }
+                    }
+                    else{
+                        chunk.push(c);
+                        while nc == ' '{
+                            chunk.push(nc);
+                            nc = next_char!(iter);
+                        }
+                    }
+                },
+                '\t'=>{ // eat as many tabs as possible
+                    // lets output tab lines
+                    self.tab.draw_quad_walk(cx, Bounds::Fix(fixed_width*4.), Bounds::Fix(line_height), Margin::zero());
+                    //chunk.push(c);
+                    while nc == '\t'{
+                        self.tab.draw_quad_walk(cx, Bounds::Fix(fixed_width*4.), Bounds::Fix(line_height), Margin::zero());
+                        //chunk.push(nc);
+                        nc = next_char!(iter);
+                    }
+                },
+                '/'=>{
+                    after_newline = false;
+                    chunk.push(c);
+                    if nc == '/'{
+                        while nc != '\n'{
+                            chunk.push(nc);
+                            nc = next_char!(iter);
+                        }
+                        self.text.color = self.col_comment;
+                    }
+                    else{
+                        self.text.color = self.col_operator;
+                    }
+                },
+                '"'=>{
+                    chunk.push(c);
+                    while nc != (0 as char) && (nc != '"' || c == '\\' && nc == '"'){
+                        chunk.push(nc);
+                        nc = next_char!(iter);
+                    };
+                    chunk.push(nc);
+                    nc = next_char!(iter);
+                    self.text.color = self.col_string;
+                },
+                '\r'=>{
+                },
+                '\n'=>{
+                    if after_newline{
+                        for _i in 0..last_tabs{
+                            self.tab.draw_quad_walk(cx, Bounds::Fix(fixed_width*4.), Bounds::Fix(line_height), Margin::zero());
+                        }
+                    }
+                    else {
+                        last_tabs = newline_tabs;
+                    }
+                    chunk.push(c);
+                    do_newline = true;
+                    after_newline = true;
+                    newline_tabs = 0;
+                },
+                '0'...'9'=>{ // try to parse numbers
+                    after_newline = false;
+                    self.text.color = self.col_number;
+                    chunk.push(c);
+                    if nc == 'x'{ // parse a hex number
+                        chunk.push(nc);
+                        nc = next_char!(iter);
+                        while nc >= '0' && nc <='9' || nc >= 'a' && nc <= 'f' || nc >= 'A' && nc <='F' || nc == '_'{
+                            chunk.push(nc);
+                            nc = next_char!(iter);
+                        }
+                    }
+                    else if nc == 'b'{ // parse a binary
+                        chunk.push(nc);
+                        nc = next_char!(iter);
+                        while nc == '0' || nc =='1' || nc == '_'{
+                            chunk.push(nc);
+                            nc = next_char!(iter);
+                        }
+                    }
+                    else{
+                        while nc >= '0' && nc <='9' || nc == '_'{
+                            chunk.push(nc);
+                            nc = next_char!(iter);
+                        }
+                        if nc == 'u' || nc == 'i'{
+                            chunk.push(nc);
+                            nc = next_char!(iter);
+                            if nc == '8'{ // u8
+                                chunk.push(nc);
+                                nc = next_char!(iter);
+                                // finish token, mark as value
+                            }
+                            else if nc == '1'{ // u16?
+                                chunk.push(nc);
+                                nc = next_char!(iter);
+                                if nc == '6'{
+                                    chunk.push(nc);
+                                    nc = next_char!(iter);
+                                }
+                                else{ // invalid
+                                     
+                                }
+                            }
+                            else if nc == '3'{ // u32?
+                                chunk.push(nc);
+                                nc = next_char!(iter);
+                                if nc == '2'{
+                                    chunk.push(nc);
+                                    nc = next_char!(iter);
+                                }
+                                else{ // invalid
+
+                                }
+                            }
+                        }
+                        else if nc == '.'{
+                            chunk.push(nc);
+                            nc = next_char!(iter);
+                            // again eat as many numbers as possible
+                            while nc >= '0' && nc <='9' || nc == '_'{
+                                chunk.push(nc);
+                                nc = next_char!(iter);
+                            }
+                        }
+                    }
+                },
+                '(' | ')'=>{
+                    after_newline = false;
+                    chunk.push(c);
+                    self.text.color = self.col_paren;
+                },
+                '{' | '}'=>{
+                    after_newline = false;
+                    chunk.push(c);
+                    self.text.color = self.col_paren;
+                },
+                '[' | ']'=>{
+                    after_newline = false;
+                    chunk.push(c);
+                    self.text.color = self.col_paren;
+                },
+                'a'...'z'=>{ // try to parse keywords or identifiers
+                    after_newline = false;
+                    chunk.push(c);
+                    let mut is_keyword = false;
+                    let mut is_flow_keyword = false;
+
+                    match c{
+                        'a'=>{
+                            if match_keyword!(nc,iter,chunk,'s'){
+                                is_keyword = true;
+                            }
+                        },
+                        'b'=>{ 
+                            if match_keyword!(nc,iter,chunk,'r','e','a','k'){
+                                is_flow_keyword = true;
+                                is_keyword = true;
+                            }
+                        },
+                        'c'=>{
+                            if match_keyword!(nc,iter,chunk,'o'){
+                                if match_keyword!(nc,iter,chunk,'n','s','t'){
+                                    is_keyword = true;
+                                }
+                                else if match_keyword!(nc,iter,chunk,'n','t','i','n','u','e'){
+                                    is_flow_keyword = true;
+                                    is_keyword = true;
+                                }
+                            }
+                            else if match_keyword!(nc,iter,chunk,'r','a','t','e'){
+                                is_keyword = true;
+                            }
+                        },
+                        'e'=>{
+                            if match_keyword!(nc,iter,chunk,'l','s','e'){
+                                is_flow_keyword = true;
+                                is_keyword = true;
+                            }
+                            else if match_keyword!(nc,iter,chunk,'n','u','m'){
+                                is_keyword = true;
+                            }
+                            else if match_keyword!(nc,iter,chunk,'x','t','e','r','n'){
+                                is_keyword = true;
+                            }
+                        },
+                        'f'=>{
+                            if match_keyword!(nc,iter,chunk,'a','l','s','e'){
+                                is_keyword = true;
+                            }
+                            else if match_keyword!(nc,iter,chunk,'n'){
+                                is_keyword = true;
+                            }
+                            else if match_keyword!(nc,iter,chunk,'o','r'){
+                                is_flow_keyword = true;
+                                is_keyword = true;
+                            }
+                        },
+                        'i'=>{
+                            if match_keyword!(nc,iter,chunk,'f'){
+                                is_flow_keyword = true;
+                                is_keyword = true;
+                            }
+                            else if match_keyword!(nc,iter,chunk,'m','p','l'){
+                                is_keyword = true;
+                            }
+                            else if match_keyword!(nc,iter,chunk,'i','n'){
+                                is_keyword = true;
+                            }
+                        },
+                        'l'=>{
+                            if match_keyword!(nc,iter,chunk,'e','t'){
+                                is_keyword = true;
+                            }
+                            else if match_keyword!(nc,iter,chunk,'o','o','p'){
+                                is_flow_keyword = true;
+                                is_keyword = true;
+                            }
+                        },
+                        'm'=>{
+                            if match_keyword!(nc,iter,chunk,'a','t','c'){
+                                is_keyword = true;
+                                is_flow_keyword = true;
+                            }
+                            else if match_keyword!(nc,iter,chunk,'o'){
+                                if match_keyword!(nc,iter,chunk,'d'){
+                                    is_keyword = true;
+                                }
+                                else if match_keyword!(nc,iter,chunk,'v','e'){
+                                    is_keyword = true;
+                                }
+                            }
+                            else if match_keyword!(nc,iter,chunk,'u','t'){
+                                is_keyword = true;
+                            }
+                        },
+                        'p'=>{ // pub
+                            if match_keyword!(nc,iter,chunk,'u','b'){ 
+                                is_keyword = true;
+                            }
+                        },
+                        'r'=>{
+                            if match_keyword!(nc,iter,chunk,'e'){
+                                if match_keyword!(nc,iter,chunk,'f'){
+                                    is_keyword = true;
+                                }
+                                else if match_keyword!(nc,iter,chunk,'t','u','r','n'){
+                                    is_keyword = true;
+                                    is_flow_keyword = true;
+                                }
+                            }
+                        },
+                        's'=>{
+                            if match_keyword!(nc,iter,chunk,'e','l','f'){
+                                is_keyword = true;
+                            }
+                            if match_keyword!(nc,iter,chunk,'u','p','e','r'){
+                                is_keyword = true;
+                            }
+                            else if match_keyword!(nc,iter,chunk,'t'){
+                                if match_keyword!(nc,iter,chunk,'a','t','i','c'){
+                                    is_keyword = true;
+                                }
+                                else if match_keyword!(nc,iter,chunk,'t','r','u','c','t'){
+                                    is_keyword = true;
+                                }
+                            }
+                        },
+                        't'=>{
+                            if match_keyword!(nc,iter,chunk,'y','p','e'){
+                                is_keyword = true;
+                            }
+                            else if match_keyword!(nc,iter,chunk,'r'){
+                                if match_keyword!(nc,iter,chunk,'r','a','i','t'){
+                                    is_keyword = true;
+                                }
+                                else if match_keyword!(nc,iter,chunk,'u','e'){
+                                    is_keyword = true;
+                                }
+                            }
+                        },
+                        'u'=>{ // use
+                            if match_keyword!(nc,iter,chunk,'s','e'){ 
+                                is_keyword = true;
+                            }
+                            else if match_keyword!(nc,iter,chunk,'n','s','a','f','e'){ 
+                                is_keyword = true;
+                            }
+                        },
+                        'w'=>{ // use
+                            if match_keyword!(nc,iter,chunk,'h'){
+                                if match_keyword!(nc,iter,chunk,'e','r','e'){
+                                    is_keyword = true;
+                                }
+                                else if match_keyword!(nc,iter,chunk,'i','l','e'){
+                                    is_flow_keyword = true;
+                                    is_keyword = true;
+                                }
+                            }
+                        }, 
+                         _=>{}
+                    }
+
+                    while nc >= '0' && nc <='9' || nc >= 'a' && nc <= 'z' || nc >= 'A' && nc <='Z' || nc == '_' || nc == '$'{
+                        is_keyword = false;
+                        chunk.push(nc);
+                        nc = next_char!(iter);
+                    }
+                    if is_keyword{
+                        if is_flow_keyword{
+                            self.text.color = self.col_flow_keyword;
+                        }
+                        else{
+                            self.text.color = self.col_keyword;
+                        }
+                    }
+                    else{
+                        if nc == '('{
+                            self.text.color = self.col_function;
+                        }
+                        else{
+                            self.text.color = self.col_identifier;
+                        }
+                    }
+                   
+                },
+                'A'...'Z'=>{
+                    after_newline = false;
+                    chunk.push(c);
+                    let mut is_keyword = false;
+                    if c == 'S'{
+                        if match_keyword!(nc,iter,chunk,'e','l','f'){
+                            is_keyword = true;
+                        }
+                    }
+
+                    while nc >= '0' && nc <='9' || nc >= 'a' && nc <= 'z' || nc >= 'A' && nc <='Z' || nc == '_' || nc == '$'{
+                        is_keyword = false;
+                        chunk.push(nc);
+                        nc = next_char!(iter);
+                    }
+                    if is_keyword{
+                        self.text.color = self.col_keyword;
+                    }
+                    else{
+                        self.text.color = self.col_type;
+                    }
+                },
+                _=>{
+                    after_newline = false;
+                    chunk.push(c);
+                    // unknown type
+                    self.text.color = self.col_identifier;
+                }
+            }
+            if chunk.len()>0{
+                let height = font_size * self.text.line_spacing;
+                let geom = cx.walk_turtle(
+                    Bounds::Fix(fixed_width * (chunk.len() as f32)), 
+                    Bounds::Fix(height), 
+                    Margin::zero(),
+                    None
+                );
+
+                self.text.draw_chunk(cx, geom.x, geom.y, &area, &chunk);
+                count += chunk.len();
+                width = 0.0;
+                chunk.truncate(0);
+                if do_newline{
+                    cx.turtle_new_line();
+                }
+            }
+        }
+        self.text.end_chunks(cx, count);
+        return area
+    }
 
     pub fn handle_editor(&mut self, cx:&mut Cx, event:&mut Event, text_buffer:&mut TextBuffer)->EditorEvent{
         self.view.handle_scroll_bars(cx, event);
@@ -83,6 +570,7 @@ impl Editor{
    }
 
     pub fn draw_editor(&mut self, cx:&mut Cx, text_buffer:&mut TextBuffer){
+        
         // pull the bg color from our animation system, uses 'default' value otherwise
        // self.bg.color = self.animator.last_vec4("bg.color");
         // push the 2 vars we added to bg shader
@@ -96,8 +584,11 @@ impl Editor{
             self.text.draw_text(cx, "Loading ...");
         }
         else{
+            //let tok_str = TokenStream::from_str(&text_buffer.text);
+
+            //let expr = syn::parse_str::<syn::File>(&text_buffer.text);
             self._bg_area = self.bg.begin_quad(cx, &self.bg_layout);
-            self.text.draw_text(cx, &text_buffer.text);
+            self.draw_rust(cx, &text_buffer.text);
         }
 
         self.bg.end_quad(cx);

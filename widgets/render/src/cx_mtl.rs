@@ -249,8 +249,11 @@ impl Cx{
             }
             // call redraw event
             if self.redraw_areas.len()>0{
+                let time_now = precise_time_ns();
                 self.call_draw_event(&mut event_handler, &mut root_view);
                 self.paint_dirty = true;
+                let time_now_next = precise_time_ns();
+                println!("Redraw took: {}", ((time_now_next - time_now) as f64) / 1_000_000_000.0);
             }
 
             self.process_desktop_file_read_requests(&mut event_handler);

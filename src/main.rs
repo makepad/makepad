@@ -29,7 +29,7 @@ impl Style for App{
         set_dark_style(cx);
         Self{
             text_buffers:HashMap::new(),
-            editor_id_alloc:0,
+            editor_id_alloc:10,
             view:View{
                 scroll_h:Some(ScrollBar{
                     ..Style::style(cx)
@@ -69,13 +69,18 @@ impl Style for App{
                         align:SplitterAlign::Last,
                         pos:150.0,
                         first:Box::new(DockItem::TabControl{
-                            current:0,
+                            current:1,
                             tabs:vec![
                                 DockTab{
                                     closeable:false,
                                     title:"Edit".to_string(),
                                     item:Panel::EditorTarget
                                 },
+                                DockTab{
+                                    closeable:false,
+                                    title:"dock.rs".to_string(),
+                                    item:Panel::Editor{path:"/widgets/src/dock.rs".to_string(), editor_id:1}
+                                }
                             ],
                         }),
                         last:Box::new(DockItem::TabControl{
@@ -83,8 +88,8 @@ impl Style for App{
                             tabs:vec![
                                 DockTab{
                                     closeable:true,
-                                    title:"PurpleTab".to_string(),
-                                    item:Panel::Color(color("purple"))
+                                    title:"Log".to_string(),
+                                    item:Panel::Color(color("#1"))
                                 }
                             ]
                         })
@@ -192,10 +197,7 @@ impl App{
 
     fn draw_app(&mut self, cx:&mut Cx){
         
-        use syn::{Expr, Result};
-
-        let code = "assert_eq!(u8::max_value(), 255)";
-        let expr = syn::parse_str::<Expr>(code);
+       // use syn::{Expr, Result};
 
         //cx.debug_area = Area::Instance(InstanceArea{draw_list_id:0,draw_call_id:0,instance_offset:0,instance_count:0,redraw_id:0});
 
