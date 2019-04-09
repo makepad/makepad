@@ -77,9 +77,9 @@ impl Style for App{
                                     item:Panel::EditorTarget
                                 },
                                 DockTab{
-                                    closeable:false,
-                                    title:"dock.rs".to_string(),
-                                    item:Panel::Editor{path:"/widgets/src/dock.rs".to_string(), editor_id:1}
+                                    closeable:true,
+                                    title:"button.rs".to_string(),
+                                    item:Panel::Editor{path:"/widgets/src/button.rs".to_string(), editor_id:1}
                                 }
                             ],
                         }),
@@ -89,7 +89,7 @@ impl Style for App{
                                 DockTab{
                                     closeable:true,
                                     title:"Log".to_string(),
-                                    item:Panel::Color(color("#1"))
+                                    item:Panel::Color(color256(30,30,30))
                                 }
                             ]
                         })

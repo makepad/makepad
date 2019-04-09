@@ -53,7 +53,7 @@ impl Style for Editor{
                 ..Style::style(cx)
             },
             bg:Quad{
-                color:color("#1"),
+                color:color256(30,30,30),
                 ..Style::style(cx)
             },
             bg_layout:Layout{
