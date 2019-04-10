@@ -69,12 +69,13 @@ impl Text{
             let font_size:float<Instance>;
             //let font_base:float<Instance>;
             let tex_coord:vec2<Varying>;
+            let clipped:vec2<Varying>;
 
             fn pixel()->vec4{
                 let s:vec4 = sample2d(texture, tex_coord.xy);
                 let sig_dist:float =  max(min(s.r, s.g), min(max(s.r, s.g), s.b)) - 0.5;
-
-                df_viewport(tex_coord * tex_size * 0.05);
+                let scale:float = pow(df_antialias(clipped) * 0.002,0.5);
+                df_viewport(tex_coord * tex_size * scale);
                 df_shape = -sig_dist - 0.5 / df_aa;
                 return df_fill(color); 
             }
@@ -90,7 +91,7 @@ impl Text{
                     y - font_size * font_geom.w + font_size// * font_base
                 );
                 
-                let clipped:vec2 = clamp(
+                clipped = clamp(
                     mix(min_pos, max_pos, geom) + shift,
                     draw_list_clip.xy,
                     draw_list_clip.zw

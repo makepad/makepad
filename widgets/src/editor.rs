@@ -65,7 +65,7 @@ impl Style for Editor{
                 ..Default::default()
             },
             text:Text{
-                shader_id:cx.add_shader(text_sh, "Editor.text"),
+                //shader_id:cx.add_shader(text_sh, "Editor.text"),
                 font_id:cx.load_font(&cx.font("mono_font")),
                 font_size:13.0,
                 line_spacing:1.3,
