@@ -36,6 +36,7 @@ impl ElementLife for Editor{
 impl Style for Editor{
     fn style(cx:&mut Cx)->Self{
         let tab_sh = Self::def_tab_shader(cx);
+        let text_sh = Self::def_text_shader(cx);
         let editor = Self{
             tab:Quad{
                 color:color("#5"),
@@ -64,6 +65,7 @@ impl Style for Editor{
                 ..Default::default()
             },
             text:Text{
+                shader_id:cx.add_shader(text_sh, "Editor.text"),
                 font_id:cx.load_font(&cx.font("mono_font")),
                 font_size:13.0,
                 line_spacing:1.3,
@@ -132,6 +134,54 @@ impl Editor{
         sh
     }
 
+    pub fn def_text_shader(cx:&mut Cx)->Shader{
+       let mut sh = Text::def_text_shader(cx);
+        sh.add_ast(shader_ast!({
+            
+            fn df_fill_keep3(color:vec4, dist:vec3)->vec4{
+                let f:vec4 = vec4(
+                    df_calc_blur(dist.x),
+                    df_calc_blur(dist.y),
+                    df_calc_blur(dist.z),
+                    df_calc_blur(dist.y)
+                );
+                let source:vec4 = vec4(color.rgb * color.a, color.a);
+                let dest:vec4 = df_result;
+                df_result = source * f + dest * (1. - source.a * f);
+                return df_result;
+            }
+
+            fn pixel()->vec4{
+                df_viewport(tex_coord * tex_size * 0.05);
+
+                let dist:vec2 = vec2(0.0005/df_aa,0.);
+
+                let s1:vec4 = sample2d(texture, tex_coord.xy - dist * 2.);
+                let d1:float =  max(min(s1.r, s1.g), min(max(s1.r, s1.g), s1.b)) - 0.5;
+
+                let s2:vec4 = sample2d(texture, tex_coord.xy - dist);
+                let d2:float =  max(min(s2.r, s2.g), min(max(s2.r, s2.g), s2.b)) - 0.5;
+
+                let s3:vec4 = sample2d(texture, tex_coord.xy);
+                let d3:float =  max(min(s3.r, s3.g), min(max(s3.r, s3.g), s3.b)) - 0.5;
+
+                let s4:vec4 = sample2d(texture, tex_coord.xy + dist);
+                let d4:float =  max(min(s4.r, s4.g), min(max(s4.r, s4.g), s4.b)) - 0.5;
+
+                let s5:vec4 = sample2d(texture, tex_coord.xy + dist * 2.);
+                let d5:float =  max(min(s5.r, s5.g), min(max(s5.r, s5.g), s5.b)) - 0.5;
+                
+                let d:vec3 = vec3(
+                    - ((d1+d2+d3)/3.) -0.5 / df_aa, 
+                    - ((d2+d3+d4)/3.) -0.5 / df_aa, 
+                    - ((d3+d4+d5)/3.) -0.5 / df_aa
+                );
+
+                return df_fill_keep3(color, d); 
+            }
+        }));
+        sh
+    }
 
     pub fn handle_editor(&mut self, cx:&mut Cx, event:&mut Event, text_buffer:&mut TextBuffer)->EditorEvent{
         self.view.handle_scroll_bars(cx, event);

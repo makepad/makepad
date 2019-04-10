@@ -74,7 +74,7 @@ impl Text{
                 let s:vec4 = sample2d(texture, tex_coord.xy);
                 let sig_dist:float =  max(min(s.r, s.g), min(max(s.r, s.g), s.b)) - 0.5;
 
-                df_viewport(tex_coord * tex_size * 0.07);
+                df_viewport(tex_coord * tex_size * 0.05);
                 df_shape = -sig_dist - 0.5 / df_aa;
                 return df_fill(color); 
             }
