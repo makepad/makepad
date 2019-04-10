@@ -272,6 +272,22 @@ impl Cx{
             turtle.walk.y += dy;
         }
     }
+
+     pub fn get_turtle_walk(&self)->Vec2{
+        if let Some(turtle) = self.turtles.last(){
+            turtle.walk
+        }
+        else{
+            vec2(0.,0.)
+        }
+    }
+
+    pub fn set_turtle_walk(&mut self, walk:Vec2){
+        if let Some(turtle) = self.turtles.last_mut(){
+            turtle.walk = walk
+        }
+    }
+
     // end a turtle returning computed geometry
     pub fn end_turtle(&mut self, guard_area:Area)->Rect{
         let old = self.turtles.pop().unwrap();

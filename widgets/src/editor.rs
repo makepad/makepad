@@ -65,7 +65,7 @@ impl Style for Editor{
             },
             text:Text{
                 font_id:cx.load_font(&cx.font("mono_font")),
-                font_size:12.0,
+                font_size:13.0,
                 line_spacing:1.3,
                 wrapping:Wrapping::Line,
                 ..Style::style(cx)
@@ -132,6 +132,54 @@ impl Editor{
         sh
     }
 
+
+    pub fn handle_editor(&mut self, cx:&mut Cx, event:&mut Event, text_buffer:&mut TextBuffer)->EditorEvent{
+        self.view.handle_scroll_bars(cx, event);
+        match event.hits(cx, self._bg_area, &mut self._hit_state){
+            Event::Animate(_ae)=>{
+            },
+            Event::FingerDown(_fe)=>{
+            },
+            Event::FingerHover(_fe)=>{
+            },
+            Event::FingerUp(_fe)=>{
+            },
+            Event::FingerMove(_fe)=>{
+            },
+            _=>()
+        };
+        EditorEvent::None
+   }
+
+    pub fn draw_editor(&mut self, cx:&mut Cx, text_buffer:&mut TextBuffer){
+        
+        // pull the bg color from our animation system, uses 'default' value otherwise
+       // self.bg.color = self.animator.last_vec4("bg.color");
+        // push the 2 vars we added to bg shader
+        //self.text.color = self.animator.last_vec4("text.color");
+        self.view.begin_view(cx, &Layout{..Default::default()});
+        if text_buffer.load_id != 0{
+            self._bg_area = self.bg.begin_quad(cx, &Layout{
+                align:Align::center(),
+                ..self.bg_layout.clone()
+            });
+            self.text.draw_text(cx, "Loading ...");
+        }
+        else{
+            //let tok_str = TokenStream::from_str(&text_buffer.text);
+
+            //let expr = syn::parse_str::<syn::File>(&text_buffer.text);
+            self._bg_area = self.bg.begin_quad(cx, &self.bg_layout);
+            self.draw_rust(cx, &text_buffer.text);
+        }
+
+        self.bg.end_quad(cx);
+        self.view.end_view(cx);
+         //self.animator.set_area(cx, self._bg_area); // if our area changed, update animation
+    }
+
+
+
     pub fn draw_rust(&mut self, cx:&mut Cx, text:&str)->Area{
         let area = self.text.begin_chunks(cx);
         if let Area::Empty = area{
@@ -160,8 +208,11 @@ impl Editor{
             match c{
                 ' '=>{ // eat as many spaces as possible
                     if after_newline{ // consume spaces in groups of 4
+                        chunk.push(c);
+                        let walk = cx.get_turtle_walk();
                         let mut counter = 1;
                         while nc == ' '{
+                            chunk.push(nc);
                             counter += 1;
                             nc = next_char!(iter);
                         }
@@ -175,6 +226,7 @@ impl Editor{
                         for _i in 0..left{
                             chunk.push(' ');
                         }
+                        cx.set_turtle_walk(walk);
                     }
                     else{
                         chunk.push(c);
@@ -207,6 +259,19 @@ impl Editor{
                     else{
                         self.text.color = self.col_operator;
                     }
+                },
+                '\''=>{
+                    let mut lc = 0 as char;
+                    chunk.push(c);
+                    while nc != (0 as char) && (nc != '\'' || lc != '\\' && c == '\\' && nc == '\''){
+                        chunk.push(nc);
+                        lc = c;
+                        c = nc;
+                        nc = next_char!(iter);
+                    };
+                    chunk.push(nc);
+                    nc = next_char!(iter);
+                    self.text.color = self.col_string;
                 },
                 '"'=>{
                     chunk.push(c);
@@ -262,32 +327,13 @@ impl Editor{
                         if nc == 'u' || nc == 'i'{
                             chunk.push(nc);
                             nc = next_char!(iter);
-                            if nc == '8'{ // u8
-                                chunk.push(nc);
-                                nc = next_char!(iter);
-                                // finish token, mark as value
+                            if match_keyword!(nc,iter,chunk,'8'){
                             }
-                            else if nc == '1'{ // u16?
-                                chunk.push(nc);
-                                nc = next_char!(iter);
-                                if nc == '6'{
-                                    chunk.push(nc);
-                                    nc = next_char!(iter);
-                                }
-                                else{ // invalid
-                                     
-                                }
+                            else if match_keyword!(nc,iter,chunk,'1','6'){
                             }
-                            else if nc == '3'{ // u32?
-                                chunk.push(nc);
-                                nc = next_char!(iter);
-                                if nc == '2'{
-                                    chunk.push(nc);
-                                    nc = next_char!(iter);
-                                }
-                                else{ // invalid
-
-                                }
+                            else if match_keyword!(nc,iter,chunk,'3','2'){
+                            }
+                            else if match_keyword!(nc,iter,chunk,'6','4'){
                             }
                         }
                         else if nc == '.'{
@@ -297,6 +343,14 @@ impl Editor{
                             while nc >= '0' && nc <='9' || nc == '_'{
                                 chunk.push(nc);
                                 nc = next_char!(iter);
+                            }
+                            if nc == 'f' { // the f32, f64 postfix
+                                chunk.push(nc);
+                                nc = next_char!(iter);
+                                if match_keyword!(nc,iter,chunk,'3','2'){
+                                }
+                                else if match_keyword!(nc,iter,chunk,'6','4'){
+                                }
                             }
                         }
                     }
@@ -491,7 +545,7 @@ impl Editor{
                         }
                     }
                     else{
-                        if nc == '('{
+                        if nc == '(' || nc == '!'{
                             self.text.color = self.col_function;
                         }
                         else{
@@ -550,50 +604,4 @@ impl Editor{
         self.text.end_chunks(cx, count);
         return area
     }
-
-    pub fn handle_editor(&mut self, cx:&mut Cx, event:&mut Event, text_buffer:&mut TextBuffer)->EditorEvent{
-        self.view.handle_scroll_bars(cx, event);
-        match event.hits(cx, self._bg_area, &mut self._hit_state){
-            Event::Animate(_ae)=>{
-            },
-            Event::FingerDown(_fe)=>{
-            },
-            Event::FingerHover(_fe)=>{
-            },
-            Event::FingerUp(_fe)=>{
-            },
-            Event::FingerMove(_fe)=>{
-            },
-            _=>()
-        };
-        EditorEvent::None
-   }
-
-    pub fn draw_editor(&mut self, cx:&mut Cx, text_buffer:&mut TextBuffer){
-        
-        // pull the bg color from our animation system, uses 'default' value otherwise
-       // self.bg.color = self.animator.last_vec4("bg.color");
-        // push the 2 vars we added to bg shader
-        //self.text.color = self.animator.last_vec4("text.color");
-        self.view.begin_view(cx, &Layout{..Default::default()});
-        if text_buffer.load_id != 0{
-            self._bg_area = self.bg.begin_quad(cx, &Layout{
-                align:Align::center(),
-                ..self.bg_layout.clone()
-            });
-            self.text.draw_text(cx, "Loading ...");
-        }
-        else{
-            //let tok_str = TokenStream::from_str(&text_buffer.text);
-
-            //let expr = syn::parse_str::<syn::File>(&text_buffer.text);
-            self._bg_area = self.bg.begin_quad(cx, &self.bg_layout);
-            self.draw_rust(cx, &text_buffer.text);
-        }
-
-        self.bg.end_quad(cx);
-        self.view.end_view(cx);
-         //self.animator.set_area(cx, self._bg_area); // if our area changed, update animation
-    }
-
 }
