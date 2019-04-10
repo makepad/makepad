@@ -36,7 +36,7 @@ impl ElementLife for Editor{
 impl Style for Editor{
     fn style(cx:&mut Cx)->Self{
         let tab_sh = Self::def_tab_shader(cx);
-        let text_sh = Self::def_text_shader(cx);
+        //let text_sh = Self::def_text_shader(cx);
         let editor = Self{
             tab:Quad{
                 color:color("#5"),
@@ -68,7 +68,7 @@ impl Style for Editor{
                 //shader_id:cx.add_shader(text_sh, "Editor.text"),
                 font_id:cx.load_font(&cx.font("mono_font")),
                 font_size:13.0,
-                line_spacing:1.3,
+                line_spacing:1.4,
                 wrapping:Wrapping::Line,
                 ..Style::style(cx)
             },
@@ -133,7 +133,8 @@ impl Editor{
         }));
         sh
     }
-
+/*
+subpixel AA test
     pub fn def_text_shader(cx:&mut Cx)->Shader{
        let mut sh = Text::def_text_shader(cx);
         sh.add_ast(shader_ast!({
@@ -181,7 +182,7 @@ impl Editor{
             }
         }));
         sh
-    }
+    }*/
 
     pub fn handle_editor(&mut self, cx:&mut Cx, event:&mut Event, text_buffer:&mut TextBuffer)->EditorEvent{
         self.view.handle_scroll_bars(cx, event);
