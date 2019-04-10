@@ -2,7 +2,9 @@ use render::*;
 
 pub fn set_dark_style(cx:&mut Cx){
     cx.set_font("normal_font", "resources/ubuntu_regular_256.font");
-    cx.set_font("mono_font", "resources/source_code_pro_medium_256.font");
+    //cx.set_font("mono_font", "resources/source_code_pro_medium_256.font");
+    cx.set_font("mono_font", "resources/ubuntu_mono_256.font");
+    
     //cx.set_font("mono_font", "resources/inconsolata_regular_256.font");
     cx.set_font("icon_font", "resources/fontawesome.font");
     cx.set_size("font_size", 11.0);
