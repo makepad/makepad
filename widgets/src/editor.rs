@@ -263,7 +263,7 @@ impl Editor{
                 '\''=>{
                     let mut lc = 0 as char;
                     chunk.push(c);
-                    while nc != (0 as char) && (nc != '\'' || lc != '\\' && c == '\\' && nc == '\''){
+                    while nc != (0 as char)  && nc!='\n' && (nc != '\'' || lc != '\\' && c == '\\' && nc == '\''){
                         chunk.push(nc);
                         lc = c;
                         c = nc;
@@ -275,7 +275,7 @@ impl Editor{
                 },
                 '"'=>{
                     chunk.push(c);
-                    while nc != (0 as char) && (nc != '"' || c == '\\' && nc == '"'){
+                    while nc != (0 as char) && nc!='\n' && (nc != '"' || c == '\\' && nc == '"'){
                         chunk.push(nc);
                         nc = next_char!(iter);
                     };

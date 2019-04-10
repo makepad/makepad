@@ -13,16 +13,23 @@ We are not accepting pull requests or feature requests or bug reports or documen
 You may use, reuse, build a giant opensource community on your fork, whatever you feel like. But our focus is code/designtools and these libraries are just a tool for us to get there. Also, since this is attempt #11 it may still entirely fail and will be dropped completely. As has been done before many times. Be warned!
 
 Platforms:
+
 WebGL compiles cleanly to wasm32-unknown-unknown without emscripten/wasmbindgen
+
 Native metal backend on OSX without winit dep for UI
+
 Desktop OGL on linux/windows, uses winit/glutin
+
 Todo: DX11 / win32 native support
 
 The project is split out over a few nested crates
 
 src/main.rs - application 'main'
+
 webgl/ - webGL build crate info (actual source is src/main.rs)
+
 widget/src/*.rs - nested crate for the widgets
+
 widget/render/src/*.rs - nested crate for the render engine
 
 The only 'web' JS code sits is here, its a typed-array RPC driven simplification of the webGL API
@@ -31,9 +38,11 @@ widget/render/src/cx_webgl.js
 Prerequisites: Install cargo-watch, i use it for livecoding/building
 cargo install cargo-watch
 
-./serve_webgl.js (uses node to start a tiny server on 127.0.0.1:2001)
-./watch_webgl.rs - compiles the webGL thing
-./watch_native.rs - compiles the native app on demand
+./serve_webgl.sh (uses node to start a tiny server on 127.0.0.1:2001)
+
+./watch_webgl.sh - compiles the webGL thing
+
+./watch_native.sh - compiles the native app on demand
 
 You can choose the render backend by editing ./Cargo.toml
 At the bottom is features=["mtl"], default set for OSX
