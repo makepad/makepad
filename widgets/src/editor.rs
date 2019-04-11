@@ -67,7 +67,7 @@ impl Style for Editor{
             text:Text{
                 //shader_id:cx.add_shader(text_sh, "Editor.text"),
                 font_id:cx.load_font(&cx.font("mono_font")),
-                font_size:13.0,
+                font_size:11.0,
                 line_spacing:1.4,
                 wrapping:Wrapping::Line,
                 ..Style::style(cx)
@@ -542,7 +542,7 @@ subpixel AA test
                                 if match_keyword!(nc,iter,chunk,'a','t','i','c'){
                                     is_keyword = true;
                                 }
-                                else if match_keyword!(nc,iter,chunk,'t','r','u','c','t'){
+                                else if match_keyword!(nc,iter,chunk,'r','u','c','t'){
                                     is_keyword = true;
                                 }
                             }

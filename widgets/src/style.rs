@@ -3,8 +3,8 @@ use render::*;
 pub fn set_dark_style(cx:&mut Cx){
     
     cx.set_font("normal_font", "resources/ubuntu_regular_256.font");
-    cx.set_font("mono_font", "resources/liberation_mono_regular_256.font");
-    
+    //cx.set_font("mono_font", "resources/ubuntu_mono_256.font");
+    cx.set_font("mono_font", "resources/liberation_mono_bold_256.font");
     //cx.set_font("mono_font", "resources/source_code_pro_medium_256.font");
     //cx.set_font("mono_font", "resources/monofur_55_256.font");
     
