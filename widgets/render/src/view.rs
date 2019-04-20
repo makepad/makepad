@@ -9,8 +9,7 @@ pub trait ScrollBarLike<ScrollBarT>{
 #[derive(Clone, PartialEq)]
 pub enum ScrollBarEvent{
     None,
-    ScrollHorizontal{scroll_pos:f32, view_total:f32, view_visible:f32},
-    ScrollVertical{scroll_pos:f32, view_total:f32, view_visible:f32},
+    Scroll{scroll_pos:f32, view_total:f32, view_visible:f32},
     ScrollDone
 }
 
@@ -144,7 +143,7 @@ where TScrollBar: ScrollBarLike<TScrollBar> + Clone + ElementLife
         //cx.turtle.y = 0.0;
     }
 
-    pub fn handle_scroll_bars(&mut self, cx:&mut Cx, event:&mut Event)->ScrollBarEvent{
+    pub fn handle_scroll_bars(&mut self, cx:&mut Cx, event:&mut Event)->(ScrollBarEvent,ScrollBarEvent){
         let mut ret_h = ScrollBarEvent::None;
         let mut ret_v = ScrollBarEvent::None;
 
@@ -160,22 +159,32 @@ where TScrollBar: ScrollBarLike<TScrollBar> + Clone + ElementLife
         }
         match ret_h{
             ScrollBarEvent::None=>(),
-            ScrollBarEvent::ScrollHorizontal{scroll_pos,..}=>{
+            ScrollBarEvent::Scroll{scroll_pos,..}=>{
                 let draw_list = &mut cx.draw_lists[self.draw_list_id.unwrap()];
                 draw_list.set_scroll_x(scroll_pos);
             },
-            _=>{return ret_h;}
+            _=>()
         };
         match ret_v{
             ScrollBarEvent::None=>(),
-            ScrollBarEvent::ScrollVertical{scroll_pos,..}=>{
+            ScrollBarEvent::Scroll{scroll_pos,..}=>{
                 let draw_list = &mut cx.draw_lists[self.draw_list_id.unwrap()];
                 draw_list.set_scroll_y(scroll_pos);
             },
-            _=>{return ret_v;}
+            _=>()
         };
-        ScrollBarEvent::None
+        (ret_h, ret_v)
     }
+
+    pub fn get_scroll(&mut self, cx:&mut Cx)->Vec2{
+        if let Some(draw_list_id) = self.draw_list_id{
+            let draw_list = &cx.draw_lists[draw_list_id];
+            draw_list.get_scroll()
+        }
+        else{
+            vec2(0.,0.)
+        }
+   }
 
     pub fn end_view(&mut self, cx:&mut Cx)->Area{
         let draw_list_id = self.draw_list_id.unwrap();

@@ -260,6 +260,7 @@ impl Tab{
             Event::FingerMove(fe)=>{
                 if !self._is_drag{
                     if fe.move_distance() > 10.{
+                        //cx.set_down_mouse_cursor(MouseCursor::Hidden);
                         self._is_drag = true;
                     }
                 }
@@ -285,17 +286,17 @@ impl Tab{
         // check if we are closing
         if self.animator.term_anim_playing(){
             // so so BUT how would we draw this thing with its own clipping
-            self._bg_area = self.bg.draw_quad_walk(cx,
+            let bg_inst = self.bg.draw_quad_walk(cx,
                 Bounds::Fix(self._close_anim_rect.w * self.animator.last_float("closing")),
                 Bounds::Fix(self._close_anim_rect.h),
                 Margin::zero(),
             );
-            self._bg_area.push_vec4(cx, self.animator.last_vec4("bg.border_color"));
+            bg_inst.push_vec4(cx, self.animator.last_vec4("bg.border_color"));
+            self._bg_area = bg_inst.get_area();            
         }
         else{
-            self._bg_area = self.bg.begin_quad(cx, &self.bg_layout);
-            self._bg_area.push_vec4(cx, self.animator.last_vec4("bg.border_color"));
-
+            let bg_inst = self.bg.begin_quad(cx, &self.bg_layout);
+            bg_inst.push_vec4(cx, self.animator.last_vec4("bg.border_color"));
             if self.is_closeable{
                 self.tab_close.draw_tab_close(cx);
             }
@@ -303,7 +304,7 @@ impl Tab{
             self.text.color = self.animator.last_vec4("text.color");
             self._text_area = self.text.draw_text(cx, &self.label);
 
-            self.bg.end_quad(cx);
+            self._bg_area = self.bg.end_quad(cx, &bg_inst);
         }
         self.animator.set_area(cx, self._bg_area); // if our area changed, update animation
     }

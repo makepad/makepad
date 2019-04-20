@@ -1,6 +1,6 @@
 use crate::cx::*;
 use std::collections::HashMap;
-use std::collections::BTreeMap;
+//use std::collections::BTreeMap;
 
 // These UI Element containers are the key to automating lifecycle mgmt
 // get_draw constructs items that don't exist yet,
@@ -34,23 +34,23 @@ pub struct ElementsRedraw<T>{
 
 // Multiple elements
 #[derive(Clone, Default)]
-pub struct Elements<ID, T>
+pub struct Elements<ID, T, TEMPL>
 where ID:std::cmp::Ord + std::hash::Hash {
-    pub template:T,
+    pub template:TEMPL,
     pub element_list:Vec<ID>,
     pub element_map:HashMap<ID,ElementsRedraw<T>>,
     pub redraw_id:u64
 }
 
-pub struct ElementsIterator<'a, ID, T>
+pub struct ElementsIterator<'a, ID, T, TEMPL>
 where ID:std::cmp::Ord + std::hash::Hash{
-    elements:&'a mut Elements<ID, T>,
+    elements:&'a mut Elements<ID, T, TEMPL>,
     counter:usize 
 }
 
-impl<'a, T, ID> ElementsIterator<'a, ID, T>
+impl<'a, T, ID, TEMPL> ElementsIterator<'a, ID, T, TEMPL>
 where ID:std::cmp::Ord + std::hash::Hash{
-    fn new(elements:&'a mut Elements<ID, T>)->Self{
+    fn new(elements:&'a mut Elements<ID, T, TEMPL>)->Self{
         ElementsIterator{
             elements:elements,
             counter:0
@@ -58,7 +58,7 @@ where ID:std::cmp::Ord + std::hash::Hash{
     }
 }
 
-impl<'a, ID, T> Iterator for ElementsIterator<'a, ID, T>
+impl<'a, ID, T, TEMPL> Iterator for ElementsIterator<'a, ID, T, TEMPL>
 where ID:std::cmp::Ord + std::hash::Hash + Clone
 {
     type Item = &'a mut T;
@@ -79,15 +79,15 @@ where ID:std::cmp::Ord + std::hash::Hash + Clone
 }
 
 
-pub struct ElementsIteratorNamed<'a, ID, T>
-where ID:std::cmp::Ord + std::hash::Hash {
-    elements:&'a mut Elements<ID, T>,
+pub struct ElementsIteratorNamed<'a, ID, T, TEMPL>
+where ID:std::cmp::Ord + std::hash::Hash{
+    elements:&'a mut Elements<ID, T, TEMPL>,
     counter:usize 
 }
 
-impl<'a, ID, T> ElementsIteratorNamed<'a, ID, T>
-where ID:std::cmp::Ord + std::hash::Hash {
-    fn new(elements:&'a mut Elements<ID, T>)->Self{
+impl<'a, ID, T, TEMPL> ElementsIteratorNamed<'a, ID, T, TEMPL>
+where ID:std::cmp::Ord + std::hash::Hash{
+    fn new(elements:&'a mut Elements<ID, T, TEMPL>)->Self{
         ElementsIteratorNamed{
             elements:elements,
             counter:0
@@ -95,7 +95,7 @@ where ID:std::cmp::Ord + std::hash::Hash {
     }
 }
 
-impl<'a, ID, T> Iterator for ElementsIteratorNamed<'a, ID, T>
+impl<'a, ID, T, TEMPL> Iterator for ElementsIteratorNamed<'a, ID, T, TEMPL>
 where ID:std::cmp::Ord + std::hash::Hash + Clone
 {
     type Item = (&'a ID, &'a mut T);
@@ -115,24 +115,11 @@ where ID:std::cmp::Ord + std::hash::Hash + Clone
     }
 }
 
-/*
-// and we'll implement IntoIterator
-impl<'a, T, ID> IntoIterator for &'a mut Elements<T,ID>
-where ID:std::cmp::Ord + Clone
+impl<ID,T, TEMPL> Elements<ID, T, TEMPL>
+where T:ElementLife, ID:std::cmp::Ord + std::hash::Hash + Clone
 {
-    type Item = &'a mut T;
-    type IntoIter = ElementsIterator<'a,T,ID>;
-
-    fn into_iter(self) -> Self::IntoIter {
-        ElementsIterator::new(self)
-    }
-}*/
-
-impl<ID,T> Elements<ID, T>
-where T:Clone + ElementLife, ID:std::cmp::Ord + std::hash::Hash + Clone
-{
-    pub fn new(template:T)->Elements<ID, T>{
-        Elements::<ID, T>{
+    pub fn new(template:TEMPL)->Elements<ID, T, TEMPL>{
+        Elements::<ID, T, TEMPL>{
             template:template,
             redraw_id:0,
             element_list:Vec::new(),
@@ -194,12 +181,12 @@ where T:Clone + ElementLife, ID:std::cmp::Ord + std::hash::Hash + Clone
     }*/
 
     // iterate the set of 'last drawn' items
-    pub fn iter<'a>(&'a mut self)->ElementsIterator<'a, ID, T>{
+    pub fn iter<'a>(&'a mut self)->ElementsIterator<'a, ID, T, TEMPL>{
         return ElementsIterator::new(self)
     }
 
     // enumerate the set of 'last drawn' items
-    pub fn enumerate<'a>(&'a mut self)->ElementsIteratorNamed<'a, ID, T>{
+    pub fn enumerate<'a>(&'a mut self)->ElementsIteratorNamed<'a, ID, T, TEMPL>{
         return ElementsIteratorNamed::new(self)
     }
 
@@ -213,32 +200,9 @@ where T:Clone + ElementLife, ID:std::cmp::Ord + std::hash::Hash + Clone
             return None
         }
     }
-    
-    // gets a UI item, if you call it atleast once
-    // can be considered as an automatic call to mark
-    pub fn get_draw(&mut self, cx: &mut Cx, index:ID)->&mut T{
-        if !cx.is_in_redraw_cycle{
-            panic!("Cannot call get_draw outside of redraw cycle!")
-        }
-        self.mark(cx);
-        let template = &self.template;
-        let element_list = &mut self.element_list;
-        let redraw_id = self.redraw_id;
-        let redraw = self.element_map.entry(index.clone()).or_insert_with(||{
-            element_list.push(index);
-            let mut elem = template.clone();
-            elem.construct(cx);
-            ElementsRedraw{
-                redraw_id:redraw_id,
-                item:elem
-            }
-        });
-        redraw.redraw_id = redraw_id;
-        &mut redraw.item
-    }
-
-    pub fn get_draw_or_insert_with<F>(&mut self, cx: &mut Cx, index:ID, mut insert_callback:F)->&mut T
-    where F: FnMut(&mut Cx, &T)->T{
+   
+    pub fn get_draw<F>(&mut self, cx: &mut Cx, index:ID, mut insert_callback:F)->&mut T
+    where F: FnMut(&mut Cx, &TEMPL)->T{
         if !cx.is_in_redraw_cycle{
             panic!("Cannot call get_draw outside of redraw cycle!")
         }
@@ -259,126 +223,4 @@ where T:Clone + ElementLife, ID:std::cmp::Ord + std::hash::Hash + Clone
         redraw.redraw_id = redraw_id;
         &mut redraw.item
     }
-
-/*
-    // gets a UI item, if you call it atleast once
-    // can be considered as an automatic call to mark
-    pub fn get_draw(&mut self, cx: &mut Cx, index:ID)->&mut T{
-        if !cx.is_in_redraw_cycle{
-            panic!("Cannot call get_draw outside of redraw cycle!")
-        }
-        self.mark(cx);
-
-        if !self.element_map.contains_key(&index){
-            self.element_map.insert(index.clone(), ElementsRedraw{
-                redraw_id:self.redraw_id,
-                item:self.template.clone()
-            });
-            self.element_list.push(index.clone());
-            let elem = self.element_map.get_mut(&index).unwrap();
-            elem.item.construct(cx);
-            &mut elem.item
-        }
-        else{
-            let elem = self.element_map.get_mut(&index).unwrap();
-            elem.redraw_id = self.redraw_id;
-            &mut elem.item
-        }
-    }
-
-    pub fn get_draw_or_insert<F>(&mut self, cx: &mut Cx, index:ID, mut insert_callback:F)->&mut T
-    where F: FnMut(&mut Cx, &mut T){
-        if !cx.is_in_redraw_cycle{
-            panic!("Cannot call get_draw outside of redraw cycle!")
-        }
-        self.mark(cx);
-
-        if !self.element_map.contains_key(&index){
-            self.element_map.insert(index.clone(), ElementsRedraw{
-                redraw_id:self.redraw_id,
-                item:self.template.clone()
-            });
-            self.element_list.push(index.clone());
-            let elem = self.element_map.get_mut(&index).unwrap();
-            insert_callback(cx, &mut elem.item);
-            elem.item.construct(cx);
-            &mut elem.item
-        }
-        else{
-            let elem = self.element_map.get_mut(&index).unwrap();
-            elem.redraw_id = self.redraw_id;
-            &mut elem.item
-        }
-    }*/
-
 }
-
-
-
-// Single element
-/*
-
-#[derive(Clone, Default)]
-pub struct Element<T>{
-    pub template:T,
-    pub mark_redraw_id:u64,
-    pub get_redraw_id:u64,
-    pub element:Option<T>
-}
-
-impl<T> Element<T>
-where T:Clone + ElementLife
-{
-    pub fn new(template:T)->Element<T>{
-        Element::<T>{
-            template:template,
-            mark_redraw_id:0,
-            get_redraw_id:0,
-            element:None
-        }
-    }
-
-    pub fn get(&mut self)->Option<&mut T>{
-        // this is to check if you used mark
-        // and didn't use get
-        if self.mark_redraw_id != self.get_redraw_id{
-            return None;
-        }
-        return self.element.as_mut()
-    }
-    
-    // if you have 0 or 1 item, you can use mark/sweep
-    pub fn mark(&mut self, cx:&Cx){
-        if !cx.is_in_redraw_cycle{
-            panic!("Cannot call mark outside of redraw cycle!")
-        }
-        self.mark_redraw_id = cx.redraw_id;
-    }
-
-    pub fn sweep(&mut self, cx:&mut Cx){
-        if !cx.is_in_redraw_cycle{
-            panic!("Cannot call sweep outside of redraw cycle!")
-        }
-        if !self.element.is_none() && self.mark_redraw_id != self.get_redraw_id{
-            let element = self.element.as_mut().unwrap();
-            element.destruct(cx);
-            self.element = None;
-        }
-    }
-
-    pub fn get_draw(&mut self, cx:&mut Cx)->&mut T{
-        if !cx.is_in_redraw_cycle{
-            panic!("Cannot call get_draw outside of redraw cycle!")
-        }
-        self.mark(cx);
-        self.get_redraw_id = cx.redraw_id;
-        if self.element.is_none(){
-            self.element = Some(self.template.clone());
-            let element = self.element.as_mut().unwrap();
-            element.construct(cx);
-            return element
-        }
-        let element = self.element.as_mut().unwrap();
-        return element
-    }
-}*/

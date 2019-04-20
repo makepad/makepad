@@ -1,22 +1,29 @@
 use widgets::*;
 use std::collections::HashMap;
 
+mod textbuffer;
+pub use crate::textbuffer::*;
+mod codeeditor;
+pub use crate::codeeditor::*;
+mod rusteditor;
+pub use crate::rusteditor::*;
+
 #[derive(Clone)]
 enum Panel{
     Color(Vec4),
     FileTree,
-    EditorTarget,
-    Editor{path:String, editor_id:u64}
-    //Editor(String),
-    //LogView(String),
+    FileEditorTarget,
+    FileEditor{path:String, editor_id:u64}
 }
 
 struct App{
     view:View<ScrollBar>,
     dock:Dock<Panel>,
     file_tree:FileTree,
-    editors:Elements<u64, Editor>,
-    editor_id_alloc:u64,
+
+    file_editors:Elements<u64, FileEditor, FileEditorTemplates>,
+    file_editor_id_alloc:u64,
+
     text_buffers:HashMap<String, TextBuffer>,
     tree_load_id:u64,
     quad:Quad
@@ -29,7 +36,7 @@ impl Style for App{
         set_dark_style(cx);
         Self{
             text_buffers:HashMap::new(),
-            editor_id_alloc:10,
+            file_editor_id_alloc:10,
             view:View{
                 scroll_h:Some(ScrollBar{
                     ..Style::style(cx)
@@ -46,8 +53,8 @@ impl Style for App{
                 ..Style::style(cx)
             },
             tree_load_id:0,
-            editors:Elements::new(Editor{
-                ..Style::style(cx)
+            file_editors:Elements::new(FileEditorTemplates{
+                rust_editor:RustEditor{..Style::style(cx)}
             }),
             dock:Dock{
                 dock_items:Some(DockItem::Splitter{
@@ -74,12 +81,12 @@ impl Style for App{
                                 DockTab{
                                     closeable:false,
                                     title:"Edit".to_string(),
-                                    item:Panel::EditorTarget
+                                    item:Panel::FileEditorTarget
                                 },
                                 DockTab{
                                     closeable:true,
                                     title:"button.rs".to_string(),
-                                    item:Panel::Editor{path:"/widgets/src/button.rs".to_string(), editor_id:1}
+                                    item:Panel::FileEditor{path:"/widgets/src/button.rs".to_string(), editor_id:1}
                                 }
                             ],
                         }),
@@ -129,11 +136,8 @@ impl App{
                     if text_buffer.load_id == fr.id{
                         text_buffer.load_id = 0;
                         if let Ok(str_data) = &fr.data{
-                            if let Ok(utf8_data) = std::str::from_utf8(&str_data){
-                                text_buffer.text = utf8_data.to_string();
-                                // lets be lazy and redraw all
-                                cx.redraw_area(Area::All)
-                            }
+                            text_buffer.load_buffer(str_data);
+                            cx.redraw_area(Area::All);
                         }
                     }
                 }
@@ -148,15 +152,15 @@ impl App{
         while let Some(item) = dock_walker.walk_handle_dock(cx, event){
             match item{
                 Panel::Color(_)=>{}
-                Panel::EditorTarget=>{},
+                Panel::FileEditorTarget=>{},
                 Panel::FileTree=>{
                     file_tree_event = self.file_tree.handle_file_tree(cx, event);
                 },
-                Panel::Editor{path, editor_id}=>{
-                    if let Some(editor) = &mut self.editors.get(*editor_id){
+                Panel::FileEditor{path, editor_id}=>{
+                    if let Some(file_editor) = &mut self.file_editors.get(*editor_id){
                         let text_buffer = self.text_buffers.get_mut(path);
                         if let Some(text_buffer) = text_buffer{
-                            editor.handle_editor(cx, event, text_buffer);
+                            file_editor.handle_file_editor(cx, event, text_buffer);
                         }
                     }
                 }
@@ -173,7 +177,7 @@ impl App{
                 let mut tabs = Vec::new();
                 for path in paths{
                     // find a free editor id
-                    tabs.push(self.new_editor_tab(cx, &path));
+                    tabs.push(self.new_file_editor_tab(&path));
                 }
                 self.dock.dock_drag_end(cx, fe, tabs);
             },
@@ -212,12 +216,12 @@ impl App{
                     self.quad.color = *color2;
                     self.quad.draw_quad_walk(cx, Bounds::Fill, Bounds::Fill, Margin::zero());
                 },
-                Panel::EditorTarget=>{
+                Panel::FileEditorTarget=>{
                 },
                 Panel::FileTree=>{
                     self.file_tree.draw_file_tree(cx);
                 },
-                Panel::Editor{path, editor_id}=>{
+                Panel::FileEditor{path, editor_id}=>{
                     //let text_buffer = self.text_buffers.get_mut(path).unwrap();
                     let text_buffer = self.text_buffers.entry(path.to_string()).or_insert_with(||{
                         TextBuffer{
@@ -225,30 +229,27 @@ impl App{
                             ..Default::default()
                         }
                     });
-                    self.editors.get_draw_or_insert_with(cx, *editor_id, |cx, template|{
-                        Editor{
-                            path:path.clone(),
-                            ..template.clone()
-                        }
-                    }).draw_editor(cx, text_buffer);
+                    self.file_editors.get_draw(cx, *editor_id, |_cx, tmpl|{
+                        FileEditor::create_file_editor_for_path(path, tmpl)
+                    }).draw_file_editor(cx, text_buffer);
                 }
             }
         }
         self.view.end_view(cx);
     }
 
-    fn new_editor_tab(&mut self, cx:&mut Cx, path:&str)->DockTab<Panel>{
-        let editor_id = self.editor_id_alloc;
-        self.editor_id_alloc += 1;
+    fn new_file_editor_tab(&mut self, path:&str)->DockTab<Panel>{
+        let editor_id = self.file_editor_id_alloc;
+        self.file_editor_id_alloc += 1;
         DockTab{
             closeable:true,
             title:path_file_name(&path),
-            item:Panel::Editor{path:path.to_string(), editor_id:editor_id}
+            item:Panel::FileEditor{path:path.to_string(), editor_id:editor_id}
         }
     }
 
     fn open_new_editor_in_target_ctrl(&mut self, cx:&mut Cx, target_ctrl_id:usize, path:&str){
-        let new_tab = self.new_editor_tab(cx, path);
+        let new_tab = self.new_file_editor_tab(path);
         let mut dock_walker = self.dock.walker();
         let mut ctrl_id = 1;
         while let Some(dock_item) = dock_walker.walk_dock_item(){
@@ -274,7 +275,7 @@ impl App{
                 DockItem::TabControl{current, tabs}=>{
                     for (id,tab) in tabs.iter().enumerate(){
                         match &tab.item{
-                            Panel::Editor{path, ..}=>{
+                            Panel::FileEditor{path, ..}=>{
                                 if *path == file_path{
                                     *current = id; // focus this one
                                     only_focus_editor = true;
@@ -282,7 +283,7 @@ impl App{
                                     //break 'outer;
                                 }
                             },
-                            Panel::EditorTarget=>{
+                            Panel::FileEditorTarget=>{
                                 target_ctrl_id = ctrl_id;
                             },
                             _=>()
@@ -299,5 +300,56 @@ impl App{
         else{
             Some(target_ctrl_id)
         }
+    }
+}
+
+struct FileEditorTemplates{
+    rust_editor:RustEditor,
+}
+
+#[derive(Clone)]
+enum FileEditor{
+    Rust(RustEditor)
+}
+
+impl ElementLife for FileEditor{
+    fn construct(&mut self, cx:&mut Cx){
+        match self{
+            FileEditor::Rust(re)=>re.construct(cx),
+        }
+    }
+    fn destruct(&mut self, cx:&mut Cx){
+        match self{
+            FileEditor::Rust(re)=>re.destruct(cx),
+        }
+    }
+}
+
+enum FileEditorEvent{
+    None
+}
+
+impl FileEditor{
+    fn handle_file_editor(&mut self, cx:&mut Cx, event:&mut Event, text_buffer:&mut TextBuffer)->FileEditorEvent{
+        match self{
+            FileEditor::Rust(re)=>{
+                re.handle_rust_editor(cx, event, text_buffer);
+                FileEditorEvent::None
+            },
+        }
+    }
+
+    fn draw_file_editor(&mut self, cx:&mut Cx, text_buffer:&mut TextBuffer){
+        match self{
+            FileEditor::Rust(re)=>re.draw_rust_editor(cx, text_buffer),
+        }
+    }
+
+    fn create_file_editor_for_path(path:&str, template:&FileEditorTemplates)->FileEditor{
+        // check which file extension we have to spawn a new editor
+        FileEditor::Rust(RustEditor{
+            path:path.to_string(),
+            ..template.rust_editor.clone()
+        })
     }
 }

@@ -15,6 +15,14 @@ impl Rect{
         return x >= self.x && x <= self.x + self.w &&
             y >= self.y && y <= self.y + self.h;
     }
+    pub fn intersects(&self, r:&Rect)->bool{
+        !(
+            r.x > self.x + self.w || 
+            r.x + r.w < self.x || 
+            r.y > self.y + self.h ||
+            r.y + r.h < self.y
+        )
+    }
 }
 
 #[derive(Clone, Copy, Default, Debug)]

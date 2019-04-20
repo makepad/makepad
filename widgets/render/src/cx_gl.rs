@@ -366,8 +366,8 @@ impl Cx{
                 pix_out.push_str("precision highp float;\n");
                 vtx_out.push_str("precision highp int;\n");
                 pix_out.push_str("precision highp int;\n");
-                pix_compat.push_str("vec2 dFdx(vec2 dummy){\nreturn vec2(0.05);\n}\n");
-                pix_compat.push_str("vec2 dFdy(vec2 dummy){\nreturn vec2(0.05);\n}\n")
+                pix_compat.push_str("vec2 dFdx(vec2 dummy){\nreturn vec2(0.14);\n}\n");
+                pix_compat.push_str("vec2 dFdy(vec2 dummy){\nreturn vec2(0.14);\n}\n")
             }
             GLShaderType::OpenGL=>{
                 vtx_out.push_str("#version 100\n");

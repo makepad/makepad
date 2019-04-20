@@ -4,6 +4,7 @@ use crate::cx::*;
 pub struct Quad{
     pub shader_id:usize,
     pub id:u32,
+    pub do_scroll:bool,
     pub color: Vec4
 }
 
@@ -12,6 +13,7 @@ impl Style for Quad{
         let sh = Self::def_quad_shader(cx);
         Self{
             shader_id:cx.add_shader(sh, "Quad"),
+            do_scroll:true,
             id:0,
             color:color("green")
         }
@@ -42,9 +44,10 @@ impl Quad{
             let h:float<Instance>;
             let color:vec4<Instance>;
             let pos:vec2<Varying>;
+            let draw_list_do_scroll:float<Uniform>;
 
             fn vertex()->vec4{
-                let shift:vec2 = -draw_list_scroll;
+                let shift:vec2 = -draw_list_scroll * draw_list_do_scroll;
                 let clipped:vec2 = clamp(
                     geom*vec2(w, h) + vec2(x, y) + shift,
                     draw_list_clip.xy,
@@ -64,43 +67,49 @@ impl Quad{
         sh
     }
 
-    pub fn begin_quad(&mut self, cx:&mut Cx, layout:&Layout)->Area{
-        let area = self.draw_quad(cx, 0.0,0.0,0.0,0.0);
+    pub fn begin_quad(&mut self, cx:&mut Cx, layout:&Layout)->InstanceArea{
+        let inst = self.draw_quad(cx, 0.0,0.0,0.0,0.0);
+        let area = inst.clone().get_area();
         cx.begin_turtle(layout, area);
-        cx.push_instance_area_stack(area.clone());
-        area
+        inst
     }
 
-    pub fn end_quad(&mut self, cx:&mut Cx)->Area{
-        let area = cx.pop_instance_area_stack();
+    pub fn end_quad(&mut self, cx:&mut Cx, inst:&InstanceArea)->Area{
+        let area = inst.clone().get_area();
         let rect = cx.end_turtle(area);
         area.set_rect(cx, &rect);
         area
     }
 
-    pub fn draw_quad_walk(&mut self, cx:&mut Cx, w:Bounds, h:Bounds, margin:Margin)->Area{
-        let area = cx.new_aligned_instance(self.shader_id);
+    pub fn draw_quad_walk(&mut self, cx:&mut Cx, w:Bounds, h:Bounds, margin:Margin)->InstanceArea{
+        let inst = cx.new_aligned_instance(self.shader_id).inst;
+        if inst.need_uniforms_now(cx){
+            inst.push_uniform_float(cx, if self.do_scroll{1.0}else{0.0});
+        }
         let geom = cx.walk_turtle(w, h, margin, None);
         
         let data = [
             /*x,y,w,h*/geom.x,geom.y,geom.w,geom.h,
             /*color*/self.color.x,self.color.y,self.color.z,self.color.w
         ];
-        area.push_slice(cx, &data);
+        inst.push_slice(cx, &data);
 
-        area
+        inst
     }
 
-    pub fn draw_quad(&mut self, cx:&mut Cx, x:f32, y:f32, w:f32, h:f32)->Area{
-        let area = cx.new_aligned_instance(self.shader_id);
+    pub fn draw_quad(&mut self, cx:&mut Cx, x:f32, y:f32, w:f32, h:f32)->InstanceArea{
+        let inst = cx.new_aligned_instance(self.shader_id).inst;
+        if inst.need_uniforms_now(cx){
+            inst.push_uniform_float(cx, if self.do_scroll{1.0}else{0.0});
+        }
         //println!("{:?} {}", area, cx.current_draw_list_id);
         let pos = cx.turtle_origin();
         let data = [
             /*x,y,w,h*/pos.x+x,pos.y+y,w,h,
             /*color*/self.color.x,self.color.y,self.color.z,self.color.w
         ];
-        area.push_slice(cx, &data);
-        area
+        inst.push_slice(cx, &data);
+        inst
     }
 
 }

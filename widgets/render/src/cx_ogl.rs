@@ -164,6 +164,8 @@ impl Cx{
                 self.call_draw_event(&mut event_handler, &mut root_view);
                 self.paint_dirty = true;
             }
+             
+             self.process_desktop_file_read_requests(&mut event_handler);
 
             // set a cursor
             if !self.down_mouse_cursor.is_none(){
@@ -290,6 +292,9 @@ impl Cx{
                 _=>()
             },
             winit::Event::WindowEvent{ event, .. } => match event {
+                winit::WindowEvent::ReceivedCharacter(chr)=>{
+                    println!("GOT CHARACTER {}", chr);
+                },
                 winit::WindowEvent::MouseWheel{delta, ..}=>{
                     return vec![Event::FingerScroll(FingerScrollEvent{
                         abs:self.platform.last_mouse_pos,

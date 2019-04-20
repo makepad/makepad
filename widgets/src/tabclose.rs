@@ -140,10 +140,10 @@ impl TabClose{
     pub fn draw_tab_close(&mut self, cx:&mut Cx){
 
         self.bg.color = self.animator.last_vec4("bg.color");
-        self._bg_area = self.bg.draw_quad_walk(cx, Bounds::Fix(10.), Bounds::Fix(10.), self.margin);
-        self._bg_area.push_float(cx, self.animator.last_float("bg.hover"));
-        self._bg_area.push_float(cx, self.animator.last_float("bg.down"));
- 
+        let bg_inst =  self.bg.draw_quad_walk(cx, Bounds::Fix(10.), Bounds::Fix(10.), self.margin);
+        bg_inst.push_float(cx, self.animator.last_float("bg.hover"));
+        bg_inst.push_float(cx, self.animator.last_float("bg.down"));
+        self._bg_area = bg_inst.get_area();
         self.animator.set_area(cx, self._bg_area); // if our area changed, update animation
     }
 }

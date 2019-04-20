@@ -54,8 +54,8 @@ impl Cx{
 
     // walk the turtle with a 'w/h' and a margin
     pub fn walk_turtle(&mut self, vw:Bounds, vh:Bounds, margin:Margin, old_turtle:Option<&Turtle>)->Rect{
-        let w = nan_clamp_neg(vw.eval_width(self, margin, false));
-        let h = nan_clamp_neg(vh.eval_height(self, margin, false));
+        let w = max_zero_keep_nan(vw.eval_width(self, margin, false));
+        let h = max_zero_keep_nan(vh.eval_height(self, margin, false));
         let mut align_dx = 0.0;
         let mut align_dy = 0.0;
         let ret = if let Some(turtle) = self.turtles.last_mut(){
@@ -203,6 +203,15 @@ impl Cx{
         return vec2(0.0,0.0)        
     }
 
+    pub fn set_turtle_bounds(&mut self, bound:Vec2){
+        if let Some(turtle) = self.turtles.last_mut(){
+            turtle.bound_right_bottom = vec2(
+                bound.x - turtle.layout.padding.r + turtle.start.x,
+                bound.y - turtle.layout.padding.b + turtle.start.y
+            )
+        }
+    }
+
     pub fn turtle_origin(&self)->Vec2{
         if let Some(turtle) = self.turtles.last(){
             return turtle.start;
@@ -288,6 +297,22 @@ impl Cx{
         }
     }
 
+    pub fn visible_in_turtle(&self, geom:&Rect, scroll:&Vec2)->bool{
+        if let Some(turtle) = self.turtles.last(){
+            let view = Rect{
+                x:turtle.start.x + scroll.x,
+                y:turtle.start.y + scroll.y,
+                w:turtle.width,
+                h:turtle.height 
+            };
+
+            return view.intersects(geom)
+        }
+        else{
+            false
+        }
+    }
+
     // end a turtle returning computed geometry
     pub fn end_turtle(&mut self, guard_area:Area)->Rect{
         let old = self.turtles.pop().unwrap();
@@ -300,7 +325,7 @@ impl Cx{
                 Bounds::Fix(old.layout.padding.l + old.layout.padding.r)
             }
             else{ // use the bounding box
-                Bounds::Fix(nan_clamp_neg(old.bound_right_bottom.x - old.start.x + old.layout.padding.r))
+                Bounds::Fix(max_zero_keep_nan(old.bound_right_bottom.x - old.start.x + old.layout.padding.r))
             }
         }
         else{
@@ -312,7 +337,7 @@ impl Cx{
                 Bounds::Fix(old.layout.padding.t + old.layout.padding.b)
             }
             else{ // use the bounding box
-                Bounds::Fix(nan_clamp_neg(old.bound_right_bottom.y - old.start.y + old.layout.padding.b))
+                Bounds::Fix(max_zero_keep_nan(old.bound_right_bottom.y - old.start.y + old.layout.padding.b))
             }
         }
         else{
@@ -340,6 +365,67 @@ impl Cx{
 
         return self.walk_turtle(w, h, margin, Some(&old))
     }
+
+    pub fn width_left(&self, abs:bool)->f32{
+        if !abs{
+            if let Some(turtle) = self.turtles.last(){
+                let nan_val = max_zero_keep_nan(turtle.width - turtle.width_used - (turtle.walk.x-turtle.start.x) );
+                if nan_val.is_nan(){ // if we are a computed height, if some value is known, use that
+                    if turtle.bound_right_bottom.x != std::f32::NEG_INFINITY{
+                        return turtle.bound_right_bottom.x - turtle.start.x
+                    }
+                }
+                return nan_val
+            }
+        }
+        return self.target_size.x
+    }
+
+    pub fn width_total(&self, abs:bool)->f32{
+        if !abs{
+            if let Some(turtle) = self.turtles.last(){
+                let nan_val = max_zero_keep_nan(turtle.width - (turtle.layout.padding.l+turtle.layout.padding.r));
+                if nan_val.is_nan(){ // if we are a computed width, if some value is known, use that
+                    if turtle.bound_right_bottom.x != std::f32::NEG_INFINITY{
+                        return turtle.bound_right_bottom.x - turtle.start.x
+                    }
+                }
+                return nan_val
+            }
+        }
+        return self.target_size.x
+    }
+
+    pub fn height_left(&self, abs:bool)->f32{
+        if !abs{
+            if let Some(turtle) = self.turtles.last(){
+                let nan_val = max_zero_keep_nan(turtle.height - turtle.height_used - (turtle.walk.y -turtle.start.y) );
+                if nan_val.is_nan(){ // if we are a computed height, if some value is known, use that
+                    if turtle.bound_right_bottom.y != std::f32::NEG_INFINITY{
+                        return turtle.bound_right_bottom.y - turtle.start.y
+                    }
+                }
+                return nan_val
+            }
+        }
+        return self.target_size.y
+    }
+
+    pub fn height_total(&self, abs:bool)->f32{
+        if !abs{
+            if let Some(turtle) = self.turtles.last(){
+                let nan_val = max_zero_keep_nan(turtle.height - (turtle.layout.padding.t+turtle.layout.padding.b));
+                if nan_val.is_nan(){ // if we are a computed height, if some value is known, use that
+                    if turtle.bound_right_bottom.y != std::f32::NEG_INFINITY{
+                        return turtle.bound_right_bottom.y - turtle.start.y
+                    }
+                }
+                return nan_val
+            }
+        }
+        return self.target_size.y
+    }
+
 }
 /*
 thread_local!(pub static debug_pts_store: RefCell<Vec<(f32,f32,i32,String)>> = RefCell::new(Vec::new()));
@@ -392,85 +478,25 @@ impl Bounds{
         match self{
             Bounds::Compute=>std::f32::NAN,
             Bounds::Fix(v)=>*v,
-            Bounds::Fill=>self.eval_width_left(cx, abs) - (margin.l + margin.r),
-            Bounds::FillPad(p)=>self.eval_width_left(cx, abs) - p - (margin.l + margin.r),
-            Bounds::FillScale(s)=>self.eval_width_left(cx, abs)*s - (margin.l + margin.r),
-            Bounds::FillScalePad(s,p)=>self.eval_width_left(cx, abs)*s - p - (margin.l + margin.r),
-            Bounds::Scale(s)=> self.eval_width_total(cx, abs) * s - (margin.l + margin.r),
-            Bounds::ScalePad(s, p)=>self.eval_width_total(cx, abs) * s - p - (margin.l + margin.r),
+            Bounds::Fill=>cx.width_left(abs) - (margin.l + margin.r),
+            Bounds::FillPad(p)=>cx.width_left(abs) - p - (margin.l + margin.r),
+            Bounds::FillScale(s)=>cx.width_left(abs)*s - (margin.l + margin.r),
+            Bounds::FillScalePad(s,p)=>cx.width_left(abs)*s - p - (margin.l + margin.r),
+            Bounds::Scale(s)=> cx.width_total(abs) * s - (margin.l + margin.r),
+            Bounds::ScalePad(s, p)=>cx.width_total(abs) * s - p - (margin.l + margin.r),
         }
-    }
-
-    pub fn eval_width_left(&self, cx:&Cx, abs:bool)->f32{
-        if !abs{
-            if let Some(turtle) = cx.turtles.last(){
-                let nan_val = nan_clamp_neg(turtle.width - turtle.width_used - (turtle.walk.x-turtle.start.x) );
-                if nan_val.is_nan(){ // if we are a computed height, if some value is known, use that
-                    if turtle.bound_right_bottom.x != std::f32::NEG_INFINITY{
-                        return turtle.bound_right_bottom.x - turtle.start.x
-                    }
-                }
-                return nan_val
-            }
-        }
-        return cx.target_size.x
-    }
-
-    pub fn eval_width_total(&self, cx:&Cx, abs:bool)->f32{
-        if !abs{
-            if let Some(turtle) = cx.turtles.last(){
-                let nan_val = nan_clamp_neg(turtle.width - (turtle.layout.padding.l+turtle.layout.padding.r));
-                if nan_val.is_nan(){ // if we are a computed width, if some value is known, use that
-                    if turtle.bound_right_bottom.x != std::f32::NEG_INFINITY{
-                        return turtle.bound_right_bottom.x - turtle.start.x
-                    }
-                }
-                return nan_val
-            }
-        }
-        return cx.target_size.x
-    }
-
-    pub fn eval_height_left(&self, cx:&Cx, abs:bool)->f32{
-        if !abs{
-            if let Some(turtle) = cx.turtles.last(){
-                let nan_val = nan_clamp_neg(turtle.height - turtle.height_used - (turtle.walk.y -turtle.start.y) );
-                if nan_val.is_nan(){ // if we are a computed height, if some value is known, use that
-                    if turtle.bound_right_bottom.y != std::f32::NEG_INFINITY{
-                        return turtle.bound_right_bottom.y - turtle.start.y
-                    }
-                }
-                return nan_val
-            }
-        }
-        return cx.target_size.y
-    }
-
-    pub fn eval_height_total(&self, cx:&Cx, abs:bool)->f32{
-        if !abs{
-            if let Some(turtle) = cx.turtles.last(){
-                let nan_val = nan_clamp_neg(turtle.height - (turtle.layout.padding.t+turtle.layout.padding.b));
-                if nan_val.is_nan(){ // if we are a computed height, if some value is known, use that
-                    if turtle.bound_right_bottom.y != std::f32::NEG_INFINITY{
-                        return turtle.bound_right_bottom.y - turtle.start.y
-                    }
-                }
-                return nan_val
-            }
-        }
-        return cx.target_size.y
     }
 
     pub fn eval_height(&self, cx: &Cx, margin:Margin, abs:bool)->f32{
         match self{
             Bounds::Compute=>std::f32::NAN,
             Bounds::Fix(v)=>*v,
-            Bounds::Fill=>self.eval_height_left(cx, abs) - (margin.t + margin.b),
-            Bounds::FillPad(p)=>self.eval_height_left(cx, abs) - p - (margin.t + margin.b),
-            Bounds::FillScale(s)=>self.eval_height_left(cx, abs)*s - (margin.t + margin.b),
-            Bounds::FillScalePad(s,p)=>self.eval_height_left(cx, abs)*s - p - (margin.t + margin.b),
-            Bounds::Scale(s)=> self.eval_height_total(cx, abs) * s - (margin.t + margin.b),
-            Bounds::ScalePad(s, p)=>self.eval_height_total(cx, abs) * s - p - (margin.t + margin.b),
+            Bounds::Fill=>cx.height_left(abs) - (margin.t + margin.b),
+            Bounds::FillPad(p)=>cx.height_left(abs) - p - (margin.t + margin.b),
+            Bounds::FillScale(s)=>cx.height_left(abs)*s - (margin.t + margin.b),
+            Bounds::FillScalePad(s,p)=>cx.height_left(abs)*s - p - (margin.t + margin.b),
+            Bounds::Scale(s)=> cx.height_total(abs) * s - (margin.t + margin.b),
+            Bounds::ScalePad(s, p)=>cx.height_total(abs) * s - p - (margin.t + margin.b),
         }
     }
 }
@@ -612,7 +638,7 @@ pub struct Turtle{
 //}
 
 
-pub fn nan_clamp_neg(v:f32)->f32{
+pub fn max_zero_keep_nan(v:f32)->f32{
     if v.is_nan(){
         v
     }

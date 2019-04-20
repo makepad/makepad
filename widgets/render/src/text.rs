@@ -1,5 +1,5 @@
 use crate::cx::*;
-use std::iter::Peekable;
+//use std::iter::Peekable;
 
 #[derive(Clone)]
 pub enum Wrapping{
@@ -64,6 +64,7 @@ impl Text{
             let color:vec4<Instance>;
             let x:float<Instance>;
             let y:float<Instance>;
+
             //let w:float<Instance>;
             //let h:float<Instance>;
             let font_size:float<Instance>;
@@ -110,37 +111,31 @@ impl Text{
         sh
     }
 
-    pub fn begin_chunks(&mut self, cx:&mut Cx)->Area{
+    pub fn begin_text(&mut self, cx:&mut Cx)->AlignedInstance{
         if !cx.fonts[self.font_id].loaded{
-            return Area::Empty
+            self.font_id = 0;
         }
-        let area = cx.new_aligned_instance(self.shader_id);
-        if area.need_uniforms_now(cx){
+        let mut aligned = cx.new_aligned_instance(self.shader_id);
+        aligned.inst.instance_count = 0;
+        if aligned.inst.need_uniforms_now(cx){
             //texture,
-            area.push_uniform_texture_2d(cx, cx.fonts[self.font_id].texture_id);
+            aligned.inst.push_uniform_texture_2d(cx, cx.fonts[self.font_id].texture_id);
             //tex_size
-            area.push_uniform_vec2f(cx, cx.fonts[self.font_id].width as f32, cx.fonts[self.font_id].height as f32);
+            aligned.inst.push_uniform_vec2f(cx, cx.fonts[self.font_id].width as f32, cx.fonts[self.font_id].height as f32);
             //list_clip
             //area.push_uniform_vec4f(cx, -50000.0,-50000.0,50000.0,50000.0);
         }
-        return area
+        return aligned
     }
 
-    pub fn draw_chunk(&mut self, cx:&mut Cx, geom_x:f32, geom_y:f32, area:&Area, chunk:&[char]){
+    pub fn add_text(&mut self, cx:&mut Cx, geom_x:f32, geom_y:f32, aligned:&mut AlignedInstance, chunk:&[char]){
         let mut geom_x = geom_x;
         let unicodes = &cx.fonts[self.font_id].unicodes;
         let glyphs = &cx.fonts[self.font_id].glyphs;
-        let instance = match area{
-            Area::Instance(inst)=>{
-                let draw_list = &mut cx.draw_lists[inst.draw_list_id];
-                let draw_call = &mut draw_list.draw_calls[inst.draw_call_id];
-                &mut draw_call.instance
-            },
-            _=>{
-                let draw_list = &mut cx.draw_lists[0];
-                let draw_call = &mut draw_list.draw_calls[0];
-                &mut draw_call.instance
-            }
+        let instance = {
+            let draw_list = &mut cx.draw_lists[aligned.inst.draw_list_id];
+            let draw_call = &mut draw_list.draw_calls[ aligned.inst.draw_call_id];
+            &mut draw_call.instance
         };
 
         for wc in chunk{
@@ -165,26 +160,23 @@ impl Text{
                 instance.push(0.)
             }*/
             geom_x += w;
-            //count += 1;
-        }        
+            aligned.inst.instance_count += 1;
+        }
     }
   
-    pub fn end_chunks(&mut self, cx:&mut Cx, count:usize)->Area{
-        cx.set_count_of_aligned_instance(count)
+    pub fn end_text(&mut self, cx:&mut Cx, aligned:&AlignedInstance){
+        cx.update_aligned_instance_count(aligned);
     }
 
     pub fn draw_text(&mut self, cx:&mut Cx, text:&str)->Area{
-        let area = self.begin_chunks(cx);
-        if let Area::Empty = area{
-            return area
-        }
+        let mut aligned = self.begin_text(cx);
 
         let mut chunk = Vec::new();
         let mut width = 0.0;
-        let mut count = 0;
         let mut elipct = 0;
         let font_size = self.font_size;
         let mut iter = text.chars().peekable();
+
         while let Some(c) = iter.next(){
             let last = iter.peek().is_none();
 
@@ -240,8 +232,7 @@ impl Text{
                     None
                 );
 
-                self.draw_chunk(cx, geom.x, geom.y, &area, &chunk);
-                count += chunk.len();
+                self.add_text(cx, geom.x, geom.y, &mut aligned, &chunk);
                 width = 0.0;
                 chunk.truncate(0);
                 match self.wrapping{
@@ -253,6 +244,15 @@ impl Text{
                 }
             }
         }
-        self.end_chunks(cx, count)
+        self.end_text(cx, &aligned);
+        aligned.inst.get_area()
+    }
+
+    pub fn get_monospace_size(&self, cx:&Cx)->Vec2{
+        let glyph = &cx.fonts[self.font_id].glyphs[65];
+        vec2(
+            glyph.advance * self.font_size,
+            self.line_spacing * self.font_size
+        )
     }
 }

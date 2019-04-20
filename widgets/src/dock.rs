@@ -9,8 +9,8 @@ pub struct Dock<TItem>
 where TItem: Clone
 {
     pub dock_items: Option<DockItem<TItem>>,
-    pub splitters: Elements<usize, Splitter>,
-    pub tab_controls: Elements<usize, TabControl>,
+    pub splitters: Elements<usize, Splitter, Splitter>,
+    pub tab_controls: Elements<usize, TabControl, TabControl>,
 
     pub drop_size:Vec2,
     pub drop_quad: Quad,
@@ -122,8 +122,8 @@ where TItem: Clone
     walk_uid:usize,
     stack:Vec<DockWalkStack<'a, TItem>>,
     // forwards for Dock
-    splitters:&'a mut Elements<usize, Splitter>,
-    tab_controls:&'a mut Elements<usize, TabControl>,
+    splitters:&'a mut Elements<usize, Splitter, Splitter>,
+    tab_controls:&'a mut Elements<usize, TabControl, TabControl>,
     drop_quad_view:&'a mut View<NoScrollBar>,
     _drag_move:&'a mut Option<FingerMoveEvent>,
     _drag_end:&'a mut Option<DockDragEnd<TItem>>,
@@ -329,7 +329,7 @@ where TItem: Clone
                         stack_top.counter += 1;
                         stack_top.uid = self.walk_uid;
                         self.walk_uid += 1;
-                        let tab_control = self.tab_controls.get_draw(cx, stack_top.uid);
+                        let tab_control = self.tab_controls.get_draw(cx, stack_top.uid, |_cx,tmpl| tmpl.clone());
                         tab_control.begin_tabs(cx);
                         for (id,tab) in tabs.iter().enumerate(){
                             tab_control.draw_tab(cx, &tab.title, *current == id, tab.closeable);
@@ -343,7 +343,7 @@ where TItem: Clone
                         None
                     }
                     else{
-                        let tab_control = self.tab_controls.get_draw(cx, stack_top.uid);
+                        let tab_control = self.tab_controls.get_draw(cx, stack_top.uid, |_cx,tmpl| tmpl.clone());
                         tab_control.end_tab_page(cx);
                         None
                     }
@@ -354,7 +354,7 @@ where TItem: Clone
                         stack_top.uid = self.walk_uid;
                         self.walk_uid += 1;
                         // begin a split
-                        let split = self.splitters.get_draw(cx, stack_top.uid);
+                        let split = self.splitters.get_draw(cx, stack_top.uid, |_cx,tmpl| tmpl.clone());
                         split.set_splitter_state(align.clone(), *pos, axis.clone());
                         split.begin_splitter(cx);
                         Some(DockWalkStack{counter:0, uid:0, item:unsafe{mem::transmute(first.as_mut())}})
@@ -362,12 +362,12 @@ where TItem: Clone
                     else if stack_top.counter == 1{
                         stack_top.counter +=1 ;
 
-                        let split = self.splitters.get_draw(cx, stack_top.uid);
+                        let split = self.splitters.get_draw(cx, stack_top.uid, |_cx,tmpl| tmpl.clone());
                         split.mid_splitter(cx);
                         Some(DockWalkStack{counter:0, uid:0, item:unsafe{mem::transmute(last.as_mut())}})
                     }
                     else{
-                        let split = self.splitters.get_draw(cx, stack_top.uid);
+                        let split = self.splitters.get_draw(cx, stack_top.uid, |_cx,tmpl| tmpl.clone());
                         split.end_splitter(cx);
                         None
                     }
@@ -600,7 +600,7 @@ where TItem: Clone
         self.drop_quad_view.redraw_view_area(cx);
     }
 
-    pub fn dock_drag_end(&mut self, cx:&mut Cx, fe:FingerUpEvent, new_items:Vec<DockTab<TItem>>){
+    pub fn dock_drag_end(&mut self, _cx:&mut Cx, fe:FingerUpEvent, new_items:Vec<DockTab<TItem>>){
         self._drag_move = None;
         self._drag_end = Some(DockDragEnd::NewItems{
             fe:fe,

@@ -142,21 +142,10 @@ impl ScrollBar{
 
     // turns scroll_pos into an event on this.event
     fn make_scroll_event(&mut self)->ScrollBarEvent{
-        match self.axis{
-            Axis::Horizontal=>{
-                ScrollBarEvent::ScrollHorizontal{
-                        scroll_pos:self._scroll_pos,
-                        view_total:self._view_total,
-                        view_visible:self._view_visible
-                }
-            },
-            Axis::Vertical=>{
-                ScrollBarEvent::ScrollVertical{
-                        scroll_pos:self._scroll_pos,
-                        view_total:self._view_total,
-                        view_visible:self._view_visible
-                }
-            }
+        ScrollBarEvent::Scroll{
+            scroll_pos:self._scroll_pos,
+            view_total:self._view_total,
+            view_visible:self._view_visible
         }
     }
    
@@ -312,7 +301,7 @@ impl ScrollBarLike<ScrollBar> for ScrollBar{
                 self._view_visible = view_rect.w;
 
                 if self._visible{
-                    self._sb_area = self.sb.draw_quad(
+                    let sb_inst = self.sb.draw_quad(
                         cx,
                         self._bar_side_margin, 
                         view_rect.h - self.bar_size, 
@@ -320,7 +309,11 @@ impl ScrollBarLike<ScrollBar> for ScrollBar{
                         self.bar_size, 
                     );
                     //is_vertical
-                    self._sb_area.push_float(cx, 0.0);
+                    let (norm_scroll, norm_handle) = self.get_normalized_scroll_pos();
+                    sb_inst.push_float(cx, 0.0);
+                    sb_inst.push_float(cx, norm_handle);
+                    sb_inst.push_float(cx, norm_scroll);
+                    self._sb_area = sb_inst.get_area();
                 }
              },
              Axis::Vertical=>{
@@ -335,7 +328,7 @@ impl ScrollBarLike<ScrollBar> for ScrollBar{
                 self._view_total = view_total.y;
                 self._view_visible = view_rect.h;
                 if self._visible{
-                    self._sb_area = self.sb.draw_quad(
+                    let sb_inst = self.sb.draw_quad(
                         cx,   
                         view_rect.w - self.bar_size, 
                         self._bar_side_margin, 
@@ -343,12 +336,14 @@ impl ScrollBarLike<ScrollBar> for ScrollBar{
                         self._scroll_size
                     );
                     //is_vertical
-                    self._sb_area.push_float(cx, 1.0);
+                    let (norm_scroll, norm_handle) = self.get_normalized_scroll_pos();
+                    sb_inst.push_float(cx, 1.0);
+                    sb_inst.push_float(cx, norm_handle);
+                    sb_inst.push_float(cx, norm_scroll);
+                    self._sb_area = sb_inst.get_area();
                 }
             }
         }
-        // compute normalized sizes for the sahder
-        let (norm_scroll, norm_handle) = self.get_normalized_scroll_pos();
 
         // see if we need to clamp
         let clamped_pos = self._scroll_pos.min(self._view_total - self._view_visible).max(0.); 
@@ -358,10 +353,6 @@ impl ScrollBarLike<ScrollBar> for ScrollBar{
 
         // push the var added to the sb shader
         if self._visible{
-            //norm_handle
-            self._sb_area.push_float(cx, norm_handle);
-            //norm_scroll
-            self._sb_area.push_float(cx, norm_scroll);
             self.animator.set_area(cx, self._sb_area); // if our area changed, update animation
         }
 

@@ -5,8 +5,8 @@ use std::collections::HashMap;
 
 use cocoa::base::{id, nil};
 use cocoa::{appkit, foundation};
-use cocoa::appkit::{NSApplication, NSImage, NSEvent, NSWindow, NSView,NSEventMask,NSRunningApplication};
-use cocoa::foundation::{ NSRange, NSPoint, NSDictionary, NSRect, NSSize, NSUInteger,NSInteger};
+use cocoa::appkit::{NSApplication, NSEventModifierFlags, NSImage, NSEvent, NSWindow, NSView,NSEventMask,NSRunningApplication};
+use cocoa::foundation::{NSArray, NSPoint, NSDictionary, NSRect, NSSize, NSUInteger,NSInteger};
 use cocoa::foundation::{NSAutoreleasePool, NSString};
 use objc::runtime::{Class, Object, Protocol, Sel, BOOL, YES, NO};
 use objc::declare::ClassDecl;
@@ -21,9 +21,14 @@ pub struct CocoaWindow{
     pub window_delegate:Option<id>,
     pub view:Option<id>,
     pub window:Option<id>,
+    pub attributes_for_marked_text:Option<id>,
+    pub empty_string:Option<id>,
+    //pub input_context:Option<id>,
     pub init_resize:bool,
     pub last_size:Vec2,
+    pub ime_spot:Vec2,
     pub last_dpi_factor:f32,
+    pub last_key_mod:KeyMod,
     pub fingers_down:Vec<bool>,
     pub cursors:HashMap<MouseCursor, id>,
     pub current_cursor:MouseCursor,
@@ -59,6 +64,14 @@ impl CocoaWindow{
 
     pub fn init(&mut self, title:&str){
         unsafe{
+
+            let objects = vec![
+                NSString::alloc(nil).init_str("NSMarkedClauseSegment"),
+                NSString::alloc(nil).init_str("NSGlyphInfo")
+            ];
+            self.attributes_for_marked_text = Some(NSArray::arrayWithObjects(nil, &objects));
+            self.empty_string = Some(NSString::alloc(nil).init_str(""));
+
             for _i in 0..10{
                 self.fingers_down.push(false);
             }
@@ -96,19 +109,26 @@ impl CocoaWindow{
             let view_class = define_cocoa_view_class();
             let view:id = msg_send![view_class, alloc];
             msg_send![view, initWithPtr:self as *mut _ as *mut c_void];
-            
+                                   
             window.setContentView_(view);
             window.makeFirstResponder_(view);
             window.makeKeyAndOrderFront_(nil);
 
+            //let input_context: id = msg_send![class!(NSTextInputContext), alloc];
+            //msg_send![input_context, initWithClient:view];
             window.center();
 
             self.window_delegate = Some(window_delegate);
             self.window = Some(window);
             self.view = Some(view);
+            //self.input_context = Some(input_context);
             self.last_size = self.get_inner_size();
             self.last_dpi_factor = self.get_dpi_factor();
             let _: () = msg_send![autoreleasepool, drain];
+
+            let input_context:id = msg_send![view, inputContext];
+            msg_send![input_context, invalidateCharacterCoordinates];
+            //msg_send![input_context, activate];
         }
     }
 
@@ -117,6 +137,16 @@ impl CocoaWindow{
         unsafe {
             NSWindow::setFrameTopLeftPoint_(self.window.unwrap(), ns_point);
         }        
+    }
+
+    pub fn get_position(&mut self)->Vec2{
+        let view_frame = unsafe { NSView::frame(self.view.unwrap()) };
+        let rect = NSRect::new(
+            NSPoint::new(0.0, view_frame.size.height),
+            NSSize::new(0.0, 0.0),
+        );
+        let out = unsafe{NSWindow::convertRectToScreen_(self.window.unwrap(), rect)};
+        vec2(out.origin.x as f32, out.origin.y as f32)
     }
 
     pub fn get_inner_size(&self)->Vec2{
@@ -134,24 +164,86 @@ impl CocoaWindow{
         unsafe{NSWindow::backingScaleFactor(self.window.unwrap()) as f32}
     }
 
-     unsafe fn ns_event_to_event(&mut self, ns_event: cocoa::base::id) -> Option<Event> {
+    unsafe fn process_ns_event(&mut self, ns_event: cocoa::base::id){
         if ns_event == cocoa::base::nil {
-            return None;
+            return;
         }
 
         if ns_event.eventType() as u64 == 21 { // some missing event from cocoa-rs crate
-            return None;
+            return;
         }
 
-        //let event_type = ns_event.eventType();
-        //let ns_window = ns_event.window();
-        
         appkit::NSApp().sendEvent_(ns_event);
 
         match ns_event.eventType(){
-            appkit::NSKeyUp => {},
-            appkit::NSKeyDown => {},
-            appkit::NSFlagsChanged => {},
+            appkit::NSKeyUp => {
+                if let Some(key_code) = get_event_keycode(ns_event){
+                    let key_mod = get_event_key_mod(ns_event);
+                    let key_char = get_event_char(ns_event);
+                    let is_repeat:bool = msg_send![ns_event, isARepeat];
+                    self.do_callback(&mut vec![
+                        Event::KeyUp(KeyEvent{
+                            key_code:key_code,
+                            key_char:key_char,
+                            is_repeat:is_repeat,
+                            with_shift:key_mod.shift,
+                            with_control:key_mod.control,
+                            with_alt:key_mod.alt,
+                            with_logo:key_mod.logo,
+                        })
+                    ]);
+                }
+            },
+            appkit::NSKeyDown => {
+                if let Some(key_code) = get_event_keycode(ns_event){
+                    let key_mod = get_event_key_mod(ns_event);
+                    let key_char = get_event_char(ns_event);
+                    let is_repeat:bool = msg_send![ns_event, isARepeat];
+                    self.do_callback(&mut vec![
+                        Event::KeyDown(KeyEvent{
+                            key_code:key_code,
+                            key_char:key_char,
+                            is_repeat:is_repeat,
+                            with_shift:key_mod.shift,
+                            with_control:key_mod.control,
+                            with_alt:key_mod.alt,
+                            with_logo:key_mod.logo,
+                        })
+                    ]);
+                }
+            },
+            appkit::NSFlagsChanged => {
+                let key_mod = get_event_key_mod(ns_event);
+                let last_key_mod = self.last_key_mod.clone();
+                self.last_key_mod = key_mod.clone();
+                let mut events = Vec::new();
+                fn add_event(old:bool, new:bool, key_mod:KeyMod, events:&mut Vec<Event>, key_code:KeyCode){
+                    if old != new{
+                        let event = KeyEvent{
+                            key_code:key_code,
+                            key_char:'\0',
+                            is_repeat:false,
+                            with_shift:key_mod.shift,
+                            with_control:key_mod.control,
+                            with_alt:key_mod.alt,
+                            with_logo:key_mod.logo,
+                        };
+                        if new{
+                            events.push(Event::KeyDown(event));
+                        }
+                        else{
+                            events.push(Event::KeyUp(event));
+                        }
+                    }
+                }
+                add_event(last_key_mod.shift, key_mod.shift, key_mod.clone(), &mut events, KeyCode::LeftShift);
+                add_event(last_key_mod.alt, key_mod.alt, key_mod.clone(), &mut events, KeyCode::LeftAlt);
+                add_event(last_key_mod.logo, key_mod.logo, key_mod.clone(), &mut events, KeyCode::LeftLogo);
+                add_event(last_key_mod.control, key_mod.control, key_mod.clone(), &mut events, KeyCode::LeftControl);
+                if events.len() > 0{
+                    self.do_callback(&mut events);
+                }
+            },
             appkit::NSMouseEntered => {},
             appkit::NSMouseExited => {},
             appkit::NSMouseMoved |
@@ -160,25 +252,29 @@ impl CocoaWindow{
             appkit::NSRightMouseDragged => {},
             appkit::NSScrollWheel => {
                 return if ns_event.hasPreciseScrollingDeltas() == cocoa::base::YES {
-                    Some(Event::FingerScroll(FingerScrollEvent{
-                        scroll:vec2(
-                            ns_event.scrollingDeltaX() as f32,
-                            -ns_event.scrollingDeltaY() as f32
-                        ),
-                        abs:vec2(self.last_mouse_pos.x, self.last_mouse_pos.y),
-                        rel:vec2(0.,0.),
-                        handled:false
-                    }))
+                    self.do_callback(&mut vec![
+                        Event::FingerScroll(FingerScrollEvent{
+                            scroll:vec2(
+                                ns_event.scrollingDeltaX() as f32,
+                                -ns_event.scrollingDeltaY() as f32
+                            ),
+                            abs:vec2(self.last_mouse_pos.x, self.last_mouse_pos.y),
+                            rel:vec2(0.,0.),
+                            handled:false
+                        })
+                    ]);
                 } else {
-                    Some(Event::FingerScroll(FingerScrollEvent{
-                        scroll:vec2(
-                            ns_event.scrollingDeltaX() as f32 * 32.,
-                            -ns_event.scrollingDeltaY() as f32 * 32.
-                        ),
-                        abs:vec2(self.last_mouse_pos.x, self.last_mouse_pos.y),
-                        rel:vec2(0.,0.),
-                        handled:false
-                    }))
+                    self.do_callback(&mut vec![
+                        Event::FingerScroll(FingerScrollEvent{
+                            scroll:vec2(
+                                ns_event.scrollingDeltaX() as f32 * 32.,
+                                -ns_event.scrollingDeltaY() as f32 * 32.
+                            ),
+                            abs:vec2(self.last_mouse_pos.x, self.last_mouse_pos.y),
+                            rel:vec2(0.,0.),
+                            handled:false
+                        })
+                    ]);
                 }
             },
             appkit::NSEventTypePressure => {},
@@ -189,7 +285,6 @@ impl CocoaWindow{
             },
             _=>(),
         }
-        None
     }
 
     pub fn poll_events<F>(&mut self, first_block:bool, mut event_handler:F)
@@ -223,14 +318,14 @@ impl CocoaWindow{
                 if ns_event == nil{
                     break;
                 }
-
-                let event = self.ns_event_to_event(ns_event);
+               // msg_send![self.input_context.unwrap(), handleEvent:ns_event];
+                self.process_ns_event(ns_event);
 
                 let _: () = msg_send![pool, release];
 
-                if !event.is_none(){
-                    event_handler(&mut vec![event.unwrap()])
-                }
+                //if !event.is_none(){
+                //    event_handler(&mut vec![event.unwrap()])
+                // }
             }
             self.event_callback = None;
         }
@@ -317,8 +412,192 @@ impl CocoaWindow{
     pub fn send_close_requested_event(&mut self){
         self.do_callback(&mut vec![Event::CloseRequested])
     }
+
+    pub fn send_text_input(&mut self, input:String, replace_last:bool){
+        self.do_callback(&mut vec![Event::TextInput(TextInputEvent{
+            input:input,
+            replace_last:replace_last
+        })])
+    }
 }
 
+fn get_event_char(event: id) -> char {
+    unsafe {
+        let characters: id =  msg_send![event, characters];
+        if characters == nil{
+            return '\0'
+        }
+        if characters.len() == 0{
+            return '\0'
+        }
+        let slice = std::slice::from_raw_parts(
+            characters.UTF8String() as *const std::os::raw::c_uchar,
+            characters.len(),
+        );
+        let string = std::str::from_utf8_unchecked(slice);
+        string.chars().next().unwrap()
+    }
+}
+
+#[derive(Clone, Default)]
+pub struct KeyMod {
+    pub shift: bool,
+    pub control: bool,
+    pub alt: bool,
+    pub logo: bool
+}
+
+fn get_event_key_mod(event: id) -> KeyMod {
+    let flags = unsafe {
+        NSEvent::modifierFlags(event)
+    };
+    KeyMod {
+        shift: flags.contains(NSEventModifierFlags::NSShiftKeyMask),
+        control: flags.contains(NSEventModifierFlags::NSControlKeyMask),
+        alt: flags.contains(NSEventModifierFlags::NSAlternateKeyMask),
+        logo: flags.contains(NSEventModifierFlags::NSCommandKeyMask),
+    }
+}
+
+fn get_event_keycode(event: id) -> Option<KeyCode> {
+    let scan_code: std::os::raw::c_ushort = unsafe {
+        msg_send![event, keyCode]
+    };
+    //println!("SCAN CODE {} ", scan_code);
+    Some(match scan_code {
+        0x00 => KeyCode::KeyA,
+        0x01 => KeyCode::KeyS,
+        0x02 => KeyCode::KeyD,
+        0x03 => KeyCode::KeyF,
+        0x04 => KeyCode::KeyH,
+        0x05 => KeyCode::KeyG,
+        0x06 => KeyCode::KeyZ,
+        0x07 => KeyCode::KeyX,
+        0x08 => KeyCode::KeyC,
+        0x09 => KeyCode::KeyV,
+        //0x0a => World 1,
+        0x0b => KeyCode::KeyB,
+        0x0c => KeyCode::KeyQ,
+        0x0d => KeyCode::KeyW,
+        0x0e => KeyCode::KeyE,
+        0x0f => KeyCode::KeyR,
+        0x10 => KeyCode::KeyY,
+        0x11 => KeyCode::KeyT,
+        0x12 => KeyCode::Key1,
+        0x13 => KeyCode::Key2,
+        0x14 => KeyCode::Key3,
+        0x15 => KeyCode::Key4,
+        0x16 => KeyCode::Key6,
+        0x17 => KeyCode::Key5,
+        0x18 => KeyCode::Equals,
+        0x19 => KeyCode::Key9,
+        0x1a => KeyCode::Key7,
+        0x1b => KeyCode::Minus,
+        0x1c => KeyCode::Key8,
+        0x1d => KeyCode::Key0,
+        0x1e => KeyCode::RBracket,
+        0x1f => KeyCode::KeyO,
+        0x20 => KeyCode::KeyU,
+        0x21 => KeyCode::LBracket,
+        0x22 => KeyCode::KeyI,
+        0x23 => KeyCode::KeyP,
+        0x24 => KeyCode::Return,
+        0x25 => KeyCode::KeyL,
+        0x26 => KeyCode::KeyJ,
+        0x27 => KeyCode::Backtick,
+        0x28 => KeyCode::KeyK,
+        0x29 => KeyCode::Semicolon,
+        0x2a => KeyCode::Backslash,
+        0x2b => KeyCode::Comma,
+        0x2c => KeyCode::Slash,
+        0x2d => KeyCode::KeyN,
+        0x2e => KeyCode::KeyM,
+        0x2f => KeyCode::Period,
+        0x30 => KeyCode::Tab,
+        0x31 => KeyCode::Space,
+        0x32 => KeyCode::Backtick,
+        0x33 => KeyCode::Backspace,
+        //0x34 => unkown,
+        0x35 => KeyCode::Escape,
+        //0x36 => KeyCode::RLogo,
+        //0x37 => KeyCode::LLogo,
+        //0x38 => KeyCode::LShift,
+        0x39 => KeyCode::Capslock,
+        //0x3a => KeyCode::LAlt,
+        //0x3b => KeyCode::LControl,
+        //0x3c => KeyCode::RShift,
+        //0x3d => KeyCode::RAlt,
+        //0x3e => KeyCode::RControl,
+        //0x3f => Fn key,
+        //0x40 => KeyCode::F17,
+        0x41 => KeyCode::NumpadDecimal,
+        //0x42 -> unkown,
+        0x43 => KeyCode::NumpadMultiply,
+        //0x44 => unkown,
+        0x45 => KeyCode::NumpadAdd,
+        //0x46 => unkown,
+        0x47 => KeyCode::Numlock,
+        //0x48 => KeypadClear,
+        //0x49 => KeyCode::VolumeUp,
+        //0x4a => KeyCode::VolumeDown,
+        0x4b => KeyCode::NumpadDivide,
+        0x4c => KeyCode::NumpadEnter,
+        0x4e => KeyCode::NumpadSubtract,
+        //0x4d => unkown,
+        //0x4e => KeyCode::Subtract,
+        //0x4f => KeyCode::F18,
+        //0x50 => KeyCode::F19,
+        0x51 => KeyCode::NumpadEquals,
+        0x52 => KeyCode::Numpad0,
+        0x53 => KeyCode::Numpad1,
+        0x54 => KeyCode::Numpad2,
+        0x55 => KeyCode::Numpad3,
+        0x56 => KeyCode::Numpad4,
+        0x57 => KeyCode::Numpad5,
+        0x58 => KeyCode::Numpad6,
+        0x59 => KeyCode::Numpad7,
+        //0x5a => KeyCode::F20,
+        0x5b => KeyCode::Numpad8,
+        0x5c => KeyCode::Numpad9,
+        //0x5d => KeyCode::Yen,
+        //0x5e => JIS Ro,
+        //0x5f => unkown,
+        0x60 => KeyCode::F5,
+        0x61 => KeyCode::F6,
+        0x62 => KeyCode::F7,
+        0x63 => KeyCode::F3,
+        0x64 => KeyCode::F8,
+        0x65 => KeyCode::F9,
+        //0x66 => JIS Eisuu (macOS),
+        0x67 => KeyCode::F11,
+        //0x68 => JIS Kana (macOS),
+        //0x69 => KeyCode::F13,
+        //0x6a => KeyCode::F16,
+        //0x6b => KeyCode::F14,
+        //0x6c => unkown,
+        0x6d => KeyCode::F10,
+        //0x6e => unkown,
+        0x6f => KeyCode::F12,
+        //0x70 => unkown,
+        //0x71 => KeyCode::F15,
+        0x72 => KeyCode::Insert,
+        0x73 => KeyCode::Home,
+        0x74 => KeyCode::PageUp,
+        0x75 => KeyCode::Delete,
+        0x76 => KeyCode::F4,
+        0x77 => KeyCode::End,
+        0x78 => KeyCode::F2,
+        0x79 => KeyCode::PageDown,
+        0x7a => KeyCode::F1,
+        0x7b => KeyCode::ArrowLeft,
+        0x7c => KeyCode::ArrowRight,
+        0x7d => KeyCode::ArrowDown,
+        0x7e => KeyCode::ArrowUp,
+        //0x7f =>  unkown,
+        //0xa => KeyCode::Caret,
+        _ => return None,
+    })
+}
 
 fn get_cocoa_window(this:&Object)->&mut CocoaWindow{
     unsafe{
@@ -452,7 +731,7 @@ pub fn define_cocoa_window_class()->*const Class{
     extern fn yes(_: &Object, _: Sel) -> BOOL {
         YES
     }
- 
+    
     let window_superclass = class!(NSWindow);
     let mut decl = ClassDecl::new("RenderWindow", window_superclass).unwrap();
     unsafe{
@@ -476,10 +755,10 @@ pub fn define_cocoa_view_class()->*const Class{
             let this: id = msg_send![this, init];
             if this != nil {
                 (*this).set_ivar("cocoa_window_ptr", cx);
-                //let marked_text = <id as NSMutableAttributedString>::init(
-                //    NSMutableAttributedString::alloc(nil),
-                //);
-                //(*this).set_ivar("markedText", marked_text);
+                let marked_text = <id as NSMutableAttributedString>::init(
+                    NSMutableAttributedString::alloc(nil),
+                );
+                (*this).set_ivar("markedText", marked_text);
             }
             this
         }
@@ -570,29 +849,73 @@ pub fn define_cocoa_view_class()->*const Class{
             ];
         }
     }
+    
+    // NSTextInput protocol
+    extern fn marked_range(this: &Object, _sel: Sel) -> NSRange {
+        //println!("markedRange");
+        unsafe {
+            let marked_text: id = *this.get_ivar("markedText");
+            let length = marked_text.length();
+            if length > 0 {
+                NSRange::new(0, length - 1)
+            } else {
+                NSRange {
+                    location: NSInteger::max_value() as NSUInteger,
+                    length: 0,
+                }
+            }
+        }
+    }
 
     extern fn selected_range(_this: &Object, _sel: Sel) -> NSRange {
-        //println!("selectedRange");
         NSRange {
-            location: NSInteger::max_value() as NSUInteger,
-            length: 0,
+            location: 0,
+            length: 1,
+        }
+    }
+
+    extern fn has_marked_text(this: &Object, _sel: Sel) -> BOOL {
+        unsafe {
+            let marked_text: id = *this.get_ivar("markedText");
+            (marked_text.length() > 0) as i8
         }
     }
 
     extern fn set_marked_text(
-        _this: &mut Object,
+        this: &mut Object,
         _sel: Sel,
-        _string: id,
+        string: id,
         _selected_range: NSRange,
         _replacement_range: NSRange,
     ) {
+        unsafe {
+            let marked_text_ref: &mut id = this.get_mut_ivar("markedText");
+            let _: () = msg_send![(*marked_text_ref), release];
+            let marked_text = NSMutableAttributedString::alloc(nil);
+            let has_attr = msg_send![string, isKindOfClass:class!(NSAttributedString)];
+            if has_attr {
+                marked_text.init_with_attributed_string(string);
+            } else {
+                marked_text.init_with_string(string);
+            };
+            *marked_text_ref = marked_text;
+        }
     }
 
-    extern fn unmark_text(_this: &Object, _sel: Sel) {
+    extern fn unmark_text(this: &Object, _sel: Sel) {
+        let cw = get_cocoa_window(this);
+        unsafe {
+            let marked_text: id = *this.get_ivar("markedText");
+            let mutable_string = marked_text.mutable_string();
+            let _: () = msg_send![mutable_string, setString:cw.empty_string.unwrap()];
+            let input_context: id = msg_send![this, inputContext];
+            let _: () = msg_send![input_context, discardMarkedText];
+        }    
     }
 
-    extern fn valid_attributes_for_marked_text(_this: &Object, _sel: Sel) -> id {
-        unsafe { msg_send![class!(NSArray), array] }
+    extern fn valid_attributes_for_marked_text(this: &Object, _sel: Sel) -> id {
+        let cw = get_cocoa_window(this);
+        cw.attributes_for_marked_text.unwrap()
     }
 
     extern fn attributed_substring_for_proposed_range(
@@ -605,31 +928,66 @@ pub fn define_cocoa_view_class()->*const Class{
     }
 
     extern fn character_index_for_point(_this: &Object, _sel: Sel, _point: NSPoint) -> NSUInteger {
+       // println!("character_index_for_point");
         0
     }
 
     extern fn first_rect_for_character_range(this: &Object, _sel: Sel, _range: NSRange, _actual_range: *mut c_void) -> NSRect {
-        let _cw = get_cocoa_window(this);
+        let cw = get_cocoa_window(this);
+        unsafe{ 
+            //let view: id = this as *const _ as *mut _;
+            //let view_rect = NSView::frame(view);
+            //println!("{} {}", view_rect.origin.x + cw.ime_spot.x as f64, view_rect.size.height - cw.ime_spot.y as f64);
+            let origin = cw.get_position();
             NSRect::new(
-                NSPoint::new(0.0, 0.0),// as _, y as _),
+                NSPoint::new((origin.x + cw.ime_spot.x) as f64, (origin.y + cw.ime_spot.y) as f64),// as _, y as _),
                 NSSize::new(0.0, 0.0),
             )
+        }
     }
 
-    extern fn insert_text(this: &Object, _sel: Sel, _string: id, _replacement_range: NSRange) {
-        let _cw = get_cocoa_window(this);
+    extern fn insert_text(this: &Object, _sel: Sel, string: id, replacement_range: NSRange) {
+        let cw = get_cocoa_window(this);
+        unsafe{
+            let has_attr = msg_send![string, isKindOfClass:class!(NSAttributedString)];
+            let characters = if has_attr {
+                msg_send![string, string]
+            } else {
+                string
+            };
+            let slice = std::slice::from_raw_parts(
+                characters.UTF8String() as *const std::os::raw::c_uchar,
+                characters.len(),
+            );
+            let string = std::str::from_utf8_unchecked(slice).to_owned();
+            cw.send_text_input(string, replacement_range.length != 0);
+            let input_context: id = msg_send![this, inputContext];
+            msg_send![input_context, invalidateCharacterCoordinates];
+            msg_send![cw.view.unwrap(), setNeedsDisplay:YES];
+            unmark_text(this, _sel);
+           // msg_send![cw.view.unwrap(), unmarkText];
+        }
     }
 
     extern fn do_command_by_selector(this: &Object, _sel: Sel, _command: Sel) {
         let _cw = get_cocoa_window(this);
+        println!("do_command_by_selector");
     }
 
-    extern fn key_down(this: &Object, _sel: Sel, _event: id) {
+    extern fn key_down(this: &Object, _sel: Sel, event: id) {
         let _cw = get_cocoa_window(this);
+        unsafe{
+            let input_context: id = msg_send![this, inputContext];
+            msg_send![input_context, handleEvent:event];
+            //let is_repeat:bool = msg_send![event, isARepeat];
+            //if !is_repeat{
+            //    let array: id = msg_send![class!(NSArray), arrayWithObject:event];
+            //    let (): _ = msg_send![this, interpretKeyEvents:array];
+           // }
+        }
     }
 
-    extern fn key_up(this: &Object, _sel: Sel, _event: id) {
-        let _cw = get_cocoa_window(this);
+    extern fn key_up(_this: &Object, _sel: Sel, _event: id) {
     }
 
     extern fn insert_tab(this: &Object, _sel: Sel, _sender: id) {
@@ -654,7 +1012,7 @@ pub fn define_cocoa_view_class()->*const Class{
         }
     }
 
-    extern fn wants_key_down_for_event(_this: &Object, _se: Sel, _event: id) -> BOOL {
+    extern fn yes_function(_this: &Object, _se: Sel, _event: id) -> BOOL {
         YES
     }
 
@@ -665,30 +1023,30 @@ pub fn define_cocoa_view_class()->*const Class{
         decl.add_method(sel!(initWithPtr:), init_with_ptr as extern fn(&Object, Sel, *mut c_void) -> id);
         decl.add_method(sel!(drawRect:), draw_rect as extern fn(&Object, Sel, NSRect));
         decl.add_method(sel!(resetCursorRects), reset_cursor_rects as extern fn(&Object, Sel));
-        //decl.add_method(sel!(hasMarkedText), has_marked_text as extern fn(&Object, Sel) -> BOOL);
-        //decl.add_method(sel!(markedRange), marked_range as extern fn(&Object, Sel) -> NSRange);
-        //decl.add_method(sel!(selectedRange), selected_range as extern fn(&Object, Sel) -> NSRange);
-        //decl.add_method(sel!(setMarkedText:selectedRange:replacementRange:),set_marked_text as extern fn(&mut Object, Sel, id, NSRange, NSRange));
+        decl.add_method(sel!(hasMarkedText), has_marked_text as extern fn(&Object, Sel) -> BOOL);
+        decl.add_method(sel!(markedRange), marked_range as extern fn(&Object, Sel) -> NSRange);
+        decl.add_method(sel!(selectedRange), selected_range as extern fn(&Object, Sel) -> NSRange);
+        decl.add_method(sel!(setMarkedText:selectedRange:replacementRange:),set_marked_text as extern fn(&mut Object, Sel, id, NSRange, NSRange));
         decl.add_method(sel!(unmarkText), unmark_text as extern fn(&Object, Sel));
         decl.add_method(sel!(validAttributesForMarkedText),valid_attributes_for_marked_text as extern fn(&Object, Sel) -> id);
-        //decl.add_method(
-        //   sel!(attributedSubstringForProposedRange:actualRange:),
-        //    attributed_substring_for_proposed_range
-        //       as extern fn(&Object, Sel, NSRange, *mut c_void) -> id,
-        //);
-        //decl.add_method(
-        //    sel!(insertText:replacementRange:),
-        //    insert_text as extern fn(&Object, Sel, id, NSRange),
-        //);
+        decl.add_method(
+            sel!(attributedSubstringForProposedRange:actualRange:),
+            attributed_substring_for_proposed_range
+                as extern fn(&Object, Sel, NSRange, *mut c_void) -> id,
+        );
+        decl.add_method(
+            sel!(insertText:replacementRange:),
+            insert_text as extern fn(&Object, Sel, id, NSRange),
+        );
         decl.add_method(
             sel!(characterIndexForPoint:),
             character_index_for_point as extern fn(&Object, Sel, NSPoint) -> NSUInteger,
         );
-        //decl.add_method(
-        //    sel!(firstRectForCharacterRange:actualRange:),
-        //    first_rect_for_character_range
-        //        as extern fn(&Object, Sel, NSRange, *mut c_void) -> NSRect,
-        //);
+        decl.add_method(
+            sel!(firstRectForCharacterRange:actualRange:),
+            first_rect_for_character_range
+                as extern fn(&Object, Sel, NSRange, *mut c_void) -> NSRect,
+        );
         decl.add_method(sel!(doCommandBySelector:),do_command_by_selector as extern fn(&Object, Sel, Sel));
         decl.add_method(sel!(keyDown:), key_down as extern fn(&Object, Sel, id));
         decl.add_method(sel!(keyUp:), key_up as extern fn(&Object, Sel, id));
@@ -704,11 +1062,15 @@ pub fn define_cocoa_view_class()->*const Class{
         decl.add_method(sel!(mouseDragged:), mouse_dragged as extern fn(&Object, Sel, id));
         decl.add_method(sel!(rightMouseDragged:), right_mouse_dragged as extern fn(&Object, Sel, id));
         decl.add_method(sel!(otherMouseDragged:), other_mouse_dragged as extern fn(&Object, Sel, id));
-        decl.add_method(sel!(_wantsKeyDownForEvent:), wants_key_down_for_event as extern fn(&Object, Sel, id) -> BOOL);
+        decl.add_method(sel!(wantsKeyDownForEvent:), yes_function as extern fn(&Object, Sel, id) -> BOOL);
+        decl.add_method(sel!(acceptsFirstResponder:), yes_function as extern fn(&Object, Sel, id) -> BOOL);
+        decl.add_method(sel!(becomeFirstResponder:), yes_function as extern fn(&Object, Sel, id) -> BOOL);
+        decl.add_method(sel!(resignFirstResponder:), yes_function as extern fn(&Object, Sel, id) -> BOOL);
     }
     decl.add_ivar::<*mut c_void>("cocoa_window_ptr");
     decl.add_ivar::<id>("markedText");
     let protocol = Protocol::get("NSTextInputClient").unwrap();
+    //println!("NTextInputClient {}", protocol);
     decl.add_protocol(&protocol);
 
     return decl.register();
@@ -819,5 +1181,71 @@ fn load_webkit_cursor(cursor_name_str: &str) -> id {
         );
         let cursor: id = msg_send![class!(NSCursor), alloc];
         msg_send![cursor, initWithImage:image hotSpot:point]
+    }
+}
+
+
+#[repr(C)]
+pub struct NSRange {
+    pub location: NSUInteger,
+    pub length: NSUInteger,
+}
+
+impl NSRange {
+    #[inline]
+    pub fn new(location: NSUInteger, length: NSUInteger) -> NSRange {
+        NSRange { location, length }
+    }
+}
+
+unsafe impl objc::Encode for NSRange {
+    fn encode() -> objc::Encoding {
+        let encoding = format!(
+            // TODO: Verify that this is correct
+            "{{NSRange={}{}}}",
+            NSUInteger::encode().as_str(),
+            NSUInteger::encode().as_str(),
+        );
+        unsafe { objc::Encoding::from_str(&encoding) }
+    }
+}
+
+pub trait NSMutableAttributedString: Sized {
+    unsafe fn alloc(_: Self) -> id {
+        msg_send![class!(NSMutableAttributedString), alloc]
+    }
+
+    unsafe fn init(self) -> id; // *mut NSMutableAttributedString
+    unsafe fn init_with_string(self, string: id) -> id;
+    unsafe fn init_with_attributed_string(self, string: id) -> id;
+
+    unsafe fn string(self) -> id; // *mut NSString
+    unsafe fn mutable_string(self) -> id; // *mut NSMutableString
+    unsafe fn length(self) -> NSUInteger;
+}
+
+impl NSMutableAttributedString for id {
+    unsafe fn init(self) -> id {
+        msg_send![self, init]
+    }
+
+    unsafe fn init_with_string(self, string: id) -> id {
+        msg_send![self, initWithString:string]
+    }
+
+    unsafe fn init_with_attributed_string(self, string: id) -> id {
+        msg_send![self, initWithAttributedString:string]
+    }
+
+    unsafe fn string(self) -> id {
+        msg_send![self, string]
+    }
+
+    unsafe fn mutable_string(self) -> id {
+        msg_send![self, mutableString]
+    }
+
+    unsafe fn length(self) -> NSUInteger {
+        msg_send![self, length]
     }
 }

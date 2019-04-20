@@ -287,11 +287,11 @@ impl Splitter{
         self.split.color = self.animator.last_vec4("split.color");
         match self.axis{
             Axis::Horizontal=>{
-                self._split_area = self.split.draw_quad(cx, 0., self._calc_pos, rect.w, self.split_size);
+                self._split_area = self.split.draw_quad(cx, 0., self._calc_pos, rect.w, self.split_size).get_area();
                 self._drag_max_pos = rect.h;
             },
             Axis::Vertical=>{
-                self._split_area = self.split.draw_quad(cx, self._calc_pos, 0., self.split_size, rect.h);
+                self._split_area = self.split.draw_quad(cx, self._calc_pos, 0., self.split_size, rect.h).get_area();
                 self._drag_max_pos = rect.w;
             }
        };

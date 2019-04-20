@@ -40,7 +40,6 @@ pub struct Cx{
 
     pub draw_lists: Vec<DrawList>,
     pub draw_lists_free: Vec<usize>,
-    pub instance_area_stack: Vec<Area>,
     pub draw_list_stack: Vec<usize>,
     pub current_draw_list_id: usize,
 
@@ -55,6 +54,9 @@ pub struct Cx{
     pub redraw_id: u64,
     pub event_id: u64,
     pub is_in_redraw_cycle:bool,
+
+    pub last_key_focus:Area,
+    pub key_focus:Area,
 
     pub debug_area:Area,
 
@@ -99,7 +101,6 @@ impl Default for Cx{
 
             draw_lists:Vec::new(),
             draw_lists_free:Vec::new(),
-            instance_area_stack:Vec::new(),
             draw_list_stack:Vec::new(),
             current_draw_list_id:0,
 
@@ -119,6 +120,9 @@ impl Default for Cx{
             target_size:vec2(0.0,0.0),
             target_dpi_factor:0.0,
             
+            last_key_focus:Area::Empty,
+            key_focus:Area::Empty,
+
             debug_area:Area::Empty,
 
             down_mouse_cursor:None,
@@ -244,10 +248,20 @@ impl Cx{
         }
     }
 
-    pub fn new_aligned_instance(&mut self, shader_id:usize)->Area{
-        let area = self.new_instance(shader_id);
-        self.align_list.push(area.clone());
-        area
+    pub fn new_aligned_instance(&mut self, shader_id:usize)->AlignedInstance{
+        let instance_area = self.new_instance(shader_id);
+        let align_index = self.align_list.len();
+        self.align_list.push(Area::Instance(instance_area.clone()));
+        AlignedInstance{
+            inst:instance_area,
+            index:align_index
+        }
+    }
+
+    pub fn update_aligned_instance_count(&mut self,align:&AlignedInstance){
+        if let Area::Instance(instance) = &mut self.align_list[align.index]{
+            instance.instance_count = align.inst.instance_count;
+        }
     }
 /*
     fn draw_call_to_area(dc:&DrawCall)->Area{
@@ -260,7 +274,7 @@ impl Cx{
         })
     }*/
 
-    pub fn new_instance(&mut self, shader_id:usize)->Area{
+    pub fn new_instance(&mut self, shader_id:usize)->InstanceArea{
         if !self.is_in_redraw_cycle{
             panic!("calling get_instance outside of redraw cycle is not possible!");
         }
@@ -280,7 +294,7 @@ impl Cx{
                 }
                 dc.need_uniforms_now = false;
                 
-                return dc.get_current_area();
+                return dc.get_current_instance_area();
             }
         }
 
@@ -305,7 +319,7 @@ impl Cx{
                 platform:DrawCallPlatform{..Default::default()}
             });
             let dc = &mut draw_list.draw_calls[draw_call_id];
-            return dc.get_current_area();
+            return dc.get_current_instance_area();
         }
 
         // reuse a draw
@@ -320,7 +334,7 @@ impl Cx{
         dc.textures_2d.truncate(0);
         dc.instance_dirty = true;
         dc.need_uniforms_now = true;
-        return dc.get_current_area();
+        return dc.get_current_instance_area();
     }
 
     pub fn color(&self, name:&str)->Vec4{
@@ -355,15 +369,11 @@ impl Cx{
     pub fn set_size(&mut self, name:&str, val:f64){
         self.style_values.insert(name.to_string(), StyleValue::Size(val));
     }
-    // push instance so it can be written to again in pop_instance
-    pub fn push_instance_area_stack(&mut self, area:Area){
-        self.instance_area_stack.push(area.clone());
+
+    pub fn set_key_focus(&mut self, focus_area:Area){
+        self.key_focus = focus_area;
     }
 
-    // pops instance patching the supplied geometry in the instancebuffer
-    pub fn pop_instance_area_stack(&mut self)->Area{
-        self.instance_area_stack.pop().unwrap()
-    }
 
     // event handler wrappers
 
@@ -372,6 +382,17 @@ impl Cx{
     { 
         self.event_id += 1;
         event_handler(self, event);
+
+        if self.last_key_focus != self.key_focus{
+            let last_key_focus = self.last_key_focus;
+            self.last_key_focus = self.key_focus;
+            event_handler(self, &mut Event::KeyFocus(KeyFocusEvent{
+                is_lost:false,
+                last:last_key_focus,
+                focus:self.key_focus
+            }))
+        }
+
         // check any user events and send them
         if self.user_events.len() > 0{
             let user_events = self.user_events.clone();
@@ -470,6 +491,12 @@ impl Cx{
 }
 
 #[derive(Clone)]
+pub struct AlignedInstance{
+    pub inst:InstanceArea,
+    pub index:usize
+}
+
+#[derive(Clone)]
 pub enum StyleValue{
     Color(Vec4),
     Font(String),
@@ -494,14 +521,14 @@ pub struct DrawCall{
 
 impl DrawCall{
 
-    pub fn get_current_area(&self)->Area{
-        Area::Instance(InstanceArea{
+    pub fn get_current_instance_area(&self)->InstanceArea{
+        InstanceArea{
             draw_list_id:self.draw_list_id,
             draw_call_id:self.draw_call_id,
             redraw_id:self.redraw_id,
             instance_offset:self.current_instance_offset,
             instance_count:1
-        })
+        }
     }
 }
 
@@ -652,12 +679,12 @@ impl BinaryDep{
         if self.parse + len as isize > self.vec_obj.len() as isize{
              return Err(format!("Eof on read file {} len {} offset {}", self.name, out.len(), self.parse));
         };
-        unsafe{
+        //unsafe{
             for i in 0..len{
                 out[i] = self.vec_obj[self.parse as usize + i];
             };
             self.parse += len as isize;
-        }
+        //}
         Ok(len)
     }
 }

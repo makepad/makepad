@@ -420,207 +420,149 @@ impl Area{
         }
         return vec4(0.0,0.0,0.0,0.0);
     }
+}
+
+impl InstanceArea{
+    pub fn get_area(self)->Area{
+        Area::Instance(self)
+    }
 
     pub fn push_slice(&self, cx:&mut Cx, data:&[f32]){
-        match self{
-            Area::Instance(inst)=>{
-                let draw_list = &mut cx.draw_lists[inst.draw_list_id];
-                if draw_list.redraw_id != inst.redraw_id {
-                    println!("push_data called on invalid area pointer, use mark/sweep correctly!");
-                    return
-                }
-                let draw_call = &mut draw_list.draw_calls[inst.draw_call_id];
-                //let csh = &cx.shaders.compiled_shaders[draw_call.shader_id];
-                draw_call.instance.extend_from_slice(data);
-            },
-            _=>(),
+        let draw_list = &mut cx.draw_lists[self.draw_list_id];
+        if draw_list.redraw_id != self.redraw_id {
+            println!("push_data called on invalid area pointer, use mark/sweep correctly!");
+            return
         }
+        let draw_call = &mut draw_list.draw_calls[self.draw_call_id];
+        //let csh = &cx.shaders.compiled_shaders[draw_call.shader_id];
+        draw_call.instance.extend_from_slice(data);
     }
 
     pub fn push_float(&self, cx:&mut Cx, value:f32){
-        match self{
-            Area::Instance(inst)=>{
-                let draw_list = &mut cx.draw_lists[inst.draw_list_id];
-                if draw_list.redraw_id != inst.redraw_id {
-                    println!("push_float called on invalid area pointer, use mark/sweep correctly!");
-                    return
-                }
-                let draw_call = &mut draw_list.draw_calls[inst.draw_call_id];
-                //let csh = &cx.shaders.compiled_shaders[draw_call.shader_id];
-                draw_call.instance.push(value);
-            },
-            _=>(),
+        let draw_list = &mut cx.draw_lists[self.draw_list_id];
+        if draw_list.redraw_id != self.redraw_id {
+            println!("push_float called on invalid area pointer, use mark/sweep correctly!");
+            return
         }
+        let draw_call = &mut draw_list.draw_calls[self.draw_call_id];
+        //let csh = &cx.shaders.compiled_shaders[draw_call.shader_id];
+        draw_call.instance.push(value);
     }
-
 
     pub fn push_vec2(&self, cx:&mut Cx, value:Vec2){
-        match self{
-            Area::Instance(inst)=>{
-                let draw_list = &mut cx.draw_lists[inst.draw_list_id];
-                if draw_list.redraw_id != inst.redraw_id {
-                    println!("push_vec2 called on invalid area pointer, use mark/sweep correctly!");
-                    return
-                }
-                let draw_call = &mut draw_list.draw_calls[inst.draw_call_id];
-                //let csh = &cx.shaders.compiled_shaders[draw_call.shader_id];
-                draw_call.instance.push(value.x);
-                draw_call.instance.push(value.y);
-            },
-            _=>(),
+        let draw_list = &mut cx.draw_lists[self.draw_list_id];
+        if draw_list.redraw_id != self.redraw_id {
+            println!("push_vec2 called on invalid area pointer, use mark/sweep correctly!");
+            return
         }
+        let draw_call = &mut draw_list.draw_calls[self.draw_call_id];
+        //let csh = &cx.shaders.compiled_shaders[draw_call.shader_id];
+        draw_call.instance.push(value.x);
+        draw_call.instance.push(value.y);
     }
-
 
     pub fn push_vec3(&self, cx:&mut Cx, value:Vec3){
-        match self{
-            Area::Instance(inst)=>{
-                let draw_list = &mut cx.draw_lists[inst.draw_list_id];
-                if draw_list.redraw_id != inst.redraw_id {
-                    println!("push_vec3 called on invalid area pointer, use mark/sweep correctly!");
-                    return
-                }
-                let draw_call = &mut draw_list.draw_calls[inst.draw_call_id];
-                draw_call.instance.push(value.x);
-                draw_call.instance.push(value.y);
-                draw_call.instance.push(value.z);
-            },
-            _=>(),
+        let draw_list = &mut cx.draw_lists[self.draw_list_id];
+        if draw_list.redraw_id != self.redraw_id {
+            println!("push_vec3 called on invalid area pointer, use mark/sweep correctly!");
+            return
         }
+        let draw_call = &mut draw_list.draw_calls[self.draw_call_id];
+        draw_call.instance.push(value.x);
+        draw_call.instance.push(value.y);
+        draw_call.instance.push(value.z);
     }
 
-
     pub fn push_vec4(&self, cx:&mut Cx, value:Vec4){
-        match self{
-            Area::Instance(inst)=>{
-                let draw_list = &mut cx.draw_lists[inst.draw_list_id];
-                if draw_list.redraw_id != inst.redraw_id {
-                    println!("push_vec4 called on invalid area pointer, use mark/sweep correctly!");
-                    return
-                }
-                let draw_call = &mut draw_list.draw_calls[inst.draw_call_id];
-                draw_call.instance.push(value.x);
-                draw_call.instance.push(value.y);
-                draw_call.instance.push(value.z);
-                draw_call.instance.push(value.w);
-            },
-            _=>(),
+        let draw_list = &mut cx.draw_lists[self.draw_list_id];
+        if draw_list.redraw_id != self.redraw_id {
+            println!("push_vec4 called on invalid area pointer, use mark/sweep correctly!");
+            return
         }
+        let draw_call = &mut draw_list.draw_calls[self.draw_call_id];
+        draw_call.instance.push(value.x);
+        draw_call.instance.push(value.y);
+        draw_call.instance.push(value.z);
+        draw_call.instance.push(value.w);
     }
 
 
     pub fn need_uniforms_now(&self, cx:&mut Cx)->bool{
-        match self{
-            Area::Instance(inst)=>{
-                let draw_list = &mut cx.draw_lists[inst.draw_list_id];
-                if draw_list.redraw_id != inst.redraw_id {
-                    println!("need_uniforms_now called on invalid area pointer, use mark/sweep correctly!");
-                    return false
-                }
-                let draw_call = &mut draw_list.draw_calls[inst.draw_call_id];
-                //let csh = &cx.shaders.compiled_shaders[draw_call.shader_id];
-                return draw_call.need_uniforms_now
-            },
-            _=>(),
+        let draw_list = &mut cx.draw_lists[self.draw_list_id];
+        if draw_list.redraw_id != self.redraw_id {
+            println!("need_uniforms_now called on invalid area pointer, use mark/sweep correctly!");
+            return false
         }
-        return false
+        let draw_call = &mut draw_list.draw_calls[self.draw_call_id];
+        //let csh = &cx.shaders.compiled_shaders[draw_call.shader_id];
+        return draw_call.need_uniforms_now
     }
 
    pub fn push_uniform_texture_2d(&self, cx:&mut Cx,texture_id: usize){
-        match self{
-            Area::Instance(inst)=>{
-                let draw_list = &mut cx.draw_lists[inst.draw_list_id];
-                if draw_list.redraw_id != inst.redraw_id {
-                    println!("uniform_texture_2d called on invalid area pointer, use mark/sweep correctly!");
-                    return
-                }
-                let draw_call = &mut draw_list.draw_calls[inst.draw_call_id]; 
-                draw_call.textures_2d.push(texture_id as u32);
-            },
-            _=>()
+        let draw_list = &mut cx.draw_lists[self.draw_list_id];
+        if draw_list.redraw_id != self.redraw_id {
+            println!("uniform_texture_2d called on invalid area pointer, use mark/sweep correctly!");
+            return
         }
+        let draw_call = &mut draw_list.draw_calls[self.draw_call_id]; 
+        draw_call.textures_2d.push(texture_id as u32);
     }
 
     pub fn push_uniform_float(&self, cx:&mut Cx, v:f32){
-        match self{
-            Area::Instance(inst)=>{
-                let draw_list = &mut cx.draw_lists[inst.draw_list_id];
-                if draw_list.redraw_id != inst.redraw_id {
-                    println!("uniform_float called on invalid area pointer, use mark/sweep correctly!");
-                    return
-                }
-                let draw_call = &mut draw_list.draw_calls[inst.draw_call_id]; 
-                draw_call.uniforms.push(v);
-            },
-            _=>()
-         }
+        let draw_list = &mut cx.draw_lists[self.draw_list_id];
+        if draw_list.redraw_id != self.redraw_id {
+            println!("uniform_float called on invalid area pointer, use mark/sweep correctly!");
+            return
+        }
+        let draw_call = &mut draw_list.draw_calls[self.draw_call_id]; 
+        draw_call.uniforms.push(v);
     }
 
     pub fn push_uniform_vec2f(&self, cx:&mut Cx,  x:f32, y:f32){
-        match self{
-            Area::Instance(inst)=>{
-                let draw_list = &mut cx.draw_lists[inst.draw_list_id];
-                if draw_list.redraw_id != inst.redraw_id {
-                    println!("uniform_vec2f called on invalid area pointer, use mark/sweep correctly!");
-                    return
-                }
-                let draw_call = &mut draw_list.draw_calls[inst.draw_call_id]; 
-                draw_call.uniforms.push(x);
-                draw_call.uniforms.push(y);
-            },
-            _=>()
-         }
+        let draw_list = &mut cx.draw_lists[self.draw_list_id];
+        if draw_list.redraw_id != self.redraw_id {
+            println!("uniform_vec2f called on invalid area pointer, use mark/sweep correctly!");
+            return
+        }
+        let draw_call = &mut draw_list.draw_calls[self.draw_call_id]; 
+        draw_call.uniforms.push(x);
+        draw_call.uniforms.push(y);
     }
 
     pub fn push_uniform_vec3f(&mut self, cx:&mut Cx, x:f32, y:f32, z:f32){
-        match self{
-            Area::Instance(inst)=>{
-                let draw_list = &mut cx.draw_lists[inst.draw_list_id];
-                if draw_list.redraw_id != inst.redraw_id {
-                    println!("uniform_vec3f called on invalid area pointer, use mark/sweep correctly!");
-                    return
-                }
-                let draw_call = &mut draw_list.draw_calls[inst.draw_call_id]; 
-                draw_call.uniforms.push(x);
-                draw_call.uniforms.push(y);
-                draw_call.uniforms.push(z);
-            },
-            _=>()
+        let draw_list = &mut cx.draw_lists[self.draw_list_id];
+        if draw_list.redraw_id != self.redraw_id {
+            println!("uniform_vec3f called on invalid area pointer, use mark/sweep correctly!");
+            return
         }
+        let draw_call = &mut draw_list.draw_calls[self.draw_call_id]; 
+        draw_call.uniforms.push(x);
+        draw_call.uniforms.push(y);
+        draw_call.uniforms.push(z);
     }
 
     pub fn push_uniform_vec4f(&self, cx:&mut Cx, x:f32, y:f32, z:f32, w:f32){
-        match self{
-            Area::Instance(inst)=>{
-                let draw_list = &mut cx.draw_lists[inst.draw_list_id];
-                if draw_list.redraw_id != inst.redraw_id {
-                    println!("uniform_vec4f called on invalid area pointer, use mark/sweep correctly!");
-                    return
-                }
-                let draw_call = &mut draw_list.draw_calls[inst.draw_call_id]; 
-                draw_call.uniforms.push(x);
-                draw_call.uniforms.push(y);
-                draw_call.uniforms.push(z);
-                draw_call.uniforms.push(w);
-            },
-            _=>()
+        let draw_list = &mut cx.draw_lists[self.draw_list_id];
+        if draw_list.redraw_id != self.redraw_id {
+            println!("uniform_vec4f called on invalid area pointer, use mark/sweep correctly!");
+            return
         }
+        let draw_call = &mut draw_list.draw_calls[self.draw_call_id]; 
+        draw_call.uniforms.push(x);
+        draw_call.uniforms.push(y);
+        draw_call.uniforms.push(z);
+        draw_call.uniforms.push(w);
     }
 
     pub fn push_uniform_mat4(&self, cx:&mut Cx, v:&Mat4){
-        match self{
-            Area::Instance(inst)=>{
-                let draw_list = &mut cx.draw_lists[inst.draw_list_id];
-                if draw_list.redraw_id != inst.redraw_id {
-                    println!("uniform_mat4 called on invalid area pointer, use mark/sweep correctly!");
-                    return
-                }
-                let draw_call = &mut draw_list.draw_calls[inst.draw_call_id]; 
-                for i in 0..16{
-                    draw_call.uniforms.push(v.v[i]);
-                }
-            },
-            _=>()
+        let draw_list = &mut cx.draw_lists[self.draw_list_id];
+        if draw_list.redraw_id != self.redraw_id {
+            println!("uniform_mat4 called on invalid area pointer, use mark/sweep correctly!");
+            return
+        }
+        let draw_call = &mut draw_list.draw_calls[self.draw_call_id]; 
+        for i in 0..16{
+            draw_call.uniforms.push(v.v[i]);
         }
     }
 }

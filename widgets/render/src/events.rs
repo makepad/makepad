@@ -108,6 +108,30 @@ pub struct FileWriteEvent{
 }
 
 #[derive(Clone, Debug, PartialEq)]
+pub struct KeyEvent{
+    pub key_code:KeyCode,
+    pub key_char:char,
+    pub is_repeat:bool,
+    pub with_shift: bool,
+    pub with_control: bool,
+    pub with_alt: bool,
+    pub with_logo: bool
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct KeyFocusEvent{
+    pub last:Area,
+    pub focus:Area,
+    pub is_lost:bool
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct TextInputEvent{
+    pub input:String,
+    pub replace_last:bool
+}
+
+#[derive(Clone, Debug, PartialEq)]
 pub enum Event{
     None,
     Construct,
@@ -124,7 +148,11 @@ pub enum Event{
     FingerUp(FingerUpEvent),
     FingerScroll(FingerScrollEvent),
     FileRead(FileReadEvent),
-    FileWrite(FileWriteEvent)
+    FileWrite(FileWriteEvent),
+    KeyFocus(KeyFocusEvent),
+    KeyDown(KeyEvent),
+    KeyUp(KeyEvent),
+    TextInput(TextInputEvent)
 }
 
 impl Default for Event{
@@ -172,6 +200,35 @@ impl Event{
 
     pub fn hits(&mut self, cx:&mut Cx, area:Area, hit_state:&mut HitState)->Event{
         match self{
+            Event::KeyFocus(kf)=>{
+                if area == kf.last{
+                    return Event::KeyFocus(KeyFocusEvent{
+                        is_lost:true,   
+                        ..kf.clone()
+                    })
+                }
+                else if area == kf.focus{
+                    return Event::KeyFocus(KeyFocusEvent{
+                        is_lost:false,   
+                        ..kf.clone()
+                    })
+                }
+            },
+            Event::KeyDown(_)=>{
+                if area == cx.key_focus{
+                    return self.clone();
+                }
+            },
+            Event::KeyUp(_)=>{
+                if area == cx.key_focus{
+                    return self.clone();
+                }
+            },
+            Event::TextInput(_)=>{
+                if area == cx.key_focus{
+                    return self.clone();
+                }
+            },
             Event::Animate(_)=>{
                 for anim in &cx.playing_anim_areas{
                     if anim.area == area{
@@ -331,3 +388,126 @@ impl Event{
         return Event::None;
     }
 }
+
+// lowest common denominator keymap between desktop and web
+#[derive(Clone, PartialEq, Debug)]
+pub enum KeyCode {
+    Escape,
+
+    Backtick,
+    Key0,
+    Key1,
+    Key2,
+    Key3,
+    Key4,
+    Key5,
+    Key6,
+    Key7,
+    Key8,
+    Key9,
+    Minus,
+    Equals,
+
+    Backspace,
+    Tab,
+
+    KeyQ,
+    KeyW,
+    KeyE,
+    KeyR,
+    KeyT,
+    KeyY,
+    KeyU,
+    KeyI,
+    KeyO,
+    KeyP,
+    LBracket,
+    RBracket,
+    Return,
+
+    KeyA,
+    KeyS,
+    KeyD,
+    KeyF,
+    KeyG,
+    KeyH,
+    KeyJ,
+    KeyK,
+    KeyL,
+    Semicolon,
+    Quote,
+    Backslash,
+
+    KeyZ,
+    KeyX,
+    KeyC,
+    KeyV,
+    KeyB,
+    KeyN,
+    KeyM,
+    Comma,
+    Period,
+    Slash,
+
+    LeftControl,
+    LeftAlt,
+    LeftShift,
+    LeftLogo,
+
+    RightControl,
+    RightShift,
+    RightAlt,
+    RightLogo,
+
+    Space,
+    Capslock,
+    F1,
+    F2,
+    F3,
+    F4,
+    F5,
+    F6,
+    F7,
+    F8,
+    F9,
+    F10,
+    F11,
+    F12,
+ 
+    PrintScreen,
+    Scrolllock,
+    Pause,
+ 
+    Insert,
+    Delete,
+    Home,
+    End,
+    PageUp,
+    PageDown,
+
+    Numpad0,
+    Numpad1,
+    Numpad2,
+    Numpad3,
+    Numpad4,
+    Numpad5,
+    Numpad6,
+    Numpad7,
+    Numpad8,
+    Numpad9,
+
+    NumpadEquals,
+    NumpadSubtract,
+    NumpadAdd,
+    NumpadDecimal,
+    NumpadMultiply,
+    NumpadDivide,
+    Numlock,
+    NumpadEnter,
+
+    ArrowUp,
+    ArrowDown,
+    ArrowLeft,
+    ArrowRight,
+}
+

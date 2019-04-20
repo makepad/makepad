@@ -6,7 +6,7 @@ use crate::tab::*;
 #[derive(Clone)]
 pub struct TabControl{
     pub tabs_view:View<ScrollBar>,
-    pub tabs:Elements<usize, Tab>,
+    pub tabs:Elements<usize, Tab, Tab>,
     pub drag_tab_view:View<NoScrollBar>,
     pub drag_tab:Tab,
     pub page_view:View<NoScrollBar>,
@@ -185,7 +185,7 @@ impl TabControl{
 
     pub fn draw_tab(&mut self, cx:&mut Cx, label:&str, selected:bool, closeable:bool){
         let new_tab = self.tabs.get(self._tab_id_alloc).is_none();
-        let tab = self.tabs.get_draw(cx, self._tab_id_alloc);
+        let tab = self.tabs.get_draw(cx, self._tab_id_alloc, |_cx, tmpl| tmpl.clone());
         self._tab_id_alloc += 1;
         tab.label = label.to_string();
         tab.is_closeable = closeable;
@@ -208,7 +208,7 @@ impl TabControl{
             });
             
             self.drag_tab.bg_layout.abs_start = Some(vec2(fe.abs.x - fe.rel_start.x, fe.abs.y - fe.rel_start.y));
-            let origin_tab = self.tabs.get_draw(cx, *id);
+            let origin_tab = self.tabs.get_draw(cx, *id, |_cx, tmpl| tmpl.clone());
             self.drag_tab.label = origin_tab.label.clone();
             self.drag_tab.is_closeable = origin_tab.is_closeable;
             self.drag_tab.draw_tab(cx);

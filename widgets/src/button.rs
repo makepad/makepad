@@ -160,14 +160,14 @@ impl Button{
 
         // pull the bg color from our animation system, uses 'default' value otherwise
         self.bg.color = self.animator.last_vec4("bg.color");
-        self._bg_area = self.bg.begin_quad(cx, &self.bg_layout);
+        let bg_inst =  self.bg.begin_quad(cx, &self.bg_layout);
         // push the 2 vars we added to bg shader
-        self._bg_area.push_vec4(cx, self.animator.last_vec4("bg.border_color"));
-        self._bg_area.push_float(cx, self.animator.last_float("bg.border_color"));
+        bg_inst.push_vec4(cx, self.animator.last_vec4("bg.border_color"));
+        bg_inst.push_float(cx, self.animator.last_float("bg.border_color"));
 
         self.text.draw_text(cx, label);
         
-        self.bg.end_quad(cx);
+        self._bg_area = self.bg.end_quad(cx, &bg_inst);
 
         self.animator.set_area(cx, self._bg_area); // if our area changed, update animation
     }

@@ -1,6 +1,6 @@
 use render::*;
 use crate::scrollbar::*;
-use serde_json::{Result, Value};
+use serde_json::{Result};
 use serde::*;
 
 #[derive(Clone)]
@@ -497,15 +497,14 @@ impl FileTree{
 
             self.node_bg.color = node_draw.animator.last_vec4("bg.color");
 
-            let area = self.node_bg.begin_quad(cx, &Layout{
+            let inst = self.node_bg.begin_quad(cx, &Layout{
                 width:Bounds::Fill,
                 height:Bounds::Fix(self.row_height*scale as f32),
                 align:Align::left_center(),
                 padding:self.row_padding,
                 ..Default::default()
             });
-
-            node_draw.animator.set_area(cx, area); 
+            node_draw.animator.set_area(cx, inst.clone().get_area()); 
             let is_marked = node_draw.marked != 0;
 
             for i in 0..(depth-1){
@@ -557,7 +556,7 @@ impl FileTree{
                     area.push_float(cx, 1.);
                     cx.realign_turtle(Align::left_center(), false);
                     self.tree_text.color = self.tree_folder_color;
-                    let wleft = Bounds::Fill.eval_width_left(cx, false) - 10.;
+                    let wleft = cx.width_left(false) - 10.;
                     self.tree_text.wrapping = Wrapping::Ellipsis(wleft);
                     self.tree_text.draw_text(cx, name);
                     
@@ -603,7 +602,8 @@ impl FileTree{
                 }
             }
 
-            self.node_bg.end_quad(cx);
+            self.node_bg.end_quad(cx, &inst);
+            
             cx.turtle_new_line();
             // if any of the parents is closing, don't count alternating lines
             if !file_walker.current_closing(){
@@ -639,13 +639,13 @@ impl FileTree{
             while let Some((_depth, _index, _len, node)) = file_walker.walk(){
                 let node_draw = if let Some(node_draw) = node.get_draw(){node_draw}else{continue};
                 if node_draw.marked != 0{
-                    self.drag_bg.begin_quad(cx, &self.drag_bg_layout);
+                    let inst = self.drag_bg.begin_quad(cx, &self.drag_bg_layout);
                     self.tree_text.color = self.tree_folder_color;
                     self.tree_text.draw_text(cx, match node{
                         FileNode::Folder{name,..}=>{name},
                         FileNode::File{name,..}=>{name}
                     });
-                    self.drag_bg.end_quad(cx);
+                    self.drag_bg.end_quad(cx, &inst);
                 }
             }
             self.drag_view.end_view(cx);
