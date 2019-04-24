@@ -209,6 +209,11 @@ impl Font{
         ff.unicodes[10] = ff.glyphs.len();
         ff.unicodes[13] = ff.glyphs.len();
         let space_slot = ff.unicodes[32];
+        // set texture coord to 0
+        ff.glyphs[space_slot].tx1 = 0.0;
+        ff.glyphs[space_slot].ty1 = 0.0;
+        ff.glyphs[space_slot].tx2 = 0.0;
+        ff.glyphs[space_slot].ty2 = 0.0;
 
         ff.glyphs.push(Glyph{
             unicode:10,

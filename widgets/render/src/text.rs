@@ -80,7 +80,7 @@ impl Text{
                     df_viewport(clipped);
                     let center = (rect.xy+rect.zw)*0.5;
                     df_circle(center.x, center.y, 1.);
-                    return df_fill(vec4(color.rgb,1.)); 
+                    return df_fill(color); 
                 }
                 else{
                     let s = sample2d(texture, tex_coord.xy);

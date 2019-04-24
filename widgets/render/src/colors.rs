@@ -5,10 +5,6 @@ pub fn color256(r:i32, g:i32, b:i32)->Color{
     Color{r:r as f32 / 255., g:g as f32 / 255., b:b as f32 / 255., a:1.}
 }
 
-pub fn color256a(r:i32, g:i32, b:i32, a:i32)->Color{
-    Color{r:r as f32 / 255., g:g as f32 / 255., b:b as f32 / 255., a:a as f32 / 255.}
-}
-
 pub fn color(name:&str)->Color{
     match name.to_lowercase().as_ref(){
         "aliceblue"=>Color{r:0.9411764705882353,g:0.9725490196078431,b:1.0,a:1.0},

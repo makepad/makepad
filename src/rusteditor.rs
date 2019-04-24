@@ -33,7 +33,7 @@ impl Style for RustEditor{
                 ..Style::style(cx)
             },
             // syntax highlighting colors
-            col_whitespace:color256a(110,110,110,0),
+            col_whitespace:color256(110,110,110),
             col_keyword:color256(91,155,211),
             col_flow_keyword:color256(196,133,190),
             col_identifier:color256(212,212,212),
