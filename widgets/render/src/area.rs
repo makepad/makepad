@@ -466,6 +466,18 @@ impl InstanceArea{
         draw_call.instance.push(value.w);
     }
 
+    pub fn push_color(&self, cx:&mut Cx, value:Color){
+        let draw_list = &mut cx.draw_lists[self.draw_list_id];
+        if draw_list.redraw_id != self.redraw_id {
+            println!("push_vec4 called on invalid area pointer, use mark/sweep correctly!");
+            return
+        }
+        let draw_call = &mut draw_list.draw_calls[self.draw_call_id];
+        draw_call.instance.push(value.r);
+        draw_call.instance.push(value.g);
+        draw_call.instance.push(value.b);
+        draw_call.instance.push(value.a);
+    }
 
     pub fn need_uniforms_now(&self, cx:&mut Cx)->bool{
         let draw_list = &mut cx.draw_lists[self.draw_list_id];

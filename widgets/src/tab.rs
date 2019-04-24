@@ -291,14 +291,18 @@ impl Tab{
                 Bounds::Fix(self._close_anim_rect.h),
                 Margin::zero(),
             );
-            bg_inst.push_vec4(cx, self.animator.last_vec4("bg.border_color"));
+            bg_inst.push_color(cx, self.animator.last_color("bg.border_color"));
             self._bg_area = bg_inst.into_area();            
         }
         else{
             let bg_inst = self.bg.begin_quad(cx, &self.bg_layout);
-            bg_inst.push_vec4(cx, self.animator.last_vec4("bg.border_color"));
+            bg_inst.push_color(cx, self.animator.last_color("bg.border_color"));
             if self.is_closeable{
                 self.tab_close.draw_tab_close(cx);
+            }
+            else{
+                // take up the height of the close button for correct centering 
+                cx.walk_turtle(Bounds::Fix(0.0),Bounds::Fix(10.0),self.tab_close.margin,None);
             }
             // push the 2 vars we added to bg shader
             self.text.color = self.animator.last_color("text.color");
