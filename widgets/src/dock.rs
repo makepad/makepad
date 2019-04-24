@@ -15,7 +15,7 @@ where TItem: Clone
     pub drop_size:Vec2,
     pub drop_quad: Quad,
     pub drop_quad_view:View<NoScrollBar>,
-    pub drop_quad_color:Vec4,
+    pub drop_quad_color:Color,
     pub _drag_move: Option<FingerMoveEvent>,
     pub _drag_end: Option<DockDragEnd<TItem>>,
     pub _close_tab: Option<DockTabIdent>,
@@ -46,7 +46,7 @@ where TItem: Clone
     fn style(cx: &mut Cx)->Dock<TItem>{
         Dock{
             dock_items:None,
-            drop_size:vec2(50.,70.),
+            drop_size:Vec2{x:50., y:70.},
             drop_quad_color:color("#a"),
             drop_quad:Quad{
                 ..Style::style(cx)
@@ -669,7 +669,7 @@ where TItem: Clone
         // lets draw our hover layer if need be
         if let Some(fe) = &self._drag_move{
             self.drop_quad_view.begin_view(cx, &Layout{
-                abs_start:Some(vec2(0.,0.)),
+                abs_start:Some(Vec2::zero()),
                 ..Default::default()
             });
             let mut found_drop_zone = false;
@@ -710,9 +710,9 @@ where TItem: Clone
                         (rc, alpha)
                     };
                     self.drop_quad.color = self.drop_quad_color;
-                    self.drop_quad.color.w = alpha*0.8;
+                    self.drop_quad.color.a = alpha*0.8;
                     found_drop_zone = true;
-                    self.drop_quad.draw_quad(cx, dr.x, dr.y, dr.w, dr.h);
+                    self.drop_quad.draw_quad(cx, dr);
                 }
             }
             if !found_drop_zone{

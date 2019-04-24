@@ -187,7 +187,7 @@ impl Font{
             //ff.unicodes.insert(b.unicode, i as  u32);
             ox += b.tw+1;
         }
-
+        /*
         ff.unicodes[32] = ff.glyphs.len();
         ff.glyphs.push(Glyph{
             unicode:32,
@@ -204,43 +204,21 @@ impl Font{
             ty1:0.0,
             tx2:0.0,
             ty2:0.0,
-        });
+        });*/
 
         ff.unicodes[10] = ff.glyphs.len();
         ff.unicodes[13] = ff.glyphs.len();
+        let space_slot = ff.unicodes[32];
+
         ff.glyphs.push(Glyph{
             unicode:10,
-            x1:0.0,
-            y1:-0.3,
-            x2:0.5,
-            y2:1.0,
-            advance:-0.5,
-            tsingle:0,
-            toffset:0,
-            tw:0,
-            th:0,
-            tx1:0.0,
-            ty1:0.0,
-            tx2:0.0,
-            ty2:0.0,
+            ..ff.glyphs[space_slot].clone()
         });
-       
-       ff.unicodes[9] = ff.glyphs.len();
+
+        ff.unicodes[9] = ff.glyphs.len();
         ff.glyphs.push(Glyph{
             unicode:9,
-            x1:0.0,
-            y1:-0.3,
-            x2:2.0,
-            y2:1.0,
-            advance:2.0,
-            tsingle:0,
-            toffset:0,
-            tw:0,
-            th:0,
-            tx1:0.0,
-            ty1:0.0,
-            tx2:0.0,
-            ty2:0.0,
+            ..ff.glyphs[space_slot].clone()
         });
 
         Ok(ff)

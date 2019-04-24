@@ -26,10 +26,10 @@ impl Cx{
         }
         else{
             if let Some(parent) = self.turtles.last(){
-                vec2(layout.margin.l+parent.walk.x,  layout.margin.t+parent.walk.y)
+                Vec2{x:layout.margin.l+parent.walk.x, y:layout.margin.t+parent.walk.y}
             }
             else{
-                vec2(layout.margin.l,  layout.margin.t)
+                Vec2{x:layout.margin.l, y:layout.margin.t}
             }
         };
         let width = layout.width.eval_width(self, layout.margin, is_abs);
@@ -39,10 +39,10 @@ impl Cx{
             align_start:self.align_list.len(),
             layout:layout.clone(),
             start:start,
-            walk:vec2(start.x + layout.padding.l, start.y + layout.padding.t),
+            walk:Vec2{x:start.x + layout.padding.l, y:start.y + layout.padding.t},
             biggest:0.0,
-            bound_left_top:vec2(std::f32::INFINITY,std::f32::INFINITY),
-            bound_right_bottom:vec2(std::f32::NEG_INFINITY, std::f32::NEG_INFINITY),
+            bound_left_top:Vec2{x:std::f32::INFINITY, y:std::f32::INFINITY},
+            bound_right_bottom:Vec2{x:std::f32::NEG_INFINITY, y:std::f32::NEG_INFINITY},
             width:width,
             height:height,
             width_used:0.,
@@ -195,20 +195,20 @@ impl Cx{
 
     pub fn turtle_bounds(&self)->Vec2{
         if let Some(turtle) = self.turtles.last(){
-            return vec2(
-                turtle.bound_right_bottom.x + turtle.layout.padding.r - turtle.start.x, 
-                turtle.bound_right_bottom.y + turtle.layout.padding.b - turtle.start.y
-            );
+            return Vec2{
+                x: turtle.bound_right_bottom.x + turtle.layout.padding.r - turtle.start.x, 
+                y: turtle.bound_right_bottom.y + turtle.layout.padding.b - turtle.start.y
+            };
         }
-        return vec2(0.0,0.0)        
+        return Vec2::zero()
     }
 
     pub fn set_turtle_bounds(&mut self, bound:Vec2){
         if let Some(turtle) = self.turtles.last_mut(){
-            turtle.bound_right_bottom = vec2(
-                bound.x - turtle.layout.padding.r + turtle.start.x,
-                bound.y - turtle.layout.padding.b + turtle.start.y
-            )
+            turtle.bound_right_bottom = Vec2{
+                x: bound.x - turtle.layout.padding.r + turtle.start.x,
+                y: bound.y - turtle.layout.padding.b + turtle.start.y
+            }
         }
     }
 
@@ -216,7 +216,7 @@ impl Cx{
         if let Some(turtle) = self.turtles.last(){
             return turtle.start;
         }
-        return vec2(0.0,0.0);
+        return Vec2::zero()
     }
 
     pub fn move_turtle(&mut self, rel_x:f32, rel_y:f32){
@@ -242,10 +242,10 @@ impl Cx{
                 ((turtle.height - turtle.height_used - (turtle.layout.padding.t + turtle.layout.padding.b)) - (turtle.bound_right_bottom.y - (turtle.start.y + turtle.layout.padding.t)));
             if dx.is_nan(){dx = 0.0}
             if dy.is_nan(){dy = 0.0}
-            vec2(dx, dy)
+            Vec2{x:dx, y:dy}
         }
         else{
-            vec2(0.,0.)
+            Vec2::zero()
         }
     }
 
@@ -255,7 +255,7 @@ impl Cx{
             (Self::compute_align_turtle(&turtle), turtle.align_start)
         }
         else{
-            (vec2(0.,0.), 0)
+            (Vec2::zero(), 0)
         };
         if align_delta.x > 0.0 || align_delta.y > 0.0{
             self.do_align(align_delta.x, align_delta.y, align_start);
@@ -270,8 +270,8 @@ impl Cx{
                 turtle.width_used = turtle.bound_right_bottom.x - turtle.start.x;
                 turtle.height_used = turtle.bound_right_bottom.y - turtle.start.y;
             }
-            turtle.bound_left_top = vec2(std::f32::INFINITY,std::f32::INFINITY);
-            turtle.bound_right_bottom = vec2(std::f32::NEG_INFINITY, std::f32::NEG_INFINITY);
+            turtle.bound_left_top = Vec2{x:std::f32::INFINITY, y:std::f32::INFINITY};
+            turtle.bound_right_bottom = Vec2{x:std::f32::NEG_INFINITY, y:std::f32::NEG_INFINITY};
         }
     }
 
@@ -287,7 +287,7 @@ impl Cx{
             turtle.walk
         }
         else{
-            vec2(0.,0.)
+            Vec2::zero()
         }
     }
 
@@ -297,7 +297,7 @@ impl Cx{
         }
     }
 
-    pub fn visible_in_turtle(&self, geom:&Rect, scroll:&Vec2)->bool{
+    pub fn visible_in_turtle(&self, geom:Rect, scroll:Vec2)->bool{
         if let Some(turtle) = self.turtles.last(){
             let view = Rect{
                 x:turtle.start.x + scroll.x,
@@ -353,7 +353,7 @@ impl Cx{
         
         // when a turtle is x-abs / y-abs you dont walk the parent
         if !old.layout.abs_start.is_none(){
-            let abs_start = if let Some(abs_start) = old.layout.abs_start{abs_start} else {vec2(0.,0.)};
+            let abs_start = if let Some(abs_start) = old.layout.abs_start{abs_start} else {Vec2::zero()};
             let w = if let Bounds::Fix(vw) = w{vw} else {0.};
             let h = if let Bounds::Fix(vh) = h{vh} else {0.};
             return Rect{x:abs_start.x, y:abs_start.y, w:w, h:h};

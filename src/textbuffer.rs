@@ -18,7 +18,7 @@ impl TextBuffer{
         let mut char_count = 0;
         for (row,line) in self.lines.iter().enumerate(){
             let next_char_count = char_count + line.len() + 1;
-            if next_char_count >= char_offset{
+            if next_char_count > char_offset{
                 return (row, char_offset - char_count)
             }
             char_count = next_char_count;
@@ -35,6 +35,7 @@ impl TextBuffer{
             if ln_row == row{
                 return char_count + line.len().min(col);
             }
+            char_count += line.len() + 1;
         }
         0
     }
@@ -55,13 +56,13 @@ impl TextBuffer{
         char_count += self.lines.len() - 1; // invisible newline chars
         self._char_count = char_count;
     }
-
+/*
     pub fn get_range(&mut self, start:usize, end:usize){
     }
     
     pub fn replace(&mut self, start:usize, end:usize, data:&str){
         self.update_char_count();
-    }
+    }*/
 
     pub fn save_buffer(&mut self){
         //let out = self.lines.join("\n");
@@ -84,6 +85,7 @@ pub struct TokenizerState<'a>{
     pub next:char,
     pub text_buffer:&'a TextBuffer,
     pub line_counter:usize,
+    pub offset:usize,
     iter:std::slice::Iter<'a, char>
 }
 
@@ -93,6 +95,7 @@ impl<'a> TokenizerState<'a>{
             prev:'\0',
             text_buffer:text_buffer,
             line_counter:0,
+            offset:0,
             cur:'\0',
             next:'\0',
             iter:text_buffer.lines[0].iter()
@@ -104,10 +107,12 @@ impl<'a> TokenizerState<'a>{
     pub fn advance(&mut self){
         if let Some(next) = self.iter.next(){
             self.next = *next;
+            self.offset += 1;
         }
         else{
             if self.line_counter < self.text_buffer.lines.len() - 1{
                 self.line_counter += 1;
+                self.offset += 1;
                 self.iter = self.text_buffer.lines[self.line_counter].iter();
                 self.next = '\n'
             }

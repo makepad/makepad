@@ -69,13 +69,13 @@ impl Style for Splitter{
                 ..Style::style(cx)
             },
             animator:Animator::new(Anim::new(Play::Cut{duration:0.5},vec![
-                Track::vec4("split.color", Ease::Lin, vec![(1.0, cx.color("bg_split"))]),
+                Track::color("split.color", Ease::Lin, vec![(1.0, cx.color("bg_split"))]),
             ])),
             anim_over:Anim::new(Play::Cut{duration:0.05}, vec![
-                Track::vec4("split.color", Ease::Lin, vec![(1.0, color("#5"))]),
+                Track::color("split.color", Ease::Lin, vec![(1.0, color("#5"))]),
             ]),
             anim_moving:Anim::new(Play::Cut{duration:0.2}, vec![
-                Track::vec4("split.color", Ease::Lin, vec![
+                Track::color("split.color", Ease::Lin, vec![
                     (0.0, color("#f")),
                     (1.0, color("#6"))
                 ]),
@@ -284,17 +284,17 @@ impl Splitter{
         cx.end_turtle(Area::Empty);
         // draw the splitter in the middle of the turtle
         let rect = cx.turtle_rect();
-        self.split.color = self.animator.last_vec4("split.color");
+        self.split.color = self.animator.last_color("split.color");
         match self.axis{
             Axis::Horizontal=>{
-                self._split_area = self.split.draw_quad(cx, 0., self._calc_pos, rect.w, self.split_size).get_area();
+                self._split_area = self.split.draw_quad(cx, Rect{x:0., y:self._calc_pos, w:rect.w, h:self.split_size}).into_area();
                 self._drag_max_pos = rect.h;
             },
             Axis::Vertical=>{
-                self._split_area = self.split.draw_quad(cx, self._calc_pos, 0., self.split_size, rect.h).get_area();
+                self._split_area = self.split.draw_quad(cx, Rect{x:self._calc_pos, y:0., w:self.split_size, h:rect.h}).into_area();
                 self._drag_max_pos = rect.w;
             }
        };
-       self.animator.set_area(cx, self._split_area);
+       self.animator.update_area_refs(cx, self._split_area);
     }
 }

@@ -50,7 +50,7 @@ pub struct Cx{
     pub redraw_areas:Vec<Area>,
     pub incr_areas:Vec<Area>,
     pub paint_dirty:bool,
-    pub clear_color:Vec4,
+    pub clear_color:Color,
     pub redraw_id: u64,
     pub event_id: u64,
     pub is_in_redraw_cycle:bool,
@@ -111,13 +111,13 @@ impl Default for Cx{
             redraw_areas:Vec::new(),
             incr_areas:Vec::new(),
             paint_dirty:false,
-            clear_color:vec4(0.1,0.1,0.1,1.0),
+            clear_color:Color{r:0.1, g:0.1, b:0.1, a:1.0},
             redraw_id:1,
             event_id:1,
             is_in_redraw_cycle:false,
             turtles:Vec::new(),
             align_list:Vec::new(),
-            target_size:vec2(0.0,0.0),
+            target_size:Vec2::zero(),
             target_dpi_factor:0.0,
             
             last_key_focus:Area::Empty,
@@ -248,8 +248,9 @@ impl Cx{
         }
     }
 
-    pub fn new_aligned_instance(&mut self, shader_id:usize)->AlignedInstance{
-        let instance_area = self.new_instance(shader_id);
+    pub fn new_aligned_instance(&mut self, shader_id:usize, instance_count:usize)->AlignedInstance{
+        let instance_area = self.new_instance(shader_id, instance_count);
+        
         let align_index = self.align_list.len();
         self.align_list.push(Area::Instance(instance_area.clone()));
         AlignedInstance{
@@ -273,32 +274,10 @@ impl Cx{
             instance_count:1
         })
     }*/
-
-    pub fn new_instance(&mut self, shader_id:usize)->InstanceArea{
-        if !self.is_in_redraw_cycle{
-            panic!("calling get_instance outside of redraw cycle is not possible!");
-        }
-
+    pub fn new_instance_layer(&mut self, shader_id:usize, instance_count:usize)->InstanceArea{
         let sh = &self.compiled_shaders[shader_id];
         let draw_list = &mut self.draw_lists[self.current_draw_list_id];
-        
-        // find our drawcall in the filled draws
-        for i in (0..draw_list.draw_calls_len).rev(){
-            let dc = &mut draw_list.draw_calls[i];
-            if dc.sub_list_id == 0 && dc.shader_id == sh.shader_id{
-                // reuse this drawcmd and add an instance
-                dc.current_instance_offset = dc.instance.len();
-                let slot_align = dc.instance.len() % sh.instance_slots;
-                if slot_align != 0{
-                    panic!("Instance offset disaligned! shader: {} misalign: {} slots: {}", shader_id, slot_align, sh.instance_slots);
-                }
-                dc.need_uniforms_now = false;
-                
-                return dc.get_current_instance_area();
-            }
-        }
-
-        // we need a new draw
+        // we need a new draw call
         let draw_call_id = draw_list.draw_calls_len;
         draw_list.draw_calls_len = draw_list.draw_calls_len + 1;
         
@@ -314,12 +293,11 @@ impl Cx{
                 uniforms:Vec::new(),
                 textures_2d:Vec::new(),
                 current_instance_offset:0,
-                need_uniforms_now:true,
                 instance_dirty:true,
                 platform:DrawCallPlatform{..Default::default()}
             });
             let dc = &mut draw_list.draw_calls[draw_call_id];
-            return dc.get_current_instance_area();
+            return dc.get_current_instance_area(instance_count);
         }
 
         // reuse a draw
@@ -333,11 +311,51 @@ impl Cx{
         dc.uniforms.truncate(0);
         dc.textures_2d.truncate(0);
         dc.instance_dirty = true;
-        dc.need_uniforms_now = true;
-        return dc.get_current_instance_area();
+        return dc.get_current_instance_area(instance_count);
     }
 
-    pub fn color(&self, name:&str)->Vec4{
+    pub fn new_instance(&mut self, shader_id:usize, instance_count:usize)->InstanceArea{
+        if !self.is_in_redraw_cycle{
+            panic!("calling get_instance outside of redraw cycle is not possible!");
+        }
+
+        let draw_list = &mut self.draw_lists[self.current_draw_list_id];
+        let sh = &self.compiled_shaders[shader_id];
+
+        // find our drawcall to append to the current layer
+        for i in (0..draw_list.draw_calls_len).rev(){
+            let dc = &mut draw_list.draw_calls[i];
+            if dc.sub_list_id == 0 && dc.shader_id == sh.shader_id{
+                // reuse this drawcmd and add an instance
+                dc.current_instance_offset = dc.instance.len();
+                let slot_align = dc.instance.len() % sh.instance_slots;
+                if slot_align != 0{
+                    panic!("Instance offset disaligned! shader: {} misalign: {} slots: {}", shader_id, slot_align, sh.instance_slots);
+                }
+                                
+                return dc.get_current_instance_area(instance_count);
+            }
+        }
+
+        self.new_instance_layer(shader_id,instance_count)
+    }
+
+    pub fn update_area_refs(&mut self, old_area:Area, new_area:Area){
+         // alright first we find area, it already exists
+        if let Some(anim_anim) = self.playing_anim_areas.iter_mut().find(|v| v.area == old_area){
+            anim_anim.area = new_area.clone()
+        }
+        //Update mouse capture areas
+        if let Some(digit_area) = self.captured_fingers.iter_mut().find(|v| **v == old_area){
+            *digit_area = new_area.clone()
+        }
+        // update capture keyboard
+        if self.key_focus == old_area{
+            self.key_focus = new_area.clone()
+        }
+    }
+
+    pub fn color(&self, name:&str)->Color{
         if let Some(StyleValue::Color(val)) = self.style_values.get(name){
             return *val;
         }
@@ -358,7 +376,7 @@ impl Cx{
         panic!("Cannot find style size key {}", name);
     }
 
-    pub fn set_color(&mut self, name:&str, val:Vec4){
+    pub fn set_color(&mut self, name:&str, val:Color){
         self.style_values.insert(name.to_string(), StyleValue::Color(val));
     }
 
@@ -498,7 +516,7 @@ pub struct AlignedInstance{
 
 #[derive(Clone)]
 pub enum StyleValue{
-    Color(Vec4),
+    Color(Color),
     Font(String),
     Size(f64)
 }
@@ -515,19 +533,20 @@ pub struct DrawCall{
     pub uniforms:Vec<f32>,  // draw uniforms
     pub textures_2d:Vec<u32>,
     pub instance_dirty:bool,
-    pub platform:DrawCallPlatform,
-    pub need_uniforms_now:bool
+    pub platform:DrawCallPlatform
 }
 
 impl DrawCall{
-
-    pub fn get_current_instance_area(&self)->InstanceArea{
+    pub fn need_uniforms_now(&self) ->bool{
+        self.instance.len() == 0
+    }
+    pub fn get_current_instance_area(&self, instance_count:usize)->InstanceArea{
         InstanceArea{
             draw_list_id:self.draw_list_id,
             draw_call_id:self.draw_call_id,
             redraw_id:self.redraw_id,
             instance_offset:self.current_instance_offset,
-            instance_count:1
+            instance_count:instance_count
         }
     }
 }
@@ -582,7 +601,7 @@ impl DrawList{
     }
 
     pub fn get_scroll(&self)->Vec2{
-        return vec2(self.uniforms[DL_UNI_SCROLL+0],self.uniforms[DL_UNI_SCROLL+1])
+        return Vec2{x:self.uniforms[DL_UNI_SCROLL+0], y:self.uniforms[DL_UNI_SCROLL+1]}
     }
 
     pub fn clip_and_scroll_rect(&self, x:f32, y:f32, w:f32, h:f32)->Rect{

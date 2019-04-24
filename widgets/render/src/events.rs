@@ -1,12 +1,21 @@
 use crate::cx::*;
 
+#[derive(Clone, Debug, PartialEq, Default)]
+pub struct KeyModifier{
+    pub shift: bool,
+    pub control: bool,
+    pub alt: bool,
+    pub logo: bool
+}
+
 #[derive(Clone, Default,Debug, PartialEq)]
 pub struct FingerDownEvent{
     pub abs:Vec2,
     pub rel:Vec2,
     pub digit:usize,
     pub handled:bool,
-    pub is_touch:bool
+    pub is_touch:bool,
+    pub modifier:KeyModifier
 }
 
 #[derive(Clone, Default,Debug, PartialEq)]
@@ -18,6 +27,7 @@ pub struct FingerMoveEvent{
     pub is_over:bool,
     pub digit:usize,
     pub is_touch:bool,
+    pub modifier:KeyModifier
 }
 
 impl FingerMoveEvent{
@@ -34,7 +44,8 @@ pub struct FingerUpEvent{
     pub rel_start:Vec2,
     pub digit:usize,
     pub is_over:bool,
-    pub is_touch:bool
+    pub is_touch:bool,
+    pub modifier:KeyModifier
 }
 
 #[derive(Clone,Debug, PartialEq)]
@@ -65,7 +76,8 @@ pub struct FingerHoverEvent{
     pub abs:Vec2,
     pub rel:Vec2,
     pub handled:bool,
-    pub hover_state:HoverState
+    pub hover_state:HoverState,
+    pub modifier:KeyModifier
 }
 
 #[derive(Clone, Default,Debug, PartialEq)]
@@ -74,6 +86,7 @@ pub struct FingerScrollEvent{
     pub rel:Vec2,
     pub scroll:Vec2,
     pub handled:bool,
+    pub modifier:KeyModifier
 }
 
 #[derive(Clone, Default, Debug, PartialEq)]
@@ -88,7 +101,6 @@ pub struct ResizedEvent{
 pub struct AnimateEvent{
     pub time:f64
 }
-
 
 #[derive(Clone, Default, Debug)]
 pub struct RedrawEvent{
@@ -112,10 +124,7 @@ pub struct KeyEvent{
     pub key_code:KeyCode,
     pub key_char:char,
     pub is_repeat:bool,
-    pub with_shift: bool,
-    pub with_control: bool,
-    pub with_alt: bool,
-    pub with_logo: bool
+    pub modifier:KeyModifier
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -259,14 +268,14 @@ impl Event{
                             hit_state.was_over_last_call = false;
                         }
                         return Event::FingerHover(FingerHoverEvent{
-                            rel:vec2(fe.abs.x - rect.x, fe.abs.y - rect.y),
+                            rel:Vec2{x:fe.abs.x - rect.x, y:fe.abs.y - rect.y},
                             ..fe.clone()
                         })
                     }
                     else{
                         hit_state.was_over_last_call = false;
                         return Event::FingerHover(FingerHoverEvent{
-                            rel:vec2(fe.abs.x - rect.x, fe.abs.y - rect.y),
+                            rel:Vec2{x:fe.abs.x - rect.x, y:fe.abs.y - rect.y},
                             hover_state:HoverState::Out,
                             ..fe.clone()
                         })
@@ -277,7 +286,7 @@ impl Event{
                         fe.handled = true;
                         hit_state.was_over_last_call = true;
                         return Event::FingerHover(FingerHoverEvent{
-                            rel:vec2(fe.abs.x - rect.x, fe.abs.y - rect.y),
+                            rel:Vec2{x:fe.abs.x - rect.x, y:fe.abs.y - rect.y},
                             hover_state:HoverState::In,
                             ..fe.clone()
                         })
@@ -288,13 +297,13 @@ impl Event{
                 // check wether our digit is captured, otherwise don't send
                 if cx.captured_fingers[fe.digit] == area{
                     let abs_start = if hit_state.finger_down_abs_start.len() <= fe.digit{
-                        vec2(0.,0.)
+                        Vec2::zero()
                     }
                     else{
                         hit_state.finger_down_abs_start[fe.digit]
                     };
                     let rel_start = if hit_state.finger_down_rel_start.len() <= fe.digit{
-                        vec2(0.,0.)
+                        Vec2::zero()
                     }
                     else{
                         hit_state.finger_down_rel_start[fe.digit]
@@ -307,7 +316,7 @@ impl Event{
                     };
                     return Event::FingerMove(FingerMoveEvent{
                         abs_start: abs_start,
-                        rel:vec2(fe.abs.x - rect.x, fe.abs.y - rect.y),
+                        rel:Vec2{x:fe.abs.x - rect.x, y:fe.abs.y - rect.y},
                         rel_start: rel_start,
                         is_over:rect.contains_with_margin(fe.abs.x, fe.abs.y, &hit_state.margin),
                         ..fe.clone()
@@ -335,19 +344,19 @@ impl Event{
                         // store the start point, make room in the vector for the digit.
                         if hit_state.finger_down_abs_start.len() < fe.digit+1{
                             for _i in hit_state.finger_down_abs_start.len()..(fe.digit+1){
-                                hit_state.finger_down_abs_start.push(vec2(0.,0.));
+                                hit_state.finger_down_abs_start.push(Vec2{x:0., y:0.});
                             }
                         }
                         if hit_state.finger_down_rel_start.len() < fe.digit+1{
                             for _i in hit_state.finger_down_rel_start.len()..(fe.digit+1){
-                                hit_state.finger_down_rel_start.push(vec2(0.,0.));
+                                hit_state.finger_down_rel_start.push(Vec2{x:0., y:0.});
                             }
                         }
                         hit_state.finger_down_abs_start[fe.digit] = fe.abs;
-                        hit_state.finger_down_rel_start[fe.digit] = vec2(fe.abs.x - rect.x, fe.abs.y - rect.y);
+                        hit_state.finger_down_rel_start[fe.digit] = Vec2{x:fe.abs.x - rect.x, y:fe.abs.y - rect.y};
                         fe.handled = true;
                         return Event::FingerDown(FingerDownEvent{
-                            rel:vec2(fe.abs.x - rect.x, fe.abs.y - rect.y),
+                            rel:Vec2{x:fe.abs.x - rect.x, y:fe.abs.y - rect.y},
                             ..fe.clone()
                         })
                     }
@@ -357,13 +366,13 @@ impl Event{
                 if cx.captured_fingers[fe.digit] == area{
                     cx.captured_fingers[fe.digit] = Area::Empty;
                     let abs_start = if hit_state.finger_down_abs_start.len() <= fe.digit{
-                        vec2(0.,0.)
+                        Vec2::zero()
                     }
                     else{
                         hit_state.finger_down_abs_start[fe.digit]
                     };
                     let rel_start = if hit_state.finger_down_rel_start.len() <= fe.digit{
-                        vec2(0.,0.)
+                        Vec2::zero()
                     }
                     else{
                         hit_state.finger_down_rel_start[fe.digit]
@@ -378,7 +387,7 @@ impl Event{
                         is_over:rect.contains(fe.abs.x, fe.abs.y),
                         abs_start: abs_start,
                         rel_start: rel_start,
-                        rel:vec2(fe.abs.x - rect.x, fe.abs.y - rect.y),
+                        rel:Vec2{x:fe.abs.x - rect.x, y:fe.abs.y - rect.y},
                         ..fe.clone()
                     })
                 }

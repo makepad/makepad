@@ -60,7 +60,6 @@ impl Cx{
                     else{println!("Drawing error: uni_dl None")}
                     if let Some(buf) = &draw_call.platform.uni_dr.multi_buffer_read().buffer{encoder.set_fragment_buffer(2, Some(&buf), 0);}
                     else{println!("Drawing error: uni_dr None")}
-
                     // lets set our textures
                     for (i, texture_id) in draw_call.textures_2d.iter().enumerate(){
                         let tex = &mut self.textures_2d[*texture_id as usize];
@@ -100,7 +99,7 @@ impl Cx{
             color_attachment.set_texture(Some(drawable.texture()));
             color_attachment.set_load_action(MTLLoadAction::Clear);
             color_attachment.set_clear_color(MTLClearColor::new(
-                self.clear_color.x as f64, self.clear_color.y as f64, self.clear_color.z as f64, self.clear_color.w as f64
+                self.clear_color.r as f64, self.clear_color.g as f64, self.clear_color.b as f64, self.clear_color.a as f64
             ));
             color_attachment.set_store_action(MTLStoreAction::Store);
 
@@ -184,7 +183,7 @@ impl Cx{
         let command_queue = device.new_command_queue();
 
         // move it to my second screen. livecompile.
-        cocoa_window.set_position(vec2(1920.0,400.0));
+        cocoa_window.set_position(Vec2{x:1920.0, y:400.0});
 
         self.compile_all_mtl_shaders(&device);
 
@@ -583,9 +582,9 @@ impl<'a> SlCx<'a>{
                 )
             },
             "color"=>{
-                let vec4 = color(&args[0].sl);
+                let col = color(&args[0].sl);
                 return MapCallResult::Rewrite(
-                    format!("float4({},{},{},{})", vec4.x,vec4.y,vec4.z,vec4.w),
+                    format!("float4({},{},{},{})", col.r, col.g, col.b, col.a),
                     "vec4".to_string()
                 );
             },

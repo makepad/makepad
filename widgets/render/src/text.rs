@@ -15,7 +15,7 @@ pub struct Text{
     pub font_id:usize,
     pub shader_id:usize,
     pub text:String,
-    pub color: Vec4,
+    pub color: Color,
     pub font_size:f32,
     pub boldness:f32,
     pub line_spacing:f32,
@@ -68,26 +68,39 @@ impl Text{
             //let w:float<Instance>;
             //let h:float<Instance>;
             let font_size:float<Instance>;
+            let char_offset:float<Instance>;
+            let marker:float<Instance>;
             //let font_base:float<Instance>;
             let tex_coord:vec2<Varying>;
             let clipped:vec2<Varying>;
-
+            let rect:vec4<Varying>;
+            
             fn pixel()->vec4{
-                let s:vec4 = sample2d(texture, tex_coord.xy);
-                let sig_dist:float =  max(min(s.r, s.g), min(max(s.r, s.g), s.b)) - 0.5;
-                let scale:float = pow(df_antialias(clipped) * 0.002,0.5);
-                df_viewport(tex_coord * tex_size * 0.07);
-                df_shape = -sig_dist - 0.5 / df_aa;
-                return df_fill(color); 
+                if marker>0.5{
+                    df_viewport(clipped);
+                    let center = (rect.xy+rect.zw)*0.5;
+                    df_circle(center.x, center.y, 1.);
+                    return df_fill(vec4(color.rgb,1.)); 
+                }
+                else{
+                    let s = sample2d(texture, tex_coord.xy);
+                    let sig_dist =  max(min(s.r, s.g), min(max(s.r, s.g), s.b)) - 0.5;
+                    let scale = pow(df_antialias(clipped) * 0.002,0.5);
+                    df_viewport(tex_coord * tex_size * 0.07);
+                    df_shape = -sig_dist - 0.5 / df_aa;
+                    return df_fill(color); 
+                }
             }
             
             fn vertex()->vec4{
                 let shift:vec2 = -draw_list_scroll;
-                let min_pos:vec2 = vec2(
+
+                let min_pos = vec2(
                     x + font_size * font_geom.x,
                     y - font_size * font_geom.y + font_size// * font_base
                 );
-                let max_pos:vec2 = vec2(
+
+                let max_pos = vec2(
                     x + font_size * font_geom.z,
                     y - font_size * font_geom.w + font_size// * font_base
                 );
@@ -97,7 +110,9 @@ impl Text{
                     draw_list_clip.xy,
                     draw_list_clip.zw
                 );
+
                 let normalized:vec2 = (clipped - min_pos - shift) / (max_pos - min_pos);
+                rect = vec4(min_pos.x,min_pos.y,max_pos.x,max_pos.y)+shift.xyxy;
 
                 tex_coord = mix(
                     font_tc.xy,
@@ -115,8 +130,7 @@ impl Text{
         if !cx.fonts[self.font_id].loaded{
             self.font_id = 0;
         }
-        let mut aligned = cx.new_aligned_instance(self.shader_id);
-        aligned.inst.instance_count = 0;
+        let aligned = cx.new_aligned_instance(self.shader_id, 0);
         if aligned.inst.need_uniforms_now(cx){
             //texture,
             aligned.inst.push_uniform_texture_2d(cx, cx.fonts[self.font_id].texture_id);
@@ -128,8 +142,11 @@ impl Text{
         return aligned
     }
 
-    pub fn add_text(&mut self, cx:&mut Cx, geom_x:f32, geom_y:f32, aligned:&mut AlignedInstance, chunk:&[char]){
+    pub fn add_text<F>(&mut self, cx:&mut Cx, geom_x:f32, geom_y:f32, char_offset:usize, aligned:&mut AlignedInstance, chunk:&[char], mut char_callback:F)
+    where F: FnMut(usize, usize, f32, f32)->f32
+    {
         let mut geom_x = geom_x;
+        let mut char_offset = char_offset;
         let unicodes = &cx.fonts[self.font_id].unicodes;
         let glyphs = &cx.fonts[self.font_id].glyphs;
         let instance = {
@@ -139,19 +156,22 @@ impl Text{
         };
 
         for wc in chunk{
-            let slot = unicodes[*wc as usize];
+            let unicode = *wc as usize;
+            let slot = unicodes[unicode as usize];
             let glyph = &glyphs[slot];
             let w = glyph.advance * self.font_size;
-            
+            let marker = char_callback(unicode, char_offset, geom_x, w);
             let data = [
                 /*font_geom*/ glyph.x1 ,glyph.y1 ,glyph.x2 ,glyph.y2,
                 /*font_tc*/ glyph.tx1 ,glyph.ty1 ,glyph.tx2 ,glyph.ty2,
-                /*color*/ self.color.x, self.color.y, self.color.z, self.color.w,
+                /*color*/ self.color.r, self.color.g, self.color.b, self.color.a,
                 /*x*/ geom_x,
                 /*y*/ geom_y,
                 // /*w*/ w,
                 // /*h*/ height,
-                /*font_size*/ self.font_size
+                /*font_size*/ self.font_size,
+                /*char_offset*/ char_offset as f32,
+                /*marker*/ marker,
                 // /*font_base*/ 1.0
             ];
             instance.extend_from_slice(&data);
@@ -159,7 +179,9 @@ impl Text{
             for i in 0..15{
                 instance.push(0.)
             }*/
+            
             geom_x += w;
+            char_offset += 1;
             aligned.inst.instance_count += 1;
         }
     }
@@ -232,7 +254,7 @@ impl Text{
                     None
                 );
 
-                self.add_text(cx, geom.x, geom.y, &mut aligned, &chunk);
+                self.add_text(cx, geom.x, geom.y, 0, &mut aligned, &chunk, |_,_,_,_|{0.0});
                 width = 0.0;
                 chunk.truncate(0);
                 match self.wrapping{
@@ -245,14 +267,57 @@ impl Text{
             }
         }
         self.end_text(cx, &aligned);
-        aligned.inst.get_area()
+        aligned.inst.into_area()
+    }
+
+    pub fn find_closest_offset(&self, cx:&Cx, area:&Area, pos:Vec2)->usize{
+        // ok so, we have a bunch of text geom,
+        // now we need to find the closest offset
+        // first we go find when the y>= y
+        // then we scan for x<=x
+        let scroll = area.get_scroll(cx);
+        let spos = Vec2{x:pos.x + scroll.x, y:pos.y + scroll.y};
+        let x_o = area.get_prop_offset(cx, "x");
+        let y_o = area.get_prop_offset(cx, "y");
+        let font_geom_o = area.get_prop_offset(cx, "font_geom")+2;
+        let font_size_o = area.get_prop_offset(cx, "font_size");
+        let char_offset_o = area.get_prop_offset(cx, "char_offset");
+        let read = area.get_read_ref(cx);
+        let line_spacing = self.line_spacing;
+        let mut index = 0;
+        if let Some(read) = read{
+            while index < read.count{
+                let y = read.buffer[read.offset + y_o + index * read.slots];
+                let font_size = read.buffer[read.offset + font_size_o + index * read.slots];
+                if y + font_size * line_spacing > spos.y{ // alright lets find our next x
+                    while index < read.count{
+                        let x = read.buffer[read.offset + x_o + index * read.slots];
+                        let y = read.buffer[read.offset + y_o + index * read.slots];
+                        let font_size = read.buffer[read.offset + font_size_o + index* read.slots]; 
+                        let w = read.buffer[read.offset + font_geom_o + index * read.slots] * font_size;
+                        if x > spos.x + w*0.5 || y > spos.y{
+                            let prev_index = if index == 0{0}else{index - 1};
+                            return read.buffer[read.offset + char_offset_o +  prev_index * read.slots] as usize;
+                        }
+                        index += 1;
+                    }
+                }
+                index += 1;
+            }
+            if read.count == 0{
+                return 0
+            }
+            return read.buffer[read.offset + char_offset_o +  (read.count - 1) * read.slots] as usize;
+        }
+        return 0
     }
 
     pub fn get_monospace_size(&self, cx:&Cx)->Vec2{
-        let glyph = &cx.fonts[self.font_id].glyphs[65];
-        vec2(
-            glyph.advance * self.font_size,
-            self.line_spacing * self.font_size
-        )
+        let slot = cx.fonts[self.font_id].unicodes[32 as usize];
+        let glyph = &cx.fonts[self.font_id].glyphs[slot];
+        Vec2{
+            x: glyph.advance * self.font_size,
+            y:self.line_spacing * self.font_size
+        }
     }
 }

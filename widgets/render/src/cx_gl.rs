@@ -22,9 +22,9 @@ impl<'a> SlCx<'a>{
                 return MapCallResult::Rename("dFdy".to_string())
             },
             "color"=>{
-                let vec4 = color(&args[0].sl);
+                let col = color(&args[0].sl);
                 return MapCallResult::Rewrite(
-                    format!("vec4({},{},{},{})", vec4.x,vec4.y,vec4.z,vec4.w),
+                    format!("vec4({},{},{},{})", col.r,col.g,col.b,col.a),
                     "vec4".to_string()
                 );
             },

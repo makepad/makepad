@@ -182,7 +182,7 @@ where TScrollBar: ScrollBarLike<TScrollBar> + Clone + ElementLife
             draw_list.get_scroll()
         }
         else{
-            vec2(0.,0.)
+            Vec2::zero()
         }
    }
 

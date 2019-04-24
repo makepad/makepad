@@ -183,7 +183,8 @@ fn generate_let(local:Local)->TokenStream{
             }
         }
         else{
-            return error(local.span(), "let pattern misses type info");
+            found_type = "".to_string();
+            //return error(local.span(), "let pattern misses type info");
         }
         let init;
         if let Some((_,local_init)) = local.init{

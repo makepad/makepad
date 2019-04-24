@@ -12,8 +12,8 @@ pub struct FileTree{
     pub drag_bg_layout:Layout,
     pub node_bg:Quad,
     pub filler:Quad,
-    pub tree_folder_color:Vec4,
-    pub tree_file_color:Vec4,
+    pub tree_folder_color:Color,
+    pub tree_file_color:Color,
     pub tree_text:Text,
     pub root_node:FileNode,
     pub animator:Animator,
@@ -297,7 +297,7 @@ impl FileTree{
 
     pub fn get_default_anim(cx:&Cx, counter:usize, marked:bool)->Anim{
         Anim::new(Play::Chain{duration:0.01}, vec![
-            Track::vec4("bg.color", Ease::Lin, vec![(1.0,
+            Track::color("bg.color", Ease::Lin, vec![(1.0,
                 if marked{cx.color("bg_marked")}  else if counter&1==0{cx.color("bg_selected")}else{cx.color("bg_odd")}
             )])
         ])
@@ -306,7 +306,7 @@ impl FileTree{
     pub fn get_over_anim(cx:&Cx, counter:usize, marked:bool)->Anim{
         let over_color = if marked{cx.color("bg_marked_over")} else if counter&1==0{cx.color("bg_selected_over")}else{cx.color("bg_odd_over")};
         Anim::new(Play::Cut{duration:0.02}, vec![
-            Track::vec4("bg.color", Ease::Lin, vec![
+            Track::color("bg.color", Ease::Lin, vec![
                 (0., over_color),(1., over_color)
             ])
         ])
@@ -495,7 +495,7 @@ impl FileTree{
             
             // if we are NOT animating, we need to get change a default color.
 
-            self.node_bg.color = node_draw.animator.last_vec4("bg.color");
+            self.node_bg.color = node_draw.animator.last_color("bg.color");
 
             let inst = self.node_bg.begin_quad(cx, &Layout{
                 width:Bounds::Fill,
@@ -504,7 +504,7 @@ impl FileTree{
                 padding:self.row_padding,
                 ..Default::default()
             });
-            node_draw.animator.set_area(cx, inst.clone().get_area()); 
+            node_draw.animator.update_area_refs(cx, inst.clone().into_area()); 
             let is_marked = node_draw.marked != 0;
 
             for i in 0..(depth-1){
@@ -514,20 +514,20 @@ impl FileTree{
                     if is_last { 
                         if is_first{
                             //line_vec
-                            area.push_vec2(cx, vec2(0.3,0.7))
+                            area.push_vec2(cx, Vec2{x:0.3, y:0.7})
                         }
                         else{
                             //line_vec
-                            area.push_vec2(cx,vec2(-0.2,0.7))
+                            area.push_vec2(cx,Vec2{x:-0.2, y:0.7})
                         }
                     }
                     else if is_first{
                         //line_vec
-                        area.push_vec2(cx, vec2(-0.3,1.2))
+                        area.push_vec2(cx, Vec2{x:-0.3, y:1.2})
                     }
                     else{
                         //line_vec
-                        area.push_vec2(cx, vec2(-0.2,1.2));
+                        area.push_vec2(cx, Vec2{x:-0.2, y:1.2});
                     }
                     //anim_pos
                     area.push_float(cx, -1.);
@@ -540,7 +540,7 @@ impl FileTree{
                     else{
                         let area = self.filler.draw_quad_walk(cx, Bounds::Fix(10.), Bounds::Fill, quad_margin);
                         //line_vec
-                        area.push_vec2(cx, vec2(-0.2,1.2));
+                        area.push_vec2(cx, Vec2{x:-0.2, y:1.2});
                         //anim_pos
                         area.push_float(cx, -1.);
                     }
@@ -551,9 +551,9 @@ impl FileTree{
             match node{
                 FileNode::Folder{name, state, ..}=>{
                     // draw the folder icon
-                    let area = self.filler.draw_quad_walk(cx, Bounds::Fix(14.), Bounds::Fill, Margin{l:0.,t:0.,r:2.,b:0.});
-                    area.push_vec2(cx, vec2(0.,0.));
-                    area.push_float(cx, 1.);
+                    let inst = self.filler.draw_quad_walk(cx, Bounds::Fix(14.), Bounds::Fill, Margin{l:0.,t:0.,r:2.,b:0.});
+                    inst.push_vec2(cx, Vec2::zero());
+                    inst.push_float(cx, 1.);
                     cx.realign_turtle(Align::left_center(), false);
                     self.tree_text.color = self.tree_folder_color;
                     let wleft = cx.width_left(false) - 10.;
@@ -632,7 +632,7 @@ impl FileTree{
         // draw the drag item overlay layer if need be
         if let Some(mv) = &self._drag_move{
             self.drag_view.begin_view(cx, &Layout{
-                abs_start:Some(vec2(mv.abs.x + 5.,mv.abs.y + 5.)),
+                abs_start:Some(Vec2{x:mv.abs.x + 5., y:mv.abs.y + 5.}),
                 ..Default::default()
             });
             let mut file_walker = FileWalker::new(&mut self.root_node);

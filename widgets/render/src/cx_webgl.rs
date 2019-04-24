@@ -58,7 +58,7 @@ impl Cx{
     }
 
     pub fn repaint(&mut self){
-        self.platform.from_wasm.clear(self.clear_color.x, self.clear_color.y, self.clear_color.z, self.clear_color.w);
+        self.platform.from_wasm.clear(self.clear_color.r, self.clear_color.g, self.clear_color.b, self.clear_color.a);
         self.prepare_frame();        
         self.exec_draw_list(0);
     }
@@ -126,13 +126,13 @@ impl Cx{
                     }
                 },
                 3=>{ // init
-                    self.target_size = vec2(to_wasm.mf32(),to_wasm.mf32());
+                    self.target_size = Vec2{x:to_wasm.mf32(), y:to_wasm.mf32()};
                     self.target_dpi_factor = to_wasm.mf32();
                     self.call_event_handler(&mut event_handler, &mut Event::Construct); 
                     self.redraw_area(Area::All);
                 },
                 4=>{ // resize
-                    self.target_size = vec2(to_wasm.mf32(),to_wasm.mf32());
+                    self.target_size = Vec2{x:to_wasm.mf32(), y:to_wasm.mf32()};
                     self.target_dpi_factor = to_wasm.mf32();
                     
                     // do our initial redraw and repaint
@@ -150,8 +150,9 @@ impl Cx{
                     let digit = to_wasm.mu32() as usize;
                     self.platform.fingers_down[digit] = true;
                     self.call_event_handler(&mut event_handler, &mut Event::FingerDown(FingerDownEvent{
-                        abs:vec2(x,y), 
-                        rel:vec2(x,y),
+                        modifier:KeyModifier{..Default::default()},
+                        abs:Vec2{x:x, y:y}, 
+                        rel:Vec2{x:x, y:y},
                         handled:false,
                         digit:digit,
                         is_touch:to_wasm.mu32()>0
@@ -166,10 +167,11 @@ impl Cx{
                         self.down_mouse_cursor = None;
                     }
                     self.call_event_handler(&mut event_handler, &mut Event::FingerUp(FingerUpEvent{
-                        abs:vec2(x,y), 
-                        rel:vec2(x,y),
-                        abs_start:vec2(0.,0.),
-                        rel_start:vec2(0.,0.),
+                        modifier:KeyModifier{..Default::default()},
+                        abs:Vec2{x:x, y:y}, 
+                        rel:Vec2{x:x, y:y},
+                        abs_start:Vec2::zero(),
+                        rel_start:Vec2::zero(),
                         digit:digit,
                         is_over:false,
                         is_touch:to_wasm.mu32()>0
@@ -179,10 +181,11 @@ impl Cx{
                     let x = to_wasm.mf32();
                     let y = to_wasm.mf32();
                     self.call_event_handler(&mut event_handler, &mut Event::FingerMove(FingerMoveEvent{
-                        abs:vec2(x,y) ,
-                        rel:vec2(x,y),
-                        abs_start:vec2(0.,0.),
-                        rel_start:vec2(0.,0.),
+                        modifier:KeyModifier{..Default::default()},
+                        abs:Vec2{x:x, y:y},
+                        rel:Vec2{x:x, y:y},
+                        abs_start:Vec2::zero(),
+                        rel_start:Vec2::zero(),
                         is_over:false,
                         digit:to_wasm.mu32() as usize,
                         is_touch:to_wasm.mu32()>0
@@ -193,8 +196,9 @@ impl Cx{
                     let y = to_wasm.mf32();
                     self.hover_mouse_cursor = None;
                     self.call_event_handler(&mut event_handler, &mut Event::FingerHover(FingerHoverEvent{
-                        abs:vec2(x,y) ,
-                        rel:vec2(x,y),
+                        modifier:KeyModifier{..Default::default()},
+                        abs:Vec2{x:x, y:y},
+                        rel:Vec2{x:x, y:y},
                         handled:false,
                         hover_state:HoverState::Over
                     }));
@@ -203,10 +207,11 @@ impl Cx{
                     let x = to_wasm.mf32();
                     let y = to_wasm.mf32();
                     self.call_event_handler(&mut event_handler, &mut Event::FingerScroll(FingerScrollEvent{
-                        abs:vec2(x,y) ,
-                        rel:vec2(x,y),
+                        modifier:KeyModifier{..Default::default()},
+                        abs:Vec2{x:x, y:y},
+                        rel:Vec2{x:x, y:y},
                         handled:false,
-                        scroll:vec2(to_wasm.mf32(),to_wasm.mf32()),
+                        scroll:Vec2{x:to_wasm.mf32(), y:to_wasm.mf32()},
                     }));
                 },
                 11=>{
@@ -214,8 +219,9 @@ impl Cx{
                     let x = to_wasm.mf32();
                     let y = to_wasm.mf32();
                     self.call_event_handler(&mut event_handler, &mut Event::FingerHover(FingerHoverEvent{
-                        abs:vec2(x,y) ,
-                        rel:vec2(x,y),
+                        modifier:KeyModifier{..Default::default()},
+                        abs:Vec2{x:x, y:y},
+                        rel:Vec2{x:x, y:y},
                         handled:false,
                         hover_state:HoverState::Out
                     }));

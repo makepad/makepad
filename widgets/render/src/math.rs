@@ -15,7 +15,7 @@ impl Rect{
         return x >= self.x && x <= self.x + self.w &&
             y >= self.y && y <= self.y + self.h;
     }
-    pub fn intersects(&self, r:&Rect)->bool{
+    pub fn intersects(&self, r:Rect)->bool{
         !(
             r.x > self.x + self.w || 
             r.x + r.w < self.x || 
@@ -36,9 +36,15 @@ pub struct Vec2{
     pub y: f32,
 }
 
+impl Vec2{
+    pub fn zero()->Vec2{
+        Vec2{x:0.0,y:0.0}
+    }
+}
+/*
 pub fn vec2(x:f32, y:f32)->Vec2{
     Vec2{x:x, y:y}
-}
+}*/
 
 #[derive(Clone, Copy, Default, Debug)]
 pub struct Vec3{
@@ -47,9 +53,16 @@ pub struct Vec3{
     pub z: f32
 }
 
+impl Vec3{
+    pub fn zero()->Vec3{
+        Vec3{x:0.0,y:0.0,z:0.0}
+    }
+}
+
+/*
 pub fn vec3(x:f32, y:f32, z:f32)->Vec3{
     Vec3{x:x, y:y, z:z}
-}
+}*/
 
 #[derive(Clone, Copy, Default, Debug)]
 pub struct Vec4{
@@ -59,9 +72,32 @@ pub struct Vec4{
     pub w: f32
 }
 
+impl Vec4{
+    pub fn zero()->Vec4{
+        Vec4{x:0.0,y:0.0,z:0.0,w:0.0}
+    }
+}
+
+
+#[derive(Clone, Copy, Default, Debug)]
+pub struct Color{
+    pub r: f32,
+    pub g: f32,
+    pub b: f32,
+    pub a: f32
+}
+
+impl Color{
+    pub fn zero()->Color{
+        Color{r:0.0, g:0.0, b:0.0, a:0.0}
+    }
+}
+
+
+/*
 pub fn vec4(x:f32, y:f32, z:f32, w:f32)->Vec4{
     Vec4{x:x, y:y, z:z, w:w}
-}
+}*/
 
 
 impl Mat4{

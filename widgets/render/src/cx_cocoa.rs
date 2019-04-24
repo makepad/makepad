@@ -28,7 +28,7 @@ pub struct CocoaWindow{
     pub last_size:Vec2,
     pub ime_spot:Vec2,
     pub last_dpi_factor:f32,
-    pub last_key_mod:KeyMod,
+    pub last_key_mod:KeyModifier,
     pub fingers_down:Vec<bool>,
     pub cursors:HashMap<MouseCursor, id>,
     pub current_cursor:MouseCursor,
@@ -146,15 +146,15 @@ impl CocoaWindow{
             NSSize::new(0.0, 0.0),
         );
         let out = unsafe{NSWindow::convertRectToScreen_(self.window.unwrap(), rect)};
-        vec2(out.origin.x as f32, out.origin.y as f32)
+        Vec2{x:out.origin.x as f32, y:out.origin.y as f32}
     }
 
     pub fn get_inner_size(&self)->Vec2{
         if self.view.is_none(){
-            return vec2(0.,0.);
+            return Vec2::zero();
         }
         let view_frame = unsafe { NSView::frame(self.view.unwrap()) };
-        vec2(view_frame.size.width as f32, view_frame.size.height as f32)
+        Vec2{x:view_frame.size.width as f32, y:view_frame.size.height as f32}
     }
 
     pub fn get_dpi_factor(&self)->f32{
@@ -178,7 +178,7 @@ impl CocoaWindow{
         match ns_event.eventType(){
             appkit::NSKeyUp => {
                 if let Some(key_code) = get_event_keycode(ns_event){
-                    let key_mod = get_event_key_mod(ns_event);
+                    let modifier = get_event_key_modifier(ns_event);
                     let key_char = get_event_char(ns_event);
                     let is_repeat:bool = msg_send![ns_event, isARepeat];
                     self.do_callback(&mut vec![
@@ -186,17 +186,14 @@ impl CocoaWindow{
                             key_code:key_code,
                             key_char:key_char,
                             is_repeat:is_repeat,
-                            with_shift:key_mod.shift,
-                            with_control:key_mod.control,
-                            with_alt:key_mod.alt,
-                            with_logo:key_mod.logo,
+                            modifier:modifier
                         })
                     ]);
                 }
             },
             appkit::NSKeyDown => {
                 if let Some(key_code) = get_event_keycode(ns_event){
-                    let key_mod = get_event_key_mod(ns_event);
+                    let modifier = get_event_key_modifier(ns_event);
                     let key_char = get_event_char(ns_event);
                     let is_repeat:bool = msg_send![ns_event, isARepeat];
                     self.do_callback(&mut vec![
@@ -204,29 +201,24 @@ impl CocoaWindow{
                             key_code:key_code,
                             key_char:key_char,
                             is_repeat:is_repeat,
-                            with_shift:key_mod.shift,
-                            with_control:key_mod.control,
-                            with_alt:key_mod.alt,
-                            with_logo:key_mod.logo,
+                            modifier:modifier
                         })
                     ]);
                 }
             },
             appkit::NSFlagsChanged => {
-                let key_mod = get_event_key_mod(ns_event);
+                let modifier = get_event_key_modifier(ns_event);
                 let last_key_mod = self.last_key_mod.clone();
-                self.last_key_mod = key_mod.clone();
+                self.last_key_mod = modifier.clone();
                 let mut events = Vec::new();
-                fn add_event(old:bool, new:bool, key_mod:KeyMod, events:&mut Vec<Event>, key_code:KeyCode){
+                fn add_event(old:bool, new:bool, modifier:KeyModifier, events:&mut Vec<Event>, key_code:KeyCode){
                     if old != new{
                         let event = KeyEvent{
                             key_code:key_code,
                             key_char:'\0',
                             is_repeat:false,
-                            with_shift:key_mod.shift,
-                            with_control:key_mod.control,
-                            with_alt:key_mod.alt,
-                            with_logo:key_mod.logo,
+                            modifier:modifier
+
                         };
                         if new{
                             events.push(Event::KeyDown(event));
@@ -236,10 +228,10 @@ impl CocoaWindow{
                         }
                     }
                 }
-                add_event(last_key_mod.shift, key_mod.shift, key_mod.clone(), &mut events, KeyCode::LeftShift);
-                add_event(last_key_mod.alt, key_mod.alt, key_mod.clone(), &mut events, KeyCode::LeftAlt);
-                add_event(last_key_mod.logo, key_mod.logo, key_mod.clone(), &mut events, KeyCode::LeftLogo);
-                add_event(last_key_mod.control, key_mod.control, key_mod.clone(), &mut events, KeyCode::LeftControl);
+                add_event(last_key_mod.shift, modifier.shift, modifier.clone(), &mut events, KeyCode::LeftShift);
+                add_event(last_key_mod.alt, modifier.alt, modifier.clone(), &mut events, KeyCode::LeftAlt);
+                add_event(last_key_mod.logo, modifier.logo, modifier.clone(), &mut events, KeyCode::LeftLogo);
+                add_event(last_key_mod.control, modifier.control, modifier.clone(), &mut events, KeyCode::LeftControl);
                 if events.len() > 0{
                     self.do_callback(&mut events);
                 }
@@ -254,24 +246,26 @@ impl CocoaWindow{
                 return if ns_event.hasPreciseScrollingDeltas() == cocoa::base::YES {
                     self.do_callback(&mut vec![
                         Event::FingerScroll(FingerScrollEvent{
-                            scroll:vec2(
-                                ns_event.scrollingDeltaX() as f32,
-                                -ns_event.scrollingDeltaY() as f32
-                            ),
-                            abs:vec2(self.last_mouse_pos.x, self.last_mouse_pos.y),
-                            rel:vec2(0.,0.),
+                            scroll:Vec2{
+                                x:ns_event.scrollingDeltaX() as f32,
+                                y:-ns_event.scrollingDeltaY() as f32
+                            },
+                            abs:self.last_mouse_pos,
+                            rel:Vec2::zero(),
+                            modifier:get_event_key_modifier(ns_event),
                             handled:false
                         })
                     ]);
                 } else {
                     self.do_callback(&mut vec![
                         Event::FingerScroll(FingerScrollEvent{
-                            scroll:vec2(
-                                ns_event.scrollingDeltaX() as f32 * 32.,
-                                -ns_event.scrollingDeltaY() as f32 * 32.
-                            ),
-                            abs:vec2(self.last_mouse_pos.x, self.last_mouse_pos.y),
-                            rel:vec2(0.,0.),
+                            scroll:Vec2{
+                                x:ns_event.scrollingDeltaX() as f32 * 32.,
+                                y:-ns_event.scrollingDeltaY() as f32 * 32.
+                            },
+                            abs:self.last_mouse_pos,
+                            rel:Vec2::zero(),
+                            modifier:get_event_key_modifier(ns_event),
                             handled:false
                         })
                     ]);
@@ -360,31 +354,33 @@ impl CocoaWindow{
         self.do_callback(&mut vec![Event::AppFocus(focus)]);
     }
 
-    pub fn send_finger_down(&mut self, digit:usize){
+    pub fn send_finger_down(&mut self, digit:usize, modifier:KeyModifier){
         self.fingers_down[digit] = true;
         self.do_callback(&mut vec![Event::FingerDown(FingerDownEvent{
             abs:self.last_mouse_pos,
             rel:self.last_mouse_pos,
             digit:digit,
             handled:false,
-            is_touch:false
+            is_touch:false,
+            modifier:modifier
         })]);
     }
 
-    pub fn send_finger_up(&mut self, digit:usize){
+    pub fn send_finger_up(&mut self, digit:usize, modifier:KeyModifier){
         self.fingers_down[digit] = false;
         self.do_callback(&mut vec![Event::FingerUp(FingerUpEvent{
             abs:self.last_mouse_pos,
             rel:self.last_mouse_pos,
-            abs_start:vec2(0., 0.),
-            rel_start:vec2(0., 0.),
+            abs_start:Vec2::zero(),
+            rel_start:Vec2::zero(),
             digit:digit,
             is_over:false,
-            is_touch:false
+            is_touch:false,
+            modifier:modifier
         })]);
     }
 
-    pub fn send_finger_hover_and_move(&mut self, pos:Vec2){
+    pub fn send_finger_hover_and_move(&mut self, pos:Vec2, modifier:KeyModifier){
         self.last_mouse_pos = pos;
         let mut events = Vec::new();
         for (digit, down) in self.fingers_down.iter().enumerate(){
@@ -393,10 +389,11 @@ impl CocoaWindow{
                     abs:pos,
                     rel:pos,
                     digit:digit,
-                    abs_start:vec2(0.,0.),
-                    rel_start:vec2(0.,0.),
+                    abs_start:Vec2::zero(),
+                    rel_start:Vec2::zero(),
                     is_over:false,
-                    is_touch:false
+                    is_touch:false,
+                    modifier:modifier.clone()
                 }));
             }
         };
@@ -405,6 +402,7 @@ impl CocoaWindow{
             rel:pos,
             handled:false,
             hover_state:HoverState::Over,
+            modifier:modifier
         }));
         self.do_callback(&mut events);
     }
@@ -439,19 +437,11 @@ fn get_event_char(event: id) -> char {
     }
 }
 
-#[derive(Clone, Default)]
-pub struct KeyMod {
-    pub shift: bool,
-    pub control: bool,
-    pub alt: bool,
-    pub logo: bool
-}
-
-fn get_event_key_mod(event: id) -> KeyMod {
+fn get_event_key_modifier(event: id) -> KeyModifier {
     let flags = unsafe {
         NSEvent::modifierFlags(event)
     };
-    KeyMod {
+    KeyModifier {
         shift: flags.contains(NSEventModifierFlags::NSShiftKeyMask),
         control: flags.contains(NSEventModifierFlags::NSControlKeyMask),
         alt: flags.contains(NSEventModifierFlags::NSAlternateKeyMask),
@@ -764,34 +754,40 @@ pub fn define_cocoa_view_class()->*const Class{
         }
     }
 
-    extern fn mouse_down(this: &Object, _sel: Sel, _event: id) {
+    extern fn mouse_down(this: &Object, _sel: Sel, event: id) {
         let cw = get_cocoa_window(this);
-        cw.send_finger_down(0);
+        let modifier = get_event_key_modifier(event);
+        cw.send_finger_down(0, modifier);
     }
 
-    extern fn mouse_up(this: &Object, _sel: Sel, _event: id) {
+    extern fn mouse_up(this: &Object, _sel: Sel, event: id) {
         let cw = get_cocoa_window(this);
-        cw.send_finger_up(0);
+        let modifier = get_event_key_modifier(event);
+        cw.send_finger_up(0, modifier);
     }
 
-    extern fn right_mouse_down(this: &Object, _sel: Sel, _event: id) {
+    extern fn right_mouse_down(this: &Object, _sel: Sel, event: id) {
         let cw = get_cocoa_window(this);
-        cw.send_finger_down(1);
+        let modifier = get_event_key_modifier(event);
+        cw.send_finger_down(1, modifier);
     }
 
-    extern fn right_mouse_up(this: &Object, _sel: Sel, _event: id) {
+    extern fn right_mouse_up(this: &Object, _sel: Sel, event: id) {
         let cw = get_cocoa_window(this);
-        cw.send_finger_up(1);
+        let modifier = get_event_key_modifier(event);
+        cw.send_finger_up(1, modifier);
     }
 
-    extern fn other_mouse_down(this: &Object, _sel: Sel, _event: id) {
+    extern fn other_mouse_down(this: &Object, _sel: Sel, event: id) {
         let cw = get_cocoa_window(this);
-        cw.send_finger_down(2);
+        let modifier = get_event_key_modifier(event);
+        cw.send_finger_down(2, modifier);
     }
 
-    extern fn other_mouse_up(this: &Object, _sel: Sel, _event: id) {
+    extern fn other_mouse_up(this: &Object, _sel: Sel, event: id) {
         let cw = get_cocoa_window(this);
-        cw.send_finger_up(2);
+        let modifier = get_event_key_modifier(event);
+        cw.send_finger_up(2, modifier);
     }
 
     fn mouse_pos_from_event(this: &Object, event: id)->Vec2{
@@ -801,14 +797,15 @@ pub fn define_cocoa_view_class()->*const Class{
             let window_point = event.locationInWindow();
             let view_point = view.convertPoint_fromView_(window_point, nil);
             let view_rect = NSView::frame(view);
-            vec2(view_point.x as f32, view_rect.size.height as f32 - view_point.y as f32)
+            Vec2{x:view_point.x as f32, y:view_rect.size.height as f32 - view_point.y as f32}
         }
     }
 
     fn mouse_motion(this: &Object, event: id) {
         let cw = get_cocoa_window(this);
         let pos = mouse_pos_from_event(this, event);
-        cw.send_finger_hover_and_move(pos);
+        let modifier = get_event_key_modifier(event);
+        cw.send_finger_hover_and_move(pos, modifier);
     }
 
     extern fn mouse_moved(this: &Object, _sel: Sel, event: id) {

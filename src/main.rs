@@ -10,7 +10,7 @@ pub use crate::rusteditor::*;
 
 #[derive(Clone)]
 enum Panel{
-    Color(Vec4),
+    Color(Color),
     FileTree,
     FileEditorTarget,
     FileEditor{path:String, editor_id:u64}

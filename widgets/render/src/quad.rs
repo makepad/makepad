@@ -5,7 +5,7 @@ pub struct Quad{
     pub shader_id:usize,
     pub id:u32,
     pub do_scroll:bool,
-    pub color: Vec4
+    pub color: Color
 }
 
 impl Style for Quad{
@@ -68,21 +68,21 @@ impl Quad{
     }
 
     pub fn begin_quad(&mut self, cx:&mut Cx, layout:&Layout)->InstanceArea{
-        let inst = self.draw_quad(cx, 0.0,0.0,0.0,0.0);
-        let area = inst.clone().get_area();
+        let inst = self.draw_quad(cx, Rect::zero());
+        let area = inst.clone().into_area();
         cx.begin_turtle(layout, area);
         inst
     }
 
     pub fn end_quad(&mut self, cx:&mut Cx, inst:&InstanceArea)->Area{
-        let area = inst.clone().get_area();
+        let area = inst.clone().into_area();
         let rect = cx.end_turtle(area);
         area.set_rect(cx, &rect);
         area
     }
 
     pub fn draw_quad_walk(&mut self, cx:&mut Cx, w:Bounds, h:Bounds, margin:Margin)->InstanceArea{
-        let inst = cx.new_aligned_instance(self.shader_id).inst;
+        let inst = cx.new_aligned_instance(self.shader_id, 1).inst;
         if inst.need_uniforms_now(cx){
             inst.push_uniform_float(cx, if self.do_scroll{1.0}else{0.0});
         }
@@ -90,15 +90,15 @@ impl Quad{
         
         let data = [
             /*x,y,w,h*/geom.x,geom.y,geom.w,geom.h,
-            /*color*/self.color.x,self.color.y,self.color.z,self.color.w
+            /*color*/self.color.r,self.color.g,self.color.b,self.color.a
         ];
         inst.push_slice(cx, &data);
 
         inst
     }
-
+/*
     pub fn draw_quad(&mut self, cx:&mut Cx, x:f32, y:f32, w:f32, h:f32)->InstanceArea{
-        let inst = cx.new_aligned_instance(self.shader_id).inst;
+        let inst = cx.new_aligned_instance(self.shader_id, 1).inst;
         if inst.need_uniforms_now(cx){
             inst.push_uniform_float(cx, if self.do_scroll{1.0}else{0.0});
         }
@@ -110,6 +110,20 @@ impl Quad{
         ];
         inst.push_slice(cx, &data);
         inst
-    }
+    }*/
 
+    pub fn draw_quad(&mut self, cx:&mut Cx, rect:Rect)->InstanceArea{
+        let inst = cx.new_aligned_instance(self.shader_id, 1).inst;
+        if inst.need_uniforms_now(cx){
+            inst.push_uniform_float(cx, if self.do_scroll{1.0}else{0.0});
+        }
+        //println!("{:?} {}", area, cx.current_draw_list_id);
+        let pos = cx.turtle_origin();
+        let data = [
+            /*x,y,w,h*/pos.x+rect.x,pos.y+rect.y,rect.w,rect.h,
+            /*color*/self.color.r,self.color.g,self.color.b,self.color.a
+        ];
+        inst.push_slice(cx, &data);
+        inst
+    }
 }

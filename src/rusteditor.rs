@@ -6,17 +6,18 @@ use crate::codeeditor::*;
 pub struct RustEditor{
     pub path:String,
     pub code_editor:CodeEditor,
-    pub col_keyword:Vec4,
-    pub col_flow_keyword:Vec4,
-    pub col_identifier:Vec4,
-    pub col_operator:Vec4,
-    pub col_function:Vec4,
-    pub col_number:Vec4,
-    pub col_paren:Vec4,
-    pub col_comment:Vec4,
-    pub col_string:Vec4,
-    pub col_delim:Vec4,
-    pub col_type:Vec4
+    pub col_whitespace:Color,
+    pub col_keyword:Color,
+    pub col_flow_keyword:Color,
+    pub col_identifier:Color,
+    pub col_operator:Color,
+    pub col_function:Color,
+    pub col_number:Color,
+    pub col_paren:Color,
+    pub col_comment:Color,
+    pub col_string:Color,
+    pub col_delim:Color,
+    pub col_type:Color
 }
 
 impl ElementLife for RustEditor{
@@ -32,6 +33,7 @@ impl Style for RustEditor{
                 ..Style::style(cx)
             },
             // syntax highlighting colors
+            col_whitespace:color256a(110,110,110,0),
             col_keyword:color256(91,155,211),
             col_flow_keyword:color256(196,133,190),
             col_identifier:color256(212,212,212),
@@ -79,7 +81,7 @@ impl RustEditor{
         loop{
             //let bit = rust_colorizer.next(&mut chunk, &self.rust_colors);
             let mut do_newline = false;
-            let mut color = vec4(0.,0.,0.,0.);
+            let color;
             state.advance_with_cur();
             
             match state.cur{
@@ -87,6 +89,7 @@ impl RustEditor{
                     break;
                 },
                 '\n'=>{
+                    color = self.col_whitespace;
                     // do a newline
                     if after_newline{
                         self.code_editor.draw_tab_lines(cx, last_tabs);
@@ -100,12 +103,13 @@ impl RustEditor{
                     newline_tabs = 0;
                     // spool up the next char
                 },
-                ' '=>{ // eat as many spaces as possible
+                ' ' | '\t'=>{ // eat as many spaces as possible
+                    color = self.col_whitespace;
                     if after_newline{ // consume spaces in groups of 4
                         chunk.push(state.cur);
                         
                         let mut counter = 1;
-                        while state.next == ' '{
+                        while state.next == ' ' || state.next == '\t'{
                             chunk.push(state.next);
                             counter += 1;
                             state.advance();
@@ -126,17 +130,6 @@ impl RustEditor{
                             state.advance();
                         }
                     }
-                },
-                '\t'=>{ // eat as many tabs as possible
-                    // lets output tab lines
-                    //code_editor.tab.draw_quad_walk(cx, Bounds::Fix(metrics*4.), Bounds::Fix(line_height), Margin::zero());
-                    //chunk.push(c);
-                    while state.next == '\t'{
-                        //code_editor.tab.draw_quad_walk(cx, Bounds::Fix(fixed_width*4.), Bounds::Fix(line_height), Margin::zero());
-                        //chunk.push(nc);
-                        state.advance();
-                    }
-                    
                 },
                 '/'=>{ // parse comment
                     after_newline = false;
@@ -250,7 +243,7 @@ impl RustEditor{
                     color = self.col_identifier;
                 }
             }
-            self.code_editor.draw_text(cx, &chunk, &color);
+            self.code_editor.draw_text(cx, &chunk, state.offset, color);
             chunk.truncate(0);
             if do_newline{
                 self.code_editor.new_line(cx);

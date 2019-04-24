@@ -29,17 +29,17 @@ impl Style for TabClose{
             }, 
             text:Text{..Style::style(cx)},
             animator:Animator::new(Anim::new(Play::Cut{duration:0.2}, vec![
-                Track::vec4("bg.color", Ease::Lin, vec![(1.0, color("#a"))]),
+                Track::color("bg.color", Ease::Lin, vec![(1.0, color("#a"))]),
                 Track::float("bg.hover", Ease::Lin, vec![(1.0, 0.)]),
                 Track::float("bg.down", Ease::Lin, vec![(1.0, 0.)]),
             ])),
             anim_over:Anim::new(Play::Cut{duration:0.2}, vec![
-                Track::vec4("bg.color", Ease::Lin, vec![(0.0, color("#f")),(1.0, color("#f"))]),
+                Track::color("bg.color", Ease::Lin, vec![(0.0, color("#f")),(1.0, color("#f"))]),
                 Track::float("bg.down", Ease::Lin, vec![(1.0, 0.)]),
                 Track::float("bg.hover", Ease::Lin, vec![(0.0, 1.0),(1.0, 1.0)]),
             ]),
             anim_down:Anim::new(Play::Cut{duration:0.2}, vec![
-                Track::vec4("bg.color", Ease::Lin, vec![(0.0, color("#f55")),(1.0, color("#f55"))]),
+                Track::color("bg.color", Ease::Lin, vec![(0.0, color("#f55")),(1.0, color("#f55"))]),
                 Track::float("bg.hover", Ease::Lin, vec![(1.0, 1.0)]),
                 Track::float("bg.down", Ease::OutExp, vec![(0.0, 0.0),(1.0, 3.1415*0.5)]),
             ]),
@@ -139,11 +139,11 @@ impl TabClose{
 
     pub fn draw_tab_close(&mut self, cx:&mut Cx){
 
-        self.bg.color = self.animator.last_vec4("bg.color");
+        self.bg.color = self.animator.last_color("bg.color");
         let bg_inst =  self.bg.draw_quad_walk(cx, Bounds::Fix(10.), Bounds::Fix(10.), self.margin);
         bg_inst.push_float(cx, self.animator.last_float("bg.hover"));
         bg_inst.push_float(cx, self.animator.last_float("bg.down"));
-        self._bg_area = bg_inst.get_area();
-        self.animator.set_area(cx, self._bg_area); // if our area changed, update animation
+        self._bg_area = bg_inst.into_area();
+        self.animator.update_area_refs(cx, self._bg_area); // if our area changed, update animation
     }
 }
