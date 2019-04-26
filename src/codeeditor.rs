@@ -18,6 +18,7 @@ pub struct CodeEditor{
     pub _scroll:Vec2,
     pub _monospace_size:Vec2,
     pub _instance_count:usize,
+    pub _first_on_line:bool,
     pub _draw_cursor:DrawCursor
 }
 
@@ -79,6 +80,7 @@ impl Style for CodeEditor{
             },
             _hit_state:HitState{no_scrolling:true, ..Default::default()},
             _monospace_size:Vec2::zero(),
+            _first_on_line:true,
             _scroll:Vec2::zero(),
             _bg_area:Area::Empty,
             _text_inst:None,
@@ -132,7 +134,7 @@ impl CodeEditor{
             const gloopiness:float = 8.;
             const border_radius:float = 2.;
 
-            fn vertex()->vec4{
+            fn vertex()->vec4{ // custom vertex shader because we widen the draweable area a bit for the gloopiness
                 let shift:vec2 = -draw_list_scroll * draw_list_do_scroll;
                 let clipped:vec2 = clamp(
                     geom*vec2(w+16., h) + vec2(x, y) + shift - vec2(8.,0.),
@@ -163,6 +165,9 @@ impl CodeEditor{
     pub fn handle_code_editor(&mut self, cx:&mut Cx, event:&mut Event, text_buffer:&mut TextBuffer)->CodeEditorEvent{
         match self.view.handle_scroll_bars(cx, event){
             (_,ScrollBarEvent::Scroll{..})=>{
+                // the editor actually redraws on scroll, its because we don't actually
+                // generate the entire file as GPU text-buffer just the visible area
+                // in JS this wasn't possible performantly but in Rust its a breeze.
                 self.view.redraw_view_area(cx);
             },
             _=>()
@@ -257,6 +262,7 @@ impl CodeEditor{
             self._scroll = self.view.get_scroll(cx);
             self._monospace_size = self.text.get_monospace_size(cx);
             self._draw_cursor = DrawCursor::new();
+            self._first_on_line = true;
             // prime the next cursor
             self._draw_cursor.set_next(&self.cursors);
             // cursor after text
@@ -267,19 +273,24 @@ impl CodeEditor{
     }
     
     pub fn end_code_editor(&mut self, cx:&mut Cx, _text_buffer:&TextBuffer){
+        // lets insert an empty newline at the bottom so its nicer to scroll
+        cx.turtle_new_line();
+        cx.walk_turtle(Bounds::Fix(0.0),  Bounds::Fix(self._monospace_size.y),  Margin::zero(), None);
+        
         self.text.end_text(cx, self._text_inst.as_ref().unwrap());
         // lets draw cursors and selection rects.
         let draw_cursor = &self._draw_cursor;
         let pos = cx.turtle_origin();
         cx.new_instance_layer(self.cursor.shader_id, 0);
+
+        // draw the cursors    
         for rc in &draw_cursor.cursors{
-           //println!("DRAWING CURSOR {:?} ",*cursor_rect);
            self.cursor.draw_quad(cx, Rect{x:rc.x - pos.x, y:rc.y - pos.y, w:rc.w, h:rc.h});
         }
-        //let last_index = self.cursors.len();
         
         self._text_area = self._text_inst.take().unwrap().inst.into_area();
 
+        // draw the selections
         let sel = &draw_cursor.selections;
         for i in 0..sel.len(){
             let cur = &sel[i];
@@ -318,6 +329,7 @@ impl CodeEditor{
 
     pub fn new_line(&mut self, cx:&mut Cx){
         cx.turtle_new_line();
+        self._first_on_line = true;
         let mut draw_cursor = &mut self._draw_cursor;
         if !draw_cursor.first{ // we have some selection data to emit
            draw_cursor.emit_selection(true);
@@ -336,6 +348,11 @@ impl CodeEditor{
             
             // lets check if the geom is visible
             if cx.visible_in_turtle(geom, self._scroll){
+
+                if self._first_on_line{
+                    self._first_on_line = false;
+                }
+
                 self.text.color = color;
                 // we need to find the next cursor point we need to do something at
                 let cursors = &self.cursors;
@@ -359,7 +376,7 @@ impl CodeEditor{
                         if unicode == 10{
                             return 0.0
                         }
-                        else if unicode == 32{
+                        else if unicode == 32 && offset < draw_cursor.end{
                             return 2.0
                         }
                     }
@@ -459,11 +476,11 @@ impl Cursor{
     }
 
     pub fn move_right(&mut self, char_count:usize, text_buffer:&TextBuffer){
-        if self.head + char_count < text_buffer.get_char_count(){
+        if self.head + char_count < text_buffer.get_char_count() - 1{
             self.head += char_count;
         }
         else{
-            self.head = text_buffer.get_char_count();
+            self.head = text_buffer.get_char_count() - 1;
         }
         self.calc_max(text_buffer);
     }
@@ -481,12 +498,12 @@ impl Cursor{
     pub fn move_down(&mut self, line_count:usize, text_buffer:&TextBuffer){
         let (row,_col) = text_buffer.offset_to_row_col(self.head);
         
-        if row + line_count < text_buffer.get_line_count(){
+        if row + line_count < text_buffer.get_line_count() - 1{
             
             self.head = text_buffer.row_col_to_offset(row + line_count, self.max);
         }
         else{
-            self.head = text_buffer.get_char_count();
+            self.head = text_buffer.get_char_count() - 1;
         }
     }
 }
@@ -508,6 +525,7 @@ pub struct DrawCursor{
     pub right_bottom:Vec2,
     pub last_w:f32,
     pub first:bool,
+    pub empty:bool,
     pub cursors:Vec<Rect>,
     pub selections:Vec<DrawSel>
 }
@@ -519,6 +537,7 @@ impl DrawCursor{
             end:0,
             head:0,
             first:true,
+            empty:true,
             next_index:0,
             left_top:Vec2::zero(),
             right_bottom:Vec2::zero(),
@@ -539,6 +558,7 @@ impl DrawCursor{
             self.next_index += 1;
             self.last_w = 0.0;
             self.first = true;
+            self.empty = true;
             true
         }
         else{
@@ -558,15 +578,17 @@ impl DrawCursor{
     pub fn emit_selection(&mut self, on_new_line:bool){
         if !self.first{
             self.first = true;
-            self.selections.push(DrawSel{
-                index:self.next_index - 1,
-                rc:Rect{
-                    x:self.left_top.x,
-                    y:self.left_top.y,
-                    w:(self.right_bottom.x - self.left_top.x) + if on_new_line{self.last_w} else {0.0},
-                    h:self.right_bottom.y - self.left_top.y
-                }
-            })
+            if !self.empty || on_new_line{
+                self.selections.push(DrawSel{
+                    index:self.next_index - 1,
+                    rc:Rect{
+                        x:self.left_top.x,
+                        y:self.left_top.y,
+                        w:(self.right_bottom.x - self.left_top.x) + if on_new_line{self.last_w} else {0.0},
+                        h:self.right_bottom.y - self.left_top.y
+                    }
+                })
+            }
         }
     }
 
@@ -578,6 +600,10 @@ impl DrawCursor{
             self.first = false;
             self.left_top.x = x;
             self.left_top.y = y;
+            self.empty = true;
+        }
+        else{
+            self.empty = false;
         }
         // current right/bottom
         self.last_w = w;

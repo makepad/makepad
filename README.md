@@ -30,10 +30,10 @@ webgl/ - webGL build crate info (actual source is src/main.rs)
 
 widget/src/*.rs - nested crate for the widgets
 
-widget/render/src/*.rs - nested crate for the render engine
+widgets/render/src/*.rs - nested crate for the render engine
 
 The only 'web' JS code sits is here, its a typed-array RPC driven simplification of the webGL API
-widget/render/src/cx_webgl.js
+widgets/render/src/cx_webgl.js
 
 Prerequisites: Install cargo-watch, i use it for livecoding/building
 cargo install cargo-watch
@@ -60,9 +60,9 @@ What is Cx? Cx is a large struct (widget/render/src/cx.rs) that contains all of 
 
 Every widget generaly has 2 functions. One is called handle_(widget), the other one is draw_(widget). These functions are NOT an interface, you can name them however you want since the parent calls these functions directly, and by name. But naming them handle_mywidget and draw_mywidget is the convention. That they are not interfaces is important because it means the system never re-enters the codeflow at a random point in your UI tree. Events /draw flow always starts at the absolute top of the application, and bubbles all the way through it at every single event / drawflow. This can be done intelligently (as in dont always flow everywhere), however its important to realise it always starts at the top. 
 
-This comprises a new type of imgui. If you haven't heard of 'dear imgui' i suggest looking up some tutorials. Makepad is different in signficant ways though.
-In Imgui both the draw and eventflow are one single function. In makepad we splice out the draw and eventflow in 2 functions, draw and handle, with a struct as the backing connector between those 2.
-This solves major shortcomings in imguis in terms of performance, eventflow complexity and providing the missing lifecycle systems.
+Some widgets have their 'draw_widget' function spread out over a begin/drawitem/end set of functions, this means you can use widgets as tiny render-libraries for a wrapper widget (see codeeditor.rs, which is wrapped by rusteditor.rs). The idea is that most widgets don't own their data, but the parent-widget uses a begin/draw/end structure to draw the data itself using the widgets' immediate mode render api. This solves a huge datamapping problem. Note however that with Filetree the easiest way was to specialise the widget entirely for the data. There is a cut-off point where generalising immediate mode APIs becomes a losing game. However if you ever saw a win32 filetree widget you would also say that writing it yourself actually is easier than using the widget APIs after some complexity point. 
+
+Using a dual-api (handle and draw) comprises a new type of imgui. If you haven't heard of 'dear imgui' i suggest looking up some tutorials. Makepad is different in signficant ways though. In Imgui both the draw and eventflow are one single function. In makepad we splice out the draw and eventflow in 2 functions, draw and handle, with a struct as the backing connector between those 2. This solves major shortcomings in imguis in terms of performance, eventflow complexity and providing the missing lifecycle systems.
 
 Whats fantastic about having an interface-free immediate mode event system, is that widget-events flow 'back up' to parent widgets as return values of their 'handle' functions. And because these aren't an interface, and Rust is statically typed, you can return any type you want as a return value.
 Is your widget returning many events? Return a vec, is it returning a particular type? Return that. And because the parent usually knows its context, it can do something useful with it or bubble the event up further if need be. This model is proving to work exceptionally well, and obsoletes the need for closures or methods like 'onclick'. But Rust has closures you say. Yes, but JS like onclick and eventhandler methods really only work well with a GC. Rusts closures are 'functional' closures. Ie they work best having a lifetime the same as the functioncall they are embedded in. Don't do this and you won't be very happy with the borrowchecker.

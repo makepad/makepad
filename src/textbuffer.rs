@@ -117,6 +117,7 @@ impl<'a> TokenizerState<'a>{
                 self.next = '\n'
             }
             else{
+                self.offset += 1;
                 self.next = '\0'
             }
         }

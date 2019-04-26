@@ -145,19 +145,38 @@ impl RustEditor{
                         color = self.col_operator;
                     }
                 },
-                '\''=>{ // parse char literal
+                '\''=>{ // parse char literal or lifetime annotation
+
                     after_newline = false;
-                    state.prev = '\0';
                     chunk.push(state.cur);
-                    if state.next == '\\'{
-                        while state.next != '\0' && state.next!='\n' && (state.next != '\'' || state.prev != '\\' && state.cur == '\\' && state.next == '\''){
+
+                    if Self::parse_rust_escape_char(&mut state, &mut chunk){ // escape char or unicode
+                        if state.next == '\''{ // parsed to closing '
                             chunk.push(state.next);
-                            state.advance_with_prev();
-                        };
+                            state.advance();
+                            color = self.col_string;
+                        }
+                        else{
+                            color = self.col_comment;
+                        }
                     }
-                    chunk.push(state.next);
-                    state.advance();
-                    color = self.col_string;
+                    else{ // parse a single char or lifetime
+                        let offset = state.offset;
+                        if Self::parse_rust_ident_tail(&mut state, &mut chunk) && ((state.offset - offset) > 1 || state.next != '\''){
+                            color = self.col_keyword;
+                        }
+                        else{
+                            if (state.offset - offset) == 0{ // not an identifier char
+                                chunk.push(state.next);
+                                state.advance();
+                            }
+                            if state.next == '\''{ // lifetime identifier
+                                chunk.push(state.next);
+                                state.advance();
+                            }
+                            color = self.col_string;
+                        }
+                    }
                 },
                 '"'=>{ // parse string
                     after_newline = false;
@@ -261,6 +280,36 @@ impl RustEditor{
             state.advance();
         }
         ret
+    }
+
+    fn parse_rust_escape_char<'a>(state:&mut TokenizerState<'a>, chunk:&mut Vec<char>)->bool{
+        if state.next == '\\'{
+            chunk.push(state.next);
+            state.advance();
+            if state.next == 'u'{
+                chunk.push(state.next);
+                state.advance();
+                if state.next == '{'{
+                    chunk.push(state.next);
+                    state.advance();
+                    while state.next_is_hex(){
+                        chunk.push(state.next);
+                        state.advance();
+                    }
+                    if state.next == '}'{
+                        chunk.push(state.next);
+                        state.advance();
+                    }
+                }
+            }
+            else{
+                // its a single char escape TODO limit this to valid escape chars
+                chunk.push(state.next);
+                state.advance();
+            }
+            return true
+        }
+        return false
     }
 
     fn parse_rust_number_tail<'a>(state:&mut TokenizerState<'a>, chunk:&mut Vec<char>){
