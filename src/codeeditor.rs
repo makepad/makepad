@@ -164,7 +164,7 @@ impl CodeEditor{
 
     pub fn handle_code_editor(&mut self, cx:&mut Cx, event:&mut Event, text_buffer:&mut TextBuffer)->CodeEditorEvent{
         match self.view.handle_scroll_bars(cx, event){
-            (_,ScrollBarEvent::Scroll{..})=>{
+            (_,ScrollBarEvent::Scroll{..}) | (ScrollBarEvent::Scroll{..},_)=>{
                 // the editor actually redraws on scroll, its because we don't actually
                 // generate the entire file as GPU text-buffer just the visible area
                 // in JS this wasn't possible performantly but in Rust its a breeze.
@@ -194,9 +194,11 @@ impl CodeEditor{
             Event::FingerUp(_fe)=>{
             },
             Event::FingerMove(fe)=>{
-                
                 let offset = self.text.find_closest_offset(cx, &self._text_area, fe.abs);
                 self.cursors[0].head = offset;
+                // so what if we are 'outside' our view area to the left
+                // how do we approximate computing the visual area of our cursor?
+                
                 self.view.redraw_view_area(cx);
             },
             Event::KeyDown(ke)=>{
@@ -290,7 +292,7 @@ impl CodeEditor{
         
         self._text_area = self._text_inst.take().unwrap().inst.into_area();
 
-        // draw the selections
+        // draw
         let sel = &draw_cursor.selections;
         for i in 0..sel.len(){
             let cur = &sel[i];

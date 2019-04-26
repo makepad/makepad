@@ -931,16 +931,11 @@ pub fn define_cocoa_view_class()->*const Class{
 
     extern fn first_rect_for_character_range(this: &Object, _sel: Sel, _range: NSRange, _actual_range: *mut c_void) -> NSRect {
         let cw = get_cocoa_window(this);
-        unsafe{ 
-            //let view: id = this as *const _ as *mut _;
-            //let view_rect = NSView::frame(view);
-            //println!("{} {}", view_rect.origin.x + cw.ime_spot.x as f64, view_rect.size.height - cw.ime_spot.y as f64);
-            let origin = cw.get_position();
-            NSRect::new(
-                NSPoint::new((origin.x + cw.ime_spot.x) as f64, (origin.y + cw.ime_spot.y) as f64),// as _, y as _),
-                NSSize::new(0.0, 0.0),
-            )
-        }
+        let origin = cw.get_position();
+        NSRect::new(
+            NSPoint::new((origin.x + cw.ime_spot.x) as f64, (origin.y + cw.ime_spot.y) as f64),// as _, y as _),
+            NSSize::new(0.0, 0.0),
+        )
     }
 
     extern fn insert_text(this: &Object, _sel: Sel, string: id, replacement_range: NSRange) {
