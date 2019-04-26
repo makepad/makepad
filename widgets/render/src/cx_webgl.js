@@ -1040,6 +1040,7 @@
 	var wasm_instances = [];
 
 	function init(){
+		console.log("NOTICE! When profiling in chrome check 'Disable JavaScript Samples' under the gear icon. It slows the readings by a factor of 6-8x")
 		for(let i = 0; i < canvasses.length; i++){
 			// we found a canvas. instance the referenced wasm file
 			var canvas = canvasses[i]

@@ -5,9 +5,6 @@ use glutin::GlProfile;
 use std::mem;
 use std::ptr;
 use std::ffi::CStr;
-use std::fs::File;
-use std::io;
-use std::io::prelude::*;
 use time::precise_time_ns;
 
 use crate::cx::*;
@@ -74,7 +71,7 @@ impl Cx{
             gl::BlendEquationSeparate(gl::FUNC_ADD, gl::FUNC_ADD);
             gl::BlendFuncSeparate(gl::ONE, gl::ONE_MINUS_SRC_ALPHA, gl::ONE, gl::ONE_MINUS_SRC_ALPHA);
             gl::Enable(gl::BLEND);
-            gl::ClearColor(self.clear_color.x, self.clear_color.y, self.clear_color.z, self.clear_color.w);
+            gl::ClearColor(self.clear_color.r, self.clear_color.g, self.clear_color.b, self.clear_color.a);
             gl::Clear(gl::COLOR_BUFFER_BIT|gl::DEPTH_BUFFER_BIT);
         }
         self.prepare_frame();        
@@ -213,11 +210,12 @@ impl Cx{
             let down = self.platform.fingers_down[i];
             if down{
                 out.push(Event::FingerMove(FingerMoveEvent{
+                    modifier:KeyModifier{..Default::default()},
                     abs:self.platform.last_mouse_pos,
                     digit:i,
                     rel:self.platform.last_mouse_pos,
-                    abs_start:vec2(0.,0.),
-                    rel_start:vec2(0.,0.),
+                    abs_start:Vec2::zero(),
+                    rel_start:Vec2::zero(),
                     is_over:false,
                     is_touch:false
                 }))
@@ -297,29 +295,31 @@ impl Cx{
                 },
                 winit::WindowEvent::MouseWheel{delta, ..}=>{
                     return vec![Event::FingerScroll(FingerScrollEvent{
+                        modifier:KeyModifier{..Default::default()},
                         abs:self.platform.last_mouse_pos,
                         rel:self.platform.last_mouse_pos,
                         handled:false,
-                        scroll:vec2(
-                            match delta{
+                        scroll:Vec2{
+                            x:match delta{
                                 winit::MouseScrollDelta::LineDelta(dx,_dy)=>-dx*32.0,
                                 winit::MouseScrollDelta::PixelDelta(pp)=>pp.x as f32
                             },
-                            match delta{
+                            y:match delta{
                                 winit::MouseScrollDelta::LineDelta(_dx,dy)=>-dy*32.0,
                                 winit::MouseScrollDelta::PixelDelta(pp)=>pp.y as f32
                             }
-                        ), 
+                        } 
                     })]
                 },
                 winit::WindowEvent::CursorMoved{position,..}=>{
                     self.platform.is_cursor_in_window = true;
-                    self.platform.last_mouse_pos = vec2(position.x as f32, position.y as f32);
+                    self.platform.last_mouse_pos = Vec2{x:position.x as f32, y:position.y as f32};
                     self.hover_mouse_cursor = None;
                     let mut events = self.make_mouse_move_events();
                     events.push(Event::FingerHover(FingerHoverEvent{
                         abs:self.platform.last_mouse_pos,
                         rel:self.platform.last_mouse_pos,
+                        modifier:KeyModifier{..Default::default()},
                         handled:false,
                         hover_state:HoverState::Over
                     }));
@@ -336,6 +336,7 @@ impl Cx{
                     self.hover_mouse_cursor = None;
                    // fire a hover out on our last known mouse position
                     return vec![Event::FingerHover(FingerHoverEvent{
+                        modifier:KeyModifier{..Default::default()},
                         abs:self.platform.last_mouse_pos,
                         rel:self.platform.last_mouse_pos,
                         handled:false,
@@ -357,6 +358,7 @@ impl Cx{
                             };
                             self.platform.fingers_down[digit] = true;
                             return vec![Event::FingerDown(FingerDownEvent{
+                                modifier:KeyModifier{..Default::default()},
                                 abs:self.platform.last_mouse_pos,
                                 rel:self.platform.last_mouse_pos,
                                 handled:false,
@@ -381,10 +383,11 @@ impl Cx{
                                 self.down_mouse_cursor = None;
                             }
                             return vec![Event::FingerUp(FingerUpEvent{
+                                modifier:KeyModifier{..Default::default()},
                                 abs:self.platform.last_mouse_pos,
                                 rel:self.platform.last_mouse_pos,
-                                abs_start:vec2(0.,0.),
-                                rel_start:vec2(0.,0.),
+                                abs_start:Vec2::zero(),
+                                rel_start:Vec2::zero(),
                                 digit:digit,
                                 is_over:false,
                                 is_touch:false,
@@ -402,7 +405,7 @@ impl Cx{
                     let old_dpi_factor = self.target_dpi_factor as f32;
                     let old_size = self.target_size.clone();
                     self.target_dpi_factor = dpi_factor as f32;
-                    self.target_size = vec2(logical_size.width as f32, logical_size.height as f32);
+                    self.target_size = Vec2{x:logical_size.width as f32, y:logical_size.height as f32};
                     return vec![Event::Resized(ResizedEvent{
                         old_size: old_size,
                         old_dpi_factor: old_dpi_factor,
@@ -619,6 +622,9 @@ impl Cx{
     pub fn set_uniform_buffer_fallback(locs:&Vec<GLUniform>, uni:&Vec<f32>){
         let mut o = 0;
         for loc in locs{
+            if o + loc.size > uni.len(){
+                return
+            }
             if loc.loc >=0 {
                 unsafe{
                     match loc.size{
