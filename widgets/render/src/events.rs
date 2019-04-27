@@ -12,6 +12,7 @@ pub struct KeyModifier{
 pub struct FingerDownEvent{
     pub abs:Vec2,
     pub rel:Vec2,
+    pub rect:Rect,
     pub digit:usize,
     pub handled:bool,
     pub is_touch:bool,
@@ -24,6 +25,7 @@ pub struct FingerMoveEvent{
     pub abs_start:Vec2,
     pub rel:Vec2,
     pub rel_start:Vec2,
+    pub rect:Rect,
     pub is_over:bool,
     pub digit:usize,
     pub is_touch:bool,
@@ -42,6 +44,7 @@ pub struct FingerUpEvent{
     pub abs_start:Vec2,
     pub rel:Vec2,
     pub rel_start:Vec2,
+    pub rect:Rect,
     pub digit:usize,
     pub is_over:bool,
     pub is_touch:bool,
@@ -75,6 +78,7 @@ pub struct HitState{
 pub struct FingerHoverEvent{
     pub abs:Vec2,
     pub rel:Vec2,
+    pub rect:Rect,
     pub handled:bool,
     pub hover_state:HoverState,
     pub modifier:KeyModifier
@@ -84,6 +88,7 @@ pub struct FingerHoverEvent{
 pub struct FingerScrollEvent{
     pub abs:Vec2,
     pub rel:Vec2,
+    pub rect:Rect,
     pub scroll:Vec2,
     pub handled:bool,
     pub modifier:KeyModifier
@@ -269,6 +274,7 @@ impl Event{
                         }
                         return Event::FingerHover(FingerHoverEvent{
                             rel:Vec2{x:fe.abs.x - rect.x, y:fe.abs.y - rect.y},
+                            rect:rect,
                             ..fe.clone()
                         })
                     }
@@ -276,6 +282,7 @@ impl Event{
                         hit_state.was_over_last_call = false;
                         return Event::FingerHover(FingerHoverEvent{
                             rel:Vec2{x:fe.abs.x - rect.x, y:fe.abs.y - rect.y},
+                            rect:rect,
                             hover_state:HoverState::Out,
                             ..fe.clone()
                         })
@@ -287,6 +294,7 @@ impl Event{
                         hit_state.was_over_last_call = true;
                         return Event::FingerHover(FingerHoverEvent{
                             rel:Vec2{x:fe.abs.x - rect.x, y:fe.abs.y - rect.y},
+                            rect:rect,
                             hover_state:HoverState::In,
                             ..fe.clone()
                         })
@@ -318,6 +326,7 @@ impl Event{
                         abs_start: abs_start,
                         rel:Vec2{x:fe.abs.x - rect.x, y:fe.abs.y - rect.y},
                         rel_start: rel_start,
+                        rect:rect,
                         is_over:rect.contains_with_margin(fe.abs.x, fe.abs.y, &hit_state.margin),
                         ..fe.clone()
                     })
@@ -357,6 +366,7 @@ impl Event{
                         fe.handled = true;
                         return Event::FingerDown(FingerDownEvent{
                             rel:Vec2{x:fe.abs.x - rect.x, y:fe.abs.y - rect.y},
+                            rect:rect,
                             ..fe.clone()
                         })
                     }
@@ -388,6 +398,7 @@ impl Event{
                         abs_start: abs_start,
                         rel_start: rel_start,
                         rel:Vec2{x:fe.abs.x - rect.x, y:fe.abs.y - rect.y},
+                        rect:rect,
                         ..fe.clone()
                     })
                 }

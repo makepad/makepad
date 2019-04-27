@@ -275,8 +275,8 @@ impl Text{
         // now we need to find the closest offset
         // first we go find when the y>= y
         // then we scan for x<=x
-        let scroll = area.get_scroll(cx);
-        let spos = Vec2{x:pos.x + scroll.x, y:pos.y + scroll.y};
+        let scroll_pos = area.get_scroll_pos(cx);
+        let spos = Vec2{x:pos.x + scroll_pos.x, y:pos.y + scroll_pos.y};
         let x_o = area.get_prop_offset(cx, "x");
         let y_o = area.get_prop_offset(cx, "y");
         let font_geom_o = area.get_prop_offset(cx, "font_geom")+2;

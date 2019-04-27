@@ -15,13 +15,23 @@ pub struct CodeEditor{
     pub _bg_area:Area,
     pub _text_inst:Option<AlignedInstance>,
     pub _text_area:Area,
-    pub _scroll:Vec2,
+    pub _scroll_pos:Vec2,
+
+    pub _visibility_margin:Margin,
+    pub _select_scroll:Option<SelectScroll>,
+    
     pub _monospace_size:Vec2,
     pub _instance_count:usize,
     pub _first_on_line:bool,
     pub _draw_cursor:DrawCursor
 }
 
+#[derive(Clone, Default)]
+pub struct SelectScroll{
+    pub margin:Margin,
+    pub delta:Vec2,
+    pub abs:Vec2
+}
 
 impl ElementLife for CodeEditor{
     fn construct(&mut self, _cx:&mut Cx){}
@@ -81,11 +91,13 @@ impl Style for CodeEditor{
             _hit_state:HitState{no_scrolling:true, ..Default::default()},
             _monospace_size:Vec2::zero(),
             _first_on_line:true,
-            _scroll:Vec2::zero(),
+            _scroll_pos:Vec2::zero(),
+            _visibility_margin:Margin::zero(),
             _bg_area:Area::Empty,
             _text_inst:None,
             _text_area:Area::Empty,
             _instance_count:0,
+            _select_scroll:None,
             _draw_cursor:DrawCursor::new()
         };
         //tab.animator.default = tab.anim_default(cx);
@@ -192,13 +204,50 @@ impl CodeEditor{
                 cx.set_hover_mouse_cursor(MouseCursor::Text);
             },
             Event::FingerUp(_fe)=>{
+                self._select_scroll = None;
             },
             Event::FingerMove(fe)=>{
                 let offset = self.text.find_closest_offset(cx, &self._text_area, fe.abs);
                 self.cursors[0].head = offset;
-                // so what if we are 'outside' our view area to the left
-                // how do we approximate computing the visual area of our cursor?
-                
+                // determine selection drag scroll dynamics
+                let pow_scale:f32 = 0.1;
+                let pow_fac:f32 = 3.;
+                let max_speed:f32 = 40.;
+                let delta = Vec2{
+                    x:if fe.abs.x < fe.rect.x{
+                        -((fe.rect.x - fe.abs.x) * pow_scale).powf(pow_fac).min(max_speed)
+                    }
+                    else if fe.abs.x > fe.rect.x + fe.rect.w{
+                        ((fe.abs.x - (fe.rect.x + fe.rect.w)) * pow_scale).powf(pow_fac).min(max_speed)
+                    }
+                    else{
+                        0.
+                    },
+                    y:if fe.abs.y < fe.rect.y{
+                        -((fe.rect.y - fe.abs.y) * pow_scale).powf(pow_fac).min(max_speed)
+                    }
+                    else if fe.abs.y > fe.rect.y + fe.rect.h{
+                        ((fe.abs.y - (fe.rect.y + fe.rect.h)) * pow_scale).powf(pow_fac).min(max_speed)
+                    }
+                    else{
+                        0.
+                    }
+                };
+                if delta.x !=0. || delta.y != 0.{
+                   self._select_scroll = Some(SelectScroll{
+                       abs:fe.abs,
+                       delta:delta,
+                       margin:Margin{
+                            l:(-delta.x).max(0.),
+                            t:(-delta.y).max(0.),
+                            r:delta.x.max(0.),
+                            b:delta.y.max(0.)
+                        }
+                   })
+                }
+                else{
+                    self._select_scroll = None;
+                }
                 self.view.redraw_view_area(cx);
             },
             Event::KeyDown(ke)=>{
@@ -208,7 +257,6 @@ impl CodeEditor{
                         self.view.redraw_view_area(cx);
                     },
                     KeyCode::ArrowDown=>{
-                        println!("MOVE DOWN!");
                         self.cursors_move_down(1, ke.modifier.shift, text_buffer);
                         self.view.redraw_view_area(cx);
                     },
@@ -261,7 +309,16 @@ impl CodeEditor{
 
             self._text_inst = Some(self.text.begin_text(cx));
             self._instance_count = 0;
-            self._scroll = self.view.get_scroll(cx);
+
+            self._scroll_pos = self.view.get_scroll_pos(cx);
+
+            self._visibility_margin = if let Some(select_scroll) = &self._select_scroll{
+                select_scroll.margin
+            }
+            else{
+                Margin::zero()
+            };
+
             self._monospace_size = self.text.get_monospace_size(cx);
             self._draw_cursor = DrawCursor::new();
             self._first_on_line = true;
@@ -292,7 +349,7 @@ impl CodeEditor{
         
         self._text_area = self._text_inst.take().unwrap().inst.into_area();
 
-        // draw
+        // draw selections
         let sel = &draw_cursor.selections;
         for i in 0..sel.len(){
             let cur = &sel[i];
@@ -315,13 +372,31 @@ impl CodeEditor{
             }
         }
 
+        // do select scrolling
+        if let Some(select_scroll) = &self._select_scroll{
+            if self.view.set_scroll_pos(cx, Vec2{
+                x:self._scroll_pos.x + select_scroll.delta.x,
+                y:self._scroll_pos.y + select_scroll.delta.y
+            }){
+                let offset = self.text.find_closest_offset(cx, &self._text_area, select_scroll.abs);
+                
+                self.cursors[0].head = offset;
+
+                self.view.redraw_view_area(cx);
+            }
+        }
+
         self.view.end_view(cx);
     }
 
     pub fn draw_tab_lines(&mut self, cx:&mut Cx, tabs:usize){
         let walk = cx.get_turtle_walk();
         let tab_width = self._monospace_size.x*4.;
-        if cx.visible_in_turtle(Rect{x:walk.x, y:walk.y, w:tab_width * tabs as f32, h:self._monospace_size.y}, self._scroll){
+        if cx.visible_in_turtle(
+            Rect{x:walk.x, y:walk.y, w:tab_width * tabs as f32, h:self._monospace_size.y}, 
+            self._visibility_margin, 
+            self._scroll_pos,
+        ){
             for _i in 0..tabs{
                 self.tab.draw_quad_walk(cx, Bounds::Fix(tab_width), Bounds::Fix(self._monospace_size.y), Margin::zero());
             }   
@@ -349,7 +424,7 @@ impl CodeEditor{
             );
             
             // lets check if the geom is visible
-            if cx.visible_in_turtle(geom, self._scroll){
+            if cx.visible_in_turtle(geom, self._visibility_margin, self._scroll_pos){
 
                 if self._first_on_line{
                     self._first_on_line = false;

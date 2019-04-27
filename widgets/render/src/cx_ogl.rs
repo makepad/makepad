@@ -212,8 +212,9 @@ impl Cx{
                 out.push(Event::FingerMove(FingerMoveEvent{
                     modifier:KeyModifier{..Default::default()},
                     abs:self.platform.last_mouse_pos,
-                    digit:i,
                     rel:self.platform.last_mouse_pos,
+                    rect:Rect::zero(),
+                    digit:i,
                     abs_start:Vec2::zero(),
                     rel_start:Vec2::zero(),
                     is_over:false,
@@ -298,6 +299,7 @@ impl Cx{
                         modifier:KeyModifier{..Default::default()},
                         abs:self.platform.last_mouse_pos,
                         rel:self.platform.last_mouse_pos,
+                        rect:Rect::zero(),
                         handled:false,
                         scroll:Vec2{
                             x:match delta{
@@ -319,6 +321,7 @@ impl Cx{
                     events.push(Event::FingerHover(FingerHoverEvent{
                         abs:self.platform.last_mouse_pos,
                         rel:self.platform.last_mouse_pos,
+                        rect:Rect::zero(),
                         modifier:KeyModifier{..Default::default()},
                         handled:false,
                         hover_state:HoverState::Over
@@ -339,6 +342,7 @@ impl Cx{
                         modifier:KeyModifier{..Default::default()},
                         abs:self.platform.last_mouse_pos,
                         rel:self.platform.last_mouse_pos,
+                        rect:Rect::zero(),
                         handled:false,
                         hover_state:HoverState::Out
                     })]
@@ -361,6 +365,7 @@ impl Cx{
                                 modifier:KeyModifier{..Default::default()},
                                 abs:self.platform.last_mouse_pos,
                                 rel:self.platform.last_mouse_pos,
+                                rect:Rect::zero(),
                                 handled:false,
                                 digit:digit,
                                 is_touch:false,
@@ -386,6 +391,7 @@ impl Cx{
                                 modifier:KeyModifier{..Default::default()},
                                 abs:self.platform.last_mouse_pos,
                                 rel:self.platform.last_mouse_pos,
+                                rect:Rect::zero(),
                                 abs_start:Vec2::zero(),
                                 rel_start:Vec2::zero(),
                                 digit:digit,

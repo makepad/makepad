@@ -1,9 +1,10 @@
 use crate::cx::*;
 
 pub trait ScrollBarLike<ScrollBarT>{
-
     fn draw_scroll_bar(&mut self, cx:&mut Cx, axis:Axis, view_area:Area, view_rect:Rect, total_size:Vec2)->f32;
     fn handle_scroll_bar(&mut self, cx:&mut Cx, event:&mut Event)->ScrollBarEvent;
+    fn set_scroll_pos(&mut self, cx:&mut Cx, scroll_pos:f32)->bool;
+    fn get_scroll_pos(&self)->f32;
 }
 
 #[derive(Clone, PartialEq)]
@@ -58,6 +59,8 @@ impl ScrollBarLike<NoScrollBar> for NoScrollBar{
     fn handle_scroll_bar(&mut self, _cx:&mut Cx, _event:&mut Event)->ScrollBarEvent{
         ScrollBarEvent::None
     }
+    fn set_scroll_pos(&mut self, _cx:&mut Cx, _scroll_pos:f32)->bool{false}
+    fn get_scroll_pos(&self)->f32{0.}
 }
 
 impl<TScrollBar> View<TScrollBar>
@@ -176,15 +179,36 @@ where TScrollBar: ScrollBarLike<TScrollBar> + Clone + ElementLife
         (ret_h, ret_v)
     }
 
-    pub fn get_scroll(&mut self, cx:&mut Cx)->Vec2{
+    pub fn get_scroll_pos(&mut self, cx:&mut Cx)->Vec2{
         if let Some(draw_list_id) = self.draw_list_id{
             let draw_list = &cx.draw_lists[draw_list_id];
-            draw_list.get_scroll()
+            draw_list.get_scroll_pos()
         }
         else{
             Vec2::zero()
         }
    }
+
+    pub fn set_scroll_pos(&mut self, cx:&mut Cx, pos:Vec2)->bool{
+        let draw_list_id = self.draw_list_id.unwrap();
+        let view_area = Area::DrawList(DrawListArea{draw_list_id:draw_list_id, redraw_id:cx.redraw_id});
+        let mut changed = false;
+        if let Some(scroll_h) = &mut self.scroll_h{
+            if scroll_h.set_scroll_pos(cx, pos.x){
+                let scroll_pos = scroll_h.get_scroll_pos();
+                cx.draw_lists[draw_list_id].set_scroll_x(scroll_pos);
+                changed = true;
+            }
+        }
+        if let Some(scroll_v) = &mut self.scroll_v{
+            if scroll_v.set_scroll_pos(cx, pos.y){
+                let scroll_pos = scroll_v.get_scroll_pos();
+                cx.draw_lists[draw_list_id].set_scroll_y(scroll_pos);
+                changed = true;
+            }
+        }
+        changed
+    }
 
     pub fn end_view(&mut self, cx:&mut Cx)->Area{
         let draw_list_id = self.draw_list_id.unwrap();
@@ -222,8 +246,9 @@ where TScrollBar: ScrollBarLike<TScrollBar> + Clone + ElementLife
     }
 
     pub fn redraw_view_area(&self, cx:&mut Cx){
-        if let Some(_) = self.draw_list_id{
-            cx.redraw_area(self.get_view_area(cx))
+        if let Some(draw_list_id) = self.draw_list_id{
+            let draw_list = &cx.draw_lists[draw_list_id];
+            cx.redraw_area(Area::DrawList(DrawListArea{draw_list_id:draw_list_id, redraw_id:draw_list.redraw_id}))
         }
         else{
             cx.redraw_area(Area::All)

@@ -153,6 +153,7 @@ impl Cx{
                         modifier:KeyModifier{..Default::default()},
                         abs:Vec2{x:x, y:y}, 
                         rel:Vec2{x:x, y:y},
+                        rect:Rect::zero(),
                         handled:false,
                         digit:digit,
                         is_touch:to_wasm.mu32()>0
@@ -170,6 +171,7 @@ impl Cx{
                         modifier:KeyModifier{..Default::default()},
                         abs:Vec2{x:x, y:y}, 
                         rel:Vec2{x:x, y:y},
+                        rect:Rect::zero(),
                         abs_start:Vec2::zero(),
                         rel_start:Vec2::zero(),
                         digit:digit,
@@ -184,6 +186,7 @@ impl Cx{
                         modifier:KeyModifier{..Default::default()},
                         abs:Vec2{x:x, y:y},
                         rel:Vec2{x:x, y:y},
+                        rect:Rect::zero(),
                         abs_start:Vec2::zero(),
                         rel_start:Vec2::zero(),
                         is_over:false,
@@ -199,6 +202,7 @@ impl Cx{
                         modifier:KeyModifier{..Default::default()},
                         abs:Vec2{x:x, y:y},
                         rel:Vec2{x:x, y:y},
+                        rect:Rect::zero(),
                         handled:false,
                         hover_state:HoverState::Over
                     }));
@@ -210,6 +214,7 @@ impl Cx{
                         modifier:KeyModifier{..Default::default()},
                         abs:Vec2{x:x, y:y},
                         rel:Vec2{x:x, y:y},
+                        rect:Rect::zero(),
                         handled:false,
                         scroll:Vec2{x:to_wasm.mf32(), y:to_wasm.mf32()},
                     }));
@@ -222,6 +227,7 @@ impl Cx{
                         modifier:KeyModifier{..Default::default()},
                         abs:Vec2{x:x, y:y},
                         rel:Vec2{x:x, y:y},
+                        rect:Rect::zero(),
                         handled:false,
                         hover_state:HoverState::Out
                     }));

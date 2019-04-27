@@ -600,7 +600,7 @@ impl DrawList{
         self.uniforms[DL_UNI_SCROLL+1] = y;
     }
 
-    pub fn get_scroll(&self)->Vec2{
+    pub fn get_scroll_pos(&self)->Vec2{
         return Vec2{x:self.uniforms[DL_UNI_SCROLL+0], y:self.uniforms[DL_UNI_SCROLL+1]}
     }
 

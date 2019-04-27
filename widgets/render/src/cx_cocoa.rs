@@ -251,7 +251,8 @@ impl CocoaWindow{
                                 y:-ns_event.scrollingDeltaY() as f32
                             },
                             abs:self.last_mouse_pos,
-                            rel:Vec2::zero(),
+                            rel:self.last_mouse_pos,
+                            rect:Rect::zero(),
                             modifier:get_event_key_modifier(ns_event),
                             handled:false
                         })
@@ -264,7 +265,8 @@ impl CocoaWindow{
                                 y:-ns_event.scrollingDeltaY() as f32 * 32.
                             },
                             abs:self.last_mouse_pos,
-                            rel:Vec2::zero(),
+                            rel:self.last_mouse_pos,
+                            rect:Rect::zero(),
                             modifier:get_event_key_modifier(ns_event),
                             handled:false
                         })
@@ -359,6 +361,7 @@ impl CocoaWindow{
         self.do_callback(&mut vec![Event::FingerDown(FingerDownEvent{
             abs:self.last_mouse_pos,
             rel:self.last_mouse_pos,
+            rect:Rect::zero(),
             digit:digit,
             handled:false,
             is_touch:false,
@@ -371,6 +374,7 @@ impl CocoaWindow{
         self.do_callback(&mut vec![Event::FingerUp(FingerUpEvent{
             abs:self.last_mouse_pos,
             rel:self.last_mouse_pos,
+            rect:Rect::zero(),
             abs_start:Vec2::zero(),
             rel_start:Vec2::zero(),
             digit:digit,
@@ -388,6 +392,7 @@ impl CocoaWindow{
                 events.push(Event::FingerMove(FingerMoveEvent{
                     abs:pos,
                     rel:pos,
+                    rect:Rect::zero(),
                     digit:digit,
                     abs_start:Vec2::zero(),
                     rel_start:Vec2::zero(),
@@ -400,6 +405,7 @@ impl CocoaWindow{
         events.push(Event::FingerHover(FingerHoverEvent{
             abs:pos,
             rel:pos,
+            rect:Rect::zero(),
             handled:false,
             hover_state:HoverState::Over,
             modifier:modifier

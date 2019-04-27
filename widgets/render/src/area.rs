@@ -75,7 +75,7 @@ impl Area{
         }
     }
     
-    pub fn get_scroll(&self, cx:&Cx)->Vec2{
+    pub fn get_scroll_pos(&self, cx:&Cx)->Vec2{
         return match self{
             Area::Instance(inst)=>{
                 let draw_list = &cx.draw_lists[inst.draw_list_id];
@@ -83,12 +83,12 @@ impl Area{
                     Vec2::zero()
                 }
                 else{
-                    draw_list.get_scroll()
+                    draw_list.get_scroll_pos()
                 }
             },
             Area::DrawList(draw_list_area)=>{
                 let draw_list = &cx.draw_lists[draw_list_area.draw_list_id];
-                draw_list.get_scroll()
+                draw_list.get_scroll_pos()
             },
             _=>Vec2::zero(),
         }
@@ -226,7 +226,7 @@ impl Area{
                 let draw_list = &cx.draw_lists[inst.draw_list_id];
                 let draw_call = &draw_list.draw_calls[inst.draw_call_id];
                 if draw_list.redraw_id != inst.redraw_id {
-                    println!("get_read_pointer alled on invalid area pointer, use mark/sweep correctly!");
+                    println!("get_read_ref alled on invalid area pointer, use mark/sweep correctly!");
                     return None;
                 }
                 let csh = &cx.compiled_shaders[draw_call.shader_id];
@@ -250,7 +250,7 @@ impl Area{
                 let draw_list = &mut cx.draw_lists[inst.draw_list_id];
                 let draw_call = &mut draw_list.draw_calls[inst.draw_call_id];
                 if draw_list.redraw_id != inst.redraw_id {
-                    println!("get_write_pointer called on invalid area pointer, use mark/sweep correctly!");
+                    //println!("get_write_ref called on invalid area pointer, use mark/sweep correctly!");
                     return None;
                 }
                 let csh = &cx.compiled_shaders[draw_call.shader_id];

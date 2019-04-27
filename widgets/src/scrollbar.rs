@@ -148,26 +148,28 @@ impl ScrollBar{
             view_visible:self._view_visible
         }
     }
-   
+  
+}
+
+
+impl ScrollBarLike<ScrollBar> for ScrollBar{
 
     // public facing API
 
-    pub fn get_scroll_pos(&self)->f32{
+    fn get_scroll_pos(&self)->f32{
         return self._scroll_pos;
     }
 
-    pub fn set_scroll_pos(&mut self, cx:&mut Cx, scroll_pos:f32){
+    fn set_scroll_pos(&mut self, cx:&mut Cx, scroll_pos:f32)->bool{
         // clamp scroll_pos to
         let scroll_pos = scroll_pos.min(self._view_total - self._view_visible).max(0.); 
         if self._scroll_pos != scroll_pos{
             self._scroll_pos = scroll_pos;
             self.update_shader_scroll_pos(cx);
-        }
+            return true
+        };
+        return false
     }
-}
-
-
-impl ScrollBarLike<ScrollBar> for ScrollBar{
 
     fn handle_scroll_bar(&mut self, cx:&mut Cx, event:&mut Event)->ScrollBarEvent{
         // lets check if our view-area gets a mouse-scroll.
