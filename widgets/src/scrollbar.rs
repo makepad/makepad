@@ -207,6 +207,7 @@ impl ScrollBarLike<ScrollBar> for ScrollBar{
         let scroll_pos = scroll_pos.min(self._view_total - self._view_visible).max(0.); 
         if self._scroll_pos != scroll_pos{
             self._scroll_pos = scroll_pos;
+            self._scroll_pos_target = scroll_pos;
             self.update_shader_scroll_pos(cx);
             return true
         };
