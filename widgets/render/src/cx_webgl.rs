@@ -142,7 +142,12 @@ impl Cx{
                     is_animation_frame = true;
                     let time = to_wasm.mf64();
                     //log!(self, "{} o clock",time);
-                    self.call_animation_event(&mut event_handler, time);
+                    if self.playing_anim_areas.len() != 0{
+                        self.call_animation_event(&mut event_handler, time);
+                    }
+                    if self.next_frame_callbacks.len() != 0{
+                        self.call_frame_event(&mut event_handler, time);
+                    }
                 },
                 6=>{ // finger down
                     let x = to_wasm.mf32();
@@ -269,6 +274,7 @@ impl Cx{
 
         if is_animation_frame && self.paint_dirty{
             self.paint_dirty = false;
+            self.repaint_id += 1;
             self.repaint();
         }
 
@@ -277,7 +283,7 @@ impl Cx{
         
         // request animation frame if still need to redraw, or repaint
         // we use request animation frame for that.
-        if self.redraw_areas.len() > 0 || self.playing_anim_areas.len()> 0 || self.paint_dirty{
+        if self.redraw_areas.len() > 0 || self.playing_anim_areas.len()> 0 || self.paint_dirty || self.next_frame_callbacks.len() != 0{
             self.platform.from_wasm.request_animation_frame();
         }
 

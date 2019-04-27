@@ -12,6 +12,7 @@ pub struct ScrollBar{
     pub anim_scrolling:Anim,
 
     pub _visible:bool,
+    pub smoothing:Option<f32>,
     pub _hit_state:HitState,
     pub _sb_area:Area,
     pub _bar_side_margin:f32,
@@ -20,6 +21,10 @@ pub struct ScrollBar{
     pub _view_visible:f32, // the visible view area
     pub _scroll_size:f32, // the size of the scrollbar
     pub _scroll_pos:f32, // scrolling position non normalised
+
+    pub _scroll_pos_target:f32,
+    pub _scroll_pos_delta:f32,
+
     pub _drag_point:Option<f32>, // the point in pixels where we are dragging
 }
 
@@ -34,7 +39,8 @@ impl Style for ScrollBar{
         Self{
             bar_size:12.0,
             min_handle_size:30.0,
-
+            smoothing:None,
+            
             axis:Axis::Horizontal,
             animator:Animator::new(Anim::new(Play::Cut{duration:0.5}, vec![
                 Track::color("sb.color", Ease::Lin, vec![(1.0, color("#5"))])
@@ -57,6 +63,10 @@ impl Style for ScrollBar{
             _bar_side_margin:6.0,
             _scroll_size:0.0,
             _scroll_pos:0.0,
+
+            _scroll_pos_target:0.0,
+            _scroll_pos_delta:0.0,
+
             _drag_point:None,
             _hit_state:HitState{
                 no_scrolling:true,
@@ -127,6 +137,7 @@ impl ScrollBar{
 
         let changed = self._scroll_pos != new_scroll_pos;
         self._scroll_pos = new_scroll_pos;
+        self._scroll_pos_target = new_scroll_pos;
         if changed{
             self.update_shader_scroll_pos(cx);
             return self.make_scroll_event();
@@ -148,7 +159,38 @@ impl ScrollBar{
             view_visible:self._view_visible
         }
     }
-  
+
+    fn move_scroll_pos_target(&mut self, cx:&mut Cx, delta:f32)->bool{
+        // clamp scroll_pos to
+        let new_target = (self._scroll_pos_target + delta).min(self._view_total - self._view_visible).max(0.); 
+        if self._scroll_pos_target != new_target{
+            self._scroll_pos_target = new_target;
+            self._scroll_pos_delta = delta;
+            cx.next_frame(self._sb_area);
+            return true
+        };
+        return false
+    }
+
+    fn move_towards_scroll_target(&mut self)->bool{
+        if (self._scroll_pos_target - self._scroll_pos).abs() < 0.01{
+            return false
+        }
+        if self._scroll_pos > self._scroll_pos_target{ // go back
+            self._scroll_pos = self._scroll_pos + self.smoothing.unwrap() * self._scroll_pos_delta;
+            if self._scroll_pos <= self._scroll_pos_target{ // hit the target
+                self._scroll_pos = self._scroll_pos_target;
+            }
+        }
+        else{// go forward
+            self._scroll_pos = self._scroll_pos + self.smoothing.unwrap() * self._scroll_pos_delta;
+            if self._scroll_pos > self._scroll_pos_target{ // hit the target
+                self._scroll_pos = self._scroll_pos_target;
+            }
+        }
+        true
+    }
+
 }
 
 
@@ -180,13 +222,26 @@ impl ScrollBarLike<ScrollBar> for ScrollBar{
                     // we should scroll in either x or y
                     match self.axis{
                         Axis::Horizontal=>{
-                            let scroll_pos= self.get_scroll_pos();
-                            self.set_scroll_pos(cx, scroll_pos + fe.scroll.x);
-                            return self.make_scroll_event();
+                            if !self.smoothing.is_none(){
+                                self.move_scroll_pos_target(cx, fe.scroll.x);
+                                self.move_towards_scroll_target();// take the first step now
+                            }
+                            else{
+                                let scroll_pos = self.get_scroll_pos();
+                                self.set_scroll_pos(cx, scroll_pos + fe.scroll.x);
+                                return self.make_scroll_event();
+                            }
                         },
                         Axis::Vertical=>{
-                            let scroll_pos= self.get_scroll_pos();
-                            self.set_scroll_pos(cx, scroll_pos + fe.scroll.y);
+                            if !self.smoothing.is_none(){
+                                self.move_scroll_pos_target(cx, fe.scroll.y);
+                                self.move_towards_scroll_target(); // take the first step now
+                            }
+                            else{
+                                let scroll_pos = self.get_scroll_pos();
+                                self.set_scroll_pos(cx, scroll_pos + fe.scroll.y);
+                                return self.make_scroll_event();                                
+                            }
                             return self.make_scroll_event();
                         }
                     }
@@ -198,6 +253,12 @@ impl ScrollBarLike<ScrollBar> for ScrollBar{
             match event.hits(cx, self._sb_area, &mut self._hit_state){
                 Event::Animate(ae)=>{
                     self.animator.calc_write(cx, "sb.color", ae.time, self._sb_area);
+                },
+                Event::Frame(ae)=>{
+                    if self.move_towards_scroll_target(){
+                        cx.next_frame(self._sb_area);
+                    }
+                    return self.make_scroll_event()
                 },
                 Event::FingerDown(fe)=>{
                     self.animator.play_anim(cx, self.anim_scrolling.clone());
@@ -351,15 +412,18 @@ impl ScrollBarLike<ScrollBar> for ScrollBar{
             }
         }
 
+        // push the var added to the sb shader
+        if self._visible{
+            self.animator.update_area_refs(cx, self._sb_area); // if our area changed, update animation
+        }
+
         // see if we need to clamp
         let clamped_pos = self._scroll_pos.min(self._view_total - self._view_visible).max(0.); 
         if clamped_pos != self._scroll_pos{
             self._scroll_pos = clamped_pos;
-        }
-
-        // push the var added to the sb shader
-        if self._visible{
-            self.animator.update_area_refs(cx, self._sb_area); // if our area changed, update animation
+            self._scroll_pos_target = clamped_pos;
+            // ok so this means we 'scrolled' this can give a problem for virtual viewport widgets
+            cx.next_frame(self._sb_area);
         }
 
         self._scroll_pos

@@ -50,9 +50,9 @@ pub struct Cx{
     pub redraw_areas:Vec<Area>,
     pub incr_areas:Vec<Area>,
     pub paint_dirty:bool,
-    pub redraws_per_repaint:u32,
     pub clear_color:Color,
     pub redraw_id: u64,
+    pub repaint_id: u64,
     pub event_id: u64,
     pub is_in_redraw_cycle:bool,
 
@@ -74,6 +74,9 @@ pub struct Cx{
 
     pub playing_anim_areas:Vec<AnimArea>,
     pub ended_anim_areas:Vec<AnimArea>,
+
+    pub frame_callbacks:Vec<Area>,
+    pub next_frame_callbacks:Vec<Area>,
 
     pub platform:CxPlatform,
 
@@ -113,9 +116,11 @@ impl Default for Cx{
             incr_areas:Vec::new(),
             paint_dirty:false,
             clear_color:Color{r:0.1, g:0.1, b:0.1, a:1.0},
+
             redraw_id:1,
-            redraws_per_repaint:0,
             event_id:1,
+            repaint_id:1,
+    
             is_in_redraw_cycle:false,
             turtles:Vec::new(),
             align_list:Vec::new(),
@@ -137,6 +142,9 @@ impl Default for Cx{
 
             playing_anim_areas:Vec::new(),
             ended_anim_areas:Vec::new(),
+
+            frame_callbacks:Vec::new(),
+            next_frame_callbacks:Vec::new(),
 
             platform:CxPlatform{..Default::default()},
 
@@ -355,6 +363,10 @@ impl Cx{
         if self.key_focus == old_area{
             self.key_focus = new_area.clone()
         }
+        //
+        if let Some(next_frame) = self.next_frame_callbacks.iter_mut().find(|v| **v == old_area){
+            *next_frame = new_area.clone()
+        }
     }
 
     pub fn color(&self, name:&str)->Color{
@@ -441,11 +453,26 @@ impl Cx{
     pub fn call_animation_event<F>(&mut self, mut event_handler:F, time:f64)
     where F: FnMut(&mut Cx, &mut Event)
     { 
-        self.call_event_handler(&mut event_handler, &mut Event::Animate(AnimateEvent{time:time}));
+        self.call_event_handler(&mut event_handler, &mut Event::Animate(AnimateEvent{time:time, frame:self.repaint_id}));
         self.check_ended_anim_areas(time);
         if self.ended_anim_areas.len() > 0{
-            self.call_event_handler(&mut event_handler, &mut Event::AnimationEnded(AnimateEvent{time:time}));
+            self.call_event_handler(&mut event_handler, &mut Event::AnimationEnded(AnimateEvent{time:time, frame:self.repaint_id}));
         }
+    }
+
+    pub fn call_frame_event<F>(&mut self, mut event_handler:F, time:f64)
+    where F: FnMut(&mut Cx, &mut Event)
+    { 
+        self.frame_callbacks = self.next_frame_callbacks.clone();
+        self.next_frame_callbacks.truncate(0);
+        self.call_event_handler(&mut event_handler, &mut Event::Frame(FrameEvent{time:time, frame:self.repaint_id}));
+    }
+
+    pub fn next_frame(&mut self, area:Area){
+        if let Some(_) = self.next_frame_callbacks.iter().position(|a| *a == area){
+            return;
+        }
+        self.next_frame_callbacks.push(area);
     }
 
     pub fn debug_draw_tree_recur(&mut self, draw_list_id: usize, depth:usize){

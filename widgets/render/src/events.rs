@@ -104,6 +104,13 @@ pub struct ResizedEvent{
 
 #[derive(Clone, Default, Debug, PartialEq)]
 pub struct AnimateEvent{
+    pub frame:u64,
+    pub time:f64
+}
+
+#[derive(Clone, Default, Debug, PartialEq)]
+pub struct FrameEvent{
+    pub frame:u64,
     pub time:f64
 }
 
@@ -154,6 +161,7 @@ pub enum Event{
     AppFocus(bool),
     AnimationEnded(AnimateEvent),
     Animate(AnimateEvent),
+    Frame(FrameEvent),
     CloseRequested,
     Resized(ResizedEvent),
     FingerDown(FingerDownEvent),
@@ -246,6 +254,13 @@ impl Event{
             Event::Animate(_)=>{
                 for anim in &cx.playing_anim_areas{
                     if anim.area == area{
+                        return self.clone()
+                    }
+                }
+            },
+            Event::Frame(_)=>{
+                for area in &cx.frame_callbacks{
+                    if area == area{
                         return self.clone()
                     }
                 }

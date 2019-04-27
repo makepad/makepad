@@ -201,7 +201,7 @@ impl Cx{
         while self.running{
             //println!("{}{} ",self.playing_anim_areas.len(), self.redraw_areas.len());
             cocoa_window.poll_events(
-                self.playing_anim_areas.len() == 0 && self.redraw_areas.len() == 0,
+                self.playing_anim_areas.len() == 0 && self.redraw_areas.len() == 0 && self.next_frame_callbacks.len() == 0,
                 |events|{
                     for mut event in events{
                         match &event{
@@ -243,9 +243,14 @@ impl Cx{
                 let time_now = precise_time_ns();
                 let time = (time_now - start_time) as f64 / 1_000_000_000.0; // keeps the error as low as possible
                 self.call_animation_event(&mut event_handler, time);
-                //let time_now_next = precise_time_ns();
-                //println!("Animation took: {}", ((time_now_next - time_now) as f64) / 1_000_000_000.0);
             }
+
+            if self.next_frame_callbacks.len() != 0{
+                let time_now = precise_time_ns();
+                let time = (time_now - start_time) as f64 / 1_000_000_000.0; // keeps the error as low as possible
+                self.call_frame_event(&mut event_handler, time);
+            }
+
             // call redraw event
             if self.redraw_areas.len()>0{
                 let time_now = precise_time_ns();
@@ -271,6 +276,7 @@ impl Cx{
             // repaint everything if we need to
             if self.paint_dirty{
                 self.paint_dirty = false;
+                self.repaint_id += 1;
                 self.repaint(&layer, &device, &command_queue);
             }
         }

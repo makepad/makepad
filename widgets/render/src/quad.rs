@@ -55,7 +55,6 @@ impl Quad{
                 );
                 pos = (clipped - shift - vec2(x,y)) / vec2(w, h);
                 // only pass the clipped position forward
-                //pos = clipped;
                 return vec4(clipped,0.,1.) * camera_projection;
             }
 

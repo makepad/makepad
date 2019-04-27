@@ -867,7 +867,6 @@
 		}
 
 		clear(r,g,b,a){
-			console.log(this.in_animation_frame);
 			var gl = this.gl;
 			gl.enable(gl.DEPTH_TEST);
 			gl.depthFunc(gl.LEQUAL);

@@ -226,6 +226,8 @@ where TScrollBar: ScrollBarLike<TScrollBar> + Clone + ElementLife
 
         if let Some(scroll_h) = &mut self.scroll_h{
             let scroll_pos = scroll_h.draw_scroll_bar(cx, Axis::Horizontal, view_area, rect_now, view_total);
+            // so, in a virtual viewport widget this isn't actually allowed
+            
             cx.draw_lists[draw_list_id].set_scroll_x(scroll_pos);
         }
         if let Some(scroll_v) = &mut self.scroll_v{
