@@ -177,13 +177,13 @@ impl ScrollBar{
             return false
         }
         if self._scroll_pos > self._scroll_pos_target{ // go back
-            self._scroll_pos = self._scroll_pos + self.smoothing.unwrap() * self._scroll_pos_delta;
+            self._scroll_pos = self._scroll_pos + (self.smoothing.unwrap() * self._scroll_pos_delta).min(-1.);
             if self._scroll_pos <= self._scroll_pos_target{ // hit the target
                 self._scroll_pos = self._scroll_pos_target;
             }
         }
         else{// go forward
-            self._scroll_pos = self._scroll_pos + self.smoothing.unwrap() * self._scroll_pos_delta;
+            self._scroll_pos = self._scroll_pos + (self.smoothing.unwrap() * self._scroll_pos_delta).max(1.);
             if self._scroll_pos > self._scroll_pos_target{ // hit the target
                 self._scroll_pos = self._scroll_pos_target;
             }
@@ -234,6 +234,7 @@ impl ScrollBarLike<ScrollBar> for ScrollBar{
                             }
                         },
                         Axis::Vertical=>{
+                            println!("{}", fe.scroll.y);
                             if !self.smoothing.is_none(){
                                 self.move_scroll_pos_target(cx, fe.scroll.y);
                                 self.move_towards_scroll_target(); // take the first step now

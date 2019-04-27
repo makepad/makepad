@@ -211,6 +211,7 @@ impl CodeEditor{
             Event::FingerMove(fe)=>{
                 let offset = self.text.find_closest_offset(cx, &self._text_area, fe.abs);
                 self.cursors[0].head = offset;
+
                 // determine selection drag scroll dynamics
                 let pow_scale = 0.1;
                 let pow_fac = 3.;
