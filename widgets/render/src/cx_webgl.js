@@ -252,7 +252,9 @@
 			this.req_anim_frame_id = window.requestAnimationFrame(time=>{
 				this.req_anim_frame_id = 0;
 				this.to_wasm.animation_frame(time / 1000.0);
+				this.in_animation_frame = true;
 				this.do_wasm_io();
+				this.in_animation_frame = false;
 			})
 		}
 
@@ -865,6 +867,7 @@
 		}
 
 		clear(r,g,b,a){
+			console.log(this.in_animation_frame);
 			var gl = this.gl;
 			gl.enable(gl.DEPTH_TEST);
 			gl.depthFunc(gl.LEQUAL);

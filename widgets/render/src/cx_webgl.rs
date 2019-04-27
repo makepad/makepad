@@ -252,7 +252,7 @@ impl Cx{
             };
         };
 
-        if self.redraw_areas.len()>0{
+        if is_animation_frame && self.redraw_areas.len()>0{
             self.call_draw_event(&mut event_handler, root_view);
             self.paint_dirty = true;
         }

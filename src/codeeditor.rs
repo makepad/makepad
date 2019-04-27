@@ -84,6 +84,7 @@ impl Style for CodeEditor{
             text:Text{
                 font_id:cx.load_font(&cx.font("mono_font")),
                 font_size:11.0,
+                brightness:1.05,
                 line_spacing:1.4,
                 wrapping:Wrapping::Line,
                 ..Style::style(cx)
@@ -233,6 +234,7 @@ impl CodeEditor{
                         0.
                     }
                 };
+                let last_scroll_none = self._select_scroll.is_none();
                 if delta.x !=0. || delta.y != 0.{
                    self._select_scroll = Some(SelectScroll{
                        abs:fe.abs,
@@ -248,7 +250,10 @@ impl CodeEditor{
                 else{
                     self._select_scroll = None;
                 }
-                self.view.redraw_view_area(cx);
+                if last_scroll_none{
+                    println!("REDRAWING");
+                    self.view.redraw_view_area(cx);
+                }
             },
             Event::KeyDown(ke)=>{
                 match ke.key_code{

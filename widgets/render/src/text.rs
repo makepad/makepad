@@ -17,7 +17,7 @@ pub struct Text{
     pub text:String,
     pub color: Color,
     pub font_size:f32,
-    pub boldness:f32,
+    pub brightness:f32,
     pub line_spacing:f32,
     pub wrapping:Wrapping,
 }
@@ -31,7 +31,7 @@ impl Style for Text{
             text:"".to_string(),
             font_size:cx.size("font_size") as f32,
             line_spacing:1.15,
-            boldness:0.,
+            brightness:1.0,
             wrapping:Wrapping::Word,
             color:color("white")
         }
@@ -74,7 +74,7 @@ impl Text{
             let tex_coord:vec2<Varying>;
             let clipped:vec2<Varying>;
             let rect:vec4<Varying>;
-            
+            let brightness:float<Uniform>;
             fn pixel()->vec4{
                 if marker>0.5{
                     df_viewport(clipped);
@@ -88,7 +88,7 @@ impl Text{
                     let scale = pow(df_antialias(clipped) * 0.002,0.5);
                     df_viewport(tex_coord * tex_size * 0.07);
                     df_shape = -sig_dist - 0.5 / df_aa;
-                    return df_fill(color); 
+                    return df_fill(color*brightness); 
                 }
             }
             
@@ -136,6 +136,7 @@ impl Text{
             aligned.inst.push_uniform_texture_2d(cx, cx.fonts[self.font_id].texture_id);
             //tex_size
             aligned.inst.push_uniform_vec2f(cx, cx.fonts[self.font_id].width as f32, cx.fonts[self.font_id].height as f32);
+            aligned.inst.push_uniform_float(cx, self.brightness);
             //list_clip
             //area.push_uniform_vec4f(cx, -50000.0,-50000.0,50000.0,50000.0);
         }
