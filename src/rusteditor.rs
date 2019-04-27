@@ -115,13 +115,9 @@ impl RustEditor{
                             state.advance();
                         }
                         let tabs = counter >> 2;
-                        let left = counter & 3;
                         last_tabs = tabs;
                         newline_tabs = tabs;
                         self.code_editor.draw_tab_lines(cx, tabs);
-                        for _i in 0..left{
-                            chunk.push(' ');
-                        }
                     }
                     else{
                         chunk.push(state.cur);
