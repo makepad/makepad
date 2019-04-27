@@ -211,24 +211,31 @@ impl CodeEditor{
                 let offset = self.text.find_closest_offset(cx, &self._text_area, fe.abs);
                 self.cursors[0].head = offset;
                 // determine selection drag scroll dynamics
-                let pow_scale:f32 = 0.1;
-                let pow_fac:f32 = 3.;
-                let max_speed:f32 = 40.;
+                let pow_scale = 0.1;
+                let pow_fac = 3.;
+                let max_speed = 40.;
+                let pad_scroll = 20.;
+                let rect = Rect{
+                    x:fe.rect.x+pad_scroll,
+                    y:fe.rect.y+pad_scroll,
+                    w:fe.rect.w-2.*pad_scroll,
+                    h:fe.rect.h-2.*pad_scroll,
+                };
                 let delta = Vec2{
-                    x:if fe.abs.x < fe.rect.x{
-                        -((fe.rect.x - fe.abs.x) * pow_scale).powf(pow_fac).min(max_speed)
+                    x:if fe.abs.x < rect.x{
+                        -((rect.x - fe.abs.x) * pow_scale).powf(pow_fac).min(max_speed)
                     }
-                    else if fe.abs.x > fe.rect.x + fe.rect.w{
-                        ((fe.abs.x - (fe.rect.x + fe.rect.w)) * pow_scale).powf(pow_fac).min(max_speed)
+                    else if fe.abs.x > rect.x + rect.w{
+                        ((fe.abs.x - (rect.x + rect.w)) * pow_scale).powf(pow_fac).min(max_speed)
                     }
                     else{
                         0.
                     },
-                    y:if fe.abs.y < fe.rect.y{
-                        -((fe.rect.y - fe.abs.y) * pow_scale).powf(pow_fac).min(max_speed)
+                    y:if fe.abs.y < rect.y{
+                        -((rect.y - fe.abs.y) * pow_scale).powf(pow_fac).min(max_speed)
                     }
-                    else if fe.abs.y > fe.rect.y + fe.rect.h{
-                        ((fe.abs.y - (fe.rect.y + fe.rect.h)) * pow_scale).powf(pow_fac).min(max_speed)
+                    else if fe.abs.y > rect.y + rect.h{
+                        ((fe.abs.y - (rect.y + rect.h)) * pow_scale).powf(pow_fac).min(max_speed)
                     }
                     else{
                         0.
@@ -251,7 +258,6 @@ impl CodeEditor{
                     self._select_scroll = None;
                 }
                 if last_scroll_none{
-                    println!("REDRAWING");
                     self.view.redraw_view_area(cx);
                 }
             },
