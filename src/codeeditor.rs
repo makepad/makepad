@@ -385,15 +385,16 @@ impl CodeEditor{
 
         // do select scrolling
         if let Some(select_scroll) = &self._select_scroll{
+            let offset = self.text.find_closest_offset(cx, &self._text_area, select_scroll.abs);
+            self.cursors[0].head = offset;
             if self.view.set_scroll_pos(cx, Vec2{
                 x:self._scroll_pos.x + select_scroll.delta.x,
                 y:self._scroll_pos.y + select_scroll.delta.y
             }){
-                let offset = self.text.find_closest_offset(cx, &self._text_area, select_scroll.abs);
-                
-                self.cursors[0].head = offset;
-
                 self.view.redraw_view_area(cx);
+            }
+            else{
+                self._select_scroll = None;
             }
         }
 
