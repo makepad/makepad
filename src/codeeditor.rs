@@ -10,7 +10,7 @@ pub struct CodeEditor{
     pub marker: Quad,
     pub tab:Quad,
     pub text: Text,
-    pub cursors:Vec<Cursor>,
+    pub cursors:CursorSet,
     pub _hit_state:HitState,
     pub _bg_area:Area,
     pub _text_inst:Option<AlignedInstance>,
@@ -44,7 +44,7 @@ impl Style for CodeEditor{
         let marker_sh = Self::def_marker_shader(cx);
         let cursor_sh = Self::def_cursor_shader(cx);
         let code_editor = Self{
-            cursors:vec![Cursor{head:0,tail:0,max:0}],
+            cursors:CursorSet::new(),
             tab:Quad{
                 color:color("#5"),
                 shader_id:cx.add_shader(tab_sh, "Editor.tab"),
@@ -194,12 +194,7 @@ impl CodeEditor{
                 // give us the focus
                 cx.set_key_focus(self._bg_area);
                 let offset = self.text.find_closest_offset(cx, &self._text_area, fe.abs);
-                self.cursors.truncate(0);
-                self.cursors.push(Cursor{
-                    head:offset,
-                    tail:offset,
-                    max:0
-                });
+                self.cursors.clear(offset);
                 self.view.redraw_view_area(cx);
             },
             Event::FingerHover(_fe)=>{
@@ -210,7 +205,7 @@ impl CodeEditor{
             },
             Event::FingerMove(fe)=>{
                 let offset = self.text.find_closest_offset(cx, &self._text_area, fe.abs);
-                self.cursors[0].head = offset;
+                self.cursors.finger_move(offset);
 
                 // determine selection drag scroll dynamics
                 let pow_scale = 0.1;
@@ -266,19 +261,19 @@ impl CodeEditor{
             Event::KeyDown(ke)=>{
                 match ke.key_code{
                     KeyCode::ArrowUp=>{
-                        self.cursors_move_up(1, ke.modifier.shift, text_buffer);
+                        self.cursors.move_up(1, ke.modifier.shift, text_buffer);
                         self.view.redraw_view_area(cx);
                     },
                     KeyCode::ArrowDown=>{
-                        self.cursors_move_down(1, ke.modifier.shift, text_buffer);
+                        self.cursors.move_down(1, ke.modifier.shift, text_buffer);
                         self.view.redraw_view_area(cx);
                     },
                     KeyCode::ArrowLeft=>{
-                        self.cursors_move_left(1, ke.modifier.shift, text_buffer);
+                        self.cursors.move_left(1, ke.modifier.shift, text_buffer);
                         self.view.redraw_view_area(cx);
                     },
                     KeyCode::ArrowRight=>{
-                        self.cursors_move_right(1, ke.modifier.shift, text_buffer);
+                        self.cursors.move_right(1, ke.modifier.shift, text_buffer);
                         self.view.redraw_view_area(cx);
                     },
                     _=>()
@@ -336,7 +331,7 @@ impl CodeEditor{
             self._draw_cursor = DrawCursor::new();
             self._first_on_line = true;
             // prime the next cursor
-            self._draw_cursor.set_next(&self.cursors);
+            self._draw_cursor.set_next(&self.cursors.set);
             // cursor after text
             cx.new_instance_layer(self.cursor.shader_id, 0);
             
@@ -388,7 +383,7 @@ impl CodeEditor{
         // do select scrolling
         if let Some(select_scroll) = &self._select_scroll{
             let offset = self.text.find_closest_offset(cx, &self._text_area, select_scroll.abs);
-            self.cursors[0].head = offset;
+            self.cursors.finger_move(offset);
             if self.view.set_scroll_pos(cx, Vec2{
                 x:self._scroll_pos.x + select_scroll.delta.x,
                 y:self._scroll_pos.y + select_scroll.delta.y
@@ -446,7 +441,7 @@ impl CodeEditor{
 
                 self.text.color = color;
                 // we need to find the next cursor point we need to do something at
-                let cursors = &self.cursors;
+                let cursors = &self.cursors.set;
                 let draw_cursor = &mut self._draw_cursor;
                 let height = self._monospace_size.y;
 
@@ -479,45 +474,72 @@ impl CodeEditor{
         }
     }
 
-    pub fn cursors_merge(&mut self){
-        // merge all cursors
-    }
-
-   pub fn cursors_move_up(&mut self, line_count:usize, only_head:bool, text_buffer:&TextBuffer){
-        for cursor in &mut self.cursors{
-            cursor.move_up(line_count, text_buffer);
-            if !only_head{cursor.tail = cursor.head}
-        }
-        self.cursors_merge()
-    }
-
-    pub fn cursors_move_down(&mut self,line_count:usize, only_head:bool, text_buffer:&TextBuffer){
-        for cursor in &mut self.cursors{
-            cursor.move_down(line_count, text_buffer);
-            if !only_head{cursor.tail = cursor.head}
-        }
-        self.cursors_merge()
-    }
-
-    pub fn cursors_move_left(&mut self, char_count:usize, only_head:bool, text_buffer:&TextBuffer){
-        for cursor in &mut self.cursors{
-            cursor.move_left(char_count, text_buffer);
-            if !only_head{cursor.tail = cursor.head}
-        }
-        self.cursors_merge()
-    }
-
-    pub fn cursors_move_right(&mut self,char_count:usize, only_head:bool, text_buffer:&TextBuffer){
-        for cursor in &mut self.cursors{
-            cursor.move_right(char_count, text_buffer);
-            if !only_head{cursor.tail = cursor.head}
-        }
-        self.cursors_merge()
-    }
 /*
     pub fn cursors_replace_text(&mut self, text:&str, text_buffer:&mut TextBuffer){
 
     }*/
+}
+
+#[derive(Clone)]
+pub struct CursorSet{
+    set:Vec<Cursor>
+}
+
+impl CursorSet{
+    fn new()->CursorSet{
+        CursorSet{
+            set:vec![Cursor{head:0,tail:0,max:0}]
+        }
+    }
+
+    pub fn clear(&mut self, offset:usize){
+        self.set.truncate(0);
+        self.set.push(Cursor{
+            head:offset,
+            tail:offset,
+            max:0
+        });
+    }
+
+    pub fn merge(&mut self){
+        // merge all cursors
+    }
+
+    pub fn finger_move(&mut self, offset:usize){
+        self.set[0].head = offset;
+    }
+
+    pub fn move_up(&mut self, line_count:usize, only_head:bool, text_buffer:&TextBuffer){
+        for cursor in &mut self.set{
+            cursor.move_up(line_count, text_buffer);
+            if !only_head{cursor.tail = cursor.head}
+        }
+        self.merge()
+    }
+
+    pub fn move_down(&mut self,line_count:usize, only_head:bool, text_buffer:&TextBuffer){
+        for cursor in &mut self.set{
+            cursor.move_down(line_count, text_buffer);
+            if !only_head{cursor.tail = cursor.head}
+        }
+        self.merge()
+    }
+
+    pub fn move_left(&mut self, char_count:usize, only_head:bool, text_buffer:&TextBuffer){
+        for cursor in &mut self.set{
+            cursor.move_left(char_count, text_buffer);
+            if !only_head{cursor.tail = cursor.head}
+        }
+        self.merge()
+    }
+
+    pub fn move_right(&mut self,char_count:usize, only_head:bool, text_buffer:&TextBuffer){
+        for cursor in &mut self.set{
+            cursor.move_right(char_count, text_buffer);
+            if !only_head{cursor.tail = cursor.head}
+        }
+        self.merge()
+    }
 }
 
 #[derive(Clone)]
@@ -545,6 +567,7 @@ impl Cursor{
         let (_row,col) = text_buffer.offset_to_row_col(self.head);
         self.max = col;
     }
+
 
     pub fn move_home(&mut self, text_buffer:&TextBuffer){
         self.head = 0;

@@ -180,12 +180,14 @@ impl ScrollBar{
             self._scroll_pos = self._scroll_pos + (self.smoothing.unwrap() * self._scroll_pos_delta).min(-1.);
             if self._scroll_pos <= self._scroll_pos_target{ // hit the target
                 self._scroll_pos = self._scroll_pos_target;
+                return false;
             }
         }
         else{// go forward
             self._scroll_pos = self._scroll_pos + (self.smoothing.unwrap() * self._scroll_pos_delta).max(1.);
             if self._scroll_pos > self._scroll_pos_target{ // hit the target
                 self._scroll_pos = self._scroll_pos_target;
+                return false;
             }
         }
         true
@@ -234,15 +236,13 @@ impl ScrollBarLike<ScrollBar> for ScrollBar{
                             }
                         },
                         Axis::Vertical=>{
-                            println!("{}", fe.scroll.y);
-                            if !self.smoothing.is_none(){
+                            if fe.is_wheel && !self.smoothing.is_none(){ // only smooth wheel
                                 self.move_scroll_pos_target(cx, fe.scroll.y);
                                 self.move_towards_scroll_target(); // take the first step now
                             }
                             else{
                                 let scroll_pos = self.get_scroll_pos();
                                 self.set_scroll_pos(cx, scroll_pos + fe.scroll.y);
-                                return self.make_scroll_event();                                
                             }
                             return self.make_scroll_event();
                         }
@@ -257,6 +257,7 @@ impl ScrollBarLike<ScrollBar> for ScrollBar{
                     self.animator.calc_write(cx, "sb.color", ae.time, self._sb_area);
                 },
                 Event::Frame(ae)=>{
+                    println!("SCROLLSMOOTHING");
                     if self.move_towards_scroll_target(){
                         cx.next_frame(self._sb_area);
                     }

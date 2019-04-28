@@ -215,13 +215,17 @@ impl Cx{
                 10=>{ // finger scroll
                     let x = to_wasm.mf32();
                     let y = to_wasm.mf32();
+                    let scroll_x =  to_wasm.mf32();
+                    let scroll_y =  to_wasm.mf32();
+                    let is_wheel =  to_wasm.mu32() != 0;
                     self.call_event_handler(&mut event_handler, &mut Event::FingerScroll(FingerScrollEvent{
                         modifier:KeyModifier{..Default::default()},
                         abs:Vec2{x:x, y:y},
                         rel:Vec2{x:x, y:y},
                         rect:Rect::zero(),
                         handled:false,
-                        scroll:Vec2{x:to_wasm.mf32(), y:to_wasm.mf32()},
+                        scroll:Vec2{x:scroll_x, y:scroll_y},
+                        is_wheel:is_wheel
                     }));
                 },
                 11=>{

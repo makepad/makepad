@@ -247,12 +247,13 @@ impl CocoaWindow{
                     self.do_callback(&mut vec![
                         Event::FingerScroll(FingerScrollEvent{
                             scroll:Vec2{
-                                x:ns_event.scrollingDeltaX() as f32,
+                                x:-ns_event.scrollingDeltaX() as f32,
                                 y:-ns_event.scrollingDeltaY() as f32
                             },
                             abs:self.last_mouse_pos,
                             rel:self.last_mouse_pos,
                             rect:Rect::zero(),
+                            is_wheel:false,
                             modifier:get_event_key_modifier(ns_event),
                             handled:false
                         })
@@ -261,12 +262,13 @@ impl CocoaWindow{
                     self.do_callback(&mut vec![
                         Event::FingerScroll(FingerScrollEvent{
                             scroll:Vec2{
-                                x:ns_event.scrollingDeltaX() as f32 * 32.,
+                                x:-ns_event.scrollingDeltaX() as f32 * 32.,
                                 y:-ns_event.scrollingDeltaY() as f32 * 32.
                             },
                             abs:self.last_mouse_pos,
                             rel:self.last_mouse_pos,
                             rect:Rect::zero(),
+                            is_wheel:true,
                             modifier:get_event_key_modifier(ns_event),
                             handled:false
                         })

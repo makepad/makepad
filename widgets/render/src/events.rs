@@ -90,6 +90,7 @@ pub struct FingerScrollEvent{
     pub rel:Vec2,
     pub rect:Rect,
     pub scroll:Vec2,
+    pub is_wheel:bool,
     pub handled:bool,
     pub modifier:KeyModifier
 }

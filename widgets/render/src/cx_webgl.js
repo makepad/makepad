@@ -124,12 +124,13 @@
 		}
 		
 		on_finger_wheel(finger){
-			let pos = this.fit(5);
+			let pos = this.fit(6);
 			this.mu32[pos++] = 10;
 			this.mf32[pos++] = finger.x
 			this.mf32[pos++] = finger.y
 			this.mf32[pos++] = finger.x_wheel
 			this.mf32[pos++] = finger.y_wheel
+			this.mu32[pos++] = finger.is_wheel?1:0
 		}
 
 		on_finger_out(x, y){
@@ -732,15 +733,35 @@
 				this.do_wasm_io();
 				return false
 			})
+			var last_wheel_time;
+			var last_was_wheel;
+			var is_firefox = navigator.userAgent.toLowerCase().indexOf('firefox') > -1;
 			canvas.addEventListener('wheel', e=>{
 				var fingers = mouse_to_finger(e)
 				e.preventDefault()
+				let delta = e.timeStamp-last_wheel_time;
+				last_wheel_time = e.timeStamp;
+				// typical web bullshit. this reliably detects mousewheel or touchpad on mac in safari
+				if(is_firefox){
+					last_was_wheel = e.deltaMode == 1
+				}
+				else{ // detect it
+					if(Math.abs(Math.abs((e.deltaY / e.wheelDeltaY)) - (1./3.)) < 0.00001 ||
+						!last_was_wheel && delta < 250){
+						last_was_wheel = false;
+					}
+					else{
+						last_was_wheel = true;
+					}
+				}
+				//console.log(e.deltaY / e.wheelDeltaY);
+				//last_delta = delta;
 				var fac = 1
 				if(e.deltaMode === 1) fac = 40
 				else if(e.deltaMode === 2) fac = window.offsetHeight
-		
 				fingers[0].x_wheel = e.deltaX * fac
 				fingers[0].y_wheel = e.deltaY * fac
+				fingers[0].is_wheel = last_was_wheel;
 				this.on_finger_wheel(fingers)
 				this.do_wasm_io();
 			})
