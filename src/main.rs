@@ -30,7 +30,7 @@ struct App{
     quad:Quad
 }
 
-main_app!(App, "My App!");
+main_app!(App, "Makepad");
  
 impl Style for App{
     fn style(cx:&mut Cx)->Self{
