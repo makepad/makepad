@@ -207,7 +207,7 @@ int main(int argc, const char **argv) {
         finalHeight *= 2;
     }
 
-    int headerLen = (slot)*10*4+4*6;
+    int headerLen = (slot)*10*4+4*7;
     char* header = new char[headerLen];
     unsigned short *u16 = (unsigned short*)header;
     unsigned int *u32 = (unsigned int*)header;
@@ -229,16 +229,17 @@ int main(int argc, const char **argv) {
     }
 
     // output header
-    u32[0] = 0x03F01175;
+    u32[0] = 0x03F01176;
     u16[2] = outWidth;
     u16[3] = finalHeight;
     u32[2] = slot;
     u32[3] = o1;
     u32[4] = o2;
     u32[5] = kernsize / 3;
+    f32[6] = (float) scale;
     // write out font table
     for(int i = 0; i < slot; i++){
-        int o = i*10 + 6;
+        int o = i*10 + 7;
         u32[o+0] = glyph_unicode[i];
         f32[o+1] = glyph_x1[i];
         f32[o+2] = glyph_y1[i];

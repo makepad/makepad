@@ -70,6 +70,7 @@ pub struct Font{
     pub rgbsize:usize,
     pub onesize:usize,
     pub kernsize:usize, 
+    pub scale:f32,
     pub glyphs:Vec<Glyph>,
     pub unicodes:Vec<usize>,
     pub kerntable:Vec<Kern>,
@@ -88,6 +89,7 @@ impl Font{
             rgbsize: inp.u32()? as usize,
             onesize: inp.u32()? as usize,
             kernsize:inp.u32()? as usize,
+            scale:inp.f32()?,
             ..Default::default()
         };
         ff.unicodes.resize(65535, 0);
