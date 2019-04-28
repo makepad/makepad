@@ -1109,7 +1109,6 @@
 				})
 			})
 			req.open("GET", file_path)
-			req.setRequestHeader('Accept-Encoding','gzip');
 			req.send()
 		})
 	}
