@@ -213,6 +213,12 @@
 				})
 				this.do_wasm_block = false;
 				this.do_wasm_io();
+
+				var loaders =	document.getElementsByClassName('cx_webgl_loader');
+				for(var i = 0; i < loaders.length; i++){
+					loaders[i].parentNode.removeChild(loaders[i])
+				}	
+
 			})
 		}
 
@@ -1079,14 +1085,6 @@
 				});
 			// load this wasm file
 		}
-	}
-
-	function compile_progress_shader(){
-		
-	}
-
-	function draw_progress_shader(psh, blob, deps, compile){
-
 	}
 
 	var canvasses =	document.getElementsByClassName('cx_webgl')
