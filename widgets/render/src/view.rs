@@ -191,7 +191,7 @@ where TScrollBar: ScrollBarLike<TScrollBar> + Clone + ElementLife
 
     pub fn set_scroll_pos(&mut self, cx:&mut Cx, pos:Vec2)->bool{
         let draw_list_id = self.draw_list_id.unwrap();
-        let view_area = Area::DrawList(DrawListArea{draw_list_id:draw_list_id, redraw_id:cx.redraw_id});
+        //let view_area = Area::DrawList(DrawListArea{draw_list_id:draw_list_id, redraw_id:cx.redraw_id});
         let mut changed = false;
         if let Some(scroll_h) = &mut self.scroll_h{
             if scroll_h.set_scroll_pos(cx, pos.x){
@@ -250,7 +250,8 @@ where TScrollBar: ScrollBarLike<TScrollBar> + Clone + ElementLife
     pub fn redraw_view_area(&self, cx:&mut Cx){
         if let Some(draw_list_id) = self.draw_list_id{
             let draw_list = &cx.draw_lists[draw_list_id];
-            cx.redraw_area(Area::DrawList(DrawListArea{draw_list_id:draw_list_id, redraw_id:draw_list.redraw_id}))
+            let area = Area::DrawList(DrawListArea{draw_list_id:draw_list_id, redraw_id:draw_list.redraw_id});
+            cx.redraw_area(area);
         }
         else{
             cx.redraw_area(Area::All)

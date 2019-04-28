@@ -256,7 +256,7 @@ impl ScrollBarLike<ScrollBar> for ScrollBar{
                 Event::Animate(ae)=>{
                     self.animator.calc_write(cx, "sb.color", ae.time, self._sb_area);
                 },
-                Event::Frame(ae)=>{
+                Event::Frame(_ae)=>{
                     if self.move_towards_scroll_target(){
                         cx.next_frame(self._sb_area);
                     }
@@ -326,7 +326,7 @@ impl ScrollBarLike<ScrollBar> for ScrollBar{
                      // helper called by event code to scroll from a finger 
                     if self._drag_point.is_none(){
                         // state should never occur.
-                        println!("Invalid state in scrollbar, fingerMove whilst drag_point is none")
+                        //println!("Invalid state in scrollbar, fingerMove whilst drag_point is none")
                     }
                     else{
                         match self.axis{

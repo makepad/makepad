@@ -474,7 +474,7 @@ impl Cx{
         }
         self.next_frame_callbacks.push(area);
     }
-
+/*
     pub fn debug_draw_tree_recur(&mut self, draw_list_id: usize, depth:usize){
         if draw_list_id >= self.draw_lists.len(){
             println!("---------- Drawlist still empty ---------");
@@ -534,7 +534,7 @@ impl Cx{
         if draw_list_id == 0{
             println!("---------- End Debug draw tree for redraw_id: {} ---------", self.redraw_id)
         }
-    }
+    }*/
 }
 
 #[derive(Clone)]

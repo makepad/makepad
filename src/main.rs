@@ -1,3 +1,4 @@
+
 use widgets::*;
 use std::collections::HashMap;
 
@@ -10,7 +11,7 @@ pub use crate::rusteditor::*;
 
 #[derive(Clone)]
 enum Panel{
-    Color(Color),
+    Color(Color), 
     FileTree,
     FileEditorTarget,
     FileEditor{path:String, editor_id:u64}

@@ -292,7 +292,7 @@ impl Cx{
             },
             winit::Event::WindowEvent{ event, .. } => match event {
                 winit::WindowEvent::ReceivedCharacter(chr)=>{
-                    println!("GOT CHARACTER {}", chr);
+                    //println!("GOT CHARACTER {}", chr);
                 },
                 winit::WindowEvent::MouseWheel{delta, ..}=>{
                     return vec![Event::FingerScroll(FingerScrollEvent{

@@ -287,7 +287,7 @@ impl CodeEditor{
                 }
             },
             Event::TextInput(te)=>{
-                println!("TextInput {:?}", te);
+                //println!("TextInput {:?}", te);
             }
             _=>()
         };

@@ -542,8 +542,8 @@ impl Cx{
         pix_out.push_str(&pix_main);
 
         if sh.log != 0{
-            println!("---------- Pixelshader:  ---------\n{}", pix_out);
-            println!("---------- Vertexshader:  ---------\n{}", vtx_out);
+            //println!("---------- Pixelshader:  ---------\n{}", pix_out);
+            //println!("---------- Vertexshader:  ---------\n{}", vtx_out);
         }
         // we can also flatten our uniform variable set
         
