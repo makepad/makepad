@@ -16,7 +16,7 @@ pub struct CodeEditor{
     pub _text_inst:Option<AlignedInstance>,
     pub _text_area:Area,
     pub _scroll_pos:Vec2,
-
+    pub _last_finger_move:Option<Vec2>,
     pub _visibility_margin:Margin,
     pub _select_scroll:Option<SelectScroll>,
     
@@ -92,6 +92,7 @@ impl Style for CodeEditor{
             },
             _hit_state:HitState{no_scrolling:true, ..Default::default()},
             _monospace_size:Vec2::zero(),
+            _last_finger_move:None,
             _first_on_line:true,
             _scroll_pos:Vec2::zero(),
             _visibility_margin:Margin::zero(),
@@ -183,6 +184,10 @@ impl CodeEditor{
                 // generate the entire file as GPU text-buffer just the visible area
                 // in JS this wasn't possible performantly but in Rust its a breeze.
                 self.view.redraw_view_area(cx);
+                if let Some(last_finger_move) = self._last_finger_move{
+                    let offset = self.text.find_closest_offset(cx, &self._text_area, last_finger_move);
+                    self.cursors.finger_move(offset);
+                }
             },
             _=>()
         }
@@ -196,17 +201,19 @@ impl CodeEditor{
                 let offset = self.text.find_closest_offset(cx, &self._text_area, fe.abs);
                 self.cursors.clear(offset);
                 self.view.redraw_view_area(cx);
+                self._last_finger_move = Some(fe.abs);
             },
             Event::FingerHover(_fe)=>{
                 cx.set_hover_mouse_cursor(MouseCursor::Text);
             },
             Event::FingerUp(_fe)=>{
                 self._select_scroll = None;
+                self._last_finger_move = None;
             },
             Event::FingerMove(fe)=>{
                 let offset = self.text.find_closest_offset(cx, &self._text_area, fe.abs);
                 self.cursors.finger_move(offset);
-
+                self._last_finger_move = Some(fe.abs);
                 // determine selection drag scroll dynamics
                 let pow_scale = 0.1;
                 let pow_fac = 3.;

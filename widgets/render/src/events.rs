@@ -273,7 +273,22 @@ impl Event{
                     }
                 }
             },
-           
+            Event::FingerScroll(fe)=>{
+                let rect = if hit_state.no_scrolling{
+                    area.get_rect_no_scrolling(&cx)
+                }
+                else{
+                    area.get_rect(&cx)
+                };
+                if !fe.handled && rect.contains_with_margin(fe.abs.x, fe.abs.y, &hit_state.margin){
+                    fe.handled = true;
+                    return Event::FingerScroll(FingerScrollEvent{
+                        rel:Vec2{x:fe.abs.x - rect.x, y:fe.abs.y - rect.y},
+                        rect:rect,
+                        ..fe.clone()
+                    })
+                }
+            },
             Event::FingerHover(fe)=>{
                 let rect = if hit_state.no_scrolling{
                     area.get_rect_no_scrolling(&cx)

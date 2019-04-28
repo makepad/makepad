@@ -257,7 +257,6 @@ impl ScrollBarLike<ScrollBar> for ScrollBar{
                     self.animator.calc_write(cx, "sb.color", ae.time, self._sb_area);
                 },
                 Event::Frame(ae)=>{
-                    println!("SCROLLSMOOTHING");
                     if self.move_towards_scroll_target(){
                         cx.next_frame(self._sb_area);
                     }
