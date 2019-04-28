@@ -304,7 +304,7 @@ impl CodeEditor{
         //}
         if text_buffer.load_id != 0{
             let bg_inst = self.bg.begin_quad(cx, &Layout{
-                align:Align::center(),
+                align:Align::left_top(),
                 ..self.bg_layout.clone()
             });
             self.text.color = color("#666");
