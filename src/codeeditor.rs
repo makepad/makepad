@@ -307,7 +307,8 @@ impl CodeEditor{
                 align:Align::center(),
                 ..self.bg_layout.clone()
             });
-            self.text.draw_text(cx, "Loading ...");
+            self.text.color = color("#666");
+            self.text.draw_text(cx, "Opening file");
             self.bg.end_quad(cx, &bg_inst);
             self._bg_area = bg_inst.into_area();
             self.view.end_view(cx);
