@@ -114,13 +114,13 @@ impl Cx{
 
             // ok now we should call our render thing
             self.exec_draw_list(0, &device, encoder);
-
+            /*
             match &self.debug_area{
                 Area::All=>self.debug_draw_tree_recur(0, 0),
                 Area::Instance(ia)=>self.debug_draw_tree_recur(ia.draw_list_id, 0),
                 Area::DrawList(dl)=>self.debug_draw_tree_recur(dl.draw_list_id, 0),
                 _=>()
-            }
+            }*/
 
             encoder.end_encoding();
             parallel_encoder.end_encoding();

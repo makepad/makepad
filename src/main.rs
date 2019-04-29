@@ -1,3 +1,4 @@
+//use syn::Type;
 
 use widgets::*;
 use std::collections::HashMap;
@@ -202,8 +203,8 @@ impl App{
 
     fn draw_app(&mut self, cx:&mut Cx){
         
-       // use syn::{Expr, Result};
-
+        //use syn::{Expr, Result};
+        //let t:Result<Expr> = syn::parse_str("std::collections::HashMap<String, Value>");
         //cx.debug_area = Area::Instance(InstanceArea{draw_list_id:0,draw_call_id:0,instance_offset:0,instance_count:0,redraw_id:0});
 
         self.view.begin_view(cx, &Layout{..Default::default()});

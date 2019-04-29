@@ -180,18 +180,19 @@ impl CodeEditor{
     pub fn handle_code_editor(&mut self, cx:&mut Cx, event:&mut Event, text_buffer:&mut TextBuffer)->CodeEditorEvent{
         match self.view.handle_scroll_bars(cx, event){
             (_,ScrollBarEvent::Scroll{..}) | (ScrollBarEvent::Scroll{..},_)=>{
+                if let Some(last_finger_move) = self._last_finger_move{
+                    let offset = self.text.find_closest_offset(cx, &self._text_area, last_finger_move);
+                    self.cursors.update_cursor_drag(offset, text_buffer);
+                }
                 // the editor actually redraws on scroll, its because we don't actually
                 // generate the entire file as GPU text-buffer just the visible area
                 // in JS this wasn't possible performantly but in Rust its a breeze.
                 self.view.redraw_view_area(cx);
-                if let Some(last_finger_move) = self._last_finger_move{
-                    let offset = self.text.find_closest_offset(cx, &self._text_area, last_finger_move);
-                    self.cursors.finger_move(offset);
-                }
             },
             _=>()
         }
         match event.hits(cx, self._bg_area, &mut self._hit_state){
+
             Event::Animate(_ae)=>{
             },
             Event::FingerDown(fe)=>{
@@ -199,7 +200,7 @@ impl CodeEditor{
                 // give us the focus
                 cx.set_key_focus(self._bg_area);
                 let offset = self.text.find_closest_offset(cx, &self._text_area, fe.abs);
-                self.cursors.clear(offset);
+                self.cursors.begin_cursor_drag(fe.modifier.logo, offset, text_buffer);
                 self.view.redraw_view_area(cx);
                 self._last_finger_move = Some(fe.abs);
             },
@@ -207,12 +208,14 @@ impl CodeEditor{
                 cx.set_hover_mouse_cursor(MouseCursor::Text);
             },
             Event::FingerUp(_fe)=>{
+                self.cursors.end_cursor_drag(text_buffer);
                 self._select_scroll = None;
                 self._last_finger_move = None;
             },
             Event::FingerMove(fe)=>{
                 let offset = self.text.find_closest_offset(cx, &self._text_area, fe.abs);
-                self.cursors.finger_move(offset);
+                self.cursors.update_cursor_drag(offset, text_buffer);
+
                 self._last_finger_move = Some(fe.abs);
                 // determine selection drag scroll dynamics
                 let pow_scale = 0.1;
@@ -347,7 +350,7 @@ impl CodeEditor{
         }
     }
     
-    pub fn end_code_editor(&mut self, cx:&mut Cx, _text_buffer:&TextBuffer){
+    pub fn end_code_editor(&mut self, cx:&mut Cx, text_buffer:&TextBuffer){
         // lets insert an empty newline at the bottom so its nicer to scroll
         cx.turtle_new_line();
         cx.walk_turtle(Bounds::Fix(0.0),  Bounds::Fix(self._monospace_size.y),  Margin::zero(), None);
@@ -391,7 +394,7 @@ impl CodeEditor{
         // do select scrolling
         if let Some(select_scroll) = &self._select_scroll{
             let offset = self.text.find_closest_offset(cx, &self._text_area, select_scroll.abs);
-            self.cursors.finger_move(offset);
+            self.cursors.finger_move(offset, text_buffer);
             if self.view.set_scroll_pos(cx, Vec2{
                 x:self._scroll_pos.x + select_scroll.delta.x,
                 y:self._scroll_pos.y + select_scroll.delta.y
@@ -490,31 +493,116 @@ impl CodeEditor{
 
 #[derive(Clone)]
 pub struct CursorSet{
-    set:Vec<Cursor>
+    set:Vec<Cursor>,
+    finger_cursor:Option<usize>
 }
 
 impl CursorSet{
     fn new()->CursorSet{
         CursorSet{
-            set:vec![Cursor{head:0,tail:0,max:0}]
+            set:vec![Cursor{head:0,tail:0,max:0}],
+            finger_cursor:None
         }
     }
 
-    pub fn clear(&mut self, offset:usize){
-        self.set.truncate(0);
-        self.set.push(Cursor{
+    pub fn fuse_adjacent(&mut self, text_buffer:&TextBuffer){
+        let mut index = 0;
+        loop{
+            if self.set.len() < 2 || index >= self.set.len() - 1{ // no more pairs
+                return
+            }
+            // get the pair data
+            let (my_start,my_end) = self.set[index].order();
+            let (next_start,next_end) = self.set[index+1].order();
+            if my_end >= next_start{ // fuse them together
+                // check if we are mergin down or up
+                if my_end < next_end{ // otherwise just remove the next
+                    if self.set[index].tail>self.set[index].head{ // down
+                        self.set[index].head = my_start;
+                        self.set[index].tail = next_end;
+                    }
+                    else{ // up
+                    self.set[index].head = next_end;
+                    self.set[index].tail = my_start;
+                    }
+                    self.set[index].calc_max(text_buffer);
+                    // remove the next item
+                }
+                self.set.remove(index + 1);
+            }
+            index += 1;
+        }
+    }
+
+    pub fn remove_collision(&mut self, offset:usize)->usize{
+        // remove any cursor that intersects us
+        let mut index = 0;
+        loop{
+            if index >= self.set.len(){
+                return index
+            }
+            let (start,end) = self.set[index].order();
+            if offset < start{
+                return index
+            }
+            if offset >= start && offset <=end{
+                if let Some(finger_cursor) = self.finger_cursor{
+                    if finger_cursor > index{ // we remove a cursor before the finger
+                        self.finger_cursor = Some(finger_cursor - 1);
+                        self.set.remove(index);
+                    }
+                    else if finger_cursor != index{ // it something after it so it doesnt matter
+                        self.set.remove(index);
+                    }
+                    else{ // we are the finger_cursor
+                        index += 1;
+                    }
+                }
+                else{
+                    self.set.remove(index);
+                }
+            }
+            else{
+                index += 1;
+            }
+        }
+    }
+
+    // puts the head down
+    pub fn begin_cursor_drag(&mut self, add:bool, offset:usize, text_buffer:&TextBuffer){
+        if !add{
+            self.set.truncate(0);
+        }
+
+        let index = self.remove_collision(offset);
+        
+        self.set.insert(index, Cursor{
             head:offset,
             tail:offset,
             max:0
         });
+        self.finger_cursor = Some(index);
+        self.set[index].calc_max(text_buffer);
     }
 
-    pub fn merge(&mut self){
-        // merge all cursors
+    pub fn update_cursor_drag(&mut self, offset:usize, text_buffer:&TextBuffer){
+
+        // remove any cursor that intersects us
+        self.remove_collision(offset);
+
+        if let Some(finger_cursor) = self.finger_cursor{
+            self.set[finger_cursor].head = offset;
+            self.set[finger_cursor].calc_max(text_buffer);
+        }
     }
 
-    pub fn finger_move(&mut self, offset:usize){
+    pub fn end_cursor_drag(&mut self, _text_buffer:&TextBuffer){
+        self.finger_cursor = None;
+    }
+
+    pub fn finger_move(&mut self, offset:usize, text_buffer:&TextBuffer){
         self.set[0].head = offset;
+        self.set[0].calc_max(text_buffer);
     }
 
     pub fn move_up(&mut self, line_count:usize, only_head:bool, text_buffer:&TextBuffer){
@@ -522,7 +610,7 @@ impl CursorSet{
             cursor.move_up(line_count, text_buffer);
             if !only_head{cursor.tail = cursor.head}
         }
-        self.merge()
+        self.fuse_adjacent(text_buffer)
     }
 
     pub fn move_down(&mut self,line_count:usize, only_head:bool, text_buffer:&TextBuffer){
@@ -530,7 +618,7 @@ impl CursorSet{
             cursor.move_down(line_count, text_buffer);
             if !only_head{cursor.tail = cursor.head}
         }
-        self.merge()
+        self.fuse_adjacent(text_buffer)
     }
 
     pub fn move_left(&mut self, char_count:usize, only_head:bool, text_buffer:&TextBuffer){
@@ -538,7 +626,7 @@ impl CursorSet{
             cursor.move_left(char_count, text_buffer);
             if !only_head{cursor.tail = cursor.head}
         }
-        self.merge()
+        self.fuse_adjacent(text_buffer)
     }
 
     pub fn move_right(&mut self,char_count:usize, only_head:bool, text_buffer:&TextBuffer){
@@ -546,7 +634,7 @@ impl CursorSet{
             cursor.move_right(char_count, text_buffer);
             if !only_head{cursor.tail = cursor.head}
         }
-        self.merge()
+        self.fuse_adjacent(text_buffer)
     }
 }
 
@@ -562,7 +650,7 @@ impl Cursor{
         self.head != self.tail
     }
 
-    pub fn sort(&self)->(usize,usize){
+    pub fn order(&self)->(usize,usize){
         if self.head > self.tail{
             (self.tail,self.head)
         }
@@ -575,7 +663,6 @@ impl Cursor{
         let (_row,col) = text_buffer.offset_to_row_col(self.head);
         self.max = col;
     }
-
 
     pub fn move_home(&mut self, text_buffer:&TextBuffer){
         self.head = 0;
@@ -673,7 +760,7 @@ impl DrawCursor{
         if self.next_index < cursors.len(){
             self.emit_selection(false);
             let cursor = &cursors[self.next_index];
-            let (start,end) = cursor.sort();
+            let (start,end) = cursor.order();
             self.start = start;
             self.end = end;
             self.head = cursor.head;

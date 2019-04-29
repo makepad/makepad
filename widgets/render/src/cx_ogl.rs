@@ -295,22 +295,22 @@ impl Cx{
                     //println!("GOT CHARACTER {}", chr);
                 },
                 winit::WindowEvent::MouseWheel{delta, ..}=>{
+                    let (x, xis_wheel) = match delta{
+                        winit::MouseScrollDelta::LineDelta(dx,_dy)=>(-dx*32.0, true),
+                        winit::MouseScrollDelta::PixelDelta(pp)=>(-pp.x as f32, false)
+                    };
+                    let (y, yis_wheel) = match delta{
+                        winit::MouseScrollDelta::LineDelta(_dx,dy)=>(-dy*32.0, true),
+                        winit::MouseScrollDelta::PixelDelta(pp)=>(-pp.y as f32, false)
+                    };
                     return vec![Event::FingerScroll(FingerScrollEvent{
                         modifier:KeyModifier{..Default::default()},
                         abs:self.platform.last_mouse_pos,
                         rel:self.platform.last_mouse_pos,
                         rect:Rect::zero(),
+                        is_wheel:yis_wheel || xis_wheel,
                         handled:false,
-                        scroll:Vec2{
-                            x:match delta{
-                                winit::MouseScrollDelta::LineDelta(dx,_dy)=>-dx*32.0,
-                                winit::MouseScrollDelta::PixelDelta(pp)=>pp.x as f32
-                            },
-                            y:match delta{
-                                winit::MouseScrollDelta::LineDelta(_dx,dy)=>-dy*32.0,
-                                winit::MouseScrollDelta::PixelDelta(pp)=>pp.y as f32
-                            }
-                        } 
+                        scroll:Vec2{x:x, y:y} 
                     })]
                 },
                 winit::WindowEvent::CursorMoved{position,..}=>{
