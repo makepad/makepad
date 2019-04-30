@@ -18,6 +18,7 @@ pub struct CodeEditor{
     pub _scroll_pos:Vec2,
     pub _last_finger_move:Option<Vec2>,
     pub _line_geometry:Vec<LineGeom>,
+    pub _visible_lines:usize,
     pub _visibility_margin:Margin,
     pub _select_scroll:Option<SelectScroll>,
     
@@ -103,6 +104,7 @@ impl Style for CodeEditor{
             _first_on_line:true,
             _scroll_pos:Vec2::zero(),
             _visibility_margin:Margin::zero(),
+            _visible_lines:0, 
             _line_geometry:Vec::new(),
             _bg_area:Area::Empty,
             _text_inst:None,
@@ -295,11 +297,11 @@ impl CodeEditor{
                         true
                     },
                     KeyCode::PageUp=>{
-                        self.cursors.move_up(self._line_geometry.len().min(20), ke.modifier.shift, text_buffer);
+                        self.cursors.move_up(self._visible_lines.max(5) - 5, ke.modifier.shift, text_buffer);
                         true
                     },
                     KeyCode::PageDown=>{
-                        self.cursors.move_down(self._line_geometry.len().min(20), ke.modifier.shift, text_buffer);
+                        self.cursors.move_down(self._visible_lines.max(5) - 5, ke.modifier.shift, text_buffer);
                         true
                     },
                     KeyCode::Home=>{
@@ -370,6 +372,7 @@ impl CodeEditor{
             self._line_geometry.truncate(0);
             self._draw_cursor = DrawCursor::new();
             self._first_on_line = true;
+            self._visible_lines = 0;
             // prime the next cursor
             self._draw_cursor.set_next(&self.cursors.set);
             // cursor after text
@@ -497,6 +500,7 @@ impl CodeEditor{
 
                 if self._first_on_line{
                     self._first_on_line = false;
+                    self._visible_lines += 1;
                 }
 
                 self.text.color = color;
