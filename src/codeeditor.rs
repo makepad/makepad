@@ -297,11 +297,11 @@ impl CodeEditor{
                         true
                     },
                     KeyCode::PageUp=>{
-                        self.cursors.move_up(self._visible_lines.max(5) - 5, ke.modifier.shift, text_buffer);
+                        self.cursors.move_up(self._visible_lines.max(5) - 4, ke.modifier.shift, text_buffer);
                         true
                     },
                     KeyCode::PageDown=>{
-                        self.cursors.move_down(self._visible_lines.max(5) - 5, ke.modifier.shift, text_buffer);
+                        self.cursors.move_down(self._visible_lines.max(5) - 4, ke.modifier.shift, text_buffer);
                         true
                     },
                     KeyCode::Home=>{
