@@ -560,5 +560,7 @@ pub enum KeyCode {
     ArrowDown,
     ArrowLeft,
     ArrowRight,
+
+    Unknown
 }
 

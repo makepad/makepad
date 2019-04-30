@@ -297,6 +297,15 @@ impl Cx{
         }
     }
 
+     pub fn get_rel_turtle_walk(&self)->Vec2{
+        if let Some(turtle) = self.turtles.last(){
+            Vec2{x:turtle.walk.x - turtle.start.x, y:turtle.walk.y - turtle.start.y}
+        }
+        else{
+            Vec2::zero()
+        }
+    }    
+
     pub fn visible_in_turtle(&self, geom:Rect, margin:Margin, scroll:Vec2)->bool{
         if let Some(turtle) = self.turtles.last(){
             let view = Rect{

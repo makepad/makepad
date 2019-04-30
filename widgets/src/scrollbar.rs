@@ -160,12 +160,16 @@ impl ScrollBar{
         }
     }
 
-    fn move_scroll_pos_target(&mut self, cx:&mut Cx, delta:f32)->bool{
+    fn get_scroll_pos_target(&mut self)->f32{
+        return self._scroll_pos_target
+    }
+
+    fn set_scroll_pos_target(&mut self, cx:&mut Cx, scroll_pos_target:f32)->bool{
         // clamp scroll_pos to
-        let new_target = (self._scroll_pos_target + delta).min(self._view_total - self._view_visible).max(0.); 
+        let new_target = scroll_pos_target.min(self._view_total - self._view_visible).max(0.); 
         if self._scroll_pos_target != new_target{
             self._scroll_pos_target = new_target;
-            self._scroll_pos_delta = delta;
+            self._scroll_pos_delta = new_target - self._scroll_pos;
             cx.next_frame(self._sb_area);
             return true
         };
@@ -211,9 +215,31 @@ impl ScrollBarLike<ScrollBar> for ScrollBar{
             self._scroll_pos = scroll_pos;
             self._scroll_pos_target = scroll_pos;
             self.update_shader_scroll_pos(cx);
+            cx.next_frame(self._sb_area);
             return true
         };
         return false
+    }
+
+    fn scroll_into_view(&mut self, cx:&mut Cx, pos:f32, size:f32){
+        if pos < self._scroll_pos{ // scroll up
+            let scroll_to = pos;
+            if self.smoothing.is_none(){
+                self.set_scroll_pos(cx, scroll_to);
+            }
+            else{
+                self.set_scroll_pos_target(cx, scroll_to);
+            }
+        }
+        else if pos + size > self._scroll_pos + self._view_visible{ // scroll down
+            let scroll_to = (pos+size) - self._view_visible;
+            if self.smoothing.is_none(){
+                self.set_scroll_pos(cx, scroll_to);
+            }
+            else{
+                self.set_scroll_pos_target(cx, scroll_to);
+            }
+        }
     }
 
     fn handle_scroll_bar(&mut self, cx:&mut Cx, event:&mut Event)->ScrollBarEvent{
@@ -223,29 +249,19 @@ impl ScrollBarLike<ScrollBar> for ScrollBar{
                 let rect = self._view_area.get_rect(cx);
                 if rect.contains(fe.abs.x, fe.abs.y){ // handle mousewheel
                     // we should scroll in either x or y
-                    match self.axis{
-                        Axis::Horizontal=>{
-                            if !self.smoothing.is_none(){
-                                self.move_scroll_pos_target(cx, fe.scroll.x);
-                                self.move_towards_scroll_target();// take the first step now
-                            }
-                            else{
-                                let scroll_pos = self.get_scroll_pos();
-                                self.set_scroll_pos(cx, scroll_pos + fe.scroll.x);
-                                return self.make_scroll_event();
-                            }
-                        },
-                        Axis::Vertical=>{
-                            if fe.is_wheel && !self.smoothing.is_none(){ // only smooth wheel
-                                self.move_scroll_pos_target(cx, fe.scroll.y);
-                                self.move_towards_scroll_target(); // take the first step now
-                            }
-                            else{
-                                let scroll_pos = self.get_scroll_pos();
-                                self.set_scroll_pos(cx, scroll_pos + fe.scroll.y);
-                            }
-                            return self.make_scroll_event();
-                        }
+                    let scroll =  match self.axis{
+                        Axis::Horizontal=>fe.scroll.x,
+                        Axis::Vertical=>fe.scroll.y
+                    };
+                    if !self.smoothing.is_none(){
+                        let scroll_pos_target = self.get_scroll_pos_target();
+                        self.set_scroll_pos_target(cx, scroll_pos_target+ scroll);
+                        self.move_towards_scroll_target();// take the first step now
+                    }
+                    else{
+                        let scroll_pos = self.get_scroll_pos();
+                        self.set_scroll_pos(cx, scroll_pos + scroll);
+                        return self.make_scroll_event();
                     }
                 }
             },
@@ -264,35 +280,20 @@ impl ScrollBarLike<ScrollBar> for ScrollBar{
                 },
                 Event::FingerDown(fe)=>{
                     self.animator.play_anim(cx, self.anim_scrolling.clone());
-
-                    match self.axis{
-                        Axis::Horizontal=>{
-                            //drag_start
-                            let (norm_scroll, norm_handle) = self.get_normalized_scroll_pos();
-                            let bar_x = norm_scroll * self._scroll_size;
-                            let bar_w = norm_handle * self._scroll_size;
-                            if fe.rel.x < bar_x || fe.rel.x > bar_w + bar_x{ // clicked below
-                                self._drag_point = Some(bar_w * 0.5);
-                                return self.set_scroll_pos_from_finger(cx, fe.rel.x - self._drag_point.unwrap());
-                            }
-                            else{ // clicked on
-                                self._drag_point = Some(fe.rel.x - bar_x); // store the drag delta
-                            }
-                        },
-                        Axis::Vertical=>{
-                            // computed handle size normalized
-                            let (norm_scroll, norm_handle) = self.get_normalized_scroll_pos();
-                            let bar_y = norm_scroll * self._scroll_size;
-                            let bar_h = norm_handle * self._scroll_size;
-                            if fe.rel.y < bar_y || fe.rel.y > bar_h + bar_y{ // clicked below or above
-                                self._drag_point = Some(bar_h * 0.5);
-                                return self.set_scroll_pos_from_finger(cx, fe.rel.y - self._drag_point.unwrap());
-                            }
-                            else{ // clicked on
-                                self._drag_point = Some(fe.rel.y - bar_y); // store the drag delta
-                            }
-                        }
-                    }        
+                    let rel = match self.axis{
+                        Axis::Horizontal=>fe.rel.x,
+                        Axis::Vertical=>fe.rel.y
+                    };
+                    let (norm_scroll, norm_handle) = self.get_normalized_scroll_pos();
+                    let bar_start = norm_scroll * self._scroll_size;
+                    let bar_size = norm_handle * self._scroll_size;
+                    if rel < bar_start || rel > bar_start + bar_size{ // clicked outside
+                        self._drag_point = Some(bar_size * 0.5);
+                        return self.set_scroll_pos_from_finger(cx, rel - self._drag_point.unwrap());
+                    }
+                    else{ // clicked on
+                        self._drag_point = Some(rel - bar_start); // store the drag delta
+                    }
                 },
                 Event::FingerHover(fe)=>{
                     if self._drag_point.is_none(){

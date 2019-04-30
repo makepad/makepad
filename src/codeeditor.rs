@@ -17,6 +17,7 @@ pub struct CodeEditor{
     pub _text_area:Area,
     pub _scroll_pos:Vec2,
     pub _last_finger_move:Option<Vec2>,
+    pub _line_geometry:Vec<LineGeom>,
     pub _visibility_margin:Margin,
     pub _select_scroll:Option<SelectScroll>,
     
@@ -24,6 +25,12 @@ pub struct CodeEditor{
     pub _instance_count:usize,
     pub _first_on_line:bool,
     pub _draw_cursor:DrawCursor
+}
+
+#[derive(Clone, Default)]
+pub struct LineGeom{
+    walk:Vec2,
+    font_size:f32
 }
 
 #[derive(Clone, Default)]
@@ -55,7 +62,7 @@ impl Style for CodeEditor{
                     ..Style::style(cx)
                 }),
                 scroll_v:Some(ScrollBar{
-                    smoothing:Some(0.25),
+                    smoothing:Some(0.15),
                     ..Style::style(cx)
                 }),
                 ..Style::style(cx)
@@ -96,6 +103,7 @@ impl Style for CodeEditor{
             _first_on_line:true,
             _scroll_pos:Vec2::zero(),
             _visibility_margin:Margin::zero(),
+            _line_geometry:Vec::new(),
             _bg_area:Area::Empty,
             _text_inst:None,
             _text_area:Area::Empty,
@@ -269,24 +277,44 @@ impl CodeEditor{
                 }
             },
             Event::KeyDown(ke)=>{
-                match ke.key_code{
+                let cursor_moved = match ke.key_code{
                     KeyCode::ArrowUp=>{
                         self.cursors.move_up(1, ke.modifier.shift, text_buffer);
-                        self.view.redraw_view_area(cx);
+                        true
                     },
                     KeyCode::ArrowDown=>{
                         self.cursors.move_down(1, ke.modifier.shift, text_buffer);
-                        self.view.redraw_view_area(cx);
+                        true
                     },
                     KeyCode::ArrowLeft=>{
                         self.cursors.move_left(1, ke.modifier.shift, text_buffer);
-                        self.view.redraw_view_area(cx);
+                        true
                     },
                     KeyCode::ArrowRight=>{
                         self.cursors.move_right(1, ke.modifier.shift, text_buffer);
-                        self.view.redraw_view_area(cx);
+                        true
                     },
-                    _=>()
+                    KeyCode::PageUp=>{
+                        self.cursors.move_up(self._line_geometry.len().min(20), ke.modifier.shift, text_buffer);
+                        true
+                    },
+                    KeyCode::PageDown=>{
+                        self.cursors.move_down(self._line_geometry.len().min(20), ke.modifier.shift, text_buffer);
+                        true
+                    },
+                    KeyCode::Home=>{
+                        self.cursors.move_home(ke.modifier.shift, text_buffer);
+                        true
+                    },
+                    KeyCode::End=>{
+                        self.cursors.move_end(ke.modifier.shift, text_buffer);
+                        true
+                    },
+                    _=>false
+                };
+                if cursor_moved{
+                    self.scroll_last_cursor_visible(cx, text_buffer);
+                    self.view.redraw_view_area(cx);
                 }
             },
             Event::TextInput(te)=>{
@@ -338,7 +366,8 @@ impl CodeEditor{
                 Margin::zero()
             };
 
-            self._monospace_size = self.text.get_monospace_size(cx);
+            self._monospace_size = self.text.get_monospace_size(cx, None);
+            self._line_geometry.truncate(0);
             self._draw_cursor = DrawCursor::new();
             self._first_on_line = true;
             // prime the next cursor
@@ -394,7 +423,7 @@ impl CodeEditor{
         // do select scrolling
         if let Some(select_scroll) = &self._select_scroll{
             let offset = self.text.find_closest_offset(cx, &self._text_area, select_scroll.abs);
-            self.cursors.finger_move(offset, text_buffer);
+            self.cursors.update_cursor_drag(offset, text_buffer);
             if self.view.set_scroll_pos(cx, Vec2{
                 x:self._scroll_pos.x + select_scroll.delta.x,
                 y:self._scroll_pos.y + select_scroll.delta.y
@@ -424,7 +453,27 @@ impl CodeEditor{
         }
     }
 
+    // set it once per line otherwise the LineGeom stuff isn't really working out.
+    pub fn set_font_size(&mut self, cx:&Cx, font_size:f32){
+        self.text.font_size = font_size;
+        self._monospace_size = self.text.get_monospace_size(cx, None);
+    }
+
     pub fn new_line(&mut self, cx:&mut Cx){
+        // line geometry is used for scrolling look up of cursors
+        self._line_geometry.push(
+            LineGeom{
+                walk:cx.get_rel_turtle_walk(),
+                font_size:self.text.font_size
+            }
+        );
+        // add a bit of room to the right
+        cx.walk_turtle(
+            Bounds::Fix(self._monospace_size.x * 3.), 
+            Bounds::Fix(self._monospace_size.y), 
+            Margin::zero(),
+            None
+        );
         cx.turtle_new_line();
         self._first_on_line = true;
         let mut draw_cursor = &mut self._draw_cursor;
@@ -485,6 +534,28 @@ impl CodeEditor{
         }
     }
 
+    fn scroll_last_cursor_visible(&mut self, cx:&mut Cx, text_buffer:&TextBuffer){
+        // so we have to compute (approximately) the rect of our cursor
+        if self.cursors.last_cursor >= self.cursors.set.len(){
+            panic!("LAST CURSOR INVALID");
+        }
+        let offset = self.cursors.set[self.cursors.last_cursor].head;
+        let (row, col) = text_buffer.offset_to_row_col(offset);
+        // alright now lets query the line geometry
+        if row < self._line_geometry.len(){
+            let geom = &self._line_geometry[row];
+            let mono_size = self.text.get_monospace_size(cx, Some(geom.font_size));
+            let rect = Rect{
+                x:(col as f32) * mono_size.x,
+                y:geom.walk.y - mono_size.y * 1.,
+                w:mono_size.x * 4.,
+                h:mono_size.y * 3.
+            };
+            // scroll this cursor into view
+            self.view.scroll_into_view(cx, rect);
+        }
+    }
+
 /*
     pub fn cursors_replace_text(&mut self, text:&str, text_buffer:&mut TextBuffer){
 
@@ -494,14 +565,14 @@ impl CodeEditor{
 #[derive(Clone)]
 pub struct CursorSet{
     set:Vec<Cursor>,
-    finger_cursor:Option<usize>
+    last_cursor:usize
 }
 
 impl CursorSet{
     fn new()->CursorSet{
         CursorSet{
             set:vec![Cursor{head:0,tail:0,max:0}],
-            finger_cursor:None
+            last_cursor:0
         }
     }
 
@@ -528,6 +599,9 @@ impl CursorSet{
                     self.set[index].calc_max(text_buffer);
                     // remove the next item
                 }
+                if self.last_cursor > index{
+                    self.last_cursor -= 1;
+                }
                 self.set.remove(index + 1);
             }
             index += 1;
@@ -546,20 +620,15 @@ impl CursorSet{
                 return index
             }
             if offset >= start && offset <=end{
-                if let Some(finger_cursor) = self.finger_cursor{
-                    if finger_cursor > index{ // we remove a cursor before the finger
-                        self.finger_cursor = Some(finger_cursor - 1);
-                        self.set.remove(index);
-                    }
-                    else if finger_cursor != index{ // it something after it so it doesnt matter
-                        self.set.remove(index);
-                    }
-                    else{ // we are the finger_cursor
-                        index += 1;
-                    }
-                }
-                else{
+                if self.last_cursor > index{ // we remove a cursor before the last_cursor
+                    self.last_cursor = self.last_cursor - 1;
                     self.set.remove(index);
+                }
+                else if self.last_cursor != index{ // it something after it so it doesnt matter
+                    self.set.remove(index);
+                }
+                else{ // we are the last_cursor
+                    index += 1;
                 }
             }
             else{
@@ -581,7 +650,7 @@ impl CursorSet{
             tail:offset,
             max:0
         });
-        self.finger_cursor = Some(index);
+        self.last_cursor = index;
         self.set[index].calc_max(text_buffer);
     }
 
@@ -590,19 +659,27 @@ impl CursorSet{
         // remove any cursor that intersects us
         self.remove_collision(offset);
 
-        if let Some(finger_cursor) = self.finger_cursor{
-            self.set[finger_cursor].head = offset;
-            self.set[finger_cursor].calc_max(text_buffer);
-        }
+        self.set[self.last_cursor].head = offset;
+        self.set[self.last_cursor].calc_max(text_buffer);
     }
 
     pub fn end_cursor_drag(&mut self, _text_buffer:&TextBuffer){
-        self.finger_cursor = None;
     }
 
-    pub fn finger_move(&mut self, offset:usize, text_buffer:&TextBuffer){
-        self.set[0].head = offset;
-        self.set[0].calc_max(text_buffer);
+    pub fn move_home(&mut self,only_head:bool, text_buffer:&TextBuffer){
+        for cursor in &mut self.set{
+            cursor.move_home(text_buffer);
+            if !only_head{cursor.tail = cursor.head}
+        }
+        self.fuse_adjacent(text_buffer)
+    }
+
+    pub fn move_end(&mut self,only_head:bool, text_buffer:&TextBuffer){
+        for cursor in &mut self.set{
+            cursor.move_end(text_buffer);
+            if !only_head{cursor.tail = cursor.head}
+        }
+        self.fuse_adjacent(text_buffer)
     }
 
     pub fn move_up(&mut self, line_count:usize, only_head:bool, text_buffer:&TextBuffer){
@@ -665,12 +742,22 @@ impl Cursor{
     }
 
     pub fn move_home(&mut self, text_buffer:&TextBuffer){
-        self.head = 0;
-        self.calc_max(text_buffer);
+        let (row, _col) = text_buffer.offset_to_row_col(self.head);
+
+        // alright lets walk the line from the left till its no longer 9 or 32
+        for (pos,ch) in text_buffer.lines[row].iter().enumerate(){
+            if *ch != '\t' && *ch != ' '{
+                self.head = text_buffer.row_col_to_offset(row, pos);
+                self.calc_max(text_buffer);
+                return
+            }
+        }
     }
 
     pub fn move_end(&mut self, text_buffer:&TextBuffer){
-        self.head = text_buffer.get_char_count();
+        let (row, _col) = text_buffer.offset_to_row_col(self.head);
+        // alright lets walk the line from the left till its no longer 9 or 32
+        self.head = text_buffer.row_col_to_offset(row, text_buffer.lines[row].len());
         self.calc_max(text_buffer);
     }
 

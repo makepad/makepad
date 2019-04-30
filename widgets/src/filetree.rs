@@ -116,21 +116,21 @@ impl<'a> FileWalker<'a>{
 
     pub fn walk(&mut self)->Option<(usize, usize, usize, &mut FileNode)>{
         // lets get the current item on the stack
-        let stack_len = self.stack.len() - 1;
+        let stack_len = self.stack.len();
         let push_or_pop = if let Some(stack_top) = self.stack.last_mut(){
             // return item 'count'
             match stack_top.node{
                 FileNode::File{..}=>{
                     stack_top.counter += 1;
                     if stack_top.counter == 1{
-                        return Some((stack_len, stack_top.index, stack_top.len, unsafe{std::mem::transmute(&mut *stack_top.node)}));
+                        return Some((stack_len - 1, stack_top.index, stack_top.len, unsafe{std::mem::transmute(&mut *stack_top.node)}));
                     }
                     None // pop stack
                 },
                 FileNode::Folder{folder, state, ..}=>{
                     stack_top.counter += 1;
                     if stack_top.counter == 1{ // return self
-                        return Some((stack_len, stack_top.index, stack_top.len, unsafe{std::mem::transmute(&mut *stack_top.node)}));
+                        return Some((stack_len - 1, stack_top.index, stack_top.len, unsafe{std::mem::transmute(&mut *stack_top.node)}));
                     }
                     else{
                         let child_index = stack_top.counter - 2;

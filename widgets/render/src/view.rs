@@ -5,6 +5,7 @@ pub trait ScrollBarLike<ScrollBarT>{
     fn handle_scroll_bar(&mut self, cx:&mut Cx, event:&mut Event)->ScrollBarEvent;
     fn set_scroll_pos(&mut self, cx:&mut Cx, scroll_pos:f32)->bool;
     fn get_scroll_pos(&self)->f32;
+    fn scroll_into_view(&mut self, cx:&mut Cx, pos:f32, size:f32);
 }
 
 #[derive(Clone, PartialEq)]
@@ -61,6 +62,7 @@ impl ScrollBarLike<NoScrollBar> for NoScrollBar{
     }
     fn set_scroll_pos(&mut self, _cx:&mut Cx, _scroll_pos:f32)->bool{false}
     fn get_scroll_pos(&self)->f32{0.}
+    fn scroll_into_view(&mut self, _cx:&mut Cx, _pos:f32, _size:f32){}
 }
 
 impl<TScrollBar> View<TScrollBar>
@@ -208,6 +210,15 @@ where TScrollBar: ScrollBarLike<TScrollBar> + Clone + ElementLife
             }
         }
         changed
+    }
+
+    pub fn scroll_into_view(&mut self, cx:&mut Cx, rect:Rect){
+        if let Some(scroll_h) = &mut self.scroll_h{
+            scroll_h.scroll_into_view(cx, rect.x, rect.w);
+        }
+        if let Some(scroll_v) = &mut self.scroll_v{
+            scroll_v.scroll_into_view(cx, rect.y, rect.h);
+        }
     }
 
     pub fn end_view(&mut self, cx:&mut Cx)->Area{
