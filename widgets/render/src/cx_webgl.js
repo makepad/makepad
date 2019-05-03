@@ -830,6 +830,7 @@
 				ta.selectionStart = 0;
 				ta.selectionEnd = ta.value.length;
 				this.to_wasm.on_text_input(ta.value);
+				this.do_wasm_io();
 			})
 			ta.addEventListener('touchmove', e=>{
 				
@@ -853,6 +854,8 @@
 					is_repeat:e.repeat,
 					modifiers:pack_key_modifier(e)
 				})
+
+				
 				this.do_wasm_io();
 			})
 			ta.addEventListener('keyup', e=>{
