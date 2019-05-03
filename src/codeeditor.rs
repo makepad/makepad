@@ -210,7 +210,7 @@ impl CodeEditor{
                 // give us the focus
                 cx.set_key_focus(self._bg_area);
                 let offset = self.text.find_closest_offset(cx, &self._text_area, fe.abs);
-                self.cursors.begin_cursor_drag(fe.modifier.logo, offset, text_buffer);
+                self.cursors.begin_cursor_drag(fe.modifiers.logo, offset, text_buffer);
                 self.view.redraw_view_area(cx);
                 self._last_finger_move = Some(fe.abs);
             },
@@ -281,37 +281,64 @@ impl CodeEditor{
             Event::KeyDown(ke)=>{
                 let cursor_moved = match ke.key_code{
                     KeyCode::ArrowUp=>{
-                        self.cursors.move_up(1, ke.modifier.shift, text_buffer);
+                        self.cursors.move_up(1, ke.modifiers.shift, text_buffer);
                         true
                     },
                     KeyCode::ArrowDown=>{
-                        self.cursors.move_down(1, ke.modifier.shift, text_buffer);
+                        self.cursors.move_down(1, ke.modifiers.shift, text_buffer);
                         true
                     },
                     KeyCode::ArrowLeft=>{
-                        self.cursors.move_left(1, ke.modifier.shift, text_buffer);
+                        self.cursors.move_left(1, ke.modifiers.shift, text_buffer);
                         true
                     },
                     KeyCode::ArrowRight=>{
-                        self.cursors.move_right(1, ke.modifier.shift, text_buffer);
+                        self.cursors.move_right(1, ke.modifiers.shift, text_buffer);
                         true
                     },
                     KeyCode::PageUp=>{
-                        self.cursors.move_up(self._visible_lines.max(5) - 4, ke.modifier.shift, text_buffer);
+                        self.cursors.move_up(self._visible_lines.max(5) - 4, ke.modifiers.shift, text_buffer);
                         true
                     },
                     KeyCode::PageDown=>{
-                        self.cursors.move_down(self._visible_lines.max(5) - 4, ke.modifier.shift, text_buffer);
+                        self.cursors.move_down(self._visible_lines.max(5) - 4, ke.modifiers.shift, text_buffer);
                         true
                     },
                     KeyCode::Home=>{
-                        self.cursors.move_home(ke.modifier.shift, text_buffer);
+                        self.cursors.move_home(ke.modifiers.shift, text_buffer);
                         true
                     },
                     KeyCode::End=>{
-                        self.cursors.move_end(ke.modifier.shift, text_buffer);
+                        self.cursors.move_end(ke.modifiers.shift, text_buffer);
                         true
                     },
+                    KeyCode::Backspace=>{
+                        self.cursors.backspace(text_buffer);
+                        true
+                    },
+                    KeyCode::Delete=>{
+                        self.cursors.delete(text_buffer);
+                        true
+                    },
+                    KeyCode::KeyZ=>{
+                        if ke.modifiers.logo || ke.modifiers.control{
+                            if ke.modifiers.shift{ // redo
+                                text_buffer.redo(&mut self.cursors);
+                                true
+                            }
+                            else{ // undo
+                                text_buffer.undo(&mut self.cursors);
+                                true
+                            }
+                        }
+                        else{
+                            false
+                        }
+                    },
+                    //KeyCode::Return=>{
+                    //    self.cursors.replace_text("\n", text_buffer);
+                    //    true
+                    //},
                     _=>false
                 };
                 if cursor_moved{
@@ -320,7 +347,9 @@ impl CodeEditor{
                 }
             },
             Event::TextInput(te)=>{
-                //println!("TextInput {:?}", te);
+                self.cursors.replace_text(&te.input, text_buffer);
+                self.scroll_last_cursor_visible(cx, text_buffer);
+                self.view.redraw_view_area(cx);
             }
             _=>()
         };
@@ -564,248 +593,6 @@ impl CodeEditor{
     pub fn cursors_replace_text(&mut self, text:&str, text_buffer:&mut TextBuffer){
 
     }*/
-}
-
-#[derive(Clone)]
-pub struct CursorSet{
-    set:Vec<Cursor>,
-    last_cursor:usize
-}
-
-impl CursorSet{
-    fn new()->CursorSet{
-        CursorSet{
-            set:vec![Cursor{head:0,tail:0,max:0}],
-            last_cursor:0
-        }
-    }
-
-    pub fn fuse_adjacent(&mut self, text_buffer:&TextBuffer){
-        let mut index = 0;
-        loop{
-            if self.set.len() < 2 || index >= self.set.len() - 1{ // no more pairs
-                return
-            }
-            // get the pair data
-            let (my_start,my_end) = self.set[index].order();
-            let (next_start,next_end) = self.set[index+1].order();
-            if my_end >= next_start{ // fuse them together
-                // check if we are mergin down or up
-                if my_end < next_end{ // otherwise just remove the next
-                    if self.set[index].tail>self.set[index].head{ // down
-                        self.set[index].head = my_start;
-                        self.set[index].tail = next_end;
-                    }
-                    else{ // up
-                    self.set[index].head = next_end;
-                    self.set[index].tail = my_start;
-                    }
-                    self.set[index].calc_max(text_buffer);
-                    // remove the next item
-                }
-                if self.last_cursor > index{
-                    self.last_cursor -= 1;
-                }
-                self.set.remove(index + 1);
-            }
-            index += 1;
-        }
-    }
-
-    pub fn remove_collision(&mut self, offset:usize)->usize{
-        // remove any cursor that intersects us
-        let mut index = 0;
-        loop{
-            if index >= self.set.len(){
-                return index
-            }
-            let (start,end) = self.set[index].order();
-            if offset < start{
-                return index
-            }
-            if offset >= start && offset <=end{
-                if self.last_cursor > index{ // we remove a cursor before the last_cursor
-                    self.last_cursor = self.last_cursor - 1;
-                    self.set.remove(index);
-                }
-                else if self.last_cursor != index{ // it something after it so it doesnt matter
-                    self.set.remove(index);
-                }
-                else{ // we are the last_cursor
-                    index += 1;
-                }
-            }
-            else{
-                index += 1;
-            }
-        }
-    }
-
-    // puts the head down
-    pub fn begin_cursor_drag(&mut self, add:bool, offset:usize, text_buffer:&TextBuffer){
-        if !add{
-            self.set.truncate(0);
-        }
-
-        let index = self.remove_collision(offset);
-        
-        self.set.insert(index, Cursor{
-            head:offset,
-            tail:offset,
-            max:0
-        });
-        self.last_cursor = index;
-        self.set[index].calc_max(text_buffer);
-    }
-
-    pub fn update_cursor_drag(&mut self, offset:usize, text_buffer:&TextBuffer){
-
-        // remove any cursor that intersects us
-        self.remove_collision(offset);
-
-        self.set[self.last_cursor].head = offset;
-        self.set[self.last_cursor].calc_max(text_buffer);
-    }
-
-    pub fn end_cursor_drag(&mut self, _text_buffer:&TextBuffer){
-    }
-
-    pub fn move_home(&mut self,only_head:bool, text_buffer:&TextBuffer){
-        for cursor in &mut self.set{
-            cursor.move_home(text_buffer);
-            if !only_head{cursor.tail = cursor.head}
-        }
-        self.fuse_adjacent(text_buffer)
-    }
-
-    pub fn move_end(&mut self,only_head:bool, text_buffer:&TextBuffer){
-        for cursor in &mut self.set{
-            cursor.move_end(text_buffer);
-            if !only_head{cursor.tail = cursor.head}
-        }
-        self.fuse_adjacent(text_buffer)
-    }
-
-    pub fn move_up(&mut self, line_count:usize, only_head:bool, text_buffer:&TextBuffer){
-        for cursor in &mut self.set{
-            cursor.move_up(line_count, text_buffer);
-            if !only_head{cursor.tail = cursor.head}
-        }
-        self.fuse_adjacent(text_buffer)
-    }
-
-    pub fn move_down(&mut self,line_count:usize, only_head:bool, text_buffer:&TextBuffer){
-        for cursor in &mut self.set{
-            cursor.move_down(line_count, text_buffer);
-            if !only_head{cursor.tail = cursor.head}
-        }
-        self.fuse_adjacent(text_buffer)
-    }
-
-    pub fn move_left(&mut self, char_count:usize, only_head:bool, text_buffer:&TextBuffer){
-        for cursor in &mut self.set{
-            cursor.move_left(char_count, text_buffer);
-            if !only_head{cursor.tail = cursor.head}
-        }
-        self.fuse_adjacent(text_buffer)
-    }
-
-    pub fn move_right(&mut self,char_count:usize, only_head:bool, text_buffer:&TextBuffer){
-        for cursor in &mut self.set{
-            cursor.move_right(char_count, text_buffer);
-            if !only_head{cursor.tail = cursor.head}
-        }
-        self.fuse_adjacent(text_buffer)
-    }
-}
-
-#[derive(Clone)]
-pub struct Cursor{
-    head:usize,
-    tail:usize,
-    max:usize
-}
-
-impl Cursor{
-    pub fn has_selection(&self)->bool{
-        self.head != self.tail
-    }
-
-    pub fn order(&self)->(usize,usize){
-        if self.head > self.tail{
-            (self.tail,self.head)
-        }
-        else{
-            (self.head,self.tail)
-        }
-    }
-
-    pub fn calc_max(&mut self, text_buffer:&TextBuffer){
-        let (_row,col) = text_buffer.offset_to_row_col(self.head);
-        self.max = col;
-    }
-
-    pub fn move_home(&mut self, text_buffer:&TextBuffer){
-        let (row, _col) = text_buffer.offset_to_row_col(self.head);
-
-        // alright lets walk the line from the left till its no longer 9 or 32
-        for (pos,ch) in text_buffer.lines[row].iter().enumerate(){
-            if *ch != '\t' && *ch != ' '{
-                self.head = text_buffer.row_col_to_offset(row, pos);
-                self.calc_max(text_buffer);
-                return
-            }
-        }
-    }
-
-    pub fn move_end(&mut self, text_buffer:&TextBuffer){
-        let (row, _col) = text_buffer.offset_to_row_col(self.head);
-        // alright lets walk the line from the left till its no longer 9 or 32
-        self.head = text_buffer.row_col_to_offset(row, text_buffer.lines[row].len());
-        self.calc_max(text_buffer);
-    }
-
-    pub fn move_left(&mut self, char_count:usize,  text_buffer:&TextBuffer){
-        if self.head >= char_count{
-            self.head -= char_count;
-        }
-        else{
-            self.head = 0;
-        }
-        self.calc_max(text_buffer);
-    }
-
-    pub fn move_right(&mut self, char_count:usize, text_buffer:&TextBuffer){
-        if self.head + char_count < text_buffer.get_char_count() - 1{
-            self.head += char_count;
-        }
-        else{
-            self.head = text_buffer.get_char_count() - 1;
-        }
-        self.calc_max(text_buffer);
-    }
-
-    pub fn move_up(&mut self, line_count:usize, text_buffer:&TextBuffer){
-        let (row,_col) = text_buffer.offset_to_row_col(self.head);
-        if row >= line_count {
-            self.head = text_buffer.row_col_to_offset(row - line_count, self.max);
-        }
-        else{
-            self.head = 0;
-        }
-    }
-    
-    pub fn move_down(&mut self, line_count:usize, text_buffer:&TextBuffer){
-        let (row,_col) = text_buffer.offset_to_row_col(self.head);
-        
-        if row + line_count < text_buffer.get_line_count() - 1{
-            
-            self.head = text_buffer.row_col_to_offset(row + line_count, self.max);
-        }
-        else{
-            self.head = text_buffer.get_char_count() - 1;
-        }
-    }
 }
 
 

@@ -1,7 +1,7 @@
 use crate::cx::*;
 
 #[derive(Clone, Debug, PartialEq, Default)]
-pub struct KeyModifier{
+pub struct KeyModifiers{
     pub shift: bool,
     pub control: bool,
     pub alt: bool,
@@ -16,7 +16,7 @@ pub struct FingerDownEvent{
     pub digit:usize,
     pub handled:bool,
     pub is_touch:bool,
-    pub modifier:KeyModifier
+    pub modifiers:KeyModifiers
 }
 
 #[derive(Clone, Default,Debug, PartialEq)]
@@ -29,7 +29,7 @@ pub struct FingerMoveEvent{
     pub is_over:bool,
     pub digit:usize,
     pub is_touch:bool,
-    pub modifier:KeyModifier
+    pub modifiers:KeyModifiers
 }
 
 impl FingerMoveEvent{
@@ -48,7 +48,7 @@ pub struct FingerUpEvent{
     pub digit:usize,
     pub is_over:bool,
     pub is_touch:bool,
-    pub modifier:KeyModifier
+    pub modifiers:KeyModifiers
 }
 
 #[derive(Clone,Debug, PartialEq)]
@@ -81,7 +81,7 @@ pub struct FingerHoverEvent{
     pub rect:Rect,
     pub handled:bool,
     pub hover_state:HoverState,
-    pub modifier:KeyModifier
+    pub modifiers:KeyModifiers
 }
 
 #[derive(Clone, Default,Debug, PartialEq)]
@@ -92,7 +92,7 @@ pub struct FingerScrollEvent{
     pub scroll:Vec2,
     pub is_wheel:bool,
     pub handled:bool,
-    pub modifier:KeyModifier
+    pub modifiers:KeyModifiers
 }
 
 #[derive(Clone, Default, Debug, PartialEq)]
@@ -137,7 +137,7 @@ pub struct KeyEvent{
     pub key_code:KeyCode,
     pub key_char:char,
     pub is_repeat:bool,
-    pub modifier:KeyModifier
+    pub modifiers:KeyModifiers
 }
 
 #[derive(Clone, Debug, PartialEq)]

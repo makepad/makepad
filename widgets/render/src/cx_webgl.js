@@ -98,7 +98,7 @@
 			this.mf32[pos++] = finger.y
 			this.mu32[pos++] = finger.digit
 			this.mu32[pos++] = finger.touch?1:0
-			this.mu32[pos++] = finger.modifier
+			this.mu32[pos++] = finger.modifiers
 		}
 
 		on_finger_up(finger){
@@ -108,7 +108,7 @@
 			this.mf32[pos++] = finger.y
 			this.mu32[pos++] = finger.digit
 			this.mu32[pos++] = finger.touch?1:0
-			this.mu32[pos++] = finger.modifier
+			this.mu32[pos++] = finger.modifiers
 		}
 
 		on_finger_move(finger){
@@ -118,7 +118,7 @@
 			this.mf32[pos++] = finger.y
 			this.mu32[pos++] = finger.digit
 			this.mu32[pos++] = finger.touch?1:0
-			this.mu32[pos++] = finger.modifier
+			this.mu32[pos++] = finger.modifiers
 		}
 
 		on_finger_hover(finger){
@@ -126,7 +126,7 @@
 			this.mu32[pos++] = 9;
 			this.mf32[pos++] = finger.x
 			this.mf32[pos++] = finger.y
-			this.mu32[pos++] = finger.modifier
+			this.mu32[pos++] = finger.modifiers
 		}
 		
 		on_finger_scroll(finger){
@@ -137,7 +137,7 @@
 			this.mf32[pos++] = finger.scroll_x
 			this.mf32[pos++] = finger.scroll_y
 			this.mu32[pos++] = finger.is_wheel?1:0
-			this.mu32[pos++] = finger.modifier
+			this.mu32[pos++] = finger.modifiers
 		}
 
 		on_finger_out(finger){
@@ -145,7 +145,7 @@
 			this.mu32[pos++] = 11;
 			this.mf32[pos++] = finger.x
 			this.mf32[pos++] = finger.y
-			this.mu32[pos++] = finger.modifier
+			this.mu32[pos++] = finger.modifiers
 		}
 
 		on_key_down(key){
@@ -154,7 +154,7 @@
 			this.mu32[pos++] = key.key_code;
 			this.mu32[pos++] = key.char_code;
 			this.mu32[pos++] = key.is_repeat?1:0;
-			this.mu32[pos++] = key.modifier;
+			this.mu32[pos++] = key.modifiers;
 		}
 
 		on_key_up(key){
@@ -163,10 +163,13 @@
 			this.mu32[pos++] = key.key_code;
 			this.mu32[pos++] = key.char_code;
 			this.mu32[pos++] = key.is_repeat?1:0;
-			this.mu32[pos++] = key.modifier;
+			this.mu32[pos++] = key.modifiers;
 		}
 
 		on_text_input(text){
+			let pos = this.fit(1);
+			this.mu32[pos++] = 14;
+			this.send_string(text);
 		}
 
 		read_file_data(id, buf_ptr, buf_len){
@@ -570,7 +573,7 @@
 					x:e.pageX,
 					y:e.pageY,
 					digit: e.button,
-					modifier:pack_key_modifier(e),
+					modifiers:pack_key_modifier(e),
 					touch: false
 				}
 			}
@@ -598,7 +601,7 @@
 						x:t.pageX,
 						y:t.pageY,
 						digit:digit,
-						modifier:0,
+						modifiers:0,
 						touch: true,
 					})
 				}
@@ -623,7 +626,7 @@
 						x:t.pageX,
 						y:t.pageY,
 						digit:lookup_digit(t.identifier),
-						modifier:{},
+						modifiers:{},
 						touch: true,
 					})
 				}
@@ -647,7 +650,7 @@
 						x:t.pageX,
 						y:t.pageY,
 						digit:digit,
-						modifier:0,
+						modifiers:0,
 						touch: true,
 					})
 				}
@@ -674,7 +677,7 @@
 						this.to_wasm.on_finger_move({
 							x:e.pageX,
 							y:e.pageY,
-							modifier:0,
+							modifiers:0,
 							digit:i
 						})
 					}
@@ -811,7 +814,7 @@
 			ta.style.width = 0
 
 			// make the IME not show up:
-			ta.setAttribute('readonly','true')
+			//ta.setAttribute('readonly','false')
 
 			//document.addEventListener('focusout', this.onFocusOut.bind(this))
 			ta.addEventListener('cut', e=>{
@@ -824,7 +827,9 @@
 				
 			})
 			ta.addEventListener('input', e=>{
-				
+				ta.selectionStart = 0;
+				ta.selectionEnd = ta.value.length;
+				this.to_wasm.on_text_input(ta.value);
 			})
 			ta.addEventListener('touchmove', e=>{
 				
@@ -833,20 +838,30 @@
 				this.focus_keyboard_input();
 			})
 			ta.addEventListener('keydown', e=>{
+				let code = e.keyCode;
+
+				if(code === 8 || code === 9) e.preventDefault() // backspace/tab
+				//if(code === 88 && (e.metaKey || e.ctrlKey)) this.keyboardCut = true // x cut
+				//if(code === 65 && (e.metaKey || e.ctrlKey)) this.keyboardSelectAll = true	 // all (select all)	
+				if(code === 90 && (e.metaKey || e.ctrlKey)) e.preventDefault() // all (select all)	
+				if(code === 89 && (e.metaKey || e.ctrlKey)) e.preventDefault() // all (select all)	
+				if(code === 83 && (e.metaKey || e.ctrlKey)) e.preventDefault() // ctrl s
+		
 				this.to_wasm.on_key_down({
 					key_code:e.keyCode,
 					char_code:e.charCode,
 					is_repeat:e.repeat,
-					modifier:pack_key_modifier(e)
+					modifiers:pack_key_modifier(e)
 				})
 				this.do_wasm_io();
 			})
 			ta.addEventListener('keyup', e=>{
+
 				this.to_wasm.on_key_up({
 					key_code:e.keyCode,
 					char_code:e.charCode,
 					is_repeat:e.repeat,
-					modifier:pack_key_modifier(e)
+					modifiers:pack_key_modifier(e)
 				})
 				this.do_wasm_io();
 			})			

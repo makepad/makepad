@@ -127,6 +127,8 @@ impl Cx{
 
             command_buffer.present_drawable(&drawable);
             command_buffer.commit();
+
+            command_buffer.wait_until_completed();
         }
         unsafe { 
             msg_send![pool, release];

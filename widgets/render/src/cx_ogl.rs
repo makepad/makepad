@@ -210,7 +210,7 @@ impl Cx{
             let down = self.platform.fingers_down[i];
             if down{
                 out.push(Event::FingerMove(FingerMoveEvent{
-                    modifier:KeyModifier{..Default::default()},
+                    modifiers:KeyModifiers{..Default::default()},
                     abs:self.platform.last_mouse_pos,
                     rel:self.platform.last_mouse_pos,
                     rect:Rect::zero(),
@@ -304,7 +304,7 @@ impl Cx{
                         winit::MouseScrollDelta::PixelDelta(pp)=>(-pp.y as f32, false)
                     };
                     return vec![Event::FingerScroll(FingerScrollEvent{
-                        modifier:KeyModifier{..Default::default()},
+                        modifiers:KeyModifiers{..Default::default()},
                         abs:self.platform.last_mouse_pos,
                         rel:self.platform.last_mouse_pos,
                         rect:Rect::zero(),
@@ -322,7 +322,7 @@ impl Cx{
                         abs:self.platform.last_mouse_pos,
                         rel:self.platform.last_mouse_pos,
                         rect:Rect::zero(),
-                        modifier:KeyModifier{..Default::default()},
+                        modifiers:KeyModifiers{..Default::default()},
                         handled:false,
                         hover_state:HoverState::Over
                     }));
@@ -339,7 +339,7 @@ impl Cx{
                     self.hover_mouse_cursor = None;
                    // fire a hover out on our last known mouse position
                     return vec![Event::FingerHover(FingerHoverEvent{
-                        modifier:KeyModifier{..Default::default()},
+                        modifiers:KeyModifiers{..Default::default()},
                         abs:self.platform.last_mouse_pos,
                         rel:self.platform.last_mouse_pos,
                         rect:Rect::zero(),
@@ -362,7 +362,7 @@ impl Cx{
                             };
                             self.platform.fingers_down[digit] = true;
                             return vec![Event::FingerDown(FingerDownEvent{
-                                modifier:KeyModifier{..Default::default()},
+                                modifiers:KeyModifiers{..Default::default()},
                                 abs:self.platform.last_mouse_pos,
                                 rel:self.platform.last_mouse_pos,
                                 rect:Rect::zero(),
@@ -388,7 +388,7 @@ impl Cx{
                                 self.down_mouse_cursor = None;
                             }
                             return vec![Event::FingerUp(FingerUpEvent{
-                                modifier:KeyModifier{..Default::default()},
+                                modifiers:KeyModifiers{..Default::default()},
                                 abs:self.platform.last_mouse_pos,
                                 rel:self.platform.last_mouse_pos,
                                 rect:Rect::zero(),
