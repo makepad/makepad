@@ -370,7 +370,7 @@ impl CodeEditor{
                 // plain continuous text entrysplits undo on newlines and spaces
                 // just like consecutive backspaces and deletes
                 // what do we do when we have replace.last? do we undo and insert?
-                if(te.replace_last){
+                if te.replace_last{
                     text_buffer.undo(false, &mut self.cursors);
                 }
                 self.cursors.replace_text(&te.input, text_buffer);

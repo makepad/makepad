@@ -885,6 +885,9 @@
 			ta.addEventListener('blur', e=>{
 				this.focus_keyboard_input();
 			})
+
+			var ugly_ime_hack = false;
+
 			ta.addEventListener('keydown', e=>{
 				let code = e.keyCode;
 
@@ -904,6 +907,8 @@
 				if(code === 90 && (e.metaKey || e.ctrlKey)){
 					this.update_text_area_pos();
 					ta.value = "";
+					ugly_ime_hack = true;
+					ta.readOnly = true;
 					e.preventDefault()
 				}
 
@@ -918,6 +923,12 @@
 			})
 			ta.addEventListener('keyup', e=>{
 				var ta = this.text_area;
+				if(ugly_ime_hack){
+					ugly_ime_hack = false;
+					document.body.removeChild(ta);
+					this.bind_keyboard();
+					this.update_text_area_pos();
+				}
 				this.to_wasm.key_up({
 					key_code:e.keyCode,
 					char_code:e.charCode,
@@ -927,6 +938,7 @@
 				this.do_wasm_io();
 			})			
 			document.body.appendChild(ta);
+			ta.focus();
 		}
 	
 		focus_keyboard_input(){
