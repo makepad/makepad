@@ -573,6 +573,7 @@ impl CursorSet{
             delta += cursor.collapse(start, end, op.len);
             ops.push(op);
         }
+        text_buffer.redo_stack.truncate(0);
         text_buffer.undo_stack.push(TextUndo{
             ops:ops,
             cursors:cursors_clone
@@ -596,6 +597,7 @@ impl CursorSet{
                 delta += cursor.collapse(start, end, 0);
             }
         }
+        text_buffer.redo_stack.truncate(0);
         text_buffer.undo_stack.push(TextUndo{
             ops:ops,
             cursors:cursors_clone
@@ -619,6 +621,7 @@ impl CursorSet{
                 delta += cursor.collapse(start, end, 0);
             }
         }
+        text_buffer.redo_stack.truncate(0);
         text_buffer.undo_stack.push(TextUndo{
             ops:ops,
             cursors:cursors_clone
