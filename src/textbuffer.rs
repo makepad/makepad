@@ -712,6 +712,17 @@ impl CursorSet{
         })
     }
 
+    pub fn select_all(&mut self, text_buffer:&mut TextBuffer){
+        self.set.truncate(0);
+        let mut cursor = Cursor{
+            head:0,
+            tail:text_buffer.get_char_count(),
+            max:0
+        };
+        cursor.calc_max(text_buffer);
+        self.set.push(cursor);
+    }
+
     pub fn move_home(&mut self,only_head:bool, text_buffer:&TextBuffer){
         for cursor in &mut self.set{
             cursor.move_home(text_buffer);

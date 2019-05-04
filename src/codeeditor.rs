@@ -344,6 +344,17 @@ impl CodeEditor{
                             false
                         }
                     },
+                    KeyCode::KeyA=>{ // select all
+                        if ke.modifiers.logo || ke.modifiers.control{ // cut
+                            self.cursors.select_all(text_buffer);
+                            // don't scroll!
+                            self.view.redraw_view_area(cx);
+                            false
+                        }
+                        else{
+                            false
+                        }
+                    }
                     //KeyCode::Return=>{
                     //    self.cursors.replace_text("\n", text_buffer);
                     //    true

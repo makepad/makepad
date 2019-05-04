@@ -846,10 +846,6 @@
 			})
 
 			ta.addEventListener('input', e=>{
-				// its len 0 normally.
-				// then you type a char, then its len 1
-				// if you then type a 2rd char, you want that char, 
-				// but if its last_len 1 and now 1 its an IME replace
 				if(ta.value.length>0){
 					if(was_paste){
 						was_paste = false;
