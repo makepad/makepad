@@ -1,6 +1,6 @@
 use std::mem;
 
-use cocoa::base::{id};
+//use cocoa::base::{id};
 use cocoa::appkit::{NSWindow, NSView};
 use cocoa::foundation::{NSAutoreleasePool,NSUInteger, NSRange};
 use core_graphics::geometry::CGSize;
@@ -148,7 +148,7 @@ impl Cx{
 
         let mut cocoa_window = CocoaWindow{..Default::default()};
 
-        cocoa_window.init("Hello World");
+        cocoa_window.init(&self.title);
 
         let device = Device::system_default();
 
@@ -275,6 +275,11 @@ impl Cx{
                 cocoa_window.set_mouse_cursor(MouseCursor::Default)
             }
 
+            if let Some(set_ime_position) = self.platform.set_ime_position{
+                self.platform.set_ime_position = None;
+                cocoa_window.ime_spot = set_ime_position;
+            }
+
             // repaint everything if we need to
             if self.paint_dirty{
                 self.paint_dirty = false;
@@ -282,6 +287,20 @@ impl Cx{
                 self.repaint(&layer, &device, &command_queue);
             }
         }
+    }
+
+    pub fn show_text_ime(&mut self, x:f32, y:f32){
+        //self.platform.set_ime_posotion
+        //self.platform.from_wasm.show_text_ime(x,y);
+        self.platform.set_ime_position = Some(Vec2{x:x,y:y});
+    }
+
+    pub fn hide_text_ime(&mut self){
+        //self.platform.from_wasm.hide_text_ime();
+    }
+
+    pub fn text_clipboard_response(&mut self, data:String){
+        self.platform.text_clipboard_response = Some(data);
     }
 
     pub fn compile_all_mtl_shaders(&mut self, device:&Device){
@@ -563,7 +582,10 @@ impl Cx{
 #[derive(Clone, Default)]
 pub struct CxPlatform{
     pub uni_cx:MetalBuffer,
-    pub cocoa_window:Option<id>,
+    pub set_ime_position:Option<Vec2>,
+    pub text_clipboard_response:Option<String>,
+    //pub cocoa_window:CocoaWindow,
+    //pub cocoa_window:Option<id>,
     pub desktop:CxDesktop
 }
 

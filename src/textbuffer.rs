@@ -293,9 +293,13 @@ impl TextBuffer{
             }
             first = false;
             let text_undo = self.undo_stack.pop().unwrap();
+            let wants_grouping = text_undo.grouping.wants_grouping();
             last_grouping = text_undo.grouping.clone();
             let text_redo = self.undoredo(text_undo, cursor_set);
             self.redo_stack.push(text_redo);
+            if !wants_grouping{
+                break;
+            }
         }
     }
 
@@ -313,9 +317,13 @@ impl TextBuffer{
             }
             first = false;
             let text_redo = self.redo_stack.pop().unwrap();
+            let wants_grouping = text_redo.grouping.wants_grouping();
             last_grouping = text_redo.grouping.clone();
             let text_undo = self.undoredo(text_redo, cursor_set);
             self.undo_stack.push(text_undo);
+            if !wants_grouping{
+                break;
+            }
         }
     }
 
@@ -624,26 +632,25 @@ impl CursorSet{
     }
 
     pub fn replace_text(&mut self, text:&str, text_buffer:&mut TextBuffer){
-        let mut grouping = TextUndoGrouping::Other;
-        if text.len() == 1{
+        let grouping = if text.len() == 1{
             // check if we are space
             let ch = text.chars().next().unwrap();
             if ch == ' '{
-                grouping = TextUndoGrouping::Space;
+                TextUndoGrouping::Space
             }
             else if ch == '\n'{
-                grouping = TextUndoGrouping::Newline;
+                TextUndoGrouping::Newline
             }
             else{
-                grouping = TextUndoGrouping::Character;
+                 TextUndoGrouping::Character
             }
         }
         else if text.len() == 0{
-            grouping = TextUndoGrouping::Cut
+            TextUndoGrouping::Cut
         }
         else {
-            grouping = TextUndoGrouping::Block
-        }
+            TextUndoGrouping::Block
+        };
 
         let mut delta:isize = 0; // rolling delta to displace cursors 
         let mut ops = Vec::new();

@@ -156,6 +156,7 @@ pub struct TextInputEvent{
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct TextClipboardRequestEvent{
+    pub response:Option<String>
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -181,7 +182,7 @@ pub enum Event{
     KeyDown(KeyEvent),
     KeyUp(KeyEvent),
     TextInput(TextInputEvent),
-    TextClipboardRequest
+    TextClipboardRequest(TextClipboardRequestEvent)
 }
 
 impl Default for Event{
@@ -258,9 +259,11 @@ impl Event{
                     return self.clone();
                 }
             },
-            Event::TextClipboardRequest=>{
+            Event::TextClipboardRequest(_)=>{
                 if area == cx.key_focus{
-                    return self.clone();
+                    return Event::TextClipboardRequest(
+                        TextClipboardRequestEvent{response:None}
+                    );
                 }
             },
             Event::Animate(_)=>{

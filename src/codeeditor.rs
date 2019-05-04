@@ -355,10 +355,6 @@ impl CodeEditor{
                             false
                         }
                     }
-                    //KeyCode::Return=>{
-                    //    self.cursors.replace_text("\n", text_buffer);
-                    //    true
-                    //},
                     _=>false
                 };
                 if cursor_moved{
@@ -367,9 +363,6 @@ impl CodeEditor{
                 }
             },
             Event::TextInput(te)=>{
-                // plain continuous text entrysplits undo on newlines and spaces
-                // just like consecutive backspaces and deletes
-                // what do we do when we have replace.last? do we undo and insert?
                 if te.replace_last{
                     text_buffer.undo(false, &mut self.cursors);
                 }
@@ -377,8 +370,11 @@ impl CodeEditor{
                 self.scroll_last_cursor_visible(cx, text_buffer);
                 self.view.redraw_view_area(cx);
             },
-            Event::TextClipboardRequest=>{
-                cx.text_clipboard_response(&self.cursors.get_all_as_string(text_buffer));
+            Event::TextClipboardRequest(_)=>match event{ // access the original event
+                Event::TextClipboardRequest(req)=>{
+                    req.response = Some(self.cursors.get_all_as_string(text_buffer));
+                },
+                _=>()
             },
             _=>()
         };
@@ -500,13 +496,15 @@ impl CodeEditor{
         self.view.end_view(cx);
 
         // place the IME
-        if let Some(last_cursor) = draw_cursor.last_cursor{
-            let rc = draw_cursor.cursors[last_cursor];
-            let scroll_pos = self.view.get_scroll_pos(cx);
-            cx.show_text_ime(rc.x - scroll_pos.x, rc.y - scroll_pos.y);
-        }
-        else{ // current last cursors is not visible
-            cx.hide_text_ime();
+        if self._bg_area == cx.key_focus{
+            if let Some(last_cursor) = draw_cursor.last_cursor{
+                let rc = draw_cursor.cursors[last_cursor];
+                let scroll_pos = self.view.get_scroll_pos(cx);
+                cx.show_text_ime(rc.x - scroll_pos.x, rc.y - scroll_pos.y);
+            }
+            else{ // current last cursors is not visible
+                cx.hide_text_ime();
+            }
         }
     }
 

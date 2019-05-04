@@ -5,7 +5,7 @@ use std::collections::HashMap;
 
 use cocoa::base::{id, nil};
 use cocoa::{appkit, foundation};
-use cocoa::appkit::{NSApplication, NSEventModifierFlags, NSImage, NSEvent, NSWindow, NSView,NSEventMask,NSRunningApplication};
+use cocoa::appkit::{NSStringPboardType, NSApplication, NSEventModifierFlags, NSImage, NSEvent, NSWindow, NSView,NSEventMask,NSRunningApplication};
 use cocoa::foundation::{NSArray, NSPoint, NSDictionary, NSRect, NSSize, NSUInteger,NSInteger};
 use cocoa::foundation::{NSAutoreleasePool, NSString};
 use objc::runtime::{Class, Object, Protocol, Sel, BOOL, YES, NO};
@@ -16,7 +16,7 @@ use core_graphics::display::CGDisplay;
 
 use crate::cx::*;
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct CocoaWindow{
     pub window_delegate:Option<id>,
     pub view:Option<id>,
@@ -24,6 +24,7 @@ pub struct CocoaWindow{
     pub attributes_for_marked_text:Option<id>,
     pub empty_string:Option<id>,
     //pub input_context:Option<id>,
+    pub pasteboard:Option<id>,
     pub init_resize:bool,
     pub last_size:Vec2,
     pub ime_spot:Vec2,
@@ -128,6 +129,10 @@ impl CocoaWindow{
 
             let input_context:id = msg_send![view, inputContext];
             msg_send![input_context, invalidateCharacterCoordinates];
+
+            // grab the pasteboard
+            let pasteboard:id = msg_send![class!(NSPasteboard), generalPasteboard];
+            self.pasteboard = Some(pasteboard);
             //msg_send![input_context, activate];
         }
     }
@@ -140,9 +145,9 @@ impl CocoaWindow{
     }
 
     pub fn get_position(&mut self)->Vec2{
-        let view_frame = unsafe { NSView::frame(self.view.unwrap()) };
+        //let view_frame = unsafe { NSView::frame(self.view.unwrap()) };
         let rect = NSRect::new(
-            NSPoint::new(0.0, view_frame.size.height),
+            NSPoint::new(0.0, 0.0),//view_frame.size.height),
             NSSize::new(0.0, 0.0),
         );
         let out = unsafe{NSWindow::convertRectToScreen_(self.window.unwrap(), rect)};
@@ -197,6 +202,43 @@ impl CocoaWindow{
                     let key_char = get_event_char(ns_event);
                     let is_repeat:bool = msg_send![ns_event, isARepeat];
                     let is_return = if let KeyCode::Return = key_code{true} else{false};
+
+                    // see if its is paste, ifso TextInput was_paste the text
+                    let paste_text = if let KeyCode::KeyV = key_code{
+                        if modifiers.logo || modifiers.control{
+                            // was a paste
+                            let nsstring:id = msg_send![self.pasteboard.unwrap(), stringForType:NSStringPboardType];
+                            let string = nsstring_to_string(nsstring);
+                            
+                            Some(string)
+                        }
+                        else{None}
+                    }
+                    else{None};
+
+                    match key_code{
+                        KeyCode::KeyX | KeyCode::KeyC=>if modifiers.logo || modifiers.control{
+                            // cut or copy.
+                            let mut events = vec![
+                                Event::TextClipboardRequest(TextClipboardRequestEvent{
+                                    response:None
+                                })
+                            ];
+                            self.do_callback(&mut events);
+                            match &events[0]{
+                                Event::TextClipboardRequest(req)=>if let Some(response) = &req.response{
+                                    // plug it into the apple clipboard
+                                    let nsstring:id = NSString::alloc(nil).init_str(&response);
+                                    let array: id = msg_send![class!(NSArray), arrayWithObject:NSStringPboardType];
+                                    msg_send![self.pasteboard.unwrap(), declareTypes:array owner:nil];
+                                    msg_send![self.pasteboard.unwrap(), setString:nsstring forType:NSStringPboardType];
+                                },
+                                _=>()
+                            };
+                        },
+                        _=>{}
+                    }
+
                     self.do_callback(&mut vec![
                         Event::KeyDown(KeyEvent{
                             key_code:key_code,
@@ -209,10 +251,22 @@ impl CocoaWindow{
                         self.do_callback(&mut vec![
                             Event::TextInput(TextInputEvent{
                                 input:"\n".to_string(),
+                                was_paste:false,
                                 replace_last:false
                             })
                         ]);
                     }
+                    if let Some(paste_text) = paste_text{
+                        self.do_callback(&mut vec![
+                            Event::TextInput(TextInputEvent{
+                                input:paste_text,
+                                was_paste:true,
+                                replace_last:false
+                            })
+                        ]);
+                    }
+                    
+
                 }
             },
             appkit::NSFlagsChanged => {
@@ -431,6 +485,7 @@ impl CocoaWindow{
     pub fn send_text_input(&mut self, input:String, replace_last:bool){
         self.do_callback(&mut vec![Event::TextInput(TextInputEvent{
             input:input,
+            was_paste:false,
             replace_last:replace_last
         })])
     }
@@ -948,9 +1003,17 @@ pub fn define_cocoa_view_class()->*const Class{
 
     extern fn first_rect_for_character_range(this: &Object, _sel: Sel, _range: NSRange, _actual_range: *mut c_void) -> NSRect {
         let cw = get_cocoa_window(this);
+
+        let view: id = this as *const _ as *mut _;
+        //let window_point = event.locationInWindow();
+        //et view_point = view.convertPoint_fromView_(window_point, nil);
+        let view_rect = unsafe{NSView::frame(view)};
+        let window_rect = unsafe{NSWindow::frame(cw.window.unwrap())};
+
         let origin = cw.get_position();
+        let bar = (window_rect.size.height - view_rect.size.height) as f32 - 5.;
         NSRect::new(
-            NSPoint::new((origin.x + cw.ime_spot.x) as f64, (origin.y + cw.ime_spot.y) as f64),// as _, y as _),
+            NSPoint::new((origin.x + cw.ime_spot.x) as f64, (origin.y + (view_rect.size.height as f32 - cw.ime_spot.y - bar)) as f64),// as _, y as _),
             NSSize::new(0.0, 0.0),
         )
     }
@@ -964,11 +1027,7 @@ pub fn define_cocoa_view_class()->*const Class{
             } else {
                 string
             };
-            let slice = std::slice::from_raw_parts(
-                characters.UTF8String() as *const std::os::raw::c_uchar,
-                characters.len(),
-            );
-            let string = std::str::from_utf8_unchecked(slice).to_owned();
+            let string = nsstring_to_string(characters);
             cw.send_text_input(string, replacement_range.length != 0);
             let input_context: id = msg_send![this, inputContext];
             msg_send![input_context, invalidateCharacterCoordinates];
@@ -980,7 +1039,7 @@ pub fn define_cocoa_view_class()->*const Class{
 
     extern fn do_command_by_selector(this: &Object, _sel: Sel, _command: Sel) {
         let _cw = get_cocoa_window(this);
-        println!("do_command_by_selector");
+        //println!("do_command_by_selector");
     }
 
     extern fn key_down(this: &Object, _sel: Sel, event: id) {
@@ -988,6 +1047,7 @@ pub fn define_cocoa_view_class()->*const Class{
         unsafe{
             let input_context: id = msg_send![this, inputContext];
             msg_send![input_context, handleEvent:event];
+            //println!("HERE {} ",ret as u32);
             //let is_repeat:bool = msg_send![event, isARepeat];
             //if !is_repeat{
             //    let array: id = msg_send![class!(NSArray), arrayWithObject:event];
@@ -1192,6 +1252,16 @@ fn load_webkit_cursor(cursor_name_str: &str) -> id {
         msg_send![cursor, initWithImage:image hotSpot:point]
     }
 }
+
+unsafe fn nsstring_to_string(string:id)->String{
+    let slice = std::slice::from_raw_parts(
+        string.UTF8String() as *const std::os::raw::c_uchar,
+        string.len(),
+    );
+    std::str::from_utf8_unchecked(slice).to_owned()
+}
+
+
 
 
 #[repr(C)]

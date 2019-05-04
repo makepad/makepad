@@ -275,7 +275,16 @@ impl Cx{
                     }));
                 },
                 16=>{ // text clipboard request
-                    self.call_event_handler(&mut event_handler,&mut Event::TextClipboardRequest);
+                    let mut event = Event::TextClipboardRequest(TextClipboardRequestEvent{
+                        response:None
+                    });
+                    self.call_event_handler(&mut event_handler, &mut event);
+                    match &event{
+                        Event::TextClipboardRequest(req)=>if let Some(response) = &req.response{
+                            self.platform.from_wasm.text_clipboard_response(&response);
+                        }
+                        _=>()
+                    };
                 },
                 _=>{
                     panic!("Message unknown")
@@ -343,10 +352,6 @@ impl Cx{
 
     pub fn hide_text_ime(&mut self){
         self.platform.from_wasm.hide_text_ime();
-    }
-
-    pub fn text_clipboard_response(&mut self, data:&str){
-        self.platform.from_wasm.text_clipboard_response(data);
     }
 
     pub fn compile_all_webgl_shaders(&mut self){

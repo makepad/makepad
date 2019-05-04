@@ -949,7 +949,7 @@
 			var pos = this.text_area_pos;
 			var ta = this.text_area;
 			if(ta){
-				ta.style.left = Math.round(pos.x+4);// + "px";
+				ta.style.left = Math.round(pos.x)+4;// + "px";
 				ta.style.top = Math.round(pos.y);// + "px"
 			}
 		}
@@ -960,7 +960,6 @@
 		}
 
 		hide_text_ime(){
-
 		}
 
 		alloc_array_buffer(array_buffer_id, array){
