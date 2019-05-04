@@ -323,11 +323,11 @@ impl CodeEditor{
                     KeyCode::KeyZ=>{
                         if ke.modifiers.logo || ke.modifiers.control{
                             if ke.modifiers.shift{ // redo
-                                text_buffer.redo(&mut self.cursors);
+                                text_buffer.redo(true, &mut self.cursors);
                                 true
                             }
                             else{ // undo
-                                text_buffer.undo(&mut self.cursors);
+                                text_buffer.undo(true, &mut self.cursors);
                                 true
                             }
                         }
@@ -356,9 +356,11 @@ impl CodeEditor{
                 }
             },
             Event::TextInput(te)=>{
+                // plain continuous text entrysplits undo on newlines and spaces
+                // just like consecutive backspaces and deletes
                 // what do we do when we have replace.last? do we undo and insert?
                 if(te.replace_last){
-                    text_buffer.undo(&mut self.cursors);
+                    text_buffer.undo(false, &mut self.cursors);
                 }
                 self.cursors.replace_text(&te.input, text_buffer);
                 self.scroll_last_cursor_visible(cx, text_buffer);

@@ -824,7 +824,18 @@
 
 			//document.addEventListener('focusout', this.onFocusOut.bind(this))
 			var was_paste = false;
+			var last_len = 0;
 			ta.addEventListener('cut', e=>{
+				setTimeout(_=>{
+					ta.value="";
+					last_len = 0;
+				},0)
+			})
+			ta.addEventListener('copy', e=>{
+				setTimeout(_=>{
+					ta.value="";
+					last_len = 0;
+				},0)
 			})
 			ta.addEventListener('paste', e=>{
 				was_paste = true;
@@ -832,35 +843,43 @@
 			ta.addEventListener('select', e=>{
 				
 			})
-			ta.addEventListener('input', e=>{
 
+			ta.addEventListener('input', e=>{
+				// its len 0 normally.
+				// then you type a char, then its len 1
+				// if you then type a 2rd char, you want that char, 
+				// but if its last_len 1 and now 1 its an IME replace
 				if(ta.value.length>0){
 					if(was_paste){
+						was_paste = false;
 						this.to_wasm.text_input({
 							was_paste:true,
-							input:ta.value,
+							input:ta.value.substring(last_len),
 							replace_last:false,
 						})
+						ta.value = "";
 					}
 					else{
-						if(ta.value.length == 2){ // its an IME
-							// we should send a replace last
-							this.to_wasm.text_input({
-								was_paste:false,
-								input:ta.value.substring(0,1),
-								replace_last:true,
-							})						
+						var replace_last = false;
+						var text_value = ta.value;
+						
+						if(ta.value.length >= 2){ // we want the second char
+							text_value = ta.value.substring(1,2);
+							ta.value = text_value;
 						}
-						else{ // normal input
-							this.to_wasm.text_input({
-								was_paste:false,
-								input:ta.value,
-								replace_last:false,
-							})
+						else if(ta.value.length == 1 && last_len == ta.value.length){ // its an IME replace
+							replace_last = true;
 						}
+						// we should send a replace last
+						this.to_wasm.text_input({
+							was_paste:false,
+							input:text_value,
+							replace_last:replace_last,
+						})						
 					}
 					this.do_wasm_io();
 				}
+				last_len = ta.value.length;
 			})
 			ta.addEventListener('touchmove', e=>{
 				
@@ -889,8 +908,8 @@
 					ta.readOnly = true;
 					e.preventDefault()
 				}
-				ta.selectionStart = 0;
-				ta.selectionEnd = ta.value.length;
+				//ta.selectionStart = 0;
+				//ta.selectionEnd = ta.value.length;
 
 				this.to_wasm.key_down({
 					key_code:e.keyCode,
@@ -903,7 +922,7 @@
 			})
 			ta.addEventListener('keyup', e=>{
 				var ta = this.text_area;
-				if(ta.readOnly){
+				if(ta.readOnly == true){
 					//hahah. hahahahahhaha. this is to stop the cmd-z IME to show up in chrome
 					ta.readOnly = false;
 					document.body.removeChild(ta);

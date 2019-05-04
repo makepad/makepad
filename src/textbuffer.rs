@@ -277,7 +277,7 @@ impl TextBuffer{
     }
 
     // todo make more reuse in these functions
-    pub fn undo(&mut self, cursor_set:&mut CursorSet){
+    pub fn undo(&mut self, grouped:bool, cursor_set:&mut CursorSet){
         
         if self.undo_stack.len() == 0{
             return;
@@ -285,6 +285,9 @@ impl TextBuffer{
         let mut last_grouping = TextUndoGrouping::Other;
         let mut first = true;
         while self.undo_stack.len() > 0{
+            if !first && !grouped{
+                break
+            }
             if self.undo_stack.last().unwrap().grouping != last_grouping && !first{
                 break
             }
@@ -296,15 +299,17 @@ impl TextBuffer{
         }
     }
 
-    pub fn redo(&mut self, cursor_set:&mut CursorSet){
+    pub fn redo(&mut self, grouped:bool, cursor_set:&mut CursorSet){
         if self.redo_stack.len() == 0{
             return;
         }
         let mut last_grouping = TextUndoGrouping::Other;
         let mut first = true;
         while self.redo_stack.len() > 0{
-            if self.redo_stack.last().unwrap().grouping != last_grouping && !first{
-                break
+            if !first{
+                if self.redo_stack.last().unwrap().grouping != last_grouping || !grouped{
+                    break
+                }
             }
             first = false;
             let text_redo = self.redo_stack.pop().unwrap();
