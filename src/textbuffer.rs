@@ -83,9 +83,8 @@ impl TextBuffer{
     pub fn get_line_count(&self)->usize{
         self.lines.len()
     }
-/*
-    fn get_range_as_string(&self, start:usize, len:usize)->String{
-        let mut ret = String::new();
+
+    fn get_range_as_string(&self, start:usize, len:usize, ret:&mut String){
         let (mut row, mut col) = self.offset_to_row_col(start);
         for _ in 0..len{
             let line = &self.lines[row];
@@ -94,7 +93,7 @@ impl TextBuffer{
                 col = 0;
                 row += 1;
                 if row >= self.lines.len(){
-                    return ret;
+                    return;
                 }
             }
             else{
@@ -102,8 +101,7 @@ impl TextBuffer{
                 col += 1;
             }
         };
-        return ret;
-    }*/
+    }
 
     fn replace_range(&mut self, start:usize, len:usize, mut rep_lines:Vec<Vec<char>>)->Vec<Vec<char>>{
 
@@ -464,6 +462,15 @@ impl CursorSet{
             set:vec![Cursor{head:0,tail:0,max:0}],
             last_cursor:0
         }
+    }
+
+    pub fn get_all_as_string(&self, text_buffer:&TextBuffer)->String{
+        let mut ret = String::new();
+        for cursor in &self.set{
+            let (start, end) = cursor.order();
+            text_buffer.get_range_as_string(start, end-start, &mut ret);
+        }
+        ret
     }
 
     pub fn fuse_adjacent(&mut self, text_buffer:&TextBuffer){

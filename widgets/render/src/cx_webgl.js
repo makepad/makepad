@@ -1,6 +1,7 @@
 (function(root){
 	var user_agent = window.navigator.userAgent;
 	var is_mobile_safari = user_agent.match(/Mobile\/\w+ Safari/i);
+	var is_android = user_agent.match(/Android/i);
 	var is_add_to_homescreen_safari = is_mobile_safari && navigator.standalone;
 	var is_touch_device = ('ontouchstart' in window || navigator.maxTouchPoints);
 	var is_firefox = navigator.userAgent.toLowerCase().indexOf('firefox') > -1;
@@ -91,7 +92,7 @@
 			this.mf64[pos>>1] = time;
 		}
 
-		on_finger_down(finger){
+		finger_down(finger){
 			let pos = this.fit(6);
 			this.mu32[pos++] = 6;
 			this.mf32[pos++] = finger.x
@@ -101,7 +102,7 @@
 			this.mu32[pos++] = finger.modifiers
 		}
 
-		on_finger_up(finger){
+		finger_up(finger){
 			let pos = this.fit(6);
 			this.mu32[pos++] = 7;
 			this.mf32[pos++] = finger.x
@@ -111,7 +112,7 @@
 			this.mu32[pos++] = finger.modifiers
 		}
 
-		on_finger_move(finger){
+		finger_move(finger){
 			let pos = this.fit(6);
 			this.mu32[pos++] = 8;
 			this.mf32[pos++] = finger.x
@@ -121,7 +122,7 @@
 			this.mu32[pos++] = finger.modifiers
 		}
 
-		on_finger_hover(finger){
+		finger_hover(finger){
 			let pos = this.fit(4);
 			this.mu32[pos++] = 9;
 			this.mf32[pos++] = finger.x
@@ -129,7 +130,7 @@
 			this.mu32[pos++] = finger.modifiers
 		}
 		
-		on_finger_scroll(finger){
+		finger_scroll(finger){
 			let pos = this.fit(7);
 			this.mu32[pos++] = 10;
 			this.mf32[pos++] = finger.x
@@ -140,7 +141,7 @@
 			this.mu32[pos++] = finger.modifiers
 		}
 
-		on_finger_out(finger){
+		finger_out(finger){
 			let pos = this.fit(4);
 			this.mu32[pos++] = 11;
 			this.mf32[pos++] = finger.x
@@ -148,7 +149,7 @@
 			this.mu32[pos++] = finger.modifiers
 		}
 
-		on_key_down(key){
+		key_down(key){
 			let pos = this.fit(5);
 			this.mu32[pos++] = 12;
 			this.mu32[pos++] = key.key_code;
@@ -157,7 +158,7 @@
 			this.mu32[pos++] = key.modifiers;
 		}
 
-		on_key_up(key){
+		key_up(key){
 			let pos = this.fit(5);
 			this.mu32[pos++] = 13;
 			this.mu32[pos++] = key.key_code;
@@ -166,10 +167,12 @@
 			this.mu32[pos++] = key.modifiers;
 		}
 
-		on_text_input(text){
-			let pos = this.fit(1);
+		text_input(data){
+			let pos = this.fit(3);
 			this.mu32[pos++] = 14;
-			this.send_string(text);
+			this.mu32[pos++] = data.was_paste?1:0,
+			this.mu32[pos++] = data.replace_last?1:0,
+			this.send_string(data.input);
 		}
 
 		read_file_data(id, buf_ptr, buf_len){
@@ -178,6 +181,11 @@
 			this.mu32[pos++] = id;
 			this.mu32[pos++] = buf_ptr;
 			this.mu32[pos++] = buf_len;
+		}
+
+		text_clipboard_request(){
+			let pos = this.fit(1);
+			this.mu32[pos++] = 16;
 		}
 
 		end(){
@@ -202,7 +210,7 @@
 			this.textures = [];
 			this.resources = [];
 			this.req_anim_frame_id = 0;
-
+			this.text_clipboard_response = "";
 			this.init_webgl_context();
 			this.bind_mouse_and_touch();
 			this.bind_keyboard();
@@ -662,19 +670,19 @@
 				e.preventDefault();
 				this.focus_keyboard_input();
 				mouse_buttons_down[e.button] = true;
-				this.to_wasm.on_finger_down(mouse_to_finger(e))
+				this.to_wasm.finger_down(mouse_to_finger(e))
 				this.do_wasm_io();
 			})
 			window.addEventListener('mouseup',e=>{
 				e.preventDefault();
 				mouse_buttons_down[e.button] = false;
-				this.to_wasm.on_finger_up(mouse_to_finger(e))
+				this.to_wasm.finger_up(mouse_to_finger(e))
 				this.do_wasm_io();
 			})
 			let mouse_move = e=>{
 				for(var i = 0; i < mouse_buttons_down.length; i++){
 					if(mouse_buttons_down[i]){
-						this.to_wasm.on_finger_move({
+						this.to_wasm.finger_move({
 							x:e.pageX,
 							y:e.pageY,
 							modifiers:0,
@@ -682,7 +690,7 @@
 						})
 					}
 				}
-				this.to_wasm.on_finger_hover(mouse_to_finger(e));
+				this.to_wasm.finger_hover(mouse_to_finger(e));
 				var begin = performance.now();
 				this.do_wasm_io();
 				var end = performance.now();
@@ -690,7 +698,7 @@
 			}
 			window.addEventListener('mousemove',mouse_move);
 			window.addEventListener('mouseout',e=>{
-				this.to_wasm.on_finger_out(mouse_to_finger(e))//e.pageX, e.pageY, pa;
+				this.to_wasm.finger_out(mouse_to_finger(e))//e.pageX, e.pageY, pa;
 				this.do_wasm_io();
 			});
 			canvas.addEventListener('contextmenu',e=>{
@@ -701,7 +709,7 @@
 				e.preventDefault()
 				let fingers = touch_to_finger_alloc(e);
 				for(let i = 0; i < fingers.length; i++){
-					this.to_wasm.on_finger_down(fingers[i])
+					this.to_wasm.finger_down(fingers[i])
 				}
 				this.do_wasm_io();
 				return false
@@ -710,7 +718,7 @@
 				e.preventDefault();
 				var fingers = touch_to_finger_lookup(e);
 				for(let i = 0; i < fingers.length; i++){
-					this.to_wasm.on_finger_move(fingers[i])
+					this.to_wasm.finger_move(fingers[i])
 				}
 				this.do_wasm_io();
 				return false
@@ -719,7 +727,7 @@
 				e.preventDefault();
 				var fingers = touch_to_finger_free(e);
 				for(let i = 0; i < fingers.length; i++){
-					this.to_wasm.on_finger_up(fingers[i])
+					this.to_wasm.finger_up(fingers[i])
 				}
 				this.do_wasm_io();
 				return false
@@ -757,19 +765,17 @@
 				finger.scroll_x = e.deltaX * fac
 				finger.scroll_y = e.deltaY * fac
 				finger.is_wheel = last_was_wheel;
-				this.to_wasm.on_finger_scroll(finger);
+				this.to_wasm.finger_scroll(finger);
 				this.do_wasm_io();
 			})
 			//window.addEventListener('webkitmouseforcewillbegin', this.onCheckMacForce.bind(this), false)
 			//window.addEventListener('webkitmouseforcechanged', this.onCheckMacForce.bind(this), false)
 		}
-		
-		focus_keyboard_input(){
-			this.text_area.focus();
-		}
-
+	
 		bind_keyboard(){
-
+			if(is_mobile_safari || is_android){ // mobile keyboards are unusable on a UI like this. Not happening.
+				return
+			}
 			var ta = this.text_area = document.createElement('textarea')
 			ta.className = "makepad"
 			ta.setAttribute('autocomplete','off')
@@ -810,27 +816,51 @@
 			document.body.appendChild(style)
 			ta.style.left = -100
 			ta.style.top = -100
-			ta.style.height = 0
-			ta.style.width = 0
+			ta.style.height = 10
+			ta.style.width = 10
 
 			// make the IME not show up:
 			//ta.setAttribute('readonly','false')
 
 			//document.addEventListener('focusout', this.onFocusOut.bind(this))
+			var was_paste = false;
 			ta.addEventListener('cut', e=>{
-				
 			})
 			ta.addEventListener('paste', e=>{
-
+				was_paste = true;
 			})
 			ta.addEventListener('select', e=>{
 				
 			})
 			ta.addEventListener('input', e=>{
-				ta.selectionStart = 0;
-				ta.selectionEnd = ta.value.length;
-				this.to_wasm.on_text_input(ta.value);
-				this.do_wasm_io();
+
+				if(ta.value.length>0){
+					if(was_paste){
+						this.to_wasm.text_input({
+							was_paste:true,
+							input:ta.value,
+							replace_last:false,
+						})
+					}
+					else{
+						if(ta.value.length == 2){ // its an IME
+							// we should send a replace last
+							this.to_wasm.text_input({
+								was_paste:false,
+								input:ta.value.substring(0,1),
+								replace_last:true,
+							})						
+						}
+						else{ // normal input
+							this.to_wasm.text_input({
+								was_paste:false,
+								input:ta.value,
+								replace_last:false,
+							})
+						}
+					}
+					this.do_wasm_io();
+				}
 			})
 			ta.addEventListener('touchmove', e=>{
 				
@@ -842,25 +872,46 @@
 				let code = e.keyCode;
 
 				if(code === 8 || code === 9) e.preventDefault() // backspace/tab
-				//if(code === 88 && (e.metaKey || e.ctrlKey)) this.keyboardCut = true // x cut
+				if((code === 88 || code == 67) && (e.metaKey || e.ctrlKey) ){ // copy or cut
+					// we need to request the clipboard
+					this.to_wasm.text_clipboard_request();
+					this.do_wasm_io();
+					ta.value = this.text_clipboard_response;
+					ta.selectionStart = 0;
+					ta.selectionEnd = ta.value.length;
+				}
+				//	this.keyboardCut = true // x cut
 				//if(code === 65 && (e.metaKey || e.ctrlKey)) this.keyboardSelectAll = true	 // all (select all)	
-				if(code === 90 && (e.metaKey || e.ctrlKey)) e.preventDefault() // all (select all)	
 				if(code === 89 && (e.metaKey || e.ctrlKey)) e.preventDefault() // all (select all)	
 				if(code === 83 && (e.metaKey || e.ctrlKey)) e.preventDefault() // ctrl s
-		
-				this.to_wasm.on_key_down({
+				if(code === 90 && (e.metaKey || e.ctrlKey)){
+					// stop the cmd-Z IME showing up when undoing.
+					ta.readOnly = true;
+					e.preventDefault()
+				}
+				ta.selectionStart = 0;
+				ta.selectionEnd = ta.value.length;
+
+				this.to_wasm.key_down({
 					key_code:e.keyCode,
 					char_code:e.charCode,
 					is_repeat:e.repeat,
 					modifiers:pack_key_modifier(e)
 				})
-
 				
 				this.do_wasm_io();
 			})
 			ta.addEventListener('keyup', e=>{
+				var ta = this.text_area;
+				if(ta.readOnly){
+					//hahah. hahahahahhaha. this is to stop the cmd-z IME to show up in chrome
+					ta.readOnly = false;
+					document.body.removeChild(ta);
+					document.body.appendChild(ta);
+					ta.focus();
+				}
 
-				this.to_wasm.on_key_up({
+				this.to_wasm.key_up({
 					key_code:e.keyCode,
 					char_code:e.charCode,
 					is_repeat:e.repeat,
@@ -869,6 +920,29 @@
 				this.do_wasm_io();
 			})			
 			document.body.appendChild(ta);
+		}
+	
+		focus_keyboard_input(){
+			this.text_area.focus();
+		}
+
+		update_text_area_pos(){
+			var pos = this.text_area_pos;
+			var ta = this.text_area;
+			if(ta){
+				ta.style.left = Math.round(pos.x)+4;// + "px";
+				ta.style.top = Math.round(pos.y);// + "px"
+			}
+		}
+
+		show_text_ime(x,y){
+			
+			this.text_area_pos = {x:x,y:y}
+			this.update_text_area_pos();
+		}
+
+		hide_text_ime(){
+
 		}
 
 		alloc_array_buffer(array_buffer_id, array){
@@ -1108,6 +1182,15 @@
 		},
 		function read_file_13(self){
 			self.read_file(self.mu32[self.parse++], self.parse_string());
+		},
+		function show_text_ime_14(self){
+			self.show_text_ime(self.mf32[self.parse++], self.mf32[self.parse++])
+		},
+		function hide_text_ime_15(self){
+			self.hide_text_ime();
+		},
+		function text_clipboard_response_16(self){
+			self.text_clipboard_response = self.parse_string();
 		}
 	]
 	

@@ -150,7 +150,12 @@ pub struct KeyFocusEvent{
 #[derive(Clone, Debug, PartialEq)]
 pub struct TextInputEvent{
     pub input:String,
-    pub replace_last:bool
+    pub replace_last:bool,
+    pub was_paste:bool
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct TextClipboardRequestEvent{
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -175,7 +180,8 @@ pub enum Event{
     KeyFocus(KeyFocusEvent),
     KeyDown(KeyEvent),
     KeyUp(KeyEvent),
-    TextInput(TextInputEvent)
+    TextInput(TextInputEvent),
+    TextClipboardRequest
 }
 
 impl Default for Event{
@@ -248,6 +254,11 @@ impl Event{
                 }
             },
             Event::TextInput(_)=>{
+                if area == cx.key_focus{
+                    return self.clone();
+                }
+            },
+            Event::TextClipboardRequest=>{
                 if area == cx.key_focus{
                     return self.clone();
                 }

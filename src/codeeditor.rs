@@ -335,6 +335,15 @@ impl CodeEditor{
                             false
                         }
                     },
+                    KeyCode::KeyX=>{ // cut
+                        if ke.modifiers.logo || ke.modifiers.control{ // cut
+                            self.cursors.replace_text("", text_buffer);
+                            true
+                        }
+                        else{
+                            false
+                        }
+                    },
                     //KeyCode::Return=>{
                     //    self.cursors.replace_text("\n", text_buffer);
                     //    true
@@ -347,10 +356,17 @@ impl CodeEditor{
                 }
             },
             Event::TextInput(te)=>{
+                // what do we do when we have replace.last? do we undo and insert?
+                if(te.replace_last){
+                    text_buffer.undo(&mut self.cursors);
+                }
                 self.cursors.replace_text(&te.input, text_buffer);
                 self.scroll_last_cursor_visible(cx, text_buffer);
                 self.view.redraw_view_area(cx);
-            }
+            },
+            Event::TextClipboardRequest=>{
+                cx.text_clipboard_response(&self.cursors.get_all_as_string(text_buffer));
+            },
             _=>()
         };
         CodeEditorEvent::None
@@ -426,6 +442,7 @@ impl CodeEditor{
         for rc in &draw_cursor.cursors{
            self.cursor.draw_quad(cx, Rect{x:rc.x - pos.x, y:rc.y - pos.y, w:rc.w, h:rc.h});
         }
+
         
         self._text_area = self._text_inst.take().unwrap().inst.into_area();
 
@@ -468,6 +485,16 @@ impl CodeEditor{
         }
 
         self.view.end_view(cx);
+
+        // place the IME
+        if let Some(last_cursor) = draw_cursor.last_cursor{
+            let rc = draw_cursor.cursors[last_cursor];
+            let scroll_pos = self.view.get_scroll_pos(cx);
+            cx.show_text_ime(rc.x - scroll_pos.x, rc.y - scroll_pos.y);
+        }
+        else{ // current last cursors is not visible
+            cx.hide_text_ime();
+        }
     }
 
     pub fn draw_tab_lines(&mut self, cx:&mut Cx, tabs:usize){
@@ -535,6 +562,7 @@ impl CodeEditor{
                 self.text.color = color;
                 // we need to find the next cursor point we need to do something at
                 let cursors = &self.cursors.set;
+                let last_cursor = self.cursors.last_cursor;
                 let draw_cursor = &mut self._draw_cursor;
                 let height = self._monospace_size.y;
 
@@ -548,7 +576,7 @@ impl CodeEditor{
                     
                     // in current cursor range, update values
                     if offset >= draw_cursor.start && offset <= draw_cursor.end{
-                        draw_cursor.process_geom(offset, x, geom.y, w, height);
+                        draw_cursor.process_geom(last_cursor, offset, x, geom.y, w, height);
                         if offset == draw_cursor.end{
                             draw_cursor.emit_selection(false);
                         }
@@ -614,6 +642,7 @@ pub struct DrawCursor{
     pub first:bool,
     pub empty:bool,
     pub cursors:Vec<Rect>,
+    pub last_cursor:Option<usize>,
     pub selections:Vec<DrawSel>
 }
 
@@ -631,6 +660,7 @@ impl DrawCursor{
             last_w:0.0,
             cursors:Vec::new(),
             selections:Vec::new(),
+            last_cursor:None
         }
     }
 
@@ -679,8 +709,11 @@ impl DrawCursor{
         }
     }
 
-    pub fn process_geom(&mut self, offset:usize, x:f32, y:f32, w:f32, h:f32){
+    pub fn process_geom(&mut self, last_cursor:usize, offset:usize, x:f32, y:f32, w:f32, h:f32){
         if offset == self.head{ // emit a cursor
+            if self.next_index - 1 == last_cursor{
+                self.last_cursor = Some(self.cursors.len());
+            }
             self.emit_cursor(x, y, h);
         }
         if self.first{ // store left top of rect

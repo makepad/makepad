@@ -258,8 +258,9 @@ impl Cx{
                 },
                 14=>{ // text input
                     self.call_event_handler(&mut event_handler, &mut Event::TextInput(TextInputEvent{
+                        was_paste:to_wasm.mu32()>0,
+                        replace_last:to_wasm.mu32()>0,
                         input:to_wasm.parse_string(),
-                        replace_last:false
                     }));
                 },
                 15=>{ // file read data
@@ -272,6 +273,9 @@ impl Cx{
                         id: id as u64,
                         data:Ok(vec_buf)
                     }));
+                },
+                16=>{ // text clipboard request
+                    self.call_event_handler(&mut event_handler,&mut Event::TextClipboardRequest);
                 },
                 _=>{
                     panic!("Message unknown")
@@ -331,6 +335,18 @@ impl Cx{
         self.platform.from_wasm.read_file(id as u32, path);
         self.platform.file_read_id += 1;
         id
+    }
+
+    pub fn show_text_ime(&mut self, x:f32, y:f32){
+        self.platform.from_wasm.show_text_ime(x,y);
+    }
+
+    pub fn hide_text_ime(&mut self){
+        self.platform.from_wasm.hide_text_ime();
+    }
+
+    pub fn text_clipboard_response(&mut self, data:&str){
+        self.platform.from_wasm.text_clipboard_response(data);
     }
 
     pub fn compile_all_webgl_shaders(&mut self){
@@ -974,6 +990,24 @@ impl FromWasm{
         self.mu32(13);
         self.mu32(id);
         self.add_string(path);
+    }
+
+    pub fn show_text_ime(&mut self, x:f32, y:f32){
+        self.fit(3);
+        self.mu32(14);
+        self.mf32(x);
+        self.mf32(y);
+    }
+
+    pub fn hide_text_ime(&mut self){
+        self.fit(1);
+        self.mu32(15);
+    }
+
+    pub fn text_clipboard_response(&mut self, response:&str){
+        self.fit(1);
+        self.mu32(16);
+        self.add_string(response);
     }
 
     fn add_string(&mut self, msg:&str){

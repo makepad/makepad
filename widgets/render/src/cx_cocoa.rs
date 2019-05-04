@@ -209,6 +209,7 @@ impl CocoaWindow{
                         self.do_callback(&mut vec![
                             Event::TextInput(TextInputEvent{
                                 input:"\n".to_string(),
+                                replace_last:false
                             })
                         ]);
                     }
