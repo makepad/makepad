@@ -14,9 +14,43 @@ pub struct TextBuffer{
     pub _char_count: usize
 }
 
+#[derive(Clone,PartialEq)]
+pub enum TextUndoGrouping{
+    Space,
+    Newline,
+    Character,
+    Backspace,
+    Delete,
+    Block,
+    Cut,
+    Other
+}
+
+impl Default for TextUndoGrouping{
+    fn default()->TextUndoGrouping{
+        TextUndoGrouping::Other
+    }
+}
+
+impl TextUndoGrouping{
+    fn wants_grouping(&self)->bool{
+        match self{
+            TextUndoGrouping::Space=>true,
+            TextUndoGrouping::Newline=>true,
+            TextUndoGrouping::Character=>true,
+            TextUndoGrouping::Backspace=>true,
+            TextUndoGrouping::Delete=>true,
+            TextUndoGrouping::Block=>false,
+            TextUndoGrouping::Cut=>false,
+            TextUndoGrouping::Other=>false
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct TextUndo{
     ops:Vec<TextOp>,
+    grouping:TextUndoGrouping,
     cursors:CursorSet
 }
 
@@ -234,6 +268,7 @@ impl TextBuffer{
         }
         let text_undo_inverse = TextUndo{
             ops:ops,
+            grouping:text_undo.grouping,
             cursors:cursor_set.clone()
         };
         cursor_set.set = text_undo.cursors.set.clone();
@@ -241,22 +276,42 @@ impl TextBuffer{
         text_undo_inverse
     }
 
+    // todo make more reuse in these functions
     pub fn undo(&mut self, cursor_set:&mut CursorSet){
+        
         if self.undo_stack.len() == 0{
             return;
         }
-        let text_undo = self.undo_stack.pop().unwrap();
-        let text_redo = self.undoredo(text_undo, cursor_set);
-        self.redo_stack.push(text_redo);
+        let mut last_grouping = TextUndoGrouping::Other;
+        let mut first = true;
+        while self.undo_stack.len() > 0{
+            if self.undo_stack.last().unwrap().grouping != last_grouping && !first{
+                break
+            }
+            first = false;
+            let text_undo = self.undo_stack.pop().unwrap();
+            last_grouping = text_undo.grouping.clone();
+            let text_redo = self.undoredo(text_undo, cursor_set);
+            self.redo_stack.push(text_redo);
+        }
     }
 
     pub fn redo(&mut self, cursor_set:&mut CursorSet){
         if self.redo_stack.len() == 0{
             return;
         }
-        let text_redo = self.redo_stack.pop().unwrap();
-        let text_undo = self.undoredo(text_redo, cursor_set);
-        self.undo_stack.push(text_undo);
+        let mut last_grouping = TextUndoGrouping::Other;
+        let mut first = true;
+        while self.redo_stack.len() > 0{
+            if self.redo_stack.last().unwrap().grouping != last_grouping && !first{
+                break
+            }
+            first = false;
+            let text_redo = self.redo_stack.pop().unwrap();
+            last_grouping = text_redo.grouping.clone();
+            let text_undo = self.undoredo(text_redo, cursor_set);
+            self.undo_stack.push(text_undo);
+        }
     }
 
 }
@@ -564,6 +619,27 @@ impl CursorSet{
     }
 
     pub fn replace_text(&mut self, text:&str, text_buffer:&mut TextBuffer){
+        let mut grouping = TextUndoGrouping::Other;
+        if text.len() == 1{
+            // check if we are space
+            let ch = text.chars().next().unwrap();
+            if ch == ' '{
+                grouping = TextUndoGrouping::Space;
+            }
+            else if ch == '\n'{
+                grouping = TextUndoGrouping::Newline;
+            }
+            else{
+                grouping = TextUndoGrouping::Character;
+            }
+        }
+        else if text.len() == 0{
+            grouping = TextUndoGrouping::Cut
+        }
+        else {
+            grouping = TextUndoGrouping::Block
+        }
+
         let mut delta:isize = 0; // rolling delta to displace cursors 
         let mut ops = Vec::new();
         let cursors_clone = self.clone();
@@ -576,6 +652,7 @@ impl CursorSet{
         text_buffer.redo_stack.truncate(0);
         text_buffer.undo_stack.push(TextUndo{
             ops:ops,
+            grouping:grouping,
             cursors:cursors_clone
         })
     }
@@ -600,6 +677,7 @@ impl CursorSet{
         text_buffer.redo_stack.truncate(0);
         text_buffer.undo_stack.push(TextUndo{
             ops:ops,
+            grouping:TextUndoGrouping::Delete,
             cursors:cursors_clone
         })
     }
@@ -624,6 +702,7 @@ impl CursorSet{
         text_buffer.redo_stack.truncate(0);
         text_buffer.undo_stack.push(TextUndo{
             ops:ops,
+            grouping:TextUndoGrouping::Backspace,
             cursors:cursors_clone
         })
     }
