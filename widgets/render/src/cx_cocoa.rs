@@ -191,7 +191,8 @@ impl CocoaWindow{
                             key_code:key_code,
                             key_char:key_char,
                             is_repeat:is_repeat,
-                            modifiers:modifiers
+                            modifiers:modifiers,
+                            time:0.0
                         })
                     ]);
                 }
@@ -244,7 +245,8 @@ impl CocoaWindow{
                             key_code:key_code,
                             key_char:key_char,
                             is_repeat:is_repeat,
-                            modifiers:modifiers
+                            modifiers:modifiers,
+                            time:0.0
                         })
                     ]);
                     if is_return{
@@ -280,8 +282,8 @@ impl CocoaWindow{
                             key_code:key_code,
                             key_char:'\0',
                             is_repeat:false,
-                            modifiers:modifiers
-
+                            modifiers:modifiers,
+                            time:0.0
                         };
                         if new{
                             events.push(Event::KeyDown(event));
@@ -318,7 +320,8 @@ impl CocoaWindow{
                             rect:Rect::zero(),
                             is_wheel:false,
                             modifiers:get_event_key_modifier(ns_event),
-                            handled:false
+                            handled:false,
+                            time:0.0
                         })
                     ]);
                 } else {
@@ -333,7 +336,8 @@ impl CocoaWindow{
                             rect:Rect::zero(),
                             is_wheel:true,
                             modifiers:get_event_key_modifier(ns_event),
-                            handled:false
+                            handled:false,
+                            time:0.0
                         })
                     ]);
                 }
@@ -430,7 +434,8 @@ impl CocoaWindow{
             digit:digit,
             handled:false,
             is_touch:false,
-            modifiers:modifiers
+            modifiers:modifiers,
+            time:0.0
         })]);
     }
 
@@ -445,7 +450,8 @@ impl CocoaWindow{
             digit:digit,
             is_over:false,
             is_touch:false,
-            modifiers:modifiers
+            modifiers:modifiers,
+            time:0.0
         })]);
     }
 
@@ -463,7 +469,8 @@ impl CocoaWindow{
                     rel_start:Vec2::zero(),
                     is_over:false,
                     is_touch:false,
-                    modifiers:modifiers.clone()
+                    modifiers:modifiers.clone(),
+                    time:0.0
                 }));
             }
         };
@@ -473,7 +480,8 @@ impl CocoaWindow{
             rect:Rect::zero(),
             handled:false,
             hover_state:HoverState::Over,
-            modifiers:modifiers
+            modifiers:modifiers,
+            time:0.0
         }));
         self.do_callback(&mut events);
     }

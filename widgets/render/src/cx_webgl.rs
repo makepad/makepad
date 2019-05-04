@@ -161,7 +161,8 @@ impl Cx{
                         handled:false,
                         digit:digit,
                         is_touch:to_wasm.mu32()>0,
-                        modifiers:unpack_key_modifier(to_wasm.mu32())
+                        modifiers:unpack_key_modifier(to_wasm.mu32()),
+                        time:to_wasm.mf64()
                     }));
                 },
                 7=>{ // finger up
@@ -181,7 +182,8 @@ impl Cx{
                         digit:digit,
                         is_over:false,
                         is_touch:to_wasm.mu32()>0,
-                        modifiers:unpack_key_modifier(to_wasm.mu32())
+                        modifiers:unpack_key_modifier(to_wasm.mu32()),
+                        time:to_wasm.mf64()
                     }));
                 },
                 8=>{ // finger move
@@ -196,7 +198,8 @@ impl Cx{
                         is_over:false,
                         digit:to_wasm.mu32() as usize,
                         is_touch:to_wasm.mu32()>0,
-                        modifiers:unpack_key_modifier(to_wasm.mu32())
+                        modifiers:unpack_key_modifier(to_wasm.mu32()),
+                        time:to_wasm.mf64()
                     }));
                 },
                 9=>{ // finger hover
@@ -209,7 +212,8 @@ impl Cx{
                         rect:Rect::zero(),
                         handled:false,
                         hover_state:HoverState::Over,
-                        modifiers:unpack_key_modifier(to_wasm.mu32())
+                        modifiers:unpack_key_modifier(to_wasm.mu32()),
+                        time:to_wasm.mf64()
                     }));
                 },
                 10=>{ // finger scroll
@@ -225,7 +229,8 @@ impl Cx{
                             y:to_wasm.mf32()
                         },
                         is_wheel:to_wasm.mu32() != 0,
-                        modifiers:unpack_key_modifier(to_wasm.mu32())
+                        modifiers:unpack_key_modifier(to_wasm.mu32()),
+                        time:to_wasm.mf64()
                     }));
                 },
                 11=>{// finger out
@@ -237,7 +242,8 @@ impl Cx{
                         rect:Rect::zero(),
                         handled:false,
                         hover_state:HoverState::Out,
-                        modifiers:unpack_key_modifier(to_wasm.mu32())
+                        modifiers:unpack_key_modifier(to_wasm.mu32()),
+                        time:to_wasm.mf64()
                     }));
                 },
                 12=>{ // key_down
@@ -245,7 +251,8 @@ impl Cx{
                         key_code:web_to_key_code(to_wasm.mu32()),
                         key_char:if let Some(c) = std::char::from_u32(to_wasm.mu32()){c}else{'?'},
                         is_repeat:to_wasm.mu32() > 0,
-                        modifiers:unpack_key_modifier(to_wasm.mu32())
+                        modifiers:unpack_key_modifier(to_wasm.mu32()),
+                        time:to_wasm.mf64()
                     }));
                 },
                 13=>{ // key up
@@ -253,7 +260,8 @@ impl Cx{
                         key_code:web_to_key_code(to_wasm.mu32()),
                         key_char:if let Some(c) = std::char::from_u32(to_wasm.mu32()){c}else{'?'},
                         is_repeat:to_wasm.mu32() > 0,
-                        modifiers:unpack_key_modifier(to_wasm.mu32())
+                        modifiers:unpack_key_modifier(to_wasm.mu32()),
+                        time:to_wasm.mf64()
                     }));
                 },
                 14=>{ // text input

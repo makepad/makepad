@@ -53,6 +53,18 @@
 			}
 		}
 
+		send_f64(value){
+			if(this.used&1){ // float64 align, need to fit another
+				var pos = this.fit(3);
+				pos++;
+				this.mf64[pos>>1] = value;
+			}
+			else{
+				var pos = this.fit(2);
+				this.mf64[pos>>1] = value;
+			}
+		}
+
 		deps_loaded(deps){
 			let pos = this.fit(2);
 			this.mu32[pos++] = 2
@@ -83,13 +95,9 @@
 		}
 
 		animation_frame(time){
-			let pos = this.fit(3); // float64 uses 2 slots
+			let pos = this.fit(1); // float64 uses 2 slots
 			this.mu32[pos++] = 5;
-			if(pos&1){ // float64 align, need to fit another
-				pos++;
-				this.fit(1);
-			}
-			this.mf64[pos>>1] = time;
+			this.send_f64(time);
 		}
 
 		finger_down(finger){
@@ -110,8 +118,9 @@
 			this.mu32[pos++] = finger.digit
 			this.mu32[pos++] = finger.touch?1:0
 			this.mu32[pos++] = finger.modifiers
+			this.send_f64(finger.time);
 		}
-
+		
 		finger_move(finger){
 			let pos = this.fit(6);
 			this.mu32[pos++] = 8;
@@ -120,6 +129,7 @@
 			this.mu32[pos++] = finger.digit
 			this.mu32[pos++] = finger.touch?1:0
 			this.mu32[pos++] = finger.modifiers
+			this.send_f64(finger.time);
 		}
 
 		finger_hover(finger){
@@ -128,6 +138,7 @@
 			this.mf32[pos++] = finger.x
 			this.mf32[pos++] = finger.y
 			this.mu32[pos++] = finger.modifiers
+			this.send_f64(finger.time);
 		}
 		
 		finger_scroll(finger){
@@ -139,6 +150,7 @@
 			this.mf32[pos++] = finger.scroll_y
 			this.mu32[pos++] = finger.is_wheel?1:0
 			this.mu32[pos++] = finger.modifiers
+			this.send_f64(finger.time);
 		}
 
 		finger_out(finger){
@@ -147,6 +159,7 @@
 			this.mf32[pos++] = finger.x
 			this.mf32[pos++] = finger.y
 			this.mu32[pos++] = finger.modifiers
+			this.send_f64(finger.time);
 		}
 
 		key_down(key){
@@ -156,6 +169,7 @@
 			this.mu32[pos++] = key.char_code;
 			this.mu32[pos++] = key.is_repeat?1:0;
 			this.mu32[pos++] = key.modifiers;
+			this.send_f64(key.time);
 		}
 
 		key_up(key){
@@ -165,6 +179,7 @@
 			this.mu32[pos++] = key.char_code;
 			this.mu32[pos++] = key.is_repeat?1:0;
 			this.mu32[pos++] = key.modifiers;
+			this.send_f64(key.time);
 		}
 
 		text_input(data){
@@ -183,7 +198,7 @@
 			this.mu32[pos++] = buf_len;
 		}
 
-		text_copy_request(){
+		text_copy(){
 			let pos = this.fit(1);
 			this.mu32[pos++] = 16;
 		}
@@ -581,6 +596,7 @@
 					x:e.pageX,
 					y:e.pageY,
 					digit: e.button,
+					time:e.timeStamp,
 					modifiers:pack_key_modifier(e),
 					touch: false
 				}
@@ -609,6 +625,7 @@
 						x:t.pageX,
 						y:t.pageY,
 						digit:digit,
+						time:e.timeStamp,
 						modifiers:0,
 						touch: true,
 					})
@@ -634,6 +651,7 @@
 						x:t.pageX,
 						y:t.pageY,
 						digit:lookup_digit(t.identifier),
+						time:e.timeStamp,
 						modifiers:{},
 						touch: true,
 					})
@@ -657,6 +675,7 @@
 					f.push({
 						x:t.pageX,
 						y:t.pageY,
+						time:e.timeStamp,
 						digit:digit,
 						modifiers:0,
 						touch: true,
@@ -685,6 +704,7 @@
 						this.to_wasm.finger_move({
 							x:e.pageX,
 							y:e.pageY,
+							time:e.timeStamp,
 							modifiers:0,
 							digit:i
 						})
@@ -894,7 +914,7 @@
 				if(code === 8 || code === 9) e.preventDefault() // backspace/tab
 				if((code === 88 || code == 67) && (e.metaKey || e.ctrlKey) ){ // copy or cut
 					// we need to request the clipboard
-					this.to_wasm.text_copy_request();
+					this.to_wasm.text_copy();
 					this.do_wasm_io();
 					ta.value = this.text_copy_response;
 					ta.selectionStart = 0;
@@ -916,6 +936,7 @@
 					key_code:e.keyCode,
 					char_code:e.charCode,
 					is_repeat:e.repeat,
+					time:e.timeStamp,
 					modifiers:pack_key_modifier(e)
 				})
 				
@@ -933,6 +954,7 @@
 					key_code:e.keyCode,
 					char_code:e.charCode,
 					is_repeat:e.repeat,
+					time:e.timeStamp,
 					modifiers:pack_key_modifier(e)
 				})
 				this.do_wasm_io();

@@ -218,7 +218,8 @@ impl Cx{
                     abs_start:Vec2::zero(),
                     rel_start:Vec2::zero(),
                     is_over:false,
-                    is_touch:false
+                    is_touch:false,
+                    time:0.0
                 }))
             }
         };
@@ -310,7 +311,8 @@ impl Cx{
                         rect:Rect::zero(),
                         is_wheel:yis_wheel || xis_wheel,
                         handled:false,
-                        scroll:Vec2{x:x, y:y} 
+                        scroll:Vec2{x:x, y:y},
+                        time:0.0
                     })]
                 },
                 winit::WindowEvent::CursorMoved{position,..}=>{
@@ -324,7 +326,8 @@ impl Cx{
                         rect:Rect::zero(),
                         modifiers:KeyModifiers{..Default::default()},
                         handled:false,
-                        hover_state:HoverState::Over
+                        hover_state:HoverState::Over,
+                        time:0.0
                     }));
                     return events;
                 },
@@ -344,7 +347,8 @@ impl Cx{
                         rel:self.platform.last_mouse_pos,
                         rect:Rect::zero(),
                         handled:false,
-                        hover_state:HoverState::Out
+                        hover_state:HoverState::Out,
+                        time:0.0
                     })]
 
                 },
@@ -369,6 +373,7 @@ impl Cx{
                                 handled:false,
                                 digit:digit,
                                 is_touch:false,
+                                time:0.0
                             })]
                         },
                         winit::ElementState::Released=>{
@@ -397,6 +402,7 @@ impl Cx{
                                 digit:digit,
                                 is_over:false,
                                 is_touch:false,
+                                time:0.0
                             })]
                         }
                     }
@@ -426,6 +432,12 @@ impl Cx{
         vec![Event::None]
     }
 
+   pub fn show_text_ime(&mut self, _x:f32, _y:f32){
+    }
+
+    pub fn hide_text_ime(&mut self){
+        //self.platform.from_wasm.hide_text_ime();
+    }
 
     pub fn compile_all_ogl_shaders(&mut self){
         for sh in &self.shaders{

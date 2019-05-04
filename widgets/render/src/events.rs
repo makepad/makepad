@@ -16,7 +16,8 @@ pub struct FingerDownEvent{
     pub digit:usize,
     pub handled:bool,
     pub is_touch:bool,
-    pub modifiers:KeyModifiers
+    pub modifiers:KeyModifiers,
+    pub time:f64
 }
 
 #[derive(Clone, Default,Debug, PartialEq)]
@@ -29,7 +30,8 @@ pub struct FingerMoveEvent{
     pub is_over:bool,
     pub digit:usize,
     pub is_touch:bool,
-    pub modifiers:KeyModifiers
+    pub modifiers:KeyModifiers,
+    pub time:f64
 }
 
 impl FingerMoveEvent{
@@ -48,7 +50,8 @@ pub struct FingerUpEvent{
     pub digit:usize,
     pub is_over:bool,
     pub is_touch:bool,
-    pub modifiers:KeyModifiers
+    pub modifiers:KeyModifiers,
+    pub time:f64
 }
 
 #[derive(Clone,Debug, PartialEq)]
@@ -64,16 +67,6 @@ impl Default for HoverState{
     }
 }
 
-#[derive(Clone,Debug,Default)]
-pub struct HitState{
-    pub use_multi_touch:bool,
-    pub no_scrolling:bool,
-    pub margin:Option<Margin>,
-    pub finger_down_abs_start:Vec<Vec2>,
-    pub finger_down_rel_start:Vec<Vec2>,
-    pub was_over_last_call:bool
-}
-
 #[derive(Clone, Default,Debug, PartialEq)]
 pub struct FingerHoverEvent{
     pub abs:Vec2,
@@ -81,7 +74,8 @@ pub struct FingerHoverEvent{
     pub rect:Rect,
     pub handled:bool,
     pub hover_state:HoverState,
-    pub modifiers:KeyModifiers
+    pub modifiers:KeyModifiers,
+    pub time:f64
 }
 
 #[derive(Clone, Default,Debug, PartialEq)]
@@ -92,7 +86,8 @@ pub struct FingerScrollEvent{
     pub scroll:Vec2,
     pub is_wheel:bool,
     pub handled:bool,
-    pub modifiers:KeyModifiers
+    pub modifiers:KeyModifiers,
+    pub time:f64
 }
 
 #[derive(Clone, Default, Debug, PartialEq)]
@@ -137,7 +132,8 @@ pub struct KeyEvent{
     pub key_code:KeyCode,
     pub key_char:char,
     pub is_repeat:bool,
-    pub modifiers:KeyModifiers
+    pub modifiers:KeyModifiers,
+    pub time:f64
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -194,6 +190,16 @@ impl Default for Event{
 pub enum HitTouch{
     Single,
     Multi
+}
+
+#[derive(Clone,Debug,Default)]
+pub struct HitState{
+    pub use_multi_touch:bool,
+    pub no_scrolling:bool,
+    pub margin:Option<Margin>,
+    pub finger_down_abs_start:Vec<Vec2>,
+    pub finger_down_rel_start:Vec<Vec2>,
+    pub was_over_last_call:bool
 }
 
 impl Event{
