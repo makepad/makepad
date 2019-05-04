@@ -824,6 +824,7 @@
 
 			//document.addEventListener('focusout', this.onFocusOut.bind(this))
 			var was_paste = false;
+			this.neutralize_ime = false;
 			var last_len = 0;
 			ta.addEventListener('cut', e=>{
 				setTimeout(_=>{
@@ -852,6 +853,7 @@
 				if(ta.value.length>0){
 					if(was_paste){
 						was_paste = false;
+
 						this.to_wasm.text_input({
 							was_paste:true,
 							input:ta.value.substring(last_len),
@@ -862,13 +864,13 @@
 					else{
 						var replace_last = false;
 						var text_value = ta.value;
-						
 						if(ta.value.length >= 2){ // we want the second char
 							text_value = ta.value.substring(1,2);
 							ta.value = text_value;
 						}
 						else if(ta.value.length == 1 && last_len == ta.value.length){ // its an IME replace
 							replace_last = true;
+							
 						}
 						// we should send a replace last
 						this.to_wasm.text_input({
@@ -904,12 +906,10 @@
 				if(code === 89 && (e.metaKey || e.ctrlKey)) e.preventDefault() // all (select all)	
 				if(code === 83 && (e.metaKey || e.ctrlKey)) e.preventDefault() // ctrl s
 				if(code === 90 && (e.metaKey || e.ctrlKey)){
-					// stop the cmd-Z IME showing up when undoing.
-					ta.readOnly = true;
+					this.update_text_area_pos();
+					ta.value = "";
 					e.preventDefault()
 				}
-				//ta.selectionStart = 0;
-				//ta.selectionEnd = ta.value.length;
 
 				this.to_wasm.key_down({
 					key_code:e.keyCode,
@@ -922,14 +922,6 @@
 			})
 			ta.addEventListener('keyup', e=>{
 				var ta = this.text_area;
-				if(ta.readOnly == true){
-					//hahah. hahahahahhaha. this is to stop the cmd-z IME to show up in chrome
-					ta.readOnly = false;
-					document.body.removeChild(ta);
-					document.body.appendChild(ta);
-					ta.focus();
-				}
-
 				this.to_wasm.key_up({
 					key_code:e.keyCode,
 					char_code:e.charCode,
@@ -955,7 +947,6 @@
 		}
 
 		show_text_ime(x,y){
-			
 			this.text_area_pos = {x:x,y:y}
 			this.update_text_area_pos();
 		}
