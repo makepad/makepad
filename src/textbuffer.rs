@@ -439,7 +439,7 @@ impl Cursor{
     pub fn collapse(&mut self, start:usize, end:usize, new_len:usize)->isize{
         self.head = start + new_len;
         self.tail = self.head;
-        ((end - start) as isize - (new_len as isize))
+        ( (new_len as isize) - (end - start) as isize )
     }
 
     pub fn calc_max(&mut self, text_buffer:&TextBuffer){
