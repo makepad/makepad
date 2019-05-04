@@ -12,7 +12,7 @@ rand = "*"
 path="./widgets"
 default-features = false
 
-features=["ogl"]
+features=["mtl"]
 # other options are ["ogl"] and ["webgl"]. 
 # for linux/windows use ["ogl"]. 
 # Webgl doesn't build with this cargo, use the one in webgl/

@@ -108,6 +108,7 @@
 			this.mu32[pos++] = finger.digit
 			this.mu32[pos++] = finger.touch?1:0
 			this.mu32[pos++] = finger.modifiers
+			this.send_f64(finger.time);
 		}
 
 		finger_up(finger){
