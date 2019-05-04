@@ -602,8 +602,17 @@ impl CursorSet{
         }
     }
 
+    pub fn only_last_cursor_head(&mut self, offset:usize, text_buffer:&TextBuffer){
+        let mut cursor = self.set[self.last_cursor].clone();
+        self.last_cursor = 0;
+        self.set.truncate(0);
+        cursor.head = offset;
+        cursor.calc_max(text_buffer);
+        self.set.push(cursor);
+    }
+
     // puts the head down
-    pub fn begin_cursor_drag(&mut self, add:bool, offset:usize, text_buffer:&TextBuffer){
+    pub fn set_last_cursor_head_and_tail(&mut self, add:bool, offset:usize, text_buffer:&TextBuffer){
         if !add{
             self.set.truncate(0);
         }
@@ -619,7 +628,7 @@ impl CursorSet{
         self.set[index].calc_max(text_buffer);
     }
 
-    pub fn update_cursor_drag(&mut self, offset:usize, text_buffer:&TextBuffer){
+    pub fn set_last_cursor_head(&mut self, offset:usize, text_buffer:&TextBuffer){
 
         // remove any cursor that intersects us
         self.remove_collision(offset);

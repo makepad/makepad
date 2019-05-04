@@ -192,7 +192,7 @@ impl CodeEditor{
             (_,ScrollBarEvent::Scroll{..}) | (ScrollBarEvent::Scroll{..},_)=>{
                 if let Some(last_finger_move) = self._last_finger_move{
                     let offset = self.text.find_closest_offset(cx, &self._text_area, last_finger_move);
-                    self.cursors.update_cursor_drag(offset, text_buffer);
+                    self.cursors.set_last_cursor_head(offset, text_buffer);
                 }
                 // the editor actually redraws on scroll, its because we don't actually
                 // generate the entire file as GPU text-buffer just the visible area
@@ -210,7 +210,17 @@ impl CodeEditor{
                 // give us the focus
                 cx.set_key_focus(self._bg_area);
                 let offset = self.text.find_closest_offset(cx, &self._text_area, fe.abs);
-                self.cursors.begin_cursor_drag(fe.modifiers.logo, offset, text_buffer);
+                if fe.modifiers.shift{
+                    if !fe.modifiers.logo{ // simply place selection
+                        self.cursors.only_last_cursor_head(offset, text_buffer);
+                    }
+                    else{ // grid select
+
+                    }
+                }
+                else{ // cursor drag with possible add
+                    self.cursors.set_last_cursor_head_and_tail(fe.modifiers.logo, offset, text_buffer);
+                }
                 self.view.redraw_view_area(cx);
                 self._last_finger_move = Some(fe.abs);
             },
@@ -218,13 +228,13 @@ impl CodeEditor{
                 cx.set_hover_mouse_cursor(MouseCursor::Text);
             },
             Event::FingerUp(_fe)=>{
-                self.cursors.end_cursor_drag(text_buffer);
+                //self.cursors.end_cursor_drag(text_buffer);
                 self._select_scroll = None;
                 self._last_finger_move = None;
             },
             Event::FingerMove(fe)=>{
                 let offset = self.text.find_closest_offset(cx, &self._text_area, fe.abs);
-                self.cursors.update_cursor_drag(offset, text_buffer);
+                self.cursors.set_last_cursor_head(offset, text_buffer);
 
                 self._last_finger_move = Some(fe.abs);
                 // determine selection drag scroll dynamics
@@ -370,8 +380,8 @@ impl CodeEditor{
                 self.scroll_last_cursor_visible(cx, text_buffer);
                 self.view.redraw_view_area(cx);
             },
-            Event::TextClipboardRequest(_)=>match event{ // access the original event
-                Event::TextClipboardRequest(req)=>{
+            Event::TextCopy(_)=>match event{ // access the original event
+                Event::TextCopy(req)=>{
                     req.response = Some(self.cursors.get_all_as_string(text_buffer));
                 },
                 _=>()
@@ -481,7 +491,7 @@ impl CodeEditor{
         // do select scrolling
         if let Some(select_scroll) = &self._select_scroll{
             let offset = self.text.find_closest_offset(cx, &self._text_area, select_scroll.abs);
-            self.cursors.update_cursor_drag(offset, text_buffer);
+            self.cursors.set_last_cursor_head(offset, text_buffer);
             if self.view.set_scroll_pos(cx, Vec2{
                 x:self._scroll_pos.x + select_scroll.delta.x,
                 y:self._scroll_pos.y + select_scroll.delta.y

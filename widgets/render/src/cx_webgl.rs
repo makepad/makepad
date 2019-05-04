@@ -274,14 +274,14 @@ impl Cx{
                         data:Ok(vec_buf)
                     }));
                 },
-                16=>{ // text clipboard request
-                    let mut event = Event::TextClipboardRequest(TextClipboardRequestEvent{
+                16=>{ // text copy
+                    let mut event = Event::TextCopy(TextCopyEvent{
                         response:None
                     });
                     self.call_event_handler(&mut event_handler, &mut event);
                     match &event{
-                        Event::TextClipboardRequest(req)=>if let Some(response) = &req.response{
-                            self.platform.from_wasm.text_clipboard_response(&response);
+                        Event::TextCopy(req)=>if let Some(response) = &req.response{
+                            self.platform.from_wasm.text_copy_response(&response);
                         }
                         _=>()
                     };
@@ -1009,7 +1009,7 @@ impl FromWasm{
         self.mu32(15);
     }
 
-    pub fn text_clipboard_response(&mut self, response:&str){
+    pub fn text_copy_response(&mut self, response:&str){
         self.fit(1);
         self.mu32(16);
         self.add_string(response);

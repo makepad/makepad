@@ -183,7 +183,7 @@
 			this.mu32[pos++] = buf_len;
 		}
 
-		text_clipboard_request(){
+		text_copy_request(){
 			let pos = this.fit(1);
 			this.mu32[pos++] = 16;
 		}
@@ -210,7 +210,7 @@
 			this.textures = [];
 			this.resources = [];
 			this.req_anim_frame_id = 0;
-			this.text_clipboard_response = "";
+			this.text_copy_response = "";
 			this.init_webgl_context();
 			this.bind_mouse_and_touch();
 			this.bind_keyboard();
@@ -894,9 +894,9 @@
 				if(code === 8 || code === 9) e.preventDefault() // backspace/tab
 				if((code === 88 || code == 67) && (e.metaKey || e.ctrlKey) ){ // copy or cut
 					// we need to request the clipboard
-					this.to_wasm.text_clipboard_request();
+					this.to_wasm.text_copy_request();
 					this.do_wasm_io();
-					ta.value = this.text_clipboard_response;
+					ta.value = this.text_copy_response;
 					ta.selectionStart = 0;
 					ta.selectionEnd = ta.value.length;
 				}
@@ -1206,8 +1206,8 @@
 		function hide_text_ime_15(self){
 			self.hide_text_ime();
 		},
-		function text_clipboard_response_16(self){
-			self.text_clipboard_response = self.parse_string();
+		function text_copy_response_16(self){
+			self.text_copy_response = self.parse_string();
 		}
 	]
 	

@@ -220,13 +220,13 @@ impl CocoaWindow{
                         KeyCode::KeyX | KeyCode::KeyC=>if modifiers.logo || modifiers.control{
                             // cut or copy.
                             let mut events = vec![
-                                Event::TextClipboardRequest(TextClipboardRequestEvent{
+                                Event::TextCopy(TextCopyEvent{
                                     response:None
                                 })
                             ];
                             self.do_callback(&mut events);
                             match &events[0]{
-                                Event::TextClipboardRequest(req)=>if let Some(response) = &req.response{
+                                Event::TextCopy(req)=>if let Some(response) = &req.response{
                                     // plug it into the apple clipboard
                                     let nsstring:id = NSString::alloc(nil).init_str(&response);
                                     let array: id = msg_send![class!(NSArray), arrayWithObject:NSStringPboardType];

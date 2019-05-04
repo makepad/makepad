@@ -155,7 +155,7 @@ pub struct TextInputEvent{
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct TextClipboardRequestEvent{
+pub struct TextCopyEvent{
     pub response:Option<String>
 }
 
@@ -182,7 +182,7 @@ pub enum Event{
     KeyDown(KeyEvent),
     KeyUp(KeyEvent),
     TextInput(TextInputEvent),
-    TextClipboardRequest(TextClipboardRequestEvent)
+    TextCopy(TextCopyEvent)
 }
 
 impl Default for Event{
@@ -195,7 +195,6 @@ pub enum HitTouch{
     Single,
     Multi
 }
-
 
 impl Event{
     pub fn set_handled(&mut self, set:bool){
@@ -259,10 +258,10 @@ impl Event{
                     return self.clone();
                 }
             },
-            Event::TextClipboardRequest(_)=>{
+            Event::TextCopy(_)=>{
                 if area == cx.key_focus{
-                    return Event::TextClipboardRequest(
-                        TextClipboardRequestEvent{response:None}
+                    return Event::TextCopy(
+                        TextCopyEvent{response:None}
                     );
                 }
             },
