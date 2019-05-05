@@ -73,6 +73,7 @@ impl Cx{
             gl::Enable(gl::BLEND);
             gl::ClearColor(self.clear_color.r, self.clear_color.g, self.clear_color.b, self.clear_color.a);
             gl::Clear(gl::COLOR_BUFFER_BIT|gl::DEPTH_BUFFER_BIT);
+            gl::Viewport(0, 0, self.target_size.x as i32, self.target_size.y as i32);
         }
         self.prepare_frame();        
         self.exec_draw_list(0);
@@ -414,10 +415,11 @@ impl Cx{
                 },
                 winit::WindowEvent::Resized(logical_size) => {
                     let dpi_factor = glutin_window.get_hidpi_factor();
+                    let actual_size = glutin_window.get_inner_size().unwrap();
                     let old_dpi_factor = self.target_dpi_factor as f32;
                     let old_size = self.target_size.clone();
                     self.target_dpi_factor = dpi_factor as f32;
-                    self.target_size = Vec2{x:logical_size.width as f32, y:logical_size.height as f32};
+                    self.target_size = Vec2{x:actual_size.width as f32, y:actual_size.height as f32};
                     return vec![Event::Resized(ResizedEvent{
                         old_size: old_size,
                         old_dpi_factor: old_dpi_factor,
