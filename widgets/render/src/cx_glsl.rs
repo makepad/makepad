@@ -1,66 +1,5 @@
 use crate::cx::*;
 
-impl<'a> SlCx<'a>{
-    pub fn map_call(&self, name:&str, args:&Vec<Sl>)->MapCallResult{
-        match name{
-            "matrix_comp_mult"=>return MapCallResult::Rename("matrixCompMult".to_string()),
-            "less_than"=>return MapCallResult::Rename("less_than".to_string()),
-            "less_than_equal"=>return MapCallResult::Rename("lessThanEqual".to_string()),
-            "greater_than"=>return MapCallResult::Rename("greaterThan".to_string()),
-            "greater_than_equal"=>return MapCallResult::Rename("greaterThanEqual".to_string()),
-            "not_equal"=>return MapCallResult::Rename("notEqual".to_string()),
-            "sample2d"=>{
-                return MapCallResult::Rename("texture2D".to_string())
-            },
-            "fmod"=>{
-                return MapCallResult::Rename("mod".to_string())
-            },
-            "dfdx"=>{
-                return MapCallResult::Rename("dFdx".to_string())
-            },
-            "dfdy"=>{
-                return MapCallResult::Rename("dFdy".to_string())
-            },
-            "color"=>{
-                let col = color(&args[0].sl);
-                return MapCallResult::Rewrite(
-                    format!("vec4({},{},{},{})", col.r,col.g,col.b,col.a),
-                    "vec4".to_string()
-                );
-            },
-            _=>return MapCallResult::None
-        }
-    }
-
-    pub fn map_type(&self, ty:&str)->String{
-        match ty{
-            "texture2d"=>return "sampler2D".to_string(),
-            _=>return ty.to_string()
-        }
-    }
-
-    pub fn map_var(&mut self, var:&ShVar)->String{
-        match var.store{
-            ShVarStore::Instance=>{
-                if let SlTarget::Pixel = self.target{
-                    if self.auto_vary.iter().find(|v|v.name == var.name).is_none(){
-                        self.auto_vary.push(var.clone());
-                    }
-                }
-            },
-            ShVarStore::Geometry=>{
-                if let SlTarget::Pixel = self.target{
-                    if self.auto_vary.iter().find(|v|v.name == var.name).is_none(){
-                        self.auto_vary.push(var.clone());
-                    }
-                }
-            },
-            _=>()
-        }
-        var.name.clone()
-    }
-    
-}
 
 #[derive(Default,Clone)]
 pub struct AssembledGLShader{
@@ -561,4 +500,67 @@ impl Cx{
             rect_instance_props:RectInstanceProps::construct(sh, &instances)
         })
     }
+}
+
+
+impl<'a> SlCx<'a>{
+    pub fn map_call(&self, name:&str, args:&Vec<Sl>)->MapCallResult{
+        match name{
+            "matrix_comp_mult"=>return MapCallResult::Rename("matrixCompMult".to_string()),
+            "less_than"=>return MapCallResult::Rename("less_than".to_string()),
+            "less_than_equal"=>return MapCallResult::Rename("lessThanEqual".to_string()),
+            "greater_than"=>return MapCallResult::Rename("greaterThan".to_string()),
+            "greater_than_equal"=>return MapCallResult::Rename("greaterThanEqual".to_string()),
+            "not_equal"=>return MapCallResult::Rename("notEqual".to_string()),
+            "sample2d"=>{
+                return MapCallResult::Rename("texture2D".to_string())
+            },
+            "fmod"=>{
+                return MapCallResult::Rename("mod".to_string())
+            },
+            "dfdx"=>{
+                return MapCallResult::Rename("dFdx".to_string())
+            },
+            "dfdy"=>{
+                return MapCallResult::Rename("dFdy".to_string())
+            },
+            "color"=>{
+                let col = color(&args[0].sl);
+                return MapCallResult::Rewrite(
+                    format!("vec4({},{},{},{})", col.r,col.g,col.b,col.a),
+                    "vec4".to_string()
+                );
+            },
+            _=>return MapCallResult::None
+        }
+    }
+
+    pub fn map_type(&self, ty:&str)->String{
+        match ty{
+            "texture2d"=>return "sampler2D".to_string(),
+            _=>return ty.to_string()
+        }
+    }
+
+    pub fn map_var(&mut self, var:&ShVar)->String{
+        match var.store{
+            ShVarStore::Instance=>{
+                if let SlTarget::Pixel = self.target{
+                    if self.auto_vary.iter().find(|v|v.name == var.name).is_none(){
+                        self.auto_vary.push(var.clone());
+                    }
+                }
+            },
+            ShVarStore::Geometry=>{
+                if let SlTarget::Pixel = self.target{
+                    if self.auto_vary.iter().find(|v|v.name == var.name).is_none(){
+                        self.auto_vary.push(var.clone());
+                    }
+                }
+            },
+            _=>()
+        }
+        var.name.clone()
+    }
+    
 }

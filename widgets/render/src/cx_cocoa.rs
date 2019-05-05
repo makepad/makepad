@@ -13,6 +13,7 @@ use objc::declare::ClassDecl;
 use std::os::raw::c_void;
 use objc::*;
 use core_graphics::display::CGDisplay;
+use time::precise_time_ns;
 
 use crate::cx::*;
 
@@ -29,6 +30,7 @@ pub struct CocoaWindow{
     pub last_size:Vec2,
     pub ime_spot:Vec2,
     pub last_dpi_factor:f32,
+    pub time_start:u64,
     pub last_key_mod:KeyModifiers,
     pub fingers_down:Vec<bool>,
     pub cursors:HashMap<MouseCursor, id>,
@@ -125,6 +127,8 @@ impl CocoaWindow{
             //self.input_context = Some(input_context);
             self.last_size = self.get_inner_size();
             self.last_dpi_factor = self.get_dpi_factor();
+            self.time_start = precise_time_ns();
+
             let _: () = msg_send![autoreleasepool, drain];
 
             let input_context:id = msg_send![view, inputContext];
@@ -135,6 +139,11 @@ impl CocoaWindow{
             self.pasteboard = Some(pasteboard);
             //msg_send![input_context, activate];
         }
+    }
+
+    pub fn time_now(&self)->f64{
+        let time_now = precise_time_ns();
+        (time_now - self.time_start) as f64 / 1_000_000_000.0
     }
 
     pub fn set_position(&mut self, pos:Vec2){
@@ -192,7 +201,7 @@ impl CocoaWindow{
                             key_char:key_char,
                             is_repeat:is_repeat,
                             modifiers:modifiers,
-                            time:0.0
+                            time:self.time_now()
                         })
                     ]);
                 }
@@ -246,7 +255,7 @@ impl CocoaWindow{
                             key_char:key_char,
                             is_repeat:is_repeat,
                             modifiers:modifiers,
-                            time:0.0
+                            time:self.time_now()
                         })
                     ]);
                     if is_return{
@@ -276,14 +285,14 @@ impl CocoaWindow{
                 let last_key_mod = self.last_key_mod.clone();
                 self.last_key_mod = modifiers.clone();
                 let mut events = Vec::new();
-                fn add_event(old:bool, new:bool, modifiers:KeyModifiers, events:&mut Vec<Event>, key_code:KeyCode){
+                fn add_event(time:f64, old:bool, new:bool, modifiers:KeyModifiers, events:&mut Vec<Event>, key_code:KeyCode){
                     if old != new{
                         let event = KeyEvent{
                             key_code:key_code,
                             key_char:'\0',
                             is_repeat:false,
                             modifiers:modifiers,
-                            time:0.0
+                            time:time
                         };
                         if new{
                             events.push(Event::KeyDown(event));
@@ -293,10 +302,11 @@ impl CocoaWindow{
                         }
                     }
                 }
-                add_event(last_key_mod.shift, modifiers.shift, modifiers.clone(), &mut events, KeyCode::LeftShift);
-                add_event(last_key_mod.alt, modifiers.alt, modifiers.clone(), &mut events, KeyCode::LeftAlt);
-                add_event(last_key_mod.logo, modifiers.logo, modifiers.clone(), &mut events, KeyCode::LeftLogo);
-                add_event(last_key_mod.control, modifiers.control, modifiers.clone(), &mut events, KeyCode::LeftControl);
+                let time = self.time_now();
+                add_event(time, last_key_mod.shift, modifiers.shift, modifiers.clone(), &mut events, KeyCode::LeftShift);
+                add_event(time, last_key_mod.alt, modifiers.alt, modifiers.clone(), &mut events, KeyCode::LeftAlt);
+                add_event(time, last_key_mod.logo, modifiers.logo, modifiers.clone(), &mut events, KeyCode::LeftLogo);
+                add_event(time, last_key_mod.control, modifiers.control, modifiers.clone(), &mut events, KeyCode::LeftControl);
                 if events.len() > 0{
                     self.do_callback(&mut events);
                 }
@@ -321,7 +331,7 @@ impl CocoaWindow{
                             is_wheel:false,
                             modifiers:get_event_key_modifier(ns_event),
                             handled:false,
-                            time:0.0
+                            time:self.time_now()
                         })
                     ]);
                 } else {
@@ -337,7 +347,7 @@ impl CocoaWindow{
                             is_wheel:true,
                             modifiers:get_event_key_modifier(ns_event),
                             handled:false,
-                            time:0.0
+                            time:self.time_now()
                         })
                     ]);
                 }
@@ -435,7 +445,8 @@ impl CocoaWindow{
             handled:false,
             is_touch:false,
             modifiers:modifiers,
-            time:0.0
+            tap_count:0,
+            time:self.time_now()
         })]);
     }
 
@@ -451,7 +462,7 @@ impl CocoaWindow{
             is_over:false,
             is_touch:false,
             modifiers:modifiers,
-            time:0.0
+            time:self.time_now()
         })]);
     }
 
@@ -470,7 +481,7 @@ impl CocoaWindow{
                     is_over:false,
                     is_touch:false,
                     modifiers:modifiers.clone(),
-                    time:0.0
+                    time:self.time_now()
                 }));
             }
         };
@@ -481,7 +492,7 @@ impl CocoaWindow{
             handled:false,
             hover_state:HoverState::Over,
             modifiers:modifiers,
-            time:0.0
+            time:self.time_now()
         }));
         self.do_callback(&mut events);
     }

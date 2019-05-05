@@ -14,6 +14,7 @@ pub struct FingerDownEvent{
     pub rel:Vec2,
     pub rect:Rect,
     pub digit:usize,
+    pub tap_count:u32,
     pub handled:bool,
     pub is_touch:bool,
     pub modifiers:KeyModifiers,
