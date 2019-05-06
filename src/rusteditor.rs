@@ -168,7 +168,7 @@ impl RustEditor{
                         if Self::parse_rust_ident_tail(&mut state, &mut chunk) && ((state.offset - offset) > 1 || state.next != '\''){
                             color = self.col_keyword;
                         }
-                        else{
+                        else if state.next != '\n'{
                             if (state.offset - offset) == 0{ // not an identifier char
                                 chunk.push(state.next);
                                 state.advance();
@@ -178,6 +178,9 @@ impl RustEditor{
                                 state.advance();
                             }
                             color = self.col_string;
+                        }
+                        else{
+                            color = self.col_string;                            
                         }
                     }
                 },

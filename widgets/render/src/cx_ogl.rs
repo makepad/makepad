@@ -373,6 +373,7 @@ impl Cx{
                                 handled:false,
                                 digit:digit,
                                 is_touch:false,
+                                tap_count:1,
                                 time:0.0
                             })]
                         },
