@@ -837,8 +837,8 @@
 			document.body.appendChild(style)
 			ta.style.left = -100
 			ta.style.top = -100
-			ta.style.height = 10
-			ta.style.width = 10
+			ta.style.height = 1
+			ta.style.width = 1
 
 			// make the IME not show up:
 			//ta.setAttribute('readonly','false')
