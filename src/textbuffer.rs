@@ -75,45 +75,6 @@ pub struct TextOp{
     lines:Vec<Vec<char>>,
 }
 
-#[derive(PartialEq,Debug)]
-pub enum CharType{
-    Whitespace,
-    Word,
-    Other
-}
-
-impl CharType{
-    fn from(ch:char)->CharType{
-        if ch>='0' && ch <='9' || ch >= 'a' && ch <='z' || ch >= 'A' && ch <='Z' || ch == '_'{
-            return CharType::Word
-        }
-        if ch == ' '|| ch == '\t' || ch == '\n'{
-            return CharType::Whitespace
-        }
-        return CharType::Other
-    }
-
-    fn is_prio(&self, rhs:&CharType)->bool{
-        match self{
-            CharType::Word=>match rhs{
-                CharType::Word=>false,
-                CharType::Whitespace=>true,
-                CharType::Other=>true,
-            },
-            CharType::Whitespace=>match rhs{
-                CharType::Word=>false,
-                CharType::Whitespace=>false,
-                CharType::Other=>true,
-            },
-            CharType::Other=>match rhs{
-                CharType::Word=>false,
-                CharType::Whitespace=>true,
-                CharType::Other=>false,
-            }
-        }
-    }
-}
-
 impl TextBuffer{
 
     pub fn offset_to_text_pos(&self, char_offset:usize)->TextPos{
@@ -164,56 +125,6 @@ impl TextBuffer{
             char_count += line.len() + 1;
         }
         0
-    }
-
-    pub fn get_nearest_word_range2(&self, offset:usize)->(usize, usize){
-        let pos = self.offset_to_text_pos(offset);
-        let line = &self.lines[pos.row];
-        // lets get the char to the left, if any
-        let left_type = CharType::from(if pos.col>0{line[pos.col - 1]} else {'\0'});
-        let right_type = CharType::from(if pos.col<line.len(){line[pos.col]} else {'\n'});
-        let offset_base = offset - pos.col;
-        
-        let (mi,ma) = if left_type == right_type{ // scan both ways
-            let mut mi = pos.col;
-            let mut ma = pos.col;
-            while mi>0{
-                if left_type != CharType::from(line[mi-1]){
-                    break;
-                }
-                mi -= 1;
-            }
-            while ma<line.len(){
-                if right_type != CharType::from(line[ma]){
-                    break;
-                }
-                ma += 1;
-            }
-            (mi,ma)
-        }
-        else if left_type.is_prio(&right_type){ // scan towards the left
-            let ma = pos.col;
-            let mut mi = pos.col;
-            while mi>0{
-                if left_type != CharType::from(line[mi-1]){
-                    break;
-                }
-                mi -= 1;
-            }
-            (mi,ma)
-        }
-        else{ // scan towards the right
-            let mut ma = pos.col;
-            let mi = pos.col;
-            while ma < line.len(){
-                if right_type != CharType::from(line[ma]){
-                    break;
-                }
-                ma += 1;
-            }
-            (mi,ma)
-        };
-        (mi+offset_base, ma+offset_base)
     }
 
     pub fn get_nearest_line_range(&self, offset:usize)->(usize, usize){
@@ -986,4 +897,64 @@ impl CursorSet{
         }
         self.fuse_adjacent(text_buffer)
     }
+
+
+    fn get_nearest_token_chunk(left:bool, offset:usize, chunks:&Vec<TokenChunk>)->usize{
+        for i in 0..chunks.len(){
+            // if we are in the chunk, decide what to do
+            if offset >= chunks[i].offset && offset < chunks[i].offset + chunks[i].len{
+                if left{ // we want to to the beginning of the prev token
+                    if offset > chunks[i].offset{
+                        return chunks[i].offset
+                    }
+                    if i ==0  {
+                        return 0
+                    }
+                    if offset == chunks[i].offset{
+                        if chunks[i-1].is_whitespace && i>1{
+                            return chunks[i-2].offset// + chunks[i-2].len
+                        }
+                        return chunks[i-1].offset
+                    }
+                    return chunks[i-1].offset + chunks[i-1].len
+                }
+                else{ // jump right
+
+                    if i < chunks.len() - 1 && chunks[i].is_whitespace{
+                        return chunks[i+1].offset + chunks[i+1].len;
+                    }
+                    return chunks[i].offset + chunks[i].len
+                }
+            }
+        };
+        0
+    }
+
+    pub fn move_left_nearest_token(&mut self, only_head:bool, token_chunks:&Vec<TokenChunk>, text_buffer:&TextBuffer){
+        for cursor in &mut self.set{
+            // take the cursor head and find nearest token left
+            let pos = CursorSet::get_nearest_token_chunk(true, cursor.head, token_chunks);
+            cursor.head = pos;
+            if !only_head{cursor.tail = cursor.head}
+        }
+        self.fuse_adjacent(text_buffer)
+    }
+
+    pub fn move_right_nearest_token(&mut self, only_head:bool, token_chunks:&Vec<TokenChunk>, text_buffer:&TextBuffer){
+        for cursor in &mut self.set{
+            // take the cursor head and find nearest token left
+            let pos = CursorSet::get_nearest_token_chunk(false, cursor.head, token_chunks);
+            cursor.head = pos;
+            if !only_head{cursor.tail = cursor.head}
+        }
+        self.fuse_adjacent(text_buffer)
+    }
+
+}
+
+#[derive(Clone, Default)]
+pub struct TokenChunk{
+    pub offset:usize,
+    pub len:usize,
+    pub is_whitespace:bool
 }

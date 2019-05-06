@@ -37,13 +37,6 @@ pub struct LineGeom{
 }
 
 #[derive(Clone, Default)]
-pub struct TokenChunk{
-    offset:usize,
-    len:usize,
-    is_whitespace:bool
-}
-
-#[derive(Clone, Default)]
 pub struct SelectScroll{
     pub margin:Margin,
     pub delta:Vec2,
@@ -351,11 +344,21 @@ impl CodeEditor{
                         true
                     },
                     KeyCode::ArrowLeft=>{
-                        self.cursors.move_left(1, ke.modifiers.shift, text_buffer);
+                        if ke.modifiers.logo{ // token skipping
+                            self.cursors.move_left_nearest_token(ke.modifiers.shift, &self._token_chunks, text_buffer)
+                        }
+                        else{
+                            self.cursors.move_left(1, ke.modifiers.shift, text_buffer);
+                        }
                         true
                     },
                     KeyCode::ArrowRight=>{
-                        self.cursors.move_right(1, ke.modifiers.shift, text_buffer);
+                        if ke.modifiers.logo{ // token skipping
+                            self.cursors.move_right_nearest_token(ke.modifiers.shift, &self._token_chunks, text_buffer)
+                        }
+                        else{
+                            self.cursors.move_right(1, ke.modifiers.shift, text_buffer);
+                        }
                         true
                     },
                     KeyCode::PageUp=>{
