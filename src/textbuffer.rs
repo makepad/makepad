@@ -781,13 +781,13 @@ impl CursorSet{
             let head_dist = head_pos.dist(&new_pos);
             let tail_dist = tail_pos.dist(&new_pos);
             if head_dist > tail_dist{
-                if head_dist > max_dist{
+                if head_dist >= max_dist{
                     max_dist = head_dist;
                     max_pos = head_pos;
                 }
             }
             else{
-                if tail_dist > max_dist{
+                if tail_dist >= max_dist{
                     max_dist = tail_dist;
                     max_pos = tail_pos;
                 }
