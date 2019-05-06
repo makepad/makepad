@@ -246,7 +246,7 @@ impl ScrollBarLike<ScrollBar> for ScrollBar{
         // lets check if our view-area gets a mouse-scroll.
         match event{
             Event::FingerScroll(fe)=>{
-                let rect = self._view_area.get_rect(cx);
+                let rect = self._view_area.get_rect_scrolled(cx);
                 if rect.contains(fe.abs.x, fe.abs.y){ // handle mousewheel
                     // we should scroll in either x or y
                     let scroll =  match self.axis{

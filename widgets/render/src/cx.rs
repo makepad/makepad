@@ -72,7 +72,7 @@ pub struct Cx{
     pub down_mouse_cursor:Option<MouseCursor>,
     pub hover_mouse_cursor:Option<MouseCursor>,
     pub captured_fingers:Vec<Area>,
-    pub tapped_fingers:Vec<(f64,u32)>,
+    pub finger_tap_count:Vec<(Vec2,f64,u32)>,
 
     pub user_events:Vec<Event>,
 
@@ -94,10 +94,10 @@ impl Default for Cx{
         let mut uniforms = Vec::<f32>::new();
         uniforms.resize(CX_UNI_SIZE, 0.0);
         let mut captured_fingers = Vec::new();
-        let mut tapped_fingers = Vec::new();
+        let mut finger_tap_count = Vec::new();
         for _i in 0..10{
             captured_fingers.push(Area::Empty);
-            tapped_fingers.push((0.0,0));
+            finger_tap_count.push((Vec2::zero(),0.0,0));
         }
 
         Self{
@@ -140,7 +140,7 @@ impl Default for Cx{
             down_mouse_cursor:None,
             hover_mouse_cursor:None,
             captured_fingers:captured_fingers,
-            tapped_fingers:tapped_fingers,
+            finger_tap_count:finger_tap_count,
 
             user_events:Vec::new(),
 
@@ -186,6 +186,22 @@ impl Cx{
             });
         }
         *store_id
+    }
+
+    pub fn process_tap_count(&mut self, digit:usize, pos:Vec2, time:f64)->u32{
+        if digit >= self.finger_tap_count.len(){
+            return 0
+        };
+        let (last_pos, last_time, count) = self.finger_tap_count[digit];
+
+        if (time - last_time) < 0.5 && pos.distance(&last_pos) < 5.{
+            self.finger_tap_count[digit] = (pos, time, count + 1);
+            count + 1
+        }
+        else{
+            self.finger_tap_count[digit] = (pos, time, 1);
+            1
+        }
     }
 
     pub fn def_uniforms(sh: &mut Shader){

@@ -597,7 +597,7 @@
 					x:e.pageX,
 					y:e.pageY,
 					digit: e.button,
-					time:e.timeStamp,
+					time:e.timeStamp/ 1000.0,
 					modifiers:pack_key_modifier(e),
 					touch: false
 				}
@@ -626,7 +626,7 @@
 						x:t.pageX,
 						y:t.pageY,
 						digit:digit,
-						time:e.timeStamp,
+						time:e.timeStamp/ 1000.0,
 						modifiers:0,
 						touch: true,
 					})
@@ -652,7 +652,7 @@
 						x:t.pageX,
 						y:t.pageY,
 						digit:lookup_digit(t.identifier),
-						time:e.timeStamp,
+						time:e.timeStamp/ 1000.0,
 						modifiers:{},
 						touch: true,
 					})
@@ -676,7 +676,7 @@
 					f.push({
 						x:t.pageX,
 						y:t.pageY,
-						time:e.timeStamp,
+						time:e.timeStamp / 1000.0,
 						digit:digit,
 						modifiers:0,
 						touch: true,
@@ -705,7 +705,7 @@
 						this.to_wasm.finger_move({
 							x:e.pageX,
 							y:e.pageY,
-							time:e.timeStamp,
+							time:e.timeStamp/ 1000.0,
 							modifiers:0,
 							digit:i
 						})
@@ -937,7 +937,7 @@
 					key_code:e.keyCode,
 					char_code:e.charCode,
 					is_repeat:e.repeat,
-					time:e.timeStamp,
+					time:e.timeStamp / 1000.0,
 					modifiers:pack_key_modifier(e)
 				})
 				
@@ -955,7 +955,7 @@
 					key_code:e.keyCode,
 					char_code:e.charCode,
 					is_repeat:e.repeat,
-					time:e.timeStamp,
+					time:e.timeStamp / 1000.0,
 					modifiers:pack_key_modifier(e)
 				})
 				this.do_wasm_io();

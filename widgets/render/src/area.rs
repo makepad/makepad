@@ -94,7 +94,7 @@ impl Area{
         }
     }
 
-    pub fn get_rect(&self, cx:&Cx)->Rect{
+    pub fn get_rect_scrolled(&self, cx:&Cx)->Rect{
 
         return match self{
             Area::Instance(inst)=>{
@@ -132,8 +132,45 @@ impl Area{
         }
     }
 
+    pub fn abs_to_rel_scrolled(&self, cx:&Cx, abs:Vec2)->Vec2{
+        return match self{
+            Area::Instance(inst)=>{
+                if inst.instance_count == 0{
+                    println!("abs_to_rel_scroll called on instance_count ==0 area pointer, use mark/sweep correctly!");
+                    return abs
+                }
+                let draw_list = &cx.draw_lists[inst.draw_list_id];
+                if draw_list.redraw_id != inst.redraw_id {
+                    return abs;
+                }
+                let draw_call = &draw_list.draw_calls[inst.draw_call_id];
+                let csh = &cx.compiled_shaders[draw_call.shader_id];
+                // ok now we have to patch x/y/w/h into it
+                if let Some(ix) = csh.rect_instance_props.x{
+                    let x = draw_call.instance[inst.instance_offset + ix];
+                    if let Some(iy) = csh.rect_instance_props.y{
+                        let y = draw_call.instance[inst.instance_offset + iy];
+                        let scroll = draw_list.get_scroll_pos();
+                        return Vec2{
+                            x:abs.x - x + scroll.x,
+                            y:abs.y - y + scroll.y
+                        }
+                    }
+                }
+                abs
+            },
+            Area::DrawList(draw_list_area)=>{
+                let draw_list = &cx.draw_lists[draw_list_area.draw_list_id];
+                Vec2{
+                    x:abs.x - draw_list.rect.x,
+                    y:abs.y - draw_list.rect.y
+                }
+            },
+            _=>abs,
+        }
+    }
 
-    pub fn get_rect_no_scrolling(&self, cx:&Cx)->Rect{
+    pub fn get_rect_not_scrolled(&self, cx:&Cx)->Rect{
         return match self{
             Area::Instance(inst)=>{
                 if inst.instance_count == 0{

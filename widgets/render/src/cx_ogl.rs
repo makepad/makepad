@@ -432,7 +432,7 @@ impl Cx{
         vec![Event::None]
     }
 
-   pub fn show_text_ime(&mut self, _x:f32, _y:f32){
+    pub fn show_text_ime(&mut self, _x:f32, _y:f32){
     }
 
     pub fn hide_text_ime(&mut self){

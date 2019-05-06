@@ -15,7 +15,7 @@ impl Cx{
             if sub_list_id != 0{
                 self.exec_draw_list(sub_list_id);
             }
-            else{ 
+            else{
                 let draw_list = &mut self.draw_lists[draw_list_id];
 
                 draw_list.set_clipping_uniforms();
@@ -150,100 +150,114 @@ impl Cx{
                     }
                 },
                 6=>{ // finger down
-                    let x = to_wasm.mf32();
-                    let y = to_wasm.mf32();
+                    let abs = Vec2{x:to_wasm.mf32(),y:to_wasm.mf32()};
                     let digit = to_wasm.mu32() as usize;
                     self.platform.fingers_down[digit] = true;
+                    let is_touch = to_wasm.mu32()>0;
+                    let modifiers = unpack_key_modifier(to_wasm.mu32());
+                    let time = to_wasm.mf64();
+                    let tap_count = self.process_tap_count(digit, abs, time);
                     self.call_event_handler(&mut event_handler, &mut Event::FingerDown(FingerDownEvent{
-                        abs:Vec2{x:x, y:y}, 
-                        rel:Vec2{x:x, y:y},
+                        abs:abs, 
+                        rel:abs,
                         rect:Rect::zero(),
                         handled:false,
                         digit:digit,
-                        is_touch:to_wasm.mu32()>0,
-                        modifiers:unpack_key_modifier(to_wasm.mu32()),
-                        time:to_wasm.mf64()
+                        is_touch:is_touch,
+                        modifiers:modifiers,
+                        time:time,
+                        tap_count:tap_count
                     }));
                 },
                 7=>{ // finger up
-                    let x = to_wasm.mf32();
-                    let y = to_wasm.mf32();
+                    let abs = Vec2{x:to_wasm.mf32(),y:to_wasm.mf32()};
                     let digit = to_wasm.mu32() as usize;
                     self.platform.fingers_down[digit] = false;
                     if !self.platform.fingers_down.iter().any(|down| *down){
                         self.down_mouse_cursor = None;
                     }
+                    let is_touch = to_wasm.mu32()>0;
+                    let modifiers = unpack_key_modifier(to_wasm.mu32());
+                    let time = to_wasm.mf64();
                     self.call_event_handler(&mut event_handler, &mut Event::FingerUp(FingerUpEvent{
-                        abs:Vec2{x:x, y:y}, 
-                        rel:Vec2{x:x, y:y},
+                        abs:abs, 
+                        rel:abs,
                         rect:Rect::zero(),
                         abs_start:Vec2::zero(),
                         rel_start:Vec2::zero(),
                         digit:digit,
                         is_over:false,
-                        is_touch:to_wasm.mu32()>0,
-                        modifiers:unpack_key_modifier(to_wasm.mu32()),
-                        time:to_wasm.mf64()
+                        is_touch:is_touch,
+                        modifiers:modifiers,
+                        time:time
                     }));
                 },
                 8=>{ // finger move
-                    let x = to_wasm.mf32();
-                    let y = to_wasm.mf32();
+                    let abs = Vec2{x:to_wasm.mf32(),y:to_wasm.mf32()};
+                    let digit = to_wasm.mu32() as usize;
+                    let is_touch = to_wasm.mu32()>0;
+                    let modifiers = unpack_key_modifier(to_wasm.mu32());
+                    let time = to_wasm.mf64();
                     self.call_event_handler(&mut event_handler, &mut Event::FingerMove(FingerMoveEvent{
-                        abs:Vec2{x:x, y:y},
-                        rel:Vec2{x:x, y:y},
+                        abs:abs,
+                        rel:abs,
                         rect:Rect::zero(),
                         abs_start:Vec2::zero(),
                         rel_start:Vec2::zero(),
                         is_over:false,
-                        digit:to_wasm.mu32() as usize,
-                        is_touch:to_wasm.mu32()>0,
-                        modifiers:unpack_key_modifier(to_wasm.mu32()),
-                        time:to_wasm.mf64()
+                        digit:digit,
+                        is_touch:is_touch,
+                        modifiers:modifiers,
+                        time:time
                     }));
                 },
                 9=>{ // finger hover
-                    let x = to_wasm.mf32();
-                    let y = to_wasm.mf32();
+                    let abs = Vec2{x:to_wasm.mf32(),y:to_wasm.mf32()};
                     self.hover_mouse_cursor = None;
+                    let modifiers = unpack_key_modifier(to_wasm.mu32());
+                    let time = to_wasm.mf64();
                     self.call_event_handler(&mut event_handler, &mut Event::FingerHover(FingerHoverEvent{
-                        abs:Vec2{x:x, y:y},
-                        rel:Vec2{x:x, y:y},
+                        abs:abs,
+                        rel:abs,
                         rect:Rect::zero(),
                         handled:false,
                         hover_state:HoverState::Over,
-                        modifiers:unpack_key_modifier(to_wasm.mu32()),
-                        time:to_wasm.mf64()
+                        modifiers:modifiers,
+                        time:time
                     }));
                 },
                 10=>{ // finger scroll
-                    let x = to_wasm.mf32();
-                    let y = to_wasm.mf32();
+                    let abs = Vec2{x:to_wasm.mf32(),y:to_wasm.mf32()};
+                    let scroll = Vec2{
+                        x:to_wasm.mf32(), 
+                        y:to_wasm.mf32()
+                    };
+                    let is_wheel = to_wasm.mu32() != 0;
+                    let modifiers = unpack_key_modifier(to_wasm.mu32());
+                    let time = to_wasm.mf64();
                     self.call_event_handler(&mut event_handler, &mut Event::FingerScroll(FingerScrollEvent{
-                        abs:Vec2{x:x, y:y},
-                        rel:Vec2{x:x, y:y},
+                        abs:abs,
+                        rel:abs,
                         rect:Rect::zero(),
                         handled:false,
-                        scroll:Vec2{
-                            x:to_wasm.mf32(), 
-                            y:to_wasm.mf32()
-                        },
-                        is_wheel:to_wasm.mu32() != 0,
-                        modifiers:unpack_key_modifier(to_wasm.mu32()),
-                        time:to_wasm.mf64()
+                        scroll:scroll,
+                        is_wheel:is_wheel,
+                        modifiers:modifiers,
+                        time:time
                     }));
                 },
                 11=>{// finger out
-                    let x = to_wasm.mf32();
-                    let y = to_wasm.mf32();
+                    let abs = Vec2{x:to_wasm.mf32(),y:to_wasm.mf32()};
+                    let modifiers = unpack_key_modifier(to_wasm.mu32());
+                    let time = to_wasm.mf64();
                     self.call_event_handler(&mut event_handler, &mut Event::FingerHover(FingerHoverEvent{
-                        abs:Vec2{x:x, y:y},
-                        rel:Vec2{x:x, y:y},
+                        abs:abs,
+                        rel:abs,
                         rect:Rect::zero(),
                         handled:false,
                         hover_state:HoverState::Out,
-                        modifiers:unpack_key_modifier(to_wasm.mu32()),
-                        time:to_wasm.mf64()
+                        modifiers:modifiers,
+                        time:time
                     }));
                 },
                 12=>{ // key_down

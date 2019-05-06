@@ -21,7 +21,8 @@ pub struct CodeEditor{
     pub _visible_lines:usize,
     pub _visibility_margin:Margin,
     pub _select_scroll:Option<SelectScroll>,
-    
+    pub _grid_select_corner:Option<TextPos>,
+
     pub _monospace_size:Vec2,
     pub _instance_count:usize,
     pub _first_on_line:bool,
@@ -106,6 +107,7 @@ impl Style for CodeEditor{
             _visibility_margin:Margin::zero(),
             _visible_lines:0, 
             _line_geometry:Vec::new(),
+            _grid_select_corner:None,
             _bg_area:Area::Empty,
             _text_inst:None,
             _text_area:Area::Empty,
@@ -191,8 +193,14 @@ impl CodeEditor{
         match self.view.handle_scroll_bars(cx, event){
             (_,ScrollBarEvent::Scroll{..}) | (ScrollBarEvent::Scroll{..},_)=>{
                 if let Some(last_finger_move) = self._last_finger_move{
-                    let offset = self.text.find_closest_offset(cx, &self._text_area, last_finger_move);
-                    self.cursors.set_last_cursor_head(offset, text_buffer);
+                    if let Some(grid_select_corner) = self._grid_select_corner{
+                        let pos = self.compute_grid_text_pos_from_abs(cx, last_finger_move);
+                        self.cursors.grid_select(grid_select_corner, pos, text_buffer);
+                    }
+                    else{
+                        let offset = self.text.find_closest_offset(cx, &self._text_area, last_finger_move);
+                        self.cursors.set_last_cursor_head(offset, text_buffer);
+                    }
                 }
                 // the editor actually redraws on scroll, its because we don't actually
                 // generate the entire file as GPU text-buffer just the visible area
@@ -210,16 +218,43 @@ impl CodeEditor{
                 // give us the focus
                 cx.set_key_focus(self._bg_area);
                 let offset = self.text.find_closest_offset(cx, &self._text_area, fe.abs);
+                match fe.tap_count{
+                    2=>{
+                        let range = text_buffer.get_nearest_word_range(offset);
+                        self.cursors.set_last_clamp_range(range);
+                    },
+                    3=>{
+                        let range = text_buffer.get_nearest_line_range(offset);
+                        self.cursors.set_last_clamp_range(range);
+                    },
+                    4=>{
+                        let range = (0, text_buffer.get_char_count());
+                        self.cursors.set_last_clamp_range(range);
+                    },
+                    _=>()
+                }
+                // ok so we should scan a range 
+
                 if fe.modifiers.shift{
                     if !fe.modifiers.logo{ // simply place selection
-                        self.cursors.only_last_cursor_head(offset, text_buffer);
+                        self.cursors.clear_and_set_last_cursor_head(offset, text_buffer);
                     }
                     else{ // grid select
-
+                        // we need to figure out wether we'll pick 
+                        // essentially what we do is on mousemove just 'create' all cursors
+                        let pos = self.compute_grid_text_pos_from_abs(cx, fe.abs);
+                        self._grid_select_corner = Some(self.cursors.grid_select_corner(pos, text_buffer));
+                        self.cursors.grid_select(self._grid_select_corner.unwrap(), pos, text_buffer);
+                        //self._is_grid_select = true;
                     }
                 }
                 else{ // cursor drag with possible add
-                    self.cursors.set_last_cursor_head_and_tail(fe.modifiers.logo, offset, text_buffer);
+                    if fe.modifiers.logo{
+                        self.cursors.add_last_cursor_head_and_tail(offset, text_buffer);
+                    }
+                    else{
+                        self.cursors.clear_and_set_last_cursor_head_and_tail(offset, text_buffer);
+                    }
                 }
                 self.view.redraw_view_area(cx);
                 self._last_finger_move = Some(fe.abs);
@@ -228,13 +263,21 @@ impl CodeEditor{
                 cx.set_hover_mouse_cursor(MouseCursor::Text);
             },
             Event::FingerUp(_fe)=>{
+                self.cursors.clear_last_clamp_range();
                 //self.cursors.end_cursor_drag(text_buffer);
                 self._select_scroll = None;
                 self._last_finger_move = None;
+                self._grid_select_corner = None;
             },
             Event::FingerMove(fe)=>{
-                let offset = self.text.find_closest_offset(cx, &self._text_area, fe.abs);
-                self.cursors.set_last_cursor_head(offset, text_buffer);
+                if let Some(grid_select_corner) = self._grid_select_corner{
+                    let pos = self.compute_grid_text_pos_from_abs(cx, fe.abs);
+                    self.cursors.grid_select(grid_select_corner, pos, text_buffer);
+                }
+                else{
+                    let offset = self.text.find_closest_offset(cx, &self._text_area, fe.abs);
+                    self.cursors.set_last_cursor_head(offset, text_buffer);
+                }
 
                 self._last_finger_move = Some(fe.abs);
                 // determine selection drag scroll dynamics
@@ -453,12 +496,12 @@ impl CodeEditor{
         
         self.text.end_text(cx, self._text_inst.as_ref().unwrap());
         // lets draw cursors and selection rects.
-        let draw_cursor = &self._draw_cursor;
+        //let draw_cursor = &self._draw_cursor;
         let pos = cx.turtle_origin();
         cx.new_instance_layer(self.cursor.shader_id, 0);
 
         // draw the cursors    
-        for rc in &draw_cursor.cursors{
+        for rc in &self._draw_cursor.cursors{
            self.cursor.draw_quad(cx, Rect{x:rc.x - pos.x, y:rc.y - pos.y, w:rc.w, h:rc.h});
         }
 
@@ -466,7 +509,7 @@ impl CodeEditor{
         self._text_area = self._text_inst.take().unwrap().inst.into_area();
 
         // draw selections
-        let sel = &draw_cursor.selections;
+        let sel = &self._draw_cursor.selections;
         for i in 0..sel.len(){
             let cur = &sel[i];
             let mk_inst = self.marker.draw_quad(cx, Rect{x:cur.rc.x - pos.x, y:cur.rc.y - pos.y, w:cur.rc.w, h:cur.rc.h});
@@ -489,9 +532,17 @@ impl CodeEditor{
         }
 
         // do select scrolling
-        if let Some(select_scroll) = &self._select_scroll{
-            let offset = self.text.find_closest_offset(cx, &self._text_area, select_scroll.abs);
-            self.cursors.set_last_cursor_head(offset, text_buffer);
+        if let Some(select_scroll) = self._select_scroll.clone(){
+            if let Some(grid_select_corner) = self._grid_select_corner{
+               // self.cursors.grid_select(offset, text_buffer);
+                let pos = self.compute_grid_text_pos_from_abs(cx, select_scroll.abs);
+                self.cursors.grid_select(grid_select_corner, pos, text_buffer);
+            }
+            else{
+                let offset = self.text.find_closest_offset(cx, &self._text_area, select_scroll.abs);
+                self.cursors.set_last_cursor_head(offset, text_buffer);
+            }
+
             if self.view.set_scroll_pos(cx, Vec2{
                 x:self._scroll_pos.x + select_scroll.delta.x,
                 y:self._scroll_pos.y + select_scroll.delta.y
@@ -507,8 +558,8 @@ impl CodeEditor{
 
         // place the IME
         if self._bg_area == cx.key_focus{
-            if let Some(last_cursor) = draw_cursor.last_cursor{
-                let rc = draw_cursor.cursors[last_cursor];
+            if let Some(last_cursor) = self._draw_cursor.last_cursor{
+                let rc = self._draw_cursor.cursors[last_cursor];
                 let scroll_pos = self.view.get_scroll_pos(cx);
                 cx.show_text_ime(rc.x - scroll_pos.x, rc.y - scroll_pos.y);
             }
@@ -589,12 +640,15 @@ impl CodeEditor{
 
                 self.text.add_text(cx, geom.x, geom.y, end_offset - chunk.len() - 1, self._text_inst.as_mut().unwrap(), &chunk, |unicode, offset, x, w|{
                     // check if we need to skip cursors
-                    while offset > draw_cursor.end{ // jump to next cursor
+                    while offset >= draw_cursor.end{ // jump to next cursor
+                        if offset == draw_cursor.end{ // process the last bit here
+                             draw_cursor.process_geom(last_cursor, offset, x, geom.y, w, height);
+                            draw_cursor.emit_selection(false);
+                        }
                         if !draw_cursor.set_next(cursors){ // cant go further
                             return 0.0
                         }
                     }
-                    
                     // in current cursor range, update values
                     if offset >= draw_cursor.start && offset <= draw_cursor.end{
                         draw_cursor.process_geom(last_cursor, offset, x, geom.y, w, height);
@@ -622,13 +676,13 @@ impl CodeEditor{
             panic!("LAST CURSOR INVALID");
         }
         let offset = self.cursors.set[self.cursors.last_cursor].head;
-        let (row, col) = text_buffer.offset_to_row_col(offset);
+        let pos = text_buffer.offset_to_text_pos(offset);
         // alright now lets query the line geometry
-        if row < self._line_geometry.len(){
-            let geom = &self._line_geometry[row];
+        if pos.row < self._line_geometry.len(){
+            let geom = &self._line_geometry[pos.row];
             let mono_size = self.text.get_monospace_size(cx, Some(geom.font_size));
             let rect = Rect{
-                x:(col as f32) * mono_size.x,
+                x:(pos.col as f32) * mono_size.x,
                 y:geom.walk.y - mono_size.y * 1.,
                 w:mono_size.x * 4.,
                 h:mono_size.y * 3.
@@ -638,10 +692,22 @@ impl CodeEditor{
         }
     }
 
-/*
-    pub fn cursors_replace_text(&mut self, text:&str, text_buffer:&mut TextBuffer){
+    fn compute_grid_text_pos_from_abs(&mut self, cx:&Cx, abs:Vec2)->TextPos{
+        // 
+        let rel = self._bg_area.abs_to_rel_scrolled(cx, abs);
+        let mut mono_size = Vec2::zero();
+        for (row, geom) in self._line_geometry.iter().enumerate(){
+            //let geom = &self._line_geometry[pos.row];
+            mono_size = self.text.get_monospace_size(cx, Some(geom.font_size));
+            if rel.y < geom.walk.y || rel.y >= geom.walk.y && rel.y <= geom.walk.y + mono_size.y{ // its on the right line
+                let col = (rel.x.max(0.) / mono_size.x) as usize; // do a dumb calc
+                return TextPos{row:row, col:col};
+            }
+        }
+        // otherwise the file is too short, lets use the last line
+        TextPos{row:self._line_geometry.len() - 1, col: (rel.x.max(0.) / mono_size.x) as usize}
+    }
 
-    }*/
 }
 
 

@@ -157,11 +157,11 @@ impl TabControl{
     }
 
     pub fn get_tabs_view_rect(&mut self, cx:&Cx)->Rect{
-        self.tabs_view.get_view_area(cx).get_rect(cx)
+        self.tabs_view.get_rect(cx)
     }
 
     pub fn get_content_drop_rect(&mut self, cx:&Cx)->Rect{
-        let pr = self.page_view.get_view_area(cx).get_rect(cx);
+        let pr = self.page_view.get_rect(cx);
         // we now need to change the y and the new height
         Rect{
             x:pr.x,

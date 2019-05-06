@@ -40,6 +40,12 @@ impl Vec2{
     pub fn zero()->Vec2{
         Vec2{x:0.0,y:0.0}
     }
+
+    pub fn distance(&self, other:&Vec2)->f32{
+        let dx = self.x - other.x;
+        let dy = self.y - other.y;
+        (dx*dx+dy*dy).sqrt()
+    }
 }
 /*
 pub fn vec2(x:f32, y:f32)->Vec2{

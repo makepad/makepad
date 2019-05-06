@@ -14,6 +14,20 @@ pub struct TextBuffer{
     pub _char_count: usize
 }
 
+#[derive(Clone, Copy)]
+pub struct TextPos{
+    pub row:usize,
+    pub col:usize
+}
+
+impl TextPos{
+    fn dist(&self, other:&TextPos)->f64{
+        let dr = (self.row as f64) - (other.row as f64);
+        let dc = (self.col as f64) - (other.col as f64);
+        (dr*dr+dc*dc).sqrt()
+    }
+}
+
 #[derive(Clone,PartialEq)]
 pub enum TextUndoGrouping{
     Space,
@@ -61,21 +75,60 @@ pub struct TextOp{
     lines:Vec<Vec<char>>,
 }
 
+#[derive(PartialEq,Debug)]
+pub enum CharType{
+    Whitespace,
+    Word,
+    Other
+}
+
+impl CharType{
+    fn from(ch:char)->CharType{
+        if ch>='0' && ch <='9' || ch >= 'a' && ch <='z' || ch >= 'A' && ch <='Z' || ch == '_'{
+            return CharType::Word
+        }
+        if ch == ' '|| ch == '\t' || ch == '\n'{
+            return CharType::Whitespace
+        }
+        return CharType::Other
+    }
+
+    fn is_prio(&self, rhs:&CharType)->bool{
+        match self{
+            CharType::Word=>match rhs{
+                CharType::Word=>false,
+                CharType::Whitespace=>true,
+                CharType::Other=>true,
+            },
+            CharType::Whitespace=>match rhs{
+                CharType::Word=>false,
+                CharType::Whitespace=>false,
+                CharType::Other=>true,
+            },
+            CharType::Other=>match rhs{
+                CharType::Word=>false,
+                CharType::Whitespace=>true,
+                CharType::Other=>false,
+            }
+        }
+    }
+}
+
 impl TextBuffer{
 
-    pub fn offset_to_row_col(&self, char_offset:usize)->(usize,usize){
+    pub fn offset_to_text_pos(&self, char_offset:usize)->TextPos{
         let mut char_count = 0;
         for (row,line) in self.lines.iter().enumerate(){
             let next_char_count = char_count + line.len() + 1;
             if next_char_count > char_offset{
-                return (row, char_offset - char_count)
+                return TextPos{row:row, col:char_offset - char_count}
             }
             char_count = next_char_count;
         }
-        (0,0)
+        TextPos{row:0, col:0}
     }
 
-    pub fn offset_len_to_row_col(&self, char_offset:usize, len:usize)->(usize,usize,usize,usize){
+    pub fn offset_len_to_text_pos(&self, char_offset:usize, len:usize)->(TextPos, TextPos){
         let mut char_count = 0;
         let mut start_row = 0;
         let mut start_col = 0;
@@ -88,26 +141,85 @@ impl TextBuffer{
                 begin_found = true;
             }
             if begin_found && next_char_count > char_offset + len{
-                return (start_row, start_col, row, (char_offset + len) - char_count);
+                return (
+                    TextPos{row:start_row, col:start_col}, 
+                    TextPos{row:row, col: (char_offset + len) - char_count}
+                );
             }
             char_count = next_char_count;
         }
-        (0,0,0,0)
+        (TextPos{row:0, col:0},TextPos{row:0, col:0})
     }
 
 
-    pub fn row_col_to_offset(&self, row:usize, col:usize)->usize{
+    pub fn text_pos_to_offset(&self, pos:TextPos)->usize{
         let mut char_count = 0;
-        if row >= self.lines.len(){
+        if pos.row >= self.lines.len(){
             return self._char_count
         }
         for (ln_row, line) in self.lines.iter().enumerate(){
-            if ln_row == row{
-                return char_count + line.len().min(col);
+            if ln_row == pos.row{
+                return char_count + line.len().min(pos.col);
             }
             char_count += line.len() + 1;
         }
         0
+    }
+
+    pub fn get_nearest_word_range(&self, offset:usize)->(usize, usize){
+        let pos = self.offset_to_text_pos(offset);
+        let line = &self.lines[pos.row];
+        // lets get the char to the left, if any
+        let left_type = CharType::from(if pos.col>0{line[pos.col - 1]} else {'\0'});
+        let right_type = CharType::from(if pos.col<line.len(){line[pos.col]} else {'\n'});
+        let offset_base = offset - pos.col;
+        
+        let (mi,ma) = if left_type == right_type{ // scan both ways
+            let mut mi = pos.col;
+            let mut ma = pos.col;
+            while mi>0{
+                if left_type != CharType::from(line[mi-1]){
+                    break;
+                }
+                mi -= 1;
+            }
+            while ma<line.len(){
+                if right_type != CharType::from(line[ma]){
+                    break;
+                }
+                ma += 1;
+            }
+            (mi,ma)
+        }
+        else if left_type.is_prio(&right_type){ // scan towards the left
+            let ma = pos.col;
+            let mut mi = pos.col;
+            while mi>0{
+                if left_type != CharType::from(line[mi-1]){
+                    break;
+                }
+                mi -= 1;
+            }
+            (mi,ma)
+        }
+        else{ // scan towards the right
+            let mut ma = pos.col;
+            let mi = pos.col;
+            while ma < line.len(){
+                if right_type != CharType::from(line[ma]){
+                    break;
+                }
+                ma += 1;
+            }
+            (mi,ma)
+        };
+        (mi+offset_base, ma+offset_base)
+    }
+
+    pub fn get_nearest_line_range(&self, offset:usize)->(usize, usize){
+        let pos = self.offset_to_text_pos(offset);
+        let line = &self.lines[pos.row];
+        return (offset - pos.col, offset - pos.col + line.len() + if pos.row < line.len()-1{1}else{0})
     }
 
     pub fn get_char_count(&self)->usize{
@@ -119,31 +231,31 @@ impl TextBuffer{
     }
 
     fn get_range_as_string(&self, start:usize, len:usize, ret:&mut String){
-        let (mut row, mut col) = self.offset_to_row_col(start);
+        let mut pos = self.offset_to_text_pos(start);
         for _ in 0..len{
-            let line = &self.lines[row];
-            if col >= line.len(){
+            let line = &self.lines[pos.row];
+            if pos.col >= line.len(){
                 ret.push('\n');
-                col = 0;
-                row += 1;
-                if row >= self.lines.len(){
+                pos.col = 0;
+                pos.row += 1;
+                if pos.row >= self.lines.len(){
                     return;
                 }
             }
             else{
-                ret.push(line[col]);
-                col += 1;
+                ret.push(line[pos.col]);
+                pos.col += 1;
             }
         };
     }
 
     fn replace_range(&mut self, start:usize, len:usize, mut rep_lines:Vec<Vec<char>>)->Vec<Vec<char>>{
 
-        let (start_row, start_col, end_row, end_col) = self.offset_len_to_row_col(start, len);
+        let (start_pos, end_pos) = self.offset_len_to_text_pos(start, len);
 
-        if start_row == end_row && rep_lines.len() == 1{ // replace in one line
+        if start_pos.row == end_pos.row && rep_lines.len() == 1{ // replace in one line
             let rep_line_zero = rep_lines.drain(0..1).next().unwrap();
-            let line = self.lines[start_row].splice(start_col..end_col, rep_line_zero).collect();
+            let line = self.lines[start_pos.row].splice(start_pos.col..end_pos.col, rep_line_zero).collect();
             return vec![line];
         }
         else{
@@ -152,19 +264,19 @@ impl TextBuffer{
                 let rep_line_zero = rep_lines.drain(0..1).next().unwrap();
 
                 // replace it in the first
-                let first = self.lines[start_row].splice(start_col.., rep_line_zero).collect();
+                let first = self.lines[start_pos.row].splice(start_pos.col.., rep_line_zero).collect();
 
                 // collect the middle ones
-                let mut middle:Vec<Vec<char>> = self.lines.drain((start_row+1)..(end_row)).collect();
+                let mut middle:Vec<Vec<char>> = self.lines.drain((start_pos.row+1)..(end_pos.row)).collect();
 
                 // cut out the last bit
-                let last:Vec<char> = self.lines[start_row+1].drain(0..end_col).collect();
+                let last:Vec<char> = self.lines[start_pos.row+1].drain(0..end_pos.col).collect();
                 
                 // last line bit
-                let mut last_line = self.lines.drain((start_row+1)..(start_row+2)).next().unwrap();
+                let mut last_line = self.lines.drain((start_pos.row+1)..(start_pos.row+2)).next().unwrap();
 
                 // merge start_row+1 into start_row
-                self.lines[start_row].append(&mut last_line);
+                self.lines[start_pos.row].append(&mut last_line);
 
                 // concat it all together
                 middle.insert(0, first);
@@ -172,35 +284,35 @@ impl TextBuffer{
 
                 return middle
             }
-            else if start_row == end_row{ // replacing single line with multiple lines
-                let mut last_bit:Vec<char> =  self.lines[start_row].drain(end_col..).collect();// but we have co drain end_col..
+            else if start_pos.row == end_pos.row{ // replacing single line with multiple lines
+                let mut last_bit:Vec<char> =  self.lines[start_pos.row].drain(end_pos.col..).collect();// but we have co drain end_col..
 
                 // replaced first line
                 let rep_lines_len = rep_lines.len();
                 let rep_line_first:Vec<char> = rep_lines.drain(0..1).next().unwrap();
-                let line = self.lines[start_row].splice(start_col.., rep_line_first).collect();
+                let line = self.lines[start_pos.row].splice(start_pos.col.., rep_line_first).collect();
 
                 // splice in middle rest
                 let rep_line_mid = rep_lines.drain(0..(rep_lines.len()));
-                self.lines.splice( (start_row+1)..(start_row+1), rep_line_mid);
+                self.lines.splice( (start_pos.row+1)..(start_pos.row+1), rep_line_mid);
                 
                 // append last bit
-                self.lines[start_row + rep_lines_len-1].append(&mut last_bit);
+                self.lines[start_pos.row + rep_lines_len-1].append(&mut last_bit);
 
                 return vec![line];
             }
             else{ // replaceing multiple lines with multiple lines
                 // drain and replace last line
                 let rep_line_last = rep_lines.drain((rep_lines.len()-1)..(rep_lines.len())).next().unwrap();
-                let last = self.lines[end_row].splice(..end_col, rep_line_last).collect();
+                let last = self.lines[end_pos.row].splice(..end_pos.col, rep_line_last).collect();
 
                 // swap out middle lines and drain them
                 let rep_line_mid = rep_lines.drain(1..(rep_lines.len()));
-                let mut middle:Vec<Vec<char>> = self.lines.splice( (start_row+1)..end_row, rep_line_mid).collect();
+                let mut middle:Vec<Vec<char>> = self.lines.splice( (start_pos.row+1)..end_pos.row, rep_line_mid).collect();
 
                 // drain and replace first line
                 let rep_line_zero = rep_lines.drain(0..1).next().unwrap();
-                let first = self.lines[start_row].splice(start_col.., rep_line_zero).collect();
+                let first = self.lines[start_pos.row].splice(start_pos.col.., rep_line_zero).collect();
 
                 // concat it all together
                 middle.insert(0, first);
@@ -438,6 +550,20 @@ impl Cursor{
             (self.head,self.tail)
         }
     }
+    
+    pub fn clamp_range(&mut self, range:&Option<(usize,usize)>){
+        if let Some((mi, ma)) = range{
+            if self.head >= self.tail{
+                if self.head < *ma{self.head = *ma}
+                if self.tail > *mi{self.tail = *mi}
+            }
+            else{
+                if self.tail < *ma{self.tail = *ma}
+                if self.head > *mi{self.head = *mi}
+            }
+        }
+    }
+
 
     pub fn delta(&self, delta:isize)->(usize,usize){
         let (start,end) = self.order();
@@ -451,17 +577,17 @@ impl Cursor{
     }
 
     pub fn calc_max(&mut self, text_buffer:&TextBuffer){
-        let (_row,col) = text_buffer.offset_to_row_col(self.head);
-        self.max = col;
+        let pos = text_buffer.offset_to_text_pos(self.head);
+        self.max = pos.col;
     }
 
     pub fn move_home(&mut self, text_buffer:&TextBuffer){
-        let (row, _col) = text_buffer.offset_to_row_col(self.head);
+        let pos = text_buffer.offset_to_text_pos(self.head);
 
         // alright lets walk the line from the left till its no longer 9 or 32
-        for (pos,ch) in text_buffer.lines[row].iter().enumerate(){
+        for (index,ch) in text_buffer.lines[pos.row].iter().enumerate(){
             if *ch != '\t' && *ch != ' '{
-                self.head = text_buffer.row_col_to_offset(row, pos);
+                self.head = text_buffer.text_pos_to_offset(TextPos{row:pos.row, col:index});
                 self.calc_max(text_buffer);
                 return
             }
@@ -469,9 +595,9 @@ impl Cursor{
     }
 
     pub fn move_end(&mut self, text_buffer:&TextBuffer){
-        let (row, _col) = text_buffer.offset_to_row_col(self.head);
+        let pos = text_buffer.offset_to_text_pos(self.head);
         // alright lets walk the line from the left till its no longer 9 or 32
-        self.head = text_buffer.row_col_to_offset(row, text_buffer.lines[row].len());
+        self.head = text_buffer.text_pos_to_offset(TextPos{row:pos.row, col:text_buffer.lines[pos.row].len()});
         self.calc_max(text_buffer);
     }
 
@@ -496,9 +622,9 @@ impl Cursor{
     }
 
     pub fn move_up(&mut self, line_count:usize, text_buffer:&TextBuffer){
-        let (row,_col) = text_buffer.offset_to_row_col(self.head);
-        if row >= line_count {
-            self.head = text_buffer.row_col_to_offset(row - line_count, self.max);
+        let pos = text_buffer.offset_to_text_pos(self.head);
+        if pos.row >= line_count {
+            self.head = text_buffer.text_pos_to_offset(TextPos{row:pos.row - line_count, col:self.max});
         }
         else{
             self.head = 0;
@@ -506,11 +632,11 @@ impl Cursor{
     }
     
     pub fn move_down(&mut self, line_count:usize, text_buffer:&TextBuffer){
-        let (row,_col) = text_buffer.offset_to_row_col(self.head);
+        let pos = text_buffer.offset_to_text_pos(self.head);
         
-        if row + line_count < text_buffer.get_line_count() - 1{
+        if pos.row + line_count < text_buffer.get_line_count() - 1{
             
-            self.head = text_buffer.row_col_to_offset(row + line_count, self.max);
+            self.head = text_buffer.text_pos_to_offset(TextPos{row:pos.row + line_count, col:self.max});
         }
         else{
             self.head = text_buffer.get_char_count() - 1;
@@ -521,14 +647,16 @@ impl Cursor{
 #[derive(Clone)]
 pub struct CursorSet{
     pub set:Vec<Cursor>,
-    pub last_cursor:usize
+    pub last_cursor:usize,
+    pub last_clamp_range:Option<(usize, usize)>
 }
 
 impl CursorSet{
     pub fn new()->CursorSet{
         CursorSet{
             set:vec![Cursor{head:0,tail:0,max:0}],
-            last_cursor:0
+            last_cursor:0,
+            last_clamp_range:None
         }
     }
 
@@ -541,7 +669,7 @@ impl CursorSet{
         ret
     }
 
-    pub fn fuse_adjacent(&mut self, text_buffer:&TextBuffer){
+    fn fuse_adjacent(&mut self, text_buffer:&TextBuffer){
         let mut index = 0;
         loop{
             if self.set.len() < 2 || index >= self.set.len() - 1{ // no more pairs
@@ -573,7 +701,7 @@ impl CursorSet{
         }
     }
 
-    pub fn remove_collision(&mut self, offset:usize)->usize{
+    fn remove_collisions(&mut self, offset:usize, len:usize)->usize{
         // remove any cursor that intersects us
         let mut index = 0;
         loop{
@@ -581,20 +709,11 @@ impl CursorSet{
                 return index
             }
             let (start,end) = self.set[index].order();
-            if offset < start{
+            if start > offset + len{
                 return index
             }
-            if offset >= start && offset <=end{
-                if self.last_cursor > index{ // we remove a cursor before the last_cursor
-                    self.last_cursor = self.last_cursor - 1;
-                    self.set.remove(index);
-                }
-                else if self.last_cursor != index{ // it something after it so it doesnt matter
-                    self.set.remove(index);
-                }
-                else{ // we are the last_cursor
-                    index += 1;
-                }
+            if offset + len >= start && offset <end{
+                self.set.remove(index); // remove it
             }
             else{
                 index += 1;
@@ -602,42 +721,123 @@ impl CursorSet{
         }
     }
 
-    pub fn only_last_cursor_head(&mut self, offset:usize, text_buffer:&TextBuffer){
-        let mut cursor = self.set[self.last_cursor].clone();
-        self.last_cursor = 0;
-        self.set.truncate(0);
-        cursor.head = offset;
+    // puts the head down
+    fn set_last_cursor(&mut self, head:usize, tail:usize, text_buffer:&TextBuffer){
+        // widen the head to include the min range
+        let (off, len) = if let Some((mi, ma)) = &self.last_clamp_range{
+            (*mi, ma - mi)
+        }
+        else{
+            (head, 0)
+        };
+
+        // cut out all the collisions with the head range including 'last_cursor'
+        let index = self.remove_collisions(off, len);
+
+        // make a new cursor
+        let mut cursor = Cursor{
+            head:head,
+            tail:tail,
+            max:0
+        };
+
+        // clamp its head/tail to min range
+        cursor.clamp_range(&self.last_clamp_range);
+        // recompute maximum h pos
         cursor.calc_max(text_buffer);
-        self.set.push(cursor);
+        // insert it back into the set
+        self.set.insert(index, cursor);
+        self.last_cursor = index;
     }
 
-    // puts the head down
-    pub fn set_last_cursor_head_and_tail(&mut self, add:bool, offset:usize, text_buffer:&TextBuffer){
-        if !add{
-            self.set.truncate(0);
-        }
+    pub fn add_last_cursor_head_and_tail(&mut self, offset:usize, text_buffer:&TextBuffer){
+        self.set_last_cursor(offset, offset, text_buffer);
+    }
 
-        let index = self.remove_collision(offset);
-        
-        self.set.insert(index, Cursor{
-            head:offset,
-            tail:offset,
-            max:0
-        });
-        self.last_cursor = index;
-        self.set[index].calc_max(text_buffer);
+    pub fn clear_and_set_last_cursor_head_and_tail(&mut self,offset:usize, text_buffer:&TextBuffer){
+        self.set.truncate(0);
+        self.set_last_cursor(offset, offset, text_buffer);
     }
 
     pub fn set_last_cursor_head(&mut self, offset:usize, text_buffer:&TextBuffer){
-
-        // remove any cursor that intersects us
-        self.remove_collision(offset);
-
-        self.set[self.last_cursor].head = offset;
-        self.set[self.last_cursor].calc_max(text_buffer);
+        let cursor_tail = self.set[self.last_cursor].tail;
+        self.set.remove(self.last_cursor);
+        self.set_last_cursor(offset, cursor_tail, text_buffer);
     }
 
-    pub fn end_cursor_drag(&mut self, _text_buffer:&TextBuffer){
+    pub fn clear_and_set_last_cursor_head(&mut self, offset:usize, text_buffer:&TextBuffer){
+        let cursor_tail = self.set[self.last_cursor].tail;
+        self.set.truncate(0);
+        self.set_last_cursor(offset, cursor_tail, text_buffer);
+    }
+
+    pub fn grid_select_corner(&mut self, new_pos:TextPos, text_buffer:&TextBuffer)->TextPos{
+        // we need to compute the furthest row/col in our cursor set
+        let mut max_dist = 0.0;
+        let mut max_pos = TextPos{row:0,col:0};
+        for cursor in &self.set{
+            let head_pos = text_buffer.offset_to_text_pos(cursor.head);
+            let tail_pos = text_buffer.offset_to_text_pos(cursor.tail);
+            let head_dist = head_pos.dist(&new_pos);
+            let tail_dist = tail_pos.dist(&new_pos);
+            if head_dist > tail_dist{
+                if head_dist > max_dist{
+                    max_dist = head_dist;
+                    max_pos = head_pos;
+                }
+            }
+            else{
+                if tail_dist > max_dist{
+                    max_dist = tail_dist;
+                    max_pos = tail_pos;
+                }
+            }
+        }
+        return max_pos;
+    }
+
+    pub fn grid_select(&mut self, start_pos:TextPos, end_pos:TextPos, text_buffer:&TextBuffer){
+       
+        let (left,right) = if start_pos.col < end_pos.col{(start_pos.col, end_pos.col)}
+        else{(end_pos.col,start_pos.col)};
+
+        let (top,bottom) = if start_pos.row < end_pos.row{(start_pos.row, end_pos.row)}
+        else{(end_pos.row,start_pos.row)};
+
+        self.set.truncate(0);
+
+        // lets start the cursor gen
+        let mut offset = text_buffer.text_pos_to_offset(TextPos{row:top, col:0});
+        for row in top..(bottom+1){
+            let line = &text_buffer.lines[row];
+            if left < line.len(){
+                if start_pos.col < end_pos.col{
+                    self.set.push(Cursor{
+                        tail:offset + left,
+                        head:offset + line.len().min(right),
+                        max:line.len().min(right)
+                    });
+                }
+                else{
+                    self.set.push(Cursor{
+                        head:offset + left,
+                        tail:offset + line.len().min(right),
+                        max:line.len().min(right)
+                    });                    
+                }
+            }
+            offset += line.len() + 1;
+        }
+        // depending on the direction the last cursor remains 
+        self.last_cursor = 0;
+    }
+
+    pub fn set_last_clamp_range(&mut self, range:(usize,usize)){
+        self.last_clamp_range = Some(range);
+    }
+
+    pub fn clear_last_clamp_range(&mut self){
+        self.last_clamp_range = None;
     }
 
     pub fn replace_text(&mut self, text:&str, text_buffer:&mut TextBuffer){

@@ -258,6 +258,15 @@ where TScrollBar: ScrollBarLike<TScrollBar> + Clone + ElementLife
        return view_area
     }
 
+    pub fn get_rect(&mut self, cx:&Cx)->Rect{
+        if let Some(draw_list_id) = self.draw_list_id{
+            let draw_list = &cx.draw_lists[draw_list_id];
+            return draw_list.rect
+        }
+        Rect::zero()
+    }
+
+
     pub fn redraw_view_area(&self, cx:&mut Cx){
         if let Some(draw_list_id) = self.draw_list_id{
             let draw_list = &cx.draw_lists[draw_list_id];
