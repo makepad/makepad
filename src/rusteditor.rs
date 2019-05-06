@@ -81,6 +81,7 @@ impl RustEditor{
         loop{
             //let bit = rust_colorizer.next(&mut chunk, &self.rust_colors);
             let mut do_newline = false;
+            let mut is_whitespace = false;
             let color;
             state.advance_with_cur();
             
@@ -100,6 +101,7 @@ impl RustEditor{
                     chunk.push('\n');
                     do_newline = true;
                     after_newline = true;
+                    is_whitespace = true;
                     newline_tabs = 0;
                     // spool up the next char
                 },
@@ -126,6 +128,7 @@ impl RustEditor{
                             state.advance();
                         }
                     }
+                    is_whitespace = true;
                 },
                 '/'=>{ // parse comment
                     after_newline = false;
@@ -138,6 +141,10 @@ impl RustEditor{
                         color = self.col_comment;
                     }
                     else{
+                        if state.next == '='{
+                            chunk.push(state.next);
+                            state.advance();
+                        }
                         color = self.col_operator;
                     }
                 },
@@ -192,6 +199,60 @@ impl RustEditor{
                     chunk.push(state.cur);
                     Self::parse_rust_number_tail(&mut state, &mut chunk);
                 },
+                ':'=>{
+                    after_newline = false;
+                    chunk.push(state.cur);
+                    if state.next == ':'{
+                        chunk.push(state.next);
+                        state.advance();
+                    }
+                    color = self.col_operator;
+                },
+                '*'=>{
+                    after_newline = false;
+                    chunk.push(state.cur);
+                    if state.next == '='{
+                        chunk.push(state.next);
+                        state.advance();
+                    }                    
+                    color = self.col_operator;
+                },
+                '+'=>{
+                    after_newline = false;
+                    chunk.push(state.cur);
+                    if state.next == '='{
+                        chunk.push(state.next);
+                        state.advance();
+                    }
+                    color = self.col_operator;
+                },
+                '-'=>{
+                    after_newline = false;
+                    chunk.push(state.cur);
+                    if state.next == '>' || state.next == '='{
+                        chunk.push(state.next);
+                        state.advance();
+                    }
+                    color = self.col_operator;
+                },
+                '='=>{
+                    after_newline = false;
+                    chunk.push(state.cur);
+                    if state.next == '>' {
+                        chunk.push(state.next);
+                        state.advance();
+                    }
+                    color = self.col_operator;
+                },
+                '.'=>{
+                    after_newline = false;
+                    chunk.push(state.cur);
+                    if state.next == '.' {
+                        chunk.push(state.next);
+                        state.advance();
+                    }
+                    color = self.col_operator;
+                },
                 '(' | ')'=>{
                     after_newline = false;
                     chunk.push(state.cur);
@@ -206,6 +267,12 @@ impl RustEditor{
                     after_newline = false;
                     chunk.push(state.cur);
                     color = self.col_paren;
+                },
+                '_'=>{
+                    after_newline = false;
+                    chunk.push(state.cur);
+                    Self::parse_rust_ident_tail(&mut state, &mut chunk);
+                    color = self.col_identifier;
                 },
                 'a'...'z'=>{ // try to parse keywords or identifiers
                     after_newline = false;
@@ -258,7 +325,7 @@ impl RustEditor{
                     color = self.col_identifier;
                 }
             }
-            self.code_editor.draw_text(cx, &chunk, state.offset, color);
+            self.code_editor.draw_text(cx, &chunk, state.offset, is_whitespace, color);
             chunk.truncate(0);
             if do_newline{
                 self.code_editor.new_line(cx);

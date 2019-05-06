@@ -18,6 +18,7 @@ pub struct CodeEditor{
     pub _scroll_pos:Vec2,
     pub _last_finger_move:Option<Vec2>,
     pub _line_geometry:Vec<LineGeom>,
+    pub _token_chunks:Vec<TokenChunk>,
     pub _visible_lines:usize,
     pub _visibility_margin:Margin,
     pub _select_scroll:Option<SelectScroll>,
@@ -33,6 +34,13 @@ pub struct CodeEditor{
 pub struct LineGeom{
     walk:Vec2,
     font_size:f32
+}
+
+#[derive(Clone, Default)]
+pub struct TokenChunk{
+    offset:usize,
+    len:usize,
+    is_whitespace:bool
 }
 
 #[derive(Clone, Default)]
@@ -107,6 +115,7 @@ impl Style for CodeEditor{
             _visibility_margin:Margin::zero(),
             _visible_lines:0, 
             _line_geometry:Vec::new(),
+            _token_chunks:Vec::new(),
             _grid_select_corner:None,
             _bg_area:Area::Empty,
             _text_inst:None,
@@ -220,7 +229,7 @@ impl CodeEditor{
                 let offset = self.text.find_closest_offset(cx, &self._text_area, fe.abs);
                 match fe.tap_count{
                     2=>{
-                        let range = text_buffer.get_nearest_word_range(offset);
+                        let range = self.get_nearest_token_chunk_range(offset);
                         self.cursors.set_last_clamp_range(range);
                     },
                     3=>{
@@ -477,6 +486,7 @@ impl CodeEditor{
 
             self._monospace_size = self.text.get_monospace_size(cx, None);
             self._line_geometry.truncate(0);
+            self._token_chunks.truncate(0);
             self._draw_cursor = DrawCursor::new();
             self._first_on_line = true;
             self._visible_lines = 0;
@@ -614,8 +624,15 @@ impl CodeEditor{
         }
     }
 
-    pub fn draw_text(&mut self, cx:&mut Cx, chunk:&Vec<char>, end_offset:usize, color:Color){
+    pub fn draw_text(&mut self, cx:&mut Cx, chunk:&Vec<char>, end_offset:usize, is_whitespace:bool, color:Color){
         if chunk.len()>0{
+            
+            self._token_chunks.push(TokenChunk{
+                offset:end_offset - chunk.len() - 1,
+                len:chunk.len(),
+                is_whitespace:is_whitespace,
+            });
+            
             let geom = cx.walk_turtle(
                 Bounds::Fix(self._monospace_size.x * (chunk.len() as f32)), 
                 Bounds::Fix(self._monospace_size.y), 
@@ -706,6 +723,25 @@ impl CodeEditor{
         }
         // otherwise the file is too short, lets use the last line
         TextPos{row:self._line_geometry.len() - 1, col: (rel.x.max(0.) / mono_size.x) as usize}
+    }
+
+    fn get_nearest_token_chunk_range(&self, offset:usize)->(usize, usize){
+        let chunks = &self._token_chunks;
+        for i in 0..chunks.len(){
+            if chunks[i].is_whitespace{
+                if offset == chunks[i].offset && i > 0{ // at the start of whitespace
+                    return (chunks[i-1].offset, chunks[i-1].len)
+                }
+                else if offset == chunks[i].offset + chunks[i].len && i < chunks.len()-1{
+                    return (chunks[i+1].offset, chunks[i+1].len)
+                }
+            };
+
+            if offset >= chunks[i].offset && offset < chunks[i].offset + chunks[i].len{
+                return (chunks[i].offset, chunks[i].len)
+            }
+        };
+        (0,0)
     }
 
 }

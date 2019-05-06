@@ -166,7 +166,7 @@ impl TextBuffer{
         0
     }
 
-    pub fn get_nearest_word_range(&self, offset:usize)->(usize, usize){
+    pub fn get_nearest_word_range2(&self, offset:usize)->(usize, usize){
         let pos = self.offset_to_text_pos(offset);
         let line = &self.lines[pos.row];
         // lets get the char to the left, if any
@@ -219,7 +219,7 @@ impl TextBuffer{
     pub fn get_nearest_line_range(&self, offset:usize)->(usize, usize){
         let pos = self.offset_to_text_pos(offset);
         let line = &self.lines[pos.row];
-        return (offset - pos.col, offset - pos.col + line.len() + if pos.row < line.len()-1{1}else{0})
+        return (offset - pos.col, line.len() + if pos.row < line.len()-1{1}else{0})
     }
 
     pub fn get_char_count(&self)->usize{
@@ -552,14 +552,14 @@ impl Cursor{
     }
     
     pub fn clamp_range(&mut self, range:&Option<(usize,usize)>){
-        if let Some((mi, ma)) = range{
+        if let Some((off, len)) = range{
             if self.head >= self.tail{
-                if self.head < *ma{self.head = *ma}
-                if self.tail > *mi{self.tail = *mi}
+                if self.head < off+len{self.head = off+len}
+                if self.tail > *off{self.tail = *off}
             }
             else{
-                if self.tail < *ma{self.tail = *ma}
-                if self.head > *mi{self.head = *mi}
+                if self.tail < off+len{self.tail = off+len}
+                if self.head > *off{self.head = *off}
             }
         }
     }
@@ -724,8 +724,8 @@ impl CursorSet{
     // puts the head down
     fn set_last_cursor(&mut self, head:usize, tail:usize, text_buffer:&TextBuffer){
         // widen the head to include the min range
-        let (off, len) = if let Some((mi, ma)) = &self.last_clamp_range{
-            (*mi, ma - mi)
+        let (off, len) = if let Some((off, len)) = &self.last_clamp_range{
+            (*off, *len)
         }
         else{
             (head, 0)
