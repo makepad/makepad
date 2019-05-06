@@ -283,24 +283,30 @@ impl Font{
             ty2:0.0,
         });*/
 
-        ff.unicodes[10] = ff.glyphs.len();
-        ff.unicodes[13] = ff.glyphs.len();
-        let space_slot = ff.unicodes[32];
-        // set texture coord to 0
-        ff.glyphs[space_slot].tx1 = 0.0;
-        ff.glyphs[space_slot].ty1 = 0.0;
-        ff.glyphs[space_slot].tx2 = 0.0;
-        ff.glyphs[space_slot].ty2 = 0.0;
+        let mut excl_slot = ff.glyphs[ff.unicodes[33]].clone();
 
+        // set texture coord to 0
+        excl_slot.tx1 = 0.0;
+        excl_slot.ty1 = 0.0;
+        excl_slot.tx2 = 0.0;
+        excl_slot.ty2 = 0.0;
+
+        ff.unicodes[32] = ff.glyphs.len();
+        ff.glyphs.push(Glyph{
+            unicode:32,
+            ..excl_slot.clone()
+        });
+
+        ff.unicodes[10] = ff.glyphs.len();
         ff.glyphs.push(Glyph{
             unicode:10,
-            ..ff.glyphs[space_slot].clone()
+            ..excl_slot.clone()
         });
 
         ff.unicodes[9] = ff.glyphs.len();
         ff.glyphs.push(Glyph{
             unicode:9,
-            ..ff.glyphs[space_slot].clone()
+            ..excl_slot.clone()
         });
 
         Ok(ff)
