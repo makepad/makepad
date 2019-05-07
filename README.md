@@ -5,7 +5,10 @@ Live demo: https://makepad.github.io/makepad/
 
 This repo is for developing Makepad, a livecoding Rust IDE for 2D CAD design. The goal of the containing code is to be a Code Editor / UI kit for the Makepad application and will change without notice to suit that goal. The makepad application itself may be closed-sourced and sold, since we also have to feed our families.
 
-The vision is to build a livecoding / design hybrid program, where procedural design and code are fused in one environment. Useable for learning, creating, designing, and just plain fun. However  building a performant-enough UI thats also scalable in a development sense has been a serious problem. We've invested over a decade of trying to build this, one way or another in C++, JS, HTML, WebGL in every possible combination and variation. We looked at React, imGUI, Elm and any UI kit we could find to look for solutions. However everyone always neatly skipped the rendering part and left it to HTML (imgui did its own tho) and chose solutions that were limited by the underlying renderstack (or host-language) performance (react). This UI stack has a unique way of approaching it we'll dub 'dual immediate mode' and uses multi-platform shaders for styling that are compiled from Rust source via a proc macro. Rust is extremely helpful in managing complexity, its much better as a development experience than anything before so we are hopeful this time it will work.
+The vision is to build a livecoding / design hybrid program, where procedural design and code are fused in one environment. If you have missed 'learnable programming' please check this out: http://worrydream.com/LearnableProgramming/
+Makepad aims to fulfill (some) of these ideas using a completely from-scratch renderstack built on the GPU and Rust. It will be like an IDE meets a vector designtool, and had offspring. Direct manipulation of the vectors modifies the code, the code modifies the vectors. And the result can be lasercut, embroidered or drawn using a plotter. This means our first goal is 2D path CNC with booleans (hence the CAD), and not dropshadowy-gradients.
+
+However before we can make this awesome application,  building a performant-enough UI thats also scalable in a development sense has been a serious problem. We've invested over a decade of trying to build this, one way or another in C++, JS, HTML, WebGL in every possible combination and variation. We looked at React, imGUI, Elm and any UI kit we could find to look for solutions. However everyone always neatly skipped the rendering part and left it to HTML (imgui did its own tho) and chose solutions that were limited by the underlying renderstack (or host-language) performance (react). This UI stack has a unique way of approaching it we'll dub 'dual immediate mode' and uses multi-platform shaders for styling that are compiled from Rust source via a proc macro. Rust is extremely helpful in managing complexity, its much better as a development experience than anything before so we are hopeful this time it will work.
 
 The aim of this toolkit is NOT to be the end all be all of UI kits as a standalone library for everyone. We are not a giant company with huge teams to maintain this project specifically. The goal is to build a livecoding IDE and designtools that don't suck or fall to pieces along the way of complexity.
 
@@ -34,7 +37,7 @@ widget/src/*.rs - nested crate for the widgets
 
 widgets/render/src/*.rs - nested crate for the render engine
 
-The only 'web' JS code sits is here, its a typed-array RPC driven simplification of the webGL API
+The only 'web' JS code sits here, its a typed-array RPC driven simplification of the webGL API
 widgets/render/src/cx_webgl.js
 
 Prerequisites: Install cargo-watch, i use it for livecoding/building

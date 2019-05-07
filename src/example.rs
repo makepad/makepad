@@ -1,19 +1,34 @@
-// This is Makepad, a work-in-progress livecoding IDE for 2D Design
+// This is Makepad, a work-in-progress livecoding IDE for 2D Design.
+// The vision is to build a livecoding / design hybrid program, 
+// here procedural design and code are fused in one environment. 
+// If you have missed 'learnable programming' please check this out: 
+// http://worrydream.com/LearnableProgramming/
+// Makepad aims to fulfill (some) of these ideas using a completely 
+// from-scratch renderstack built on the GPU and Rust/wasm. 
+// It will be like an IDE meets a vector designtool, and had offspring. 
+// Direct manipulation of the vectors modifies the code, the code modifies the vectors. 
+// And the result can be lasercut, embroidered or drawn using a plotter. 
+// This means our first goal is 2D path CNC with booleans (hence the CAD), 
+// and not dropshadowy-gradients.
+
 // Find the repo and more explanation at github.com/makepad/makepad.
 // We are developing the UI kit and code-editor as MIT, but the full stack
 // will be a cloud/native app product in a few months.
 
-// Its very early still, but it will soon get hybrid live manipulation
-// UI with colorpickers and vector editors.
+// However to get to this amazing mixed-mode code editing-designtool,
+// we first have to build an actually nice code editor (what you are looking at)
+// And a vector stack with booleans (in progress)
+// Up next will be a script engine, and colorpicker UIs and vector editors.
 // All of the code is written in Rust, and it compiles to native and Wasm
 // Its built on a novel immediate-mode UI architecture
 // The styling is done with shaders written in Rust, transpiled to metal/glsl
 
-// The 2D-graphics livecoding bit is not here yet, but for now enjoy
-// how smooth a full GPU editor can scroll (try select scrolling the edge)
+// The scriptengine/vector engine isn't here yet so you can't do much yet.
+// for now enjoy how smooth a full GPU editor can scroll (try select scrolling the edge)
 // Also the tree fold-animates and the docking panel system works.
 // Multi cursor/grid cursor also works with cmd+click / cmd+shift+click
 // press alt for animated codefolding outline view!
+
 use widgets::*;
 
 struct App{
