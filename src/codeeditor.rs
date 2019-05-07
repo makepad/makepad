@@ -87,7 +87,7 @@ impl AnimFoldingState{
             AnimFoldingState::Folded=>AnimFoldingState::Folded,
             AnimFoldingState::Opening(f)=>{
                 let mut new_f = *f * 0.7;
-                if new_f < 0.01{
+                if new_f < 0.001{
                     AnimFoldingState::Open
                 }
                 else{
@@ -96,7 +96,7 @@ impl AnimFoldingState{
             },
             AnimFoldingState::Folding(f)=>{
                 let mut new_f = *f * 0.7;
-                if new_f < 0.01{
+                if new_f < 0.001{
                     AnimFoldingState::Folded
                 }
                 else{
