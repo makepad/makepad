@@ -1,5 +1,3 @@
-//use syn::Type;
-
 use widgets::*;
 
 struct App{
@@ -53,7 +51,11 @@ impl App{
 
     fn draw_app(&mut self, cx:&mut Cx){
         
-        self.view.begin_view(cx, &Layout{..Default::default()});
+        self.view.begin_view(cx, &Layout{
+            padding:Padding{l:10.,t:10.,r:0.,b:0.},
+            ..Default::default()
+        });
+
 
         for i in 0..10{
             self.buttons.get_draw(cx, i, |cx, templ|{
