@@ -34,6 +34,7 @@ pub struct CodeEditor{
     pub _first_line_visible:usize,
     pub _anim_keep_visible_line:usize,
     pub _anim_keep_visible_pos:f32,
+    pub _anim_delta_y:f32,
     pub _monospace_size:Vec2,
     pub _instance_count:usize,
     pub _first_on_line:bool,
@@ -225,6 +226,7 @@ impl Style for CodeEditor{
             _paren_list:Vec::new(),
             _first_line_visible:0,
             _anim_keep_visible_line:0,
+            _anim_delta_y:0.0,
             _anim_keep_visible_pos:0.0,
         };
         //tab.animator.default = tab.anim_default(cx);
@@ -539,7 +541,7 @@ impl CodeEditor{
                         // lets figure out which line is top left
                         self._anim_keep_visible_line = self.compute_first_visible_line(cx);
                         self._anim_keep_visible_pos = self._line_geometry[self._anim_keep_visible_line].walk.y;
-
+                        self._anim_delta_y = 100.0;
                         self.view.redraw_view_area(cx);
                         false
                         //return CodeEditorEvent::FoldStart
@@ -558,6 +560,7 @@ impl CodeEditor{
                         self._anim_keep_visible_line = self.compute_first_visible_line(cx);
                         self._anim_keep_visible_pos = self._line_geometry[self._anim_keep_visible_line].walk.y;
                         self.view.redraw_view_area(cx);
+                        self._anim_delta_y = 100.0;
                         // return to normal size
                     },
                     _=>(),
@@ -628,8 +631,8 @@ impl CodeEditor{
             };
 
             if self._anim_folding_state.is_animating(){
-                self._visibility_margin.t += 100.0;
-                self._visibility_margin.b += 100.0;
+                self._visibility_margin.t += self._anim_delta_y;
+                self._visibility_margin.b += self._anim_delta_y;
             }
 
             self._monospace_size = self.text.get_monospace_size(cx, None);
@@ -708,6 +711,7 @@ impl CodeEditor{
             // we might have to scroll the f'er
             let dy =  self._anim_keep_visible_pos - self._line_geometry[self._anim_keep_visible_line].walk.y;
             self._anim_keep_visible_pos = self._line_geometry[self._anim_keep_visible_line].walk.y;            
+            self._anim_delta_y = dy.abs();
             self.view.set_scroll_pos(cx, Vec2{
                 x:self._scroll_pos.x,
                 y:self._scroll_pos.y - dy
