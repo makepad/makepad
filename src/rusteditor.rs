@@ -83,7 +83,7 @@ impl RustEditor{
             //let bit = rust_colorizer.next(&mut chunk, &self.rust_colors);
             let mut do_newline = false;
             let mut is_whitespace = false;
-            let mut push_paren = None;
+            let mut pop_paren = None;
             let color;
             state.advance_with_cur();
             
@@ -262,37 +262,37 @@ impl RustEditor{
                     after_newline = false;
                     chunk.push(state.cur);
                     color = self.col_paren;
-                    push_paren = Some(ParenType::Round);
+                    self.code_editor.push_paren_stack(cx, ParenType::Round);
                 },
                 ')'=>{
                     after_newline = false;
                     chunk.push(state.cur);
                     color = self.col_paren;
-                    self.code_editor.pop_paren_stack(cx, ParenType::Round);
+                    pop_paren = Some(ParenType::Round);
                 },
                 '{'=>{
                     after_newline = false;
                     chunk.push(state.cur);
                     color = self.col_paren;
-                    push_paren = Some(ParenType::Curly);
+                    self.code_editor.push_paren_stack(cx, ParenType::Curly);
                 },
                 '}'=>{
                     after_newline = false;
                     chunk.push(state.cur);
                     color = self.col_paren;
-                    self.code_editor.pop_paren_stack(cx, ParenType::Curly);
+                    pop_paren = Some(ParenType::Curly);
                 },
                 '['=>{
                     after_newline = false;
                     chunk.push(state.cur);
                     color = self.col_paren;
-                    push_paren = Some(ParenType::Square);
+                    self.code_editor.push_paren_stack(cx, ParenType::Square);
                 },
                 ']'=>{
                     after_newline = false;
                     chunk.push(state.cur);
                     color = self.col_paren;
-                    self.code_editor.pop_paren_stack(cx, ParenType::Square);
+                    pop_paren = Some(ParenType::Square);
                 },
                 '_'=>{
                     after_newline = false;
@@ -353,8 +353,8 @@ impl RustEditor{
             }
             self.code_editor.draw_text(cx, &chunk, state.offset, is_whitespace, color);
             chunk.truncate(0);
-            if let Some(paren_type) = push_paren{
-                self.code_editor.push_paren_stack(cx, paren_type);
+            if let Some(paren_type) = pop_paren{
+                self.code_editor.pop_paren_stack(cx, paren_type);
             }
             if do_newline{
                 self.code_editor.new_line(cx);

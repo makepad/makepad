@@ -34,6 +34,7 @@ pub struct CodeEditor{
     pub _first_line_visible:usize,
     pub _anim_keep_visible_line:usize,
     pub _anim_keep_visible_pos:f32,
+    pub _anim_folding_was_animating:bool,
     pub _anim_delta_y:f32,
     pub _monospace_size:Vec2,
     pub _instance_count:usize,
@@ -203,7 +204,7 @@ impl Style for CodeEditor{
                 ..Style::style(cx)
             },
             open_font_size:11.0,
-            folded_font_size:3.0,
+            folded_font_size:0.5,
             _hit_state:HitState{no_scrolling:true, ..Default::default()},
             _monospace_size:Vec2::zero(),
             _last_finger_move:None,
@@ -225,6 +226,7 @@ impl Style for CodeEditor{
             _paren_stack:Vec::new(),
             _paren_list:Vec::new(),
             _first_line_visible:0,
+            _anim_folding_was_animating:false,
             _anim_keep_visible_line:0,
             _anim_delta_y:0.0,
             _anim_keep_visible_pos:0.0,
@@ -641,6 +643,7 @@ impl CodeEditor{
             self._draw_cursor = DrawCursor::new();
             self._first_on_line = true;
             self._visible_lines = 0;
+            self._anim_folding_was_animating = self._anim_folding_state.is_animating();
             self._anim_folding_state.next_anim_step();
             // we should try to keep the same 'top left' line in view somehow
             
@@ -704,8 +707,8 @@ impl CodeEditor{
             // lets give the view a whole extra page of space
             cx.walk_turtle(Bounds::Fix(0.0),  Bounds::Fix(cx.height_total(false)),  Margin::zero(), None);
         }
-
-        if self._anim_folding_state.is_animating(){
+        
+        if self._anim_folding_was_animating{
             self.view.redraw_view_area(cx);
             //self.scroll_last_cursor_visible(cx, text_buffer);
             // we might have to scroll the f'er
@@ -807,9 +810,9 @@ impl CodeEditor{
         self._paren_stack.push(ParenItem{
             start:self._token_chunks.len(),
             end:0,
-            paren_type:paren_type
+            paren_type:paren_type.clone()
         });
-        if self._paren_stack.len() == 1{ // one level down
+        if self._paren_stack.len() == 2 && paren_type == ParenType::Curly{ // one level down
             self.set_font_size(cx, self._anim_font_size);
         }
     }
@@ -822,7 +825,7 @@ impl CodeEditor{
                 self._paren_list.push(paren_item);
             }
         }
-        if self._paren_stack.len() == 0{ // root level
+        if self._paren_stack.len() == 1{ // root level
             self.set_font_size(cx, self.open_font_size);
         }
     }
