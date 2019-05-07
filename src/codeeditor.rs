@@ -11,23 +11,100 @@ pub struct CodeEditor{
     pub tab:Quad,
     pub text: Text,
     pub cursors:CursorSet,
+    
+    pub open_font_size:f32,
+    pub folded_font_size:f32,
+
     pub _hit_state:HitState,
     pub _bg_area:Area,
     pub _text_inst:Option<AlignedInstance>,
     pub _text_area:Area,
     pub _scroll_pos:Vec2,
     pub _last_finger_move:Option<Vec2>,
+    pub _paren_stack:Vec<ParenItem>,
+    pub _paren_list:Vec<ParenItem>,
     pub _line_geometry:Vec<LineGeom>,
     pub _token_chunks:Vec<TokenChunk>,
     pub _visible_lines:usize,
     pub _visibility_margin:Margin,
     pub _select_scroll:Option<SelectScroll>,
     pub _grid_select_corner:Option<TextPos>,
-
+    pub _anim_font_size:f32,
+    pub _anim_folding_state:AnimFoldingState,
     pub _monospace_size:Vec2,
     pub _instance_count:usize,
     pub _first_on_line:bool,
     pub _draw_cursor:DrawCursor
+}
+
+#[derive(Clone)]
+pub enum AnimFoldingState{
+    Open,
+    Opening(f32),
+    Folded,
+    Folding(f32)
+}
+
+impl AnimFoldingState{
+    fn is_animating(&self)->bool{
+        match self{
+            AnimFoldingState::Open=>false,
+            AnimFoldingState::Folded=>false,
+            _=>true
+        }
+    }
+
+    fn get_font_size(&self, open_size:f32, folded_size:f32)->f32{
+        match self{
+            AnimFoldingState::Open=>open_size,
+            AnimFoldingState::Folded=>folded_size,
+            AnimFoldingState::Opening(f)=>f*folded_size + (1.-f)*open_size,
+            AnimFoldingState::Folding(f)=>f*open_size + (1.-f)*folded_size,
+        }
+    }
+
+    fn do_folding(&mut self){
+        *self = match self{
+            AnimFoldingState::Open=>AnimFoldingState::Folding(1.0),
+            AnimFoldingState::Folded=>AnimFoldingState::Folded,
+            AnimFoldingState::Opening(f)=>AnimFoldingState::Folding(1.0 - *f),
+            AnimFoldingState::Folding(f)=>AnimFoldingState::Folding(*f),
+        }
+    }
+
+    fn do_opening(&mut self){
+        *self = match self{
+            AnimFoldingState::Open=>AnimFoldingState::Open,
+            AnimFoldingState::Folded=>AnimFoldingState::Opening(1.0),
+            AnimFoldingState::Opening(f)=>AnimFoldingState::Opening(*f),
+            AnimFoldingState::Folding(f)=>AnimFoldingState::Opening(1.0 - *f),
+        }
+    }
+
+    fn next_anim_step(&mut self){
+        *self = match self{
+            AnimFoldingState::Open=>AnimFoldingState::Open,
+            AnimFoldingState::Folded=>AnimFoldingState::Folded,
+            AnimFoldingState::Opening(f)=>{
+                let mut new_f = *f * 0.7;
+                if new_f < 0.01{
+                    AnimFoldingState::Open
+                }
+                else{
+                    AnimFoldingState::Opening(new_f)
+                }
+            },
+            AnimFoldingState::Folding(f)=>{
+                let mut new_f = *f * 0.7;
+                if new_f < 0.01{
+                    AnimFoldingState::Folded
+                }
+                else{
+                    AnimFoldingState::Folding(new_f)
+                }
+            },
+        }
+    }
 }
 
 #[derive(Clone, Default)]
@@ -41,6 +118,20 @@ pub struct SelectScroll{
     pub margin:Margin,
     pub delta:Vec2,
     pub abs:Vec2
+}
+
+#[derive(Clone)]
+pub struct ParenItem{
+    start:usize,
+    end:usize,
+    paren_type:ParenType
+}
+
+#[derive(Clone, PartialEq)]
+pub enum ParenType{
+    Round,
+    Square,
+    Curly
 }
 
 impl ElementLife for CodeEditor{
@@ -100,6 +191,8 @@ impl Style for CodeEditor{
                 wrapping:Wrapping::Line,
                 ..Style::style(cx)
             },
+            open_font_size:11.0,
+            folded_font_size:3.0,
             _hit_state:HitState{no_scrolling:true, ..Default::default()},
             _monospace_size:Vec2::zero(),
             _last_finger_move:None,
@@ -114,8 +207,12 @@ impl Style for CodeEditor{
             _text_inst:None,
             _text_area:Area::Empty,
             _instance_count:0,
+            _anim_font_size:11.0,
+            _anim_folding_state:AnimFoldingState::Open,
             _select_scroll:None,
-            _draw_cursor:DrawCursor::new()
+            _draw_cursor:DrawCursor::new(),
+            _paren_stack:Vec::new(),
+            _paren_list:Vec::new(),
         };
         //tab.animator.default = tab.anim_default(cx);
         code_editor
@@ -419,7 +516,14 @@ impl CodeEditor{
                         else{
                             false
                         }
-                    }
+                    },
+                    KeyCode::Alt=>{
+                        // start code folding anim
+                        self._anim_folding_state.do_folding();
+                        self.view.redraw_view_area(cx);
+                        false
+                        //return CodeEditorEvent::FoldStart
+                    },
                     _=>false
                 };
                 if cursor_moved{
@@ -427,12 +531,22 @@ impl CodeEditor{
                     self.view.redraw_view_area(cx);
                 }
             },
+            Event::KeyUp(ke)=>{
+                match ke.key_code{
+                    KeyCode::Alt=>{
+                        self._anim_folding_state.do_opening();
+                        self.view.redraw_view_area(cx);
+                        // return to normal size
+                    },
+                    _=>(),
+                }
+            },
             Event::TextInput(te)=>{
                 if te.replace_last{
                     text_buffer.undo(false, &mut self.cursors);
                 }
                 if te.input.len() == 1 && te.input.chars().next().unwrap() == '\n'{
-                    
+
                 } 
                 // if we are inserting just a newline, 
                 self.cursors.replace_text(&te.input, text_buffer);
@@ -497,7 +611,12 @@ impl CodeEditor{
             self._draw_cursor = DrawCursor::new();
             self._first_on_line = true;
             self._visible_lines = 0;
+            self._anim_folding_state.next_anim_step();
+            self._paren_stack.truncate(0);
+            self._anim_font_size = self._anim_folding_state.get_font_size(self.open_font_size, self.folded_font_size);
             // prime the next cursor
+            //println!("DOING FOLDINT STATE {}", self._anim_font_size);
+
             self._draw_cursor.set_next(&self.cursors.set);
             // cursor after text
             cx.new_instance_layer(self.cursor.shader_id, 0);
@@ -584,6 +703,13 @@ impl CodeEditor{
                 cx.hide_text_ime();
             }
         }
+
+        // code folding
+        
+        if self._anim_folding_state.is_animating(){
+            self.view.redraw_view_area(cx);
+            //self.scroll_last_cursor_visible(cx, text_buffer);
+        }
     }
 
     pub fn draw_tab_lines(&mut self, cx:&mut Cx, tabs:usize){
@@ -612,7 +738,7 @@ impl CodeEditor{
         self._line_geometry.push(
             LineGeom{
                 walk:cx.get_rel_turtle_walk(),
-                font_size:self.text.font_size
+                font_size:cx.turtle_biggest(),//self.text.font_size
             }
         );
         // add a bit of room to the right
@@ -628,6 +754,30 @@ impl CodeEditor{
         if !draw_cursor.first{ // we have some selection data to emit
            draw_cursor.emit_selection(true);
            draw_cursor.first = true;
+        }
+    }
+
+    pub fn push_paren_stack(&mut self, cx:&Cx, paren_type:ParenType){
+        self._paren_stack.push(ParenItem{
+            start:self._token_chunks.len(),
+            end:0,
+            paren_type:paren_type
+        });
+        if self._paren_stack.len() == 1{ // one level down
+            self.set_font_size(cx, self._anim_font_size);
+        }
+    }
+
+    pub fn pop_paren_stack(&mut self, cx:&Cx, paren_type:ParenType){
+        if self._paren_stack.len()>0{
+            let mut paren_item = self._paren_stack.pop().unwrap();
+            if paren_item.paren_type == paren_type{
+                paren_item.end = self._token_chunks.len();
+                self._paren_list.push(paren_item);
+            }
+        }
+        if self._paren_stack.len() == 0{ // root level
+            self.set_font_size(cx, self.open_font_size);
         }
     }
 
@@ -804,6 +954,7 @@ impl DrawCursor{
             self.head = cursor.head;
             self.next_index += 1;
             self.last_w = 0.0;
+            self.right_bottom.y = 0.;
             self.first = true;
             self.empty = true;
             true
@@ -836,6 +987,7 @@ impl DrawCursor{
                     }
                 })
             }
+            self.right_bottom.y = 0.;
         }
     }
 
@@ -858,6 +1010,8 @@ impl DrawCursor{
         // current right/bottom
         self.last_w = w;
         self.right_bottom.x = x;
-        self.right_bottom.y = y + h;
+        if y + h > self.right_bottom.y{
+            self.right_bottom.y = y + h;
+        }
     }
 }

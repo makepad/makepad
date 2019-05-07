@@ -193,6 +193,15 @@ impl Cx{
         return Rect::zero();
     }
 
+    pub fn turtle_biggest(&self)->f32{
+        if let Some(turtle) = self.turtles.last(){
+            turtle.biggest
+        }
+        else{
+            0.
+        }
+    }
+
     pub fn turtle_bounds(&self)->Vec2{
         if let Some(turtle) = self.turtles.last(){
             return Vec2{

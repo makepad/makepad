@@ -520,15 +520,15 @@ pub enum KeyCode {
     Period,
     Slash,
 
-    LeftControl,
-    LeftAlt,
-    LeftShift,
-    LeftLogo,
+    Control,
+    Alt,
+    Shift,
+    Logo,
 
-    RightControl,
-    RightShift,
-    RightAlt,
-    RightLogo,
+    //RightControl,
+    //RightShift,
+    //RightAlt,
+    //RightLogo,
 
     Space,
     Capslock,

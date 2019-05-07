@@ -303,10 +303,10 @@ impl CocoaWindow{
                     }
                 }
                 let time = self.time_now();
-                add_event(time, last_key_mod.shift, modifiers.shift, modifiers.clone(), &mut events, KeyCode::LeftShift);
-                add_event(time, last_key_mod.alt, modifiers.alt, modifiers.clone(), &mut events, KeyCode::LeftAlt);
-                add_event(time, last_key_mod.logo, modifiers.logo, modifiers.clone(), &mut events, KeyCode::LeftLogo);
-                add_event(time, last_key_mod.control, modifiers.control, modifiers.clone(), &mut events, KeyCode::LeftControl);
+                add_event(time, last_key_mod.shift, modifiers.shift, modifiers.clone(), &mut events, KeyCode::Shift);
+                add_event(time, last_key_mod.alt, modifiers.alt, modifiers.clone(), &mut events, KeyCode::Alt);
+                add_event(time, last_key_mod.logo, modifiers.logo, modifiers.clone(), &mut events, KeyCode::Logo);
+                add_event(time, last_key_mod.control, modifiers.control, modifiers.clone(), &mut events, KeyCode::Control);
                 if events.len() > 0{
                     self.do_callback(&mut events);
                 }

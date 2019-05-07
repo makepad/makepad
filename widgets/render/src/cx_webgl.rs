@@ -506,16 +506,16 @@ fn web_to_key_code(key_code:u32)->KeyCode{
         190=>KeyCode::Period,
         191=>KeyCode::Slash,
 
-        17=>KeyCode::LeftControl,
-        18=>KeyCode::LeftAlt,
-        16=>KeyCode::LeftShift,
-        224=>KeyCode::LeftLogo,
-        91=>KeyCode::LeftLogo,
+        17=>KeyCode::Control,
+        18=>KeyCode::Alt,
+        16=>KeyCode::Shift,
+        224=>KeyCode::Logo,
+        91=>KeyCode::Logo,
 
         //RightControl,
         //RightShift,
         //RightAlt,
-        93=>KeyCode::RightLogo,
+        93=>KeyCode::Logo,
 
         32=>KeyCode::Space,
         20=>KeyCode::Capslock,
