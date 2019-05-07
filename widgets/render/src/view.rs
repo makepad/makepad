@@ -181,7 +181,7 @@ where TScrollBar: ScrollBarLike<TScrollBar> + Clone + ElementLife
         (ret_h, ret_v)
     }
 
-    pub fn get_scroll_pos(&mut self, cx:&mut Cx)->Vec2{
+    pub fn get_scroll_pos(&self, cx:&Cx)->Vec2{
         if let Some(draw_list_id) = self.draw_list_id{
             let draw_list = &cx.draw_lists[draw_list_id];
             draw_list.get_scroll_pos()
