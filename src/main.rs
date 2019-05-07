@@ -87,8 +87,8 @@ impl Style for App{
                                 },
                                 DockTab{
                                     closeable:true,
-                                    title:"button.rs".to_string(),
-                                    item:Panel::FileEditor{path:"/widgets/src/button.rs".to_string(), editor_id:1}
+                                    title:"example.rs".to_string(),
+                                    item:Panel::FileEditor{path:"/src/example.rs".to_string(), editor_id:1}
                                 }
                             ],
                         }),

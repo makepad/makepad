@@ -212,7 +212,6 @@ impl CodeEditor{
             _=>()
         }
         match event.hits(cx, self._bg_area, &mut self._hit_state){
-
             Event::Animate(_ae)=>{
             },
             Event::FingerDown(fe)=>{
@@ -221,6 +220,7 @@ impl CodeEditor{
                 cx.set_key_focus(self._bg_area);
                 let offset = self.text.find_closest_offset(cx, &self._text_area, fe.abs);
                 match fe.tap_count{
+                    1=>(),
                     2=>{
                         let range = self.get_nearest_token_chunk_range(offset);
                         self.cursors.set_last_clamp_range(range);
@@ -229,11 +229,10 @@ impl CodeEditor{
                         let range = text_buffer.get_nearest_line_range(offset);
                         self.cursors.set_last_clamp_range(range);
                     },
-                    4=>{
+                    _=>{
                         let range = (0, text_buffer.get_char_count());
                         self.cursors.set_last_clamp_range(range);
-                    },
-                    _=>()
+                    }
                 }
                 // ok so we should scan a range 
 
@@ -362,7 +361,7 @@ impl CodeEditor{
                         true
                     },
                     KeyCode::PageUp=>{
-                        
+
                         self.cursors.move_up(self._visible_lines.max(5) - 4, ke.modifiers.shift, text_buffer);
                         true
                     },
@@ -401,7 +400,7 @@ impl CodeEditor{
                             false
                         }
                     },
-                    KeyCode::KeyX=>{ // cut
+                    KeyCode::KeyX=>{ // cut, the actual copy comes from the TextCopy event from the platform layer
                         if ke.modifiers.logo || ke.modifiers.control{ // cut
                             self.cursors.replace_text("", text_buffer);
                             true
@@ -432,6 +431,10 @@ impl CodeEditor{
                 if te.replace_last{
                     text_buffer.undo(false, &mut self.cursors);
                 }
+                if te.input.len() == 1 && te.input.chars().next().unwrap() == '\n'{
+                    
+                } 
+                // if we are inserting just a newline, 
                 self.cursors.replace_text(&te.input, text_buffer);
                 self.scroll_last_cursor_visible(cx, text_buffer);
                 self.view.redraw_view_area(cx);
