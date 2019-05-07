@@ -45,9 +45,9 @@ pub struct CodeEditor{
 #[derive(Clone)]
 pub enum AnimFoldingState{
     Open,
-    Opening(f32),
+    Opening(f32,f32),
     Folded,
-    Folding(f32)
+    Folding(f32,f32)
 }
 
 impl AnimFoldingState{
@@ -70,26 +70,26 @@ impl AnimFoldingState{
         match self{
             AnimFoldingState::Open=>open_size,
             AnimFoldingState::Folded=>folded_size,
-            AnimFoldingState::Opening(f)=>f*folded_size + (1.-f)*open_size,
-            AnimFoldingState::Folding(f)=>f*open_size + (1.-f)*folded_size,
+            AnimFoldingState::Opening(f, _)=>f*folded_size + (1.-f)*open_size,
+            AnimFoldingState::Folding(f, _)=>f*open_size + (1.-f)*folded_size,
         }
     }
 
-    fn do_folding(&mut self){
+    fn do_folding(&mut self, speed:f32){
         *self = match self{
-            AnimFoldingState::Open=>AnimFoldingState::Folding(1.0),
+            AnimFoldingState::Open=>AnimFoldingState::Folding(1.0, speed),
             AnimFoldingState::Folded=>AnimFoldingState::Folded,
-            AnimFoldingState::Opening(f)=>AnimFoldingState::Folding(1.0 - *f),
-            AnimFoldingState::Folding(f)=>AnimFoldingState::Folding(*f),
+            AnimFoldingState::Opening(f, _)=>AnimFoldingState::Folding(1.0 - *f, speed),
+            AnimFoldingState::Folding(f, _)=>AnimFoldingState::Folding(*f, speed),
         }
     }
 
-    fn do_opening(&mut self){
+    fn do_opening(&mut self, speed:f32){
         *self = match self{
             AnimFoldingState::Open=>AnimFoldingState::Open,
-            AnimFoldingState::Folded=>AnimFoldingState::Opening(1.0),
-            AnimFoldingState::Opening(f)=>AnimFoldingState::Opening(*f),
-            AnimFoldingState::Folding(f)=>AnimFoldingState::Opening(1.0 - *f),
+            AnimFoldingState::Folded=>AnimFoldingState::Opening(1.0, speed),
+            AnimFoldingState::Opening(f,_)=>AnimFoldingState::Opening(*f, speed),
+            AnimFoldingState::Folding(f,_)=>AnimFoldingState::Opening(1.0 - *f, speed),
         }
     }
 
@@ -97,22 +97,22 @@ impl AnimFoldingState{
         *self = match self{
             AnimFoldingState::Open=>AnimFoldingState::Open,
             AnimFoldingState::Folded=>AnimFoldingState::Folded,
-            AnimFoldingState::Opening(f)=>{
-                let mut new_f = *f * 0.7;
+            AnimFoldingState::Opening(f,speed)=>{
+                let mut new_f = *f * *speed;
                 if new_f < 0.001{
                     AnimFoldingState::Open
                 }
                 else{
-                    AnimFoldingState::Opening(new_f)
+                    AnimFoldingState::Opening(new_f,*speed)
                 }
             },
-            AnimFoldingState::Folding(f)=>{
-                let mut new_f = *f * 0.7;
+            AnimFoldingState::Folding(f, speed)=>{
+                let mut new_f = *f * *speed;
                 if new_f < 0.001{
                     AnimFoldingState::Folded
                 }
                 else{
-                    AnimFoldingState::Folding(new_f)
+                    AnimFoldingState::Folding(new_f,*speed)
                 }
             },
         }
@@ -539,7 +539,8 @@ impl CodeEditor{
                         // its simply the top line
 
                         // start code folding anim
-                        self._anim_folding_state.do_folding();
+                        let speed = if ke.modifiers.shift{0.97}else{0.7};
+                        self._anim_folding_state.do_folding(speed);
                         // lets figure out which line is top left
                         self._anim_keep_visible_line = self.compute_first_visible_line(cx);
                         self._anim_keep_visible_pos = self._line_geometry[self._anim_keep_visible_line].walk.y;
@@ -558,7 +559,8 @@ impl CodeEditor{
             Event::KeyUp(ke)=>{
                 match ke.key_code{
                     KeyCode::Alt=>{
-                        self._anim_folding_state.do_opening();
+                        let speed = if ke.modifiers.shift{0.97}else{0.7};
+                        self._anim_folding_state.do_opening(speed);
                         self._anim_keep_visible_line = self.compute_first_visible_line(cx);
                         self._anim_keep_visible_pos = self._line_geometry[self._anim_keep_visible_line].walk.y;
                         self.view.redraw_view_area(cx);
