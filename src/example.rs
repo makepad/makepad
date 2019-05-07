@@ -1,15 +1,17 @@
 // This is Makepad, a work-in-progress livecoding IDE for 2D Design
+// Find the repo and more explanation at github.com/makepad/makepad.
+// We are developing the UI kit and code-editor as MIT, but the full stack
+// will be a cloud/native app product in a few months.
+
 // Its very early still, but it will soon get hybrid live manipulation
 // UI with colorpickers and vector editors.
 // All of the code is written in Rust, and it compiles to native and Wasm
 // Its built on a novel immediate-mode UI architecture
 // The styling is done with shaders written in Rust, transpiled to metal/glsl
-// Find the repo and more explanation at github.com/makepad/makepad.
+
 // The 2D-graphics livecoding bit is not here yet, but for now enjoy
 // how smooth a full GPU editor can scroll (try select scrolling the edge)
 // Also the tree fold-animates and the docking panel system works.
-// We are developing the UI kit and code-editor as MIT, but the full stack
-// will be a cloud/native app product in a few months.
 
 use widgets::*;
 
