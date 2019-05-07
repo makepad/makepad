@@ -12,6 +12,7 @@
 // The 2D-graphics livecoding bit is not here yet, but for now enjoy
 // how smooth a full GPU editor can scroll (try select scrolling the edge)
 // Also the tree fold-animates and the docking panel system works.
+// Multi cursor/grid cursor also works with cmd+click / cmd+shift+click
 
 use widgets::*;
 
