@@ -1,4 +1,4 @@
-cargo-watch watch -x 'build --target=wasm32-unknown-unknown --manifest-path="./example_webgl/Cargo.toml"' \
+cargo-watch watch -x 'build --target=wasm32-unknown-unknown --release --manifest-path="./example_webgl/Cargo.toml"' \
 #-s'cp ./example_webgl/target/wasm32-unknown-unknown/debug/example_webgl.wasm ./example_webgl/debug/wasm32-unknown-unknown/release/example_webgl.webassembly.html' \
 #-s'../wabt/bin/wasm-strip ./webgl/target/wasm32-unknown-unknown/release/makepad_webgl.webassembly.html' 
 #cargo-watch watch -x 'build --target=wasm32-unknown-unknown --release --manifest-path="./example_webgl/Cargo.toml"' \

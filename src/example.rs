@@ -57,10 +57,13 @@ impl App{
         });
 
 
-        for i in 0..10{
+        for i in 0..100{
             self.buttons.get_draw(cx, i, |cx, templ|{
                 templ.clone()
             }).draw_button_with_label(cx, &format!("Btn {}", i));
+            if i%10 == 9{
+                cx.turtle_new_line()
+            }
         }
 
         cx.turtle_new_line();
