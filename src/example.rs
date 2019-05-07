@@ -4,7 +4,8 @@ struct App{
     view:View<ScrollBar>,
     buttons:Elements<u64, Button, Button>,
     text:Text,
-    quad:Quad
+    quad:Quad,
+    clickety:u64
 }
 
 main_app!(App, "Example");
@@ -30,7 +31,8 @@ impl Style for App{
             },
             buttons:Elements::new(Button{
                 ..Style::style(cx)
-            })
+            }),
+            clickety:0
         }
     }
 }
@@ -43,6 +45,8 @@ impl App{
             match btn.handle_button(cx, event){
                 ButtonEvent::Clicked=>{
                     // boop
+                    self.clickety += 1;
+                    cx.redraw_area(Area::All);
                 },
                 _=>()
             }
@@ -68,7 +72,7 @@ impl App{
 
         cx.turtle_new_line();
 
-        self.text.draw_text(cx, "Hello World");
+        self.text.draw_text(cx, &format!("Hello World {}",self.clickety));
         self.quad.draw_quad_walk(cx, Bounds::Fix(100.),Bounds::Fix(100.), Margin{l:15.,t:0.,r:0.,b:0.});
 
         self.view.end_view(cx);
