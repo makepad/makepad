@@ -362,6 +362,7 @@ impl CodeEditor{
                         true
                     },
                     KeyCode::PageUp=>{
+                        
                         self.cursors.move_up(self._visible_lines.max(5) - 4, ke.modifiers.shift, text_buffer);
                         true
                     },

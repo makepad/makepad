@@ -1,0 +1,25 @@
+[package]
+name = "example_webgl"
+version = "0.1.0"
+authors = ["arc"]
+edition = "2018"
+
+[lib]
+path = "../src/example.rs"
+crate-type = ["cdylib"]
+
+[profile.release]
+lto = true
+opt-level = 'z'
+panic = "abort"
+debug = false
+codegen-units = 1
+
+[dependencies]
+rand = "*"
+#syn = "*"
+
+[dependencies.widgets]
+path="../widgets"
+default-features = false
+features=["webgl"]

@@ -194,7 +194,7 @@ impl Cx{
         };
         let (last_pos, last_time, count) = self.finger_tap_count[digit];
 
-        if (time - last_time) < 0.5 && pos.distance(&last_pos) < 5.{
+        if (time - last_time) < 0.5 && pos.distance(&last_pos) < 10.{
             self.finger_tap_count[digit] = (pos, time, count + 1);
             count + 1
         }

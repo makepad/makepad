@@ -41,12 +41,12 @@ impl Style for Button{
             animator:Animator::new(Anim::new(Play::Cut{duration:0.5}, vec![
                 Track::color("bg.color", Ease::Lin, vec![(1., cx.color("bg_normal"))]),
                 Track::float("bg.glow_size", Ease::Lin, vec![(1., 0.0)]),
-                Track::color("bg.border_color", Ease::Lin, vec![(1., color("white"))]),
+                Track::color("bg.border_color", Ease::Lin, vec![(1., color("#6"))]),
                 Track::color("text.color", Ease::Lin, vec![(1., color("white"))]),
                 Track::color("icon.color", Ease::Lin, vec![(1., color("white"))])
             ])),
             anim_over:Anim::new(Play::Cut{duration:0.05}, vec![
-                Track::color("bg.color", Ease::Lin, vec![(1., color("white"))]),
+                Track::color("bg.color", Ease::Lin, vec![(1., color("#999"))]),
                 Track::color("bg.border_color", Ease::Lin, vec![(1., color("white"))]),
                 Track::float("bg.glow_size", Ease::Lin, vec![(1., 1.0)])
             ]),
@@ -116,11 +116,9 @@ impl Button{
             Event::FingerDown(_fe)=>{
                 self._is_down = true;
                 self.animator.play_anim(cx, self.anim_down.clone());
-                cx.set_down_mouse_cursor(MouseCursor::Crosshair);
                 return ButtonEvent::Down;
             },
             Event::FingerHover(fe)=>{
-                cx.set_hover_mouse_cursor(MouseCursor::Hand);
                 match fe.hover_state{
                     HoverState::In=>{
                         if self._is_down{
@@ -162,8 +160,8 @@ impl Button{
         self.bg.color = self.animator.last_color("bg.color");
         let bg_inst =  self.bg.begin_quad(cx, &self.bg_layout);
         // push the 2 vars we added to bg shader
-        bg_inst.push_vec4(cx, self.animator.last_vec4("bg.border_color"));
-        bg_inst.push_float(cx, self.animator.last_float("bg.border_color"));
+        bg_inst.push_color(cx, self.animator.last_color("bg.border_color"));
+        bg_inst.push_float(cx, self.animator.last_float("bg.glow_size"));
 
         self.text.draw_text(cx, label);
         
