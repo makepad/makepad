@@ -911,7 +911,7 @@
 
 			ta.addEventListener('keydown', e=>{
 				let code = e.keyCode;
-
+				if(code == 18) e.preventDefault(); // alt
 				if(code === 8 || code === 9) e.preventDefault() // backspace/tab
 				if((code === 88 || code == 67) && (e.metaKey || e.ctrlKey) ){ // copy or cut
 					// we need to request the clipboard
