@@ -535,15 +535,16 @@ impl CodeEditor{
                             false
                         }
                     },
+                    KeyCode::Space=>{
+                        if ke.modifiers.control{
+                            self.do_code_folding(cx);
+                        }
+                        false
+                    },
                     KeyCode::Alt=>{
                         // how do we find the center line of the view
                         // its simply the top line
-
-                        // start code folding anim
-                        let speed = if ke.modifiers.shift{0.99}else{0.98};
-                        self._anim_folding.state.do_folding(speed, 0.95);
-                        self._anim_folding.first_visible = self.compute_first_visible_line(cx);
-                        self.view.redraw_view_area(cx);
+                        self.do_code_folding(cx);
                         false
                         //return CodeEditorEvent::FoldStart
                     },
@@ -557,12 +558,13 @@ impl CodeEditor{
             Event::KeyUp(ke)=>{
                 match ke.key_code{
                     KeyCode::Alt=>{
-                        let speed = if ke.modifiers.shift{0.99}else{0.96};
-                        self._anim_folding.state.do_opening(speed, 0.97);
-                        self._anim_folding.first_visible = self.compute_first_visible_line(cx);
-                        self.view.redraw_view_area(cx);
-                        // return to normal size
+                        self.do_code_unfolding(cx);
                     },
+                    KeyCode::Space=>{
+                        if ke.modifiers.control{
+                            self.do_code_unfolding(cx);
+                        }
+                    }
                     _=>(),
                 }
             },
@@ -588,6 +590,22 @@ impl CodeEditor{
         };
         CodeEditorEvent::None
    }
+
+    pub fn do_code_folding(&mut self, cx:&mut Cx){
+        // start code folding anim
+        let speed = 0.98;
+        self._anim_folding.state.do_folding(speed, 0.95);
+        self._anim_folding.first_visible = self.compute_first_visible_line(cx);
+        self.view.redraw_view_area(cx);
+    }
+
+    pub fn do_code_unfolding(&mut self, cx:&mut Cx){
+        let speed = 0.96;
+        self._anim_folding.state.do_opening(speed, 0.97);
+        self._anim_folding.first_visible = self.compute_first_visible_line(cx);
+        self.view.redraw_view_area(cx);
+        // return to normal size
+    }
 
     pub fn begin_code_editor(&mut self, cx:&mut Cx, text_buffer:&TextBuffer)->bool{
         // pull the bg color from our animation system, uses 'default' value otherwise
