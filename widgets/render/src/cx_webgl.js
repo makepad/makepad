@@ -944,6 +944,7 @@
 				this.do_wasm_io();
 			})
 			ta.addEventListener('keyup', e=>{
+				if(code == 18) e.preventDefault(); // alt
 				var ta = this.text_area;
 				if(ugly_ime_hack){
 					ugly_ime_hack = false;
