@@ -911,7 +911,7 @@
 
 			ta.addEventListener('keydown', e=>{
 				let code = e.keyCode;
-				console.log("keydown",code);
+				
 				if(code == 91){firefox_logo_key = true; e.preventDefault();}
 				if(code == 18 || code == 17 || code == 16) e.preventDefault(); // alt
 				if(code === 8 || code === 9) e.preventDefault() // backspace/tab
@@ -947,7 +947,7 @@
 			})
 			ta.addEventListener('keyup', e=>{
 				let code = e.keyCode;
-				console.log("keyup",code);
+				
 				if(code == 18 || code == 17 || code == 16) e.preventDefault(); // alt
 				if(code == 91){firefox_logo_key = false; e.preventDefault();}
 				var ta = this.text_area;

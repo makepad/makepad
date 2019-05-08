@@ -358,20 +358,17 @@ impl CodeEditor{
                 // ok so we should scan a range 
 
                 if fe.modifiers.shift{
-                    if !fe.modifiers.logo{ // simply place selection
-                        self.cursors.clear_and_set_last_cursor_head(offset, text_buffer);
-                    }
-                    else{ // grid select
-                        // we need to figure out wether we'll pick 
-                        // essentially what we do is on mousemove just 'create' all cursors
+                    if fe.modifiers.logo || fe.modifiers.control{ // grid select
                         let pos = self.compute_grid_text_pos_from_abs(cx, fe.abs);
                         self._grid_select_corner = Some(self.cursors.grid_select_corner(pos, text_buffer));
                         self.cursors.grid_select(self._grid_select_corner.unwrap(), pos, text_buffer);
-                        //self._is_grid_select = true;
+                    }
+                    else{ // simply place selection
+                        self.cursors.clear_and_set_last_cursor_head(offset, text_buffer);
                     }
                 }
                 else{ // cursor drag with possible add
-                    if fe.modifiers.logo{
+                    if fe.modifiers.logo || fe.modifiers.control{
                         self.cursors.add_last_cursor_head_and_tail(offset, text_buffer);
                     }
                     else{
@@ -459,7 +456,7 @@ impl CodeEditor{
                         true
                     },
                     KeyCode::ArrowLeft=>{
-                        if ke.modifiers.logo{ // token skipping
+                        if ke.modifiers.logo || ke.modifiers.control{ // token skipping
                             self.cursors.move_left_nearest_token(ke.modifiers.shift, &self._token_chunks, text_buffer)
                         }
                         else{
@@ -468,7 +465,7 @@ impl CodeEditor{
                         true
                     },
                     KeyCode::ArrowRight=>{
-                        if ke.modifiers.logo{ // token skipping
+                        if ke.modifiers.logo || ke.modifiers.control{ // token skipping
                             self.cursors.move_right_nearest_token(ke.modifiers.shift, &self._token_chunks, text_buffer)
                         }
                         else{
