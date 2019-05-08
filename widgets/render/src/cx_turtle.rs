@@ -315,13 +315,13 @@ impl Cx{
         }
     }    
 
-    pub fn visible_in_turtle(&self, geom:Rect, margin:Margin, scroll:Vec2)->bool{
+    pub fn visible_in_turtle(&self, geom:Rect, scroll:Vec2)->bool{
         if let Some(turtle) = self.turtles.last(){
             let view = Rect{
-                x:turtle.start.x + scroll.x - margin.l,
-                y:turtle.start.y + scroll.y - margin.t,
-                w:turtle.width + margin.l + margin.r,
-                h:turtle.height + margin.t + margin.b 
+                x:turtle.start.x + scroll.x,//- margin.l,
+                y:turtle.start.y + scroll.y,// - margin.t,
+                w:turtle.width,// + margin.l + margin.r,
+                h:turtle.height,// + margin.t + margin.b 
             };
 
             return view.intersects(geom)

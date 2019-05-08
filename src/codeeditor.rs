@@ -26,16 +26,13 @@ pub struct CodeEditor{
     pub _line_geometry:Vec<LineGeom>,
     pub _token_chunks:Vec<TokenChunk>,
     pub _visible_lines:usize,
-    pub _visibility_margin:Margin,
+
     pub _select_scroll:Option<SelectScroll>,
     pub _grid_select_corner:Option<TextPos>,
+
     pub _anim_font_size:f32,
-    pub _anim_folding_state:AnimFoldingState,
-    pub _first_line_visible:usize,
-    pub _anim_keep_visible_line:usize,
-    pub _anim_keep_visible_pos:f32,
-    pub _anim_folding_was_animating:bool,
-    pub _anim_delta_y:f32,
+    pub _anim_folding:AnimFolding,
+
     pub _monospace_size:Vec2,
     pub _instance_count:usize,
     pub _first_on_line:bool,
@@ -98,7 +95,7 @@ impl AnimFoldingState{
             AnimFoldingState::Open=>AnimFoldingState::Open,
             AnimFoldingState::Folded=>AnimFoldingState::Folded,
             AnimFoldingState::Opening(f,speed, speed2)=>{
-                let mut new_f = *f * *speed;
+                let new_f = *f * *speed;
                 if new_f < 0.001{
                     AnimFoldingState::Open
                 }
@@ -107,7 +104,7 @@ impl AnimFoldingState{
                 }
             },
             AnimFoldingState::Folding(f, speed, speed2)=>{
-                let mut new_f = *f * *speed;
+                let new_f = *f * *speed;
                 if new_f < 0.001{
                     AnimFoldingState::Folded
                 }
@@ -119,6 +116,13 @@ impl AnimFoldingState{
     }
 }
 
+#[derive(Clone)]
+pub struct AnimFolding{
+    pub state:AnimFoldingState,
+    pub first_visible:(usize,f32),
+    pub did_animate:bool
+}
+
 #[derive(Clone, Default)]
 pub struct LineGeom{
     walk:Vec2,
@@ -127,9 +131,10 @@ pub struct LineGeom{
 
 #[derive(Clone, Default)]
 pub struct SelectScroll{
-    pub margin:Margin,
+//    pub margin:Margin,
     pub delta:Vec2,
-    pub abs:Vec2
+    pub abs:Vec2,
+    pub at_end:bool
 }
 
 #[derive(Clone)]
@@ -210,7 +215,6 @@ impl Style for CodeEditor{
             _last_finger_move:None,
             _first_on_line:true,
             _scroll_pos:Vec2::zero(),
-            _visibility_margin:Margin::zero(),
             _visible_lines:0, 
             _line_geometry:Vec::new(),
             _token_chunks:Vec::new(),
@@ -220,16 +224,19 @@ impl Style for CodeEditor{
             _text_area:Area::Empty,
             _instance_count:0,
             _anim_font_size:11.0,
-            _anim_folding_state:AnimFoldingState::Open,
+            _anim_folding:AnimFolding{
+                state:AnimFoldingState::Open,
+                first_visible:(0,0.0),
+                did_animate:false,
+            },
             _select_scroll:None,
             _draw_cursor:DrawCursor::new(),
             _paren_stack:Vec::new(),
             _paren_list:Vec::new(),
-            _first_line_visible:0,
-            _anim_folding_was_animating:false,
-            _anim_keep_visible_line:0,
-            _anim_delta_y:0.0,
-            _anim_keep_visible_pos:0.0,
+            //_anim_folding_was_animating:false,
+            //_anim_keep_visible_line:0,
+            //_anim_delta_y:0.0,
+            //_anim_keep_visible_pos:0.0,
         };
         //tab.animator.default = tab.anim_default(cx);
         code_editor
@@ -431,12 +438,7 @@ impl CodeEditor{
                    self._select_scroll = Some(SelectScroll{
                        abs:fe.abs,
                        delta:delta,
-                       margin:Margin{
-                            l:(-delta.x).max(0.),
-                            t:(-delta.y).max(0.),
-                            r:delta.x.max(0.),
-                            b:delta.y.max(0.)
-                        }
+                       at_end:false
                    })
                 }
                 else{
@@ -540,11 +542,8 @@ impl CodeEditor{
 
                         // start code folding anim
                         let speed = if ke.modifiers.shift{0.99}else{0.98};
-                        self._anim_folding_state.do_folding(speed, 0.95);
-                        // lets figure out which line is top left
-                        self._anim_keep_visible_line = self.compute_first_visible_line(cx);
-                        self._anim_keep_visible_pos = self._line_geometry[self._anim_keep_visible_line].walk.y;
-                        self._anim_delta_y = 1000.0;
+                        self._anim_folding.state.do_folding(speed, 0.95);
+                        self._anim_folding.first_visible = self.compute_first_visible_line(cx);
                         self.view.redraw_view_area(cx);
                         false
                         //return CodeEditorEvent::FoldStart
@@ -560,11 +559,9 @@ impl CodeEditor{
                 match ke.key_code{
                     KeyCode::Alt=>{
                         let speed = if ke.modifiers.shift{0.99}else{0.96};
-                        self._anim_folding_state.do_opening(speed, 0.97);
-                        self._anim_keep_visible_line = self.compute_first_visible_line(cx);
-                        self._anim_keep_visible_pos = self._line_geometry[self._anim_keep_visible_line].walk.y;
+                        self._anim_folding.state.do_opening(speed, 0.97);
+                        self._anim_folding.first_visible = self.compute_first_visible_line(cx);
                         self.view.redraw_view_area(cx);
-                        self._anim_delta_y = 1000.0;
                         // return to normal size
                     },
                     _=>(),
@@ -625,19 +622,25 @@ impl CodeEditor{
             self._text_inst = Some(self.text.begin_text(cx));
             self._instance_count = 0;
 
+            /* 
+                do the select scrolling now
+            */
+           
+
+            if let Some(select_scroll) = &mut self._select_scroll{
+                let scroll_pos = self.view.get_scroll_pos(cx);
+                if self.view.set_scroll_pos(cx, Vec2{
+                    x:scroll_pos.x + select_scroll.delta.x,
+                    y:scroll_pos.y + select_scroll.delta.y
+                }){
+                    self.view.redraw_view_area(cx);
+                }
+                else{
+                    select_scroll.at_end = true;
+                }
+            }
+
             self._scroll_pos = self.view.get_scroll_pos(cx);
-
-            self._visibility_margin = if let Some(select_scroll) = &self._select_scroll{
-                select_scroll.margin
-            }
-            else{
-                Margin::zero()
-            };
-
-            if self._anim_folding_state.is_animating(){
-                self._visibility_margin.t += 1000.0;
-                self._visibility_margin.b += 1000.0;
-            }
 
             self._monospace_size = self.text.get_monospace_size(cx, None);
             self._line_geometry.truncate(0);
@@ -645,12 +648,21 @@ impl CodeEditor{
             self._draw_cursor = DrawCursor::new();
             self._first_on_line = true;
             self._visible_lines = 0;
-            self._anim_folding_was_animating = self._anim_folding_state.is_animating();
-            self._anim_folding_state.next_anim_step();
-            // we should try to keep the same 'top left' line in view somehow
             
+            let anim_folding = &mut self._anim_folding;
+            if anim_folding.state.is_animating(){
+                anim_folding.state.next_anim_step();
+                if anim_folding.state.is_animating(){
+                    self.view.redraw_view_area(cx);
+                }
+                anim_folding.did_animate = true;
+            }
+            else{
+                anim_folding.did_animate = false;
+            }
+           
             self._paren_stack.truncate(0);
-            self._anim_font_size = self._anim_folding_state.get_font_size(self.open_font_size, self.folded_font_size);
+            self._anim_font_size = anim_folding.state.get_font_size(self.open_font_size, self.folded_font_size);
             // prime the next cursor
             //println!("DOING FOLDINT STATE {}", self._anim_font_size);
 
@@ -705,25 +717,9 @@ impl CodeEditor{
         }
         
          // code folding
-        if self._anim_folding_state.is_folded(){
+        if self._anim_folding.state.is_folded(){
             // lets give the view a whole extra page of space
             cx.walk_turtle(Bounds::Fix(0.0),  Bounds::Fix(cx.height_total(false)),  Margin::zero(), None);
-        }
-        
-        self.view.end_view(cx);
-
-        if self._anim_folding_was_animating{
-            self.view.redraw_view_area(cx);
-            //self.scroll_last_cursor_visible(cx, text_buffer);
-            // we might have to scroll the f'er
-            let dy =  self._anim_keep_visible_pos - self._line_geometry[self._anim_keep_visible_line].walk.y;
-            self._anim_keep_visible_pos = self._line_geometry[self._anim_keep_visible_line].walk.y;            
-            // println!("{} {} {}", self._anim_delta_y, dy.abs(),self._anim_delta_y<dy.abs());
-            // self._anim_delta_y = dy.abs();
-            self.view.set_scroll_pos(cx, Vec2{
-                x:self._scroll_pos.x,
-                y:self._scroll_pos.y - dy
-            });
         }
 
         // do select scrolling
@@ -737,14 +733,7 @@ impl CodeEditor{
                 let offset = self.text.find_closest_offset(cx, &self._text_area, select_scroll.abs);
                 self.cursors.set_last_cursor_head(offset, text_buffer);
             }
-
-            if self.view.set_scroll_pos(cx, Vec2{
-                x:self._scroll_pos.x + select_scroll.delta.x,
-                y:self._scroll_pos.y + select_scroll.delta.y
-            }){
-                self.view.redraw_view_area(cx);
-            }
-            else{
+            if select_scroll.at_end{
                 self._select_scroll = None;
             }
         }
@@ -760,8 +749,13 @@ impl CodeEditor{
                 cx.hide_text_ime();
             }
         }
+        
+        self.view.end_view(cx);
 
-    
+        if self._anim_folding.did_animate{
+            // update scroll_pos
+            self.view.set_scroll_pos(cx, self._scroll_pos);
+        }
     }
 
     pub fn draw_tab_lines(&mut self, cx:&mut Cx, tabs:usize){
@@ -769,7 +763,6 @@ impl CodeEditor{
         let tab_width = self._monospace_size.x*4.;
         if cx.visible_in_turtle(
             Rect{x:walk.x, y:walk.y, w:tab_width * tabs as f32, h:self._monospace_size.y}, 
-            self._visibility_margin, 
             self._scroll_pos,
         ){
             for _i in 0..tabs{
@@ -807,6 +800,23 @@ impl CodeEditor{
            draw_cursor.emit_selection(true);
            draw_cursor.first = true;
         }
+
+        // we could modify our visibility window here by computing the DY we are going to have the moment we know it
+        if self._anim_folding.did_animate{
+            let (line, pos) = self._anim_folding.first_visible;
+            if line == self._line_geometry.len(){ // the line is going to be the next one
+                let walk = cx.get_rel_turtle_walk();
+                let dy =  pos - walk.y;
+                self._scroll_pos = Vec2{
+                    x:self._scroll_pos.x,
+                    y:self._scroll_pos.y - dy
+                };
+                // update the line pos
+                self._anim_folding.first_visible = (line, walk.y);
+           }
+        }
+
+
     }
 
     pub fn push_paren_stack(&mut self, cx:&Cx, paren_type:ParenType){
@@ -850,7 +860,7 @@ impl CodeEditor{
             );
             
             // lets check if the geom is visible
-            if cx.visible_in_turtle(geom, self._visibility_margin, self._scroll_pos){
+            if cx.visible_in_turtle(geom, self._scroll_pos){
 
                 if self._first_on_line{
                     self._first_on_line = false;
@@ -934,14 +944,19 @@ impl CodeEditor{
         TextPos{row:self._line_geometry.len() - 1, col: (rel.x.max(0.) / mono_size.x) as usize}
     }
 
-    fn compute_first_visible_line(&self, cx:&Cx)->usize{
+    fn compute_first_visible_line(&self, cx:&Cx)->(usize,f32){
         let scroll = self.view.get_scroll_pos(cx);
+        let mut last_y = 0.0;
         for (line, geom) in self._line_geometry.iter().enumerate(){
             if geom.walk.y >= scroll.y{
-                return line
+                if line>0{
+                    return (line - 1, last_y)
+                }
+                return (line, geom.walk.y)
             }
+            last_y = geom.walk.y;
         }
-        return 0
+        return (0,0.0)
     }
 
     fn get_nearest_token_chunk_range(&self, offset:usize)->(usize, usize){
