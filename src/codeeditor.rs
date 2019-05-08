@@ -45,9 +45,9 @@ pub struct CodeEditor{
 #[derive(Clone)]
 pub enum AnimFoldingState{
     Open,
-    Opening(f32,f32),
+    Opening(f32,f32,f32),
     Folded,
-    Folding(f32,f32)
+    Folding(f32,f32,f32)
 }
 
 impl AnimFoldingState{
@@ -70,26 +70,26 @@ impl AnimFoldingState{
         match self{
             AnimFoldingState::Open=>open_size,
             AnimFoldingState::Folded=>folded_size,
-            AnimFoldingState::Opening(f, _)=>f*folded_size + (1.-f)*open_size,
-            AnimFoldingState::Folding(f, _)=>f*open_size + (1.-f)*folded_size,
+            AnimFoldingState::Opening(f, _, _)=>f*folded_size + (1.-f)*open_size,
+            AnimFoldingState::Folding(f, _, _)=>f*open_size + (1.-f)*folded_size,
         }
     }
 
-    fn do_folding(&mut self, speed:f32){
+    fn do_folding(&mut self, speed:f32, speed2:f32){
         *self = match self{
-            AnimFoldingState::Open=>AnimFoldingState::Folding(1.0, speed),
+            AnimFoldingState::Open=>AnimFoldingState::Folding(1.0, speed,speed2),
             AnimFoldingState::Folded=>AnimFoldingState::Folded,
-            AnimFoldingState::Opening(f, _)=>AnimFoldingState::Folding(1.0 - *f, speed),
-            AnimFoldingState::Folding(f, _)=>AnimFoldingState::Folding(*f, speed),
+            AnimFoldingState::Opening(f, _, _)=>AnimFoldingState::Folding(1.0 - *f, speed,speed2),
+            AnimFoldingState::Folding(f, _, _)=>AnimFoldingState::Folding(*f, speed,speed2),
         }
     }
 
-    fn do_opening(&mut self, speed:f32){
+    fn do_opening(&mut self, speed:f32, speed2:f32){
         *self = match self{
             AnimFoldingState::Open=>AnimFoldingState::Open,
-            AnimFoldingState::Folded=>AnimFoldingState::Opening(1.0, speed),
-            AnimFoldingState::Opening(f,_)=>AnimFoldingState::Opening(*f, speed),
-            AnimFoldingState::Folding(f,_)=>AnimFoldingState::Opening(1.0 - *f, speed),
+            AnimFoldingState::Folded=>AnimFoldingState::Opening(1.0, speed, speed2),
+            AnimFoldingState::Opening(f,_,_)=>AnimFoldingState::Opening(*f, speed, speed2),
+            AnimFoldingState::Folding(f,_,_)=>AnimFoldingState::Opening(1.0 - *f, speed, speed2),
         }
     }
 
@@ -97,22 +97,22 @@ impl AnimFoldingState{
         *self = match self{
             AnimFoldingState::Open=>AnimFoldingState::Open,
             AnimFoldingState::Folded=>AnimFoldingState::Folded,
-            AnimFoldingState::Opening(f,speed)=>{
+            AnimFoldingState::Opening(f,speed, speed2)=>{
                 let mut new_f = *f * *speed;
                 if new_f < 0.001{
                     AnimFoldingState::Open
                 }
                 else{
-                    AnimFoldingState::Opening(new_f,*speed)
+                    AnimFoldingState::Opening(new_f,*speed * *speed2, *speed2)
                 }
             },
-            AnimFoldingState::Folding(f, speed)=>{
+            AnimFoldingState::Folding(f, speed, speed2)=>{
                 let mut new_f = *f * *speed;
                 if new_f < 0.001{
                     AnimFoldingState::Folded
                 }
                 else{
-                    AnimFoldingState::Folding(new_f,*speed)
+                    AnimFoldingState::Folding(new_f,*speed * *speed2, *speed2)
                 }
             },
         }
@@ -539,12 +539,12 @@ impl CodeEditor{
                         // its simply the top line
 
                         // start code folding anim
-                        let speed = if ke.modifiers.shift{0.99}else{0.7};
-                        self._anim_folding_state.do_folding(speed);
+                        let speed = if ke.modifiers.shift{0.99}else{0.98};
+                        self._anim_folding_state.do_folding(speed, 0.95);
                         // lets figure out which line is top left
                         self._anim_keep_visible_line = self.compute_first_visible_line(cx);
                         self._anim_keep_visible_pos = self._line_geometry[self._anim_keep_visible_line].walk.y;
-                        self._anim_delta_y = 100.0;
+                        self._anim_delta_y = 1000.0;
                         self.view.redraw_view_area(cx);
                         false
                         //return CodeEditorEvent::FoldStart
@@ -560,11 +560,11 @@ impl CodeEditor{
                 match ke.key_code{
                     KeyCode::Alt=>{
                         let speed = if ke.modifiers.shift{0.99}else{0.96};
-                        self._anim_folding_state.do_opening(speed);
+                        self._anim_folding_state.do_opening(speed, 0.97);
                         self._anim_keep_visible_line = self.compute_first_visible_line(cx);
                         self._anim_keep_visible_pos = self._line_geometry[self._anim_keep_visible_line].walk.y;
                         self.view.redraw_view_area(cx);
-                        self._anim_delta_y = 100.0;
+                        self._anim_delta_y = 1000.0;
                         // return to normal size
                     },
                     _=>(),
@@ -635,8 +635,8 @@ impl CodeEditor{
             };
 
             if self._anim_folding_state.is_animating(){
-                self._visibility_margin.t += self._anim_delta_y;
-                self._visibility_margin.b += self._anim_delta_y;
+                self._visibility_margin.t += 1000.0;
+                self._visibility_margin.b += 1000.0;
             }
 
             self._monospace_size = self.text.get_monospace_size(cx, None);
@@ -710,13 +710,16 @@ impl CodeEditor{
             cx.walk_turtle(Bounds::Fix(0.0),  Bounds::Fix(cx.height_total(false)),  Margin::zero(), None);
         }
         
+        self.view.end_view(cx);
+
         if self._anim_folding_was_animating{
             self.view.redraw_view_area(cx);
             //self.scroll_last_cursor_visible(cx, text_buffer);
             // we might have to scroll the f'er
             let dy =  self._anim_keep_visible_pos - self._line_geometry[self._anim_keep_visible_line].walk.y;
             self._anim_keep_visible_pos = self._line_geometry[self._anim_keep_visible_line].walk.y;            
-            self._anim_delta_y = dy.abs();
+            // println!("{} {} {}", self._anim_delta_y, dy.abs(),self._anim_delta_y<dy.abs());
+            // self._anim_delta_y = dy.abs();
             self.view.set_scroll_pos(cx, Vec2{
                 x:self._scroll_pos.x,
                 y:self._scroll_pos.y - dy
@@ -745,8 +748,6 @@ impl CodeEditor{
                 self._select_scroll = None;
             }
         }
-
-        self.view.end_view(cx);
 
         // place the IME
         if self._bg_area == cx.key_focus{
