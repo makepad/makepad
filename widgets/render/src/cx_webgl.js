@@ -945,6 +945,7 @@
 			})
 			ta.addEventListener('keyup', e=>{
 				let code = e.keyCode;
+				console.log(code);
 				if(code == 18) e.preventDefault(); // alt
 				var ta = this.text_area;
 				if(ugly_ime_hack){
