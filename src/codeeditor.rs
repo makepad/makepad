@@ -539,7 +539,7 @@ impl CodeEditor{
                         // its simply the top line
 
                         // start code folding anim
-                        let speed = if ke.modifiers.shift{0.97}else{0.7};
+                        let speed = if ke.modifiers.shift{0.99}else{0.7};
                         self._anim_folding_state.do_folding(speed);
                         // lets figure out which line is top left
                         self._anim_keep_visible_line = self.compute_first_visible_line(cx);
@@ -559,7 +559,7 @@ impl CodeEditor{
             Event::KeyUp(ke)=>{
                 match ke.key_code{
                     KeyCode::Alt=>{
-                        let speed = if ke.modifiers.shift{0.97}else{0.7};
+                        let speed = if ke.modifiers.shift{0.99}else{0.96};
                         self._anim_folding_state.do_opening(speed);
                         self._anim_keep_visible_line = self.compute_first_visible_line(cx);
                         self._anim_keep_visible_pos = self._line_geometry[self._anim_keep_visible_line].walk.y;

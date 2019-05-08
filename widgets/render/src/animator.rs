@@ -525,7 +525,7 @@ pub enum Ease{
 
 
 impl Ease{
-    fn map(&self, t:f64)->f64{
+    pub fn map(&self, t:f64)->f64{
         match self{
             Ease::Lin=>{
                 return t.max(0.0).min(1.0);
