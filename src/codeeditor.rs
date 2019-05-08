@@ -343,7 +343,8 @@ impl CodeEditor{
                 cx.set_key_focus(self._bg_area);
                 let offset = self.text.find_closest_offset(cx, &self._text_area, fe.abs);
                 match fe.tap_count{
-                    1=>(),
+                    1=>{
+                    },
                     2=>{
                         let range = self.get_nearest_token_chunk_range(offset);
                         self.cursors.set_last_clamp_range(range);
@@ -379,11 +380,21 @@ impl CodeEditor{
                 }
                 self.view.redraw_view_area(cx);
                 self._last_finger_move = Some(fe.abs);
+
             },
             Event::FingerHover(_fe)=>{
                 cx.set_hover_mouse_cursor(MouseCursor::Text);
             },
-            Event::FingerUp(_fe)=>{
+            Event::FingerUp(fe)=>{
+
+                // do the folded scrollnav
+                if self._anim_folding.state.is_folded() && !fe.modifiers.shift{
+                    let (start,end) = self.cursors.get_last_cursor_order();
+                    if start == end{
+                        self.scroll_last_cursor_to_top(cx, text_buffer);
+                    }
+                }
+
                 self.cursors.clear_last_clamp_range();
                 //self.cursors.end_cursor_drag(text_buffer);
                 self._select_scroll = None;
@@ -924,13 +935,25 @@ impl CodeEditor{
         }
     }
 
+   fn scroll_last_cursor_to_top(&mut self, cx:&mut Cx, text_buffer:&TextBuffer){
+       // ok lets get the last cursor pos
+       let pos = self.cursors.get_last_cursor_text_pos(text_buffer);
+       // lets find the line offset in the line geometry
+       if pos.row < self._line_geometry.len(){
+           let geom = &self._line_geometry[pos.row];
+           // ok now we want the y scroll to be geom.y
+           self.view.set_scroll_target(cx, Vec2{x:0.0,y:geom.walk.y});
+       }
+   }
+ 
     fn scroll_last_cursor_visible(&mut self, cx:&mut Cx, text_buffer:&TextBuffer){
         // so we have to compute (approximately) the rect of our cursor
         if self.cursors.last_cursor >= self.cursors.set.len(){
             panic!("LAST CURSOR INVALID");
         }
-        let offset = self.cursors.set[self.cursors.last_cursor].head;
-        let pos = text_buffer.offset_to_text_pos(offset);
+        //let offset = self.cursors.set[self.cursors.last_cursor].head;
+        let pos = self.cursors.get_last_cursor_text_pos(text_buffer);
+        //text_buffer.offset_to_text_pos(offset);
         // alright now lets query the line geometry
         if pos.row < self._line_geometry.len(){
             let geom = &self._line_geometry[pos.row];

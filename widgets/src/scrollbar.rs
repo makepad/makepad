@@ -22,8 +22,8 @@ pub struct ScrollBar{
     pub _scroll_size:f32, // the size of the scrollbar
     pub _scroll_pos:f32, // scrolling position non normalised
 
-    pub _scroll_pos_target:f32,
-    pub _scroll_pos_delta:f32,
+    pub _scroll_target:f32,
+    pub _scroll_delta:f32,
 
     pub _drag_point:Option<f32>, // the point in pixels where we are dragging
 }
@@ -64,8 +64,8 @@ impl Style for ScrollBar{
             _scroll_size:0.0,
             _scroll_pos:0.0,
 
-            _scroll_pos_target:0.0,
-            _scroll_pos_delta:0.0,
+            _scroll_target:0.0,
+            _scroll_delta:0.0,
 
             _drag_point:None,
             _hit_state:HitState{
@@ -137,7 +137,7 @@ impl ScrollBar{
 
         let changed = self._scroll_pos != new_scroll_pos;
         self._scroll_pos = new_scroll_pos;
-        self._scroll_pos_target = new_scroll_pos;
+        self._scroll_target = new_scroll_pos;
         if changed{
             self.update_shader_scroll_pos(cx);
             return self.make_scroll_event();
@@ -160,37 +160,22 @@ impl ScrollBar{
         }
     }
 
-    fn get_scroll_pos_target(&mut self)->f32{
-        return self._scroll_pos_target
-    }
-
-    fn set_scroll_pos_target(&mut self, cx:&mut Cx, scroll_pos_target:f32)->bool{
-        // clamp scroll_pos to
-        let new_target = scroll_pos_target.min(self._view_total - self._view_visible).max(0.); 
-        if self._scroll_pos_target != new_target{
-            self._scroll_pos_target = new_target;
-            self._scroll_pos_delta = new_target - self._scroll_pos;
-            cx.next_frame(self._sb_area);
-            return true
-        };
-        return false
-    }
 
     fn move_towards_scroll_target(&mut self)->bool{
-        if (self._scroll_pos_target - self._scroll_pos).abs() < 0.01{
+        if (self._scroll_target - self._scroll_pos).abs() < 0.01{
             return false
         }
-        if self._scroll_pos > self._scroll_pos_target{ // go back
-            self._scroll_pos = self._scroll_pos + (self.smoothing.unwrap() * self._scroll_pos_delta).min(-1.);
-            if self._scroll_pos <= self._scroll_pos_target{ // hit the target
-                self._scroll_pos = self._scroll_pos_target;
+        if self._scroll_pos > self._scroll_target{ // go back
+            self._scroll_pos = self._scroll_pos + (self.smoothing.unwrap() * self._scroll_delta).min(-1.);
+            if self._scroll_pos <= self._scroll_target{ // hit the target
+                self._scroll_pos = self._scroll_target;
                 return false;
             }
         }
         else{// go forward
-            self._scroll_pos = self._scroll_pos + (self.smoothing.unwrap() * self._scroll_pos_delta).max(1.);
-            if self._scroll_pos > self._scroll_pos_target{ // hit the target
-                self._scroll_pos = self._scroll_pos_target;
+            self._scroll_pos = self._scroll_pos + (self.smoothing.unwrap() * self._scroll_delta).max(1.);
+            if self._scroll_pos > self._scroll_target{ // hit the target
+                self._scroll_pos = self._scroll_target;
                 return false;
             }
         }
@@ -213,8 +198,24 @@ impl ScrollBarLike<ScrollBar> for ScrollBar{
         let scroll_pos = scroll_pos.min(self._view_total - self._view_visible).max(0.); 
         if self._scroll_pos != scroll_pos{
             self._scroll_pos = scroll_pos;
-            self._scroll_pos_target = scroll_pos;
+            self._scroll_target = scroll_pos;
             self.update_shader_scroll_pos(cx);
+            cx.next_frame(self._sb_area);
+            return true
+        };
+        return false
+    }
+
+    fn get_scroll_target(&mut self)->f32{
+        return self._scroll_target
+    }
+
+    fn set_scroll_target(&mut self, cx:&mut Cx, scroll_pos_target:f32)->bool{
+        // clamp scroll_pos to
+        let new_target = scroll_pos_target.min(self._view_total - self._view_visible).max(0.); 
+        if self._scroll_target != new_target{
+            self._scroll_target = new_target;
+            self._scroll_delta = new_target - self._scroll_pos;
             cx.next_frame(self._sb_area);
             return true
         };
@@ -228,7 +229,7 @@ impl ScrollBarLike<ScrollBar> for ScrollBar{
                 self.set_scroll_pos(cx, scroll_to);
             }
             else{
-                self.set_scroll_pos_target(cx, scroll_to);
+                self.set_scroll_target(cx, scroll_to);
             }
         }
         else if pos + size > self._scroll_pos + self._view_visible{ // scroll down
@@ -237,7 +238,7 @@ impl ScrollBarLike<ScrollBar> for ScrollBar{
                 self.set_scroll_pos(cx, scroll_to);
             }
             else{
-                self.set_scroll_pos_target(cx, scroll_to);
+                self.set_scroll_target(cx, scroll_to);
             }
         }
     }
@@ -254,8 +255,8 @@ impl ScrollBarLike<ScrollBar> for ScrollBar{
                         Axis::Vertical=>fe.scroll.y
                     };
                     if !self.smoothing.is_none(){
-                        let scroll_pos_target = self.get_scroll_pos_target();
-                        self.set_scroll_pos_target(cx, scroll_pos_target+ scroll);
+                        let scroll_pos_target = self.get_scroll_target();
+                        self.set_scroll_target(cx, scroll_pos_target+ scroll);
                         self.move_towards_scroll_target();// take the first step now
                     }
                     else{
@@ -424,7 +425,7 @@ impl ScrollBarLike<ScrollBar> for ScrollBar{
         let clamped_pos = self._scroll_pos.min(self._view_total - self._view_visible).max(0.); 
         if clamped_pos != self._scroll_pos{
             self._scroll_pos = clamped_pos;
-            self._scroll_pos_target = clamped_pos;
+            self._scroll_target = clamped_pos;
             // ok so this means we 'scrolled' this can give a problem for virtual viewport widgets
             cx.next_frame(self._sb_area);
         }
