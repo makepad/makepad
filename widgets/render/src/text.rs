@@ -314,7 +314,7 @@ impl Text{
     }
 
     pub fn get_monospace_size(&self, cx:&Cx, font_size:Option<f32>)->Vec2{
-        let slot = cx.fonts[self.font_id].unicodes[32 as usize];
+        let slot = cx.fonts[self.font_id].unicodes[33 as usize];
         let glyph = &cx.fonts[self.font_id].glyphs[slot];
         let font_size = if let Some(font_size) = font_size{font_size}else{self.font_size};
         Vec2{

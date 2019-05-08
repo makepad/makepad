@@ -31,6 +31,7 @@ pub struct CodeEditor{
     pub _grid_select_corner:Option<TextPos>,
 
     pub _anim_font_size:f32,
+    pub _line_largest_font:f32,
     pub _anim_folding:AnimFolding,
 
     pub _monospace_size:Vec2,
@@ -224,6 +225,7 @@ impl Style for CodeEditor{
             _text_area:Area::Empty,
             _instance_count:0,
             _anim_font_size:11.0,
+            _line_largest_font:0.,
             _anim_folding:AnimFolding{
                 state:AnimFoldingState::Open,
                 first_visible:(0,0.0),
@@ -660,6 +662,7 @@ impl CodeEditor{
            
             self._paren_stack.truncate(0);
             self._anim_font_size = anim_folding.state.get_font_size(self.open_font_size, self.folded_font_size);
+
             // prime the next cursor
             //println!("DOING FOLDINT STATE {}", self._anim_font_size);
 
@@ -772,6 +775,9 @@ impl CodeEditor{
     // set it once per line otherwise the LineGeom stuff isn't really working out.
     pub fn set_font_size(&mut self, cx:&Cx, font_size:f32){
         self.text.font_size = font_size;
+        if font_size > self._line_largest_font{
+            self._line_largest_font = font_size;
+        }
         self._monospace_size = self.text.get_monospace_size(cx, None);
     }
 
@@ -780,9 +786,10 @@ impl CodeEditor{
         self._line_geometry.push(
             LineGeom{
                 walk:cx.get_rel_turtle_walk(),
-                font_size:cx.turtle_biggest(),//self.text.font_size
+                font_size:self._line_largest_font
             }
         );
+        self._line_largest_font = self.text.font_size;
         // add a bit of room to the right
         cx.walk_turtle(
             Bounds::Fix(self._monospace_size.x * 3.), 
