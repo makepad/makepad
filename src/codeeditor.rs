@@ -535,7 +535,7 @@ impl CodeEditor{
                             false
                         }
                     },
-                    KeyCode::Space=>{
+                    KeyCode::Escape=>{
                         if ke.modifiers.control{
                             self.do_code_folding(cx);
                         }
@@ -560,7 +560,7 @@ impl CodeEditor{
                     KeyCode::Alt=>{
                         self.do_code_unfolding(cx);
                     },
-                    KeyCode::Space=>{
+                    KeyCode::Escape=>{
                         if ke.modifiers.control{
                             self.do_code_unfolding(cx);
                         }
