@@ -911,6 +911,7 @@
 
 			ta.addEventListener('keydown', e=>{
 				let code = e.keyCode;
+				console.log("keydown",code);
 				if(code == 18 || code == 17 || code == 16) e.preventDefault(); // alt
 				if(code === 8 || code === 9) e.preventDefault() // backspace/tab
 				if((code === 88 || code == 67) && (e.metaKey || e.ctrlKey) ){ // copy or cut
@@ -945,7 +946,7 @@
 			})
 			ta.addEventListener('keyup', e=>{
 				let code = e.keyCode;
-				console.log(code);
+				console.log("keyup",code);
 				if(code == 18 || code == 17 || code == 16) e.preventDefault(); // alt
 				var ta = this.text_area;
 				if(ugly_ime_hack){
