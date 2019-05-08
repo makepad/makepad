@@ -912,6 +912,7 @@
 			ta.addEventListener('keydown', e=>{
 				let code = e.keyCode;
 				console.log("keydown",code);
+				if(code == 91){firefox_logo_key = true; e.preventDefault();}
 				if(code == 18 || code == 17 || code == 16) e.preventDefault(); // alt
 				if(code === 8 || code === 9) e.preventDefault() // backspace/tab
 				if((code === 88 || code == 67) && (e.metaKey || e.ctrlKey) ){ // copy or cut
@@ -948,6 +949,7 @@
 				let code = e.keyCode;
 				console.log("keyup",code);
 				if(code == 18 || code == 17 || code == 16) e.preventDefault(); // alt
+				if(code == 91){firefox_logo_key = false; e.preventDefault();}
 				var ta = this.text_area;
 				if(ugly_ime_hack){
 					ugly_ime_hack = false;
@@ -1289,8 +1291,9 @@
 		return out	
 	}
 
+	var firefox_logo_key = false;
 	function pack_key_modifier(e){
-		return (e.shiftKey?1:0)|(e.ctrlKey?2:0)|(e.altKey?4:0)|(e.metaKey?8:0)		
+		return (e.shiftKey?1:0)|(e.ctrlKey?2:0)|(e.altKey?4:0)|((e.metaKey || firefox_logo_key)?8:0)		
 	}
 
 	var wasm_instances = [];
