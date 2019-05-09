@@ -234,6 +234,9 @@ impl ScrollBarLike<ScrollBar> for ScrollBar{
         }
         else if pos + size > self._scroll_pos + self._view_visible{ // scroll down
             let scroll_to = (pos+size) - self._view_visible;
+            if pos + size > self._view_total{ // resize _view_total if need be
+                self._view_total = pos + size;
+            }
             if self.smoothing.is_none(){
                 self.set_scroll_pos(cx, scroll_to);
             }

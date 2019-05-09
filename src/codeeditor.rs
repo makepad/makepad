@@ -579,11 +579,13 @@ impl CodeEditor{
                 if te.replace_last{
                     text_buffer.undo(false, &mut self.cursors);
                 }
-                if te.input.len() == 1 && te.input.chars().next().unwrap() == '\n'{
-
-                } 
-                // if we are inserting just a newline, 
-                self.cursors.replace_text(&te.input, text_buffer);
+                //if te.input.len() == 1 && te.input.chars().next().unwrap() == '\n'{
+                    // lets insert a newline
+                //    self.cursors.insert_enter_with_indent(text_buffer);
+                //} 
+                //else{
+                    self.cursors.replace_text(&te.input, text_buffer);
+                //}
                 self.scroll_last_cursor_visible(cx, text_buffer);
                 self.view.redraw_view_area(cx);
             },
@@ -645,12 +647,7 @@ impl CodeEditor{
 
             self._text_inst = Some(self.text.begin_text(cx));
             self._instance_count = 0;
-
-            /* 
-                do the select scrolling now
-            */
-           
-
+   
             if let Some(select_scroll) = &mut self._select_scroll{
                 let scroll_pos = self.view.get_scroll_pos(cx);
                 if self.view.set_scroll_pos(cx, Vec2{
@@ -688,9 +685,6 @@ impl CodeEditor{
             self._paren_stack.truncate(0);
             self._anim_font_size = anim_folding.state.get_font_size(self.open_font_size, self.folded_font_size);
 
-            // prime the next cursor
-            //println!("DOING FOLDINT STATE {}", self._anim_font_size);
-
             self._draw_cursor.set_next(&self.cursors.set);
             // cursor after text
             cx.new_instance_layer(self.cursor.shader_id, 0);
@@ -704,7 +698,7 @@ impl CodeEditor{
         // lets insert an empty newline at the bottom so its nicer to scroll
         self.new_line(cx);
         //cx.turtle_new_line();
-        //cx.walk_turtle(Bounds::Fix(0.0),  Bounds::Fix(self._monospace_size.y),  Margin::zero(), None);
+        cx.walk_turtle(Bounds::Fix(0.0),  Bounds::Fix(self._monospace_size.y),  Margin::zero(), None);
         
         self.text.end_text(cx, self._text_inst.as_ref().unwrap());
         // lets draw cursors and selection rects.
@@ -717,7 +711,6 @@ impl CodeEditor{
            self.cursor.draw_quad(cx, Rect{x:rc.x - pos.x, y:rc.y - pos.y, w:rc.w, h:rc.h});
         }
 
-        
         self._text_area = self._text_inst.take().unwrap().inst.into_area();
 
         // draw selections
@@ -957,14 +950,15 @@ impl CodeEditor{
         let pos = self.cursors.get_last_cursor_text_pos(text_buffer);
         //text_buffer.offset_to_text_pos(offset);
         // alright now lets query the line geometry
-        if pos.row < self._line_geometry.len(){
-            let geom = &self._line_geometry[pos.row];
+        let row = pos.row.min(self._line_geometry.len()-1);
+        if row < self._line_geometry.len(){
+            let geom = &self._line_geometry[row];
             let mono_size = self.text.get_monospace_size(cx, Some(geom.font_size));
             let rect = Rect{
                 x:(pos.col as f32) * mono_size.x,
                 y:geom.walk.y - mono_size.y * 1.,
                 w:mono_size.x * 4.,
-                h:mono_size.y * 3.
+                h:mono_size.y * 4.
             };
             // scroll this cursor into view
             self.view.scroll_into_view(cx, rect);
