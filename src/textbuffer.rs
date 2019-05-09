@@ -441,7 +441,7 @@ impl<'a> TokenizerState<'a>{
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct Cursor{
     pub head:usize,
     pub tail:usize,
@@ -523,11 +523,11 @@ impl Cursor{
     }
 
     pub fn move_right(&mut self, char_count:usize, text_buffer:&TextBuffer){
-        if self.head + char_count < text_buffer.get_char_count() - 1{
+        if self.head + char_count < text_buffer.get_char_count(){
             self.head += char_count;
         }
         else{
-            self.head = text_buffer.get_char_count() - 1;
+            self.head = text_buffer.get_char_count();
         }
         self.calc_max(text_buffer);
     }
@@ -550,7 +550,7 @@ impl Cursor{
             self.head = text_buffer.text_pos_to_offset(TextPos{row:pos.row + line_count, col:self.max});
         }
         else{
-            self.head = text_buffer.get_char_count() - 1;
+            self.head = text_buffer.get_char_count();
         }
     }
 }
@@ -623,7 +623,7 @@ impl CursorSet{
             if start > offset + len{
                 return index
             }
-            if offset + len >= start && offset <end{
+            if offset + len >= start && offset <= end{
                 self.set.remove(index); // remove it
             }
             else{
@@ -854,6 +854,7 @@ impl CursorSet{
             tail:text_buffer.get_char_count(),
             max:0
         };
+        self.last_cursor = 0;
         cursor.calc_max(text_buffer);
         self.set.push(cursor);
     }

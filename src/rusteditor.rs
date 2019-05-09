@@ -78,18 +78,21 @@ impl RustEditor{
         let mut after_newline = true; 
         let mut last_tabs = 0;
         let mut newline_tabs = 0;
-
-        loop{
+        let mut looping = true;
+        while looping{
             //let bit = rust_colorizer.next(&mut chunk, &self.rust_colors);
             let mut do_newline = false;
             let mut is_whitespace = false;
             let mut pop_paren = None;
+
             let color;
             state.advance_with_cur();
             
             match state.cur{
-                '\0'=>{ // eof
-                    break;
+                '\0'=>{ // eof insert a terminating space and end
+                    chunk.push(' ');
+                    color = self.col_whitespace;
+                    looping = false;
                 },
                 '\n'=>{
                     color = self.col_whitespace;

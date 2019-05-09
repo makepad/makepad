@@ -88,7 +88,7 @@ impl Style for App{
                                 DockTab{
                                     closeable:true,
                                     title:"example.rs".to_string(),
-                                    item:Panel::FileEditor{path:"/src/example.rs".to_string(), editor_id:1}
+                                    item:Panel::FileEditor{path:"/widgets/src/lib.rs".to_string(), editor_id:1}
                                 }
                             ],
                         }),

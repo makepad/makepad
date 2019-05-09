@@ -700,9 +700,11 @@ impl CodeEditor{
     }
     
     pub fn end_code_editor(&mut self, cx:&mut Cx, text_buffer:&TextBuffer){
+
         // lets insert an empty newline at the bottom so its nicer to scroll
-        cx.turtle_new_line();
-        cx.walk_turtle(Bounds::Fix(0.0),  Bounds::Fix(self._monospace_size.y),  Margin::zero(), None);
+        self.new_line(cx);
+        //cx.turtle_new_line();
+        //cx.walk_turtle(Bounds::Fix(0.0),  Bounds::Fix(self._monospace_size.y),  Margin::zero(), None);
         
         self.text.end_text(cx, self._text_inst.as_ref().unwrap());
         // lets draw cursors and selection rects.
@@ -940,7 +942,7 @@ impl CodeEditor{
        let pos = self.cursors.get_last_cursor_text_pos(text_buffer);
        // lets find the line offset in the line geometry
        if pos.row < self._line_geometry.len(){
-           let geom = &self._line_geometry[pos.row];
+           let geom = &self._line_geometry[pos.row.max(1) - 1];
            // ok now we want the y scroll to be geom.y
            self.view.set_scroll_target(cx, Vec2{x:0.0,y:geom.walk.y});
        }
