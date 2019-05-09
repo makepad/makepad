@@ -27,8 +27,8 @@
 // The scriptengine/vector engine isn't here yet so you can't do much yet.
 // for now enjoy how smooth a full GPU editor can scroll (try select scrolling the edge)
 // Also the tree fold-animates and the docking panel system works.
-// Multi cursor/grid cursor also works with cmd+click / cmd+shift+click
-// press alt for animated codefolding outline view!
+// Multi cursor/grid cursor also works with ctrl+click / ctrl+shift+click
+// press alt or escape for animated codefolding outline view!
 
 use widgets::*;
 
