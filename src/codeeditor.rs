@@ -127,6 +127,8 @@ pub struct AnimFolding{
 
 #[derive(Clone)]
 pub struct AnimSelect{
+    pub ypos:f32,
+    pub invert:bool,
     pub time:f64
 }
 
@@ -725,8 +727,15 @@ impl CodeEditor{
         let mut anim_select_any = false;
         for i in 0..sel.len(){
             let cur = &sel[i];
-   
-            let time = if i < self._anim_select.len(){
+
+
+            if i < self._anim_select.len() &&  cur.rc.y < self._anim_select[i].ypos{
+                // insert new one at the top
+                self._anim_select.insert(i, AnimSelect{time:0., invert:true, ypos:cur.rc.y});
+            }
+            
+            let (wtime, htime, invert) = if i < self._anim_select.len(){
+                let len = self._anim_select.len()-1;
                 let anim = &mut self._anim_select[i];
                 if anim.time >= 1.0{
                     anim.time = 1.0
@@ -735,16 +744,26 @@ impl CodeEditor{
                     anim.time += 0.1;
                     anim_select_any = true;
                 }
-                anim.time
+                if i == len{
+                    (anim.time, anim.time, anim.invert)
+                }
+                else{
+                    (anim.time, 1., anim.invert)
+                }
             }
             else{
-                self._anim_select.push(AnimSelect{time:0.});
+                self._anim_select.push(AnimSelect{time:0.,invert:false, ypos:cur.rc.y});
                 anim_select_any = true;
-                0.
+                (0.,0.,false)
             };
-            let time = Ease::OutExp.map(time) as f32;
-                
-            let mk_inst = self.marker.draw_quad(cx, Rect{x:cur.rc.x - pos.x + (cur.rc.w * (1.-time)), y:cur.rc.y - pos.y, w:cur.rc.w * time, h:cur.rc.h * time});
+            let wtime = Ease::OutExp.map(wtime) as f32;
+            let htime = Ease::OutExp.map(htime) as f32;
+            let mk_inst = if invert{
+                self.marker.draw_quad(cx, Rect{x:cur.rc.x - pos.x, y:cur.rc.y - pos.y, w:cur.rc.w * wtime, h:cur.rc.h * htime})
+            }
+            else{
+                self.marker.draw_quad(cx, Rect{x:cur.rc.x - pos.x + (cur.rc.w * (1.-wtime)), y:cur.rc.y - pos.y, w:cur.rc.w * wtime, h:cur.rc.h * htime})
+            };
 
             // do we have a prev?
             if i > 0 && sel[i-1].index == cur.index{
