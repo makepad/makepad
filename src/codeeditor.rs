@@ -244,10 +244,6 @@ impl Style for CodeEditor{
             _draw_cursor:DrawCursor::new(),
             _paren_stack:Vec::new(),
             _paren_list:Vec::new(),
-            //_anim_folding_was_animating:false,
-            //_anim_keep_visible_line:0,
-            //_anim_delta_y:0.0,
-            //_anim_keep_visible_pos:0.0,
         };
         //tab.animator.default = tab.anim_default(cx);
         code_editor
@@ -478,6 +474,7 @@ impl CodeEditor{
                         true
                     },
                     KeyCode::ArrowLeft=>{
+                        println!("{}", ke.modifiers.control);
                         if ke.modifiers.logo || ke.modifiers.control{ // token skipping
                             self.cursors.move_left_nearest_token(ke.modifiers.shift, &self._token_chunks, text_buffer)
                         }
@@ -566,6 +563,10 @@ impl CodeEditor{
                         false
                         //return CodeEditorEvent::FoldStart
                     },
+                    KeyCode::Tab=>{
+                        self.cursors.replace_text("    ", text_buffer);
+                        true
+                    },
                     _=>false
                 };
                 if cursor_moved{
@@ -588,13 +589,13 @@ impl CodeEditor{
                 if te.replace_last{
                     text_buffer.undo(false, &mut self.cursors);
                 }
-                //if te.input.len() == 1 && te.input.chars().next().unwrap() == '\n'{
+                if te.input.len() == 1 && te.input.chars().next().unwrap() == '\n'{
                     // lets insert a newline
-                //    self.cursors.insert_enter_with_indent(text_buffer);
-                //} 
-                //else{
+                    self.cursors.insert_newline_with_indent(text_buffer);
+                } 
+                else{
                     self.cursors.replace_text(&te.input, text_buffer);
-                //}
+                }
                 self.scroll_last_cursor_visible(cx, text_buffer);
                 self.view.redraw_view_area(cx);
             },
@@ -678,7 +679,7 @@ impl CodeEditor{
             self._draw_cursor = DrawCursor::new();
             self._first_on_line = true;
             self._visible_lines = 0;
-            
+
             let anim_folding = &mut self._anim_folding;
             if anim_folding.state.is_animating(){
                 anim_folding.state.next_anim_step();
@@ -724,54 +725,61 @@ impl CodeEditor{
 
         // draw selections
         let sel = &mut self._draw_cursor.selections;
-        let mut anim_select_any = false;
 
-
-        // do silly animations
-        for i in 0..sel.len(){
-            let cur = &mut sel[i];
-            // silly selection animation start
-            if i < self._anim_select.len() &&  cur.rc.y < self._anim_select[i].ypos{
-                // insert new one at the top
-                self._anim_select.insert(i, AnimSelect{time:1., invert:true, ypos:cur.rc.y});
-            }
-            let (wtime, htime, invert) = if i < self._anim_select.len(){
-                let len = self._anim_select.len()-1;
-                let anim = &mut self._anim_select[i];
-                anim.ypos = cur.rc.y;
-                if anim.time <= 0.0001{
-                    anim.time = 0.0
+        // do silly selection animations
+        if !self._anim_folding.state.is_animating(){
+            let mut anim_select_any = false;
+            for i in 0..sel.len(){
+                let cur = &mut sel[i];
+                let start_time = if self._select_scroll.is_none() && !self._last_finger_move.is_none(){1.}else{0.};
+                // silly selection animation start
+                if i < self._anim_select.len() &&  cur.rc.y < self._anim_select[i].ypos{
+                    // insert new one at the top
+                    self._anim_select.insert(i, AnimSelect{time:start_time, invert:true, ypos:cur.rc.y});
+                }
+                let (wtime, htime, invert) = if i < self._anim_select.len(){
+                    let len = self._anim_select.len()-1;
+                    let anim = &mut self._anim_select[i];
+                    anim.ypos = cur.rc.y;
+                    if anim.time <= 0.0001{
+                        anim.time = 0.0
+                    }
+                    else{
+                        anim.time = anim.time *0.55;//= 0.1;
+                        anim_select_any = true;
+                    }
+                    if i == len{
+                        (anim.time, anim.time, i == 0 && anim.invert)
+                    }
+                    else{
+                        (anim.time, 0., i == 0 && anim.invert)
+                    }
                 }
                 else{
-                    anim.time = anim.time *0.55;//= 0.1;
+                    self._anim_select.push(AnimSelect{time:start_time,invert:i == 0, ypos:cur.rc.y});
                     anim_select_any = true;
-                }
-                if i == len{
-                    (anim.time, anim.time, i == 0 && anim.invert)
+                    (start_time,start_time,false)
+                };
+                let wtime = 1.0 - wtime as f32;
+                let htime = 1.0 - htime as f32;
+                
+                if invert{
+                    cur.rc.w = cur.rc.w * wtime;
+                    cur.rc.h = cur.rc.h * htime;
                 }
                 else{
-                    (anim.time, 0., i == 0 && anim.invert)
+                    cur.rc.x = cur.rc.x + (cur.rc.w * (1.-wtime));
+                    cur.rc.w = cur.rc.w * wtime;
+                    cur.rc.h = cur.rc.h * htime;
                 }
             }
-            else{
-                self._anim_select.push(AnimSelect{time:1.,invert:i == 0, ypos:cur.rc.y});
-                anim_select_any = true;
-                (1.,1.,false)
-            };
-            let wtime = 1.0 - wtime as f32;
-            let htime = 1.0 - htime as f32;
-            
-            if invert{
-                cur.rc.w = cur.rc.w * wtime;
-                cur.rc.h = cur.rc.h * htime;
-            }
-            else{
-                cur.rc.x = cur.rc.x + (cur.rc.w * (1.-wtime));
-                cur.rc.w = cur.rc.w * wtime;
-                cur.rc.h = cur.rc.h * htime;
+            self._anim_select.truncate(sel.len());
+            if anim_select_any{
+                self.view.redraw_view_area(cx);        
             }
         }
 
+        // draw selections
         for i in 0..sel.len(){
             let cur = &sel[i];
             
@@ -794,11 +802,7 @@ impl CodeEditor{
                 mk_inst.push_vec2(cx, Vec2{x:0., y:-1.}); // prev_x, prev_w
             }
         }
-        self._anim_select.truncate(sel.len());
-        if anim_select_any{
-            self.view.redraw_view_area(cx);        
-        }
-
+        
          // code folding
         if self._anim_folding.state.is_folded(){
             // lets give the view a whole extra page of space
@@ -930,9 +934,9 @@ impl CodeEditor{
         }
     }
 
-    pub fn draw_text(&mut self, cx:&mut Cx, chunk:&Vec<char>, end_offset:usize, is_whitespace:bool, color:Color){
+    pub fn draw_text(&mut self, cx:&mut Cx, chunk:&mut Vec<char>, end_offset:usize, is_whitespace:bool, color:Color){
         if chunk.len()>0{
-            
+
             self._token_chunks.push(TokenChunk{
                 offset:end_offset - chunk.len() - 1,
                 len:chunk.len(),
@@ -949,7 +953,7 @@ impl CodeEditor{
             // lets check if the geom is visible
             if cx.visible_in_turtle(geom, self._scroll_pos){
 
-                if self._first_on_line{
+                 if self._first_on_line{
                     self._first_on_line = false;
                     self._visible_lines += 1;
                 }

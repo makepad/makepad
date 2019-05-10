@@ -80,7 +80,6 @@ impl RustEditor{
         let mut newline_tabs = 0;
         let mut looping = true;
         while looping{
-            //let bit = rust_colorizer.next(&mut chunk, &self.rust_colors);
             let mut do_newline = false;
             let mut is_whitespace = false;
             let mut pop_paren = None;
@@ -117,7 +116,7 @@ impl RustEditor{
                         
                         let mut counter = 1;
                         while state.next == ' ' || state.next == '\t'{
-                            chunk.push(state.next);
+                            chunk.push(' ');
                             counter += 1;
                             state.advance();
                         }
@@ -133,6 +132,7 @@ impl RustEditor{
                             state.advance();
                         }
                     }
+                    after_newline = false;
                     is_whitespace = true;
                 },
                 '/'=>{ // parse comment
@@ -354,7 +354,7 @@ impl RustEditor{
                     color = self.col_identifier;
                 }
             }
-            self.code_editor.draw_text(cx, &chunk, state.offset, is_whitespace, color);
+            self.code_editor.draw_text(cx, &mut chunk, state.offset, is_whitespace, color);
             chunk.truncate(0);
             if let Some(paren_type) = pop_paren{
                 self.code_editor.pop_paren_stack(cx, paren_type);

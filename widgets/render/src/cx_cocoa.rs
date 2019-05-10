@@ -1058,7 +1058,6 @@ pub fn define_cocoa_view_class()->*const Class{
 
     extern fn do_command_by_selector(this: &Object, _sel: Sel, _command: Sel) {
         let _cw = get_cocoa_window(this);
-        //println!("do_command_by_selector");
     }
 
     extern fn key_down(this: &Object, _sel: Sel, event: id) {

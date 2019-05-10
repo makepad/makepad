@@ -133,6 +133,38 @@ impl TextBuffer{
         return (offset - pos.col, line.len() + if pos.row < line.len()-1{1}else{0})
     }
 
+    pub fn calc_next_line_indent_depth(&self, offset:usize, tabsize:usize)->usize{
+        let pos = self.offset_to_text_pos(offset);
+        let line = &self.lines[pos.row];
+        let prev_index = pos.col;
+        if prev_index == 0 || prev_index > line.len(){
+            return 0;
+        };
+        let prev = line[prev_index-1];
+        let instep = if prev == '{' || prev == '(' || prev == '['{tabsize}else{0};
+        for (i,ch) in line.iter().enumerate(){
+            if *ch != ' '{
+                return i + instep;
+            }
+        };
+        return line.len();
+    }
+
+    pub fn calc_backspace_line_indent_depth(&self, offset:usize)->usize{
+        let pos = self.offset_to_text_pos(offset);
+        let line = &self.lines[pos.row];
+        for (i,ch) in line.iter().enumerate(){
+            if *ch != ' '{
+                //println!("{} {}", i, pos.col);
+                if i == pos.col{
+                    return i;
+                }
+                return 0;
+            }
+        };
+        return line.len();
+    }
+
     pub fn get_char_count(&self)->usize{
         self._char_count
     }
@@ -759,6 +791,39 @@ impl CursorSet{
         self.last_clamp_range = None;
     }
 
+    pub fn insert_newline_with_indent(&mut self, text_buffer:&mut TextBuffer){
+        let mut delta:isize = 0; // rolling delta to displace cursors 
+        let mut ops = Vec::new();
+        let cursors_clone = self.clone();
+        for cursor in &mut self.set{
+            let (start, end) = cursor.delta(delta);
+            // lets find where we are as a cursor in the textbuffer
+            let text = if start == end{
+                // compute how many spaces we'll inject
+                // lets find the indent depth on our current line
+                let spaces = text_buffer.calc_next_line_indent_depth(start, 4);
+                let mut out = String::new();
+                out.push_str("\n");
+                for _ in 0..spaces{
+                    out.push_str(" ");
+                }
+                out
+            }
+            else{
+                "\n".to_string()     
+            };
+            let op = text_buffer.replace_with_string(start, end-start, &text);
+            delta += cursor.collapse(start, end, op.len);
+            ops.push(op);
+        }
+        text_buffer.redo_stack.truncate(0);
+        text_buffer.undo_stack.push(TextUndo{
+            ops:ops,
+            grouping:TextUndoGrouping::Newline,
+            cursors:cursors_clone
+        })
+    }
+
     pub fn replace_text(&mut self, text:&str, text_buffer:&mut TextBuffer){
         let grouping = if text.len() == 1{
             // check if we are space
@@ -829,9 +894,13 @@ impl CursorSet{
         for cursor in &mut self.set{
             let (start, end) = cursor.delta(delta);
             if start == end && start > 0{
-                let op = text_buffer.replace_with_string(start - 1, 1, "");
+                // check our indent depth
+                let indent = text_buffer.calc_backspace_line_indent_depth(start);
+                let new_start = start - 1 - indent;
+                let new_end = 1 + indent;
+                let op = text_buffer.replace_with_string(new_start, new_end, "");
                 ops.push(op);
-                delta += cursor.collapse(start - 1, start, 0);
+                delta += cursor.collapse(new_start,new_start + new_end, 0);
             }
             else if start != end{
                 let op = text_buffer.replace_with_string(start, end - start, "");
