@@ -152,7 +152,7 @@ impl TextBuffer{
                 }
                 // check pair removal
                 let pch = if pos.col>=1 {line[pos.col-1]}else{'\0'};
-                let nch = line[pos.col];
+                let nch = if pos.col < line.len(){line[pos.col]}else{'\n'};
                 if pch == '{' && nch == '}' || pch == '(' && nch == ')' || pch == '[' && nch == ']'{
                     return (offset - 1, 2)
                 }
