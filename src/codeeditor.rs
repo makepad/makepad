@@ -738,6 +738,7 @@ impl CodeEditor{
             let (wtime, htime, invert) = if i < self._anim_select.len(){
                 let len = self._anim_select.len()-1;
                 let anim = &mut self._anim_select[i];
+                anim.ypos = cur.rc.y;
                 if anim.time <= 0.0001{
                     anim.time = 0.0
                 }
@@ -759,8 +760,6 @@ impl CodeEditor{
             };
             let wtime = 1.0 - wtime as f32;
             let htime = 1.0 - htime as f32;
-            //let wtime = Ease::OutExp.map(wtime) as f32;
-            //let htime = Ease::OutExp.map(htime) as f32;
             
             if invert{
                 cur.rc.w = cur.rc.w * wtime;
