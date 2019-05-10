@@ -50,7 +50,7 @@ impl TextUndoGrouping{
     fn wants_grouping(&self)->bool{
         match self{
             TextUndoGrouping::Space=>true,
-            TextUndoGrouping::Newline=>true,
+            TextUndoGrouping::Newline=>false,
             TextUndoGrouping::Character=>true,
             TextUndoGrouping::Backspace=>true,
             TextUndoGrouping::Delete=>true,
