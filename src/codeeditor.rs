@@ -723,11 +723,12 @@ impl CodeEditor{
         self._text_area = self._text_inst.take().unwrap().inst.into_area();
 
         // draw selections
-        let sel = &self._draw_cursor.selections;
+        let sel = &mut self._draw_cursor.selections;
         let mut anim_select_any = false;
-        for i in 0..sel.len(){
-            let cur = &sel[i];
 
+        // do silly animations
+        for i in 0..sel.len(){
+            let cur = &mut sel[i];
             // silly selection animation start
             if i < self._anim_select.len() &&  cur.rc.y < self._anim_select[i].ypos{
                 // insert new one at the top
@@ -757,13 +758,22 @@ impl CodeEditor{
             };
             let wtime = Ease::OutExp.map(wtime) as f32;
             let htime = Ease::OutExp.map(htime) as f32;
-            let mk_inst = if invert{
-                self.marker.draw_quad(cx, Rect{x:cur.rc.x - pos.x, y:cur.rc.y - pos.y, w:cur.rc.w * wtime, h:cur.rc.h * htime})
+            
+            if invert{
+                cur.rc.w = cur.rc.w * wtime;
+                cur.rc.h = cur.rc.h * htime;
             }
             else{
-                self.marker.draw_quad(cx, Rect{x:cur.rc.x - pos.x + (cur.rc.w * (1.-wtime)), y:cur.rc.y - pos.y, w:cur.rc.w * wtime, h:cur.rc.h * htime})
-            };
-            // silly selection animation end
+                cur.rc.x = cur.rc.x + (cur.rc.w * (1.-wtime));
+                cur.rc.w = cur.rc.w * wtime;
+                cur.rc.h = cur.rc.h * htime;
+            }
+        }
+
+        for i in 0..sel.len(){
+            let cur = &sel[i];
+            
+            let mk_inst = self.marker.draw_quad(cx, Rect{x:cur.rc.x - pos.x, y:cur.rc.y - pos.y, w:cur.rc.w, h:cur.rc.h});
 
             // do we have a prev?
             if i > 0 && sel[i-1].index == cur.index{
