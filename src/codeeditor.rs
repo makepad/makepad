@@ -726,38 +726,41 @@ impl CodeEditor{
         let sel = &mut self._draw_cursor.selections;
         let mut anim_select_any = false;
 
+
         // do silly animations
         for i in 0..sel.len(){
             let cur = &mut sel[i];
             // silly selection animation start
             if i < self._anim_select.len() &&  cur.rc.y < self._anim_select[i].ypos{
                 // insert new one at the top
-                self._anim_select.insert(i, AnimSelect{time:0., invert:true, ypos:cur.rc.y});
+                self._anim_select.insert(i, AnimSelect{time:1., invert:true, ypos:cur.rc.y});
             }
             let (wtime, htime, invert) = if i < self._anim_select.len(){
                 let len = self._anim_select.len()-1;
                 let anim = &mut self._anim_select[i];
-                if anim.time >= 1.0{
-                    anim.time = 1.0
+                if anim.time <= 0.0001{
+                    anim.time = 0.0
                 }
                 else{
-                    anim.time += 0.1;
+                    anim.time = anim.time *0.55;//= 0.1;
                     anim_select_any = true;
                 }
                 if i == len{
                     (anim.time, anim.time, i == 0 && anim.invert)
                 }
                 else{
-                    (anim.time, 1., i == 0 && anim.invert)
+                    (anim.time, 0., i == 0 && anim.invert)
                 }
             }
             else{
-                self._anim_select.push(AnimSelect{time:0.,invert:i == 0, ypos:cur.rc.y});
+                self._anim_select.push(AnimSelect{time:1.,invert:i == 0, ypos:cur.rc.y});
                 anim_select_any = true;
-                (0.,0.,false)
+                (1.,1.,false)
             };
-            let wtime = Ease::OutExp.map(wtime) as f32;
-            let htime = Ease::OutExp.map(htime) as f32;
+            let wtime = 1.0 - wtime as f32;
+            let htime = 1.0 - htime as f32;
+            //let wtime = Ease::OutExp.map(wtime) as f32;
+            //let htime = Ease::OutExp.map(htime) as f32;
             
             if invert{
                 cur.rc.w = cur.rc.w * wtime;
