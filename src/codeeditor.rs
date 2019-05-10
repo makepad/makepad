@@ -728,12 +728,11 @@ impl CodeEditor{
         for i in 0..sel.len(){
             let cur = &sel[i];
 
-
+            // silly selection animation start
             if i < self._anim_select.len() &&  cur.rc.y < self._anim_select[i].ypos{
                 // insert new one at the top
                 self._anim_select.insert(i, AnimSelect{time:0., invert:true, ypos:cur.rc.y});
             }
-            
             let (wtime, htime, invert) = if i < self._anim_select.len(){
                 let len = self._anim_select.len()-1;
                 let anim = &mut self._anim_select[i];
@@ -752,7 +751,7 @@ impl CodeEditor{
                 }
             }
             else{
-                self._anim_select.push(AnimSelect{time:0.,invert:false, ypos:cur.rc.y});
+                self._anim_select.push(AnimSelect{time:0.,invert:i == 0, ypos:cur.rc.y});
                 anim_select_any = true;
                 (0.,0.,false)
             };
@@ -764,6 +763,7 @@ impl CodeEditor{
             else{
                 self.marker.draw_quad(cx, Rect{x:cur.rc.x - pos.x + (cur.rc.w * (1.-wtime)), y:cur.rc.y - pos.y, w:cur.rc.w * wtime, h:cur.rc.h * htime})
             };
+            // silly selection animation end
 
             // do we have a prev?
             if i > 0 && sel[i-1].index == cur.index{
