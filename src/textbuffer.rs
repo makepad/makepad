@@ -11,7 +11,6 @@ pub struct TextBuffer{
     pub undo_stack: Vec<TextUndo>,
     pub redo_stack: Vec<TextUndo>,
     pub load_id: u64,
-    pub _char_count: usize
 }
 
 #[derive(Clone, Copy)]
@@ -36,6 +35,7 @@ pub enum TextUndoGrouping{
     Backspace,
     Delete,
     Block,
+    Tab,
     Cut,
     Other
 }
@@ -55,6 +55,7 @@ impl TextUndoGrouping{
             TextUndoGrouping::Backspace=>true,
             TextUndoGrouping::Delete=>true,
             TextUndoGrouping::Block=>false,
+            TextUndoGrouping::Tab=>false,
             TextUndoGrouping::Cut=>false,
             TextUndoGrouping::Other=>false
         }
@@ -73,6 +74,15 @@ pub struct TextOp{
     start:usize,
     len:usize,
     lines:Vec<Vec<char>>,
+}
+
+fn calc_char_count(lines:&Vec<Vec<char>>)->usize{
+    let mut char_count = 0;
+    for line in lines{
+        char_count += line.len()
+    }
+    char_count += lines.len() - 1; // invisible newline chars
+    char_count
 }
 
 impl TextBuffer{
@@ -107,7 +117,7 @@ impl TextBuffer{
     pub fn text_pos_to_offset(&self, pos:TextPos)->usize{
         let mut char_count = 0;
         if pos.row >= self.lines.len(){
-            return self._char_count
+            return self.calc_char_count()
         }
         for (ln_row, line) in self.lines.iter().enumerate(){
             if ln_row == pos.row{
@@ -178,8 +188,8 @@ impl TextBuffer{
         return line.len();
     }
 
-    pub fn get_char_count(&self)->usize{
-        self._char_count
+    pub fn calc_char_count(&self)->usize{
+        calc_char_count(&self.lines)
     }
 
     pub fn get_line_count(&self)->usize{
@@ -203,6 +213,10 @@ impl TextBuffer{
                 pos.col += 1;
             }
         };
+    }
+
+    fn replace_line(&mut self, row:usize, start_col:usize, len:usize, mut rep_line:Vec<char>)->Vec<char>{
+        self.lines[row].splice(start_col..(start_col+len), rep_line).collect()
     }
 
     fn replace_range(&mut self, start:usize, len:usize, mut rep_lines:Vec<Vec<char>>)->Vec<Vec<char>>{
@@ -283,21 +297,10 @@ impl TextBuffer{
         return string.split("\n").map(|s| s.chars().collect()).collect()
     }
 
-    pub fn compute_char_count(lines:&Vec<Vec<char>>)->usize{
-        let mut char_count = 0;
-        for line in lines{
-            char_count += line.len()
-        }
-        char_count += lines.len() - 1; // invisible newline chars
-        char_count
-    }
-
-    pub fn replace_with_string(&mut self, start:usize, len:usize, string:&str)->TextOp{
+    pub fn replace_lines_with_string(&mut self, start:usize, len:usize, string:&str)->TextOp{
         let rep_lines = Self::split_string_to_lines(string);
-        let rep_lines_chars = Self::compute_char_count(&rep_lines);
+        let rep_lines_chars = calc_char_count(&rep_lines);
         let lines = self.replace_range(start, len, rep_lines);
-        // ok now we have to replace start, len with data
-        self._char_count = Self::compute_char_count(&self.lines);
         TextOp{
             start:start,
             len:rep_lines_chars,
@@ -305,10 +308,20 @@ impl TextBuffer{
         }
     }
 
+    pub fn replace_line_with_string(&mut self, start:usize, row:usize, col:usize, len:usize, string:&str)->TextOp{
+        let rep_line:Vec<char> = string.chars().collect();
+        let rep_line_chars = rep_line.len();
+        let line = self.replace_line(row, col, len, rep_line);
+        TextOp{
+            start:start,
+            len:rep_line_chars,
+            lines:vec![line]
+        }
+    }   
+
     pub fn replace_with_textop(&mut self, text_op:TextOp)->TextOp{
-        let rep_lines_chars = Self::compute_char_count(&text_op.lines);
+        let rep_lines_chars = calc_char_count(&text_op.lines);
         let lines = self.replace_range(text_op.start, text_op.len, text_op.lines);
-        self._char_count = Self::compute_char_count(&self.lines);
         TextOp{
             start:text_op.start,
             len:rep_lines_chars,
@@ -326,7 +339,6 @@ impl TextBuffer{
             self.lines = Self::split_string_to_lines(&utf8_data.to_string());
             // lets be lazy and redraw all
         }
-        self._char_count = Self::compute_char_count(&self.lines);
     }
 
     pub fn undoredo(&mut self, mut text_undo:TextUndo, cursor_set:&mut CursorSet)->TextUndo{
@@ -570,12 +582,12 @@ impl Cursor{
         //self.calc_max(text_buffer);
     }
 
-    pub fn move_right(&mut self, char_count:usize, text_buffer:&TextBuffer){
-        if self.head + char_count < text_buffer.get_char_count(){
+    pub fn move_right(&mut self, char_count:usize, total_char_count:usize, text_buffer:&TextBuffer){
+        if self.head + char_count < total_char_count{
             self.head += char_count;
         }
         else{
-            self.head = text_buffer.get_char_count();
+            self.head = total_char_count;
         }
         //self.calc_max(text_buffer);
     }
@@ -590,7 +602,7 @@ impl Cursor{
         }
     }
     
-    pub fn move_down(&mut self, line_count:usize, text_buffer:&TextBuffer){
+    pub fn move_down(&mut self, line_count:usize,  total_char_count:usize, text_buffer:&TextBuffer){
         let pos = text_buffer.offset_to_text_pos(self.head);
         
         if pos.row + line_count < text_buffer.get_line_count() - 1{
@@ -598,7 +610,7 @@ impl Cursor{
             self.head = text_buffer.text_pos_to_offset(TextPos{row:pos.row + line_count, col:self.max});
         }
         else{
-            self.head = text_buffer.get_char_count();
+            self.head = total_char_count;
         }
     }
 }
@@ -833,20 +845,20 @@ impl CursorSet{
                     for _ in 0..post_spaces{
                         text.push_str(" ");
                     };
-                    let op = text_buffer.replace_with_string(start, end-start, &text);
+                    let op = text_buffer.replace_lines_with_string(start, end-start, &text);
                     cursor.head += pre_spaces + 1;
                     cursor.tail = cursor.head;
                     delta += (pre_spaces + post_spaces + 2) as isize;
                     ops.push(op);
                 }
                 else{
-                    let op = text_buffer.replace_with_string(start, end-start, &text);
+                    let op = text_buffer.replace_lines_with_string(start, end-start, &text);
                     delta += cursor.collapse(start, end, op.len);
                     ops.push(op);
                 }
             }
             else{
-                let op = text_buffer.replace_with_string(start, end-start, "\n");
+                let op = text_buffer.replace_lines_with_string(start, end-start, "\n");
                 delta += cursor.collapse(start, end, op.len);
                 ops.push(op);
             };
@@ -888,7 +900,7 @@ impl CursorSet{
         let cursors_clone = self.clone();
         for cursor in &mut self.set{
             let (start, end) = cursor.delta(delta);
-            let op = text_buffer.replace_with_string(start, end-start, text);
+            let op = text_buffer.replace_lines_with_string(start, end-start, text);
             delta += cursor.collapse(start, end, op.len);
             ops.push(op);
             old_max = cursor.calc_max(text_buffer, old_max);
@@ -914,7 +926,7 @@ impl CursorSet{
             text.push_str(pre);
             text_buffer.get_range_as_string(start, end-start, &mut text);
             text.push_str(post);
-            let op = text_buffer.replace_with_string(start, end-start, &text);
+            let op = text_buffer.replace_lines_with_string(start, end-start, &text);
 
             // we wanna keep the original selection pushed by l
             let pre_chars = pre.chars().count();
@@ -942,14 +954,15 @@ impl CursorSet{
             let (start, end) = cursor.delta(delta);
             // if start == end do overwrite if exists
             let mut next = String::new();
-            text_buffer.get_range_as_string(start, 1, &mut next);
+            let thing_chars = thing.chars().count();
+            text_buffer.get_range_as_string(start, thing_chars, &mut next);
 
             let op = if start == end && thing == next{
                 // replace thing with next as an op even though its a noop
-                text_buffer.replace_with_string(start, thing.chars().count(), thing)
+                text_buffer.replace_lines_with_string(start, thing_chars, thing)
             }
             else{ // normal insert/replace
-                text_buffer.replace_with_string(start, end-start, thing)
+                text_buffer.replace_lines_with_string(start, end-start, thing)
             };
             delta += cursor.collapse(start, end, op.len);
             ops.push(op);
@@ -962,6 +975,7 @@ impl CursorSet{
             cursors:cursors_clone
         })
     }
+
     pub fn delete(&mut self, text_buffer:&mut TextBuffer){
         let mut delta:isize = 0; // rolling delta to displace cursors 
         let mut ops = Vec::new();
@@ -971,12 +985,12 @@ impl CursorSet{
             let (start, end) = cursor.delta(delta);
             if start == end{
                 let indent = text_buffer.calc_delete_line_indent_depth(start);
-                let op = text_buffer.replace_with_string(start, 1 + indent, "");
+                let op = text_buffer.replace_lines_with_string(start, 1 + indent, "");
                 ops.push(op);
                 delta += cursor.collapse(start, start+1+indent, 0);
             }
             else if start != end{
-                let op = text_buffer.replace_with_string(start, end - start, "");
+                let op = text_buffer.replace_lines_with_string(start, end - start, "");
                 ops.push(op);
                 delta += cursor.collapse(start, end, 0);
             }
@@ -1000,12 +1014,12 @@ impl CursorSet{
             if start == end && start > 0{
                 // check our indent depth
                 let (new_start, new_len) = text_buffer.calc_backspace_line_indent_depth_and_pair(start);
-                let op = text_buffer.replace_with_string(new_start, new_len, "");
+                let op = text_buffer.replace_lines_with_string(new_start, new_len, "");
                 ops.push(op);
                 delta += cursor.collapse(new_start,new_start + new_len, 0);
             }
             else if start != end{
-                let op = text_buffer.replace_with_string(start, end - start, "");
+                let op = text_buffer.replace_lines_with_string(start, end - start, "");
                 ops.push(op);
                 delta += cursor.collapse(start, end, 0);
             }
@@ -1019,11 +1033,62 @@ impl CursorSet{
         })
     }
 
+    pub fn insert_tab(&mut self, text_buffer:&mut TextBuffer, tab_str:&str){
+        let mut delta:isize = 0; // rolling delta to displace cursors 
+        let mut ops = Vec::new();
+        let tab_str_chars = tab_str.chars().count();
+        let cursors_clone = self.clone();
+        let mut old_max = (TextPos{row:0,col:0},0);
+        for cursor in &mut self.set{
+            let (start, end) = cursor.delta(delta);
+            if start == end{ // just insert 4 spaces
+                // check our indent depth
+                let op = text_buffer.replace_lines_with_string(start, end-start, tab_str);
+                delta += cursor.collapse(start, end, op.len);
+                ops.push(op);
+            }
+            else if start != end{ // either indent the lines, OR replace
+                let start_pos = text_buffer.offset_to_text_pos_next(start, old_max.0, old_max.1);
+                let end_pos = text_buffer.offset_to_text_pos_next(end, start_pos, start);
+                if start_pos.row == end_pos.row{ // its a single line replace with 4 chars
+                    let op = text_buffer.replace_lines_with_string(start, end - start, tab_str);
+                    ops.push(op);
+                    delta += cursor.collapse(start, end, tab_str_chars);
+                }
+                else{ // tab indent the lines
+                    let mut off = start - start_pos.col;
+                    for row in start_pos.row..(end_pos.row+1){
+                        // ok so how do we compute the actual op offset of this line
+                        let op = text_buffer.replace_line_with_string(off, row, 0, 0, tab_str);
+                        off += text_buffer.lines[row].len() + 1;
+                        ops.push(op);
+                    }
+                    // figure out which way the cursor is
+                    if cursor.head > cursor.tail{
+                        cursor.tail += tab_str_chars;
+                        cursor.head += (end_pos.row - start_pos.row + 1) * tab_str_chars;
+                    }
+                    else{
+                        cursor.tail += (end_pos.row - start_pos.row + 1) * tab_str_chars;
+                        cursor.head += tab_str_chars;
+                    }
+                }
+            }
+            old_max = cursor.calc_max(text_buffer, old_max);
+        }
+        text_buffer.redo_stack.truncate(0);
+        text_buffer.undo_stack.push(TextUndo{
+            ops:ops,
+            grouping:TextUndoGrouping::Tab,
+            cursors:cursors_clone
+        })
+    }
+
     pub fn select_all(&mut self, text_buffer:&mut TextBuffer){
         self.set.truncate(0);
         let mut cursor = Cursor{
             head:0,
-            tail:text_buffer.get_char_count(),
+            tail:text_buffer.calc_char_count(),
             max:0
         };
         self.last_cursor = 0;
@@ -1056,8 +1121,9 @@ impl CursorSet{
     }
 
     pub fn move_down(&mut self,line_count:usize, only_head:bool, text_buffer:&TextBuffer){
+        let total_char_count = text_buffer.calc_char_count();
         for cursor in &mut self.set{
-            cursor.move_down(line_count, text_buffer);
+            cursor.move_down(line_count, total_char_count, text_buffer);
             if !only_head{cursor.tail = cursor.head}
         }
         self.fuse_adjacent(text_buffer)
@@ -1075,8 +1141,9 @@ impl CursorSet{
 
     pub fn move_right(&mut self,char_count:usize, only_head:bool, text_buffer:&TextBuffer){
         let mut old_max = (TextPos{row:0,col:0},0);
+        let total_char_count = text_buffer.calc_char_count();
         for cursor in &mut self.set{
-            cursor.move_right(char_count, text_buffer);
+            cursor.move_right(char_count, total_char_count, text_buffer);
             if !only_head{cursor.tail = cursor.head}
             old_max = cursor.calc_max(text_buffer, old_max);
         }

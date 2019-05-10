@@ -359,7 +359,7 @@ impl CodeEditor{
                         self.cursors.set_last_clamp_range(range);
                     },
                     _=>{
-                        let range = (0, text_buffer.get_char_count());
+                        let range = (0, text_buffer.calc_char_count());
                         self.cursors.set_last_clamp_range(range);
                     }
                 }
@@ -563,7 +563,12 @@ impl CodeEditor{
                         //return CodeEditorEvent::FoldStart
                     },
                     KeyCode::Tab=>{
-                        self.cursors.replace_text("    ", text_buffer);
+                        if ke.modifiers.shift{
+                            //self.cursors.remove_tab(text_buffer);
+                        }
+                        else{
+                            self.cursors.insert_tab(text_buffer,"    ");
+                        }
                         true
                     },
                     _=>false
