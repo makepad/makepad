@@ -745,10 +745,10 @@ impl CodeEditor{
                     anim_select_any = true;
                 }
                 if i == len{
-                    (anim.time, anim.time, anim.invert)
+                    (anim.time, anim.time, i == 0 && anim.invert)
                 }
                 else{
-                    (anim.time, 1., anim.invert)
+                    (anim.time, 1., i == 0 && anim.invert)
                 }
             }
             else{
