@@ -474,7 +474,6 @@ impl CodeEditor{
                         true
                     },
                     KeyCode::ArrowLeft=>{
-                        println!("{}", ke.modifiers.control);
                         if ke.modifiers.logo || ke.modifiers.control{ // token skipping
                             self.cursors.move_left_nearest_token(ke.modifiers.shift, &self._token_chunks, text_buffer)
                         }
@@ -493,7 +492,7 @@ impl CodeEditor{
                         true
                     },
                     KeyCode::PageUp=>{
-
+                        
                         self.cursors.move_up(self._visible_lines.max(5) - 4, ke.modifiers.shift, text_buffer);
                         true
                     },
@@ -589,9 +588,35 @@ impl CodeEditor{
                 if te.replace_last{
                     text_buffer.undo(false, &mut self.cursors);
                 }
-                if te.input.len() == 1 && te.input.chars().next().unwrap() == '\n'{
+                
+                if !te.was_paste && te.input.len() == 1{
+                    match te.input.chars().next().unwrap(){
+                        '\n'=>{
+                            self.cursors.insert_newline_with_indent(text_buffer);
+                        },
+                        '('=>{
+                            self.cursors.insert_around("(",")",text_buffer);
+                        },
+                        '['=>{
+                            self.cursors.insert_around("[","]",text_buffer);
+                        },
+                        '{'=>{
+                            self.cursors.insert_around("{","}",text_buffer);
+                        },
+                        ')'=>{
+                            self.cursors.overwrite_if_exists(")", text_buffer);
+                        },
+                        ']'=>{
+                            self.cursors.overwrite_if_exists("]", text_buffer);
+                        },
+                        '}'=>{
+                            self.cursors.overwrite_if_exists("}", text_buffer);
+                        },
+                        _=>{
+                            self.cursors.replace_text(&te.input, text_buffer);
+                        }
+                    }  
                     // lets insert a newline
-                    self.cursors.insert_newline_with_indent(text_buffer);
                 } 
                 else{
                     self.cursors.replace_text(&te.input, text_buffer);
