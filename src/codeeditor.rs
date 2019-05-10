@@ -24,6 +24,7 @@ pub struct CodeEditor{
     pub _paren_stack:Vec<ParenItem>,
     pub _paren_list:Vec<ParenItem>,
     pub _line_geometry:Vec<LineGeom>,
+    pub _anim_select:Vec<AnimSelect>,
     pub _token_chunks:Vec<TokenChunk>,
     pub _visible_lines:usize,
 
@@ -124,6 +125,11 @@ pub struct AnimFolding{
     pub did_animate:bool
 }
 
+#[derive(Clone)]
+pub struct AnimSelect{
+    pub time:f64
+}
+
 #[derive(Clone, Default)]
 pub struct LineGeom{
     walk:Vec2,
@@ -219,6 +225,7 @@ impl Style for CodeEditor{
             _visible_lines:0, 
             _line_geometry:Vec::new(),
             _token_chunks:Vec::new(),
+            _anim_select:Vec::new(),
             _grid_select_corner:None,
             _bg_area:Area::Empty,
             _text_inst:None,
@@ -715,9 +722,30 @@ impl CodeEditor{
 
         // draw selections
         let sel = &self._draw_cursor.selections;
+        let mut anim_select_any = false;
         for i in 0..sel.len(){
             let cur = &sel[i];
-            let mk_inst = self.marker.draw_quad(cx, Rect{x:cur.rc.x - pos.x, y:cur.rc.y - pos.y, w:cur.rc.w, h:cur.rc.h});
+   
+            let time = if i < self._anim_select.len(){
+                let anim = &mut self._anim_select[i];
+                if anim.time >= 1.0{
+                    anim.time = 1.0
+                }
+                else{
+                    anim.time += 0.1;
+                    anim_select_any = true;
+                }
+                anim.time
+            }
+            else{
+                self._anim_select.push(AnimSelect{time:0.});
+                anim_select_any = true;
+                0.
+            };
+            let time = Ease::OutExp.map(time) as f32;
+                
+            let mk_inst = self.marker.draw_quad(cx, Rect{x:cur.rc.x - pos.x + (cur.rc.w * (1.-time)), y:cur.rc.y - pos.y, w:cur.rc.w * time, h:cur.rc.h * time});
+
             // do we have a prev?
             if i > 0 && sel[i-1].index == cur.index{
                 let p_rc = &sel[i-1].rc;
@@ -735,7 +763,11 @@ impl CodeEditor{
                 mk_inst.push_vec2(cx, Vec2{x:0., y:-1.}); // prev_x, prev_w
             }
         }
-        
+        self._anim_select.truncate(sel.len());
+        if anim_select_any{
+            self.view.redraw_view_area(cx);        
+        }
+
          // code folding
         if self._anim_folding.state.is_folded(){
             // lets give the view a whole extra page of space
