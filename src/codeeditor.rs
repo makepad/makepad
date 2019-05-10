@@ -741,7 +741,7 @@ impl CodeEditor{
                     anim.time = 1.0
                 }
                 else{
-                    anim.time += 0.02;
+                    anim.time += 0.1;
                     anim_select_any = true;
                 }
                 if i == len{
@@ -756,8 +756,8 @@ impl CodeEditor{
                 anim_select_any = true;
                 (0.,0.,false)
             };
-            let wtime = Ease::OutElastic.map(wtime) as f32;
-            let htime = Ease::OutElastic.map(htime) as f32;
+            let wtime = Ease::OutExp.map(wtime) as f32;
+            let htime = Ease::OutExp.map(htime) as f32;
             
             if invert{
                 cur.rc.w = cur.rc.w * wtime;
