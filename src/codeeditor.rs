@@ -656,12 +656,12 @@ impl CodeEditor{
         // return to normal size
     }
 
-    pub fn begin_code_editor(&mut self, cx:&mut Cx, text_buffer:&TextBuffer)->bool{
+    pub fn begin_code_editor(&mut self, cx:&mut Cx, text_buffer:&TextBuffer)->Result<(),()>{
         // pull the bg color from our animation system, uses 'default' value otherwise
         // self.bg.color = self.animator.last_vec4("bg.color");
         // push the 2 vars we added to bg shader
         //self.text.color = self.animator.last_vec4("text.color");
-        self.view.begin_view(cx, &Layout{..Default::default()});
+        self.view.begin_view(cx, &Layout{..Default::default()})?;
         //   return false
         //}
         if text_buffer.load_id != 0{
@@ -674,7 +674,7 @@ impl CodeEditor{
             self.bg.end_quad(cx, &bg_inst);
             self._bg_area = bg_inst.into_area();
             self.view.end_view(cx);
-            return false
+            return Err(())
         }
         else{
 
@@ -705,7 +705,6 @@ impl CodeEditor{
 
             self._monospace_size = self.text.get_monospace_size(cx, None);
             self._line_geometry.truncate(0);
-            self._token_chunks.truncate(0);
             self._draw_cursor = DrawCursor::new();
             self._first_on_line = true;
             self._visible_lines = 0;
@@ -728,8 +727,25 @@ impl CodeEditor{
             self._draw_cursor.set_next(&self.cursors.set);
             // cursor after text
             cx.new_instance_layer(self.cursor.shader_id, 0);
-            
-            return true
+            /*
+            if !self._token_chunks_dirty{
+                for i in 0 .. self._token_chunks.len(){
+                    let tc = self._token_chunks[i].clone();
+                    self.draw_text(
+                        cx, 
+                        tc.chunk, 
+                        tc.offset,
+                        tc.is_whitespace,
+                        tc.is_newline,
+                        tc.color
+                    );
+                }
+                self.end_code_editor(cx, text_buffer);
+                return false;
+            }*/
+            self._token_chunks.truncate(0);
+
+            return Ok(())
         }
     }
     
@@ -752,7 +768,6 @@ impl CodeEditor{
         }
 
         self._text_area = self._text_inst.take().unwrap().inst.into_area();
-
         // draw selections
         let sel = &mut self._draw_cursor.selections;
 
@@ -962,15 +977,8 @@ impl CodeEditor{
         }
     }
 
-    pub fn draw_text(&mut self, cx:&mut Cx, chunk:&mut Vec<char>, end_offset:usize, is_whitespace:bool, color:Color){
+    pub fn draw_text(&mut self, cx:&mut Cx, chunk:&Vec<char>, offset:usize, is_whitespace:bool, is_newline:bool, color:Color){
         if chunk.len()>0{
-
-            self._token_chunks.push(TokenChunk{
-                offset:end_offset - chunk.len() - 1,
-                len:chunk.len(),
-                is_whitespace:is_whitespace,
-            });
-            
             // lets check if the geom is visible
             if let Some(geom) = cx.walk_turtle_text(
                 self._monospace_size.x * (chunk.len() as f32), 
@@ -989,7 +997,7 @@ impl CodeEditor{
                 let draw_cursor = &mut self._draw_cursor;
                 let height = self._monospace_size.y;
 
-                self.text.add_text(cx, geom.x, geom.y, end_offset - chunk.len() - 1, self._text_inst.as_mut().unwrap(), &chunk, |unicode, offset, x, w|{
+                self.text.add_text(cx, geom.x, geom.y, offset, self._text_inst.as_mut().unwrap(), &chunk, |unicode, offset, x, w|{
                     // check if we need to skip cursors
                     while offset >= draw_cursor.end{ // jump to next cursor
                         if offset == draw_cursor.end{ // process the last bit here
@@ -1017,7 +1025,21 @@ impl CodeEditor{
                 });
             }
 
+            if is_newline{
+                self.new_line(cx);
+            }
+
             self._instance_count += chunk.len();
+            //if self._token_chunks_dirty{
+                self._token_chunks.push(TokenChunk{
+                    offset:offset,
+                    len:chunk.len(),
+                    //chunk:chunk,
+                    //color:color,
+                    is_newline:is_newline,
+                    is_whitespace:is_whitespace,
+                });            
+           // }
         }
     }
 

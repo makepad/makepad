@@ -226,6 +226,45 @@ impl Cx{
         self.redraw_areas.push(area);
     }
 
+    // figure out if areas are in some way a child of draw_list_id
+    pub fn draw_list_needs_redraw(&self, draw_list_id:usize)->bool{
+        for area in &self.incr_areas{
+            match area{
+                Area::All=>{
+                    return true;
+                },
+                Area::Empty=>(),
+                Area::Instance(instance)=>{
+                    let mut dl = instance.draw_list_id;
+                    if dl == draw_list_id{
+                        return true
+                    }
+                    while dl != 0{
+                        dl = self.draw_lists[dl].nesting_draw_list_id;
+                        if dl == draw_list_id{
+                            return true
+                        }
+                    }
+                },
+                Area::DrawList(drawlist)=>{
+                    let mut dl = drawlist.draw_list_id;
+                    if dl == draw_list_id{
+                        return true
+                    }
+                    while dl != 0{
+                        dl = self.draw_lists[dl].nesting_draw_list_id;
+                        if dl == draw_list_id{
+                            return true
+                        }
+                    }
+
+                }
+            }
+        }
+        false
+    }
+
+
     pub fn uniform_camera_projection(&mut self, v:Mat4){
         //dump in uniforms
         self.uniforms.resize(CX_UNI_SIZE, 0.0);
@@ -336,7 +375,6 @@ impl Cx{
         self.key_focus = focus_area;
     }
 
-
     // event handler wrappers
 
     pub fn call_event_handler<F>(&mut self, mut event_handler:F, event:&mut Event)
@@ -371,7 +409,12 @@ impl Cx{
         //for i in 0..10{
         self.is_in_redraw_cycle = true;
         self.redraw_id += 1;
-        root_view.begin_view(self, &Layout{..Default::default()});
+        
+        if let Err(()) = root_view.begin_view(self, &Layout{..Default::default()}){
+            // nothing to begin i suppose?
+            return;
+        }
+
         self.incr_areas = self.redraw_areas.clone();
         self.redraw_areas.truncate(0);
         self.call_event_handler(&mut event_handler, &mut Event::Draw);

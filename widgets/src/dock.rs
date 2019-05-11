@@ -274,10 +274,12 @@ where TItem: Clone
                             match split.unwrap().handle_splitter(cx, event){
                                 SplitterEvent::Moving{new_pos}=>{
                                     *pos = new_pos;
+                                    cx.redraw_area(Area::All);
                                 },
                                 SplitterEvent::MovingEnd{new_align, new_pos}=>{
                                     *align = new_align;
                                     *pos = new_pos;
+                                    cx.redraw_area(Area::All);
                                 },
                                 _=>()
                             };
@@ -330,16 +332,19 @@ where TItem: Clone
                         stack_top.uid = self.walk_uid;
                         self.walk_uid += 1;
                         let tab_control = self.tab_controls.get_draw(cx, stack_top.uid, |_cx,tmpl| tmpl.clone());
-                        tab_control.begin_tabs(cx);
-                        for (id,tab) in tabs.iter().enumerate(){
-                            tab_control.draw_tab(cx, &tab.title, *current == id, tab.closeable);
+                        if let Ok(()) = tab_control.begin_tabs(cx){
+                            for (id,tab) in tabs.iter().enumerate(){
+                                tab_control.draw_tab(cx, &tab.title, *current == id, tab.closeable);
+                            }
+                            tab_control.end_tabs(cx);
                         }
-                        tab_control.end_tabs(cx);
-                        tab_control.begin_tab_page(cx);
-                        if *current < tabs.len(){
-                            return Some(unsafe{mem::transmute(&mut tabs[*current].item)});
+
+                        if let Ok(()) = tab_control.begin_tab_page(cx){
+                            if *current < tabs.len(){
+                                return Some(unsafe{mem::transmute(&mut tabs[*current].item)});
+                            }
+                            tab_control.end_tab_page(cx);
                         }
-                        tab_control.end_tab_page(cx);
                         None
                     }
                     else{
@@ -668,10 +673,12 @@ where TItem: Clone
     pub fn draw_dock(&mut self, cx: &mut Cx){
         // lets draw our hover layer if need be
         if let Some(fe) = &self._drag_move{
-            self.drop_quad_view.begin_view(cx, &Layout{
+            if let Err(()) = self.drop_quad_view.begin_view(cx, &Layout{
                 abs_start:Some(Vec2::zero()),
                 ..Default::default()
-            });
+            }){
+                return 
+            }
             let mut found_drop_zone = false;
             for (id,tab_control) in self.tab_controls.enumerate(){
 

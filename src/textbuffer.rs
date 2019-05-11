@@ -1,4 +1,4 @@
-//use widgets::*;
+use widgets::*;
 
 #[derive(Clone, Default)]
 pub struct TextBuffer{
@@ -451,16 +451,20 @@ impl<'a> TokenizerState<'a>{
             self.offset += 1;
         }
         else{
-            if self.line_counter < self.text_buffer.lines.len() - 1{
-                self.line_counter += 1;
-                self.offset += 1;
-                self.iter = self.text_buffer.lines[self.line_counter].iter();
-                self.next = '\n'
-            }
-            else{
-                self.offset += 1;
-                self.next = '\0'
-            }
+            self.next_line();
+        }
+    }
+
+    pub fn next_line(&mut self){
+        if self.line_counter < self.text_buffer.lines.len() - 1{
+            self.line_counter += 1;
+            self.offset += 1;
+            self.iter = self.text_buffer.lines[self.line_counter].iter();
+            self.next = '\n'
+        }
+        else{
+            self.offset += 1;
+            self.next = '\0'
         }
     }
 
@@ -1263,7 +1267,10 @@ impl CursorSet{
 
 #[derive(Clone, Default)]
 pub struct TokenChunk{
+    pub is_newline:bool,
     pub offset:usize,
+   // pub chunk:Vec<char>,
     pub len:usize,
+   // pub color:Color,
     pub is_whitespace:bool
 }

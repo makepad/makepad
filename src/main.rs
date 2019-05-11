@@ -207,7 +207,9 @@ impl App{
         //let t:Result<Expr> = syn::parse_str("std::collections::HashMap<String, Value>");
         //cx.debug_area = Area::Instance(InstanceArea{draw_list_id:0,draw_call_id:0,instance_offset:0,instance_count:0,redraw_id:0});
 
-        self.view.begin_view(cx, &Layout{..Default::default()});
+        if let Err(()) = self.view.begin_view(cx, &Layout{..Default::default()}){
+            return
+        }
 
         self.dock.draw_dock(cx);
 

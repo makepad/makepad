@@ -136,6 +136,7 @@ impl Cx{
         ret
     }
     
+    // high perf text only no wrap turtle
     pub fn walk_turtle_text(&mut self, w:f32, h:f32, scroll:Vec2)->Option<Rect>{
         if let Some(turtle) = self.turtles.last_mut(){
             let x = turtle.walk.x;

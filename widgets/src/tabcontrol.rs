@@ -172,15 +172,16 @@ impl TabControl{
     }
 
     // data free APIs for the win!
-    pub fn begin_tabs(&mut self, cx:&mut Cx){
+    pub fn begin_tabs(&mut self, cx:&mut Cx)->Result<(),()>{
         //cx.begin_turtle(&Layout{
         self.tabs_view.begin_view(cx, &Layout{
             width:Bounds::Fill,
             height:Bounds::Compute,
            ..Default::default()
-        });
+        })?;
         //self.tabs.mark();
         self._tab_id_alloc = 0;
+        Ok(())
     }
 
     pub fn draw_tab(&mut self, cx:&mut Cx, label:&str, selected:bool, closeable:bool){
@@ -202,25 +203,26 @@ impl TabControl{
         self.tab_fill.draw_quad_walk(cx, Bounds::Fill, Bounds::Fill, Margin::zero());
         self.tabs.sweep(cx);
         if let Some((fe, id)) = &self._dragging_tab{
-            self.drag_tab_view.begin_view(cx, &Layout{
+            if let Ok(()) = self.drag_tab_view.begin_view(cx, &Layout{
                 abs_start:Some(Vec2::zero()),
                 ..Default::default()
-            });
-            
-            self.drag_tab.bg_layout.abs_start = Some(Vec2{x:fe.abs.x - fe.rel_start.x, y:fe.abs.y - fe.rel_start.y});
-            let origin_tab = self.tabs.get_draw(cx, *id, |_cx, tmpl| tmpl.clone());
-            self.drag_tab.label = origin_tab.label.clone();
-            self.drag_tab.is_closeable = origin_tab.is_closeable;
-            self.drag_tab.draw_tab(cx);
+            }){
+                
+                self.drag_tab.bg_layout.abs_start = Some(Vec2{x:fe.abs.x - fe.rel_start.x, y:fe.abs.y - fe.rel_start.y});
+                let origin_tab = self.tabs.get_draw(cx, *id, |_cx, tmpl| tmpl.clone());
+                self.drag_tab.label = origin_tab.label.clone();
+                self.drag_tab.is_closeable = origin_tab.is_closeable;
+                self.drag_tab.draw_tab(cx);
 
-            self.drag_tab_view.end_view(cx);
+                self.drag_tab_view.end_view(cx);
+            }
         }
         self.tabs_view.end_view(cx);
     }
 
-    pub fn begin_tab_page(&mut self, cx:&mut Cx){
+    pub fn begin_tab_page(&mut self, cx:&mut Cx)->Result<(),()>{
         cx.turtle_new_line();
-        self.page_view.begin_view(cx, &Layout{..Default::default()});
+        self.page_view.begin_view(cx, &Layout{..Default::default()})
     }
 
     pub fn end_tab_page(&mut self, cx:&mut Cx){

@@ -7,6 +7,7 @@ use core_graphics::geometry::CGSize;
 use objc::{msg_send, sel, sel_impl};
 use objc::runtime::YES;
 use metal::*;
+use time::*;
 
 use crate::cx_cocoa::*;
 use crate::cx::*;
@@ -225,6 +226,7 @@ impl Cx{
                                 self.target_dpi_factor = re.new_dpi_factor;
                                 self.target_size = re.new_size; 
                                 self.call_event_handler(&mut event_handler, &mut event); 
+                                self.redraw_area(Area::All);
                                 self.call_draw_event(&mut event_handler, &mut root_view);
                                 self.repaint(&layer, &device, &command_queue);
                                 self.resize_layer_to_turtle(&layer);
@@ -296,6 +298,35 @@ impl Cx{
     pub fn hide_text_ime(&mut self){
     }
 
+    pub fn profile_clear(&mut self){
+        self.platform.profiler_totals.truncate(0);
+    }
+
+    pub fn profile_report(&self){
+        println!("-----------------------  Profile Report -------------------------");
+        let mut all = 0;
+        for (id,total) in self.platform.profiler_totals.iter().enumerate(){
+            all += total;
+            println!("Profile Id:{} time:{} usec", id, total / 1_000);
+        }
+        println!("Profile total:{} usec", all / 1_000);
+    }
+
+    pub fn profile_begin(&mut self, id:usize){
+        while self.platform.profiler_list.len() <= id{
+            self.platform.profiler_list.push(0);
+        }
+        self.platform.profiler_list[id] = precise_time_ns();
+    }
+
+    pub fn profile_end(&mut self, id:usize){
+        let delta = precise_time_ns() - self.platform.profiler_list[id];
+        while self.platform.profiler_totals.len() <= id{
+            self.platform.profiler_totals.push(0);
+        }
+        self.platform.profiler_totals[id] += delta;
+    }
+
 }
 
 #[derive(Clone, Default)]
@@ -303,7 +334,9 @@ pub struct CxPlatform{
     pub uni_cx:MetalBuffer,
     pub set_ime_position:Option<Vec2>,
     pub text_clipboard_response:Option<String>,
-    pub desktop:CxDesktop
+    pub desktop:CxDesktop,
+    pub profiler_list:Vec<u64>,
+    pub profiler_totals:Vec<u64>
 }
 
 #[derive(Clone, Default)]

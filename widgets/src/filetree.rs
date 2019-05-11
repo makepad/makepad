@@ -463,7 +463,10 @@ impl FileTree{
     }
 
     pub fn draw_file_tree(&mut self, cx:&mut Cx){
-        self.view.begin_view(cx, &Layout{..Default::default()});
+        if let Err(()) = self.view.begin_view(cx, &Layout{..Default::default()}){
+            return 
+        }
+
         let mut file_walker = FileWalker::new(&mut self.root_node);
         
         // lets draw the filetree
@@ -632,10 +635,12 @@ impl FileTree{
 
         // draw the drag item overlay layer if need be
         if let Some(mv) = &self._drag_move{
-            self.drag_view.begin_view(cx, &Layout{
+            if let Err(()) =self.drag_view.begin_view(cx, &Layout{
                 abs_start:Some(Vec2{x:mv.abs.x + 5., y:mv.abs.y + 5.}),
                 ..Default::default()
-            });
+            }){
+                return
+            }
             let mut file_walker = FileWalker::new(&mut self.root_node);
             while let Some((_depth, _index, _len, node)) = file_walker.walk(){
                 let node_draw = if let Some(node_draw) = node.get_draw(){node_draw}else{continue};

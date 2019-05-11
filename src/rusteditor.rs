@@ -68,25 +68,24 @@ impl RustEditor{
     }
 
     pub fn draw_rust_editor(&mut self, cx:&mut Cx, text_buffer:&TextBuffer){
-        if !self.code_editor.begin_code_editor(cx, text_buffer){
+        if let Err(()) = self.code_editor.begin_code_editor(cx, text_buffer){
             return
         }
-
-        let mut chunk = Vec::new();
+        
         let mut state = TokenizerState::new(text_buffer);
         
         let mut after_newline = true; 
         let mut last_tabs = 0;
         let mut newline_tabs = 0;
         let mut looping = true;
+        let mut chunk = Vec::new();
         while looping{
             let mut do_newline = false;
             let mut is_whitespace = false;
             let mut pop_paren = None;
-
             let color;
             state.advance_with_cur();
-            
+
             match state.cur{
                 '\0'=>{ // eof insert a terminating space and end
                     chunk.push(' ');
@@ -114,8 +113,9 @@ impl RustEditor{
                     if after_newline{ // consume spaces in groups of 4
                         chunk.push(state.cur);
                         
+                        //state.eat_spaces(&mut chunk);
                         let mut counter = 1;
-                        while state.next == ' ' || state.next == '\t'{
+                        while state.next == ' '{
                             chunk.push(' ');
                             counter += 1;
                             state.advance();
@@ -190,6 +190,7 @@ impl RustEditor{
                     }
                 },
                 '"'=>{ // parse string
+                
                     after_newline = false;
                     chunk.push(state.cur);
                     state.prev = '\0';
@@ -200,12 +201,15 @@ impl RustEditor{
                     chunk.push(state.next);
                     state.advance();
                     color = self.col_string;
+                   
                 },
                 '0'...'9'=>{ // try to parse numbers
+                    
                     after_newline = false;
                     color = self.col_number;
                     chunk.push(state.cur);
                     Self::parse_rust_number_tail(&mut state, &mut chunk);
+                    
                 },
                 ':'=>{
                     after_newline = false;
@@ -348,19 +352,18 @@ impl RustEditor{
                     }
                 },
                 _=>{
+                    
                     after_newline = false;
                     chunk.push(state.cur);
                     // unknown type
                     color = self.col_identifier;
                 }
             }
-            self.code_editor.draw_text(cx, &mut chunk, state.offset, is_whitespace, color);
+            let off = state.offset - chunk.len() - 1;
+            self.code_editor.draw_text(cx, &chunk, off, is_whitespace, do_newline, color);
             chunk.truncate(0);
             if let Some(paren_type) = pop_paren{
                 self.code_editor.pop_paren_stack(cx, paren_type);
-            }
-            if do_newline{
-                self.code_editor.new_line(cx);
             }
         }
         

@@ -65,7 +65,7 @@ impl ScrollBarLike<NoScrollBar> for NoScrollBar{
     fn set_scroll_pos(&mut self, _cx:&mut Cx, _scroll_pos:f32)->bool{false}
     fn get_scroll_pos(&self)->f32{0.}
     fn scroll_into_view(&mut self, _cx:&mut Cx, _pos:f32, _size:f32){}
-    fn set_scroll_target(&mut self, cx:&mut Cx, scroll_target:f32)->bool{false}
+    fn set_scroll_target(&mut self, _cx:&mut Cx, _scroll_target:f32)->bool{false}
     fn get_scroll_target(&mut self)->f32{0.}
 }
 
@@ -73,9 +73,8 @@ impl<TScrollBar> View<TScrollBar>
 where TScrollBar: ScrollBarLike<TScrollBar> + Clone + ElementLife
 {
 
+    pub fn begin_view(&mut self, cx:&mut Cx, layout:&Layout)->Result<(),()>{
 
-    pub fn begin_view(&mut self, cx:&mut Cx, layout:&Layout)->bool{
-        // do a dirty check
         if !cx.is_in_redraw_cycle{
             panic!("calling begin_view outside of redraw cycle is not possible!");
         }
@@ -91,14 +90,12 @@ where TScrollBar: ScrollBarLike<TScrollBar> + Clone + ElementLife
             let draw_list = &mut cx.draw_lists[self.draw_list_id.unwrap()];
             draw_list.initialize(self.is_clipped, cx.redraw_id);
         }
-        else{
+        //else{
             // set len to 0
-            let draw_list = &mut cx.draw_lists[self.draw_list_id.unwrap()];
-            draw_list.redraw_id = cx.redraw_id;
-            draw_list.draw_calls_len = 0;
-        }
+        //    let draw_list = &mut cx.draw_lists[self.draw_list_id.unwrap()];
+        //}
+ 
         let draw_list_id = self.draw_list_id.unwrap();
-        
         let nesting_draw_list_id = cx.current_draw_list_id;
        
         let parent_draw_list_id = if self.is_overlay{
@@ -137,21 +134,40 @@ where TScrollBar: ScrollBarLike<TScrollBar> + Clone + ElementLife
         }
  
         // set nesting draw list id for incremental repaint scanning
-        let draw_list = &mut cx.draw_lists[self.draw_list_id.unwrap()];
-        draw_list.nesting_draw_list_id = nesting_draw_list_id;
+        cx.draw_lists[draw_list_id].nesting_draw_list_id = nesting_draw_list_id;
+
+        if cx.draw_lists[draw_list_id].draw_calls_len != 0 && !cx.draw_list_needs_redraw(draw_list_id){
+            // walk the turtle because we aren't drawing
+            let w = Bounds::Fix(cx.draw_lists[draw_list_id].rect.w);
+            let h = Bounds::Fix(cx.draw_lists[draw_list_id].rect.h);
+            cx.walk_turtle(w, h, layout.margin, None);
+            return Err(());
+        } 
+
+        // prepare drawlist for drawing
+        let draw_list = &mut cx.draw_lists[draw_list_id];
+
+        // update drawlist ids
+        draw_list.redraw_id = cx.redraw_id;
+        draw_list.draw_calls_len = 0;
+
         cx.draw_list_stack.push(cx.current_draw_list_id);
         cx.current_draw_list_id = draw_list_id;
+
+        // this is our vec of dirty areas
+        // lets figure out of any one of them is a child treenode of us
+        // how do we figure thatout?
 
         cx.begin_turtle(layout, Area::DrawList(DrawListArea{
             draw_list_id:draw_list_id,
             redraw_id:cx.redraw_id
         }));
 
-        false
+        Ok(())
         //cx.turtle.x = 0.0;
         //cx.turtle.y = 0.0;
     }
-
+    
     pub fn handle_scroll_bars(&mut self, cx:&mut Cx, event:&mut Event)->(ScrollBarEvent,ScrollBarEvent){
         let mut ret_h = ScrollBarEvent::None;
         let mut ret_v = ScrollBarEvent::None;
