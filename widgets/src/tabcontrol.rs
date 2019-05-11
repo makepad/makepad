@@ -88,13 +88,13 @@ impl TabControl{
                 TabEvent::DragMove(fe)=>{
                     self._dragging_tab = Some((fe.clone(), *id));
                     // flag our view as dirty, to trigger
-                    cx.redraw_area(self.tabs_view.get_view_area(cx));
+                    cx.redraw_area(self.drag_tab_view.get_view_area(cx));
 
                     tab_control_event = TabControlEvent::TabDragMove{fe:fe, tab_id:*id};
                 },
                 TabEvent::DragEnd(fe)=>{
                     self._dragging_tab = None;
-                    cx.redraw_area(self.tabs_view.get_view_area(cx));
+                    cx.redraw_area(self.drag_tab_view.get_view_area(cx));
 
                     tab_control_event = TabControlEvent::TabDragEnd{fe, tab_id:*id};
                 },
