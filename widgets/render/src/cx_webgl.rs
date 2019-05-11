@@ -78,7 +78,6 @@ impl Cx{
             }
         }
         let root_view = unsafe{&mut *(self.platform.root_view_ptr as *mut View<NoScrollBar>)};
-        
         let mut to_wasm = ToWasm::from(msg);
         self.platform.from_wasm = FromWasm::new();
         let mut is_animation_frame = false;
@@ -343,9 +342,9 @@ impl Cx{
         if self.redraw_areas.len() > 0 || self.playing_anim_areas.len()> 0 || self.paint_dirty || self.next_frame_callbacks.len() != 0{
             self.platform.from_wasm.request_animation_frame();
         }
-
         // mark the end of the message
         self.platform.from_wasm.end();
+
 
         //return wasm pointer to caller
         self.platform.from_wasm.wasm_ptr()

@@ -564,11 +564,11 @@ impl CodeEditor{
                     },
                     KeyCode::Tab=>{
                         if ke.modifiers.shift{
-                            //self.cursors.remove_tab(text_buffer);
+                            self.cursors.remove_tab(text_buffer, 4);
                         }
                         else{
                             self.cursors.insert_tab(text_buffer,"    ");
-                        }
+                        } 
                         true
                     },
                     _=>false
@@ -876,16 +876,20 @@ impl CodeEditor{
     }
 
     pub fn draw_tab_lines(&mut self, cx:&mut Cx, tabs:usize){
-        let walk = cx.get_turtle_walk();
+        let walk = cx.get_rel_turtle_walk();
         let tab_width = self._monospace_size.x*4.;
         if cx.visible_in_turtle(
             Rect{x:walk.x, y:walk.y, w:tab_width * tabs as f32, h:self._monospace_size.y}, 
             self._scroll_pos,
         ){
-            for _i in 0..tabs{
-                self.tab.draw_quad_walk(cx, Bounds::Fix(tab_width), Bounds::Fix(self._monospace_size.y), Margin::zero());
-            }   
-            cx.set_turtle_walk(walk);
+            for i in 0..tabs{
+                self.tab.draw_quad(cx, Rect{
+                    x: walk.x + (tab_width * i as f32),
+                    y: walk.y, 
+                    w: tab_width,
+                    h:self._monospace_size.y
+                });
+            }
         }
     }
 
@@ -908,13 +912,7 @@ impl CodeEditor{
         );
         self._line_largest_font = self.text.font_size;
         // add a bit of room to the right
-        cx.walk_turtle(
-            Bounds::Fix(self._monospace_size.x * 3.), 
-            Bounds::Fix(self._monospace_size.y), 
-            Margin::zero(),
-            None
-        );
-        cx.turtle_new_line();
+        cx.turtle_new_line_min_height(self._monospace_size.y);
         self._first_on_line = true;
         let mut draw_cursor = &mut self._draw_cursor;
         if !draw_cursor.first{ // we have some selection data to emit
@@ -973,15 +971,11 @@ impl CodeEditor{
                 is_whitespace:is_whitespace,
             });
             
-            let geom = cx.walk_turtle(
-                Bounds::Fix(self._monospace_size.x * (chunk.len() as f32)), 
-                Bounds::Fix(self._monospace_size.y), 
-                Margin::zero(),
-                None
-            );
-            
             // lets check if the geom is visible
-            if cx.visible_in_turtle(geom, self._scroll_pos){
+            if let Some(geom) = cx.walk_turtle_text(
+                self._monospace_size.x * (chunk.len() as f32), 
+                self._monospace_size.y,
+                self._scroll_pos){
 
                  if self._first_on_line{
                     self._first_on_line = false;

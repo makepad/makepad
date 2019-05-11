@@ -135,6 +135,51 @@ impl Cx{
 
         ret
     }
+    
+    pub fn walk_turtle_text(&mut self, w:f32, h:f32, scroll:Vec2)->Option<Rect>{
+        if let Some(turtle) = self.turtles.last_mut(){
+            let x = turtle.walk.x;
+            let y = turtle.walk.y;
+            // walk it normally
+            turtle.walk.x += w;
+
+            // keep track of biggest item in the line (include item margin bottom)
+            let biggest = h;
+            if biggest > turtle.biggest{
+                turtle.biggest = biggest;
+            }
+            // update x2 bounds (margin right is only added if its negative)
+            let bound_x2 = x + w;
+            if bound_x2 > turtle.bound_right_bottom.x{
+                turtle.bound_right_bottom.x = bound_x2;
+            }
+            // update y2 bounds (margin bottom is only added if its negative)
+            let bound_y2 = turtle.walk.y + h;
+            if bound_y2 > turtle.bound_right_bottom.y{
+                turtle.bound_right_bottom.y = bound_y2;
+            }
+
+            let vx = turtle.start.x + scroll.x;
+            let vy = turtle.start.y + scroll.y;
+            let vw = turtle.width;
+            let vh = turtle.height; 
+            
+            if x > vx + vw || x + w < vx || y > vy + vh || y + h < vy{
+                None
+            }
+            else{
+                Some(Rect{
+                    x:x,
+                    y:y,
+                    w:w,
+                    h:h
+                })
+            }
+        }
+        else{
+            None
+        }
+    }
 
     pub fn turtle_new_line(&mut self){
         if let Some(turtle) = self.turtles.last_mut(){
@@ -146,6 +191,14 @@ impl Cx{
                 },
                 _=>()
             }
+        }
+    }
+
+    pub fn turtle_new_line_min_height(&mut self, h:f32){
+        if let Some(turtle) = self.turtles.last_mut(){
+            turtle.walk.x = turtle.start.x + turtle.layout.padding.l;
+            turtle.walk.y += turtle.biggest.max(h);
+            turtle.biggest = 0.0;
         }
     }
 
@@ -318,8 +371,8 @@ impl Cx{
     pub fn visible_in_turtle(&self, geom:Rect, scroll:Vec2)->bool{
         if let Some(turtle) = self.turtles.last(){
             let view = Rect{
-                x:turtle.start.x + scroll.x,//- margin.l,
-                y:turtle.start.y + scroll.y,// - margin.t,
+                x:scroll.x,//- margin.l,
+                y:scroll.y,// - margin.t,
                 w:turtle.width,// + margin.l + margin.r,
                 h:turtle.height,// + margin.t + margin.b 
             };

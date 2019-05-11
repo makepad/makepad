@@ -12,7 +12,7 @@ crate-type = ["cdylib"]
 lto = true
 opt-level = 'z'
 panic = "abort"
-debug = false
+debug = true
 codegen-units = 1
 
 [dependencies]
