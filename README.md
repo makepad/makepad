@@ -12,12 +12,12 @@ However before we can make this awesome application, we need to build a UI stack
 This new UI stack has a new way of building UI called 'dual immediate mode' and uses multi-platform shaders for styling that are compiled from Rust source via a proc macro.
 Dual immediate mode has the code simplicity of an immediate mode API with the scalability/componentisation of a retained mode API.
 
-The aim of this toolkit is NOT to be the end all be all of UI kits as a standalone library for everyone. We are not a giant company with huge teams to maintain this project specifically. The goal is to build a livecoding IDE and designtools that don't suck or fall to pieces along the way of complexity.
+The aim of this toolkit is to be our stepping stone into building a livecoding IDE and designtools that don't suck or fall to pieces along the way. We do not aim to maintain this library as everyones new web-UI lib, since we don't have the time and resources to do so. We are just a tiny company.
 
 However since openness is fine and this may be useful to someone, the foundational technologies (UI/rendering/vector engine) will be MIT opensource, but provided AS IS.
 
-We are not accepting pull requests or feature requests or bug reports or documenting the code.
-You may use, reuse, build a giant opensource community on your fork, whatever you feel like. But our focus is code/designtools and these libraries are just a tool for us to get there. Also, since this is attempt #11 it may still entirely fail and will be dropped completely. As has been done before many times. Be warned!
+We are not accepting pull requests or feature requests or documenting the code for now. However bugreports of obviously overlooked things are welcome.
+You may use, reuse, fork, do whatever you feel like. But our focus is code/designtools and these libraries are just a tool for us to get there. As the technology looks like its working this time we will contemplate our open-source strategy and update this readme along the way.
 
 Platforms:
 
