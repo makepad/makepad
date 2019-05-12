@@ -1277,6 +1277,7 @@ impl CursorSet{
             };
 
             if offset >= token_chunks[i].offset && offset < token_chunks[i].offset + token_chunks[i].len{
+                let i = if token_chunks[i].token_type == TokenType::Newline && i > 0{i - 1}else{i};
                 let pair_token = token_chunks[i].pair_token;
                 if pair_token != i{
                     return Some(TokenChunk{
