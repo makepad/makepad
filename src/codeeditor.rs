@@ -865,22 +865,7 @@ impl CodeEditor{
            draw_cursors.emit_selection(true);
            draw_cursors.first = true;
         }
-
-        // we could modify our visibility window here by computing the DY we are going to have the moment we know it
-        if self._anim_folding.did_animate{
-            let (line, pos) = self._anim_folding.first_visible;
-            if line == self._line_geometry.len(){ // the line is going to be the next one
-                let walk = cx.get_rel_turtle_walk();
-                let dy =  pos - walk.y;
-                self._scroll_pos = Vec2{
-                    x:self._scroll_pos.x,
-                    y:self._scroll_pos.y - dy
-                };
-                // update the line pos
-                self._anim_folding.first_visible = (line, walk.y);
-           }
-        }
-        
+       
         // lets search for highlight_chunk in line_chunk and emit marker rects
         let hl_len = self._highlight_selection.len();
         if  hl_len != 0{
@@ -909,6 +894,21 @@ impl CodeEditor{
         self._line_chunk.truncate(0);
         self._line_geometry.push(line_geom);
         self._line_largest_font = self.text.font_size;
+
+        // we could modify our visibility window here by computing the DY we are going to have the moment we know it
+        if self._anim_folding.did_animate{
+            let (line, pos) = self._anim_folding.first_visible;
+            if line == self._line_geometry.len(){ // the line is going to be the next one
+                let walk = cx.get_rel_turtle_walk();
+                let dy =  pos - walk.y;
+                self._scroll_pos = Vec2{
+                    x:self._scroll_pos.x,
+                    y:self._scroll_pos.y - dy
+                };
+                // update the line pos
+                self._anim_folding.first_visible = (line, walk.y);
+           }
+        }
     }
 
     pub fn draw_tabs(&mut self, cx:&mut Cx, geom_y:f32, tabs:usize){
