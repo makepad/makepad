@@ -119,7 +119,21 @@ impl Quad{
         //println!("{:?} {}", area, cx.current_draw_list_id);
         let pos = cx.turtle_origin();
         let data = [
-            /*x,y,w,h*/pos.x+rect.x,pos.y+rect.y,rect.w,rect.h,
+            /*x,y,w,h*/rect.x + pos.x,rect.y +pos.y,rect.w,rect.h,
+            /*color*/self.color.r,self.color.g,self.color.b,self.color.a
+        ];
+        inst.push_slice(cx, &data);
+        inst
+    }
+
+    pub fn draw_quad_abs(&mut self, cx:&mut Cx, rect:Rect)->InstanceArea{
+        let inst = cx.new_aligned_instance(self.shader_id, 1).inst;
+        if inst.need_uniforms_now(cx){
+            inst.push_uniform_float(cx, if self.do_scroll{1.0}else{0.0});
+        }
+        //println!("{:?} {}", area, cx.current_draw_list_id);
+        let data = [
+            /*x,y,w,h*/rect.x,rect.y,rect.w,rect.h,
             /*color*/self.color.r,self.color.g,self.color.b,self.color.a
         ];
         inst.push_slice(cx, &data);

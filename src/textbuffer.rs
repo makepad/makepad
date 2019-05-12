@@ -1289,49 +1289,66 @@ impl CursorSet{
         self.fuse_adjacent(text_buffer)
     }
 
-    pub fn get_highlight(&self, text_buffer:&TextBuffer, token_chunks:&Vec<TokenChunk>)->Vec<char>{
+    pub fn get_token_highlight(&self, text_buffer:&TextBuffer, token_chunks:&Vec<TokenChunk>)->Vec<char>{
         let cursor = &self.set[self.last_cursor];
-        if cursor.head == cursor.tail{ // find the nearest token
-            if let Some(chunk) = CursorSet::get_nearest_token_chunk(cursor.head, token_chunks){
-                let add = match chunk.token_type{
-                    TokenType::Whitespace=>false,
-                    TokenType::Newline=>false,
-                    TokenType::Keyword=>false,
-                    TokenType::Flow=>false,
-                    TokenType::Identifier=>true,
-                    TokenType::Call=>true,
-                    TokenType::TypeName=>true,
+       
+        if let Some(chunk) = CursorSet::get_nearest_token_chunk(cursor.head, token_chunks){
+            let add = match chunk.token_type{
+                TokenType::Whitespace=>false,
+                TokenType::Newline=>false,
+                TokenType::Keyword=>false,
+                TokenType::Flow=>false,
+                TokenType::Identifier=>true,
+                TokenType::Call=>true,
+                TokenType::TypeName=>true,
 
-                    TokenType::String=>true,
-                    TokenType::Number=>true,
+                TokenType::String=>true,
+                TokenType::Number=>true,
 
-                    TokenType::Comment=>false,
+                TokenType::Comment=>false,
 
-                    TokenType::ParenOpen=>false,
-                    TokenType::ParenClose=>false,
-                    TokenType::Operator=>false,
-                    TokenType::Delimiter=>false,
-                };
-                if !add{
-                    vec![]
-                }
-                else{
-                    let start_pos = text_buffer.offset_to_text_pos(chunk.offset);
-                    text_buffer.copy_line(start_pos.row, start_pos.col, chunk.len)
-                }
-            }
-            else{
+                TokenType::ParenOpen=>false,
+                TokenType::ParenClose=>false,
+                TokenType::Operator=>false,
+                TokenType::Delimiter=>false,
+            };
+            if !add{
                 vec![]
             }
+            else{
+                let start_pos = text_buffer.offset_to_text_pos(chunk.offset);
+                text_buffer.copy_line(start_pos.row, start_pos.col, chunk.len)
+            }
         }
-        else{ // decompose start/head
+        else{
+            vec![]
+        }
+    }
+
+    pub fn get_selection_highlight(&self, text_buffer:&TextBuffer, token_chunks:&Vec<TokenChunk>)->Vec<char>{
+        let cursor = &self.set[self.last_cursor];
+        if cursor.head != cursor.tail{
             let (start,end) = cursor.order();
             let start_pos = text_buffer.offset_to_text_pos(start);
             let end_pos = text_buffer.offset_to_text_pos_next(end, start_pos, start);
             if start_pos.row != end_pos.row{
                 return vec![]
             };
-            text_buffer.copy_line(start_pos.row, start_pos.col, end_pos.col - start_pos.col)
+            let buf = text_buffer.copy_line(start_pos.row, start_pos.col, end_pos.col - start_pos.col);
+            let mut only_spaces = true;
+            for ch in &buf{
+                if *ch != ' '{
+                    only_spaces = false;
+                    break;
+                }
+            };
+            if only_spaces{
+                return vec![]
+            }
+            return buf
+        }
+        else{
+            return vec![]
         }
     }
 

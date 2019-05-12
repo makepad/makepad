@@ -36,7 +36,10 @@ pub struct CodeEditor{
     pub _select_scroll:Option<SelectScroll>,
     pub _grid_select_corner:Option<TextPos>,
     pub _line_chunk:Vec<(f32,char)>,
-    pub _highlight_chunk:Vec<char>,
+
+    pub _highlight_selection:Vec<char>,
+    pub _highlight_token:Vec<char>,
+
     pub _anim_font_size:f32,
     pub _line_largest_font:f32,
     pub _anim_folding:AnimFolding,
@@ -301,7 +304,8 @@ impl Style for CodeEditor{
             _draw_search:DrawCursors::new(),
             _paren_stack:Vec::new(),
             _line_chunk:Vec::new(),
-            _highlight_chunk:Vec::new(),
+            _highlight_selection:Vec::new(),
+            _highlight_token:Vec::new(),
             //_paren_list:Vec::new(),
             _last_tabs:0,
             _newline_tabs:0
@@ -778,7 +782,7 @@ impl CodeEditor{
             return Err(())
         }
         else{
-
+            let pos = cx.turtle_origin();
             let bg_inst = self.bg.draw_quad(cx, Rect{x:0.,y:0., w:cx.width_total(false), h:cx.height_total(false)});
             let bg_area = bg_inst.into_area();
             cx.update_area_refs(self._bg_area, bg_area);
@@ -842,7 +846,8 @@ impl CodeEditor{
     }
     
     fn update_highlight(&mut self, text_buffer:&TextBuffer){
-        self._highlight_chunk = self.cursors.get_highlight(text_buffer, &self._token_chunks);        
+        self._highlight_selection = self.cursors.get_selection_highlight(text_buffer, &self._token_chunks);        
+        self._highlight_token = self.cursors.get_token_highlight(text_buffer, &self._token_chunks);
     }
 
     fn new_line(&mut self, cx:&mut Cx){
@@ -877,12 +882,12 @@ impl CodeEditor{
         }
         
         // lets search for highlight_chunk in line_chunk and emit marker rects
-        let hl_len = self._highlight_chunk.len();
+        let hl_len = self._highlight_selection.len();
         if  hl_len != 0{
             for bp in 0..self._line_chunk.len().max(hl_len) - hl_len{
                 let mut found = true;
                 for ip in 0..hl_len{
-                    if self._highlight_chunk[ip] != self._line_chunk[bp+ip].1{
+                    if self._highlight_selection[ip] != self._line_chunk[bp+ip].1{
                         found = false;
                         break;
                     }
@@ -965,9 +970,24 @@ impl CodeEditor{
                     },
                     TokenType::Keyword=> self.colors.keyword,
                     TokenType::Flow=> self.colors.flow,
-                    TokenType::Identifier=> self.colors.identifier,
-                    TokenType::Call=> self.colors.call,
-                    TokenType::TypeName=> self.colors.type_name,
+                    TokenType::Identifier=>{
+                        if *chunk == self._highlight_token{
+                            self.highlight.draw_quad_abs(cx, geom);
+                        }
+                        self.colors.identifier
+                    }
+                    TokenType::Call=>{
+                        if *chunk == self._highlight_token{
+                            self.highlight.draw_quad_abs(cx, geom);                            
+                        }
+                        self.colors.call
+                    },
+                    TokenType::TypeName=>{
+                        if *chunk == self._highlight_token{
+                            self.highlight.draw_quad_abs(cx, geom);                            
+                        }
+                        self.colors.type_name
+                    },
                     TokenType::String=> self.colors.string,
                     TokenType::Number=> self.colors.number,
                     TokenType::Comment=> self.colors.comment,
@@ -989,13 +1009,16 @@ impl CodeEditor{
                 let draw_search = &mut self._draw_search;
                 let height = self._monospace_size.y;
                 let line_chunk = &mut self._line_chunk;
+                let highlight_selection = self._highlight_selection.len() > 0;
                 // we have a chunk, only if it matches our search results keep pushing it in
                 // otherwise reset the se
                 
                 // actually generate the GPU data for the text
                 self.text.add_text(cx, geom.x, geom.y, offset, self._text_inst.as_mut().unwrap(), &chunk, |ch, offset, x, w|{
                     // check if we need to skip cursors
-                    line_chunk.push((x,ch));
+                    if highlight_selection{
+                        line_chunk.push((x,ch));
+                    }
                     draw_search.mark_text(cursors, ch, offset, x, geom.y, w, height, last_cursor);
                     draw_cursors.mark_text(cursors, ch, offset, x, geom.y, w, height, last_cursor)
                 });
