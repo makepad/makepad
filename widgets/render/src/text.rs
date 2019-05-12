@@ -145,7 +145,7 @@ impl Text{
     }
 
     pub fn add_text<F>(&mut self, cx:&mut Cx, geom_x:f32, geom_y:f32, char_offset:usize, aligned:&mut AlignedInstance, chunk:&[char], mut char_callback:F)
-    where F: FnMut(usize, usize, f32, f32)->f32
+    where F: FnMut(char, usize, f32, f32)->f32
     {
         let mut geom_x = geom_x;
         let mut char_offset = char_offset;
@@ -162,7 +162,7 @@ impl Text{
             let slot = unicodes[unicode as usize];
             let glyph = &glyphs[slot];
             let w = glyph.advance * self.font_size;
-            let marker = char_callback(unicode, char_offset, geom_x, w);
+            let marker = char_callback(*wc, char_offset, geom_x, w);
             let data = [
                 /*font_geom*/ glyph.x1 ,glyph.y1 ,glyph.x2 ,glyph.y2,
                 /*font_tc*/ glyph.tx1 ,glyph.ty1 ,glyph.tx2 ,glyph.ty2,

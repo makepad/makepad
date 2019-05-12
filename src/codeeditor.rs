@@ -7,7 +7,10 @@ pub struct CodeEditor{
     pub bg_layout:Layout,
     pub bg: Quad,
     pub cursor: Quad,
+    pub selection: Quad,
     pub marker: Quad,
+    pub cursor_row: Quad,
+    pub paren_pair: Quad,
     pub tab:Quad,
     pub text: Text,
     pub cursors:CursorSet,
@@ -32,7 +35,8 @@ pub struct CodeEditor{
 
     pub _select_scroll:Option<SelectScroll>,
     pub _grid_select_corner:Option<TextPos>,
-
+    pub _line_chunk:Vec<(f32,char)>,
+    pub _highlight_chunk:Vec<char>,
     pub _anim_font_size:f32,
     pub _line_largest_font:f32,
     pub _anim_folding:AnimFolding,
@@ -40,7 +44,8 @@ pub struct CodeEditor{
     pub _monospace_size:Vec2,
     pub _instance_count:usize,
     pub _first_on_line:bool,
-    pub _draw_cursor:DrawCursor,
+    pub _draw_cursors:DrawCursors,
+    pub _draw_search:DrawCursors,
 
     pub _last_tabs:usize,
     pub _newline_tabs:usize,
@@ -182,8 +187,11 @@ impl ElementLife for CodeEditor{
 impl Style for CodeEditor{
     fn style(cx:&mut Cx)->Self{
         let tab_sh = Self::def_tab_shader(cx);
+        let selection_sh = Self::def_selection_shader(cx);
         let marker_sh = Self::def_marker_shader(cx);
         let cursor_sh = Self::def_cursor_shader(cx);
+        let cursor_row_sh = Self::def_cursor_row_shader(cx);
+        let paren_pair_sh = Self::def_paren_pair_shader(cx);
         let code_editor = Self{
             cursors:CursorSet::new(),
             colors:SyntaxColors{
@@ -224,6 +232,11 @@ impl Style for CodeEditor{
                 do_scroll:false,
                 ..Style::style(cx)
             },
+            selection:Quad{
+                color:color256(42,78,117),
+                shader_id:cx.add_shader(selection_sh, "Editor.selection"),
+                ..Style::style(cx)
+            }, 
             marker:Quad{
                 color:color256(42,78,117),
                 shader_id:cx.add_shader(marker_sh, "Editor.marker"),
@@ -232,6 +245,16 @@ impl Style for CodeEditor{
             cursor:Quad{
                 color:color256(136,136,136),
                 shader_id:cx.add_shader(cursor_sh, "Editor.cursor"),
+                ..Style::style(cx)
+            },
+            cursor_row:Quad{
+                color:color256(136,136,136),
+                shader_id:cx.add_shader(cursor_row_sh, "Editor.cursor_row"),
+                ..Style::style(cx)
+            },
+            paren_pair:Quad{
+                color:color256(136,136,136),
+                shader_id:cx.add_shader(paren_pair_sh, "Editor.paren_pair"),
                 ..Style::style(cx)
             },
             bg_layout:Layout{
@@ -274,8 +297,11 @@ impl Style for CodeEditor{
                 did_animate:false,
             },
             _select_scroll:None,
-            _draw_cursor:DrawCursor::new(),
+            _draw_cursors:DrawCursors::new(),
+            _draw_search:DrawCursors::new(),
             _paren_stack:Vec::new(),
+            _line_chunk:Vec::new(),
+            _highlight_chunk:Vec::new(),
             //_paren_list:Vec::new(),
             _last_tabs:0,
             _newline_tabs:0
@@ -316,7 +342,7 @@ impl CodeEditor{
         sh
     }
 
-    pub fn def_marker_shader(cx:&mut Cx)->Shader{
+    pub fn def_selection_shader(cx:&mut Cx)->Shader{
         let mut sh = Quad::def_quad_shader(cx);
         sh.add_ast(shader_ast!({
             let prev_x:float<Instance>;
@@ -348,6 +374,45 @@ impl CodeEditor{
                     df_box(next_x, h, next_w, h, border_radius);
                     df_gloop(gloopiness);
                 }
+                return df_fill(color);
+            }
+        }));
+        sh
+    }
+
+   pub fn def_paren_pair_shader(cx:&mut Cx)->Shader{
+        let mut sh = Quad::def_quad_shader(cx);
+        sh.add_ast(shader_ast!({
+            fn pixel()->vec4{
+                df_viewport(pos * vec2(w, h));
+                df_box(0.,0.,w,h,2);
+                return df_stroke(color, 0.8);
+            }
+        }));
+        sh
+    }
+
+   pub fn def_cursor_row_shader(cx:&mut Cx)->Shader{
+        let mut sh = Quad::def_quad_shader(cx);
+        sh.add_ast(shader_ast!({
+            fn pixel()->vec4{
+                df_viewport(pos * vec2(w, h));
+                df_move_to(0,1.);
+                df_line_to(w,1.);
+                df_move_to(0,h-1.);
+                df_line_to(w,h-1.);
+                return df_stroke(color, 0.8);
+            }
+        }));
+        sh
+    }
+
+   pub fn def_marker_shader(cx:&mut Cx)->Shader{
+        let mut sh = Quad::def_quad_shader(cx);
+        sh.add_ast(shader_ast!({
+            fn pixel()->vec4{
+                df_viewport(pos * vec2(w, h));
+                df_box(0.,0.,w,h,2);
                 return df_fill(color);
             }
         }));
@@ -386,7 +451,7 @@ impl CodeEditor{
                     1=>{
                     },
                     2=>{
-                        let range = self.get_nearest_token_chunk_range(offset);
+                        let range = CursorSet::get_nearest_token_chunk_range(offset, &self._token_chunks);
                         self.cursors.set_last_clamp_range(range);
                     },
                     3=>{
@@ -609,6 +674,7 @@ impl CodeEditor{
                     _=>false
                 };
                 if cursor_moved{
+                    self._highlight_chunk = self.cursors.get_highlight(text_buffer, &self._token_chunks);
                     self.scroll_last_cursor_visible(cx, text_buffer);
                     self.view.redraw_view_area(cx);
                 }
@@ -713,8 +779,12 @@ impl CodeEditor{
             let bg_area = bg_inst.into_area();
             cx.update_area_refs(self._bg_area, bg_area);
             self._bg_area = bg_area;
-            // makers before text
+
+            // makers before selection
             cx.new_instance_layer(self.marker.shader_id, 0);
+
+            // selection before text
+            cx.new_instance_layer(self.selection.shader_id, 0);
 
             self._text_inst = Some(self.text.begin_text(cx));
             self._instance_count = 0;
@@ -736,7 +806,7 @@ impl CodeEditor{
 
             self._monospace_size = self.text.get_monospace_size(cx, None);
             self._line_geometry.truncate(0);
-            self._draw_cursor = DrawCursor::new();
+            self._draw_cursors = DrawCursors::new();
             self._first_on_line = true;
             self._visible_lines = 0;
             self._newline_tabs = 0;
@@ -757,7 +827,7 @@ impl CodeEditor{
             self._paren_stack.truncate(0);
             self._anim_font_size = anim_folding.state.get_font_size(self.open_font_size, self.folded_font_size);
 
-            self._draw_cursor.set_next(&self.cursors.set);
+            self._draw_cursors.set_next(&self.cursors.set);
             // cursor after text
             cx.new_instance_layer(self.cursor.shader_id, 0);
 
@@ -780,10 +850,10 @@ impl CodeEditor{
         // add a bit of room to the right
         cx.turtle_new_line_min_height(self._monospace_size.y);
         self._first_on_line = true;
-        let mut draw_cursor = &mut self._draw_cursor;
-        if !draw_cursor.first{ // we have some selection data to emit
-           draw_cursor.emit_selection(true);
-           draw_cursor.first = true;
+        let mut draw_cursors = &mut self._draw_cursors;
+        if !draw_cursors.first{ // we have some selection data to emit
+           draw_cursors.emit_selection(true);
+           draw_cursors.first = true;
         }
 
         // we could modify our visibility window here by computing the DY we are going to have the moment we know it
@@ -800,7 +870,25 @@ impl CodeEditor{
                 self._anim_folding.first_visible = (line, walk.y);
            }
         }
+        
+        // lets search for highlight_chunk in line_chunk and emit marker rects
+        if self._highlight_chunk.len() != 0{
+            for bp in 0..self._line_chunk.len().max(self._highlight_chunk.len()) - self._highlight_chunk.len(){
+                let mut found = true;
+                for ip in 0..self._highlight_chunk.len(){
+                    if self._highlight_chunk[ip] != self._line_chunk[bp+ip].1{
+                        found = false;
+                        break;
+                    }
+                }
+                if found{ // output a rect
+                }
+            }
+        }
+        // search for all markings
+        self._line_chunk.truncate(0);
     }
+
     pub fn draw_tabs(&mut self, cx:&mut Cx, geom_y:f32, tabs:usize){
         let y_pos = geom_y - cx.turtle_origin().y;
         let tab_width = self._monospace_size.x*4.;
@@ -827,7 +915,6 @@ impl CodeEditor{
                 if self._paren_stack.len() == 2 && chunk[0] == '{'{ // one level down
                     self.set_font_size(cx, self._anim_font_size);
                 }
-                // check if 'a' cursor is either here, or after it
 
             }
 
@@ -881,35 +968,19 @@ impl CodeEditor{
                 // we need to find the next cursor point we need to do something at
                 let cursors = &self.cursors.set;
                 let last_cursor = self.cursors.last_cursor;
-                let draw_cursor = &mut self._draw_cursor;
+                let draw_cursors = &mut self._draw_cursors;
+                let draw_search = &mut self._draw_search;
                 let height = self._monospace_size.y;
-
+                let line_chunk = &mut self._line_chunk;
+                // we have a chunk, only if it matches our search results keep pushing it in
+                // otherwise reset the se
+                
                 // actually generate the GPU data for the text
-                self.text.add_text(cx, geom.x, geom.y, offset, self._text_inst.as_mut().unwrap(), &chunk, |unicode, offset, x, w|{
+                self.text.add_text(cx, geom.x, geom.y, offset, self._text_inst.as_mut().unwrap(), &chunk, |ch, offset, x, w|{
                     // check if we need to skip cursors
-                    while offset >= draw_cursor.end{ // jump to next cursor
-                        if offset == draw_cursor.end{ // process the last bit here
-                            draw_cursor.process_geom(last_cursor, offset, x, geom.y, w, height);
-                            draw_cursor.emit_selection(false);
-                        }
-                        if !draw_cursor.set_next(cursors){ // cant go further
-                            return 0.0
-                        }
-                    }
-                    // in current cursor range, update values
-                    if offset >= draw_cursor.start && offset <= draw_cursor.end{
-                        draw_cursor.process_geom(last_cursor, offset, x, geom.y, w, height);
-                        if offset == draw_cursor.end{
-                            draw_cursor.emit_selection(false);
-                        }
-                        if unicode == 10{
-                            return 0.0
-                        }
-                        else if unicode == 32 && offset < draw_cursor.end{
-                            return 2.0
-                        }
-                    }
-                    return 0.0
+                    line_chunk.push((x,ch));
+                    draw_search.mark_text(cursors, ch, offset, x, geom.y, w, height, last_cursor);
+                    draw_cursors.mark_text(cursors, ch, offset, x, geom.y, w, height, last_cursor)
                 });
             }
 
@@ -952,13 +1023,13 @@ impl CodeEditor{
         cx.new_instance_layer(self.cursor.shader_id, 0);
 
         // draw the cursors    
-        for rc in &self._draw_cursor.cursors{
+        for rc in &self._draw_cursors.cursors{
            self.cursor.draw_quad(cx, Rect{x:rc.x - pos.x, y:rc.y - pos.y, w:rc.w, h:rc.h});
         }
 
         self._text_area = self._text_inst.take().unwrap().inst.into_area();
         // draw selections
-        let sel = &mut self._draw_cursor.selections;
+        let sel = &mut self._draw_cursors.selections;
 
         // do silly selection animations
         if !self._anim_folding.state.is_animating(){
@@ -1017,7 +1088,7 @@ impl CodeEditor{
         for i in 0..sel.len(){
             let cur = &sel[i];
             
-            let mk_inst = self.marker.draw_quad(cx, Rect{x:cur.rc.x - pos.x, y:cur.rc.y - pos.y, w:cur.rc.w, h:cur.rc.h});
+            let mk_inst = self.selection.draw_quad(cx, Rect{x:cur.rc.x - pos.x, y:cur.rc.y - pos.y, w:cur.rc.w, h:cur.rc.h});
 
             // do we have a prev?
             if i > 0 && sel[i-1].index == cur.index{
@@ -1061,8 +1132,8 @@ impl CodeEditor{
 
         // place the IME
         if self._bg_area == cx.key_focus{
-            if let Some(last_cursor) = self._draw_cursor.last_cursor{
-                let rc = self._draw_cursor.cursors[last_cursor];
+            if let Some(last_cursor) = self._draw_cursors.last_cursor{
+                let rc = self._draw_cursors.cursors[last_cursor];
                 let scroll_pos = self.view.get_scroll_pos(cx);
                 cx.show_text_ime(rc.x - scroll_pos.x, rc.y - scroll_pos.y);
             }
@@ -1154,24 +1225,7 @@ impl CodeEditor{
         return (0,0.0)
     }
 
-    fn get_nearest_token_chunk_range(&self, offset:usize)->(usize, usize){
-        let chunks = &self._token_chunks;
-        for i in 0..chunks.len(){
-            if chunks[i].token_type == TokenType::Whitespace{
-                if offset == chunks[i].offset && i > 0{ // at the start of whitespace
-                    return (chunks[i-1].offset, chunks[i-1].len)
-                }
-                else if offset == chunks[i].offset + chunks[i].len && i < chunks.len()-1{
-                    return (chunks[i+1].offset, chunks[i+1].len)
-                }
-            };
-
-            if offset >= chunks[i].offset && offset < chunks[i].offset + chunks[i].len{
-                return (chunks[i].offset, chunks[i].len)
-            }
-        };
-        (0,0)
-    }
+  
 
 }
 
@@ -1183,7 +1237,7 @@ pub struct DrawSel{
 }
 
 #[derive(Clone)]
-pub struct DrawCursor{
+pub struct DrawCursors{
     pub head:usize,
     pub start:usize,
     pub end:usize,
@@ -1198,9 +1252,9 @@ pub struct DrawCursor{
     pub selections:Vec<DrawSel>
 }
 
-impl DrawCursor{
-    pub fn new()->DrawCursor{
-        DrawCursor{
+impl DrawCursors{
+    pub fn new()->DrawCursors{
+        DrawCursors{
             start:0,
             end:0,
             head:0,
@@ -1285,5 +1339,32 @@ impl DrawCursor{
         if y + h > self.right_bottom.y{
             self.right_bottom.y = y + h;
         }
+    }
+
+    pub fn mark_text(&mut self, cursors:&Vec<Cursor>, ch:char, offset:usize, x:f32, y:f32, w:f32, h:f32, last_cursor:usize)->f32{
+        // check if we need to skip cursors
+        while offset >= self.end{ // jump to next cursor
+            if offset == self.end{ // process the last bit here
+                self.process_geom(last_cursor, offset, x, y, w, h);
+                self.emit_selection(false);
+            }
+            if !self.set_next(cursors){ // cant go further
+                return 0.0
+            }
+        }
+        // in current cursor range, update values
+        if offset >= self.start && offset <= self.end{
+            self.process_geom(last_cursor, offset, x, y, w, h);
+            if offset == self.end{
+                self.emit_selection(false);
+            }
+            if ch == '\n'{
+                return 0.0
+            }
+            else if ch == ' ' && offset < self.end{
+                return 2.0
+            }
+        }
+        return 0.0
     }
 }

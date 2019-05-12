@@ -162,6 +162,9 @@ impl ScrollBar{
 
 
     fn move_towards_scroll_target(&mut self)->bool{
+        if self.smoothing.is_none(){
+            return false;
+        }
         if (self._scroll_target - self._scroll_pos).abs() < 0.01{
             return false
         }

@@ -229,6 +229,10 @@ impl TextBuffer{
         self.lines[row].splice(start_col..(start_col+len), rep_line).collect()
     }
 
+    fn copy_line(&self, row:usize, start_col:usize, len:usize)->Vec<char>{
+        self.lines[row][start_col..(start_col+len)].iter().cloned().collect()
+    }
+
     fn replace_range(&mut self, start:usize, len:usize, mut rep_lines:Vec<Vec<char>>)->Vec<Vec<char>>{
 
         let start_pos = self.offset_to_text_pos(start);
@@ -1118,16 +1122,18 @@ impl CursorSet{
             for row in start_pos.row..(end_pos.row+1){
                 let indents = text_buffer.calc_line_indent_depth(row);
                 let cut_len = num_spaces.min(indents);
-                total_cut_len += cut_len;
-                let op = text_buffer.replace_line_with_string(off, row, 0, num_spaces, "");
-                if cursor.head > off{
-                    cursor.head -= cut_len;
-                }
-                if cursor.tail > off{
-                    cursor.tail -= cut_len;
+                if cut_len > 0{
+                    total_cut_len += cut_len;
+                    let op = text_buffer.replace_line_with_string(off, row, 0, num_spaces, "");
+                    if cursor.head > off{
+                        cursor.head -= cut_len;
+                    }
+                    if cursor.tail > off{
+                        cursor.tail -= cut_len;
+                    }
+                    ops.push(op);
                 }
                 off += text_buffer.lines[row].len() + 1;
-                ops.push(op);
             }
             delta -= total_cut_len as isize;
             old_max = cursor.calc_max(text_buffer, old_max);
@@ -1208,8 +1214,7 @@ impl CursorSet{
         self.fuse_adjacent(text_buffer)
     }
 
-
-    fn get_nearest_token_chunk(left:bool, offset:usize, chunks:&Vec<TokenChunk>)->usize{
+    pub fn get_nearest_token_chunk(left:bool, offset:usize, chunks:&Vec<TokenChunk>)->usize{
         for i in 0..chunks.len(){
             // if we are in the chunk, decide what to do
             if offset >= chunks[i].offset && offset < chunks[i].offset + chunks[i].len{
@@ -1240,6 +1245,24 @@ impl CursorSet{
         0
     }
 
+   pub fn get_nearest_token_chunk_range(offset:usize, token_chunks:&Vec<TokenChunk>)->(usize, usize){
+        for i in 0..token_chunks.len(){
+            if token_chunks[i].token_type == TokenType::Whitespace{
+                if offset == token_chunks[i].offset && i > 0{ // at the start of whitespace
+                    return (token_chunks[i-1].offset, token_chunks[i-1].len)
+                }
+                else if offset == token_chunks[i].offset + token_chunks[i].len && i < token_chunks.len()-1{
+                    return (token_chunks[i+1].offset, token_chunks[i+1].len)
+                }
+            };
+
+            if offset >= token_chunks[i].offset && offset < token_chunks[i].offset + token_chunks[i].len{
+                return (token_chunks[i].offset, token_chunks[i].len)
+            }
+        };
+        (0,0)
+    }
+
     pub fn move_left_nearest_token(&mut self, only_head:bool, token_chunks:&Vec<TokenChunk>, text_buffer:&TextBuffer){
         for cursor in &mut self.set{
             // take the cursor head and find nearest token left
@@ -1259,6 +1282,25 @@ impl CursorSet{
         }
         self.fuse_adjacent(text_buffer)
     }
+
+    pub fn get_highlight(&self, text_buffer:&TextBuffer, token_chunks:&Vec<TokenChunk>)->Vec<char>{
+        let cursor = &self.set[self.last_cursor];
+        if cursor.head == cursor.tail{ // find the nearest token
+            let (start,len) = CursorSet::get_nearest_token_chunk_range(cursor.head, token_chunks);
+            let start_pos = text_buffer.offset_to_text_pos(start);
+            text_buffer.copy_line(start_pos.row, start_pos.col, len)
+        }
+        else{ // decompose start/head
+            let (start,end) = cursor.order();
+            let start_pos = text_buffer.offset_to_text_pos(start);
+            let end_pos = text_buffer.offset_to_text_pos_next(end, start_pos, start);
+            if start_pos.row != end_pos.row{
+                return vec![]
+            };
+            text_buffer.copy_line(start_pos.row, start_pos.col, end_pos.col - start_pos.col)
+        }
+    }
+
 
 }
 
