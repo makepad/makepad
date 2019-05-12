@@ -172,7 +172,7 @@ impl TabControl{
     }
 
     // data free APIs for the win!
-    pub fn begin_tabs(&mut self, cx:&mut Cx)->Result<(),()>{
+    pub fn begin_tabs(&mut self, cx:&mut Cx)->ViewRedraw{
         //cx.begin_turtle(&Layout{
         self.tabs_view.begin_view(cx, &Layout{
             width:Bounds::Fill,
@@ -220,7 +220,7 @@ impl TabControl{
         self.tabs_view.end_view(cx);
     }
 
-    pub fn begin_tab_page(&mut self, cx:&mut Cx)->Result<(),()>{
+    pub fn begin_tab_page(&mut self, cx:&mut Cx)->ViewRedraw{
         cx.turtle_new_line();
         self.page_view.begin_view(cx, &Layout{..Default::default()})
     }

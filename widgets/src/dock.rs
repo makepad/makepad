@@ -332,14 +332,14 @@ where TItem: Clone
                         stack_top.uid = self.walk_uid;
                         self.walk_uid += 1;
                         let tab_control = self.tab_controls.get_draw(cx, stack_top.uid, |_cx,tmpl| tmpl.clone());
-                        if let Ok(()) = tab_control.begin_tabs(cx){
+                        if let Ok(_) = tab_control.begin_tabs(cx){
                             for (id,tab) in tabs.iter().enumerate(){
                                 tab_control.draw_tab(cx, &tab.title, *current == id, tab.closeable);
                             }
                             tab_control.end_tabs(cx);
                         }
 
-                        if let Ok(()) = tab_control.begin_tab_page(cx){
+                        if let Ok(_) = tab_control.begin_tab_page(cx){
                             if *current < tabs.len(){
                                 return Some(unsafe{mem::transmute(&mut tabs[*current].item)});
                             }

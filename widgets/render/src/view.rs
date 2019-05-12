@@ -69,11 +69,13 @@ impl ScrollBarLike<NoScrollBar> for NoScrollBar{
     fn get_scroll_target(&mut self)->f32{0.}
 }
 
+pub type ViewRedraw = Result<(),()>;
+
 impl<TScrollBar> View<TScrollBar>
 where TScrollBar: ScrollBarLike<TScrollBar> + Clone + ElementLife
 {
 
-    pub fn begin_view(&mut self, cx:&mut Cx, layout:&Layout)->Result<(),()>{
+    pub fn begin_view(&mut self, cx:&mut Cx, layout:&Layout)->ViewRedraw{
 
         if !cx.is_in_redraw_cycle{
             panic!("calling begin_view outside of redraw cycle is not possible!");

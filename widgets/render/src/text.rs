@@ -75,6 +75,7 @@ impl Text{
             let clipped:vec2<Varying>;
             let rect:vec4<Varying>;
             let brightness:float<Uniform>;
+
             fn pixel()->vec4{
                 if marker>0.5{
                     df_viewport(clipped);

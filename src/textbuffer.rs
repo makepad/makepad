@@ -1,4 +1,4 @@
-use widgets::*;
+//use widgets::*;
 
 #[derive(Clone, Default)]
 pub struct TextBuffer{
@@ -1055,6 +1055,7 @@ impl CursorSet{
         let mut old_max = (TextPos{row:0,col:0},0);
         for cursor in &mut self.set{
             let (start, end) = cursor.delta(delta);
+            /*
             if start == end{ // just insert 4 spaces
                 // check our indent depth
                 let op = text_buffer.replace_lines_with_string(start, end-start, tab_str);
@@ -1070,24 +1071,27 @@ impl CursorSet{
                     delta += cursor.collapse(start, end, tab_str_chars);
                 }
                 else{ // tab indent the lines
-                    let mut off = start - start_pos.col;
-                    for row in start_pos.row..(end_pos.row+1){
-                        // ok so how do we compute the actual op offset of this line
-                        let op = text_buffer.replace_line_with_string(off, row, 0, 0, tab_str);
-                        off += text_buffer.lines[row].len() + 1;
-                        ops.push(op);
-                    }
-                    // figure out which way the cursor is
-                    if cursor.head > cursor.tail{
-                        cursor.tail += tab_str_chars;
-                        cursor.head += (end_pos.row - start_pos.row + 1) * tab_str_chars;
-                    }
-                    else{
-                        cursor.tail += (end_pos.row - start_pos.row + 1) * tab_str_chars;
-                        cursor.head += tab_str_chars;
-                    }
-                }
+            */
+            let start_pos = text_buffer.offset_to_text_pos_next(start, old_max.0, old_max.1);
+            let end_pos = text_buffer.offset_to_text_pos_next(end, start_pos, start);
+            let mut off = start - start_pos.col;
+            for row in start_pos.row..(end_pos.row+1){
+                // ok so how do we compute the actual op offset of this line
+                let op = text_buffer.replace_line_with_string(off, row, 0, 0, tab_str);
+                off += text_buffer.lines[row].len() + 1;
+                ops.push(op);
             }
+            // figure out which way the cursor is
+            if cursor.head > cursor.tail{
+                cursor.tail += tab_str_chars;
+                cursor.head += (end_pos.row - start_pos.row + 1) * tab_str_chars;
+            }
+            else{
+                cursor.tail += (end_pos.row - start_pos.row + 1) * tab_str_chars;
+                cursor.head += tab_str_chars;
+            }
+            //    }
+            //}
             old_max = cursor.calc_max(text_buffer, old_max);
         }
         text_buffer.redo_stack.truncate(0);
@@ -1098,9 +1102,8 @@ impl CursorSet{
         })
     }
 
+    pub fn remove_tab(&mut self, text_buffer:&mut TextBuffer, num_spaces:usize){
 
-    pub fn remove_tab(&mut self, _text_buffer:&mut TextBuffer, _num_spaces:usize){
-/*
         let mut delta:isize = 0; // rolling delta to displace cursors 
         let mut ops = Vec::new();
         let cursors_clone = self.clone();
@@ -1111,28 +1114,22 @@ impl CursorSet{
             let end_pos = text_buffer.offset_to_text_pos_next(end, start_pos, start);
             let mut off = start - start_pos.col;
             let mut total_cut_len = 0;
+
             for row in start_pos.row..(end_pos.row+1){
                 let indents = text_buffer.calc_line_indent_depth(row);
                 let cut_len = num_spaces.min(indents);
                 total_cut_len += cut_len;
                 let op = text_buffer.replace_line_with_string(off, row, 0, num_spaces, "");
+                if cursor.head > off{
+                    cursor.head -= cut_len;
+                }
+                if cursor.tail > off{
+                    cursor.tail -= cut_len;
+                }
                 off += text_buffer.lines[row].len() + 1;
                 ops.push(op);
             }
-            // figure out which way the cursor is
-            if cursor.head == cursor.tail{
-                cursor.head -= total_cut_len;
-                cursor.tail = cursor.head;
-            }
-            else if cursor.head > cursor.tail{
-                cursor.tail += tab_str_chars;
-                cursor.head += (end_pos.row - start_pos.row + 1) * tab_str_chars;
-            }
-            else{
-                cursor.tail += (end_pos.row - start_pos.row + 1) * tab_str_chars;
-                cursor.head += tab_str_chars;
-            }
-
+            delta -= total_cut_len as isize;
             old_max = cursor.calc_max(text_buffer, old_max);
         }
         text_buffer.redo_stack.truncate(0);
@@ -1141,7 +1138,7 @@ impl CursorSet{
             grouping:TextUndoGrouping::Tab,
             cursors:cursors_clone
         })
-        */
+        
     }
 
 
@@ -1224,7 +1221,7 @@ impl CursorSet{
                         return 0
                     }
                     if offset == chunks[i].offset{
-                        if chunks[i-1].is_whitespace && i>1{
+                        if chunks[i-1].token_type == TokenType::Whitespace && i>1{
                             return chunks[i-2].offset// + chunks[i-2].len
                         }
                         return chunks[i-1].offset
@@ -1233,7 +1230,7 @@ impl CursorSet{
                 }
                 else{ // jump right
 
-                    if i < chunks.len() - 1 && chunks[i].is_whitespace{
+                    if i < chunks.len() - 1 && chunks[i].token_type == TokenType::Whitespace{
                         return chunks[i+1].offset + chunks[i+1].len;
                     }
                     return chunks[i].offset + chunks[i].len
@@ -1265,12 +1262,30 @@ impl CursorSet{
 
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone, PartialEq)]
+pub enum TokenType{
+    Whitespace,
+    Newline,
+    Keyword,
+    Flow,
+    Identifier,
+    Call,
+    TypeName,
+
+    String,
+    Number,
+
+    Comment,
+
+    ParenOpen,
+    ParenClose,
+    Operator,
+    Delimiter,
+}
+
+#[derive(Clone)]
 pub struct TokenChunk{
-    pub is_newline:bool,
+    pub token_type:TokenType,
     pub offset:usize,
-   // pub chunk:Vec<char>,
     pub len:usize,
-   // pub color:Color,
-    pub is_whitespace:bool
 }

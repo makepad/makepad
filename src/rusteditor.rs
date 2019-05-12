@@ -6,18 +6,6 @@ use crate::codeeditor::*;
 pub struct RustEditor{
     pub path:String,
     pub code_editor:CodeEditor,
-    pub col_whitespace:Color,
-    pub col_keyword:Color,
-    pub col_flow_keyword:Color,
-    pub col_identifier:Color,
-    pub col_operator:Color,
-    pub col_function:Color,
-    pub col_number:Color,
-    pub col_paren:Color,
-    pub col_comment:Color,
-    pub col_string:Color,
-    pub col_delim:Color,
-    pub col_type:Color
 }
 
 impl ElementLife for RustEditor{
@@ -32,19 +20,6 @@ impl Style for RustEditor{
             code_editor:CodeEditor{
                 ..Style::style(cx)
             },
-            // syntax highlighting colors
-            col_whitespace:color256(110,110,110),
-            col_keyword:color256(91,155,211),
-            col_flow_keyword:color256(196,133,190),
-            col_identifier:color256(212,212,212),
-            col_operator:color256(212,212,212),
-            col_function:color256(220,220,174),
-            col_type:color256(86,201,177),
-            col_number:color256(182,206,170),
-            col_comment:color256(99,141,84),
-            col_paren:color256(212,212,212),
-            col_string:color256(204,145,123),
-            col_delim:color256(212,212,212)
         };
         //tab.animator.default = tab.anim_default(cx);
         rust_editor
@@ -73,105 +48,65 @@ impl RustEditor{
         }
         
         let mut state = TokenizerState::new(text_buffer);
-        
-        let mut after_newline = true; 
-        let mut last_tabs = 0;
-        let mut newline_tabs = 0;
+       
         let mut looping = true;
         let mut chunk = Vec::new();
         while looping{
-            let mut do_newline = false;
-            let mut is_whitespace = false;
-            let mut pop_paren = None;
-            let color;
+            let token_type;
             state.advance_with_cur();
 
             match state.cur{
                 '\0'=>{ // eof insert a terminating space and end
+                    token_type = TokenType::Whitespace;
                     chunk.push(' ');
-                    color = self.col_whitespace;
                     looping = false;
                 },
                 '\n'=>{
-                    color = self.col_whitespace;
-                    // do a newline
-                    if after_newline{
-                        self.code_editor.draw_tab_lines(cx, last_tabs);
-                    }
-                    else {
-                        last_tabs = newline_tabs;
-                    }
+                    token_type = TokenType::Newline;
                     chunk.push('\n');
-                    do_newline = true;
-                    after_newline = true;
-                    is_whitespace = true;
-                    newline_tabs = 0;
-                    // spool up the next char
                 },
                 ' ' | '\t'=>{ // eat as many spaces as possible
-                    color = self.col_whitespace;
-                    if after_newline{ // consume spaces in groups of 4
-                        chunk.push(state.cur);
-                        
-                        //state.eat_spaces(&mut chunk);
-                        let mut counter = 1;
-                        while state.next == ' '{
-                            chunk.push(' ');
-                            counter += 1;
-                            state.advance();
-                        }
-                        let tabs = counter >> 2;
-                        last_tabs = tabs;
-                        newline_tabs = tabs;
-                        self.code_editor.draw_tab_lines(cx, tabs);
+                    token_type = TokenType::Whitespace;
+                    chunk.push(state.cur);
+                    while state.next == ' '{
+                        chunk.push(state.next);
+                        state.advance();
                     }
-                    else{
-                        chunk.push(state.cur);
-                        while state.next == ' '{
-                            chunk.push(state.next);
-                            state.advance();
-                        }
-                    }
-                    after_newline = false;
-                    is_whitespace = true;
                 },
                 '/'=>{ // parse comment
-                    after_newline = false;
                     chunk.push(state.cur);
                     if state.next == '/'{
                         while state.next != '\n' && state.next != '\0'{
                             chunk.push(state.next);
                             state.advance();
                         }
-                        color = self.col_comment;
+                        token_type = TokenType::Comment;
                     }
                     else{
                         if state.next == '='{
                             chunk.push(state.next);
                             state.advance();
                         }
-                        color = self.col_operator;
+                        token_type = TokenType::Operator;
                     }
                 },
                 '\''=>{ // parse char literal or lifetime annotation
-
-                    after_newline = false;
                     chunk.push(state.cur);
 
                     if Self::parse_rust_escape_char(&mut state, &mut chunk){ // escape char or unicode
                         if state.next == '\''{ // parsed to closing '
                             chunk.push(state.next);
                             state.advance();
-                            color = self.col_string;
+                            token_type = TokenType::String;
                         }
                         else{
-                            color = self.col_comment;
+                            token_type = TokenType::Comment;
                         }
                     }
                     else{ // parse a single char or lifetime
                         let offset = state.offset;
                         if Self::parse_rust_ident_tail(&mut state, &mut chunk) && ((state.offset - offset) > 1 || state.next != '\''){
-                            color = self.col_keyword;
+                            token_type = TokenType::Keyword;
                         }
                         else if state.next != '\n'{
                             if (state.offset - offset) == 0{ // not an identifier char
@@ -182,16 +117,14 @@ impl RustEditor{
                                 chunk.push(state.next);
                                 state.advance();
                             }
-                            color = self.col_string;
+                            token_type = TokenType::String;
                         }
                         else{
-                            color = self.col_string;                            
+                            token_type = TokenType::String;
                         }
                     }
                 },
                 '"'=>{ // parse string
-                
-                    after_newline = false;
                     chunk.push(state.cur);
                     state.prev = '\0';
                     while state.next != '\0' && state.next!='\n' && (state.next != '"' || state.prev != '\\' && state.cur == '\\' && state.next == '"'){
@@ -200,115 +133,77 @@ impl RustEditor{
                     };
                     chunk.push(state.next);
                     state.advance();
-                    color = self.col_string;
+                    token_type = TokenType::String;
                    
                 },
                 '0'...'9'=>{ // try to parse numbers
-                    
-                    after_newline = false;
-                    color = self.col_number;
+                    token_type = TokenType::Number;
                     chunk.push(state.cur);
                     Self::parse_rust_number_tail(&mut state, &mut chunk);
                     
                 },
                 ':'=>{
-                    after_newline = false;
                     chunk.push(state.cur);
                     if state.next == ':'{
                         chunk.push(state.next);
                         state.advance();
                     }
-                    color = self.col_operator;
+                    token_type = TokenType::Operator;
                 },
                 '*'=>{
-                    after_newline = false;
                     chunk.push(state.cur);
                     if state.next == '='{
                         chunk.push(state.next);
                         state.advance();
                     }                    
-                    color = self.col_operator;
+                    token_type = TokenType::Operator;
                 },
                 '+'=>{
-                    after_newline = false;
                     chunk.push(state.cur);
                     if state.next == '='{
                         chunk.push(state.next);
                         state.advance();
                     }
-                    color = self.col_operator;
+                    token_type = TokenType::Operator;
                 },
                 '-'=>{
-                    after_newline = false;
                     chunk.push(state.cur);
                     if state.next == '>' || state.next == '='{
                         chunk.push(state.next);
                         state.advance();
                     }
-                    color = self.col_operator;
+                    token_type = TokenType::Operator;
                 },
                 '='=>{
-                    after_newline = false;
                     chunk.push(state.cur);
                     if state.next == '>' {
                         chunk.push(state.next);
                         state.advance();
                     }
-                    color = self.col_operator;
+                    token_type = TokenType::Operator;
                 },
                 '.'=>{
-                    after_newline = false;
                     chunk.push(state.cur);
                     if state.next == '.' {
                         chunk.push(state.next);
                         state.advance();
                     }
-                    color = self.col_operator;
+                    token_type = TokenType::Operator;
                 },
-                '('=>{
-                    after_newline = false;
+                '(' | '{' | '['=>{
                     chunk.push(state.cur);
-                    color = self.col_paren;
-                    self.code_editor.push_paren_stack(cx, ParenType::Round);
+                    token_type = TokenType::ParenOpen;
                 },
-                ')'=>{
-                    after_newline = false;
+                ')' | '}' | ']'=>{
                     chunk.push(state.cur);
-                    color = self.col_paren;
-                    pop_paren = Some(ParenType::Round);
-                },
-                '{'=>{
-                    after_newline = false;
-                    chunk.push(state.cur);
-                    color = self.col_paren;
-                    self.code_editor.push_paren_stack(cx, ParenType::Curly);
-                },
-                '}'=>{
-                    after_newline = false;
-                    chunk.push(state.cur);
-                    color = self.col_paren;
-                    pop_paren = Some(ParenType::Curly);
-                },
-                '['=>{
-                    after_newline = false;
-                    chunk.push(state.cur);
-                    color = self.col_paren;
-                    self.code_editor.push_paren_stack(cx, ParenType::Square);
-                },
-                ']'=>{
-                    after_newline = false;
-                    chunk.push(state.cur);
-                    color = self.col_paren;
-                    pop_paren = Some(ParenType::Square);
+                    token_type = TokenType::ParenClose;
                 },
                 '_'=>{
-                    after_newline = false;
                     chunk.push(state.cur);
                     Self::parse_rust_ident_tail(&mut state, &mut chunk);
-                    color = self.col_identifier;
+                    token_type = TokenType::Identifier;
                 },
                 'a'...'z'=>{ // try to parse keywords or identifiers
-                    after_newline = false;
                     chunk.push(state.cur);
                     let mut keyword_type = Self::parse_rust_lc_keyword(&mut state, &mut chunk);
 
@@ -317,23 +212,22 @@ impl RustEditor{
                     }
                     match keyword_type{
                         KeywordType::Normal=>{
-                            color = self.col_keyword;
+                            token_type = TokenType::Keyword;
                         },
                         KeywordType::Flow=>{
-                            color = self.col_flow_keyword;
+                            token_type = TokenType::Flow;
                         },
                         KeywordType::None=>{
                             if state.next == '(' || state.next == '!'{
-                                color = self.col_function;
+                                token_type = TokenType::Call;
                             }
                             else{
-                                color = self.col_identifier;
+                                token_type = TokenType::Identifier;
                             }
                         }
                     }
                 },
                 'A'...'Z'=>{
-                    after_newline = false;
                     chunk.push(state.cur);
                     let mut is_keyword = false;
                     if state.cur == 'S'{
@@ -345,26 +239,20 @@ impl RustEditor{
                         is_keyword = false;
                     }
                     if is_keyword{
-                        color = self.col_keyword;
+                        token_type = TokenType::Keyword;
                     }
                     else{
-                        color = self.col_type;
+                        token_type = TokenType::TypeName;
                     }
                 },
                 _=>{
-                    
-                    after_newline = false;
                     chunk.push(state.cur);
-                    // unknown type
-                    color = self.col_identifier;
+                    token_type = TokenType::Identifier;
                 }
             }
             let off = state.offset - chunk.len() - 1;
-            self.code_editor.draw_text(cx, &chunk, off, is_whitespace, do_newline, color);
+            self.code_editor.draw_chunk(cx, &chunk, off, token_type);
             chunk.truncate(0);
-            if let Some(paren_type) = pop_paren{
-                self.code_editor.pop_paren_stack(cx, paren_type);
-            }
         }
         
         self.code_editor.end_code_editor(cx, text_buffer);

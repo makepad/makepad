@@ -14,6 +14,8 @@ pub struct CodeEditor{
     
     pub open_font_size:f32,
     pub folded_font_size:f32,
+    
+    pub colors:SyntaxColors,
 
     pub _hit_state:HitState,
     pub _bg_area:Area,
@@ -38,7 +40,10 @@ pub struct CodeEditor{
     pub _monospace_size:Vec2,
     pub _instance_count:usize,
     pub _first_on_line:bool,
-    pub _draw_cursor:DrawCursor
+    pub _draw_cursor:DrawCursor,
+
+    pub _last_tabs:usize,
+    pub _newline_tabs:usize,
 }
 
 #[derive(Clone)]
@@ -150,14 +155,23 @@ pub struct SelectScroll{
 pub struct ParenItem{
     start:usize,
     end:usize,
-    paren_type:ParenType
+    exp_paren:char
 }
 
-#[derive(Clone, PartialEq)]
-pub enum ParenType{
-    Round,
-    Square,
-    Curly
+#[derive(Clone)]
+pub struct SyntaxColors{
+    whitespace:Color,
+    keyword:Color,
+    flow:Color,
+    identifier:Color,
+    call:Color,
+    type_name:Color,
+    string:Color,
+    number:Color,
+    comment:Color,
+    paren:Color,
+    operator:Color,
+    delimiter:Color,
 }
 
 impl ElementLife for CodeEditor{
@@ -172,6 +186,24 @@ impl Style for CodeEditor{
         let cursor_sh = Self::def_cursor_shader(cx);
         let code_editor = Self{
             cursors:CursorSet::new(),
+            colors:SyntaxColors{
+                whitespace:color256(110,110,110),
+
+                keyword:color256(91,155,211),
+                flow:color256(196,133,190),
+                identifier:color256(212,212,212),
+                call:color256(220,220,174),
+                type_name:color256(86,201,177),
+
+                string:color256(204,145,123),
+                number:color256(182,206,170),
+
+                comment:color256(99,141,84),
+
+                paren:color256(212,212,212),
+                operator:color256(212,212,212),
+                delimiter:color256(212,212,212)
+            },
             tab:Quad{
                 color:color("#5"),
                 shader_id:cx.add_shader(tab_sh, "Editor.tab"),
@@ -219,6 +251,7 @@ impl Style for CodeEditor{
             },
             open_font_size:11.0,
             folded_font_size:0.5,
+
             _hit_state:HitState{no_scrolling:true, ..Default::default()},
             _monospace_size:Vec2::zero(),
             _last_finger_move:None,
@@ -244,6 +277,8 @@ impl Style for CodeEditor{
             _draw_cursor:DrawCursor::new(),
             _paren_stack:Vec::new(),
             _paren_list:Vec::new(),
+            _last_tabs:0,
+            _newline_tabs:0
         };
         //tab.animator.default = tab.anim_default(cx);
         code_editor
@@ -657,13 +692,9 @@ impl CodeEditor{
     }
 
     pub fn begin_code_editor(&mut self, cx:&mut Cx, text_buffer:&TextBuffer)->Result<(),()>{
-        // pull the bg color from our animation system, uses 'default' value otherwise
-        // self.bg.color = self.animator.last_vec4("bg.color");
-        // push the 2 vars we added to bg shader
-        //self.text.color = self.animator.last_vec4("text.color");
+
         self.view.begin_view(cx, &Layout{..Default::default()})?;
-        //   return false
-        //}
+
         if text_buffer.load_id != 0{
             let bg_inst = self.bg.begin_quad(cx, &Layout{
                 align:Align::left_top(),
@@ -727,22 +758,7 @@ impl CodeEditor{
             self._draw_cursor.set_next(&self.cursors.set);
             // cursor after text
             cx.new_instance_layer(self.cursor.shader_id, 0);
-            /*
-            if !self._token_chunks_dirty{
-                for i in 0 .. self._token_chunks.len(){
-                    let tc = self._token_chunks[i].clone();
-                    self.draw_text(
-                        cx, 
-                        tc.chunk, 
-                        tc.offset,
-                        tc.is_whitespace,
-                        tc.is_newline,
-                        tc.color
-                    );
-                }
-                self.end_code_editor(cx, text_buffer);
-                return false;
-            }*/
+
             self._token_chunks.truncate(0);
 
             return Ok(())
@@ -890,24 +906,6 @@ impl CodeEditor{
         }
     }
 
-    pub fn draw_tab_lines(&mut self, cx:&mut Cx, tabs:usize){
-        let walk = cx.get_rel_turtle_walk();
-        let tab_width = self._monospace_size.x*4.;
-        if cx.visible_in_turtle(
-            Rect{x:walk.x, y:walk.y, w:tab_width * tabs as f32, h:self._monospace_size.y}, 
-            self._scroll_pos,
-        ){
-            for i in 0..tabs{
-                self.tab.draw_quad(cx, Rect{
-                    x: walk.x + (tab_width * i as f32),
-                    y: walk.y, 
-                    w: tab_width,
-                    h:self._monospace_size.y
-                });
-            }
-        }
-    }
-
     // set it once per line otherwise the LineGeom stuff isn't really working out.
     pub fn set_font_size(&mut self, cx:&Cx, font_size:f32){
         self.text.font_size = font_size;
@@ -917,7 +915,7 @@ impl CodeEditor{
         self._monospace_size = self.text.get_monospace_size(cx, None);
     }
 
-    pub fn new_line(&mut self, cx:&mut Cx){
+    fn new_line(&mut self, cx:&mut Cx){
         // line geometry is used for scrolling look up of cursors
         self._line_geometry.push(
             LineGeom{
@@ -926,6 +924,7 @@ impl CodeEditor{
             }
         );
         self._line_largest_font = self.text.font_size;
+
         // add a bit of room to the right
         cx.turtle_new_line_min_height(self._monospace_size.y);
         self._first_on_line = true;
@@ -949,48 +948,83 @@ impl CodeEditor{
                 self._anim_folding.first_visible = (line, walk.y);
            }
         }
-
-
     }
 
-    pub fn push_paren_stack(&mut self, cx:&Cx, paren_type:ParenType){
-        self._paren_stack.push(ParenItem{
-            start:self._token_chunks.len(),
-            end:0,
-            paren_type:paren_type.clone()
-        });
-        if self._paren_stack.len() == 2 && paren_type == ParenType::Curly{ // one level down
-            self.set_font_size(cx, self._anim_font_size);
-        }
-    }
-
-    pub fn pop_paren_stack(&mut self, cx:&Cx, paren_type:ParenType){
-        if self._paren_stack.len()>0{
-            let mut paren_item = self._paren_stack.pop().unwrap();
-            if paren_item.paren_type == paren_type{
-                paren_item.end = self._token_chunks.len();
-                self._paren_list.push(paren_item);
-            }
-        }
-        if self._paren_stack.len() == 1{ // root level
-            self.set_font_size(cx, self.open_font_size);
-        }
-    }
-
-    pub fn draw_text(&mut self, cx:&mut Cx, chunk:&Vec<char>, offset:usize, is_whitespace:bool, is_newline:bool, color:Color){
+    // executed before drawing the next paren
+    pub fn draw_chunk(&mut self, cx:&mut Cx, chunk:&Vec<char>, offset:usize, token_type:TokenType){
         if chunk.len()>0{
+            
+            // maintain paren stack
+            if token_type == TokenType::ParenOpen{
+                self._paren_stack.push(ParenItem{
+                    start:self._token_chunks.len(),
+                    end:0,
+                    exp_paren:')'
+                });
+                if self._paren_stack.len() == 2 && chunk[0] == '{'{ // one level down
+                    self.set_font_size(cx, self._anim_font_size);
+                }
+            }
+
             // lets check if the geom is visible
             if let Some(geom) = cx.walk_turtle_text(
                 self._monospace_size.x * (chunk.len() as f32), 
                 self._monospace_size.y,
                 self._scroll_pos){
-
-                 if self._first_on_line{
+                
+                // do tab indent line drawing
+                if self._first_on_line{
                     self._first_on_line = false;
                     self._visible_lines += 1;
+
+                    let tabs_to_draw = if token_type == TokenType::Newline{
+                        self._newline_tabs = 0;
+                        self._last_tabs
+                    }
+                    else if token_type == TokenType::Whitespace && chunk[0] == ' '{
+                        // draw tab lines
+                        let tabs = chunk.len()>>2;
+                        self._last_tabs = tabs;
+                        self._newline_tabs = tabs;
+                        tabs
+                    }
+                    else{0};
+                    if tabs_to_draw > 0{
+                        let y_pos = geom.y - cx.turtle_origin().y;
+                        let tab_width = self._monospace_size.x*4.;
+                        for i in 0..tabs_to_draw{
+                            self.tab.draw_quad(cx, Rect{
+                                x: (tab_width * i as f32),
+                                y: y_pos, 
+                                w: tab_width,
+                                h:self._monospace_size.y
+                            });
+                        }
+                    }
+                }
+                else if token_type == TokenType::Newline{
+                    self._last_tabs = self._newline_tabs;
+                    self._newline_tabs = 0;
                 }
 
-                self.text.color = color;
+                // determine chunk color
+                self.text.color = match token_type{
+                    TokenType::Whitespace => self.colors.whitespace,
+                    TokenType::Newline=> self.colors.whitespace,
+                    TokenType::Keyword=> self.colors.keyword,
+                    TokenType::Flow=> self.colors.flow,
+                    TokenType::Identifier=> self.colors.identifier,
+                    TokenType::Call=> self.colors.call,
+                    TokenType::TypeName=> self.colors.type_name,
+                    TokenType::String=> self.colors.string,
+                    TokenType::Number=> self.colors.number,
+                    TokenType::Comment=> self.colors.comment,
+                    TokenType::ParenOpen=> self.colors.paren,
+                    TokenType::ParenClose=> self.colors.paren,
+                    TokenType::Operator=> self.colors.operator,
+                    TokenType::Delimiter=> self.colors.delimiter,
+                };
+
                 // we need to find the next cursor point we need to do something at
                 let cursors = &self.cursors.set;
                 let last_cursor = self.cursors.last_cursor;
@@ -1001,7 +1035,7 @@ impl CodeEditor{
                     // check if we need to skip cursors
                     while offset >= draw_cursor.end{ // jump to next cursor
                         if offset == draw_cursor.end{ // process the last bit here
-                             draw_cursor.process_geom(last_cursor, offset, x, geom.y, w, height);
+                            draw_cursor.process_geom(last_cursor, offset, x, geom.y, w, height);
                             draw_cursor.emit_selection(false);
                         }
                         if !draw_cursor.set_next(cursors){ // cant go further
@@ -1025,21 +1059,28 @@ impl CodeEditor{
                 });
             }
 
-            if is_newline{
+            if token_type == TokenType::ParenClose{
+                if self._paren_stack.len()>0{
+                    let mut paren_item = self._paren_stack.pop().unwrap();
+                   // if paren_item.paren_type == paren_type{
+                   //     paren_item.end = self._token_chunks.len();
+                    //    self._paren_list.push(paren_item);
+                   // }
+                }
+                if self._paren_stack.len() == 1{ // root level
+                    self.set_font_size(cx, self.open_font_size);
+                }
+            }
+            else if token_type == TokenType::Newline{
                 self.new_line(cx);
             }
 
             self._instance_count += chunk.len();
-            //if self._token_chunks_dirty{
-                self._token_chunks.push(TokenChunk{
-                    offset:offset,
-                    len:chunk.len(),
-                    //chunk:chunk,
-                    //color:color,
-                    is_newline:is_newline,
-                    is_whitespace:is_whitespace,
-                });            
-           // }
+            self._token_chunks.push(TokenChunk{
+                offset:offset,
+                len:chunk.len(),
+                token_type:token_type
+            });            
         }
     }
 
@@ -1112,7 +1153,7 @@ impl CodeEditor{
     fn get_nearest_token_chunk_range(&self, offset:usize)->(usize, usize){
         let chunks = &self._token_chunks;
         for i in 0..chunks.len(){
-            if chunks[i].is_whitespace{
+            if chunks[i].token_type == TokenType::Whitespace{
                 if offset == chunks[i].offset && i > 0{ // at the start of whitespace
                     return (chunks[i-1].offset, chunks[i-1].len)
                 }
