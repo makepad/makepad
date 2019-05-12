@@ -1220,7 +1220,7 @@ impl CursorSet{
         self.fuse_adjacent(text_buffer)
     }
 
-    pub fn get_nearest_token_chunk(left:bool, offset:usize, chunks:&Vec<TokenChunk>)->usize{
+    pub fn get_nearest_token_chunk_boundary(left:bool, offset:usize, chunks:&Vec<TokenChunk>)->usize{
         for i in 0..chunks.len(){
             // if we are in the chunk, decide what to do
             if offset >= chunks[i].offset && offset < chunks[i].offset + chunks[i].len{
@@ -1251,28 +1251,28 @@ impl CursorSet{
         0
     }
 
-   pub fn get_nearest_token_chunk_range(offset:usize, token_chunks:&Vec<TokenChunk>)->(usize, usize){
+    pub fn get_nearest_token_chunk(offset:usize, token_chunks:&Vec<TokenChunk>)->Option<TokenChunk>{
         for i in 0..token_chunks.len(){
             if token_chunks[i].token_type == TokenType::Whitespace{
                 if offset == token_chunks[i].offset && i > 0{ // at the start of whitespace
-                    return (token_chunks[i-1].offset, token_chunks[i-1].len)
+                    return Some(token_chunks[i-1].clone())
                 }
                 else if offset == token_chunks[i].offset + token_chunks[i].len && i < token_chunks.len()-1{
-                    return (token_chunks[i+1].offset, token_chunks[i+1].len)
+                    return Some(token_chunks[i+1].clone())
                 }
             };
 
             if offset >= token_chunks[i].offset && offset < token_chunks[i].offset + token_chunks[i].len{
-                return (token_chunks[i].offset, token_chunks[i].len)
+                return Some(token_chunks[i].clone());
             }
         };
-        (0,0)
+        None
     }
 
     pub fn move_left_nearest_token(&mut self, only_head:bool, token_chunks:&Vec<TokenChunk>, text_buffer:&TextBuffer){
         for cursor in &mut self.set{
             // take the cursor head and find nearest token left
-            let pos = CursorSet::get_nearest_token_chunk(true, cursor.head, token_chunks);
+            let pos = CursorSet::get_nearest_token_chunk_boundary(true, cursor.head, token_chunks);
             cursor.head = pos;
             if !only_head{cursor.tail = cursor.head}
         }
@@ -1282,7 +1282,7 @@ impl CursorSet{
     pub fn move_right_nearest_token(&mut self, only_head:bool, token_chunks:&Vec<TokenChunk>, text_buffer:&TextBuffer){
         for cursor in &mut self.set{
             // take the cursor head and find nearest token left
-            let pos = CursorSet::get_nearest_token_chunk(false, cursor.head, token_chunks);
+            let pos = CursorSet::get_nearest_token_chunk_boundary(false, cursor.head, token_chunks);
             cursor.head = pos;
             if !only_head{cursor.tail = cursor.head}
         }
@@ -1292,9 +1292,37 @@ impl CursorSet{
     pub fn get_highlight(&self, text_buffer:&TextBuffer, token_chunks:&Vec<TokenChunk>)->Vec<char>{
         let cursor = &self.set[self.last_cursor];
         if cursor.head == cursor.tail{ // find the nearest token
-            let (start,len) = CursorSet::get_nearest_token_chunk_range(cursor.head, token_chunks);
-            let start_pos = text_buffer.offset_to_text_pos(start);
-            text_buffer.copy_line(start_pos.row, start_pos.col, len)
+            if let Some(chunk) = CursorSet::get_nearest_token_chunk(cursor.head, token_chunks){
+                let add = match chunk.token_type{
+                    TokenType::Whitespace=>false,
+                    TokenType::Newline=>false,
+                    TokenType::Keyword=>false,
+                    TokenType::Flow=>false,
+                    TokenType::Identifier=>true,
+                    TokenType::Call=>true,
+                    TokenType::TypeName=>true,
+
+                    TokenType::String=>true,
+                    TokenType::Number=>true,
+
+                    TokenType::Comment=>false,
+
+                    TokenType::ParenOpen=>false,
+                    TokenType::ParenClose=>false,
+                    TokenType::Operator=>false,
+                    TokenType::Delimiter=>false,
+                };
+                if !add{
+                    vec![]
+                }
+                else{
+                    let start_pos = text_buffer.offset_to_text_pos(chunk.offset);
+                    text_buffer.copy_line(start_pos.row, start_pos.col, chunk.len)
+                }
+            }
+            else{
+                vec![]
+            }
         }
         else{ // decompose start/head
             let (start,end) = cursor.order();

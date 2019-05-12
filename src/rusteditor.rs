@@ -247,7 +247,7 @@ impl RustEditor{
                 },
                 _=>{
                     chunk.push(state.cur);
-                    token_type = TokenType::Identifier;
+                    token_type = TokenType::Operator;
                 }
             }
             let off = state.offset - chunk.len() - 1;

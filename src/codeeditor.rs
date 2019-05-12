@@ -8,7 +8,7 @@ pub struct CodeEditor{
     pub bg: Quad,
     pub cursor: Quad,
     pub selection: Quad,
-    pub marker: Quad,
+    pub highlight: Quad,
     pub cursor_row: Quad,
     pub paren_pair: Quad,
     pub tab:Quad,
@@ -188,7 +188,7 @@ impl Style for CodeEditor{
     fn style(cx:&mut Cx)->Self{
         let tab_sh = Self::def_tab_shader(cx);
         let selection_sh = Self::def_selection_shader(cx);
-        let marker_sh = Self::def_marker_shader(cx);
+        let highlight_sh = Self::def_highlight_shader(cx);
         let cursor_sh = Self::def_cursor_shader(cx);
         let cursor_row_sh = Self::def_cursor_row_shader(cx);
         let paren_pair_sh = Self::def_paren_pair_shader(cx);
@@ -237,9 +237,9 @@ impl Style for CodeEditor{
                 shader_id:cx.add_shader(selection_sh, "Editor.selection"),
                 ..Style::style(cx)
             }, 
-            marker:Quad{
-                color:color256(42,78,117),
-                shader_id:cx.add_shader(marker_sh, "Editor.marker"),
+            highlight:Quad{
+                color:color256a(75,75,95,128),
+                shader_id:cx.add_shader(highlight_sh, "Editor.highlight"),
                 ..Style::style(cx)
             }, 
             cursor:Quad{
@@ -407,7 +407,7 @@ impl CodeEditor{
         sh
     }
 
-   pub fn def_marker_shader(cx:&mut Cx)->Shader{
+   pub fn def_highlight_shader(cx:&mut Cx)->Shader{
         let mut sh = Quad::def_quad_shader(cx);
         sh.add_ast(shader_ast!({
             fn pixel()->vec4{
@@ -451,8 +451,9 @@ impl CodeEditor{
                     1=>{
                     },
                     2=>{
-                        let range = CursorSet::get_nearest_token_chunk_range(offset, &self._token_chunks);
-                        self.cursors.set_last_clamp_range(range);
+                        if let Some(chunk) = CursorSet::get_nearest_token_chunk(offset, &self._token_chunks){
+                            self.cursors.set_last_clamp_range((chunk.offset, chunk.len));
+                        }
                     },
                     3=>{
                         let range = text_buffer.get_nearest_line_range(offset);
@@ -485,6 +486,7 @@ impl CodeEditor{
                 }
                 self.view.redraw_view_area(cx);
                 self._last_finger_move = Some(fe.abs);
+                self.update_highlight(text_buffer);
 
             },
             Event::FingerHover(_fe)=>{
@@ -562,6 +564,7 @@ impl CodeEditor{
                 if last_scroll_none{
                     self.view.redraw_view_area(cx);
                 }
+                self.update_highlight(text_buffer);
             },
             Event::KeyDown(ke)=>{
                 let cursor_moved = match ke.key_code{
@@ -674,7 +677,8 @@ impl CodeEditor{
                     _=>false
                 };
                 if cursor_moved{
-                    self._highlight_chunk = self.cursors.get_highlight(text_buffer, &self._token_chunks);
+                    self.update_highlight(text_buffer);
+
                     self.scroll_last_cursor_visible(cx, text_buffer);
                     self.view.redraw_view_area(cx);
                 }
@@ -781,7 +785,7 @@ impl CodeEditor{
             self._bg_area = bg_area;
 
             // makers before selection
-            cx.new_instance_layer(self.marker.shader_id, 0);
+            cx.new_instance_layer(self.highlight.shader_id, 0);
 
             // selection before text
             cx.new_instance_layer(self.selection.shader_id, 0);
@@ -837,15 +841,16 @@ impl CodeEditor{
         }
     }
     
+    fn update_highlight(&mut self, text_buffer:&TextBuffer){
+        self._highlight_chunk = self.cursors.get_highlight(text_buffer, &self._token_chunks);        
+    }
+
     fn new_line(&mut self, cx:&mut Cx){
         // line geometry is used for scrolling look up of cursors
-        self._line_geometry.push(
-            LineGeom{
-                walk:cx.get_rel_turtle_walk(),
-                font_size:self._line_largest_font
-            }
-        );
-        self._line_largest_font = self.text.font_size;
+        let line_geom = LineGeom{
+            walk:cx.get_rel_turtle_walk(),
+            font_size:self._line_largest_font
+        };
 
         // add a bit of room to the right
         cx.turtle_new_line_min_height(self._monospace_size.y);
@@ -872,21 +877,33 @@ impl CodeEditor{
         }
         
         // lets search for highlight_chunk in line_chunk and emit marker rects
-        if self._highlight_chunk.len() != 0{
-            for bp in 0..self._line_chunk.len().max(self._highlight_chunk.len()) - self._highlight_chunk.len(){
+        let hl_len = self._highlight_chunk.len();
+        if  hl_len != 0{
+            for bp in 0..self._line_chunk.len().max(hl_len) - hl_len{
                 let mut found = true;
-                for ip in 0..self._highlight_chunk.len(){
+                for ip in 0..hl_len{
                     if self._highlight_chunk[ip] != self._line_chunk[bp+ip].1{
                         found = false;
                         break;
                     }
                 }
                 if found{ // output a rect
+                    let pos = cx.turtle_origin();
+                    let min_x = self._line_chunk[bp].0;
+                    let max_x = self._line_chunk[bp + hl_len].0;
+                    self.highlight.draw_quad(cx, Rect{
+                        x:min_x - pos.x,
+                        y:line_geom.walk.y,
+                        w:max_x - min_x,
+                        h:self._monospace_size.y,
+                    });
                 }
             }
         }
         // search for all markings
         self._line_chunk.truncate(0);
+        self._line_geometry.push(line_geom);
+        self._line_largest_font = self.text.font_size;
     }
 
     pub fn draw_tabs(&mut self, cx:&mut Cx, geom_y:f32, tabs:usize){
