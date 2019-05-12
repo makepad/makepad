@@ -230,7 +230,13 @@ impl TextBuffer{
     }
 
     fn copy_line(&self, row:usize, start_col:usize, len:usize)->Vec<char>{
-        self.lines[row][start_col..(start_col+len)].iter().cloned().collect()
+        let line = &self.lines[row];
+        if start_col + len > line.len(){
+            self.lines[row][start_col..(start_col+len-1)].iter().cloned().collect()
+        }
+        else{
+            self.lines[row][start_col..(start_col+len)].iter().cloned().collect()
+        }
     }
 
     fn replace_range(&mut self, start:usize, len:usize, mut rep_lines:Vec<Vec<char>>)->Vec<Vec<char>>{
