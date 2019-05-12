@@ -24,7 +24,7 @@ pub struct CodeEditor{
     pub _scroll_pos:Vec2,
     pub _last_finger_move:Option<Vec2>,
     pub _paren_stack:Vec<ParenItem>,
-    pub _paren_list:Vec<ParenItem>,
+    //pub _paren_list:Vec<ParenItem>,
     pub _line_geometry:Vec<LineGeom>,
     pub _anim_select:Vec<AnimSelect>,
     pub _token_chunks:Vec<TokenChunk>,
@@ -276,7 +276,7 @@ impl Style for CodeEditor{
             _select_scroll:None,
             _draw_cursor:DrawCursor::new(),
             _paren_stack:Vec::new(),
-            _paren_list:Vec::new(),
+            //_paren_list:Vec::new(),
             _last_tabs:0,
             _newline_tabs:0
         };
@@ -675,7 +675,7 @@ impl CodeEditor{
         CodeEditorEvent::None
    }
 
-    pub fn do_code_folding(&mut self, cx:&mut Cx){
+    fn do_code_folding(&mut self, cx:&mut Cx){
         // start code folding anim
         let speed = 0.98;
         self._anim_folding.state.do_folding(speed, 0.95);
@@ -683,7 +683,7 @@ impl CodeEditor{
         self.view.redraw_view_area(cx);
     }
 
-    pub fn do_code_unfolding(&mut self, cx:&mut Cx){
+    fn do_code_unfolding(&mut self, cx:&mut Cx){
         let speed = 0.96;
         self._anim_folding.state.do_opening(speed, 0.97);
         self._anim_folding.first_visible = self.compute_first_visible_line(cx);
@@ -739,6 +739,8 @@ impl CodeEditor{
             self._draw_cursor = DrawCursor::new();
             self._first_on_line = true;
             self._visible_lines = 0;
+            self._newline_tabs = 0;
+            self._last_tabs = 0;
 
             let anim_folding = &mut self._anim_folding;
             if anim_folding.state.is_animating(){
@@ -765,6 +767,177 @@ impl CodeEditor{
         }
     }
     
+    fn new_line(&mut self, cx:&mut Cx){
+        // line geometry is used for scrolling look up of cursors
+        self._line_geometry.push(
+            LineGeom{
+                walk:cx.get_rel_turtle_walk(),
+                font_size:self._line_largest_font
+            }
+        );
+        self._line_largest_font = self.text.font_size;
+
+        // add a bit of room to the right
+        cx.turtle_new_line_min_height(self._monospace_size.y);
+        self._first_on_line = true;
+        let mut draw_cursor = &mut self._draw_cursor;
+        if !draw_cursor.first{ // we have some selection data to emit
+           draw_cursor.emit_selection(true);
+           draw_cursor.first = true;
+        }
+
+        // we could modify our visibility window here by computing the DY we are going to have the moment we know it
+        if self._anim_folding.did_animate{
+            let (line, pos) = self._anim_folding.first_visible;
+            if line == self._line_geometry.len(){ // the line is going to be the next one
+                let walk = cx.get_rel_turtle_walk();
+                let dy =  pos - walk.y;
+                self._scroll_pos = Vec2{
+                    x:self._scroll_pos.x,
+                    y:self._scroll_pos.y - dy
+                };
+                // update the line pos
+                self._anim_folding.first_visible = (line, walk.y);
+           }
+        }
+    }
+    pub fn draw_tabs(&mut self, cx:&mut Cx, geom_y:f32, tabs:usize){
+        let y_pos = geom_y - cx.turtle_origin().y;
+        let tab_width = self._monospace_size.x*4.;
+        for i in 0..tabs{
+            self.tab.draw_quad(cx, Rect{
+                x: (tab_width * i as f32),
+                y: y_pos, 
+                w: tab_width,
+                h:self._monospace_size.y
+            });
+        }
+    }
+    // drawing a text chunk
+    pub fn draw_chunk(&mut self, cx:&mut Cx, chunk:&Vec<char>, offset:usize, token_type:TokenType){
+        if chunk.len()>0{
+            
+            // maintain paren stack
+            if token_type == TokenType::ParenOpen{
+                self._paren_stack.push(ParenItem{
+                    start:self._token_chunks.len(),
+                    end:0,
+                    exp_paren:')'
+                });
+                if self._paren_stack.len() == 2 && chunk[0] == '{'{ // one level down
+                    self.set_font_size(cx, self._anim_font_size);
+                }
+                // check if 'a' cursor is either here, or after it
+
+            }
+
+            // lets check if the geom is visible
+            if let Some(geom) = cx.walk_turtle_text(
+                self._monospace_size.x * (chunk.len() as f32), 
+                self._monospace_size.y,
+                self._scroll_pos){
+                
+                // determine chunk color
+                self.text.color = match token_type{
+                    TokenType::Whitespace => {
+                        if self._first_on_line && chunk[0] == ' '{
+                            let tabs = chunk.len()>>2;
+                            self._last_tabs = tabs;
+                            self._newline_tabs = tabs;
+                            self.draw_tabs(cx, geom.y, tabs);
+                        }
+                        self.colors.whitespace
+                    },
+                    TokenType::Newline=>{
+                        if self._first_on_line{
+                            self._newline_tabs = 0;
+                            self.draw_tabs(cx, geom.y, self._last_tabs);
+                        }
+                        else{
+                            self._last_tabs = self._newline_tabs;
+                           self._newline_tabs = 0;
+                        }
+                        self.colors.whitespace
+                    },
+                    TokenType::Keyword=> self.colors.keyword,
+                    TokenType::Flow=> self.colors.flow,
+                    TokenType::Identifier=> self.colors.identifier,
+                    TokenType::Call=> self.colors.call,
+                    TokenType::TypeName=> self.colors.type_name,
+                    TokenType::String=> self.colors.string,
+                    TokenType::Number=> self.colors.number,
+                    TokenType::Comment=> self.colors.comment,
+                    TokenType::ParenOpen=>self.colors.paren,
+                    TokenType::ParenClose=> self.colors.paren,
+                    TokenType::Operator=> self.colors.operator,
+                    TokenType::Delimiter=> self.colors.delimiter,
+                };
+
+                if self._first_on_line{
+                    self._first_on_line = false;
+                    self._visible_lines += 1;
+                }
+
+                // we need to find the next cursor point we need to do something at
+                let cursors = &self.cursors.set;
+                let last_cursor = self.cursors.last_cursor;
+                let draw_cursor = &mut self._draw_cursor;
+                let height = self._monospace_size.y;
+
+                // actually generate the GPU data for the text
+                self.text.add_text(cx, geom.x, geom.y, offset, self._text_inst.as_mut().unwrap(), &chunk, |unicode, offset, x, w|{
+                    // check if we need to skip cursors
+                    while offset >= draw_cursor.end{ // jump to next cursor
+                        if offset == draw_cursor.end{ // process the last bit here
+                            draw_cursor.process_geom(last_cursor, offset, x, geom.y, w, height);
+                            draw_cursor.emit_selection(false);
+                        }
+                        if !draw_cursor.set_next(cursors){ // cant go further
+                            return 0.0
+                        }
+                    }
+                    // in current cursor range, update values
+                    if offset >= draw_cursor.start && offset <= draw_cursor.end{
+                        draw_cursor.process_geom(last_cursor, offset, x, geom.y, w, height);
+                        if offset == draw_cursor.end{
+                            draw_cursor.emit_selection(false);
+                        }
+                        if unicode == 10{
+                            return 0.0
+                        }
+                        else if unicode == 32 && offset < draw_cursor.end{
+                            return 2.0
+                        }
+                    }
+                    return 0.0
+                });
+            }
+
+            if token_type == TokenType::ParenClose{
+                if self._paren_stack.len()>0{
+                    let mut paren_item = self._paren_stack.pop().unwrap();
+                   // if paren_item.paren_type == paren_type{
+                   //     paren_item.end = self._token_chunks.len();
+                    //    self._paren_list.push(paren_item);
+                   // }
+                }
+                if self._paren_stack.len() == 1{ // root level
+                    self.set_font_size(cx, self.open_font_size);
+                }
+            }
+            else if token_type == TokenType::Newline{
+                self.new_line(cx);
+            }
+
+            self._instance_count += chunk.len();
+            self._token_chunks.push(TokenChunk{
+                offset:offset,
+                len:chunk.len(),
+                token_type:token_type
+            });            
+        }
+    }
+
     pub fn end_code_editor(&mut self, cx:&mut Cx, text_buffer:&TextBuffer){
 
         // lets insert an empty newline at the bottom so its nicer to scroll
@@ -913,175 +1086,6 @@ impl CodeEditor{
             self._line_largest_font = font_size;
         }
         self._monospace_size = self.text.get_monospace_size(cx, None);
-    }
-
-    fn new_line(&mut self, cx:&mut Cx){
-        // line geometry is used for scrolling look up of cursors
-        self._line_geometry.push(
-            LineGeom{
-                walk:cx.get_rel_turtle_walk(),
-                font_size:self._line_largest_font
-            }
-        );
-        self._line_largest_font = self.text.font_size;
-
-        // add a bit of room to the right
-        cx.turtle_new_line_min_height(self._monospace_size.y);
-        self._first_on_line = true;
-        let mut draw_cursor = &mut self._draw_cursor;
-        if !draw_cursor.first{ // we have some selection data to emit
-           draw_cursor.emit_selection(true);
-           draw_cursor.first = true;
-        }
-
-        // we could modify our visibility window here by computing the DY we are going to have the moment we know it
-        if self._anim_folding.did_animate{
-            let (line, pos) = self._anim_folding.first_visible;
-            if line == self._line_geometry.len(){ // the line is going to be the next one
-                let walk = cx.get_rel_turtle_walk();
-                let dy =  pos - walk.y;
-                self._scroll_pos = Vec2{
-                    x:self._scroll_pos.x,
-                    y:self._scroll_pos.y - dy
-                };
-                // update the line pos
-                self._anim_folding.first_visible = (line, walk.y);
-           }
-        }
-    }
-
-    // executed before drawing the next paren
-    pub fn draw_chunk(&mut self, cx:&mut Cx, chunk:&Vec<char>, offset:usize, token_type:TokenType){
-        if chunk.len()>0{
-            
-            // maintain paren stack
-            if token_type == TokenType::ParenOpen{
-                self._paren_stack.push(ParenItem{
-                    start:self._token_chunks.len(),
-                    end:0,
-                    exp_paren:')'
-                });
-                if self._paren_stack.len() == 2 && chunk[0] == '{'{ // one level down
-                    self.set_font_size(cx, self._anim_font_size);
-                }
-            }
-
-            // lets check if the geom is visible
-            if let Some(geom) = cx.walk_turtle_text(
-                self._monospace_size.x * (chunk.len() as f32), 
-                self._monospace_size.y,
-                self._scroll_pos){
-                
-                // do tab indent line drawing
-                if self._first_on_line{
-                    self._first_on_line = false;
-                    self._visible_lines += 1;
-
-                    let tabs_to_draw = if token_type == TokenType::Newline{
-                        self._newline_tabs = 0;
-                        self._last_tabs
-                    }
-                    else if token_type == TokenType::Whitespace && chunk[0] == ' '{
-                        // draw tab lines
-                        let tabs = chunk.len()>>2;
-                        self._last_tabs = tabs;
-                        self._newline_tabs = tabs;
-                        tabs
-                    }
-                    else{0};
-                    if tabs_to_draw > 0{
-                        let y_pos = geom.y - cx.turtle_origin().y;
-                        let tab_width = self._monospace_size.x*4.;
-                        for i in 0..tabs_to_draw{
-                            self.tab.draw_quad(cx, Rect{
-                                x: (tab_width * i as f32),
-                                y: y_pos, 
-                                w: tab_width,
-                                h:self._monospace_size.y
-                            });
-                        }
-                    }
-                }
-                else if token_type == TokenType::Newline{
-                    self._last_tabs = self._newline_tabs;
-                    self._newline_tabs = 0;
-                }
-
-                // determine chunk color
-                self.text.color = match token_type{
-                    TokenType::Whitespace => self.colors.whitespace,
-                    TokenType::Newline=> self.colors.whitespace,
-                    TokenType::Keyword=> self.colors.keyword,
-                    TokenType::Flow=> self.colors.flow,
-                    TokenType::Identifier=> self.colors.identifier,
-                    TokenType::Call=> self.colors.call,
-                    TokenType::TypeName=> self.colors.type_name,
-                    TokenType::String=> self.colors.string,
-                    TokenType::Number=> self.colors.number,
-                    TokenType::Comment=> self.colors.comment,
-                    TokenType::ParenOpen=> self.colors.paren,
-                    TokenType::ParenClose=> self.colors.paren,
-                    TokenType::Operator=> self.colors.operator,
-                    TokenType::Delimiter=> self.colors.delimiter,
-                };
-
-                // we need to find the next cursor point we need to do something at
-                let cursors = &self.cursors.set;
-                let last_cursor = self.cursors.last_cursor;
-                let draw_cursor = &mut self._draw_cursor;
-                let height = self._monospace_size.y;
-
-                self.text.add_text(cx, geom.x, geom.y, offset, self._text_inst.as_mut().unwrap(), &chunk, |unicode, offset, x, w|{
-                    // check if we need to skip cursors
-                    while offset >= draw_cursor.end{ // jump to next cursor
-                        if offset == draw_cursor.end{ // process the last bit here
-                            draw_cursor.process_geom(last_cursor, offset, x, geom.y, w, height);
-                            draw_cursor.emit_selection(false);
-                        }
-                        if !draw_cursor.set_next(cursors){ // cant go further
-                            return 0.0
-                        }
-                    }
-                    // in current cursor range, update values
-                    if offset >= draw_cursor.start && offset <= draw_cursor.end{
-                        draw_cursor.process_geom(last_cursor, offset, x, geom.y, w, height);
-                        if offset == draw_cursor.end{
-                            draw_cursor.emit_selection(false);
-                        }
-                        if unicode == 10{
-                            return 0.0
-                        }
-                        else if unicode == 32 && offset < draw_cursor.end{
-                            return 2.0
-                        }
-                    }
-                    return 0.0
-                });
-            }
-
-            if token_type == TokenType::ParenClose{
-                if self._paren_stack.len()>0{
-                    let mut paren_item = self._paren_stack.pop().unwrap();
-                   // if paren_item.paren_type == paren_type{
-                   //     paren_item.end = self._token_chunks.len();
-                    //    self._paren_list.push(paren_item);
-                   // }
-                }
-                if self._paren_stack.len() == 1{ // root level
-                    self.set_font_size(cx, self.open_font_size);
-                }
-            }
-            else if token_type == TokenType::Newline{
-                self.new_line(cx);
-            }
-
-            self._instance_count += chunk.len();
-            self._token_chunks.push(TokenChunk{
-                offset:offset,
-                len:chunk.len(),
-                token_type:token_type
-            });            
-        }
     }
 
    fn scroll_last_cursor_to_top(&mut self, cx:&mut Cx, text_buffer:&TextBuffer){
