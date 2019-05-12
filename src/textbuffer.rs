@@ -775,6 +775,16 @@ impl CursorSet{
         self.set[self.last_cursor].order()
     }
 
+    pub fn get_last_cursor_singular(&self)->Option<usize>{
+        let cursor = &self.set[self.last_cursor];
+        if cursor.head != cursor.tail{
+            None
+        }
+        else{
+            Some(cursor.head)
+        }
+    }
+
     pub fn grid_select_corner(&mut self, new_pos:TextPos, text_buffer:&TextBuffer)->TextPos{
         // we need to compute the furthest row/col in our cursor set
         let mut max_dist = 0.0;
@@ -1058,14 +1068,15 @@ impl CursorSet{
     }
 
     pub fn insert_tab(&mut self, text_buffer:&mut TextBuffer, tab_str:&str){
-        let mut delta:isize = 0; // rolling delta to displace cursors 
+        let mut delta:usize = 0; // rolling delta to displace cursors 
         let mut ops = Vec::new();
         let tab_str_chars = tab_str.chars().count();
         let cursors_clone = self.clone();
         let mut old_max = (TextPos{row:0,col:0},0);
         for cursor in &mut self.set{
-            let (start, end) = cursor.delta(delta);
+            let (start, end) = cursor.delta(delta as isize);
             /*
+            i find these things really bad UX. so lets not.
             if start == end{ // just insert 4 spaces
                 // check our indent depth
                 let op = text_buffer.replace_lines_with_string(start, end-start, tab_str);
@@ -1093,13 +1104,14 @@ impl CursorSet{
             }
             // figure out which way the cursor is
             if cursor.head > cursor.tail{
-                cursor.tail += tab_str_chars;
-                cursor.head += (end_pos.row - start_pos.row + 1) * tab_str_chars;
+                cursor.tail += tab_str_chars + delta;
+                cursor.head += (end_pos.row - start_pos.row + 1) * tab_str_chars + delta;
             }
             else{
-                cursor.tail += (end_pos.row - start_pos.row + 1) * tab_str_chars;
-                cursor.head += tab_str_chars;
+                cursor.tail += (end_pos.row - start_pos.row + 1) * tab_str_chars + delta;
+                cursor.head += tab_str_chars + delta;
             }
+            delta += (((end_pos.row - start_pos.row) + 1) * tab_str_chars);
             //    }
             //}
             old_max = cursor.calc_max(text_buffer, old_max);
@@ -1114,12 +1126,12 @@ impl CursorSet{
 
     pub fn remove_tab(&mut self, text_buffer:&mut TextBuffer, num_spaces:usize){
 
-        let mut delta:isize = 0; // rolling delta to displace cursors 
+        let mut delta:usize = 0; // rolling delta to displace cursors 
         let mut ops = Vec::new();
         let cursors_clone = self.clone();
         let mut old_max = (TextPos{row:0,col:0},0);
         for cursor in &mut self.set{
-            let (start, end) = cursor.delta(delta);
+            let (start, end) = cursor.delta(-(delta as isize));
             let start_pos = text_buffer.offset_to_text_pos_next(start, old_max.0, old_max.1);
             let end_pos = text_buffer.offset_to_text_pos_next(end, start_pos, start);
             let mut off = start - start_pos.col;
@@ -1141,7 +1153,9 @@ impl CursorSet{
                 }
                 off += text_buffer.lines[row].len() + 1;
             }
-            delta -= total_cut_len as isize;
+            cursor.head -= delta;
+            cursor.tail -= delta;
+            delta += total_cut_len;
             old_max = cursor.calc_max(text_buffer, old_max);
         }
         text_buffer.redo_stack.truncate(0);
@@ -1325,7 +1339,7 @@ impl CursorSet{
         }
     }
 
-    pub fn get_selection_highlight(&self, text_buffer:&TextBuffer, token_chunks:&Vec<TokenChunk>)->Vec<char>{
+    pub fn get_selection_highlight(&self, text_buffer:&TextBuffer)->Vec<char>{
         let cursor = &self.set[self.last_cursor];
         if cursor.head != cursor.tail{
             let (start,end) = cursor.order();

@@ -251,7 +251,7 @@ impl RustEditor{
                 }
             }
             let off = state.offset - chunk.len() - 1;
-            self.code_editor.draw_chunk(cx, &chunk, off, token_type);
+            self.code_editor.draw_chunk(cx, &chunk, state.next, off, token_type);
             chunk.truncate(0);
         }
         

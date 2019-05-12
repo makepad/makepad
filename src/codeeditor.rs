@@ -162,7 +162,9 @@ pub struct SelectScroll{
 #[derive(Clone)]
 pub struct ParenItem{
     start:usize,
-    end:usize,
+    geom_open:Option<Rect>,
+    geom_close:Option<Rect>,
+    marked:bool,
     exp_paren:char
 }
 
@@ -389,8 +391,8 @@ impl CodeEditor{
         sh.add_ast(shader_ast!({
             fn pixel()->vec4{
                 df_viewport(pos * vec2(w, h));
-                df_box(0.,0.,w,h,2.);
-                return df_stroke(color, 0.8);
+                df_box(0.,0.,w,h,1.);
+                return df_stroke(color, 1.);
             }
         }));
         sh
@@ -511,6 +513,7 @@ impl CodeEditor{
                 self._select_scroll = None;
                 self._last_finger_move = None;
                 self._grid_select_corner = None;
+                self.update_highlight(text_buffer);
             },
             Event::FingerMove(fe)=>{
                 if let Some(grid_select_corner) = self._grid_select_corner{
@@ -568,7 +571,7 @@ impl CodeEditor{
                 if last_scroll_none{
                     self.view.redraw_view_area(cx);
                 }
-                self.update_highlight(text_buffer);
+                
             },
             Event::KeyDown(ke)=>{
                 let cursor_moved = match ke.key_code{
@@ -782,7 +785,6 @@ impl CodeEditor{
             return Err(())
         }
         else{
-            let pos = cx.turtle_origin();
             let bg_inst = self.bg.draw_quad(cx, Rect{x:0.,y:0., w:cx.width_total(false), h:cx.height_total(false)});
             let bg_area = bg_inst.into_area();
             cx.update_area_refs(self._bg_area, bg_area);
@@ -846,7 +848,7 @@ impl CodeEditor{
     }
     
     fn update_highlight(&mut self, text_buffer:&TextBuffer){
-        self._highlight_selection = self.cursors.get_selection_highlight(text_buffer, &self._token_chunks);        
+        self._highlight_selection = self.cursors.get_selection_highlight(text_buffer);
         self._highlight_token = self.cursors.get_token_highlight(text_buffer, &self._token_chunks);
     }
 
@@ -866,7 +868,7 @@ impl CodeEditor{
            draw_cursors.first = true;
         }
        
-        // lets search for highlight_chunk in line_chunk and emit marker rects
+        // highlighting the selection
         let hl_len = self._highlight_selection.len();
         if  hl_len != 0{
             for bp in 0..self._line_chunk.len().max(hl_len) - hl_len{
@@ -889,9 +891,9 @@ impl CodeEditor{
                     });
                 }
             }
+            self._line_chunk.truncate(0);
         }
         // search for all markings
-        self._line_chunk.truncate(0);
         self._line_geometry.push(line_geom);
         self._line_largest_font = self.text.font_size;
 
@@ -911,7 +913,7 @@ impl CodeEditor{
         }
     }
 
-    pub fn draw_tabs(&mut self, cx:&mut Cx, geom_y:f32, tabs:usize){
+    fn draw_tabs(&mut self, cx:&mut Cx, geom_y:f32, tabs:usize){
         let y_pos = geom_y - cx.turtle_origin().y;
         let tab_width = self._monospace_size.x*4.;
         for i in 0..tabs{
@@ -924,20 +926,27 @@ impl CodeEditor{
         }
     }
     // drawing a text chunk
-    pub fn draw_chunk(&mut self, cx:&mut Cx, chunk:&Vec<char>, offset:usize, token_type:TokenType){
+    pub fn draw_chunk(&mut self, cx:&mut Cx, chunk:&Vec<char>, next_char:char, offset:usize, token_type:TokenType){
         if chunk.len()>0{
             
             // maintain paren stack
             if token_type == TokenType::ParenOpen{
+                
+                let marked = if let Some(pos) = self.cursors.get_last_cursor_singular(){
+                    pos == offset || pos == offset + 1 && next_char != '(' &&  next_char != '{' && next_char !='['
+                }
+                else{false};
+                
                 self._paren_stack.push(ParenItem{
                     start:self._token_chunks.len(),
-                    end:0,
-                    exp_paren:')'
+                    geom_open:None,
+                    geom_close:None,
+                    marked:marked,
+                    exp_paren:chunk[0]
                 });
                 if self._paren_stack.len() == 2 && chunk[0] == '{'{ // one level down
                     self.set_font_size(cx, self._anim_font_size);
                 }
-
             }
 
             // lets check if the geom is visible
@@ -991,8 +1000,16 @@ impl CodeEditor{
                     TokenType::String=> self.colors.string,
                     TokenType::Number=> self.colors.number,
                     TokenType::Comment=> self.colors.comment,
-                    TokenType::ParenOpen=>self.colors.paren,
-                    TokenType::ParenClose=> self.colors.paren,
+                    TokenType::ParenOpen=>{
+                        self._paren_stack.last_mut().unwrap().geom_open = Some(geom);
+                        self.colors.paren
+                    },
+                    TokenType::ParenClose=>{
+                        if let Some(paren) = self._paren_stack.last_mut(){
+                            paren.geom_close = Some(geom);
+                        }
+                        self.colors.paren
+                    },
                     TokenType::Operator=> self.colors.operator,
                     TokenType::Delimiter=> self.colors.delimiter,
                 };
@@ -1006,31 +1023,51 @@ impl CodeEditor{
                 let cursors = &self.cursors.set;
                 let last_cursor = self.cursors.last_cursor;
                 let draw_cursors = &mut self._draw_cursors;
-                let draw_search = &mut self._draw_search;
                 let height = self._monospace_size.y;
-                let line_chunk = &mut self._line_chunk;
-                let highlight_selection = self._highlight_selection.len() > 0;
-                // we have a chunk, only if it matches our search results keep pushing it in
-                // otherwise reset the se
                 
                 // actually generate the GPU data for the text
-                self.text.add_text(cx, geom.x, geom.y, offset, self._text_inst.as_mut().unwrap(), &chunk, |ch, offset, x, w|{
-                    // check if we need to skip cursors
-                    if highlight_selection{
+                if self._highlight_selection.len() > 0{ // slow loop
+                    let draw_search = &mut self._draw_search;
+                    let line_chunk = &mut self._line_chunk;
+                    self.text.add_text(cx, geom.x, geom.y, offset, self._text_inst.as_mut().unwrap(), &chunk, |ch, offset, x, w|{
                         line_chunk.push((x,ch));
-                    }
-                    draw_search.mark_text(cursors, ch, offset, x, geom.y, w, height, last_cursor);
-                    draw_cursors.mark_text(cursors, ch, offset, x, geom.y, w, height, last_cursor)
-                });
+                        draw_search.mark_text(cursors, ch, offset, x, geom.y, w, height, last_cursor);
+                        draw_cursors.mark_text(cursors, ch, offset, x, geom.y, w, height, last_cursor)
+                    });
+                }
+                else{ // fast loop
+                    self.text.add_text(cx, geom.x, geom.y, offset, self._text_inst.as_mut().unwrap(), &chunk, |ch, offset, x, w|{
+                        draw_cursors.mark_text(cursors, ch, offset, x, geom.y, w, height, last_cursor)
+                    });
+                }
             }
 
             if token_type == TokenType::ParenClose{
                 if self._paren_stack.len()>0{
-                    let mut paren_item = self._paren_stack.pop().unwrap();
-                   // if paren_item.paren_type == paren_type{
-                   //     paren_item.end = self._token_chunks.len();
-                    //    self._paren_list.push(paren_item);
-                   // }
+                    let last = self._paren_stack.pop().unwrap();
+                    if !last.geom_open.is_none() || !last.geom_close.is_none(){
+                        if let Some(pos) = self.cursors.get_last_cursor_singular(){
+                            // cursor is near the last one.
+                            if pos == offset || pos == offset + 1 && next_char != ')' &&  next_char != '}' && next_char !=']'{
+                                // peek at the paren stack
+                                if let Some(geom_open) = last.geom_open{
+                                    self.paren_pair.draw_quad_abs(cx, geom_open);
+                                }
+                                if let Some(geom_close) = last.geom_close{
+                                    self.paren_pair.draw_quad_abs(cx, geom_close);
+                                }
+                            }
+                            // check if the cursor is near the first
+                            else if last.marked{
+                                if let Some(geom_open) = last.geom_open{
+                                    self.paren_pair.draw_quad_abs(cx, geom_open);
+                                }
+                                if let Some(geom_close) = last.geom_close{
+                                    self.paren_pair.draw_quad_abs(cx, geom_close);
+                                }
+                            }
+                        };
+                    }
                 }
                 if self._paren_stack.len() == 1{ // root level
                     self.set_font_size(cx, self.open_font_size);
