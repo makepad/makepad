@@ -1277,6 +1277,15 @@ impl CursorSet{
             };
 
             if offset >= token_chunks[i].offset && offset < token_chunks[i].offset + token_chunks[i].len{
+                let pair_token = token_chunks[i].pair_token;
+                if pair_token != i{
+                    return Some(TokenChunk{
+                        token_type:TokenType::Block,
+                        offset: token_chunks[i].offset,
+                        len:token_chunks[pair_token].len + (token_chunks[pair_token].offset - token_chunks[i].offset),
+                        pair_token: 0
+                    })
+                }
                 return Some(token_chunks[i].clone());
             }
         };
@@ -1325,6 +1334,7 @@ impl CursorSet{
                 TokenType::ParenClose=>false,
                 TokenType::Operator=>false,
                 TokenType::Delimiter=>false,
+                TokenType::Block=>false
             };
             if !add{
                 vec![]
@@ -1388,11 +1398,13 @@ pub enum TokenType{
     ParenClose,
     Operator,
     Delimiter,
+    Block
 }
 
 #[derive(Clone)]
 pub struct TokenChunk{
     pub token_type:TokenType,
     pub offset:usize,
+    pub pair_token:usize,
     pub len:usize,
 }

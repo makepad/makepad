@@ -161,7 +161,7 @@ pub struct SelectScroll{
 
 #[derive(Clone)]
 pub struct ParenItem{
-    start:usize,
+    pair_start:usize,
     geom_open:Option<Rect>,
     geom_close:Option<Rect>,
     marked:bool,
@@ -938,7 +938,7 @@ impl CodeEditor{
                 else{false};
                 
                 self._paren_stack.push(ParenItem{
-                    start:self._token_chunks.len(),
+                    pair_start:self._token_chunks.len(),
                     geom_open:None,
                     geom_close:None,
                     marked:marked,
@@ -1012,6 +1012,7 @@ impl CodeEditor{
                     },
                     TokenType::Operator=> self.colors.operator,
                     TokenType::Delimiter=> self.colors.delimiter,
+                    TokenType::Block=>self.colors.operator
                 };
 
                 if self._first_on_line{
@@ -1041,10 +1042,12 @@ impl CodeEditor{
                     });
                 }
             }
-
+            let mut pair_token = self._token_chunks.len();
             if token_type == TokenType::ParenClose{
                 if self._paren_stack.len()>0{
                     let last = self._paren_stack.pop().unwrap();
+                    self._token_chunks[last.pair_start].pair_token = pair_token;
+                    pair_token = last.pair_start;
                     if !last.geom_open.is_none() || !last.geom_close.is_none(){
                         if let Some(pos) = self.cursors.get_last_cursor_singular(){
                             // cursor is near the last one.
@@ -1080,6 +1083,7 @@ impl CodeEditor{
             self._instance_count += chunk.len();
             self._token_chunks.push(TokenChunk{
                 offset:offset,
+                pair_token:pair_token,
                 len:chunk.len(),
                 token_type:token_type
             });            
