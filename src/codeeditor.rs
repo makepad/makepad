@@ -11,7 +11,7 @@ pub struct CodeEditor{
     pub highlight: Quad,
     pub cursor_row: Quad,
     pub paren_pair: Quad,
-    pub tab:Quad,
+    pub indent_lines:Quad,
     pub text: Text,
     pub cursors:CursorSet,
     
@@ -191,7 +191,7 @@ impl ElementLife for CodeEditor{
 
 impl Style for CodeEditor{
     fn style(cx:&mut Cx)->Self{
-        let tab_sh = Self::def_tab_shader(cx);
+        let indent_lines_sh = Self::def_indent_lines_shader(cx);
         let selection_sh = Self::def_selection_shader(cx);
         let highlight_sh = Self::def_highlight_shader(cx);
         let cursor_sh = Self::def_cursor_shader(cx);
@@ -217,9 +217,9 @@ impl Style for CodeEditor{
                 operator:color256(212,212,212),
                 delimiter:color256(212,212,212)
             },
-            tab:Quad{
+            indent_lines:Quad{
                 color:color("#5"),
-                shader_id:cx.add_shader(tab_sh, "Editor.tab"),
+                shader_id:cx.add_shader(indent_lines_sh, "Editor.indent_lines"),
                 ..Style::style(cx)
             },
             view:View{
@@ -325,7 +325,7 @@ pub enum CodeEditorEvent{
 
 impl CodeEditor{
 
-    pub fn def_tab_shader(cx:&mut Cx)->Shader{
+    pub fn def_indent_lines_shader(cx:&mut Cx)->Shader{
         let mut sh = Quad::def_quad_shader(cx);
         sh.add_ast(shader_ast!({
             fn pixel()->vec4{
@@ -462,8 +462,20 @@ impl CodeEditor{
                         }
                     },
                     3=>{
-                        let range = text_buffer.get_nearest_line_range(offset);
-                        self.cursors.set_last_clamp_range(range);
+                        if let Some(chunk) = CursorSet::get_nearest_token_chunk(offset, &self._token_chunks){
+                            self.cursors.set_last_clamp_range((chunk.offset, chunk.len));
+                            //let (mut start, mut len) = text_buffer.get_nearest_line_range(offset);
+                            // fuse start, len with chunk 
+                            //len += (start + len ) + (chunk.offset+ - start ) + chunk.len
+                            //if chunk.offset < start{
+                                
+                           // }
+                            self.cursors.set_last_clamp_range((chunk.offset, chunk.len));
+                        }
+                        else{
+                            let range = text_buffer.get_nearest_line_range(offset);
+                            self.cursors.set_last_clamp_range(range);
+                        }
                     },
                     _=>{
                         let range = (0, text_buffer.calc_char_count());
@@ -913,11 +925,11 @@ impl CodeEditor{
         }
     }
 
-    fn draw_tabs(&mut self, cx:&mut Cx, geom_y:f32, tabs:usize){
+    fn draw_indent_lines(&mut self, cx:&mut Cx, geom_y:f32, tabs:usize){
         let y_pos = geom_y - cx.turtle_origin().y;
         let tab_width = self._monospace_size.x*4.;
         for i in 0..tabs{
-            self.tab.draw_quad(cx, Rect{
+            self.indent_lines.draw_quad(cx, Rect{
                 x: (tab_width * i as f32),
                 y: y_pos, 
                 w: tab_width,
@@ -962,14 +974,14 @@ impl CodeEditor{
                             let tabs = chunk.len()>>2;
                             self._last_tabs = tabs;
                             self._newline_tabs = tabs;
-                            self.draw_tabs(cx, geom.y, tabs);
+                            self.draw_indent_lines(cx, geom.y, tabs);
                         }
                         self.colors.whitespace
                     },
                     TokenType::Newline=>{
                         if self._first_on_line{
                             self._newline_tabs = 0;
-                            self.draw_tabs(cx, geom.y, self._last_tabs);
+                            self.draw_indent_lines(cx, geom.y, self._last_tabs);
                         }
                         else{
                             self._last_tabs = self._newline_tabs;
@@ -1042,6 +1054,8 @@ impl CodeEditor{
                     });
                 }
             }
+
+            // Do all the Paren matching highlighting drawing
             let mut pair_token = self._token_chunks.len();
             if token_type == TokenType::ParenClose{
                 if self._paren_stack.len()>0{
@@ -1051,22 +1065,26 @@ impl CodeEditor{
                     if !last.geom_open.is_none() || !last.geom_close.is_none(){
                         if let Some(pos) = self.cursors.get_last_cursor_singular(){
                             // cursor is near the last one.
-                            if pos == offset || pos == offset + 1 && next_char != ')' &&  next_char != '}' && next_char !=']'{
-                                // peek at the paren stack
-                                if let Some(geom_open) = last.geom_open{
-                                    self.paren_pair.draw_quad_abs(cx, geom_open);
+                            if pos == offset || pos == offset + 1 && next_char != ')' &&  next_char != '}' && next_char !=']' || last.marked{
+                                // fuse the tokens
+                                if last.pair_start + 1 == self._token_chunks.len() && !last.geom_open.is_none() && !last.geom_close.is_none(){
+                                    let geom_open = last.geom_open.unwrap();
+                                    let geom_close = last.geom_open.unwrap();
+                                    let geom = Rect{
+                                        x:geom_open.x,
+                                        y:geom_open.y,
+                                        w:geom_open.w + geom_close.w,
+                                        h:geom_close.h
+                                    };
+                                    self.paren_pair.draw_quad_abs(cx, geom);
                                 }
-                                if let Some(geom_close) = last.geom_close{
-                                    self.paren_pair.draw_quad_abs(cx, geom_close);
-                                }
-                            }
-                            // check if the cursor is near the first
-                            else if last.marked{
-                                if let Some(geom_open) = last.geom_open{
-                                    self.paren_pair.draw_quad_abs(cx, geom_open);
-                                }
-                                if let Some(geom_close) = last.geom_close{
-                                    self.paren_pair.draw_quad_abs(cx, geom_close);
+                                else{
+                                    if let Some(geom_open) = last.geom_open{
+                                        self.paren_pair.draw_quad_abs(cx, geom_open);
+                                    }
+                                    if let Some(geom_close) = last.geom_close{
+                                        self.paren_pair.draw_quad_abs(cx, geom_close);
+                                    }
                                 }
                             }
                         };
