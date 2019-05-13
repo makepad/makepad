@@ -332,7 +332,7 @@ impl CodeEditor{
                 df_viewport(pos * vec2(w, h));
                 df_move_to(1.,-1.);
                 df_line_to(1.,h+1.);
-                return df_stroke(color, 0.8);
+                return df_stroke(color, 0.8 + dpi_dilate*0.5);
             }
         }));
         sh
@@ -391,8 +391,9 @@ impl CodeEditor{
         sh.add_ast(shader_ast!({
             fn pixel()->vec4{
                 df_viewport(pos * vec2(w, h));
-                df_rect(0.,0.,w,h);
-                return df_stroke(color, 1. + dpi_dilate*0.5);
+                //df_rect(0.,0.,w,h);
+                df_rect(0.5,0.5,w-1.,h-1.);
+                return df_stroke(color, 0.75 + dpi_dilate*0.75);
             }
         }));
         sh
@@ -418,7 +419,7 @@ impl CodeEditor{
         sh.add_ast(shader_ast!({
             fn pixel()->vec4{
                 df_viewport(pos * vec2(w, h));
-                df_box(0.,0.,w,h,1.);
+                df_box(0.5,0.5,w-1.,h-1.,1.);
                 return df_fill(color);
             }
         }));
