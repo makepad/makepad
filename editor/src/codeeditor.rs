@@ -271,8 +271,9 @@ impl Style for CodeEditor{
             },
             text:Text{
                 font_id:cx.load_font(&cx.font("mono_font")),
-                font_size:11.0,
-                brightness:1.05,
+                font_size:12.0,
+                brightness:1.0,
+                dilate:0.,
                 line_spacing:1.4,
                 wrapping:Wrapping::Line,
                 ..Style::style(cx)
@@ -391,8 +392,8 @@ impl CodeEditor{
         sh.add_ast(shader_ast!({
             fn pixel()->vec4{
                 df_viewport(pos * vec2(w, h));
-                df_box(0.,0.,w,h,1.);
-                return df_stroke(color, 1.);
+                df_rect(0.,0.,w,h);
+                return df_stroke(color, 1.5);
             }
         }));
         sh
@@ -418,7 +419,7 @@ impl CodeEditor{
         sh.add_ast(shader_ast!({
             fn pixel()->vec4{
                 df_viewport(pos * vec2(w, h));
-                df_box(0.,0.,w,h,2.);
+                df_box(0.,0.,w,h,1.);
                 return df_fill(color);
             }
         }));
@@ -781,6 +782,8 @@ impl CodeEditor{
     }
 
     pub fn begin_code_editor(&mut self, cx:&mut Cx, text_buffer:&TextBuffer)->Result<(),()>{
+        // adjust dilation based on DPI factor
+        self.text.dilate = ((2.-cx.target_dpi_factor).max(0.).min(1.))*0.1;
 
         self.view.begin_view(cx, &Layout{..Default::default()})?;
 
@@ -825,8 +828,8 @@ impl CodeEditor{
             }
 
             self._scroll_pos = self.view.get_scroll_pos(cx);
+            self.set_font_size(cx, self.open_font_size);
 
-            self._monospace_size = self.text.get_monospace_size(cx, None);
             self._line_geometry.truncate(0);
             self._draw_cursors = DrawCursors::new();
             self._first_on_line = true;
@@ -1418,7 +1421,7 @@ impl DrawCursors{
 
     pub fn process_geom(&mut self, last_cursor:usize, offset:usize, x:f32, y:f32, w:f32, h:f32){
         if offset == self.head{ // emit a cursor
-            if self.next_index - 1 == last_cursor{
+            if self.next_index > 0 && self.next_index - 1 == last_cursor{
                 self.last_cursor = Some(self.cursors.len());
             }
             self.emit_cursor(x, y, h);

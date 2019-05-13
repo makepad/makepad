@@ -1,1 +1,1 @@
-node ./widgets/render/web/devserver.js
+node ./render/web/devserver.js

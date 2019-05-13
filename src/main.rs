@@ -50,7 +50,9 @@ impl Style for App{
             },
             tree_load_id:0,
             file_editors:Elements::new(FileEditorTemplates{
-                rust_editor:RustEditor{..Style::style(cx)}
+                rust_editor:RustEditor{
+                    ..Style::style(cx)
+                }
             }),
             dock:Dock{
                 dock_items:Some(DockItem::Splitter{
@@ -114,6 +116,7 @@ fn path_file_name(path:&str)->String{
 }
 
 impl App{
+
     fn handle_app(&mut self, cx:&mut Cx, event:&mut Event){
         match event{
             Event::Construct=>{

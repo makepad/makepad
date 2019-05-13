@@ -1111,7 +1111,7 @@ impl CursorSet{
                 cursor.tail += (end_pos.row - start_pos.row + 1) * tab_str_chars + delta;
                 cursor.head += tab_str_chars + delta;
             }
-            delta += (((end_pos.row - start_pos.row) + 1) * tab_str_chars);
+            delta += ((end_pos.row - start_pos.row) + 1) * tab_str_chars;
             //    }
             //}
             old_max = cursor.calc_max(text_buffer, old_max);
@@ -1279,7 +1279,7 @@ impl CursorSet{
             if offset >= token_chunks[i].offset && offset < token_chunks[i].offset + token_chunks[i].len{
                 let i = if token_chunks[i].token_type == TokenType::Newline && i > 0{i - 1}else{i};
                 let pair_token = token_chunks[i].pair_token;
-                if pair_token != i{
+                if pair_token > i{
                     return Some(TokenChunk{
                         token_type:TokenType::Block,
                         offset: token_chunks[i].offset,
