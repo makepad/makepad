@@ -30,7 +30,10 @@ pub struct CodeEditor{
     pub _scroll_pos:Vec2,
     pub _last_finger_move:Option<Vec2>,
     pub _paren_stack:Vec<ParenItem>,
-    //pub _paren_list:Vec<ParenItem>,
+    pub _indent_stack:Vec<f32>,
+    pub _indent_id_alloc:f32,
+    pub _indent_line_inst:Option<InstanceArea>,
+
     pub _line_geometry:Vec<LineGeom>,
     pub _anim_select:Vec<AnimSelect>,
     pub _token_chunks:Vec<TokenChunk>,
@@ -48,7 +51,7 @@ pub struct CodeEditor{
     pub _anim_folding:AnimFolding,
 
     pub _monospace_size:Vec2,
-    pub _instance_count:usize,
+
     pub _first_on_line:bool,
     pub _draw_cursors:DrawCursors,
     pub _draw_search:DrawCursors,
@@ -151,7 +154,8 @@ pub struct AnimSelect{
 #[derive(Clone, Default)]
 pub struct LineGeom{
     walk:Vec2,
-    font_size:f32
+    font_size:f32,
+    indent_id:f32
 }
 
 #[derive(Clone, Default)]
@@ -287,18 +291,24 @@ impl Style for CodeEditor{
 
             _hit_state:HitState{no_scrolling:true, ..Default::default()},
             _monospace_size:Vec2::zero(),
+
             _last_finger_move:None,
             _first_on_line:true,
             _scroll_pos:Vec2::zero(),
             _visible_lines:0, 
+
             _line_geometry:Vec::new(),
             _token_chunks:Vec::new(),
+
             _anim_select:Vec::new(),
             _grid_select_corner:None,
+
             _bg_area:Area::Empty,
+
             _text_inst:None,
             _text_area:Area::Empty,
-            _instance_count:0,
+            //_instance_count:0,
+
             _anim_font_size:11.0,
             _line_largest_font:0.,
             _anim_folding:AnimFolding{
@@ -309,7 +319,12 @@ impl Style for CodeEditor{
             _select_scroll:None,
             _draw_cursors:DrawCursors::new(),
             _draw_search:DrawCursors::new(),
+
             _paren_stack:Vec::new(),
+            _indent_stack:Vec::new(),
+            _indent_id_alloc:0.0,
+            _indent_line_inst:None,
+
             _line_chunk:Vec::new(),
             _highlight_selection:Vec::new(),
             _highlight_token:Vec::new(),
@@ -333,11 +348,19 @@ impl CodeEditor{
     pub fn def_indent_lines_shader(cx:&mut Cx)->Shader{
         let mut sh = Quad::def_quad_shader(cx);
         sh.add_ast(shader_ast!({
+            let indent_id:float<Instance>;
+            let indent_sel:float<Uniform>;
             fn pixel()->vec4{
+                let col = color;
+                let thickness =  0.8 + dpi_dilate*0.5;
+                if indent_id == indent_sel{
+                    col *= vec4(1.25);
+                    thickness *= 1.3;
+                };
                 df_viewport(pos * vec2(w, h));
                 df_move_to(1.,-1.);
                 df_line_to(1.,h+1.);
-                return df_stroke(color, 0.8 + dpi_dilate*0.5);
+                return df_stroke(col,thickness);
             }
         }));
         sh
@@ -824,7 +847,7 @@ impl CodeEditor{
             cx.new_instance_layer(self.selection.shader_id, 0);
 
             self._text_inst = Some(self.text.begin_text(cx));
-            self._instance_count = 0;
+            //self._instance_count = 0;
    
             if let Some(select_scroll) = &mut self._select_scroll{
                 let scroll_pos = self.view.get_scroll_pos(cx);
@@ -849,6 +872,9 @@ impl CodeEditor{
             self._newline_tabs = 0;
             self._last_tabs = 0;
 
+            self._indent_stack.truncate(0);
+            self._indent_id_alloc = 1.0;
+
             let anim_folding = &mut self._anim_folding;
             if anim_folding.state.is_animating(){
                 anim_folding.state.next_anim_step();
@@ -870,6 +896,10 @@ impl CodeEditor{
             cx.new_instance_layer(self.paren_pair.shader_id, 0);
 
             // cursor after text
+            self._indent_line_inst = Some(cx.new_instance_layer(self.indent_lines.shader_id, 0));
+
+
+            // cursor after text
             cx.new_instance_layer(self.cursor.shader_id, 0);
 
             self._token_chunks.truncate(0);
@@ -887,7 +917,8 @@ impl CodeEditor{
         // line geometry is used for scrolling look up of cursors
         let line_geom = LineGeom{
             walk:cx.get_rel_turtle_walk(),
-            font_size:self._line_largest_font
+            font_size:self._line_largest_font,
+            indent_id:if let Some(id) = self._indent_stack.last(){*id}else{0.}
         };
 
         // add a bit of room to the right
@@ -924,6 +955,8 @@ impl CodeEditor{
             }
             self._line_chunk.truncate(0);
         }
+        // we need to keep the identifier of the deepest 
+
         // search for all markings
         self._line_geometry.push(line_geom);
         self._line_largest_font = self.text.font_size;
@@ -947,13 +980,16 @@ impl CodeEditor{
     fn draw_indent_lines(&mut self, cx:&mut Cx, geom_y:f32, tabs:usize){
         let y_pos = geom_y - cx.turtle_origin().y;
         let tab_width = self._monospace_size.x*4.;
+        
         for i in 0..tabs{
-            self.indent_lines.draw_quad(cx, Rect{
+            let inst = self.indent_lines.draw_quad(cx, Rect{
                 x: (tab_width * i as f32),
                 y: y_pos, 
                 w: tab_width,
                 h:self._monospace_size.y
             });
+            inst.push_float(cx, self._indent_stack[i]);
+            // output the id of the 'first' paren chunk
         }
     }
     // drawing a text chunk
@@ -979,7 +1015,18 @@ impl CodeEditor{
                     self.set_font_size(cx, self._anim_font_size);
                 }
             }
-
+        
+            // do indent depth walking
+            if self._first_on_line && token_type == TokenType::Whitespace{
+                let tabs = chunk.len()>>2;
+                while tabs > self._indent_stack.len(){
+                    self._indent_stack.push(self._indent_id_alloc);
+                    self._indent_id_alloc += 1.0;
+                }
+                while tabs < self._indent_stack.len(){
+                    self._indent_stack.pop();
+                }
+            }
             // lets check if the geom is visible
             if let Some(geom) = cx.walk_turtle_text(
                 self._monospace_size.x * (chunk.len() as f32), 
@@ -991,6 +1038,7 @@ impl CodeEditor{
                     TokenType::Whitespace => {
                         if self._first_on_line && chunk[0] == ' '{
                             let tabs = chunk.len()>>2;
+                            // if self._last_tabs 
                             self._last_tabs = tabs;
                             self._newline_tabs = tabs;
                             self.draw_indent_lines(cx, geom.y, tabs);
@@ -1077,7 +1125,7 @@ impl CodeEditor{
                     });
                 }
             }
-
+            self._first_on_line = false;
             // Do all the Paren matching highlighting drawing
             let mut pair_token = self._token_chunks.len();
             if token_type == TokenType::ParenClose{
@@ -1131,7 +1179,7 @@ impl CodeEditor{
                 self.new_line(cx);
             }
 
-            self._instance_count += chunk.len();
+            //self._instance_count += chunk.len();
             self._token_chunks.push(TokenChunk{
                 offset:offset,
                 pair_token:pair_token,
@@ -1295,6 +1343,13 @@ impl CodeEditor{
             }
         }
         
+        // compute the line which our last cursor is on so we can set the highlight id
+        if let Some(indent_inst) = self._indent_line_inst{
+            let last_pos = self.cursors.get_last_cursor_text_pos(text_buffer);
+            let indent_id = if last_pos.row < self._line_geometry.len(){self._line_geometry[last_pos.row].indent_id}else{0.};
+            indent_inst.push_uniform_float(cx, indent_id);
+        } 
+
         self.view.end_view(cx);
 
         if self._anim_folding.did_animate{
