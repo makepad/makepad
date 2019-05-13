@@ -196,9 +196,9 @@ impl Style for FileTree{
                 ..Style::style(cx)
             },
             view:View{
-                scroll_h:Some(ScrollBar{
-                    ..Style::style(cx)
-                }),
+                //scroll_h:Some(ScrollBar{
+                //    ..Style::style(cx)
+                //}),
                 scroll_v:Some(ScrollBar{
                     smoothing:Some(0.25),
                     ..Style::style(cx)

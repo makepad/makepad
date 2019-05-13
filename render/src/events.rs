@@ -280,8 +280,8 @@ impl Event{
                 }
             },
             Event::Frame(_)=>{
-                for area in &cx.frame_callbacks{
-                    if area == area{
+                for frame_area in &cx.frame_callbacks{
+                    if *frame_area == area{
                         return self.clone()
                     }
                 }

@@ -10,7 +10,7 @@ pub trait ScrollBarLike<ScrollBarT>{
     fn set_scroll_target(&mut self, cx:&mut Cx, scroll_pos_target:f32)->bool;
 }
 
-#[derive(Clone, PartialEq)]
+#[derive(Clone, PartialEq, Debug)]
 pub enum ScrollBarEvent{
     None,
     Scroll{scroll_pos:f32, view_total:f32, view_visible:f32},
@@ -175,20 +175,17 @@ where TScrollBar: ScrollBarLike<TScrollBar> + Clone + ElementLife
         let mut ret_v = ScrollBarEvent::None;
 
         if let Some(scroll_h) = &mut self.scroll_h{
-            //if let Some(scroll_h) = &mut scroll_h.element{
             ret_h = scroll_h.handle_scroll_bar(cx, event);
-            //}
         }
         if let Some(scroll_v) = &mut self.scroll_v{
-            //if let Some(scroll_v) = &mut scroll_v.element{
             ret_v = scroll_v.handle_scroll_bar(cx, event);
-            //}
         }
         match ret_h{
             ScrollBarEvent::None=>(),
             ScrollBarEvent::Scroll{scroll_pos,..}=>{
                 let draw_list = &mut cx.draw_lists[self.draw_list_id.unwrap()];
                 draw_list.set_scroll_x(scroll_pos);
+                cx.paint_dirty = true;
             },
             _=>()
         };
@@ -197,6 +194,7 @@ where TScrollBar: ScrollBarLike<TScrollBar> + Clone + ElementLife
             ScrollBarEvent::Scroll{scroll_pos,..}=>{
                 let draw_list = &mut cx.draw_lists[self.draw_list_id.unwrap()];
                 draw_list.set_scroll_y(scroll_pos);
+                cx.paint_dirty = true;
             },
             _=>()
         };
@@ -273,6 +271,7 @@ where TScrollBar: ScrollBarLike<TScrollBar> + Clone + ElementLife
             cx.draw_lists[draw_list_id].set_scroll_x(scroll_pos);
         }
         if let Some(scroll_v) = &mut self.scroll_v{
+            //println!("SET SCROLLBAR {} {}", rect_now.h, view_total.y);
             let scroll_pos = scroll_v.draw_scroll_bar(cx, Axis::Vertical,view_area, rect_now, view_total);
             cx.draw_lists[draw_list_id].set_scroll_y(scroll_pos);
         }

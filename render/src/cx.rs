@@ -86,7 +86,10 @@ pub struct Cx{
 
     pub style_values:BTreeMap<String, StyleValue>,
 
-    pub binary_deps:Vec<BinaryDep>
+    pub binary_deps:Vec<BinaryDep>,
+
+    pub panic_now:bool,
+    pub panic_redraw:bool
  }
 
 impl Default for Cx{
@@ -154,7 +157,10 @@ impl Default for Cx{
 
             platform:CxPlatform{..Default::default()},
 
-            binary_deps:Vec::new()
+            binary_deps:Vec::new(),
+
+            panic_now:false,
+            panic_redraw:false
         }
     }
 }
@@ -211,6 +217,11 @@ impl Cx{
     }
 
     pub fn redraw_area(&mut self, area:Area){
+        if self.panic_redraw{
+            #[cfg(debug_assertions)]
+            panic!("Panic Redraw triggered")
+        }
+
         // if we are redrawing all, clear the rest
         if area == Area::All{
             self.redraw_areas.truncate(0);

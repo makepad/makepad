@@ -34,12 +34,12 @@ impl Style for App{
             text_buffers:HashMap::new(),
             file_editor_id_alloc:10,
             view:View{
-                scroll_h:Some(ScrollBar{
-                    ..Style::style(cx)
-                }),
-                scroll_v:Some(ScrollBar{
-                    ..Style::style(cx)
-                }),
+                //scroll_h:Some(ScrollBar{
+                //    ..Style::style(cx)
+                //}),
+                //scroll_v:Some(ScrollBar{
+                //    ..Style::style(cx)
+                //}),
                 ..Style::style(cx)
             },
             quad:Quad{

@@ -219,6 +219,16 @@ impl Cx{
                                 // lets set the finger tap count
                                 fe.tap_count = self.process_tap_count(fe.digit, fe.abs, fe.time);
                             },
+                            Event::KeyDown(ke)=>{
+                                if ke.key_code == KeyCode::PrintScreen{
+                                    if ke.modifiers.control{
+                                        self.panic_redraw = true;
+                                    }
+                                    else{
+                                        self.panic_now = true;
+                                    }
+                                }
+                            },
                             _=>()
                         };
                         match &event{

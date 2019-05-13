@@ -161,7 +161,7 @@ impl ScrollBar{
     }
 
 
-    fn move_towards_scroll_target(&mut self)->bool{
+    fn move_towards_scroll_target(&mut self, cx:&mut Cx)->bool{
         if self.smoothing.is_none(){
             return false;
         }
@@ -172,6 +172,7 @@ impl ScrollBar{
             self._scroll_pos = self._scroll_pos + (self.smoothing.unwrap() * self._scroll_delta).min(-1.);
             if self._scroll_pos <= self._scroll_target{ // hit the target
                 self._scroll_pos = self._scroll_target;
+                self.update_shader_scroll_pos(cx);
                 return false;
             }
         }
@@ -179,9 +180,11 @@ impl ScrollBar{
             self._scroll_pos = self._scroll_pos + (self.smoothing.unwrap() * self._scroll_delta).max(1.);
             if self._scroll_pos > self._scroll_target{ // hit the target
                 self._scroll_pos = self._scroll_target;
+                self.update_shader_scroll_pos(cx);
                 return false;
             }
         }
+        self.update_shader_scroll_pos(cx);
         true
     }
 
@@ -199,6 +202,7 @@ impl ScrollBarLike<ScrollBar> for ScrollBar{
     fn set_scroll_pos(&mut self, cx:&mut Cx, scroll_pos:f32)->bool{
         // clamp scroll_pos to
         let scroll_pos = scroll_pos.min(self._view_total - self._view_visible).max(0.); 
+        
         if self._scroll_pos != scroll_pos{
             self._scroll_pos = scroll_pos;
             self._scroll_target = scroll_pos;
@@ -215,6 +219,7 @@ impl ScrollBarLike<ScrollBar> for ScrollBar{
 
     fn set_scroll_target(&mut self, cx:&mut Cx, scroll_pos_target:f32)->bool{
         // clamp scroll_pos to
+        
         let new_target = scroll_pos_target.min(self._view_total - self._view_visible).max(0.); 
         if self._scroll_target != new_target{
             self._scroll_target = new_target;
@@ -262,8 +267,10 @@ impl ScrollBarLike<ScrollBar> for ScrollBar{
                     };
                     if !self.smoothing.is_none(){
                         let scroll_pos_target = self.get_scroll_target();
+                       
                         self.set_scroll_target(cx, scroll_pos_target+ scroll);
-                        self.move_towards_scroll_target();// take the first step now
+                        self.move_towards_scroll_target(cx);// take the first step now
+                        return self.make_scroll_event();
                     }
                     else{
                         let scroll_pos = self.get_scroll_pos();
@@ -280,7 +287,7 @@ impl ScrollBarLike<ScrollBar> for ScrollBar{
                     self.animator.calc_write(cx, "sb.color", ae.time, self._sb_area);
                 },
                 Event::Frame(_ae)=>{
-                    if self.move_towards_scroll_target(){
+                    if self.move_towards_scroll_target(cx){
                         cx.next_frame(self._sb_area);
                     }
                     return self.make_scroll_event()

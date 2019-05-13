@@ -544,7 +544,7 @@ fn get_event_keycode(event: id) -> Option<KeyCode> {
     let scan_code: std::os::raw::c_ushort = unsafe {
         msg_send![event, keyCode]
     };
-    //println!("SCAN CODE {} ", scan_code);
+
     Some(match scan_code {
         0x00 => KeyCode::KeyA,
         0x01 => KeyCode::KeyS,
@@ -652,7 +652,7 @@ fn get_event_keycode(event: id) -> Option<KeyCode> {
         //0x66 => JIS Eisuu (macOS),
         0x67 => KeyCode::F11,
         //0x68 => JIS Kana (macOS),
-        //0x69 => KeyCode::F13,
+        0x69 => KeyCode::PrintScreen,
         //0x6a => KeyCode::F16,
         //0x6b => KeyCode::F14,
         //0x6c => unkown,
