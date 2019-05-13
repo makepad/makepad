@@ -1039,6 +1039,10 @@ impl CodeEditor{
                         if let Some(paren) = self._paren_stack.last_mut(){
                             paren.geom_close = Some(geom);
                         }
+                        else{
+                            self.paren_pair.color = self.paren_pair_fail;
+                            self.paren_pair.draw_quad_abs(cx, geom);
+                        }                            
                         self.colors.paren
                     },
                     TokenType::Operator=> self.colors.operator,
@@ -1108,10 +1112,10 @@ impl CodeEditor{
                                 }
                                 else{
                                     if let Some(rc) = last.geom_open{
-                                        self.paren_pair.draw_quad_abs(cx, Rect{x:rc.x,y:rc.y,w:rc.w,h:rc.h});
+                                        self.paren_pair.draw_quad_abs(cx, rc);
                                     }
                                     if let Some(rc) = last.geom_close{
-                                        self.paren_pair.draw_quad_abs(cx, Rect{x:rc.x,y:rc.y,w:rc.w,h:rc.h});
+                                        self.paren_pair.draw_quad_abs(cx, rc);
                                     }
                                 }
                             }
@@ -1148,6 +1152,17 @@ impl CodeEditor{
         //let draw_cursor = &self._draw_cursor;
         let pos = cx.turtle_origin();
         cx.new_instance_layer(self.cursor.shader_id, 0);
+
+        // unmatched highlighting
+        while self._paren_stack.len()>0{
+            let last = self._paren_stack.pop().unwrap();
+            if !last.geom_open.is_none() && last.marked{
+                self.paren_pair.color = self.paren_pair_fail;
+                if let Some(rc) = last.geom_open{
+                    self.paren_pair.draw_quad_abs(cx, rc);
+                }
+            }
+        }
 
         // draw the cursors    
         for rc in &self._draw_cursors.cursors{
