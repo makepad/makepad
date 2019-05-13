@@ -232,7 +232,7 @@ impl TextBuffer{
     fn copy_line(&self, row:usize, start_col:usize, len:usize)->Vec<char>{
         let line = &self.lines[row];
         if start_col + len > line.len(){
-            self.lines[row][start_col..(start_col+len-1)].iter().cloned().collect()
+            self.lines[row][start_col..line.len()].iter().cloned().collect()
         }
         else{
             self.lines[row][start_col..(start_col+len)].iter().cloned().collect()
@@ -1342,6 +1342,7 @@ impl CursorSet{
             }
             else{
                 let start_pos = text_buffer.offset_to_text_pos(chunk.offset);
+                
                 text_buffer.copy_line(start_pos.row, start_pos.col, chunk.len)
             }
         }
