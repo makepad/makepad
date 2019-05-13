@@ -988,7 +988,7 @@ impl CodeEditor{
                 w: tab_width,
                 h:self._monospace_size.y
             });
-            inst.push_float(cx, self._indent_stack[i]);
+            inst.push_float(cx, if i < self._indent_stack.len(){self._indent_stack[i]}else{0.});
             // output the id of the 'first' paren chunk
         }
     }
@@ -1028,7 +1028,7 @@ impl CodeEditor{
                         self._indent_stack.pop();
                     }
                 }
-                else{
+                else if token_type != TokenType::Newline{
                     self._indent_stack.truncate(0);
                 }
             }
