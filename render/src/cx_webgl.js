@@ -517,9 +517,21 @@
 			})
 
 			let mqString = '(resolution: '+window.devicePixelRatio+'dppx)'
-			matchMedia(mqString).addEventListener("change", _=>{
-				this.on_screen_resize()
-			});
+			if(typeof matchMedia !== 'undefined'){
+				let mq = matchMedia(mqString);
+				if(mq && mq.addEventListener){
+					mq.addEventListener("change", _=>{
+						this.on_screen_resize()
+					});
+				}
+				else{ // poll for it. yes. its terrible
+					window.setInterval(_=>{
+						if(window.devicePixelRation != this.dpi_factor){
+							this.on_screen_resize()
+						}
+					},1000);
+				}
+			}
 
 			var canvas = this.canvas
 			var options = {
