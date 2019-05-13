@@ -17,7 +17,6 @@ pub struct Text{
     pub text:String,
     pub color: Color,
     pub font_size:f32,
-    pub dilate:f32,
     pub brightness:f32,
     pub line_spacing:f32,
     pub wrapping:Wrapping,
@@ -32,7 +31,6 @@ impl Style for Text{
             text:"".to_string(),
             font_size:cx.size("font_size") as f32,
             line_spacing:1.15,
-            dilate:0.0,
             brightness:1.0,
             wrapping:Wrapping::Word,
             color:color("white")
@@ -77,7 +75,7 @@ impl Text{
             let clipped:vec2<Varying>;
             let rect:vec4<Varying>;
             let brightness:float<Uniform>;
-            let dilate:float<Uniform>;
+            let dpi_dilate:float<Uniform>;
 
             fn pixel()->vec4{
                 if marker>0.5{
@@ -91,7 +89,7 @@ impl Text{
                     let sig_dist =  max(min(s.r, s.g), min(max(s.r, s.g), s.b)) - 0.5;
                     //let scale = pow(df_antialias(clipped) * 0.002,0.5);
                     df_viewport(tex_coord * tex_size * 0.07);
-                    df_shape = (-sig_dist - 0.5 / df_aa) - dilate;
+                    df_shape = (-sig_dist - 0.5 / df_aa) - dpi_dilate*0.1;
                     return df_fill(color*brightness); 
                 }
             }
@@ -141,7 +139,8 @@ impl Text{
             //tex_size
             aligned.inst.push_uniform_vec2f(cx, cx.fonts[self.font_id].width as f32, cx.fonts[self.font_id].height as f32);
             aligned.inst.push_uniform_float(cx, self.brightness);
-            aligned.inst.push_uniform_float(cx, self.dilate);
+            let dpi_dilate = (2.-cx.target_dpi_factor).max(0.).min(1.);
+            aligned.inst.push_uniform_float(cx, dpi_dilate);
             //list_clip
             //area.push_uniform_vec4f(cx, -50000.0,-50000.0,50000.0,50000.0);
         }

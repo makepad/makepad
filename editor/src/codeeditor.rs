@@ -273,7 +273,6 @@ impl Style for CodeEditor{
                 font_id:cx.load_font(&cx.font("mono_font")),
                 font_size:12.0,
                 brightness:1.0,
-                dilate:0.,
                 line_spacing:1.4,
                 wrapping:Wrapping::Line,
                 ..Style::style(cx)
@@ -393,7 +392,7 @@ impl CodeEditor{
             fn pixel()->vec4{
                 df_viewport(pos * vec2(w, h));
                 df_rect(0.,0.,w,h);
-                return df_stroke(color, 1.5);
+                return df_stroke(color, 1. + dpi_dilate*0.5);
             }
         }));
         sh
@@ -783,8 +782,6 @@ impl CodeEditor{
 
     pub fn begin_code_editor(&mut self, cx:&mut Cx, text_buffer:&TextBuffer)->Result<(),()>{
         // adjust dilation based on DPI factor
-        self.text.dilate = ((2.-cx.target_dpi_factor).max(0.).min(1.))*0.1;
-
         self.view.begin_view(cx, &Layout{..Default::default()})?;
 
         if text_buffer.load_id != 0{

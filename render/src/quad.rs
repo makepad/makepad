@@ -45,6 +45,7 @@ impl Quad{
             let color:vec4<Instance>;
             let pos:vec2<Varying>;
             let draw_list_do_scroll:float<Uniform>;
+            let dpi_dilate:float<Uniform>;
 
             fn vertex()->vec4{
                 let shift:vec2 = -draw_list_scroll * draw_list_do_scroll;
@@ -80,10 +81,16 @@ impl Quad{
         area
     }
 
+    fn do_uniforms(&mut self, cx:&mut Cx, inst:&InstanceArea){
+        inst.push_uniform_float(cx, if self.do_scroll{1.0}else{0.0});
+        let dpi_dilate = (2.-cx.target_dpi_factor).max(0.).min(1.);
+        inst.push_uniform_float(cx, dpi_dilate);
+    }
+
     pub fn draw_quad_walk(&mut self, cx:&mut Cx, w:Bounds, h:Bounds, margin:Margin)->InstanceArea{
         let inst = cx.new_aligned_instance(self.shader_id, 1).inst;
         if inst.need_uniforms_now(cx){
-            inst.push_uniform_float(cx, if self.do_scroll{1.0}else{0.0});
+            self.do_uniforms(cx, &inst);
         }
         let geom = cx.walk_turtle(w, h, margin, None);
         
@@ -114,7 +121,7 @@ impl Quad{
     pub fn draw_quad(&mut self, cx:&mut Cx, rect:Rect)->InstanceArea{
         let inst = cx.new_aligned_instance(self.shader_id, 1).inst;
         if inst.need_uniforms_now(cx){
-            inst.push_uniform_float(cx, if self.do_scroll{1.0}else{0.0});
+            self.do_uniforms(cx, &inst);
         }
         //println!("{:?} {}", area, cx.current_draw_list_id);
         let pos = cx.turtle_origin();
@@ -129,7 +136,7 @@ impl Quad{
     pub fn draw_quad_abs(&mut self, cx:&mut Cx, rect:Rect)->InstanceArea{
         let inst = cx.new_aligned_instance(self.shader_id, 1).inst;
         if inst.need_uniforms_now(cx){
-            inst.push_uniform_float(cx, if self.do_scroll{1.0}else{0.0});
+            self.do_uniforms(cx, &inst);
         }
         //println!("{:?} {}", area, cx.current_draw_list_id);
         let data = [
