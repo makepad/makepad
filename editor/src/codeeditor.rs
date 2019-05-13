@@ -1017,14 +1017,19 @@ impl CodeEditor{
             }
         
             // do indent depth walking
-            if self._first_on_line && token_type == TokenType::Whitespace{
-                let tabs = chunk.len()>>2;
-                while tabs > self._indent_stack.len(){
-                    self._indent_stack.push(self._indent_id_alloc);
-                    self._indent_id_alloc += 1.0;
+            if self._first_on_line {
+                if token_type == TokenType::Whitespace{
+                    let tabs = chunk.len()>>2;
+                    while tabs > self._indent_stack.len(){
+                        self._indent_stack.push(self._indent_id_alloc);
+                        self._indent_id_alloc += 1.0;
+                    }
+                    while tabs < self._indent_stack.len(){
+                        self._indent_stack.pop();
+                    }
                 }
-                while tabs < self._indent_stack.len(){
-                    self._indent_stack.pop();
+                else{
+                    self._indent_stack.truncate(0);
                 }
             }
             // lets check if the geom is visible
