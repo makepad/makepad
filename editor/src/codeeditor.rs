@@ -253,7 +253,7 @@ impl Style for CodeEditor{
                 ..Style::style(cx)
             },
             cursor_row:Quad{
-                color:color256(136,136,136),
+                color:color256(75,75,75),
                 shader_id:cx.add_shader(cursor_row_sh, "Editor.cursor_row"),
                 ..Style::style(cx)
             },
@@ -405,11 +405,11 @@ impl CodeEditor{
         sh.add_ast(shader_ast!({
             fn pixel()->vec4{
                 df_viewport(pos * vec2(w, h));
-                df_move_to(0.,1.);
-                df_line_to(w,1.);
-                df_move_to(0.,h-1.);
-                df_line_to(w,h-1.);
-                return df_stroke(color, 0.8);
+                df_move_to(0.,0.5);
+                df_line_to(w,0.5);
+                df_move_to(0.,h-0.5);
+                df_line_to(w,h-0.5);
+                return df_stroke(color, 0.75 + dpi_dilate*0.75);
             }
         }));
         sh
@@ -448,6 +448,11 @@ impl CodeEditor{
             _=>()
         }
         match event.hits(cx, self._bg_area, &mut self._hit_state){
+            Event::KeyFocus(kf)=>{
+                if kf.is_lost{
+                    self.view.redraw_view_area(cx)
+                }
+            },
             Event::Animate(_ae)=>{
             },
             Event::FingerDown(fe)=>{
@@ -808,6 +813,9 @@ impl CodeEditor{
             // makers before selection
             cx.new_instance_layer(self.highlight.shader_id, 0);
 
+            // then cursor row
+            cx.new_instance_layer(self.cursor_row.shader_id, 0);
+
             // selection before text
             cx.new_instance_layer(self.selection.shader_id, 0);
 
@@ -1076,17 +1084,17 @@ impl CodeEditor{
                                     let geom = Rect{
                                         x:geom_open.x,
                                         y:geom_open.y,
-                                        w:geom_open.w + geom_close.w + 1.,
-                                        h:geom_close.h+ 1.
+                                        w:geom_open.w + geom_close.w,
+                                        h:geom_close.h
                                     };
                                     self.paren_pair.draw_quad_abs(cx, geom);
                                 }
                                 else{
                                     if let Some(rc) = last.geom_open{
-                                        self.paren_pair.draw_quad_abs(cx, Rect{x:rc.x,y:rc.y,w:rc.w+1.,h:rc.h+1.});
+                                        self.paren_pair.draw_quad_abs(cx, Rect{x:rc.x,y:rc.y,w:rc.w,h:rc.h});
                                     }
                                     if let Some(rc) = last.geom_close{
-                                        self.paren_pair.draw_quad_abs(cx, Rect{x:rc.x,y:rc.y,w:rc.w+1.,h:rc.h+1.});
+                                        self.paren_pair.draw_quad_abs(cx, Rect{x:rc.x,y:rc.y,w:rc.w,h:rc.h});
                                     }
                                 }
                             }
@@ -1236,6 +1244,16 @@ impl CodeEditor{
         if self._bg_area == cx.key_focus{
             if let Some(last_cursor) = self._draw_cursors.last_cursor{
                 let rc = self._draw_cursors.cursors[last_cursor];
+                if let Some(_) = self.cursors.get_last_cursor_singular(){
+                    // lets draw the cursor line
+                    self.cursor_row.draw_quad_abs(cx,Rect{
+                        x: cx.turtle_origin().x,
+                        y: rc.y,
+                        w: cx.width_total(false),
+                        h: rc.h
+                    });
+                }
+
                 let scroll_pos = self.view.get_scroll_pos(cx);
                 cx.show_text_ime(rc.x - scroll_pos.x, rc.y - scroll_pos.y);
             }
