@@ -1088,16 +1088,17 @@ impl CodeEditor{
                     if !last.geom_open.is_none() || !last.geom_close.is_none(){
                         if let Some(pos) = self.cursors.get_last_cursor_singular(){
                             // cursor is near the last one or its marked
-                            if pos == offset || pos == offset + 1 && next_char != ')' &&  next_char != '}' && next_char !=']' || last.marked{
-                                
-                                if last.exp_paren == '(' && chunk[0] != ')' ||
-                                   last.exp_paren == '[' && chunk[0] != ']' ||
-                                   last.exp_paren == '{' && chunk[0] != '}'{
-                                    self.paren_pair.color = self.paren_pair_fail;
-                                }
-                                else{
-                                    self.paren_pair.color = self.paren_pair_match;
-                                }
+                            let fail = if last.exp_paren == '(' && chunk[0] != ')' ||
+                                last.exp_paren == '[' && chunk[0] != ']' ||
+                                last.exp_paren == '{' && chunk[0] != '}'{
+                                self.paren_pair.color = self.paren_pair_fail;
+                                true
+                            }
+                            else{
+                                self.paren_pair.color = self.paren_pair_match;
+                                false
+                            };
+                            if fail || pos == offset || pos == offset + 1 && next_char != ')' &&  next_char != '}' && next_char !=']' || last.marked{
                                 // fuse the tokens
                                 if last.pair_start + 1 == self._token_chunks.len() && !last.geom_open.is_none() && !last.geom_close.is_none(){
                                     let geom_open = last.geom_open.unwrap();
@@ -1156,7 +1157,7 @@ impl CodeEditor{
         // unmatched highlighting
         while self._paren_stack.len()>0{
             let last = self._paren_stack.pop().unwrap();
-            if !last.geom_open.is_none() && last.marked{
+            if !last.geom_open.is_none(){
                 self.paren_pair.color = self.paren_pair_fail;
                 if let Some(rc) = last.geom_open{
                     self.paren_pair.draw_quad_abs(cx, rc);
