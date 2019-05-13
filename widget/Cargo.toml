@@ -1,5 +1,5 @@
 [package]
-name = "widgets"
+name = "widget"
 version = "0.1.0"
 authors = ["makepaddev"]
 edition = "2018"
@@ -17,5 +17,5 @@ serde_json = "*"
 serde = { version = "1.0", features = ["derive"] }
 
 [dependencies.render]
-path="./render"
+path="../render"
 default-features = false

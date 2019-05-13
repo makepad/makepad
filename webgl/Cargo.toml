@@ -19,7 +19,17 @@ codegen-units = 1
 rand = "*"
 #syn = "*"
 
-[dependencies.widgets]
-path="../widgets"
+[dependencies.widget]
+path="../widget"
+default-features = false
+features=["webgl"]
+
+[dependencies.render]
+path="../render"
+default-features = false
+features=["webgl"]
+
+[dependencies.editor]
+path="../editor"
 default-features = false
 features=["webgl"]

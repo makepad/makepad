@@ -1,4 +1,4 @@
-use widgets::*;
+use widget::*;
 use crate::textbuffer::*;
 use crate::codeeditor::*;
 

@@ -22,8 +22,10 @@ function readRecur(path, name){
 let tree = readRecur(".","");
 tree.open = true;
 tree.folders[0].open = true;
-tree.folders[1].open = true;
-tree.folders[1].folders[1].open = true;
+tree.folders[0].folders[0].open = true;
+tree.folders[2].open = true;
+tree.folders[3].open = true;
+tree.folders[3].folders[0].open = true;
 var data_in = fs.readFileSync('./index.json');
 var data_out = JSON.stringify(tree);
 if(data_in != data_out){
