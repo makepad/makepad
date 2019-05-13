@@ -168,6 +168,7 @@ impl TextBuffer{
             let ch = line[i];
             if ch != ' '{
                 if i == pos.col{
+                    
                     return (offset-(i+1), 1 + i);
                 }
                 // check pair removal
@@ -181,7 +182,7 @@ impl TextBuffer{
                 return (offset - 1, 1);
             }
         };
-        return (offset - line.len() - 1, line.len() + 1);
+        return ((offset - pos.col - 1), line.len());
     }
 
     pub fn calc_delete_line_indent_depth(&self, offset:usize)->usize{
