@@ -20,6 +20,9 @@ pub struct CodeEditor{
     
     pub colors:SyntaxColors,
 
+    pub paren_pair_match:Color,
+    pub paren_pair_fail:Color,
+
     pub _hit_state:HitState,
     pub _bg_area:Area,
     pub _text_inst:Option<AlignedInstance>,
@@ -258,10 +261,11 @@ impl Style for CodeEditor{
                 ..Style::style(cx)
             },
             paren_pair:Quad{
-                color:color256(136,136,136),
                 shader_id:cx.add_shader(paren_pair_sh, "Editor.paren_pair"),
                 ..Style::style(cx)
             },
+            paren_pair_match:color256(136,136,136),
+            paren_pair_fail:color256(255,0,0),
             bg_layout:Layout{
                 width:Bounds::Fill,
                 height:Bounds::Fill,
@@ -1079,8 +1083,17 @@ impl CodeEditor{
                     pair_token = last.pair_start;
                     if !last.geom_open.is_none() || !last.geom_close.is_none(){
                         if let Some(pos) = self.cursors.get_last_cursor_singular(){
-                            // cursor is near the last one.
+                            // cursor is near the last one or its marked
                             if pos == offset || pos == offset + 1 && next_char != ')' &&  next_char != '}' && next_char !=']' || last.marked{
+                                
+                                if last.exp_paren == '(' && chunk[0] != ')' ||
+                                   last.exp_paren == '[' && chunk[0] != ']' ||
+                                   last.exp_paren == '{' && chunk[0] != '}'{
+                                    self.paren_pair.color = self.paren_pair_fail;
+                                }
+                                else{
+                                    self.paren_pair.color = self.paren_pair_match;
+                                }
                                 // fuse the tokens
                                 if last.pair_start + 1 == self._token_chunks.len() && !last.geom_open.is_none() && !last.geom_close.is_none(){
                                     let geom_open = last.geom_open.unwrap();
