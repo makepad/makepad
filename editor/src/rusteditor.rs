@@ -217,6 +217,9 @@ impl RustEditor{
                         KeywordType::Flow=>{
                             token_type = TokenType::Flow;
                         },
+                        KeywordType::BuiltinType=>{
+                            token_type = TokenType::Keyword;
+                        },
                         KeywordType::None=>{
                             if state.next == '(' || state.next == '!'{
                                 token_type = TokenType::Call;
@@ -363,6 +366,9 @@ impl RustEditor{
                 if state.keyword(chunk,"reak"){
                     return KeywordType::Flow
                 }
+                if state.keyword(chunk,"ool"){
+                    return KeywordType::BuiltinType
+                }
             },
             'c'=>{
                 if state.keyword(chunk,"o"){
@@ -375,6 +381,9 @@ impl RustEditor{
                 }
                 else if state.keyword(chunk,"rate"){
                     return KeywordType::Normal
+                }
+                else if state.keyword(chunk,"har"){
+                    return KeywordType::BuiltinType
                 }
             },
             'e'=>{
@@ -398,6 +407,12 @@ impl RustEditor{
                 else if state.keyword(chunk,"or"){
                     return KeywordType::Flow
                 }
+                else if state.keyword(chunk,"32"){
+                    return KeywordType::BuiltinType
+                }
+                else if state.keyword(chunk,"64"){
+                    return KeywordType::BuiltinType
+                }
             },
             'i'=>{
                 if state.keyword(chunk,"f"){
@@ -406,8 +421,20 @@ impl RustEditor{
                 else if state.keyword(chunk,"mpl"){
                     return KeywordType::Normal
                 }
-                else if state.keyword(chunk,"in"){
+                else if state.keyword(chunk,"n"){
                     return KeywordType::Normal
+                }
+                else if state.keyword(chunk,"8"){ 
+                    return KeywordType::BuiltinType
+                }
+                else if state.keyword(chunk,"16"){ 
+                    return KeywordType::BuiltinType
+                }
+                else if state.keyword(chunk,"32"){ 
+                    return KeywordType::BuiltinType
+                }
+                else if state.keyword(chunk,"64"){ 
+                    return KeywordType::BuiltinType
                 }
             },
             'l'=>{
@@ -485,6 +512,18 @@ impl RustEditor{
                 else if state.keyword(chunk,"nsafe"){ 
                     return KeywordType::Normal
                 }
+                else if state.keyword(chunk,"8"){ 
+                    return KeywordType::BuiltinType
+                }
+                else if state.keyword(chunk,"16"){ 
+                    return KeywordType::BuiltinType
+                }
+                else if state.keyword(chunk,"32"){ 
+                    return KeywordType::BuiltinType
+                }
+                else if state.keyword(chunk,"64"){ 
+                    return KeywordType::BuiltinType
+                }
             },
             'w'=>{ // use
                 if state.keyword(chunk,"h"){
@@ -506,4 +545,5 @@ enum KeywordType{
     None,
     Normal,
     Flow,
+    BuiltinType
 }
