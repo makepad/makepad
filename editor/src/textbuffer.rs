@@ -33,7 +33,7 @@ pub enum TextUndoGrouping{
     Newline,
     Character,
     Backspace,
-    Delete,
+    Delete(usize),
     Block,
     Tab,
     Cut,
@@ -53,7 +53,7 @@ impl TextUndoGrouping{
             TextUndoGrouping::Newline=>false,
             TextUndoGrouping::Character=>true,
             TextUndoGrouping::Backspace=>true,
-            TextUndoGrouping::Delete=>true,
+            TextUndoGrouping::Delete(_)=>true,
             TextUndoGrouping::Block=>false,
             TextUndoGrouping::Tab=>false,
             TextUndoGrouping::Cut=>false,
@@ -1031,10 +1031,11 @@ impl CursorSet{
             }
             old_max = cursor.calc_max(text_buffer, old_max);
         }
+        let del_pos = self.set[self.last_cursor].head;
         text_buffer.redo_stack.truncate(0);
         text_buffer.undo_stack.push(TextUndo{
             ops:ops,
-            grouping:TextUndoGrouping::Delete,
+            grouping:TextUndoGrouping::Delete(del_pos),
             cursors:cursors_clone
         })
     }
