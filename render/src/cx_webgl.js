@@ -954,9 +954,16 @@
 					ta.readOnly = true;
 					e.preventDefault()
 				}
+				// if we are using arrow keys, home or end 
+				let key_code = e.keyCode;
 
+				if(key_code >= 33 && key_code <= 40){
+					ta.value = "";
+					last_len = ta.value.length;
+				}
+				//if(key_code
 				this.to_wasm.key_down({
-					key_code:e.keyCode,
+					key_code:key_code,
 					char_code:e.charCode,
 					is_repeat:e.repeat,
 					time:e.timeStamp / 1000.0,
