@@ -282,6 +282,11 @@
 			if(this.do_wasm_block){
 				return
 			}
+
+			//if(this.dpi_factor != window.devicePixelRatio){
+			//	this.on_screen_resize();
+			//}
+
 			this.to_wasm.end();
 			let from_wasm_ptr = this.exports.process_to_wasm(this.app, this.to_wasm.pointer)
 			// get a clean to_wasm set up immediately
@@ -510,7 +515,12 @@
 			window.addEventListener('orientationchange', _=>{
 				this.on_screen_resize()
 			})
-			
+
+			let mqString = '(resolution: '+window.devicePixelRatio+'dppx)'
+			matchMedia(mqString).addEventListener("change", _=>{
+				this.on_screen_resize()
+			});
+
 			var canvas = this.canvas
 			var options = {
 				alpha: canvas.getAttribute("alpha")?true:false,
