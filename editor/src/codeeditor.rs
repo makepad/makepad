@@ -861,6 +861,10 @@ impl CodeEditor{
             self._anim_font_size = anim_folding.state.get_font_size(self.open_font_size, self.folded_font_size);
 
             self._draw_cursors.set_next(&self.cursors.set);
+
+            // pair before cursor
+            cx.new_instance_layer(self.paren_pair.shader_id, 0);
+
             // cursor after text
             cx.new_instance_layer(self.cursor.shader_id, 0);
 
