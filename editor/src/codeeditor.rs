@@ -274,6 +274,7 @@ impl Style for CodeEditor{
                 font_size:12.0,
                 brightness:1.0,
                 line_spacing:1.4,
+                do_dpi_dilate:true,
                 wrapping:Wrapping::Line,
                 ..Style::style(cx)
             },
@@ -465,13 +466,14 @@ impl CodeEditor{
                     3=>{
                         if let Some(chunk) = CursorSet::get_nearest_token_chunk(offset, &self._token_chunks){
                             self.cursors.set_last_clamp_range((chunk.offset, chunk.len));
-                            //let (mut start, mut len) = text_buffer.get_nearest_line_range(offset);
-                            // fuse start, len with chunk 
-                            //len += (start + len ) + (chunk.offset+ - start ) + chunk.len
-                            //if chunk.offset < start{
-                                
-                           // }
-                            self.cursors.set_last_clamp_range((chunk.offset, chunk.len));
+                            let (start, _len) = text_buffer.get_nearest_line_range(offset);
+                            let mut chunk_offset = chunk.offset;
+                            let mut chunk_len = chunk.len;
+                            if start < chunk_offset{
+                                chunk_len += chunk_offset - start;
+                                chunk_offset = start;
+                            }
+                            self.cursors.set_last_clamp_range((chunk_offset, chunk_len));
                         }
                         else{
                             let range = text_buffer.get_nearest_line_range(offset);
@@ -1074,17 +1076,17 @@ impl CodeEditor{
                                     let geom = Rect{
                                         x:geom_open.x,
                                         y:geom_open.y,
-                                        w:geom_open.w + geom_close.w,
-                                        h:geom_close.h
+                                        w:geom_open.w + geom_close.w + 1.,
+                                        h:geom_close.h+ 1.
                                     };
                                     self.paren_pair.draw_quad_abs(cx, geom);
                                 }
                                 else{
-                                    if let Some(geom_open) = last.geom_open{
-                                        self.paren_pair.draw_quad_abs(cx, geom_open);
+                                    if let Some(rc) = last.geom_open{
+                                        self.paren_pair.draw_quad_abs(cx, Rect{x:rc.x,y:rc.y,w:rc.w+1.,h:rc.h+1.});
                                     }
-                                    if let Some(geom_close) = last.geom_close{
-                                        self.paren_pair.draw_quad_abs(cx, geom_close);
+                                    if let Some(rc) = last.geom_close{
+                                        self.paren_pair.draw_quad_abs(cx, Rect{x:rc.x,y:rc.y,w:rc.w+1.,h:rc.h+1.});
                                     }
                                 }
                             }

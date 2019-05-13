@@ -17,6 +17,7 @@ pub struct Text{
     pub text:String,
     pub color: Color,
     pub font_size:f32,
+    pub do_dpi_dilate:bool,
     pub brightness:f32,
     pub line_spacing:f32,
     pub wrapping:Wrapping,
@@ -31,6 +32,7 @@ impl Style for Text{
             text:"".to_string(),
             font_size:cx.size("font_size") as f32,
             line_spacing:1.15,
+            do_dpi_dilate:false,
             brightness:1.0,
             wrapping:Wrapping::Word,
             color:color("white")
@@ -139,7 +141,9 @@ impl Text{
             //tex_size
             aligned.inst.push_uniform_vec2f(cx, cx.fonts[self.font_id].width as f32, cx.fonts[self.font_id].height as f32);
             aligned.inst.push_uniform_float(cx, self.brightness);
-            let dpi_dilate = (2.-cx.target_dpi_factor).max(0.).min(1.);
+
+            let dpi_dilate = if self.do_dpi_dilate{(2.-cx.target_dpi_factor).max(0.).min(1.)}else{0.};
+
             aligned.inst.push_uniform_float(cx, dpi_dilate);
             //list_clip
             //area.push_uniform_vec4f(cx, -50000.0,-50000.0,50000.0,50000.0);
