@@ -174,12 +174,14 @@ impl TabControl{
     // data free APIs for the win!
     pub fn begin_tabs(&mut self, cx:&mut Cx)->ViewRedraw{
         //cx.begin_turtle(&Layout{
-        self.tabs_view.begin_view(cx, &Layout{
+        if let Err(_) = self.tabs_view.begin_view(cx, &Layout{
             width:Bounds::Fill,
             height:Bounds::Compute,
            ..Default::default()
-        })?;
-        //self.tabs.mark();
+        }){
+            return Err(())
+        }
+
         self._tab_id_alloc = 0;
         Ok(())
     }

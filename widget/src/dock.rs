@@ -711,7 +711,8 @@ where TItem: Clone
                         };
                         let dist = (rc.x-rect.x).abs().max((rc.y-rect.y).abs()).max((rc.w-rect.w).abs()).max((rc.h-rect.h).abs()).max(100.-alpha*100.);
                         if dist>0.5{ // keep redrawing until we are close
-                            self.drop_quad_view.redraw_view_area(cx);
+                            cx.redraw_previous_areas();
+                            //self.drop_quad_view.redraw_view_area(cx);
                         }
                         self._tweening_quad = Some((id,rc,alpha));
                         (rc, alpha)

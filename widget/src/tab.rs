@@ -190,7 +190,7 @@ impl Tab{
                 _=>()
             }
         }
-
+        
         match event.hits(cx, self._bg_area, &mut self._hit_state){
             Event::Animate(ae)=>{
                 // its playing the term anim, run a redraw

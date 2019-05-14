@@ -237,6 +237,12 @@ impl Cx{
         self.redraw_areas.push(area);
     }
 
+    pub fn redraw_previous_areas(&mut self){
+        for area in self.incr_areas.clone(){
+            self.redraw_area(area);
+        }
+    }
+
     // figure out if areas are in some way a child of draw_list_id
     pub fn draw_list_needs_redraw(&self, draw_list_id:usize)->bool{
         for area in &self.incr_areas{
