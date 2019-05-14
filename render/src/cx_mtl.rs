@@ -88,8 +88,9 @@ impl Cx{
         }
     }
  
-    pub fn repaint(&mut self,layer:&CoreAnimationLayer, device:&Device, command_queue:&CommandQueue){
+    pub fn repaint(&mut self,layer:&CoreAnimationLayer, device:&Device, command_queue:&CommandQueue, wait:bool){
         let pool = unsafe { NSAutoreleasePool::new(cocoa::base::nil) };
+        let command_buffer = command_queue.new_command_buffer();
         if let Some(drawable) = layer.next_drawable() {
             self.prepare_frame();
             
@@ -107,8 +108,8 @@ impl Cx{
 
             render_pass_descriptor.color_attachments().object_at(0).unwrap().set_load_action(MTLLoadAction::Clear);
 
-            let parallel_encoder = command_buffer.new_parallel_render_command_encoder(&render_pass_descriptor);
-            let encoder = parallel_encoder.render_command_encoder();
+            let encoder = command_buffer.new_render_command_encoder(&render_pass_descriptor);
+            //let encoder = parallel_encoder.render_command_encoder();
 
             self.platform.uni_cx.update_with_f32_data(&device, &self.uniforms);
 
@@ -123,12 +124,14 @@ impl Cx{
             }*/
 
             encoder.end_encoding();
-            parallel_encoder.end_encoding();
+            //parallel_encoder.end_encoding();
 
             command_buffer.present_drawable(&drawable);
             command_buffer.commit();
 
-            //command_buffer.wait_until_completed();
+            if wait{
+                command_buffer.wait_until_completed();
+            }
         }
         unsafe { 
             msg_send![pool, release];
@@ -198,7 +201,7 @@ impl Cx{
         self.call_event_handler(&mut event_handler, &mut Event::Construct);
 
         self.redraw_area(Area::All);
-
+    
         while self.running{
             //println!("{}{} ",self.playing_anim_areas.len(), self.redraw_areas.len());
             cocoa_window.poll_events(
@@ -238,7 +241,7 @@ impl Cx{
                                 self.call_event_handler(&mut event_handler, &mut event); 
                                 self.redraw_area(Area::All);
                                 self.call_draw_event(&mut event_handler, &mut root_view);
-                                self.repaint(&layer, &device, &command_queue);
+                                self.repaint(&layer, &device, &command_queue, false);
                                 self.resize_layer_to_turtle(&layer);
                             },
                             Event::None=>{
@@ -296,7 +299,8 @@ impl Cx{
             if self.paint_dirty{
                 self.paint_dirty = false;
                 self.repaint_id += 1;
-                self.repaint(&layer, &device, &command_queue);
+                self.repaint(&layer, &device, &command_queue, true);
+
             }
         }
     }
@@ -383,7 +387,10 @@ impl MetalBuffer{
         match self.last_written{
             0=>&self.multi1,
             1=>&self.multi2,
-            _=>&self.multi3,
+            2=>&self.multi3,
+            3=>&self.multi4,
+            4=>&self.multi5,
+            _=>&self.multi6,
         }
     }
 
@@ -392,7 +399,10 @@ impl MetalBuffer{
         match self.last_written{
             0=>&mut self.multi1,
             1=>&mut self.multi2,
-            _=>&mut self.multi3,
+            2=>&mut self.multi3,
+            3=>&mut self.multi4,
+            4=>&mut self.multi5,
+            _=>&mut self.multi6,
         }
     }
 

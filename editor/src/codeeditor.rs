@@ -414,7 +414,7 @@ impl CodeEditor{
         sh
     }
 
-   pub fn def_paren_pair_shader(cx:&mut Cx)->Shader{
+    pub fn def_paren_pair_shader(cx:&mut Cx)->Shader{
         let mut sh = Quad::def_quad_shader(cx);
         sh.add_ast(shader_ast!({
             fn pixel()->vec4{
@@ -427,7 +427,7 @@ impl CodeEditor{
         sh
     }
 
-   pub fn def_cursor_row_shader(cx:&mut Cx)->Shader{
+    pub fn def_cursor_row_shader(cx:&mut Cx)->Shader{
         let mut sh = Quad::def_quad_shader(cx);
         sh.add_ast(shader_ast!({
             fn pixel()->vec4{
@@ -1127,6 +1127,10 @@ impl CodeEditor{
                 else{ // fast loop
                     self.text.add_text(cx, geom.x, geom.y, offset, self._text_inst.as_mut().unwrap(), &chunk, |ch, offset, x, w|{
                         draw_cursors.mark_text(cursors, ch, offset, x, geom.y, w, height, last_cursor)
+                        //if ch == ' '{
+                        //    return 1.0;
+                       // }
+                        //return 0.0;
                     });
                 }
             }
@@ -1350,8 +1354,11 @@ impl CodeEditor{
         
         // compute the line which our last cursor is on so we can set the highlight id
         if let Some(indent_inst) = self._indent_line_inst{
+            
             let last_pos = self.cursors.get_last_cursor_text_pos(text_buffer);
-            let indent_id = if last_pos.row < self._line_geometry.len(){self._line_geometry[last_pos.row].indent_id}else{0.};
+            let indent_id = if !self.cursors.get_last_cursor_singular().is_none() && last_pos.row < self._line_geometry.len(){
+                self._line_geometry[last_pos.row].indent_id
+            }else{0.};
             indent_inst.push_uniform_float(cx, indent_id);
         } 
 
@@ -1372,7 +1379,7 @@ impl CodeEditor{
         self._monospace_size = self.text.get_monospace_size(cx, None);
     }
 
-   fn scroll_last_cursor_to_top(&mut self, cx:&mut Cx, text_buffer:&TextBuffer){
+    fn scroll_last_cursor_to_top(&mut self, cx:&mut Cx, text_buffer:&TextBuffer){
        // ok lets get the last cursor pos
        let pos = self.cursors.get_last_cursor_text_pos(text_buffer);
        // lets find the line offset in the line geometry
@@ -1381,7 +1388,7 @@ impl CodeEditor{
            // ok now we want the y scroll to be geom.y
            self.view.set_scroll_target(cx, Vec2{x:0.0,y:geom.walk.y});
        }
-   }
+    }
  
     fn scroll_last_cursor_visible(&mut self, cx:&mut Cx, text_buffer:&TextBuffer){
         // so we have to compute (approximately) the rect of our cursor

@@ -182,7 +182,7 @@ impl TextBuffer{
                 return (offset - 1, 1);
             }
         };
-        return ((offset - pos.col - 1), line.len());
+        return ((offset - pos.col - 1), line.len()+1);
     }
 
     pub fn calc_delete_line_indent_depth(&self, offset:usize)->usize{
