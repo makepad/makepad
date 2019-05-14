@@ -1560,7 +1560,7 @@ impl CodeEditor{
         let scroll = self.view.get_scroll_pos(cx);
         let mut last_y = 0.0;
         for (line, geom) in self._line_geometry.iter().enumerate(){
-            if geom.walk.y >= scroll.y{
+            if geom.walk.y > scroll.y{
                 if line>0{
                     return (line - 1, last_y)
                 }
