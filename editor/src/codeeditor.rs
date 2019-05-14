@@ -52,6 +52,7 @@ pub struct CodeEditor{
     pub _anim_folding:AnimFolding,
 
     pub _monospace_size:Vec2,
+    pub _monospace_base:Vec2,
 
     pub _first_on_line:bool,
     pub _line_was_visible:bool,
@@ -314,7 +315,7 @@ impl Style for CodeEditor{
             top_padding:27.,
             _hit_state:HitState{no_scrolling:true, ..Default::default()},
             _monospace_size:Vec2::zero(),
-
+            _monospace_base:Vec2::zero(),
             _last_finger_move:None,
             _first_on_line:true,
             _line_was_visible:false,
@@ -897,6 +898,7 @@ impl CodeEditor{
 
             // initialize all drawing counters/stacks
             self._scroll_pos = self.view.get_scroll_pos(cx);
+            self._monospace_base = self.text.get_monospace_base(cx);
             self.set_font_size(cx, self.open_font_size);
             self._line_geometry.truncate(0);
             self._draw_cursors = DrawCursors::new();
@@ -978,7 +980,13 @@ impl CodeEditor{
                 self.text.color = self.colors.line_number_normal;
             }
             let origin = cx.get_turtle_origin();
-            self.text.add_text(cx, origin.x, origin.y+line_geom.walk.y, 0, self._line_number_inst.as_mut().unwrap(), chunk, |_,_,_,_|{0.});
+            let chunk_width = self._monospace_size.x * 5.0;
+            self.text.add_text(cx, 
+                origin.x + (self.line_number_width - chunk_width-10.), 
+                origin.y + line_geom.walk.y,
+                0, 
+                self._line_number_inst.as_mut().unwrap(), chunk, |_,_,_,_|{0.}
+            );
         }
 
         // newline with minheight
@@ -1043,15 +1051,18 @@ impl CodeEditor{
 
     fn draw_indent_lines(&mut self, cx:&mut Cx, geom_y:f32, tabs:usize){
         let y_pos = geom_y - cx.get_turtle_origin().y;
-        let tab_width = self._monospace_size.x*4.;
-        
+        let tab_variable_width = self._monospace_base.x*4.*self._anim_font_size;
+        let tab_fixed_width = self._monospace_base.x*4.*self.open_font_size;
+        let mut off = self.line_number_width;
         for i in 0..tabs{
+            let tab_width = if i<2{tab_fixed_width}else{tab_variable_width};
             let inst = self.indent_lines.draw_quad(cx, Rect{
-                x: self.line_number_width + (tab_width * i as f32),
+                x: off,
                 y: y_pos, 
                 w: tab_width,
                 h:self._monospace_size.y
             });
+            off += tab_width;
             inst.push_float(cx, if i < self._indent_stack.len(){self._indent_stack[i]}else{0.});
             // output the id of the 'first' paren chunk
         }
@@ -1075,14 +1086,11 @@ impl CodeEditor{
                     marked:marked,
                     exp_paren:chunk[0]
                 });
-                if self._paren_stack.len() == 2 && chunk[0] == '{'{ // one level down
-                    self.set_font_size(cx, self._anim_font_size);
-                }
             }
         
             // do indent depth walking
             if self._first_on_line {
-                if token_type == TokenType::Whitespace{
+                let font_size = if token_type == TokenType::Whitespace{
                     let tabs = chunk.len()>>2;
                     while tabs > self._indent_stack.len(){
                         self._indent_stack.push(self._indent_id_alloc);
@@ -1091,10 +1099,26 @@ impl CodeEditor{
                     while tabs < self._indent_stack.len(){
                         self._indent_stack.pop();
                     }
+                    // lets do the code folding here. if we are tabs > fold line
+                    // lets change the fontsize
+                    if tabs >= 2 || next_char == '\n'{
+                        // ok lets think. we need to move it over by the delta of 8 spaces * _anim_font_size
+                        let dx = (self._monospace_base.x * self.open_font_size * 8.) - (self._monospace_base.x * self._anim_font_size * 8.);
+                        cx.move_turtle(dx,0.0);
+                        self._anim_font_size
+                    }
+                    else{
+                        self.open_font_size
+                    }
                 }
                 else if token_type != TokenType::Newline{
                     self._indent_stack.truncate(0);
+                    self.open_font_size
                 }
+                else{
+                    self._anim_font_size
+                };
+                self.set_font_size(cx, font_size);
             }
             // lets check if the geom is visible
             if let Some(geom) = cx.walk_turtle_text(
@@ -1244,9 +1268,9 @@ impl CodeEditor{
                         };
                     }
                 }
-                if self._paren_stack.len() == 1{ // root level
-                    self.set_font_size(cx, self.open_font_size);
-                }
+                //if self._paren_stack.len() == 1{ // root level
+                 //   self.set_font_size(cx, self.open_font_size);
+                //}
             }
             else if token_type == TokenType::Newline{
                 self.new_line(cx);
@@ -1440,7 +1464,8 @@ impl CodeEditor{
         if font_size > self._line_largest_font{
             self._line_largest_font = font_size;
         }
-        self._monospace_size = self.text.get_monospace_size(cx, None);
+        self._monospace_size.x = self._monospace_base.x * font_size;
+        self._monospace_size.y = self._monospace_base.y * font_size;
     }
 
     fn scroll_last_cursor_to_top(&mut self, cx:&mut Cx, text_buffer:&TextBuffer){
@@ -1466,7 +1491,7 @@ impl CodeEditor{
         let row = pos.row.min(self._line_geometry.len()-1);
         if row < self._line_geometry.len(){
             let geom = &self._line_geometry[row];
-            let mono_size = self.text.get_monospace_size(cx, Some(geom.font_size));
+            let mono_size = Vec2{x:self._monospace_base.x * geom.font_size, y:self._monospace_base.y*geom.font_size};//self.text.get_monospace_size(cx, geom.font_size);
             let rect = Rect{
                 x:(pos.col as f32) * mono_size.x,
                 y:geom.walk.y - mono_size.y * 1.,
@@ -1484,7 +1509,7 @@ impl CodeEditor{
         let mut mono_size = Vec2::zero();
         for (row, geom) in self._line_geometry.iter().enumerate(){
             //let geom = &self._line_geometry[pos.row];
-            mono_size = self.text.get_monospace_size(cx, Some(geom.font_size));
+            mono_size = Vec2{x:self._monospace_base.x * geom.font_size, y:self._monospace_base.y*geom.font_size};
             if rel.y < geom.walk.y || rel.y >= geom.walk.y && rel.y <= geom.walk.y + mono_size.y{ // its on the right line
                 let col = (rel.x.max(0.) / mono_size.x) as usize; // do a dumb calc
                 return TextPos{row:row, col:col};

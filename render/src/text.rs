@@ -90,7 +90,7 @@ impl Text{
                     let s = sample2d(texture, tex_coord.xy);
                     let sig_dist =  max(min(s.r, s.g), min(max(s.r, s.g), s.b)) - 0.5;
                     //let scale = pow(df_antialias(clipped) * 0.002,0.5);
-                    df_viewport(tex_coord * tex_size * 0.07);
+                    df_viewport(tex_coord * tex_size * (0.1 - dpi_dilate*0.03));
                     df_shape = (-sig_dist - 0.5 / df_aa) - dpi_dilate*0.1;
                     return df_fill(color*brightness); 
                 }
@@ -321,13 +321,13 @@ impl Text{
         return 0
     }
 
-    pub fn get_monospace_size(&self, cx:&Cx, font_size:Option<f32>)->Vec2{
+    pub fn get_monospace_base(&self, cx:&Cx)->Vec2{
         let slot = cx.fonts[self.font_id].unicodes[33 as usize];
         let glyph = &cx.fonts[self.font_id].glyphs[slot];
-        let font_size = if let Some(font_size) = font_size{font_size}else{self.font_size};
+        //let font_size = if let Some(font_size) = font_size{font_size}else{self.font_size};
         Vec2{
-            x: glyph.advance * font_size,
-            y:self.line_spacing * font_size
+            x: glyph.advance,
+            y: self.line_spacing
         }
     }
 }
