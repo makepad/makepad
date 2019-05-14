@@ -576,8 +576,8 @@ impl CodeEditor{
 
                 // do the folded scrollnav
                 if self._anim_folding.state.is_folded() && !fe.modifiers.shift{
-                    let (start,end) = self.cursors.get_last_cursor_order();
-                    if start == end{
+                    let pos = self.cursors.get_last_cursor_text_pos(text_buffer);
+                    if  self.cursors.is_last_cursor_singular() && pos.row < self._line_geometry.len() && self._line_geometry[pos.row].font_size >= self.open_font_size{
                         self.scroll_last_cursor_to_top(cx, text_buffer);
                     }
                 }
