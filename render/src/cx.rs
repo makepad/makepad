@@ -57,6 +57,7 @@ pub struct Cx{
     pub redraw_id: u64,
     pub repaint_id: u64,
     pub event_id: u64,
+    pub timer_id: u64,
     pub is_in_redraw_cycle:bool,
 
     pub last_key_focus:Area,
@@ -128,6 +129,7 @@ impl Default for Cx{
             redraw_id:1,
             event_id:1,
             repaint_id:1,
+            timer_id:1,
     
             is_in_redraw_cycle:false,
             turtles:Vec::new(),
@@ -464,6 +466,7 @@ impl Cx{
         }
         self.next_frame_callbacks.push(area);
     }
+
 /*
     pub fn debug_draw_tree_recur(&mut self, draw_list_id: usize, depth:usize){
         if draw_list_id >= self.draw_lists.len(){

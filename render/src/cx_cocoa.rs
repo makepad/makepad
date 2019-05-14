@@ -5,7 +5,7 @@ use std::collections::HashMap;
 
 use cocoa::base::{id, nil};
 use cocoa::{appkit, foundation};
-use cocoa::appkit::{NSStringPboardType, NSApplication, NSEventModifierFlags, NSImage, NSEvent, NSWindow, NSView,NSEventMask,NSRunningApplication};
+use cocoa::appkit::{NSStringPboardType, NSApplication, NSEventModifierFlags, NSImage, NSEvent,NSApplicationDefined, NSWindow, NSView,NSEventMask,NSRunningApplication};
 use cocoa::foundation::{NSArray, NSPoint, NSDictionary, NSRect, NSSize, NSUInteger,NSInteger};
 use cocoa::foundation::{NSAutoreleasePool, NSString};
 use objc::runtime::{Class, Object, Protocol, Sel, BOOL, YES, NO};
@@ -14,6 +14,7 @@ use std::os::raw::c_void;
 use objc::*;
 use core_graphics::display::CGDisplay;
 use time::precise_time_ns;
+use time::precise_time_s;
 
 use crate::cx::*;
 
@@ -34,9 +35,17 @@ pub struct CocoaWindow{
     pub last_key_mod:KeyModifiers,
     pub fingers_down:Vec<bool>,
     pub cursors:HashMap<MouseCursor, id>,
+    pub timers:Vec<CocoaTimer>,
     pub current_cursor:MouseCursor,
     pub last_mouse_pos:Vec2,
     pub event_callback:Option<*mut FnMut(&mut Vec<Event>)>
+}
+
+#[derive(Clone)]
+pub struct CocoaTimer{
+    timer_id:u64,
+    nstimer:id,
+    repeats:bool
 }
 
 impl CocoaWindow{
@@ -146,6 +155,7 @@ impl CocoaWindow{
         (time_now - self.time_start) as f64 / 1_000_000_000.0
     }
 
+
     pub fn set_position(&mut self, pos:Vec2){
         let ns_point =  NSPoint::new(pos.x as f64,CGDisplay::main().pixels_high() as f64 - pos.y as f64);
         unsafe {
@@ -188,7 +198,7 @@ impl CocoaWindow{
         }
 
         appkit::NSApp().sendEvent_(ns_event);
-
+        
         match ns_event.eventType(){
             appkit::NSKeyUp => {
                 if let Some(key_code) = get_event_keycode(ns_event){
@@ -389,7 +399,7 @@ impl CocoaWindow{
                     },
                     foundation::NSDefaultRunLoopMode,
                     cocoa::base::YES);
-                
+               
                 if ns_event == nil{
                     break;
                 }
@@ -413,6 +423,65 @@ impl CocoaWindow{
             };
             let callback = self.event_callback.unwrap();
             (*callback)(events);
+        }
+    }
+
+    pub fn start_timer(&mut self, timer_id:u64, interval:f64, repeats:bool){
+        unsafe{
+            let nstimer:id = msg_send![
+                class!(NSTimer), 
+                scheduledTimerWithTimeInterval:interval
+                target:self.window_delegate.unwrap()
+                selector:sel!(windowReceivedTimer:)
+                userInfo:nil
+                repeats:repeats
+            ];
+            self.timers.push(CocoaTimer{
+                timer_id:timer_id,
+                nstimer:nstimer,
+                repeats:repeats
+            });
+        }
+    }
+
+    pub fn stop_timer(&mut self, timer_id:u64){
+        for i in 0..self.timers.len(){
+            if self.timers[i].timer_id == timer_id{
+                unsafe{
+                    msg_send![self.timers[i].nstimer,invalidate]
+                }
+                self.timers.remove(i);
+                return;
+            }
+        }
+    }
+
+    pub fn send_timer_received(&mut self, nstimer:id){
+        for i in 0..self.timers.len(){
+            if self.timers[i].nstimer == nstimer{
+                let found_id = self.timers[i].timer_id;
+                if !self.timers[i].repeats{
+                    self.timers.remove(i);
+                }
+                self.do_callback(&mut vec![Event::Timer(TimerEvent{id:found_id})]);
+                // break the eventloop
+                unsafe{
+                    let nsevent: id = msg_send![
+                        class!(NSEvent), 
+                        otherEventWithType:NSApplicationDefined
+                        location:NSPoint::new(0.,0.)
+                        modifierFlags:0u64
+                        timestamp:0f64//precise_time_s()
+                        windowNumber:1u64
+                        context:nil
+                        subtype:0i16
+                        data1:0u64
+                        data2:0u64
+                    ];
+                    msg_send![appkit::NSApp(),postEvent:nsevent atStart:0];
+                }  
+                return;
+            }
         }
     }
 
@@ -690,6 +759,11 @@ fn get_cocoa_window(this:&Object)->&mut CocoaWindow{
 pub fn define_cocoa_window_delegate()->*const Class{
     use std::os::raw::c_void;
     
+    extern fn window_received_timer(this: &Object, _: Sel, nstimer: id){
+        let cw = get_cocoa_window(this);
+        cw.send_timer_received(nstimer);
+    }
+
     extern fn window_should_close(this: &Object, _: Sel, _: id) -> BOOL {
         let cw = get_cocoa_window(this);
         cw.send_close_requested_event();
@@ -801,6 +875,9 @@ pub fn define_cocoa_window_delegate()->*const Class{
         decl.add_method(sel!(windowWillEnterFullScreen:), window_will_enter_fullscreen as extern fn(&Object, Sel, id));
         decl.add_method(sel!(windowDidExitFullScreen:), window_did_exit_fullscreen as extern fn(&Object, Sel, id));
         decl.add_method(sel!(windowDidFailToEnterFullScreen:), window_did_fail_to_enter_fullscreen as extern fn(&Object, Sel, id));
+        // custom timer fn
+        decl.add_method(sel!(windowReceivedTimer:), window_received_timer as extern fn(&Object, Sel, id));
+
     }
     // Store internal state as user data
     decl.add_ivar::<*mut c_void>("cocoa_window_ptr");

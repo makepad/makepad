@@ -214,7 +214,8 @@ where TItem: Clone
                             match tab_control.unwrap().handle_tab_control(cx, event){
                                 TabControlEvent::TabSelect{tab_id}=>{
                                     *current = tab_id;
-                                    // lets defocus all the other tab controls
+                                    // someday ill fix this. Luckily entire UI redraws are millisecond span
+                                    cx.redraw_area(Area::All);
                                     defocus = true;
                                 },
                                 TabControlEvent::TabDragMove{fe, ..}=>{
@@ -249,11 +250,13 @@ where TItem: Clone
                         }
                        
                         if defocus{
+                            // defocus all other tabcontrols
                             for (id, tab_control) in self.tab_controls.enumerate(){
                                 if *id != stack_top.uid{
                                     tab_control.set_tab_control_focus(cx, false);
                                 }
                             }
+                            
                         }
                         if *current < tabs.len(){
                             return Some(unsafe{mem::transmute(&mut tabs[*current].item)});

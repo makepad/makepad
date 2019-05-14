@@ -123,6 +123,11 @@ pub struct FileReadEvent{
 }
 
 #[derive(Clone, Debug, PartialEq)]
+pub struct TimerEvent{
+    pub id:u64
+}
+
+#[derive(Clone, Debug, PartialEq)]
 pub struct FileWriteEvent{
     id:u64,
     error:Option<String>
@@ -175,6 +180,7 @@ pub enum Event{
     FingerScroll(FingerScrollEvent),
     FileRead(FileReadEvent),
     FileWrite(FileWriteEvent),
+    Timer(TimerEvent),
     KeyFocus(KeyFocusEvent),
     KeyDown(KeyEvent),
     KeyUp(KeyEvent),

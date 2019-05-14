@@ -35,6 +35,9 @@ impl Cx{
                     draw_call.instance_dirty = false;
                     // update the instance buffer data
                     draw_call.platform.inst_vbuf.update_with_f32_data(device, &draw_call.instance);
+                }
+                if draw_call.uniforms_dirty{
+                    draw_call.uniforms_dirty = false;
                     draw_call.platform.uni_dr.update_with_f32_data(device, &draw_call.uniforms);
                 }
 
@@ -295,6 +298,16 @@ impl Cx{
                 cocoa_window.ime_spot = set_ime_position;
             }
 
+            while self.platform.start_timer.len()>0{
+                let (timer_id, interval, repeats)= self.platform.start_timer.pop().unwrap();
+                cocoa_window.start_timer(timer_id, interval, repeats);
+            }
+
+            while self.platform.stop_timer.len()>0{
+                let timer_id = self.platform.stop_timer.pop().unwrap();
+                cocoa_window.stop_timer(timer_id);
+            }
+
             // repaint everything if we need to
             if self.paint_dirty{
                 self.paint_dirty = false;
@@ -310,6 +323,16 @@ impl Cx{
     }
 
     pub fn hide_text_ime(&mut self){
+    }
+
+    pub fn start_timer(&mut self, interval:f64, repeats:bool)->u64{
+        self.timer_id += 1;
+        self.platform.start_timer.push((self.timer_id, interval, repeats));
+        self.timer_id
+    }
+
+    pub fn stop_timer(&mut self, id:u64){
+        self.platform.stop_timer.push(id);
     }
 
     pub fn profile_clear(&mut self){
@@ -347,6 +370,8 @@ impl Cx{
 pub struct CxPlatform{
     pub uni_cx:MetalBuffer,
     pub set_ime_position:Option<Vec2>,
+    pub start_timer:Vec<(u64,f64,bool)>,
+    pub stop_timer:Vec<(u64)>,
     pub text_clipboard_response:Option<String>,
     pub desktop:CxDesktop,
     pub profiler_list:Vec<u64>,

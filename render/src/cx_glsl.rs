@@ -13,7 +13,8 @@ pub struct AssembledGLShader{
 
     pub fragment:String,
     pub vertex:String,
-    pub named_instance_props: NamedInstanceProps,
+    pub named_uniform_props: NamedProps,
+    pub named_instance_props: NamedProps,
     pub rect_instance_props: RectInstanceProps
 }
 
@@ -488,6 +489,9 @@ impl Cx{
         
         // lets composite our ShAst structure into a set of methods
         Ok(AssembledGLShader{
+            named_instance_props:NamedProps::construct(sh, &instances),
+            named_uniform_props:NamedProps::construct(sh, &uniforms_dr),
+            rect_instance_props:RectInstanceProps::construct(sh, &instances),
             geometry_slots:geometry_slots,
             instance_slots:instance_slots,
             uniforms_dr:uniforms_dr,
@@ -495,9 +499,7 @@ impl Cx{
             uniforms_cx:uniforms_cx,
             texture_slots:texture_slots,
             fragment:pix_out,
-            vertex:vtx_out,
-            named_instance_props:NamedInstanceProps::construct(sh, &instances),
-            rect_instance_props:RectInstanceProps::construct(sh, &instances)
+            vertex:vtx_out
         })
     }
 }

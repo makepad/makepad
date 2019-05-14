@@ -17,11 +17,13 @@ impl Cx{
                 redraw_id:self.redraw_id,
                 sub_list_id:0,
                 shader_id:sh.shader_id,
+                uniforms_required:sh.named_uniform_props.total_slots,
                 instance:Vec::new(),
                 uniforms:Vec::new(),
                 textures_2d:Vec::new(),
                 current_instance_offset:0,
                 instance_dirty:true,
+                uniforms_dirty:true,
                 platform:DrawCallPlatform{..Default::default()}
             });
             let dc = &mut draw_list.draw_calls[draw_call_id];
@@ -31,6 +33,7 @@ impl Cx{
         // reuse a draw
         let dc = &mut draw_list.draw_calls[draw_call_id];
         dc.shader_id = sh.shader_id;
+        dc.uniforms_required = sh.named_uniform_props.total_slots;
         dc.sub_list_id = 0; // make sure its recognised as a draw call
         // truncate buffers and set update frame
         dc.redraw_id = self.redraw_id;
@@ -39,6 +42,7 @@ impl Cx{
         dc.uniforms.truncate(0);
         dc.textures_2d.truncate(0);
         dc.instance_dirty = true;
+        dc.uniforms_dirty = true;
         return dc.get_current_instance_area(instance_count);
     }
 
@@ -51,17 +55,18 @@ impl Cx{
         let sh = &self.compiled_shaders[shader_id];
 
         // find our drawcall to append to the current layer
-        for i in (0..draw_list.draw_calls_len).rev(){
-            let dc = &mut draw_list.draw_calls[i];
-            if dc.sub_list_id == 0 && dc.shader_id == sh.shader_id{
-                // reuse this drawcmd and add an instance
-                dc.current_instance_offset = dc.instance.len();
-                let slot_align = dc.instance.len() % sh.instance_slots;
-                if slot_align != 0{
-                    panic!("Instance offset disaligned! shader: {} misalign: {} slots: {}", shader_id, slot_align, sh.instance_slots);
+        if draw_list.draw_calls_len > 0{
+            for i in (0..draw_list.draw_calls_len).rev(){
+                let dc = &mut draw_list.draw_calls[i];
+                if dc.sub_list_id == 0 && dc.shader_id == sh.shader_id{
+                    // reuse this drawcmd and add an instance
+                    dc.current_instance_offset = dc.instance.len();
+                    let slot_align = dc.instance.len() % sh.instance_slots;
+                    if slot_align != 0{
+                        panic!("Instance offset disaligned! shader: {} misalign: {} slots: {}", shader_id, slot_align, sh.instance_slots);
+                    }
+                    return dc.get_current_instance_area(instance_count);
                 }
-                                
-                return dc.get_current_instance_area(instance_count);
             }
         }
 
@@ -103,14 +108,16 @@ pub struct DrawCall{
     pub instance:Vec<f32>,
     pub current_instance_offset:usize, // offset of current instance
     pub uniforms:Vec<f32>,  // draw uniforms
+    pub uniforms_required:usize,
     pub textures_2d:Vec<u32>,
     pub instance_dirty:bool,
+    pub uniforms_dirty:bool,
     pub platform:DrawCallPlatform
 }
 
 impl DrawCall{
     pub fn need_uniforms_now(&self) ->bool{
-        self.instance.len() == 0
+        self.uniforms.len() < self.uniforms_required
     }
     pub fn get_current_instance_area(&self, instance_count:usize)->InstanceArea{
         InstanceArea{

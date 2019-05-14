@@ -307,6 +307,12 @@ impl Cx{
                         _=>()
                     };
                 },
+                17=>{ // timer fired
+                    let id = to_wasm.mf64() as u64;
+                    self.call_event_handler(&mut event_handler, &mut Event::Timer(TimerEvent{
+                        id:id
+                    }));
+                },
                 _=>{
                     panic!("Message unknown")
                 }
@@ -375,6 +381,16 @@ impl Cx{
         self.platform.from_wasm.hide_text_ime();
     }
 
+    pub fn start_timer(&mut self, interval:f64, repeats:bool)->u64{
+        self.timer_id += 1;
+        self.platform.from_wasm.start_timer(self.timer_id, interval, repeats);
+        self.timer_id
+    }
+
+    pub fn stop_timer(&mut self, id:u64){
+        self.platform.from_wasm.stop_timer(id);
+    }
+
     pub fn compile_all_webgl_shaders(&mut self){
         for sh in &self.shaders{
             let csh = Self::compile_webgl_shader(self.compiled_shaders.len(), &sh, &mut self.platform);
@@ -425,6 +441,7 @@ impl Cx{
             texture_slots:ash.texture_slots.clone(),
             rect_instance_props:ash.rect_instance_props.clone(),
             named_instance_props:ash.named_instance_props.clone(),
+            named_uniform_props:ash.named_uniform_props.clone(),
             //assembled_shader:ash,
             ..Default::default()
         };
@@ -582,8 +599,9 @@ pub struct CompiledShader{
     pub uniforms_dl: Vec<ShVar>,
     pub uniforms_cx: Vec<ShVar>,
     pub texture_slots:Vec<ShVar>,
+    pub named_uniform_props: NamedProps,
+    pub named_instance_props: NamedProps,
     pub rect_instance_props: RectInstanceProps,
-    pub named_instance_props: NamedInstanceProps
 }
 
 #[derive(Default,Clone)]
@@ -832,11 +850,13 @@ impl FromWasm{
         }
     }   
  
-    fn mf64(&mut self, v:f64){
+    fn add_f64(&mut self, v:f64){
         unsafe{
             if self.offset&1 != 0{
+                self.fit(1);
                 self.offset += 1;
             }
+            self.fit(2);
             self.mf64.offset(self.offset>>1).write(v);
             self.offset += 2;
         }
@@ -1034,6 +1054,20 @@ impl FromWasm{
         self.fit(1);
         self.mu32(16);
         self.add_string(response);
+    }
+
+    pub fn start_timer(&mut self, id:u64, interval:f64, repeats:bool){
+        self.fit(2);
+        self.mu32(17);
+        self.mu32(if repeats{1}else{0});
+        self.add_f64(id as f64);
+        self.add_f64(interval);
+    }
+
+    pub fn stop_timer(&mut self, id:u64){
+        self.fit(1);
+        self.mu32(18);
+        self.add_f64(id as f64);
     }
 
     fn add_string(&mut self, msg:&str){

@@ -10,7 +10,8 @@ pub struct AssembledMtlShader{
     pub uniforms_cx: Vec<ShVar>,
     pub texture_slots:Vec<ShVar>,
     pub rect_instance_props: RectInstanceProps,
-    pub named_instance_props: NamedInstanceProps,
+    pub named_uniform_props: NamedProps,
+    pub named_instance_props: NamedProps,
     pub mtlsl:String,
 }
 
@@ -23,7 +24,8 @@ pub struct CompiledShader{
     pub geom_ibuf:MetalBuffer,
     pub instance_slots:usize,
     pub rect_instance_props: RectInstanceProps,
-    pub named_instance_props: NamedInstanceProps,
+    pub named_uniform_props: NamedProps,
+    pub named_instance_props: NamedProps,
 }
 
 impl Cx{
@@ -245,13 +247,14 @@ impl Cx{
         }
 
          Ok(AssembledMtlShader{
+            rect_instance_props:RectInstanceProps::construct(sh, &instances),
+            named_instance_props:NamedProps::construct(sh, &instances),
+            named_uniform_props:NamedProps::construct(sh, &uniforms_dr),
             instance_slots:instance_slots,
             uniforms_dr:uniforms_dr,
             uniforms_dl:uniforms_dl,
             uniforms_cx:uniforms_cx,
             texture_slots:texture_slots,
-            rect_instance_props:RectInstanceProps::construct(sh, &instances),
-            named_instance_props:NamedInstanceProps::construct(sh, &instances),
             mtlsl:mtl_out
         })
     }
@@ -286,6 +289,7 @@ impl Cx{
                 library:Some(library),
                 instance_slots:ash.instance_slots,
                 named_instance_props:ash.named_instance_props.clone(),
+                named_uniform_props:ash.named_uniform_props.clone(),
                 rect_instance_props:ash.rect_instance_props.clone(),
                 //assembled_shader:ash,
                 geom_ibuf:{

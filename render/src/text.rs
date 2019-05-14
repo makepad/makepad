@@ -286,11 +286,11 @@ impl Text{
         // then we scan for x<=x
         let scroll_pos = area.get_scroll_pos(cx);
         let spos = Vec2{x:pos.x + scroll_pos.x, y:pos.y + scroll_pos.y};
-        let x_o = area.get_prop_offset(cx, "x");
-        let y_o = area.get_prop_offset(cx, "y");
-        let font_geom_o = area.get_prop_offset(cx, "font_geom")+2;
-        let font_size_o = area.get_prop_offset(cx, "font_size");
-        let char_offset_o = area.get_prop_offset(cx, "char_offset");
+        let x_o = area.get_instance_offset(cx, "x");
+        let y_o = area.get_instance_offset(cx, "y");
+        let font_geom_o = area.get_instance_offset(cx, "font_geom")+2;
+        let font_size_o = area.get_instance_offset(cx, "font_size");
+        let char_offset_o = area.get_instance_offset(cx, "char_offset");
         let read = area.get_read_ref(cx);
         let line_spacing = self.line_spacing;
         let mut index = 0;

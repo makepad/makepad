@@ -20,7 +20,7 @@ pub struct CodeEditor{
     pub line_number_width:f32,
     pub top_padding:f32,
     pub colors:CodeEditorColors,
-
+    pub cursor_blink_speed:f64,
     pub _hit_state:HitState,
     pub _bg_area:Area,
     pub _text_inst:Option<AlignedInstance>,
@@ -58,6 +58,10 @@ pub struct CodeEditor{
     pub _line_was_visible:bool,
     pub _draw_cursors:DrawCursors,
     pub _draw_search:DrawCursors,
+
+    pub _cursor_blink_timer_id:u64,
+    pub _cursor_blink_flipflop:f32,
+    pub _cursor_area:Area,
 
     pub _last_tabs:usize,
     pub _newline_tabs:usize,
@@ -312,6 +316,7 @@ impl Style for CodeEditor{
             open_font_size:11.0,
             folded_font_size:0.5,
             line_number_width:45.,
+            cursor_blink_speed:0.5,
             top_padding:27.,
             _hit_state:HitState{no_scrolling:true, ..Default::default()},
             _monospace_size:Vec2::zero(),
@@ -355,7 +360,11 @@ impl Style for CodeEditor{
             _highlight_selection:Vec::new(),
             _highlight_token:Vec::new(),
             _last_cursor_pos:TextPos::zero(),
-
+            
+            _cursor_blink_timer_id:0,
+            _cursor_blink_flipflop:1.0,
+            _cursor_area:Area::Empty,
+            
             _last_tabs:0,
             _newline_tabs:0
         };
@@ -396,8 +405,14 @@ impl CodeEditor{
     pub fn def_cursor_shader(cx:&mut Cx)->Shader{
         let mut sh = Quad::def_quad_shader(cx);
         sh.add_ast(shader_ast!({
+            let blink:float<Uniform>;
             fn pixel()->vec4{
-                return vec4(color.rgb*color.a,color.a)
+                if blink<0.5{
+                    return vec4(color.rgb*color.a,color.a)
+                }
+                else{
+                    return vec4(0.);
+                }
             }
         }));
         sh
@@ -481,6 +496,13 @@ impl CodeEditor{
         sh
     }
 
+    pub fn reset_cursor_blinker(&mut self, cx:&mut Cx){
+        cx.stop_timer(self._cursor_blink_timer_id);
+        self._cursor_blink_timer_id = cx.start_timer(self.cursor_blink_speed,false);
+        self._cursor_blink_flipflop = 0.;
+        self._cursor_area.write_uniform_float(cx, "blink", self._cursor_blink_flipflop);
+    }
+
     pub fn handle_code_editor(&mut self, cx:&mut Cx, event:&mut Event, text_buffer:&mut TextBuffer)->CodeEditorEvent{
         match self.view.handle_scroll_bars(cx, event){
             (_,ScrollBarEvent::Scroll{..}) | (ScrollBarEvent::Scroll{..},_)=>{
@@ -500,6 +522,14 @@ impl CodeEditor{
                 self.view.redraw_view_area(cx);
             },
             _=>()
+        }
+        if let Event::Timer(te) = event{
+            if te.id == self._cursor_blink_timer_id{
+                self._cursor_blink_timer_id = cx.start_timer(self.cursor_blink_speed,false);
+                // update the cursor uniform to blink it.
+                self._cursor_blink_flipflop = 1.0 - self._cursor_blink_flipflop;
+                self._cursor_area.write_uniform_float(cx, "blink", self._cursor_blink_flipflop);
+            }
         }
         match event.hits(cx, self._bg_area, &mut self._hit_state){
             Event::KeyFocus(kf)=>{
@@ -567,7 +597,7 @@ impl CodeEditor{
                 self.view.redraw_view_area(cx);
                 self._last_finger_move = Some(fe.abs);
                 self.update_highlight(text_buffer);
-
+                self.reset_cursor_blinker(cx);
             },
             Event::FingerHover(_fe)=>{
                 cx.set_hover_mouse_cursor(MouseCursor::Text);
@@ -588,6 +618,7 @@ impl CodeEditor{
                 self._last_finger_move = None;
                 self._grid_select_corner = None;
                 self.update_highlight(text_buffer);
+                self.reset_cursor_blinker(cx);
             },
             Event::FingerMove(fe)=>{
                 if let Some(grid_select_corner) = self._grid_select_corner{
@@ -645,7 +676,8 @@ impl CodeEditor{
                 if last_scroll_none{
                     self.view.redraw_view_area(cx);
                 }
-                
+                self.reset_cursor_blinker(cx);
+              
             },
             Event::KeyDown(ke)=>{
                 let cursor_moved = match ke.key_code{
@@ -763,6 +795,7 @@ impl CodeEditor{
                     self.scroll_last_cursor_visible(cx, text_buffer);
                     self.view.redraw_view_area(cx);
                 }
+                self.reset_cursor_blinker(cx);
             },
             Event::KeyUp(ke)=>{
                 match ke.key_code{
@@ -774,6 +807,7 @@ impl CodeEditor{
                     }
                     _=>(),
                 }
+                self.reset_cursor_blinker(cx);
             },
             Event::TextInput(te)=>{
                 if te.replace_last{
@@ -814,6 +848,7 @@ impl CodeEditor{
                 }
                 self.scroll_last_cursor_visible(cx, text_buffer);
                 self.view.redraw_view_area(cx);
+                self.reset_cursor_blinker(cx);
             },
             Event::TextCopy(_)=>match event{ // access the original event
                 Event::TextCopy(req)=>{
@@ -881,7 +916,9 @@ impl CodeEditor{
             self._text_inst = Some(self.text.begin_text(cx));
             cx.new_instance_layer(self.paren_pair.shader_id, 0);
             self._indent_line_inst = Some(cx.new_instance_layer(self.indent_lines.shader_id, 0));
-            cx.new_instance_layer(self.cursor.shader_id, 0);
+
+            self._cursor_area = cx.new_instance_layer(self.cursor.shader_id, 0).into_area();
+
 
             if let Some(select_scroll) = &mut self._select_scroll{
                 let scroll_pos = self.view.get_scroll_pos(cx);
@@ -1296,10 +1333,7 @@ impl CodeEditor{
 
         self.text.end_text(cx, self._line_number_inst.as_ref().unwrap());
 
-        // lets draw cursors and selection rects.
-        //let draw_cursor = &self._draw_cursor;
         let origin = cx.get_turtle_origin();
-        cx.new_instance_layer(self.cursor.shader_id, 0);
 
         // unmatched highlighting
         while self._paren_stack.len()>0{
@@ -1314,7 +1348,10 @@ impl CodeEditor{
 
         // draw the cursors    
         for rc in &self._draw_cursors.cursors{
-           self.cursor.draw_quad(cx, Rect{x:rc.x - origin.x, y:rc.y - origin.y, w:rc.w, h:rc.h});
+            let inst = self.cursor.draw_quad(cx, Rect{x:rc.x - origin.x, y:rc.y - origin.y, w:rc.w, h:rc.h});
+            if inst.need_uniforms_now(cx){
+                inst.push_uniform_float(cx, self._cursor_blink_flipflop);//blink
+            }
         }
 
         self._text_area = self._text_inst.take().unwrap().inst.into_area();
@@ -1473,7 +1510,7 @@ impl CodeEditor{
        let pos = self.cursors.get_last_cursor_text_pos(text_buffer);
        // lets find the line offset in the line geometry
        if pos.row < self._line_geometry.len(){
-           let geom = &self._line_geometry[pos.row.max(1) - 1];
+           let geom = &self._line_geometry[pos.row];
            // ok now we want the y scroll to be geom.y
            self.view.set_scroll_target(cx, Vec2{x:0.0,y:geom.walk.y});
        }

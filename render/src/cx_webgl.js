@@ -410,6 +410,15 @@
 			return str
 		}
 
+		parse_f64(){
+			if(this.parse&1){
+				this.parse++;
+			}
+			var ret = this.mf64[this.parse>>1];
+			this.parse += 2;
+			return ret
+		}
+
 		parse_shvarvec(){
 			var len = this.mu32[this.parse++];
 			var vars = []
@@ -1161,6 +1170,14 @@
 			}, err=>{
 			})
 		}
+
+		start_timer(id, interval, repeats){
+			//console.log("START TIMER",id,interval,repeats);
+		}
+
+		stop_timer(id){
+			//console.log("STOP TIMER",id);
+		}
 	}
 
 	// array of function id's wasm can call on us, self is pointer to WasmApp
@@ -1264,6 +1281,16 @@
 		},
 		function text_copy_response_16(self){
 			self.text_copy_response = self.parse_string();
+		},
+		function start_timer_17(self){
+			var repeats = self.mu32[self.parse++]
+			var id = self.parse_f64();
+			var interval = self.parse_f64();
+			self.start_timer(id, interval, repeats);
+		},
+		function stop_timer_18(self){
+			var id = self.parse_f64();
+			self.stop_timer(id);
 		}
 	]
 	

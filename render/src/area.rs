@@ -43,7 +43,6 @@ pub struct InstanceWriteRef<'a>{
     pub buffer:&'a mut Vec<f32>
 }
 
-
 impl Area{
     pub fn is_empty(&self)->bool{
         if let Area::Empty = self{
@@ -239,7 +238,7 @@ impl Area{
          }
     }
 
-    pub fn get_prop_offset(&self, cx:&Cx, prop_name:&str)->usize{
+    pub fn get_instance_offset(&self, cx:&Cx, prop_name:&str)->usize{
         match self{
             Area::Instance(inst)=>{
                 let draw_list = &cx.draw_lists[inst.draw_list_id];
@@ -253,9 +252,33 @@ impl Area{
             }
             _=>(),
         }
-        println!("get_prop_offset {} called on invalid prop", prop_name);
+        println!("get_instance_offset {} called on invalid prop", prop_name);
         0
     }
+
+    pub fn get_uniform_offset(&self, cx:&Cx, prop_name:&str)->usize{
+        match self{
+            Area::Instance(inst)=>{
+                let draw_list = &cx.draw_lists[inst.draw_list_id];
+                let draw_call = &draw_list.draw_calls[inst.draw_call_id];
+                let csh = &cx.compiled_shaders[draw_call.shader_id];
+                for prop in &csh.named_uniform_props.props{
+                    if prop.name == prop_name{
+                        return prop.offset
+                    }
+                }
+                let mut dbg = String::new();
+                for prop in &csh.named_uniform_props.props{
+                    dbg.push_str(&format!("name:{} offset:{}, ", prop.name, prop.offset));
+                }
+                println!("get_uniform_offset {} not found in [{}]", prop_name,dbg);
+            }
+            _=>(),
+        }
+        println!("get_uniform_offset {} called on invalid prop", prop_name);
+        0
+    }
+
 
     pub fn get_read_ref<'a>(&self, cx:&'a Cx)->Option<InstanceReadRef<'a>>{
         match self{
@@ -307,21 +330,40 @@ impl Area{
         return None;
     }
 
+    pub fn get_uniform_write_ref<'a>(&self, cx:&'a mut Cx)->Option<&'a mut Vec<f32>>{
+        match self{
+            Area::Instance(inst)=>{
+                let draw_list = &mut cx.draw_lists[inst.draw_list_id];
+                let draw_call = &mut draw_list.draw_calls[inst.draw_call_id];
+                if draw_list.redraw_id != inst.redraw_id {
+                    return None;
+                }
+                cx.paint_dirty = true;
+                draw_call.uniforms_dirty = true;
+                return Some(
+                    &mut draw_call.uniforms
+                )
+            }
+            _=>(),
+        }
+        return None;
+    }
+
     pub fn write_float(&self, cx:&mut Cx, prop_name:&str, value:f32){
-        let prop_offset = self.get_prop_offset(cx, prop_name);
+        let inst_offset = self.get_instance_offset(cx, prop_name);
         let write = self.get_write_ref(cx);
         if let Some(write) = write{
             for i in 0..write.count{
-                write.buffer[write.offset + prop_offset + i * write.slots] = value;
+                write.buffer[write.offset + inst_offset + i * write.slots] = value;
             }
         }
     }
 
     pub fn read_float(&self, cx:&Cx, prop_name:&str)->f32{
-        let prop_offset = self.get_prop_offset(cx, prop_name);
+        let inst_offset = self.get_instance_offset(cx, prop_name);
         let read = self.get_read_ref(cx);
         if let Some(read) = read{
-            read.buffer[read.offset + prop_offset]
+            read.buffer[read.offset + inst_offset]
         }
         else{
             0.0
@@ -329,23 +371,23 @@ impl Area{
     }
 
    pub fn write_vec2(&self, cx:&mut Cx, prop_name:&str, value:Vec2){
-        let prop_offset = self.get_prop_offset(cx, prop_name);
+        let inst_offset = self.get_instance_offset(cx, prop_name);
         let write = self.get_write_ref(cx);
         if let Some(write) = write{
             for i in 0..write.count{
-                write.buffer[write.offset + prop_offset + 0 + i * write.slots] = value.y;
-                write.buffer[write.offset + prop_offset + 1 + i * write.slots] = value.x;
+                write.buffer[write.offset + inst_offset + 0 + i * write.slots] = value.y;
+                write.buffer[write.offset + inst_offset + 1 + i * write.slots] = value.x;
             }
         }
    }
 
     pub fn read_vec2(&self, cx:&Cx, prop_name:&str)->Vec2{
-        let prop_offset = self.get_prop_offset(cx, prop_name);
+        let inst_offset = self.get_instance_offset(cx, prop_name);
         let read = self.get_read_ref(cx);
         if let Some(read) = read{
             Vec2{
-                x:read.buffer[read.offset + prop_offset + 0],
-                y:read.buffer[read.offset + prop_offset + 1]
+                x:read.buffer[read.offset + inst_offset + 0],
+                y:read.buffer[read.offset + inst_offset + 1]
             }
         }
         else{
@@ -354,25 +396,25 @@ impl Area{
     }
 
    pub fn write_vec3(&self, cx:&mut Cx, prop_name:&str, value:Vec3){
-        let prop_offset = self.get_prop_offset(cx, prop_name);
+        let inst_offset = self.get_instance_offset(cx, prop_name);
         let write = self.get_write_ref(cx);
         if let Some(write) = write{
             for i in 0..write.count{
-                write.buffer[write.offset + prop_offset + 0 + i * write.slots] = value.y;
-                write.buffer[write.offset + prop_offset + 1 + i * write.slots] = value.x;
-                write.buffer[write.offset + prop_offset + 2 + i * write.slots] = value.z;
+                write.buffer[write.offset + inst_offset + 0 + i * write.slots] = value.y;
+                write.buffer[write.offset + inst_offset + 1 + i * write.slots] = value.x;
+                write.buffer[write.offset + inst_offset + 2 + i * write.slots] = value.z;
             }
         }
    }
 
     pub fn read_vec3(&self, cx:&Cx, prop_name:&str)->Vec3{
-        let prop_offset = self.get_prop_offset(cx, prop_name);
+        let inst_offset = self.get_instance_offset(cx, prop_name);
         let read = self.get_read_ref(cx);
         if let Some(read) = read{
             Vec3{
-                x:read.buffer[read.offset + prop_offset + 0],
-                y:read.buffer[read.offset + prop_offset + 1],
-                z:read.buffer[read.offset + prop_offset + 2]
+                x:read.buffer[read.offset + inst_offset + 0],
+                y:read.buffer[read.offset + inst_offset + 1],
+                z:read.buffer[read.offset + inst_offset + 2]
             }
         }
         else{
@@ -381,27 +423,27 @@ impl Area{
     }
 
    pub fn write_vec4(&self, cx:&mut Cx, prop_name:&str, value:Vec4){
-        let prop_offset = self.get_prop_offset(cx, prop_name);
+        let inst_offset = self.get_instance_offset(cx, prop_name);
         let write = self.get_write_ref(cx);
         if let Some(write) = write{
             for i in 0..write.count{
-                write.buffer[write.offset + prop_offset + 0 + i * write.slots] = value.x;
-                write.buffer[write.offset + prop_offset + 1 + i * write.slots] = value.y;
-                write.buffer[write.offset + prop_offset + 2 + i * write.slots] = value.z;
-                write.buffer[write.offset + prop_offset + 3 + i * write.slots] = value.w;
+                write.buffer[write.offset + inst_offset + 0 + i * write.slots] = value.x;
+                write.buffer[write.offset + inst_offset + 1 + i * write.slots] = value.y;
+                write.buffer[write.offset + inst_offset + 2 + i * write.slots] = value.z;
+                write.buffer[write.offset + inst_offset + 3 + i * write.slots] = value.w;
             }
         }
    }
 
     pub fn read_vec4(&self, cx:&Cx, prop_name:&str)->Vec4{
-        let prop_offset = self.get_prop_offset(cx, prop_name);
+        let inst_offset = self.get_instance_offset(cx, prop_name);
         let read = self.get_read_ref(cx);
         if let Some(read) = read{
             Vec4{
-                x:read.buffer[read.offset + prop_offset + 0],
-                y:read.buffer[read.offset + prop_offset + 1],
-                z:read.buffer[read.offset + prop_offset + 2],
-                w:read.buffer[read.offset + prop_offset + 3],
+                x:read.buffer[read.offset + inst_offset + 0],
+                y:read.buffer[read.offset + inst_offset + 1],
+                z:read.buffer[read.offset + inst_offset + 2],
+                w:read.buffer[read.offset + inst_offset + 3],
             }
         }
         else{
@@ -410,33 +452,91 @@ impl Area{
     }
 
     pub fn write_color(&self, cx:&mut Cx, prop_name:&str, value:Color){
-        let prop_offset = self.get_prop_offset(cx, prop_name);
+        let inst_offset = self.get_instance_offset(cx, prop_name);
         let write = self.get_write_ref(cx);
         if let Some(write) = write{
             for i in 0..write.count{
-                write.buffer[write.offset + prop_offset + 0 + i * write.slots] = value.r;
-                write.buffer[write.offset + prop_offset + 1 + i * write.slots] = value.g;
-                write.buffer[write.offset + prop_offset + 2 + i * write.slots] = value.b;
-                write.buffer[write.offset + prop_offset + 3 + i * write.slots] = value.a;
+                write.buffer[write.offset + inst_offset + 0 + i * write.slots] = value.r;
+                write.buffer[write.offset + inst_offset + 1 + i * write.slots] = value.g;
+                write.buffer[write.offset + inst_offset + 2 + i * write.slots] = value.b;
+                write.buffer[write.offset + inst_offset + 3 + i * write.slots] = value.a;
             }
         }
    }
 
     pub fn read_color(&self, cx:&Cx, prop_name:&str)->Color{
-        let prop_offset = self.get_prop_offset(cx, prop_name);
+        let inst_offset = self.get_instance_offset(cx, prop_name);
         let read = self.get_read_ref(cx);
         if let Some(read) = read{
             Color{
-                r:read.buffer[read.offset + prop_offset + 0],
-                g:read.buffer[read.offset + prop_offset + 1],
-                b:read.buffer[read.offset + prop_offset + 2],
-                a:read.buffer[read.offset + prop_offset + 3],
+                r:read.buffer[read.offset + inst_offset + 0],
+                g:read.buffer[read.offset + inst_offset + 1],
+                b:read.buffer[read.offset + inst_offset + 2],
+                a:read.buffer[read.offset + inst_offset + 3],
             }
         }
         else{
             Color::zero()
         }
     }
+
+    pub fn write_uniform_float(&self, cx:&mut Cx, prop_name:&str, v:f32){
+        let uni_offset = self.get_uniform_offset(cx, prop_name);
+        let write = self.get_uniform_write_ref(cx);
+        if let Some(write) = write{
+            if uni_offset < write.len(){
+                write[uni_offset] = v;
+            }
+        }
+    }
+/*
+    pub fn push_uniform_vec2f(&self, cx:&mut Cx,  x:f32, y:f32){
+        let draw_list = &mut cx.draw_lists[self.draw_list_id];
+        if draw_list.redraw_id != self.redraw_id {
+            println!("uniform_vec2f called on invalid area pointer, use mark/sweep correctly!");
+            return
+        }
+        let draw_call = &mut draw_list.draw_calls[self.draw_call_id]; 
+        draw_call.uniforms.push(x);
+        draw_call.uniforms.push(y);
+    }
+
+    pub fn push_uniform_vec3f(&mut self, cx:&mut Cx, x:f32, y:f32, z:f32){
+        let draw_list = &mut cx.draw_lists[self.draw_list_id];
+        if draw_list.redraw_id != self.redraw_id {
+            println!("uniform_vec3f called on invalid area pointer, use mark/sweep correctly!");
+            return
+        }
+        let draw_call = &mut draw_list.draw_calls[self.draw_call_id]; 
+        draw_call.uniforms.push(x);
+        draw_call.uniforms.push(y);
+        draw_call.uniforms.push(z);
+    }
+
+    pub fn push_uniform_vec4f(&self, cx:&mut Cx, x:f32, y:f32, z:f32, w:f32){
+        let draw_list = &mut cx.draw_lists[self.draw_list_id];
+        if draw_list.redraw_id != self.redraw_id {
+            println!("uniform_vec4f called on invalid area pointer, use mark/sweep correctly!");
+            return
+        }
+        let draw_call = &mut draw_list.draw_calls[self.draw_call_id]; 
+        draw_call.uniforms.push(x);
+        draw_call.uniforms.push(y);
+        draw_call.uniforms.push(z);
+        draw_call.uniforms.push(w);
+    }
+
+    pub fn push_uniform_mat4(&self, cx:&mut Cx, v:&Mat4){
+        let draw_list = &mut cx.draw_lists[self.draw_list_id];
+        if draw_list.redraw_id != self.redraw_id {
+            println!("uniform_mat4 called on invalid area pointer, use mark/sweep correctly!");
+            return
+        }
+        let draw_call = &mut draw_list.draw_calls[self.draw_call_id]; 
+        for i in 0..16{
+            draw_call.uniforms.push(v.v[i]);
+        }
+    }    */
 }
 
 impl InstanceArea{

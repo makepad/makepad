@@ -788,32 +788,34 @@ impl RectInstanceProps{
 }
 
 #[derive(Default,Clone)]
-pub struct NamedInstanceProp{
+pub struct NamedProp{
     pub name: String,
     pub offset: usize,
     pub slots: usize
 }
 
 #[derive(Default,Clone)]
-pub struct NamedInstanceProps{
-    pub props: Vec<NamedInstanceProp>,
+pub struct NamedProps{
+    pub props: Vec<NamedProp>,
+    pub total_slots: usize,
 }
 
-impl NamedInstanceProps{
-    pub fn construct(sh:&Shader, instances:&Vec<ShVar>)->NamedInstanceProps{
+impl NamedProps{
+    pub fn construct(sh:&Shader, in_props:&Vec<ShVar>)->NamedProps{
         let mut slot = 0;
-        let mut props = Vec::new();
-        for inst in instances{
-            let slots = sh.get_type_slots(&inst.ty);
-            props.push(NamedInstanceProp{
-                name:inst.name.clone(),
+        let mut out_props = Vec::new();
+        for prop in in_props{
+            let slots = sh.get_type_slots(&prop.ty);
+            out_props.push(NamedProp{
+                name:prop.name.clone(),
                 offset:slot,
                 slots:slots
             });
             slot += slots
         };
-        NamedInstanceProps{
-            props:props
+        NamedProps{
+            props:out_props,
+            total_slots:slot
         }
     }
 }
