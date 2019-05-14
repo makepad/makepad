@@ -255,8 +255,8 @@ where TScrollBar: ScrollBarLike<TScrollBar> + Clone + ElementLife
         let view_area = Area::DrawList(DrawListArea{draw_list_id:draw_list_id, redraw_id:cx.redraw_id});
 
         // lets ask the turtle our actual bounds
-        let view_total = cx.turtle_bounds();   
-        let mut rect_now =  cx.turtle_rect();
+        let view_total = cx.get_turtle_bounds();   
+        let mut rect_now =  cx.get_turtle_rect();
         if rect_now.h.is_nan(){
             rect_now.h = view_total.y;
         }

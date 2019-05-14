@@ -20,10 +20,14 @@ pub struct TextPos{
 }
 
 impl TextPos{
-    fn dist(&self, other:&TextPos)->f64{
+    pub fn dist(&self, other:&TextPos)->f64{
         let dr = (self.row as f64) - (other.row as f64);
         let dc = (self.col as f64) - (other.col as f64);
         (dr*dr+dc*dc).sqrt()
+    }
+
+    pub fn zero()->TextPos{
+        TextPos{row:0, col:0}
     }
 }
 

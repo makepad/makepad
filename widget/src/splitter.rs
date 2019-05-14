@@ -237,7 +237,7 @@ impl Splitter{
     }
 
     pub fn begin_splitter(&mut self, cx:&mut Cx){
-       let rect = cx.turtle_rect();
+       let rect = cx.get_turtle_rect();
        self._calc_pos = match self.align{
            SplitterAlign::First=>self.pos,
            SplitterAlign::Last=>match self.axis{
@@ -269,12 +269,13 @@ impl Splitter{
 
     pub fn mid_splitter(&mut self, cx:&mut Cx){
         cx.end_turtle(Area::Empty);
+        let origin = cx.get_turtle_origin();
         match self.axis{
             Axis::Horizontal=>{
-                cx.move_turtle(0.0,self._calc_pos + self.split_size);
+                cx.set_turtle_walk(Vec2{x:origin.x, y:origin.y+self._calc_pos + self.split_size});
             },
             Axis::Vertical=>{
-                cx.move_turtle(self._calc_pos + self.split_size, 0.0);
+                cx.set_turtle_walk(Vec2{x:origin.x + self._calc_pos + self.split_size, y:origin.y});
             }
        };
        cx.begin_turtle(&Layout{..Default::default()},Area::Empty);
@@ -283,7 +284,7 @@ impl Splitter{
     pub fn end_splitter(&mut self, cx:&mut Cx){
         cx.end_turtle(Area::Empty);
         // draw the splitter in the middle of the turtle
-        let rect = cx.turtle_rect();
+        let rect = cx.get_turtle_rect();
         self.split.color = self.animator.last_color("split.color");
         match self.axis{
             Axis::Horizontal=>{

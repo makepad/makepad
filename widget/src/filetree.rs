@@ -560,7 +560,7 @@ impl FileTree{
                     inst.push_float(cx, 1.);
                     cx.realign_turtle(Align::left_center(), false);
                     self.tree_text.color = self.tree_folder_color;
-                    let wleft = cx.width_left(false) - 10.;
+                    let wleft = cx.get_width_left() - 10.;
                     self.tree_text.wrapping = Wrapping::Ellipsis(wleft);
                     self.tree_text.draw_text(cx, name);
                     
@@ -616,8 +616,8 @@ impl FileTree{
         }
 
         // draw filler nodes
-        let view_total = cx.turtle_bounds();   
-        let rect_now =  cx.turtle_rect();
+        let view_total = cx.get_turtle_bounds();   
+        let rect_now =  cx.get_turtle_rect();
         let bg_even = cx.color("bg_selected");
         let bg_odd = cx.color("bg_odd");
         let mut y = view_total.y;
@@ -636,7 +636,7 @@ impl FileTree{
         // draw the drag item overlay layer if need be
         if let Some(mv) = &self._drag_move{
             if let Err(()) =self.drag_view.begin_view(cx, &Layout{
-                abs_start:Some(Vec2{x:mv.abs.x + 5., y:mv.abs.y + 5.}),
+                abs_origin:Some(Vec2{x:mv.abs.x + 5., y:mv.abs.y + 5.}),
                 ..Default::default()
             }){
                 return

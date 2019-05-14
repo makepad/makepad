@@ -206,11 +206,11 @@ impl TabControl{
         self.tabs.sweep(cx);
         if let Some((fe, id)) = &self._dragging_tab{
             if let Ok(()) = self.drag_tab_view.begin_view(cx, &Layout{
-                abs_start:Some(Vec2::zero()),
+                abs_origin:Some(Vec2::zero()),
                 ..Default::default()
             }){
                 
-                self.drag_tab.bg_layout.abs_start = Some(Vec2{x:fe.abs.x - fe.rel_start.x, y:fe.abs.y - fe.rel_start.y});
+                self.drag_tab.bg_layout.abs_origin = Some(Vec2{x:fe.abs.x - fe.rel_start.x, y:fe.abs.y - fe.rel_start.y});
                 let origin_tab = self.tabs.get_draw(cx, *id, |_cx, tmpl| tmpl.clone());
                 self.drag_tab.label = origin_tab.label.clone();
                 self.drag_tab.is_closeable = origin_tab.is_closeable;

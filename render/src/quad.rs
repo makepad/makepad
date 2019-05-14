@@ -124,7 +124,7 @@ impl Quad{
             self.do_uniforms(cx, &inst);
         }
         //println!("{:?} {}", area, cx.current_draw_list_id);
-        let pos = cx.turtle_origin();
+        let pos = cx.get_turtle_origin();
         let data = [
             /*x,y,w,h*/rect.x + pos.x,rect.y +pos.y,rect.w,rect.h,
             /*color*/self.color.r,self.color.g,self.color.b,self.color.a
