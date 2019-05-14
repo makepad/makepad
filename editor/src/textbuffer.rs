@@ -786,6 +786,11 @@ impl CursorSet{
         }
     }
 
+    pub fn is_last_cursor_singular(&self)->bool{
+        let cursor = &self.set[self.last_cursor];
+        cursor.head == cursor.tail
+    }
+
     pub fn grid_select_corner(&mut self, new_pos:TextPos, text_buffer:&TextBuffer)->TextPos{
         // we need to compute the furthest row/col in our cursor set
         let mut max_dist = 0.0;

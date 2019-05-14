@@ -1108,7 +1108,6 @@ impl CodeEditor{
                     self._visible_lines += 1;
                 }
 
-                // we need to find the next cursor point we need to do something at
                 let cursors = &self.cursors.set;
                 let last_cursor = self.cursors.last_cursor;
                 let draw_cursors = &mut self._draw_cursors;
@@ -1202,7 +1201,6 @@ impl CodeEditor{
 
         // lets insert an empty newline at the bottom so its nicer to scroll
         self.new_line(cx);
-        //cx.turtle_new_line();
         cx.walk_turtle(Bounds::Fix(0.0),  Bounds::Fix(self._monospace_size.y),  Margin::zero(), None);
         
         self.text.end_text(cx, self._text_inst.as_ref().unwrap());
@@ -1356,7 +1354,7 @@ impl CodeEditor{
         if let Some(indent_inst) = self._indent_line_inst{
             
             let last_pos = self.cursors.get_last_cursor_text_pos(text_buffer);
-            let indent_id = if !self.cursors.get_last_cursor_singular().is_none() && last_pos.row < self._line_geometry.len(){
+            let indent_id = if self.cursors.is_last_cursor_singular() && last_pos.row < self._line_geometry.len(){
                 self._line_geometry[last_pos.row].indent_id
             }else{0.};
             indent_inst.push_uniform_float(cx, indent_id);
