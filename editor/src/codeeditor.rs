@@ -57,6 +57,7 @@ pub struct CodeEditor{
     pub _first_on_line:bool,
     pub _line_was_folded:bool,
     pub _line_was_visible:bool,
+    pub _final_fill_height:f32,
     pub _draw_cursors:DrawCursors,
     pub _draw_search:DrawCursors,
 
@@ -148,7 +149,7 @@ impl AnimFoldingState{
 #[derive(Clone)]
 pub struct AnimFolding{
     pub state:AnimFoldingState,
-    pub focussed_line:(usize, f32, Vec2),
+    pub focussed_line:usize,
     pub did_animate:bool
 }
 
@@ -345,9 +346,10 @@ impl Style for CodeEditor{
 
             _anim_font_size:11.0,
             _line_largest_font:0.,
+            _final_fill_height:0.,
             _anim_folding:AnimFolding{
                 state:AnimFoldingState::Open,
-                focussed_line:(0,0.0,Vec2::zero()),
+                focussed_line:0,
                 did_animate:false,
             },
             _select_scroll:None,
@@ -945,26 +947,30 @@ impl CodeEditor{
 
             // lets compute our scroll line position and keep it where it is
             if self._anim_folding.did_animate{
-                let mut calc_ypos = self.top_padding;
-                let (focus_line, focussed_ypos, old_scroll) = self._anim_folding.focussed_line;
-                for (line, geom) in self._line_geometry.iter().enumerate(){
-                    if focus_line == line{
-                        // calculate where it was on screen
-                        let was = focussed_ypos - old_scroll.y;
-                        // where it would go
-                        let now = calc_ypos - old_scroll.y;
-                        self.view.set_scroll_pos(cx, Vec2{
-                            x:old_scroll.x,
-                            y:old_scroll.y - (was - now)
-                        });
-                        break;
+                let mut ypos = self.top_padding;
+                let mut ypos_at_line = ypos;
+                let focus_line = self._anim_folding.focussed_line;
+                if focus_line < self._line_geometry.len(){
+                    for (line, geom) in self._line_geometry.iter().enumerate(){
+                        if focus_line == line{
+                            ypos_at_line = ypos;
+                        }
+                        ypos += if geom.was_folded{
+                            self._monospace_base.y * self._anim_font_size
+                        }
+                        else{
+                            self._monospace_base.y * self.open_font_size
+                        }
                     }
-                    calc_ypos += if geom.was_folded{
-                        self._monospace_base.y * self._anim_font_size
-                    }
-                    else{
-                        self._monospace_base.y * self.open_font_size
-                    }
+                    ypos += self._final_fill_height;
+                    let dy = self._line_geometry[focus_line].walk.y - ypos_at_line;
+                    let sv = self.view.get_scroll_view_total();
+                    self.view.set_scroll_view_total(cx, Vec2{x:sv.x, y:ypos});
+                    let scroll_pos = self.view.get_scroll_pos(cx);
+                    self.view.set_scroll_pos(cx, Vec2{
+                        x:scroll_pos.x,
+                        y:scroll_pos.y - dy
+                    });
                 }
             }
 
@@ -1462,7 +1468,8 @@ impl CodeEditor{
             }
         }
         
-        cx.walk_turtle(Bounds::Fix(0.0),  Bounds::Fix(cx.get_height_total() - self._monospace_size.y),  Margin::zero(), None);
+        self._final_fill_height = cx.get_height_total() - self._monospace_size.y;
+        cx.walk_turtle(Bounds::Fix(0.0),  Bounds::Fix(self._final_fill_height),  Margin::zero(), None);
 
         // do select scrolling
         if let Some(select_scroll) = self._select_scroll.clone(){
@@ -1649,7 +1656,7 @@ impl CodeEditor{
         last_scroll_none
     }
 
-    fn compute_focussed_line_for_folding(&self, cx:&Cx, text_buffer:&TextBuffer)->(usize,f32,Vec2){
+    fn compute_focussed_line_for_folding(&self, cx:&Cx, text_buffer:&TextBuffer)->usize{
         let scroll = self.view.get_scroll_pos(cx);
         let rect = self.view.get_view_area(cx).get_rect_scrolled(cx);
 
@@ -1658,9 +1665,9 @@ impl CodeEditor{
         if pos.row < self._line_geometry.len(){
             let geom = &self._line_geometry[pos.row];
             // check if cursor is visible
-            if geom.walk.y - scroll.y > 0. && geom.walk.y - scroll.y < rect.h{ // visible
+            if geom.walk.y - scroll.y > 0. && geom.walk.y - scroll.y <rect.h{ // visible
             //println!("FOUND");
-                return (pos.row, geom.walk.y, scroll)
+                return pos.row
             }
         }
 
@@ -1670,7 +1677,7 @@ impl CodeEditor{
         for (line, geom) in self._line_geometry.iter().enumerate(){
             if geom.walk.y > center_y{
             //println!("CENTER");
-                return (line, geom.walk.y, scroll)
+                return line
             }
         }
         
@@ -1678,12 +1685,12 @@ impl CodeEditor{
         for (line, geom) in self._line_geometry.iter().enumerate(){
             if geom.walk.y > scroll.y{
             //println!("TOP");
-                return (line, geom.walk.y, scroll)
+                return line
             }
         }
 
         // cant find anything
-        return (0,0.,Vec2::zero())
+        return 0
     }
 
   

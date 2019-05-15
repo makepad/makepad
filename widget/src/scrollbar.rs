@@ -215,6 +215,14 @@ impl ScrollBarLike<ScrollBar> for ScrollBar{
     fn get_scroll_target(&mut self)->f32{
         return self._scroll_target
     }
+    
+    fn set_scroll_view_total(&mut self, _cx:&mut Cx, view_total:f32){
+        self._view_total = view_total;
+    }
+    
+    fn get_scroll_view_total(&self)->f32{
+        return self._view_total;
+    }
 
     fn set_scroll_target(&mut self, cx:&mut Cx, scroll_pos_target:f32)->bool{
         // clamp scroll_pos to

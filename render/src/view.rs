@@ -3,6 +3,8 @@ use crate::cx::*;
 pub trait ScrollBarLike<ScrollBarT>{
     fn draw_scroll_bar(&mut self, cx:&mut Cx, axis:Axis, view_area:Area, view_rect:Rect, total_size:Vec2)->f32;
     fn handle_scroll_bar(&mut self, cx:&mut Cx, event:&mut Event)->ScrollBarEvent;
+    fn set_scroll_view_total(&mut self, cx:&mut Cx, view_total:f32);
+    fn get_scroll_view_total(&self)->f32;
     fn set_scroll_pos(&mut self, cx:&mut Cx, scroll_pos:f32)->bool;
     fn get_scroll_pos(&self)->f32;
     fn scroll_into_view(&mut self, cx:&mut Cx, pos:f32, size:f32);
@@ -62,6 +64,8 @@ impl ScrollBarLike<NoScrollBar> for NoScrollBar{
     fn handle_scroll_bar(&mut self, _cx:&mut Cx, _event:&mut Event)->ScrollBarEvent{
         ScrollBarEvent::None
     }
+    fn set_scroll_view_total(&mut self, cx:&mut Cx, view_total:f32){}
+    fn get_scroll_view_total(&self)->f32{0.}
     fn set_scroll_pos(&mut self, _cx:&mut Cx, _scroll_pos:f32)->bool{false}
     fn get_scroll_pos(&self)->f32{0.}
     fn scroll_into_view(&mut self, _cx:&mut Cx, _pos:f32, _size:f32){}
@@ -231,6 +235,26 @@ where TScrollBar: ScrollBarLike<TScrollBar> + Clone + ElementLife
         }
         changed
     }
+
+    pub fn set_scroll_view_total(&mut self, cx:&mut Cx, view_total:Vec2){
+        if let Some(scroll_h) = &mut self.scroll_h{
+            scroll_h.set_scroll_view_total(cx, view_total.x)
+        }
+        if let Some(scroll_v) = &mut self.scroll_v{
+            scroll_v.set_scroll_view_total(cx, view_total.y)
+        }
+    }    
+
+    pub fn get_scroll_view_total(&mut self)->Vec2{
+        Vec2{
+            x:if let Some(scroll_h) = &mut self.scroll_h{
+                scroll_h.get_scroll_view_total()
+            }else{0.},
+            y:if let Some(scroll_v) = &mut self.scroll_v{
+                scroll_v.get_scroll_view_total()
+            }else{0.}
+        }
+    }    
 
     pub fn scroll_into_view(&mut self, cx:&mut Cx, rect:Rect){
         if let Some(scroll_h) = &mut self.scroll_h{
