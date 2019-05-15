@@ -209,6 +209,7 @@ pub struct CodeEditorColors{
     string:Color,
     number:Color,
     comment:Color,
+    doc_comment:Color,
     paren:Color,
     operator:Color,
     delimiter:Color,
@@ -256,7 +257,7 @@ impl Style for CodeEditor{
                 number:color256(182,206,170),
 
                 comment:color256(99,141,84),
-
+                doc_comment:color256(120,171,104),
                 paren:color256(212,212,212),
                 operator:color256(212,212,212),
                 delimiter:color256(212,212,212),
@@ -1133,8 +1134,9 @@ impl CodeEditor{
         }
     }
     // drawing a text chunk
-    pub fn draw_chunk(&mut self, cx:&mut Cx, chunk:&Vec<char>, next_char:char, offset:usize, token_type:TokenType){
+    pub fn draw_chunk(&mut self, cx:&mut Cx, chunk:&Vec<char>, next_char:char, end_offset:usize, token_type:TokenType){
         if chunk.len()>0{
+            let offset = end_offset - chunk.len() -1;
             
             // maintain paren stack
             if token_type == TokenType::ParenOpen{
@@ -1178,14 +1180,14 @@ impl CodeEditor{
                         self.open_font_size
                     }
                 }
-                else if token_type != TokenType::Newline{
+                else if token_type == TokenType::Newline || token_type == TokenType::Comment{
+                    self._line_was_folded = true;
+                    self._anim_font_size
+                }
+                else{
                     self._indent_stack.truncate(0);
                     self._line_was_folded = false;
                     self.open_font_size
-                }
-                else{
-                    self._line_was_folded = true;
-                    self._anim_font_size
                 };
                 self.set_font_size(cx, font_size);
             }
@@ -1241,6 +1243,7 @@ impl CodeEditor{
                     TokenType::String=> self.colors.string,
                     TokenType::Number=> self.colors.number,
                     TokenType::Comment=> self.colors.comment,
+                    TokenType::DocComment=> self.colors.doc_comment,
                     TokenType::ParenOpen=>{
                         self._paren_stack.last_mut().unwrap().geom_open = Some(geom);
                         self.colors.paren

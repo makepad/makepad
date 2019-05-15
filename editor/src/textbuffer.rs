@@ -1348,6 +1348,7 @@ impl CursorSet{
                 TokenType::String=>true,
                 TokenType::Number=>true,
 
+                TokenType::DocComment=>false,
                 TokenType::Comment=>false,
 
                 TokenType::ParenOpen=>false,
@@ -1413,6 +1414,7 @@ pub enum TokenType{
     String,
     Number,
 
+    DocComment,
     Comment,
 
     ParenOpen,

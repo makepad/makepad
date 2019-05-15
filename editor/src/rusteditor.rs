@@ -50,11 +50,12 @@ impl RustEditor{
         let mut state = TokenizerState::new(text_buffer);
        
         let mut looping = true;
+        let mut ml_comment_stack = 0;
         let mut chunk = Vec::new();
         while looping{
             let token_type;
             state.advance_with_cur();
-
+            
             match state.cur{
                 '\0'=>{ // eof insert a terminating space and end
                     token_type = TokenType::Whitespace;
@@ -76,9 +77,64 @@ impl RustEditor{
                 '/'=>{ // parse comment
                     chunk.push(state.cur);
                     if state.next == '/'{
-                        while state.next != '\n' && state.next != '\0'{
-                            chunk.push(state.next);
-                            state.advance();
+                        chunk.push(state.next);
+                        state.advance();
+                        if state.next == '/'{
+                            while state.next != '\n' && state.next != '\0'{
+                                chunk.push(state.next);
+                                state.advance();
+                            }
+                            token_type = TokenType::DocComment;
+                        }
+                        else{
+                            while state.next != '\n' && state.next != '\0'{
+                                chunk.push(state.next);
+                                state.advance();
+                            }
+                            token_type = TokenType::Comment;
+                        }
+                    }
+                    else if state.next == '*'{ // start parsing a multiline comment
+                        let mut comment_depth = 1;
+                        chunk.push(state.next);
+                        state.advance();
+
+                        while state.next != '\0'{
+                            if state.next == '*'{
+                                chunk.push(state.next);
+                                state.advance();
+                                if state.next == '/'{
+                                    comment_depth -= 1;
+                                    chunk.push(state.next);
+                                    state.advance();
+                                    if comment_depth == 0{
+                                        break;
+                                    }
+                                }
+                            }
+                            else if state.next == '\n'{
+                                // output current line
+                                self.code_editor.draw_chunk(cx, &chunk, state.next, state.offset, TokenType::Comment);
+                                chunk.truncate(0);
+                                // output a newline
+                                chunk.push(state.next);
+                                state.advance();
+                                self.code_editor.draw_chunk(cx, &chunk, state.next, state.offset, TokenType::Newline);
+                                chunk.truncate(0);
+                                // output indent lines
+                                while state.next == ' '{
+                                    chunk.push(state.next);
+                                    state.advance();
+                                }
+                                if chunk.len()>0{
+                                    self.code_editor.draw_chunk(cx, &chunk, state.next, state.offset, TokenType::Whitespace);
+                                    chunk.truncate(0);
+                                }
+                            }
+                            else{
+                                chunk.push(state.next);
+                                state.advance();
+                            }
                         }
                         token_type = TokenType::Comment;
                     }
@@ -100,7 +156,7 @@ impl RustEditor{
                             token_type = TokenType::String;
                         }
                         else{
-                            token_type = TokenType::Comment;
+                            token_type = TokenType::TypeName;
                         }
                     }
                     else{ // parse a single char or lifetime
@@ -253,8 +309,7 @@ impl RustEditor{
                     token_type = TokenType::Operator;
                 }
             }
-            let off = state.offset - chunk.len() - 1;
-            self.code_editor.draw_chunk(cx, &chunk, state.next, off, token_type);
+            self.code_editor.draw_chunk(cx, &chunk, state.next, state.offset, token_type);
             chunk.truncate(0);
         }
         
@@ -299,6 +354,10 @@ impl RustEditor{
             return true
         }
         return false
+    }
+
+    fn parse_ml_comment_chunk<'a>(state:&mut TokenizerState<'a>, ml_comment_stack:&mut usize, chunk:&mut Vec<char>){
+        
     }
 
     fn parse_rust_number_tail<'a>(state:&mut TokenizerState<'a>, chunk:&mut Vec<char>){
