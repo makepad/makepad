@@ -1,4 +1,4 @@
-// This is Makepad, a work-in-progress livecoding IDE for 2D Design.
+/// This is Makepad, a work-in-progress livecoding IDE for 2D Design.
 // This application is nearly 100% Wasm running on webGL. NO HTML AT ALL.
 // The vision is to build a livecoding / design hybrid program, 
 // here procedural design and code are fused in one environment. 

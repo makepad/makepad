@@ -174,7 +174,7 @@ where TScrollBar: ScrollBarLike<TScrollBar> + Clone + ElementLife
         //cx.turtle.y = 0.0;
     }
     
-    pub fn handle_scroll_bars(&mut self, cx:&mut Cx, event:&mut Event)->(ScrollBarEvent,ScrollBarEvent){
+    pub fn handle_scroll_bars(&mut self, cx:&mut Cx, event:&mut Event)->bool{
         let mut ret_h = ScrollBarEvent::None;
         let mut ret_v = ScrollBarEvent::None;
 
@@ -202,7 +202,7 @@ where TScrollBar: ScrollBarLike<TScrollBar> + Clone + ElementLife
             },
             _=>()
         };
-        (ret_h, ret_v)
+        ret_h != ScrollBarEvent::None || ret_v != ScrollBarEvent::None
     }
 
     pub fn get_scroll_pos(&self, cx:&Cx)->Vec2{

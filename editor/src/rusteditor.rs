@@ -35,11 +35,7 @@ pub enum RustEditorEvent{
 
 impl RustEditor{
     pub fn handle_rust_editor(&mut self, cx:&mut Cx, event:&mut Event, text_buffer:&mut TextBuffer)->CodeEditorEvent{
-        match self.code_editor.handle_code_editor(cx, event, text_buffer){
-            _=>()
-        }
-        
-        CodeEditorEvent::None
+        self.code_editor.handle_code_editor(cx, event, text_buffer)
     }
 
     pub fn draw_rust_editor(&mut self, cx:&mut Cx, text_buffer:&TextBuffer){
@@ -50,7 +46,6 @@ impl RustEditor{
         let mut state = TokenizerState::new(text_buffer);
        
         let mut looping = true;
-        let mut ml_comment_stack = 0;
         let mut chunk = Vec::new();
         while looping{
             let token_type;

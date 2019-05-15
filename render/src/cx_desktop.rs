@@ -37,6 +37,23 @@ impl Cx{
         id
     }
 
+    pub fn write_file(&mut self, path:&str, data:Vec<u8>)->u64{
+        // just write it right now
+        if let Ok(mut file) = File::create(path){
+            if let Ok(_) = file.write_all(&data){
+                println!("WRITTEN FILE {}", path);
+            }
+            else{
+                println!("ERROR WRITING FILE {}", path);
+            }
+        }
+        else{
+            println!("ERROR WRITING FILE {}", path);
+        }
+        0
+    }
+
+
     pub fn process_desktop_file_read_requests<F>(&mut self, mut event_handler:F)
     where F: FnMut(&mut Cx, &mut Event)
     {   
@@ -48,6 +65,7 @@ impl Cx{
         self.platform.desktop.file_read_requests.truncate(0);
 
         for read_req in file_read_requests{
+            println!("OPEN FILE {}", read_req.path);
             let file_result = File::open(&read_req.path);
             if let Ok(mut file) = file_result{
                 let mut buffer = Vec::new();

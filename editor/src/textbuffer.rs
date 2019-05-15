@@ -11,6 +11,7 @@ pub struct TextBuffer{
     pub undo_stack: Vec<TextUndo>,
     pub redo_stack: Vec<TextUndo>,
     pub load_id: u64,
+    pub mutation_id: u64
 }
 
 #[derive(Clone, Copy)]
@@ -230,7 +231,22 @@ impl TextBuffer{
         };
     }
 
+    pub fn get_as_string(&self)->String{
+        let mut ret = String::new();
+        for i in 0..self.lines.len(){
+            let line = &self.lines[i];
+            for ch in line{
+                ret.push(*ch);
+            }
+            if i != self.lines.len()-1{
+                ret.push('\n');
+            }
+        }
+        return ret
+    }
+
     fn replace_line(&mut self, row:usize, start_col:usize, len:usize, rep_line:Vec<char>)->Vec<char>{
+        self.mutation_id += 1;
         self.lines[row].splice(start_col..(start_col+len), rep_line).collect()
     }
 
@@ -245,7 +261,7 @@ impl TextBuffer{
     }
 
     fn replace_range(&mut self, start:usize, len:usize, mut rep_lines:Vec<Vec<char>>)->Vec<Vec<char>>{
-
+        self.mutation_id += 1;
         let start_pos = self.offset_to_text_pos(start);
         let end_pos = self.offset_to_text_pos_next(start+len,start_pos, start);
         

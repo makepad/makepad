@@ -2,11 +2,15 @@
 
 use widget::*;
 use editor::*;
+mod rustcompiler;
+pub use crate::rustcompiler::*;
+
 use std::collections::HashMap;
 
 #[derive(Clone)]
 enum Panel{
     Color(Color), 
+    RustCompiler,
     FileTree,
     FileEditorTarget,
     FileEditor{path:String, editor_id:u64}
@@ -20,8 +24,11 @@ struct App{
     file_editors:Elements<u64, FileEditor, FileEditorTemplates>,
     file_editor_id_alloc:u64,
 
+    rust_compiler:RustCompiler,
+
     text_buffers:HashMap<String, TextBuffer>,
     tree_load_id:u64,
+    editor_root:String,
     quad:Quad
 }
 
@@ -42,6 +49,7 @@ impl Style for App{
                 //}),
                 ..Style::style(cx)
             },
+            editor_root:"./edit_repo".to_string(),
             quad:Quad{
                 ..Style::style(cx)
             },
@@ -54,6 +62,9 @@ impl Style for App{
                     ..Style::style(cx)
                 }
             }),
+            rust_compiler:RustCompiler{
+                ..Style::style(cx)
+            },
             dock:Dock{
                 dock_items:Some(DockItem::Splitter{
                     axis:Axis::Vertical,
@@ -83,8 +94,8 @@ impl Style for App{
                                 },
                                 DockTab{
                                     closeable:true,
-                                    title:"example.rs".to_string(),
-                                    item:Panel::FileEditor{path:"/src/example.rs".to_string(), editor_id:1}
+                                    title:"main.rs".to_string(),
+                                    item:Panel::FileEditor{path:"/src/main.rs".to_string(), editor_id:1}
                                 }
                             ],
                         }),
@@ -93,8 +104,8 @@ impl Style for App{
                             tabs:vec![
                                 DockTab{
                                     closeable:true,
-                                    title:"Log".to_string(),
-                                    item:Panel::Color(color256(30,30,30))
+                                    title:"Rust Compiler".to_string(),
+                                    item:Panel::RustCompiler
                                 }
                             ]
                         })
@@ -120,7 +131,8 @@ impl App{
     fn handle_app(&mut self, cx:&mut Cx, event:&mut Event){
         match event{
             Event::Construct=>{
-                self.tree_load_id = cx.read_file("./index.json");
+                self.tree_load_id = cx.read_file(&format!("{}/index.json",self.editor_root));
+                self.rust_compiler.start_poll(cx);
             },
             Event::FileRead(fr)=>{
                 // lets see which file we loaded
@@ -151,6 +163,9 @@ impl App{
         while let Some(item) = dock_walker.walk_handle_dock(cx, event){
             match item{
                 Panel::Color(_)=>{}
+                Panel::RustCompiler=>{
+                    self.rust_compiler.handle_rust_compiler(cx, event);
+                },
                 Panel::FileEditorTarget=>{},
                 Panel::FileTree=>{
                     file_tree_event = self.file_tree.handle_file_tree(cx, event);
@@ -159,7 +174,15 @@ impl App{
                     if let Some(file_editor) = &mut self.file_editors.get(*editor_id){
                         let text_buffer = self.text_buffers.get_mut(path);
                         if let Some(text_buffer) = text_buffer{
-                            file_editor.handle_file_editor(cx, event, text_buffer);
+                            match file_editor.handle_file_editor(cx, event, text_buffer){
+                                FileEditorEvent::LagChange=>{
+                                    // lets save the textbuffer to disk
+                                    cx.write_file(&format!("{}{}",self.editor_root,path), text_buffer.get_as_string().bytes().collect());
+                                    // lets re-trigger the rust compiler
+                                    self.rust_compiler.restart_rust_compiler();
+                                },
+                                _=>()
+                            }
                         }
                     }
                 }
@@ -217,8 +240,10 @@ impl App{
                     self.quad.color = *color2;
                     self.quad.draw_quad_walk(cx, Bounds::Fill, Bounds::Fill, Margin::zero());
                 },
-                Panel::FileEditorTarget=>{
+                Panel::RustCompiler=>{
+                    self.rust_compiler.draw_rust_compiler(cx);
                 },
+                Panel::FileEditorTarget=>{},
                 Panel::FileTree=>{
                     self.file_tree.draw_file_tree(cx);
                 },
@@ -327,15 +352,20 @@ impl ElementLife for FileEditor{
 }
 
 enum FileEditorEvent{
-    None
+    None,
+    LagChange,
+    Change
 }
 
 impl FileEditor{
     fn handle_file_editor(&mut self, cx:&mut Cx, event:&mut Event, text_buffer:&mut TextBuffer)->FileEditorEvent{
         match self{
             FileEditor::Rust(re)=>{
-                re.handle_rust_editor(cx, event, text_buffer);
-                FileEditorEvent::None
+                match re.handle_rust_editor(cx, event, text_buffer){
+                    CodeEditorEvent::Change=>FileEditorEvent::Change,
+                    CodeEditorEvent::LagChange=>FileEditorEvent::LagChange,
+                    _=>FileEditorEvent::None
+                }
             },
         }
     }

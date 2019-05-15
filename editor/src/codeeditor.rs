@@ -67,6 +67,8 @@ pub struct CodeEditor{
 
     pub _last_tabs:usize,
     pub _newline_tabs:usize,
+
+    pub _last_lag_mutation_id:u64
 }
 
 #[derive(Clone)]
@@ -89,6 +91,7 @@ impl AnimFoldingState{
     fn is_folded(&self)->bool{
         match self{
             AnimFoldingState::Folded=>true,
+            AnimFoldingState::Folding(_,_,_)=>true,
             _=>false
         }
     }
@@ -230,7 +233,7 @@ impl Style for CodeEditor{
         let cursor_sh = Self::def_cursor_shader(cx);
         let cursor_row_sh = Self::def_cursor_row_shader(cx);
         let paren_pair_sh = Self::def_paren_pair_shader(cx);
-        let code_editor = Self{
+        Self{
             cursors:CursorSet::new(),
             colors:CodeEditorColors{
                 bg:color256(30,30,30),
@@ -371,18 +374,17 @@ impl Style for CodeEditor{
             _cursor_blink_timer_id:0,
             _cursor_blink_flipflop:1.0,
             _cursor_area:Area::Empty,
-            
+            _last_lag_mutation_id:0,
             _last_tabs:0,
             _newline_tabs:0
-        };
-        //tab.animator.default = tab.anim_default(cx);
-        code_editor
+        }
     }
 }
 
 #[derive(Clone, PartialEq)]
 pub enum CodeEditorEvent{
     None,
+    LagChange,
     Change
 }
 
@@ -504,24 +506,21 @@ impl CodeEditor{
     }
 
     pub fn handle_code_editor(&mut self, cx:&mut Cx, event:&mut Event, text_buffer:&mut TextBuffer)->CodeEditorEvent{
-        match self.view.handle_scroll_bars(cx, event){
-            (_,ScrollBarEvent::Scroll{..}) | (ScrollBarEvent::Scroll{..},_)=>{
-                if let Some(last_finger_move) = self._last_finger_move{
-                    if let Some(grid_select_corner) = self._grid_select_corner{
-                        let pos = self.compute_grid_text_pos_from_abs(cx, last_finger_move);
-                        self.cursors.grid_select(grid_select_corner, pos, text_buffer);
-                    }
-                    else{
-                        let offset = self.text.find_closest_offset(cx, &self._text_area, last_finger_move);
-                        self.cursors.set_last_cursor_head(offset, text_buffer);
-                    }
+        if self.view.handle_scroll_bars(cx, event){
+            if let Some(last_finger_move) = self._last_finger_move{
+                if let Some(grid_select_corner) = self._grid_select_corner{
+                    let pos = self.compute_grid_text_pos_from_abs(cx, last_finger_move);
+                    self.cursors.grid_select(grid_select_corner, pos, text_buffer);
                 }
-                // the editor actually redraws on scroll, its because we don't actually
-                // generate the entire file as GPU text-buffer just the visible area
-                // in JS this wasn't possible performantly but in Rust its a breeze.
-                self.view.redraw_view_area(cx);
-            },
-            _=>()
+                else{
+                    let offset = self.text.find_closest_offset(cx, &self._text_area, last_finger_move);
+                    self.cursors.set_last_cursor_head(offset, text_buffer);
+                }
+            }
+            // the editor actually redraws on scroll, its because we don't actually
+            // generate the entire file as GPU text-buffer just the visible area
+            // in JS this wasn't possible performantly but in Rust its a breeze.
+            self.view.redraw_view_area(cx);
         }
         if let Event::Timer(te) = event{
             if te.id == self._cursor_blink_timer_id{
@@ -529,6 +528,11 @@ impl CodeEditor{
                 // update the cursor uniform to blink it.
                 self._cursor_blink_flipflop = 1.0 - self._cursor_blink_flipflop;
                 self._cursor_area.write_uniform_float(cx, "blink", self._cursor_blink_flipflop);
+                // ok see if we changed.
+                if self._last_lag_mutation_id != text_buffer.mutation_id{
+                    self._last_lag_mutation_id = text_buffer.mutation_id;
+                    return CodeEditorEvent::LagChange;
+                }
             }
         }
         match event.hits(cx, self._bg_area, &mut self._hit_state){
