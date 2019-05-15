@@ -85,6 +85,13 @@ impl AnimFoldingState{
         }
     }
 
+    fn is_folded(&self)->bool{
+        match self{
+            AnimFoldingState::Folded=>true,
+            _=>false
+        }
+    }
+
     fn get_font_size(&self, open_size:f32, folded_size:f32)->f32{
         match self{
             AnimFoldingState::Open=>open_size,
@@ -631,11 +638,45 @@ impl CodeEditor{
             Event::KeyDown(ke)=>{
                 let cursor_moved = match ke.key_code{
                     KeyCode::ArrowUp=>{
-                        self.cursors.move_up(1, ke.modifiers.shift, text_buffer);
+                        if self._anim_folding.state.is_folded() && self.cursors.set.len() == 1{
+                            // compute the nearest nonfolded line
+                            let pos = self.cursors.get_last_cursor_text_pos(text_buffer);
+                            let mut delta = 1;
+                            if pos.row > 0 && pos.row < self._line_geometry.len(){
+                                let mut scan = pos.row - 1;
+                                while scan >0{
+                                    if !self._line_geometry[scan].was_folded{
+                                        delta = pos.row - scan;
+                                        break;
+                                    }   
+                                    scan -= 1;
+                                }
+                            };
+                            self.cursors.move_up(delta, ke.modifiers.shift, text_buffer);
+                        }
+                        else{
+                            self.cursors.move_up(1, ke.modifiers.shift, text_buffer);
+                        }
                         true
                     },
                     KeyCode::ArrowDown=>{
-                        self.cursors.move_down(1, ke.modifiers.shift, text_buffer);
+                        if self._anim_folding.state.is_folded() && self.cursors.set.len() == 1{
+                            // compute the nearest nonfolded line
+                            let pos = self.cursors.get_last_cursor_text_pos(text_buffer);
+                            let mut delta = 1;
+                            let mut scan = pos.row + 1;
+                            while scan < self._line_geometry.len(){
+                                if !self._line_geometry[scan].was_folded{
+                                    delta = scan - pos.row;
+                                    break;
+                                }   
+                                scan += 1;
+                            }
+                            self.cursors.move_down(delta, ke.modifiers.shift, text_buffer);
+                        }
+                        else{
+                            self.cursors.move_down(1, ke.modifiers.shift, text_buffer);
+                        }
                         true
                     },
                     KeyCode::ArrowLeft=>{
