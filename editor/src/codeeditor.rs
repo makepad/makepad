@@ -213,6 +213,7 @@ pub struct CodeEditorColors{
     paren:Color,
     operator:Color,
     delimiter:Color,
+    unexpected:Color
 
 }
 
@@ -261,7 +262,7 @@ impl Style for CodeEditor{
                 paren:color256(212,212,212),
                 operator:color256(212,212,212),
                 delimiter:color256(212,212,212),
-
+                unexpected:color256(255,0,0),
             },
             indent_lines:Quad{
                 shader_id:cx.add_shader(indent_lines_sh, "Editor.indent_lines"),
@@ -1260,7 +1261,8 @@ impl CodeEditor{
                     },
                     TokenType::Operator=> self.colors.operator,
                     TokenType::Delimiter=> self.colors.delimiter,
-                    TokenType::Block=>self.colors.operator
+                    TokenType::Block=>self.colors.operator,
+                    TokenType::Unexpected=>self.colors.unexpected
                 };
 
                 if self._first_on_line{

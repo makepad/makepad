@@ -100,7 +100,16 @@ impl RustEditor{
                         state.advance();
 
                         while state.next != '\0'{
-                            if state.next == '*'{
+                            if state.next == '/'{
+                                chunk.push(state.next);
+                                state.advance();
+                                if state.next == '*'{
+                                    chunk.push(state.next);
+                                    state.advance();
+                                    comment_depth += 1;
+                                }
+                            }
+                            else if state.next == '*'{
                                 chunk.push(state.next);
                                 state.advance();
                                 if state.next == '/'{
@@ -211,8 +220,16 @@ impl RustEditor{
                     if state.next == '='{
                         chunk.push(state.next);
                         state.advance();
-                    }                    
-                    token_type = TokenType::Operator;
+                        token_type = TokenType::Operator;
+                    }
+                    else if state.next == '/'{
+                        chunk.push(state.next);
+                        state.advance();
+                        token_type = TokenType::Unexpected;
+                    } 
+                    else{
+                        token_type = TokenType::Operator;
+                    }
                 },
                 '+'=>{
                     chunk.push(state.cur);
@@ -355,11 +372,6 @@ impl RustEditor{
         }
         return false
     }
-
-    fn parse_ml_comment_chunk<'a>(state:&mut TokenizerState<'a>, ml_comment_stack:&mut usize, chunk:&mut Vec<char>){
-        
-    }
-
     fn parse_rust_number_tail<'a>(state:&mut TokenizerState<'a>, chunk:&mut Vec<char>){
         if state.next == 'x'{ // parse a hex number
             chunk.push(state.next);

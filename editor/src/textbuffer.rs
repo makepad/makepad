@@ -1350,12 +1350,13 @@ impl CursorSet{
 
                 TokenType::DocComment=>false,
                 TokenType::Comment=>false,
-
+                
                 TokenType::ParenOpen=>false,
                 TokenType::ParenClose=>false,
                 TokenType::Operator=>false,
                 TokenType::Delimiter=>false,
-                TokenType::Block=>false
+                TokenType::Block=>false,
+                TokenType::Unexpected=>false,
             };
             if !add{
                 vec![]
@@ -1421,7 +1422,9 @@ pub enum TokenType{
     ParenClose,
     Operator,
     Delimiter,
-    Block
+    Block,
+
+    Unexpected
 }
 
 #[derive(Clone)]
