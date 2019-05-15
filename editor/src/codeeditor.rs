@@ -1533,7 +1533,7 @@ impl CodeEditor{
     }
 
     // set it once per line otherwise the LineGeom stuff isn't really working out.
-    pub fn set_font_size(&mut self, cx:&Cx, font_size:f32){
+    pub fn set_font_size(&mut self, _cx:&Cx, font_size:f32){
         self.text.font_size = font_size;
         if font_size > self._line_largest_font{
             self._line_largest_font = font_size;

@@ -349,7 +349,7 @@ impl FileTree{
                 },
                 Event::FingerDown(_fe)=>{
                     // mark ourselves, unmark others
-                    if node_draw.marked != 0 && is_filenode{
+                    if is_filenode{
                         select_node = true;
                     }
                     node_draw.marked = cx.event_id;
