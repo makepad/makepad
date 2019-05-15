@@ -273,11 +273,11 @@ impl Cx{
 
             // call redraw event
             if self.redraw_areas.len()>0{
-                let time_start = cocoa_window.time_now();
+                //let time_start = cocoa_window.time_now();
                 self.call_draw_event(&mut event_handler, &mut root_view);
                 self.paint_dirty = true;
-                let time_end = cocoa_window.time_now();
-                println!("Redraw took: {}", (time_end - time_start));
+                //let time_end = cocoa_window.time_now();
+                //println!("Redraw took: {}", (time_end - time_start));
             }
 
             self.process_desktop_file_read_requests(&mut event_handler);

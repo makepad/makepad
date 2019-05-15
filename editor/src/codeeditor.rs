@@ -148,7 +148,7 @@ impl AnimFoldingState{
 #[derive(Clone)]
 pub struct AnimFolding{
     pub state:AnimFoldingState,
-    pub focussed_line:usize,
+    pub focussed_line:(usize, f32, Vec2),
     pub did_animate:bool
 }
 
@@ -347,7 +347,7 @@ impl Style for CodeEditor{
             _line_largest_font:0.,
             _anim_folding:AnimFolding{
                 state:AnimFoldingState::Open,
-                focussed_line:0,
+                focussed_line:(0,0.0,Vec2::zero()),
                 did_animate:false,
             },
             _select_scroll:None,
@@ -639,7 +639,7 @@ impl CodeEditor{
                 let cursor_moved = match ke.key_code{
                     KeyCode::ArrowUp=>{
                         if self._anim_folding.state.is_folded() && self.cursors.set.len() == 1{
-                            // compute the nearest nonfolded line
+                            // compute the nearest nonfolded line up
                             let pos = self.cursors.get_last_cursor_text_pos(text_buffer);
                             let mut delta = 1;
                             if pos.row > 0 && pos.row < self._line_geometry.len(){
@@ -661,7 +661,7 @@ impl CodeEditor{
                     },
                     KeyCode::ArrowDown=>{
                         if self._anim_folding.state.is_folded() && self.cursors.set.len() == 1{
-                            // compute the nearest nonfolded line
+                            // compute the nearest nonfolded line down
                             let pos = self.cursors.get_last_cursor_text_pos(text_buffer);
                             let mut delta = 1;
                             let mut scan = pos.row + 1;
@@ -945,19 +945,21 @@ impl CodeEditor{
 
             // lets compute our scroll line position and keep it where it is
             if self._anim_folding.did_animate{
-                let mut ypos = self.top_padding;
-                let focus_line = self._anim_folding.focussed_line;
+                let mut calc_ypos = self.top_padding;
+                let (focus_line, focussed_ypos, old_scroll) = self._anim_folding.focussed_line;
                 for (line, geom) in self._line_geometry.iter().enumerate(){
                     if focus_line == line{
-                        let dy = geom.walk.y - ypos;
-                        let scroll_pos = self.view.get_scroll_pos(cx);
+                        // calculate where it was on screen
+                        let was = focussed_ypos - old_scroll.y;
+                        // where it would go
+                        let now = calc_ypos - old_scroll.y;
                         self.view.set_scroll_pos(cx, Vec2{
-                            x:scroll_pos.x,
-                            y:scroll_pos.y - dy
+                            x:old_scroll.x,
+                            y:old_scroll.y - (was - now)
                         });
                         break;
                     }
-                    ypos += if geom.was_folded{
+                    calc_ypos += if geom.was_folded{
                         self._monospace_base.y * self._anim_font_size
                     }
                     else{
@@ -1532,7 +1534,7 @@ impl CodeEditor{
         self._monospace_size.x = self._monospace_base.x * font_size;
         self._monospace_size.y = self._monospace_base.y * font_size;
     }
-
+/*
     fn scroll_last_cursor_to_top(&mut self, cx:&mut Cx, text_buffer:&TextBuffer){
        // ok lets get the last cursor pos
        let pos = self.cursors.get_last_cursor_text_pos(text_buffer);
@@ -1543,7 +1545,7 @@ impl CodeEditor{
            self.view.set_scroll_target(cx, Vec2{x:0.0,y:geom.walk.y});
        }
     }
- 
+ */
     fn scroll_last_cursor_visible(&mut self, cx:&mut Cx, text_buffer:&TextBuffer){
         // so we have to compute (approximately) the rect of our cursor
         if self.cursors.last_cursor >= self.cursors.set.len(){
@@ -1589,6 +1591,7 @@ impl CodeEditor{
         let speed = 0.98;
         self._anim_folding.state.do_folding(speed, 0.95);
         self._anim_folding.focussed_line = self.compute_focussed_line_for_folding(cx,text_buffer);
+        //println!("FOLDING {}",self._anim_folding.focussed_line);
         self.view.redraw_view_area(cx);
     }
 
@@ -1596,6 +1599,7 @@ impl CodeEditor{
         let speed = 0.96;
         self._anim_folding.state.do_opening(speed, 0.97);
         self._anim_folding.focussed_line = self.compute_focussed_line_for_folding(cx,text_buffer);
+        //println!("UNFOLDING {}",self._anim_folding.focussed_line);
         self.view.redraw_view_area(cx);
         // return to normal size
     }
@@ -1645,7 +1649,7 @@ impl CodeEditor{
         last_scroll_none
     }
 
-    fn compute_focussed_line_for_folding(&self, cx:&Cx, text_buffer:&TextBuffer)->usize{
+    fn compute_focussed_line_for_folding(&self, cx:&Cx, text_buffer:&TextBuffer)->(usize,f32,Vec2){
         let scroll = self.view.get_scroll_pos(cx);
         let rect = self.view.get_view_area(cx).get_rect_scrolled(cx);
 
@@ -1654,8 +1658,9 @@ impl CodeEditor{
         if pos.row < self._line_geometry.len(){
             let geom = &self._line_geometry[pos.row];
             // check if cursor is visible
-            if geom.walk.y -scroll.y > rect.y && geom.walk.y - scroll.y <rect.y+rect.h{ // visible
-                return pos.row
+            if geom.walk.y - scroll.y > 0. && geom.walk.y - scroll.y < rect.h{ // visible
+            //println!("FOUND");
+                return (pos.row, geom.walk.y, scroll)
             }
         }
 
@@ -1664,19 +1669,21 @@ impl CodeEditor{
         let center_y = rect.h * 0.5 + scroll.y;
         for (line, geom) in self._line_geometry.iter().enumerate(){
             if geom.walk.y > center_y{
-                return line
+            //println!("CENTER");
+                return (line, geom.walk.y, scroll)
             }
         }
         
         // if we cant find the centerline, use the view top
         for (line, geom) in self._line_geometry.iter().enumerate(){
             if geom.walk.y > scroll.y{
-                return line
+            //println!("TOP");
+                return (line, geom.walk.y, scroll)
             }
         }
 
         // cant find anything
-        return 0
+        return (0,0.,Vec2::zero())
     }
 
   
