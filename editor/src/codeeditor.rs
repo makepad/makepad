@@ -232,7 +232,7 @@ impl Style for CodeEditor{
                 indent_lines: color("#5"),
                 selection: color256(42,78,117),
                 highlight:color256a(75,75,95,128),
-                cursor:color256(136,136,136),
+                cursor:color256(176,176,176),
                 cursor_row:color256(75,75,75),
 
                 paren_pair_match:color256(136,136,136),

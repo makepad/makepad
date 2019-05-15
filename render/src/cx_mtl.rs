@@ -93,7 +93,7 @@ impl Cx{
  
     pub fn repaint(&mut self,layer:&CoreAnimationLayer, device:&Device, command_queue:&CommandQueue, wait:bool){
         let pool = unsafe { NSAutoreleasePool::new(cocoa::base::nil) };
-        let command_buffer = command_queue.new_command_buffer();
+        //let command_buffer = command_queue.new_command_buffer();
         if let Some(drawable) = layer.next_drawable() {
             self.prepare_frame();
             

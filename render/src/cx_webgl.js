@@ -1187,13 +1187,20 @@
 			}
 			var obj = {id:id, repeats:repeats};
 			if(repeats !== 0){
-				obj.sys_id = window.setTimeout(e=>{
+				obj.sys_id = window.setInterval(e=>{
 					this.to_wasm.timer(id);
 					this.do_wasm_io();
 				}, interval * 1000.0);
 			}
 			else{
-				obj.sys_id = window.setInterval(e=>{
+				obj.sys_id = window.setTimeout(e=>{
+					for(let i = 0; i < this.timers.length; i++){
+						let timer = this.timers[i];
+						if(timer.id == id){
+							this.timers.splice(i, 1);
+							break;
+						}
+					}
 					this.to_wasm.timer(id);
 					this.do_wasm_io();
 				}, interval * 1000.0);
@@ -1205,6 +1212,7 @@
 			for(let i = 0; i < this.timers.length; i++){
 				let timer = this.timers[i];
 				if(timer.id == id){
+					console.log("clearing timer!")
 					if(timer.repeats){
 						window.clearInterval(timer.sys_id);
 					}
@@ -1212,6 +1220,7 @@
 						window.clearTimeout(timer.sys_id);
 					}
 					this.timers.splice(i, 1);
+					console.log(this.timers)
 					return
 				}
 			}
