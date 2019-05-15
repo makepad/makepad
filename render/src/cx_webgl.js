@@ -1212,7 +1212,6 @@
 			for(let i = 0; i < this.timers.length; i++){
 				let timer = this.timers[i];
 				if(timer.id == id){
-					console.log("clearing timer!")
 					if(timer.repeats){
 						window.clearInterval(timer.sys_id);
 					}
@@ -1220,7 +1219,6 @@
 						window.clearTimeout(timer.sys_id);
 					}
 					this.timers.splice(i, 1);
-					console.log(this.timers)
 					return
 				}
 			}
