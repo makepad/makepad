@@ -528,7 +528,7 @@ impl<'a> TokenizerState<'a>{
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Cursor{
     pub head:usize,
     pub tail:usize,
@@ -760,10 +760,16 @@ impl CursorSet{
         self.set_last_cursor(offset, offset, text_buffer);
     }
 
-    pub fn set_last_cursor_head(&mut self, offset:usize, text_buffer:&TextBuffer){
-        let cursor_tail = self.set[self.last_cursor].tail;
-        self.set.remove(self.last_cursor);
-        self.set_last_cursor(offset, cursor_tail, text_buffer);
+    pub fn set_last_cursor_head(&mut self, offset:usize, text_buffer:&TextBuffer)->bool{
+        if self.set[self.last_cursor].head != offset{
+            let cursor_tail = self.set[self.last_cursor].tail;
+            self.set.remove(self.last_cursor);
+            self.set_last_cursor(offset, cursor_tail, text_buffer);
+            true
+        }
+        else{
+            false
+        }
     }
 
     pub fn clear_and_set_last_cursor_head(&mut self, offset:usize, text_buffer:&TextBuffer){
@@ -820,7 +826,7 @@ impl CursorSet{
         return max_pos;
     }
 
-    pub fn grid_select(&mut self, start_pos:TextPos, end_pos:TextPos, text_buffer:&TextBuffer){
+    pub fn grid_select(&mut self, start_pos:TextPos, end_pos:TextPos, text_buffer:&TextBuffer)->bool{
        
         let (left,right) = if start_pos.col < end_pos.col{(start_pos.col, end_pos.col)}
         else{(end_pos.col,start_pos.col)};
@@ -828,6 +834,7 @@ impl CursorSet{
         let (top,bottom) = if start_pos.row < end_pos.row{(start_pos.row, end_pos.row)}
         else{(end_pos.row,start_pos.row)};
 
+        let change_check = self.set.clone();
         self.set.truncate(0);
 
         // lets start the cursor gen
@@ -854,6 +861,7 @@ impl CursorSet{
         }
         // depending on the direction the last cursor remains 
         self.last_cursor = 0;
+        self.set != change_check
     }
 
     pub fn set_last_clamp_range(&mut self, range:(usize,usize)){

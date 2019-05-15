@@ -204,6 +204,12 @@
 			this.mu32[pos++] = 16;
 		}
 
+		timer(id){
+			let pos = this.fit(1);
+			this.mu32[pos++] = 17;
+			this.send_f64(id);
+		}
+
 		end(){
 			let pos = this.fit(1);
 			this.mu32[pos] = 0;
@@ -222,6 +228,7 @@
 			this.shaders = [];
 			this.index_buffers = [];
 			this.array_buffers = [];
+			this.timers = [];
 			this.vaos = [];
 			this.textures = [];
 			this.resources = [];
@@ -1172,11 +1179,43 @@
 		}
 
 		start_timer(id, interval, repeats){
-			//console.log("START TIMER",id,interval,repeats);
+			for(let i = 0; i < this.timers.length; i++){
+				if(this.timers[i].id == id){
+					console.log("Timer ID collision!")
+					return
+				}
+			}
+			var obj = {id:id, repeats:repeats};
+			if(repeats !== 0){
+				obj.sys_id = window.setTimeout(e=>{
+					this.to_wasm.timer(id);
+					this.do_wasm_io();
+				}, interval * 1000.0);
+			}
+			else{
+				obj.sys_id = window.setInterval(e=>{
+					this.to_wasm.timer(id);
+					this.do_wasm_io();
+				}, interval * 1000.0);
+			}
+			this.timers.push(obj)
 		}
 
 		stop_timer(id){
-			//console.log("STOP TIMER",id);
+			for(let i = 0; i < this.timers.length; i++){
+				let timer = this.timers[i];
+				if(timer.id == id){
+					if(timer.repeats){
+						window.clearInterval(timer.sys_id);
+					}
+					else{
+						window.clearTimeout(timer.sys_id);
+					}
+					this.timers.splice(i, 1);
+					return
+				}
+			}
+			//console.log("Timer ID not found!")
 		}
 	}
 

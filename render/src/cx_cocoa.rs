@@ -428,6 +428,7 @@ impl CocoaWindow{
 
     pub fn start_timer(&mut self, timer_id:u64, interval:f64, repeats:bool){
         unsafe{
+            let pool = foundation::NSAutoreleasePool::new(cocoa::base::nil);
             let nstimer:id = msg_send![
                 class!(NSTimer), 
                 scheduledTimerWithTimeInterval:interval
@@ -441,6 +442,7 @@ impl CocoaWindow{
                 nstimer:nstimer,
                 repeats:repeats
             });
+            let _: () = msg_send![pool, release];
         }
     }
 
@@ -466,12 +468,13 @@ impl CocoaWindow{
                 self.do_callback(&mut vec![Event::Timer(TimerEvent{id:found_id})]);
                 // break the eventloop
                 unsafe{
+                    let pool = foundation::NSAutoreleasePool::new(cocoa::base::nil);
                     let nsevent: id = msg_send![
                         class!(NSEvent), 
                         otherEventWithType:NSApplicationDefined
                         location:NSPoint::new(0.,0.)
                         modifierFlags:0u64
-                        timestamp:0f64//precise_time_s()
+                        timestamp:0f64
                         windowNumber:1u64
                         context:nil
                         subtype:0i16
@@ -479,6 +482,7 @@ impl CocoaWindow{
                         data2:0u64
                     ];
                     msg_send![appkit::NSApp(),postEvent:nsevent atStart:0];
+                    let _: () = msg_send![pool, release];
                 }  
                 return;
             }

@@ -621,14 +621,14 @@ impl CodeEditor{
                 self.reset_cursor_blinker(cx);
             },
             Event::FingerMove(fe)=>{
-                if let Some(grid_select_corner) = self._grid_select_corner{
+                let cursor_moved = if let Some(grid_select_corner) = self._grid_select_corner{
                     let pos = self.compute_grid_text_pos_from_abs(cx, fe.abs);
-                    self.cursors.grid_select(grid_select_corner, pos, text_buffer);
+                    self.cursors.grid_select(grid_select_corner, pos, text_buffer)
                 }
                 else{
                     let offset = self.text.find_closest_offset(cx, &self._text_area, fe.abs);
-                    self.cursors.set_last_cursor_head(offset, text_buffer);
-                }
+                    self.cursors.set_last_cursor_head(offset, text_buffer)
+                };
 
                 self._last_finger_move = Some(fe.abs);
                 // determine selection drag scroll dynamics
@@ -673,10 +673,12 @@ impl CodeEditor{
                 else{
                     self._select_scroll = None;
                 }
-                if last_scroll_none{
+                if last_scroll_none && cursor_moved{
                     self.view.redraw_view_area(cx);
                 }
-                self.reset_cursor_blinker(cx);
+                if cursor_moved{
+                    self.reset_cursor_blinker(cx);
+                }
               
             },
             Event::KeyDown(ke)=>{
