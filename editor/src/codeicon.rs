@@ -14,7 +14,7 @@ impl Style for CodeIcon{
         Self{
             width:14.0,
             height:14.0,
-            margin:Margin{l:0.,t:1.,r:4.,b:0.},
+            margin:Margin{l:0.,t:0.5,r:4.,b:0.},
             quad:Quad{
                 shader_id:cx.add_shader(sh, "CodeIcon"),
                 ..Style::style(cx)

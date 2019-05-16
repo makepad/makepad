@@ -113,8 +113,11 @@ impl RustCompiler{
                 }
                 self.process_compiler_messages(cx, datas);
             }
+            // lets export our errors
+            
         }
         let mut unmark_nodes = false;
+        let mut clicked_item = None;
         for (counter,item) in self._items.iter_mut().enumerate(){   
             match event.hits(cx, item.animator.area, &mut item.hit_state){
                 Event::Animate(ae)=>{
@@ -125,10 +128,11 @@ impl RustCompiler{
                     item.marked = cx.event_id;
                     unmark_nodes = true;
                     item.animator.play_anim(cx, Self::get_over_anim(cx, counter, item.marked != 0));
+                    clicked_item = Some(counter);
                 },
-                Event::FingerUp(fe)=>{
+                Event::FingerUp(_fe)=>{
                 },
-                Event::FingerMove(fe)=>{
+                Event::FingerMove(_fe)=>{
                 },
                 Event::FingerHover(fe)=>{
                     match fe.hover_state{
@@ -152,7 +156,9 @@ impl RustCompiler{
                 }
             };
         }
-        
+        if let Some(clicked_item) = clicked_item{
+            //return RustCompilerEvent::
+        }
         RustCompilerEvent::None
     }
 
@@ -188,7 +194,7 @@ impl RustCompiler{
             let bg_inst = self.item_bg.begin_quad(cx,&Layout{
                 width:Bounds::Fill,
                 height:Bounds::Fix(self.row_height),
-                padding:Padding{l:2.,t:2.,b:2.,r:0.},
+                padding:Padding{l:2.,t:3.,b:2.,r:0.},
                 ..Default::default()
             });
 
@@ -236,6 +242,7 @@ impl RustCompiler{
         self._rustc_messages.truncate(0);
         self._rustc_artifacts.truncate(0);
         self._rustc_done = false;
+        self._items.truncate(0);
         self._data.push(String::new());
 
         if let Some(child) = &mut self._child{
@@ -244,7 +251,7 @@ impl RustCompiler{
         }
 
         let mut _child = Command::new("cargo")
-            .args(&["build","--message-format=json"])
+            .args(&["check","--message-format=json"])
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .current_dir("./edit_repo")

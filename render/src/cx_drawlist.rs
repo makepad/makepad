@@ -119,6 +119,7 @@ impl DrawCall{
     pub fn need_uniforms_now(&self) ->bool{
         self.uniforms.len() < self.uniforms_required
     }
+
     pub fn get_current_instance_area(&self, instance_count:usize)->InstanceArea{
         InstanceArea{
             draw_list_id:self.draw_list_id,

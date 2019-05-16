@@ -64,7 +64,7 @@ impl ScrollBarLike<NoScrollBar> for NoScrollBar{
     fn handle_scroll_bar(&mut self, _cx:&mut Cx, _event:&mut Event)->ScrollBarEvent{
         ScrollBarEvent::None
     }
-    fn set_scroll_view_total(&mut self, cx:&mut Cx, view_total:f32){}
+    fn set_scroll_view_total(&mut self, _cx:&mut Cx, _view_total:f32){}
     fn get_scroll_view_total(&self)->f32{0.}
     fn set_scroll_pos(&mut self, _cx:&mut Cx, _scroll_pos:f32)->bool{false}
     fn get_scroll_pos(&self)->f32{0.}

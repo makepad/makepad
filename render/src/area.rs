@@ -484,9 +484,10 @@ impl Area{
         let uni_offset = self.get_uniform_offset(cx, prop_name);
         let write = self.get_uniform_write_ref(cx);
         if let Some(write) = write{
-            if uni_offset < write.len(){
-                write[uni_offset] = v;
+            while uni_offset >= write.len(){
+                write.push(0.);
             }
+            write[uni_offset] = v;
         }
     }
 /*

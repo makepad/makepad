@@ -2,6 +2,8 @@ mod textbuffer;
 pub use crate::textbuffer::*;
 mod codeeditor;
 pub use crate::codeeditor::*;
+mod textcursor;
+pub use crate::textcursor::*;
 mod rusteditor;
 pub use crate::rusteditor::*;
 pub mod codeicon;

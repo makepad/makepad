@@ -1,5 +1,6 @@
 use widget::*;
 use crate::textbuffer::*;
+use crate::textcursor::*;
 use crate::codeeditor::*;
 
 #[derive(Clone)]

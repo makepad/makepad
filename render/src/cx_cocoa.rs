@@ -374,11 +374,6 @@ impl CocoaWindow{
                 }
             },
             appkit::NSEventTypePressure => {},
-            appkit::NSApplicationDefined => match ns_event.subtype() {
-                appkit::NSEventSubtype::NSApplicationActivatedEventType => {
-                },
-                _=>(),
-            },
             _=>(),
         }
     }
