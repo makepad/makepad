@@ -949,6 +949,10 @@ impl DrawCursors{
         }
     }
 
+    pub fn term(&mut self, cursors:&Vec<TextCursor>){
+        self.next_index = cursors.len();
+    }
+
     pub fn set_next(&mut self, cursors:&Vec<TextCursor>)->bool{
         if self.next_index < cursors.len(){
             self.emit_selection();

@@ -4,7 +4,6 @@ use widget::*;
 use editor::*;
 mod rustcompiler;
 pub use crate::rustcompiler::*;
-
 use std::collections::HashMap;
 
 #[derive(Clone)]
@@ -25,10 +24,9 @@ struct App{
     file_editor_id_alloc:u64,
 
     rust_compiler:RustCompiler,
-
-    text_buffers:HashMap<String, TextBuffer>,
+    text_buffers:TextBuffers,
     index_read_id:u64,
-    editor_root:String,
+
     quad:Quad
 }
 
@@ -38,7 +36,6 @@ impl Style for App{
     fn style(cx:&mut Cx)->Self{
         set_dark_style(cx);
         Self{
-            text_buffers:HashMap::new(),
             file_editor_id_alloc:10,
             view:View{
                 //scroll_h:Some(ScrollBar{
@@ -49,7 +46,11 @@ impl Style for App{
                 //}),
                 ..Style::style(cx)
             },
-            editor_root:".".to_string(),
+            text_buffers:TextBuffers{
+                root_path:".".to_string(),
+                message_id:0,
+                storage:HashMap::new()
+            },
             quad:Quad{
                 ..Style::style(cx)
             },
@@ -132,9 +133,9 @@ impl App{
         match event{
             Event::Construct=>{
                 if cx.feature == "mtl"{
-                    self.editor_root = "./edit_repo".to_string();
+                    self.text_buffers.root_path = "./edit_repo".to_string();
                 }
-                self.index_read_id = cx.read_file(&format!("{}/index.json",self.editor_root));
+                self.index_read_id = cx.read_file(&format!("{}/index.json",self.text_buffers.root_path));
                 self.rust_compiler.init(cx);
             },
             Event::FileRead(fr)=>{
@@ -146,14 +147,8 @@ impl App{
                         }
                     }
                 }
-                for (_path, text_buffer) in &mut self.text_buffers{
-                    if text_buffer.load_id == fr.read_id{
-                        text_buffer.load_id = 0;
-                        if let Ok(str_data) = &fr.data{
-                            text_buffer.load_buffer(str_data);
-                            cx.redraw_area(Area::All);
-                        }
-                    }
+                if self.text_buffers.handle_file_read(&fr){
+                    cx.redraw_area(Area::All);
                 }
             }
             _=>()
@@ -167,7 +162,12 @@ impl App{
             match item{
                 Panel::Color(_)=>{}
                 Panel::RustCompiler=>{
-                    self.rust_compiler.handle_rust_compiler(cx, event);
+                    match self.rust_compiler.handle_rust_compiler(cx, event, &mut self.text_buffers){
+                        RustCompilerEvent::UpdateMessages=>{
+                            cx.redraw_area(Area::All);
+                        },
+                        _=>()
+                    }
                 },
                 Panel::FileEditorTarget=>{},
                 Panel::FileTree=>{
@@ -175,17 +175,15 @@ impl App{
                 },
                 Panel::FileEditor{path, editor_id}=>{
                     if let Some(file_editor) = &mut self.file_editors.get(*editor_id){
-                        let text_buffer = self.text_buffers.get_mut(path);
-                        if let Some(text_buffer) = text_buffer{
-                            match file_editor.handle_file_editor(cx, event, text_buffer){
-                                FileEditorEvent::LagChange=>{
-                                    // lets save the textbuffer to disk
-                                    cx.write_file(&format!("{}{}",self.editor_root,path), text_buffer.get_as_string().bytes().collect());
-                                    // lets re-trigger the rust compiler
-                                    self.rust_compiler.restart_rust_compiler();
-                                },
-                                _=>()
-                            }
+                        let text_buffer = self.text_buffers.from_path(cx, path);
+                        match file_editor.handle_file_editor(cx, event, text_buffer){
+                            FileEditorEvent::LagChange=>{
+                                self.text_buffers.save_file(cx, path);
+                                // lets save the textbuffer to disk
+                                // lets re-trigger the rust compiler
+                                self.rust_compiler.restart_rust_compiler();
+                            },
+                            _=>()
                         }
                     }
                 }
@@ -226,10 +224,6 @@ impl App{
 
     fn draw_app(&mut self, cx:&mut Cx){
         
-        //use syn::{Expr, Result};
-        //let t:Result<Expr> = syn::parse_str("std::collections::HashMap<String, Value>");
-        //cx.debug_area = Area::Instance(InstanceArea{draw_list_id:0,draw_call_id:0,instance_offset:0,instance_count:0,redraw_id:0});
-
         if let Err(()) = self.view.begin_view(cx, &Layout{..Default::default()}){
             return
         }
@@ -252,13 +246,7 @@ impl App{
                 },
                 Panel::FileEditor{path, editor_id}=>{
                     //let text_buffer = self.text_buffers.get_mut(path).unwrap();
-                    let editor_root = &self.editor_root;
-                    let text_buffer = self.text_buffers.entry(path.to_string()).or_insert_with(||{
-                        TextBuffer{
-                            load_id:cx.read_file(&format!("{}{}",editor_root, path)),
-                            ..Default::default()
-                        }
-                    });
+                    let text_buffer = self.text_buffers.from_path(cx, path);
                     self.file_editors.get_draw(cx, *editor_id, |_cx, tmpl|{
                         FileEditor::create_file_editor_for_path(path, tmpl)
                     }).draw_file_editor(cx, text_buffer);

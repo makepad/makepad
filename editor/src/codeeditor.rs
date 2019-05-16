@@ -66,8 +66,6 @@ pub struct CodeEditor{
     pub _draw_search:DrawCursors,
     pub _draw_messages:DrawCursors,
 
-    pub _message_cursors:Vec<TextCursor>,
-    pub _message_strings:Vec<String>,
 
     pub _cursor_blink_timer_id:u64,
     pub _cursor_blink_flipflop:f32,
@@ -77,12 +75,6 @@ pub struct CodeEditor{
     pub _newline_tabs:usize,
 
     pub _last_lag_mutation_id:u64
-}
-
-pub struct CodeMessage{
-    row:usize,
-    col:usize,
-    message:String
 }
 
 #[derive(Clone)]
@@ -98,7 +90,8 @@ pub struct CodeEditorColors{
     paren_pair_fail:Color,
     line_number_normal:Color,
     line_number_highlight:Color,
-
+    marker_error:Color,
+    marker_warning:Color,
     // syntax
     whitespace:Color,
     keyword:Color,
@@ -143,6 +136,9 @@ impl Style for CodeEditor{
 
                 paren_pair_match:color256(136,136,136),
                 paren_pair_fail:color256(255,0,0),
+
+                marker_error:color256(200,0,0),
+                marker_warning:color256(0,200,0),
 
                 line_number_normal:color256(136,136,136),
                 line_number_highlight:color256(212,212,212),
@@ -277,9 +273,7 @@ impl Style for CodeEditor{
             _highlight_token:Vec::new(),
             _last_cursor_pos:TextPos::zero(),
 
-            _message_cursors:Vec::new(),
-            _message_strings:Vec::new(),
-            
+           
             _cursor_blink_timer_id:0,
             _cursor_blink_flipflop:1.0,
             _cursor_area:Area::Empty,
@@ -418,10 +412,12 @@ impl CodeEditor{
         let mut sh = Quad::def_quad_shader(cx);
         sh.add_ast(shader_ast!({
             fn pixel()->vec4{
-                df_viewport(pos * vec2(w, h));
+                let pos2 = vec2(pos.x, pos.y+0.03*sin(pos.x*w));
+                df_viewport(pos2 * vec2(w, h));
                 //df_rect(0.,0.,w,h);
-                df_rect(0.5,0.5,w-1.,h-1.);
-                return df_stroke(color, 0.75 + dpi_dilate*0.75);
+                df_move_to(0.,h-1.);
+                df_line_to(w,h-1.);
+                return df_stroke(color, 0.8);
             }
         }));
         sh
@@ -432,11 +428,6 @@ impl CodeEditor{
         self._cursor_blink_timer_id = cx.start_timer(self.cursor_blink_speed*0.5,false);
         self._cursor_blink_flipflop = 0.;
         self._cursor_area.write_uniform_float(cx, "blink", self._cursor_blink_flipflop);
-    }
-
-    pub fn handle_new_code_messages(&mut self, cx:&mut Cx, messsages:Vec<CodeMessage>){
-        // build a Cursor array 
-
     }
 
     pub fn handle_finger_down(&mut self, cx:&mut Cx, fe:&FingerDownEvent, text_buffer:&mut TextBuffer){
@@ -852,10 +843,15 @@ impl CodeEditor{
             self._indent_id_alloc = 1.0;
             self._paren_stack.truncate(0);
             self._draw_cursors.set_next(&self.cursors.set);
-            self._draw_messages.set_next(&self._message_cursors);
+            if text_buffer.message_mut_id != text_buffer.mutation_id{
+                self._draw_messages.term(&text_buffer.message_cursors);
+            }
+            else{
+                self._draw_messages.set_next(&text_buffer.message_cursors);
+            }
             self._token_chunks.truncate(0);
             self._last_cursor_pos = self.cursors.get_last_cursor_text_pos(text_buffer);
-
+            
             // indent
             cx.move_turtle(self.line_number_width, self.top_padding);
 
@@ -1005,7 +1001,6 @@ impl CodeEditor{
             }
             self._line_chunk.truncate(0);
         }
-        // we need to keep the identifier of the deepest 
 
         // search for all markings
         self._line_geometry.push(line_geom);
@@ -1027,11 +1022,10 @@ impl CodeEditor{
             });
             off += tab_width;
             inst.push_float(cx, if i < self._indent_stack.len(){self._indent_stack[i]}else{0.});
-            // output the id of the 'first' paren chunk
         }
     }
     // drawing a text chunk
-    pub fn draw_chunk(&mut self, cx:&mut Cx, chunk:&Vec<char>, next_char:char, end_offset:usize, token_type:TokenType){
+    pub fn draw_chunk(&mut self, cx:&mut Cx, chunk:&Vec<char>, next_char:char, end_offset:usize, token_type:TokenType, message_cursors:&Vec<TextCursor>){
         if chunk.len() == 0{
             return
         }
@@ -1158,7 +1152,7 @@ impl CodeEditor{
             }
 
             let cursors = &self.cursors.set;
-            let message_cursors = &self._message_cursors;
+            //let messages_cursors = &text_buffer.message_cursors;
             let last_cursor = self.cursors.last_cursor;
             let draw_cursors = &mut self._draw_cursors;
             let draw_messages = &mut self._draw_messages;
@@ -1280,11 +1274,10 @@ impl CodeEditor{
        
         // unmatched highlighting
         self.draw_unmatched_highlighting(cx);
-        let origin = cx.get_turtle_origin();
-        self.draw_cursors(cx, &origin);
+        self.draw_cursors(cx);
         self.do_selection_animations(cx);
-        self.draw_selections(cx, &origin);
-        self.draw_message_markers(cx, &origin);
+        self.draw_selections(cx);
+        self.draw_message_markers(cx, text_buffer);
 
         // inject a final page 
         self._final_fill_height = cx.get_height_total() - self._monospace_size.y;
@@ -1310,7 +1303,8 @@ impl CodeEditor{
         }
     }
 
-    fn draw_cursors(&mut self, cx:&mut Cx, origin:&Vec2){
+    fn draw_cursors(&mut self, cx:&mut Cx){
+        let origin = cx.get_turtle_origin();
         for rc in &self._draw_cursors.cursors{
             let inst = self.cursor.draw_quad(cx, Rect{x:rc.x - origin.x, y:rc.y - origin.y, w:rc.w, h:rc.h});
             if inst.need_uniforms_now(cx){
@@ -1319,16 +1313,23 @@ impl CodeEditor{
         }
     }
 
-    fn draw_message_markers(&mut self, cx:&mut Cx, origin:&Vec2){
+    fn draw_message_markers(&mut self, cx:&mut Cx, text_buffer:&TextBuffer){
+        let origin = cx.get_turtle_origin();
         let message_markers = &mut self._draw_messages.selections;
+        
         for i in 0..message_markers.len(){
             let mark = &message_markers[i];
+            let body = &text_buffer.message_bodies[mark.index];
+            self.message_marker.color = match body.level{
+                TextBufferMessageLevel::Warning=>self.colors.marker_warning,
+                TextBufferMessageLevel::Error=>self.colors.marker_error
+            };
             let mk_inst = self.message_marker.draw_quad(cx, Rect{x:mark.rc.x - origin.x, y:mark.rc.y - origin.y, w:mark.rc.w, h:mark.rc.h});
         }
     }
 
-    fn draw_selections(&mut self, cx:&mut Cx, origin:&Vec2){
-        //let origin = cx.get_turtle_origin();
+    fn draw_selections(&mut self, cx:&mut Cx){
+        let origin = cx.get_turtle_origin();
         let sel = &mut self._draw_cursors.selections;
         // draw selections
         for i in 0..sel.len(){

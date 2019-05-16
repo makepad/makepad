@@ -1,5 +1,6 @@
-//use widgets::*;
+use widget::*;
 use crate::textcursor::*;
+use std::collections::HashMap;
 
 #[derive(Clone, Default)]
 pub struct TextBuffer{
@@ -12,7 +13,62 @@ pub struct TextBuffer{
     pub undo_stack: Vec<TextUndo>,
     pub redo_stack: Vec<TextUndo>,
     pub load_id: u64,
-    pub mutation_id: u64
+    pub mutation_id: u64,
+    pub message_id:u64,
+    pub message_mut_id:u64, // if not the same as mutation_id its probably stale
+    pub message_cursors:Vec<TextCursor>,
+    pub message_bodies:Vec<TextBufferMessage>
+}
+
+pub struct TextBuffers{
+    pub root_path: String,
+    pub message_id:u64,
+    pub storage: HashMap<String, TextBuffer>
+}
+
+impl TextBuffers{
+    pub fn from_path(&mut self, cx:&mut Cx, path:&str)->&mut TextBuffer{
+        let root_path = &self.root_path;
+        self.storage.entry(path.to_string()).or_insert_with(||{
+            TextBuffer{
+                load_id:cx.read_file(&format!("{}{}",root_path, path)),
+                ..Default::default()
+            }
+        })
+    }
+
+    pub fn save_file(&mut self, cx:&mut Cx, path:&str){
+        let text_buffer = self.storage.get(path);
+        if let Some(text_buffer) = text_buffer{
+            let data = text_buffer.get_as_string().bytes().collect();
+            cx.write_file(&format!("{}{}",self.root_path,path),data);
+        }
+    }
+
+    pub fn handle_file_read(&mut self, fr:&FileReadEvent)->bool{
+        for (_path, text_buffer) in &mut self.storage{
+            if text_buffer.load_id == fr.read_id{
+                text_buffer.load_id = 0;
+                if let Ok(str_data) = &fr.data{
+                    text_buffer.load_buffer(str_data);
+                    return true;
+                }
+            }
+        }
+        return false
+    }
+}
+
+#[derive(Clone)]
+pub enum TextBufferMessageLevel{
+    Error,
+    Warning,
+}
+
+#[derive(Clone)]
+pub struct TextBufferMessage{
+    pub level:TextBufferMessageLevel,
+    pub body:String
 }
 
 #[derive(Clone, Copy)]

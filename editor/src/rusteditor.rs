@@ -119,12 +119,12 @@ impl RustEditor{
                             }
                             else if state.next == '\n'{
                                 // output current line
-                                self.code_editor.draw_chunk(cx, &chunk, state.next, state.offset, TokenType::Comment);
+                                self.code_editor.draw_chunk(cx, &chunk, state.next, state.offset, TokenType::Comment, &text_buffer.message_cursors);
                                 chunk.truncate(0);
                                 // output a newline
                                 chunk.push(state.next);
                                 state.advance();
-                                self.code_editor.draw_chunk(cx, &chunk, state.next, state.offset, TokenType::Newline);
+                                self.code_editor.draw_chunk(cx, &chunk, state.next, state.offset, TokenType::Newline,  &text_buffer.message_cursors);
                                 chunk.truncate(0);
                                 // output indent lines
                                 while state.next == ' '{
@@ -132,7 +132,7 @@ impl RustEditor{
                                     state.advance();
                                 }
                                 if chunk.len()>0{
-                                    self.code_editor.draw_chunk(cx, &chunk, state.next, state.offset, TokenType::Whitespace);
+                                    self.code_editor.draw_chunk(cx, &chunk, state.next, state.offset, TokenType::Whitespace,  &text_buffer.message_cursors);
                                     chunk.truncate(0);
                                 }
                             }
@@ -322,7 +322,7 @@ impl RustEditor{
                     token_type = TokenType::Operator;
                 }
             }
-            self.code_editor.draw_chunk(cx, &chunk, state.next, state.offset, token_type);
+            self.code_editor.draw_chunk(cx, &chunk, state.next, state.offset, token_type,  &text_buffer.message_cursors);
             chunk.truncate(0);
         }
         

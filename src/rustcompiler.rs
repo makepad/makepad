@@ -1,8 +1,11 @@
 use widget::*;
 use editor::*;
+
 use std::io::Read;
 use std::process::{Command, Child, Stdio};
 use std::sync::mpsc;
+use std::collections::HashMap;
+
 use serde_json::{Result};
 use serde::*;
 
@@ -19,6 +22,7 @@ pub struct RustCompiler{
     pub _rx:Option<mpsc::Receiver<std::vec::Vec<u8>>>,
     pub _thread:Option<std::thread::JoinHandle<()>>,
     pub _data:Vec<String>,
+    pub _rustc_spans:Vec<RustcSpan>,
     pub _rustc_messages:Vec<RustcCompilerMessage>,
     pub _rustc_done:bool,
     pub _rustc_artifacts:Vec<RustcCompilerArtifact>,
@@ -31,10 +35,12 @@ pub struct RustCompilerItem{
     marked:u64
 }
 
-#[derive(Clone, PartialEq)]
+#[derive(Clone)]
 pub enum RustCompilerEvent{
+    UpdateMessages,
     None,
 }
+
 
 impl Style for RustCompiler{
     fn style(cx:&mut Cx)->Self{
@@ -66,6 +72,7 @@ impl Style for RustCompiler{
             _child:None,
             _thread:None,
             _rx:None,
+            _rustc_spans:Vec::new(),
             _rustc_messages:Vec::new(),
             _rustc_artifacts:Vec::new(),
             _rustc_done:false,
@@ -98,7 +105,62 @@ impl RustCompiler{
         ])
     }
 
-    pub fn handle_rust_compiler(&mut self, cx:&mut Cx, event:&mut Event)->RustCompilerEvent{
+    pub fn export_messages(&self, cx:&mut Cx, text_buffers:&mut TextBuffers){
+        text_buffers.message_id += 1;
+        let message_id = text_buffers.message_id;
+        for span in &self._rustc_spans{
+            if span.label.is_none(){
+                continue;
+            }
+            // lets get the first span
+            //let spans = &rcmsg.message.spans;
+            //for i in (0..spans.len()).rev(){
+
+                //let span = &spans[i];
+            let path = format!("/{}",span.file_name);
+            let text_buffer = text_buffers.from_path(cx, &path);
+            text_buffer.message_mut_id = text_buffer.mutation_id;
+            if text_buffer.message_id != message_id{
+                text_buffer.message_id = message_id;
+                text_buffer.message_cursors.truncate(0);
+                text_buffer.message_bodies.truncate(0);
+            }
+            if span.byte_start == span.byte_end{
+                text_buffer.message_cursors.push(TextCursor{
+                    head:(span.byte_start-1) as usize,
+                    tail:span.byte_end as usize,
+                    max:0
+                });
+            }
+            else{
+                text_buffer.message_cursors.push(TextCursor{
+                    head:span.byte_start as usize,
+                    tail:span.byte_end as usize,
+                    max:0
+                });
+            }
+            //println!("PROCESING MESSAGES FOR {} {} {}", span.byte_start, span.byte_end+1, path);
+            text_buffer.message_bodies.push(TextBufferMessage{
+                body:span.label.clone().unwrap(),
+                level:match span.level.as_ref().unwrap().as_ref(){
+                    "warning"=>TextBufferMessageLevel::Warning,
+                    "error"=>TextBufferMessageLevel::Error,
+                    _=>TextBufferMessageLevel::Warning
+                }
+            });
+            //}
+        }
+        // clear all files we missed
+        for (_, text_buffer) in &mut text_buffers.storage{
+            if text_buffer.message_id != message_id{
+                text_buffer.message_id = message_id;
+                text_buffer.message_cursors.truncate(0);
+                text_buffer.message_bodies.truncate(0);
+            }
+        }
+    }
+
+    pub fn handle_rust_compiler(&mut self, cx:&mut Cx, event:&mut Event, text_buffers:&mut TextBuffers)->RustCompilerEvent{
         // do shit here
         if self.view.handle_scroll_bars(cx, event){
             // do zshit.
@@ -111,10 +173,14 @@ impl RustCompiler{
                         datas.push(data);
                     }
                 }
-                self.process_compiler_messages(cx, datas);
+                if datas.len() > 0{
+                    self.process_compiler_messages(cx, datas);
+                    self.export_messages(cx, text_buffers);
+                    return RustCompilerEvent::UpdateMessages;
+                }
+
             }
             // lets export our errors
-            
         }
         let mut unmark_nodes = false;
         let mut clicked_item = None;
@@ -179,10 +245,10 @@ impl RustCompiler{
         //    cx.turtle_new_line();
         //}
         let mut counter = 0;
-        for message in &self._rustc_messages{
-            // lets show level
-            let msg = &message.message;
-            
+        for span in &self._rustc_spans{
+            if span.label.is_none(){
+                continue;
+            }
             // reuse or overwrite a slot
              if counter >= self._items.len(){
                 self._items.push(RustCompilerItem{
@@ -200,15 +266,17 @@ impl RustCompiler{
                 ..Default::default()
             });
 
-            if msg.level == "error"{
-                self.code_icon.draw_icon_walk(cx, CodeIconType::Error);
-            }
-            else{
-                self.code_icon.draw_icon_walk(cx, CodeIconType::Warning);
+            if let Some(level) = &span.level{
+                if level == "error"{
+                    self.code_icon.draw_icon_walk(cx, CodeIconType::Error);
+                }
+                else{
+                    self.code_icon.draw_icon_walk(cx, CodeIconType::Warning);
+                }
             }
             //if message.
             //self.text.draw_text(cx, &format!("{}", message.message.message));
-            self.text.draw_text(cx, &format!("{}", message.message.message));
+            self.text.draw_text(cx, &format!("{}", span.label.as_ref().unwrap()));
 
             let bg_area = self.item_bg.end_quad(cx, &bg_inst);
             self._items[counter].animator.update_area_refs(cx, bg_area);
@@ -242,6 +310,7 @@ impl RustCompiler{
     pub fn restart_rust_compiler(&mut self){
         self._data.truncate(0);
         self._rustc_messages.truncate(0);
+        self._rustc_spans.truncate(0);
         self._rustc_artifacts.truncate(0);
         self._rustc_done = false;
         self._items.truncate(0);
@@ -328,6 +397,20 @@ impl RustCompiler{
                             match parsed{
                                 Err(err)=>println!("JSON PARSE ERROR {:?} {}", err, line),
                                 Ok(parsed)=>{
+                                    let spans = &parsed.message.spans;
+                                    if spans.len() > 0{
+                                        for i in 0..spans.len(){
+                                            let mut span = spans[i].clone();
+                                            if !span.is_primary{
+                                                continue
+                                            }
+                                            if span.label.is_none(){
+                                                span.label = Some(parsed.message.message.clone());
+                                            }
+                                            span.level = Some(parsed.message.level.clone());
+                                            self._rustc_spans.push(span);
+                                        }
+                                    }
                                     self._rustc_messages.push(parsed);
                                 }
                             }
@@ -344,7 +427,7 @@ impl RustCompiler{
     }
 }
 
-#[derive(Deserialize, Debug, Default)]
+#[derive(Clone, Deserialize, Debug, Default)]
 pub struct RustcTarget{
     kind:Vec<String>,
     crate_types:Vec<String>,
@@ -353,14 +436,14 @@ pub struct RustcTarget{
     edition:String
 }
 
-#[derive(Deserialize, Debug, Default)]
+#[derive(Clone, Deserialize, Debug, Default)]
 pub struct RustcText{
     text:String,
     highlight_start:u32,
     highlight_end:u32
 }
 
-#[derive(Deserialize, Debug, Default)]
+#[derive(Clone, Deserialize, Debug, Default)]
 pub struct RustcSpan{
     file_name:String,
     byte_start:u32,
@@ -374,16 +457,17 @@ pub struct RustcSpan{
     label:Option<String>,
     suggested_replacement:Option<String>,
     sugggested_applicability:Option<String>,
-    expansion:Option<String>
+    expansion:Option<String>,
+    level:Option<String>
 }
 
-#[derive(Deserialize, Debug, Default)]
+#[derive(Clone, Deserialize, Debug, Default)]
 pub struct RustcCode{
     code:String,
     explanation:Option<String>
 }
 
-#[derive(Deserialize, Debug, Default)]
+#[derive(Clone, Deserialize, Debug, Default)]
 pub struct RustcMessage{
     message:String,
     code:Option<RustcCode>,
@@ -393,7 +477,7 @@ pub struct RustcMessage{
     rendered:Option<String>
 }
 
-#[derive(Deserialize, Debug, Default)]
+#[derive(Clone, Deserialize, Debug, Default)]
 pub struct RustcProfile{
     opt_level:String,
     debuginfo:u32,
@@ -402,7 +486,7 @@ pub struct RustcProfile{
     test:bool
 }
 
-#[derive(Deserialize, Debug, Default)]
+#[derive(Clone, Deserialize, Debug, Default)]
 pub struct RustcCompilerMessage{
     reason:String,
     package_id:String,
@@ -410,7 +494,7 @@ pub struct RustcCompilerMessage{
     message:RustcMessage
 }
 
-#[derive(Deserialize, Debug, Default)]
+#[derive(Clone, Deserialize, Debug, Default)]
 pub struct RustcCompilerArtifact{
     reason:String,
     package_id:String,
