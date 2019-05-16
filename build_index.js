@@ -21,6 +21,7 @@ function readRecur(path, name){
 }
 let tree = readRecur(".","");
 tree.open = true;
+tree.folders.splice(0,1);
 tree.folders[0].open = true;
 tree.folders[0].folders[0].open = true;
 tree.folders[2].open = true;

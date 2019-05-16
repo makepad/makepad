@@ -124,6 +124,7 @@ impl RustCompiler{
                     item.animator.calc_write(cx, "bg.color", ae.time, item.animator.area);
                 },
                 Event::FingerDown(_fe)=>{
+                    cx.set_down_mouse_cursor(MouseCursor::Hand);
                     // mark ourselves, unmark others
                     item.marked = cx.event_id;
                     unmark_nodes = true;
@@ -135,6 +136,7 @@ impl RustCompiler{
                 Event::FingerMove(_fe)=>{
                 },
                 Event::FingerHover(fe)=>{
+                    cx.set_hover_mouse_cursor(MouseCursor::Hand);
                     match fe.hover_state{
                         HoverState::In=>{
                             item.animator.play_anim(cx, Self::get_over_anim(cx, counter, item.marked != 0));
