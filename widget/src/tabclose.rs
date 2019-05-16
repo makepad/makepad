@@ -79,8 +79,8 @@ impl TabClose{
                 df_line_to(c.x+c.x*hover_max, c.y+c.y*hover_max);
                 df_move_to(c.x+c.x*hover_max, c.y*hover_min);
                 df_line_to(c.x*hover_min, c.y+c.y*hover_max);
-                df_stroke_keep(color,1.+down*0.2);
-                return df_fill(color);
+                return df_stroke(color,1.+down*0.2);
+                //return df_fill(color);
             }
         }));
         sh

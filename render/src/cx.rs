@@ -36,6 +36,7 @@ pub use crate::cx_desktop::*;
 pub struct Cx{
     pub title:String,
     pub running:bool,
+    pub feature:String,
 
     pub fonts:Vec<Font>,
     pub textures_2d:Vec<Texture2D>,
@@ -106,6 +107,7 @@ impl Default for Cx{
 
         Self{
             title:"Hello World".to_string(),
+            feature:"".to_string(),
             running: true,
 
             fonts:Vec::new(),

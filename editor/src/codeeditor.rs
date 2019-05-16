@@ -72,123 +72,6 @@ pub struct CodeEditor{
 }
 
 #[derive(Clone)]
-pub enum AnimFoldingState{
-    Open,
-    Opening(f32,f32,f32),
-    Folded,
-    Folding(f32,f32,f32)
-}
-
-impl AnimFoldingState{
-    fn is_animating(&self)->bool{
-        match self{
-            AnimFoldingState::Open=>false,
-            AnimFoldingState::Folded=>false,
-            _=>true
-        }
-    }
-
-    fn is_folded(&self)->bool{
-        match self{
-            AnimFoldingState::Folded=>true,
-            AnimFoldingState::Folding(_,_,_)=>true,
-            _=>false
-        }
-    }
-
-    fn get_font_size(&self, open_size:f32, folded_size:f32)->f32{
-        match self{
-            AnimFoldingState::Open=>open_size,
-            AnimFoldingState::Folded=>folded_size,
-            AnimFoldingState::Opening(f, _, _)=>f*folded_size + (1.-f)*open_size,
-            AnimFoldingState::Folding(f, _, _)=>f*open_size + (1.-f)*folded_size,
-        }
-    }
-
-    fn do_folding(&mut self, speed:f32, speed2:f32){
-        *self = match self{
-            AnimFoldingState::Open=>AnimFoldingState::Folding(1.0, speed,speed2),
-            AnimFoldingState::Folded=>AnimFoldingState::Folded,
-            AnimFoldingState::Opening(f, _, _)=>AnimFoldingState::Folding(1.0 - *f, speed,speed2),
-            AnimFoldingState::Folding(f, _, _)=>AnimFoldingState::Folding(*f, speed,speed2),
-        }
-    }
-
-    fn do_opening(&mut self, speed:f32, speed2:f32){
-        *self = match self{
-            AnimFoldingState::Open=>AnimFoldingState::Open,
-            AnimFoldingState::Folded=>AnimFoldingState::Opening(1.0, speed, speed2),
-            AnimFoldingState::Opening(f,_,_)=>AnimFoldingState::Opening(*f, speed, speed2),
-            AnimFoldingState::Folding(f,_,_)=>AnimFoldingState::Opening(1.0 - *f, speed, speed2),
-        }
-    }
-
-    fn next_anim_step(&mut self){
-        *self = match self{
-            AnimFoldingState::Open=>AnimFoldingState::Open,
-            AnimFoldingState::Folded=>AnimFoldingState::Folded,
-            AnimFoldingState::Opening(f,speed, speed2)=>{
-                let new_f = *f * *speed;
-                if new_f < 0.001{
-                    AnimFoldingState::Open
-                }
-                else{
-                    AnimFoldingState::Opening(new_f,*speed * *speed2, *speed2)
-                }
-            },
-            AnimFoldingState::Folding(f, speed, speed2)=>{
-                let new_f = *f * *speed;
-                if new_f < 0.001{
-                    AnimFoldingState::Folded
-                }
-                else{
-                    AnimFoldingState::Folding(new_f,*speed * *speed2, *speed2)
-                }
-            },
-        }
-    }
-}
-
-#[derive(Clone)]
-pub struct AnimFolding{
-    pub state:AnimFoldingState,
-    pub focussed_line:usize,
-    pub did_animate:bool
-}
-
-#[derive(Clone)]
-pub struct AnimSelect{
-    pub ypos:f32,
-    pub invert:bool,
-    pub time:f64
-}
-
-#[derive(Clone, Default)]
-pub struct LineGeom{
-    walk:Vec2,
-    was_folded:bool,
-    font_size:f32,
-    indent_id:f32
-}
-
-#[derive(Clone, Default)]
-pub struct SelectScroll{
-//    pub margin:Margin,
-    pub delta:Vec2,
-    pub abs:Vec2,
-    pub at_end:bool
-}
-
-#[derive(Clone)]
-pub struct ParenItem{
-    pair_start:usize,
-    geom_open:Option<Rect>,
-    geom_close:Option<Rect>,
-    marked:bool,
-    exp_paren:char
-}
-
-#[derive(Clone)]
 pub struct CodeEditorColors{
     // UI
     bg:Color,
@@ -398,7 +281,7 @@ impl CodeEditor{
             fn pixel()->vec4{
                 let col = color;
                 let thickness =  0.8 + dpi_dilate*0.5;
-                if indent_id == indent_sel{
+                if abs(indent_id - indent_sel) < 0.1{
                     col *= vec4(1.25);
                     thickness *= 1.3;
                 };
@@ -505,6 +388,13 @@ impl CodeEditor{
         sh
     }
 
+    pub fn reset_cursor_blinker(&mut self, cx:&mut Cx){
+        cx.stop_timer(self._cursor_blink_timer_id);
+        self._cursor_blink_timer_id = cx.start_timer(self.cursor_blink_speed*0.5,false);
+        self._cursor_blink_flipflop = 0.;
+        self._cursor_area.write_uniform_float(cx, "blink", self._cursor_blink_flipflop);
+    }
+
     pub fn handle_code_editor(&mut self, cx:&mut Cx, event:&mut Event, text_buffer:&mut TextBuffer)->CodeEditorEvent{
         if self.view.handle_scroll_bars(cx, event){
             if let Some(last_finger_move) = self._last_finger_move{
@@ -523,7 +413,7 @@ impl CodeEditor{
             self.view.redraw_view_area(cx);
         }
         if let Event::Timer(te) = event{
-            if te.id == self._cursor_blink_timer_id{
+            if te.timer_id == self._cursor_blink_timer_id{
                 self._cursor_blink_timer_id = cx.start_timer(self.cursor_blink_speed, false);
                 // update the cursor uniform to blink it.
                 self._cursor_blink_flipflop = 1.0 - self._cursor_blink_flipflop;
@@ -1534,12 +1424,6 @@ impl CodeEditor{
         //}
     }
 
-    pub fn reset_cursor_blinker(&mut self, cx:&mut Cx){
-        cx.stop_timer(self._cursor_blink_timer_id);
-        self._cursor_blink_timer_id = cx.start_timer(self.cursor_blink_speed,false);
-        self._cursor_blink_flipflop = 0.;
-        self._cursor_area.write_uniform_float(cx, "blink", self._cursor_blink_flipflop);
-    }
 
     // set it once per line otherwise the LineGeom stuff isn't really working out.
     pub fn set_font_size(&mut self, _cx:&Cx, font_size:f32){
@@ -1704,6 +1588,123 @@ impl CodeEditor{
 
   
 
+}
+
+#[derive(Clone)]
+pub enum AnimFoldingState{
+    Open,
+    Opening(f32,f32,f32),
+    Folded,
+    Folding(f32,f32,f32)
+}
+
+#[derive(Clone)]
+pub struct AnimFolding{
+    pub state:AnimFoldingState,
+    pub focussed_line:usize,
+    pub did_animate:bool
+}
+
+#[derive(Clone)]
+pub struct AnimSelect{
+    pub ypos:f32,
+    pub invert:bool,
+    pub time:f64
+}
+
+#[derive(Clone, Default)]
+pub struct LineGeom{
+    walk:Vec2,
+    was_folded:bool,
+    font_size:f32,
+    indent_id:f32
+}
+
+#[derive(Clone, Default)]
+pub struct SelectScroll{
+//    pub margin:Margin,
+    pub delta:Vec2,
+    pub abs:Vec2,
+    pub at_end:bool
+}
+
+#[derive(Clone)]
+pub struct ParenItem{
+    pair_start:usize,
+    geom_open:Option<Rect>,
+    geom_close:Option<Rect>,
+    marked:bool,
+    exp_paren:char
+}
+
+impl AnimFoldingState{
+    fn is_animating(&self)->bool{
+        match self{
+            AnimFoldingState::Open=>false,
+            AnimFoldingState::Folded=>false,
+            _=>true
+        }
+    }
+
+    fn is_folded(&self)->bool{
+        match self{
+            AnimFoldingState::Folded=>true,
+            AnimFoldingState::Folding(_,_,_)=>true,
+            _=>false
+        }
+    }
+
+    fn get_font_size(&self, open_size:f32, folded_size:f32)->f32{
+        match self{
+            AnimFoldingState::Open=>open_size,
+            AnimFoldingState::Folded=>folded_size,
+            AnimFoldingState::Opening(f, _, _)=>f*folded_size + (1.-f)*open_size,
+            AnimFoldingState::Folding(f, _, _)=>f*open_size + (1.-f)*folded_size,
+        }
+    }
+
+    fn do_folding(&mut self, speed:f32, speed2:f32){
+        *self = match self{
+            AnimFoldingState::Open=>AnimFoldingState::Folding(1.0, speed,speed2),
+            AnimFoldingState::Folded=>AnimFoldingState::Folded,
+            AnimFoldingState::Opening(f, _, _)=>AnimFoldingState::Folding(1.0 - *f, speed,speed2),
+            AnimFoldingState::Folding(f, _, _)=>AnimFoldingState::Folding(*f, speed,speed2),
+        }
+    }
+
+    fn do_opening(&mut self, speed:f32, speed2:f32){
+        *self = match self{
+            AnimFoldingState::Open=>AnimFoldingState::Open,
+            AnimFoldingState::Folded=>AnimFoldingState::Opening(1.0, speed, speed2),
+            AnimFoldingState::Opening(f,_,_)=>AnimFoldingState::Opening(*f, speed, speed2),
+            AnimFoldingState::Folding(f,_,_)=>AnimFoldingState::Opening(1.0 - *f, speed, speed2),
+        }
+    }
+
+    fn next_anim_step(&mut self){
+        *self = match self{
+            AnimFoldingState::Open=>AnimFoldingState::Open,
+            AnimFoldingState::Folded=>AnimFoldingState::Folded,
+            AnimFoldingState::Opening(f,speed, speed2)=>{
+                let new_f = *f * *speed;
+                if new_f < 0.001{
+                    AnimFoldingState::Open
+                }
+                else{
+                    AnimFoldingState::Opening(new_f,*speed * *speed2, *speed2)
+                }
+            },
+            AnimFoldingState::Folding(f, speed, speed2)=>{
+                let new_f = *f * *speed;
+                if new_f < 0.001{
+                    AnimFoldingState::Folded
+                }
+                else{
+                    AnimFoldingState::Folding(new_f,*speed * *speed2, *speed2)
+                }
+            },
+        }
+    }
 }
 
 

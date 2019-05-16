@@ -27,7 +27,7 @@ struct App{
     rust_compiler:RustCompiler,
 
     text_buffers:HashMap<String, TextBuffer>,
-    tree_load_id:u64,
+    index_read_id:u64,
     editor_root:String,
     quad:Quad
 }
@@ -49,14 +49,14 @@ impl Style for App{
                 //}),
                 ..Style::style(cx)
             },
-            editor_root:"./edit_repo".to_string(),
+            editor_root:".".to_string(),
             quad:Quad{
                 ..Style::style(cx)
             },
             file_tree:FileTree{
                 ..Style::style(cx)
             },
-            tree_load_id:0,
+            index_read_id:0,
             file_editors:Elements::new(FileEditorTemplates{
                 rust_editor:RustEditor{
                     ..Style::style(cx)
@@ -103,7 +103,7 @@ impl Style for App{
                             current:0,
                             tabs:vec![
                                 DockTab{
-                                    closeable:true,
+                                    closeable:false,
                                     title:"Rust Compiler".to_string(),
                                     item:Panel::RustCompiler
                                 }
@@ -131,12 +131,15 @@ impl App{
     fn handle_app(&mut self, cx:&mut Cx, event:&mut Event){
         match event{
             Event::Construct=>{
-                self.tree_load_id = cx.read_file(&format!("{}/index.json",self.editor_root));
-                self.rust_compiler.start_poll(cx);
+                if cx.feature == "mtl"{
+                    self.editor_root = "./edit_repo".to_string();
+                }
+                self.index_read_id = cx.read_file(&format!("{}/index.json",self.editor_root));
+                self.rust_compiler.init(cx);
             },
             Event::FileRead(fr)=>{
                 // lets see which file we loaded
-                if fr.id == self.tree_load_id{
+                if fr.read_id == self.index_read_id{
                     if let Ok(str_data) = &fr.data{
                         if let Ok(utf8_data) = std::str::from_utf8(&str_data){
                             self.file_tree.load_from_json(cx, utf8_data);
@@ -144,7 +147,7 @@ impl App{
                     }
                 }
                 for (_path, text_buffer) in &mut self.text_buffers{
-                    if text_buffer.load_id == fr.id{
+                    if text_buffer.load_id == fr.read_id{
                         text_buffer.load_id = 0;
                         if let Ok(str_data) = &fr.data{
                             text_buffer.load_buffer(str_data);
@@ -249,9 +252,10 @@ impl App{
                 },
                 Panel::FileEditor{path, editor_id}=>{
                     //let text_buffer = self.text_buffers.get_mut(path).unwrap();
+                    let editor_root = &self.editor_root;
                     let text_buffer = self.text_buffers.entry(path.to_string()).or_insert_with(||{
                         TextBuffer{
-                            load_id:cx.read_file(&format!(".{}",path)),
+                            load_id:cx.read_file(&format!("{}{}",editor_root, path)),
                             ..Default::default()
                         }
                     });

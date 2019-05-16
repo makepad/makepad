@@ -76,6 +76,7 @@ impl Cx{
             for _i in 0..10{
                 self.platform.fingers_down.push(false);
             }
+            self.feature = "webgl".to_string();
         }
         let root_view = unsafe{&mut *(self.platform.root_view_ptr as *mut View<NoScrollBar>)};
         let mut to_wasm = ToWasm::from(msg);
@@ -285,13 +286,13 @@ impl Cx{
                     }));
                 },
                 15=>{ // file read data
-                    let id = to_wasm.mu32();
+                    let read_id = to_wasm.mu32();
                     let buf_ptr = to_wasm.mu32() as *mut u8;
                     let buf_len = to_wasm.mu32() as usize;
                     let vec_buf = unsafe{Vec::<u8>::from_raw_parts(buf_ptr, buf_len, buf_len)};
 
                     self.call_event_handler(&mut event_handler, &mut Event::FileRead(FileReadEvent{
-                        id: id as u64,
+                        read_id: read_id as u64,
                         data:Ok(vec_buf)
                     }));
                 },
@@ -308,9 +309,9 @@ impl Cx{
                     };
                 },
                 17=>{ // timer fired
-                    let id = to_wasm.mf64() as u64;
+                    let timer_id = to_wasm.mf64() as u64;
                     self.call_event_handler(&mut event_handler, &mut Event::Timer(TimerEvent{
-                        id:id
+                        timer_id:timer_id
                     }));
                 },
                 _=>{
@@ -371,6 +372,17 @@ impl Cx{
         self.platform.from_wasm.read_file(id as u32, path);
         self.platform.file_read_id += 1;
         id
+    }
+
+    pub fn write_file(&mut self, path:&str, data:Vec<u8>)->u64{
+        return 0
+    }
+
+    pub fn new_post_event_id(&mut self)->u64{
+        return 0
+    }
+
+    pub fn post_event(_id:u64, _data:u64){
     }
 
     pub fn show_text_ime(&mut self, x:f32, y:f32){

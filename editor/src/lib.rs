@@ -4,3 +4,5 @@ mod codeeditor;
 pub use crate::codeeditor::*;
 mod rusteditor;
 pub use crate::rusteditor::*;
+pub mod codeicon;
+pub use crate::codeicon::*;

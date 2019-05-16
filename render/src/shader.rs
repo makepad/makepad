@@ -599,6 +599,8 @@ impl Shader{
             let df_last_pos:vec2<Local>;
             let df_start_pos:vec2<Local>;
             let df_shape:float<Local>;
+            let df_clip:float<Local>;
+            let df_has_clip:float<Local>;
             let df_old_shape:float<Local>;
             let df_blur:float<Local>;
             let df_aa:float<Local>;
@@ -610,10 +612,13 @@ impl Shader{
                 df_result = vec4(0.);
                 df_old_shape =
                 df_shape = 1e+20;
+                df_clip = -1e+20;
                 df_blur = 0.00001;
                 df_aa = df_antialias(pos);
                 df_scale = 1.0;
                 df_field = 0.0;
+                df_clip = 0.0;
+                df_has_clip = 0.0;
                 return df_pos;
             }
             
@@ -643,10 +648,9 @@ impl Shader{
             }
 
             fn df_calc_blur(w:float)->float{
-                //let f:float = w - df_blur;
                 let wa:float = clamp(-w * df_aa, 0.0, 1.0);
                 let wb:float = 1.0;
-                if df_blur > 0.0001{
+                if df_blur > 0.001{
                     wb = clamp(-w / df_blur, 0.0, 1.0)
                 }
                 return wa * wb;
@@ -655,14 +659,19 @@ impl Shader{
             fn df_fill_keep(color:vec4)->vec4{
                 let f:float = df_calc_blur(df_shape);
                 let source:vec4 = vec4(color.rgb * color.a, color.a);
-                let dest:vec4 = df_result;
-                df_result = source * f + dest * (1. - source.a * f);
+                df_result = source * f + df_result * (1. - source.a * f);
+                if df_has_clip > 0.5{
+                    let f2:float = 1.-df_calc_blur(-df_clip);
+                    df_result = source * f2 + df_result * (1. - source.a * f2);
+                }
                 return df_result;
             }
 
             fn df_fill(color:vec4)->vec4 {
                 df_fill_keep(color);
                 df_old_shape = df_shape = 1e+20;
+                df_clip = -1e+20;
+                df_has_clip = 0.;
                 return df_result;
             }
 
@@ -677,6 +686,8 @@ impl Shader{
             fn df_stroke(color:vec4, width:float)->vec4{
                 df_stroke_keep(color, width);
                 df_old_shape = df_shape = 1e+20;
+                df_clip = -1e+20;
+                df_has_clip = 0.;
                 return df_result;
             }
 
@@ -691,6 +702,8 @@ impl Shader{
             fn df_glow(color:vec4, width:float)->vec4 {
                 df_glow_keep(color, width);
                 df_old_shape = df_shape = 1e+20;
+                df_clip = -1e+20;
+                df_has_clip = 0.;
                 return df_result;
             }
 
@@ -751,9 +764,12 @@ impl Shader{
                 let pa:vec2 = df_pos - df_last_pos;
                 let ba:vec2 = p - df_last_pos;
                 let h:float = clamp(dot(pa, ba) / dot(ba, ba), 0.0, 1.0);
+                let s:float = sign(pa.x*ba.y-pa.y*ba.x);
                 df_field = length(pa - ba * h) / df_scale;
                 df_old_shape = df_shape;
                 df_shape = min(df_shape, df_field);
+                df_clip = max(df_clip, df_field*s);
+                df_has_clip = 1.0;
                 df_last_pos = p;
             }
  
@@ -776,6 +792,7 @@ impl Shader{
                 let e:float = 1.0e-10;
                 return vec4(abs(q.z + (q.w - q.y) / (6.0 * d + e)), d / (q.x + e), q.x, c.w);
             }
+
         }));
     }
 }

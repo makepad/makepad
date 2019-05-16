@@ -118,13 +118,19 @@ pub struct RedrawEvent{
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct FileReadEvent{
-    pub id:u64,
+    pub read_id:u64,
     pub data:Result<Vec<u8>, String>
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct TimerEvent{
-    pub id:u64
+    pub timer_id:u64
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct PostEvent{
+    pub post_id:u64,
+    pub data:u64
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -181,6 +187,7 @@ pub enum Event{
     FileRead(FileReadEvent),
     FileWrite(FileWriteEvent),
     Timer(TimerEvent),
+    Post(PostEvent),
     KeyFocus(KeyFocusEvent),
     KeyDown(KeyEvent),
     KeyUp(KeyEvent),

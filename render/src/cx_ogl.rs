@@ -90,6 +90,7 @@ impl Cx{
     pub fn event_loop<F>(&mut self, mut event_handler:F)
     where F: FnMut(&mut Cx, &mut Event),
     { 
+        self.feature = "ogl".to_string();
         for _i in 0..10{
              self.platform.fingers_down.push(false);
         }

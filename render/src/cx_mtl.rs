@@ -150,6 +150,7 @@ impl Cx{
     pub fn event_loop<F>(&mut self, mut event_handler:F)
     where F: FnMut(&mut Cx, &mut Event),
     { 
+        self.feature = "mtl".to_string();
         CocoaWindow::cocoa_app_init();
 
         let mut cocoa_window = CocoaWindow{..Default::default()};
@@ -335,6 +336,15 @@ impl Cx{
         self.platform.stop_timer.push(id);
     }
 
+    pub fn new_post_event_id(&mut self)->u64{
+        self.platform.post_event_id += 1;
+        return self.platform.post_event_id;
+    }
+
+    pub fn post_event(id:u64, data:u64){
+        CocoaWindow::post_event(id, data);
+    }
+
     pub fn profile_clear(&mut self){
         self.platform.profiler_totals.truncate(0);
     }
@@ -369,6 +379,7 @@ impl Cx{
 #[derive(Clone, Default)]
 pub struct CxPlatform{
     pub uni_cx:MetalBuffer,
+    pub post_event_id:u64,
     pub set_ime_position:Option<Vec2>,
     pub start_timer:Vec<(u64,f64,bool)>,
     pub stop_timer:Vec<(u64)>,

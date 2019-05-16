@@ -14,7 +14,6 @@ use std::os::raw::c_void;
 use objc::*;
 use core_graphics::display::CGDisplay;
 use time::precise_time_ns;
-use time::precise_time_s;
 
 use crate::cx::*;
 
@@ -200,6 +199,18 @@ impl CocoaWindow{
         appkit::NSApp().sendEvent_(ns_event);
         
         match ns_event.eventType(){
+            appkit::NSApplicationDefined=>{
+                let post_id:u64 = msg_send![ns_event, data1];
+                let user_data:u64 = msg_send![ns_event, data2];
+                if post_id != 0{
+                    self.do_callback(&mut vec![
+                        Event::Post(PostEvent{
+                            post_id:post_id,
+                            data:user_data
+                        })
+                    ]);
+                }
+            },
             appkit::NSKeyUp => {
                 if let Some(key_code) = get_event_keycode(ns_event){
                     let modifiers = get_event_key_modifier(ns_event);
@@ -461,11 +472,11 @@ impl CocoaWindow{
     pub fn send_timer_received(&mut self, nstimer:id){
         for i in 0..self.timers.len(){
             if self.timers[i].nstimer == nstimer{
-                let found_id = self.timers[i].timer_id;
+                let timer_id = self.timers[i].timer_id;
                 if !self.timers[i].repeats{
                     self.timers.remove(i);
                 }
-                self.do_callback(&mut vec![Event::Timer(TimerEvent{id:found_id})]);
+                self.do_callback(&mut vec![Event::Timer(TimerEvent{timer_id:timer_id})]);
                 // break the eventloop
                 unsafe{
                     let pool = foundation::NSAutoreleasePool::new(cocoa::base::nil);
@@ -487,6 +498,26 @@ impl CocoaWindow{
                 return;
             }
         }
+    }
+
+    pub fn post_event(post_id:u64, data:u64){
+        unsafe{
+            let pool = foundation::NSAutoreleasePool::new(cocoa::base::nil);
+            let nsevent: id = msg_send![
+                class!(NSEvent), 
+                otherEventWithType:NSApplicationDefined
+                location:NSPoint::new(0.,0.)
+                modifierFlags:0u64
+                timestamp:0f64
+                windowNumber:1u64
+                context:nil
+                subtype:0i16
+                data1:post_id
+                data2:data
+            ];
+            msg_send![appkit::NSApp(),postEvent:nsevent atStart:0];
+            let _: () = msg_send![pool, release];
+        }  
     }
 
     pub fn send_resize_event(&mut self){

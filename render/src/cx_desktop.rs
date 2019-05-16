@@ -5,7 +5,7 @@ use std::io;
 
 #[derive(Clone)]
 pub struct FileReadRequest{
-    id:u64,
+    read_id:u64,
     path:String
 }
 
@@ -28,20 +28,19 @@ impl Cx{
 
     pub fn read_file(&mut self, path:&str)->u64{
         let desktop = &mut self.platform.desktop;
-        let id = desktop.file_read_id;
         desktop.file_read_id += 1;
+        let read_id = desktop.file_read_id;
         desktop.file_read_requests.push(FileReadRequest{
-            id:id, 
+            read_id:read_id, 
             path:path.to_string()
         });
-        id
+        read_id
     }
 
     pub fn write_file(&mut self, path:&str, data:Vec<u8>)->u64{
         // just write it right now
         if let Ok(mut file) = File::create(path){
             if let Ok(_) = file.write_all(&data){
-                println!("WRITTEN FILE {}", path);
             }
             else{
                 println!("ERROR WRITING FILE {}", path);
@@ -65,27 +64,26 @@ impl Cx{
         self.platform.desktop.file_read_requests.truncate(0);
 
         for read_req in file_read_requests{
-            println!("OPEN FILE {}", read_req.path);
             let file_result = File::open(&read_req.path);
             if let Ok(mut file) = file_result{
                 let mut buffer = Vec::new();
                 // read the whole file
                 if file.read_to_end(&mut buffer).is_ok(){
                     event_handler(self, &mut Event::FileRead(FileReadEvent{
-                        id:read_req.id,
+                        read_id:read_req.read_id,
                         data:Ok(buffer)
                     }))
                 }
                 else{ 
                     event_handler(self, &mut Event::FileRead(FileReadEvent{
-                        id:read_req.id,
+                        read_id:read_req.read_id,
                         data:Err(format!("Failed to read {}", read_req.path))
                     }))
                 }
             }
             else{
                 event_handler(self, &mut Event::FileRead(FileReadEvent{
-                    id:read_req.id,
+                    read_id:read_req.read_id,
                     data:Err(format!("Failed to open {}", read_req.path))
                 }))
             }
