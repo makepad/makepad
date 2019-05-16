@@ -436,7 +436,273 @@ impl CodeEditor{
 
     pub fn handle_new_code_messages(&mut self, cx:&mut Cx, messsages:Vec<CodeMessage>){
         // build a Cursor array 
+
+    }
+
+    pub fn handle_finger_down(&mut self, cx:&mut Cx, fe:&FingerDownEvent, text_buffer:&mut TextBuffer){
+        cx.set_down_mouse_cursor(MouseCursor::Text);
+        // give us the focus
+        cx.set_key_focus(self._bg_area);
+        let offset = self.text.find_closest_offset(cx, &self._text_area, fe.abs);
+        match fe.tap_count{
+            1=>{
+            },
+            2=>{
+                if let Some(chunk) = TextCursorSet::get_nearest_token_chunk(offset, &self._token_chunks){
+                    self.cursors.set_last_clamp_range((chunk.offset, chunk.len));
+                }
+            },
+            3=>{
+                if let Some(chunk) = TextCursorSet::get_nearest_token_chunk(offset, &self._token_chunks){
+                    self.cursors.set_last_clamp_range((chunk.offset, chunk.len));
+                    let (start, _len) = text_buffer.get_nearest_line_range(offset);
+                    let mut chunk_offset = chunk.offset;
+                    let mut chunk_len = chunk.len;
+                    if start < chunk_offset{
+                        chunk_len += chunk_offset - start;
+                        chunk_offset = start;
+                    }
+                    self.cursors.set_last_clamp_range((chunk_offset, chunk_len));
+                }
+                else{
+                    let range = text_buffer.get_nearest_line_range(offset);
+                    self.cursors.set_last_clamp_range(range);
+                }
+            },
+            _=>{
+                let range = (0, text_buffer.calc_char_count());
+                self.cursors.set_last_clamp_range(range);
+            }
+        }
+        // ok so we should scan a range 
+
+        if fe.modifiers.shift{
+            if fe.modifiers.logo || fe.modifiers.control{ // grid select
+                let pos = self.compute_grid_text_pos_from_abs(cx, fe.abs);
+                self._grid_select_corner = Some(self.cursors.grid_select_corner(pos, text_buffer));
+                self.cursors.grid_select(self._grid_select_corner.unwrap(), pos, text_buffer);
+            }
+            else{ // simply place selection
+                self.cursors.clear_and_set_last_cursor_head(offset, text_buffer);
+            }
+        }
+        else{ // cursor drag with possible add
+            if fe.modifiers.logo || fe.modifiers.control{
+                self.cursors.add_last_cursor_head_and_tail(offset, text_buffer);
+            }
+            else{
+                self.cursors.clear_and_set_last_cursor_head_and_tail(offset, text_buffer);
+            }
+        }
+        self.view.redraw_view_area(cx);
+        self._last_finger_move = Some(fe.abs);
+        self.update_highlight(text_buffer);
+        self.reset_cursor_blinker(cx);
+    }
+
+    pub fn handle_finger_move(&mut self, cx:&mut Cx, fe:&FingerMoveEvent, text_buffer:&mut TextBuffer){
+        let cursor_moved = if let Some(grid_select_corner) = self._grid_select_corner{
+            let pos = self.compute_grid_text_pos_from_abs(cx, fe.abs);
+            self.cursors.grid_select(grid_select_corner, pos, text_buffer)
+        }
+        else{
+            let offset = self.text.find_closest_offset(cx, &self._text_area, fe.abs);
+            self.cursors.set_last_cursor_head(offset, text_buffer)
+        };
+        self._last_finger_move = Some(fe.abs);
+        // determine selection drag scroll dynamics
+        let repaint_scroll = self.check_select_scroll_dynamics(&fe);
+
+        if repaint_scroll && cursor_moved{
+            self.view.redraw_view_area(cx);
+        }
+        if cursor_moved{
+            self.reset_cursor_blinker(cx);
+        }
+    }
+
+    pub fn handle_finger_up(&mut self, cx:&mut Cx, _fe:&FingerUpEvent, text_buffer:&mut TextBuffer){
+        self.cursors.clear_last_clamp_range();
+        self._select_scroll = None;
+        self._last_finger_move = None;
+        self._grid_select_corner = None;
+        self.update_highlight(text_buffer);
+        self.reset_cursor_blinker(cx);
+    }
+
+    pub fn handle_key_down(&mut self, cx:&mut Cx, ke:&KeyEvent, text_buffer:&mut TextBuffer){
+        let cursor_moved = match ke.key_code{
+            KeyCode::ArrowUp=>{
+                if self._anim_folding.state.is_folded() && self.cursors.set.len() == 1{
+                    // compute the nearest nonfolded line up
+                    let delta = self.compute_next_unfolded_line_up(text_buffer);
+                    self.cursors.move_up(delta, ke.modifiers.shift, text_buffer);
+                }
+                else{
+                    self.cursors.move_up(1, ke.modifiers.shift, text_buffer);
+                }
+                true
+            },
+            KeyCode::ArrowDown=>{
+                if self._anim_folding.state.is_folded() && self.cursors.set.len() == 1{
+                    // compute the nearest nonfolded line down
+                    let delta = self.compute_next_unfolded_line_down(text_buffer);
+                    self.cursors.move_down(delta, ke.modifiers.shift, text_buffer);
+                }
+                else{
+                    self.cursors.move_down(1, ke.modifiers.shift, text_buffer);
+                }
+                true
+            },
+            KeyCode::ArrowLeft=>{
+                if ke.modifiers.logo || ke.modifiers.control{ // token skipping
+                    self.cursors.move_left_nearest_token(ke.modifiers.shift, &self._token_chunks, text_buffer)
+                }
+                else{
+                    self.cursors.move_left(1, ke.modifiers.shift, text_buffer);
+                }
+                true
+            },
+            KeyCode::ArrowRight=>{
+                if ke.modifiers.logo || ke.modifiers.control{ // token skipping
+                    self.cursors.move_right_nearest_token(ke.modifiers.shift, &self._token_chunks, text_buffer)
+                }
+                else{
+                    self.cursors.move_right(1, ke.modifiers.shift, text_buffer);
+                }
+                true
+            },
+            KeyCode::PageUp=>{
+                
+                self.cursors.move_up(self._visible_lines.max(5) - 4, ke.modifiers.shift, text_buffer);
+                true
+            },
+            KeyCode::PageDown=>{
+                self.cursors.move_down(self._visible_lines.max(5) - 4, ke.modifiers.shift, text_buffer);
+                true
+            },
+            KeyCode::Home=>{
+                self.cursors.move_home(ke.modifiers.shift, text_buffer);
+                true
+            },
+            KeyCode::End=>{
+                self.cursors.move_end(ke.modifiers.shift, text_buffer);
+                true
+            },
+            KeyCode::Backspace=>{
+                self.cursors.backspace(text_buffer);
+                true
+            },
+            KeyCode::Delete=>{
+                self.cursors.delete(text_buffer);
+                true
+            },
+            KeyCode::KeyZ=>{
+                if ke.modifiers.logo || ke.modifiers.control{
+                    if ke.modifiers.shift{ // redo
+                        text_buffer.redo(true, &mut self.cursors);
+                        true
+                    }
+                    else{ // undo
+                        text_buffer.undo(true, &mut self.cursors);
+                        true
+                    }
+                }
+                else{
+                    false
+                }
+            },
+            KeyCode::KeyX=>{ // cut, the actual copy comes from the TextCopy event from the platform layer
+                if ke.modifiers.logo || ke.modifiers.control{ // cut
+                    self.cursors.replace_text("", text_buffer);
+                    true
+                }
+                else{
+                    false
+                }
+            },
+            KeyCode::KeyA=>{ // select all
+                if ke.modifiers.logo || ke.modifiers.control{ // cut
+                    self.cursors.select_all(text_buffer);
+                    // don't scroll!
+                    self.view.redraw_view_area(cx);
+                    false
+                }
+                else{
+                    false
+                }
+            },
+            KeyCode::Escape=>{
+                self.start_code_folding(cx, text_buffer);
+                false
+            },
+            KeyCode::Alt=>{
+                // how do we find the center line of the view
+                // its simply the top line
+                self.start_code_folding(cx, text_buffer);
+                false
+                //return CodeEditorEvent::FoldStart
+            },
+            KeyCode::Tab=>{
+                if ke.modifiers.shift{
+                    self.cursors.remove_tab(text_buffer, 4);
+                }
+                else{
+                    self.cursors.insert_tab(text_buffer,"    ");
+                } 
+                true
+            },
+            _=>false
+        };
+        if cursor_moved{
+            self.update_highlight(text_buffer);
+
+            self.scroll_last_cursor_visible(cx, text_buffer);
+            self.view.redraw_view_area(cx);
+        }
+        self.reset_cursor_blinker(cx);        
+    }
+
+    pub fn handle_text_input(&mut self, cx:&mut Cx, te:&TextInputEvent, text_buffer:&mut TextBuffer){
+        if te.replace_last{
+            text_buffer.undo(false, &mut self.cursors);
+        }
         
+        if !te.was_paste && te.input.len() == 1{
+            match te.input.chars().next().unwrap(){
+                '\n'=>{
+                    self.cursors.insert_newline_with_indent(text_buffer);
+                },
+                '('=>{
+                    self.cursors.insert_around("(",")",text_buffer);
+                },
+                '['=>{
+                    self.cursors.insert_around("[","]",text_buffer);
+                },
+                '{'=>{
+                    self.cursors.insert_around("{","}",text_buffer);
+                },
+                ')'=>{
+                    self.cursors.overwrite_if_exists(")", text_buffer);
+                },
+                ']'=>{
+                    self.cursors.overwrite_if_exists("]", text_buffer);
+                },
+                '}'=>{
+                    self.cursors.overwrite_if_exists("}", text_buffer);
+                },
+                _=>{
+                    self.cursors.replace_text(&te.input, text_buffer);
+                }
+            }  
+            // lets insert a newline
+        } 
+        else{
+            self.cursors.replace_text(&te.input, text_buffer);
+        }
+        self.scroll_last_cursor_visible(cx, text_buffer);
+        self.view.redraw_view_area(cx);
+        self.reset_cursor_blinker(cx);        
     }
 
     pub fn handle_code_editor(&mut self, cx:&mut Cx, event:&mut Event, text_buffer:&mut TextBuffer)->CodeEditorEvent{
@@ -476,228 +742,19 @@ impl CodeEditor{
                 }
             },
             Event::FingerDown(fe)=>{
-                cx.set_down_mouse_cursor(MouseCursor::Text);
-                // give us the focus
-                cx.set_key_focus(self._bg_area);
-                let offset = self.text.find_closest_offset(cx, &self._text_area, fe.abs);
-                match fe.tap_count{
-                    1=>{
-                    },
-                    2=>{
-                        if let Some(chunk) = TextCursorSet::get_nearest_token_chunk(offset, &self._token_chunks){
-                            self.cursors.set_last_clamp_range((chunk.offset, chunk.len));
-                        }
-                    },
-                    3=>{
-                        if let Some(chunk) = TextCursorSet::get_nearest_token_chunk(offset, &self._token_chunks){
-                            self.cursors.set_last_clamp_range((chunk.offset, chunk.len));
-                            let (start, _len) = text_buffer.get_nearest_line_range(offset);
-                            let mut chunk_offset = chunk.offset;
-                            let mut chunk_len = chunk.len;
-                            if start < chunk_offset{
-                                chunk_len += chunk_offset - start;
-                                chunk_offset = start;
-                            }
-                            self.cursors.set_last_clamp_range((chunk_offset, chunk_len));
-                        }
-                        else{
-                            let range = text_buffer.get_nearest_line_range(offset);
-                            self.cursors.set_last_clamp_range(range);
-                        }
-                    },
-                    _=>{
-                        let range = (0, text_buffer.calc_char_count());
-                        self.cursors.set_last_clamp_range(range);
-                    }
-                }
-                // ok so we should scan a range 
-
-                if fe.modifiers.shift{
-                    if fe.modifiers.logo || fe.modifiers.control{ // grid select
-                        let pos = self.compute_grid_text_pos_from_abs(cx, fe.abs);
-                        self._grid_select_corner = Some(self.cursors.grid_select_corner(pos, text_buffer));
-                        self.cursors.grid_select(self._grid_select_corner.unwrap(), pos, text_buffer);
-                    }
-                    else{ // simply place selection
-                        self.cursors.clear_and_set_last_cursor_head(offset, text_buffer);
-                    }
-                }
-                else{ // cursor drag with possible add
-                    if fe.modifiers.logo || fe.modifiers.control{
-                        self.cursors.add_last_cursor_head_and_tail(offset, text_buffer);
-                    }
-                    else{
-                        self.cursors.clear_and_set_last_cursor_head_and_tail(offset, text_buffer);
-                    }
-                }
-                self.view.redraw_view_area(cx);
-                self._last_finger_move = Some(fe.abs);
-                self.update_highlight(text_buffer);
-                self.reset_cursor_blinker(cx);
+                self.handle_finger_down(cx, &fe, text_buffer);
             },
             Event::FingerHover(_fe)=>{
                 cx.set_hover_mouse_cursor(MouseCursor::Text);
             },
-            Event::FingerUp(_fe)=>{
-                self.cursors.clear_last_clamp_range();
-                self._select_scroll = None;
-                self._last_finger_move = None;
-                self._grid_select_corner = None;
-                self.update_highlight(text_buffer);
-                self.reset_cursor_blinker(cx);
+            Event::FingerUp(fe)=>{
+                self.handle_finger_up(cx, &fe, text_buffer);
             },
             Event::FingerMove(fe)=>{
-                let cursor_moved = if let Some(grid_select_corner) = self._grid_select_corner{
-                    let pos = self.compute_grid_text_pos_from_abs(cx, fe.abs);
-                    self.cursors.grid_select(grid_select_corner, pos, text_buffer)
-                }
-                else{
-                    let offset = self.text.find_closest_offset(cx, &self._text_area, fe.abs);
-                    self.cursors.set_last_cursor_head(offset, text_buffer)
-                };
-                self._last_finger_move = Some(fe.abs);
-                // determine selection drag scroll dynamics
-                let repaint_scroll = self.check_select_scroll_dynamics(&fe);
-
-                if repaint_scroll && cursor_moved{
-                    self.view.redraw_view_area(cx);
-                }
-                if cursor_moved{
-                    self.reset_cursor_blinker(cx);
-                }
-              
+                self.handle_finger_move(cx, &fe, text_buffer);
             },
             Event::KeyDown(ke)=>{
-                let cursor_moved = match ke.key_code{
-                    KeyCode::ArrowUp=>{
-                        if self._anim_folding.state.is_folded() && self.cursors.set.len() == 1{
-                            // compute the nearest nonfolded line up
-                            let delta = self.compute_next_unfolded_line_up(text_buffer);
-                            self.cursors.move_up(delta, ke.modifiers.shift, text_buffer);
-                        }
-                        else{
-                            self.cursors.move_up(1, ke.modifiers.shift, text_buffer);
-                        }
-                        true
-                    },
-                    KeyCode::ArrowDown=>{
-                        if self._anim_folding.state.is_folded() && self.cursors.set.len() == 1{
-                            // compute the nearest nonfolded line down
-                            let delta = self.compute_next_unfolded_line_down(text_buffer);
-                            self.cursors.move_down(delta, ke.modifiers.shift, text_buffer);
-                        }
-                        else{
-                            self.cursors.move_down(1, ke.modifiers.shift, text_buffer);
-                        }
-                        true
-                    },
-                    KeyCode::ArrowLeft=>{
-                        if ke.modifiers.logo || ke.modifiers.control{ // token skipping
-                            self.cursors.move_left_nearest_token(ke.modifiers.shift, &self._token_chunks, text_buffer)
-                        }
-                        else{
-                            self.cursors.move_left(1, ke.modifiers.shift, text_buffer);
-                        }
-                        true
-                    },
-                    KeyCode::ArrowRight=>{
-                        if ke.modifiers.logo || ke.modifiers.control{ // token skipping
-                            self.cursors.move_right_nearest_token(ke.modifiers.shift, &self._token_chunks, text_buffer)
-                        }
-                        else{
-                            self.cursors.move_right(1, ke.modifiers.shift, text_buffer);
-                        }
-                        true
-                    },
-                    KeyCode::PageUp=>{
-                        
-                        self.cursors.move_up(self._visible_lines.max(5) - 4, ke.modifiers.shift, text_buffer);
-                        true
-                    },
-                    KeyCode::PageDown=>{
-                        self.cursors.move_down(self._visible_lines.max(5) - 4, ke.modifiers.shift, text_buffer);
-                        true
-                    },
-                    KeyCode::Home=>{
-                        self.cursors.move_home(ke.modifiers.shift, text_buffer);
-                        true
-                    },
-                    KeyCode::End=>{
-                        self.cursors.move_end(ke.modifiers.shift, text_buffer);
-                        true
-                    },
-                    KeyCode::Backspace=>{
-                        self.cursors.backspace(text_buffer);
-                        true
-                    },
-                    KeyCode::Delete=>{
-                        self.cursors.delete(text_buffer);
-                        true
-                    },
-                    KeyCode::KeyZ=>{
-                        if ke.modifiers.logo || ke.modifiers.control{
-                            if ke.modifiers.shift{ // redo
-                                text_buffer.redo(true, &mut self.cursors);
-                                true
-                            }
-                            else{ // undo
-                                text_buffer.undo(true, &mut self.cursors);
-                                true
-                            }
-                        }
-                        else{
-                            false
-                        }
-                    },
-                    KeyCode::KeyX=>{ // cut, the actual copy comes from the TextCopy event from the platform layer
-                        if ke.modifiers.logo || ke.modifiers.control{ // cut
-                            self.cursors.replace_text("", text_buffer);
-                            true
-                        }
-                        else{
-                            false
-                        }
-                    },
-                    KeyCode::KeyA=>{ // select all
-                        if ke.modifiers.logo || ke.modifiers.control{ // cut
-                            self.cursors.select_all(text_buffer);
-                            // don't scroll!
-                            self.view.redraw_view_area(cx);
-                            false
-                        }
-                        else{
-                            false
-                        }
-                    },
-                    KeyCode::Escape=>{
-                        self.start_code_folding(cx, text_buffer);
-                        false
-                    },
-                    KeyCode::Alt=>{
-                        // how do we find the center line of the view
-                        // its simply the top line
-                        self.start_code_folding(cx, text_buffer);
-                        false
-                        //return CodeEditorEvent::FoldStart
-                    },
-                    KeyCode::Tab=>{
-                        if ke.modifiers.shift{
-                            self.cursors.remove_tab(text_buffer, 4);
-                        }
-                        else{
-                            self.cursors.insert_tab(text_buffer,"    ");
-                        } 
-                        true
-                    },
-                    _=>false
-                };
-                if cursor_moved{
-                    self.update_highlight(text_buffer);
-
-                    self.scroll_last_cursor_visible(cx, text_buffer);
-                    self.view.redraw_view_area(cx);
-                }
-                self.reset_cursor_blinker(cx);
+                self.handle_key_down(cx, &ke, text_buffer);
             },
             Event::KeyUp(ke)=>{
                 match ke.key_code{
@@ -712,45 +769,7 @@ impl CodeEditor{
                 self.reset_cursor_blinker(cx);
             },
             Event::TextInput(te)=>{
-                if te.replace_last{
-                    text_buffer.undo(false, &mut self.cursors);
-                }
-                
-                if !te.was_paste && te.input.len() == 1{
-                    match te.input.chars().next().unwrap(){
-                        '\n'=>{
-                            self.cursors.insert_newline_with_indent(text_buffer);
-                        },
-                        '('=>{
-                            self.cursors.insert_around("(",")",text_buffer);
-                        },
-                        '['=>{
-                            self.cursors.insert_around("[","]",text_buffer);
-                        },
-                        '{'=>{
-                            self.cursors.insert_around("{","}",text_buffer);
-                        },
-                        ')'=>{
-                            self.cursors.overwrite_if_exists(")", text_buffer);
-                        },
-                        ']'=>{
-                            self.cursors.overwrite_if_exists("]", text_buffer);
-                        },
-                        '}'=>{
-                            self.cursors.overwrite_if_exists("}", text_buffer);
-                        },
-                        _=>{
-                            self.cursors.replace_text(&te.input, text_buffer);
-                        }
-                    }  
-                    // lets insert a newline
-                } 
-                else{
-                    self.cursors.replace_text(&te.input, text_buffer);
-                }
-                self.scroll_last_cursor_visible(cx, text_buffer);
-                self.view.redraw_view_area(cx);
-                self.reset_cursor_blinker(cx);
+                self.handle_text_input(cx, &te, text_buffer);
             },
             Event::TextCopy(_)=>match event{ // access the original event
                 Event::TextCopy(req)=>{
