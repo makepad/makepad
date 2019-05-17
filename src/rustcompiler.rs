@@ -193,6 +193,7 @@ impl RustCompiler{
                     }
                     else{
                         self._run_when_done = true;
+                        self.view.redraw_view_area(cx);
                     }
                 },
                 KeyCode::F6=>{ // next error
@@ -396,7 +397,12 @@ impl RustCompiler{
             match self._rustc_build_stages{
                 BuildStage::NotRunning=>self.text.draw_text(cx, "Done"),
                 BuildStage::Building=>{
-                    self.text.draw_text(cx, "Building")
+                    if self._run_when_done{
+                        self.text.draw_text(cx, "Running when ready")
+                    }
+                    else{
+                        self.text.draw_text(cx, "Building")
+                    }
                 },
                 BuildStage::Complete=>{
                     self.text.draw_text(cx, "Press F5 to run")
