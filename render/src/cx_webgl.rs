@@ -374,7 +374,7 @@ impl Cx{
         id
     }
 
-    pub fn write_file(&mut self, path:&str, data:Vec<u8>)->u64{
+    pub fn write_file(&mut self, _path:&str, _data:Vec<u8>)->u64{
         return 0
     }
 

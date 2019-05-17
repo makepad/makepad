@@ -256,6 +256,7 @@ impl Style for CodeEditor{
             _anim_folding:AnimFolding{
                 state:AnimFoldingState::Open,
                 focussed_line:0,
+                zoom_scale:1.0,
                 did_animate:false,
             },
             _select_scroll:None,
@@ -624,13 +625,13 @@ impl CodeEditor{
                 }
             },
             KeyCode::Escape=>{
-                self.start_code_folding(cx, text_buffer);
+                self.start_code_folding(cx, text_buffer, ke.modifiers.logo || ke.modifiers.control);
                 false
             },
             KeyCode::Alt=>{
                 // how do we find the center line of the view
                 // its simply the top line
-                self.start_code_folding(cx, text_buffer);
+                self.start_code_folding(cx, text_buffer, ke.modifiers.logo || ke.modifiers.control);
                 false
                 //return CodeEditorEvent::FoldStart
             },
@@ -879,7 +880,7 @@ impl CodeEditor{
             anim_folding.did_animate = false;
         }
         //let new_anim_font_size = 
-        self._anim_font_size = anim_folding.state.get_font_size(self.open_font_size, self.folded_font_size);
+        self._anim_font_size = anim_folding.state.get_font_size(self.open_font_size, self.folded_font_size * anim_folding.zoom_scale);
 
         if self._anim_folding.did_animate{
             let mut ypos = self.top_padding;
@@ -1324,7 +1325,7 @@ impl CodeEditor{
                 TextBufferMessageLevel::Warning=>self.colors.marker_warning,
                 TextBufferMessageLevel::Error=>self.colors.marker_error
             };
-            let mk_inst = self.message_marker.draw_quad(cx, Rect{x:mark.rc.x - origin.x, y:mark.rc.y - origin.y, w:mark.rc.w, h:mark.rc.h});
+            self.message_marker.draw_quad(cx, Rect{x:mark.rc.x - origin.x, y:mark.rc.y - origin.y, w:mark.rc.w, h:mark.rc.h});
         }
     }
 
@@ -1514,9 +1515,10 @@ impl CodeEditor{
         TextPos{row:self._line_geometry.len() - 1, col: (rel.x.max(0.) / mono_size.x) as usize}
     }
 
-    fn start_code_folding(&mut self, cx:&mut Cx, text_buffer:&TextBuffer){
+    fn start_code_folding(&mut self, cx:&mut Cx, text_buffer:&TextBuffer, halfway:bool){
         // start code folding anim
         let speed = 0.98;
+        self._anim_folding.zoom_scale = if halfway{9.0} else{1.0};
         self._anim_folding.state.do_folding(speed, 0.95);
         self._anim_folding.focussed_line = self.compute_focussed_line_for_folding(cx,text_buffer);
         //println!("FOLDING {}",self._anim_folding.focussed_line);
@@ -1660,6 +1662,7 @@ pub enum AnimFoldingState{
 pub struct AnimFolding{
     pub state:AnimFoldingState,
     pub focussed_line:usize,
+    pub zoom_scale:f32,
     pub did_animate:bool
 }
 

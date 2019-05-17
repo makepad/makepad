@@ -1025,7 +1025,7 @@ impl DrawCursors{
         }
     }
 
-    pub fn process_geom(&mut self, offset:usize, x:f32, y:f32, w:f32, h:f32){
+    pub fn process_geom(&mut self, x:f32, y:f32, w:f32, h:f32){
         if self.first{ // store left top of rect
             self.first = false;
             self.left_top.x = x;
@@ -1054,7 +1054,7 @@ impl DrawCursors{
         // check if we need to skip cursors
         while offset >= self.end{ // jump to next cursor
             if offset == self.end{ // process the last bit here
-                self.process_geom(offset, x, y, w, h);
+                self.process_geom(x, y, w, h);
                 self.emit_selection();
             }
             if !self.set_next(cursors){ // cant go further
@@ -1063,7 +1063,7 @@ impl DrawCursors{
         }
         // in current cursor range, update values
         if offset >= self.start && offset <= self.end{
-            self.process_geom(offset, x, y, w, h);
+            self.process_geom(x, y, w, h);
             if offset == self.end{
                 self.emit_selection();
             }
@@ -1075,7 +1075,7 @@ impl DrawCursors{
         while offset >= self.end{ // jump to next cursor
             if offset == self.end{ // process the last bit here
                 self.process_cursor(last_cursor, offset, x, y, h);
-                self.process_geom(offset, x, y, w, h);
+                self.process_geom(x, y, w, h);
                 self.emit_selection();
             }
             if !self.set_next(cursors){ // cant go further
@@ -1085,7 +1085,7 @@ impl DrawCursors{
         // in current cursor range, update values
         if offset >= self.start && offset <= self.end{
             self.process_cursor(last_cursor, offset, x, y, h);
-            self.process_geom(offset, x, y, w, h);
+            self.process_geom(x, y, w, h);
             if offset == self.end{
                 self.emit_selection();
             }

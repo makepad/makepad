@@ -380,7 +380,7 @@ impl FileTree{
                     if !self._drag_move.is_none(){
                         drag_end = Some(fe);
                         // we now have to do the drop....
-                        self.view.redraw_view_area(cx);
+                        self.drag_view.redraw_view_area(cx);
                         //self._drag_move = None;
                     }
                 },
@@ -389,12 +389,14 @@ impl FileTree{
                     if self._drag_move.is_none(){
                         if fe.move_distance() > 10.{
                             self._drag_move = Some(fe);
-                           self.view.redraw_view_area(cx);
+                            self.view.redraw_view_area(cx);
+                            self.drag_view.redraw_view_area(cx);
                         }
                     }
                     else{
                         self._drag_move = Some(fe);
                         self.view.redraw_view_area(cx);
+                        self.drag_view.redraw_view_area(cx);
                     }
                     drag_nodes = true;
                 },
@@ -635,26 +637,25 @@ impl FileTree{
 
         // draw the drag item overlay layer if need be
         if let Some(mv) = &self._drag_move{
-            if let Err(()) =self.drag_view.begin_view(cx, &Layout{
+            if let Ok(()) =self.drag_view.begin_view(cx, &Layout{
                 abs_origin:Some(Vec2{x:mv.abs.x + 5., y:mv.abs.y + 5.}),
                 ..Default::default()
             }){
-                return
-            }
-            let mut file_walker = FileWalker::new(&mut self.root_node);
-            while let Some((_depth, _index, _len, node)) = file_walker.walk(){
-                let node_draw = if let Some(node_draw) = node.get_draw(){node_draw}else{continue};
-                if node_draw.marked != 0{
-                    let inst = self.drag_bg.begin_quad(cx, &self.drag_bg_layout);
-                    self.tree_text.color = self.tree_folder_color;
-                    self.tree_text.draw_text(cx, match node{
-                        FileNode::Folder{name,..}=>{name},
-                        FileNode::File{name,..}=>{name}
-                    });
-                    self.drag_bg.end_quad(cx, &inst);
+                let mut file_walker = FileWalker::new(&mut self.root_node);
+                while let Some((_depth, _index, _len, node)) = file_walker.walk(){
+                    let node_draw = if let Some(node_draw) = node.get_draw(){node_draw}else{continue};
+                    if node_draw.marked != 0{
+                        let inst = self.drag_bg.begin_quad(cx, &self.drag_bg_layout);
+                        self.tree_text.color = self.tree_folder_color;
+                        self.tree_text.draw_text(cx, match node{
+                            FileNode::Folder{name,..}=>{name},
+                            FileNode::File{name,..}=>{name}
+                        });
+                        self.drag_bg.end_quad(cx, &inst);
+                    }
                 }
+                self.drag_view.end_view(cx);
             }
-            self.drag_view.end_view(cx);
         }
         self.view.end_view(cx);
     }

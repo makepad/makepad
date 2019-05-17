@@ -163,6 +163,9 @@ where TScrollBar: ScrollBarLike<TScrollBar> + Clone + ElementLife
         // this is our vec of dirty areas
         // lets figure out of any one of them is a child treenode of us
         // how do we figure thatout?
+        //if cx.panic_now && draw_list_id == 4 && cx.redraw_id == 8{
+        //    panic!("BREAK");
+       // }
 
         cx.begin_turtle(layout, Area::DrawList(DrawListArea{
             draw_list_id:draw_list_id,

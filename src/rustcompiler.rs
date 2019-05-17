@@ -4,7 +4,6 @@ use editor::*;
 use std::io::Read;
 use std::process::{Command, Child, Stdio};
 use std::sync::mpsc;
-use std::collections::HashMap;
 
 use serde_json::{Result};
 use serde::*;
@@ -329,20 +328,14 @@ impl RustCompiler{
             .spawn();
         
         if let Err(_) = _child{
-            self._rustc_messages.push(RustcCompilerMessage{
-                message:RustcMessage{
-                    level:"error".to_string(),
-                    message:"A Rust compiler error, only works native".to_string(),
-                    ..Default::default()
-                },
+            self._rustc_spans.push(RustcSpan{
+                level:Some("error".to_string()),
+                label:Some("A Rust compiler error, only works native".to_string()),
                 ..Default::default()
             });
-            self._rustc_messages.push(RustcCompilerMessage{
-                message:RustcMessage{
-                    level:"warning".to_string(),
-                    message:"A Rust compiler warning, only works native".to_string(),
-                    ..Default::default()
-                },
+            self._rustc_spans.push(RustcSpan{
+                level:Some("warning".to_string()),
+                label:Some("A Rust compiler warning, only works native".to_string()),
                 ..Default::default()
             });
             return;
@@ -427,7 +420,7 @@ impl RustCompiler{
     }
 }
 
-#[derive(Clone, Deserialize, Debug, Default)]
+#[derive(Clone, Deserialize,  Default)]
 pub struct RustcTarget{
     kind:Vec<String>,
     crate_types:Vec<String>,
@@ -436,14 +429,14 @@ pub struct RustcTarget{
     edition:String
 }
 
-#[derive(Clone, Deserialize, Debug, Default)]
+#[derive(Clone, Deserialize,  Default)]
 pub struct RustcText{
     text:String,
     highlight_start:u32,
     highlight_end:u32
 }
 
-#[derive(Clone, Deserialize, Debug, Default)]
+#[derive(Clone, Deserialize,  Default)]
 pub struct RustcSpan{
     file_name:String,
     byte_start:u32,
@@ -461,13 +454,13 @@ pub struct RustcSpan{
     level:Option<String>
 }
 
-#[derive(Clone, Deserialize, Debug, Default)]
+#[derive(Clone, Deserialize,  Default)]
 pub struct RustcCode{
     code:String,
     explanation:Option<String>
 }
 
-#[derive(Clone, Deserialize, Debug, Default)]
+#[derive(Clone, Deserialize,  Default)]
 pub struct RustcMessage{
     message:String,
     code:Option<RustcCode>,
@@ -477,7 +470,7 @@ pub struct RustcMessage{
     rendered:Option<String>
 }
 
-#[derive(Clone, Deserialize, Debug, Default)]
+#[derive(Clone, Deserialize,  Default)]
 pub struct RustcProfile{
     opt_level:String,
     debuginfo:u32,
@@ -486,7 +479,7 @@ pub struct RustcProfile{
     test:bool
 }
 
-#[derive(Clone, Deserialize, Debug, Default)]
+#[derive(Clone, Deserialize,  Default)]
 pub struct RustcCompilerMessage{
     reason:String,
     package_id:String,
@@ -494,7 +487,7 @@ pub struct RustcCompilerMessage{
     message:RustcMessage
 }
 
-#[derive(Clone, Deserialize, Debug, Default)]
+#[derive(Clone, Deserialize,  Default)]
 pub struct RustcCompilerArtifact{
     reason:String,
     package_id:String,
