@@ -19,9 +19,17 @@ pub struct RustCompiler{
     pub path_color:Color,
     pub message_color:Color,
     pub _post_id:u64,
-    pub _child:Option<Child>,
+
+    pub _check_child:Option<Child>,
+    pub _build_child:Option<Child>,
+    pub _run_child:Option<Child>,
+    pub _run_when_done:bool,
+
+    pub _rustc_build_stages:BuildStage,
     pub _rx:Option<mpsc::Receiver<std::vec::Vec<u8>>>,
+
     pub _thread:Option<std::thread::JoinHandle<()>>,
+
     pub _data:Vec<String>,
     pub _rustc_spans:Vec<RustcSpan>,
     pub _rustc_messages:Vec<RustcCompilerMessage>,
@@ -30,11 +38,18 @@ pub struct RustCompiler{
     pub _items:Vec<RustCompilerItem>
 }
 
+#[derive(PartialEq)]
+pub enum BuildStage{
+    NotRunning,
+    Building,
+    Complete
+}
+
 pub struct RustCompilerItem{
     hit_state:HitState,
     animator:Animator,
     span_index:usize,
-    marked:u64
+    selected:bool
 }
 
 #[derive(Clone)]
@@ -73,7 +88,11 @@ impl Style for RustCompiler{
             message_color:color("#bbb"),
             row_height:20.0,
             _post_id:0,
-            _child:None,
+            _check_child:None,
+            _build_child:None,
+            _run_child:None,
+            _run_when_done:false,
+            _rustc_build_stages:BuildStage::NotRunning,
             _thread:None,
             _rx:None,
             _rustc_spans:Vec::new(),
@@ -89,7 +108,7 @@ impl Style for RustCompiler{
 impl RustCompiler{
     pub fn init(&mut self, cx:&mut Cx){
         self._post_id = cx.new_post_event_id();
-        self.restart_rust_compiler();
+        self.restart_rust_checker();
     }
 
     pub fn get_default_anim(cx:&Cx, counter:usize, marked:bool)->Anim{
@@ -163,24 +182,89 @@ impl RustCompiler{
         if self.view.handle_scroll_bars(cx, event){
             // do zshit.
         }
-        if let Event::Post(pe) = event{
-            if self._post_id == pe.post_id{
-                let mut datas = Vec::new();
-                if let Some(rx) = &self._rx{
-                    while let Ok(data) = rx.try_recv(){
-                        datas.push(data);
+
+        let mut item_to_select = None;
+
+        match event{
+            Event::KeyDown(ke)=>match ke.key_code{
+                KeyCode::F5=>{
+                    if self._rustc_build_stages == BuildStage::Complete{
+                        self.run_program();
+                    }
+                    else{
+                        self._run_when_done = true;
+                    }
+                },
+                KeyCode::F6=>{ // next error
+                    if self._items.len() > 0{
+                        let mut selected_index = None;
+                        for (counter,item) in self._items.iter_mut().enumerate(){
+                            if item.selected{
+                                selected_index = Some(counter);
+                            }
+                        }
+                        if let Some(selected_index) = selected_index{
+                            if selected_index + 1 < self._items.len(){
+                                item_to_select = Some(selected_index + 1);
+                            }
+                            else {
+                                item_to_select = Some(0);
+                            }
+                        }
+                        else{
+                            item_to_select = Some(0);
+                        }
+                    }
+                },
+                KeyCode::F7=>{ // previous error
+                    if self._items.len() > 0{
+                        let mut selected_index = None;
+                        for (counter,item) in self._items.iter_mut().enumerate(){
+                            if item.selected{
+                                selected_index = Some(counter);
+                            }
+                        }
+                        if let Some(selected_index) = selected_index{
+                            if selected_index > 0{
+                                item_to_select = Some(selected_index - 1);
+                            }
+                            else {
+                                item_to_select = Some(self._items.len() - 1);
+                            }
+                        }
+                        else{
+                            item_to_select = Some(self._items.len() - 1);
+                        }
+                    }
+                },
+                _=>()
+            },
+            Event::Post(pe)=>if self._post_id == pe.post_id{
+                if pe.data == 0{
+                    let mut datas = Vec::new();
+                    if let Some(rx) = &self._rx{
+                        while let Ok(data) = rx.try_recv(){
+                            datas.push(data);
+                        }
+                    }
+                    if datas.len() > 0{
+                        self.process_compiler_messages(cx, datas);
+                        self.export_messages(cx, text_buffers);
+                        return RustCompilerEvent::UpdateMessages;
                     }
                 }
-                if datas.len() > 0{
-                    self.process_compiler_messages(cx, datas);
-                    self.export_messages(cx, text_buffers);
-                    return RustCompilerEvent::UpdateMessages;
+                else{
+                    self._rustc_build_stages = BuildStage::Complete;
+                    if self._run_when_done{
+                        self.run_program();
+                    }
+                    self.view.redraw_view_area(cx);
                 }
-            }
-            // lets export our errors
+            },
+            _=>()
         }
-        let mut unmark_nodes = false;
-        let mut clicked_span_index = None;
+
+        //let mut unmark_nodes = false;
         for (counter,item) in self._items.iter_mut().enumerate(){   
             match event.hits(cx, item.animator.area, &mut item.hit_state){
                 Event::Animate(ae)=>{
@@ -189,10 +273,7 @@ impl RustCompiler{
                 Event::FingerDown(_fe)=>{
                     cx.set_down_mouse_cursor(MouseCursor::Hand);
                     // mark ourselves, unmark others
-                    item.marked = cx.event_id;
-                    unmark_nodes = true;
-                    item.animator.play_anim(cx, Self::get_over_anim(cx, counter, item.marked != 0));
-                    clicked_span_index = Some(item.span_index); 
+                    item_to_select = Some(counter);
                 },
                 Event::FingerUp(_fe)=>{
                 },
@@ -202,10 +283,10 @@ impl RustCompiler{
                     cx.set_hover_mouse_cursor(MouseCursor::Hand);
                     match fe.hover_state{
                         HoverState::In=>{
-                            item.animator.play_anim(cx, Self::get_over_anim(cx, counter, item.marked != 0));
+                            item.animator.play_anim(cx, Self::get_over_anim(cx, counter, item.selected));
                         },
                         HoverState::Out=>{
-                            item.animator.play_anim(cx, Self::get_default_anim(cx, counter, item.marked != 0));
+                            item.animator.play_anim(cx, Self::get_default_anim(cx, counter, item.selected));
                         },
                         _=>()
                     }
@@ -213,16 +294,21 @@ impl RustCompiler{
                 _=>()
             }
         };
-        if unmark_nodes{
+
+        if let Some(item_to_select) = item_to_select{
+            
             for (counter,item) in self._items.iter_mut().enumerate(){   
-                if item.marked != cx.event_id{
-                    item.marked = 0;
+                if counter != item_to_select{
+                    item.selected = false;
                     item.animator.play_anim(cx, Self::get_default_anim(cx, counter, false));
                 }
             };
-        }
-        if let Some(clicked_span_index) = clicked_span_index{
-            let span = &self._rustc_spans[clicked_span_index];
+
+            let item = &mut self._items[item_to_select];
+            item.selected  = true;
+            item.animator.play_anim(cx, Self::get_over_anim(cx, item_to_select, true));
+
+            let span = &self._rustc_spans[item.span_index];
             // alright we clicked an item. now what. well 
             let text_buffer = text_buffers.from_path(cx, &span.file_name);
             text_buffer.messages.jump_to_offset = Some(span.byte_start as usize);
@@ -247,6 +333,7 @@ impl RustCompiler{
         //    cx.turtle_new_line();
         //}
         let mut counter = 0;
+        let mut any_error = false;
         for (index,span) in self._rustc_spans.iter().enumerate(){
             if span.label.is_none(){
                 continue;
@@ -257,7 +344,7 @@ impl RustCompiler{
                     animator:Animator::new(Self::get_default_anim(cx, counter, false)),
                     hit_state:HitState{..Default::default()},
                     span_index:index,
-                    marked:0
+                    selected:false
                 });
             };
             self.item_bg.color =  self._items[counter].animator.last_color("bg.color");
@@ -271,6 +358,7 @@ impl RustCompiler{
 
             if let Some(level) = &span.level{
                 if level == "error"{
+                    any_error = true;
                     self.code_icon.draw_icon_walk(cx, CodeIconType::Error);
                 }
                 else{
@@ -294,26 +382,35 @@ impl RustCompiler{
         let bg_even = cx.color("bg_selected");
         let bg_odd = cx.color("bg_odd");
 
-        if self._rustc_spans.len() == 0{
-            self.item_bg.color = if counter&1 == 0{bg_even}else{bg_odd};
-            let bg_inst = self.item_bg.begin_quad(cx,&Layout{
-                width:Bounds::Fill,
-                height:Bounds::Fix(self.row_height),
-                padding:Padding{l:2.,t:3.,b:2.,r:0.},
-                ..Default::default()
-            });
-            if self._rustc_done == true{
-                self.code_icon.draw_icon_walk(cx, CodeIconType::Ok);
-                self.text.draw_text(cx, "All OK!");
-            }
-            else{
-                self.code_icon.draw_icon_walk(cx, CodeIconType::Wait);
-                self.text.draw_text(cx, "Checking");
-            }
-            self.item_bg.end_quad(cx, &bg_inst);
-            cx.turtle_new_line();
-            counter += 1;
+    
+        self.item_bg.color = if counter&1 == 0{bg_even}else{bg_odd};
+        let bg_inst = self.item_bg.begin_quad(cx,&Layout{
+            width:Bounds::Fill,
+            height:Bounds::Fix(self.row_height),
+            padding:Padding{l:2.,t:3.,b:2.,r:0.},
+            ..Default::default()
+        });
+        if self._rustc_done == true{
+            self.code_icon.draw_icon_walk(cx, CodeIconType::Ok);//if any_error{CodeIconType::Error}else{CodeIconType::Warning});
+            self.text.color = self.path_color;
+            match self._rustc_build_stages{
+                BuildStage::NotRunning=>self.text.draw_text(cx, "Done"),
+                BuildStage::Building=>{
+                    self.text.draw_text(cx, "Building")
+                },
+                BuildStage::Complete=>{
+                    self.text.draw_text(cx, "Press F5 to run")
+                }
+            };
         }
+        else{
+            self.code_icon.draw_icon_walk(cx, CodeIconType::Wait);
+            self.text.color = self.path_color;
+            self.text.draw_text(cx, &format!("Checking({})",self._rustc_artifacts.len()));
+        }
+        self.item_bg.end_quad(cx, &bg_inst);
+        cx.turtle_new_line();
+        counter += 1;
 
         // draw filler nodes
         
@@ -335,21 +432,75 @@ impl RustCompiler{
         self.view.end_view(cx);
     }
 
-    pub fn restart_rust_compiler(&mut self){
+    pub fn start_rust_builder(&mut self){
+        if let Some(child) = &mut self._build_child{
+            let _= child.kill();
+        }
+        // start a release build
+        self._rustc_build_stages = BuildStage::Building;
+
+        let mut _child = Command::new("cargo")
+            //.args(&["build","--release","--message-format=json"])
+            .args(&["build", "--release", "--message-format=json"])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .current_dir("./edit_repo")
+            .spawn();
+
+
+        let mut child = _child.unwrap();
+
+        let mut stdout =  child.stdout.take().unwrap();
+        let post_id = self._post_id;
+        let thread = std::thread::spawn(move ||{
+            loop{
+                let mut data = vec![0; 4096];
+                let n_bytes_read = stdout.read(&mut data).expect("cannot read");
+                data.truncate(n_bytes_read);
+                if n_bytes_read == 0{
+                    Cx::post_event(post_id, 1);
+                    return 
+                }
+            }
+        });
+        self._build_child = Some(child);
+    }
+
+     pub fn run_program(&mut self){
+        if let Some(child) = &mut self._run_child{
+            let _= child.kill();
+        }
+
+        let mut _child = Command::new("cargo")
+            .args(&["run", "--release"])
+            //.stdout(Stdio::piped())
+            //.stderr(Stdio::piped())
+            .current_dir("./edit_repo")
+            .spawn();
+        let mut child = _child.unwrap();
+        self._run_child = Some(child);
+    }
+
+    pub fn restart_rust_checker(&mut self){
         self._data.truncate(0);
         self._rustc_messages.truncate(0);
         self._rustc_spans.truncate(0);
         self._rustc_artifacts.truncate(0);
         self._rustc_done = false;
+        self._rustc_build_stages = BuildStage::NotRunning;
         self._items.truncate(0);
         self._data.push(String::new());
 
-        if let Some(child) = &mut self._child{
-            
+        if let Some(child) = &mut self._check_child{
+            let _= child.kill();
+        }
+
+         if let Some(child) = &mut self._build_child{
             let _= child.kill();
         }
 
         let mut _child = Command::new("cargo")
+            //.args(&["build","--release","--message-format=json"])
             .args(&["check","--message-format=json"])
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -389,13 +540,26 @@ impl RustCompiler{
         });
         self._rx = Some(rx);
         self._thread = Some(thread);
-        self._child = Some(child);
+        self._check_child = Some(child);
     }
 
      pub fn process_compiler_messages(&mut self, cx:&mut Cx, datas:Vec<Vec<u8>>){
         for data in datas{
             if data.len() == 0{ // last event
                 self._rustc_done = true;
+                // the check is done, do we have any errors? ifnot start a release build
+                let mut has_errors = false;
+                for span in &self._rustc_spans{
+                    if let Some(level) = &span.level{
+                        if level == "error"{
+                            has_errors = true;
+                            break;
+                        }
+                    }
+                }
+                if !has_errors{ // start release build
+                    self.start_rust_builder();
+                }
                 self.view.redraw_view_area(cx);
             }
             else {
@@ -503,7 +667,7 @@ pub struct RustcMessage{
 #[derive(Clone, Deserialize,  Default)]
 pub struct RustcProfile{
     opt_level:String,
-    debuginfo:u32,
+    debuginfo:Option<u32>,
     debug_assertions:bool,
     overflow_checks:bool,
     test:bool

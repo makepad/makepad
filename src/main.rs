@@ -184,7 +184,7 @@ impl App{
                                 self.text_buffers.save_file(cx, path);
                                 // lets save the textbuffer to disk
                                 // lets re-trigger the rust compiler
-                                self.rust_compiler.restart_rust_compiler();
+                                self.rust_compiler.restart_rust_checker();
                             },
                             _=>()
                         }
