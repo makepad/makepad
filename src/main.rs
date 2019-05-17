@@ -162,9 +162,6 @@ impl App{
                 Panel::Color(_)=>{}
                 Panel::RustCompiler=>{
                     match self.rust_compiler.handle_rust_compiler(cx, event, &mut self.text_buffers){
-                        RustCompilerEvent::UpdateMessages=>{
-                            cx.redraw_area(Area::All);
-                        },
                         RustCompilerEvent::SelectMessage{path}=>{
                             // just make it open an editor
                             file_tree_event = FileTreeEvent::SelectFile{path:path};
@@ -246,7 +243,6 @@ impl App{
                     self.file_tree.draw_file_tree(cx);
                 },
                 Panel::FileEditor{path, editor_id}=>{
-                    //let text_buffer = self.text_buffers.get_mut(path).unwrap();
                     let text_buffer = self.text_buffers.from_path(cx, path);
                     self.file_editors.get_draw(cx, *editor_id, |_cx, tmpl|{
                         FileEditor::create_file_editor_for_path(path, tmpl)

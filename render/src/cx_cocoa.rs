@@ -200,13 +200,13 @@ impl CocoaWindow{
         
         match ns_event.eventType(){
             appkit::NSApplicationDefined=>{
-                let post_id:u64 = msg_send![ns_event, data1];
-                let user_data:u64 = msg_send![ns_event, data2];
-                if post_id != 0{
+                let signal_id:u64 = msg_send![ns_event, data1];
+                let value:u64 = msg_send![ns_event, data2];
+                if signal_id != 0{
                     self.do_callback(&mut vec![
-                        Event::Post(PostEvent{
-                            post_id:post_id,
-                            data:user_data
+                        Event::Signal(SignalEvent{
+                            signal_id:signal_id,
+                            value:value
                         })
                     ]);
                 }
@@ -495,7 +495,7 @@ impl CocoaWindow{
         }
     }
 
-    pub fn post_event(post_id:u64, data:u64){
+    pub fn post_signal(signal_id:u64, value:u64){
         unsafe{
             let pool = foundation::NSAutoreleasePool::new(cocoa::base::nil);
             let nsevent: id = msg_send![
@@ -507,8 +507,8 @@ impl CocoaWindow{
                 windowNumber:1u64
                 context:nil
                 subtype:0i16
-                data1:post_id
-                data2:data
+                data1:signal_id
+                data2:value
             ];
             msg_send![appkit::NSApp(),postEvent:nsevent atStart:0];
             let _: () = msg_send![pool, release];

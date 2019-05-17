@@ -704,6 +704,7 @@ impl CodeEditor{
     }
 
     pub fn handle_code_editor(&mut self, cx:&mut Cx, event:&mut Event, text_buffer:&mut TextBuffer)->CodeEditorEvent{
+        
         if self.view.handle_scroll_bars(cx, event){
             if let Some(last_finger_move) = self._last_finger_move{
                 if let Some(grid_select_corner) = self._grid_select_corner{
@@ -720,8 +721,9 @@ impl CodeEditor{
             // in JS this wasn't possible performantly but in Rust its a breeze.
             self.view.redraw_view_area(cx);
         }
-        if let Event::Timer(te) = event{
-            if te.timer_id == self._cursor_blink_timer_id{
+        // global events
+        match event{
+            Event::Timer(te)=>if te.timer_id == self._cursor_blink_timer_id{
                 self._cursor_blink_timer_id = cx.start_timer(self.cursor_blink_speed, false);
                 // update the cursor uniform to blink it.
                 self._cursor_blink_flipflop = 1.0 - self._cursor_blink_flipflop;
@@ -731,8 +733,21 @@ impl CodeEditor{
                     self._last_lag_mutation_id = text_buffer.mutation_id;
                     return CodeEditorEvent::LagChange;
                 }
-            }
+            },
+            Event::Signal(se)=>if se.signal_id == text_buffer.signal_id{
+                match se.value{
+                    SIGNAL_TEXTBUFFER_MESSAGE_UPDATE=>{
+                        self.view.redraw_view_area(cx);
+                    },
+                    SIGNAL_TEXTBUFFER_JUMP_TO_OFFSET=>{
+                        self.do_jump_to_offset(cx, text_buffer);
+                    },
+                    _=>()
+                }
+            },
+            _=>()
         }
+        // editor local
         match event.hits(cx, self._bg_area, &mut self._hit_state){
             Event::KeyFocus(kf)=>{
                 if kf.is_lost{
@@ -740,6 +755,7 @@ impl CodeEditor{
                 }
             },
             Event::FingerDown(fe)=>{
+                
                 self.handle_finger_down(cx, &fe, text_buffer);
             },
             Event::FingerHover(_fe)=>{
@@ -1320,21 +1336,14 @@ impl CodeEditor{
         self.set_indent_line_highlight_id(cx);
 
         self.view.end_view(cx);
-
-        // possibly jump to offset
-        self.do_jump_to_offset(cx, text_buffer);
     }
 
     fn do_jump_to_offset(&mut self, cx:&mut Cx, text_buffer:&TextBuffer){
-        if !text_buffer.messages.jump_to_offset.is_none() && 
-            text_buffer.messages.jump_to_offset_id != self._jump_to_offset_id {
-            self._jump_to_offset_id = text_buffer.messages.jump_to_offset_id;
-            let offset = text_buffer.messages.jump_to_offset.unwrap();
-            // make one cursor, and start scrolling towards it
-            self.cursors.clear_and_set_last_cursor_head_and_tail(offset, text_buffer);
-            self.scroll_last_cursor_visible(cx, text_buffer, self._final_fill_height / 2.);
-            self.view.redraw_view_area(cx);
-        }   
+        let offset = text_buffer.messages.jump_to_offset;
+        // make one cursor, and start scrolling towards it
+        self.cursors.clear_and_set_last_cursor_head_and_tail(offset, text_buffer);
+        self.scroll_last_cursor_visible(cx, text_buffer, self._final_fill_height / 2.);
+        self.view.redraw_view_area(cx);
     }
 
     fn draw_cursors(&mut self, cx:&mut Cx){

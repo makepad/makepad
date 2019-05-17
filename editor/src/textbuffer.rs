@@ -13,9 +13,13 @@ pub struct TextBuffer{
     pub undo_stack: Vec<TextUndo>,
     pub redo_stack: Vec<TextUndo>,
     pub load_id: u64,
+    pub signal_id: u64,
     pub mutation_id: u64,
     pub messages: TextBufferMessages,
 }
+
+pub const SIGNAL_TEXTBUFFER_MESSAGE_UPDATE:u64 = 1;
+pub const SIGNAL_TEXTBUFFER_JUMP_TO_OFFSET:u64 = 2;
 
 #[derive(Clone, Default)]
 pub struct TextBufferMessages{
@@ -23,8 +27,7 @@ pub struct TextBufferMessages{
     pub mutation_id:u64, // only if this matches the textbuffer mutation id are the messages valid
     pub cursors:Vec<TextCursor>,
     pub bodies:Vec<TextBufferMessage>,
-    pub jump_to_offset:Option<usize>,
-    pub jump_to_offset_id:u64
+    pub jump_to_offset:usize
 }
 
 #[derive(Clone)]
@@ -49,6 +52,7 @@ impl TextBuffers{
         let root_path = &self.root_path;
         self.storage.entry(path.to_string()).or_insert_with(||{
             TextBuffer{
+                signal_id:cx.new_signal_id(),
                 load_id:cx.read_file(&format!("{}{}",root_path, path)),
                 ..Default::default()
             }

@@ -128,9 +128,9 @@ pub struct TimerEvent{
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct PostEvent{
-    pub post_id:u64,
-    pub data:u64
+pub struct SignalEvent{
+    pub signal_id:u64,
+    pub value:u64
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -187,7 +187,7 @@ pub enum Event{
     FileRead(FileReadEvent),
     FileWrite(FileWriteEvent),
     Timer(TimerEvent),
-    Post(PostEvent),
+    Signal(SignalEvent),
     KeyFocus(KeyFocusEvent),
     KeyDown(KeyEvent),
     KeyUp(KeyEvent),

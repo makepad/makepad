@@ -258,6 +258,12 @@ impl Cx{
                                 //println!("Animation took: {}", ((time_now_next - time_now) as f64) / 1_000_000_000.0);
                             }
                         }
+                        match &event{
+                            Event::FingerUp(fe)=>{ // decapture automatically
+                                self.captured_fingers[fe.digit] = Area::Empty;
+                            },
+                            _=>{}
+                        }
                     }
                 }
             );
@@ -272,6 +278,8 @@ impl Cx{
                 self.call_frame_event(&mut event_handler, time);
             }
 
+            self.call_signals_before_draw(&mut event_handler);
+
             // call redraw event
             if self.redraw_areas.len()>0{
                 //let time_start = cocoa_window.time_now();
@@ -282,6 +290,8 @@ impl Cx{
             }
 
             self.process_desktop_file_read_requests(&mut event_handler);
+
+            self.call_signals_after_draw(&mut event_handler);
 
             // set a cursor
             if !self.down_mouse_cursor.is_none(){
@@ -314,7 +324,6 @@ impl Cx{
                 self.paint_dirty = false;
                 self.repaint_id += 1;
                 self.repaint(&layer, &device, &command_queue, true);
-
             }
         }
     }
@@ -336,14 +345,13 @@ impl Cx{
         self.platform.stop_timer.push(id);
     }
 
-    pub fn new_post_event_id(&mut self)->u64{
-        self.platform.post_event_id += 1;
-        return self.platform.post_event_id;
+    pub fn send_signal(id:u64, value:u64){
+        CocoaWindow::post_signal(id, value);
     }
 
-    pub fn post_event(id:u64, data:u64){
-        CocoaWindow::post_event(id, data);
-    }
+    //pub fn send_custom_event_before_draw(&mut self, id:u64, message:u64){
+     //   self.custom_before_draw.push((id, message));
+    //}
 
     pub fn profile_clear(&mut self){
         self.platform.profiler_totals.truncate(0);
@@ -379,7 +387,7 @@ impl Cx{
 #[derive(Clone, Default)]
 pub struct CxPlatform{
     pub uni_cx:MetalBuffer,
-    pub post_event_id:u64,
+    pub post_id:u64,
     pub set_ime_position:Option<Vec2>,
     pub start_timer:Vec<(u64,f64,bool)>,
     pub stop_timer:Vec<(u64)>,

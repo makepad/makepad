@@ -18,7 +18,7 @@ pub struct RustCompiler{
     pub row_height:f32,
     pub path_color:Color,
     pub message_color:Color,
-    pub _post_id:u64,
+    pub _check_signal_id:u64,
 
     pub _check_child:Option<Child>,
     pub _build_child:Option<Child>,
@@ -38,6 +38,9 @@ pub struct RustCompiler{
     pub _items:Vec<RustCompilerItem>
 }
 
+const SIGNAL_CHECK_DATA:u64 = 1;
+const SIGNAL_BUILD_COMPLETE:u64 = 2;
+
 #[derive(PartialEq)]
 pub enum BuildStage{
     NotRunning,
@@ -54,7 +57,6 @@ pub struct RustCompilerItem{
 
 #[derive(Clone)]
 pub enum RustCompilerEvent{
-    UpdateMessages,
     SelectMessage{path:String},
     None,
 }
@@ -87,7 +89,7 @@ impl Style for RustCompiler{
             path_color:color("#999"),
             message_color:color("#bbb"),
             row_height:20.0,
-            _post_id:0,
+            _check_signal_id:0,
             _check_child:None,
             _build_child:None,
             _run_child:None,
@@ -107,7 +109,7 @@ impl Style for RustCompiler{
 
 impl RustCompiler{
     pub fn init(&mut self, cx:&mut Cx){
-        self._post_id = cx.new_post_event_id();
+        self._check_signal_id = cx.new_signal_id();
         self.restart_rust_checker();
     }
 
@@ -174,6 +176,9 @@ impl RustCompiler{
                 text_buffer.messages.cursors.truncate(0);
                 text_buffer.messages.bodies.truncate(0);
             }
+            else{
+                cx.send_signal_before_draw(text_buffer.signal_id, SIGNAL_TEXTBUFFER_MESSAGE_UPDATE);
+            }
         }
     }
 
@@ -187,7 +192,7 @@ impl RustCompiler{
 
         match event{
             Event::KeyDown(ke)=>match ke.key_code{
-                KeyCode::F5=>{
+                KeyCode::F9=>{
                     if self._rustc_build_stages == BuildStage::Complete{
                         self.run_program();
                     }
@@ -196,70 +201,74 @@ impl RustCompiler{
                         self.view.redraw_view_area(cx);
                     }
                 },
-                KeyCode::F6=>{ // next error
+                KeyCode::F8=>{ // next error
                     if self._items.len() > 0{
-                        let mut selected_index = None;
-                        for (counter,item) in self._items.iter_mut().enumerate(){
-                            if item.selected{
-                                selected_index = Some(counter);
+                        if ke.modifiers.shift{
+                            let mut selected_index = None;
+                            for (counter,item) in self._items.iter_mut().enumerate(){
+                                if item.selected{
+                                    selected_index = Some(counter);
+                                }
                             }
-                        }
-                        if let Some(selected_index) = selected_index{
-                            if selected_index + 1 < self._items.len(){
-                                item_to_select = Some(selected_index + 1);
+                            if let Some(selected_index) = selected_index{
+                                if selected_index > 0{
+                                    item_to_select = Some(selected_index - 1);
+                                }
+                                else {
+                                    item_to_select = Some(self._items.len() - 1);
+                                }
                             }
-                            else {
-                                item_to_select = Some(0);
-                            }
-                        }
-                        else{
-                            item_to_select = Some(0);
-                        }
-                    }
-                },
-                KeyCode::F7=>{ // previous error
-                    if self._items.len() > 0{
-                        let mut selected_index = None;
-                        for (counter,item) in self._items.iter_mut().enumerate(){
-                            if item.selected{
-                                selected_index = Some(counter);
-                            }
-                        }
-                        if let Some(selected_index) = selected_index{
-                            if selected_index > 0{
-                                item_to_select = Some(selected_index - 1);
-                            }
-                            else {
+                            else{
                                 item_to_select = Some(self._items.len() - 1);
                             }
                         }
                         else{
-                            item_to_select = Some(self._items.len() - 1);
+                            let mut selected_index = None;
+                            for (counter,item) in self._items.iter_mut().enumerate(){
+                                if item.selected{
+                                    selected_index = Some(counter);
+                                }
+                            }
+                            if let Some(selected_index) = selected_index{
+                                if selected_index + 1 < self._items.len(){
+                                    item_to_select = Some(selected_index + 1);
+                                }
+                                else {
+                                    item_to_select = Some(0);
+                                }
+                            }
+                            else{
+                                item_to_select = Some(0);
+                            }
                         }
                     }
                 },
                 _=>()
             },
-            Event::Post(pe)=>if self._post_id == pe.post_id{
-                if pe.data == 0{
-                    let mut datas = Vec::new();
-                    if let Some(rx) = &self._rx{
-                        while let Ok(data) = rx.try_recv(){
-                            datas.push(data);
-                        }
+            Event::Signal(se)=>{
+                if self._check_signal_id == se.signal_id{
+                    match se.value{
+                        SIGNAL_CHECK_DATA=>{
+                            let mut datas = Vec::new();
+                            if let Some(rx) = &self._rx{
+                                while let Ok(data) = rx.try_recv(){
+                                    datas.push(data);
+                                }
+                            }
+                            if datas.len() > 0{
+                                self.process_compiler_messages(cx, datas);
+                                self.export_messages(cx, text_buffers);
+                            }
+                        },
+                        SIGNAL_BUILD_COMPLETE=>{
+                            self._rustc_build_stages = BuildStage::Complete;
+                            if self._run_when_done{
+                                self.run_program();
+                            }
+                            self.view.redraw_view_area(cx);
+                        },
+                        _=>()
                     }
-                    if datas.len() > 0{
-                        self.process_compiler_messages(cx, datas);
-                        self.export_messages(cx, text_buffers);
-                        return RustCompilerEvent::UpdateMessages;
-                    }
-                }
-                else{
-                    self._rustc_build_stages = BuildStage::Complete;
-                    if self._run_when_done{
-                        self.run_program();
-                    }
-                    self.view.redraw_view_area(cx);
                 }
             },
             _=>()
@@ -312,8 +321,8 @@ impl RustCompiler{
             let span = &self._rustc_spans[item.span_index];
             // alright we clicked an item. now what. well 
             let text_buffer = text_buffers.from_path(cx, &span.file_name);
-            text_buffer.messages.jump_to_offset = Some(span.byte_start as usize);
-            text_buffer.messages.jump_to_offset_id = cx.event_id;
+            text_buffer.messages.jump_to_offset = span.byte_start as usize;
+            cx.send_signal_after_draw(text_buffer.signal_id, SIGNAL_TEXTBUFFER_JUMP_TO_OFFSET);
             return RustCompilerEvent::SelectMessage{path:span.file_name.clone()}
         }
         RustCompilerEvent::None
@@ -324,17 +333,7 @@ impl RustCompiler{
             return
         }
 
-        //if !self._rustc_done{
-        //    self.code_icon.draw_icon_walk(cx, CodeIconType::Warning);
-        //    self.text.draw_text(cx, "Rust building...");
-        //    cx.turtle_new_line();
-        // }
-        //else{
-        //    self.text.draw_text(cx, "Rust Done!");
-        //    cx.turtle_new_line();
-        //}
         let mut counter = 0;
-        let mut any_error = false;
         for (index,span) in self._rustc_spans.iter().enumerate(){
             if span.label.is_none(){
                 continue;
@@ -359,15 +358,13 @@ impl RustCompiler{
 
             if let Some(level) = &span.level{
                 if level == "error"{
-                    any_error = true;
                     self.code_icon.draw_icon_walk(cx, CodeIconType::Error);
                 }
                 else{
                     self.code_icon.draw_icon_walk(cx, CodeIconType::Warning);
                 }
             }
-            //if message.
-            //self.text.draw_text(cx, &format!("{}", message.message.message));
+
             self.text.color = self.path_color;
             self.text.draw_text(cx, &format!("{}:{} - ", span.file_name, span.line_start));
             self.text.color = self.message_color;
@@ -382,7 +379,6 @@ impl RustCompiler{
 
         let bg_even = cx.color("bg_selected");
         let bg_odd = cx.color("bg_odd");
-
     
         self.item_bg.color = if counter&1 == 0{bg_even}else{bg_odd};
         let bg_inst = self.item_bg.begin_quad(cx,&Layout{
@@ -405,7 +401,7 @@ impl RustCompiler{
                     }
                 },
                 BuildStage::Complete=>{
-                    self.text.draw_text(cx, "Press F5 to run")
+                    self.text.draw_text(cx, "Press F9 to run")
                 }
             };
         }
@@ -457,14 +453,14 @@ impl RustCompiler{
         let mut child = _child.unwrap();
 
         let mut stdout =  child.stdout.take().unwrap();
-        let post_id = self._post_id;
+        let signal_id = self._check_signal_id;
         let thread = std::thread::spawn(move ||{
             loop{
                 let mut data = vec![0; 4096];
                 let n_bytes_read = stdout.read(&mut data).expect("cannot read");
                 data.truncate(n_bytes_read);
                 if n_bytes_read == 0{
-                    Cx::post_event(post_id, 1);
+                    Cx::send_signal(signal_id, SIGNAL_BUILD_COMPLETE);
                     return 
                 }
             }
@@ -531,14 +527,14 @@ impl RustCompiler{
         //let mut stderr =  child.stderr.take().unwrap();
         let mut stdout =  child.stdout.take().unwrap();
         let (tx, rx) = mpsc::channel();
-        let post_id = self._post_id;
+        let signal_id = self._check_signal_id;
         let thread = std::thread::spawn(move ||{
             loop{
                 let mut data = vec![0; 4096];
                 let n_bytes_read = stdout.read(&mut data).expect("cannot read");
                 data.truncate(n_bytes_read);
                 let _ = tx.send(data);
-                Cx::post_event(post_id, 0);
+                Cx::send_signal(signal_id, SIGNAL_CHECK_DATA);
                 if n_bytes_read == 0{
                     return 
                 }

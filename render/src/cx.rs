@@ -59,6 +59,7 @@ pub struct Cx{
     pub repaint_id: u64,
     pub event_id: u64,
     pub timer_id: u64,
+    pub signal_id: u64,
     pub is_in_redraw_cycle:bool,
 
     pub last_key_focus:Area,
@@ -83,6 +84,9 @@ pub struct Cx{
 
     pub frame_callbacks:Vec<Area>,
     pub next_frame_callbacks:Vec<Area>,
+
+    pub signals_before_draw:Vec<(u64,u64)>,
+    pub signals_after_draw:Vec<(u64,u64)>,
 
     pub platform:CxPlatform,
 
@@ -132,7 +136,8 @@ impl Default for Cx{
             event_id:1,
             repaint_id:1,
             timer_id:1,
-    
+            signal_id:1,
+
             is_in_redraw_cycle:false,
             turtles:Vec::new(),
             align_list:Vec::new(),
@@ -158,6 +163,10 @@ impl Default for Cx{
 
             frame_callbacks:Vec::new(),
             next_frame_callbacks:Vec::new(),
+
+            //custom_before_draw:Vec::new(),
+            signals_before_draw:Vec::new(),
+            signals_after_draw:Vec::new(),
 
             platform:CxPlatform{..Default::default()},
 
@@ -417,15 +426,6 @@ impl Cx{
                 focus:self.key_focus
             }))
         }
-/*
-        // check any user events and send them
-        if self.user_events.len() > 0{
-            let user_events = self.user_events.clone();
-            self.user_events.truncate(0);
-            for mut user_event in user_events{
-                event_handler(self, &mut user_event);
-            }
-        }*/
     }
 
     pub fn call_draw_event<F, T>(&mut self, mut event_handler:F, root_view:&mut View<T>)
@@ -471,6 +471,53 @@ impl Cx{
             return;
         }
         self.next_frame_callbacks.push(area);
+    }
+
+    pub fn new_signal_id(&mut self)->u64{
+        self.signal_id += 1;
+        return self.signal_id;
+    }
+
+    pub fn send_signal_before_draw(&mut self, id:u64, message:u64){
+        self.signals_before_draw.push((id, message));
+    }
+
+    pub fn send_signal_after_draw(&mut self, id:u64, message:u64){
+        self.signals_after_draw.push((id, message));
+    }
+
+    pub fn call_signals_before_draw<F>(&mut self, mut event_handler:F)
+    where F: FnMut(&mut Cx, &mut Event)
+    {
+        if self.signals_before_draw.len() == 0{
+            return
+        }
+
+        let signals_before_draw = self.signals_before_draw.clone();
+        self.signals_before_draw.truncate(0);
+        for (signal_id, value) in signals_before_draw{
+            self.call_event_handler(&mut event_handler, &mut Event::Signal(SignalEvent{
+                signal_id:signal_id,
+                value:value
+            }));
+        }
+    }
+
+    pub fn call_signals_after_draw<F>(&mut self, mut event_handler:F)
+    where F: FnMut(&mut Cx, &mut Event)
+    {
+        if self.signals_after_draw.len() == 0{
+            return
+        }
+
+        let signals_after_draw = self.signals_after_draw.clone();
+        self.signals_after_draw.truncate(0);
+        for (signal_id, value) in signals_after_draw{
+            self.call_event_handler(&mut event_handler, &mut Event::Signal(SignalEvent{
+                signal_id:signal_id,
+                value:value
+            }));
+        }
     }
 
 /*
