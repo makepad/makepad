@@ -47,8 +47,7 @@ impl Style for App{
                 ..Style::style(cx)
             },
             text_buffers:TextBuffers{
-                root_path:".".to_string(),
-                message_id:0,
+                root_path:"./".to_string(),
                 storage:HashMap::new()
             },
             quad:Quad{
@@ -96,7 +95,7 @@ impl Style for App{
                                 DockTab{
                                     closeable:true,
                                     title:"main.rs".to_string(),
-                                    item:Panel::FileEditor{path:"/src/main.rs".to_string(), editor_id:1}
+                                    item:Panel::FileEditor{path:"src/main.rs".to_string(), editor_id:1}
                                 }
                             ],
                         }),
@@ -133,9 +132,9 @@ impl App{
         match event{
             Event::Construct=>{
                 if cx.feature == "mtl"{
-                    self.text_buffers.root_path = "./edit_repo".to_string();
+                    self.text_buffers.root_path = "./edit_repo/".to_string();
                 }
-                self.index_read_id = cx.read_file(&format!("{}/index.json",self.text_buffers.root_path));
+                self.index_read_id = cx.read_file(&format!("{}index.json",self.text_buffers.root_path));
                 self.rust_compiler.init(cx);
             },
             Event::FileRead(fr)=>{
@@ -165,6 +164,10 @@ impl App{
                     match self.rust_compiler.handle_rust_compiler(cx, event, &mut self.text_buffers){
                         RustCompilerEvent::UpdateMessages=>{
                             cx.redraw_area(Area::All);
+                        },
+                        RustCompilerEvent::SelectMessage{path}=>{
+                            // just make it open an editor
+                            file_tree_event = FileTreeEvent::SelectFile{path:path};
                         },
                         _=>()
                     }
@@ -206,9 +209,7 @@ impl App{
             },
             FileTreeEvent::SelectFile{path}=>{
                 // search for the tabcontrol with the maximum amount of editors
-                if let Some(target_ctrl_id) = self.focus_editor_or_find_editor_target(cx, &path){ // found a control to append to
-                    self.open_new_editor_in_target_ctrl(cx, target_ctrl_id, &path);
-                }
+                self.focus_or_new_editor(cx, &path);
             },
             _=>{}
         }
@@ -266,42 +267,28 @@ impl App{
         }
     }
 
-    fn open_new_editor_in_target_ctrl(&mut self, cx:&mut Cx, target_ctrl_id:usize, path:&str){
-        let new_tab = self.new_file_editor_tab(path);
-        let mut dock_walker = self.dock.walker();
-        let mut ctrl_id = 1;
-        while let Some(dock_item) = dock_walker.walk_dock_item(){
-            if ctrl_id == target_ctrl_id{
-                if let DockItem::TabControl{current, tabs} = dock_item{
-                    tabs.insert(*current+1, new_tab);
-                    *current = *current + 1;//tabs.len() - 1;
-                    cx.redraw_area(Area::All);
-                    break
-                }
-            }
-            ctrl_id += 1;
-        }
-   }
-
-    fn focus_editor_or_find_editor_target(&mut self, cx:&mut Cx, file_path:&str)->Option<usize>{
+    fn focus_or_new_editor(&mut self, cx:&mut Cx, file_path:&str){
         let mut target_ctrl_id = 0;
         let mut only_focus_editor = false;
         let mut dock_walker = self.dock.walker();
         let mut ctrl_id = 1;
-        'outer: while let Some(dock_item) = dock_walker.walk_dock_item(){
+        while let Some(dock_item) = dock_walker.walk_dock_item(){
             match dock_item{
                 DockItem::TabControl{current, tabs}=>{
                     for (id,tab) in tabs.iter().enumerate(){
                         match &tab.item{
-                            Panel::FileEditor{path, ..}=>{
+                            Panel::FileEditor{path, editor_id}=>{
                                 if *path == file_path{
                                     *current = id; // focus this one
+                                    // set the keyboard focus
+                                    if let Some(file_editor) = &mut self.file_editors.get(*editor_id){
+                                        file_editor.set_key_focus(cx);
+                                    }
                                     only_focus_editor = true;
                                     cx.redraw_area(Area::All);
-                                    //break 'outer;
                                 }
                             },
-                            Panel::FileEditorTarget=>{
+                            Panel::FileEditorTarget=>{ // found the editor target
                                 target_ctrl_id = ctrl_id;
                             },
                             _=>()
@@ -312,11 +299,21 @@ impl App{
             }
             ctrl_id += 1;
         }
-        if target_ctrl_id == 0 || only_focus_editor{
-            None
-        }
-        else{
-            Some(target_ctrl_id)
+        if target_ctrl_id != 0 && !only_focus_editor{ // open a new one
+            let new_tab = self.new_file_editor_tab(file_path);
+            let mut dock_walker = self.dock.walker();
+            let mut ctrl_id = 1;
+            while let Some(dock_item) = dock_walker.walk_dock_item(){
+                if ctrl_id == target_ctrl_id{
+                    if let DockItem::TabControl{current, tabs} = dock_item{
+                        tabs.insert(*current+1, new_tab);
+                        *current = *current + 1;//tabs.len() - 1;
+                        cx.redraw_area(Area::All);
+                        break
+                    }
+                }
+                ctrl_id += 1;
+            }
         }
     }
 }
@@ -362,6 +359,12 @@ impl FileEditor{
         }
     }
 
+    fn set_key_focus(&mut self, cx:&mut Cx){
+        match self{
+            FileEditor::Rust(re)=>re.code_editor.set_key_focus(cx),
+        }
+    }
+
     fn draw_file_editor(&mut self, cx:&mut Cx, text_buffer:&mut TextBuffer){
         match self{
             FileEditor::Rust(re)=>re.draw_rust_editor(cx, text_buffer),
@@ -372,6 +375,7 @@ impl FileEditor{
         // check which file extension we have to spawn a new editor
         FileEditor::Rust(RustEditor{
             path:path.to_string(),
+            set_key_focus_on_draw:true,
             ..template.rust_editor.clone()
         })
     }

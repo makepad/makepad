@@ -6,6 +6,7 @@ use crate::codeeditor::*;
 #[derive(Clone)]
 pub struct RustEditor{
     pub path:String,
+    pub set_key_focus_on_draw:bool,
     pub code_editor:CodeEditor,
 }
 
@@ -17,6 +18,7 @@ impl ElementLife for RustEditor{
 impl Style for RustEditor{
     fn style(cx:&mut Cx)->Self{
         let rust_editor = Self{
+            set_key_focus_on_draw:false,
             path:"".to_string(),
             code_editor:CodeEditor{
                 ..Style::style(cx)
@@ -33,7 +35,6 @@ pub enum RustEditorEvent{
     Change
 }
 
-
 impl RustEditor{
     pub fn handle_rust_editor(&mut self, cx:&mut Cx, event:&mut Event, text_buffer:&mut TextBuffer)->CodeEditorEvent{
         self.code_editor.handle_code_editor(cx, event, text_buffer)
@@ -44,6 +45,11 @@ impl RustEditor{
             return
         }
         
+        if self.set_key_focus_on_draw{
+            self.set_key_focus_on_draw = false;
+            self.code_editor.set_key_focus(cx);
+        }        
+
         let mut state = TokenizerState::new(text_buffer);
        
         let mut looping = true;
@@ -119,12 +125,12 @@ impl RustEditor{
                             }
                             else if state.next == '\n'{
                                 // output current line
-                                self.code_editor.draw_chunk(cx, &chunk, state.next, state.offset, TokenType::Comment, &text_buffer.message_cursors);
+                                self.code_editor.draw_chunk(cx, &chunk, state.next, state.offset, TokenType::Comment, &text_buffer.messages.cursors);
                                 chunk.truncate(0);
                                 // output a newline
                                 chunk.push(state.next);
                                 state.advance();
-                                self.code_editor.draw_chunk(cx, &chunk, state.next, state.offset, TokenType::Newline,  &text_buffer.message_cursors);
+                                self.code_editor.draw_chunk(cx, &chunk, state.next, state.offset, TokenType::Newline,  &text_buffer.messages.cursors);
                                 chunk.truncate(0);
                                 // output indent lines
                                 while state.next == ' '{
@@ -132,7 +138,7 @@ impl RustEditor{
                                     state.advance();
                                 }
                                 if chunk.len()>0{
-                                    self.code_editor.draw_chunk(cx, &chunk, state.next, state.offset, TokenType::Whitespace,  &text_buffer.message_cursors);
+                                    self.code_editor.draw_chunk(cx, &chunk, state.next, state.offset, TokenType::Whitespace,  &text_buffer.messages.cursors);
                                     chunk.truncate(0);
                                 }
                             }
@@ -322,7 +328,7 @@ impl RustEditor{
                     token_type = TokenType::Operator;
                 }
             }
-            self.code_editor.draw_chunk(cx, &chunk, state.next, state.offset, token_type,  &text_buffer.message_cursors);
+            self.code_editor.draw_chunk(cx, &chunk, state.next, state.offset, token_type,  &text_buffer.messages.cursors);
             chunk.truncate(0);
         }
         

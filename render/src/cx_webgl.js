@@ -30,10 +30,8 @@
 				if(new_slots&1)new_slots++; // float64 align it
 				let new_bytes = new_slots * 4;
 				this.pointer = this.exports.realloc_wasm_message(this.pointer, new_bytes); // by
-				this.mf32 = new Float32Array(this.exports.memory.buffer, this.pointer, new_slots);
-				this.mu32 = new Uint32Array(this.exports.memory.buffer, this.pointer, new_slots);
-				this.mf64 =  new Float64Array(this.exports.memory.buffer, this.pointer, new_slots>>1);
    				this.slots = new_slots
+	 		    this.update_refs()
 			}
 			let pos = this.used;
 			this.used += slots;

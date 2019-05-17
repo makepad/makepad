@@ -14,15 +14,33 @@ pub struct TextBuffer{
     pub redo_stack: Vec<TextUndo>,
     pub load_id: u64,
     pub mutation_id: u64,
-    pub message_id:u64,
-    pub message_mut_id:u64, // if not the same as mutation_id its probably stale
-    pub message_cursors:Vec<TextCursor>,
-    pub message_bodies:Vec<TextBufferMessage>
+    pub messages: TextBufferMessages,
+}
+
+#[derive(Clone, Default)]
+pub struct TextBufferMessages{
+    pub gc_id:u64, // gc id for the update pass
+    pub mutation_id:u64, // only if this matches the textbuffer mutation id are the messages valid
+    pub cursors:Vec<TextCursor>,
+    pub bodies:Vec<TextBufferMessage>,
+    pub jump_to_offset:Option<usize>,
+    pub jump_to_offset_id:u64
+}
+
+#[derive(Clone)]
+pub enum TextBufferMessageLevel{
+    Error,
+    Warning,
+}
+
+#[derive(Clone)]
+pub struct TextBufferMessage{
+    pub level:TextBufferMessageLevel,
+    pub body:String
 }
 
 pub struct TextBuffers{
     pub root_path: String,
-    pub message_id:u64,
     pub storage: HashMap<String, TextBuffer>
 }
 
@@ -59,17 +77,6 @@ impl TextBuffers{
     }
 }
 
-#[derive(Clone)]
-pub enum TextBufferMessageLevel{
-    Error,
-    Warning,
-}
-
-#[derive(Clone)]
-pub struct TextBufferMessage{
-    pub level:TextBufferMessageLevel,
-    pub body:String
-}
 
 #[derive(Clone, Copy)]
 pub struct TextPos{

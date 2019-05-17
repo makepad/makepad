@@ -16,6 +16,8 @@ pub struct RustCompiler{
     pub item_bg:Quad,
     pub code_icon:CodeIcon,
     pub row_height:f32,
+    pub path_color:Color,
+    pub message_color:Color,
     pub _post_id:u64,
     pub _child:Option<Child>,
     pub _rx:Option<mpsc::Receiver<std::vec::Vec<u8>>>,
@@ -31,15 +33,16 @@ pub struct RustCompiler{
 pub struct RustCompilerItem{
     hit_state:HitState,
     animator:Animator,
+    span_index:usize,
     marked:u64
 }
 
 #[derive(Clone)]
 pub enum RustCompilerEvent{
     UpdateMessages,
+    SelectMessage{path:String},
     None,
 }
-
 
 impl Style for RustCompiler{
     fn style(cx:&mut Cx)->Self{
@@ -66,6 +69,8 @@ impl Style for RustCompiler{
             code_icon:CodeIcon{
                 ..Style::style(cx)
             },
+            path_color:color("#999"),
+            message_color:color("#bbb"),
             row_height:20.0,
             _post_id:0,
             _child:None,
@@ -105,41 +110,36 @@ impl RustCompiler{
     }
 
     pub fn export_messages(&self, cx:&mut Cx, text_buffers:&mut TextBuffers){
-        text_buffers.message_id += 1;
-        let message_id = text_buffers.message_id;
+        
         for span in &self._rustc_spans{
             if span.label.is_none(){
                 continue;
             }
-            // lets get the first span
-            //let spans = &rcmsg.message.spans;
-            //for i in (0..spans.len()).rev(){
 
-                //let span = &spans[i];
-            let path = format!("/{}",span.file_name);
-            let text_buffer = text_buffers.from_path(cx, &path);
-            text_buffer.message_mut_id = text_buffer.mutation_id;
-            if text_buffer.message_id != message_id{
-                text_buffer.message_id = message_id;
-                text_buffer.message_cursors.truncate(0);
-                text_buffer.message_bodies.truncate(0);
+            let text_buffer = text_buffers.from_path(cx, &span.file_name);
+            let messages = &mut text_buffer.messages;
+            messages.mutation_id = text_buffer.mutation_id;
+            if messages.gc_id != cx.event_id{
+                messages.gc_id = cx.event_id;
+                messages.cursors.truncate(0);
+                messages.bodies.truncate(0);
             }
             if span.byte_start == span.byte_end{
-                text_buffer.message_cursors.push(TextCursor{
+                messages.cursors.push(TextCursor{
                     head:(span.byte_start-1) as usize,
                     tail:span.byte_end as usize,
                     max:0
                 });
             }
             else{
-                text_buffer.message_cursors.push(TextCursor{
+                messages.cursors.push(TextCursor{
                     head:span.byte_start as usize,
                     tail:span.byte_end as usize,
                     max:0
                 });
             }
             //println!("PROCESING MESSAGES FOR {} {} {}", span.byte_start, span.byte_end+1, path);
-            text_buffer.message_bodies.push(TextBufferMessage{
+            text_buffer.messages.bodies.push(TextBufferMessage{
                 body:span.label.clone().unwrap(),
                 level:match span.level.as_ref().unwrap().as_ref(){
                     "warning"=>TextBufferMessageLevel::Warning,
@@ -151,10 +151,9 @@ impl RustCompiler{
         }
         // clear all files we missed
         for (_, text_buffer) in &mut text_buffers.storage{
-            if text_buffer.message_id != message_id{
-                text_buffer.message_id = message_id;
-                text_buffer.message_cursors.truncate(0);
-                text_buffer.message_bodies.truncate(0);
+            if text_buffer.messages.gc_id != cx.event_id{
+                text_buffer.messages.cursors.truncate(0);
+                text_buffer.messages.bodies.truncate(0);
             }
         }
     }
@@ -177,12 +176,11 @@ impl RustCompiler{
                     self.export_messages(cx, text_buffers);
                     return RustCompilerEvent::UpdateMessages;
                 }
-
             }
             // lets export our errors
         }
         let mut unmark_nodes = false;
-        let mut clicked_item = None;
+        let mut clicked_span_index = None;
         for (counter,item) in self._items.iter_mut().enumerate(){   
             match event.hits(cx, item.animator.area, &mut item.hit_state){
                 Event::Animate(ae)=>{
@@ -194,7 +192,7 @@ impl RustCompiler{
                     item.marked = cx.event_id;
                     unmark_nodes = true;
                     item.animator.play_anim(cx, Self::get_over_anim(cx, counter, item.marked != 0));
-                    clicked_item = Some(counter);
+                    clicked_span_index = Some(item.span_index); 
                 },
                 Event::FingerUp(_fe)=>{
                 },
@@ -223,8 +221,13 @@ impl RustCompiler{
                 }
             };
         }
-        if let Some(clicked_item) = clicked_item{
-            //return RustCompilerEvent::
+        if let Some(clicked_span_index) = clicked_span_index{
+            let span = &self._rustc_spans[clicked_span_index];
+            // alright we clicked an item. now what. well 
+            let text_buffer = text_buffers.from_path(cx, &span.file_name);
+            text_buffer.messages.jump_to_offset = Some(span.byte_start as usize);
+            text_buffer.messages.jump_to_offset_id = cx.event_id;
+            return RustCompilerEvent::SelectMessage{path:span.file_name.clone()}
         }
         RustCompilerEvent::None
     }
@@ -244,7 +247,7 @@ impl RustCompiler{
         //    cx.turtle_new_line();
         //}
         let mut counter = 0;
-        for span in &self._rustc_spans{
+        for (index,span) in self._rustc_spans.iter().enumerate(){
             if span.label.is_none(){
                 continue;
             }
@@ -253,6 +256,7 @@ impl RustCompiler{
                 self._items.push(RustCompilerItem{
                     animator:Animator::new(Self::get_default_anim(cx, counter, false)),
                     hit_state:HitState{..Default::default()},
+                    span_index:index,
                     marked:0
                 });
             };
@@ -275,6 +279,9 @@ impl RustCompiler{
             }
             //if message.
             //self.text.draw_text(cx, &format!("{}", message.message.message));
+            self.text.color = self.path_color;
+            self.text.draw_text(cx, &format!("{}:{} - ", span.file_name, span.line_start));
+            self.text.color = self.message_color;
             self.text.draw_text(cx, &format!("{}", span.label.as_ref().unwrap()));
 
             let bg_area = self.item_bg.end_quad(cx, &bg_inst);
@@ -284,12 +291,34 @@ impl RustCompiler{
             counter += 1;
         }
 
+        let bg_even = cx.color("bg_selected");
+        let bg_odd = cx.color("bg_odd");
+
+        if self._rustc_spans.len() == 0{
+            self.item_bg.color = if counter&1 == 0{bg_even}else{bg_odd};
+            let bg_inst = self.item_bg.begin_quad(cx,&Layout{
+                width:Bounds::Fill,
+                height:Bounds::Fix(self.row_height),
+                padding:Padding{l:2.,t:3.,b:2.,r:0.},
+                ..Default::default()
+            });
+            if self._rustc_done == true{
+                self.code_icon.draw_icon_walk(cx, CodeIconType::Ok);
+                self.text.draw_text(cx, "All OK!");
+            }
+            else{
+                self.code_icon.draw_icon_walk(cx, CodeIconType::Wait);
+                self.text.draw_text(cx, "Checking");
+            }
+            self.item_bg.end_quad(cx, &bg_inst);
+            cx.turtle_new_line();
+            counter += 1;
+        }
+
         // draw filler nodes
         
         let view_total = cx.get_turtle_bounds();   
         let rect_now =  cx.get_turtle_rect();
-        let bg_even = cx.color("bg_selected");
-        let bg_odd = cx.color("bg_odd");
         let mut y = view_total.y;
         while y < rect_now.h{
             self.item_bg.color = if counter&1 == 0{bg_even}else{bg_odd};
@@ -400,6 +429,7 @@ impl RustCompiler{
                                             if span.label.is_none(){
                                                 span.label = Some(parsed.message.message.clone());
                                             }
+                                            //span.file_name = format!("/{}",span.file_name);
                                             span.level = Some(parsed.message.level.clone());
                                             self._rustc_spans.push(span);
                                         }

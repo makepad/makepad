@@ -74,6 +74,8 @@ pub struct CodeEditor{
     pub _last_tabs:usize,
     pub _newline_tabs:usize,
 
+    pub _jump_to_offset_id:u64,
+
     pub _last_lag_mutation_id:u64
 }
 
@@ -83,6 +85,7 @@ pub struct CodeEditorColors{
     bg:Color,
     indent_lines:Color,
     selection:Color,
+    selection_defocus:Color,
     highlight:Color,
     cursor:Color,
     cursor_row:Color,
@@ -130,6 +133,7 @@ impl Style for CodeEditor{
                 bg:color256(30,30,30),
                 indent_lines: color("#5"),
                 selection: color256(42,78,117),
+                selection_defocus:color256(75,75,75),
                 highlight:color256a(75,75,95,128),
                 cursor:color256(176,176,176),
                 cursor_row:color256(75,75,75),
@@ -276,11 +280,12 @@ impl Style for CodeEditor{
 
            
             _cursor_blink_timer_id:0,
-            _cursor_blink_flipflop:1.0,
+            _cursor_blink_flipflop:0.,
             _cursor_area:Area::Empty,
             _last_lag_mutation_id:0,
             _last_tabs:0,
-            _newline_tabs:0
+            _newline_tabs:0,
+            _jump_to_offset_id:0
         }
     }
 }
@@ -434,7 +439,8 @@ impl CodeEditor{
     pub fn handle_finger_down(&mut self, cx:&mut Cx, fe:&FingerDownEvent, text_buffer:&mut TextBuffer){
         cx.set_down_mouse_cursor(MouseCursor::Text);
         // give us the focus
-        cx.set_key_focus(self._bg_area);
+       
+        self.set_key_focus(cx);
         let offset = self.text.find_closest_offset(cx, &self._text_area, fe.abs);
         match fe.tap_count{
             1=>{
@@ -649,7 +655,7 @@ impl CodeEditor{
         if cursor_moved{
             self.update_highlight(text_buffer);
 
-            self.scroll_last_cursor_visible(cx, text_buffer);
+            self.scroll_last_cursor_visible(cx, text_buffer, 0.);
             self.view.redraw_view_area(cx);
         }
         self.reset_cursor_blinker(cx);        
@@ -692,7 +698,7 @@ impl CodeEditor{
         else{
             self.cursors.replace_text(&te.input, text_buffer);
         }
-        self.scroll_last_cursor_visible(cx, text_buffer);
+        self.scroll_last_cursor_visible(cx, text_buffer, 0.);
         self.view.redraw_view_area(cx);
         self.reset_cursor_blinker(cx);        
     }
@@ -774,6 +780,15 @@ impl CodeEditor{
         CodeEditorEvent::None
    }
 
+    pub fn has_key_focus(&self, cx:&Cx)->bool{
+        cx.has_key_focus(self._bg_area)
+    }
+
+    pub fn set_key_focus(&mut self, cx:&mut Cx){
+        cx.set_key_focus(self._bg_area);
+        self.reset_cursor_blinker(cx);
+    }
+
     pub fn begin_code_editor(&mut self, cx:&mut Cx, text_buffer:&TextBuffer)->Result<(),()>{
         // adjust dilation based on DPI factor
         self.view.begin_view(cx, &Layout{..Default::default()})?;
@@ -781,7 +796,7 @@ impl CodeEditor{
         // copy over colors
         self.indent_lines.color = self.colors.indent_lines;
         self.bg.color = self.colors.bg;
-        self.selection.color = self.colors.selection;
+        self.selection.color = if self.has_key_focus(cx){self.colors.selection}else{self.colors.selection_defocus};
         self.highlight.color = self.colors.highlight;
         self.cursor.color = self.colors.cursor;
         self.cursor_row.color = self.colors.cursor_row;
@@ -844,11 +859,11 @@ impl CodeEditor{
             self._indent_id_alloc = 1.0;
             self._paren_stack.truncate(0);
             self._draw_cursors.set_next(&self.cursors.set);
-            if text_buffer.message_mut_id != text_buffer.mutation_id{
-                self._draw_messages.term(&text_buffer.message_cursors);
+            if text_buffer.messages.mutation_id != text_buffer.mutation_id{
+                self._draw_messages.term(&text_buffer.messages.cursors);
             }
             else{
-                self._draw_messages.set_next(&text_buffer.message_cursors);
+                self._draw_messages.set_next(&text_buffer.messages.cursors);
             }
             self._token_chunks.truncate(0);
             self._last_cursor_pos = self.cursors.get_last_cursor_text_pos(text_buffer);
@@ -1225,6 +1240,9 @@ impl CodeEditor{
         if last.geom_open.is_none() && !last.geom_close.is_none(){
             return token_chunks_len
         }
+        if !self.has_key_focus(cx){
+            return pair_token
+        }
         if let Some(pos) = self.cursors.get_last_cursor_singular(){
             // cursor is near the last one or its marked
             let fail = if last.exp_paren == '(' && chunk[0] != ')' ||
@@ -1263,6 +1281,18 @@ impl CodeEditor{
         return pair_token
     }
 
+    fn draw_paren_unmatched(&mut self, cx:&mut Cx){
+        while self._paren_stack.len()>0{
+            let last = self._paren_stack.pop().unwrap();
+            if self.has_key_focus(cx) && !last.geom_open.is_none(){
+                self.paren_pair.color = self.colors.paren_pair_fail;
+                if let Some(rc) = last.geom_open{
+                    self.paren_pair.draw_quad_abs(cx, rc);
+                }
+            }
+        }
+    }
+
     pub fn end_code_editor(&mut self, cx:&mut Cx, text_buffer:&TextBuffer){
 
         // lets insert an empty newline at the bottom so its nicer to scroll
@@ -1274,7 +1304,7 @@ impl CodeEditor{
         self.text.end_text(cx, self._line_number_inst.as_ref().unwrap());
        
         // unmatched highlighting
-        self.draw_unmatched_highlighting(cx);
+        self.draw_paren_unmatched(cx);
         self.draw_cursors(cx);
         self.do_selection_animations(cx);
         self.draw_selections(cx);
@@ -1290,26 +1320,31 @@ impl CodeEditor{
         self.set_indent_line_highlight_id(cx);
 
         self.view.end_view(cx);
+
+        // possibly jump to offset
+        self.do_jump_to_offset(cx, text_buffer);
     }
 
-    fn draw_unmatched_highlighting(&mut self, cx:&mut Cx){
-        while self._paren_stack.len()>0{
-            let last = self._paren_stack.pop().unwrap();
-            if !last.geom_open.is_none(){
-                self.paren_pair.color = self.colors.paren_pair_fail;
-                if let Some(rc) = last.geom_open{
-                    self.paren_pair.draw_quad_abs(cx, rc);
-                }
-            }
-        }
+    fn do_jump_to_offset(&mut self, cx:&mut Cx, text_buffer:&TextBuffer){
+        if !text_buffer.messages.jump_to_offset.is_none() && 
+            text_buffer.messages.jump_to_offset_id != self._jump_to_offset_id {
+            self._jump_to_offset_id = text_buffer.messages.jump_to_offset_id;
+            let offset = text_buffer.messages.jump_to_offset.unwrap();
+            // make one cursor, and start scrolling towards it
+            self.cursors.clear_and_set_last_cursor_head_and_tail(offset, text_buffer);
+            self.scroll_last_cursor_visible(cx, text_buffer, self._final_fill_height / 2.);
+            self.view.redraw_view_area(cx);
+        }   
     }
 
     fn draw_cursors(&mut self, cx:&mut Cx){
-        let origin = cx.get_turtle_origin();
-        for rc in &self._draw_cursors.cursors{
-            let inst = self.cursor.draw_quad(cx, Rect{x:rc.x - origin.x, y:rc.y - origin.y, w:rc.w, h:rc.h});
-            if inst.need_uniforms_now(cx){
-                inst.push_uniform_float(cx, self._cursor_blink_flipflop);//blink
+        if self.has_key_focus(cx){
+            let origin = cx.get_turtle_origin();
+            for rc in &self._draw_cursors.cursors{
+                let inst = self.cursor.draw_quad(cx, Rect{x:rc.x - origin.x, y:rc.y - origin.y, w:rc.w, h:rc.h});
+                if inst.need_uniforms_now(cx){
+                    inst.push_uniform_float(cx, self._cursor_blink_flipflop);//blink
+                }
             }
         }
     }
@@ -1320,7 +1355,7 @@ impl CodeEditor{
         
         for i in 0..message_markers.len(){
             let mark = &message_markers[i];
-            let body = &text_buffer.message_bodies[mark.index];
+            let body = &text_buffer.messages.bodies[mark.index];
             self.message_marker.color = match body.level{
                 TextBufferMessageLevel::Warning=>self.colors.marker_warning,
                 TextBufferMessageLevel::Error=>self.colors.marker_error
@@ -1359,7 +1394,7 @@ impl CodeEditor{
 
     fn place_ime_and_draw_cursor_row(&mut self, cx:&mut Cx){
         // place the IME
-        if self._bg_area == cx.key_focus{
+        if cx.has_key_focus(self._bg_area){
             if let Some(last_cursor) = self._draw_cursors.last_cursor{
                 let rc = self._draw_cursors.cursors[last_cursor];
                 if let Some(_) = self.cursors.get_last_cursor_singular(){
@@ -1475,7 +1510,7 @@ impl CodeEditor{
         self._monospace_size.y = self._monospace_base.y * font_size;
     }
 
-    fn scroll_last_cursor_visible(&mut self, cx:&mut Cx, text_buffer:&TextBuffer){
+    fn scroll_last_cursor_visible(&mut self, cx:&mut Cx, text_buffer:&TextBuffer, height_pad:f32){
         // so we have to compute (approximately) the rect of our cursor
         if self.cursors.last_cursor >= self.cursors.set.len(){
             panic!("LAST CURSOR INVALID");
@@ -1492,7 +1527,7 @@ impl CodeEditor{
                 x:(pos.col as f32) * mono_size.x,
                 y:geom.walk.y - mono_size.y * 1.,
                 w:mono_size.x * 4.,
-                h:mono_size.y * 4.
+                h:mono_size.y * 4. + height_pad
             };
             // scroll this cursor into view
             self.view.scroll_into_view(cx, rect);

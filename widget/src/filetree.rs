@@ -95,7 +95,7 @@ impl<'a> FileWalker<'a>{
         // the current stack top returned as path 
         let mut path = String::new();
         for i in 0..self.stack.len(){
-            if i != 0{
+            if i > 1{
                 path.push_str("/");
             }
             path.push_str( 

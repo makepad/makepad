@@ -225,6 +225,16 @@ impl TextCursorSet{
     }
 
     pub fn add_last_cursor_head_and_tail(&mut self, offset:usize, text_buffer:&TextBuffer){
+        // check if we dont already have exactly that cursor. ifso just remove it
+        if self.set.len()>1{
+            for i in 0..self.set.len(){
+                if self.set[i].head == self.set[i].tail && self.set[i].head == offset{
+                    self.set.remove(i);
+                    self.last_cursor = self.set.len() - 1;
+                    return
+                }
+            }
+        }
         self.set_last_cursor(offset, offset, text_buffer);
     }
 

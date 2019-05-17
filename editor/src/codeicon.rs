@@ -25,7 +25,9 @@ impl Style for CodeIcon{
 
 pub enum CodeIconType{
     Warning,
-    Error
+    Error,
+    Ok,
+    Wait
 }
 
 impl CodeIconType{
@@ -33,6 +35,8 @@ impl CodeIconType{
         match self{
             CodeIconType::Warning=>1.,
             CodeIconType::Error=>2.,
+            CodeIconType::Ok=>3.,
+            CodeIconType::Wait=>4.,
         }
     }
 }
@@ -45,8 +49,33 @@ impl CodeIcon{
 
             fn pixel()->vec4{
                 let col = color;
-                // lets draw a triangle
-                if abs(icon_id - 2.) < 0.1{
+                if abs(icon_id - 4.) < 0.1{ //Wait
+                    df_viewport(pos*vec2(10.));// * vec2(w, h));
+                    df_circle(5.,5.,4.);
+                    df_fill_keep(color("orange"));
+                    df_stroke(color("gray"),0.5);
+                    let sz = 1.;
+                    df_move_to(5.,5.);
+                    df_line_to(5.,5.);
+                    //df_move_to(5.,5.-sz);
+                    //df_line_to(5.,5.+sz);
+                    df_stroke(color("white"),0.8);
+                    return df_result;
+                }
+                if abs(icon_id - 3.) < 0.1{ //OK
+                    df_viewport(pos*vec2(10.));// * vec2(w, h));
+                    df_circle(5.,5.,4.);
+                    df_fill_keep(color("#0a0"));
+                    df_stroke(color("gray"),0.5);
+                    let sz = 1.;
+                    df_move_to(5.-sz,5.);
+                    df_line_to(5.+sz,5.);
+                    df_move_to(5.,5.-sz);
+                    df_line_to(5.,5.+sz);
+                    df_stroke(color("white"),0.8);
+                    return df_result;
+                }
+                else if abs(icon_id - 2.) < 0.1{ // Error
                     df_viewport(pos*vec2(10.));// * vec2(w, h));
                     df_circle(5.,5.,4.);
                     df_fill_keep(color("#c00"));
@@ -59,7 +88,7 @@ impl CodeIcon{
                     df_stroke(color("black"),0.8);
                     return df_result;
                 }
-                else if abs(icon_id - 1.) < 0.1{
+                else if abs(icon_id - 1.) < 0.1{ // Warning
                     df_viewport(pos*vec2(10.));// * vec2(w, h));
                     df_move_to(5.,1.);
                     df_line_to(9.,9.);

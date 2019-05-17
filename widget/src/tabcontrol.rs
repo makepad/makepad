@@ -90,7 +90,6 @@ impl TabControl{
                     // flag our view as dirty, to trigger
                     self.tabs_view.redraw_view_area(cx);
                     self.drag_tab_view.redraw_view_area(cx);
-                   // cx.redraw_area(self.drag_tab_view.get_view_area(cx));
 
                     tab_control_event = TabControlEvent::TabDragMove{fe:fe, tab_id:*id};
                 },

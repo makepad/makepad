@@ -76,7 +76,7 @@ pub struct Cx{
     pub captured_fingers:Vec<Area>,
     pub finger_tap_count:Vec<(Vec2,f64,u32)>,
 
-    pub user_events:Vec<Event>,
+    //pub user_events:Vec<Event>,
 
     pub playing_anim_areas:Vec<AnimArea>,
     pub ended_anim_areas:Vec<AnimArea>,
@@ -149,7 +149,7 @@ impl Default for Cx{
             captured_fingers:captured_fingers,
             finger_tap_count:finger_tap_count,
 
-            user_events:Vec::new(),
+            //user_events:Vec::new(),
 
             style_values:BTreeMap::new(),
 
@@ -396,6 +396,10 @@ impl Cx{
         self.key_focus = focus_area;
     }
 
+    pub fn has_key_focus(&self, focus_area:Area)->bool{
+        self.key_focus == focus_area
+    }
+
     // event handler wrappers
 
     pub fn call_event_handler<F>(&mut self, mut event_handler:F, event:&mut Event)
@@ -413,7 +417,7 @@ impl Cx{
                 focus:self.key_focus
             }))
         }
-
+/*
         // check any user events and send them
         if self.user_events.len() > 0{
             let user_events = self.user_events.clone();
@@ -421,7 +425,7 @@ impl Cx{
             for mut user_event in user_events{
                 event_handler(self, &mut user_event);
             }
-        }
+        }*/
     }
 
     pub fn call_draw_event<F, T>(&mut self, mut event_handler:F, root_view:&mut View<T>)

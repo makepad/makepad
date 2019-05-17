@@ -46,7 +46,7 @@ where TItem: Clone
     fn style(cx: &mut Cx)->Dock<TItem>{
         Dock{
             dock_items:None,
-            drop_size:Vec2{x:50., y:70.},
+            drop_size:Vec2{x:100., y:70.},
             drop_quad_color:color("#a"),
             drop_quad:Quad{
                 ..Style::style(cx)
