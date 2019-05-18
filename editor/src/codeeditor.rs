@@ -700,7 +700,8 @@ impl CodeEditor{
         }
         self.scroll_last_cursor_visible(cx, text_buffer, 0.);
         self.view.redraw_view_area(cx);
-        self.reset_cursor_blinker(cx);        
+        self.reset_cursor_blinker(cx); 
+        cx.send_signal_after_draw(text_buffer.signal_id, SIGNAL_TEXTBUFFER_DATA_UPDATE);       
     }
 
     pub fn handle_code_editor(&mut self, cx:&mut Cx, event:&mut Event, text_buffer:&mut TextBuffer)->CodeEditorEvent{
@@ -741,6 +742,9 @@ impl CodeEditor{
                     },
                     SIGNAL_TEXTBUFFER_JUMP_TO_OFFSET=>{
                         self.do_jump_to_offset(cx, text_buffer);
+                    },
+                    SIGNAL_TEXTBUFFER_DATA_UPDATE=>{
+                        self.view.redraw_view_area(cx);
                     },
                     _=>()
                 }
@@ -1533,8 +1537,8 @@ impl CodeEditor{
             let geom = &self._line_geometry[row];
             let mono_size = Vec2{x:self._monospace_base.x * geom.font_size, y:self._monospace_base.y*geom.font_size};//self.text.get_monospace_size(cx, geom.font_size);
             let rect = Rect{
-                x:(pos.col as f32) * mono_size.x,
-                y:geom.walk.y - mono_size.y * 1.,
+                x:(pos.col as f32) * mono_size.x + self.line_number_width,
+                y:geom.walk.y - mono_size.y * 1. - height_pad,
                 w:mono_size.x * 4.,
                 h:mono_size.y * 4. + height_pad
             };

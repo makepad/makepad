@@ -20,6 +20,7 @@ pub struct TextBuffer{
 
 pub const SIGNAL_TEXTBUFFER_MESSAGE_UPDATE:u64 = 1;
 pub const SIGNAL_TEXTBUFFER_JUMP_TO_OFFSET:u64 = 2;
+pub const SIGNAL_TEXTBUFFER_DATA_UPDATE:u64 = 3;
 
 #[derive(Clone, Default)]
 pub struct TextBufferMessages{

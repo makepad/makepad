@@ -194,14 +194,18 @@ impl RustEditor{
                 '"'=>{ // parse string
                     chunk.push(state.cur);
                     state.prev = '\0';
-                    while state.next != '\0' && state.next!='\n' && (state.next != '"' || state.prev != '\\' && state.cur == '\\' && state.next == '"'){
-                        chunk.push(state.next);
-                        state.advance_with_prev();
+                    while state.next != '\0' && state.next!='\n'{
+                        if state.next != '"' || state.prev != '\\' && state.cur == '\\' && state.next == '"'{
+                            chunk.push(state.next);
+                            state.advance_with_prev();
+                        }
+                        else{
+                            chunk.push(state.next);
+                            state.advance();
+                            break;
+                        }
                     };
-                    chunk.push(state.next);
-                    state.advance();
                     token_type = TokenType::String;
-                   
                 },
                 '0'...'9'=>{ // try to parse numbers
                     token_type = TokenType::Number;

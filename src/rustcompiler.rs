@@ -454,7 +454,7 @@ impl RustCompiler{
 
         let mut stdout =  child.stdout.take().unwrap();
         let signal_id = self._check_signal_id;
-        let thread = std::thread::spawn(move ||{
+        std::thread::spawn(move ||{
             loop{
                 let mut data = vec![0; 4096];
                 let n_bytes_read = stdout.read(&mut data).expect("cannot read");
@@ -479,7 +479,7 @@ impl RustCompiler{
             //.stderr(Stdio::piped())
             .current_dir("./edit_repo")
             .spawn();
-        let mut child = _child.unwrap();
+        let child = _child.unwrap();
         self._run_child = Some(child);
     }
 

@@ -8,7 +8,6 @@ use std::collections::HashMap;
 
 #[derive(Clone)]
 enum Panel{
-    Color(Color), 
     RustCompiler,
     FileTree,
     FileEditorTarget,
@@ -26,8 +25,6 @@ struct App{
     rust_compiler:RustCompiler,
     text_buffers:TextBuffers,
     index_read_id:u64,
-
-    quad:Quad
 }
 
 main_app!(App, "Makepad");
@@ -49,9 +46,6 @@ impl Style for App{
             text_buffers:TextBuffers{
                 root_path:"./".to_string(),
                 storage:HashMap::new()
-            },
-            quad:Quad{
-                ..Style::style(cx)
             },
             file_tree:FileTree{
                 ..Style::style(cx)
@@ -159,7 +153,6 @@ impl App{
         let mut file_tree_event = FileTreeEvent::None;
         while let Some(item) = dock_walker.walk_handle_dock(cx, event){
             match item{
-                Panel::Color(_)=>{}
                 Panel::RustCompiler=>{
                     match self.rust_compiler.handle_rust_compiler(cx, event, &mut self.text_buffers){
                         RustCompilerEvent::SelectMessage{path}=>{
@@ -231,10 +224,6 @@ impl App{
         let mut dock_walker = self.dock.walker();
         while let Some(item) = dock_walker.walk_draw_dock(cx){
             match item{
-                Panel::Color(color2)=>{
-                    self.quad.color = *color2;
-                    self.quad.draw_quad_walk(cx, Bounds::Fill, Bounds::Fill, Margin::zero());
-                },
                 Panel::RustCompiler=>{
                     self.rust_compiler.draw_rust_compiler(cx);
                 },
