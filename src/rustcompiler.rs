@@ -262,9 +262,9 @@ impl RustCompiler{
                         },
                         SIGNAL_BUILD_COMPLETE=>{
                             self._rustc_build_stages = BuildStage::Complete;
-                            //if self._run_when_done{
-                            self.run_program();
-                            //}
+                            if self._run_when_done{
+                                self.run_program();
+                            }
                             self.view.redraw_view_area(cx);
                         },
                         _=>()
