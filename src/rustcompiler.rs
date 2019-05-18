@@ -152,32 +152,6 @@ impl RustCompiler{
             
             let text_buffer = text_buffers.from_path(cx, &dm.path);
             
-            let cursor = if !dm.deref_row_col{
-                if dm.head == dm.tail{
-                    TextCursor{
-                        head:dm.head as usize,
-                        tail:dm.tail as usize,
-                        max:0
-                    }
-                }
-                else{
-                    TextCursor{
-                        head:dm.head,
-                        tail:dm.tail,
-                        max:0 
-                    }
-                }
-            }
-            else{
-                let offset = text_buffer.text_pos_to_offset(TextPos{row:dm.row, col:dm.col});
-                println!("ROW {}",dm.row);
-                TextCursor{
-                    head:offset,
-                    tail:offset,
-                    max:0
-                }
-            };
-            
             let messages = &mut text_buffer.messages;
             messages.mutation_id = text_buffer.mutation_id;
             if messages.gc_id != cx.event_id{
@@ -186,7 +160,22 @@ impl RustCompiler{
                 messages.bodies.truncate(0);
             }
             
-            messages.cursors.push(cursor);
+            if !dm.deref_row_col{
+                if dm.head == dm.tail{
+                     messages.cursors.push(TextCursor{
+                        head:dm.head as usize,
+                        tail:dm.tail as usize,
+                        max:0
+                    })
+                }
+                else{
+                     messages.cursors.push(TextCursor{
+                        head:dm.head,
+                        tail:dm.tail,
+                        max:0 
+                    })
+                }
+            };
             
             //println!("PROCESING MESSAGES FOR {} {} {}", span.byte_start, span.byte_end+1, path);
             text_buffer.messages.bodies.push(TextBufferMessage{
@@ -351,7 +340,13 @@ impl RustCompiler{
             // alright we clicked an item. now what. well 
             if dm.path != ""{
                 let text_buffer = text_buffers.from_path(cx, &dm.path);
-                text_buffer.messages.jump_to_offset = dm.head;
+                text_buffer.messages.jump_to_offset = if dm.deref_row_col{
+                    text_buffer.text_pos_to_offset(TextPos{row:dm.row, col:dm.col})
+                }
+                else{
+                    dm.head
+                };
+
                 cx.send_signal_after_draw(text_buffer.signal_id, SIGNAL_TEXTBUFFER_JUMP_TO_OFFSET);
                 return RustCompilerEvent::SelectMessage{path:dm.path.clone()}
             }
