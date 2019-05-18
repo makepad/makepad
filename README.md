@@ -48,14 +48,13 @@ widgets/render/src/*.rs - nested crate for the render engine
 The only 'web' JS code sits here, its a typed-array RPC driven simplification of the webGL API
 widgets/render/src/cx_webgl.js
 
-Prerequisites: Install cargo-watch, i use it for livecoding/building
-cargo install cargo-watch
+./run_first_init.sh - just downloads the repository again in ./edit_repo for the editor to have something to do
 
 ./serve_webgl.sh (uses node to start a tiny server on 127.0.0.1:2001)
 
-./watch_webgl.sh - compiles the webGL thing
+./build_webgl.sh - compiles the webGL thing
 
-./watch_native.sh - compiles the native app on demand
+./build_release.sh - compiles the native ap
 
 You can choose the render backend by editing ./Cargo.toml
 At the bottom is features=["mtl"], default set for OSX
