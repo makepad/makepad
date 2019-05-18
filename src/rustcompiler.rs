@@ -170,6 +170,7 @@ impl RustCompiler{
             }
             else{
                 let offset = text_buffer.text_pos_to_offset(TextPos{row:dm.row, col:dm.col});
+                println!("ROW {}",dm.row);
                 TextCursor{
                     head:offset,
                     tail:offset,
