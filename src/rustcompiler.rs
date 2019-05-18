@@ -24,6 +24,8 @@ pub struct RustCompiler{
     pub _build_child:Option<Child>,
     pub _run_child:Option<Child>,
     pub _run_when_done:bool,
+    pub _program_running:bool,
+    pub _messages_updated:bool,
 
     pub _rustc_build_stages:BuildStage,
     pub _rx:Option<mpsc::Receiver<std::vec::Vec<u8>>>,
@@ -103,11 +105,13 @@ impl Style for RustCompiler{
             _build_child:None,
             _run_child:None,
             _run_when_done:false,
+            _program_running:false,
             _rustc_build_stages:BuildStage::NotRunning,
             _thread:None,
             _rx:None,
             //_rustc_spans:Vec::new(),
             _draw_messages:Vec::new(),
+            _messages_updated:true,
             _visible_window:(0,0),
             _rustc_messages:Vec::new(),
             _rustc_artifacts:Vec::new(),
@@ -390,17 +394,19 @@ impl RustCompiler{
             self.code_icon.draw_icon_walk(cx, CodeIconType::Ok);//if any_error{CodeIconType::Error}else{CodeIconType::Warning});
             self.text.color = self.path_color;
             match self._rustc_build_stages{
-                BuildStage::NotRunning=>self.text.draw_text(cx, "Done"),
+                BuildStage::NotRunning=>{self.text.draw_text(cx, "Done");}
                 BuildStage::Building=>{
                     if self._run_when_done{
-                        self.text.draw_text(cx, "Running when ready")
+                        self.text.draw_text(cx, "Running when ready");
                     }
                     else{
-                        self.text.draw_text(cx, "Building")
+                        self.text.draw_text(cx, "Building");
                     }
                 },
                 BuildStage::Complete=>{
-                    self.text.draw_text(cx, "Press F9 to run")
+                    if !self._program_running{
+                        self.text.draw_text(cx, "Press F9 to run");
+                    }
                 }
             };
         }
@@ -431,6 +437,12 @@ impl RustCompiler{
         } 
 
         self.view.end_view(cx);
+
+        if self._messages_updated{
+            self._messages_updated = false;
+            // scroll to bottom
+            
+        }
     }
 
     pub fn start_rust_builder(&mut self){
@@ -472,6 +484,7 @@ impl RustCompiler{
 
      pub fn run_program(&mut self){
         self._run_when_done = false;
+        self._program_running = true;
         if let Some(child) = &mut self._run_child{
             let _= child.kill();
         }
@@ -639,6 +652,8 @@ impl RustCompiler{
     pub fn process_run_messages(&mut self, cx:&mut Cx, datas:Vec<Vec<u8>>){
         for data in datas{
             if data.len() == 0{ // last event
+                self._program_running = false;
+                self.view.redraw_view_area(cx);
             }
             else {
                 for ch in data{
@@ -657,6 +672,7 @@ impl RustCompiler{
                             body:line.clone(),
                             level:TextBufferMessageLevel::Log
                         });
+                        self._messages_updated = true;
                         self.view.redraw_view_area(cx);
                         self._data.push(String::new());
                     }
