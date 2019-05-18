@@ -394,6 +394,8 @@ impl TextCursorSet{
                     ops.push(op);
                 }
                 else{
+                    // this just inserts the post spaces. but its more complex.
+                    
                     let op = text_buffer.replace_lines_with_string(start, end-start, &text);
                     delta += cursor.collapse(start, end, op.len);
                     ops.push(op);
@@ -462,21 +464,43 @@ impl TextCursorSet{
         let cursors_clone = self.clone();
         for cursor in &mut self.set{
             let (start, end) = cursor.delta(delta);
-
-            // lets serialize our selection
-            let mut text = String::new();
-            text.push_str(pre);
-            text_buffer.get_range_as_string(start, end-start, &mut text);
-            text.push_str(post);
-            let op = text_buffer.replace_lines_with_string(start, end-start, &text);
-
-            // we wanna keep the original selection pushed by l
             let pre_chars = pre.chars().count();
             let post_chars = post.chars().count();
-            cursor.head += pre_chars;
-            cursor.tail += pre_chars;
-            delta += (pre_chars+post_chars) as isize;
-            ops.push(op);
+
+            // check if we should
+            if start != end{
+                // lets serialize our selection
+                let mut text = String::new();
+                text.push_str(pre);
+                text_buffer.get_range_as_string(start, end-start, &mut text);
+                text.push_str(post);
+                let op = text_buffer.replace_lines_with_string(start, end-start, &text);
+                // we wanna keep the original selection pushed by l
+                cursor.head += pre_chars;
+                cursor.tail += pre_chars;
+                delta += (pre_chars+post_chars) as isize;
+                ops.push(op);
+            }
+            else{ // only insert post if next char is whitespace newline, : , or .
+                let ch = text_buffer.get_char(start);
+                if ch == ' ' || ch == ',' || ch == '.' || ch == ';' || ch == '\n' || ch == '\0'{
+                    let mut text = String::new();
+                    text.push_str(pre);
+                    text.push_str(post);
+                    let op = text_buffer.replace_lines_with_string(start, 0, &text);
+                    cursor.head += pre_chars;
+                    cursor.tail += pre_chars;
+                    delta += (pre_chars+post_chars) as isize;
+                    ops.push(op);
+                }
+                else{
+                    let op = text_buffer.replace_lines_with_string(start, 0, pre);
+                    cursor.head += pre_chars;
+                    cursor.tail += pre_chars;
+                    delta += (pre_chars+post_chars) as isize;
+                    ops.push(op);
+                }
+            }
             old_max = cursor.calc_max(text_buffer, old_max);
         }
         text_buffer.redo_stack.truncate(0);
@@ -672,6 +696,47 @@ impl TextCursorSet{
             cursors:cursors_clone
         })
     }
+
+/*
+    pub fn toggle_comment(&mut self, text_buffer:&mut TextBuffer, comment_str:&str){
+        let mut delta:usize = 0; // rolling delta to displace cursors 
+        let mut ops = Vec::new();
+        let comment_str_chars = comment_str.chars().count();
+        let cursors_clone = self.clone();
+        let mut old_max = (TextPos{row:0,col:0},0);
+        for cursor in &mut self.set{
+            let (start, end) = cursor.delta(delta as isize);
+ 
+            let start_pos = text_buffer.offset_to_text_pos_next(start, old_max.0, old_max.1);
+            let end_pos = text_buffer.offset_to_text_pos_next(end, start_pos, start);
+            let mut off = start - start_pos.col;
+            let last_line = if start_pos.row == end_pos.row || end_pos.col>0{1}else{0};
+            
+            for row in start_pos.row..(end_pos.row+last_line){
+                // ok so how do we compute the actual op offset of this line
+                let op = text_buffer.replace_line_with_string(off, row, 0, 0, tab_str);
+                off += text_buffer.lines[row].len() + 1;
+                ops.push(op);
+            }
+            // figure out which way the cursor is
+            if cursor.head > cursor.tail{
+                cursor.tail += tab_str_chars + delta;
+                cursor.head += (end_pos.row - start_pos.row + last_line) * tab_str_chars + delta;
+            }
+            else{
+                cursor.tail += (end_pos.row - start_pos.row + last_line) * tab_str_chars + delta;
+                cursor.head += tab_str_chars + delta;
+            }
+            delta += ((end_pos.row - start_pos.row) + 1) * tab_str_chars;
+            old_max = cursor.calc_max(text_buffer, old_max);
+        }
+        text_buffer.redo_stack.truncate(0);
+        text_buffer.undo_stack.push(TextUndo{
+            ops:ops,
+            grouping:TextUndoGrouping::Tab,
+            cursors:cursors_clone
+        })
+    }*/
 
     pub fn remove_tab(&mut self, text_buffer:&mut TextBuffer, num_spaces:usize){
 

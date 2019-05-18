@@ -331,6 +331,19 @@ impl TextBuffer{
         };
     }
 
+
+    pub fn get_char(&self, start:usize)->char{
+        let mut pos = self.offset_to_text_pos(start);
+        let line = &self.lines[pos.row];
+        if pos.row == self.lines.len() - 1&& pos.col >= line.len(){
+            return '\0'
+        }
+        if pos.col >= line.len(){
+            return '\n'
+        }
+        return line[pos.col]
+    }
+
     pub fn get_as_string(&self)->String{
         let mut ret = String::new();
         for i in 0..self.lines.len(){

@@ -70,6 +70,7 @@ pub struct CodeEditor{
     pub _cursor_blink_timer_id:u64,
     pub _cursor_blink_flipflop:f32,
     pub _cursor_area:Area,
+    pub _highlight_visibility:f32,
 
     pub _last_tabs:usize,
     pub _newline_tabs:usize,
@@ -250,7 +251,8 @@ impl Style for CodeEditor{
 
             _bg_area:Area::Empty,
             _highlight_area:Area::Empty,
-
+            _highlight_visibility:0.,
+            
             _text_inst:None,
             _text_area:Area::Empty,
             _line_number_inst:None,
@@ -439,7 +441,9 @@ impl CodeEditor{
         cx.stop_timer(self._cursor_blink_timer_id);
         self._cursor_blink_timer_id = cx.start_timer(self.cursor_blink_speed*0.5,false);
         self._cursor_blink_flipflop = 0.;
+        self._highlight_visibility = 0.0;
         self._cursor_area.write_uniform_float(cx, "blink", self._cursor_blink_flipflop);
+        self._highlight_area.write_uniform_float(cx, "visible", self._highlight_visibility);
     }
 
     pub fn handle_finger_down(&mut self, cx:&mut Cx, fe:&FingerDownEvent, text_buffer:&mut TextBuffer){
@@ -686,6 +690,9 @@ impl CodeEditor{
                 '{'=>{
                     self.cursors.insert_around("{","}",text_buffer);
                 },
+                '"'=>{
+                    self.cursors.insert_around("\"","\"",text_buffer);
+                },
                 ')'=>{
                     self.cursors.overwrite_if_exists_or_deindent(")", 4, text_buffer);
                 },
@@ -704,6 +711,7 @@ impl CodeEditor{
         else{
             self.cursors.replace_text(&te.input, text_buffer);
         }
+        self.update_highlight(text_buffer);
         self.scroll_last_cursor_visible(cx, text_buffer, 0.);
         self.view.redraw_view_area(cx);
         self.reset_cursor_blinker(cx); 
@@ -734,8 +742,9 @@ impl CodeEditor{
                 self._cursor_blink_timer_id = cx.start_timer(self.cursor_blink_speed, false);
                 // update the cursor uniform to blink it.
                 self._cursor_blink_flipflop = 1.0 - self._cursor_blink_flipflop;
+                self._highlight_visibility = 1.0;
                 self._cursor_area.write_uniform_float(cx, "blink", self._cursor_blink_flipflop);
-                self._highlight_area.write_uniform_float(cx, "visible", 1.0);
+                self._highlight_area.write_uniform_float(cx, "visible", self._highlight_visibility);
                 // ok see if we changed.
                 if self._last_lag_mutation_id != text_buffer.mutation_id{
                     self._last_lag_mutation_id = text_buffer.mutation_id;
@@ -1245,7 +1254,7 @@ impl CodeEditor{
     pub fn draw_highlight_quad(&mut self, cx:&mut Cx, geom:Rect){
         let inst = self.highlight.draw_quad_abs(cx, geom);
         if inst.need_uniforms_now(cx){
-            inst.push_uniform_float(cx, 0.);
+            inst.push_uniform_float(cx, self._highlight_visibility);
         }
     }
 
