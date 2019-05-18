@@ -598,7 +598,8 @@ impl TextCursorSet{
             let start_pos = text_buffer.offset_to_text_pos_next(start, old_max.0, old_max.1);
             let end_pos = text_buffer.offset_to_text_pos_next(end, start_pos, start);
             let mut off = start - start_pos.col;
-            for row in start_pos.row..(end_pos.row+1){
+            let last_line = if start_pos.row == end_pos.row || end_pos.col>0{1}else{0};
+            for row in start_pos.row..(end_pos.row+last_line){
                 // ok so how do we compute the actual op offset of this line
                 let op = text_buffer.replace_line_with_string(off, row, 0, 0, tab_str);
                 off += text_buffer.lines[row].len() + 1;
@@ -607,10 +608,10 @@ impl TextCursorSet{
             // figure out which way the cursor is
             if cursor.head > cursor.tail{
                 cursor.tail += tab_str_chars + delta;
-                cursor.head += (end_pos.row - start_pos.row + 1) * tab_str_chars + delta;
+                cursor.head += (end_pos.row - start_pos.row + last_line) * tab_str_chars + delta;
             }
             else{
-                cursor.tail += (end_pos.row - start_pos.row + 1) * tab_str_chars + delta;
+                cursor.tail += (end_pos.row - start_pos.row + last_line) * tab_str_chars + delta;
                 cursor.head += tab_str_chars + delta;
             }
             delta += ((end_pos.row - start_pos.row) + 1) * tab_str_chars;
@@ -638,8 +639,9 @@ impl TextCursorSet{
             let end_pos = text_buffer.offset_to_text_pos_next(end, start_pos, start);
             let mut off = start - start_pos.col;
             let mut total_cut_len = 0;
-
-            for row in start_pos.row..(end_pos.row+1){
+            
+            let last_line = if start_pos.row == end_pos.row || end_pos.col>0{1}else{0};
+            for row in start_pos.row..(end_pos.row+last_line){
                 let indents = text_buffer.calc_line_indent_depth(row);
                 let cut_len = num_spaces.min(indents);
                 if cut_len > 0{
