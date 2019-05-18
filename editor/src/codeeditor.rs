@@ -66,7 +66,6 @@ pub struct CodeEditor{
     pub _draw_search:DrawCursors,
     pub _draw_messages:DrawCursors,
 
-
     pub _cursor_blink_timer_id:u64,
     pub _cursor_blink_flipflop:f32,
     pub _cursor_area:Area,

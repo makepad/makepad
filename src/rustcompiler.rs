@@ -262,9 +262,9 @@ impl RustCompiler{
                         },
                         SIGNAL_BUILD_COMPLETE=>{
                             self._rustc_build_stages = BuildStage::Complete;
-                            if self._run_when_done{
-                                self.run_program();
-                            }
+                            //if self._run_when_done{
+                            self.run_program();
+                            //}
                             self.view.redraw_view_area(cx);
                         },
                         _=>()
@@ -436,6 +436,9 @@ impl RustCompiler{
 
     pub fn start_rust_builder(&mut self){
         if let Some(child) = &mut self._build_child{
+            let _= child.kill();
+        }
+        if let Some(child) = &mut self._run_child{
             let _= child.kill();
         }
         // start a release build
