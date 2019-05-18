@@ -423,7 +423,7 @@ impl TextCursorSet{
                 TextUndoGrouping::Space
             }
             else if ch == '\n'{
-                TextUndoGrouping::Newline
+                 TextUndoGrouping::Newline
             }
             else{
                  TextUndoGrouping::Character(self.insert_undo_group)
@@ -507,30 +507,23 @@ impl TextCursorSet{
             }
             else{
                 if start == end{
-                    // normal insert/replace
-                    let pos = text_buffer.offset_to_text_pos(start);
-                    
-                    if let Some((rstart, l1ws, l1len)) = text_buffer.calc_deindent_whitespace(start){
+                    let deindented = if let Some((rstart, l1ws, l1len)) = text_buffer.calc_deindent_whitespace(start){
                         if start-rstart == l1len && l1ws == l1len && l1ws >= deindent{ // empty line, deindent
                             let op = text_buffer.replace_lines_with_string(start - deindent, deindent, thing);
                             delta += cursor.collapse(start - deindent, start - deindent, op.len);
-                            ops.push(op);                                    
+                            ops.push(op);
+                            true
                         }
-                        else{
-                            let op = text_buffer.replace_lines_with_string(start, 0, thing);
-                            delta += cursor.collapse(start, start, op.len);
-                            ops.push(op);                                    
-                        }
+                        else{false}
                     } 
-                    else{
-                        // check if the 
+                    else{false};
+                    if !deindented{
                         let op = text_buffer.replace_lines_with_string(start, 0, thing);
                         delta += cursor.collapse(start, start, op.len);
                         ops.push(op);                        
                     }
                 }
                 else{
-                    // check if the 
                     let op = text_buffer.replace_lines_with_string(start, end-start, thing);
                     delta += cursor.collapse(start, end, op.len);
                     ops.push(op);
@@ -554,13 +547,7 @@ impl TextCursorSet{
         for cursor in &mut self.set{
             let (start, end) = cursor.delta(delta);
             if start == end{
-                // calc empty line deletion
-                
-                // what i want is to know
-                // whitespace on this line, len of this line
-                // whitespace on next line, len of next line
                 let op = if let Some((rstart, l1ws, l1len, l2ws)) = text_buffer.calc_deletion_whitespace(start){
-                    // cases. ok l1ws == l1len
                     if l1ws == l1len{ // we wanna delete a whole line
                         delta -= l1len as isize + 1;
                         cursor.head = rstart + l2ws;

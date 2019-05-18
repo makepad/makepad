@@ -27,6 +27,7 @@ pub struct CodeEditor{
     pub cursor_blink_speed:f64,
     pub _hit_state:HitState,
     pub _bg_area:Area,
+    pub _highlight_area:Area,
     pub _text_inst:Option<AlignedInstance>,
     pub _line_number_inst:Option<AlignedInstance>,
     pub _line_number_chunk:Vec<char>,
@@ -248,6 +249,7 @@ impl Style for CodeEditor{
             _grid_select_corner:None,
 
             _bg_area:Area::Empty,
+            _highlight_area:Area::Empty,
 
             _text_inst:None,
             _text_area:Area::Empty,
@@ -405,7 +407,11 @@ impl CodeEditor{
    pub fn def_highlight_shader(cx:&mut Cx)->Shader{
         let mut sh = Quad::def_quad_shader(cx);
         sh.add_ast(shader_ast!({
+            let visible:float<Uniform>;
             fn pixel()->vec4{
+                if visible<0.5{
+                    return vec4(0.)
+                }
                 df_viewport(pos * vec2(w, h));
                 df_box(0.5,0.5,w-1.,h-1.,1.);
                 return df_fill(color);
@@ -729,6 +735,7 @@ impl CodeEditor{
                 // update the cursor uniform to blink it.
                 self._cursor_blink_flipflop = 1.0 - self._cursor_blink_flipflop;
                 self._cursor_area.write_uniform_float(cx, "blink", self._cursor_blink_flipflop);
+                self._highlight_area.write_uniform_float(cx, "visible", 1.0);
                 // ok see if we changed.
                 if self._last_lag_mutation_id != text_buffer.mutation_id{
                     self._last_lag_mutation_id = text_buffer.mutation_id;
@@ -840,7 +847,7 @@ impl CodeEditor{
             self._bg_area = bg_area;
 
             // layering, this sets the draw call order
-            cx.new_instance_layer(self.highlight.shader_id, 0);
+            self._highlight_area = cx.new_instance_layer(self.highlight.shader_id, 0).into_area();
             cx.new_instance_layer(self.cursor_row.shader_id, 0);
             cx.new_instance_layer(self.selection.shader_id, 0);
             cx.new_instance_layer(self.message_marker.shader_id, 0);
@@ -1027,7 +1034,7 @@ impl CodeEditor{
                     let origin = cx.get_turtle_origin();
                     let min_x = self._line_chunk[bp].0;
                     let max_x = self._line_chunk[bp + hl_len].0;
-                    self.highlight.draw_quad(cx, Rect{
+                    self.draw_highlight_quad(cx, Rect{
                         x:min_x - origin.x,
                         y:line_geom.walk.y,
                         w:max_x - min_x,
@@ -1141,19 +1148,20 @@ impl CodeEditor{
                 TokenType::Flow=> self.colors.flow,
                 TokenType::Identifier=>{
                     if *chunk == self._highlight_token{
-                        self.highlight.draw_quad_abs(cx, geom);
+                        self.draw_highlight_quad(cx, geom);
+
                     }
                     self.colors.identifier
                 }
                 TokenType::Call=>{
                     if *chunk == self._highlight_token{
-                        self.highlight.draw_quad_abs(cx, geom);                            
+                        self.draw_highlight_quad(cx, geom);
                     }
                     self.colors.call
                 },
                 TokenType::TypeName=>{
                     if *chunk == self._highlight_token{
-                        self.highlight.draw_quad_abs(cx, geom);                            
+                        self.draw_highlight_quad(cx, geom);
                     }
                     self.colors.type_name
                 },
@@ -1232,6 +1240,13 @@ impl CodeEditor{
             len:chunk.len(),
             token_type:token_type
         });            
+    }
+    
+    pub fn draw_highlight_quad(&mut self, cx:&mut Cx, geom:Rect){
+        let inst = self.highlight.draw_quad_abs(cx, geom);
+        if inst.need_uniforms_now(cx){
+            inst.push_uniform_float(cx, 0.);
+        }
     }
 
     pub fn draw_paren_open(&mut self, offset:usize, next_char:char, chunk:&Vec<char>){
@@ -1408,23 +1423,22 @@ impl CodeEditor{
 
     fn place_ime_and_draw_cursor_row(&mut self, cx:&mut Cx){
         // place the IME
-        if cx.has_key_focus(self._bg_area){
-            if let Some(last_cursor) = self._draw_cursors.last_cursor{
-                let rc = self._draw_cursors.cursors[last_cursor];
-                if let Some(_) = self.cursors.get_last_cursor_singular(){
-                    // lets draw the cursor line
-                    self.cursor_row.draw_quad_abs(cx,Rect{
-                        x: self.line_number_width + cx.get_turtle_origin().x,
-                        y: rc.y,
-                        w: cx.get_width_total() - self.line_number_width,
-                        h: rc.h
-                    });
-                }
-
+        if let Some(last_cursor) = self._draw_cursors.last_cursor{
+            let rc = self._draw_cursors.cursors[last_cursor];
+            if let Some(_) = self.cursors.get_last_cursor_singular(){
+                // lets draw the cursor line
+                self.cursor_row.draw_quad_abs(cx,Rect{
+                    x: self.line_number_width + cx.get_turtle_origin().x,
+                    y: rc.y,
+                    w: cx.get_width_total() - self.line_number_width,
+                    h: rc.h
+                });
+            }
+            if cx.has_key_focus(self._bg_area){
                 let scroll_pos = self.view.get_scroll_pos(cx);
                 cx.show_text_ime(rc.x - scroll_pos.x, rc.y - scroll_pos.y);
             }
-            else{ // current last cursors is not visible
+            else{
                 cx.hide_text_ime();
             }
         }

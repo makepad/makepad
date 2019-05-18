@@ -20,7 +20,7 @@ struct App{
     view:View<ScrollBar>,
     dock:Dock<Panel>,
     file_tree:FileTree,
-
+    
     file_editors:Elements<u64, FileEditor, FileEditorTemplates>,
     file_editor_id_alloc:u64,
 
