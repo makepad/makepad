@@ -119,7 +119,6 @@ fn path_file_name(path:&str)->String{
 impl App{
 
     fn handle_app(&mut self, cx:&mut Cx, event:&mut Event){
-        log!("HELLO WORLD");
         match event{
             Event::Construct=>{
                 if cx.feature == "mtl"{
