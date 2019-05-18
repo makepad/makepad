@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use serde_json::{Result};
 use serde::*;
 
-#[derive(Clone, Deserialize,  Default)]
+#[derive(Clone, Deserialize)]
 enum Panel{
     RustCompiler,
     FileTree,
