@@ -690,6 +690,7 @@ impl RustCompiler{
                                 path.push(tok.next);
                                 tok.advance();
                             }
+                            tok.advance();
                             while tok.next != ']' && tok.next != '\0'{
                                 row_str.push(tok.next);
                                 tok.advance();
