@@ -599,7 +599,7 @@ pub trait Style{
 #[macro_export]
 macro_rules! log {
     ($($arg:tt)*) => ({
-        $crate::Cx::write_log(&format!("[{}:{}] {}\n",file!(),line!(),&format!($($arg)*)))
+        $crate::Cx::write_log(&format!("[{}:{}:{}] {}\n",file!(),line!(),column!(),&format!($($arg)*)))
     })
 }
 

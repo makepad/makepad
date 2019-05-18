@@ -341,7 +341,7 @@ impl RustCompiler{
             if dm.path != ""{
                 let text_buffer = text_buffers.from_path(cx, &dm.path);
                 text_buffer.messages.jump_to_offset = if dm.deref_row_col{
-                    text_buffer.text_pos_to_offset(TextPos{row:dm.row, col:dm.col})
+                    text_buffer.text_pos_to_offset(TextPos{row:dm.row - 1, col:dm.col - 1})
                 }
                 else{
                     dm.head
@@ -679,6 +679,7 @@ impl RustCompiler{
                         let mut tok = LineTokenizer::new(&line);
                         let mut path = String::new();
                         let mut row_str = String::new();
+                        let mut col_str = String::new();
                         let mut body = String::new();
                         if tok.next == '['{
                             tok.advance();
@@ -687,10 +688,16 @@ impl RustCompiler{
                                 tok.advance();
                             }
                             tok.advance();
-                            while tok.next != ']' && tok.next != '\0'{
+                            while tok.next != ':' && tok.next != '\0'{
                                 row_str.push(tok.next);
                                 tok.advance();
                             }
+                            tok.advance();
+                            while tok.next != ']' && tok.next != '\0'{
+                                col_str.push(tok.next);
+                                tok.advance();
+                            }
+                            tok.advance();
                             tok.advance();
                             while tok.next != '\0'{
                                 body.push(tok.next);
@@ -701,6 +708,7 @@ impl RustCompiler{
                             body = line.clone();
                         }
                         let row = if let Ok(row) = row_str.parse::<u32>(){row as usize}else{0};
+                        let col = if let Ok(col) = col_str.parse::<u32>(){col as usize}else{0};
                         
                         self._draw_messages.push(RustDrawMessage{
                             hit_state:HitState{..Default::default()},
@@ -709,7 +717,7 @@ impl RustCompiler{
                             path:path,
                             deref_row_col:true,
                             row:row,
-                            col:0,
+                            col:col,
                             tail:0,
                             head:0,
                             body:body,
