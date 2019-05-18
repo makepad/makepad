@@ -8,7 +8,7 @@ use objc::{msg_send, sel, sel_impl};
 use objc::runtime::YES;
 use metal::*;
 use time::*;
-
+use std::io::{self, Write};
 use crate::cx_cocoa::*;
 use crate::cx::*;
 
@@ -347,6 +347,11 @@ impl Cx{
 
     pub fn send_signal(id:u64, value:u64){
         CocoaWindow::post_signal(id, value);
+    }
+    
+    pub fn write_log(data:&str){
+        let _=io::stdout().write(data.as_bytes());
+        let _=io::stdout().flush();
     }
 
     //pub fn send_custom_event_before_draw(&mut self, id:u64, message:u64){

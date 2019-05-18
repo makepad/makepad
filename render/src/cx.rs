@@ -598,9 +598,9 @@ pub trait Style{
 
 #[macro_export]
 macro_rules! log {
-    ($cx:ident, $($arg:expr),+) => {
-        $cx.log(&format!("[{}:{}] {}\n",file!(),line!(),&format!($($arg),+)))
-    };
+    ($($arg:tt)*) => ({
+        $crate::Cx::write_log(&format!("[{}:{}] {}\n",file!(),line!(),&format!($($arg)*)))
+    })
 }
 
 #[macro_export]

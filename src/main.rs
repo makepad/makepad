@@ -34,7 +34,7 @@ main_app!(App, "Makepad");
 impl Style for App{
     fn style(cx:&mut Cx)->Self{
         set_dark_style(cx);
-        Self{
+        Self{ 
             file_editor_id_alloc:10,
             view:View{
                 ..Style::style(cx)
@@ -119,6 +119,7 @@ fn path_file_name(path:&str)->String{
 impl App{
 
     fn handle_app(&mut self, cx:&mut Cx, event:&mut Event){
+        log!("HELLO WORLD");
         match event{
             Event::Construct=>{
                 if cx.feature == "mtl"{

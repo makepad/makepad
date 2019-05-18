@@ -469,7 +469,8 @@ impl CodeEditor{
         cx.set_down_mouse_cursor(MouseCursor::Text);
         // give us the focus
         self.set_key_focus(cx);
-        println!("{}",fe.rel.x);
+        
+        log!("{}",fe.rel.x);
         
         let offset;
 
