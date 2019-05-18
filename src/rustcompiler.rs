@@ -58,7 +58,6 @@ pub struct RustDrawMessage{
     animator:Animator,
     path:String,
     body:String,
-    deref_row_col:bool,
     row:usize,
     col:usize,
     head:usize,
@@ -160,22 +159,23 @@ impl RustCompiler{
                 messages.bodies.truncate(0);
             }
             
-            if !dm.deref_row_col{
-                if dm.head == dm.tail{
-                     messages.cursors.push(TextCursor{
-                        head:dm.head as usize,
-                        tail:dm.tail as usize,
-                        max:0
-                    })
-                }
-                else{
-                     messages.cursors.push(TextCursor{
-                        head:dm.head,
-                        tail:dm.tail,
-                        max:0 
-                    })
-                }
-            };
+            if dm.level == TextBufferMessageLevel::Log{
+                break
+            }
+            if dm.head == dm.tail{
+                 messages.cursors.push(TextCursor{
+                    head:dm.head as usize,
+                    tail:dm.tail as usize,
+                    max:0
+                })
+            }
+            else{
+                 messages.cursors.push(TextCursor{
+                    head:dm.head,
+                    tail:dm.tail,
+                    max:0 
+                })
+            }
             
             //println!("PROCESING MESSAGES FOR {} {} {}", span.byte_start, span.byte_end+1, path);
             text_buffer.messages.bodies.push(TextBufferMessage{
@@ -272,11 +272,11 @@ impl RustCompiler{
                             if datas.len() > 0{
                                 if se.value == SIGNAL_RUST_CHECKER{
                                     self.process_compiler_messages(cx, datas);
+                                    self.export_messages(cx, text_buffers);
                                 }
                                 else{
                                     self.process_run_messages(cx, datas);
                                 }
-                                self.export_messages(cx, text_buffers);
                             }
                         },
                         SIGNAL_BUILD_COMPLETE=>{
@@ -332,7 +332,7 @@ impl RustCompiler{
                     dm.animator.play_anim(cx, Self::get_default_anim(cx, counter, false));
                 }
             };
-
+ 
             let dm = &mut self._draw_messages[dm_to_select];
             dm.selected  = true;
             dm.animator.play_anim(cx, Self::get_over_anim(cx, dm_to_select, true));
@@ -340,7 +340,7 @@ impl RustCompiler{
             // alright we clicked an item. now what. well 
             if dm.path != ""{
                 let text_buffer = text_buffers.from_path(cx, &dm.path);
-                text_buffer.messages.jump_to_offset = if dm.deref_row_col{
+                text_buffer.messages.jump_to_offset = if dm.level == TextBufferMessageLevel::Log{
                     text_buffer.text_pos_to_offset(TextPos{row:dm.row - 1, col:dm.col - 1})
                 }
                 else{
@@ -405,20 +405,25 @@ impl RustCompiler{
             ..Default::default()
         });
         if self._rustc_done == true{
-            self.code_icon.draw_icon_walk(cx, CodeIconType::Ok);//if any_error{CodeIconType::Error}else{CodeIconType::Warning});
             self.text.color = self.path_color;
             match self._rustc_build_stages{
-                BuildStage::NotRunning=>{self.text.draw_text(cx, "Done");}
+                BuildStage::NotRunning=>{
+                     self.code_icon.draw_icon_walk(cx, CodeIconType::Ok);
+                    self.text.draw_text(cx, "Done");
+                }
                 BuildStage::Building=>{
                     if self._run_when_done{
+                        self.code_icon.draw_icon_walk(cx, CodeIconType::Ok);
                         self.text.draw_text(cx, "Running when ready");
                     }
                     else{
+                        self.code_icon.draw_icon_walk(cx, CodeIconType::Ok);
                         self.text.draw_text(cx, "Building");
                     }
                 },
                 BuildStage::Complete=>{
                     if !self._program_running{
+                        self.code_icon.draw_icon_walk(cx, CodeIconType::Ok);
                         self.text.draw_text(cx, "Press F9 to run");
                     }
                 }
@@ -634,7 +639,6 @@ impl RustCompiler{
                                                 hit_state:HitState{..Default::default()},
                                                 animator:Animator::new(Self::get_default_anim(cx, self._draw_messages.len(), false)),
                                                 selected:false,
-                                                deref_row_col:false,
                                                 path:span.file_name,
                                                 row:span.line_start as usize,
                                                 col:span.column_start as usize,
@@ -715,7 +719,6 @@ impl RustCompiler{
                             animator:Animator::new(Self::get_default_anim(cx, self._draw_messages.len(), false)),
                             selected:false,
                             path:path,
-                            deref_row_col:true,
                             row:row,
                             col:col,
                             tail:0,

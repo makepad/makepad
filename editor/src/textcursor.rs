@@ -482,7 +482,7 @@ impl TextCursorSet{
             }
             else{ // only insert post if next char is whitespace newline, : , or .
                 let ch = text_buffer.get_char(start);
-                if ch == ' ' || ch == ',' || ch == '.' || ch == ';' || ch == '\n' || ch == '\0'{
+                if ch == ' ' || ch == ',' || ch == '.' || ch == ';' || ch == '\n' || ch == '\0' || ch == '}' || ch == ']' || ch == ')'{
                     let mut text = String::new();
                     text.push_str(pre);
                     text.push_str(post);

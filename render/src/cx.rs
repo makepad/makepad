@@ -350,11 +350,14 @@ impl Cx{
     }
 
     pub fn update_area_refs(&mut self, old_area:Area, new_area:Area){
-         // alright first we find area, it already exists
+        if old_area == Area::Empty || old_area == Area::All{
+            return
+        }
+
         if let Some(anim_anim) = self.playing_anim_areas.iter_mut().find(|v| v.area == old_area){
             anim_anim.area = new_area.clone()
         }
-        //Update mouse capture areas
+
         if let Some(digit_area) = self.captured_fingers.iter_mut().find(|v| **v == old_area){
             *digit_area = new_area.clone()
         }
@@ -594,7 +597,6 @@ pub enum StyleValue{
 pub trait Style{
     fn style(cx:&mut Cx) -> Self;
 }
-
 
 #[macro_export]
 macro_rules! log {
