@@ -5,7 +5,7 @@ use editor::*;
 mod rustcompiler;
 pub use crate::rustcompiler::*;
 use std::collections::HashMap;
-use serde_json::{Result};
+//use serde_json::{Result};
 use serde::*;
 
 #[derive(Clone, Deserialize)]
@@ -210,7 +210,7 @@ impl App{
     }
 
     fn draw_app(&mut self, cx:&mut Cx){
-        
+        println!("BOOTED");
         if let Err(()) = self.view.begin_view(cx, &Layout{..Default::default()}){
             return
         }

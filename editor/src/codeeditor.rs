@@ -94,6 +94,7 @@ pub struct CodeEditorColors{
     line_number_highlight:Color,
     marker_error:Color,
     marker_warning:Color,
+    marker_log:Color,
     // syntax
     whitespace:Color,
     keyword:Color,
@@ -142,7 +143,7 @@ impl Style for CodeEditor{
 
                 marker_error:color256(200,0,0),
                 marker_warning:color256(0,200,0),
-
+                marker_log:color256(200,200,200),
                 line_number_normal:color256(136,136,136),
                 line_number_highlight:color256(212,212,212),
 
@@ -1370,7 +1371,8 @@ impl CodeEditor{
             let body = &text_buffer.messages.bodies[mark.index];
             self.message_marker.color = match body.level{
                 TextBufferMessageLevel::Warning=>self.colors.marker_warning,
-                TextBufferMessageLevel::Error=>self.colors.marker_error
+                TextBufferMessageLevel::Error=>self.colors.marker_error,
+                TextBufferMessageLevel::Log=>self.colors.marker_log,
             };
             self.message_marker.draw_quad(cx, Rect{x:mark.rc.x - origin.x, y:mark.rc.y - origin.y, w:mark.rc.w, h:mark.rc.h});
         }

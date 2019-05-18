@@ -31,10 +31,11 @@ pub struct TextBufferMessages{
     pub jump_to_offset:usize
 }
 
-#[derive(Clone)]
+#[derive(Clone,PartialEq)]
 pub enum TextBufferMessageLevel{
     Error,
     Warning,
+    Log
 }
 
 #[derive(Clone)]

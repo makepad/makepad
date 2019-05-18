@@ -27,15 +27,16 @@ pub struct RustCompiler{
 
     pub _rustc_build_stages:BuildStage,
     pub _rx:Option<mpsc::Receiver<std::vec::Vec<u8>>>,
-
+    
     pub _thread:Option<std::thread::JoinHandle<()>>,
-
+    
     pub _data:Vec<String>,
-    pub _rustc_spans:Vec<RustcSpan>,
+    pub _visible_window:(usize,usize),
+    pub _draw_messages:Vec<RustDrawMessage>,
+    // pub _rustc_spans:Vec<RustcSpan>,
     pub _rustc_messages:Vec<RustcCompilerMessage>,
-    pub _rustc_done:bool,
     pub _rustc_artifacts:Vec<RustcCompilerArtifact>,
-    pub _items:Vec<RustCompilerItem>
+    pub _rustc_done:bool,
 }
 
 const SIGNAL_RUST_CHECKER:u64 = 1;
@@ -49,10 +50,17 @@ pub enum BuildStage{
     Complete
 }
 
-pub struct RustCompilerItem{
+#[derive(Clone)]
+pub struct RustDrawMessage{
     hit_state:HitState,
     animator:Animator,
-    span_index:usize,
+    path:String,
+    body:String,
+    row:usize,
+    col:usize,
+    head:usize,
+    tail:usize,
+    level:TextBufferMessageLevel,
     selected:bool
 }
 
@@ -98,11 +106,13 @@ impl Style for RustCompiler{
             _rustc_build_stages:BuildStage::NotRunning,
             _thread:None,
             _rx:None,
-            _rustc_spans:Vec::new(),
+            //_rustc_spans:Vec::new(),
+            _draw_messages:Vec::new(),
+            _visible_window:(0,0),
             _rustc_messages:Vec::new(),
             _rustc_artifacts:Vec::new(),
             _rustc_done:false,
-            _items:Vec::new(),
+            //_items:Vec::new(),
             _data:Vec::new()
         }
     }
@@ -133,12 +143,9 @@ impl RustCompiler{
 
     pub fn export_messages(&self, cx:&mut Cx, text_buffers:&mut TextBuffers){
         
-        for span in &self._rustc_spans{
-            if span.label.is_none(){
-                continue;
-            }
+        for dm in &self._draw_messages{
 
-            let text_buffer = text_buffers.from_path(cx, &span.file_name);
+            let text_buffer = text_buffers.from_path(cx, &dm.path);
             let messages = &mut text_buffer.messages;
             messages.mutation_id = text_buffer.mutation_id;
             if messages.gc_id != cx.event_id{
@@ -146,28 +153,24 @@ impl RustCompiler{
                 messages.cursors.truncate(0);
                 messages.bodies.truncate(0);
             }
-            if span.byte_start == span.byte_end{
+            if dm.head == dm.tail{
                 messages.cursors.push(TextCursor{
-                    head:(span.byte_start-1) as usize,
-                    tail:span.byte_end as usize,
+                    head:dm.head as usize,
+                    tail:dm.tail as usize,
                     max:0
                 });
             }
             else{
                 messages.cursors.push(TextCursor{
-                    head:span.byte_start as usize,
-                    tail:span.byte_end as usize,
+                    head:dm.head,
+                    tail:dm.tail,
                     max:0 
                 });
             }
             //println!("PROCESING MESSAGES FOR {} {} {}", span.byte_start, span.byte_end+1, path);
             text_buffer.messages.bodies.push(TextBufferMessage{
-                body:span.label.clone().unwrap(),
-                level:match span.level.as_ref().unwrap().as_ref(){
-                    "warning"=>TextBufferMessageLevel::Warning,
-                    "error"=>TextBufferMessageLevel::Error,
-                    _=>TextBufferMessageLevel::Warning
-                }
+                body:dm.body.clone(),
+                level:dm.level.clone()
             });
             //}
         }
@@ -189,7 +192,7 @@ impl RustCompiler{
             // do zshit.
         }
 
-        let mut item_to_select = None;
+        let mut dm_to_select = None;
 
         match event{
             Event::KeyDown(ke)=>match ke.key_code{
@@ -203,43 +206,43 @@ impl RustCompiler{
                     }
                 },
                 KeyCode::F8=>{ // next error
-                    if self._items.len() > 0{
+                    if self._draw_messages.len() > 0{
                         if ke.modifiers.shift{
                             let mut selected_index = None;
-                            for (counter,item) in self._items.iter_mut().enumerate(){
+                            for (counter,item) in self._draw_messages.iter_mut().enumerate(){
                                 if item.selected{
                                     selected_index = Some(counter);
                                 }
                             }
                             if let Some(selected_index) = selected_index{
                                 if selected_index > 0{
-                                    item_to_select = Some(selected_index - 1);
+                                    dm_to_select = Some(selected_index - 1);
                                 }
                                 else {
-                                    item_to_select = Some(self._items.len() - 1);
+                                    dm_to_select = Some(self._draw_messages.len() - 1);
                                 }
                             }
                             else{
-                                item_to_select = Some(self._items.len() - 1);
+                                dm_to_select = Some(self._draw_messages.len() - 1);
                             }
                         }
                         else{
                             let mut selected_index = None;
-                            for (counter,item) in self._items.iter_mut().enumerate(){
-                                if item.selected{
+                            for (counter,dm) in self._draw_messages.iter_mut().enumerate(){
+                                if dm.selected{
                                     selected_index = Some(counter);
                                 }
                             }
                             if let Some(selected_index) = selected_index{
-                                if selected_index + 1 < self._items.len(){
-                                    item_to_select = Some(selected_index + 1);
+                                if selected_index + 1 < self._draw_messages.len(){
+                                    dm_to_select = Some(selected_index + 1);
                                 }
                                 else {
-                                    item_to_select = Some(0);
+                                    dm_to_select = Some(0);
                                 }
                             }
                             else{
-                                item_to_select = Some(0);
+                                dm_to_select = Some(0);
                             }
                         }
                     }
@@ -249,7 +252,7 @@ impl RustCompiler{
             Event::Signal(se)=>{
                 if self._check_signal_id == se.signal_id{
                     match se.value{
-                        SIGNAL_RUST_CHECKER=>{
+                        SIGNAL_RUST_CHECKER | SIGNAL_RUN_OUTPUT=>{
                             let mut datas = Vec::new();
                             if let Some(rx) = &self._rx{
                                 while let Ok(data) = rx.try_recv(){
@@ -257,7 +260,12 @@ impl RustCompiler{
                                 }
                             }
                             if datas.len() > 0{
-                                self.process_compiler_messages(cx, datas);
+                                if se.value == SIGNAL_RUST_CHECKER{
+                                    self.process_compiler_messages(cx, datas);
+                                }
+                                else{
+                                    self.process_run_messages(cx, datas);
+                                }
                                 self.export_messages(cx, text_buffers);
                             }
                         },
@@ -276,15 +284,15 @@ impl RustCompiler{
         }
 
         //let mut unmark_nodes = false;
-        for (counter,item) in self._items.iter_mut().enumerate(){   
-            match event.hits(cx, item.animator.area, &mut item.hit_state){
+        for (counter,dm) in self._draw_messages.iter_mut().enumerate(){   
+            match event.hits(cx, dm.animator.area, &mut dm.hit_state){
                 Event::Animate(ae)=>{
-                    item.animator.calc_write(cx, "bg.color", ae.time, item.animator.area);
+                    dm.animator.calc_write(cx, "bg.color", ae.time, dm.animator.area);
                 },
                 Event::FingerDown(_fe)=>{
                     cx.set_down_mouse_cursor(MouseCursor::Hand);
                     // mark ourselves, unmark others
-                    item_to_select = Some(counter);
+                    dm_to_select = Some(counter);
                 },
                 Event::FingerUp(_fe)=>{
                 },
@@ -294,10 +302,10 @@ impl RustCompiler{
                     cx.set_hover_mouse_cursor(MouseCursor::Hand);
                     match fe.hover_state{
                         HoverState::In=>{
-                            item.animator.play_anim(cx, Self::get_over_anim(cx, counter, item.selected));
+                            dm.animator.play_anim(cx, Self::get_over_anim(cx, counter, dm.selected));
                         },
                         HoverState::Out=>{
-                            item.animator.play_anim(cx, Self::get_default_anim(cx, counter, item.selected));
+                            dm.animator.play_anim(cx, Self::get_default_anim(cx, counter, dm.selected));
                         },
                         _=>()
                     }
@@ -306,25 +314,24 @@ impl RustCompiler{
             }
         };
 
-        if let Some(item_to_select) = item_to_select{
+        if let Some(dm_to_select) = dm_to_select{
             
-            for (counter,item) in self._items.iter_mut().enumerate(){   
-                if counter != item_to_select{
-                    item.selected = false;
-                    item.animator.play_anim(cx, Self::get_default_anim(cx, counter, false));
+            for (counter,dm) in self._draw_messages.iter_mut().enumerate(){   
+                if counter != dm_to_select{
+                    dm.selected = false;
+                    dm.animator.play_anim(cx, Self::get_default_anim(cx, counter, false));
                 }
             };
 
-            let item = &mut self._items[item_to_select];
-            item.selected  = true;
-            item.animator.play_anim(cx, Self::get_over_anim(cx, item_to_select, true));
+            let dm = &mut self._draw_messages[dm_to_select];
+            dm.selected  = true;
+            dm.animator.play_anim(cx, Self::get_over_anim(cx, dm_to_select, true));
 
-            let span = &self._rustc_spans[item.span_index];
             // alright we clicked an item. now what. well 
-            let text_buffer = text_buffers.from_path(cx, &span.file_name);
-            text_buffer.messages.jump_to_offset = span.byte_start as usize;
+            let text_buffer = text_buffers.from_path(cx, &dm.path);
+            text_buffer.messages.jump_to_offset = dm.head;
             cx.send_signal_after_draw(text_buffer.signal_id, SIGNAL_TEXTBUFFER_JUMP_TO_OFFSET);
-            return RustCompilerEvent::SelectMessage{path:span.file_name.clone()}
+            return RustCompilerEvent::SelectMessage{path:dm.path.clone()}
         }
         RustCompilerEvent::None
     }
@@ -335,20 +342,8 @@ impl RustCompiler{
         }
 
         let mut counter = 0;
-        for (index,span) in self._rustc_spans.iter().enumerate(){
-            if span.label.is_none(){
-                continue;
-            }
-            // reuse or overwrite a slot
-             if counter >= self._items.len(){
-                self._items.push(RustCompilerItem{
-                    animator:Animator::new(Self::get_default_anim(cx, counter, false)),
-                    hit_state:HitState{..Default::default()},
-                    span_index:index,
-                    selected:false
-                });
-            };
-            self.item_bg.color =  self._items[counter].animator.last_color("bg.color");
+        for dm in &mut self._draw_messages{
+            self.item_bg.color =  dm.animator.last_color("bg.color");
 
             let bg_inst = self.item_bg.begin_quad(cx,&Layout{
                 width:Bounds::Fill,
@@ -357,22 +352,25 @@ impl RustCompiler{
                 ..Default::default()
             });
 
-            if let Some(level) = &span.level{
-                if level == "error"{
+            match dm.level{
+                TextBufferMessageLevel::Error=>{
                     self.code_icon.draw_icon_walk(cx, CodeIconType::Error);
-                }
-                else{
+                },
+                TextBufferMessageLevel::Warning=>{
                     self.code_icon.draw_icon_walk(cx, CodeIconType::Warning);
+                },
+                TextBufferMessageLevel::Log=>{
+                    self.code_icon.draw_icon_walk(cx, CodeIconType::Ok);
                 }
             }
 
             self.text.color = self.path_color;
-            self.text.draw_text(cx, &format!("{}:{} - ", span.file_name, span.line_start));
+            self.text.draw_text(cx, &format!("{}:{} - ", dm.path, dm.row));
             self.text.color = self.message_color;
-            self.text.draw_text(cx, &format!("{}", span.label.as_ref().unwrap()));
+            self.text.draw_text(cx, &format!("{}", dm.body));
 
             let bg_area = self.item_bg.end_quad(cx, &bg_inst);
-            self._items[counter].animator.update_area_refs(cx, bg_area);
+            dm.animator.update_area_refs(cx, bg_area);
 
             cx.turtle_new_line();
             counter += 1;
@@ -510,11 +508,10 @@ impl RustCompiler{
     pub fn restart_rust_checker(&mut self){
         self._data.truncate(0);
         self._rustc_messages.truncate(0);
-        self._rustc_spans.truncate(0);
         self._rustc_artifacts.truncate(0);
+        self._draw_messages.truncate(0);
         self._rustc_done = false;
         self._rustc_build_stages = BuildStage::NotRunning;
-        self._items.truncate(0);
         self._data.push(String::new());
 
         if let Some(child) = &mut self._check_child{
@@ -534,16 +531,6 @@ impl RustCompiler{
             .spawn();
         
         if let Err(_) = _child{
-            self._rustc_spans.push(RustcSpan{
-                level:Some("error".to_string()),
-                label:Some("A Rust compiler error, only works native".to_string()),
-                ..Default::default()
-            });
-            self._rustc_spans.push(RustcSpan{
-                level:Some("warning".to_string()),
-                label:Some("A Rust compiler warning, only works native".to_string()),
-                ..Default::default()
-            });
             return;
         }
         let mut child = _child.unwrap();
@@ -575,12 +562,10 @@ impl RustCompiler{
                 self._rustc_done = true;
                 // the check is done, do we have any errors? ifnot start a release build
                 let mut has_errors = false;
-                for span in &self._rustc_spans{
-                    if let Some(level) = &span.level{
-                        if level == "error"{
-                            has_errors = true;
-                            break;
-                        }
+                for dm in &self._draw_messages{
+                    if dm.level == TextBufferMessageLevel::Error{
+                        has_errors = true;
+                        break;
                     }
                 }
                 if !has_errors{ // start release build
@@ -616,12 +601,24 @@ impl RustCompiler{
                                             if !span.is_primary{
                                                 continue
                                             }
-                                            if span.label.is_none(){
-                                                span.label = Some(parsed.message.message.clone());
-                                            }
                                             //span.file_name = format!("/{}",span.file_name);
                                             span.level = Some(parsed.message.level.clone());
-                                            self._rustc_spans.push(span);
+                                            self._draw_messages.push(RustDrawMessage{
+                                                hit_state:HitState{..Default::default()},
+                                                animator:Animator::new(Self::get_default_anim(cx, self._draw_messages.len(), false)),
+                                                selected:false,
+                                                path:span.file_name,
+                                                row:span.line_start as usize,
+                                                col:span.column_start as usize,
+                                                tail:span.byte_start as usize,
+                                                head:span.byte_end as usize,
+                                                body:parsed.message.message.clone(),
+                                                level:match parsed.message.level.as_ref(){
+                                                    "warning"=>TextBufferMessageLevel::Warning,
+                                                    "error"=>TextBufferMessageLevel::Error,
+                                                    _=>TextBufferMessageLevel::Warning
+                                                }
+                                            });
                                         }
                                     }
                                     self._rustc_messages.push(parsed);
@@ -638,6 +635,38 @@ impl RustCompiler{
             }
         }
     }
+    
+    pub fn process_run_messages(&mut self, cx:&mut Cx, datas:Vec<Vec<u8>>){
+        for data in datas{
+            if data.len() == 0{ // last event
+            }
+            else {
+                for ch in data{
+                    if ch == '\n' as u8{
+                        // parse it
+                        let line = self._data.last_mut().unwrap();
+                        self._draw_messages.push(RustDrawMessage{
+                            hit_state:HitState{..Default::default()},
+                            animator:Animator::new(Self::get_default_anim(cx, self._draw_messages.len(), false)),
+                            selected:false,
+                            path:"test".to_string(),
+                            row:0,
+                            col:0,
+                            tail:0,
+                            head:0,
+                            body:line.clone(),
+                            level:TextBufferMessageLevel::Log
+                        });
+                        self.view.redraw_view_area(cx);
+                        self._data.push(String::new());
+                    }
+                    else{
+                        self._data.last_mut().unwrap().push(ch as char);
+                    }
+                }
+            }
+        }
+    }    
 }
 
 #[derive(Clone, Deserialize,  Default)]
