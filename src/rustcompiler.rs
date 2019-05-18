@@ -670,11 +670,18 @@ pub struct RustcSpan{
     label:Option<String>,
     suggested_replacement:Option<String>,
     sugggested_applicability:Option<String>,
-    expansion:Option<String>,
+    expansion:Option<Box<RustcExpansion>>,
     level:Option<String>
 }
 
 #[derive(Clone, Deserialize,  Default)]
+pub struct RustcExpansion{
+    span:Option<RustcSpan>,
+    macro_decl_name:String,
+    def_site_span:Option<RustcSpan>
+}
+
+#[derive(Clone, Deserialize,  Default)] 
 pub struct RustcCode{
     code:String,
     explanation:Option<String>

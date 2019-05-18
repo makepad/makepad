@@ -5,8 +5,10 @@ use editor::*;
 mod rustcompiler;
 pub use crate::rustcompiler::*;
 use std::collections::HashMap;
+use serde_json::{Result};
+use serde::*;
 
-#[derive(Clone)]
+#[derive(Clone, Deserialize,  Default)]
 enum Panel{
     RustCompiler,
     FileTree,
@@ -35,12 +37,6 @@ impl Style for App{
         Self{
             file_editor_id_alloc:10,
             view:View{
-                //scroll_h:Some(ScrollBar{
-                //    ..Style::style(cx)
-                //}),
-                //scroll_v:Some(ScrollBar{
-                //    ..Style::style(cx)
-                //}),
                 ..Style::style(cx)
             },
             text_buffers:TextBuffers{
