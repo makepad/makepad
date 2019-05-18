@@ -38,8 +38,9 @@ pub struct RustCompiler{
     pub _items:Vec<RustCompilerItem>
 }
 
-const SIGNAL_CHECK_DATA:u64 = 1;
+const SIGNAL_RUST_CHECKER:u64 = 1;
 const SIGNAL_BUILD_COMPLETE:u64 = 2;
+const SIGNAL_RUN_OUTPUT:u64 = 3;
 
 #[derive(PartialEq)]
 pub enum BuildStage{
@@ -156,7 +157,7 @@ impl RustCompiler{
                 messages.cursors.push(TextCursor{
                     head:span.byte_start as usize,
                     tail:span.byte_end as usize,
-                    max:0
+                    max:0 
                 });
             }
             //println!("PROCESING MESSAGES FOR {} {} {}", span.byte_start, span.byte_end+1, path);
@@ -248,7 +249,7 @@ impl RustCompiler{
             Event::Signal(se)=>{
                 if self._check_signal_id == se.signal_id{
                     match se.value{
-                        SIGNAL_CHECK_DATA=>{
+                        SIGNAL_RUST_CHECKER=>{
                             let mut datas = Vec::new();
                             if let Some(rx) = &self._rx{
                                 while let Ok(data) = rx.try_recv(){
@@ -472,17 +473,37 @@ impl RustCompiler{
     }
 
      pub fn run_program(&mut self){
+        self._run_when_done = false;
         if let Some(child) = &mut self._run_child{
             let _= child.kill();
         }
 
         let mut _child = Command::new("cargo")
             .args(&["run", "--release"])
-            //.stdout(Stdio::piped())
-            //.stderr(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
             .current_dir("./edit_repo")
             .spawn();
-        let child = _child.unwrap();
+
+        let mut child = _child.unwrap();
+
+        let mut stdout =  child.stdout.take().unwrap();
+        let (tx, rx) = mpsc::channel();
+        let signal_id = self._check_signal_id;
+        let thread = std::thread::spawn(move ||{
+            loop{
+                let mut data = vec![0; 4096];
+                let n_bytes_read = stdout.read(&mut data).expect("cannot read");
+                data.truncate(n_bytes_read);
+                let _ = tx.send(data);
+                Cx::send_signal(signal_id, SIGNAL_RUN_OUTPUT);
+                if n_bytes_read == 0{
+                    return 
+                }
+            }
+        });
+        self._rx = Some(rx);
+        self._thread = Some(thread);
         self._run_child = Some(child);
     }
 
@@ -537,7 +558,7 @@ impl RustCompiler{
                 let n_bytes_read = stdout.read(&mut data).expect("cannot read");
                 data.truncate(n_bytes_read);
                 let _ = tx.send(data);
-                Cx::send_signal(signal_id, SIGNAL_CHECK_DATA);
+                Cx::send_signal(signal_id, SIGNAL_RUST_CHECKER);
                 if n_bytes_read == 0{
                     return 
                 }

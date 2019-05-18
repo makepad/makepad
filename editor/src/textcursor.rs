@@ -121,6 +121,7 @@ impl TextCursor{
 pub struct TextCursorSet{
     pub set:Vec<TextCursor>,
     pub last_cursor:usize,
+    pub insert_undo_group:u64,
     pub last_clamp_range:Option<(usize, usize)>
 }
 
@@ -129,6 +130,7 @@ impl TextCursorSet{
         TextCursorSet{
             set:vec![TextCursor{head:0,tail:0,max:0}],
             last_cursor:0,
+            insert_undo_group:0,
             last_clamp_range:None
         }
     }
@@ -225,6 +227,7 @@ impl TextCursorSet{
     }
 
     pub fn add_last_cursor_head_and_tail(&mut self, offset:usize, text_buffer:&TextBuffer){
+        self.insert_undo_group += 1;
         // check if we dont already have exactly that cursor. ifso just remove it
         if self.set.len()>1{
             for i in 0..self.set.len(){
@@ -239,11 +242,13 @@ impl TextCursorSet{
     }
 
     pub fn clear_and_set_last_cursor_head_and_tail(&mut self,offset:usize, text_buffer:&TextBuffer){
+        self.insert_undo_group += 1;
         self.set.truncate(0);
         self.set_last_cursor(offset, offset, text_buffer);
     }
 
     pub fn set_last_cursor_head(&mut self, offset:usize, text_buffer:&TextBuffer)->bool{
+        self.insert_undo_group += 1;
         if self.set[self.last_cursor].head != offset{
             let cursor_tail = self.set[self.last_cursor].tail;
             self.set.remove(self.last_cursor);
@@ -256,6 +261,7 @@ impl TextCursorSet{
     }
 
     pub fn clear_and_set_last_cursor_head(&mut self, offset:usize, text_buffer:&TextBuffer){
+        self.insert_undo_group += 1;
         let cursor_tail = self.set[self.last_cursor].tail;
         self.set.truncate(0);
         self.set_last_cursor(offset, cursor_tail, text_buffer);
@@ -285,6 +291,7 @@ impl TextCursorSet{
     }
 
     pub fn grid_select_corner(&mut self, new_pos:TextPos, text_buffer:&TextBuffer)->TextPos{
+        self.insert_undo_group += 1;
         // we need to compute the furthest row/col in our cursor set
         let mut max_dist = 0.0;
         let mut max_pos = TextPos{row:0,col:0};
@@ -310,7 +317,7 @@ impl TextCursorSet{
     }
 
     pub fn grid_select(&mut self, start_pos:TextPos, end_pos:TextPos, text_buffer:&TextBuffer)->bool{
-       
+        self.insert_undo_group += 1;
         let (left,right) = if start_pos.col < end_pos.col{(start_pos.col, end_pos.col)}
         else{(end_pos.col,start_pos.col)};
 
@@ -419,7 +426,7 @@ impl TextCursorSet{
                 TextUndoGrouping::Newline
             }
             else{
-                 TextUndoGrouping::Character
+                 TextUndoGrouping::Character(self.insert_undo_group)
             }
         }
         else if text.len() == 0{
@@ -674,6 +681,7 @@ impl TextCursorSet{
 
     pub fn select_all(&mut self, text_buffer:&mut TextBuffer){
         self.set.truncate(0);
+        self.insert_undo_group += 1;
         let mut cursor = TextCursor{
             head:0,
             tail:text_buffer.calc_char_count(),
@@ -685,6 +693,7 @@ impl TextCursorSet{
     }
 
     pub fn move_home(&mut self,only_head:bool, text_buffer:&TextBuffer){
+        self.insert_undo_group += 1;
         for cursor in &mut self.set{
             cursor.move_home(text_buffer);
             if !only_head{cursor.tail = cursor.head}
@@ -693,6 +702,7 @@ impl TextCursorSet{
     }
 
     pub fn move_end(&mut self,only_head:bool, text_buffer:&TextBuffer){
+        self.insert_undo_group += 1;
         for cursor in &mut self.set{
             cursor.move_end(text_buffer);
             if !only_head{cursor.tail = cursor.head}
@@ -701,6 +711,7 @@ impl TextCursorSet{
     }
 
     pub fn move_up(&mut self, line_count:usize, only_head:bool, text_buffer:&TextBuffer){
+        self.insert_undo_group += 1;
         for cursor in &mut self.set{
             cursor.move_up(line_count, text_buffer);
             if !only_head{cursor.tail = cursor.head}
@@ -709,6 +720,7 @@ impl TextCursorSet{
     }
 
     pub fn move_down(&mut self,line_count:usize, only_head:bool, text_buffer:&TextBuffer){
+        self.insert_undo_group += 1;
         let total_char_count = text_buffer.calc_char_count();
         for cursor in &mut self.set{
             cursor.move_down(line_count, total_char_count, text_buffer);
@@ -718,6 +730,7 @@ impl TextCursorSet{
     }
 
     pub fn move_left(&mut self, char_count:usize, only_head:bool, text_buffer:&TextBuffer){
+        self.insert_undo_group += 1;
         let mut old_max = (TextPos{row:0,col:0},0);
         for cursor in &mut self.set{
             cursor.move_left(char_count, text_buffer);
@@ -798,6 +811,7 @@ impl TextCursorSet{
     }
 
     pub fn move_left_nearest_token(&mut self, only_head:bool, token_chunks:&Vec<TokenChunk>, text_buffer:&TextBuffer){
+        self.insert_undo_group += 1;
         for cursor in &mut self.set{
             // take the cursor head and find nearest token left
             let pos = TextCursorSet::get_nearest_token_chunk_boundary(true, cursor.head, token_chunks);
@@ -808,6 +822,7 @@ impl TextCursorSet{
     }
 
     pub fn move_right_nearest_token(&mut self, only_head:bool, token_chunks:&Vec<TokenChunk>, text_buffer:&TextBuffer){
+        self.insert_undo_group += 1;
         for cursor in &mut self.set{
             // take the cursor head and find nearest token left
             let pos = TextCursorSet::get_nearest_token_chunk_boundary(false, cursor.head, token_chunks);

@@ -105,7 +105,7 @@ impl TextPos{
 pub enum TextUndoGrouping{
     Space,
     Newline,
-    Character,
+    Character(u64),
     Backspace,
     Delete(usize),
     Block,
@@ -125,7 +125,7 @@ impl TextUndoGrouping{
         match self{
             TextUndoGrouping::Space=>true,
             TextUndoGrouping::Newline=>false,
-            TextUndoGrouping::Character=>true,
+            TextUndoGrouping::Character(_)=>true,
             TextUndoGrouping::Backspace=>true,
             TextUndoGrouping::Delete(_)=>true,
             TextUndoGrouping::Block=>false,
