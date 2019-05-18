@@ -332,10 +332,12 @@ impl RustCompiler{
             dm.animator.play_anim(cx, Self::get_over_anim(cx, dm_to_select, true));
 
             // alright we clicked an item. now what. well 
-            let text_buffer = text_buffers.from_path(cx, &dm.path);
-            text_buffer.messages.jump_to_offset = dm.head;
-            cx.send_signal_after_draw(text_buffer.signal_id, SIGNAL_TEXTBUFFER_JUMP_TO_OFFSET);
-            return RustCompilerEvent::SelectMessage{path:dm.path.clone()}
+            if dm.path != ""{
+                let text_buffer = text_buffers.from_path(cx, &dm.path);
+                text_buffer.messages.jump_to_offset = dm.head;
+                cx.send_signal_after_draw(text_buffer.signal_id, SIGNAL_TEXTBUFFER_JUMP_TO_OFFSET);
+                return RustCompilerEvent::SelectMessage{path:dm.path.clone()}
+            }
         }
         RustCompilerEvent::None
     }

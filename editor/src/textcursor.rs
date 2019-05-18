@@ -370,7 +370,7 @@ impl TextCursorSet{
         for cursor in &mut self.set{
             let (start, end) = cursor.delta(delta);
             // lets find where we are as a cursor in the textbuffer
-            if start == end{
+            if start == end && start > 0{
                 // insert spaces till indent level
                 let pre_spaces = text_buffer.calc_next_line_indent_depth(start, 4);
                 let mut text = String::new();
@@ -379,9 +379,9 @@ impl TextCursorSet{
                     text.push_str(" ");
                 }
                 let mut next = String::new();
-                text_buffer.get_range_as_string(start, 1, &mut next);
+                text_buffer.get_range_as_string(start-1, 2, &mut next);
                 // we have to insert more newlines and spaces because we were between () {} or []
-                if next == "}" || next == ")" || next == "]"{
+                if next == "{}" || next == "()" || next == "[]"{
                     let post_spaces = pre_spaces.max(4) - 4;
                     text.push_str("\n");
                     for _ in 0..post_spaces{
@@ -487,7 +487,7 @@ impl TextCursorSet{
         })
     }
 
-    pub fn overwrite_if_exists(&mut self, thing:&str, text_buffer:&mut TextBuffer){
+    pub fn overwrite_if_exists_or_deindent(&mut self, thing:&str, deindent:usize, text_buffer:&mut TextBuffer){
         let mut delta:isize = 0; // rolling delta to displace cursors 
         let mut ops = Vec::new();
         let mut old_max = (TextPos{row:0,col:0},0);
@@ -499,15 +499,43 @@ impl TextCursorSet{
             let thing_chars = thing.chars().count();
             text_buffer.get_range_as_string(start, thing_chars, &mut next);
 
-            let op = if start == end && thing == next{
+            if start == end && thing == next{
                 // replace thing with next as an op even though its a noop
-                text_buffer.replace_lines_with_string(start, thing_chars, thing)
+                let op = text_buffer.replace_lines_with_string(start, thing_chars, thing);
+                delta += cursor.collapse(start, end, op.len);
+                ops.push(op);
             }
-            else{ // normal insert/replace
-                text_buffer.replace_lines_with_string(start, end-start, thing)
+            else{
+                if start == end{
+                    // normal insert/replace
+                    let pos = text_buffer.offset_to_text_pos(start);
+                    
+                    if let Some((rstart, l1ws, l1len)) = text_buffer.calc_deindent_whitespace(start){
+                        if start-rstart == l1len && l1ws == l1len && l1ws >= deindent{ // empty line, deindent
+                            let op = text_buffer.replace_lines_with_string(start - deindent, deindent, thing);
+                            delta += cursor.collapse(start - deindent, start - deindent, op.len);
+                            ops.push(op);                                    
+                        }
+                        else{
+                            let op = text_buffer.replace_lines_with_string(start, 0, thing);
+                            delta += cursor.collapse(start, start, op.len);
+                            ops.push(op);                                    
+                        }
+                    } 
+                    else{
+                        // check if the 
+                        let op = text_buffer.replace_lines_with_string(start, 0, thing);
+                        delta += cursor.collapse(start, start, op.len);
+                        ops.push(op);                        
+                    }
+                }
+                else{
+                    // check if the 
+                    let op = text_buffer.replace_lines_with_string(start, end-start, thing);
+                    delta += cursor.collapse(start, end, op.len);
+                    ops.push(op);
+                }
             };
-            delta += cursor.collapse(start, end, op.len);
-            ops.push(op);
             old_max = cursor.calc_max(text_buffer, old_max);
        }
         text_buffer.redo_stack.truncate(0);
@@ -526,10 +554,33 @@ impl TextCursorSet{
         for cursor in &mut self.set{
             let (start, end) = cursor.delta(delta);
             if start == end{
-                let indent = text_buffer.calc_delete_line_indent_depth(start);
-                let op = text_buffer.replace_lines_with_string(start, 1 + indent, "");
+                // calc empty line deletion
+                
+                // what i want is to know
+                // whitespace on this line, len of this line
+                // whitespace on next line, len of next line
+                let op = if let Some((rstart, l1ws, l1len, l2ws)) = text_buffer.calc_deletion_whitespace(start){
+                    // cases. ok l1ws == l1len
+                    if l1ws == l1len{ // we wanna delete a whole line
+                        delta -= l1len as isize + 1;
+                        cursor.head = rstart + l2ws;
+                        cursor.tail = cursor.head;
+                        text_buffer.replace_lines_with_string(rstart, l1len+1, "")
+                    }
+                    else if start == rstart + l1len{ // if start == rstart + l1len we are at the end of a line
+                        delta -= l2ws as isize + 1;
+                        text_buffer.replace_lines_with_string(start, l2ws + 1, "")
+                    }
+                    else{
+                        delta += cursor.collapse(start, start+1, 0);
+                        text_buffer.replace_lines_with_string(start, 1, "")
+                    }
+                }
+                else{
+                    delta += cursor.collapse(start, start+1, 0);
+                    text_buffer.replace_lines_with_string(start, 1, "")
+                };
                 ops.push(op);
-                delta += cursor.collapse(start, start+1+indent, 0);
             }
             else if start != end{
                 let op = text_buffer.replace_lines_with_string(start, end - start, "");
@@ -560,6 +611,7 @@ impl TextCursorSet{
                 let op = text_buffer.replace_lines_with_string(new_start, new_len, "");
                 ops.push(op);
                 delta += cursor.collapse(new_start,new_start + new_len, 0);
+                // so what if following is newline, indent, )]}
             }
             else if start != end{
                 let op = text_buffer.replace_lines_with_string(start, end - start, "");

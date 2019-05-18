@@ -210,7 +210,6 @@ impl App{
     }
 
     fn draw_app(&mut self, cx:&mut Cx){
-        println!("BOOTED");
         if let Err(()) = self.view.begin_view(cx, &Layout{..Default::default()}){
             return
         }

@@ -260,18 +260,48 @@ impl TextBuffer{
         return ((offset - pos.col - 1), line.len()+1);
     }
 
-    pub fn calc_delete_line_indent_depth(&self, offset:usize)->usize{
+    pub fn calc_deletion_whitespace(&self, offset:usize)->Option<(usize, usize, usize, usize)>{
         let pos = self.offset_to_text_pos(offset);
-        if self.lines.len() < 1 || pos.col != self.lines[pos.row].len() || pos.row >= self.lines.len() - 1{
-            return 0
+        if self.lines.len() < 1 || pos.row >= self.lines.len() - 1{
+            return None
         }
-        let line = &self.lines[pos.row+1];
-        for (i,ch) in line.iter().enumerate(){
+        let line1 = &self.lines[pos.row];
+        let mut line1_ws = 0;
+        for ch in line1{
             if *ch != ' '{
-                return i;
+                break;
             }
+            line1_ws += 1;
         };
-        return line.len();
+        
+        let line2 = &self.lines[pos.row+1];
+        let mut line2_ws = 0;
+        for ch in line2{
+            if *ch != ' '{
+                break;
+            }
+            line2_ws += 1;
+        };
+        
+        return Some((offset - pos.col, line1_ws, line1.len(),line2_ws));
+    }
+
+
+    pub fn calc_deindent_whitespace(&self, offset:usize)->Option<(usize, usize, usize)>{
+        let pos = self.offset_to_text_pos(offset);
+        if self.lines.len() < 1 || pos.row >= self.lines.len(){
+            return None
+        }
+        let line1 = &self.lines[pos.row];
+        let mut line1_ws = 0;
+        for ch in line1{
+            if *ch != ' '{
+                break;
+            }
+            line1_ws += 1;
+        };
+        
+        return Some((offset - pos.col, line1_ws, line1.len()));
     }
 
     pub fn calc_char_count(&self)->usize{

@@ -681,13 +681,13 @@ impl CodeEditor{
                     self.cursors.insert_around("{","}",text_buffer);
                 },
                 ')'=>{
-                    self.cursors.overwrite_if_exists(")", text_buffer);
+                    self.cursors.overwrite_if_exists_or_deindent(")", 4, text_buffer);
                 },
                 ']'=>{
-                    self.cursors.overwrite_if_exists("]", text_buffer);
+                    self.cursors.overwrite_if_exists_or_deindent("]", 4, text_buffer);
                 },
                 '}'=>{
-                    self.cursors.overwrite_if_exists("}", text_buffer);
+                    self.cursors.overwrite_if_exists_or_deindent("}", 4, text_buffer);
                 },
                 _=>{
                     self.cursors.replace_text(&te.input, text_buffer);
