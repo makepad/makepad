@@ -695,7 +695,7 @@ impl RustCompiler{
                                 tok.advance();
                             }
                             tok.advance();
-                            while tok.next != '0'{
+                            while tok.next != '\0'{
                                 body.push(tok.next);
                                 tok.advance();
                             }
