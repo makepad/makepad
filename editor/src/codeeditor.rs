@@ -1044,8 +1044,8 @@ impl CodeEditor{
                     let min_x = self._line_chunk[bp].0;
                     let max_x = self._line_chunk[bp + hl_len].0;
                     self.draw_highlight_quad(cx, Rect{
-                        x:min_x - origin.x,
-                        y:line_geom.walk.y,
+                        x:min_x,
+                        y:line_geom.walk.y + origin.y,
                         w:max_x - min_x,
                         h:self._monospace_size.y,
                     });
