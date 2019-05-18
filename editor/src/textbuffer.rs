@@ -196,7 +196,7 @@ impl TextBuffer{
         }
         for (ln_row, line) in self.lines.iter().enumerate(){
             if ln_row == pos.row{
-                return char_count + line.len().min(pos.col);
+                return char_count + (line.len()+1).min(pos.col);
             }
             char_count += line.len() + 1;
         }

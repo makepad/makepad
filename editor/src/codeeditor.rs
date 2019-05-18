@@ -47,6 +47,7 @@ pub struct CodeEditor{
 
     pub _select_scroll:Option<SelectScroll>,
     pub _grid_select_corner:Option<TextPos>,
+    pub _is_row_select:bool,
     pub _line_chunk:Vec<(f32,char)>,
 
     pub _highlight_selection:Vec<char>,
@@ -254,6 +255,7 @@ impl Style for CodeEditor{
 
             _anim_select:Vec::new(),
             _grid_select_corner:None,
+            _is_row_select:false,
 
             _bg_area:Area::Empty,
             _highlight_area:Area::Empty,
@@ -466,41 +468,52 @@ impl CodeEditor{
     pub fn handle_finger_down(&mut self, cx:&mut Cx, fe:&FingerDownEvent, text_buffer:&mut TextBuffer){
         cx.set_down_mouse_cursor(MouseCursor::Text);
         // give us the focus
-       
         self.set_key_focus(cx);
-        let offset = self.text.find_closest_offset(cx, &self._text_area, fe.abs);
-        match fe.tap_count{
-            1=>{
-            },
-            2=>{
-                if let Some(chunk) = TextCursorSet::get_nearest_token_chunk(offset, &self._token_chunks){
-                    self.cursors.set_last_clamp_range((chunk.offset, chunk.len));
-                }
-            },
-            3=>{
-                if let Some(chunk) = TextCursorSet::get_nearest_token_chunk(offset, &self._token_chunks){
-                    self.cursors.set_last_clamp_range((chunk.offset, chunk.len));
-                    let (start, _len) = text_buffer.get_nearest_line_range(offset);
-                    let mut chunk_offset = chunk.offset;
-                    let mut chunk_len = chunk.len;
-                    if start < chunk_offset{
-                        chunk_len += chunk_offset - start;
-                        chunk_offset = start;
+        println!("{}",fe.rel.x);
+        
+        let offset;
+
+        if fe.rel.x < self.line_number_width{
+            offset = self.compute_offset_from_ypos(cx, fe.abs.y, text_buffer, false);
+            let range = text_buffer.get_nearest_line_range(offset);
+            self.cursors.set_last_clamp_range(range);
+            self._is_row_select = true;
+        }
+        else{
+            offset = self.text.find_closest_offset(cx, &self._text_area, fe.abs);
+            match fe.tap_count{
+                1=>{
+                },
+                2=>{
+                    if let Some(chunk) = TextCursorSet::get_nearest_token_chunk(offset, &self._token_chunks){
+                        self.cursors.set_last_clamp_range((chunk.offset, chunk.len));
                     }
-                    self.cursors.set_last_clamp_range((chunk_offset, chunk_len));
-                }
-                else{
-                    let range = text_buffer.get_nearest_line_range(offset);
+                },
+                3=>{
+                    if let Some(chunk) = TextCursorSet::get_nearest_token_chunk(offset, &self._token_chunks){
+                        self.cursors.set_last_clamp_range((chunk.offset, chunk.len));
+                        let (start, _len) = text_buffer.get_nearest_line_range(offset);
+                        let mut chunk_offset = chunk.offset;
+                        let mut chunk_len = chunk.len;
+                        if start < chunk_offset{
+                            chunk_len += chunk_offset - start;
+                            chunk_offset = start;
+                        }
+                        self.cursors.set_last_clamp_range((chunk_offset, chunk_len));
+                    }
+                    else{
+                        let range = text_buffer.get_nearest_line_range(offset);
+                        self.cursors.set_last_clamp_range(range);
+                    }
+                },
+                _=>{
+                    let range = (0, text_buffer.calc_char_count());
                     self.cursors.set_last_clamp_range(range);
                 }
-            },
-            _=>{
-                let range = (0, text_buffer.calc_char_count());
-                self.cursors.set_last_clamp_range(range);
             }
+            // ok so we should scan a range 
         }
-        // ok so we should scan a range 
-
+        
         if fe.modifiers.shift{
             if fe.modifiers.logo || fe.modifiers.control{ // grid select
                 let pos = self.compute_grid_text_pos_from_abs(cx, fe.abs);
@@ -519,6 +532,7 @@ impl CodeEditor{
                 self.cursors.clear_and_set_last_cursor_head_and_tail(offset, text_buffer);
             }
         }
+        
         self.view.redraw_view_area(cx);
         self._last_finger_move = Some(fe.abs);
         self.update_highlight(text_buffer);
@@ -529,6 +543,10 @@ impl CodeEditor{
         let cursor_moved = if let Some(grid_select_corner) = self._grid_select_corner{
             let pos = self.compute_grid_text_pos_from_abs(cx, fe.abs);
             self.cursors.grid_select(grid_select_corner, pos, text_buffer)
+        }
+        else if self._is_row_select{
+            let offset = self.compute_offset_from_ypos(cx, fe.abs.y, text_buffer, true);
+            self.cursors.set_last_cursor_head(offset, text_buffer)
         }
         else{
             let offset = self.text.find_closest_offset(cx, &self._text_area, fe.abs);
@@ -553,6 +571,7 @@ impl CodeEditor{
         self._select_scroll = None;
         self._last_finger_move = None;
         self._grid_select_corner = None;
+        self._is_row_select = false;
         self.update_highlight(text_buffer);
         self.reset_cursor_blinker(cx);
     }
@@ -1606,6 +1625,20 @@ impl CodeEditor{
         }
         // otherwise the file is too short, lets use the last line
         TextPos{row:self._line_geometry.len() - 1, col: (rel.x.max(0.) / mono_size.x) as usize}
+    }
+
+    fn compute_offset_from_ypos(&mut self, cx:&Cx, ypos_abs:f32, text_buffer:&TextBuffer, end:bool)->usize{
+        let rel = self._bg_area.abs_to_rel_scrolled(cx, Vec2{x:0.0,y:ypos_abs});
+        let mut mono_size;// = Vec2::zero();
+        let end_col = if end{1<<32}else{0};
+        for (row, geom) in self._line_geometry.iter().enumerate(){
+            //let geom = &self._line_geometry[pos.row];
+            mono_size = Vec2{x:self._monospace_base.x * geom.font_size, y:self._monospace_base.y*geom.font_size};
+            if rel.y < geom.walk.y || rel.y >= geom.walk.y && rel.y <= geom.walk.y + mono_size.y{ // its on the right line
+                return text_buffer.text_pos_to_offset(TextPos{row:row,col:end_col})
+            }
+        }
+        return text_buffer.text_pos_to_offset(TextPos{row:self._line_geometry.len() - 1,col:end_col})
     }
 
     fn start_code_folding(&mut self, cx:&mut Cx, text_buffer:&TextBuffer, halfway:bool){
