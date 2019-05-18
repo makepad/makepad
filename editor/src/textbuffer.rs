@@ -564,6 +564,79 @@ impl TextBuffer{
 
 }
 
+pub struct LineTokenizer<'a>{
+    pub prev:char,
+    pub cur:char,
+    pub next:char,
+    iter: std::str::Chars<'a>
+}
+
+impl<'a> LineTokenizer<'a>{
+    pub fn new(st:&'a str)->Self{
+        let mut ret = Self{
+            prev:'\0',
+            cur:'\0',
+            next:'\0',
+            iter:st.chars()
+        };
+        ret.advance();
+        ret
+    }
+
+    pub fn advance(&mut self){
+        if let Some(next) = self.iter.next(){
+            self.next = next;
+        }
+        else{
+            self.next = '\0'
+        }
+    }
+
+    pub fn next_is_digit(&self)->bool{
+        self.next >= '0' && self.next <='9'
+    }
+
+    pub fn next_is_letter(&self)->bool{
+        self.next >= 'a' && self.next <='z' || self.next >= 'A' && self.next <='Z'
+    }
+
+    pub fn next_is_lowercase_letter(&self)->bool{
+        self.next >= 'a' && self.next <='z' 
+    }
+
+    pub fn next_is_uppercase_letter(&self)->bool{
+        self.next >= 'A' && self.next <='Z' 
+    }
+
+    pub fn next_is_hex(&self)->bool{
+        self.next >= '0' && self.next <='9' || self.next >= 'a' && self.next <= 'f' || self.next >= 'A' && self.next <='F'
+    }
+
+    pub fn advance_with_cur(&mut self){
+        self.cur = self.next;
+        self.advance();
+    }
+
+    pub fn advance_with_prev(&mut self){
+        self.prev = self.cur;
+        self.cur = self.next;
+        self.advance();
+    }
+
+    pub fn keyword(&mut self, chunk:&mut Vec<char>, word:&str)->bool{
+        for m in word.chars(){
+            if m == self.next{ 
+                chunk.push(m);
+                self.advance();
+            }
+            else{
+                return false
+            }
+        }
+        return true
+    }
+}
+
 pub struct TokenizerState<'a>{
     pub prev:char,
     pub cur:char,

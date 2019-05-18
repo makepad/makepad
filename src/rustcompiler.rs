@@ -58,6 +58,7 @@ pub struct RustDrawMessage{
     animator:Animator,
     path:String,
     body:String,
+    deref_row_col:bool,
     row:usize,
     col:usize,
     head:usize,
@@ -148,8 +149,34 @@ impl RustCompiler{
     pub fn export_messages(&self, cx:&mut Cx, text_buffers:&mut TextBuffers){
         
         for dm in &self._draw_messages{
-
+            
             let text_buffer = text_buffers.from_path(cx, &dm.path);
+            
+            let cursor = if !dm.deref_row_col{
+                if dm.head == dm.tail{
+                    TextCursor{
+                        head:dm.head as usize,
+                        tail:dm.tail as usize,
+                        max:0
+                    }
+                }
+                else{
+                    TextCursor{
+                        head:dm.head,
+                        tail:dm.tail,
+                        max:0 
+                    }
+                }
+            }
+            else{
+                let offset = text_buffer.text_pos_to_offset(TextPos{row:dm.row, col:dm.col});
+                TextCursor{
+                    head:offset,
+                    tail:offset,
+                    max:0
+                }
+            };
+            
             let messages = &mut text_buffer.messages;
             messages.mutation_id = text_buffer.mutation_id;
             if messages.gc_id != cx.event_id{
@@ -157,20 +184,9 @@ impl RustCompiler{
                 messages.cursors.truncate(0);
                 messages.bodies.truncate(0);
             }
-            if dm.head == dm.tail{
-                messages.cursors.push(TextCursor{
-                    head:dm.head as usize,
-                    tail:dm.tail as usize,
-                    max:0
-                });
-            }
-            else{
-                messages.cursors.push(TextCursor{
-                    head:dm.head,
-                    tail:dm.tail,
-                    max:0 
-                });
-            }
+            
+            messages.cursors.push(cursor);
+            
             //println!("PROCESING MESSAGES FOR {} {} {}", span.byte_start, span.byte_end+1, path);
             text_buffer.messages.bodies.push(TextBufferMessage{
                 body:dm.body.clone(),
@@ -622,6 +638,7 @@ impl RustCompiler{
                                                 hit_state:HitState{..Default::default()},
                                                 animator:Animator::new(Self::get_default_anim(cx, self._draw_messages.len(), false)),
                                                 selected:false,
+                                                deref_row_col:false,
                                                 path:span.file_name,
                                                 row:span.line_start as usize,
                                                 col:span.column_start as usize,
@@ -662,16 +679,43 @@ impl RustCompiler{
                     if ch == '\n' as u8{
                         // parse it
                         let line = self._data.last_mut().unwrap();
+                        // lets parse line
+                        let mut tok = LineTokenizer::new(&line);
+                        let mut path = String::new();
+                        let mut row_str = String::new();
+                        let mut body = String::new();
+                        if tok.next == '['{
+                            tok.advance();
+                            while tok.next != ':' && tok.next != '\0'{
+                                path.push(tok.next);
+                                tok.advance();
+                            }
+                            while tok.next != ']' && tok.next != '\0'{
+                                row_str.push(tok.next);
+                                tok.advance();
+                            }
+                            tok.advance();
+                            while tok.next != '0'{
+                                body.push(tok.next);
+                                tok.advance();
+                            }
+                        }
+                        else{
+                            body = line.clone();
+                        }
+                        let row = if let Ok(row) = row_str.parse::<u32>(){row as usize}else{0};
+                        
                         self._draw_messages.push(RustDrawMessage{
                             hit_state:HitState{..Default::default()},
                             animator:Animator::new(Self::get_default_anim(cx, self._draw_messages.len(), false)),
                             selected:false,
-                            path:"test".to_string(),
-                            row:0,
+                            path:path,
+                            deref_row_col:true,
+                            row:row,
                             col:0,
                             tail:0,
                             head:0,
-                            body:line.clone(),
+                            body:body,
                             level:TextBufferMessageLevel::Log
                         });
                         self._messages_updated = true;
@@ -686,6 +730,8 @@ impl RustCompiler{
         }
     }    
 }
+
+
 
 #[derive(Clone, Deserialize,  Default)]
 pub struct RustcTarget{
