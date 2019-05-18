@@ -1043,12 +1043,15 @@ impl CodeEditor{
                     let origin = cx.get_turtle_origin();
                     let min_x = self._line_chunk[bp].0;
                     let max_x = self._line_chunk[bp + hl_len].0;
-                    self.draw_highlight_quad(cx, Rect{
+                    let inst = self.highlight.draw_quad_abs(cx, Rect{
                         x:min_x,
                         y:line_geom.walk.y + origin.y,
                         w:max_x - min_x,
                         h:self._monospace_size.y,
                     });
+                    if inst.need_uniforms_now(cx){
+                        inst.push_uniform_float(cx, 1.0);
+                    }
                 }
             }
             self._line_chunk.truncate(0);
