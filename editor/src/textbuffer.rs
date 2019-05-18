@@ -209,21 +209,21 @@ impl TextBuffer{
         return (offset - pos.col, line.len() + if pos.row < line.len()-1{1}else{0})
     }
 
-    pub fn calc_next_line_indent_depth(&self, offset:usize, tabsize:usize)->usize{
+    pub fn calc_next_line_indent_depth(&self, offset:usize, tabsize:usize)->(usize,usize){
         let pos = self.offset_to_text_pos(offset);
         let line = &self.lines[pos.row];
         let prev_index = pos.col;
         if prev_index == 0 || prev_index > line.len(){
-            return 0;
+            return (offset-pos.col, 0);
         };
         let prev = line[prev_index-1];
         let instep = if prev == '{' || prev == '(' || prev == '['{tabsize}else{0};
         for (i,ch) in line.iter().enumerate(){
             if *ch != ' '{
-                return i + instep;
+                return (offset-pos.col, i + instep);
             }
         };
-        return line.len();
+        return (offset-pos.col, line.len());
     }
 
     pub fn calc_line_indent_depth(&self, row:usize)->usize{
@@ -333,7 +333,7 @@ impl TextBuffer{
 
 
     pub fn get_char(&self, start:usize)->char{
-        let mut pos = self.offset_to_text_pos(start);
+        let pos = self.offset_to_text_pos(start);
         let line = &self.lines[pos.row];
         if pos.row == self.lines.len() - 1&& pos.col >= line.len(){
             return '\0'
