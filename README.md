@@ -19,6 +19,12 @@ However since openness is fine and this may be useful to someone, the foundation
 We are not accepting pull requests or feature requests or documenting the code for now. However bugreports of obviously overlooked things are welcome.
 You may use, reuse, fork, do whatever you feel like. But our focus is code/designtools and these libraries are just a tool for us to get there. As the technology looks like its working this time we will contemplate our open-source strategy and update this readme along the way.
 
+IMPORTANT INFO RUNNING THE LOCAL VERSION:
+The native version is being dogfooded on itself, so when you clone it run this first:
+./run_first_init.sh
+then run
+./build_native.sh
+
 Platforms:
 
 WebGL compiles cleanly to wasm32-unknown-unknown without emscripten/wasmbindgen
