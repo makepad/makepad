@@ -304,12 +304,12 @@ impl Text{
                         let y = read.buffer[read.offset + y_o + index * read.slots];
                         let font_size = read.buffer[read.offset + font_size_o + index* read.slots]; 
                         let w = read.buffer[read.offset + font_geom_o + index * read.slots] * font_size;
-                        if x > spos.x + w*0.5 || y > spos.y{
+                        if x > spos.x + w*0.5 || y > spos.y{ 
                             let prev_index = if index == 0{0}else{index - 1};
-                            let prev_y = read.buffer[read.offset + y_o +  prev_index * read.slots];
-                            //if prev_y <= spos.y{
-                            //    return read.buffer[read.offset + char_offset_o + index * read.slots] as usize;
-                           // }
+                            let prev_x = read.buffer[read.offset + x_o +  prev_index * read.slots];
+                            if prev_x > spos.x{
+                                return read.buffer[read.offset + char_offset_o + index * read.slots] as usize;
+                            }
                             return read.buffer[read.offset + char_offset_o +  prev_index * read.slots] as usize;
                         }
                         index += 1;
