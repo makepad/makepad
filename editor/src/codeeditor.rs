@@ -456,13 +456,16 @@ impl CodeEditor{
         sh
     }
 
+    pub fn reset_highlight_visible(&mut self, cx:&mut Cx){
+        self._highlight_visibility = 0.0;
+        self._highlight_area.write_uniform_float(cx, "visible", self._highlight_visibility);
+    }
+
     pub fn reset_cursor_blinker(&mut self, cx:&mut Cx){
         cx.stop_timer(self._cursor_blink_timer_id);
         self._cursor_blink_timer_id = cx.start_timer(self.cursor_blink_speed*0.5,false);
         self._cursor_blink_flipflop = 0.;
-        self._highlight_visibility = 0.0;
         self._cursor_area.write_uniform_float(cx, "blink", self._cursor_blink_flipflop);
-        self._highlight_area.write_uniform_float(cx, "visible", self._highlight_visibility);
     }
 
     pub fn handle_finger_down(&mut self, cx:&mut Cx, fe:&FingerDownEvent, text_buffer:&mut TextBuffer){
@@ -536,7 +539,7 @@ impl CodeEditor{
         
         self.view.redraw_view_area(cx);
         self._last_finger_move = Some(fe.abs);
-        self.update_highlight(text_buffer);
+        self.update_highlight(cx, text_buffer);
         self.reset_cursor_blinker(cx);
     }
 
@@ -557,7 +560,7 @@ impl CodeEditor{
         // determine selection drag scroll dynamics
         let repaint_scroll = self.check_select_scroll_dynamics(&fe);
         if cursor_moved{
-           self.update_highlight(text_buffer);
+           self.update_highlight(cx, text_buffer);
         };
         if repaint_scroll && cursor_moved{
             self.view.redraw_view_area(cx);
@@ -573,7 +576,7 @@ impl CodeEditor{
         self._last_finger_move = None;
         self._grid_select_corner = None;
         self._is_row_select = false;
-        self.update_highlight(text_buffer);
+        self.update_highlight(cx, text_buffer);
         self.reset_cursor_blinker(cx);
     }
 
@@ -702,7 +705,7 @@ impl CodeEditor{
             _=>false
         };
         if cursor_moved{
-            self.update_highlight(text_buffer);
+            self.update_highlight(cx, text_buffer);
             self.scroll_last_cursor_visible(cx, text_buffer, 0.);
             self.view.redraw_view_area(cx);
             self.reset_cursor_blinker(cx);        
@@ -749,7 +752,7 @@ impl CodeEditor{
         else{
             self.cursors.replace_text(&te.input, text_buffer);
         }
-        self.update_highlight(text_buffer);
+        self.update_highlight(cx, text_buffer);
         self.scroll_last_cursor_visible(cx, text_buffer, 0.);
         self.view.redraw_view_area(cx);
         self.reset_cursor_blinker(cx); 
@@ -1002,9 +1005,14 @@ impl CodeEditor{
         }
     }
     
-    fn update_highlight(&mut self, text_buffer:&TextBuffer){
+    fn update_highlight(&mut self, cx:&mut Cx,text_buffer:&TextBuffer){
         self._highlight_selection = self.cursors.get_selection_highlight(text_buffer);
-        self._highlight_token = self.cursors.get_token_highlight(text_buffer, &self._token_chunks);
+        let new_token = self.cursors.get_token_highlight(text_buffer, &self._token_chunks);
+        if new_token != self._highlight_token{
+            self.reset_highlight_visible(cx);
+        }
+        self._highlight_token = new_token;
+
     }
 
     fn draw_new_line(&mut self, cx:&mut Cx){
@@ -1232,7 +1240,7 @@ impl CodeEditor{
                     else{
                         self.paren_pair.color = self.colors.paren_pair_fail;
                         self.paren_pair.draw_quad_abs(cx, geom);
-                    }                            
+                    }
                     self.colors.paren
                 },
                 TokenType::Operator=> self.colors.operator,

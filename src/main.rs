@@ -18,7 +18,6 @@ enum Panel{
     FileEditor{path:String, editor_id:u64}
 }
 
-
 struct App{
     view:View<ScrollBar>,
     dock:Dock<Panel>,
@@ -37,7 +36,7 @@ main_app!(App, "Makepad");
 impl Style for App{
     fn style(cx:&mut Cx)->Self{
         set_dark_style(cx);
-        Self{ 
+        Self{
             file_editor_id_alloc:10,
             view:View{
                 ..Style::style(cx)

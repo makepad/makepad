@@ -441,6 +441,19 @@ impl Cx{
         //self.platform.from_wasm.hide_text_ime();
     }
 
+    pub fn start_timer(&mut self, _interval:f64, _repeats:bool)->u64{
+        0
+    }
+
+    pub fn stop_timer(&mut self, _id:u64){
+    }
+
+    pub fn send_signal(_id:u64, _value:u64){
+    }
+    
+    pub fn write_log(_data:&str){
+    }
+    
     pub fn compile_all_ogl_shaders(&mut self){
         for sh in &self.shaders{
             let glsh = Self::compile_ogl_shader(&sh);
@@ -629,6 +642,7 @@ impl Cx{
                 uniforms_dl:Self::compile_get_uniforms(program, sh, &ash.uniforms_dl),
                 uniforms_dr:Self::compile_get_uniforms(program, sh, &ash.uniforms_dr),
                 texture_slots:Self::compile_get_texture_slots(program, &ash.texture_slots),
+                named_uniform_props:ash.named_uniform_props.clone(),
                 named_instance_props:ash.named_instance_props.clone(),
                 rect_instance_props:ash.rect_instance_props.clone(),
                 instance_slots:ash.instance_slots,
@@ -726,7 +740,8 @@ pub struct AssembledGLShader{
 
     pub fragment:String,
     pub vertex:String,
-    pub named_instance_props: NamedInstanceProps
+    pub named_uniform_props: NamedProps,
+    pub named_instance_props: NamedProps
 }
 
 #[derive(Default,Clone)]
@@ -743,7 +758,8 @@ pub struct CompiledShader{
     pub uniforms_dl: Vec<GLUniform>,
     pub uniforms_cx: Vec<GLUniform>,
     pub texture_slots: Vec<GLUniform>,
-    pub named_instance_props: NamedInstanceProps,
+    pub named_instance_props: NamedProps,
+    pub named_uniform_props: NamedProps,
     pub rect_instance_props: RectInstanceProps
 }
 
