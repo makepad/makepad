@@ -5,8 +5,9 @@ use std::io::Read;
 use std::process::{Command, Child, Stdio};
 use std::sync::mpsc;
 
-use serde_json::{Result};
-use serde::*;
+use miniserde::{json,  Deserialize}; 
+//use serde_json::{Result};
+//use serde::*;
 
 //#[derive(Clone)]
 pub struct RustCompiler{
@@ -616,7 +617,7 @@ impl RustCompiler{
                         let line = self._data.last_mut().unwrap();
                         // parse the line
                         if line.contains("\"reason\":\"compiler-artifact\""){
-                            let parsed:Result<RustcCompilerArtifact> = serde_json::from_str(line); 
+                            let parsed:Result<RustcCompilerArtifact,miniserde::Error> = json::from_str(line); 
                             match parsed{
                                 Err(err)=>println!("JSON PARSE ERROR {:?} {}", err, line),
                                 Ok(parsed)=>{
@@ -626,7 +627,7 @@ impl RustCompiler{
                             self.view.redraw_view_area(cx);
                         }
                         else if line.contains("\"reason\":\"compiler-message\""){
-                            let parsed:Result<RustcCompilerMessage> = serde_json::from_str(line); 
+                            let parsed:Result<RustcCompilerMessage,miniserde::Error> = json::from_str(line); 
                             match parsed{
                                 Err(err)=>println!("JSON PARSE ERROR {:?} {}", err, line),
                                 Ok(parsed)=>{

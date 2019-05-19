@@ -13,8 +13,9 @@ webgl = ["render/webgl"]
 rand = "*"
 #syn = "*"
 proc-macro2 = "*"
-serde_json = "*"
-serde = { version = "1.0", features = ["derive"] }
+miniserde = "*"
+#serde_json = "*"
+#serde = { version = "1.0", features = ["derive"] }
 
 [dependencies.render]
 path="../render"

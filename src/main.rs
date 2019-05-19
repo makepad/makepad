@@ -5,10 +5,11 @@ use editor::*;
 mod rustcompiler;
 pub use crate::rustcompiler::*;
 use std::collections::HashMap;
+use miniserde::{json,  Deserialize}; 
 //use serde_json::{Result};
-use serde::*;
+//use serde::*;
 
-#[derive(Clone, Deserialize)]
+#[derive(Clone)]
 enum Panel{
     RustCompiler,
     FileTree,

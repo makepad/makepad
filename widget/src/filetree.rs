@@ -1,8 +1,9 @@
 use render::*;
 use crate::scrollbar::*;
-use serde_json::{Result};
-use serde::*;
-
+use miniserde::{json,  Deserialize};
+//use serde_json::{Result};
+//use serde::*;
+ 
 #[derive(Clone)]
 pub struct FileTree{
     pub view:View<ScrollBar>,
@@ -288,7 +289,7 @@ impl FileTree{
     } 
 
     pub fn load_from_json(&mut self, cx:&mut Cx, json_data:&str){
-        let value:Result<JsonFolder> = serde_json::from_str(json_data); 
+        let value:Result<JsonFolder,miniserde::Error> = json::from_str(json_data); 
         if let Ok(value) = value{
             self.root_node = Self::json_to_file_node(value);
         }
