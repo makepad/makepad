@@ -21,6 +21,7 @@ mod cx_glsl;
 mod cx_desktop; 
 
 // shared modules
+#[macro_use]
 mod cx; 
 mod cx_turtle;
 mod cx_fonts;

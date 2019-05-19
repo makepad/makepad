@@ -1,9 +1,9 @@
 cargo build --target=wasm32-unknown-unknown --release --manifest-path="./webgl/Cargo.toml"
 node ./build_index.js
 cp ./webgl/target/wasm32-unknown-unknown/release/makepad_webgl.wasm ./webgl/target/wasm32-unknown-unknown/release/makepad_webgl.webassembly.html
-../wabt/bin/wasm-strip ./webgl/target/wasm32-unknown-unknown/release/makepad_webgl.webassembly.html
+./bin/wasm-strip ./webgl/target/wasm32-unknown-unknown/release/makepad_webgl.webassembly.html
 rm ./webgl/target/wasm32-unknown-unknown/release/makepad_webgl.webassembly.html.br
-../brotli/out/brotli ./webgl/target/wasm32-unknown-unknown/release/makepad_webgl.webassembly.html
+./bin/brotli ./webgl/target/wasm32-unknown-unknown/release/makepad_webgl.webassembly.html
 ls -al ./webgl/target/wasm32-unknown-unknown/release/|grep makepad_webgl.webassembly.html
 echo "Zipped size:";gzip -9 < ./webgl/target/wasm32-unknown-unknown/release/makepad_webgl.webassembly.html|wc -c
 

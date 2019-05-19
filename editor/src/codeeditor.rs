@@ -1411,7 +1411,7 @@ impl CodeEditor{
         let offset = text_buffer.messages.jump_to_offset;
         // make one cursor, and start scrolling towards it
         self.cursors.clear_and_set_last_cursor_head_and_tail(offset, text_buffer);
-        self.scroll_last_cursor_visible(cx, text_buffer, self._final_fill_height / 2.);
+        self.scroll_last_cursor_visible(cx, text_buffer, self._final_fill_height*0.8);
         self.view.redraw_view_area(cx);
     }
 
@@ -1603,7 +1603,7 @@ impl CodeEditor{
             let mono_size = Vec2{x:self._monospace_base.x * geom.font_size, y:self._monospace_base.y*geom.font_size};//self.text.get_monospace_size(cx, geom.font_size);
             let rect = Rect{
                 x:(pos.col as f32) * mono_size.x + self.line_number_width,
-                y:geom.walk.y - mono_size.y * 1. - height_pad,
+                y:geom.walk.y - mono_size.y * 1. - 0.5*height_pad,
                 w:mono_size.x * 4.,
                 h:mono_size.y * 4. + height_pad
             };
@@ -1631,7 +1631,7 @@ impl CodeEditor{
     fn compute_offset_from_ypos(&mut self, cx:&Cx, ypos_abs:f32, text_buffer:&TextBuffer, end:bool)->usize{
         let rel = self._bg_area.abs_to_rel_scrolled(cx, Vec2{x:0.0,y:ypos_abs});
         let mut mono_size;// = Vec2::zero();
-        let end_col = if end{1<<32}else{0};
+        let end_col = if end{1<<31}else{0};
         for (row, geom) in self._line_geometry.iter().enumerate(){
             //let geom = &self._line_geometry[pos.row];
             mono_size = Vec2{x:self._monospace_base.x * geom.font_size, y:self._monospace_base.y*geom.font_size};

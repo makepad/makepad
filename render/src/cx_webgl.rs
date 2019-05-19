@@ -321,14 +321,14 @@ impl Cx{
             };
         };
 
-        self.send_signals_before_draw(&mut event_handler);
+        self.call_signals_before_draw(&mut event_handler);
 
         if is_animation_frame && self.redraw_areas.len()>0{
             self.call_draw_event(&mut event_handler, root_view);
             self.paint_dirty = true;
         }
 
-        self.send_signals_after_draw(&mut event_handler);
+        self.call_signals_after_draw(&mut event_handler);
 
         // check if we need to send a cursor
         if !self.down_mouse_cursor.is_none(){
@@ -368,8 +368,13 @@ impl Cx{
     { 
     }
 
-    pub fn log(&mut self, val:&str){
-        self.platform.from_wasm.log(val)
+    pub fn write_log(_data:&str){
+        //let _=io::stdout().write(data.as_bytes());
+        //let _=io::stdout().flush();
+    }
+
+    pub fn send_signal(_id:u64, _value:u64){
+        // todo
     }
 
     pub fn read_file(&mut self, path:&str)->u64{
