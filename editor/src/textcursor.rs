@@ -907,6 +907,17 @@ impl TextCursorSet{
                         pair_token: 0
                     })
                 }
+                if token_chunks[i].token_type == TokenType::String{
+                    if token_chunks[i].len == 2{
+                        return Some(token_chunks[i].clone())
+                    }
+                    return Some(TokenChunk{
+                        token_type:TokenType::String,
+                        offset: token_chunks[i].offset+1,
+                        len:token_chunks[i].len - 2,
+                        pair_token: 0
+                    })
+                }
                 return Some(token_chunks[i].clone());
             }
         };
@@ -937,7 +948,9 @@ impl TextCursorSet{
 
     pub fn get_token_highlight(&self, text_buffer:&TextBuffer, token_chunks:&Vec<TokenChunk>)->Vec<char>{
         let cursor = &self.set[self.last_cursor];
-       
+        if cursor.head != cursor.tail{
+            return vec![]
+        }
         if let Some(chunk) = TextCursorSet::get_nearest_token_chunk(cursor.head, token_chunks){
             let add = match chunk.token_type{
                 TokenType::Whitespace=>false,
@@ -1200,7 +1213,7 @@ impl DrawCursors{
         }
     }
 
-    pub fn mark_text_with_cursor(&mut self, cursors:&Vec<TextCursor>, ch:char, offset:usize, x:f32, y:f32, w:f32, h:f32, last_cursor:usize)->f32{
+    pub fn mark_text_with_cursor(&mut self, cursors:&Vec<TextCursor>, ch:char, offset:usize, x:f32, y:f32, w:f32, h:f32, last_cursor:usize, mark_spaces:f32)->f32{
         // check if we need to skip cursors
         while offset >= self.end{ // jump to next cursor
             if offset == self.end{ // process the last bit here
@@ -1209,7 +1222,7 @@ impl DrawCursors{
                 self.emit_selection();
             }
             if !self.set_next(cursors){ // cant go further
-                return 0.0
+                return mark_spaces
             }
         }
         // in current cursor range, update values
@@ -1226,6 +1239,6 @@ impl DrawCursors{
                 return 2.0
             }
         }
-        return 0.0
+        return mark_spaces
     }
 }

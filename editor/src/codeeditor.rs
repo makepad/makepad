@@ -11,7 +11,7 @@ pub struct CodeEditor{
     pub cursor: Quad,
     pub selection: Quad,
     pub token_highlight: Quad,
-    pub select_highlight: Quad,
+    //pub select_highlight: Quad,
     pub cursor_row: Quad,
     pub paren_pair: Quad,
     pub indent_lines:Quad,
@@ -127,7 +127,7 @@ impl Style for CodeEditor{
         let indent_lines_sh = Self::def_indent_lines_shader(cx);
         let selection_sh = Self::def_selection_shader(cx);
         let token_highlight_sh = Self::def_token_highlight_shader(cx);
-        let select_highlight_sh = Self::def_select_highlight_shader(cx);
+        //let select_highlight_sh = Self::def_select_highlight_shader(cx);
         let cursor_sh = Self::def_cursor_shader(cx);
         let cursor_row_sh = Self::def_cursor_row_shader(cx);
         let paren_pair_sh = Self::def_paren_pair_shader(cx);
@@ -196,10 +196,10 @@ impl Style for CodeEditor{
                 shader_id:cx.add_shader(token_highlight_sh.clone(), "Editor.token_highlight"),
                 ..Style::style(cx)
             }, 
-            select_highlight:Quad{
-                shader_id:cx.add_shader(select_highlight_sh, "Editor.select_highlight"),
-                ..Style::style(cx)
-            }, 
+            //select_highlight:Quad{
+            //    shader_id:cx.add_shader(select_highlight_sh, "Editor.select_highlight"),
+            //    ..Style::style(cx)
+            //}, 
             cursor:Quad{
                 shader_id:cx.add_shader(cursor_sh, "Editor.cursor"),
                 ..Style::style(cx)
@@ -703,11 +703,10 @@ impl CodeEditor{
         };
         if cursor_moved{
             self.update_highlight(text_buffer);
-
             self.scroll_last_cursor_visible(cx, text_buffer, 0.);
             self.view.redraw_view_area(cx);
+            self.reset_cursor_blinker(cx);        
         }
-        self.reset_cursor_blinker(cx);        
     }
 
     pub fn handle_text_input(&mut self, cx:&mut Cx, te:&TextInputEvent, text_buffer:&mut TextBuffer){
@@ -872,7 +871,7 @@ impl CodeEditor{
         self.indent_lines.color = self.colors.indent_lines;
         self.bg.color = self.colors.bg;
         self.selection.color = if self.has_key_focus(cx){self.colors.selection}else{self.colors.selection_defocus};
-        self.select_highlight.color = self.colors.highlight;
+        //self.select_highlight.color = self.colors.highlight;
         self.token_highlight.color = self.colors.highlight;
         self.cursor.color = self.colors.cursor;
         self.cursor_row.color = self.colors.cursor_row;
@@ -897,7 +896,7 @@ impl CodeEditor{
 
             // layering, this sets the draw call order
             self._highlight_area = cx.new_instance_layer(self.token_highlight.shader_id, 0).into_area();
-            cx.new_instance_layer(self.select_highlight.shader_id, 0);
+            //cx.new_instance_layer(self.select_highlight.shader_id, 0);
             cx.new_instance_layer(self.cursor_row.shader_id, 0);
             cx.new_instance_layer(self.selection.shader_id, 0);
             cx.new_instance_layer(self.message_marker.shader_id, 0);
@@ -1084,7 +1083,7 @@ impl CodeEditor{
                     let origin = cx.get_turtle_origin();
                     let min_x = self._line_chunk[bp].0;
                     let max_x = self._line_chunk[bp + hl_len].0;
-                    self.select_highlight.draw_quad_abs(cx, Rect{
+                    self.draw_token_highlight_quad(cx, Rect{
                         x:min_x,
                         y:line_geom.walk.y + origin.y,
                         w:max_x - min_x,
@@ -1170,7 +1169,7 @@ impl CodeEditor{
             self._monospace_size.x * (chunk.len() as f32), 
             self._monospace_size.y,
             self._scroll_pos){
-            
+            let mut mark_spaces = 0.0;
             // determine chunk color
             self.text.color = match token_type{
                 TokenType::Whitespace => {
@@ -1180,6 +1179,9 @@ impl CodeEditor{
                         self._last_tabs = tabs;
                         self._newline_tabs = tabs;
                         self.draw_indent_lines(cx, geom.y, tabs);
+                    }
+                    else if next_char == '\n'{
+                        mark_spaces = 1.0;
                     }
                     self.colors.whitespace
                 },
@@ -1260,13 +1262,13 @@ impl CodeEditor{
                     line_chunk.push((x,ch));
                     //draw_search.mark_text_select_only(cursors, offset, x, geom.y, w, height);
                     draw_messages.mark_text_select_only(message_cursors,offset, x, geom.y, w, height);
-                    draw_cursors.mark_text_with_cursor(cursors, ch, offset, x, geom.y, w, height, last_cursor)
+                    draw_cursors.mark_text_with_cursor(cursors, ch, offset, x, geom.y, w, height, last_cursor, mark_spaces)
                 });
             }
             else{ // fast loop
                 self.text.add_text(cx, geom.x, geom.y, offset, self._text_inst.as_mut().unwrap(), &chunk, |ch, offset, x, w|{
                     draw_messages.mark_text_select_only(message_cursors,offset, x, geom.y, w, height);
-                    draw_cursors.mark_text_with_cursor(cursors, ch, offset, x, geom.y, w, height, last_cursor)
+                    draw_cursors.mark_text_with_cursor(cursors, ch, offset, x, geom.y, w, height, last_cursor, mark_spaces)
                 });
             }
         }

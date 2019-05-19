@@ -51,7 +51,7 @@ impl RustEditor{
         }        
 
         let mut state = TokenizerState::new(text_buffer);
-       
+        
         let mut looping = true;
         let mut chunk = Vec::new();
         while looping{
@@ -523,7 +523,7 @@ impl RustEditor{
                 }
             },
             'm'=>{
-                if state.keyword(chunk,"atc"){
+                if state.keyword(chunk,"atch"){
                     return KeywordType::Flow
                 }
                 else if state.keyword(chunk,"o"){
@@ -574,7 +574,7 @@ impl RustEditor{
                     return KeywordType::Normal
                 }
                 else if state.keyword(chunk,"r"){
-                    if state.keyword(chunk,"rait"){
+                    if state.keyword(chunk,"ait"){
                         return KeywordType::Normal
                     }
                     else if state.keyword(chunk,"ue"){

@@ -4,7 +4,9 @@ use render::*;
 use crate::splitter::*;
 use crate::tabcontrol::*;
 
-#[derive(Clone)]
+use miniserde::ser::{Fragment, Map, Serialize};
+use std::borrow::Cow;
+
 pub struct Dock<TItem>
 where TItem: Clone
 {
@@ -102,6 +104,69 @@ where TItem: Clone
         last:Box<DockItem<TItem>>
     }
 }
+
+impl <TItem>Serialize for DockItem<TItem> 
+where TItem: Clone
+{
+    fn begin(&self) -> Fragment {
+        Fragment::Map(Box::new(PanelStream {
+            data: self,
+            state: 0,
+        }))
+    }
+}
+
+struct PanelStream<'a, TItem> 
+where TItem: Clone
+{
+    data: &'a DockItem<TItem>,
+    state: usize,
+}
+
+impl<'a, TItem> Map for PanelStream<'a, TItem> 
+where TItem: Clone
+{
+    fn next(&mut self) -> Option<(Cow<str>, &Serialize)> {
+        let state = self.state;
+        self.state += 1;
+        match self.data{
+            DockItem::Single(item)=>{
+                match state {
+                    0 => Some((Cow::Borrowed("node"), &Cow::Borrowed("single"))),
+                    //1 => Some((Cow::Borrowed("message"), &self.data.message)),
+                    _ => None,
+                }
+            },
+            DockItem::TabControl{..}=>{
+                match state {
+                    0 => Some((Cow::Borrowed("node"),&Cow::Borrowed("tabcontrol"))),
+                    //0 => Some((Cow::Borrowed("code"), &self.data.code)),
+                    //1 => Some((Cow::Borrowed("message"), &self.data.message)),
+                    _ => None,
+                }
+            },
+            DockItem::Splitter{align, pos, axis, first, last}=>{
+                match state {
+                    0 => Some((Cow::Borrowed("node"), &Cow::Borrowed("splitter"))),
+                    1=> Some((Cow::Borrowed("align"), match align{
+                       SplitterAlign::First=> &Cow::Borrowed("first"),
+                       SplitterAlign::Last=> &Cow::Borrowed("last"),
+                       SplitterAlign::Weighted=> &Cow::Borrowed("weighted"),
+                    })),
+                    2=> Some((Cow::Borrowed("axis"), match axis{
+                       Axis::Horizontal=> &Cow::Borrowed("horizontal"),
+                       Axis::Vertical=> &Cow::Borrowed("vertical"),
+                    })),
+                    3=> Some((Cow::Borrowed("pos"), pos)),
+                    4=> Some((Cow::Borrowed("first"), first)),
+                    5=> Some((Cow::Borrowed("first"), last)),
+                    _ => None,
+                }
+            }
+        }
+    }
+}
+
 
 struct DockWalkStack<'a, TItem>
 where TItem: Clone

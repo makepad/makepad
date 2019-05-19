@@ -1,13 +1,14 @@
 //use syn::Type;
-
+ 
 use widget::*;
 use editor::*;
 mod rustcompiler;
 pub use crate::rustcompiler::*;
 use std::collections::HashMap;
-//use miniserde::{json,  Deserialize}; 
-//use serde_json::{Result};
-//use serde::*;
+
+use miniserde::{json};
+use miniserde::ser::{Fragment, Map, Serialize};
+use std::borrow::Cow;
 
 #[derive(Clone)]
 enum Panel{
@@ -16,6 +17,7 @@ enum Panel{
     FileEditorTarget,
     FileEditor{path:String, editor_id:u64}
 }
+
 
 struct App{
     view:View<ScrollBar>,
@@ -127,6 +129,9 @@ impl App{
                 }
                 self.index_read_id = cx.read_file(&format!("{}index.json",self.text_buffers.root_path));
                 self.rust_compiler.init(cx);
+                
+                let json = json::to_string(self.dock.dock_items.as_ref().unwrap());
+                println!("{}", json)
             },
             Event::FileRead(fr)=>{
                 // lets see which file we loaded
@@ -288,7 +293,7 @@ impl App{
                 if ctrl_id == target_ctrl_id{
                     if let DockItem::TabControl{current, tabs} = dock_item{
                         tabs.insert(*current+1, new_tab);
-                        *current = *current + 1;//tabs.len() - 1;
+                        *current = *current + 1;
                         cx.redraw_area(Area::All);
                         break
                     }
@@ -359,5 +364,55 @@ impl FileEditor{
             set_key_focus_on_draw:true,
             ..template.rust_editor.clone()
         })
+    }
+}
+
+// serde serializer for Panel
+impl Serialize for Panel {
+    fn begin(&self) -> Fragment {
+        Fragment::Map(Box::new(PanelStream {
+            data: self,
+            state: 0,
+        }))
+    }
+}
+
+struct PanelStream<'a> {
+    data: &'a Panel,
+    state: usize,
+}
+
+impl<'a> Map for PanelStream<'a> {
+    fn next(&mut self) -> Option<(Cow<str>, &Serialize)> {
+        let state = self.state;
+        self.state += 1;
+        match self.data{
+            Panel::RustCompiler=>{
+                match state {
+                    0 => Some((Cow::Borrowed("node"), &Cow::Borrowed("rustcompiler"))),
+                    _ => None,
+                }
+            },
+            Panel::FileTree=>{
+                match state {
+                    0 => Some((Cow::Borrowed("node"),&Cow::Borrowed("filetree"))),
+                    _ => None,
+                }
+            },
+            Panel::FileEditorTarget=>{
+                match state {
+                    0 => Some((Cow::Borrowed("node"), &Cow::Borrowed("fileeditortarget"))),
+                    _ => None,
+                }
+            },
+            Panel::FileEditor{path, editor_id}=>{
+                match state {
+                    0 => Some((Cow::Borrowed("node"), &Cow::Borrowed("fileeditor"))),
+                    1 => Some((Cow::Borrowed("path"), path)),
+                    2 => Some((Cow::Borrowed("editor_id"), editor_id)),
+                    _ => None,
+                }
+            }
+        }
     }
 }
