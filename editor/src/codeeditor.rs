@@ -118,7 +118,6 @@ pub struct CodeEditorColors{
     pub doc_comment:Color,
     pub paren_d1:Color,
     pub paren_d2:Color,
-    pub paren_d3:Color,
     pub operator:Color,
     pub delimiter:Color,
     pub unexpected:Color
@@ -152,7 +151,8 @@ impl Style for CodeEditor{
                 selection_defocus:color256(75,75,75),
                 highlight:color256a(75,75,95,128),
                 cursor:color256(176,176,176),
-                cursor_row:color256(75,75,75),
+                //cursor_row:color256(75,75,75),
+                cursor_row:color256(45,45,45), 
 
                 paren_pair_match:color256(136,136,136),
                 paren_pair_fail:color256(255,0,0),
@@ -177,9 +177,8 @@ impl Style for CodeEditor{
 
                 comment:color256(99,141,84),
                 doc_comment:color256(120,171,104),
-                paren_d1:color("orchid"),
-                paren_d2:color("gold"),
-                paren_d3:color("lightskyblue"),
+                paren_d1:color("#eee"),
+                paren_d2:color("#888"),
                 operator:color256(212,212,212),
                 delimiter:color256(212,212,212),
                 unexpected:color256(255,0,0),
@@ -421,11 +420,14 @@ impl CodeEditor{
         sh.add_ast(shader_ast!({
             fn pixel()->vec4{
                 df_viewport(pos * vec2(w, h));
+                df_rect(0.,0.,w,h);
+                return df_fill(color);
+                /*
                 df_move_to(0.,0.5);
                 df_line_to(w,0.5);
                 df_move_to(0.,h-0.5);
                 df_line_to(w,h-0.5);
-                return df_stroke(color, 0.75 + dpi_dilate*0.75);
+                return df_stroke(color, 0.75 + dpi_dilate*0.75);*/
             }
         }));
         sh
@@ -1253,10 +1255,9 @@ impl CodeEditor{
                 TokenType::ParenOpen=>{
                     let depth = self._paren_stack.len();
                     self._paren_stack.last_mut().unwrap().geom_open = Some(geom);
-                    match depth%3{
+                    match depth%2{
                         0=>self.colors.paren_d1,
-                        1=>self.colors.paren_d2,
-                        _=>self.colors.paren_d3
+                        _=>self.colors.paren_d2,
                     }
                 },
                 TokenType::ParenClose=>{
@@ -1268,10 +1269,10 @@ impl CodeEditor{
                         self.paren_pair.draw_quad_abs(cx, geom);
                     }
                     let depth = self._paren_stack.len();
-                    match depth%3{
+                    match depth%2{
                         0=>self.colors.paren_d1,
-                        1=>self.colors.paren_d2,
-                        _=>self.colors.paren_d3
+                        _=>self.colors.paren_d2,
+                        //_=>self.colors.paren_d3
                     }
                 },
                 TokenType::Operator=> self.colors.operator,
