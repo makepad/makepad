@@ -154,8 +154,10 @@ impl Style for CodeEditor{
                 //cursor_row:color256(75,75,75),
                 cursor_row:color256(45,45,45), 
 
-                paren_pair_match:color256(136,136,136),
-                paren_pair_fail:color256(255,0,0),
+                //paren_pair_match:color256(136,136,136),
+                //paren_pair_fail:color256(255,0,0),
+                paren_pair_match:color256(90,90,90),
+                paren_pair_fail:color256(155,0,0),
 
                 marker_error:color256(200,0,0),
                 marker_warning:color256(0,200,0),
@@ -410,8 +412,10 @@ impl CodeEditor{
                 //df_rect(0.,0.,w,h);
                 //df_rect(0.5,0.5,w-1.,h-1.);
                 //return df_stroke(color, 0.75 + dpi_dilate*0.75);
-                df_rect(0.,h-2.,w,2.);
-                return df_fill(color("white"));
+                //df_rect(0.,h-2.,w,2.);
+                //return df_fill(color("white"));
+                df_rect(0.01,0.,w,h);
+                return df_fill(color);
             }
         }));
         sh
@@ -922,12 +926,12 @@ impl CodeEditor{
             self._highlight_area = cx.new_instance_layer(self.token_highlight.shader_id, 0).into_area();
             //cx.new_instance_layer(self.select_highlight.shader_id, 0);
             cx.new_instance_layer(self.cursor_row.shader_id, 0);
+            cx.new_instance_layer(self.paren_pair.shader_id, 0);
             cx.new_instance_layer(self.selection.shader_id, 0);
             cx.new_instance_layer(self.message_marker.shader_id, 0);
             self._line_number_inst = Some(self.text.begin_text(cx));
             cx.new_instance_layer(self.text.shader_id, 0); // force next begin_text in another drawcall
             self._text_inst = Some(self.text.begin_text(cx));
-            cx.new_instance_layer(self.paren_pair.shader_id, 0);
             self._indent_line_inst = Some(cx.new_instance_layer(self.indent_lines.shader_id, 0));
 
             self._cursor_area = cx.new_instance_layer(self.cursor.shader_id, 0).into_area();
