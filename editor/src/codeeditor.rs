@@ -861,7 +861,6 @@ impl CodeEditor{
                 }
             },
             Event::FingerDown(fe)=>{
-                
                 self.handle_finger_down(cx, &fe, text_buffer);
             },
             Event::FingerHover(_fe)=>{
@@ -900,7 +899,7 @@ impl CodeEditor{
             _=>()
         };
         CodeEditorEvent::None
-   }
+    }
 
     pub fn has_key_focus(&self, cx:&Cx)->bool{
         cx.has_key_focus(self._bg_area)
@@ -1718,7 +1717,7 @@ impl CodeEditor{
         // start code folding anim
         let speed = 0.98;
         self._anim_folding.depth = if halfway{1}else{2};
-        self._anim_folding.zoom_scale = 1.0;//if halfway{9.0} else{1.0};
+        self._anim_folding.zoom_scale = if halfway{0.5}else{1.};//if halfway{9.0} else{1.0};
         self._anim_folding.state.do_folding(speed, 0.95);
         self._anim_folding.focussed_line = self.compute_focussed_line_for_folding(cx,text_buffer);
         //println!("FOLDING {}",self._anim_folding.focussed_line);
