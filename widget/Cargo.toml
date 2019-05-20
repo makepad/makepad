@@ -11,11 +11,11 @@ webgl = ["render/webgl"]
 
 [dependencies]
 rand = "*"
+serde_json = "*"
+serde = { version = "1.0", features = ["derive"] }
 #syn = "*"
-proc-macro2 = "*"
-miniserde = "*"
-#serde_json = "*"
-#serde = { version = "1.0", features = ["derive"] }
+#proc-macro2 = "*"
+#miniserde = "*"
 
 [dependencies.render]
 path="../render"

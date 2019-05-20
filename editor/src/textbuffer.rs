@@ -16,11 +16,20 @@ pub struct TextBuffer{
     pub signal_id: u64,
     pub mutation_id: u64,
     pub messages: TextBufferMessages,
+    pub keyboard:TextBufferKeyboard,
 }
 
 pub const SIGNAL_TEXTBUFFER_MESSAGE_UPDATE:u64 = 1;
 pub const SIGNAL_TEXTBUFFER_JUMP_TO_OFFSET:u64 = 2;
 pub const SIGNAL_TEXTBUFFER_DATA_UPDATE:u64 = 3;
+pub const SIGNAL_TEXTBUFFER_KEYBOARD_UPDATE:u64 = 4;
+
+#[derive(Clone,Default)]
+pub struct TextBufferKeyboard{
+    pub modifiers:KeyModifiers,
+    pub key_down:Option<KeyCode>,
+    pub key_up:Option<KeyCode>
+}
 
 #[derive(Clone, Default)]
 pub struct TextBufferMessages{
@@ -365,6 +374,9 @@ impl TextBuffer{
 
     pub fn copy_line(&self, row:usize, start_col:usize, len:usize)->Vec<char>{
         let line = &self.lines[row];
+        if start_col >= line.len(){
+            return vec![]
+        }
         if start_col + len > line.len(){
             self.lines[row][start_col..line.len()].iter().cloned().collect()
         }

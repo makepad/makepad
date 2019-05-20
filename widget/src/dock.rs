@@ -4,8 +4,8 @@ use render::*;
 use crate::splitter::*;
 use crate::tabcontrol::*;
 
-use miniserde::ser::{Fragment, Map, Serialize};
-use std::borrow::Cow;
+use serde_json::{Result};
+use serde::*; 
 
 pub struct Dock<TItem>
 where TItem: Clone
@@ -33,11 +33,11 @@ pub struct DockTabIdent{
 impl<TItem> ElementLife for Dock<TItem>
 where TItem: Clone
 {
-    fn construct(&mut self, cx: &mut Cx){
+    fn construct(&mut self, _cx: &mut Cx){
         //self.handle_dock(cx, &mut Event::Construct);
     }
 
-    fn destruct(&mut self, cx: &mut Cx){
+    fn destruct(&mut self, _cx: &mut Cx){
         //self.handle_dock(cx, &mut Event::Destruct);
     }
 }
@@ -78,7 +78,7 @@ where TItem: Clone{
     NewItems{fe:FingerUpEvent, items:Vec<DockTab<TItem>>}
 }
 
-#[derive(Clone)]
+#[derive(Clone, Serialize)]
 pub struct DockTab<TItem>
 where TItem: Clone
 {
@@ -87,7 +87,7 @@ where TItem: Clone
     pub item:TItem
 }
 
-#[derive(Clone)]
+#[derive(Clone, Serialize)]
 pub enum DockItem<TItem>
 where TItem: Clone
 {
@@ -104,9 +104,9 @@ where TItem: Clone
         last:Box<DockItem<TItem>>
     }
 }
-
+/*
 impl <TItem>Serialize for DockItem<TItem> 
-where TItem: Clone
+where TItem: Clone + Serialize
 {
     fn begin(&self) -> Fragment {
         Fragment::Map(Box::new(PanelStream {
@@ -117,14 +117,14 @@ where TItem: Clone
 }
 
 struct PanelStream<'a, TItem> 
-where TItem: Clone
+where TItem: Clone + Serialize
 {
     data: &'a DockItem<TItem>,
     state: usize,
 }
 
 impl<'a, TItem> Map for PanelStream<'a, TItem> 
-where TItem: Clone
+where TItem: Clone + Serialize
 {
     fn next(&mut self) -> Option<(Cow<str>, &Serialize)> {
         let state = self.state;
@@ -137,11 +137,11 @@ where TItem: Clone
                     _ => None,
                 }
             },
-            DockItem::TabControl{..}=>{
+            DockItem::TabControl{current, tabs}=>{
                 match state {
                     0 => Some((Cow::Borrowed("node"),&Cow::Borrowed("tabcontrol"))),
-                    //0 => Some((Cow::Borrowed("code"), &self.data.code)),
-                    //1 => Some((Cow::Borrowed("message"), &self.data.message)),
+                    1 => Some((Cow::Borrowed("current"), current)),
+                    2 => Some((Cow::Borrowed("tabs"), tabs)),
                     _ => None,
                 }
             },
@@ -166,7 +166,7 @@ where TItem: Clone
         }
     }
 }
-
+*/
 
 struct DockWalkStack<'a, TItem>
 where TItem: Clone
@@ -381,8 +381,7 @@ where TItem: Clone
 
     pub fn walk_draw_dock(&mut self, cx: &mut Cx)->Option<&'a mut TItem>{
         // lets get the current item on the stack
-         let push_or_pop = if let Some(stack_top) = self.stack.last_mut(){
-           
+        let push_or_pop = if let Some(stack_top) = self.stack.last_mut(){
             // return item 'count'
             match stack_top.item{
                 DockItem::Single(item)=>{
@@ -509,9 +508,9 @@ where TItem: Clone
         None
     }
 
-   fn recur_collapse_empty(dock_walk:&mut DockItem<TItem>)->bool
-   where TItem: Clone
-   {
+    fn recur_collapse_empty(dock_walk:&mut DockItem<TItem>)->bool
+    where TItem: Clone
+    {
         match dock_walk{
             DockItem::Single(_)=>{},
             DockItem::TabControl{tabs,..}=>{
@@ -601,32 +600,8 @@ where TItem: Clone
             }
         }
     }
-/*
-   fn recur_debug_dock(dock_walk:&mut DockItem<TItem>, counter:&mut usize, depth:usize)
-    where TItem: Clone
-    {
-        let mut indent = String::new();
-        for i in 0..depth{indent.push_str("  ")}
-        match dock_walk{
-            DockItem::Single(item)=>{},
-            DockItem::TabControl{tabs,..}=>{
-                let id = *counter;
-                *counter += 1;
-                println!("{}TabControl {}", indent, id);
-                for (id,tab) in tabs.iter().enumerate(){
-                    println!("{}  Tab{} {}", indent, id, tab.title);
-                }
-            },
-            DockItem::Splitter{first,last,..}=>{
-                let id = *counter;
-                *counter += 1;
-                println!("{}Splitter {}", indent, id);
-                Self::recur_debug_dock(first, counter, depth + 1);
-                Self::recur_debug_dock(last,  counter, depth + 1);
-            }
-        }
-    }*/
-  fn get_drop_kind(pos:Vec2, drop_size:Vec2, tvr:Rect, cdr:Rect, tab_rects:Vec<Rect>)->(DockDropKind, Rect){
+
+    fn get_drop_kind(pos:Vec2, drop_size:Vec2, tvr:Rect, cdr:Rect, tab_rects:Vec<Rect>)->(DockDropKind, Rect){
         // this is how the drop areas look
         //    |            Tab                |
         //    |-------------------------------|
@@ -814,4 +789,30 @@ where TItem: Clone
             drop_quad_view:&mut self.drop_quad_view,
         }
     }
+    
+       /*
+   fn recur_debug_dock(dock_walk:&mut DockItem<TItem>, counter:&mut usize, depth:usize)
+    where TItem: Clone
+    {
+        let mut indent = String::new();
+        for i in 0..depth{indent.push_str("  ")}
+        match dock_walk{
+            DockItem::Single(item)=>{},
+            DockItem::TabControl{tabs,..}=>{
+                let id = *counter;
+                *counter += 1;
+                println!("{}TabControl {}", indent, id);
+                for (id,tab) in tabs.iter().enumerate(){
+                    println!("{}  Tab{} {}", indent, id, tab.title);
+                }
+            },
+            DockItem::Splitter{first,last,..}=>{
+                let id = *counter;
+                *counter += 1;
+                println!("{}Splitter {}", indent, id);
+                Self::recur_debug_dock(first, counter, depth + 1);
+                Self::recur_debug_dock(last,  counter, depth + 1);
+            }
+        }
+    }*/
 }

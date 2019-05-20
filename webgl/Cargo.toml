@@ -17,8 +17,9 @@ codegen-units = 1
 
 [dependencies]
 rand = "*"
-miniserde = "*"
-#serde = { version = "1.0", features = ["derive"] }
+#miniserde = "*"
+serde_json = "*"
+serde = { version = "1.0", features = ["derive"] }
 
 [dependencies.widget]
 path="../widget"

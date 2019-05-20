@@ -6,9 +6,8 @@ edition = "2018"
 
 [dependencies]
 rand = "*"
-miniserde = "*"
-#serde_json = "*"
-#serde = { version = "1.0", features = ["derive"] }
+serde_json = "*"
+serde = { version = "1.0", features = ["derive"] }
 
 [dependencies.widget]
 path="./widget"

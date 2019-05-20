@@ -76,7 +76,8 @@ impl Style for Button{
 pub enum ButtonEvent{
     None,
     Clicked,
-    Down
+    Down,
+    Up
 }
 
 impl Button{
@@ -147,6 +148,7 @@ impl Button{
                 }
                 else{
                     self.animator.play_anim(cx, self.animator.default.clone());
+                    return ButtonEvent::Up;
                 }
             },
             _=>()

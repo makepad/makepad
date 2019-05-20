@@ -10,7 +10,7 @@ pub struct ScrollBar{
     pub animator:Animator,
     pub anim_over:Anim,
     pub anim_scrolling:Anim,
-
+    pub use_vertical_finger_scroll:bool,
     pub _visible:bool,
     pub smoothing:Option<f32>,
     pub _hit_state:HitState,
@@ -55,8 +55,9 @@ impl Style for ScrollBar{
                 shader_id:cx.add_shader(sh, "ScrollBar.sb"),
                 ..Style::style(cx)
             },
-
+            use_vertical_finger_scroll:false,
             _visible:false,
+            
             _view_area:Area::Empty,
             _view_total:0.0,
             _view_visible:0.0,
@@ -269,7 +270,7 @@ impl ScrollBarLike<ScrollBar> for ScrollBar{
                 if rect.contains(fe.abs.x, fe.abs.y){ // handle mousewheel
                     // we should scroll in either x or y
                     let scroll =  match self.axis{
-                        Axis::Horizontal=>fe.scroll.x,
+                        Axis::Horizontal=>if self.use_vertical_finger_scroll{fe.scroll.y}else{fe.scroll.x},
                         Axis::Vertical=>fe.scroll.y
                     };
                     if !self.smoothing.is_none(){

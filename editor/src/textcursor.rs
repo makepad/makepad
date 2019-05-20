@@ -326,7 +326,6 @@ impl TextCursorSet{
 
         let change_check = self.set.clone();
         self.set.truncate(0);
-
         // lets start the cursor gen
         let mut offset = text_buffer.text_pos_to_offset(TextPos{row:top, col:0});
         for row in top..(bottom+1){
@@ -344,7 +343,7 @@ impl TextCursorSet{
                         head:offset + left,
                         tail:offset + line.len().min(right),
                         max:line.len().min(right)
-                    });                    
+                    });
                 }
             }
             offset += line.len() + 1;
@@ -908,7 +907,7 @@ impl TextCursorSet{
                     })
                 }
                 if token_chunks[i].token_type == TokenType::String{
-                    if token_chunks[i].len == 2{
+                    if token_chunks[i].len <= 2{
                         return Some(token_chunks[i].clone())
                     }
                     return Some(TokenChunk{

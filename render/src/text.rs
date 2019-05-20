@@ -228,7 +228,7 @@ impl Text{
                     },
                     Wrapping::Word=>{
                         chunk.push(c);
-                        if c == 32 as char || c == 9 as char|| c == 10 as char|| c == 13 as char{
+                        if c == ' ' || c == '\t' || c == '\n' || c==',' {
                             emit = true;
                         }
                     },

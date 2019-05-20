@@ -62,7 +62,7 @@ pub struct CodeEditor{
     pub _monospace_size:Vec2,
     pub _monospace_base:Vec2,
 
-    pub _first_on_line:bool,
+    pub _tokens_on_line:usize,
     pub _line_was_folded:bool,
     pub _line_was_visible:bool,
     pub _final_fill_height:f32,
@@ -259,7 +259,7 @@ impl Style for CodeEditor{
             _monospace_size:Vec2::zero(),
             _monospace_base:Vec2::zero(),
             _last_finger_move:None,
-            _first_on_line:true,
+            _tokens_on_line:0,
             _line_was_folded:false,
             _line_was_visible:false,
             _scroll_pos:Vec2::zero(),
@@ -440,7 +440,7 @@ impl CodeEditor{
         sh
     }
 
-   pub fn def_select_highlight_shader(cx:&mut Cx)->Shader{
+    pub fn def_select_highlight_shader(cx:&mut Cx)->Shader{
         let mut sh = Quad::def_quad_shader(cx);
         sh.add_ast(shader_ast!({
             fn pixel()->vec4{
@@ -452,7 +452,7 @@ impl CodeEditor{
         sh
     }
 
-   pub fn def_token_highlight_shader(cx:&mut Cx)->Shader{
+    pub fn def_token_highlight_shader(cx:&mut Cx)->Shader{
         let mut sh = Quad::def_quad_shader(cx);
         sh.add_ast(shader_ast!({
             let visible:float<Uniform>;
@@ -482,7 +482,7 @@ impl CodeEditor{
         sh
     }
 
-     fn reset_highlight_visible(&mut self, cx:&mut Cx){
+    fn reset_highlight_visible(&mut self, cx:&mut Cx){
         self._highlight_visibility = 0.0;
         self._highlight_area.write_uniform_float(cx, "visible", self._highlight_visibility);
     }
@@ -499,7 +499,7 @@ impl CodeEditor{
         // give us the focus
         self.set_key_focus(cx);
         
-        log!("{}",fe.rel.x);
+        log!("HELLO {}",fe.rel.x);
         
         let offset;
 
@@ -829,6 +829,24 @@ impl CodeEditor{
                     SIGNAL_TEXTBUFFER_DATA_UPDATE=>{
                         self.view.redraw_view_area(cx);
                     },
+                    SIGNAL_TEXTBUFFER_KEYBOARD_UPDATE=>{
+                        if let Some(key_down) = &text_buffer.keyboard.key_down{
+                            match key_down{
+                                KeyCode::Alt=>{
+                                    self.start_code_folding(cx, text_buffer, text_buffer.keyboard.modifiers.control);
+                                },
+                                _=>()
+                            }
+                        }
+                        if let Some(key_up) = &text_buffer.keyboard.key_up{
+                            match key_up{
+                                KeyCode::Alt=>{
+                                    self.start_code_unfolding(cx, text_buffer);
+                                },
+                                _=>()
+                            }
+                        }
+                    },
                     _=>()
                 }
             },
@@ -955,7 +973,7 @@ impl CodeEditor{
             self.set_font_size(cx, self.open_font_size);
             self._draw_cursors = DrawCursors::new();
             self._draw_messages = DrawCursors::new();
-            self._first_on_line = true;
+            self._tokens_on_line = 0;
             self._line_largest_font = 0.;
             self._visible_lines = 0;
             self._newline_tabs = 0;
@@ -1096,7 +1114,7 @@ impl CodeEditor{
         // skip the linenumber
         cx.move_turtle(self.line_number_width, 0.);
 
-        self._first_on_line = true;
+        self._tokens_on_line = 0;
         self._line_was_visible = false;
         
         self._draw_cursors.process_newline();
@@ -1165,7 +1183,7 @@ impl CodeEditor{
         }
     
         // do indent depth walking
-        if self._first_on_line {
+        if self._tokens_on_line == 0 {
             let font_size = if token_type == TokenType::Whitespace{
                 let tabs = chunk.len()>>2;
                 while tabs > self._indent_stack.len(){
@@ -1210,7 +1228,7 @@ impl CodeEditor{
             // determine chunk color
             self.text.color = match token_type{
                 TokenType::Whitespace => {
-                    if self._first_on_line && chunk[0] == ' '{
+                    if self._tokens_on_line == 0 && chunk[0] == ' '{
                         let tabs = chunk.len()>>2;
                         // if self._last_tabs 
                         self._last_tabs = tabs;
@@ -1223,7 +1241,7 @@ impl CodeEditor{
                     self.colors.whitespace
                 },
                 TokenType::Newline=>{
-                    if self._first_on_line{
+                    if self._tokens_on_line == 0{
                         self._newline_tabs = 0;
                         self.draw_indent_lines(cx, geom.y, self._last_tabs);
                     }
@@ -1288,8 +1306,7 @@ impl CodeEditor{
                 TokenType::Unexpected=>self.colors.unexpected
             };
 
-            if self._first_on_line{
-                self._first_on_line = false;
+            if self._tokens_on_line == 0{
                 self._visible_lines += 1;
                 self._line_was_visible = true;
             }
@@ -1319,7 +1336,7 @@ impl CodeEditor{
                 });
             }
         }
-        self._first_on_line = false;
+        self._tokens_on_line += 1;
         // Do all the Paren matching highlighting drawing
         let pair_token;
         if token_type == TokenType::ParenClose{
@@ -1338,7 +1355,7 @@ impl CodeEditor{
             pair_token:pair_token,
             len:chunk.len(),
             token_type:token_type
-        });            
+        });
     }
     
     fn draw_token_highlight_quad(&mut self, cx:&mut Cx, geom:Rect){
@@ -1436,7 +1453,7 @@ impl CodeEditor{
         self.text.end_text(cx, self._text_inst.as_ref().unwrap());
         self._text_area = self._text_inst.take().unwrap().inst.into_area();
         self.text.end_text(cx, self._line_number_inst.as_ref().unwrap());
-       
+           
         // unmatched highlighting
         self.draw_paren_unmatched(cx);
         self.draw_cursors(cx);
@@ -1529,7 +1546,7 @@ impl CodeEditor{
                 self.cursor_row.draw_quad_abs(cx,Rect{
                     x: self.line_number_width + cx.get_turtle_origin().x,
                     y: rc.y,
-                    w: cx.get_width_total() - self.line_number_width,
+                    w: cx.get_width_total().max(cx.get_turtle_bounds().x) - self.line_number_width,
                     h: rc.h
                 });
             }
@@ -1673,7 +1690,7 @@ impl CodeEditor{
             //let geom = &self._line_geometry[pos.row];
             mono_size = Vec2{x:self._monospace_base.x * geom.font_size, y:self._monospace_base.y*geom.font_size};
             if rel.y < geom.walk.y || rel.y >= geom.walk.y && rel.y <= geom.walk.y + mono_size.y{ // its on the right line
-                let col = (rel.x.max(0.) / mono_size.x) as usize; // do a dumb calc
+                let col = ((rel.x - self.line_number_width).max(0.) / mono_size.x) as usize; // do a dumb calc
                 return TextPos{row:row, col:col};
             }
         }

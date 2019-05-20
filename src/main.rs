@@ -5,20 +5,18 @@ use editor::*;
 mod rustcompiler;
 pub use crate::rustcompiler::*;
 use std::collections::HashMap;
+//use std::borrow::Cow;
+use serde::*; 
 
-use miniserde::{json};
-use miniserde::ser::{Fragment, Map};
-use miniserde::{Serialize, Deserialize};
-use std::borrow::Cow;
-
-#[derive(Clone)]
+#[derive(Clone, Serialize)]
 enum Panel{
     RustCompiler,
+    Keyboard,
     FileTree,
     FileEditorTarget,
     FileEditor{path:String, editor_id:u64}
 }
-
+ 
 struct App{ 
     view:View<ScrollBar>,
     
@@ -30,8 +28,10 @@ struct App{
     file_editor_id_alloc:u64,
 
     rust_compiler:RustCompiler,
+    keyboard:Keyboard,
     text_buffers:TextBuffers,
     index_read_id:u64,
+    app_state_read_id:u64,
 }
 
 #[derive(Clone, Serialize)]
@@ -57,12 +57,16 @@ impl Style for App{
                 ..Style::style(cx)
             },
             index_read_id:0,
+            app_state_read_id:0,
             file_editors:Elements::new(FileEditorTemplates{
                 rust_editor:RustEditor{
                     ..Style::style(cx)
                 }
             }),
             rust_compiler:RustCompiler{
+                ..Style::style(cx)
+            },
+            keyboard:Keyboard{
                 ..Style::style(cx)
             },
             app_state:AppState{
@@ -106,6 +110,11 @@ impl Style for App{
                                     closeable:false,
                                     title:"Rust Compiler".to_string(),
                                     item:Panel::RustCompiler
+                                },
+                                DockTab{
+                                    closeable:false,
+                                    title:"Keyboard".to_string(),
+                                    item:Panel::Keyboard
                                 }
                             ]
                         })
@@ -114,7 +123,7 @@ impl Style for App{
             },
             dock:Dock{
                 ..Style::style(cx)
-            }
+            } 
         }
     }
 }
@@ -129,18 +138,18 @@ fn path_file_name(path:&str)->String{
 }
 
 impl App{
-
     fn handle_app(&mut self, cx:&mut Cx, event:&mut Event){
         match event{
             Event::Construct=>{
                 if cx.feature == "mtl"{
                     self.text_buffers.root_path = "./edit_repo/".to_string();
                 }
+
                 self.index_read_id = cx.read_file(&format!("{}index.json",self.text_buffers.root_path));
-                self.rust_compiler.init(cx);
-                
-                let json = json::to_string(&self.app_state.dock_items);
-                println!("{}", json)
+                self.app_state_read_id = cx.read_file(&format!("{}makepad_state.json",self.text_buffers.root_path));
+
+                self.rust_compiler.init(cx, &mut self.text_buffers);
+                let json = serde_json::to_string(&self.app_state.dock_items).unwrap();
             },
             Event::FileRead(fr)=>{
                 // lets see which file we loaded
@@ -151,7 +160,10 @@ impl App{
                         }
                     }
                 }
-                if self.text_buffers.handle_file_read(&fr){
+                else if fr.read_id == self.app_state_read_id{
+                    
+                }
+                else if self.text_buffers.handle_file_read(&fr){
                     cx.redraw_area(Area::All);
                 }
             }
@@ -173,6 +185,9 @@ impl App{
                         _=>()
                     }
                 },
+                Panel::Keyboard=>{
+                    self.keyboard.handle_keyboard(cx,event,&mut self.text_buffers);
+                },
                 Panel::FileEditorTarget=>{
                     
                 },
@@ -187,7 +202,7 @@ impl App{
                                 self.text_buffers.save_file(cx, path);
                                 // lets save the textbuffer to disk
                                 // lets re-trigger the rust compiler
-                                self.rust_compiler.restart_rust_checker();
+                                self.rust_compiler.restart_rust_checker(cx, &mut self.text_buffers);
                             },
                             _=>()
                         }
@@ -237,6 +252,9 @@ impl App{
             match item{
                 Panel::RustCompiler=>{
                     self.rust_compiler.draw_rust_compiler(cx);
+                },
+                Panel::Keyboard=>{
+                    self.keyboard.draw_keyboard(cx);
                 },
                 Panel::FileEditorTarget=>{},
                 Panel::FileTree=>{
@@ -374,55 +392,5 @@ impl FileEditor{
             set_key_focus_on_draw:true,
             ..template.rust_editor.clone()
         })
-    }
-}
-
-// serde serializer for Panel
-impl Serialize for Panel {
-    fn begin(&self) -> Fragment {
-        Fragment::Map(Box::new(PanelStream {
-            data: self,
-            state: 0,
-        }))
-    }
-}
-
-struct PanelStream<'a> {
-    data: &'a Panel,
-    state: usize,
-}
-
-impl<'a> Map for PanelStream<'a> {
-    fn next(&mut self) -> Option<(Cow<str>, &Serialize)> {
-        let state = self.state;
-        self.state += 1;
-        match self.data{
-            Panel::RustCompiler=>{
-                match state {
-                    0 => Some((Cow::Borrowed("node"), &Cow::Borrowed("rustcompiler"))),
-                    _ => None,
-                }
-            },
-            Panel::FileTree=>{
-                match state {
-                    0 => Some((Cow::Borrowed("node"),&Cow::Borrowed("filetree"))),
-                    _ => None,
-                }
-            },
-            Panel::FileEditorTarget=>{
-                match state {
-                    0 => Some((Cow::Borrowed("node"), &Cow::Borrowed("fileeditortarget"))),
-                    _ => None,
-                }
-            },
-            Panel::FileEditor{path, editor_id}=>{
-                match state {
-                    0 => Some((Cow::Borrowed("node"), &Cow::Borrowed("fileeditor"))),
-                    1 => Some((Cow::Borrowed("path"), path)),
-                    2 => Some((Cow::Borrowed("editor_id"), editor_id)),
-                    _ => None,
-                }
-            }
-        }
     }
 }

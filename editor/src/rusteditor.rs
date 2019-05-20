@@ -307,10 +307,21 @@ impl RustEditor{
                         KeywordType::Def=>{
                             token_type = TokenType::Keyword;
                             self.code_editor.set_indent_color(self.code_editor.colors.indent_line_def);
-                         },
+                        },
                         KeywordType::Looping=>{
                             token_type = TokenType::Looping;
                             self.code_editor.set_indent_color(self.code_editor.colors.indent_line_looping);
+                        },
+                        KeywordType::For=>{
+                            // check if we are first on a line
+                            if self.code_editor._tokens_on_line == 1{
+                                token_type = TokenType::Looping;
+                                self.code_editor.set_indent_color(self.code_editor.colors.indent_line_looping);
+                            }
+                            else{
+                                token_type = TokenType::Keyword;
+                                self.code_editor.set_indent_color(self.code_editor.colors.indent_line_def);
+                            }
                         },
                         KeywordType::None=>{
                             if state.next == '(' || state.next == '!'{
@@ -497,11 +508,8 @@ impl RustEditor{
                 else if state.keyword(chunk,"n"){
                     return KeywordType::Fn
                 }
-                else if state.keyword(chunk,"or "){
-                    if state.next_is_uppercase_letter(){
-                        return KeywordType::BuiltinType
-                    }
-                    return KeywordType::Looping
+                else if state.keyword(chunk,"or"){
+                    return KeywordType::For
                 }
                 else if state.keyword(chunk,"32"){
                     return KeywordType::BuiltinType
@@ -643,6 +651,7 @@ enum KeywordType{
     Flow,
     Fn,
     Looping,
+    For,
     Def,
     BuiltinType
 }

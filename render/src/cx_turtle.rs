@@ -1,4 +1,5 @@
 use crate::cx::*;
+use serde::*; 
 
 impl Cx{
     //pub fn debug_pt(&self, x:f32, y:f32, color:i32){
@@ -313,8 +314,14 @@ impl Cx{
         else{
             Vec2::zero()
         }
-    }    
-
+    }
+    
+    pub fn set_turtle_padding(&mut self, padding:Padding){
+        if let Some(turtle) = self.turtles.last_mut(){
+            turtle.layout.padding = padding
+        }
+    }
+    
     pub fn visible_in_turtle(&self, geom:Rect, scroll:Vec2)->bool{
         if let Some(turtle) = self.turtles.last(){
             let view = Rect{
@@ -686,7 +693,7 @@ impl Default for Direction{
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Serialize)]
 pub enum Axis{
     Horizontal,
     Vertical

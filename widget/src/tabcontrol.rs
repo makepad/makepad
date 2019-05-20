@@ -39,6 +39,7 @@ impl Style for TabControl{
             tabs_view:View{
                 scroll_h:Some(ScrollBar{
                     bar_size:8.0,
+                    use_vertical_finger_scroll:true,
                     ..Style::style(cx)
                 }),
                 ..Style::style(cx)

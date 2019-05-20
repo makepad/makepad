@@ -1,4 +1,5 @@
 use render::*;
+use serde::*; 
 
 #[derive(Clone)]
 pub struct Splitter{
@@ -29,7 +30,7 @@ impl ElementLife for Splitter{
     fn destruct(&mut self, _cx:&mut Cx){}
 }
 
-#[derive(Clone, PartialEq)]
+#[derive(Clone, PartialEq, Serialize)]
 pub enum SplitterAlign{
     First,
     Last,
