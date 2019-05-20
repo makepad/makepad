@@ -710,13 +710,13 @@ impl CodeEditor{
                 }
             },
             KeyCode::Escape=>{
-                self.start_code_folding(cx, text_buffer, ke.modifiers.logo || ke.modifiers.control);
+                self.start_code_folding(cx, text_buffer, ke.modifiers.shift);
                 false
             },
             KeyCode::Alt=>{
                 // how do we find the center line of the view
                 // its simply the top line
-                self.start_code_folding(cx, text_buffer, ke.modifiers.logo || ke.modifiers.control);
+                self.start_code_folding(cx, text_buffer, ke.modifiers.shift);
                 false
                 //return CodeEditorEvent::FoldStart
             },
@@ -834,7 +834,7 @@ impl CodeEditor{
                         if let Some(key_down) = &text_buffer.keyboard.key_down{
                             match key_down{
                                 KeyCode::Alt=>{
-                                    self.start_code_folding(cx, text_buffer, text_buffer.keyboard.modifiers.control);
+                                    self.start_code_folding(cx, text_buffer, text_buffer.keyboard.modifiers.shift);
                                 },
                                 _=>()
                             }
