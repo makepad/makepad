@@ -116,7 +116,9 @@ pub struct CodeEditorColors{
     pub number:Color,
     pub comment:Color,
     pub doc_comment:Color,
-    pub paren:Color,
+    pub paren_d1:Color,
+    pub paren_d2:Color,
+    pub paren_d3:Color,
     pub operator:Color,
     pub delimiter:Color,
     pub unexpected:Color
@@ -175,7 +177,9 @@ impl Style for CodeEditor{
 
                 comment:color256(99,141,84),
                 doc_comment:color256(120,171,104),
-                paren:color256(212,212,212),
+                paren_d1:color("orchid"),
+                paren_d2:color("gold"),
+                paren_d3:color("lightskyblue"),
                 operator:color256(212,212,212),
                 delimiter:color256(212,212,212),
                 unexpected:color256(255,0,0),
@@ -1247,8 +1251,13 @@ impl CodeEditor{
                 TokenType::Comment=> self.colors.comment,
                 TokenType::DocComment=> self.colors.doc_comment,
                 TokenType::ParenOpen=>{
+                    let depth = self._paren_stack.len();
                     self._paren_stack.last_mut().unwrap().geom_open = Some(geom);
-                    self.colors.paren
+                    match depth%3{
+                        0=>self.colors.paren_d1,
+                        1=>self.colors.paren_d2,
+                        _=>self.colors.paren_d3
+                    }
                 },
                 TokenType::ParenClose=>{
                     if let Some(paren) = self._paren_stack.last_mut(){
@@ -1258,7 +1267,12 @@ impl CodeEditor{
                         self.paren_pair.color = self.colors.paren_pair_fail;
                         self.paren_pair.draw_quad_abs(cx, geom);
                     }
-                    self.colors.paren
+                    let depth = self._paren_stack.len();
+                    match depth%3{
+                        0=>self.colors.paren_d1,
+                        1=>self.colors.paren_d2,
+                        _=>self.colors.paren_d3
+                    }
                 },
                 TokenType::Operator=> self.colors.operator,
                 TokenType::Delimiter=> self.colors.delimiter,

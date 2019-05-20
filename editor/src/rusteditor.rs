@@ -48,7 +48,7 @@ impl RustEditor{
         if self.set_key_focus_on_draw{
             self.set_key_focus_on_draw = false;
             self.code_editor.set_key_focus(cx);
-        }        
+        }
 
         let mut state = TokenizerState::new(text_buffer);
         
@@ -499,7 +499,7 @@ impl RustEditor{
                 }
                 else if state.keyword(chunk,"or "){
                     if state.next_is_uppercase_letter(){
-                        return KeywordType::Def
+                        return KeywordType::BuiltinType
                     }
                     return KeywordType::Looping
                 }
