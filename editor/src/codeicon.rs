@@ -54,15 +54,12 @@ impl CodeIcon{
                     df_circle(5.,5.,4.);
                     df_fill_keep(color("orange"));
                     df_stroke(color("gray"),0.5);
-                    let sz = 1.;
                     df_move_to(3.,5.);
                     df_line_to(3.,5.);
                     df_move_to(5.,5.);
                     df_line_to(5.,5.);
                     df_move_to(7.,5.);
                     df_line_to(7.,5.);
-                    //df_move_to(5.,5.-sz);
-                    //df_line_to(5.,5.+sz);
                     df_stroke(color("black"),0.8);
                     return df_result;
                 }
@@ -73,11 +70,7 @@ impl CodeIcon{
                     df_stroke(color("#555"),0.5);
                     let sz = 1.;
                     df_move_to(5.,5.);
-                    df_line_to(5.,5.);/*
-                    df_move_to(5.-sz,5.);
-                    df_line_to(5.+sz,5.);
-                    df_move_to(5.,5.-sz);
-                    df_line_to(5.,5.+sz);*/
+                    df_line_to(5.,5.);
                     df_stroke(color("#aaa"),0.8);
                     return df_result;
                 }
@@ -110,24 +103,7 @@ impl CodeIcon{
                     df_stroke(color("black"),0.8);
                     return df_result;
                 }
-
-                //return df_stroke(color("white"),1.);
-                
-                //return vec4(df_clip*0.1+0.5,0.0,0.0,1.0);//df_hsv2rgb(vec4(pos.x,0.5,0.3,1.0));
-               // df_fill_keep(color("red"));
-                //return df_stroke(color("white"), 1.0);
-/*  
-                let thickness =  0.8 + dpi_dilate*0.5;
-                if abs(indent_id - indent_sel) < 0.1{
-                    col *= vec4(1.25);
-                    thickness *= 1.3;
-                };
-                df_viewport(pos * vec2(w, h));
-                df_move_to(1.,-1.);
-                df_line_to(1.,h+1.);
-                return df_stroke(col,thickness);*/
             }
-
         }));
         sh
     }
