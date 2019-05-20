@@ -156,8 +156,8 @@ impl Style for CodeEditor{
 
                 //paren_pair_match:color256(136,136,136),
                 //paren_pair_fail:color256(255,0,0),
-                paren_pair_match:color256(90,90,90),
-                paren_pair_fail:color256(155,0,0),
+                paren_pair_match:color256(255,255,255),
+                paren_pair_fail:color256(255,0,0),
 
                 marker_error:color256(200,0,0),
                 marker_warning:color256(0,200,0),
@@ -179,8 +179,8 @@ impl Style for CodeEditor{
 
                 comment:color256(99,141,84),
                 doc_comment:color256(120,171,104),
-                paren_d1:color("#eee"),
-                paren_d2:color("#888"),
+                paren_d1:color256(212,212,212),//color("#eee"),
+                paren_d2:color256(212,212,212),//color("#888"),
                 operator:color256(212,212,212),
                 delimiter:color256(212,212,212),
                 unexpected:color256(255,0,0),
@@ -412,10 +412,11 @@ impl CodeEditor{
                 //df_rect(0.,0.,w,h);
                 //df_rect(0.5,0.5,w-1.,h-1.);
                 //return df_stroke(color, 0.75 + dpi_dilate*0.75);
-                //df_rect(0.,h-2.,w,2.);
-                //return df_fill(color("white"));
-                df_rect(0.01,0.,w,h);
+                //df_rect(0.,h-1.-dpi_dilate,w,1.+dpi_dilate);
+                df_rect(0.,h-1.5-dpi_dilate,w,1.5+dpi_dilate);
                 return df_fill(color);
+                //df_rect(0.01,0.,w,h);
+                //return df_fill(color);
             }
         }));
         sh
@@ -926,9 +927,9 @@ impl CodeEditor{
             self._highlight_area = cx.new_instance_layer(self.token_highlight.shader_id, 0).into_area();
             //cx.new_instance_layer(self.select_highlight.shader_id, 0);
             cx.new_instance_layer(self.cursor_row.shader_id, 0);
-            cx.new_instance_layer(self.paren_pair.shader_id, 0);
             cx.new_instance_layer(self.selection.shader_id, 0);
             cx.new_instance_layer(self.message_marker.shader_id, 0);
+            cx.new_instance_layer(self.paren_pair.shader_id, 0);
             self._line_number_inst = Some(self.text.begin_text(cx));
             cx.new_instance_layer(self.text.shader_id, 0); // force next begin_text in another drawcall
             self._text_inst = Some(self.text.begin_text(cx));
@@ -1359,7 +1360,7 @@ impl CodeEditor{
             geom_close:None,
             marked:marked,
             exp_paren:chunk[0]
-        });        
+        });
     }
 
     fn draw_paren_close(&mut self, cx:&mut Cx, offset:usize, next_char:char, chunk:&Vec<char>)->usize{
@@ -1370,7 +1371,7 @@ impl CodeEditor{
         let last = self._paren_stack.pop().unwrap();
         self._token_chunks[last.pair_start].pair_token = token_chunks_len;
         let pair_token = last.pair_start;
-        if last.geom_open.is_none() && !last.geom_close.is_none(){
+        if last.geom_open.is_none() && last.geom_close.is_none(){
             return token_chunks_len
         }
         if !self.has_key_focus(cx){
@@ -1611,7 +1612,7 @@ impl CodeEditor{
             }
             self._anim_select.truncate(sel.len());
             if anim_select_any{
-                self.view.redraw_view_area(cx);        
+                self.view.redraw_view_area(cx);
             }
         }
     }
