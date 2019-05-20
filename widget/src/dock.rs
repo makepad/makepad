@@ -10,7 +10,7 @@ use std::borrow::Cow;
 pub struct Dock<TItem>
 where TItem: Clone
 {
-    pub dock_items: Option<DockItem<TItem>>,
+   // pub dock_items: Option<DockItem<TItem>>,
     pub splitters: Elements<usize, Splitter, Splitter>,
     pub tab_controls: Elements<usize, TabControl, TabControl>,
 
@@ -34,11 +34,11 @@ impl<TItem> ElementLife for Dock<TItem>
 where TItem: Clone
 {
     fn construct(&mut self, cx: &mut Cx){
-        self.handle_dock(cx, &mut Event::Construct);
+        //self.handle_dock(cx, &mut Event::Construct);
     }
 
     fn destruct(&mut self, cx: &mut Cx){
-        self.handle_dock(cx, &mut Event::Destruct);
+        //self.handle_dock(cx, &mut Event::Destruct);
     }
 }
 
@@ -47,7 +47,7 @@ where TItem: Clone
 {
     fn style(cx: &mut Cx)->Dock<TItem>{
         Dock{
-            dock_items:None,
+           // dock_items:None,
             drop_size:Vec2{x:100., y:70.},
             drop_quad_color:color("#a"),
             drop_quad:Quad{
@@ -681,9 +681,9 @@ where TItem: Clone
         });
     }
 
-    pub fn handle_dock(&mut self, cx: &mut Cx, _event:&mut Event)->DockEvent{
+    pub fn handle_dock(&mut self, cx: &mut Cx, _event:&mut Event, dock_items:&mut DockItem<TItem>)->DockEvent{
         if let Some(close_tab) = &self._close_tab{
-            Self::recur_remove_tab(self.dock_items.as_mut().unwrap(), close_tab.tab_control_id, close_tab.tab_id, &mut 0);
+            Self::recur_remove_tab(dock_items, close_tab.tab_control_id, close_tab.tab_id, &mut 0);
             self._close_tab = None;
             return DockEvent::DockChanged
         }
@@ -705,7 +705,7 @@ where TItem: Clone
                     // we have a kind!
                     let items = match &drag_end{
                         DockDragEnd::OldTab{ident,..}=>{
-                            let item = Self::recur_remove_tab(self.dock_items.as_mut().unwrap(), ident.tab_control_id, ident.tab_id, &mut 0);
+                            let item = Self::recur_remove_tab(dock_items, ident.tab_control_id, ident.tab_id, &mut 0);
                             if let Some(item) = item{
                                 vec![item]
                             }
@@ -720,7 +720,7 @@ where TItem: Clone
                     // alright we have a kind. 
                     if items.len() > 0{
                         Self::recur_split_dock(
-                            self.dock_items.as_mut().unwrap(), 
+                            dock_items, 
                             &items,
                             *target_id,
                             &kind,
@@ -729,7 +729,7 @@ where TItem: Clone
                     };
                 }
             }
-            Self::recur_collapse_empty(self.dock_items.as_mut().unwrap());
+            Self::recur_collapse_empty(dock_items);
             cx.redraw_area(Area::All);
             //Self::recur_debug_dock(self.dock_items.as_mut().unwrap(), &mut 0, 0);
             return DockEvent::DockChanged
@@ -798,11 +798,11 @@ where TItem: Clone
         }
     }
 
-    pub fn walker<'a>(&'a mut self)->DockWalker<'a, TItem>{
+    pub fn walker<'a>(&'a mut self, dock_items:&'a mut DockItem<TItem>)->DockWalker<'a, TItem>{
         let mut stack = Vec::new();
-        if !self.dock_items.is_none(){
-            stack.push(DockWalkStack{counter:0, uid:0, item:self.dock_items.as_mut().unwrap()});
-        }
+        //if !self.dock_items.is_none(){
+        stack.push(DockWalkStack{counter:0, uid:0, item:dock_items});
+        //}
         DockWalker{
             walk_uid:0,
             stack:stack,

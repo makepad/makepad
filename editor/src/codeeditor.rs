@@ -36,9 +36,10 @@ pub struct CodeEditor{
     pub _scroll_pos:Vec2,
     pub _last_finger_move:Option<Vec2>,
     pub _paren_stack:Vec<ParenItem>,
-    pub _indent_stack:Vec<f32>,
+    pub _indent_stack:Vec<(Color,f32)>,
     pub _indent_id_alloc:f32,
     pub _indent_line_inst:Option<InstanceArea>,
+    pub _last_indent_color:Color,
 
     pub _line_geometry:Vec<LineGeom>,
     pub _anim_select:Vec<AnimSelect>,
@@ -85,36 +86,40 @@ pub struct CodeEditor{
 #[derive(Clone)]
 pub struct CodeEditorColors{
     // UI
-    bg:Color,
-    indent_lines:Color,
-    selection:Color,
-    selection_defocus:Color,
-    highlight:Color,
-    cursor:Color,
-    cursor_row:Color,
-    paren_pair_match:Color,
-    paren_pair_fail:Color,
-    line_number_normal:Color,
-    line_number_highlight:Color,
-    marker_error:Color,
-    marker_warning:Color,
-    marker_log:Color,
-    // syntax
-    whitespace:Color,
-    keyword:Color,
-    flow:Color,
-    identifier:Color,
-    call:Color,
-    type_name:Color,
-    string:Color,
-    number:Color,
-    comment:Color,
-    doc_comment:Color,
-    paren:Color,
-    operator:Color,
-    delimiter:Color,
-    unexpected:Color
+    pub bg:Color,
+    pub indent_line_unknown:Color,
+    pub indent_line_fn:Color,
+    pub indent_line_def:Color,
+    pub indent_line_looping:Color,
+    pub indent_line_flow:Color,
+    pub selection:Color,
+    pub selection_defocus:Color,
+    pub highlight:Color,
+    pub cursor:Color,
+    pub cursor_row:Color,
+    pub paren_pair_match:Color,
+    pub paren_pair_fail:Color,
+    pub line_number_normal:Color,
+    pub line_number_highlight:Color,
+    pub marker_error:Color,
+    pub marker_warning:Color,
+    pub marker_log:Color,
 
+    pub whitespace:Color,
+    pub keyword:Color,
+    pub flow:Color,
+    pub looping:Color,
+    pub identifier:Color,
+    pub call:Color,
+    pub type_name:Color,
+    pub string:Color,
+    pub number:Color,
+    pub comment:Color,
+    pub doc_comment:Color,
+    pub paren:Color,
+    pub operator:Color,
+    pub delimiter:Color,
+    pub unexpected:Color
 }
 
 impl ElementLife for CodeEditor{
@@ -136,7 +141,11 @@ impl Style for CodeEditor{
             cursors:TextCursorSet::new(),
             colors:CodeEditorColors{
                 bg:color256(30,30,30),
-                indent_lines: color("#5"),
+                indent_line_unknown:color("#5"),
+                indent_line_fn:color256(220,220,174),
+                indent_line_def:color256(91,155,211),
+                indent_line_looping:color("darkorange"),
+                indent_line_flow:color256(196,133,190),
                 selection: color256(42,78,117),
                 selection_defocus:color256(75,75,75),
                 highlight:color256a(75,75,95,128),
@@ -156,6 +165,7 @@ impl Style for CodeEditor{
 
                 keyword:color256(91,155,211),
                 flow:color256(196,133,190),
+                looping:color("darkorange"),
                 identifier:color256(212,212,212),
                 call:color256(220,220,174),
                 type_name:color256(86,201,177),
@@ -289,7 +299,7 @@ impl Style for CodeEditor{
             _highlight_selection:Vec::new(),
             _highlight_token:Vec::new(),
             _last_cursor_pos:TextPos::zero(),
-
+            _last_indent_color:Color::zero(),
            
             _cursor_blink_timer_id:0,
             _cursor_blink_flipflop:0.,
@@ -320,9 +330,12 @@ impl CodeEditor{
                 let col = color;
                 let thickness =  0.8 + dpi_dilate*0.5;
                 if indent_id == indent_sel{
-                    col *= vec4(1.25);
+                    col *= vec4(1.);
                     thickness *= 1.3;
-                };
+                }
+                else{
+                    col *= vec4(0.75);
+                }
                 df_viewport(pos * vec2(w, h));
                 df_move_to(1.,-1.);
                 df_line_to(1.,h+1.);
@@ -456,19 +469,19 @@ impl CodeEditor{
         sh
     }
 
-    pub fn reset_highlight_visible(&mut self, cx:&mut Cx){
+     fn reset_highlight_visible(&mut self, cx:&mut Cx){
         self._highlight_visibility = 0.0;
         self._highlight_area.write_uniform_float(cx, "visible", self._highlight_visibility);
     }
 
-    pub fn reset_cursor_blinker(&mut self, cx:&mut Cx){
+    fn reset_cursor_blinker(&mut self, cx:&mut Cx){
         cx.stop_timer(self._cursor_blink_timer_id);
         self._cursor_blink_timer_id = cx.start_timer(self.cursor_blink_speed*0.5,false);
         self._cursor_blink_flipflop = 0.;
         self._cursor_area.write_uniform_float(cx, "blink", self._cursor_blink_flipflop);
     }
 
-    pub fn handle_finger_down(&mut self, cx:&mut Cx, fe:&FingerDownEvent, text_buffer:&mut TextBuffer){
+    fn handle_finger_down(&mut self, cx:&mut Cx, fe:&FingerDownEvent, text_buffer:&mut TextBuffer){
         cx.set_down_mouse_cursor(MouseCursor::Text);
         // give us the focus
         self.set_key_focus(cx);
@@ -543,7 +556,7 @@ impl CodeEditor{
         self.reset_cursor_blinker(cx);
     }
 
-    pub fn handle_finger_move(&mut self, cx:&mut Cx, fe:&FingerMoveEvent, text_buffer:&mut TextBuffer){
+    fn handle_finger_move(&mut self, cx:&mut Cx, fe:&FingerMoveEvent, text_buffer:&mut TextBuffer){
         let cursor_moved = if let Some(grid_select_corner) = self._grid_select_corner{
             let pos = self.compute_grid_text_pos_from_abs(cx, fe.abs);
             self.cursors.grid_select(grid_select_corner, pos, text_buffer)
@@ -570,7 +583,7 @@ impl CodeEditor{
         }
     }
 
-    pub fn handle_finger_up(&mut self, cx:&mut Cx, _fe:&FingerUpEvent, text_buffer:&mut TextBuffer){
+    fn handle_finger_up(&mut self, cx:&mut Cx, _fe:&FingerUpEvent, text_buffer:&mut TextBuffer){
         self.cursors.clear_last_clamp_range();
         self._select_scroll = None;
         self._last_finger_move = None;
@@ -580,7 +593,7 @@ impl CodeEditor{
         self.reset_cursor_blinker(cx);
     }
 
-    pub fn handle_key_down(&mut self, cx:&mut Cx, ke:&KeyEvent, text_buffer:&mut TextBuffer){
+    fn handle_key_down(&mut self, cx:&mut Cx, ke:&KeyEvent, text_buffer:&mut TextBuffer){
         let cursor_moved = match ke.key_code{
             KeyCode::ArrowUp=>{
                 if self._anim_folding.state.is_folded() && self.cursors.set.len() == 1{
@@ -712,7 +725,7 @@ impl CodeEditor{
         }
     }
 
-    pub fn handle_text_input(&mut self, cx:&mut Cx, te:&TextInputEvent, text_buffer:&mut TextBuffer){
+    fn handle_text_input(&mut self, cx:&mut Cx, te:&TextInputEvent, text_buffer:&mut TextBuffer){
         if te.replace_last{
             text_buffer.undo(false, &mut self.cursors);
         }
@@ -871,7 +884,7 @@ impl CodeEditor{
         self.view.begin_view(cx, &Layout{..Default::default()})?;
 
         // copy over colors
-        self.indent_lines.color = self.colors.indent_lines;
+        self._last_indent_color = self.colors.indent_line_unknown;
         self.bg.color = self.colors.bg;
         self.selection.color = if self.has_key_focus(cx){self.colors.selection}else{self.colors.selection_defocus};
         //self.select_highlight.color = self.colors.highlight;
@@ -1021,7 +1034,7 @@ impl CodeEditor{
             walk:cx.get_rel_turtle_walk(),
             font_size:self._line_largest_font,
             was_folded:self._line_was_folded,
-            indent_id:if let Some(id) = self._indent_stack.last(){*id}else{0.}
+            indent_id:if let Some((_,id)) = self._indent_stack.last(){*id}else{0.}
         };
         
         // draw a linenumber if we are visible
@@ -1113,7 +1126,9 @@ impl CodeEditor{
         let tab_fixed_width = self._monospace_base.x*4.*self.open_font_size;
         let mut off = self.line_number_width;
         for i in 0..tabs{
+            let (indent_color, indent_id) =  if i < self._indent_stack.len(){self._indent_stack[i]}else{(self.colors.indent_line_unknown, 0.)};
             let tab_width = if i<2{tab_fixed_width}else{tab_variable_width};
+            self.indent_lines.color = indent_color;
             let inst = self.indent_lines.draw_quad(cx, Rect{
                 x: off,
                 y: y_pos, 
@@ -1121,7 +1136,7 @@ impl CodeEditor{
                 h:self._monospace_size.y
             });
             off += tab_width;
-            inst.push_float(cx, if i < self._indent_stack.len(){self._indent_stack[i]}else{0.});
+            inst.push_float(cx,indent_id);
         }
     }
     // drawing a text chunk
@@ -1141,7 +1156,8 @@ impl CodeEditor{
             let font_size = if token_type == TokenType::Whitespace{
                 let tabs = chunk.len()>>2;
                 while tabs > self._indent_stack.len(){
-                    self._indent_stack.push(self._indent_id_alloc);
+                    self._indent_stack.push((self._last_indent_color,self._indent_id_alloc));
+                    // allocating an indent_id, we also need to 
                     self._indent_id_alloc += 1.0;
                 }
                 while tabs < self._indent_stack.len(){
@@ -1206,6 +1222,7 @@ impl CodeEditor{
                 },
                 TokenType::Keyword=> self.colors.keyword,
                 TokenType::Flow=> self.colors.flow,
+                TokenType::Looping=> self.colors.looping,
                 TokenType::Identifier=>{
                     if *chunk == self._highlight_token{
                         self.draw_token_highlight_quad(cx, geom);
@@ -1302,14 +1319,14 @@ impl CodeEditor{
         });            
     }
     
-    pub fn draw_token_highlight_quad(&mut self, cx:&mut Cx, geom:Rect){
+    fn draw_token_highlight_quad(&mut self, cx:&mut Cx, geom:Rect){
         let inst = self.token_highlight.draw_quad_abs(cx, geom);
         if inst.need_uniforms_now(cx){
             inst.push_uniform_float(cx, self._highlight_visibility);
         }
     }
 
-    pub fn draw_paren_open(&mut self, offset:usize, next_char:char, chunk:&Vec<char>){
+    fn draw_paren_open(&mut self, offset:usize, next_char:char, chunk:&Vec<char>){
         let marked = if let Some(pos) = self.cursors.get_last_cursor_singular(){
             pos == offset || pos == offset + 1 && next_char != '(' &&  next_char != '{' && next_char !='['
         }
@@ -1324,7 +1341,7 @@ impl CodeEditor{
         });        
     }
 
-    pub fn draw_paren_close(&mut self, cx:&mut Cx, offset:usize, next_char:char, chunk:&Vec<char>)->usize{
+    fn draw_paren_close(&mut self, cx:&mut Cx, offset:usize, next_char:char, chunk:&Vec<char>)->usize{
         let token_chunks_len = self._token_chunks.len();
         if self._paren_stack.len()==0{
             return token_chunks_len
@@ -1577,8 +1594,12 @@ impl CodeEditor{
             }
         }
     }
-
-    pub fn set_indent_line_highlight_id(&mut self, cx:&mut Cx){
+    
+    pub fn set_indent_color(&mut self, color:Color){
+        self._last_indent_color = color
+    }
+    
+    fn set_indent_line_highlight_id(&mut self, cx:&mut Cx){
         // compute the line which our last cursor is on so we can set the highlight id
         if let Some(indent_inst) = self._indent_line_inst{
             let indent_id = if self.cursors.is_last_cursor_singular() && self._last_cursor_pos.row < self._line_geometry.len(){
@@ -1589,7 +1610,7 @@ impl CodeEditor{
     }
 
     // set it once per line otherwise the LineGeom stuff isn't really working out.
-    pub fn set_font_size(&mut self, _cx:&Cx, font_size:f32){
+    fn set_font_size(&mut self, _cx:&Cx, font_size:f32){
         self.text.font_size = font_size;
         if font_size > self._line_largest_font{
             self._line_largest_font = font_size;

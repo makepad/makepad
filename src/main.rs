@@ -7,7 +7,8 @@ pub use crate::rustcompiler::*;
 use std::collections::HashMap;
 
 use miniserde::{json};
-use miniserde::ser::{Fragment, Map, Serialize};
+use miniserde::ser::{Fragment, Map};
+use miniserde::{Serialize, Deserialize};
 use std::borrow::Cow;
 
 #[derive(Clone)]
@@ -18,9 +19,11 @@ enum Panel{
     FileEditor{path:String, editor_id:u64}
 }
 
-struct App{
+struct App{ 
     view:View<ScrollBar>,
+    
     dock:Dock<Panel>,
+    app_state:AppState,
     file_tree:FileTree,
     
     file_editors:Elements<u64, FileEditor, FileEditorTemplates>,
@@ -29,6 +32,11 @@ struct App{
     rust_compiler:RustCompiler,
     text_buffers:TextBuffers,
     index_read_id:u64,
+}
+
+#[derive(Clone, Serialize)]
+struct AppState{
+    dock_items:DockItem<Panel>,
 }
 
 main_app!(App, "Makepad");
@@ -57,8 +65,8 @@ impl Style for App{
             rust_compiler:RustCompiler{
                 ..Style::style(cx)
             },
-            dock:Dock{
-                dock_items:Some(DockItem::Splitter{
+            app_state:AppState{
+                dock_items:DockItem::Splitter{
                     axis:Axis::Vertical,
                     align:SplitterAlign::First,
                     pos:150.0,
@@ -102,7 +110,9 @@ impl Style for App{
                             ]
                         })
                     })
-                }),
+                },
+            },
+            dock:Dock{
                 ..Style::style(cx)
             }
         }
@@ -129,7 +139,7 @@ impl App{
                 self.index_read_id = cx.read_file(&format!("{}index.json",self.text_buffers.root_path));
                 self.rust_compiler.init(cx);
                 
-                let json = json::to_string(self.dock.dock_items.as_ref().unwrap());
+                let json = json::to_string(&self.app_state.dock_items);
                 println!("{}", json)
             },
             Event::FileRead(fr)=>{
@@ -150,7 +160,7 @@ impl App{
 
         self.view.handle_scroll_bars(cx, event);
         
-        let mut dock_walker =  self.dock.walker();
+        let mut dock_walker =  self.dock.walker(&mut self.app_state.dock_items);
         let mut file_tree_event = FileTreeEvent::None;
         while let Some(item) = dock_walker.walk_handle_dock(cx, event){
             match item{
@@ -163,7 +173,9 @@ impl App{
                         _=>()
                     }
                 },
-                Panel::FileEditorTarget=>{},
+                Panel::FileEditorTarget=>{
+                    
+                },
                 Panel::FileTree=>{
                     file_tree_event = self.file_tree.handle_file_tree(cx, event);
                 },
@@ -206,12 +218,11 @@ impl App{
         }
 
         // handle the dock events        
-        match self.dock.handle_dock(cx, event){
+        match self.dock.handle_dock(cx, event, &mut self.app_state.dock_items){
             DockEvent::DockChanged=>{ // thats a bit bland event. lets let the thing know which file closed
             },
             _=>()
         }
-      
     }
 
     fn draw_app(&mut self, cx:&mut Cx){
@@ -221,7 +232,7 @@ impl App{
 
         self.dock.draw_dock(cx);
 
-        let mut dock_walker = self.dock.walker();
+        let mut dock_walker = self.dock.walker(&mut self.app_state.dock_items);
         while let Some(item) = dock_walker.walk_draw_dock(cx){
             match item{
                 Panel::RustCompiler=>{
@@ -255,7 +266,7 @@ impl App{
     fn focus_or_new_editor(&mut self, cx:&mut Cx, file_path:&str){
         let mut target_ctrl_id = 0;
         let mut only_focus_editor = false;
-        let mut dock_walker = self.dock.walker();
+        let mut dock_walker = self.dock.walker(&mut self.app_state.dock_items);
         let mut ctrl_id = 1;
         while let Some(dock_item) = dock_walker.walk_dock_item(){
             match dock_item{
@@ -286,7 +297,7 @@ impl App{
         }
         if target_ctrl_id != 0 && !only_focus_editor{ // open a new one
             let new_tab = self.new_file_editor_tab(file_path);
-            let mut dock_walker = self.dock.walker();
+            let mut dock_walker = self.dock.walker(&mut self.app_state.dock_items);
             let mut ctrl_id = 1;
             while let Some(dock_item) = dock_walker.walk_dock_item(){
                 if ctrl_id == target_ctrl_id{

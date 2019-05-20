@@ -295,9 +295,22 @@ impl RustEditor{
                         },
                         KeywordType::Flow=>{
                             token_type = TokenType::Flow;
+                            self.code_editor.set_indent_color(self.code_editor.colors.indent_line_flow);
                         },
                         KeywordType::BuiltinType=>{
                             token_type = TokenType::Keyword;
+                        },
+                        KeywordType::Fn=>{
+                             token_type = TokenType::Call;
+                             self.code_editor.set_indent_color(self.code_editor.colors.indent_line_fn);
+                        },
+                        KeywordType::Def=>{
+                            token_type = TokenType::Keyword;
+                            self.code_editor.set_indent_color(self.code_editor.colors.indent_line_def);
+                         },
+                        KeywordType::Looping=>{
+                            token_type = TokenType::Looping;
+                            self.code_editor.set_indent_color(self.code_editor.colors.indent_line_looping);
                         },
                         KeywordType::None=>{
                             if state.next == '(' || state.next == '!'{
@@ -325,6 +338,9 @@ impl RustEditor{
                     }
                     else{
                         token_type = TokenType::TypeName;
+                        //if state.next == '{'{
+                        //    self.code_editor.set_indent_color(self.code_editor.colors.indent_line_def);                            
+                        //}
                     }
                 },
                 _=>{
@@ -468,7 +484,7 @@ impl RustEditor{
                     return KeywordType::Flow
                 }
                 else if state.keyword(chunk,"num"){
-                    return KeywordType::Normal
+                    return KeywordType::Def
                 }
                 else if state.keyword(chunk,"xtern"){
                     return KeywordType::Normal
@@ -479,10 +495,13 @@ impl RustEditor{
                     return KeywordType::Normal
                 }
                 else if state.keyword(chunk,"n"){
-                    return KeywordType::Normal
+                    return KeywordType::Fn
                 }
-                else if state.keyword(chunk,"or"){
-                    return KeywordType::Flow
+                else if state.keyword(chunk,"or "){
+                    if state.next_is_uppercase_letter(){
+                        return KeywordType::Def
+                    }
+                    return KeywordType::Looping
                 }
                 else if state.keyword(chunk,"32"){
                     return KeywordType::BuiltinType
@@ -496,7 +515,7 @@ impl RustEditor{
                     return KeywordType::Flow
                 }
                 else if state.keyword(chunk,"mpl"){
-                    return KeywordType::Normal
+                    return KeywordType::Def
                 }
                 else if state.keyword(chunk,"n"){
                     return KeywordType::Normal
@@ -519,7 +538,7 @@ impl RustEditor{
                     return KeywordType::Normal
                 }
                 else if state.keyword(chunk,"oop"){
-                    return KeywordType::Flow
+                    return KeywordType::Looping
                 }
             },
             'm'=>{
@@ -565,7 +584,7 @@ impl RustEditor{
                         return KeywordType::Normal
                     }
                     else if state.keyword(chunk,"ruct"){
-                        return KeywordType::Normal
+                        return KeywordType::Def
                     }
                 }
             },
@@ -575,7 +594,7 @@ impl RustEditor{
                 }
                 else if state.keyword(chunk,"r"){
                     if state.keyword(chunk,"ait"){
-                        return KeywordType::Normal
+                        return KeywordType::Def
                     }
                     else if state.keyword(chunk,"ue"){
                         return KeywordType::Normal
@@ -608,7 +627,7 @@ impl RustEditor{
                         return KeywordType::Normal
                     }
                     else if state.keyword(chunk,"ile"){
-                        return KeywordType::Flow
+                        return KeywordType::Looping
                     }
                 }
             }, 
@@ -622,5 +641,8 @@ enum KeywordType{
     None,
     Normal,
     Flow,
+    Fn,
+    Looping,
+    Def,
     BuiltinType
 }
