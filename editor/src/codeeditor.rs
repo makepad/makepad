@@ -287,6 +287,7 @@ impl Style for CodeEditor{
             _anim_folding:AnimFolding{
                 state:AnimFoldingState::Open,
                 focussed_line:0,
+                depth:2,
                 zoom_scale:1.0,
                 did_animate:false,
             },
@@ -1158,7 +1159,7 @@ impl CodeEditor{
         let mut off = self.line_number_width;
         for i in 0..tabs{
             let (indent_color, indent_id) =  if i < self._indent_stack.len(){self._indent_stack[i]}else{(self.colors.indent_line_unknown, 0.)};
-            let tab_width = if i<2{tab_fixed_width}else{tab_variable_width};
+            let tab_width = if i<self._anim_folding.depth{tab_fixed_width}else{tab_variable_width};
             self.indent_lines.color = indent_color;
             let inst = self.indent_lines.draw_quad(cx, Rect{
                 x: off,
@@ -1196,9 +1197,9 @@ impl CodeEditor{
                 }
                 // lets do the code folding here. if we are tabs > fold line
                 // lets change the fontsize
-                if tabs >= 2 || next_char == '\n'{
+                if tabs >= self._anim_folding.depth || next_char == '\n'{
                     // ok lets think. we need to move it over by the delta of 8 spaces * _anim_font_size
-                    let dx = (self._monospace_base.x * self.open_font_size * 8.) - (self._monospace_base.x * self._anim_font_size * 8.);
+                    let dx = (self._monospace_base.x * self.open_font_size * 4. * (self._anim_folding.depth as f32)) - (self._monospace_base.x * self._anim_font_size * 4. * (self._anim_folding.depth as f32));
                     cx.move_turtle(dx,0.0);
                     self._line_was_folded = true;
                     self._anim_font_size
@@ -1208,7 +1209,7 @@ impl CodeEditor{
                     self.open_font_size
                 }
             }
-            else if token_type == TokenType::Newline || token_type == TokenType::Comment{
+            else if token_type == TokenType::Newline || token_type == TokenType::Comment || token_type == TokenType::Hash{
                 self._line_was_folded = true;
                 self._anim_font_size
             }
@@ -1301,6 +1302,7 @@ impl CodeEditor{
                     }
                 },
                 TokenType::Operator=> self.colors.operator,
+                TokenType::Hash=> self.colors.operator,
                 TokenType::Delimiter=> self.colors.delimiter,
                 TokenType::Block=>self.colors.operator,
                 TokenType::Unexpected=>self.colors.unexpected
@@ -1715,7 +1717,8 @@ impl CodeEditor{
     fn start_code_folding(&mut self, cx:&mut Cx, text_buffer:&TextBuffer, halfway:bool){
         // start code folding anim
         let speed = 0.98;
-        self._anim_folding.zoom_scale = if halfway{9.0} else{1.0};
+        self._anim_folding.depth = if halfway{1}else{2};
+        self._anim_folding.zoom_scale = 1.0;//if halfway{9.0} else{1.0};
         self._anim_folding.state.do_folding(speed, 0.95);
         self._anim_folding.focussed_line = self.compute_focussed_line_for_folding(cx,text_buffer);
         //println!("FOLDING {}",self._anim_folding.focussed_line);
@@ -1860,6 +1863,7 @@ pub struct AnimFolding{
     pub state:AnimFoldingState,
     pub focussed_line:usize,
     pub zoom_scale:f32,
+    pub depth:usize,
     pub did_animate:bool
 }
 

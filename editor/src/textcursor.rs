@@ -970,6 +970,7 @@ impl TextCursorSet{
                 TokenType::ParenOpen=>false,
                 TokenType::ParenClose=>false,
                 TokenType::Operator=>false,
+                TokenType::Hash=>false,
                 TokenType::Delimiter=>false,
                 TokenType::Block=>false,
                 TokenType::Unexpected=>false,
@@ -1028,6 +1029,7 @@ pub enum TokenType{
     Identifier,
     Call,
     TypeName,
+    Hash,
 
     String,
     Number,

@@ -277,6 +277,10 @@ impl RustEditor{
                     chunk.push(state.cur);
                     token_type = TokenType::ParenClose;
                 },
+                '#'=>{
+                    chunk.push(state.cur);
+                    token_type = TokenType::Hash;
+                },
                 '_'=>{
                     chunk.push(state.cur);
                     Self::parse_rust_ident_tail(&mut state, &mut chunk);
