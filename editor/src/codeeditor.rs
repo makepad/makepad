@@ -408,8 +408,10 @@ impl CodeEditor{
             fn pixel()->vec4{
                 df_viewport(pos * vec2(w, h));
                 //df_rect(0.,0.,w,h);
-                df_rect(0.5,0.5,w-1.,h-1.);
-                return df_stroke(color, 0.75 + dpi_dilate*0.75);
+                //df_rect(0.5,0.5,w-1.,h-1.);
+                //return df_stroke(color, 0.75 + dpi_dilate*0.75);
+                df_rect(0.,h-2.,w,2.);
+                return df_fill(color("white"));
             }
         }));
         sh
