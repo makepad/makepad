@@ -126,7 +126,7 @@ impl RustEditor{
                     //let is_curly = chunk[0] == '{';
                     out_lines.last_mut().unwrap().append(&mut chunk);
                     //if is_curly && state.next != '\n'{
-                    //    out_lines.last_mut().unwrap().push(' ');
+                    // out_lines.last_mut().unwrap().push(' ');
                     //}
                 },
                 TokenType::ParenClose => {
@@ -138,10 +138,10 @@ impl RustEditor{
                     if last_line.len()>0 && *last_line.last().unwrap() == ','{
                         last_line.pop();
                     }
-
+                    
                     //if chunk[0] == '}' && last_line.len()>0 && *last_line.last().unwrap() != ' '{
-                   //     last_line.push(' ');
-                   // }
+                    // last_line.push(' ');
+                    // }
                     
                     first_after_open = false;
                     if !first_on_line && paren_stack.last().unwrap().expecting_newlines == true{ // we are expecting newlines!
@@ -165,7 +165,7 @@ impl RustEditor{
                     else{
                         is_unary_operator = false;
                     }
-
+                    
                     out_lines.last_mut().unwrap().append(&mut chunk);
                 },
                 TokenType::CommentLine => {
@@ -225,7 +225,7 @@ impl RustEditor{
                     out_lines.last_mut().unwrap().append(&mut chunk);
                     if (ch != ',' || paren_stack.last_mut().unwrap().angle_counter == 0)  // otherwise our generics multiline
                         && paren_stack.last().unwrap().expecting_newlines == true
-                        && state.next != '\n' { // we are expecting newlines!
+                    && state.next != '\n' { // we are expecting newlines!
                         out_lines.push(Vec::new());
                         first_on_line = true;
                     }
@@ -284,7 +284,7 @@ impl RustEditor{
                     }
                     out_lines.last_mut().unwrap().append(&mut chunk);
                 },
-                TokenType::Namespace=>{
+                TokenType::Namespace => {
                     is_unary_operator = true;
                     first_after_open = false;
                     if first_on_line{
@@ -293,7 +293,7 @@ impl RustEditor{
                     }
                     out_lines.last_mut().unwrap().append(&mut chunk);
                 },
-                TokenType::Keyword|TokenType::Flow|TokenType::Looping=>{
+                TokenType::Keyword | TokenType::Flow | TokenType::Looping => {
                     is_unary_operator = true;
                     paren_stack.last_mut().unwrap().angle_counter = 0;
                     first_after_open = false;
@@ -340,6 +340,8 @@ impl RustEditor{
         if let Err(()) = self.code_editor.begin_code_editor(cx, text_buffer){
             return
         }
+        
+        
         
         if self.set_key_focus_on_draw{
             self.set_key_focus_on_draw = false;
@@ -701,8 +703,8 @@ impl RustTokenizer{
                             // check if we are first on a line
                             if token_chunks.len() < 2
                                 || token_chunks[token_chunks.len() - 1].token_type == TokenType::Newline
-                                || token_chunks[token_chunks.len() - 2].token_type == TokenType::Newline
-                                && token_chunks[token_chunks.len() - 1].token_type == TokenType::Whitespace{
+                            || token_chunks[token_chunks.len() - 2].token_type == TokenType::Newline
+                            && token_chunks[token_chunks.len() - 1].token_type == TokenType::Whitespace{
                                 return TokenType::Looping;
                                 //self.code_editor.set_indent_color(self.code_editor.colors.indent_line_looping);
                             }
