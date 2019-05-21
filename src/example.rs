@@ -1,15 +1,15 @@
 /// This is Makepad, a work-in-progress livecoding IDE for 2D Design.
 // This application is nearly 100% Wasm running on webGL. NO HTML AT ALL.
-// The vision is to build a livecoding / design hybrid program, 
-// here procedural design and code are fused in one environment. 
-// If you have missed 'learnable programming' please check this out: 
+// The vision is to build a livecoding / design hybrid program,
+// here procedural design and code are fused in one environment.
+// If you have missed 'learnable programming' please check this out:
 // http://worrydream.com/LearnableProgramming/
-// Makepad aims to fulfill (some) of these ideas using a completely 
-// from-scratch renderstack built on the GPU and Rust/wasm. 
-// It will be like an IDE meets a vector designtool, and had offspring. 
-// Direct manipulation of the vectors modifies the code, the code modifies the vectors. 
-// And the result can be lasercut, embroidered or drawn using a plotter. 
-// This means our first goal is 2D path CNC with booleans (hence the CAD), 
+// Makepad aims to fulfill (some) of these ideas using a completely
+// from-scratch renderstack built on the GPU and Rust/wasm.
+// It will be like an IDE meets a vector designtool, and had offspring.
+// Direct manipulation of the vectors modifies the code, the code modifies the vectors.
+// And the result can be lasercut, embroidered or drawn using a plotter.
+// This means our first goal is 2D path CNC with booleans (hence the CAD),
 // and not dropshadowy-gradients.
 
 // Find the repo and more explanation at github.com/makepad/makepad.
@@ -41,9 +41,9 @@ struct App{
 }
 
 main_app!(App, "Example");
- 
+
 impl Style for App{
-    fn style(cx:&mut Cx)->Self{
+    fn style(cx:&mut Cx) -> Self{
         set_dark_style(cx);
         let quad_sh = App::def_quad_shader(cx);
         Self{
@@ -72,58 +72,58 @@ impl Style for App{
 }
 
 impl App{
-    fn def_quad_shader(cx:&mut Cx)->Shader{
+    fn def_quad_shader(cx:&mut Cx) -> Shader{
         let mut sh = Quad::def_quad_shader(cx);
         sh.add_ast(shader_ast!({
-            fn pixel()->vec4{
+            fn pixel() -> vec4{
                 df_viewport(pos * vec2(w, h));
-                df_rect(0.,0.,w,h);
-                df_fill(vec4(pos.x, pos.y, sin(pos.x),1.));
-                df_move_to(0.,0.);
-                df_line_to(w,h);
+                df_rect(0., 0., w, h);
+                df_fill(vec4(pos.x, pos.y, sin(pos.x), 1.));
+                df_move_to(0., 0.);
+                df_line_to(w, h);
                 return df_stroke(color, 4.);
             }
         }));
         sh
     }
-
+    
     fn handle_app(&mut self, cx:&mut Cx, event:&mut Event){
         self.view.handle_scroll_bars(cx, event);
-
+        
         for btn in self.buttons.iter(){
             match btn.handle_button(cx, event){
-                ButtonEvent::Clicked=>{
+                ButtonEvent::Clicked => {
                     // boop
                     self.clickety += 1;
                     cx.redraw_area(Area::All);
                 },
-                _=>()
+                _ => ()
             }
         }
     }
-
+    
     fn draw_app(&mut self, cx:&mut Cx){
         
         self.view.begin_view(cx, &Layout{
-            padding:Padding{l:10.,t:10.,r:0.,b:0.},
+            padding:Padding{l:10., t:10., r:0., b:0.},
             ..Default::default()
         });
-
-
+        
+        
         for i in 0..100{
             self.buttons.get_draw(cx, i, |_cx, templ|{
                 templ.clone()
             }).draw_button_with_label(cx, &format!("Btn {}", i));
-            if i%10 == 9{
+            if i % 10 == 9{
                 cx.turtle_new_line()
             }
         }
-
+        
         cx.turtle_new_line();
-
-        self.text.draw_text(cx, &format!("Hello World {}",self.clickety));
-        self.quad.draw_quad_walk(cx, Bounds::Fix(100.),Bounds::Fix(100.), Margin{l:15.,t:0.,r:0.,b:0.});
-
+        
+        self.text.draw_text(cx, &format!("Hello World {}", self.clickety));
+        self.quad.draw_quad_walk(cx, Bounds::Fix(100.), Bounds::Fix(100.), Margin{l:15., t:0., r:0., b:0.});
+        
         self.view.end_view(cx);
     }
 }

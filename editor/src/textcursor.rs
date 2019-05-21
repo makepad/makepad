@@ -965,6 +965,7 @@ impl TextCursorSet{
                 TokenType::Whitespace=>false,
                 TokenType::Newline=>false,
                 TokenType::Keyword=>false,
+                TokenType::BuiltinType=>false,
                 TokenType::Flow=>false,
                 TokenType::Fn=>false,
                 TokenType::Def=>false,
@@ -1049,6 +1050,7 @@ pub enum TokenType{
     Identifier,
     Call,
     TypeName,
+    BuiltinType,
     Hash,
 
     String,

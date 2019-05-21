@@ -56,8 +56,16 @@ impl RustEditor{
         out_lines.push(Vec::new());
         let mut chunk:Vec<char> = Vec::new();
         let mut first_on_line = true;
+        let mut horrible_angle_count = 0; // this is just absolutely NOT nice, but it works somewhat.
         let mut first_after_open = false;
-        let mut paren_stack:Vec<(bool, usize)> = Vec::new();
+        struct ParenStack{
+            expecting_newlines:bool,
+            expected_indent:usize,
+            angle_counter:usize
+        }
+        let mut paren_stack:Vec<ParenStack> = Vec::new();
+        paren_stack.push(ParenStack{expecting_newlines:true,expected_indent:0,angle_counter:0});
+        
         let mut expected_indent = 0;
         
         fn output_indent(out_lines:&mut Vec<Vec<char>>, indent_depth:usize){
@@ -76,15 +84,16 @@ impl RustEditor{
                     }
                 },
                 TokenType::Newline => {
+                   // paren_stack.last_mut().unwrap().angle_counter = 0;
                     if first_on_line{
                         output_indent(&mut out_lines, expected_indent);
                     }
                     
                     if first_after_open{
-                        paren_stack.last_mut().unwrap().0 = true;
+                        paren_stack.last_mut().unwrap().expecting_newlines = true;
                         expected_indent += 4;
                     }
-                    if paren_stack.len()>0 && paren_stack.last_mut().unwrap().0 == false{ // we are NOT expecting newlines!
+                    if paren_stack.last_mut().unwrap().expecting_newlines == false{ // we are NOT expecting newlines!
                         
                     }
                     else{
@@ -100,7 +109,7 @@ impl RustEditor{
                         output_indent(&mut out_lines, expected_indent);
                     }
                     
-                    paren_stack.push((false, expected_indent));
+                    paren_stack.push(ParenStack{expecting_newlines:false, expected_indent:expected_indent, angle_counter:0});
                     first_after_open = true;
                     out_lines.last_mut().unwrap().append(&mut chunk);
                 },
@@ -114,12 +123,12 @@ impl RustEditor{
                     }
                     
                     first_after_open = false;
-                    if !first_on_line && paren_stack.len()>0 && paren_stack.last_mut().unwrap().0 == true{ // we are expecting newlines!
+                    if !first_on_line && paren_stack.last().unwrap().expecting_newlines == true{ // we are expecting newlines!
                         out_lines.push(Vec::new());
                         first_on_line = true;
                     }
-                    expected_indent = if paren_stack.len()>0{
-                        paren_stack.pop().unwrap().1
+                    expected_indent = if paren_stack.len()>1{
+                        paren_stack.pop().unwrap().expected_indent
                     }
                     else{
                         0
@@ -171,10 +180,11 @@ impl RustEditor{
                             last_line.pop();
                         }
                     }
+                    let ch = chunk[0];
                     out_lines.last_mut().unwrap().append(&mut chunk);
-                    if paren_stack.len() > 0 && paren_stack.last_mut().unwrap().0 == true && state.next != '\n' { // we are expecting newlines!
+                    if (ch !=',' || paren_stack.last_mut().unwrap().angle_counter == 0) && 
+                    paren_stack.last().unwrap().expecting_newlines == true && state.next != '\n' { // we are expecting newlines!
                         out_lines.push(Vec::new());
-                        // do shi
                         first_on_line = true;
                     }
                     else if state.next != ' ' && state.next != '\n'{
@@ -184,8 +194,23 @@ impl RustEditor{
                 TokenType::Operator => {
                     if first_on_line{
                         first_on_line = false;
-                        let extra_indent = if chunk.len() == 1 && (chunk[0] == '*' || chunk[0] == '.'){0}else{4};
+                        let extra_indent = if chunk.len() == 1 && (chunk[0] == '*' || chunk[0] == '.'|| chunk[0] == '&'){0}else{4};
                         output_indent(&mut out_lines, expected_indent + extra_indent);
+                    }
+                    if chunk.len() == 1{
+                        if chunk[0] == '<'{
+                            paren_stack.last_mut().unwrap().angle_counter += 1;
+                        }
+                        else if chunk[0] == '>'{
+                            let last = paren_stack.last_mut().unwrap();
+                            last.angle_counter = last.angle_counter.max(1) - 1;
+                        }
+                        else if chunk[0] != '&'{
+                            paren_stack.last_mut().unwrap().angle_counter = 0
+                        }
+                    }
+                    else{
+                        paren_stack.last_mut().unwrap().angle_counter = 0
                     }
                     let last_line = out_lines.last_mut().unwrap();
                     if chunk.len() == 1 && (chunk[0] == '!' || chunk[0] == '|' || chunk[0] == '&' || chunk[0] == '*' || chunk[0] == '.' || chunk[0] == '<' || chunk[0] == '>'){
@@ -203,7 +228,16 @@ impl RustEditor{
                         }
                     }
                 },
-                _ => {
+                TokenType::BuiltinType | TokenType::TypeName => {
+                    first_after_open = false;
+                    if first_on_line{
+                        first_on_line = false;
+                        output_indent(&mut out_lines, expected_indent);
+                    }
+                    out_lines.last_mut().unwrap().append(&mut chunk);
+                },
+                _ => { 
+                    paren_stack.last_mut().unwrap().angle_counter = 0;
                     first_after_open = false;
                     if first_on_line{
                         first_on_line = false;
@@ -581,7 +615,7 @@ impl RustTokenizer{
                             //self.code_editor.set_indent_color(self.code_editor.colors.indent_line_flow);
                         },
                         KeywordType::BuiltinType => {
-                            return TokenType::Keyword;
+                            return TokenType::BuiltinType;
                         },
                         KeywordType::Fn => {
                             return TokenType::Fn;

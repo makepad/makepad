@@ -20,21 +20,16 @@ enum Panel{
 
 struct App{
     view: View<ScrollBar>,
-    
     dock: Dock<Panel>,
     app_state: AppState,
     file_tree: FileTree,
-    
-    file_editors: Elements<u64,
-    FileEditor,
-    FileEditorTemplates>,
+    file_editors: Elements<u64, FileEditor, FileEditorTemplates>,
     file_editor_id_alloc: u64,
-    
     rust_compiler: RustCompiler,
     keyboard: Keyboard,
     text_buffers: TextBuffers,
     index_read_id: u64,
-    app_state_read_id: u64,
+    app_state_read_id: u64
 }
 
 #[derive(Clone, Serialize)]
@@ -56,9 +51,7 @@ impl Style for App{
                 root_path: "./".to_string(),
                 storage: HashMap::new()
             },
-            file_tree: FileTree{
-                ..Style::style(cx)
-            },
+            file_tree: FileTree{..Style::style(cx)},
             index_read_id: 0,
             app_state_read_id: 0,
             file_editors: Elements::new(FileEditorTemplates{
@@ -79,13 +72,11 @@ impl Style for App{
                     pos: 150.0,
                     first: Box::new(DockItem::TabControl{
                         current: 0,
-                        tabs: vec![
-                            DockTab{
-                                closeable: false,
-                                title: "Files".to_string(),
-                                item: Panel::FileTree
-                            }
-                        ]
+                        tabs: vec![DockTab{
+                            closeable: false,
+                            title: "Files".to_string(),
+                            item: Panel::FileTree
+                        }]
                     }),
                     last: Box::new(DockItem::Splitter{
                         axis: Axis::Horizontal,
@@ -243,6 +234,7 @@ impl App{
         // handle the dock events
         match self.dock.handle_dock(cx, event, &mut self.app_state.dock_items){
             DockEvent::DockChanged => { // thats a bit bland event. lets let the thing know which file closed
+                
             },
             _ => ()
         }

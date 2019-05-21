@@ -1278,6 +1278,7 @@ impl CodeEditor{
                     }
                     self.colors.whitespace
                 },
+                TokenType::BuiltinType=> self.colors.keyword,
                 TokenType::Keyword=> self.colors.keyword,
                 TokenType::Flow=>{
                     self.colors.flow
