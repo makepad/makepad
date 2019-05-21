@@ -172,7 +172,7 @@ impl RustEditor{
                         }
                     }
                     out_lines.last_mut().unwrap().append(&mut chunk);
-                    if paren_stack.len()>0 && paren_stack.last_mut().unwrap().0 == true && state.next != '\n' { // we are expecting newlines!
+                    if paren_stack.len() > 0 && paren_stack.last_mut().unwrap().0 == true && state.next != '\n' { // we are expecting newlines!
                         out_lines.push(Vec::new());
                         // do shi
                         first_on_line = true;
@@ -192,7 +192,7 @@ impl RustEditor{
                         last_line.append(&mut chunk);
                     }
                     else{
-                        if last_line.len()>0 && *last_line.last().unwrap() != ' '{
+                        if last_line.len() > 0 && *last_line.last().unwrap() != ' '{
                             if state.next != ' ' && state.next != '\n'{
                                 last_line.push(' ');
                             }

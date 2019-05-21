@@ -695,7 +695,7 @@ impl TextCursorSet{
         })
     }
     
-    pub fn replace_lines_formatted(&mut self, start_row:usize, end_row:usize, mut rep_lines:Vec<Vec<char>>, text_buffer:&mut TextBuffer){
+    pub fn replace_lines_formatted(&mut self, start_row:usize, end_row:usize, rep_lines:Vec<Vec<char>>, text_buffer:&mut TextBuffer){
         let cursors_clone = self.clone();
         let op = text_buffer.replace_lines(start_row, end_row, rep_lines);
         text_buffer.redo_stack.truncate(0);

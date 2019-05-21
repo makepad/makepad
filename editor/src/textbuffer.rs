@@ -15,7 +15,7 @@ pub struct TextBuffer{
     pub load_id: u64,
     pub signal_id: u64,
     pub mutation_id: u64,
-    pub messages: TextBufferMessages,
+    pub messages: TextBufferMessages, 
     pub keyboard:TextBufferKeyboard,
 }
 
@@ -461,7 +461,7 @@ impl TextBuffer{
         }
     }
     
-    pub fn replace_lines(&mut self, start_row:usize, end_row:usize, mut rep_lines:Vec<Vec<char>>)->TextOp{
+    pub fn replace_lines(&mut self, start_row:usize, end_row:usize, rep_lines:Vec<Vec<char>>)->TextOp{
         let start = self.text_pos_to_offset(TextPos{row:start_row, col:0});
         let end = self.text_pos_to_offset(TextPos{row:end_row, col:0});
         let rep_lines_chars = calc_char_count(&rep_lines);

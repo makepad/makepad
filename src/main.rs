@@ -101,8 +101,8 @@ impl Style for App{
                                 },
                                 DockTab{
                                     closeable: true,
-                                    title: "main.rs".to_string(),
-                                    item: Panel::FileEditor{path: "src/main.rs".to_string(), editor_id: 1}
+                                    title: "example.rs".to_string(),
+                                    item: Panel::FileEditor{path: "src/example.rs".to_string(), editor_id: 1}
                                 }
                             ],
                         }),
@@ -152,7 +152,7 @@ impl App{
                 self.app_state_read_id = cx.read_file(&format!("{}makepad_state.json", self.text_buffers.root_path));
                 
                 self.rust_compiler.init(cx, &mut self.text_buffers);
-                let json = serde_json::to_string(&self.app_state.dock_items).unwrap();
+                let _json = serde_json::to_string(&self.app_state.dock_items).unwrap();
             },
             Event::FileRead(fr) => {
                 // lets see which file we loaded
