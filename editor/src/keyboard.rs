@@ -2,7 +2,7 @@ use widget::*;
 use crate::textbuffer::*;
 
 //#[derive(Clone)]
-pub struct Keyboard{
+pub struct Keyboard {
     pub view: View<ScrollBar>,
     pub modifiers: KeyModifiers,
     pub key_down: Option<KeyCode>,
@@ -11,21 +11,21 @@ pub struct Keyboard{
 }
 
 #[derive(Clone)]
-pub enum KeyboardEvent{
+pub enum KeyboardEvent {
     None,
 }
 
 #[derive(Clone, PartialEq, PartialOrd, Hash, Ord)]
-pub enum KeyType{
+pub enum KeyType {
     Control,
     Alt,
     Shift
 }
-impl Eq for KeyType{}
+impl Eq for KeyType {}
 
-impl KeyType{
-    fn name(&self) -> String{
-        match self{
+impl KeyType {
+    fn name(&self) -> String {
+        match self {
             KeyType::Control => "Control".to_string(),
             KeyType::Alt => "Alternate".to_string(),
             KeyType::Shift => "Shift".to_string(),
@@ -33,16 +33,16 @@ impl KeyType{
     }
 }
 
-impl Style for Keyboard{
-    fn style(cx: &mut Cx) -> Self{
-        Self{
-            view: View{
+impl Style for Keyboard {
+    fn style(cx: &mut Cx) -> Self {
+        Self {
+            view: View {
                 ..Style::style(cx)
             },
-            buttons: Elements::new(Button{
+            buttons: Elements::new(Button {
                 ..Style::style(cx)
             }),
-            modifiers: KeyModifiers{..Default::default()},
+            modifiers: KeyModifiers {..Default::default()},
             key_down: None,
             key_up: None,
             
@@ -50,11 +50,11 @@ impl Style for Keyboard{
     }
 }
 
-impl Keyboard{
+impl Keyboard {
     
-    fn send_textbuffers_update(&mut self, cx: &mut Cx, text_buffers: &mut TextBuffers){
+    fn send_textbuffers_update(&mut self, cx: &mut Cx, text_buffers: &mut TextBuffers) {
         // clear all files we missed
-        for (_, text_buffer) in &mut text_buffers.storage{
+        for (_, text_buffer) in &mut text_buffers.storage {
             text_buffer.keyboard.modifiers = self.modifiers.clone();
             text_buffer.keyboard.key_down = self.key_down.clone();
             text_buffer.keyboard.key_up = self.key_up.clone();
@@ -62,15 +62,15 @@ impl Keyboard{
         }
     }
     
-    pub fn handle_keyboard(&mut self, cx: &mut Cx, event: &mut Event, text_buffers: &mut TextBuffers) -> KeyboardEvent{
+    pub fn handle_keyboard(&mut self, cx: &mut Cx, event: &mut Event, text_buffers: &mut TextBuffers) -> KeyboardEvent {
         // do shit here
-        if self.view.handle_scroll_bars(cx, event){
+        if self.view.handle_scroll_bars(cx, event) {
         }
         let mut update_textbuffers = false;
-        for (key_type, btn) in self.buttons.enumerate(){
-            match btn.handle_button(cx, event){
+        for (key_type, btn) in self.buttons.enumerate() {
+            match btn.handle_button(cx, event) {
                 ButtonEvent::Down => {
-                    match key_type{
+                    match key_type {
                         KeyType::Control => {
                             self.modifiers.control = true;
                             self.key_up = None;
@@ -90,7 +90,7 @@ impl Keyboard{
                     update_textbuffers = true;
                 },
                 ButtonEvent::Up | ButtonEvent::Clicked => {
-                    match key_type{
+                    match key_type {
                         KeyType::Control => {
                             self.modifiers.control = false;
                             self.key_down = None;
@@ -112,22 +112,22 @@ impl Keyboard{
                 _ => ()
             }
         }
-        if update_textbuffers{
+        if update_textbuffers {
             self.send_textbuffers_update(cx, text_buffers);
         }
         
         KeyboardEvent::None
     }
     
-    pub fn draw_keyboard(&mut self, cx: &mut Cx){
-        if let Err(_) = self.view.begin_view(cx, &Layout{..Default::default()}){
+    pub fn draw_keyboard(&mut self, cx: &mut Cx) {
+        if let Err(_) = self.view.begin_view(cx, &Layout {..Default::default()}) {
             return
         }
         
         let keys = vec![KeyType::Alt, KeyType::Control, KeyType::Shift];
         
-        for key in keys{
-            self.buttons.get_draw(cx, key.clone(), |_cx, templ|{
+        for key in keys {
+            self.buttons.get_draw(cx, key.clone(), | _cx, templ | {
                 templ.clone()
             }).draw_button_with_label(cx, &key.name());
         }
