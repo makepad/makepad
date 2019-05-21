@@ -33,46 +33,46 @@
 use widgets::*;
 
 struct App{
-    view:View<ScrollBar>,
-    buttons:Elements<u64, Button, Button>,
-    text:Text,
-    quad:Quad,
-    clickety:u64
+    view: View<ScrollBar>,
+    buttons: Elements<u64, Button, Button>,
+    text: Text,
+    quad: Quad,
+    clickety: u64
 }
 
 main_app!(App, "Example");
 
 impl Style for App{
-    fn style(cx:&mut Cx) -> Self{
+    fn style(cx: &mut Cx) -> Self{
         set_dark_style(cx);
         let quad_sh = App::def_quad_shader(cx);
         Self{
-            view:View{
-                scroll_h:Some(ScrollBar{
+            view: View{
+                scroll_h: Some(ScrollBar{
                     ..Style::style(cx)
                 }),
-                scroll_v:Some(ScrollBar{
+                scroll_v: Some(ScrollBar{
                     ..Style::style(cx)
                 }),
                 ..Style::style(cx)
             },
-            quad:Quad{
-                shader_id:cx.add_shader(quad_sh, "App.quad"),
+            quad: Quad{
+                shader_id: cx.add_shader(quad_sh, "App.quad"),
                 ..Style::style(cx)
             },
-            text:Text{
+            text: Text{
                 ..Style::style(cx)
             },
-            buttons:Elements::new(Button{
+            buttons: Elements::new(Button{
                 ..Style::style(cx)
             }),
-            clickety:0
+            clickety: 0
         }
     }
 }
 
 impl App{
-    fn def_quad_shader(cx:&mut Cx) -> Shader{
+    fn def_quad_shader(cx: &mut Cx) -> Shader{
         let mut sh = Quad::def_quad_shader(cx);
         sh.add_ast(shader_ast!({
             fn pixel() -> vec4{
@@ -87,7 +87,7 @@ impl App{
         sh
     }
     
-    fn handle_app(&mut self, cx:&mut Cx, event:&mut Event){
+    fn handle_app(&mut self, cx: &mut Cx, event: &mut Event){
         self.view.handle_scroll_bars(cx, event);
         
         for btn in self.buttons.iter(){
@@ -102,10 +102,10 @@ impl App{
         }
     }
     
-    fn draw_app(&mut self, cx:&mut Cx){
+    fn draw_app(&mut self, cx: &mut Cx){
         
         self.view.begin_view(cx, &Layout{
-            padding:Padding{l:10., t:10., r:0., b:0.},
+            padding: Padding{l: 10., t: 10., r: 0., b: 0.},
             ..Default::default()
         });
         
@@ -122,7 +122,7 @@ impl App{
         cx.turtle_new_line();
         
         self.text.draw_text(cx, &format!("Hello World {}", self.clickety));
-        self.quad.draw_quad_walk(cx, Bounds::Fix(100.), Bounds::Fix(100.), Margin{l:15., t:0., r:0., b:0.});
+        self.quad.draw_quad_walk(cx, Bounds::Fix(100.), Bounds::Fix(100.), Margin{l: 15., t: 0., r: 0., b: 0.});
         
         self.view.end_view(cx);
     }

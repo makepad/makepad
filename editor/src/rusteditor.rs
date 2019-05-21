@@ -67,7 +67,11 @@ impl RustEditor{
         
         let mut paren_stack:Vec<ParenStack> = Vec::new();
         
-        paren_stack.push(ParenStack{expecting_newlines:true, expected_indent:0, angle_counter:0});
+        paren_stack.push(ParenStack{
+            expecting_newlines:true,
+            expected_indent:0,
+            angle_counter:0
+        });
         out_lines.push(Vec::new());
         
         let mut expected_indent = 0;
@@ -174,6 +178,13 @@ impl RustEditor{
                     let last_line = out_lines.last_mut().unwrap();
                     last_line.append(&mut chunk);
                     last_line.push(' ');
+                },
+                TokenType::Colon => {
+                    let last_line = out_lines.last_mut().unwrap();
+                    last_line.append(&mut chunk);
+                    if state.next != ' ' && state.next != '\n'{
+                        last_line.push(' ');
+                    }
                 },
                 TokenType::Delimiter => {
                     if first_on_line{
