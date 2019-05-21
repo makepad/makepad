@@ -50,21 +50,25 @@ impl RustEditor{
     
     // because rustfmt is such an insane shitpile to compile or use as a library, here is a stupid version.
     pub fn auto_format(&mut self, text_buffer:&mut TextBuffer){
+        
         let mut state = TokenizerState::new(text_buffer);
         let mut rust_tok = RustTokenizer::new();
         let mut out_lines:Vec<Vec<char>> = Vec::new();
-        out_lines.push(Vec::new());
         let mut chunk:Vec<char> = Vec::new();
+        
         let mut first_on_line = true;
-        let mut horrible_angle_count = 0; // this is just absolutely NOT nice, but it works somewhat.
         let mut first_after_open = false;
+        
         struct ParenStack{
             expecting_newlines:bool,
             expected_indent:usize,
             angle_counter:usize
         }
+        
         let mut paren_stack:Vec<ParenStack> = Vec::new();
-        paren_stack.push(ParenStack{expecting_newlines:true,expected_indent:0,angle_counter:0});
+        
+        paren_stack.push(ParenStack{expecting_newlines:true, expected_indent:0, angle_counter:0});
+        out_lines.push(Vec::new());
         
         let mut expected_indent = 0;
         
@@ -74,6 +78,7 @@ impl RustEditor{
                 last_line.push(' ');
             }
         }
+        
         let mut last_token = TokenType::Unexpected;
         loop{
             let token_type = rust_tok.next_token(&mut state, &mut chunk, &self.code_editor.token_chunks);
@@ -84,7 +89,7 @@ impl RustEditor{
                     }
                 },
                 TokenType::Newline => {
-                   // paren_stack.last_mut().unwrap().angle_counter = 0;
+                    // paren_stack.last_mut().unwrap().angle_counter = 0;
                     if first_on_line{
                         output_indent(&mut out_lines, expected_indent);
                     }
@@ -93,10 +98,7 @@ impl RustEditor{
                         paren_stack.last_mut().unwrap().expecting_newlines = true;
                         expected_indent += 4;
                     }
-                    if paren_stack.last_mut().unwrap().expecting_newlines == false{ // we are NOT expecting newlines!
-                        
-                    }
-                    else{
+                    if paren_stack.last_mut().unwrap().expecting_newlines { // only insert when expecting newlines
                         first_after_open = false;
                         out_lines.push(Vec::new());
                         first_on_line = true;
@@ -109,7 +111,11 @@ impl RustEditor{
                         output_indent(&mut out_lines, expected_indent);
                     }
                     
-                    paren_stack.push(ParenStack{expecting_newlines:false, expected_indent:expected_indent, angle_counter:0});
+                    paren_stack.push(ParenStack{
+                        expecting_newlines:false,
+                        expected_indent:expected_indent,
+                        angle_counter:0
+                    });
                     first_after_open = true;
                     out_lines.last_mut().unwrap().append(&mut chunk);
                 },
@@ -182,8 +188,8 @@ impl RustEditor{
                     }
                     let ch = chunk[0];
                     out_lines.last_mut().unwrap().append(&mut chunk);
-                    if (ch !=',' || paren_stack.last_mut().unwrap().angle_counter == 0) && 
-                    paren_stack.last().unwrap().expecting_newlines == true && state.next != '\n' { // we are expecting newlines!
+                    if (ch != ',' || paren_stack.last_mut().unwrap().angle_counter == 0)
+                        && paren_stack.last().unwrap().expecting_newlines == true && state.next != '\n' { // we are expecting newlines!
                         out_lines.push(Vec::new());
                         first_on_line = true;
                     }
@@ -192,12 +198,14 @@ impl RustEditor{
                     }
                 },
                 TokenType::Operator => {
+                    
                     if first_on_line{
                         first_on_line = false;
                         let extra_indent = if chunk.len() == 1 && (chunk[0] == '*' || chunk[0] == '.'|| chunk[0] == '&'){0}else{4};
                         output_indent(&mut out_lines, expected_indent + extra_indent);
                     }
-                    if chunk.len() == 1{
+                    
+                    if chunk.len() == 1{ // do angle counting
                         if chunk[0] == '<'{
                             paren_stack.last_mut().unwrap().angle_counter += 1;
                         }
@@ -205,13 +213,14 @@ impl RustEditor{
                             let last = paren_stack.last_mut().unwrap();
                             last.angle_counter = last.angle_counter.max(1) - 1;
                         }
-                        else if chunk[0] != '&'{
+                        else if chunk[0] != '&' && chunk[0] != '*'{ // anything else resets the angle counter
                             paren_stack.last_mut().unwrap().angle_counter = 0
                         }
                     }
                     else{
                         paren_stack.last_mut().unwrap().angle_counter = 0
                     }
+                    
                     let last_line = out_lines.last_mut().unwrap();
                     if chunk.len() == 1 && (chunk[0] == '!' || chunk[0] == '|' || chunk[0] == '&' || chunk[0] == '*' || chunk[0] == '.' || chunk[0] == '<' || chunk[0] == '>'){
                         last_line.append(&mut chunk);
@@ -228,7 +237,7 @@ impl RustEditor{
                         }
                     }
                 },
-                TokenType::BuiltinType | TokenType::TypeName => {
+                TokenType::BuiltinType | TokenType::TypeName => { // these dont reset the angle counter
                     first_after_open = false;
                     if first_on_line{
                         first_on_line = false;
@@ -236,7 +245,7 @@ impl RustEditor{
                     }
                     out_lines.last_mut().unwrap().append(&mut chunk);
                 },
-                _ => { 
+                _ => { // otherwise reset the angulat counter
                     paren_stack.last_mut().unwrap().angle_counter = 0;
                     first_after_open = false;
                     if first_on_line{
