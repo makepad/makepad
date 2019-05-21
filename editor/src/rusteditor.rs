@@ -84,7 +84,7 @@ impl RustEditor{
                         paren_stack.last_mut().unwrap().0 = true;
                         expected_indent += 4;
                     }
-                    if paren_stack.len()>0 && paren_stack.last_mut().unwrap().0 == false{// we are NOT expecting newlines!
+                    if paren_stack.len()>0 && paren_stack.last_mut().unwrap().0 == false{ // we are NOT expecting newlines!
                         
                     }
                     else{
@@ -114,7 +114,7 @@ impl RustEditor{
                     }
                     
                     first_after_open = false;
-                    if !first_on_line && paren_stack.len()>0 && paren_stack.last_mut().unwrap().0 == true{// we are expecting newlines!
+                    if !first_on_line && paren_stack.len()>0 && paren_stack.last_mut().unwrap().0 == true{ // we are expecting newlines!
                         out_lines.push(Vec::new());
                         first_on_line = true;
                     }
@@ -130,12 +130,35 @@ impl RustEditor{
                     }
                     out_lines.last_mut().unwrap().append(&mut chunk);
                 },
-                TokenType::Comment => {
+                TokenType::CommentLine => {
                     if first_on_line{
                         first_on_line = false;
                         output_indent(&mut out_lines, expected_indent);
                     }
+                    else{
+                        let last_line = out_lines.last_mut().unwrap();
+                        last_line.push(' ');
+                    }
                     out_lines.last_mut().unwrap().append(&mut chunk);
+                },
+                TokenType::CommentMultiBegin => {
+                    if first_on_line{
+                        first_on_line = false;
+                        output_indent(&mut out_lines, expected_indent);
+                    }
+                    else{
+                        let last_line = out_lines.last_mut().unwrap();
+                        last_line.push(' ');
+                    }
+                    out_lines.last_mut().unwrap().append(&mut chunk);
+                },
+                TokenType::CommentChunk => {
+                    out_lines.last_mut().unwrap().append(&mut chunk);
+                },
+                TokenType::CommentMultiEnd => {
+                    let last_line = out_lines.last_mut().unwrap();
+                    last_line.append(&mut chunk);
+                    last_line.push(' ');
                 },
                 TokenType::Delimiter => {
                     if first_on_line{
@@ -149,21 +172,23 @@ impl RustEditor{
                         }
                     }
                     out_lines.last_mut().unwrap().append(&mut chunk);
-                    if paren_stack.len()>0 && paren_stack.last_mut().unwrap().0 == true && state.next != '\n'{// we are expecting newlines!
+                    if paren_stack.len()>0 && paren_stack.last_mut().unwrap().0 == true && state.next != '\n' { // we are expecting newlines!
                         out_lines.push(Vec::new());
+                        // do shi
                         first_on_line = true;
                     }
-                    if state.next != ' ' && state.next != '\n'{
+                    else if state.next != ' ' && state.next != '\n'{
                         out_lines.last_mut().unwrap().push(' ');
                     }
                 },
                 TokenType::Operator => {
                     if first_on_line{
                         first_on_line = false;
-                        output_indent(&mut out_lines, expected_indent);
+                        let extra_indent = if chunk.len() == 1 && (chunk[0] == '*' || chunk[0] == '.'){0}else{4};
+                        output_indent(&mut out_lines, expected_indent + extra_indent);
                     }
                     let last_line = out_lines.last_mut().unwrap();
-                    if chunk[0] == '!' || chunk[0] == '|' || chunk[0] == '&' || chunk[0] == '*' || chunk[0] == '.' || chunk[0] == '<' || chunk[0] == '>'{
+                    if chunk.len() == 1 && (chunk[0] == '!' || chunk[0] == '|' || chunk[0] == '&' || chunk[0] == '*' || chunk[0] == '.' || chunk[0] == '<' || chunk[0] == '>'){
                         last_line.append(&mut chunk);
                     }
                     else{
@@ -253,11 +278,11 @@ impl RustTokenizer{
     }
     
     fn next_token<'a>(&mut self, state:&mut TokenizerState<'a>, chunk:&mut Vec<char>, token_chunks:&Vec<TokenChunk>) -> TokenType{
-        if self.comment_depth > 0{// parse comments
+        if self.comment_depth > 0{ // parse comments
             loop{
                 if state.next == '\0'{
                     self.comment_depth = 0;
-                    return TokenType::Comment
+                    return TokenType::CommentChunk
                 }
                 if state.next == '/'{
                     chunk.push(state.next);
@@ -276,7 +301,7 @@ impl RustTokenizer{
                         chunk.push(state.next);
                         state.advance();
                         if self.comment_depth == 0{
-                            return TokenType::Comment
+                            return TokenType::CommentMultiEnd
                         }
                     }
                 }
@@ -286,7 +311,7 @@ impl RustTokenizer{
                     }
                     // output current line
                     if chunk.len()>0{
-                        return TokenType::Comment
+                        return TokenType::CommentChunk
                     }
                     
                     chunk.push(state.next);
@@ -295,7 +320,7 @@ impl RustTokenizer{
                 }
                 else if state.next == ' '{
                     if chunk.len()>0{
-                        return TokenType::Comment
+                        return TokenType::CommentChunk
                     }
                     while state.next == ' '{
                         chunk.push(state.next);
@@ -312,7 +337,7 @@ impl RustTokenizer{
         else{
             state.advance_with_cur();
             match state.cur{
-                '\0' => {// eof insert a terminating space and end
+                '\0' => { // eof insert a terminating space and end
                     chunk.push(' ');
                     return TokenType::Eof
                 },
@@ -320,7 +345,7 @@ impl RustTokenizer{
                     chunk.push('\n');
                     return TokenType::Newline
                 },
-                ' ' | '\t' => {// eat as many spaces as possible
+                ' ' | '\t' => { // eat as many spaces as possible
                     chunk.push(state.cur);
                     while state.next == ' '{
                         chunk.push(state.next);
@@ -328,22 +353,22 @@ impl RustTokenizer{
                     }
                     return TokenType::Whitespace;
                 },
-                '/' => {// parse comment
+                '/' => { // parse comment
                     chunk.push(state.cur);
                     if state.next == '/'{
                         chunk.push(state.next);
                         state.advance();
                         self.comment_depth = 1;
                         self.comment_single = true;
-                        return TokenType::Comment;
+                        return TokenType::CommentLine;
                     }
-                    else if state.next == '*'{// start parsing a multiline comment
+                    else if state.next == '*'{ // start parsing a multiline comment
                         //let mut comment_depth = 1;
                         chunk.push(state.next);
                         state.advance();
                         self.comment_single = false;
                         self.comment_depth = 1;
-                        return TokenType::Comment;
+                        return TokenType::CommentMultiBegin;
                     }
                     else{
                         if state.next == '='{
@@ -353,11 +378,11 @@ impl RustTokenizer{
                         return TokenType::Operator;
                     }
                 },
-                '\'' => {// parse char literal or lifetime annotation
+                '\'' => { // parse char literal or lifetime annotation
                     chunk.push(state.cur);
                     
-                    if Self::parse_rust_escape_char(state, chunk){// escape char or unicode
-                        if state.next == '\''{// parsed to closing '
+                    if Self::parse_rust_escape_char(state, chunk){ // escape char or unicode
+                        if state.next == '\''{ // parsed to closing '
                             chunk.push(state.next);
                             state.advance();
                             return TokenType::String;
@@ -366,17 +391,17 @@ impl RustTokenizer{
                             return TokenType::TypeName;
                         }
                     }
-                    else{// parse a single char or lifetime
+                    else{ // parse a single char or lifetime
                         let offset = state.offset;
                         if Self::parse_rust_ident_tail(state, chunk) && ((state.offset - offset) > 1 || state.next != '\''){
                             return TokenType::Keyword;
                         }
                         else if state.next != '\n'{
-                            if (state.offset - offset) == 0{// not an identifier char
+                            if (state.offset - offset) == 0{ // not an identifier char
                                 chunk.push(state.next);
                                 state.advance();
                             }
-                            if state.next == '\''{// lifetime identifier
+                            if state.next == '\''{ // lifetime identifier
                                 chunk.push(state.next);
                                 state.advance();
                             }
@@ -387,10 +412,10 @@ impl RustTokenizer{
                         }
                     }
                 },
-                '"' => {// parse string
+                '"' => { // parse string
                     chunk.push(state.cur);
                     state.prev = '\0';
-                    while state.next != '\0' && state.next!='\n'{
+                    while state.next != '\0' && state.next != '\n'{
                         if state.next != '"' || state.prev != '\\' && state.cur == '\\' && state.next == '"'{
                             chunk.push(state.next);
                             state.advance_with_prev();
@@ -403,7 +428,7 @@ impl RustTokenizer{
                     };
                     return TokenType::String;
                 },
-                '0'...'9' => {// try to parse numbers
+                '0'...'9' => { // try to parse numbers
                     chunk.push(state.cur);
                     Self::parse_rust_number_tail(state, chunk);
                     return TokenType::Number;
@@ -463,6 +488,7 @@ impl RustTokenizer{
                     if state.next == '.' {
                         chunk.push(state.next);
                         state.advance();
+                        return TokenType::Splat;
                     }
                     return TokenType::Operator;
                 },
@@ -498,6 +524,22 @@ impl RustTokenizer{
                     }
                     return TokenType::Operator;
                 },
+                '<' => {
+                    chunk.push(state.cur);
+                    if state.next == '='{
+                        chunk.push(state.next);
+                        state.advance();
+                    }
+                    return TokenType::Operator;
+                },
+                '>' => {
+                    chunk.push(state.cur);
+                    if state.next == '='{
+                        chunk.push(state.next);
+                        state.advance();
+                    }
+                    return TokenType::Operator;
+                },
                 ',' => {
                     chunk.push(state.cur);
                     if state.next == '.' {
@@ -523,7 +565,7 @@ impl RustTokenizer{
                     Self::parse_rust_ident_tail(state, chunk);
                     return TokenType::Identifier;
                 },
-                'a'...'z' => {// try to parse keywords or identifiers
+                'a'...'z' => { // try to parse keywords or identifiers
                     chunk.push(state.cur);
                     let mut keyword_type = Self::parse_rust_lc_keyword(state, chunk);
                     
@@ -555,10 +597,10 @@ impl RustTokenizer{
                         },
                         KeywordType::For => {
                             // check if we are first on a line
-                            if token_chunks.len() < 2 ||
-                            token_chunks[token_chunks.len() - 1].token_type == TokenType::Newline ||
-                            token_chunks[token_chunks.len() - 2].token_type == TokenType::Newline &&
-                            token_chunks[token_chunks.len() - 1].token_type == TokenType::Whitespace{
+                            if token_chunks.len() < 2
+                                || token_chunks[token_chunks.len() - 1].token_type == TokenType::Newline
+                                || token_chunks[token_chunks.len() - 2].token_type == TokenType::Newline
+                                && token_chunks[token_chunks.len() - 1].token_type == TokenType::Whitespace{
                                 return TokenType::Looping;
                                 //self.code_editor.set_indent_color(self.code_editor.colors.indent_line_looping);
                             }
@@ -652,7 +694,7 @@ impl RustTokenizer{
         return false
     }
     fn parse_rust_number_tail<'a>(state:&mut TokenizerState<'a>, chunk:&mut Vec<char>){
-        if state.next == 'x'{// parse a hex number
+        if state.next == 'x'{ // parse a hex number
             chunk.push(state.next);
             state.advance();
             while state.next_is_hex() || state.next == '_'{
@@ -660,7 +702,7 @@ impl RustTokenizer{
                 state.advance();
             }
         }
-        else if state.next == 'b'{// parse a binary
+        else if state.next == 'b'{ // parse a binary
             chunk.push(state.next);
             state.advance();
             while state.next == '0' || state.next == '1' || state.next == '_'{
@@ -693,7 +735,7 @@ impl RustTokenizer{
                     chunk.push(state.next);
                     state.advance();
                 }
-                if state.next == 'f' {// the f32, f64 postfix
+                if state.next == 'f' { // the f32, f64 postfix
                     chunk.push(state.next);
                     state.advance();
                     if state.keyword(chunk, "32"){
@@ -811,7 +853,7 @@ impl RustTokenizer{
                     return KeywordType::Normal
                 }
             },
-            'p' => {// pub
+            'p' => { // pub
                 if state.keyword(chunk, "ub"){
                     return KeywordType::Normal
                 }
@@ -855,7 +897,7 @@ impl RustTokenizer{
                     }
                 }
             },
-            'u' => {// use
+            'u' => { // use
                 if state.keyword(chunk, "se"){
                     return KeywordType::Normal
                 }
@@ -875,7 +917,7 @@ impl RustTokenizer{
                     return KeywordType::BuiltinType
                 }
             },
-            'w' => {// use
+            'w' => { // use
                 if state.keyword(chunk, "h"){
                     if state.keyword(chunk, "ere"){
                         return KeywordType::Normal

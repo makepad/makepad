@@ -188,6 +188,7 @@ impl App{
                         RustCompilerEvent::SelectMessage{path} => {
                             // just make it open an editor
                             file_tree_event = FileTreeEvent::SelectFile{path: path};
+                            
                         },
                         _ => ()
                     }
@@ -241,7 +242,7 @@ impl App{
         
         // handle the dock events
         match self.dock.handle_dock(cx, event, &mut self.app_state.dock_items){
-            DockEvent::DockChanged => {// thats a bit bland event. lets let the thing know which file closed
+            DockEvent::DockChanged => { // thats a bit bland event. lets let the thing know which file closed
             },
             _ => ()
         }
@@ -310,7 +311,7 @@ impl App{
                                     cx.redraw_area(Area::All);
                                 }
                             },
-                            Panel::FileEditorTarget => {// found the editor target
+                            Panel::FileEditorTarget => { // found the editor target
                                 target_ctrl_id = ctrl_id;
                             },
                             _ => ()
@@ -321,7 +322,7 @@ impl App{
             }
             ctrl_id += 1;
         }
-        if target_ctrl_id != 0 && !only_focus_editor{// open a new one
+        if target_ctrl_id != 0 && !only_focus_editor{ // open a new one
             let new_tab = self.new_file_editor_tab(file_path);
             let mut dock_walker = self.dock.walker(&mut self.app_state.dock_items);
             let mut ctrl_id = 1;

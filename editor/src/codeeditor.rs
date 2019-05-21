@@ -1216,7 +1216,7 @@ impl CodeEditor{
                         self.open_font_size
                     }
                 }
-                TokenType::Newline | TokenType::Comment | TokenType::Hash=>{
+                TokenType::Newline | TokenType::CommentLine | TokenType::CommentChunk | TokenType::CommentMultiBegin | TokenType::CommentMultiEnd | TokenType::Hash=>{
                     self._line_was_folded = true;
                     self._anim_font_size
                 }
@@ -1312,8 +1312,10 @@ impl CodeEditor{
                 },
                 TokenType::String=> self.colors.string,
                 TokenType::Number=> self.colors.number,
-                TokenType::Comment=> self.colors.comment,
-                TokenType::DocComment=> self.colors.doc_comment,
+                TokenType::CommentMultiBegin=> self.colors.comment,
+                TokenType::CommentMultiEnd=> self.colors.comment,
+                TokenType::CommentLine=> self.colors.comment,
+                TokenType::CommentChunk=> self.colors.comment,
                 TokenType::ParenOpen=>{
                     let depth = self._paren_stack.len();
                     self._paren_stack.last_mut().unwrap().geom_open = Some(geom);
@@ -1342,6 +1344,7 @@ impl CodeEditor{
                 TokenType::Hash=> self.colors.operator,
                 TokenType::Delimiter=> self.colors.delimiter,
                 TokenType::Colon=> self.colors.delimiter,
+                TokenType::Splat=> self.colors.operator,
                 TokenType::Block=>self.colors.operator,
                 TokenType::Eof=>self.colors.unexpected,
                 TokenType::Unexpected=>self.colors.unexpected
