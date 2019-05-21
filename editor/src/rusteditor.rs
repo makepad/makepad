@@ -89,7 +89,7 @@ impl RustEditor{
                     }
                 },
                 TokenType::Newline => {
-                    // paren_stack.last_mut().unwrap().angle_counter = 0;
+                    paren_stack.last_mut().unwrap().angle_counter = 0;
                     if first_on_line{
                         output_indent(&mut out_lines, expected_indent);
                     }
@@ -188,7 +188,7 @@ impl RustEditor{
                     }
                     let ch = chunk[0];
                     out_lines.last_mut().unwrap().append(&mut chunk);
-                    if (ch != ',' || paren_stack.last_mut().unwrap().angle_counter == 0)
+                    if (ch != ',' || paren_stack.last_mut().unwrap().angle_counter == 0)  // otherwise our generics multiline
                         && paren_stack.last().unwrap().expecting_newlines == true && state.next != '\n' { // we are expecting newlines!
                         out_lines.push(Vec::new());
                         first_on_line = true;
