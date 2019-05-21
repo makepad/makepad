@@ -121,6 +121,7 @@ pub enum TextUndoGrouping{
     Block,
     Tab,
     Cut,
+    Format,
     Other
 }
 
@@ -140,6 +141,7 @@ impl TextUndoGrouping{
             TextUndoGrouping::Delete(_)=>true,
             TextUndoGrouping::Block=>false,
             TextUndoGrouping::Tab=>false,
+            TextUndoGrouping::Format=>false,
             TextUndoGrouping::Cut=>false,
             TextUndoGrouping::Other=>false
         }
@@ -384,7 +386,7 @@ impl TextBuffer{
             self.lines[row][start_col..(start_col+len)].iter().cloned().collect()
         }
     }
-
+    
     pub fn replace_range(&mut self, start:usize, len:usize, mut rep_lines:Vec<Vec<char>>)->Vec<Vec<char>>{
         self.mutation_id += 1;
         let start_pos = self.offset_to_text_pos(start);
@@ -458,6 +460,18 @@ impl TextBuffer{
             }
         }
     }
+    
+    pub fn replace_lines(&mut self, start_row:usize, end_row:usize, mut rep_lines:Vec<Vec<char>>)->TextOp{
+        let start = self.text_pos_to_offset(TextPos{row:start_row, col:0});
+        let end = self.text_pos_to_offset(TextPos{row:end_row, col:0});
+        let rep_lines_chars = calc_char_count(&rep_lines);
+        let lines = self.replace_range(start, end-start-1, rep_lines);
+        TextOp{
+            start:start,
+            len:rep_lines_chars,
+            lines:lines
+        }
+    }
 
     pub fn split_string_to_lines(string:&str)->Vec<Vec<char>>{
         return string.split("\n").map(|s| s.chars().collect()).collect()
@@ -483,7 +497,7 @@ impl TextBuffer{
             len:rep_line_chars,
             lines:vec![line]
         }
-    }   
+    }
 
     pub fn replace_with_textop(&mut self, text_op:TextOp)->TextOp{
         let rep_lines_chars = calc_char_count(&text_op.lines);

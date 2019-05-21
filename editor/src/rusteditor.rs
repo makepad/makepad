@@ -37,12 +37,150 @@ pub enum RustEditorEvent{
 
 impl RustEditor{
     pub fn handle_rust_editor(&mut self, cx:&mut Cx, event:&mut Event, text_buffer:&mut TextBuffer)->CodeEditorEvent{
-        self.code_editor.handle_code_editor(cx, event, text_buffer)
+        let ce = self.code_editor.handle_code_editor(cx, event, text_buffer);
+        match ce{
+            CodeEditorEvent::AutoFormat=>{
+                self.auto_format(text_buffer);
+                self.code_editor.view.redraw_view_area(cx);
+            },
+            _=>()
+        }
+        ce
+    }
+
+    // because rustfmt is such an insane shitpile to compile or use as a library, here is a stupid version.
+    pub fn auto_format(&mut self, text_buffer:&mut TextBuffer){
+        let mut state = TokenizerState::new(text_buffer);
+        let mut rust_tok = RustTokenizer::new();
+        let mut out_lines:Vec<Vec<char>> = Vec::new();
+        out_lines.push(Vec::new());
+        let mut chunk:Vec<char> = Vec::new();
+        let mut first_on_line = true;
+        let mut first_after_open = false;
+        let mut paren_stack:Vec<(char,usize)> = Vec::new();
+        let mut expected_indent = 0;
+        
+        fn output_indent(out_lines:&mut Vec<Vec<char>>, indent_depth:usize){
+            let last_line = out_lines.last_mut().unwrap();
+            for _ in 0..indent_depth{
+                last_line.push(' ');
+            }
+        }
+        
+        loop{
+            let token_type = rust_tok.next_token(&mut state, &mut chunk, &self.code_editor.token_chunks);
+            match token_type{
+                TokenType::Whitespace=>{
+                    if !first_on_line && state.next != '\n'{
+                        out_lines.last_mut().unwrap().push(' ');
+                    }
+                },
+                TokenType::Newline=>{
+                    if first_on_line{
+                        output_indent(&mut out_lines, expected_indent);
+                    }
+                    if first_after_open{
+                        expected_indent += 4;
+                    }
+                    first_after_open = false;
+                    out_lines.push(Vec::new());
+                    first_on_line = true;
+                },
+                TokenType::Eof=>{break},
+                TokenType::ParenOpen=>{
+                    if first_on_line{
+                        first_on_line = false;
+                        output_indent(&mut out_lines, expected_indent);
+                    }
+                    paren_stack.push((chunk[0], expected_indent));
+                    first_after_open = true;
+                    out_lines.last_mut().unwrap().append(&mut chunk);
+                },
+                TokenType::ParenClose=>{
+                    first_after_open = false;
+                    expected_indent = if paren_stack.len()>0{
+                        paren_stack.pop().unwrap().1
+                    }
+                    else{
+                        0
+                    };
+                    if first_on_line{
+                        first_on_line = false;
+                        output_indent(&mut out_lines, expected_indent);
+                    }
+                    out_lines.last_mut().unwrap().append(&mut chunk);
+                },
+                TokenType::Comment=>{
+                    if first_on_line{
+                        first_on_line = false;
+                        output_indent(&mut out_lines, expected_indent);
+                    }
+                    out_lines.last_mut().unwrap().append(&mut chunk);
+                },
+                TokenType::Delimiter=>{
+                    if first_on_line{
+                        first_on_line = false;
+                        output_indent(&mut out_lines, expected_indent);
+                    }
+                    out_lines.last_mut().unwrap().append(&mut chunk);
+                    if state.next != ' ' && state.next != '\n'{
+                        out_lines.last_mut().unwrap().push(' ');
+                    }
+                },
+                TokenType::Operator=>{
+                    if first_on_line{
+                        first_on_line = false;
+                        output_indent(&mut out_lines, expected_indent);
+                    }
+                    let last_line = out_lines.last_mut().unwrap();
+                    if chunk[0] == '!' || chunk[0] == '|' || chunk[0] == '&' || chunk[0] == '*' || chunk[0] == '.' || chunk[0] == '<' || chunk[0] == '>'{
+                        last_line.append(&mut chunk);
+                    }
+                    else{
+                        if last_line.len()>0 && *last_line.last().unwrap() != ' '{
+                            if state.next != ' ' && state.next != '\n'{
+                                last_line.push(' ');
+                            }
+                        }
+                        last_line.append(&mut chunk);
+                        if state.next != ' ' && state.next != '\n'{
+                            last_line.push(' ');
+                        }
+                    }
+                },
+                _=>{
+                    first_after_open = false;
+                    if first_on_line{
+                        first_on_line = false;
+                        output_indent(&mut out_lines, expected_indent);
+                    }
+                    out_lines.last_mut().unwrap().append(&mut chunk);
+                },
+            }
+            chunk.truncate(0);
+        }
+        // lets do a diff from top, and bottom
+        let mut top_row = 0;
+        while top_row < text_buffer.lines.len() && top_row < out_lines.len() && text_buffer.lines[top_row] == out_lines[top_row]{
+            top_row += 1;
+        }
+        
+        let mut bottom_row_old = text_buffer.lines.len();
+        let mut bottom_row_new = out_lines.len();
+        while bottom_row_old > top_row && bottom_row_new > top_row && text_buffer.lines[bottom_row_old-1] == out_lines[bottom_row_new-1]{
+            bottom_row_old -= 1;
+            bottom_row_new -= 1;
+        }
+        // alright we now have a line range to replace.
+        if top_row != bottom_row_new{
+            let changed = out_lines.splice(top_row..(bottom_row_new+1),vec![]).collect();
+            self.code_editor.cursors.replace_lines_formatted(top_row, bottom_row_old+1, changed, text_buffer);
+        }
     }
 
     pub fn draw_rust_editor(&mut self, cx:&mut Cx, text_buffer:&TextBuffer){
         if let Err(()) = self.code_editor.begin_code_editor(cx, text_buffer){
-            return
+            return 
         }
         
         if self.set_key_focus_on_draw{
@@ -51,129 +189,156 @@ impl RustEditor{
         }
 
         let mut state = TokenizerState::new(text_buffer);
-        
-        let mut looping = true;
+        let mut rust_tok = RustTokenizer::new();
         let mut chunk = Vec::new();
-        while looping{
-            let token_type;
+        
+        loop{
+            let token_type = rust_tok.next_token(&mut state, &mut chunk, &self.code_editor.token_chunks);
+            if token_type == TokenType::Eof{
+                self.code_editor.draw_chunk(cx, &chunk, state.next, state.offset, TokenType::Whitespace, &text_buffer.messages.cursors);
+                break
+            }
+            else{
+                self.code_editor.draw_chunk(cx, &chunk, state.next, state.offset, token_type,  &text_buffer.messages.cursors);
+            }
+            chunk.truncate(0);
+        }
+        
+        self.code_editor.end_code_editor(cx, text_buffer);
+    }
+}
+
+pub struct RustTokenizer{
+    pub comment_single:bool,
+    pub comment_depth:usize
+}
+
+impl RustTokenizer{
+    fn new()->RustTokenizer{
+        RustTokenizer{
+            comment_single:false,
+            comment_depth:0
+        }
+    }
+    
+    fn next_token<'a>(&mut self, state:&mut TokenizerState<'a>, chunk:&mut Vec<char>, token_chunks:&Vec<TokenChunk>)->TokenType{
+        if self.comment_depth > 0{ // parse comments
+            loop{
+                if state.next == '\0'{
+                    self.comment_depth = 0;
+                    return TokenType::Comment
+                }
+                if state.next == '/'{
+                    chunk.push(state.next);
+                    state.advance();
+                    if state.next == '*'{
+                        chunk.push(state.next);
+                        state.advance();
+                        self.comment_depth += 1;
+                    }
+                }
+                else if state.next == '*'{
+                    chunk.push(state.next);
+                    state.advance();
+                    if state.next == '/'{
+                       self.comment_depth -= 1;
+                        chunk.push(state.next);
+                        state.advance();
+                        if self.comment_depth == 0{
+                            return TokenType::Comment
+                        }
+                    }
+                }
+                else if state.next == '\n'{
+                    if self.comment_single {
+                        self.comment_depth = 0;
+                    }
+                    // output current line
+                    if chunk.len()>0{
+                        return TokenType::Comment
+                    }
+                    
+                    chunk.push(state.next);
+                    state.advance();
+                    return TokenType::Newline
+                }
+                else if state.next == ' '{
+                    if chunk.len()>0{
+                        return TokenType::Comment
+                    }
+                    while state.next == ' '{
+                        chunk.push(state.next);
+                        state.advance();
+                    }
+                    return TokenType::Whitespace
+                }
+                else{
+                    chunk.push(state.next);
+                    state.advance();
+                }
+            }
+        }
+        else{
             state.advance_with_cur();
-            
             match state.cur{
                 '\0'=>{ // eof insert a terminating space and end
-                    token_type = TokenType::Whitespace;
                     chunk.push(' ');
-                    looping = false;
+                    return TokenType::Eof
                 },
                 '\n'=>{
-                    token_type = TokenType::Newline;
                     chunk.push('\n');
+                    return TokenType::Newline
                 },
                 ' ' | '\t'=>{ // eat as many spaces as possible
-                    token_type = TokenType::Whitespace;
                     chunk.push(state.cur);
                     while state.next == ' '{
                         chunk.push(state.next);
                         state.advance();
                     }
+                    return TokenType::Whitespace;
                 },
                 '/'=>{ // parse comment
                     chunk.push(state.cur);
                     if state.next == '/'{
                         chunk.push(state.next);
                         state.advance();
-                        if state.next == '/'{
-                            while state.next != '\n' && state.next != '\0'{
-                                chunk.push(state.next);
-                                state.advance();
-                            }
-                            token_type = TokenType::DocComment;
-                        }
-                        else{
-                            while state.next != '\n' && state.next != '\0'{
-                                chunk.push(state.next);
-                                state.advance();
-                            }
-                            token_type = TokenType::Comment;
-                        }
-                    }
+                        self.comment_depth = 1;
+                        self.comment_single = true;
+                        return TokenType::Comment;
+                    } 
                     else if state.next == '*'{ // start parsing a multiline comment
-                        let mut comment_depth = 1;
+                        //let mut comment_depth = 1;
                         chunk.push(state.next);
                         state.advance();
-
-                        while state.next != '\0'{
-                            if state.next == '/'{
-                                chunk.push(state.next);
-                                state.advance();
-                                if state.next == '*'{
-                                    chunk.push(state.next);
-                                    state.advance();
-                                    comment_depth += 1;
-                                }
-                            }
-                            else if state.next == '*'{
-                                chunk.push(state.next);
-                                state.advance();
-                                if state.next == '/'{
-                                    comment_depth -= 1;
-                                    chunk.push(state.next);
-                                    state.advance();
-                                    if comment_depth == 0{
-                                        break;
-                                    }
-                                }
-                            }
-                            else if state.next == '\n'{
-                                // output current line
-                                self.code_editor.draw_chunk(cx, &chunk, state.next, state.offset, TokenType::Comment, &text_buffer.messages.cursors);
-                                chunk.truncate(0);
-                                // output a newline
-                                chunk.push(state.next);
-                                state.advance();
-                                self.code_editor.draw_chunk(cx, &chunk, state.next, state.offset, TokenType::Newline,  &text_buffer.messages.cursors);
-                                chunk.truncate(0);
-                                // output indent lines
-                                while state.next == ' '{
-                                    chunk.push(state.next);
-                                    state.advance();
-                                }
-                                if chunk.len()>0{
-                                    self.code_editor.draw_chunk(cx, &chunk, state.next, state.offset, TokenType::Whitespace,  &text_buffer.messages.cursors);
-                                    chunk.truncate(0);
-                                }
-                            }
-                            else{
-                                chunk.push(state.next);
-                                state.advance();
-                            }
-                        }
-                        token_type = TokenType::Comment;
+                        self.comment_single = false;
+                        self.comment_depth = 1;
+                        return TokenType::Comment;
                     }
                     else{
                         if state.next == '='{
                             chunk.push(state.next);
                             state.advance();
                         }
-                        token_type = TokenType::Operator;
+                        return TokenType::Operator;
                     }
                 },
                 '\''=>{ // parse char literal or lifetime annotation
                     chunk.push(state.cur);
-
-                    if Self::parse_rust_escape_char(&mut state, &mut chunk){ // escape char or unicode
+                    
+                    if Self::parse_rust_escape_char(state, chunk){ // escape char or unicode
                         if state.next == '\''{ // parsed to closing '
                             chunk.push(state.next);
                             state.advance();
-                            token_type = TokenType::String;
+                            return TokenType::String;
                         }
                         else{
-                            token_type = TokenType::TypeName;
+                            return TokenType::TypeName;
                         }
                     }
                     else{ // parse a single char or lifetime
                         let offset = state.offset;
-                        if Self::parse_rust_ident_tail(&mut state, &mut chunk) && ((state.offset - offset) > 1 || state.next != '\''){
-                            token_type = TokenType::Keyword;
+                        if Self::parse_rust_ident_tail(state, chunk) && ((state.offset - offset) > 1 || state.next != '\''){
+                            return TokenType::Keyword;
                         }
                         else if state.next != '\n'{
                             if (state.offset - offset) == 0{ // not an identifier char
@@ -184,10 +349,10 @@ impl RustEditor{
                                 chunk.push(state.next);
                                 state.advance();
                             }
-                            token_type = TokenType::String;
+                            return TokenType::String;
                         }
                         else{
-                            token_type = TokenType::String;
+                            return TokenType::String;
                         }
                     }
                 },
@@ -205,36 +370,36 @@ impl RustEditor{
                             break;
                         }
                     };
-                    token_type = TokenType::String;
+                    return TokenType::String;
                 },
                 '0'...'9'=>{ // try to parse numbers
-                    token_type = TokenType::Number;
                     chunk.push(state.cur);
-                    Self::parse_rust_number_tail(&mut state, &mut chunk);
-                    
+                    Self::parse_rust_number_tail(state, chunk);
+                    return TokenType::Number;
                 },
                 ':'=>{
                     chunk.push(state.cur);
                     if state.next == ':'{
                         chunk.push(state.next);
                         state.advance();
+                        return TokenType::Namespace;
                     }
-                    token_type = TokenType::Operator;
-                },
+                    return TokenType::Delimiter;
+            },
                 '*'=>{
                     chunk.push(state.cur);
                     if state.next == '='{
                         chunk.push(state.next);
                         state.advance();
-                        token_type = TokenType::Operator;
+                        return TokenType::Operator;
                     }
                     else if state.next == '/'{
                         chunk.push(state.next);
                         state.advance();
-                        token_type = TokenType::Unexpected;
+                        return TokenType::Unexpected;
                     } 
                     else{
-                        token_type = TokenType::Operator;
+                        return TokenType::Operator;
                     }
                 },
                 '+'=>{
@@ -243,7 +408,7 @@ impl RustEditor{
                         chunk.push(state.next);
                         state.advance();
                     }
-                    token_type = TokenType::Operator;
+                    return TokenType::Operator;
                 },
                 '-'=>{
                     chunk.push(state.cur);
@@ -251,15 +416,16 @@ impl RustEditor{
                         chunk.push(state.next);
                         state.advance();
                     }
-                    token_type = TokenType::Operator;
+                    return TokenType::Operator;
                 },
                 '='=>{
                     chunk.push(state.cur);
-                    if state.next == '>' {
+                    if state.next == '>' || state.next == '=' {
                         chunk.push(state.next);
                         state.advance();
                     }
-                    token_type = TokenType::Operator;
+                    
+                    return TokenType::Operator;
                 },
                 '.'=>{
                     chunk.push(state.cur);
@@ -267,72 +433,120 @@ impl RustEditor{
                         chunk.push(state.next);
                         state.advance();
                     }
-                    token_type = TokenType::Operator;
+                    return TokenType::Operator;
+                },
+                ';'=>{
+                    chunk.push(state.cur);
+                    if state.next == '.' {
+                        chunk.push(state.next);
+                        state.advance();
+                    }
+                    return TokenType::Delimiter;
+                },
+                '&'=>{
+                    chunk.push(state.cur);
+                    if state.next == '&' || state.next == '='{
+                        chunk.push(state.next);
+                        state.advance();
+                    }
+                    return TokenType::Operator;
+                },
+                '|'=>{
+                    chunk.push(state.cur);
+                    if state.next == '|' || state.next == '='{
+                        chunk.push(state.next);
+                        state.advance();
+                    }
+                    return TokenType::Operator;
+                },
+                '!'=>{
+                    chunk.push(state.cur);
+                    if state.next == '='{
+                        chunk.push(state.next);
+                        state.advance();
+                    }
+                    return TokenType::Operator;
+                },
+                ','=>{
+                    chunk.push(state.cur);
+                    if state.next == '.' {
+                        chunk.push(state.next);
+                        state.advance();
+                    }
+                    return TokenType::Delimiter;
                 },
                 '(' | '{' | '['=>{
                     chunk.push(state.cur);
-                    token_type = TokenType::ParenOpen;
+                    return TokenType::ParenOpen;
                 },
                 ')' | '}' | ']'=>{
                     chunk.push(state.cur);
-                    token_type = TokenType::ParenClose;
+                    return TokenType::ParenClose;
                 },
                 '#'=>{
                     chunk.push(state.cur);
-                    token_type = TokenType::Hash;
+                    return TokenType::Hash;
                 },
                 '_'=>{
                     chunk.push(state.cur);
-                    Self::parse_rust_ident_tail(&mut state, &mut chunk);
-                    token_type = TokenType::Identifier;
+                    Self::parse_rust_ident_tail(state, chunk);
+                    return TokenType::Identifier;
                 },
                 'a'...'z'=>{ // try to parse keywords or identifiers
                     chunk.push(state.cur);
-                    let mut keyword_type = Self::parse_rust_lc_keyword(&mut state, &mut chunk);
-
-                    if Self::parse_rust_ident_tail(&mut state, &mut chunk){
+                    let mut keyword_type = Self::parse_rust_lc_keyword(state, chunk);
+                    
+                    if Self::parse_rust_ident_tail(state, chunk){
                         keyword_type = KeywordType::None;
                     }
                     match keyword_type{
                         KeywordType::Normal=>{
-                            token_type = TokenType::Keyword;
+                            return TokenType::Keyword;
                         },
                         KeywordType::Flow=>{
-                            token_type = TokenType::Flow;
-                            self.code_editor.set_indent_color(self.code_editor.colors.indent_line_flow);
+                            return TokenType::Flow;
+                            //self.code_editor.set_indent_color(self.code_editor.colors.indent_line_flow);
                         },
                         KeywordType::BuiltinType=>{
-                            token_type = TokenType::Keyword;
+                            return TokenType::Keyword;
                         },
                         KeywordType::Fn=>{
-                             token_type = TokenType::Call;
-                             self.code_editor.set_indent_color(self.code_editor.colors.indent_line_fn);
+                             return TokenType::Fn;
+                             //self.code_editor.set_indent_color(self.code_editor.colors.indent_line_fn);
                         },
                         KeywordType::Def=>{
-                            token_type = TokenType::Keyword;
-                            self.code_editor.set_indent_color(self.code_editor.colors.indent_line_def);
+                            return TokenType::Def;
+                            //self.code_editor.set_indent_color(self.code_editor.colors.indent_line_def);
                         },
                         KeywordType::Looping=>{
-                            token_type = TokenType::Looping;
-                            self.code_editor.set_indent_color(self.code_editor.colors.indent_line_looping);
+                            return TokenType::Looping;
+                            //self.code_editor.set_indent_color(self.code_editor.colors.indent_line_looping);
                         },
                         KeywordType::For=>{
                             // check if we are first on a line
-                            if self.code_editor._tokens_on_line == 1{
-                                token_type = TokenType::Looping;
-                                self.code_editor.set_indent_color(self.code_editor.colors.indent_line_looping);
+                            if token_chunks.len() < 2 || 
+                                token_chunks[token_chunks.len()-1].token_type == TokenType::Newline ||
+                                token_chunks[token_chunks.len()-2].token_type == TokenType::Newline && 
+                                token_chunks[token_chunks.len()-1].token_type == TokenType::Whitespace{
+                               return  TokenType::Looping;
+                                //self.code_editor.set_indent_color(self.code_editor.colors.indent_line_looping);
                             }
                             else{
-                                token_type = TokenType::Keyword;
-                                self.code_editor.set_indent_color(self.code_editor.colors.indent_line_def);
+                                return  TokenType::Keyword;
+                               // self.code_editor.set_indent_color(self.code_editor.colors.indent_line_def);
                             }
                         },
                         KeywordType::None=>{
-                            if state.next == '(' || state.next == '!'{
-                                token_type = TokenType::Call;
+                            if state.next == '!'{
+                                chunk.push(state.next);
+                                state.advance();
+                                return TokenType::Call;
+                            }
+                            else if state.next == '('{
+                                return TokenType::Call;
                             }
                             else{
-                                token_type = TokenType::Identifier;
+                                return TokenType::Identifier;
                             }
                         }
                     }
@@ -341,18 +555,18 @@ impl RustEditor{
                     chunk.push(state.cur);
                     let mut is_keyword = false;
                     if state.cur == 'S'{
-                        if state.keyword(&mut chunk, "elf"){
+                        if state.keyword(chunk, "elf"){
                             is_keyword = true;
                         }
                     }
-                    if Self::parse_rust_ident_tail(&mut state, &mut chunk){
+                    if Self::parse_rust_ident_tail(state, chunk){
                         is_keyword = false;
                     }
                     if is_keyword{
-                        token_type = TokenType::Keyword;
+                        return  TokenType::Keyword;
                     }
                     else{
-                        token_type = TokenType::TypeName;
+                        return  TokenType::TypeName;
                         //if state.next == '{'{
                         //    self.code_editor.set_indent_color(self.code_editor.colors.indent_line_def);                            
                         //}
@@ -360,14 +574,10 @@ impl RustEditor{
                 },
                 _=>{
                     chunk.push(state.cur);
-                    token_type = TokenType::Operator;
+                    return  TokenType::Operator;
                 }
             }
-            self.code_editor.draw_chunk(cx, &chunk, state.next, state.offset, token_type,  &text_buffer.messages.cursors);
-            chunk.truncate(0);
         }
-        
-        self.code_editor.end_code_editor(cx, text_buffer);
     }
 
     fn parse_rust_ident_tail<'a>(state:&mut TokenizerState<'a>, chunk:&mut Vec<char>)->bool{
@@ -648,6 +858,8 @@ impl RustEditor{
         KeywordType::None
     }
 }
+    
+
 
 enum KeywordType{
     None,

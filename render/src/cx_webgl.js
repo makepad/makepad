@@ -924,11 +924,13 @@
 							
 						}
 						// we should send a replace last
-						this.to_wasm.text_input({
-							was_paste:false,
-							input:text_value,
-							replace_last:replace_last,
-						})						
+						if(replace_last || text_value != '\n'){
+							this.to_wasm.text_input({
+								was_paste:false,
+								input:text_value,
+								replace_last:replace_last,
+							})						
+						}
 					}
 					this.do_wasm_io();
 				}

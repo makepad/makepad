@@ -694,7 +694,17 @@ impl TextCursorSet{
             cursors:cursors_clone
         })
     }
-
+    
+    pub fn replace_lines_formatted(&mut self, start_row:usize, end_row:usize, mut rep_lines:Vec<Vec<char>>, text_buffer:&mut TextBuffer){
+        let cursors_clone = self.clone();
+        let op = text_buffer.replace_lines(start_row, end_row, rep_lines);
+        text_buffer.redo_stack.truncate(0);
+        text_buffer.undo_stack.push(TextUndo{
+            ops:vec![op],
+            grouping:TextUndoGrouping::Format,
+            cursors:cursors_clone
+        })
+    }
 /*
     pub fn toggle_comment(&mut self, text_buffer:&mut TextBuffer, comment_str:&str){
         let mut delta:usize = 0; // rolling delta to displace cursors 
@@ -956,6 +966,8 @@ impl TextCursorSet{
                 TokenType::Newline=>false,
                 TokenType::Keyword=>false,
                 TokenType::Flow=>false,
+                TokenType::Fn=>false,
+                TokenType::Def=>false,
                 TokenType::Looping=>false,
                 TokenType::Identifier=>true,
                 TokenType::Call=>true,
@@ -970,10 +982,12 @@ impl TextCursorSet{
                 TokenType::ParenOpen=>false,
                 TokenType::ParenClose=>false,
                 TokenType::Operator=>false,
+                TokenType::Namespace=>false,
                 TokenType::Hash=>false,
                 TokenType::Delimiter=>false,
                 TokenType::Block=>false,
                 TokenType::Unexpected=>false,
+                TokenType::Eof=>false,
             };
             if !add{
                 vec![]
@@ -1025,6 +1039,8 @@ pub enum TokenType{
     Newline,
     Keyword,
     Flow,
+    Fn,
+    Def,
     Looping,
     Identifier,
     Call,
@@ -1040,10 +1056,12 @@ pub enum TokenType{
     ParenOpen,
     ParenClose,
     Operator,
+    Namespace,
     Delimiter,
     Block,
 
-    Unexpected
+    Unexpected,
+    Eof
 }
 
 #[derive(Clone)]

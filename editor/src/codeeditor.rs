@@ -43,7 +43,7 @@ pub struct CodeEditor{
 
     pub _line_geometry:Vec<LineGeom>,
     pub _anim_select:Vec<AnimSelect>,
-    pub _token_chunks:Vec<TokenChunk>,
+    pub token_chunks:Vec<TokenChunk>,
     pub _visible_lines:usize,
 
     pub _select_scroll:Option<SelectScroll>,
@@ -266,7 +266,7 @@ impl Style for CodeEditor{
             _visible_lines:0, 
 
             _line_geometry:Vec::new(),
-            _token_chunks:Vec::new(),
+            token_chunks:Vec::new(),
 
             _anim_select:Vec::new(),
             _grid_select_corner:None,
@@ -321,6 +321,7 @@ impl Style for CodeEditor{
 #[derive(Clone, PartialEq)]
 pub enum CodeEditorEvent{
     None,
+    AutoFormat,
     LagChange,
     Change
 }
@@ -516,12 +517,12 @@ impl CodeEditor{
                 1=>{
                 },
                 2=>{
-                    if let Some(chunk) = TextCursorSet::get_nearest_token_chunk(offset, &self._token_chunks){
+                    if let Some(chunk) = TextCursorSet::get_nearest_token_chunk(offset, &self.token_chunks){
                         self.cursors.set_last_clamp_range((chunk.offset, chunk.len));
                     }
                 },
                 3=>{
-                    if let Some(chunk) = TextCursorSet::get_nearest_token_chunk(offset, &self._token_chunks){
+                    if let Some(chunk) = TextCursorSet::get_nearest_token_chunk(offset, &self.token_chunks){
                         self.cursors.set_last_clamp_range((chunk.offset, chunk.len));
                         let (start, _len) = text_buffer.get_nearest_line_range(offset);
                         let mut chunk_offset = chunk.offset;
@@ -633,7 +634,7 @@ impl CodeEditor{
             },
             KeyCode::ArrowLeft=>{
                 if ke.modifiers.logo || ke.modifiers.control{ // token skipping
-                    self.cursors.move_left_nearest_token(ke.modifiers.shift, &self._token_chunks, text_buffer)
+                    self.cursors.move_left_nearest_token(ke.modifiers.shift, &self.token_chunks, text_buffer)
                 }
                 else{
                     self.cursors.move_left(1, ke.modifiers.shift, text_buffer);
@@ -642,7 +643,7 @@ impl CodeEditor{
             },
             KeyCode::ArrowRight=>{
                 if ke.modifiers.logo || ke.modifiers.control{ // token skipping
-                    self.cursors.move_right_nearest_token(ke.modifiers.shift, &self._token_chunks, text_buffer)
+                    self.cursors.move_right_nearest_token(ke.modifiers.shift, &self.token_chunks, text_buffer)
                 }
                 else{
                     self.cursors.move_right(1, ke.modifiers.shift, text_buffer);
@@ -729,6 +730,12 @@ impl CodeEditor{
                 } 
                 true
             },
+            KeyCode::Return=>{
+                if !ke.modifiers.control && !ke.modifiers.logo{
+                    self.cursors.insert_newline_with_indent(text_buffer);
+                }
+                true
+            },
             _=>false
         };
         if cursor_moved{
@@ -746,9 +753,6 @@ impl CodeEditor{
         
         if !te.was_paste && te.input.len() == 1{
             match te.input.chars().next().unwrap(){
-                '\n'=>{
-                    self.cursors.insert_newline_with_indent(text_buffer);
-                },
                 '('=>{
                     self.cursors.insert_around("(",")",text_buffer);
                 },
@@ -873,6 +877,9 @@ impl CodeEditor{
                 self.handle_finger_move(cx, &fe, text_buffer);
             },
             Event::KeyDown(ke)=>{
+                if ke.key_code == KeyCode::Return && (ke.modifiers.logo || ke.modifiers.control){
+                    return CodeEditorEvent::AutoFormat
+                }
                 self.handle_key_down(cx, &ke, text_buffer);
             },
             Event::KeyUp(ke)=>{
@@ -988,7 +995,7 @@ impl CodeEditor{
             else{
                 self._draw_messages.set_next(&text_buffer.messages.cursors);
             }
-            self._token_chunks.truncate(0);
+            self.token_chunks.truncate(0);
             self._last_cursor_pos = self.cursors.get_last_cursor_text_pos(text_buffer);
             
             // indent
@@ -1051,7 +1058,7 @@ impl CodeEditor{
     
     fn update_highlight(&mut self, cx:&mut Cx,text_buffer:&TextBuffer){
         self._highlight_selection = self.cursors.get_selection_highlight(text_buffer);
-        let new_token = self.cursors.get_token_highlight(text_buffer, &self._token_chunks);
+        let new_token = self.cursors.get_token_highlight(text_buffer, &self.token_chunks);
         if new_token != self._highlight_token{
             self.reset_highlight_visible(cx);
         }
@@ -1184,40 +1191,60 @@ impl CodeEditor{
     
         // do indent depth walking
         if self._tokens_on_line == 0 {
-            let font_size = if token_type == TokenType::Whitespace{
-                let tabs = chunk.len()>>2;
-                while tabs > self._indent_stack.len(){
-                    self._indent_stack.push((self._last_indent_color,self._indent_id_alloc));
-                    // allocating an indent_id, we also need to 
-                    self._indent_id_alloc += 1.0;
+            let font_size = match token_type{
+                TokenType::Whitespace=>{
+                    let tabs = chunk.len()>>2;
+                    while tabs > self._indent_stack.len(){
+                        self._indent_stack.push((self._last_indent_color,self._indent_id_alloc));
+                        // allocating an indent_id, we also need to 
+                        self._indent_id_alloc += 1.0;
+                    }
+                    while tabs < self._indent_stack.len(){
+                        self._last_indent_color = self._indent_stack.pop().unwrap().0;
+                    }
+                    // lets do the code folding here. if we are tabs > fold line
+                    // lets change the fontsize
+                    if tabs >= self._anim_folding.depth || next_char == '\n'{
+                        // ok lets think. we need to move it over by the delta of 8 spaces * _anim_font_size
+                        let dx = (self._monospace_base.x * self.open_font_size * 4. * (self._anim_folding.depth as f32)) - (self._monospace_base.x * self._anim_font_size * 4. * (self._anim_folding.depth as f32));
+                        cx.move_turtle(dx,0.0);
+                        self._line_was_folded = true;
+                        self._anim_font_size
+                    }
+                    else{
+                        self._line_was_folded = false;
+                        self.open_font_size
+                    }
                 }
-                while tabs < self._indent_stack.len(){
-                    self._indent_stack.pop();
-                }
-                // lets do the code folding here. if we are tabs > fold line
-                // lets change the fontsize
-                if tabs >= self._anim_folding.depth || next_char == '\n'{
-                    // ok lets think. we need to move it over by the delta of 8 spaces * _anim_font_size
-                    let dx = (self._monospace_base.x * self.open_font_size * 4. * (self._anim_folding.depth as f32)) - (self._monospace_base.x * self._anim_font_size * 4. * (self._anim_folding.depth as f32));
-                    cx.move_turtle(dx,0.0);
+                TokenType::Newline | TokenType::Comment | TokenType::Hash=>{
                     self._line_was_folded = true;
                     self._anim_font_size
                 }
-                else{
+                _=>{
+                    self._indent_stack.truncate(0);
                     self._line_was_folded = false;
                     self.open_font_size
                 }
-            }
-            else if token_type == TokenType::Newline || token_type == TokenType::Comment || token_type == TokenType::Hash{
-                self._line_was_folded = true;
-                self._anim_font_size
-            }
-            else{
-                self._indent_stack.truncate(0);
-                self._line_was_folded = false;
-                self.open_font_size
             };
             self.set_font_size(cx, font_size);
+        }
+        // colorise indent lines properly
+        if self._tokens_on_line < 2{
+            match token_type{
+                TokenType::Flow=>{
+                    self._last_indent_color = self.colors.indent_line_flow;
+                },
+                TokenType::Looping=>{
+                    self._last_indent_color = self.colors.indent_line_looping;
+                },
+                TokenType::Def=>{
+                    self._last_indent_color = self.colors.indent_line_def;
+                },
+                TokenType::Fn=>{
+                    self._last_indent_color = self.colors.indent_line_fn;
+                }
+                _=>()
+            }
         }
         // lets check if the geom is visible
         if let Some(geom) = cx.walk_turtle_text(
@@ -1252,8 +1279,18 @@ impl CodeEditor{
                     self.colors.whitespace
                 },
                 TokenType::Keyword=> self.colors.keyword,
-                TokenType::Flow=> self.colors.flow,
-                TokenType::Looping=> self.colors.looping,
+                TokenType::Flow=>{
+                    self.colors.flow
+                }
+                TokenType::Looping=>{
+                    self.colors.looping
+                }
+                TokenType::Def=>{
+                    self.colors.keyword
+                }
+                TokenType::Fn=>{
+                    self.colors.keyword
+                }
                 TokenType::Identifier=>{
                     if *chunk == self._highlight_token{
                         self.draw_token_highlight_quad(cx, geom);
@@ -1301,9 +1338,11 @@ impl CodeEditor{
                     }
                 },
                 TokenType::Operator=> self.colors.operator,
+                TokenType::Namespace=> self.colors.operator,
                 TokenType::Hash=> self.colors.operator,
                 TokenType::Delimiter=> self.colors.delimiter,
                 TokenType::Block=>self.colors.operator,
+                TokenType::Eof=>self.colors.unexpected,
                 TokenType::Unexpected=>self.colors.unexpected
             };
 
@@ -1344,14 +1383,14 @@ impl CodeEditor{
             pair_token = self.draw_paren_close(cx, offset, next_char, chunk,);
         }
         else{
-            pair_token = self._token_chunks.len();
+            pair_token = self.token_chunks.len();
             if token_type == TokenType::Newline{
                 self.draw_new_line(cx);
             }
         }
 
         //self._instance_count += chunk.len();
-        self._token_chunks.push(TokenChunk{
+        self.token_chunks.push(TokenChunk{
             offset:offset,
             pair_token:pair_token,
             len:chunk.len(),
@@ -1373,7 +1412,7 @@ impl CodeEditor{
         else{false};
         
         self._paren_stack.push(ParenItem{
-            pair_start:self._token_chunks.len(),
+            pair_start:self.token_chunks.len(),
             geom_open:None,
             geom_close:None,
             marked:marked,
@@ -1382,12 +1421,12 @@ impl CodeEditor{
     }
 
     fn draw_paren_close(&mut self, cx:&mut Cx, offset:usize, next_char:char, chunk:&Vec<char>)->usize{
-        let token_chunks_len = self._token_chunks.len();
+        let token_chunks_len = self.token_chunks.len();
         if self._paren_stack.len()==0{
             return token_chunks_len
         }
         let last = self._paren_stack.pop().unwrap();
-        self._token_chunks[last.pair_start].pair_token = token_chunks_len;
+        self.token_chunks[last.pair_start].pair_token = token_chunks_len;
         let pair_token = last.pair_start;
         if last.geom_open.is_none() && last.geom_close.is_none(){
             return token_chunks_len
@@ -1409,7 +1448,7 @@ impl CodeEditor{
             };
             if fail || pos == offset || pos == offset + 1 && next_char != ')' &&  next_char != '}' && next_char !=']' || last.marked{
                 // fuse the tokens
-                if last.pair_start + 1 == self._token_chunks.len() && !last.geom_open.is_none() && !last.geom_close.is_none(){
+                if last.pair_start + 1 == self.token_chunks.len() && !last.geom_open.is_none() && !last.geom_close.is_none(){
                     let geom_open = last.geom_open.unwrap();
                     let geom_close = last.geom_open.unwrap();
                     let geom = Rect{
@@ -1633,10 +1672,6 @@ impl CodeEditor{
                 self.view.redraw_view_area(cx);
             }
         }
-    }
-    
-    pub fn set_indent_color(&mut self, color:Color){
-        self._last_indent_color = color
     }
     
     fn set_indent_line_highlight_id(&mut self, cx:&mut Cx){

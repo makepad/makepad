@@ -9,6 +9,7 @@ use std::collections::HashMap;
 use serde::*; 
 
 #[derive(Clone, Serialize)]
+
 enum Panel{
     RustCompiler,
     Keyboard,
@@ -161,7 +162,11 @@ impl App{
                     }
                 }
                 else if fr.read_id == self.app_state_read_id{
-                    
+                    if let Ok(str_data) = &fr.data{
+                        if let Ok(utf8_data) = std::str::from_utf8(&str_data){
+                            self.file_tree.load_from_json(cx, utf8_data);
+                        }
+                    }
                 }
                 else if self.text_buffers.handle_file_read(&fr){
                     cx.redraw_area(Area::All);

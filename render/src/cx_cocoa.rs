@@ -232,7 +232,7 @@ impl CocoaWindow{
                     let modifiers = get_event_key_modifier(ns_event);
                     let key_char = get_event_char(ns_event);
                     let is_repeat:bool = msg_send![ns_event, isARepeat];
-                    let is_return = if let KeyCode::Return = key_code{true} else{false};
+                    //let is_return = if let KeyCode::Return = key_code{true} else{false};
 
                     // see if its is paste, ifso TextInput was_paste the text
                     let paste_text = if let KeyCode::KeyV = key_code{
@@ -279,6 +279,7 @@ impl CocoaWindow{
                             time:self.time_now()
                         })
                     ]);
+                    /*
                     if is_return{
                         self.do_callback(&mut vec![
                             Event::TextInput(TextInputEvent{
@@ -287,7 +288,7 @@ impl CocoaWindow{
                                 replace_last:false
                             })
                         ]);
-                    }
+                    }*/
                     if let Some(paste_text) = paste_text{
                         self.do_callback(&mut vec![
                             Event::TextInput(TextInputEvent{

@@ -275,7 +275,7 @@ impl ScrollBarLike<ScrollBar> for ScrollBar{
                     };
                     if !self.smoothing.is_none(){
                         let scroll_pos_target = self.get_scroll_target();
-                       
+                        
                         self.set_scroll_target(cx, scroll_pos_target+ scroll);
                         self.move_towards_scroll_target(cx);// take the first step now
                         return self.make_scroll_event();
@@ -287,6 +287,7 @@ impl ScrollBarLike<ScrollBar> for ScrollBar{
                     }
                 }
             },
+            
             _=>()
         };
         if self._visible{
