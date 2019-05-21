@@ -122,6 +122,12 @@ impl RustEditor{
                         first_on_line = false;
                         output_indent(&mut out_lines, expected_indent);
                     }
+                    else{
+                        let last_line = out_lines.last_mut().unwrap();
+                        if last_line.len()>0 && *last_line.last().unwrap() == ' '{
+                            last_line.pop();
+                        }
+                    }
                     out_lines.last_mut().unwrap().append(&mut chunk);
                     if state.next != ' ' && state.next != '\n'{
                         out_lines.last_mut().unwrap().push(' ');
