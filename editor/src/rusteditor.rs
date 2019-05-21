@@ -5,22 +5,22 @@ use crate::codeeditor::*;
 
 #[derive(Clone)]
 pub struct RustEditor{
-    pub path:String,
-    pub set_key_focus_on_draw:bool,
-    pub code_editor:CodeEditor,
+    pub path: String,
+    pub set_key_focus_on_draw: bool,
+    pub code_editor: CodeEditor,
 }
 
 impl ElementLife for RustEditor{
-    fn construct(&mut self, _cx:&mut Cx){}
-    fn destruct(&mut self, _cx:&mut Cx){}
+    fn construct(&mut self, _cx: &mut Cx){}
+    fn destruct(&mut self, _cx: &mut Cx){}
 }
 
 impl Style for RustEditor{
-    fn style(cx:&mut Cx) -> Self{
+    fn style(cx: &mut Cx) -> Self{
         let rust_editor = Self{
-            set_key_focus_on_draw:false,
-            path:"".to_string(),
-            code_editor:CodeEditor{
+            set_key_focus_on_draw: false,
+            path: "".to_string(),
+            code_editor: CodeEditor{
                 ..Style::style(cx)
             },
         };
@@ -36,7 +36,7 @@ pub enum RustEditorEvent{
 }
 
 impl RustEditor{
-    pub fn handle_rust_editor(&mut self, cx:&mut Cx, event:&mut Event, text_buffer:&mut TextBuffer) -> CodeEditorEvent{
+    pub fn handle_rust_editor(&mut self, cx: &mut Cx, event: &mut Event, text_buffer: &mut TextBuffer) -> CodeEditorEvent{
         let ce = self.code_editor.handle_code_editor(cx, event, text_buffer);
         match ce{
             CodeEditorEvent::AutoFormat => {
@@ -49,34 +49,34 @@ impl RustEditor{
     }
     
     // because rustfmt is such an insane shitpile to compile or use as a library, here is a stupid version.
-    pub fn auto_format(&mut self, text_buffer:&mut TextBuffer){
+    pub fn auto_format(&mut self, text_buffer: &mut TextBuffer){
         
         let mut state = TokenizerState::new(text_buffer);
         let mut rust_tok = RustTokenizer::new();
-        let mut out_lines:Vec<Vec<char>> = Vec::new();
-        let mut chunk:Vec<char> = Vec::new();
+        let mut out_lines: Vec<Vec<char>> = Vec::new();
+        let mut chunk: Vec<char> = Vec::new();
         
         let mut first_on_line = true;
         let mut first_after_open = false;
         
         struct ParenStack{
-            expecting_newlines:bool,
-            expected_indent:usize,
-            angle_counter:usize
+            expecting_newlines: bool,
+            expected_indent: usize,
+            angle_counter: usize
         }
         
-        let mut paren_stack:Vec<ParenStack> = Vec::new();
+        let mut paren_stack: Vec<ParenStack> = Vec::new();
         
         paren_stack.push(ParenStack{
-            expecting_newlines:true,
-            expected_indent:0,
-            angle_counter:0
+            expecting_newlines: true,
+            expected_indent: 0,
+            angle_counter: 0
         });
         out_lines.push(Vec::new());
         
         let mut expected_indent = 0;
         
-        fn output_indent(out_lines:&mut Vec<Vec<char>>, indent_depth:usize){
+        fn output_indent(out_lines: &mut Vec<Vec<char>>, indent_depth: usize){
             let last_line = out_lines.last_mut().unwrap();
             for _ in 0..indent_depth{
                 last_line.push(' ');
@@ -116,9 +116,9 @@ impl RustEditor{
                     }
                     
                     paren_stack.push(ParenStack{
-                        expecting_newlines:false,
-                        expected_indent:expected_indent,
-                        angle_counter:0
+                        expecting_newlines: false,
+                        expected_indent: expected_indent,
+                        angle_counter: 0
                     });
                     first_after_open = true;
                     out_lines.last_mut().unwrap().append(&mut chunk);
@@ -172,12 +172,20 @@ impl RustEditor{
                     out_lines.last_mut().unwrap().append(&mut chunk);
                 },
                 TokenType::CommentChunk => {
+                    if first_on_line{
+                        first_on_line = false;
+                        output_indent(&mut out_lines, expected_indent);
+                    }
                     out_lines.last_mut().unwrap().append(&mut chunk);
                 },
                 TokenType::CommentMultiEnd => {
+                    if first_on_line{
+                        first_on_line = false;
+                        output_indent(&mut out_lines, expected_indent);
+                    }
                     let last_line = out_lines.last_mut().unwrap();
                     last_line.append(&mut chunk);
-                    last_line.push(' ');
+                    //last_line.push(' ');
                 },
                 TokenType::Colon => {
                     let last_line = out_lines.last_mut().unwrap();
@@ -200,7 +208,8 @@ impl RustEditor{
                     let ch = chunk[0];
                     out_lines.last_mut().unwrap().append(&mut chunk);
                     if (ch != ',' || paren_stack.last_mut().unwrap().angle_counter == 0)  // otherwise our generics multiline
-                        && paren_stack.last().unwrap().expecting_newlines == true && state.next != '\n' { // we are expecting newlines!
+                        && paren_stack.last().unwrap().expecting_newlines == true
+                        && state.next != '\n' { // we are expecting newlines!
                         out_lines.push(Vec::new());
                         first_on_line = true;
                     }
@@ -212,7 +221,7 @@ impl RustEditor{
                     
                     if first_on_line{
                         first_on_line = false;
-                        let extra_indent = if chunk.len() == 1 && (chunk[0] == '*' || chunk[0] == '.'|| chunk[0] == '&'){0}else{4};
+                        let extra_indent = if chunk.len() == 1 && (chunk[0] == '*' || chunk[0] == '&'){0}else{4};
                         output_indent(&mut out_lines, expected_indent + extra_indent);
                     }
                     
@@ -288,7 +297,7 @@ impl RustEditor{
         }
     }
     
-    pub fn draw_rust_editor(&mut self, cx:&mut Cx, text_buffer:&TextBuffer){
+    pub fn draw_rust_editor(&mut self, cx: &mut Cx, text_buffer: &TextBuffer){
         if let Err(()) = self.code_editor.begin_code_editor(cx, text_buffer){
             return
         }
@@ -319,19 +328,19 @@ impl RustEditor{
 }
 
 pub struct RustTokenizer{
-    pub comment_single:bool,
-    pub comment_depth:usize
+    pub comment_single: bool,
+    pub comment_depth: usize
 }
 
 impl RustTokenizer{
     fn new() -> RustTokenizer{
         RustTokenizer{
-            comment_single:false,
-            comment_depth:0
+            comment_single: false,
+            comment_depth: 0
         }
     }
     
-    fn next_token<'a>(&mut self, state:&mut TokenizerState<'a>, chunk:&mut Vec<char>, token_chunks:&Vec<TokenChunk>) -> TokenType{
+    fn next_token<'a>(&mut self, state: &mut TokenizerState<'a>, chunk: &mut Vec<char>, token_chunks: &Vec<TokenChunk>) -> TokenType{
         if self.comment_depth > 0{ // parse comments
             loop{
                 if state.next == '\0'{
@@ -708,7 +717,7 @@ impl RustTokenizer{
         }
     }
     
-    fn parse_rust_ident_tail<'a>(state:&mut TokenizerState<'a>, chunk:&mut Vec<char>) -> bool{
+    fn parse_rust_ident_tail<'a>(state: &mut TokenizerState<'a>, chunk: &mut Vec<char>) -> bool{
         let mut ret = false;
         while state.next_is_digit() || state.next_is_letter() || state.next == '_' || state.next == '$'{
             ret = true;
@@ -718,7 +727,7 @@ impl RustTokenizer{
         ret
     }
     
-    fn parse_rust_escape_char<'a>(state:&mut TokenizerState<'a>, chunk:&mut Vec<char>) -> bool{
+    fn parse_rust_escape_char<'a>(state: &mut TokenizerState<'a>, chunk: &mut Vec<char>) -> bool{
         if state.next == '\\'{
             chunk.push(state.next);
             state.advance();
@@ -738,7 +747,7 @@ impl RustTokenizer{
                     }
                 }
             }
-            else{
+            else if state.next != '\n' && state.next != '\0'{
                 // its a single char escape TODO limit this to valid escape chars
                 chunk.push(state.next);
                 state.advance();
@@ -747,7 +756,7 @@ impl RustTokenizer{
         }
         return false
     }
-    fn parse_rust_number_tail<'a>(state:&mut TokenizerState<'a>, chunk:&mut Vec<char>){
+    fn parse_rust_number_tail<'a>(state: &mut TokenizerState<'a>, chunk: &mut Vec<char>){
         if state.next == 'x'{ // parse a hex number
             chunk.push(state.next);
             state.advance();
@@ -801,7 +810,7 @@ impl RustTokenizer{
         }
     }
     
-    fn parse_rust_lc_keyword<'a>(state:&mut TokenizerState<'a>, chunk:&mut Vec<char>) -> KeywordType{
+    fn parse_rust_lc_keyword<'a>(state: &mut TokenizerState<'a>, chunk: &mut Vec<char>) -> KeywordType{
         match state.cur{
             'a' => {
                 if state.keyword(chunk, "s"){
