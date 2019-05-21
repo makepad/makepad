@@ -123,7 +123,11 @@ impl RustEditor{
                     });
                     first_after_open = true;
                     is_unary_operator = true;
+                    //let is_curly = chunk[0] == '{';
                     out_lines.last_mut().unwrap().append(&mut chunk);
+                    //if is_curly && state.next != '\n'{
+                    //    out_lines.last_mut().unwrap().push(' ');
+                    //}
                 },
                 TokenType::ParenClose => {
                     
@@ -134,12 +138,17 @@ impl RustEditor{
                     if last_line.len()>0 && *last_line.last().unwrap() == ','{
                         last_line.pop();
                     }
+
+                    //if chunk[0] == '}' && last_line.len()>0 && *last_line.last().unwrap() != ' '{
+                   //     last_line.push(' ');
+                   // }
                     
                     first_after_open = false;
                     if !first_on_line && paren_stack.last().unwrap().expecting_newlines == true{ // we are expecting newlines!
                         out_lines.push(Vec::new());
                         first_on_line = true;
                     }
+                    
                     expected_indent = if paren_stack.len()>1{
                         paren_stack.pop().unwrap().expected_indent
                     }
@@ -156,6 +165,7 @@ impl RustEditor{
                     else{
                         is_unary_operator = false;
                     }
+
                     out_lines.last_mut().unwrap().append(&mut chunk);
                 },
                 TokenType::CommentLine => {
@@ -173,10 +183,6 @@ impl RustEditor{
                     if first_on_line{
                         first_on_line = false;
                         output_indent(&mut out_lines, expected_indent);
-                    }
-                    else{
-                        let last_line = out_lines.last_mut().unwrap();
-                        last_line.push(' ');
                     }
                     out_lines.last_mut().unwrap().append(&mut chunk);
                 },
@@ -271,6 +277,15 @@ impl RustEditor{
                     is_unary_operator = true;
                 },
                 TokenType::BuiltinType | TokenType::TypeName => { // these dont reset the angle counter
+                    first_after_open = false;
+                    if first_on_line{
+                        first_on_line = false;
+                        output_indent(&mut out_lines, expected_indent);
+                    }
+                    out_lines.last_mut().unwrap().append(&mut chunk);
+                },
+                TokenType::Namespace=>{
+                    is_unary_operator = true;
                     first_after_open = false;
                     if first_on_line{
                         first_on_line = false;

@@ -261,7 +261,7 @@ impl App{
                 },
                 Panel::FileEditor{path, editor_id} => {
                     let text_buffer = self.text_buffers.from_path(cx, path);
-                    self.file_editors.get_draw(cx, *editor_id, |_cx, tmpl|{
+                    self.file_editors.get_draw(cx, *editor_id, | _cx, tmpl | {
                         FileEditor::create_file_editor_for_path(path, tmpl)
                     }).draw_file_editor(cx, text_buffer);
                 }
