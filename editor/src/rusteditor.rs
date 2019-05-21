@@ -75,6 +75,7 @@ impl RustEditor{
         out_lines.push(Vec::new());
         
         let mut expected_indent = 0;
+        let mut is_unary_operator = true;
         
         fn output_indent(out_lines: &mut Vec<Vec<char>>, indent_depth: usize){
             let last_line = out_lines.last_mut().unwrap();
@@ -121,9 +122,11 @@ impl RustEditor{
                         angle_counter: 0
                     });
                     first_after_open = true;
+                    is_unary_operator = true;
                     out_lines.last_mut().unwrap().append(&mut chunk);
                 },
                 TokenType::ParenClose => {
+                    
                     let last_line = out_lines.last_mut().unwrap();
                     if last_line.len()>0 && *last_line.last().unwrap() == ' '{
                         last_line.pop();
@@ -146,6 +149,12 @@ impl RustEditor{
                     if first_on_line{
                         first_on_line = false;
                         output_indent(&mut out_lines, expected_indent);
+                    }
+                    if chunk[0] == '}'{
+                        is_unary_operator = true;
+                    }
+                    else{
+                        is_unary_operator = false;
                     }
                     out_lines.last_mut().unwrap().append(&mut chunk);
                 },
@@ -188,6 +197,7 @@ impl RustEditor{
                     //last_line.push(' ');
                 },
                 TokenType::Colon => {
+                    is_unary_operator = true;
                     let last_line = out_lines.last_mut().unwrap();
                     last_line.append(&mut chunk);
                     if state.next != ' ' && state.next != '\n'{
@@ -216,12 +226,13 @@ impl RustEditor{
                     else if state.next != ' ' && state.next != '\n'{
                         out_lines.last_mut().unwrap().push(' ');
                     }
+                    is_unary_operator = true;
                 },
                 TokenType::Operator => {
                     
                     if first_on_line{
                         first_on_line = false;
-                        let extra_indent = if chunk.len() == 1 && (chunk[0] == '*' || chunk[0] == '&'){0}else{4};
+                        let extra_indent = if is_unary_operator{0}else{4};
                         output_indent(&mut out_lines, expected_indent + extra_indent);
                     }
                     
@@ -242,7 +253,7 @@ impl RustEditor{
                     }
                     
                     let last_line = out_lines.last_mut().unwrap();
-                    if chunk.len() == 1 && (chunk[0] == '!' || chunk[0] == '|' || chunk[0] == '&' || chunk[0] == '*' || chunk[0] == '.' || chunk[0] == '<' || chunk[0] == '>'){
+                    if chunk.len() == 1 && ((is_unary_operator && (chunk[0] == '*' || chunk[0] == '&')) || chunk[0] == '!' || chunk[0] == '.' || chunk[0] == '<' || chunk[0] == '>'){
                         last_line.append(&mut chunk);
                     }
                     else{
@@ -256,6 +267,8 @@ impl RustEditor{
                             last_line.push(' ');
                         }
                     }
+                    
+                    is_unary_operator = true;
                 },
                 TokenType::BuiltinType | TokenType::TypeName => { // these dont reset the angle counter
                     first_after_open = false;
@@ -265,7 +278,18 @@ impl RustEditor{
                     }
                     out_lines.last_mut().unwrap().append(&mut chunk);
                 },
+                TokenType::Keyword|TokenType::Flow|TokenType::Looping=>{
+                    is_unary_operator = true;
+                    paren_stack.last_mut().unwrap().angle_counter = 0;
+                    first_after_open = false;
+                    if first_on_line{
+                        first_on_line = false;
+                        output_indent(&mut out_lines, expected_indent);
+                    }
+                    out_lines.last_mut().unwrap().append(&mut chunk);
+                },
                 _ => { // otherwise reset the angulat counter
+                    is_unary_operator = false;
                     paren_stack.last_mut().unwrap().angle_counter = 0;
                     first_after_open = false;
                     if first_on_line{

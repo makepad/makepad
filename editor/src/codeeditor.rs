@@ -1,7 +1,7 @@
-use widget::*;
-use crate::textbuffer::*;
-use crate::textcursor::*;
-use crate::codeicon::*;
+use widget:: *;
+use crate::textbuffer:: *;
+use crate::textcursor:: *;
+use crate::codeicon:: *;
 
 #[derive(Clone)]
 pub struct CodeEditor{
@@ -151,12 +151,8 @@ impl Style for CodeEditor{
                 selection_defocus: color256(75, 75, 75),
                 highlight: color256a(75, 75, 95, 128),
                 cursor: color256(176, 176, 176),
-                //cursor_row:color256(75,75,75),
                 cursor_row: color256(45, 45, 45),
                 
-                
-                //paren_pair_match:color256(136,136,136),
-                //paren_pair_fail:color256(255,0,0),
                 paren_pair_match: color256(255, 255, 255),
                 paren_pair_fail: color256(255, 0, 0),
                 
@@ -215,7 +211,6 @@ impl Style for CodeEditor{
                 shader_id: cx.add_shader(token_highlight_sh.clone(), "Editor.token_highlight"),
                 ..Style::style(cx)
             },
-            
             //select_highlight:Quad{
             // shader_id:cx.add_shader(select_highlight_sh, "Editor.select_highlight"),
             // ..Style::style(cx)
@@ -336,7 +331,7 @@ impl CodeEditor{
     
     pub fn def_indent_lines_shader(cx: &mut Cx) -> Shader{
         let mut sh = Quad::def_quad_shader(cx);
-        sh.add_ast(shader_ast!({
+        sh.add_ast(shader_ast ! ({
             let indent_id: float<Instance>;
             let indent_sel: float<Uniform>;
             fn pixel() -> vec4{
@@ -360,7 +355,7 @@ impl CodeEditor{
     
     pub fn def_cursor_shader(cx: &mut Cx) -> Shader{
         let mut sh = Quad::def_quad_shader(cx);
-        sh.add_ast(shader_ast!({
+        sh.add_ast(shader_ast ! ({
             let blink: float<Uniform>;
             fn pixel() -> vec4{
                 if blink<0.5{
@@ -376,7 +371,7 @@ impl CodeEditor{
     
     pub fn def_selection_shader(cx: &mut Cx) -> Shader{
         let mut sh = Quad::def_quad_shader(cx);
-        sh.add_ast(shader_ast!({
+        sh.add_ast(shader_ast ! ({
             let prev_x: float<Instance>;
             let prev_w: float<Instance>;
             let next_x: float<Instance>;
@@ -387,7 +382,7 @@ impl CodeEditor{
             fn vertex() -> vec4{ // custom vertex shader because we widen the draweable area a bit for the gloopiness
                 let shift: vec2 = - draw_list_scroll * draw_list_do_scroll;
                 let clipped: vec2 = clamp(
-                    geom*vec2(w + 16., h) + vec2(x, y) + shift - vec2(8., 0.),
+                    geom * vec2(w + 16., h) + vec2(x, y) + shift - vec2(8., 0.),
                     draw_list_clip.xy,
                     draw_list_clip.zw
                 );
@@ -414,7 +409,7 @@ impl CodeEditor{
     
     pub fn def_paren_pair_shader(cx: &mut Cx) -> Shader{
         let mut sh = Quad::def_quad_shader(cx);
-        sh.add_ast(shader_ast!({
+        sh.add_ast(shader_ast ! ({
             fn pixel() -> vec4{
                 df_viewport(pos * vec2(w, h));
                 //df_rect(0.,0.,w,h);
@@ -432,7 +427,7 @@ impl CodeEditor{
     
     pub fn def_cursor_row_shader(cx: &mut Cx) -> Shader{
         let mut sh = Quad::def_quad_shader(cx);
-        sh.add_ast(shader_ast!({
+        sh.add_ast(shader_ast ! ({
             fn pixel() -> vec4{
                 df_viewport(pos * vec2(w, h));
                 df_rect(0., 0., w, h);
@@ -450,7 +445,7 @@ impl CodeEditor{
     
     pub fn def_select_highlight_shader(cx: &mut Cx) -> Shader{
         let mut sh = Quad::def_quad_shader(cx);
-        sh.add_ast(shader_ast!({
+        sh.add_ast(shader_ast ! ({
             fn pixel() -> vec4{
                 df_viewport(pos * vec2(w, h));
                 df_box(0.5, 0.5, w - 1., h - 1., 1.);
@@ -462,7 +457,7 @@ impl CodeEditor{
     
     pub fn def_token_highlight_shader(cx: &mut Cx) -> Shader{
         let mut sh = Quad::def_quad_shader(cx);
-        sh.add_ast(shader_ast!({
+        sh.add_ast(shader_ast ! ({
             let visible: float<Uniform>;
             fn pixel() -> vec4{
                 if visible<0.5{
@@ -477,9 +472,9 @@ impl CodeEditor{
     }
     pub fn def_message_marker_shader(cx: &mut Cx) -> Shader{
         let mut sh = Quad::def_quad_shader(cx);
-        sh.add_ast(shader_ast!({
+        sh.add_ast(shader_ast ! ({
             fn pixel() -> vec4{
-                let pos2 = vec2(pos.x, pos.y + 0.03*sin(pos.x*w));
+                let pos2 = vec2(pos.x, pos.y + 0.03 * sin(pos.x * w));
                 df_viewport(pos2 * vec2(w, h));
                 //df_rect(0.,0.,w,h);
                 df_move_to(0., h - 1.);
@@ -497,7 +492,7 @@ impl CodeEditor{
     
     fn reset_cursor_blinker(&mut self, cx: &mut Cx){
         cx.stop_timer(self._cursor_blink_timer_id);
-        self._cursor_blink_timer_id = cx.start_timer(self.cursor_blink_speed*0.5, false);
+        self._cursor_blink_timer_id = cx.start_timer(self.cursor_blink_speed * 0.5, false);
         self._cursor_blink_flipflop = 0.;
         self._cursor_area.write_uniform_float(cx, "blink", self._cursor_blink_flipflop);
     }
@@ -1118,7 +1113,7 @@ impl CodeEditor{
             }
             let origin = cx.get_turtle_origin();
             let chunk_width = self._monospace_size.x * 5.0;
-            self.text.add_text(cx, origin.x + (self.line_number_width - chunk_width - 10.), origin.y + line_geom.walk.y, 0, self._line_number_inst.as_mut().unwrap(), chunk, |_, _, _, _|{0.});
+            self.text.add_text(cx, origin.x + (self.line_number_width - chunk_width - 10.), origin.y + line_geom.walk.y, 0, self._line_number_inst.as_mut().unwrap(), chunk, | _, _, _, _ | {0.});
         }
         
         // newline with minheight
@@ -1165,8 +1160,8 @@ impl CodeEditor{
     
     fn draw_indent_lines(&mut self, cx: &mut Cx, geom_y: f32, tabs: usize){
         let y_pos = geom_y - cx.get_turtle_origin().y;
-        let tab_variable_width = self._monospace_base.x*4.*self._anim_font_size;
-        let tab_fixed_width = self._monospace_base.x*4.*self.open_font_size;
+        let tab_variable_width = self._monospace_base.x * 4. * self._anim_font_size;
+        let tab_fixed_width = self._monospace_base.x * 4. * self.open_font_size;
         let mut off = self.line_number_width;
         for i in 0..tabs{
             let (indent_color, indent_id) = if i < self._indent_stack.len(){self._indent_stack[i]}else{(self.colors.indent_line_unknown, 0.)};
@@ -1375,7 +1370,7 @@ impl CodeEditor{
             if self._highlight_selection.len() > 0{ // slow loop
                 //let draw_search = &mut self._draw_search;
                 let line_chunk = &mut self._line_chunk;
-                self.text.add_text(cx, geom.x, geom.y, offset, self._text_inst.as_mut().unwrap(), &chunk, |ch, offset, x, w|{
+                self.text.add_text(cx, geom.x, geom.y, offset, self._text_inst.as_mut().unwrap(), &chunk, | ch, offset, x, w | {
                     line_chunk.push((x, ch));
                     //draw_search.mark_text_select_only(cursors, offset, x, geom.y, w, height);
                     draw_messages.mark_text_select_only(message_cursors, offset, x, geom.y, w, height);
@@ -1383,7 +1378,7 @@ impl CodeEditor{
                 });
             }
             else{ // fast loop
-                self.text.add_text(cx, geom.x, geom.y, offset, self._text_inst.as_mut().unwrap(), &chunk, |ch, offset, x, w|{
+                self.text.add_text(cx, geom.x, geom.y, offset, self._text_inst.as_mut().unwrap(), &chunk, | ch, offset, x, w | {
                     draw_messages.mark_text_select_only(message_cursors, offset, x, geom.y, w, height);
                     draw_cursors.mark_text_with_cursor(cursors, ch, offset, x, geom.y, w, height, last_cursor, mark_spaces)
                 });
@@ -1530,7 +1525,7 @@ impl CodeEditor{
         let offset = text_buffer.messages.jump_to_offset;
         // make one cursor, and start scrolling towards it
         self.cursors.clear_and_set_last_cursor_head_and_tail(offset, text_buffer);
-        self.scroll_last_cursor_visible(cx, text_buffer, self._final_fill_height*0.8);
+        self.scroll_last_cursor_visible(cx, text_buffer, self._final_fill_height * 0.8);
         self.view.redraw_view_area(cx);
     }
     
@@ -1657,7 +1652,7 @@ impl CodeEditor{
                         anim.time = 0.0
                     }
                     else{
-                        anim.time = anim.time *0.55;
+                        anim.time = anim.time * 0.55;
                         //= 0.1;
                         anim_select_any = true;
                     }
@@ -1716,7 +1711,7 @@ impl CodeEditor{
     fn scroll_last_cursor_visible(&mut self, cx: &mut Cx, text_buffer: &TextBuffer, height_pad: f32){
         // so we have to compute (approximately) the rect of our cursor
         if self.cursors.last_cursor >= self.cursors.set.len(){
-            panic!("LAST CURSOR INVALID");
+            panic ! ("LAST CURSOR INVALID");
         }
         
         let pos = self.cursors.get_last_cursor_text_pos(text_buffer);
@@ -1725,11 +1720,11 @@ impl CodeEditor{
         let row = pos.row.min(self._line_geometry.len() - 1);
         if row < self._line_geometry.len(){
             let geom = &self._line_geometry[row];
-            let mono_size = Vec2{x: self._monospace_base.x * geom.font_size, y: self._monospace_base.y*geom.font_size};
+            let mono_size = Vec2{x: self._monospace_base.x * geom.font_size, y: self._monospace_base.y * geom.font_size};
             //self.text.get_monospace_size(cx, geom.font_size);
             let rect = Rect{
                 x: (pos.col as f32) * mono_size.x + self.line_number_width,
-                y: geom.walk.y - mono_size.y * 1. - 0.5*height_pad,
+                y: geom.walk.y - mono_size.y * 1. - 0.5 * height_pad,
                 w: mono_size.x * 4.,
                 h: mono_size.y * 4. + height_pad
             };
@@ -1744,7 +1739,7 @@ impl CodeEditor{
         let mut mono_size = Vec2::zero();
         for (row, geom) in self._line_geometry.iter().enumerate(){
             //let geom = &self._line_geometry[pos.row];
-            mono_size = Vec2{x: self._monospace_base.x * geom.font_size, y: self._monospace_base.y*geom.font_size};
+            mono_size = Vec2{x: self._monospace_base.x * geom.font_size, y: self._monospace_base.y * geom.font_size};
             if rel.y < geom.walk.y || rel.y >= geom.walk.y && rel.y <= geom.walk.y + mono_size.y{ // its on the right line
                 let col = ((rel.x - self.line_number_width).max(0.) / mono_size.x) as usize;
                 // do a dumb calc
@@ -1762,7 +1757,7 @@ impl CodeEditor{
         let end_col = if end{1<<31}else{0};
         for (row, geom) in self._line_geometry.iter().enumerate(){
             //let geom = &self._line_geometry[pos.row];
-            mono_size = Vec2{x: self._monospace_base.x * geom.font_size, y: self._monospace_base.y*geom.font_size};
+            mono_size = Vec2{x: self._monospace_base.x * geom.font_size, y: self._monospace_base.y * geom.font_size};
             if rel.y < geom.walk.y || rel.y >= geom.walk.y && rel.y <= geom.walk.y + mono_size.y{ // its on the right line
                 return text_buffer.text_pos_to_offset(TextPos{row: row, col: end_col})
             }
@@ -1799,12 +1794,12 @@ impl CodeEditor{
         let rect = Rect{
             x: fe.rect.x + pad_scroll,
             y: fe.rect.y + pad_scroll,
-            w: fe.rect.w - 2.*pad_scroll,
-            h: fe.rect.h - 2.*pad_scroll,
+            w: fe.rect.w - 2. * pad_scroll,
+            h: fe.rect.h - 2. * pad_scroll,
         };
         let delta = Vec2{
             x: if fe.abs.x < rect.x{
-                    - ((rect.x - fe.abs.x) * pow_scale).powf(pow_fac).min(max_speed)
+                - ((rect.x - fe.abs.x) * pow_scale).powf(pow_fac).min(max_speed)
             }
             else if fe.abs.x > rect.x + rect.w{
                 ((fe.abs.x - (rect.x + rect.w)) * pow_scale).powf(pow_fac).min(max_speed)
@@ -1813,7 +1808,7 @@ impl CodeEditor{
                 0.
             },
             y: if fe.abs.y < rect.y{
-                    - ((rect.y - fe.abs.y) * pow_scale).powf(pow_fac).min(max_speed)
+                - ((rect.y - fe.abs.y) * pow_scale).powf(pow_fac).min(max_speed)
             }
             else if fe.abs.y > rect.y + rect.h{
                 ((fe.abs.y - (rect.y + rect.h)) * pow_scale).powf(pow_fac).min(max_speed)
@@ -1977,8 +1972,8 @@ impl AnimFoldingState{
         match self{
             AnimFoldingState::Open => open_size,
             AnimFoldingState::Folded => folded_size,
-            AnimFoldingState::Opening(f, _, _) => f*folded_size + (1. - f)*open_size,
-            AnimFoldingState::Folding(f, _, _) => f*open_size + (1. - f)*folded_size,
+            AnimFoldingState::Opening(f, _, _) => f * folded_size + (1. - f) * open_size,
+            AnimFoldingState::Folding(f, _, _) => f * open_size + (1. - f) * folded_size,
         }
     }
     
