@@ -371,9 +371,10 @@ impl TextCursorSet{
             // lets find where we are as a cursor in the textbuffer
             if start == end && start > 0{
                 // insert spaces till indent level
-                let (pre_base, pre_spaces) = text_buffer.calc_next_line_indent_depth(start, 4);
+                let (_pre_base, pre_spaces) = text_buffer.calc_next_line_indent_depth(start, 4);
                 let mut text = String::new();
-                let warp = pre_spaces - (start - pre_base).min(pre_spaces);
+                //let warp = pre_spaces - (start - pre_base).min(pre_spaces);
+                //println!("{}", warp);
                 text.push_str("\n");
                 for _ in 0..pre_spaces{
                     text.push_str(" ");
@@ -394,7 +395,7 @@ impl TextCursorSet{
                     ops.push(op);
                 }
                 else{
-                    let op = text_buffer.replace_lines_with_string(start+warp, end-start, &text);
+                    let op = text_buffer.replace_lines_with_string(start, end-start, &text);
                     delta += cursor.collapse(start, end, op.len);
                     ops.push(op);
                 }

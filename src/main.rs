@@ -31,7 +31,6 @@ struct App{
     index_read_id: u64,
     app_state_read_id: u64
 }
-
 #[derive(Clone, Serialize)]
 struct AppState{
     dock_items: DockItem<Panel>,
