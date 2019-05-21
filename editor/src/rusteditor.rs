@@ -16,7 +16,7 @@ impl ElementLife for RustEditor{
 }
 
 impl Style for RustEditor{
-    fn style(cx:&mut Cx)->Self{
+    fn style(cx:&mut Cx) -> Self{
         let rust_editor = Self{
             set_key_focus_on_draw:false,
             path:"".to_string(),
@@ -36,18 +36,18 @@ pub enum RustEditorEvent{
 }
 
 impl RustEditor{
-    pub fn handle_rust_editor(&mut self, cx:&mut Cx, event:&mut Event, text_buffer:&mut TextBuffer)->CodeEditorEvent{
+    pub fn handle_rust_editor(&mut self, cx:&mut Cx, event:&mut Event, text_buffer:&mut TextBuffer) -> CodeEditorEvent{
         let ce = self.code_editor.handle_code_editor(cx, event, text_buffer);
         match ce{
-            CodeEditorEvent::AutoFormat=>{
+            CodeEditorEvent::AutoFormat => {
                 self.auto_format(text_buffer);
                 self.code_editor.view.redraw_view_area(cx);
             },
-            _=>()
+            _ => ()
         }
         ce
     }
-
+    
     // because rustfmt is such an insane shitpile to compile or use as a library, here is a stupid version.
     pub fn auto_format(&mut self, text_buffer:&mut TextBuffer){
         let mut state = TokenizerState::new(text_buffer);
@@ -57,7 +57,7 @@ impl RustEditor{
         let mut chunk:Vec<char> = Vec::new();
         let mut first_on_line = true;
         let mut first_after_open = false;
-        let mut paren_stack:Vec<(char,usize)> = Vec::new();
+        let mut paren_stack:Vec<(bool, usize)> = Vec::new();
         let mut expected_indent = 0;
         
         fn output_indent(out_lines:&mut Vec<Vec<char>>, indent_depth:usize){
@@ -66,38 +66,58 @@ impl RustEditor{
                 last_line.push(' ');
             }
         }
-        
+        let mut last_token = TokenType::Unexpected;
         loop{
             let token_type = rust_tok.next_token(&mut state, &mut chunk, &self.code_editor.token_chunks);
             match token_type{
-                TokenType::Whitespace=>{
-                    if !first_on_line && state.next != '\n'{
+                TokenType::Whitespace => {
+                    if !first_on_line && state.next != '\n' && last_token != TokenType::ParenOpen{
                         out_lines.last_mut().unwrap().push(' ');
                     }
                 },
-                TokenType::Newline=>{
+                TokenType::Newline => {
                     if first_on_line{
                         output_indent(&mut out_lines, expected_indent);
                     }
+                    
                     if first_after_open{
+                        paren_stack.last_mut().unwrap().0 = true;
                         expected_indent += 4;
                     }
-                    first_after_open = false;
-                    out_lines.push(Vec::new());
-                    first_on_line = true;
+                    if paren_stack.len()>0 && paren_stack.last_mut().unwrap().0 == false{// we are NOT expecting newlines!
+                        
+                    }
+                    else{
+                        first_after_open = false;
+                        out_lines.push(Vec::new());
+                        first_on_line = true;
+                    }
                 },
-                TokenType::Eof=>{break},
-                TokenType::ParenOpen=>{
+                TokenType::Eof => {break},
+                TokenType::ParenOpen => {
                     if first_on_line{
                         first_on_line = false;
                         output_indent(&mut out_lines, expected_indent);
                     }
-                    paren_stack.push((chunk[0], expected_indent));
+                    
+                    paren_stack.push((false, expected_indent));
                     first_after_open = true;
                     out_lines.last_mut().unwrap().append(&mut chunk);
                 },
-                TokenType::ParenClose=>{
+                TokenType::ParenClose => {
+                    let last_line = out_lines.last_mut().unwrap();
+                    if last_line.len()>0 && *last_line.last().unwrap() == ' '{
+                        last_line.pop();
+                    }
+                    if last_line.len()>0 && *last_line.last().unwrap() == ','{
+                        last_line.pop();
+                    }
+                    
                     first_after_open = false;
+                    if !first_on_line && paren_stack.len()>0 && paren_stack.last_mut().unwrap().0 == true{// we are expecting newlines!
+                        out_lines.push(Vec::new());
+                        first_on_line = true;
+                    }
                     expected_indent = if paren_stack.len()>0{
                         paren_stack.pop().unwrap().1
                     }
@@ -110,14 +130,14 @@ impl RustEditor{
                     }
                     out_lines.last_mut().unwrap().append(&mut chunk);
                 },
-                TokenType::Comment=>{
+                TokenType::Comment => {
                     if first_on_line{
                         first_on_line = false;
                         output_indent(&mut out_lines, expected_indent);
                     }
                     out_lines.last_mut().unwrap().append(&mut chunk);
                 },
-                TokenType::Delimiter=>{
+                TokenType::Delimiter => {
                     if first_on_line{
                         first_on_line = false;
                         output_indent(&mut out_lines, expected_indent);
@@ -129,11 +149,15 @@ impl RustEditor{
                         }
                     }
                     out_lines.last_mut().unwrap().append(&mut chunk);
+                    if paren_stack.len()>0 && paren_stack.last_mut().unwrap().0 == true && state.next != '\n'{// we are expecting newlines!
+                        out_lines.push(Vec::new());
+                        first_on_line = true;
+                    }
                     if state.next != ' ' && state.next != '\n'{
                         out_lines.last_mut().unwrap().push(' ');
                     }
                 },
-                TokenType::Operator=>{
+                TokenType::Operator => {
                     if first_on_line{
                         first_on_line = false;
                         output_indent(&mut out_lines, expected_indent);
@@ -154,7 +178,7 @@ impl RustEditor{
                         }
                     }
                 },
-                _=>{
+                _ => {
                     first_after_open = false;
                     if first_on_line{
                         first_on_line = false;
@@ -163,6 +187,7 @@ impl RustEditor{
                     out_lines.last_mut().unwrap().append(&mut chunk);
                 },
             }
+            last_token = token_type;
             chunk.truncate(0);
         }
         // lets do a diff from top, and bottom
@@ -173,27 +198,27 @@ impl RustEditor{
         
         let mut bottom_row_old = text_buffer.lines.len();
         let mut bottom_row_new = out_lines.len();
-        while bottom_row_old > top_row && bottom_row_new > top_row && text_buffer.lines[bottom_row_old-1] == out_lines[bottom_row_new-1]{
+        while bottom_row_old > top_row && bottom_row_new > top_row && text_buffer.lines[bottom_row_old - 1] == out_lines[bottom_row_new - 1]{
             bottom_row_old -= 1;
             bottom_row_new -= 1;
         }
         // alright we now have a line range to replace.
         if top_row != bottom_row_new{
-            let changed = out_lines.splice(top_row..(bottom_row_new+1),vec![]).collect();
-            self.code_editor.cursors.replace_lines_formatted(top_row, bottom_row_old+1, changed, text_buffer);
+            let changed = out_lines.splice(top_row..(bottom_row_new + 1).min(out_lines.len()), vec![]).collect();
+            self.code_editor.cursors.replace_lines_formatted(top_row, bottom_row_old + 1, changed, text_buffer);
         }
     }
-
+    
     pub fn draw_rust_editor(&mut self, cx:&mut Cx, text_buffer:&TextBuffer){
         if let Err(()) = self.code_editor.begin_code_editor(cx, text_buffer){
-            return 
+            return
         }
         
         if self.set_key_focus_on_draw{
             self.set_key_focus_on_draw = false;
             self.code_editor.set_key_focus(cx);
         }
-
+        
         let mut state = TokenizerState::new(text_buffer);
         let mut rust_tok = RustTokenizer::new();
         let mut chunk = Vec::new();
@@ -205,7 +230,7 @@ impl RustEditor{
                 break
             }
             else{
-                self.code_editor.draw_chunk(cx, &chunk, state.next, state.offset, token_type,  &text_buffer.messages.cursors);
+                self.code_editor.draw_chunk(cx, &chunk, state.next, state.offset, token_type, &text_buffer.messages.cursors);
             }
             chunk.truncate(0);
         }
@@ -220,15 +245,15 @@ pub struct RustTokenizer{
 }
 
 impl RustTokenizer{
-    fn new()->RustTokenizer{
+    fn new() -> RustTokenizer{
         RustTokenizer{
             comment_single:false,
             comment_depth:0
         }
     }
     
-    fn next_token<'a>(&mut self, state:&mut TokenizerState<'a>, chunk:&mut Vec<char>, token_chunks:&Vec<TokenChunk>)->TokenType{
-        if self.comment_depth > 0{ // parse comments
+    fn next_token<'a>(&mut self, state:&mut TokenizerState<'a>, chunk:&mut Vec<char>, token_chunks:&Vec<TokenChunk>) -> TokenType{
+        if self.comment_depth > 0{// parse comments
             loop{
                 if state.next == '\0'{
                     self.comment_depth = 0;
@@ -247,7 +272,7 @@ impl RustTokenizer{
                     chunk.push(state.next);
                     state.advance();
                     if state.next == '/'{
-                       self.comment_depth -= 1;
+                        self.comment_depth -= 1;
                         chunk.push(state.next);
                         state.advance();
                         if self.comment_depth == 0{
@@ -287,15 +312,15 @@ impl RustTokenizer{
         else{
             state.advance_with_cur();
             match state.cur{
-                '\0'=>{ // eof insert a terminating space and end
+                '\0' => {// eof insert a terminating space and end
                     chunk.push(' ');
                     return TokenType::Eof
                 },
-                '\n'=>{
+                '\n' => {
                     chunk.push('\n');
                     return TokenType::Newline
                 },
-                ' ' | '\t'=>{ // eat as many spaces as possible
+                ' ' | '\t' => {// eat as many spaces as possible
                     chunk.push(state.cur);
                     while state.next == ' '{
                         chunk.push(state.next);
@@ -303,7 +328,7 @@ impl RustTokenizer{
                     }
                     return TokenType::Whitespace;
                 },
-                '/'=>{ // parse comment
+                '/' => {// parse comment
                     chunk.push(state.cur);
                     if state.next == '/'{
                         chunk.push(state.next);
@@ -311,8 +336,8 @@ impl RustTokenizer{
                         self.comment_depth = 1;
                         self.comment_single = true;
                         return TokenType::Comment;
-                    } 
-                    else if state.next == '*'{ // start parsing a multiline comment
+                    }
+                    else if state.next == '*'{// start parsing a multiline comment
                         //let mut comment_depth = 1;
                         chunk.push(state.next);
                         state.advance();
@@ -328,11 +353,11 @@ impl RustTokenizer{
                         return TokenType::Operator;
                     }
                 },
-                '\''=>{ // parse char literal or lifetime annotation
+                '\'' => {// parse char literal or lifetime annotation
                     chunk.push(state.cur);
                     
-                    if Self::parse_rust_escape_char(state, chunk){ // escape char or unicode
-                        if state.next == '\''{ // parsed to closing '
+                    if Self::parse_rust_escape_char(state, chunk){// escape char or unicode
+                        if state.next == '\''{// parsed to closing '
                             chunk.push(state.next);
                             state.advance();
                             return TokenType::String;
@@ -341,17 +366,17 @@ impl RustTokenizer{
                             return TokenType::TypeName;
                         }
                     }
-                    else{ // parse a single char or lifetime
+                    else{// parse a single char or lifetime
                         let offset = state.offset;
                         if Self::parse_rust_ident_tail(state, chunk) && ((state.offset - offset) > 1 || state.next != '\''){
                             return TokenType::Keyword;
                         }
                         else if state.next != '\n'{
-                            if (state.offset - offset) == 0{ // not an identifier char
+                            if (state.offset - offset) == 0{// not an identifier char
                                 chunk.push(state.next);
                                 state.advance();
                             }
-                            if state.next == '\''{ // lifetime identifier
+                            if state.next == '\''{// lifetime identifier
                                 chunk.push(state.next);
                                 state.advance();
                             }
@@ -362,7 +387,7 @@ impl RustTokenizer{
                         }
                     }
                 },
-                '"'=>{ // parse string
+                '"' => {// parse string
                     chunk.push(state.cur);
                     state.prev = '\0';
                     while state.next != '\0' && state.next!='\n'{
@@ -378,21 +403,21 @@ impl RustTokenizer{
                     };
                     return TokenType::String;
                 },
-                '0'...'9'=>{ // try to parse numbers
+                '0'...'9' => {// try to parse numbers
                     chunk.push(state.cur);
                     Self::parse_rust_number_tail(state, chunk);
                     return TokenType::Number;
                 },
-                ':'=>{
+                ':' => {
                     chunk.push(state.cur);
                     if state.next == ':'{
                         chunk.push(state.next);
                         state.advance();
                         return TokenType::Namespace;
                     }
-                    return TokenType::Delimiter;
-            },
-                '*'=>{
+                    return TokenType::Colon;
+                },
+                '*' => {
                     chunk.push(state.cur);
                     if state.next == '='{
                         chunk.push(state.next);
@@ -403,12 +428,12 @@ impl RustTokenizer{
                         chunk.push(state.next);
                         state.advance();
                         return TokenType::Unexpected;
-                    } 
+                    }
                     else{
                         return TokenType::Operator;
                     }
                 },
-                '+'=>{
+                '+' => {
                     chunk.push(state.cur);
                     if state.next == '='{
                         chunk.push(state.next);
@@ -416,7 +441,7 @@ impl RustTokenizer{
                     }
                     return TokenType::Operator;
                 },
-                '-'=>{
+                '-' => {
                     chunk.push(state.cur);
                     if state.next == '>' || state.next == '='{
                         chunk.push(state.next);
@@ -424,7 +449,7 @@ impl RustTokenizer{
                     }
                     return TokenType::Operator;
                 },
-                '='=>{
+                '=' => {
                     chunk.push(state.cur);
                     if state.next == '>' || state.next == '=' {
                         chunk.push(state.next);
@@ -433,7 +458,7 @@ impl RustTokenizer{
                     
                     return TokenType::Operator;
                 },
-                '.'=>{
+                '.' => {
                     chunk.push(state.cur);
                     if state.next == '.' {
                         chunk.push(state.next);
@@ -441,7 +466,7 @@ impl RustTokenizer{
                     }
                     return TokenType::Operator;
                 },
-                ';'=>{
+                ';' => {
                     chunk.push(state.cur);
                     if state.next == '.' {
                         chunk.push(state.next);
@@ -449,7 +474,7 @@ impl RustTokenizer{
                     }
                     return TokenType::Delimiter;
                 },
-                '&'=>{
+                '&' => {
                     chunk.push(state.cur);
                     if state.next == '&' || state.next == '='{
                         chunk.push(state.next);
@@ -457,7 +482,7 @@ impl RustTokenizer{
                     }
                     return TokenType::Operator;
                 },
-                '|'=>{
+                '|' => {
                     chunk.push(state.cur);
                     if state.next == '|' || state.next == '='{
                         chunk.push(state.next);
@@ -465,7 +490,7 @@ impl RustTokenizer{
                     }
                     return TokenType::Operator;
                 },
-                '!'=>{
+                '!' => {
                     chunk.push(state.cur);
                     if state.next == '='{
                         chunk.push(state.next);
@@ -473,7 +498,7 @@ impl RustTokenizer{
                     }
                     return TokenType::Operator;
                 },
-                ','=>{
+                ',' => {
                     chunk.push(state.cur);
                     if state.next == '.' {
                         chunk.push(state.next);
@@ -481,24 +506,24 @@ impl RustTokenizer{
                     }
                     return TokenType::Delimiter;
                 },
-                '(' | '{' | '['=>{
+                '(' | '{' | '[' => {
                     chunk.push(state.cur);
                     return TokenType::ParenOpen;
                 },
-                ')' | '}' | ']'=>{
+                ')' | '}' | ']' => {
                     chunk.push(state.cur);
                     return TokenType::ParenClose;
                 },
-                '#'=>{
+                '#' => {
                     chunk.push(state.cur);
                     return TokenType::Hash;
                 },
-                '_'=>{
+                '_' => {
                     chunk.push(state.cur);
                     Self::parse_rust_ident_tail(state, chunk);
                     return TokenType::Identifier;
                 },
-                'a'...'z'=>{ // try to parse keywords or identifiers
+                'a'...'z' => {// try to parse keywords or identifiers
                     chunk.push(state.cur);
                     let mut keyword_type = Self::parse_rust_lc_keyword(state, chunk);
                     
@@ -506,49 +531,50 @@ impl RustTokenizer{
                         keyword_type = KeywordType::None;
                     }
                     match keyword_type{
-                        KeywordType::Normal=>{
+                        KeywordType::Normal => {
                             return TokenType::Keyword;
                         },
-                        KeywordType::Flow=>{
+                        KeywordType::Flow => {
                             return TokenType::Flow;
                             //self.code_editor.set_indent_color(self.code_editor.colors.indent_line_flow);
                         },
-                        KeywordType::BuiltinType=>{
+                        KeywordType::BuiltinType => {
                             return TokenType::Keyword;
                         },
-                        KeywordType::Fn=>{
-                             return TokenType::Fn;
-                             //self.code_editor.set_indent_color(self.code_editor.colors.indent_line_fn);
+                        KeywordType::Fn => {
+                            return TokenType::Fn;
+                            //self.code_editor.set_indent_color(self.code_editor.colors.indent_line_fn);
                         },
-                        KeywordType::Def=>{
+                        KeywordType::Def => {
                             return TokenType::Def;
                             //self.code_editor.set_indent_color(self.code_editor.colors.indent_line_def);
                         },
-                        KeywordType::Looping=>{
+                        KeywordType::Looping => {
                             return TokenType::Looping;
                             //self.code_editor.set_indent_color(self.code_editor.colors.indent_line_looping);
                         },
-                        KeywordType::For=>{
+                        KeywordType::For => {
                             // check if we are first on a line
-                            if token_chunks.len() < 2 || 
-                                token_chunks[token_chunks.len()-1].token_type == TokenType::Newline ||
-                                token_chunks[token_chunks.len()-2].token_type == TokenType::Newline && 
-                                token_chunks[token_chunks.len()-1].token_type == TokenType::Whitespace{
-                               return  TokenType::Looping;
+                            if token_chunks.len() < 2 ||
+                            token_chunks[token_chunks.len() - 1].token_type == TokenType::Newline ||
+                            token_chunks[token_chunks.len() - 2].token_type == TokenType::Newline &&
+                            token_chunks[token_chunks.len() - 1].token_type == TokenType::Whitespace{
+                                return TokenType::Looping;
                                 //self.code_editor.set_indent_color(self.code_editor.colors.indent_line_looping);
                             }
                             else{
-                                return  TokenType::Keyword;
-                               // self.code_editor.set_indent_color(self.code_editor.colors.indent_line_def);
+                                return TokenType::Keyword;
+                                // self.code_editor.set_indent_color(self.code_editor.colors.indent_line_def);
                             }
                         },
-                        KeywordType::None=>{
-                            if state.next == '!'{
-                                chunk.push(state.next);
-                                state.advance();
-                                return TokenType::Call;
-                            }
-                            else if state.next == '('{
+                        KeywordType::None => {
+                            //if state.next == '!'{
+                            // chunk.push(state.next);
+                            // state.advance();
+                            // return TokenType::Call;
+                            // }
+                            //else
+                            if state.next == '('{
                                 return TokenType::Call;
                             }
                             else{
@@ -557,7 +583,7 @@ impl RustTokenizer{
                         }
                     }
                 },
-                'A'...'Z'=>{
+                'A'...'Z' => {
                     chunk.push(state.cur);
                     let mut is_keyword = false;
                     if state.cur == 'S'{
@@ -569,24 +595,24 @@ impl RustTokenizer{
                         is_keyword = false;
                     }
                     if is_keyword{
-                        return  TokenType::Keyword;
+                        return TokenType::Keyword;
                     }
                     else{
-                        return  TokenType::TypeName;
+                        return TokenType::TypeName;
                         //if state.next == '{'{
-                        //    self.code_editor.set_indent_color(self.code_editor.colors.indent_line_def);                            
+                        // self.code_editor.set_indent_color(self.code_editor.colors.indent_line_def);
                         //}
                     }
                 },
-                _=>{
+                _ => {
                     chunk.push(state.cur);
-                    return  TokenType::Operator;
+                    return TokenType::Operator;
                 }
             }
         }
     }
-
-    fn parse_rust_ident_tail<'a>(state:&mut TokenizerState<'a>, chunk:&mut Vec<char>)->bool{
+    
+    fn parse_rust_ident_tail<'a>(state:&mut TokenizerState<'a>, chunk:&mut Vec<char>) -> bool{
         let mut ret = false;
         while state.next_is_digit() || state.next_is_letter() || state.next == '_' || state.next == '$'{
             ret = true;
@@ -595,8 +621,8 @@ impl RustTokenizer{
         }
         ret
     }
-
-    fn parse_rust_escape_char<'a>(state:&mut TokenizerState<'a>, chunk:&mut Vec<char>)->bool{
+    
+    fn parse_rust_escape_char<'a>(state:&mut TokenizerState<'a>, chunk:&mut Vec<char>) -> bool{
         if state.next == '\\'{
             chunk.push(state.next);
             state.advance();
@@ -626,7 +652,7 @@ impl RustTokenizer{
         return false
     }
     fn parse_rust_number_tail<'a>(state:&mut TokenizerState<'a>, chunk:&mut Vec<char>){
-        if state.next == 'x'{ // parse a hex number
+        if state.next == 'x'{// parse a hex number
             chunk.push(state.next);
             state.advance();
             while state.next_is_hex() || state.next == '_'{
@@ -634,10 +660,10 @@ impl RustTokenizer{
                 state.advance();
             }
         }
-        else if state.next == 'b'{ // parse a binary
+        else if state.next == 'b'{// parse a binary
             chunk.push(state.next);
             state.advance();
-            while state.next == '0' || state.next =='1' || state.next == '_'{
+            while state.next == '0' || state.next == '1' || state.next == '_'{
                 chunk.push(state.next);
                 state.advance();
             }
@@ -654,9 +680,9 @@ impl RustTokenizer{
                 }
                 else if state.keyword(chunk, "16"){
                 }
-                else if state.keyword(chunk,"32"){
+                else if state.keyword(chunk, "32"){
                 }
-                else if state.keyword(chunk,"64"){
+                else if state.keyword(chunk, "64"){
                 }
             }
             else if state.next == '.'{
@@ -667,204 +693,205 @@ impl RustTokenizer{
                     chunk.push(state.next);
                     state.advance();
                 }
-                if state.next == 'f' { // the f32, f64 postfix
+                if state.next == 'f' {// the f32, f64 postfix
                     chunk.push(state.next);
                     state.advance();
-                    if state.keyword(chunk,"32"){
+                    if state.keyword(chunk, "32"){
                     }
-                    else if state.keyword(chunk,"64"){
+                    else if state.keyword(chunk, "64"){
                     }
                 }
             }
         }
     }
-
-    fn parse_rust_lc_keyword<'a>(state:&mut TokenizerState<'a>, chunk:&mut Vec<char>)->KeywordType{
+    
+    fn parse_rust_lc_keyword<'a>(state:&mut TokenizerState<'a>, chunk:&mut Vec<char>) -> KeywordType{
         match state.cur{
-            'a'=>{
-                if state.keyword(chunk,"s"){
+            'a' => {
+                if state.keyword(chunk, "s"){
                     return KeywordType::Normal
                 }
             },
-            'b'=>{ 
-                if state.keyword(chunk,"reak"){
+            'b' => {
+                if state.keyword(chunk, "reak"){
                     return KeywordType::Flow
                 }
-                if state.keyword(chunk,"ool"){
+                if state.keyword(chunk, "ool"){
                     return KeywordType::BuiltinType
                 }
             },
-            'c'=>{
-                if state.keyword(chunk,"o"){
-                    if state.keyword(chunk,"nst"){
+            'c' => {
+                if state.keyword(chunk, "o"){
+                    if state.keyword(chunk, "nst"){
                         return KeywordType::Normal
                     }
-                    else if state.keyword(chunk,"ntinue"){
+                    else if state.keyword(chunk, "ntinue"){
                         return KeywordType::Flow
                     }
                 }
-                else if state.keyword(chunk,"rate"){
+                else if state.keyword(chunk, "rate"){
                     return KeywordType::Normal
                 }
-                else if state.keyword(chunk,"har"){
+                else if state.keyword(chunk, "har"){
                     return KeywordType::BuiltinType
                 }
             },
-            'e'=>{
-                if state.keyword(chunk,"lse"){
+            'e' => {
+                if state.keyword(chunk, "lse"){
                     return KeywordType::Flow
                 }
-                else if state.keyword(chunk,"num"){
+                else if state.keyword(chunk, "num"){
                     return KeywordType::Def
                 }
-                else if state.keyword(chunk,"xtern"){
+                else if state.keyword(chunk, "xtern"){
                     return KeywordType::Normal
                 }
             },
-            'f'=>{
-                if state.keyword(chunk,"alse"){
+            'f' => {
+                if state.keyword(chunk, "alse"){
                     return KeywordType::Normal
                 }
-                else if state.keyword(chunk,"n"){
+                else if state.keyword(chunk, "n"){
                     return KeywordType::Fn
                 }
-                else if state.keyword(chunk,"or"){
+                else if state.keyword(chunk, "or"){
                     return KeywordType::For
                 }
-                else if state.keyword(chunk,"32"){
+                else if state.keyword(chunk, "32"){
                     return KeywordType::BuiltinType
                 }
-                else if state.keyword(chunk,"64"){
+                else if state.keyword(chunk, "64"){
                     return KeywordType::BuiltinType
                 }
             },
-            'i'=>{
-                if state.keyword(chunk,"f"){
+            'i' => {
+                if state.keyword(chunk, "f"){
                     return KeywordType::Flow
                 }
-                else if state.keyword(chunk,"mpl"){
+                else if state.keyword(chunk, "mpl"){
                     return KeywordType::Def
                 }
-                else if state.keyword(chunk,"n"){
+                else if state.keyword(chunk, "n"){
                     return KeywordType::Normal
                 }
-                else if state.keyword(chunk,"8"){ 
+                else if state.keyword(chunk, "8"){
                     return KeywordType::BuiltinType
                 }
-                else if state.keyword(chunk,"16"){ 
+                else if state.keyword(chunk, "16"){
                     return KeywordType::BuiltinType
                 }
-                else if state.keyword(chunk,"32"){ 
+                else if state.keyword(chunk, "32"){
                     return KeywordType::BuiltinType
                 }
-                else if state.keyword(chunk,"64"){ 
+                else if state.keyword(chunk, "64"){
                     return KeywordType::BuiltinType
                 }
             },
-            'l'=>{
-                if state.keyword(chunk,"et"){
+            'l' => {
+                if state.keyword(chunk, "et"){
                     return KeywordType::Normal
                 }
-                else if state.keyword(chunk,"oop"){
+                else if state.keyword(chunk, "oop"){
                     return KeywordType::Looping
                 }
             },
-            'm'=>{
-                if state.keyword(chunk,"atch"){
+            'm' => {
+                if state.keyword(chunk, "atch"){
                     return KeywordType::Flow
                 }
-                else if state.keyword(chunk,"o"){
-                    if state.keyword(chunk,"d"){
+                else if state.keyword(chunk, "o"){
+                    if state.keyword(chunk, "d"){
                         return KeywordType::Normal
                     }
-                    else if state.keyword(chunk,"ve"){
+                    else if state.keyword(chunk, "ve"){
                         return KeywordType::Normal
                     }
                 }
-                else if state.keyword(chunk,"ut"){
+                else if state.keyword(chunk, "ut"){
                     return KeywordType::Normal
                 }
             },
-            'p'=>{ // pub
-                if state.keyword(chunk,"ub"){ 
+            'p' => {// pub
+                if state.keyword(chunk, "ub"){
                     return KeywordType::Normal
                 }
             },
-            'r'=>{
-                if state.keyword(chunk,"e"){
-                    if state.keyword(chunk,"f"){
+            'r' => {
+                if state.keyword(chunk, "e"){
+                    if state.keyword(chunk, "f"){
                         return KeywordType::Normal
                     }
-                    else if state.keyword(chunk,"turn"){
+                    else if state.keyword(chunk, "turn"){
                         return KeywordType::Flow
                     }
                 }
             },
-            's'=>{
-                if state.keyword(chunk,"elf"){
+            's' => {
+                if state.keyword(chunk, "elf"){
                     return KeywordType::Normal
                 }
-                if state.keyword(chunk,"uper"){
+                if state.keyword(chunk, "uper"){
                     return KeywordType::Normal
                 }
-                else if state.keyword(chunk,"t"){
-                    if state.keyword(chunk,"atic"){
+                else if state.keyword(chunk, "t"){
+                    if state.keyword(chunk, "atic"){
                         return KeywordType::Normal
                     }
-                    else if state.keyword(chunk,"ruct"){
+                    else if state.keyword(chunk, "ruct"){
                         return KeywordType::Def
                     }
                 }
             },
-            't'=>{
-                if state.keyword(chunk,"ype"){
+            't' => {
+                if state.keyword(chunk, "ype"){
                     return KeywordType::Normal
                 }
-                else if state.keyword(chunk,"r"){
-                    if state.keyword(chunk,"ait"){
+                else if state.keyword(chunk, "r"){
+                    if state.keyword(chunk, "ait"){
                         return KeywordType::Def
                     }
-                    else if state.keyword(chunk,"ue"){
+                    else if state.keyword(chunk, "ue"){
                         return KeywordType::Normal
                     }
                 }
             },
-            'u'=>{ // use
-                if state.keyword(chunk,"se"){ 
+            'u' => {// use
+                if state.keyword(chunk, "se"){
                     return KeywordType::Normal
                 }
-                else if state.keyword(chunk,"nsafe"){ 
+                else if state.keyword(chunk, "nsafe"){
                     return KeywordType::Normal
                 }
-                else if state.keyword(chunk,"8"){ 
+                else if state.keyword(chunk, "8"){
                     return KeywordType::BuiltinType
                 }
-                else if state.keyword(chunk,"16"){ 
+                else if state.keyword(chunk, "16"){
                     return KeywordType::BuiltinType
                 }
-                else if state.keyword(chunk,"32"){ 
+                else if state.keyword(chunk, "32"){
                     return KeywordType::BuiltinType
                 }
-                else if state.keyword(chunk,"64"){ 
+                else if state.keyword(chunk, "64"){
                     return KeywordType::BuiltinType
                 }
             },
-            'w'=>{ // use
-                if state.keyword(chunk,"h"){
-                    if state.keyword(chunk,"ere"){
+            'w' => {// use
+                if state.keyword(chunk, "h"){
+                    if state.keyword(chunk, "ere"){
                         return KeywordType::Normal
                     }
-                    else if state.keyword(chunk,"ile"){
+                    else if state.keyword(chunk, "ile"){
                         return KeywordType::Looping
                     }
                 }
-            }, 
-            _=>{}
-        }     
+            },
+            
+            _ => {}
+        }
         KeywordType::None
     }
 }
-    
+
 
 
 enum KeywordType{

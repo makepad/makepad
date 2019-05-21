@@ -25,7 +25,9 @@ struct App{
     app_state: AppState,
     file_tree: FileTree,
     
-    file_editors: Elements<u64, FileEditor, FileEditorTemplates>,
+    file_editors: Elements<u64,
+    FileEditor,
+    FileEditorTemplates>,
     file_editor_id_alloc: u64,
     
     rust_compiler: RustCompiler,
@@ -239,7 +241,7 @@ impl App{
         
         // handle the dock events
         match self.dock.handle_dock(cx, event, &mut self.app_state.dock_items){
-            DockEvent::DockChanged => { // thats a bit bland event. lets let the thing know which file closed
+            DockEvent::DockChanged => {// thats a bit bland event. lets let the thing know which file closed
             },
             _ => ()
         }
@@ -298,7 +300,8 @@ impl App{
                         match &tab.item{
                             Panel::FileEditor{path, editor_id} => {
                                 if *path == file_path{
-                                    *current = id; // focus this one
+                                    *current = id;
+                                    // focus this one
                                     // set the keyboard focus
                                     if let Some(file_editor) = &mut self.file_editors.get(*editor_id){
                                         file_editor.set_key_focus(cx);
@@ -307,7 +310,7 @@ impl App{
                                     cx.redraw_area(Area::All);
                                 }
                             },
-                            Panel::FileEditorTarget => { // found the editor target
+                            Panel::FileEditorTarget => {// found the editor target
                                 target_ctrl_id = ctrl_id;
                             },
                             _ => ()
@@ -318,7 +321,7 @@ impl App{
             }
             ctrl_id += 1;
         }
-        if target_ctrl_id != 0 && !only_focus_editor{ // open a new one
+        if target_ctrl_id != 0 && !only_focus_editor{// open a new one
             let new_tab = self.new_file_editor_tab(file_path);
             let mut dock_walker = self.dock.walker(&mut self.app_state.dock_items);
             let mut ctrl_id = 1;

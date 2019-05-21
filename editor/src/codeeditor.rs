@@ -1341,6 +1341,7 @@ impl CodeEditor{
                 TokenType::Namespace=> self.colors.operator,
                 TokenType::Hash=> self.colors.operator,
                 TokenType::Delimiter=> self.colors.delimiter,
+                TokenType::Colon=> self.colors.delimiter,
                 TokenType::Block=>self.colors.operator,
                 TokenType::Eof=>self.colors.unexpected,
                 TokenType::Unexpected=>self.colors.unexpected
