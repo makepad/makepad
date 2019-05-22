@@ -37,7 +37,7 @@ impl Cx{
         read_id
     }
 
-    pub fn write_file(&mut self, path:&str, data:Vec<u8>)->u64{
+    pub fn write_file(&mut self, path:&str, data:&[u8])->u64{
         // just write it right now
         if let Ok(mut file) = File::create(path){
             if let Ok(_) = file.write_all(&data){

@@ -89,7 +89,7 @@ pub struct CodeEditorColors {
     pub bg: Color,
     pub indent_line_unknown: Color,
     pub indent_line_fn: Color,
-    pub indent_line_def: Color,
+    pub indent_line_typedef: Color,
     pub indent_line_looping: Color,
     pub indent_line_flow: Color,
     pub selection: Color,
@@ -124,8 +124,8 @@ pub struct CodeEditorColors {
 }
 
 impl ElementLife for CodeEditor {
-    fn construct(&mut self, _cx: &mut Cx) { }
-    fn destruct(&mut self, _cx: &mut Cx) { }
+    fn construct(&mut self, _cx: &mut Cx) {}
+    fn destruct(&mut self, _cx: &mut Cx) {}
 }
 
 impl Style for CodeEditor {
@@ -144,7 +144,7 @@ impl Style for CodeEditor {
                 bg: color256(30, 30, 30),
                 indent_line_unknown: color("#5"),
                 indent_line_fn: color256(220, 220, 174),
-                indent_line_def: color256(91, 155, 211),
+                indent_line_typedef: color256(91, 155, 211),
                 indent_line_looping: color("darkorange"),
                 indent_line_flow: color256(196, 133, 190),
                 selection: color256(42, 78, 117),
@@ -238,7 +238,7 @@ impl Style for CodeEditor {
                 width: Bounds::Fill,
                 height: Bounds::Fill,
                 margin: Margin::all(0.),
-                padding: Padding { l: 4.0, t: 4.0, r: 4.0, b: 4.0 },
+                padding: Padding {l: 4.0, t: 4.0, r: 4.0, b: 4.0},
                 ..Default::default()
             },
             text: Text {
@@ -255,7 +255,7 @@ impl Style for CodeEditor {
             line_number_width: 45.,
             cursor_blink_speed: 0.5,
             top_padding: 27.,
-            _hit_state: HitState { no_scrolling: true, ..Default::default() },
+            _hit_state: HitState {no_scrolling: true, ..Default::default()},
             _monospace_size: Vec2::zero(),
             _monospace_base: Vec2::zero(),
             _last_finger_move: None,
@@ -331,7 +331,7 @@ impl CodeEditor {
     
     pub fn def_indent_lines_shader(cx: &mut Cx) -> Shader {
         let mut sh = Quad::def_quad_shader(cx);
-        sh.add_ast(shader_ast ! ({
+        sh.add_ast(shader_ast !({
             let indent_id: float<Instance>;
             let indent_sel: float<Uniform>;
             fn pixel() -> vec4 {
@@ -355,7 +355,7 @@ impl CodeEditor {
     
     pub fn def_cursor_shader(cx: &mut Cx) -> Shader {
         let mut sh = Quad::def_quad_shader(cx);
-        sh.add_ast(shader_ast ! ({
+        sh.add_ast(shader_ast !({
             let blink: float<Uniform>;
             fn pixel() -> vec4 {
                 if blink<0.5 {
@@ -371,7 +371,7 @@ impl CodeEditor {
     
     pub fn def_selection_shader(cx: &mut Cx) -> Shader {
         let mut sh = Quad::def_quad_shader(cx);
-        sh.add_ast(shader_ast ! ({
+        sh.add_ast(shader_ast !({
             let prev_x: float<Instance>;
             let prev_w: float<Instance>;
             let next_x: float<Instance>;
@@ -379,14 +379,14 @@ impl CodeEditor {
             const gloopiness: float = 8.;
             const border_radius: float = 2.;
             
-            fn vertex() -> vec4 {  // custom vertex shader because we widen the draweable area a bit for the gloopiness
+            fn vertex() -> vec4 { // custom vertex shader because we widen the draweable area a bit for the gloopiness
                 let shift: vec2 = - draw_list_scroll * draw_list_do_scroll;
                 let clipped: vec2 = clamp(
                     geom * vec2(w + 16., h) + vec2(x, y) + shift - vec2(8., 0.),
                     draw_list_clip.xy,
                     draw_list_clip.zw
                 );
-                pos = (clipped - shift - vec2(x, y)) / vec2(w, h);
+                pos =(clipped - shift - vec2(x, y)) / vec2(w, h);
                 return vec4(clipped, 0., 1.) * camera_projection;
             }
             
@@ -525,7 +525,7 @@ impl CodeEditor {
                 3 => {
                     if let Some(chunk) = TextCursorSet::get_nearest_token_chunk(offset, &self.token_chunks) {
                         self.cursors.set_last_clamp_range((chunk.offset, chunk.len));
-                        let (start, _len) = text_buffer.get_nearest_line_range(offset);
+                        let(start, _len) = text_buffer.get_nearest_line_range(offset);
                         let mut chunk_offset = chunk.offset;
                         let mut chunk_len = chunk.len;
                         if start < chunk_offset {
@@ -540,7 +540,7 @@ impl CodeEditor {
                     }
                 },
                 _ => {
-                    let range = (0, text_buffer.calc_char_count());
+                    let range =(0, text_buffer.calc_char_count());
                     self.cursors.set_last_clamp_range(range);
                 }
             }
@@ -548,16 +548,16 @@ impl CodeEditor {
         }
         
         if fe.modifiers.shift {
-            if fe.modifiers.logo || fe.modifiers.control {  // grid select
+            if fe.modifiers.logo || fe.modifiers.control { // grid select
                 let pos = self.compute_grid_text_pos_from_abs(cx, fe.abs);
                 self._grid_select_corner = Some(self.cursors.grid_select_corner(pos, text_buffer));
                 self.cursors.grid_select(self._grid_select_corner.unwrap(), pos, text_buffer);
             }
-            else {  // simply place selection
+            else { // simply place selection
                 self.cursors.clear_and_set_last_cursor_head(offset, text_buffer);
             }
         }
-        else {  // cursor drag with possible add
+        else { // cursor drag with possible add
             if fe.modifiers.logo || fe.modifiers.control {
                 self.cursors.add_last_cursor_head_and_tail(offset, text_buffer);
             }
@@ -634,7 +634,7 @@ impl CodeEditor {
                 true
             },
             KeyCode::ArrowLeft => {
-                if ke.modifiers.logo || ke.modifiers.control {  // token skipping
+                if ke.modifiers.logo || ke.modifiers.control { // token skipping
                     self.cursors.move_left_nearest_token(ke.modifiers.shift, &self.token_chunks, text_buffer)
                 }
                 else {
@@ -643,7 +643,7 @@ impl CodeEditor {
                 true
             },
             KeyCode::ArrowRight => {
-                if ke.modifiers.logo || ke.modifiers.control {  // token skipping
+                if ke.modifiers.logo || ke.modifiers.control { // token skipping
                     self.cursors.move_right_nearest_token(ke.modifiers.shift, &self.token_chunks, text_buffer)
                 }
                 else {
@@ -678,11 +678,11 @@ impl CodeEditor {
             },
             KeyCode::KeyZ => {
                 if ke.modifiers.logo || ke.modifiers.control {
-                    if ke.modifiers.shift {  // redo
+                    if ke.modifiers.shift { // redo
                         text_buffer.redo(true, &mut self.cursors);
                         true
                     }
-                    else {  // undo
+                    else { // undo
                         text_buffer.undo(true, &mut self.cursors);
                         true
                     }
@@ -691,8 +691,8 @@ impl CodeEditor {
                     false
                 }
             },
-            KeyCode::KeyX => {  // cut, the actual copy comes from the TextCopy event from the platform layer
-                if ke.modifiers.logo || ke.modifiers.control {  // cut
+            KeyCode::KeyX => { // cut, the actual copy comes from the TextCopy event from the platform layer
+                if ke.modifiers.logo || ke.modifiers.control { // cut
                     self.cursors.replace_text("", text_buffer);
                     true
                 }
@@ -700,8 +700,8 @@ impl CodeEditor {
                     false
                 }
             },
-            KeyCode::KeyA => {  // select all
-                if ke.modifiers.logo || ke.modifiers.control {  // cut
+            KeyCode::KeyA => { // select all
+                if ke.modifiers.logo || ke.modifiers.control { // cut
                     self.cursors.select_all(text_buffer);
                     // don't scroll!
                     self.view.redraw_view_area(cx);
@@ -844,7 +844,7 @@ impl CodeEditor {
                                 KeyCode::Alt => {
                                     self.start_code_folding(cx, text_buffer, text_buffer.keyboard.modifiers.shift);
                                 },
-                                _ => ()
+                                _ =>()
                             }
                         }
                         if let Some(key_up) = &text_buffer.keyboard.key_up {
@@ -852,14 +852,14 @@ impl CodeEditor {
                                 KeyCode::Alt => {
                                     self.start_code_unfolding(cx, text_buffer);
                                 },
-                                _ => ()
+                                _ =>()
                             }
                         }
                     },
-                    _ => ()
+                    _ =>()
                 }
             },
-            _ => ()
+            _ =>()
         }
         // editor local
         match event.hits(cx, self._bg_area, &mut self._hit_state) {
@@ -881,7 +881,7 @@ impl CodeEditor {
                 self.handle_finger_move(cx, &fe, text_buffer);
             },
             Event::KeyDown(ke) => {
-                if ke.key_code == KeyCode::Return && (ke.modifiers.logo || ke.modifiers.control) {
+                if ke.key_code == KeyCode::Return &&(ke.modifiers.logo || ke.modifiers.control) {
                     return CodeEditorEvent::AutoFormat
                 }
                 self.handle_key_down(cx, &ke, text_buffer);
@@ -894,20 +894,20 @@ impl CodeEditor {
                     KeyCode::Escape => {
                         self.start_code_unfolding(cx, text_buffer);
                     }
-                    _ => (),
+                    _ =>(),
                 }
                 self.reset_cursor_blinker(cx);
             },
             Event::TextInput(te) => {
                 self.handle_text_input(cx, &te, text_buffer);
             },
-            Event::TextCopy(_) => match event {  // access the original event
+            Event::TextCopy(_) => match event { // access the original event
                 Event::TextCopy(req) => {
                     req.response = Some(self.cursors.get_all_as_string(text_buffer));
                 },
-                _ => ()
+                _ =>()
             },
-            _ => ()
+            _ =>()
         };
         CodeEditorEvent::None
     }
@@ -921,14 +921,14 @@ impl CodeEditor {
         self.reset_cursor_blinker(cx);
     }
     
-    pub fn begin_code_editor(&mut self, cx: &mut Cx, text_buffer: &TextBuffer) -> Result<(), ()> {
+    pub fn begin_code_editor(&mut self, cx: &mut Cx, text_buffer: &TextBuffer) -> Result<(),()> {
         // adjust dilation based on DPI factor
-        self.view.begin_view(cx, &Layout { ..Default::default() }) ?;
+        self.view.begin_view(cx, &Layout {..Default::default()}) ?;
         
         // copy over colors
         self._last_indent_color = self.colors.indent_line_unknown;
         self.bg.color = self.colors.bg;
-        self.selection.color = if self.has_key_focus(cx) { self.colors.selection }else { self.colors.selection_defocus };
+        self.selection.color = if self.has_key_focus(cx) {self.colors.selection}else {self.colors.selection_defocus};
         //self.select_highlight.color = self.colors.highlight;
         self.token_highlight.color = self.colors.highlight;
         self.cursor.color = self.colors.cursor;
@@ -947,7 +947,7 @@ impl CodeEditor {
             return Err(())
         }
         else {
-            let bg_inst = self.bg.draw_quad(cx, Rect { x: 0., y: 0., w: cx.get_width_total(), h: cx.get_height_total() });
+            let bg_inst = self.bg.draw_quad(cx, Rect {x: 0., y: 0., w: cx.get_width_total(), h: cx.get_height_total()});
             let bg_area = bg_inst.into_area();
             cx.update_area_refs(self._bg_area, bg_area);
             self._bg_area = bg_area;
@@ -1037,7 +1037,7 @@ impl CodeEditor {
             let mut ypos_at_line = ypos;
             let focus_line = self._anim_folding.focussed_line;
             if focus_line < self._line_geometry.len() {
-                for (line, geom) in self._line_geometry.iter().enumerate() {
+                for(line, geom) in self._line_geometry.iter().enumerate() {
                     if focus_line == line {
                         ypos_at_line = ypos;
                     }
@@ -1051,7 +1051,7 @@ impl CodeEditor {
                 ypos += self._final_fill_height;
                 let dy = self._line_geometry[focus_line].walk.y - ypos_at_line;
                 let sv = self.view.get_scroll_view_total();
-                self.view.set_scroll_view_total(cx, Vec2 { x: sv.x, y: ypos });
+                self.view.set_scroll_view_total(cx, Vec2 {x: sv.x, y: ypos});
                 let scroll_pos = self.view.get_scroll_pos(cx);
                 self.view.set_scroll_pos(cx, Vec2 {
                     x: scroll_pos.x,
@@ -1077,7 +1077,7 @@ impl CodeEditor {
             walk: cx.get_rel_turtle_walk(),
             font_size: self._line_largest_font,
             was_folded: self._line_was_folded,
-            indent_id: if let Some((_, id)) = self._indent_stack.last() { *id }else { 0. }
+            indent_id: if let Some((_, id)) = self._indent_stack.last() {*id}else {0.}
         };
         
         // draw a linenumber if we are visible
@@ -1090,7 +1090,7 @@ impl CodeEditor {
             let mut scale = 10000;
             let mut fill = false;
             loop {
-                let digit = ((line_num / scale) % 10) as u8;
+                let digit =((line_num / scale) % 10) as u8;
                 if digit != 0 {
                     fill = true;
                 }
@@ -1113,7 +1113,7 @@ impl CodeEditor {
             }
             let origin = cx.get_turtle_origin();
             let chunk_width = self._monospace_size.x * 5.0;
-            self.text.add_text(cx, origin.x + (self.line_number_width - chunk_width - 10.), origin.y + line_geom.walk.y, 0, self._line_number_inst.as_mut().unwrap(), chunk, | _, _, _, _ | { 0. });
+            self.text.add_text(cx, origin.x +(self.line_number_width - chunk_width - 10.), origin.y + line_geom.walk.y, 0, self._line_number_inst.as_mut().unwrap(), chunk, | _, _, _, _ | {0.});
         }
         
         // newline with minheight
@@ -1138,7 +1138,7 @@ impl CodeEditor {
                         break;
                     }
                 }
-                if found {  // output a rect
+                if found { // output a rect
                     let origin = cx.get_turtle_origin();
                     let min_x = self._line_chunk[bp].0;
                     let max_x = self._line_chunk[bp + hl_len].0;
@@ -1164,8 +1164,8 @@ impl CodeEditor {
         let tab_fixed_width = self._monospace_base.x * 4. * self.open_font_size;
         let mut off = self.line_number_width;
         for i in 0..tabs {
-            let (indent_color, indent_id) = if i < self._indent_stack.len() { self._indent_stack[i] }else { (self.colors.indent_line_unknown, 0.) };
-            let tab_width = if i < self._anim_folding.depth { tab_fixed_width }else { tab_variable_width };
+            let(indent_color, indent_id) = if i < self._indent_stack.len() {self._indent_stack[i]}else {(self.colors.indent_line_unknown, 0.)};
+            let tab_width = if i < self._anim_folding.depth {tab_fixed_width}else {tab_variable_width};
             self.indent_lines.color = indent_color;
             let inst = self.indent_lines.draw_quad(cx, Rect {
                 x: off,
@@ -1209,7 +1209,7 @@ impl CodeEditor {
                     // lets change the fontsize
                     if tabs >= self._anim_folding.depth || next_char == '\n' {
                         // ok lets think. we need to move it over by the delta of 8 spaces * _anim_font_size
-                        let dx = (self._monospace_base.x * self.open_font_size * 4. * (self._anim_folding.depth as f32)) - (self._monospace_base.x * self._anim_font_size * 4. * (self._anim_folding.depth as f32));
+                        let dx =(self._monospace_base.x * self.open_font_size * 4. *(self._anim_folding.depth as f32)) -(self._monospace_base.x * self._anim_font_size * 4. *(self._anim_folding.depth as f32));
                         cx.move_turtle(dx, 0.0);
                         self._line_was_folded = true;
                         self._anim_font_size
@@ -1240,18 +1240,18 @@ impl CodeEditor {
                 TokenType::Looping => {
                     self._last_indent_color = self.colors.indent_line_looping;
                 },
-                TokenType::Def => {
-                    self._last_indent_color = self.colors.indent_line_def;
+                TokenType::TypeDef => {
+                    self._last_indent_color = self.colors.indent_line_typedef;
                 },
                 TokenType::Fn => {
                     self._last_indent_color = self.colors.indent_line_fn;
                 }
-                _ => ()
+                _ =>()
             }
         }
         // lets check if the geom is visible
         if let Some(geom) = cx.walk_turtle_text(
-            self._monospace_size.x * (chunk.len() as f32),
+            self._monospace_size.x *(chunk.len() as f32),
             
             self._monospace_size.y,
             self._scroll_pos
@@ -1285,13 +1285,14 @@ impl CodeEditor {
                 },
                 TokenType::BuiltinType=> self.colors.keyword,
                 TokenType::Keyword=> self.colors.keyword,
+                TokenType::Bool=>self.colors.keyword,
                 TokenType::Flow => {
                     self.colors.flow
                 }
                 TokenType::Looping => {
                     self.colors.looping
                 }
-                TokenType::Def => {
+                TokenType::TypeDef => {
                     self.colors.keyword
                 }
                 TokenType::Fn => {
@@ -1351,7 +1352,6 @@ impl CodeEditor {
                 TokenType::Delimiter=> self.colors.delimiter,
                 TokenType::Colon=> self.colors.delimiter,
                 TokenType::Splat=> self.colors.operator,
-                TokenType::Block => self.colors.operator,
                 TokenType::Eof => self.colors.unexpected,
                 TokenType::Unexpected => self.colors.unexpected
             };
@@ -1369,7 +1369,7 @@ impl CodeEditor {
             let height = self._monospace_size.y;
             
             // actually generate the GPU data for the text
-            if self._highlight_selection.len() > 0 {  // slow loop
+            if self._highlight_selection.len() > 0 { // slow loop
                 //let draw_search = &mut self._draw_search;
                 let line_chunk = &mut self._line_chunk;
                 self.text.add_text(cx, geom.x, geom.y, offset, self._text_inst.as_mut().unwrap(), &chunk, | ch, offset, x, w | {
@@ -1379,7 +1379,7 @@ impl CodeEditor {
                     draw_cursors.mark_text_with_cursor(cursors, ch, offset, x, geom.y, w, height, last_cursor, mark_spaces)
                 });
             }
-            else {  // fast loop
+            else { // fast loop
                 self.text.add_text(cx, geom.x, geom.y, offset, self._text_inst.as_mut().unwrap(), &chunk, | ch, offset, x, w | {
                     draw_messages.mark_text_select_only(message_cursors, offset, x, geom.y, w, height);
                     draw_cursors.mark_text_with_cursor(cursors, ch, offset, x, geom.y, w, height, last_cursor, mark_spaces)
@@ -1419,7 +1419,7 @@ impl CodeEditor {
         let marked = if let Some(pos) = self.cursors.get_last_cursor_singular() {
             pos == offset || pos == offset + 1 && next_char != '(' && next_char != '{' && next_char != '['
         }
-        else { false };
+        else {false};
         
         self._paren_stack.push(ParenItem {
             pair_start: self.token_chunks.len(),
@@ -1535,7 +1535,7 @@ impl CodeEditor {
         if self.has_key_focus(cx) {
             let origin = cx.get_turtle_origin();
             for rc in &self._draw_cursors.cursors {
-                let inst = self.cursor.draw_quad(cx, Rect { x: rc.x - origin.x, y: rc.y - origin.y, w: rc.w, h: rc.h });
+                let inst = self.cursor.draw_quad(cx, Rect {x: rc.x - origin.x, y: rc.y - origin.y, w: rc.w, h: rc.h});
                 if inst.need_uniforms_now(cx) {
                     inst.push_uniform_float(cx, self._cursor_blink_flipflop);
                     //blink
@@ -1556,7 +1556,7 @@ impl CodeEditor {
                 TextBufferMessageLevel::Error => self.colors.marker_error,
                 TextBufferMessageLevel::Log => self.colors.marker_log,
             };
-            self.message_marker.draw_quad(cx, Rect { x: mark.rc.x - origin.x, y: mark.rc.y - origin.y, w: mark.rc.w, h: mark.rc.h });
+            self.message_marker.draw_quad(cx, Rect {x: mark.rc.x - origin.x, y: mark.rc.y - origin.y, w: mark.rc.w, h: mark.rc.h});
         }
     }
     
@@ -1567,26 +1567,26 @@ impl CodeEditor {
         for i in 0..sel.len() {
             let cur = &sel[i];
             
-            let mk_inst = self.selection.draw_quad(cx, Rect { x: cur.rc.x - origin.x, y: cur.rc.y - origin.y, w: cur.rc.w, h: cur.rc.h });
+            let mk_inst = self.selection.draw_quad(cx, Rect {x: cur.rc.x - origin.x, y: cur.rc.y - origin.y, w: cur.rc.w, h: cur.rc.h});
             
             // do we have a prev?
             if i > 0 && sel[i - 1].index == cur.index {
                 let p_rc = &sel[i - 1].rc;
-                mk_inst.push_vec2(cx, Vec2 { x: p_rc.x - cur.rc.x, y: p_rc.w });
+                mk_inst.push_vec2(cx, Vec2 {x: p_rc.x - cur.rc.x, y: p_rc.w});
                 // prev_x, prev_w
             }
             else {
-                mk_inst.push_vec2(cx, Vec2 { x: 0., y: - 1. });
+                mk_inst.push_vec2(cx, Vec2 {x: 0., y: - 1.});
                 // prev_x, prev_w
             }
             // do we have a next
             if i < sel.len() - 1 && sel[i + 1].index == cur.index {
                 let n_rc = &sel[i + 1].rc;
-                mk_inst.push_vec2(cx, Vec2 { x: n_rc.x - cur.rc.x, y: n_rc.w });
+                mk_inst.push_vec2(cx, Vec2 {x: n_rc.x - cur.rc.x, y: n_rc.w});
                 // prev_x, prev_w
             }
             else {
-                mk_inst.push_vec2(cx, Vec2 { x: 0., y: - 1. });
+                mk_inst.push_vec2(cx, Vec2 {x: 0., y: - 1.});
                 // prev_x, prev_w
             }
         }
@@ -1640,13 +1640,13 @@ impl CodeEditor {
             let mut anim_select_any = false;
             for i in 0..sel.len() {
                 let cur = &mut sel[i];
-                let start_time = if self._select_scroll.is_none() && !self._last_finger_move.is_none() { 1. }else { 0. };
+                let start_time = if self._select_scroll.is_none() && !self._last_finger_move.is_none() {1.}else {0.};
                 // silly selection animation start
                 if i < self._anim_select.len() && cur.rc.y < self._anim_select[i].ypos {
                     // insert new one at the top
-                    self._anim_select.insert(i, AnimSelect { time: start_time, invert: true, ypos: cur.rc.y });
+                    self._anim_select.insert(i, AnimSelect {time: start_time, invert: true, ypos: cur.rc.y});
                 }
-                let (wtime, htime, invert) = if i < self._anim_select.len() {
+                let(wtime, htime, invert) = if i < self._anim_select.len() {
                     let len = self._anim_select.len() - 1;
                     let anim = &mut self._anim_select[i];
                     anim.ypos = cur.rc.y;
@@ -1659,16 +1659,16 @@ impl CodeEditor {
                         anim_select_any = true;
                     }
                     if i == len {
-                        (anim.time, anim.time, i == 0 && anim.invert)
+                       (anim.time, anim.time, i == 0 && anim.invert)
                     }
                     else {
-                        (anim.time, 0., i == 0 && anim.invert)
+                       (anim.time, 0., i == 0 && anim.invert)
                     }
                 }
                 else {
-                    self._anim_select.push(AnimSelect { time: start_time, invert: i == 0, ypos: cur.rc.y });
+                    self._anim_select.push(AnimSelect {time: start_time, invert: i == 0, ypos: cur.rc.y});
                     anim_select_any = true;
-                    (start_time, start_time, false)
+                   (start_time, start_time, false)
                 };
                 let wtime = 1.0 - wtime as f32;
                 let htime = 1.0 - htime as f32;
@@ -1678,7 +1678,7 @@ impl CodeEditor {
                     cur.rc.h = cur.rc.h * htime;
                 }
                 else {
-                    cur.rc.x = cur.rc.x + (cur.rc.w * (1. - wtime));
+                    cur.rc.x = cur.rc.x +(cur.rc.w *(1. - wtime));
                     cur.rc.w = cur.rc.w * wtime;
                     cur.rc.h = cur.rc.h * htime;
                 }
@@ -1695,7 +1695,7 @@ impl CodeEditor {
         if let Some(indent_inst) = self._indent_line_inst {
             let indent_id = if self.cursors.is_last_cursor_singular() && self._last_cursor_pos.row < self._line_geometry.len() {
                 self._line_geometry[self._last_cursor_pos.row].indent_id
-            }else { 0. };
+            }else {0.};
             indent_inst.clone().into_area().write_uniform_float(cx, "indent_sel", indent_id);
         }
     }
@@ -1713,7 +1713,7 @@ impl CodeEditor {
     fn scroll_last_cursor_visible(&mut self, cx: &mut Cx, text_buffer: &TextBuffer, height_pad: f32) {
         // so we have to compute (approximately) the rect of our cursor
         if self.cursors.last_cursor >= self.cursors.set.len() {
-            panic ! ("LAST CURSOR INVALID");
+            panic !("LAST CURSOR INVALID");
         }
         
         let pos = self.cursors.get_last_cursor_text_pos(text_buffer);
@@ -1722,10 +1722,10 @@ impl CodeEditor {
         let row = pos.row.min(self._line_geometry.len() - 1);
         if row < self._line_geometry.len() {
             let geom = &self._line_geometry[row];
-            let mono_size = Vec2 { x: self._monospace_base.x * geom.font_size, y: self._monospace_base.y * geom.font_size };
+            let mono_size = Vec2 {x: self._monospace_base.x * geom.font_size, y: self._monospace_base.y * geom.font_size};
             //self.text.get_monospace_size(cx, geom.font_size);
             let rect = Rect {
-                x: (pos.col as f32) * mono_size.x + self.line_number_width,
+                x:(pos.col as f32) * mono_size.x + self.line_number_width,
                 y: geom.walk.y - mono_size.y * 1. - 0.5 * height_pad,
                 w: mono_size.x * 4.,
                 h: mono_size.y * 4. + height_pad
@@ -1739,39 +1739,39 @@ impl CodeEditor {
         //
         let rel = self._bg_area.abs_to_rel_scrolled(cx, abs);
         let mut mono_size = Vec2::zero();
-        for (row, geom) in self._line_geometry.iter().enumerate() {
+        for(row, geom) in self._line_geometry.iter().enumerate() {
             //let geom = &self._line_geometry[pos.row];
-            mono_size = Vec2 { x: self._monospace_base.x * geom.font_size, y: self._monospace_base.y * geom.font_size };
-            if rel.y < geom.walk.y || rel.y >= geom.walk.y && rel.y <= geom.walk.y + mono_size.y {  // its on the right line
-                let col = ((rel.x - self.line_number_width).max(0.) / mono_size.x) as usize;
+            mono_size = Vec2 {x: self._monospace_base.x * geom.font_size, y: self._monospace_base.y * geom.font_size};
+            if rel.y < geom.walk.y || rel.y >= geom.walk.y && rel.y <= geom.walk.y + mono_size.y { // its on the right line
+                let col =((rel.x - self.line_number_width).max(0.) / mono_size.x) as usize;
                 // do a dumb calc
-                return TextPos { row: row, col: col };
+                return TextPos {row: row, col: col};
             }
         }
         // otherwise the file is too short, lets use the last line
-        TextPos { row: self._line_geometry.len() - 1, col: (rel.x.max(0.) / mono_size.x) as usize }
+        TextPos {row: self._line_geometry.len() - 1, col:(rel.x.max(0.) / mono_size.x) as usize}
     }
     
     fn compute_offset_from_ypos(&mut self, cx: &Cx, ypos_abs: f32, text_buffer: &TextBuffer, end: bool) -> usize {
-        let rel = self._bg_area.abs_to_rel_scrolled(cx, Vec2 { x: 0.0, y: ypos_abs });
+        let rel = self._bg_area.abs_to_rel_scrolled(cx, Vec2 {x: 0.0, y: ypos_abs});
         let mut mono_size;
         // = Vec2::zero();
-        let end_col = if end { 1<<31 }else { 0 };
-        for (row, geom) in self._line_geometry.iter().enumerate() {
+        let end_col = if end {1<<31}else {0};
+        for(row, geom) in self._line_geometry.iter().enumerate() {
             //let geom = &self._line_geometry[pos.row];
-            mono_size = Vec2 { x: self._monospace_base.x * geom.font_size, y: self._monospace_base.y * geom.font_size };
-            if rel.y < geom.walk.y || rel.y >= geom.walk.y && rel.y <= geom.walk.y + mono_size.y {  // its on the right line
-                return text_buffer.text_pos_to_offset(TextPos { row: row, col: end_col })
+            mono_size = Vec2 {x: self._monospace_base.x * geom.font_size, y: self._monospace_base.y * geom.font_size};
+            if rel.y < geom.walk.y || rel.y >= geom.walk.y && rel.y <= geom.walk.y + mono_size.y { // its on the right line
+                return text_buffer.text_pos_to_offset(TextPos {row: row, col: end_col})
             }
         }
-        return text_buffer.text_pos_to_offset(TextPos { row: self._line_geometry.len() - 1, col: end_col })
+        return text_buffer.text_pos_to_offset(TextPos {row: self._line_geometry.len() - 1, col: end_col})
     }
     
     fn start_code_folding(&mut self, cx: &mut Cx, text_buffer: &TextBuffer, halfway: bool) {
         // start code folding anim
         let speed = 0.98;
-        self._anim_folding.depth = if halfway { 1 }else { 2 };
-        self._anim_folding.zoom_scale = if halfway { 0.5 }else { 1. };
+        self._anim_folding.depth = if halfway {1}else {2};
+        self._anim_folding.zoom_scale = if halfway {0.5}else {1.};
         //if halfway{9.0} else{1.0};
         self._anim_folding.state.do_folding(speed, 0.95);
         self._anim_folding.focussed_line = self.compute_focussed_line_for_folding(cx, text_buffer);
@@ -1801,19 +1801,19 @@ impl CodeEditor {
         };
         let delta = Vec2 {
             x: if fe.abs.x < rect.x {
-                - ((rect.x - fe.abs.x) * pow_scale).powf(pow_fac).min(max_speed)
+                -((rect.x - fe.abs.x) * pow_scale).powf(pow_fac).min(max_speed)
             }
             else if fe.abs.x > rect.x + rect.w {
-                ((fe.abs.x - (rect.x + rect.w)) * pow_scale).powf(pow_fac).min(max_speed)
+               ((fe.abs.x -(rect.x + rect.w)) * pow_scale).powf(pow_fac).min(max_speed)
             }
             else {
                 0.
             },
             y: if fe.abs.y < rect.y {
-                - ((rect.y - fe.abs.y) * pow_scale).powf(pow_fac).min(max_speed)
+                -((rect.y - fe.abs.y) * pow_scale).powf(pow_fac).min(max_speed)
             }
             else if fe.abs.y > rect.y + rect.h {
-                ((fe.abs.y - (rect.y + rect.h)) * pow_scale).powf(pow_fac).min(max_speed)
+               ((fe.abs.y -(rect.y + rect.h)) * pow_scale).powf(pow_fac).min(max_speed)
             }
             else {
                 0.
@@ -1873,7 +1873,7 @@ impl CodeEditor {
         if pos.row < self._line_geometry.len() {
             let geom = &self._line_geometry[pos.row];
             // check if cursor is visible
-            if geom.walk.y - scroll.y > 0. && geom.walk.y - scroll.y <rect.h {  // visible
+            if geom.walk.y - scroll.y > 0. && geom.walk.y - scroll.y <rect.h { // visible
                 //println!("FOUND");
                 return pos.row
             }
@@ -1882,7 +1882,7 @@ impl CodeEditor {
         // scan for the centerline otherwise
         let scroll = self.view.get_scroll_pos(cx);
         let center_y = rect.h * 0.5 + scroll.y;
-        for (line, geom) in self._line_geometry.iter().enumerate() {
+        for(line, geom) in self._line_geometry.iter().enumerate() {
             if geom.walk.y > center_y {
                 //println!("CENTER");
                 return line
@@ -1890,7 +1890,7 @@ impl CodeEditor {
         }
         
         // if we cant find the centerline, use the view top
-        for (line, geom) in self._line_geometry.iter().enumerate() {
+        for(line, geom) in self._line_geometry.iter().enumerate() {
             if geom.walk.y > scroll.y {
                 //println!("TOP");
                 return line
@@ -1974,8 +1974,8 @@ impl AnimFoldingState {
         match self {
             AnimFoldingState::Open => open_size,
             AnimFoldingState::Folded => folded_size,
-            AnimFoldingState::Opening(f, _, _) => f * folded_size + (1. - f) * open_size,
-            AnimFoldingState::Folding(f, _, _) => f * open_size + (1. - f) * folded_size,
+            AnimFoldingState::Opening(f, _, _) => f * folded_size +(1. - f) * open_size,
+            AnimFoldingState::Folding(f, _, _) => f * open_size +(1. - f) * folded_size,
         }
     }
     

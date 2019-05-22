@@ -693,7 +693,7 @@ impl Default for Direction{
     }
 }
 
-#[derive(Clone, Serialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub enum Axis{
     Horizontal,
     Vertical

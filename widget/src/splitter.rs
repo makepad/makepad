@@ -30,7 +30,7 @@ impl ElementLife for Splitter{
     fn destruct(&mut self, _cx:&mut Cx){}
 }
 
-#[derive(Clone, PartialEq, Serialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub enum SplitterAlign{
     First,
     Last,
