@@ -89,14 +89,19 @@ impl RustEditor {
         }
         
         let mut last_token = TokenType::Unexpected;
+        let mut last_chunk = Vec::new();
         loop {
             let token_type = rust_tok.next_token(&mut state, &mut chunk, &self.code_editor.token_chunks);
             match token_type {
                 TokenType::Whitespace => {
+                    let last_line = out_lines.last_mut().unwrap();
                     if in_singleline_comment || in_multline_comment {
-                        out_lines.last_mut().unwrap().append(&mut chunk);
+                        last_line.extend(&chunk);
                     }
-                    else if !first_on_line && state.next != '\n' && last_token != TokenType::ParenOpen && last_token != TokenType::Namespace {
+                    else if !first_on_line && state.next != '\n'
+                        && last_token != TokenType::ParenOpen
+                        && last_token != TokenType::Namespace
+                        && (last_token != TokenType::Operator || (last_chunk.len() == 1 && (last_chunk[0] == '>' || last_chunk[0] == '<'))) {
                         out_lines.last_mut().unwrap().push(' ');
                     }
                 },
@@ -152,7 +157,7 @@ impl RustEditor {
                         }
                     }
                     
-                    last_line.append(&mut chunk);
+                    last_line.extend(&chunk);
                     
                     if extra_spacey && is_curly && state.next != '\n' {
                         last_line.push(' ');
@@ -198,7 +203,7 @@ impl RustEditor {
                         is_unary_operator = false;
                     }
                     
-                    out_lines.last_mut().unwrap().append(&mut chunk);
+                    out_lines.last_mut().unwrap().extend(&chunk);
                 },
                 TokenType::CommentLine => {
                     in_singleline_comment = true;
@@ -210,7 +215,7 @@ impl RustEditor {
                         let last_line = out_lines.last_mut().unwrap();
                         last_line.push(' ');
                     }
-                    out_lines.last_mut().unwrap().append(&mut chunk);
+                    out_lines.last_mut().unwrap().extend(&chunk);
                 },
                 TokenType::CommentMultiBegin => {
                     in_multline_comment = true;
@@ -218,13 +223,13 @@ impl RustEditor {
                         first_on_line = false;
                         output_indent(&mut out_lines, expected_indent);
                     }
-                    out_lines.last_mut().unwrap().append(&mut chunk);
+                    out_lines.last_mut().unwrap().extend(&chunk);
                 },
                 TokenType::CommentChunk => {
                     if first_on_line {
                         first_on_line = false;
                     }
-                    out_lines.last_mut().unwrap().append(&mut chunk);
+                    out_lines.last_mut().unwrap().extend(&chunk);
                 },
                 TokenType::CommentMultiEnd => {
                     in_multline_comment = false;
@@ -232,12 +237,12 @@ impl RustEditor {
                         first_on_line = false;
                     }
                     let last_line = out_lines.last_mut().unwrap();
-                    last_line.append(&mut chunk);
+                    last_line.extend(&chunk);
                 },
                 TokenType::Colon => {
                     is_unary_operator = true;
                     let last_line = out_lines.last_mut().unwrap();
-                    last_line.append(&mut chunk);
+                    last_line.extend(&chunk);
                     if state.next != ' ' && state.next != '\n' {
                         last_line.push(' ');
                     }
@@ -249,12 +254,12 @@ impl RustEditor {
                     }
                     else {
                         let last_line = out_lines.last_mut().unwrap();
-                        if last_line.len()>0 && *last_line.last().unwrap() == ' ' {
+                        if last_line.len() > 0 && *last_line.last().unwrap() == ' ' {
                             last_line.pop();
                         }
                     }
                     let ch = chunk[0];
-                    out_lines.last_mut().unwrap().append(&mut chunk);
+                    out_lines.last_mut().unwrap().extend(&chunk);
                     if (ch != ',' || paren_stack.last_mut().unwrap().angle_counter == 0)  // otherwise our generics multiline
                         && paren_stack.last().unwrap().expecting_newlines == true
                         && state.next != '\n' { // we are expecting newlines!
@@ -293,7 +298,7 @@ impl RustEditor {
                     
                     let last_line = out_lines.last_mut().unwrap();
                     if chunk.len() == 1 && ((is_unary_operator && (chunk[0] == '*' || chunk[0] == '&')) || chunk[0] == '!' || chunk[0] == '.' || chunk[0] == '<' || chunk[0] == '>') {
-                        last_line.append(&mut chunk);
+                        last_line.extend(&chunk);
                     }
                     else {
                         if last_line.len() > 0 && *last_line.last().unwrap() != ' ' {
@@ -301,8 +306,8 @@ impl RustEditor {
                             last_line.push(' ');
                             //}
                         }
-                        last_line.append(&mut chunk);
-                        if state.next != ' ' && state.next != '\n' {
+                        last_line.extend(&chunk);
+                        if state.next != '\n' {
                             last_line.push(' ');
                         }
                     }
@@ -314,10 +319,10 @@ impl RustEditor {
                     first_after_open = false;
                     if first_on_line {
                         first_on_line = false;
-                        let extra_indent = if paren_stack.last_mut().unwrap().angle_counter > 0 {4}else {0};
+                        let extra_indent = if paren_stack.last_mut().unwrap().angle_counter >0 {4}else {0};
                         output_indent(&mut out_lines, expected_indent + extra_indent);
                     }
-                    out_lines.last_mut().unwrap().append(&mut chunk);
+                    out_lines.last_mut().unwrap().extend(&chunk);
                 },
                 TokenType::Namespace => {
                     is_unary_operator = true;
@@ -326,7 +331,7 @@ impl RustEditor {
                         first_on_line = false;
                         output_indent(&mut out_lines, expected_indent);
                     }
-                    out_lines.last_mut().unwrap().append(&mut chunk);
+                    out_lines.last_mut().unwrap().extend(&chunk);
                 },
                 // these are followed by unary operators (some)
                 TokenType::TypeDef | TokenType::Fn | TokenType::Hash | TokenType::Splat |
@@ -338,7 +343,7 @@ impl RustEditor {
                         first_on_line = false;
                         output_indent(&mut out_lines, expected_indent);
                     }
-                    out_lines.last_mut().unwrap().append(&mut chunk);
+                    out_lines.last_mut().unwrap().extend(&chunk);
                 },
                 // these are followeable by non unary operators
                 TokenType::Identifier |
@@ -351,10 +356,11 @@ impl RustEditor {
                         first_on_line = false;
                         output_indent(&mut out_lines, expected_indent);
                     }
-                    out_lines.last_mut().unwrap().append(&mut chunk);
+                    out_lines.last_mut().unwrap().extend(&chunk);
                 },
             }
             last_token = token_type;
+            std::mem::swap(&mut chunk, &mut last_chunk);
             chunk.truncate(0);
         }
         // lets do a diff from top, and bottom
@@ -380,8 +386,6 @@ impl RustEditor {
         if let Err(()) = self.code_editor.begin_code_editor(cx, text_buffer) {
             return
         }
-        
-        
         
         if self.set_key_focus_on_draw {
             self.set_key_focus_on_draw = false;
@@ -422,7 +426,7 @@ impl RustTokenizer {
     }
     
     fn next_token<'a>(&mut self, state: &mut TokenizerState<'a>, chunk: &mut Vec<char>, token_chunks: &Vec<TokenChunk>) -> TokenType {
-        if self.comment_depth > 0 { // parse comments
+        if self.comment_depth >0 { // parse comments
             loop {
                 if state.next == '\0' {
                     self.comment_depth = 0;
@@ -537,7 +541,7 @@ impl RustTokenizer {
                     }
                     else { // parse a single char or lifetime
                         let offset = state.offset;
-                        if Self::parse_rust_ident_tail(state, chunk) && ((state.offset - offset) > 1 || state.next != '\'') {
+                        if Self::parse_rust_ident_tail(state, chunk) && ((state.offset - offset) >1 || state.next != '\'') {
                             return TokenType::TypeName;
                         }
                         else if state.next != '\n' {
@@ -758,6 +762,7 @@ impl RustTokenizer {
         ret
     }
     
+    
     fn parse_rust_escape_char<'a>(state: &mut TokenizerState<'a>, chunk: &mut Vec<char>) -> bool {
         if state.next == '\\' {
             chunk.push(state.next);
@@ -892,7 +897,7 @@ impl RustTokenizer {
                 }
                 else if state.keyword(chunk, "or") {
                     // check if we are first on a line
-                    if token_chunks.len() < 2
+                    if token_chunks.len() <2
                         || token_chunks[token_chunks.len() - 1].token_type == TokenType::Newline
                         || token_chunks[token_chunks.len() - 2].token_type == TokenType::Newline
                         && token_chunks[token_chunks.len() - 1].token_type == TokenType::Whitespace {
@@ -1048,3 +1053,4 @@ impl RustTokenizer {
         }
     }
 }
+

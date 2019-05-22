@@ -4,19 +4,14 @@ use render::*;
 use crate::splitter::*;
 use crate::tabcontrol::*;
 
-use serde_json:: {Result};
 use serde::*;
 
 pub struct Dock<TItem>
 where TItem: Clone
 {
     // pub dock_items: Option<DockItem<TItem>>,
-    pub splitters: Elements<usize,
-    Splitter,
-    Splitter>,
-    pub tab_controls: Elements<usize,
-    TabControl,
-    TabControl>,
+    pub splitters: Elements<usize, Splitter, Splitter>,
+    pub tab_controls: Elements<usize, TabControl, TabControl>,
     
     pub drop_size: Vec2,
     pub drop_quad: Quad,
@@ -107,7 +102,6 @@ where TItem: Clone
         pos: f32,
         axis: Axis,
         first: Box<DockItem<TItem>>,
-        
         last: Box<DockItem<TItem>>
     }
 }
@@ -756,7 +750,7 @@ where TItem: Clone
     }
     
     pub fn walker<'a>(&'a mut self, dock_items: &'a mut DockItem<TItem>) -> DockWalker<'a,
-    TItem> {
+        TItem> {
         let mut stack = Vec::new();
         //if !self.dock_items.is_none(){
         stack.push(DockWalkStack {counter: 0, uid: 0, item: dock_items});
