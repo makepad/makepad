@@ -469,8 +469,9 @@ impl TextBuffer {
     pub fn replace_lines(&mut self, start_row: usize, end_row: usize, rep_lines: Vec<Vec<char>>) -> TextOp {
         let start = self.text_pos_to_offset(TextPos {row: start_row, col: 0});
         let end = self.text_pos_to_offset(TextPos {row: end_row, col: 0});
+        let end_mark = if end_row >= self.lines.len(){0}else{1};
         let rep_lines_chars = calc_char_count(&rep_lines);
-        let lines = self.replace_range(start, end - start - 1, rep_lines);
+        let lines = self.replace_range(start, end - start - end_mark, rep_lines);
         TextOp {
             start: start,
             len: rep_lines_chars,

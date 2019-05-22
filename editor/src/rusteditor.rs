@@ -369,7 +369,7 @@ impl RustEditor {
             top_row += 1;
         }
         
-        let mut bottom_row_old = text_buffer.lines.len();
+        let mut bottom_row_old = text_buffer.get_line_count();
         let mut bottom_row_new = out_lines.len();
         while bottom_row_old > top_row && bottom_row_new > top_row && text_buffer.lines[bottom_row_old - 1] == out_lines[bottom_row_new - 1] {
             bottom_row_old -= 1;
