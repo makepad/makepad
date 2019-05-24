@@ -1,12 +1,12 @@
 # makepad
-Livecoding Rust for 2D CAD 
+Livecoding Rust for 2D Vector design
 
 Live demo: https://makepad.github.io/makepad/
 
 This repo is for developing Makepad, a livecoding Rust IDE for 2D CAD design. The goal of the containing code is to be a Code Editor / UI kit for the Makepad application and will change without notice to suit that goal. The makepad application itself may be closed-sourced and sold, since we also have to feed our families.
 
 The vision is to build a livecoding / design hybrid program, where procedural design and code are fused in one environment. If you have missed 'learnable programming' please check this out: http://worrydream.com/LearnableProgramming/
-Makepad aims to fulfill (some) of these ideas using a completely from-scratch renderstack built on the GPU and Rust. It will be like an IDE meets a vector designtool, and had offspring. Direct manipulation of the vectors modifies the code, the code modifies the vectors. And the result can be lasercut, embroidered or drawn using a plotter. This means our first goal is 2D path CNC with booleans (hence the CAD), and not dropshadowy-gradients.
+Makepad aims to fulfill (some) of these ideas using a completely from-scratch renderstack built on the GPU and Rust. It will be like an IDE meets a vector designtool, and had offspring. Direct manipulation of the vectors modifies the code, the code modifies the vectors. 
 
 However before we can make this awesome application, we need to build a UI stack. Making a live-code editor with all sorts of visual manipulation components just doesn't work in HTML. We tried. It also doesn't work in JS+WebGL. We tried. But now with Rust we are getting right performance figures (up to 200x HTML). And even with Wasm, its plenty fast.
 This new UI stack has a new way of building UI called 'dual immediate mode' and uses multi-platform shaders for styling that are compiled from Rust source via a proc macro.
