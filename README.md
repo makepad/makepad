@@ -1,9 +1,9 @@
 # makepad
-Livecoding Rust for 2D Vector design
+Code your design
 
 Live demo: https://makepad.github.io/makepad/
 
-This repo is for developing Makepad, a livecoding Rust IDE for 2D CAD design. The goal of the containing code is to be a Code Editor / UI kit for the Makepad application and will change without notice to suit that goal. The makepad application itself may be closed-sourced and sold, since we also have to feed our families.
+This repo is for developing Makepad, a live Rust authoring tool for 2D vector design, shaders and animation. The goal of the containing code is to be a Code Editor / UI kit for the Makepad application and will change without notice to suit that goal. The makepad application itself may be closed-sourced and sold, since we also have to feed our families.
 
 The vision is to build a livecoding / design hybrid program, where procedural design and code are fused in one environment. If you have missed 'learnable programming' please check this out: http://worrydream.com/LearnableProgramming/
 Makepad aims to fulfill (some) of these ideas using a completely from-scratch renderstack built on the GPU and Rust. It will be like an IDE meets a vector designtool, and had offspring. Direct manipulation of the vectors modifies the code, the code modifies the vectors. 
