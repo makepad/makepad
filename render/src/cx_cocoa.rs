@@ -168,6 +168,7 @@ impl CocoaWindow {
         let mut window_frame = unsafe {NSWindow::frame(self.window.unwrap())};
         window_frame.origin.x = pos.x as f64;
         window_frame.origin.y = pos.y as f64;
+        //not very nice: CGDisplay::main().pixels_high() as f64
         unsafe {msg_send![self.window.unwrap(), setFrame: window_frame display: YES]};
     }
     

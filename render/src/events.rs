@@ -1,178 +1,178 @@
 use crate::cx::*;
 
 #[derive(Clone, Debug, PartialEq, Default)]
-pub struct KeyModifiers{
+pub struct KeyModifiers {
     pub shift: bool,
     pub control: bool,
     pub alt: bool,
     pub logo: bool
 }
 
-#[derive(Clone, Default,Debug, PartialEq)]
-pub struct FingerDownEvent{
-    pub abs:Vec2,
-    pub rel:Vec2,
-    pub rect:Rect,
-    pub digit:usize,
-    pub tap_count:u32,
-    pub handled:bool,
-    pub is_touch:bool,
-    pub modifiers:KeyModifiers,
-    pub time:f64
+#[derive(Clone, Default, Debug, PartialEq)]
+pub struct FingerDownEvent {
+    pub abs: Vec2,
+    pub rel: Vec2,
+    pub rect: Rect,
+    pub digit: usize,
+    pub tap_count: u32,
+    pub handled: bool,
+    pub is_touch: bool,
+    pub modifiers: KeyModifiers,
+    pub time: f64
 }
 
-#[derive(Clone, Default,Debug, PartialEq)]
-pub struct FingerMoveEvent{
-    pub abs:Vec2,
-    pub abs_start:Vec2,
-    pub rel:Vec2,
-    pub rel_start:Vec2,
-    pub rect:Rect,
-    pub is_over:bool,
-    pub digit:usize,
-    pub is_touch:bool,
-    pub modifiers:KeyModifiers,
-    pub time:f64
+#[derive(Clone, Default, Debug, PartialEq)]
+pub struct FingerMoveEvent {
+    pub abs: Vec2,
+    pub abs_start: Vec2,
+    pub rel: Vec2,
+    pub rel_start: Vec2,
+    pub rect: Rect,
+    pub is_over: bool,
+    pub digit: usize,
+    pub is_touch: bool,
+    pub modifiers: KeyModifiers,
+    pub time: f64
 }
 
-impl FingerMoveEvent{
-    pub fn move_distance(&self)->f32{
+impl FingerMoveEvent {
+    pub fn move_distance(&self) -> f32 {
         ((self.abs_start.x - self.abs.x).powf(2.) + (self.abs_start.y - self.abs.y).powf(2.)).sqrt()
     }
 }
 
-#[derive(Clone, Default,Debug, PartialEq)]
-pub struct FingerUpEvent{
-    pub abs:Vec2,
-    pub abs_start:Vec2,
-    pub rel:Vec2,
-    pub rel_start:Vec2,
-    pub rect:Rect,
-    pub digit:usize,
-    pub is_over:bool,
-    pub is_touch:bool,
-    pub modifiers:KeyModifiers,
-    pub time:f64
+#[derive(Clone, Default, Debug, PartialEq)]
+pub struct FingerUpEvent {
+    pub abs: Vec2,
+    pub abs_start: Vec2,
+    pub rel: Vec2,
+    pub rel_start: Vec2,
+    pub rect: Rect,
+    pub digit: usize,
+    pub is_over: bool,
+    pub is_touch: bool,
+    pub modifiers: KeyModifiers,
+    pub time: f64
 }
 
-#[derive(Clone,Debug, PartialEq)]
-pub enum HoverState{
+#[derive(Clone, Debug, PartialEq)]
+pub enum HoverState {
     In,
     Over,
     Out
 }
 
-impl Default for HoverState{
-    fn default()->HoverState{
+impl Default for HoverState {
+    fn default() -> HoverState {
         HoverState::Over
     }
 }
 
-#[derive(Clone, Default,Debug, PartialEq)]
-pub struct FingerHoverEvent{
-    pub abs:Vec2,
-    pub rel:Vec2,
-    pub rect:Rect,
-    pub handled:bool,
-    pub hover_state:HoverState,
-    pub modifiers:KeyModifiers,
-    pub time:f64
-}
-
-#[derive(Clone, Default,Debug, PartialEq)]
-pub struct FingerScrollEvent{
-    pub abs:Vec2,
-    pub rel:Vec2,
-    pub rect:Rect,
-    pub scroll:Vec2,
-    pub is_wheel:bool,
-    pub handled:bool,
-    pub modifiers:KeyModifiers,
-    pub time:f64
+#[derive(Clone, Default, Debug, PartialEq)]
+pub struct FingerHoverEvent {
+    pub abs: Vec2,
+    pub rel: Vec2,
+    pub rect: Rect,
+    pub handled: bool,
+    pub hover_state: HoverState,
+    pub modifiers: KeyModifiers,
+    pub time: f64
 }
 
 #[derive(Clone, Default, Debug, PartialEq)]
-pub struct WindowChangeEvent{
-    pub old_geom:WindowGeom,
-    pub new_geom:WindowGeom,
+pub struct FingerScrollEvent {
+    pub abs: Vec2,
+    pub rel: Vec2,
+    pub rect: Rect,
+    pub scroll: Vec2,
+    pub is_wheel: bool,
+    pub handled: bool,
+    pub modifiers: KeyModifiers,
+    pub time: f64
 }
 
 #[derive(Clone, Default, Debug, PartialEq)]
-pub struct WindowMovedEvent{
-    pub old_pos:Vec2,
-    pub new_pos:Vec2,
+pub struct WindowChangeEvent {
+    pub old_geom: WindowGeom,
+    pub new_geom: WindowGeom,
 }
 
 #[derive(Clone, Default, Debug, PartialEq)]
-pub struct AnimateEvent{
-    pub frame:u64,
-    pub time:f64
+pub struct WindowMovedEvent {
+    pub old_pos: Vec2,
+    pub new_pos: Vec2,
 }
 
 #[derive(Clone, Default, Debug, PartialEq)]
-pub struct FrameEvent{
-    pub frame:u64,
-    pub time:f64
+pub struct AnimateEvent {
+    pub frame: u64,
+    pub time: f64
+}
+
+#[derive(Clone, Default, Debug, PartialEq)]
+pub struct FrameEvent {
+    pub frame: u64,
+    pub time: f64
 }
 
 #[derive(Clone, Default, Debug)]
-pub struct RedrawEvent{
-    pub area:Area
+pub struct RedrawEvent {
+    pub area: Area
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct FileReadEvent{
-    pub read_id:u64,
-    pub data:Result<Vec<u8>, String>
+pub struct FileReadEvent {
+    pub read_id: u64,
+    pub data: Result<Vec<u8>, String>
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct TimerEvent{
-    pub timer_id:u64
+pub struct TimerEvent {
+    pub timer_id: u64
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct SignalEvent{
-    pub signal_id:u64,
-    pub value:u64
+pub struct SignalEvent {
+    pub signal_id: u64,
+    pub value: u64
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct FileWriteEvent{
-    id:u64,
-    error:Option<String>
+pub struct FileWriteEvent {
+    id: u64,
+    error: Option<String>
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct KeyEvent{
-    pub key_code:KeyCode,
-    pub key_char:char,
-    pub is_repeat:bool,
-    pub modifiers:KeyModifiers,
-    pub time:f64
+pub struct KeyEvent {
+    pub key_code: KeyCode,
+    pub key_char: char,
+    pub is_repeat: bool,
+    pub modifiers: KeyModifiers,
+    pub time: f64
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct KeyFocusEvent{
-    pub last:Area,
-    pub focus:Area,
-    pub is_lost:bool
+pub struct KeyFocusEvent {
+    pub last: Area,
+    pub focus: Area,
+    pub is_lost: bool
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct TextInputEvent{
-    pub input:String,
-    pub replace_last:bool,
-    pub was_paste:bool
+pub struct TextInputEvent {
+    pub input: String,
+    pub replace_last: bool,
+    pub was_paste: bool
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct TextCopyEvent{
-    pub response:Option<String>
+pub struct TextCopyEvent {
+    pub response: Option<String>
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub enum Event{
+pub enum Event {
     None,
     Construct,
     Destruct,
@@ -199,282 +199,339 @@ pub enum Event{
     TextCopy(TextCopyEvent)
 }
 
-impl Default for Event{
-    fn default()->Event{
+impl Default for Event {
+    fn default() -> Event {
         Event::None
     }
 }
 
-pub enum HitTouch{
+pub enum HitTouch {
     Single,
     Multi
 }
 
-#[derive(Clone,Debug,Default)]
-pub struct HitState{
-    pub use_multi_touch:bool,
-    pub no_scrolling:bool,
-    pub margin:Option<Margin>,
-    pub finger_down_abs_start:Vec<Vec2>,
-    pub finger_down_rel_start:Vec<Vec2>,
-    pub was_over_last_call:bool
+#[derive(Clone, Debug, Default)]
+pub struct HitState {
+    pub use_multi_touch: bool,
+    pub no_scrolling: bool,
+    pub margin: Option<Margin>,
+    pub finger_down_abs_start: Vec<Vec2>,
+    pub finger_down_rel_start: Vec<Vec2>,
+    pub was_over_last_call: bool
 }
 
-impl Event{
-    pub fn set_handled(&mut self, set:bool){
-        match self{
-            Event::FingerHover(fe)=>{
-                fe.handled = set;
-            },
-            Event::FingerScroll(fe)=>{
-                fe.handled = set;
-            },
-            Event::FingerDown(fe)=>{
-                fe.handled = set;
-            },
-            _=>()
-        }
-    }
-
-    pub fn handled(&self)->bool{
-        match self{
-            Event::FingerHover(fe)=>{
-                fe.handled
-            },
-            Event::FingerScroll(fe)=>{
-                fe.handled
-            },
-            Event::FingerDown(fe)=>{
-                fe.handled
-            }, 
-            _=>false
-        }
-    }
-
-    pub fn hits(&mut self, cx:&mut Cx, area:Area, hit_state:&mut HitState)->Event{
-        match self{
-            Event::KeyFocus(kf)=>{
-                if area == kf.last{
-                    return Event::KeyFocus(KeyFocusEvent{
-                        is_lost:true,   
+impl HitState {
+    
+    pub fn hits(&mut self, cx: &mut Cx, area: Area, event: &mut Event) -> Event {
+        match event {
+            Event::KeyFocus(kf) => {
+                if area == kf.last {
+                    return Event::KeyFocus(KeyFocusEvent {
+                        is_lost: true,
+                        
                         ..kf.clone()
                     })
                 }
-                else if area == kf.focus{
-                    return Event::KeyFocus(KeyFocusEvent{
-                        is_lost:false,   
+                else if area == kf.focus {
+                    return Event::KeyFocus(KeyFocusEvent {
+                        is_lost: false,
+                        
                         ..kf.clone()
                     })
                 }
             },
-            Event::KeyDown(_)=>{
-                if area == cx.key_focus{
-                    return self.clone();
+            Event::KeyDown(_) => {
+                if area == cx.key_focus {
+                    return event.clone();
                 }
             },
-            Event::KeyUp(_)=>{
-                if area == cx.key_focus{
-                    return self.clone();
+            Event::KeyUp(_) => {
+                if area == cx.key_focus {
+                    return event.clone();
                 }
             },
-            Event::TextInput(_)=>{
-                if area == cx.key_focus{
-                    return self.clone();
+            Event::TextInput(_) => {
+                if area == cx.key_focus {
+                    return event.clone();
                 }
             },
-            Event::TextCopy(_)=>{
-                if area == cx.key_focus{
+            Event::TextCopy(_) => {
+                if area == cx.key_focus {
                     return Event::TextCopy(
-                        TextCopyEvent{response:None}
+                        TextCopyEvent {response: None}
                     );
                 }
             },
-            Event::Animate(_)=>{
-                for anim in &cx.playing_anim_areas{
-                    if anim.area == area{
-                        return self.clone()
+            Event::Animate(_) => {
+                for anim in &cx.playing_anim_areas {
+                    if anim.area == area {
+                        return event.clone()
                     }
                 }
             },
-            Event::Frame(_)=>{
-                for frame_area in &cx.frame_callbacks{
-                    if *frame_area == area{
-                        return self.clone()
+            Event::Frame(_) => {
+                for frame_area in &cx.frame_callbacks {
+                    if *frame_area == area {
+                        return event.clone()
                     }
                 }
             },
-            Event::AnimationEnded(_)=>{
-                for anim in &cx.ended_anim_areas{
-                    if anim.area == area{
-                        return self.clone()
+            Event::AnimationEnded(_) => {
+                for anim in &cx.ended_anim_areas {
+                    if anim.area == area {
+                        return event.clone()
                     }
                 }
             },
-            Event::FingerScroll(fe)=>{
-                let rect = if hit_state.no_scrolling{
+            Event::FingerScroll(fe) => {
+                let rect = if self.no_scrolling {
                     area.get_rect_not_scrolled(&cx)
                 }
-                else{
+                else {
                     area.get_rect_scrolled(&cx)
                 };
-                if !fe.handled && rect.contains_with_margin(fe.abs.x, fe.abs.y, &hit_state.margin){
+                if !fe.handled && rect.contains_with_margin(fe.abs.x, fe.abs.y, &self.margin) {
                     fe.handled = true;
-                    return Event::FingerScroll(FingerScrollEvent{
-                        rel:Vec2{x:fe.abs.x - rect.x, y:fe.abs.y - rect.y},
-                        rect:rect,
+                    return Event::FingerScroll(FingerScrollEvent {
+                        rel: Vec2 {x: fe.abs.x - rect.x, y: fe.abs.y - rect.y},
+                        rect: rect,
                         ..fe.clone()
                     })
                 }
             },
-            Event::FingerHover(fe)=>{
-                let rect = if hit_state.no_scrolling{
+            Event::FingerHover(fe) => {
+                let rect = if self.no_scrolling {
                     area.get_rect_not_scrolled(&cx)
                 }
-                else{
+                else {
                     area.get_rect_scrolled(&cx)
                 };
-                if hit_state.was_over_last_call{
-
-                    if !fe.handled && rect.contains_with_margin(fe.abs.x, fe.abs.y, &hit_state.margin){
+                if self.was_over_last_call {
+                    
+                    if !fe.handled && rect.contains_with_margin(fe.abs.x, fe.abs.y, &self.margin) {
                         fe.handled = true;
-                        if let HoverState::Out = fe.hover_state{
-                            hit_state.was_over_last_call = false;
+                        if let HoverState::Out = fe.hover_state {
+                            self.was_over_last_call = false;
                         }
-                        return Event::FingerHover(FingerHoverEvent{
-                            rel:Vec2{x:fe.abs.x - rect.x, y:fe.abs.y - rect.y},
-                            rect:rect,
+                        return Event::FingerHover(FingerHoverEvent {
+                            rel: Vec2 {x: fe.abs.x - rect.x, y: fe.abs.y - rect.y},
+                            rect: rect,
                             ..fe.clone()
                         })
                     }
-                    else{
-                        hit_state.was_over_last_call = false;
-                        return Event::FingerHover(FingerHoverEvent{
-                            rel:Vec2{x:fe.abs.x - rect.x, y:fe.abs.y - rect.y},
-                            rect:rect,
-                            hover_state:HoverState::Out,
+                    else {
+                        self.was_over_last_call = false;
+                        return Event::FingerHover(FingerHoverEvent {
+                            rel: Vec2 {x: fe.abs.x - rect.x, y: fe.abs.y - rect.y},
+                            rect: rect,
+                            hover_state: HoverState::Out,
                             ..fe.clone()
                         })
                     }
                 }
-                else{
-                    if !fe.handled && rect.contains_with_margin(fe.abs.x, fe.abs.y, &hit_state.margin){
+                else {
+                    if !fe.handled && rect.contains_with_margin(fe.abs.x, fe.abs.y, &self.margin) {
                         fe.handled = true;
-                        hit_state.was_over_last_call = true;
-                        return Event::FingerHover(FingerHoverEvent{
-                            rel:Vec2{x:fe.abs.x - rect.x, y:fe.abs.y - rect.y},
-                            rect:rect,
-                            hover_state:HoverState::In,
+                        self.was_over_last_call = true;
+                        return Event::FingerHover(FingerHoverEvent {
+                            rel: Vec2 {x: fe.abs.x - rect.x, y: fe.abs.y - rect.y},
+                            rect: rect,
+                            hover_state: HoverState::In,
                             ..fe.clone()
                         })
                     }
                 }
             },
-            Event::FingerMove(fe)=>{
+            Event::FingerMove(fe) => {
                 // check wether our digit is captured, otherwise don't send
-                if cx.captured_fingers[fe.digit] == area{
-                    let abs_start = if hit_state.finger_down_abs_start.len() <= fe.digit{
+                if cx.captured_fingers[fe.digit] == area {
+                    let abs_start = if self.finger_down_abs_start.len() <= fe.digit {
                         Vec2::zero()
                     }
-                    else{
-                        hit_state.finger_down_abs_start[fe.digit]
+                    else {
+                        self.finger_down_abs_start[fe.digit]
                     };
-                    let rel_start = if hit_state.finger_down_rel_start.len() <= fe.digit{
+                    let rel_start = if self.finger_down_rel_start.len() <= fe.digit {
                         Vec2::zero()
                     }
-                    else{
-                        hit_state.finger_down_rel_start[fe.digit]
+                    else {
+                        self.finger_down_rel_start[fe.digit]
                     };
-                    let rect = if hit_state.no_scrolling{
+                    let rect = if self.no_scrolling {
                         area.get_rect_not_scrolled(&cx)
                     }
-                    else{
+                    else {
                         area.get_rect_scrolled(&cx)
                     };
-                    return Event::FingerMove(FingerMoveEvent{
+                    return Event::FingerMove(FingerMoveEvent {
                         abs_start: abs_start,
-                        rel:Vec2{x:fe.abs.x - rect.x, y:fe.abs.y - rect.y},
+                        rel: Vec2 {x: fe.abs.x - rect.x, y: fe.abs.y - rect.y},
                         rel_start: rel_start,
-                        rect:rect,
-                        is_over:rect.contains_with_margin(fe.abs.x, fe.abs.y, &hit_state.margin),
+                        rect: rect,
+                        is_over: rect.contains_with_margin(fe.abs.x, fe.abs.y, &self.margin),
                         ..fe.clone()
                     })
                 }
             },
-            Event::FingerDown(fe)=>{
-                if !fe.handled{
-                    let rect = if hit_state.no_scrolling{
+            Event::FingerDown(fe) => {
+                if !fe.handled {
+                    let rect = if self.no_scrolling {
                         area.get_rect_not_scrolled(&cx)
                     }
-                    else{
+                    else {
                         area.get_rect_scrolled(&cx)
                     };
-                    if rect.contains_with_margin(fe.abs.x, fe.abs.y, &hit_state.margin){
+                    if rect.contains_with_margin(fe.abs.x, fe.abs.y, &self.margin) {
                         // scan if any of the fingers already captured this area
-                        if !hit_state.use_multi_touch{
-                            for fin_area in &cx.captured_fingers{
-                                if *fin_area == area{
+                        if !self.use_multi_touch {
+                            for fin_area in &cx.captured_fingers {
+                                if *fin_area == area {
                                     return Event::None;
                                 }
                             }
                         }
                         cx.captured_fingers[fe.digit] = area;
                         // store the start point, make room in the vector for the digit.
-                        if hit_state.finger_down_abs_start.len() < fe.digit+1{
-                            for _i in hit_state.finger_down_abs_start.len()..(fe.digit+1){
-                                hit_state.finger_down_abs_start.push(Vec2{x:0., y:0.});
+                        if self.finger_down_abs_start.len() < fe.digit + 1 {
+                            for _i in self.finger_down_abs_start.len()..(fe.digit + 1) {
+                                self.finger_down_abs_start.push(Vec2 {x: 0., y: 0.});
                             }
                         }
-                        if hit_state.finger_down_rel_start.len() < fe.digit+1{
-                            for _i in hit_state.finger_down_rel_start.len()..(fe.digit+1){
-                                hit_state.finger_down_rel_start.push(Vec2{x:0., y:0.});
+                        if self.finger_down_rel_start.len() < fe.digit + 1 {
+                            for _i in self.finger_down_rel_start.len()..(fe.digit + 1) {
+                                self.finger_down_rel_start.push(Vec2 {x: 0., y: 0.});
                             }
                         }
-                        hit_state.finger_down_abs_start[fe.digit] = fe.abs;
-                        hit_state.finger_down_rel_start[fe.digit] = Vec2{x:fe.abs.x - rect.x, y:fe.abs.y - rect.y};
+                        self.finger_down_abs_start[fe.digit] = fe.abs;
+                        self.finger_down_rel_start[fe.digit] = Vec2 {x: fe.abs.x - rect.x, y: fe.abs.y - rect.y};
                         fe.handled = true;
-                        return Event::FingerDown(FingerDownEvent{
-                            rel:Vec2{x:fe.abs.x - rect.x, y:fe.abs.y - rect.y},
-                            rect:rect,
+                        return Event::FingerDown(FingerDownEvent {
+                            rel: Vec2 {x: fe.abs.x - rect.x, y: fe.abs.y - rect.y},
+                            rect: rect,
                             ..fe.clone()
                         })
                     }
                 }
             },
-            Event::FingerUp(fe)=>{
-                if cx.captured_fingers[fe.digit] == area{
+            Event::FingerUp(fe) => {
+                if cx.captured_fingers[fe.digit] == area {
                     cx.captured_fingers[fe.digit] = Area::Empty;
-                    let abs_start = if hit_state.finger_down_abs_start.len() <= fe.digit{
+                    let abs_start = if self.finger_down_abs_start.len() <= fe.digit {
                         Vec2::zero()
                     }
-                    else{
-                        hit_state.finger_down_abs_start[fe.digit]
+                    else {
+                        self.finger_down_abs_start[fe.digit]
                     };
-                    let rel_start = if hit_state.finger_down_rel_start.len() <= fe.digit{
+                    let rel_start = if self.finger_down_rel_start.len() <= fe.digit {
                         Vec2::zero()
                     }
-                    else{
-                        hit_state.finger_down_rel_start[fe.digit]
+                    else {
+                        self.finger_down_rel_start[fe.digit]
                     };
-                    let rect = if hit_state.no_scrolling{
+                    let rect = if self.no_scrolling {
                         area.get_rect_not_scrolled(&cx)
                     }
-                    else{
+                    else {
                         area.get_rect_scrolled(&cx)
                     };
-                    return Event::FingerUp(FingerUpEvent{
-                        is_over:rect.contains(fe.abs.x, fe.abs.y),
+                    return Event::FingerUp(FingerUpEvent {
+                        is_over: rect.contains(fe.abs.x, fe.abs.y),
                         abs_start: abs_start,
                         rel_start: rel_start,
-                        rel:Vec2{x:fe.abs.x - rect.x, y:fe.abs.y - rect.y},
-                        rect:rect,
+                        rel: Vec2 {x: fe.abs.x - rect.x, y: fe.abs.y - rect.y},
+                        rect: rect,
                         ..fe.clone()
                     })
                 }
             },
-            _=>()
+            _ => ()
         };
         return Event::None;
     }
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Signal{
+    pub signal_id: u64
+}
+
+impl Signal{
+    pub fn empty()->Signal{
+        Signal{
+            signal_id:0
+        }
+    }
+    
+    pub fn is_empty(&self)->bool{
+        self.signal_id == 0
+    }
+    
+    pub fn is_signal(&self, se:&SignalEvent)->bool{
+        se.signal_id == self.signal_id
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct FileReadRequest {
+    pub file_read_id: u64
+}
+
+impl FileReadRequest {
+    pub fn empty()->FileReadRequest{
+        FileReadRequest{
+            file_read_id:0
+        }
+    }
+    
+    pub fn is_loading(&self)->bool{
+        self.file_read_id != 0
+    }
+    
+    pub fn as_utf8<'a>(&mut self, fr: &'a FileReadEvent) -> Option<&'a str> {
+        if fr.read_id == self.file_read_id{
+            self.file_read_id = 0;
+            if let Ok(str_data) = &fr.data {
+                if let Ok(utf8_string) = std::str::from_utf8(&str_data){
+                    return Some(utf8_string)
+                }
+            }
+        }
+        return None
+    }
+}
+
+impl Event {
+    pub fn set_handled(&mut self, set: bool) {
+        match self {
+            Event::FingerHover(fe) => {
+                fe.handled = set;
+            },
+            Event::FingerScroll(fe) => {
+                fe.handled = set;
+            },
+            Event::FingerDown(fe) => {
+                fe.handled = set;
+            },
+            _ => ()
+        }
+    }
+    
+    pub fn handled(&self) -> bool {
+        match self {
+            Event::FingerHover(fe) => {
+                fe.handled
+            },
+            Event::FingerScroll(fe) => {
+                fe.handled
+            },
+            Event::FingerDown(fe) => {
+                fe.handled
+            },
+            
+            _ => false
+        }
+    }
+    
     
 }
 
@@ -482,7 +539,7 @@ impl Event{
 #[derive(Clone, PartialEq, Debug)]
 pub enum KeyCode {
     Escape,
-
+    
     Backtick,
     Key0,
     Key1,
@@ -496,10 +553,10 @@ pub enum KeyCode {
     Key9,
     Minus,
     Equals,
-
+    
     Backspace,
     Tab,
-
+    
     KeyQ,
     KeyW,
     KeyE,
@@ -513,7 +570,7 @@ pub enum KeyCode {
     LBracket,
     RBracket,
     Return,
-
+    
     KeyA,
     KeyS,
     KeyD,
@@ -526,7 +583,7 @@ pub enum KeyCode {
     Semicolon,
     Quote,
     Backslash,
-
+    
     KeyZ,
     KeyX,
     KeyC,
@@ -537,17 +594,17 @@ pub enum KeyCode {
     Comma,
     Period,
     Slash,
-
+    
     Control,
     Alt,
     Shift,
     Logo,
-
+    
     //RightControl,
     //RightShift,
     //RightAlt,
     //RightLogo,
-
+    
     Space,
     Capslock,
     F1,
@@ -562,18 +619,18 @@ pub enum KeyCode {
     F10,
     F11,
     F12,
- 
+    
     PrintScreen,
     Scrolllock,
     Pause,
- 
+    
     Insert,
     Delete,
     Home,
     End,
     PageUp,
     PageDown,
-
+    
     Numpad0,
     Numpad1,
     Numpad2,
@@ -584,7 +641,7 @@ pub enum KeyCode {
     Numpad7,
     Numpad8,
     Numpad9,
-
+    
     NumpadEquals,
     NumpadSubtract,
     NumpadAdd,
@@ -593,12 +650,12 @@ pub enum KeyCode {
     NumpadDivide,
     Numlock,
     NumpadEnter,
-
+    
     ArrowUp,
     ArrowDown,
     ArrowLeft,
     ArrowRight,
-
+    
     Unknown
 }
 

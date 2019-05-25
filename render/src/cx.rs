@@ -85,8 +85,8 @@ pub struct Cx{
     pub frame_callbacks:Vec<Area>,
     pub next_frame_callbacks:Vec<Area>,
 
-    pub signals_before_draw:Vec<(u64,u64)>,
-    pub signals_after_draw:Vec<(u64,u64)>,
+    pub signals_before_draw:Vec<(Signal,u64)>,
+    pub signals_after_draw:Vec<(Signal,u64)>,
 
     pub platform:CxPlatform,
 
@@ -476,17 +476,17 @@ impl Cx{
         self.next_frame_callbacks.push(area);
     }
 
-    pub fn new_signal_id(&mut self)->u64{
+    pub fn new_signal(&mut self)->Signal{
         self.signal_id += 1;
-        return self.signal_id;
+        return Signal{signal_id:self.signal_id}
     }
 
-    pub fn send_signal_before_draw(&mut self, id:u64, message:u64){
-        self.signals_before_draw.push((id, message));
+    pub fn send_signal_before_draw(&mut self, signal:Signal, message:u64){
+        self.signals_before_draw.push((signal, message));
     }
 
-    pub fn send_signal_after_draw(&mut self, id:u64, message:u64){
-        self.signals_after_draw.push((id, message));
+    pub fn send_signal_after_draw(&mut self, signal:Signal, message:u64){
+        self.signals_after_draw.push((signal, message));
     }
 
     pub fn call_signals_before_draw<F>(&mut self, mut event_handler:F)
@@ -498,9 +498,9 @@ impl Cx{
 
         let signals_before_draw = self.signals_before_draw.clone();
         self.signals_before_draw.truncate(0);
-        for (signal_id, value) in signals_before_draw{
+        for (signal, value) in signals_before_draw{
             self.call_event_handler(&mut event_handler, &mut Event::Signal(SignalEvent{
-                signal_id:signal_id,
+                signal_id:signal.signal_id,
                 value:value
             }));
         }
@@ -515,9 +515,9 @@ impl Cx{
 
         let signals_after_draw = self.signals_after_draw.clone();
         self.signals_after_draw.truncate(0);
-        for (signal_id, value) in signals_after_draw{
+        for (signal, value) in signals_after_draw{
             self.call_event_handler(&mut event_handler, &mut Event::Signal(SignalEvent{
-                signal_id:signal_id,
+                signal_id:signal.signal_id,
                 value:value
             }));
         }

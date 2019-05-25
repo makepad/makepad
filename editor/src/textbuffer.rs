@@ -12,8 +12,8 @@ pub struct TextBuffer {
     pub lines: Vec<Vec<char>>,
     pub undo_stack: Vec<TextUndo>,
     pub redo_stack: Vec<TextUndo>,
-    pub load_id: u64,
-    pub signal_id: u64,
+    pub load_read_req: FileReadRequest,
+    pub signal: Signal,
     pub mutation_id: u64,
     pub messages: TextBufferMessages,
     
@@ -66,8 +66,8 @@ impl TextBuffers {
         let root_path = &self.root_path;
         self.storage.entry(path.to_string()).or_insert_with( || {
             TextBuffer {
-                signal_id: cx.new_signal_id(),
-                load_id: cx.read_file(&format!("{}{}", root_path, path)),
+                signal: cx.new_signal(),
+                load_read_req: cx.read_file(&format!("{}{}", root_path, path)),
                 ..Default::default()
             }
         })
@@ -82,12 +82,9 @@ impl TextBuffers {
     
     pub fn handle_file_read(&mut self, fr: &FileReadEvent) -> bool {
         for (_path, text_buffer) in &mut self.storage {
-            if text_buffer.load_id == fr.read_id {
-                text_buffer.load_id = 0;
-                if let Ok(str_data) = &fr.data {
-                    text_buffer.load_buffer(str_data);
-                    return true;
-                }
+            if let Some(utf8_data) = text_buffer.load_read_req.as_utf8(fr){
+                text_buffer.lines = TextBuffer::split_string_to_lines(&utf8_data.to_string());
+                return true
             }
         }
         return false
@@ -519,14 +516,6 @@ impl TextBuffer {
         //let out = self.lines.join("\n");
     }
     
-    pub fn load_buffer(&mut self, data: &Vec<u8>) {
-        // alright we have to load it and split it on newlines
-        if let Ok(utf8_data) = std::str::from_utf8(&data) {
-            self.lines = Self::split_string_to_lines(&utf8_data.to_string());
-            // lets be lazy and redraw all
-            
-        }
-    }
     
     pub fn undoredo(&mut self, mut text_undo: TextUndo, cursor_set: &mut TextCursorSet) -> TextUndo {
         let mut ops = Vec::new();

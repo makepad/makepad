@@ -19,7 +19,7 @@ pub struct RustCompiler{
     pub row_height:f32,
     pub path_color:Color,
     pub message_color:Color,
-    pub _check_signal_id:u64, 
+    pub _check_signal:Signal, 
 
     pub _check_child:Option<Child>,
     pub _build_child:Option<Child>,
@@ -103,7 +103,7 @@ impl Style for RustCompiler{
             path_color:color("#999"),
             message_color:color("#bbb"),
             row_height:20.0,
-            _check_signal_id:0,
+            _check_signal:Signal::empty(),
             _check_child:None,
             _build_child:None,
             _run_child:None,
@@ -127,7 +127,7 @@ impl Style for RustCompiler{
 
 impl RustCompiler{
     pub fn init(&mut self, cx:&mut Cx, text_buffers:&mut TextBuffers){
-        self._check_signal_id = cx.new_signal_id();
+        self._check_signal = cx.new_signal();
         self.restart_rust_checker(cx, text_buffers);
     }
 
@@ -154,10 +154,10 @@ impl RustCompiler{
             if text_buffer.messages.gc_id != cx.event_id{
                 text_buffer.messages.cursors.truncate(0);
                 text_buffer.messages.bodies.truncate(0);
-                cx.send_signal_before_draw(text_buffer.signal_id, SIGNAL_TEXTBUFFER_MESSAGE_UPDATE);
+                cx.send_signal_before_draw(text_buffer.signal, SIGNAL_TEXTBUFFER_MESSAGE_UPDATE);
             }
             else{
-                cx.send_signal_before_draw(text_buffer.signal_id, SIGNAL_TEXTBUFFER_MESSAGE_UPDATE);
+                cx.send_signal_before_draw(text_buffer.signal, SIGNAL_TEXTBUFFER_MESSAGE_UPDATE);
             }
         }
     }
@@ -271,7 +271,7 @@ impl RustCompiler{
                 _=>()
             },
             Event::Signal(se)=>{
-                if self._check_signal_id == se.signal_id{
+                if self._check_signal.is_signal(se){
                     match se.value{
                         SIGNAL_RUST_CHECKER | SIGNAL_RUN_OUTPUT=>{
                             let mut datas = Vec::new();
@@ -306,7 +306,7 @@ impl RustCompiler{
 
         //let mut unmark_nodes = false;
         for (counter,dm) in self._draw_messages.iter_mut().enumerate(){   
-            match event.hits(cx, dm.animator.area, &mut dm.hit_state){
+            match dm.hit_state.hits(cx, dm.animator.area, event){
                 Event::Animate(ae)=>{
                     dm.animator.calc_write(cx, "bg.color", ae.time, dm.animator.area);
                 },
@@ -358,7 +358,7 @@ impl RustCompiler{
                     dm.head
                 };
 
-                cx.send_signal_after_draw(text_buffer.signal_id, SIGNAL_TEXTBUFFER_JUMP_TO_OFFSET);
+                cx.send_signal_after_draw(text_buffer.signal, SIGNAL_TEXTBUFFER_JUMP_TO_OFFSET);
                 return RustCompilerEvent::SelectMessage{path:dm.path.clone()}
             }
         }
@@ -515,14 +515,14 @@ impl RustCompiler{
         let mut child = _child.unwrap();
 
         let mut stdout =  child.stdout.take().unwrap();
-        let signal_id = self._check_signal_id;
+        let signal = self._check_signal;
         std::thread::spawn(move ||{
             loop{
                 let mut data = vec![0; 4096];
                 let n_bytes_read = stdout.read(&mut data).expect("cannot read");
                 data.truncate(n_bytes_read);
                 if n_bytes_read == 0{
-                    Cx::send_signal(signal_id, SIGNAL_BUILD_COMPLETE);
+                    Cx::send_signal(signal, SIGNAL_BUILD_COMPLETE);
                     return 
                 }
             }
@@ -548,14 +548,14 @@ impl RustCompiler{
 
         let mut stdout =  child.stdout.take().unwrap();
         let (tx, rx) = mpsc::channel();
-        let signal_id = self._check_signal_id;
+        let signal = self._check_signal;
         let thread = std::thread::spawn(move ||{
             loop{
                 let mut data = vec![0; 4096];
                 let n_bytes_read = stdout.read(&mut data).expect("cannot read");
                 data.truncate(n_bytes_read);
                 let _ = tx.send(data);
-                Cx::send_signal(signal_id, SIGNAL_RUN_OUTPUT);
+                Cx::send_signal(signal, SIGNAL_RUN_OUTPUT);
                 if n_bytes_read == 0{
                     return 
                 }
@@ -600,14 +600,14 @@ impl RustCompiler{
         //let mut stderr =  child.stderr.take().unwrap();
         let mut stdout =  child.stdout.take().unwrap();
         let (tx, rx) = mpsc::channel();
-        let signal_id = self._check_signal_id;
+        let signal = self._check_signal;
         let thread = std::thread::spawn(move ||{
             loop{
                 let mut data = vec![0; 4096];
                 let n_bytes_read = stdout.read(&mut data).expect("cannot read");
                 data.truncate(n_bytes_read);
                 let _ = tx.send(data);
-                Cx::send_signal(signal_id, SIGNAL_RUST_CHECKER);
+                Cx::send_signal(signal, SIGNAL_RUST_CHECKER);
                 if n_bytes_read == 0{
                     return 
                 }

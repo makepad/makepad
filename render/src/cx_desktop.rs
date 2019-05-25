@@ -4,7 +4,7 @@ use std::fs::File;
 use std::io;
 
 #[derive(Clone)]
-pub struct FileReadRequest{
+pub struct FileReadItem{
     read_id:u64,
     path:String
 }
@@ -12,7 +12,7 @@ pub struct FileReadRequest{
 #[derive(Clone)]
 pub struct CxDesktop{
     pub file_read_id:u64,
-    pub file_read_requests:Vec<FileReadRequest>,
+    pub file_read_requests:Vec<FileReadItem>,
 }
 
 impl Default for CxDesktop{
@@ -26,15 +26,15 @@ impl Default for CxDesktop{
 
 impl Cx{
 
-    pub fn read_file(&mut self, path:&str)->u64{
+    pub fn read_file(&mut self, path:&str)->FileReadRequest{
         let desktop = &mut self.platform.desktop;
         desktop.file_read_id += 1;
         let read_id = desktop.file_read_id;
-        desktop.file_read_requests.push(FileReadRequest{
+        desktop.file_read_requests.push(FileReadItem{
             read_id:read_id, 
             path:path.to_string()
         });
-        read_id
+        FileReadRequest{file_read_id:read_id}
     }
 
     pub fn write_file(&mut self, path:&str, data:&[u8])->u64{

@@ -381,8 +381,8 @@ impl Cx {
         self.platform.stop_timer.push(id);
     }
     
-    pub fn send_signal(id: u64, value: u64) {
-        CocoaWindow::post_signal(id, value);
+    pub fn send_signal(signal: Signal, value: u64) {
+        CocoaWindow::post_signal(signal.signal_id, value);
     }
     
     pub fn write_log(data: &str) {

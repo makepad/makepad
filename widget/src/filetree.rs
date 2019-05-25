@@ -344,7 +344,7 @@ impl FileTree{
 
             let node_draw = if let Some(node_draw) = node.get_draw(){node_draw}else{continue};
 
-            match event.hits(cx, node_draw.animator.area, &mut node_draw.hit_state){
+            match node_draw.hit_state.hits(cx, node_draw.animator.area, event){
                 Event::Animate(ae)=>{
                     node_draw.animator.calc_write(cx, "bg.color", ae.time, node_draw.animator.area);
                 },

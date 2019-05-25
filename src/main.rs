@@ -26,8 +26,8 @@ struct App {
     rust_compiler: RustCompiler,
     keyboard: Keyboard,
     text_buffers: TextBuffers,
-    index_read_id: u64,
-    app_state_read_id: u64
+    index_read_req: FileReadRequest,
+    app_state_read_req: FileReadRequest,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -53,8 +53,8 @@ impl Style for App {
                 storage: HashMap::new()
             },
             file_tree: FileTree {..Style::style(cx)},
-            index_read_id: 0,
-            app_state_read_id: 0,
+            index_read_req: FileReadRequest::empty(),
+            app_state_read_req: FileReadRequest::empty(),
             file_editors: Elements::new(FileEditorTemplates {
                 rust_editor: RustEditor {
                     ..Style::style(cx)
@@ -143,34 +143,23 @@ impl App {
                     self.text_buffers.root_path = "./edit_repo/".to_string();
                 }
                 
-                self.index_read_id = cx.read_file(&format!("{}index.json", self.text_buffers.root_path));
-                self.app_state_read_id = cx.read_file(&format!("{}makepad_state.json", self.text_buffers.root_path));
+                self.index_read_req = cx.read_file(&format!("{}index.json", self.text_buffers.root_path));
+                self.app_state_read_req = cx.read_file(&format!("{}makepad_state.json", self.text_buffers.root_path));
                 
                 self.rust_compiler.init(cx, &mut self.text_buffers);
                 
             },
             Event::FileRead(fr) => {
                 // lets see which file we loaded
-                if fr.read_id == self.index_read_id {
-                    if let Ok(str_data) = &fr.data {
-                        if let Ok(utf8_data) = std::str::from_utf8(&str_data) {
-                            self.file_tree.load_from_json(cx, utf8_data);
-                        }
-                    }
+                if let Some(utf8_data) = self.index_read_req.as_utf8(fr){
+                    self.file_tree.load_from_json(cx, utf8_data);
                 }
-                else if fr.read_id == self.app_state_read_id {
-                    self.app_state_read_id = 0;
-                    if let Ok(str_data) = &fr.data {
-                        if let Ok(utf8_data) = std::str::from_utf8(&str_data) {
-                            if let Ok(app_state) = serde_json::from_str(&utf8_data) {
-                                self.app_state = app_state;
-                                // update window pos and size
-                                println!("READ {:?}", self.app_state.window_position);
-                                cx.set_window_position(self.app_state.window_position);
-                                cx.set_window_outer_size(self.app_state.window_outer_size)
-                            }
-                            self.file_tree.load_from_json(cx, utf8_data);
-                        }
+                else if let Some(utf8_data) = self.app_state_read_req.as_utf8(fr) {
+                    if let Ok(app_state) = serde_json::from_str(&utf8_data) {
+                        self.app_state = app_state;
+                        // update window pos and size
+                        cx.set_window_position(self.app_state.window_position);
+                        cx.set_window_outer_size(self.app_state.window_outer_size)
                     }
                 }
                 else if self.text_buffers.handle_file_read(&fr) {
@@ -178,9 +167,8 @@ impl App {
                 }
             },
             Event::WindowChange(wc)=>{
-                if self.app_state_read_id == 0{
+                if !self.app_state_read_req.is_loading(){
                     self.app_state.window_position = wc.new_geom.position;
-                    println!("HERE {:?}", self.app_state.window_position);
                     self.app_state.window_outer_size = wc.new_geom.outer_size;
                     self.save_app_state(cx);
                 }

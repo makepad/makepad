@@ -103,7 +103,7 @@ impl Splitter{
     }
 
     pub fn handle_splitter(&mut self, cx:&mut Cx, event:&mut Event)->SplitterEvent{
-        match event.hits(cx, self._split_area, &mut self._hit_state){
+        match self._hit_state.hits(cx, self._split_area, event){
             Event::Animate(ae)=>{
                 self.animator.calc_write(cx, "split.color", ae.time, self._split_area);
             },

@@ -108,7 +108,7 @@ impl Button{
     pub fn handle_button(&mut self, cx:&mut Cx, event:&mut Event)->ButtonEvent{
         
         //let mut ret_event = ButtonEvent::None;
-        match event.hits(cx, self._bg_area, &mut self._hit_state){
+        match self._hit_state.hits(cx, self._bg_area, event){
             Event::Animate(ae)=>{
                 self.animator.calc_write(cx, "bg.color", ae.time, self._bg_area);
                 self.animator.calc_write(cx, "bg.border_color", ae.time, self._bg_area);

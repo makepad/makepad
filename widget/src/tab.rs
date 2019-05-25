@@ -191,7 +191,7 @@ impl Tab{
             }
         }
         
-        match event.hits(cx, self._bg_area, &mut self._hit_state){
+        match self._hit_state.hits(cx, self._bg_area, event){
             Event::Animate(ae)=>{
                 // its playing the term anim, run a redraw
                 if self.animator.term_anim_playing(){

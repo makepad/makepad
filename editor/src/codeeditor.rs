@@ -790,7 +790,7 @@ impl CodeEditor {
         self.view.redraw_view_area(cx);
         self.reset_cursor_blinker(cx);
         
-        cx.send_signal_after_draw(text_buffer.signal_id, SIGNAL_TEXTBUFFER_DATA_UPDATE);
+        cx.send_signal_after_draw(text_buffer.signal, SIGNAL_TEXTBUFFER_DATA_UPDATE);
         
     }
     
@@ -827,7 +827,7 @@ impl CodeEditor {
                     return CodeEditorEvent::LagChange;
                 }
             },
-            Event::Signal(se) => if se.signal_id == text_buffer.signal_id {
+            Event::Signal(se) => if text_buffer.signal.is_signal(se) {
                 match se.value {
                     SIGNAL_TEXTBUFFER_MESSAGE_UPDATE => {
                         self.view.redraw_view_area(cx);
@@ -862,7 +862,7 @@ impl CodeEditor {
             _ => ()
         }
         // editor local
-        match event.hits(cx, self._bg_area, &mut self._hit_state) {
+        match self._hit_state.hits(cx, self._bg_area, event) {
             Event::KeyFocus(kf) => {
                 if kf.is_lost {
                     self.view.redraw_view_area(cx)
@@ -934,7 +934,7 @@ impl CodeEditor {
         self.cursor.color = self.colors.cursor;
         self.cursor_row.color = self.colors.cursor_row;
         
-        if text_buffer.load_id != 0 {
+        if text_buffer.load_read_req.is_loading() {
             let bg_inst = self.bg.begin_quad(cx, &Layout {
                 align: Align::left_top(),
                 ..self.bg_layout.clone()

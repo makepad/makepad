@@ -291,7 +291,7 @@ impl ScrollBarLike<ScrollBar> for ScrollBar{
             _=>()
         };
         if self._visible{
-            match event.hits(cx, self._sb_area, &mut self._hit_state){
+            match self._hit_state.hits(cx, self._sb_area, event){
                 Event::Animate(ae)=>{
                     self.animator.calc_write(cx, "sb.color", ae.time, self._sb_area);
                 },

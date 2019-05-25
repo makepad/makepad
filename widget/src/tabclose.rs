@@ -89,7 +89,7 @@ impl TabClose{
     pub fn handle_tab_close(&mut self, cx:&mut Cx, event:&mut Event)->TabCloseEvent{
         
         //let mut ret_event = ButtonEvent::None;
-        match event.hits(cx, self._bg_area, &mut self._hit_state){
+        match self._hit_state.hits(cx, self._bg_area, event){
             Event::Animate(ae)=>{
                 self.animator.calc_write(cx, "bg.color", ae.time, self._bg_area);
                 self.animator.calc_write(cx, "bg.hover", ae.time, self._bg_area);
