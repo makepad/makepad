@@ -1,5 +1,4 @@
 //use syn::Type;
-
 use widget::*;
 use editor::*;
 mod rustcompiler;
@@ -24,25 +23,28 @@ struct App {
     app_state: AppState,
     file_tree: FileTree,
     file_editors: Elements<u64, FileEditor, FileEditorTemplates>,
-    file_editor_id_alloc: u64,
     rust_compiler: RustCompiler,
     keyboard: Keyboard,
     text_buffers: TextBuffers,
     index_read_id: u64,
     app_state_read_id: u64
 }
+
 #[derive(Clone, Serialize, Deserialize)]
 struct AppState {
+    window_outer_size: Vec2,
+    window_position: Vec2,
     dock_items: DockItem<Panel>,
 }
 
 main_app!(App, "Makepad");
 
 impl Style for App {
+    
     fn style(cx: &mut Cx) -> Self {
         set_dark_style(cx);
         Self {
-            file_editor_id_alloc: 10,
+            
             view: View {
                 ..Style::style(cx)
             },
@@ -65,6 +67,8 @@ impl Style for App {
                 ..Style::style(cx)
             },
             app_state: AppState {
+                window_outer_size: cx.window_geom.outer_size,
+                window_position: cx.window_geom.position,
                 dock_items: DockItem::Splitter {
                     axis: Axis::Vertical,
                     align: SplitterAlign::First,
@@ -134,6 +138,7 @@ impl App {
     fn handle_app(&mut self, cx: &mut Cx, event: &mut Event) {
         match event {
             Event::Construct => {
+                
                 if cx.feature == "mtl" {
                     self.text_buffers.root_path = "./edit_repo/".to_string();
                 }
@@ -154,10 +159,15 @@ impl App {
                     }
                 }
                 else if fr.read_id == self.app_state_read_id {
+                    self.app_state_read_id = 0;
                     if let Ok(str_data) = &fr.data {
                         if let Ok(utf8_data) = std::str::from_utf8(&str_data) {
                             if let Ok(app_state) = serde_json::from_str(&utf8_data) {
-                                self.app_state = app_state
+                                self.app_state = app_state;
+                                // update window pos and size
+                                println!("READ {:?}", self.app_state.window_position);
+                                cx.set_window_position(self.app_state.window_position);
+                                cx.set_window_outer_size(self.app_state.window_outer_size)
                             }
                             self.file_tree.load_from_json(cx, utf8_data);
                         }
@@ -166,7 +176,15 @@ impl App {
                 else if self.text_buffers.handle_file_read(&fr) {
                     cx.redraw_area(Area::All);
                 }
-            }
+            },
+            Event::WindowChange(wc)=>{
+                if self.app_state_read_id == 0{
+                    self.app_state.window_position = wc.new_geom.position;
+                    println!("HERE {:?}", self.app_state.window_position);
+                    self.app_state.window_outer_size = wc.new_geom.outer_size;
+                    self.save_app_state(cx);
+                }
+            },
             _ => ()
         }
         
@@ -229,7 +247,7 @@ impl App {
             FileTreeEvent::SelectFile {path} => {
                 // search for the tabcontrol with the maximum amount of editors
                 if self.focus_or_new_editor(cx, &path) {
-                    self.handle_dock_changed(cx);
+                    self.save_app_state(cx);
                 }
             },
             _ => {}
@@ -238,13 +256,13 @@ impl App {
         // handle the dock events
         match self.dock.handle_dock(cx, event, &mut self.app_state.dock_items) {
             DockEvent::DockChanged => { // thats a bit bland event. lets let the thing know which file closed
-                self.handle_dock_changed(cx);
+                self.save_app_state(cx);
             },
             _ => ()
         }
     }
     
-    fn handle_dock_changed(&mut self, cx: &mut Cx) {
+    fn save_app_state(&mut self, cx: &mut Cx) {
         let json = serde_json::to_string(&self.app_state).unwrap();
         cx.write_file(&format!("{}makepad_state.json", self.text_buffers.root_path), json.as_bytes());
     }
@@ -281,8 +299,26 @@ impl App {
     }
     
     fn new_file_editor_tab(&mut self, path: &str) -> DockTab<Panel> {
-        let editor_id = self.file_editor_id_alloc;
-        self.file_editor_id_alloc += 1;
+        let mut max_id = 0;
+        let mut dock_walker = self.dock.walker(&mut self.app_state.dock_items);
+        while let Some(dock_item) = dock_walker.walk_dock_item() {
+            match dock_item {
+                DockItem::TabControl {tabs, ..} => {
+                    for (_, tab) in tabs.iter().enumerate() {
+                        match &tab.item {
+                            Panel::FileEditor {editor_id, ..} => {
+                                if *editor_id > max_id {
+                                    max_id = *editor_id;
+                                }
+                            },
+                            _ => ()
+                        }
+                    }
+                },
+                _ => ()
+            }
+        }
+        let editor_id = max_id + 1;
         DockTab {
             closeable: true,
             title: path_file_name(&path),

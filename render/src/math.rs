@@ -1,5 +1,6 @@
+use serde::*; 
 
-#[derive(Clone, Copy, Default, Debug, PartialEq)]
+#[derive(Clone, Copy, Default, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Rect{
     pub x:f32,
     pub y:f32,
@@ -30,7 +31,7 @@ pub struct Mat4{
     pub v: [f32; 16],
 }
 
-#[derive(Clone, Copy, Default, Debug, PartialEq)]
+#[derive(Clone, Copy, Default, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Vec2{
     pub x: f32,
     pub y: f32,

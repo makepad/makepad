@@ -27,9 +27,10 @@ pub struct CocoaWindow {
     //pub input_context:Option<id>,
     pub pasteboard: Option<id>,
     pub init_resize: bool,
-    pub last_size: Vec2,
+    
+    pub last_window_geom: WindowGeom,
+    
     pub ime_spot: Vec2,
-    pub last_dpi_factor: f32,
     pub time_start: u64,
     pub last_key_mod: KeyModifiers,
     pub fingers_down: Vec<bool>,
@@ -134,9 +135,7 @@ impl CocoaWindow {
             self.window = Some(window);
             self.view = Some(view);
             //self.input_context = Some(input_context);
-            self.last_size = self.get_inner_size();
-            self.last_dpi_factor = self.get_dpi_factor();
-            self.time_start = precise_time_ns();
+            self.last_window_geom = self.get_window_geom();
             
             let _: () = msg_send![autoreleasepool, drain];
             
@@ -150,21 +149,40 @@ impl CocoaWindow {
         }
     }
     
+    pub fn get_window_geom(&self) -> WindowGeom {
+        WindowGeom {
+            inner_size: self.get_inner_size(),
+            outer_size: self.get_outer_size(),
+            dpi_factor: self.get_dpi_factor(),
+            position: self.get_position()
+        }
+    }
+    
+    
     pub fn time_now(&self) -> f64 {
         let time_now = precise_time_ns();
         (time_now - self.time_start) as f64 / 1_000_000_000.0
     }
     
-    
     pub fn set_position(&mut self, pos: Vec2) {
-        let ns_point = NSPoint::new(pos.x as f64, CGDisplay::main().pixels_high() as f64 - pos.y as f64);
-        unsafe {
-            NSWindow::setFrameTopLeftPoint_(self.window.unwrap(), ns_point);
-        }
+        let mut window_frame = unsafe {NSWindow::frame(self.window.unwrap())};
+        window_frame.origin.x = pos.x as f64;
+        window_frame.origin.y = pos.y as f64;
+        unsafe {msg_send![self.window.unwrap(), setFrame: window_frame display: YES]};
     }
     
-    pub fn get_position(&mut self) -> Vec2 {
-        //let view_frame = unsafe { NSView::frame(self.view.unwrap()) };
+    pub fn get_position(&self) -> Vec2 {
+        if self.window.is_none() {
+            return Vec2::zero();
+        }
+        let window_frame = unsafe {NSWindow::frame(self.window.unwrap())};
+        Vec2 {x: window_frame.origin.x as f32, y: window_frame.origin.y as f32}
+    }
+    
+    fn get_ime_origin(&self) -> Vec2 {
+        if self.window.is_none() {
+            return Vec2::zero();
+        }
         let rect = NSRect::new(
             NSPoint::new(0.0, 0.0),
             //view_frame.size.height),
@@ -180,6 +198,21 @@ impl CocoaWindow {
         }
         let view_frame = unsafe {NSView::frame(self.view.unwrap())};
         Vec2 {x: view_frame.size.width as f32, y: view_frame.size.height as f32}
+    }
+    
+    pub fn get_outer_size(&self) -> Vec2 {
+        if self.window.is_none() {
+            return Vec2::zero();
+        }
+        let window_frame = unsafe {NSWindow::frame(self.window.unwrap())};
+        Vec2 {x: window_frame.size.width as f32, y: window_frame.size.height as f32}
+    }
+    
+    pub fn set_outer_size(&self, size: Vec2) {
+        let mut window_frame = unsafe {NSWindow::frame(self.window.unwrap())};
+        window_frame.size.width = size.x as f64;
+        window_frame.size.height = size.y as f64;
+        unsafe {msg_send![self.window.unwrap(), setFrame: window_frame display: YES]};
     }
     
     pub fn get_dpi_factor(&self) -> f32 {
@@ -391,7 +424,7 @@ impl CocoaWindow {
             
             if !self.init_resize {
                 self.init_resize = true;
-                self.send_resize_event();
+                self.send_change_event();
             }
             
             loop {
@@ -521,18 +554,15 @@ impl CocoaWindow {
         }
     }
     
-    pub fn send_resize_event(&mut self) {
-        let new_dpi_factor = self.get_dpi_factor();
-        let new_size = self.get_inner_size();
-        let old_dpi_factor = self.last_dpi_factor;
-        let old_size = self.last_size;
-        self.last_dpi_factor = new_dpi_factor;
-        self.last_size = new_size;
-        self.do_callback(&mut vec![Event::Resized(ResizedEvent {
-            old_size: old_size,
-            old_dpi_factor: old_dpi_factor,
-            new_size: new_size,
-            new_dpi_factor: new_dpi_factor
+    pub fn send_change_event(&mut self) {
+        
+        let new_geom = self.get_window_geom();
+        let old_geom = self.last_window_geom.clone();
+        self.last_window_geom = new_geom.clone();
+        
+        self.do_callback(&mut vec![Event::WindowChange(WindowChangeEvent {
+            old_geom: old_geom,
+            new_geom: new_geom
         })]);
     }
     
@@ -793,7 +823,6 @@ fn get_cocoa_window(this: &Object) -> &mut CocoaWindow {
 }
 
 pub fn define_cocoa_window_delegate() -> *const Class {
-    use std::os::raw::c_void;
     
     extern fn window_received_timer(this: &Object, _: Sel, nstimer: id) {
         let cw = get_cocoa_window(this);
@@ -812,23 +841,32 @@ pub fn define_cocoa_window_delegate() -> *const Class {
     
     extern fn window_did_resize(this: &Object, _: Sel, _: id) {
         let cw = get_cocoa_window(this);
-        cw.send_resize_event();
+        if !cw.window.is_none(){
+            cw.send_change_event();
+        }
     }
     
     // This won't be triggered if the move was part of a resize.
     extern fn window_did_move(this: &Object, _: Sel, _: id) {
-        let _cw = get_cocoa_window(this);
+        let cw = get_cocoa_window(this);
+        if !cw.window.is_none(){
+            cw.send_change_event();
+        }
     }
     
     extern fn window_did_change_screen(this: &Object, _: Sel, _: id) {
         let cw = get_cocoa_window(this);
-        cw.send_resize_event();
+        if !cw.window.is_none(){
+            cw.send_change_event();
+        }
     }
     
     // This will always be called before `window_did_change_screen`.
     extern fn window_did_change_backing_properties(this: &Object, _: Sel, _: id) {
         let cw = get_cocoa_window(this);
-        cw.send_resize_event();
+        if !cw.window.is_none(){
+            cw.send_change_event();
+        }
     }
     
     extern fn window_did_become_key(this: &Object, _: Sel, _: id) {
@@ -868,7 +906,7 @@ pub fn define_cocoa_window_delegate() -> *const Class {
     // Invoked when entered fullscreen
     extern fn window_did_enter_fullscreen(this: &Object, _: Sel, _: id) {
         let cw = get_cocoa_window(this);
-        cw.send_resize_event();
+        cw.send_change_event();
     }
     
     // Invoked when before enter fullscreen
@@ -879,7 +917,7 @@ pub fn define_cocoa_window_delegate() -> *const Class {
     // Invoked when exited fullscreen
     extern fn window_did_exit_fullscreen(this: &Object, _: Sel, _: id) {
         let cw = get_cocoa_window(this);
-        cw.send_resize_event();
+        cw.send_change_event();
     }
     
     extern fn window_did_fail_to_enter_fullscreen(_this: &Object, _: Sel, _: id) {
@@ -1128,7 +1166,7 @@ pub fn define_cocoa_view_class() -> *const Class {
         let view_rect = unsafe {NSView::frame(view)};
         let window_rect = unsafe {NSWindow::frame(cw.window.unwrap())};
         
-        let origin = cw.get_position();
+        let origin = cw.get_ime_origin();
         let bar = (window_rect.size.height - view_rect.size.height) as f32 - 5.;
         NSRect::new(
             NSPoint::new((origin.x + cw.ime_spot.x) as f64, (origin.y + (view_rect.size.height as f32 - cw.ime_spot.y - bar)) as f64),

@@ -83,7 +83,7 @@ impl Quad{
 
     fn do_uniforms(&mut self, cx:&mut Cx, inst:&InstanceArea){
         inst.push_uniform_float(cx, if self.do_scroll{1.0}else{0.0});
-        let dpi_dilate = (2.-cx.target_dpi_factor).max(0.).min(1.);
+        let dpi_dilate = (2.-cx.window_geom.dpi_factor).max(0.).min(1.);
         inst.push_uniform_float(cx, dpi_dilate);
     }
 

@@ -69,9 +69,9 @@ pub struct Cx{
 
     pub turtles:Vec<Turtle>,
     pub align_list:Vec<Area>,
-    pub target_size:Vec2,
-    pub target_dpi_factor:f32,
 
+    pub window_geom:WindowGeom,
+    
     pub down_mouse_cursor:Option<MouseCursor>,
     pub hover_mouse_cursor:Option<MouseCursor>,
     pub captured_fingers:Vec<Area>,
@@ -141,8 +141,8 @@ impl Default for Cx{
             is_in_redraw_cycle:false,
             turtles:Vec::new(),
             align_list:Vec::new(),
-            target_size:Vec2::zero(),
-            target_dpi_factor:0.0,
+
+            window_geom:WindowGeom{..Default::default()},
             
             last_key_focus:Area::Empty,
             key_focus:Area::Empty,
@@ -324,7 +324,7 @@ impl Cx{
 
     pub fn prepare_frame(&mut self){
         let camera_projection = Mat4::ortho(
-                0.0, self.target_size.x, 0.0, self.target_size.y, -100.0, 100.0, 
+                0.0, self.window_geom.inner_size.x, 0.0, self.window_geom.inner_size.y, -100.0, 100.0, 
                 1.0,1.0
         );
         self.uniform_camera_projection(camera_projection);
@@ -586,6 +586,13 @@ impl Cx{
     }*/
 }
 
+#[derive(Clone, Default, Debug, PartialEq)]
+pub struct WindowGeom{
+    pub dpi_factor:f32,
+    pub position:Vec2,
+    pub inner_size:Vec2,
+    pub outer_size:Vec2,
+}
 
 #[derive(Clone)]
 pub enum StyleValue{
@@ -604,6 +611,10 @@ macro_rules! log {
         $crate::Cx::write_log(&format!("[{}:{}:{}] {}\n",file!(),line!(),column!(),&format!($($arg)*)))
     })
 }
+
+pub enum Ty{
+}
+pub fn ty(_ty:Ty){}
 
 #[macro_export]
 macro_rules! main_app {

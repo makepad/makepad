@@ -454,7 +454,7 @@ impl Cx{
             self.get_width_left()
         } 
         else{
-            self.target_size.x
+            self.window_geom.inner_size.x
         }
     }
 
@@ -468,7 +468,7 @@ impl Cx{
             }
             return nan_val
         }
-        return self.target_size.x
+        return self.window_geom.inner_size.x
     }
 
     fn _get_width_total(&self, abs:bool)->f32{
@@ -476,7 +476,7 @@ impl Cx{
             self.get_width_total()
         }
         else{
-            self.target_size.x
+            self.window_geom.inner_size.x
         }
     }
 
@@ -490,7 +490,7 @@ impl Cx{
             }
             return nan_val
         }
-        return self.target_size.x
+        return self.window_geom.inner_size.x
     }
 
     fn _get_height_left(&self, abs:bool)->f32{
@@ -498,7 +498,7 @@ impl Cx{
             self.get_height_left()
         }
         else{
-            self.target_size.y
+            self.window_geom.inner_size.y
         }
     }
 
@@ -512,7 +512,7 @@ impl Cx{
             }
             return nan_val
         }
-        return self.target_size.y
+        return self.window_geom.inner_size.y
     }
 
     fn _get_height_total(&self, abs:bool)->f32{
@@ -520,7 +520,7 @@ impl Cx{
             self.get_height_total()
         }
         else{
-            self.target_size.y
+            self.window_geom.inner_size.y
         }
     }
 
@@ -534,7 +534,7 @@ impl Cx{
             }
             return nan_val
         }
-        return self.target_size.y
+        return self.window_geom.inner_size.y
     }
 
 }

@@ -1,14 +1,14 @@
 use std::mem;
 
 //use cocoa::base::{id};
-use cocoa::appkit:: {NSWindow, NSView};
-use cocoa::foundation:: {NSAutoreleasePool, NSUInteger, NSRange};
+use cocoa::appkit::{NSWindow, NSView};
+use cocoa::foundation::{NSAutoreleasePool, NSUInteger, NSRange};
 use core_graphics::geometry::CGSize;
-use objc:: {msg_send, sel, sel_impl};
+use objc::{msg_send, sel, sel_impl};
 use objc::runtime::YES;
 use metal::*;
 use time::*;
-use std::io:: {self, Write};
+use std::io::{self, Write};
 use crate::cx_cocoa::*;
 use crate::cx::*;
 
@@ -150,8 +150,8 @@ impl Cx {
     
     fn resize_layer_to_turtle(&mut self, layer: &CoreAnimationLayer) {
         layer.set_drawable_size(CGSize::new(
-            (self.target_size.x * self.target_dpi_factor) as f64,
-            (self.target_size.y * self.target_dpi_factor) as f64
+            (self.window_geom.inner_size.x * self.window_geom.dpi_factor) as f64,
+            (self.window_geom.inner_size.y * self.window_geom.dpi_factor) as f64
         ));
     }
     
@@ -188,14 +188,11 @@ impl Cx {
         
         // ok get_inner_size eh. lets do this
         
-        let draw_size = cocoa_window.get_inner_size();
-        
-        self.target_size = draw_size;
-        self.target_dpi_factor = 2.;
+        self.window_geom = cocoa_window.get_window_geom();
         
         layer.set_drawable_size(CGSize::new(
-            (self.target_size.x * self.target_dpi_factor) as f64,
-            (self.target_size.y * self.target_dpi_factor) as f64
+            (self.window_geom.inner_size.x * self.window_geom.dpi_factor) as f64,
+            (self.window_geom.inner_size.y * self.window_geom.dpi_factor) as f64
         ));
         
         let command_queue = device.new_command_queue();
@@ -205,7 +202,7 @@ impl Cx {
         };
         
         // move it to my second screen. livecompile.
-        cocoa_window.set_position(Vec2 {x: 1920.0, y: 400.0});
+        //cocoa_window.set_position(Vec2 {x: 1920.0, y: 400.0});
         
         self.mtl_compile_all_shaders(&device);
         
@@ -248,14 +245,16 @@ impl Cx {
                             _ => ()
                         };
                         match &event {
-                            Event::Resized(re) => { // do this here because mac
-                                self.target_dpi_factor = re.new_dpi_factor;
-                                self.target_size = re.new_size;
-                                
+                            Event::WindowChange(re) => { // do this here because mac
+                                self.window_geom = re.new_geom.clone();
+                                //let resized = re.new_geom.inner_size != re.old_geom.inner_size
+                                 //   || re.new_geom.dpi_factor != re.old_geom.dpi_factor;
+
                                 self.call_event_handler(&mut event_handler, &mut event);
                                 
                                 self.redraw_area(Area::All);
                                 self.call_draw_event(&mut event_handler, &mut root_view);
+                            
                                 self.repaint(&layer, &device, &command_queue, false);
                                 self.resize_layer_to_turtle(&layer);
                             },
@@ -323,6 +322,20 @@ impl Cx {
                 cocoa_window.ime_spot = set_ime_position;
             }
             
+            if let Some(window_position) = self.platform.set_window_position {
+                self.platform.set_window_position = None;
+                cocoa_window.set_position(window_position);
+                self.window_geom = cocoa_window.get_window_geom();
+            }
+            
+            if let Some(window_outer_size) = self.platform.set_window_outer_size {
+                self.platform.set_window_outer_size = None;
+                cocoa_window.set_outer_size(window_outer_size);
+                self.window_geom = cocoa_window.get_window_geom();
+                self.resize_layer_to_turtle(&layer);
+            }
+            
+            
             while self.platform.start_timer.len()>0 {
                 let (timer_id, interval, repeats) = self.platform.start_timer.pop().unwrap();
                 cocoa_window.start_timer(timer_id, interval, repeats);
@@ -347,6 +360,15 @@ impl Cx {
     }
     
     pub fn hide_text_ime(&mut self) {
+    }
+    
+    
+    pub fn set_window_outer_size(&mut self, size: Vec2) {
+        self.platform.set_window_outer_size = Some(size);
+    }
+    
+    pub fn set_window_position(&mut self, pos: Vec2) {
+        self.platform.set_window_position = Some(pos);
     }
     
     pub fn start_timer(&mut self, interval: f64, repeats: bool) -> u64 {
@@ -407,6 +429,8 @@ impl Cx {
 pub struct CxPlatform {
     pub uni_cx: MetalBuffer,
     pub post_id: u64,
+    pub set_window_position: Option<Vec2>,
+    pub set_window_outer_size: Option<Vec2>,
     pub set_ime_position: Option<Vec2>,
     pub start_timer: Vec<(u64, f64, bool)>,
     pub stop_timer: Vec<(u64)>,

@@ -24,7 +24,7 @@ pub struct CodeEditor {
     pub folded_font_size: f32,
     pub line_number_width: f32,
     pub top_padding: f32,
-    pub colors: CodeEditorColors,
+    pub colors: CodeEditorColors, 
     pub cursor_blink_speed: f64,
     pub _hit_state: HitState,
     pub _bg_area: Area,

@@ -92,11 +92,15 @@ pub struct FingerScrollEvent{
 }
 
 #[derive(Clone, Default, Debug, PartialEq)]
-pub struct ResizedEvent{
-    pub old_size:Vec2,
-    pub old_dpi_factor:f32,
-    pub new_size:Vec2,
-    pub new_dpi_factor:f32
+pub struct WindowChangeEvent{
+    pub old_geom:WindowGeom,
+    pub new_geom:WindowGeom,
+}
+
+#[derive(Clone, Default, Debug, PartialEq)]
+pub struct WindowMovedEvent{
+    pub old_pos:Vec2,
+    pub new_pos:Vec2,
 }
 
 #[derive(Clone, Default, Debug, PartialEq)]
@@ -178,7 +182,7 @@ pub enum Event{
     Animate(AnimateEvent),
     Frame(FrameEvent),
     CloseRequested,
-    Resized(ResizedEvent),
+    WindowChange(WindowChangeEvent),
     FingerDown(FingerDownEvent),
     FingerMove(FingerMoveEvent),
     FingerHover(FingerHoverEvent),

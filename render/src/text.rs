@@ -142,7 +142,7 @@ impl Text{
             aligned.inst.push_uniform_vec2f(cx, cx.fonts[self.font_id].width as f32, cx.fonts[self.font_id].height as f32);
             aligned.inst.push_uniform_float(cx, self.brightness);
 
-            let dpi_dilate = if self.do_dpi_dilate{(2.-cx.target_dpi_factor).max(0.).min(1.)}else{0.};
+            let dpi_dilate = if self.do_dpi_dilate{(2.-cx.window_geom.dpi_factor).max(0.).min(1.)}else{0.};
 
             aligned.inst.push_uniform_float(cx, dpi_dilate);
             //list_clip
