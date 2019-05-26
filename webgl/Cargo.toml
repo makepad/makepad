@@ -16,8 +16,6 @@ debug = true
 codegen-units = 1
 
 [dependencies]
-rand = "*"
-#miniserde = "*"
 serde_json = "*"
 serde = { version = "1.0", features = ["derive"] }
 

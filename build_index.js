@@ -2,7 +2,8 @@ var fs = require('fs');
 
 function readRecur(path, name){
     var files = fs.readdirSync(path);
-    var ret = {name:name,open:false,folders:[], files:[]};
+    var ret = {name:name,open:true,folders:[], files:[]};
+    if(name == "shader_ast" || name == "webgl") ret.open = false;
     for(file of files){
         let new_file = path + '/' + file
         if (fs.statSync(new_file).isDirectory()) {
@@ -13,7 +14,7 @@ function readRecur(path, name){
             }
         }
         else{
-            if(!file.match(/\.rs/)) continue;
+            if(!file.match(/\.rs$|.js$|.toml$/)) continue;
             ret.files.push({name:file})
         }
     }
@@ -23,9 +24,9 @@ let tree = readRecur(".","");
 tree.open = true;
 tree.folders.splice(0,1);
 tree.folders[0].open = true;
-tree.folders[0].folders[0].open = true;
-tree.folders[2].open = true;
-tree.folders[3].open = true;
+//tree.folders[0].folders[0].open = true;
+//tree.folders[2].open = true;
+//tree.folders[3].open = true;
 //tree.folders[3].folders[0].open = true;
 var data_in = fs.readFileSync('./index.json');
 var data_out = JSON.stringify(tree);

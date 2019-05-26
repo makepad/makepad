@@ -19,7 +19,7 @@ pub struct CodeEditor {
     pub message_marker: Quad,
     pub text: Text,
     pub cursors: TextCursorSet,
-    
+
     pub open_font_size: f32,
     pub folded_font_size: f32,
     pub line_number_width: f32,
@@ -70,7 +70,7 @@ pub struct CodeEditor {
     pub _draw_search: DrawCursors,
     pub _draw_messages: DrawCursors,
     
-    pub _cursor_blink_timer_id: u64,
+    pub _cursor_blink_timer: Timer,
     pub _cursor_blink_flipflop: f32,
     pub _cursor_area: Area,
     pub _highlight_visibility: f32,
@@ -308,7 +308,7 @@ impl Style for CodeEditor {
             _last_cursor_pos: TextPos::zero(),
             _last_indent_color: Color::zero(),
             
-            _cursor_blink_timer_id: 0,
+            _cursor_blink_timer: Timer::empty(),
             _cursor_blink_flipflop: 0.,
             _cursor_area: Area::Empty,
             _last_lag_mutation_id: 0,
@@ -491,8 +491,8 @@ impl CodeEditor {
     }
     
     fn reset_cursor_blinker(&mut self, cx: &mut Cx) {
-        cx.stop_timer(self._cursor_blink_timer_id);
-        self._cursor_blink_timer_id = cx.start_timer(self.cursor_blink_speed * 0.5, false);
+        cx.stop_timer(&mut self._cursor_blink_timer);
+        self._cursor_blink_timer = cx.start_timer(self.cursor_blink_speed * 0.5, false);
         self._cursor_blink_flipflop = 0.;
         self._cursor_area.write_uniform_float(cx, "blink", self._cursor_blink_flipflop);
     }
@@ -814,8 +814,8 @@ impl CodeEditor {
         }
         // global events
         match event {
-            Event::Timer(te) => if te.timer_id == self._cursor_blink_timer_id {
-                self._cursor_blink_timer_id = cx.start_timer(self.cursor_blink_speed, false);
+            Event::Timer(te) => if self._cursor_blink_timer.is_timer(te)  {
+                self._cursor_blink_timer = cx.start_timer(self.cursor_blink_speed, false);
                 // update the cursor uniform to blink it.
                 self._cursor_blink_flipflop = 1.0 - self._cursor_blink_flipflop;
                 self._highlight_visibility = 1.0;
@@ -863,10 +863,8 @@ impl CodeEditor {
         }
         // editor local
         match self._hit_state.hits(cx, self._bg_area, event) {
-            Event::KeyFocus(kf) => {
-                if kf.is_lost {
-                    self.view.redraw_view_area(cx)
-                }
+            Event::KeyFocusLost(_kf) => {
+                self.view.redraw_view_area(cx)
             },
             Event::FingerDown(fe) => {
                 self.handle_finger_down(cx, &fe, text_buffer);
@@ -1243,7 +1241,7 @@ impl CodeEditor {
                 TokenType::TypeDef => {
                     self._last_indent_color = self.colors.indent_line_typedef;
                 },
-                TokenType::Fn => {
+                TokenType::Fn|TokenType::Call => {
                     self._last_indent_color = self.colors.indent_line_fn;
                 }
                 _ => ()
@@ -1317,6 +1315,7 @@ impl CodeEditor {
                     }
                     self.colors.type_name
                 },
+                TokenType::Regex => self.colors.string,
                 TokenType::String => self.colors.string,
                 TokenType::Number => self.colors.number,
                 TokenType::CommentMultiBegin => self.colors.comment,

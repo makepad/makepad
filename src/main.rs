@@ -58,6 +58,9 @@ impl Style for App {
             file_editors: Elements::new(FileEditorTemplates {
                 rust_editor: RustEditor {
                     ..Style::style(cx)
+                },
+                js_editor: JSEditor {
+                    ..Style::style(cx)
                 }
             }),
             rust_compiler: RustCompiler {
@@ -151,7 +154,7 @@ impl App {
             },
             Event::FileRead(fr) => {
                 // lets see which file we loaded
-                if let Some(utf8_data) = self.index_read_req.as_utf8(fr){
+                if let Some(utf8_data) = self.index_read_req.as_utf8(fr) {
                     self.file_tree.load_from_json(cx, utf8_data);
                 }
                 else if let Some(utf8_data) = self.app_state_read_req.as_utf8(fr) {
@@ -166,8 +169,8 @@ impl App {
                     cx.redraw_area(Area::All);
                 }
             },
-            Event::WindowChange(wc)=>{
-                if !self.app_state_read_req.is_loading(){
+            Event::WindowChange(wc) => {
+                if !self.app_state_read_req.is_loading() {
                     self.app_state.window_position = wc.new_geom.position;
                     self.app_state.window_outer_size = wc.new_geom.outer_size;
                     self.save_app_state(cx);
@@ -277,9 +280,15 @@ impl App {
                 },
                 Panel::FileEditor {path, editor_id} => {
                     let text_buffer = self.text_buffers.from_path(cx, path);
-                    self.file_editors.get_draw(cx, *editor_id, | _cx, tmpl | {
+                    let mut set_key_focus = false;
+                    let file_editor = self.file_editors.get_draw(cx, *editor_id, | _cx, tmpl | {
+                        set_key_focus = true;
                         FileEditor::create_file_editor_for_path(path, tmpl)
-                    }).draw_file_editor(cx, text_buffer);
+                    });
+                    file_editor.draw_file_editor(cx, text_buffer);
+                    if set_key_focus {
+                        file_editor.set_key_focus(cx);
+                    }
                 }
             }
         }
@@ -369,22 +378,28 @@ impl App {
 
 struct FileEditorTemplates {
     rust_editor: RustEditor,
+    js_editor: JSEditor,
+    //text_editor: TextEditor
 }
 
 #[derive(Clone)]
 enum FileEditor {
-    Rust(RustEditor)
+    Rust(RustEditor),
+    JS(JSEditor),
+    //Text(TextEditor)
 }
 
 impl ElementLife for FileEditor {
     fn construct(&mut self, cx: &mut Cx) {
         match self {
             FileEditor::Rust(re) => re.construct(cx),
+            FileEditor::JS(re) => re.construct(cx),
         }
     }
     fn destruct(&mut self, cx: &mut Cx) {
         match self {
             FileEditor::Rust(re) => re.destruct(cx),
+            FileEditor::JS(re) => re.destruct(cx),
         }
     }
 }
@@ -405,27 +420,46 @@ impl FileEditor {
                     _ => FileEditorEvent::None
                 }
             },
+            FileEditor::JS(re) => {
+                match re.handle_js_editor(cx, event, text_buffer) {
+                    CodeEditorEvent::Change => FileEditorEvent::Change,
+                    CodeEditorEvent::LagChange => FileEditorEvent::LagChange,
+                    _ => FileEditorEvent::None
+                }
+            },
         }
     }
     
     fn set_key_focus(&mut self, cx: &mut Cx) {
         match self {
             FileEditor::Rust(re) => re.code_editor.set_key_focus(cx),
+            FileEditor::JS(re) => re.code_editor.set_key_focus(cx),
         }
     }
     
     fn draw_file_editor(&mut self, cx: &mut Cx, text_buffer: &mut TextBuffer) {
         match self {
             FileEditor::Rust(re) => re.draw_rust_editor(cx, text_buffer),
+            FileEditor::JS(re) => re.draw_js_editor(cx, text_buffer),
         }
     }
     
     fn create_file_editor_for_path(path: &str, template: &FileEditorTemplates) -> FileEditor {
         // check which file extension we have to spawn a new editor
-        FileEditor::Rust(RustEditor {
-            path: path.to_string(),
-            set_key_focus_on_draw: true,
-            ..template.rust_editor.clone()
-        })
+        if path.ends_with(".rs"){
+            FileEditor::Rust(RustEditor {
+                ..template.rust_editor.clone()
+            })
+        }
+        else if path.ends_with(".js"){
+            FileEditor::JS(JSEditor {
+                ..template.js_editor.clone()
+            })
+        }
+        else{
+            FileEditor::Rust(RustEditor {
+                ..template.rust_editor.clone()
+            })
+        }
     }
 }

@@ -35,6 +35,7 @@ pub struct CocoaWindow {
     pub last_key_mod: KeyModifiers,
     pub fingers_down: Vec<bool>,
     pub cursors: HashMap<MouseCursor, id>,
+
     pub timers: Vec<CocoaTimer>,
     pub current_cursor: MouseCursor,
     pub last_mouse_pos: Vec2,
@@ -567,8 +568,12 @@ impl CocoaWindow {
         })]);
     }
     
-    pub fn send_focus_event(&mut self, focus: bool) {
-        self.do_callback(&mut vec![Event::AppFocus(focus)]);
+    pub fn send_focus_event(&mut self) {
+        self.do_callback(&mut vec![Event::AppFocus]);
+    }
+
+    pub fn send_focus_lost_event(&mut self) {
+        self.do_callback(&mut vec![Event::AppFocusLost]);
     }
     
     pub fn send_finger_down(&mut self, digit: usize, modifiers: KeyModifiers) {
@@ -872,12 +877,12 @@ pub fn define_cocoa_window_delegate() -> *const Class {
     
     extern fn window_did_become_key(this: &Object, _: Sel, _: id) {
         let cw = get_cocoa_window(this);
-        cw.send_focus_event(true);
+        cw.send_focus_event();
     }
     
     extern fn window_did_resign_key(this: &Object, _: Sel, _: id) {
         let cw = get_cocoa_window(this);
-        cw.send_focus_event(false);
+        cw.send_focus_lost_event();
     }
     
     // Invoked when the dragged image enters destination bounds or frame

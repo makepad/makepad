@@ -135,16 +135,25 @@ impl Cx {
                     }
                 },
                 3 => { // init
-                    self.target_size = Vec2 {x: to_wasm.mf32(), y: to_wasm.mf32()};
-                    self.target_dpi_factor = to_wasm.mf32();
+                    self.window_geom = WindowGeom{
+                        inner_size:Vec2 {x: to_wasm.mf32(), y: to_wasm.mf32()},
+                        dpi_factor:to_wasm.mf32(),
+                        outer_size:Vec2{x:0.,y:0.},
+                        position:Vec2{x:0.,y:0.}
+                    };
+
                     self.call_event_handler(&mut event_handler, &mut Event::Construct);
                     
                     self.redraw_area(Area::All);
                 },
                 4 => { // resize
-                    self.target_size = Vec2 {x: to_wasm.mf32(), y: to_wasm.mf32()};
-                    self.target_dpi_factor = to_wasm.mf32();
-                    
+                    self.window_geom = WindowGeom{
+                        inner_size:Vec2 {x: to_wasm.mf32(), y: to_wasm.mf32()},
+                        dpi_factor:to_wasm.mf32(),
+                        outer_size:Vec2{x:0.,y:0.},
+                        position:Vec2{x:0.,y:0.}
+                    };
+
                     // do our initial redraw and repaint
                     self.redraw_area(Area::All);
                 },
@@ -170,7 +179,7 @@ impl Cx {
                     self.call_event_handler(&mut event_handler, &mut Event::FingerDown(FingerDownEvent {
                         abs: abs,
                         rel: abs,
-                        rect: Rect::zero(),
+                        rect: Rect::zero(), 
                         handled: false,
                         digit: digit,
                         is_touch: is_touch,
@@ -272,22 +281,26 @@ impl Cx {
                     }));
                 },
                 12 => { // key_down
-                    self.call_event_handler(&mut event_handler, &mut Event::KeyDown(KeyEvent {
+                    let key_event = KeyEvent {
                         key_code: web_to_key_code(to_wasm.mu32()),
                         key_char: if let Some(c) = std::char::from_u32(to_wasm.mu32()) {c}else {'?'},
                         is_repeat: to_wasm.mu32() > 0,
                         modifiers: unpack_key_modifier(to_wasm.mu32()),
                         time: to_wasm.mf64()
-                    }));
+                    };
+                    self.process_key_down(key_event.clone());
+                    self.call_event_handler(&mut event_handler, &mut Event::KeyDown(key_event));
                 },
                 13 => { // key up
-                    self.call_event_handler(&mut event_handler, &mut Event::KeyUp(KeyEvent {
+                    let key_event = KeyEvent {
                         key_code: web_to_key_code(to_wasm.mu32()),
                         key_char: if let Some(c) = std::char::from_u32(to_wasm.mu32()) {c}else {'?'},
                         is_repeat: to_wasm.mu32() > 0,
                         modifiers: unpack_key_modifier(to_wasm.mu32()),
                         time: to_wasm.mf64()
-                    }));
+                    };
+                    self.process_key_up(&key_event);
+                    self.call_event_handler(&mut event_handler, &mut Event::KeyUp(key_event));
                 },
                 14 => { // text input
                     self.call_event_handler(&mut event_handler, &mut Event::TextInput(TextInputEvent {
@@ -324,6 +337,16 @@ impl Cx {
                     self.call_event_handler(&mut event_handler, &mut Event::Timer(TimerEvent {
                         timer_id: timer_id
                     }));
+                },
+                18 =>{ // window focus lost
+                    let focus = to_wasm.mu32();
+                    if focus == 0{
+                        self.call_all_keys_up(&mut event_handler);
+                        self.call_event_handler(&mut event_handler,&mut Event::AppFocusLost);
+                    }
+                    else{
+                        self.call_event_handler(&mut event_handler,&mut Event::AppFocus);
+                    }
                 },
                 _ => {
                     panic!("Message unknown")
@@ -383,28 +406,27 @@ impl Cx {
         //let _=io::stdout().flush();
     }
     
-    pub fn send_signal(_id: u64, _value: u64) {
+    pub fn send_signal(_signal: Signal, _value: u64) {
         // todo
     }
     
-    pub fn read_file(&mut self, path: &str) -> u64 {
+    pub fn read_file(&mut self, path: &str) -> FileReadRequest {
         let id = self.platform.file_read_id;
         self.platform.from_wasm.read_file(id as u32, path);
         self.platform.file_read_id += 1;
-        id
+        FileReadRequest{read_id:id, path:path.to_string()}
     }
     
     pub fn write_file(&mut self, _path: &str, _data: &[u8]) -> u64 {
         return 0
     }
-    
-    pub fn new_post_event_id(&mut self) -> u64 {
-        return 0
+
+    pub fn set_window_outer_size(&mut self, _size: Vec2) {
     }
     
-    pub fn post_event(_id: u64, _data: u64) {
+    pub fn set_window_position(&mut self, _pos: Vec2) {
     }
-    
+
     pub fn show_text_ime(&mut self, x: f32, y: f32) {
         self.platform.from_wasm.show_text_ime(x, y);
     }
@@ -413,14 +435,17 @@ impl Cx {
         self.platform.from_wasm.hide_text_ime();
     }
     
-    pub fn start_timer(&mut self, interval: f64, repeats: bool) -> u64 {
+    pub fn start_timer(&mut self, interval: f64, repeats: bool) -> Timer {
         self.timer_id += 1;
         self.platform.from_wasm.start_timer(self.timer_id, interval, repeats);
-        self.timer_id
+        Timer{timer_id:self.timer_id}
     }
     
-    pub fn stop_timer(&mut self, id: u64) {
-        self.platform.from_wasm.stop_timer(id);
+    pub fn stop_timer(&mut self, timer:&mut Timer) {
+        if timer.timer_id != 0{
+            self.platform.from_wasm.stop_timer(timer.timer_id);
+            timer.timer_id = 0;
+        }
     }
     
     pub fn compile_all_webgl_shaders(&mut self) {

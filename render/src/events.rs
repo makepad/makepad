@@ -156,7 +156,6 @@ pub struct KeyEvent {
 pub struct KeyFocusEvent {
     pub last: Area,
     pub focus: Area,
-    pub is_lost: bool
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -177,8 +176,9 @@ pub enum Event {
     Construct,
     Destruct,
     Draw,
-    AppFocus(bool),
-    AnimationEnded(AnimateEvent),
+    AppFocus,
+    AppFocusLost,
+    AnimateEnded(AnimateEvent),
     Animate(AnimateEvent),
     Frame(FrameEvent),
     CloseRequested,
@@ -193,6 +193,7 @@ pub enum Event {
     Timer(TimerEvent),
     Signal(SignalEvent),
     KeyFocus(KeyFocusEvent),
+    KeyFocusLost(KeyFocusEvent),
     KeyDown(KeyEvent),
     KeyUp(KeyEvent),
     TextInput(TextInputEvent),
@@ -226,18 +227,10 @@ impl HitState {
         match event {
             Event::KeyFocus(kf) => {
                 if area == kf.last {
-                    return Event::KeyFocus(KeyFocusEvent {
-                        is_lost: true,
-                        
-                        ..kf.clone()
-                    })
+                    return Event::KeyFocusLost(kf.clone())
                 }
                 else if area == kf.focus {
-                    return Event::KeyFocus(KeyFocusEvent {
-                        is_lost: false,
-                        
-                        ..kf.clone()
-                    })
+                    return Event::KeyFocus(kf.clone())
                 }
             },
             Event::KeyDown(_) => {
@@ -276,7 +269,7 @@ impl HitState {
                     }
                 }
             },
-            Event::AnimationEnded(_) => {
+            Event::AnimateEnded(_) => {
                 for anim in &cx.ended_anim_areas {
                     if anim.area == area {
                         return event.clone()
@@ -451,52 +444,75 @@ impl HitState {
 }
 
 #[derive(Clone, Copy, Debug, Default)]
-pub struct Signal{
+pub struct Signal {
     pub signal_id: u64
 }
 
-impl Signal{
-    pub fn empty()->Signal{
-        Signal{
-            signal_id:0
+impl Signal {
+    pub fn empty() -> Signal {
+        Signal {
+            signal_id: 0
         }
     }
     
-    pub fn is_empty(&self)->bool{
+    pub fn is_empty(&self) -> bool {
         self.signal_id == 0
     }
     
-    pub fn is_signal(&self, se:&SignalEvent)->bool{
+    pub fn is_signal(&self, se: &SignalEvent) -> bool {
         se.signal_id == self.signal_id
     }
 }
 
 #[derive(Clone, Debug, Default)]
 pub struct FileReadRequest {
-    pub file_read_id: u64
+    pub path: String,
+    pub read_id: u64
 }
 
 impl FileReadRequest {
-    pub fn empty()->FileReadRequest{
-        FileReadRequest{
-            file_read_id:0
+    pub fn empty() -> FileReadRequest {
+        FileReadRequest {
+            read_id: 0,
+            path: String::new()
         }
     }
     
-    pub fn is_loading(&self)->bool{
-        self.file_read_id != 0
+    pub fn is_loading(&self) -> bool {
+        self.read_id != 0
     }
     
     pub fn as_utf8<'a>(&mut self, fr: &'a FileReadEvent) -> Option<&'a str> {
-        if fr.read_id == self.file_read_id{
-            self.file_read_id = 0;
+        if fr.read_id == self.read_id {
+            self.read_id = 0;
             if let Ok(str_data) = &fr.data {
-                if let Ok(utf8_string) = std::str::from_utf8(&str_data){
+                if let Ok(utf8_string) = std::str::from_utf8(&str_data) {
                     return Some(utf8_string)
                 }
             }
         }
         return None
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct Timer {
+    pub timer_id: u64
+}
+
+impl Timer {
+    pub fn empty() -> Timer {
+        Timer {
+            timer_id: 0,
+        }
+    }
+    
+    pub fn is_empty(&self) -> bool {
+        self.timer_id == 0
+    }
+    
+    pub fn is_timer(&mut self, te: &TimerEvent) -> bool {
+        te.timer_id == self.timer_id
     }
 }
 

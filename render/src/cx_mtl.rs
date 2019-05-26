@@ -233,6 +233,7 @@ impl Cx {
                                 fe.tap_count = self.process_tap_count(fe.digit, fe.abs, fe.time);
                             },
                             Event::KeyDown(ke) => {
+                                self.process_key_down(ke.clone());
                                 if ke.key_code == KeyCode::PrintScreen {
                                     if ke.modifiers.control {
                                         self.panic_redraw = true;
@@ -242,24 +243,27 @@ impl Cx {
                                     }
                                 }
                             },
+                            Event::KeyUp(ke) => {
+                                self.process_key_up(&ke);
+                            },
+                            Event::AppFocusLost => {
+                                self.call_all_keys_up(&mut event_handler);
+                            },
                             _ => ()
                         };
                         match &event {
                             Event::WindowChange(re) => { // do this here because mac
                                 self.window_geom = re.new_geom.clone();
-                                //let resized = re.new_geom.inner_size != re.old_geom.inner_size
-                                 //   || re.new_geom.dpi_factor != re.old_geom.dpi_factor;
-
+                                
                                 self.call_event_handler(&mut event_handler, &mut event);
                                 
                                 self.redraw_area(Area::All);
                                 self.call_draw_event(&mut event_handler, &mut root_view);
-                            
+                                
                                 self.repaint(&layer, &device, &command_queue, false);
                                 self.resize_layer_to_turtle(&layer);
                             },
                             Event::None => {
-                                
                             },
                             _ => {
                                 //let time_now = precise_time_ns();
@@ -335,7 +339,6 @@ impl Cx {
                 self.resize_layer_to_turtle(&layer);
             }
             
-            
             while self.platform.start_timer.len()>0 {
                 let (timer_id, interval, repeats) = self.platform.start_timer.pop().unwrap();
                 cocoa_window.start_timer(timer_id, interval, repeats);
@@ -362,7 +365,6 @@ impl Cx {
     pub fn hide_text_ime(&mut self) {
     }
     
-    
     pub fn set_window_outer_size(&mut self, size: Vec2) {
         self.platform.set_window_outer_size = Some(size);
     }
@@ -371,14 +373,17 @@ impl Cx {
         self.platform.set_window_position = Some(pos);
     }
     
-    pub fn start_timer(&mut self, interval: f64, repeats: bool) -> u64 {
+    pub fn start_timer(&mut self, interval: f64, repeats: bool) -> Timer {
         self.timer_id += 1;
         self.platform.start_timer.push((self.timer_id, interval, repeats));
-        self.timer_id
+        Timer{timer_id:self.timer_id}
     }
     
-    pub fn stop_timer(&mut self, id: u64) {
-        self.platform.stop_timer.push(id);
+    pub fn stop_timer(&mut self, timer:&mut Timer) {
+        if timer.timer_id != 0{
+            self.platform.stop_timer.push(timer.timer_id);
+            timer.timer_id = 0;
+        }
     }
     
     pub fn send_signal(signal: Signal, value: u64) {

@@ -132,7 +132,7 @@ impl Tab{
     }
 
     pub fn anim_close(&self, _cx:&Cx)->Anim{
-        Anim::new(Play::Single{duration:0.2, cut:true, term:true, end:1.0}, vec![
+        Anim::new(Play::Single{duration:0.1, cut:true, term:true, end:1.0}, vec![
             Track::float("closing", Ease::OutExp, vec![(0.0, 1.0), (1.0, 0.0)]),
         ])
     }
@@ -204,7 +204,7 @@ impl Tab{
                     self.animator.calc_write(cx, "text.color", ae.time, self._text_area);
                 }
             },
-            Event::AnimationEnded(_ae)=>{
+            Event::AnimateEnded(_ae)=>{
                 if self.animator.term_anim_playing(){
                     return TabEvent::Close;
                 }

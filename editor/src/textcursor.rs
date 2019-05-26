@@ -715,15 +715,32 @@ impl TextCursorSet {
         })
     }
     
-    pub fn replace_lines_formatted(&mut self, start_row: usize, end_row: usize, rep_lines: Vec<Vec<char>>, text_buffer: &mut TextBuffer) {
-        let cursors_clone = self.clone();
-        let op = text_buffer.replace_lines(start_row, end_row, rep_lines);
-        text_buffer.redo_stack.truncate(0);
-        text_buffer.undo_stack.push(TextUndo {
-            ops: vec![op],
-            grouping: TextUndoGrouping::Format,
-            cursors: cursors_clone
-        })
+    pub fn replace_lines_formatted(&mut self, mut out_lines: Vec<Vec<char>>, text_buffer: &mut TextBuffer) {
+        
+        let mut top_row = 0;
+        while top_row < text_buffer.lines.len() && top_row < out_lines.len() && text_buffer.lines[top_row] == out_lines[top_row] {
+            top_row += 1;
+        }
+        
+        let mut bottom_row_old = text_buffer.get_line_count();
+        let mut bottom_row_new = out_lines.len();
+        while bottom_row_old > top_row && bottom_row_new > top_row && text_buffer.lines[bottom_row_old - 1] == out_lines[bottom_row_new - 1] {
+            bottom_row_old -= 1;
+            bottom_row_new -= 1;
+        }
+        // alright we now have a line range to replace.
+        if top_row != bottom_row_new {
+            let changed = out_lines.splice(top_row..(bottom_row_new + 1).min(out_lines.len()), vec![]).collect();
+            
+            let cursors_clone = self.clone();
+            let op = text_buffer.replace_lines(top_row, bottom_row_old + 1, changed);
+            text_buffer.redo_stack.truncate(0);
+            text_buffer.undo_stack.push(TextUndo {
+                ops: vec![op],
+                grouping: TextUndoGrouping::Format,
+                cursors: cursors_clone
+            })
+        }
     }
     /*
     pub fn toggle_comment(&mut self, text_buffer:&mut TextBuffer, comment_str:&str){
@@ -734,12 +751,12 @@ impl TextCursorSet {
     let mut old_max = (TextPos{row:0,col:0},0);
     for cursor in &mut self.set{
     let (start, end) = cursor.delta(delta as isize);
-    
+   
     let start_pos = text_buffer.offset_to_text_pos_next(start, old_max.0, old_max.1);
     let end_pos = text_buffer.offset_to_text_pos_next(end, start_pos, start);
     let mut off = start - start_pos.col;
     let last_line = if start_pos.row == end_pos.row || end_pos.col>0{1}else{0};
-    
+   
     for row in start_pos.row..(end_pos.row+last_line){
     // ok so how do we compute the actual op offset of this line
     let op = text_buffer.replace_line_with_string(off, row, 0, 0, tab_str);
@@ -997,6 +1014,7 @@ impl TextCursorSet {
                 
                 TokenType::Bool => true,
                 TokenType::String => true,
+                TokenType::Regex => true,
                 TokenType::Number => true,
                 
                 TokenType::CommentLine => false,
@@ -1059,7 +1077,7 @@ impl TextCursorSet {
     
 }
 
-#[derive(Clone, PartialEq)]
+#[derive(Clone, PartialEq, Copy, Debug)]
 pub enum TokenType {
     Whitespace,
     Newline,
@@ -1074,6 +1092,7 @@ pub enum TokenType {
     BuiltinType,
     Hash,
     
+    Regex,
     String,
     Number,
     Bool,
@@ -1095,12 +1114,40 @@ pub enum TokenType {
     Eof
 }
 
+impl TokenType{
+    pub fn should_ignore(&self)->bool{
+        match self{
+            TokenType::Whitespace=>true,
+            TokenType::Newline=>true,
+            TokenType::CommentLine=>true,
+            TokenType::CommentMultiBegin=>true,
+            TokenType::CommentChunk=>true,
+            TokenType::CommentMultiEnd=>true,
+            _=>false
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct TokenChunk {
     pub token_type: TokenType,
     pub offset: usize,
     pub pair_token: usize,
     pub len: usize,
+}
+
+impl TokenChunk{
+    pub fn scan_last_token(token_chunks:&Vec<TokenChunk>)->TokenType{
+        let mut prev_tok_index = token_chunks.len();
+        while prev_tok_index > 0{
+            let tt = &token_chunks[prev_tok_index - 1].token_type;
+            if !tt.should_ignore(){
+                return tt.clone();
+            }
+            prev_tok_index -= 1;
+        }
+        return TokenType::Unexpected
+    }
 }
 
 
