@@ -1150,6 +1150,141 @@ impl TokenChunk{
     }
 }
 
+pub struct TokenParserItem{
+    pub chunk:Vec<char>,
+    pub token_type:TokenType,
+}
+
+pub struct TokenParser{
+    pub tokens:Vec<TokenParserItem>,
+    pub index:usize,
+    pub next_index:usize
+}
+
+impl TokenParser{
+    pub fn new()->TokenParser{
+        TokenParser{
+            tokens:Vec::new(),
+            index:0,
+            next_index:0
+        }
+    }
+
+    pub fn add_token(&mut self, token_type:TokenType, chunk:Vec<char>){
+        self.tokens.push(TokenParserItem{chunk:chunk, token_type:token_type})
+    }
+
+    pub fn advance(&mut self)->bool{
+        if self.next_index >= self.tokens.len(){
+            return false
+        }
+        self.index = self.next_index;
+        self.next_index += 1;
+        return true;
+    }
+
+    pub fn prev_type(&self)->TokenType{
+        if self.index > 0{
+            self.tokens[self.index - 1].token_type
+        }
+        else{
+            TokenType::Unexpected
+        }
+    }
+
+    pub fn cur_type(&self)->TokenType{
+        self.tokens[self.index].token_type
+    }
+
+    pub fn next_type(&self)->TokenType{
+        if self.index < self.tokens.len() - 1{
+            self.tokens[self.index +1].token_type
+        }
+        else{
+            TokenType::Unexpected
+        }
+    }
+
+    pub fn prev_char(&self)->char{
+        if self.index > 0{
+            let chunk = &self.tokens[self.index -1].chunk;
+            if chunk.len() == 1 || chunk[0] == ' '{
+                return chunk[0]
+            }
+        }
+        '\0'
+    }
+
+    pub fn cur_char(&self)->char{
+        let chunk = &self.tokens[self.index].chunk;
+        if chunk.len() == 1 || chunk[0] == ' '{
+            return chunk[0]
+        }
+        '\0'
+    }
+
+    pub fn cur_chunk(&self)->&Vec<char>{
+        &self.tokens[self.index].chunk
+    }
+
+    pub fn next_char(&self)->char{
+        if self.index < self.tokens.len() - 1{
+            let chunk = &self.tokens[self.index + 1].chunk;
+            if chunk.len() == 1 || chunk[0] == ' '{
+                return chunk[0]
+            }
+        }
+        '\0'
+    }
+}
+
+pub struct FormatOutput{
+    pub out_lines:Vec<Vec<char >>
+}
+
+impl FormatOutput{
+    pub fn new()->FormatOutput{
+        FormatOutput{
+            out_lines:Vec::new()
+        }
+    }
+
+    pub fn indent(&mut self, indent_depth:usize){
+        let last_line = self.out_lines.last_mut().unwrap();
+        for _ in 0..indent_depth {
+            last_line.push(' ');
+        }
+    }
+    
+    pub fn strip_space(&mut self) {
+        let last_line = self.out_lines.last_mut().unwrap();
+        if last_line.len()>0 && *last_line.last().unwrap() == ' ' {
+            last_line.pop();
+        }
+    }
+    
+    pub fn new_line(&mut self){
+        self.out_lines.push(Vec::new());
+    }
+    
+    pub fn extend(&mut self, chunk:&Vec<char>){
+        let last_line = self.out_lines.last_mut().unwrap();
+        last_line.extend(chunk);
+    }
+
+    pub fn add_space(&mut self){
+        let last_line = self.out_lines.last_mut().unwrap();
+        if last_line.len()>0{
+            if *last_line.last().unwrap() != ' '{
+                last_line.push(' ');
+            }
+        }
+        else{
+            last_line.push(' ');
+        }
+    }
+
+}
 
 #[derive(Clone)]
 pub struct DrawSel {

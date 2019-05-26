@@ -37,7 +37,7 @@ impl JSEditor {
         let ce = self.code_editor.handle_code_editor(cx, event, text_buffer);
         match ce {
             CodeEditorEvent::AutoFormat => {
-                let formatted = JSTokenizer::auto_format(text_buffer);
+                let formatted = JSTokenizer::auto_format(text_buffer).out_lines;
                 self.code_editor.cursors.replace_lines_formatted(formatted, text_buffer);
                 self.code_editor.view.redraw_view_area(cx);
             },
@@ -61,7 +61,6 @@ impl JSEditor {
             if token_type == TokenType::Eof {
                 break
             }
-            chunk.truncate(0);
         }
         
         self.code_editor.end_code_editor(cx, text_buffer);
@@ -82,6 +81,7 @@ impl JSTokenizer {
     }
     
     pub fn next_token<'a>(&mut self, state: &mut TokenizerState<'a>, chunk: &mut Vec<char>, token_chunks: &Vec<TokenChunk>) -> TokenType {
+        chunk.truncate(0);
         if self.comment_depth >0 { // parse comments
             loop {
                 if state.next == '\0' {
@@ -637,25 +637,15 @@ impl JSTokenizer {
     }
     
     // js autoformatter. nothing fancy.
-    pub fn auto_format(text_buffer: &mut TextBuffer) -> Vec<Vec<char >> {
+    pub fn auto_format(text_buffer: &mut TextBuffer) -> FormatOutput {
         
         let extra_spacey = false;
         let pre_spacey = true;
         let mut state = TokenizerState::new(text_buffer);
         let mut tokenizer = JSTokenizer::new();
-        let mut out_lines: Vec<Vec<char >> = Vec::new();
-        let mut chunk: Vec<char> = Vec::new();
-        
-        struct Token {
-            chunk: Vec<char>,
-            token_type: TokenType
-        }
-        
-        let mut tokens: Vec<Token> = Vec::new();
+        let mut out = FormatOutput::new();
         let mut token_chunks: Vec<TokenChunk> = Vec::new();
-        
-        let mut first_on_line = true;
-        let mut first_after_open = false;
+        let mut tp = TokenParser::new();
         
         struct ParenStack {
             expecting_newlines: bool,
@@ -668,27 +658,18 @@ impl JSTokenizer {
             expecting_newlines: true,
             expected_indent: 0,
         });
-        out_lines.push(Vec::new());
         
+        out.new_line();
+        
+        let mut first_on_line = true;
+        let mut first_after_open = false;
         let mut expected_indent = 0;
         let mut is_unary_operator = true;
         let mut in_multline_comment = false;
         let mut in_singleline_comment = false;
         
-        fn output_indent(out_lines: &mut Vec<Vec<char >>, indent_depth: usize) {
-            let last_line = out_lines.last_mut().unwrap();
-            for _ in 0..indent_depth {
-                last_line.push(' ');
-            }
-        }
-        
-        fn strip_space(line: &mut Vec<char >) {
-            if line.len()>0 && *line.last().unwrap() == ' ' {
-                line.pop();
-            }
-        }
-        
         loop {
+            let mut chunk = Vec::new();
             let token_type = tokenizer.next_token(&mut state, &mut chunk, &token_chunks);
             token_chunks.push(TokenChunk {
                 offset: state.offset - chunk.len() - 1,
@@ -696,53 +677,35 @@ impl JSTokenizer {
                 len: chunk.len(),
                 token_type: token_type.clone()
             });
-            tokens.push(Token {
-                chunk: chunk.clone(),
-                token_type: token_type.clone()
-            });
-            chunk.truncate(0);
+            tp.add_token(token_type, chunk);
             if token_type == TokenType::Eof {
                 break;
             }
         }
         
-        for index in 0..tokens.len() {
+        while tp.advance() {
             
-            let chunk = &tokens[index].chunk;
-            let token_type = &tokens[index].token_type;
-            // look ahead and behind helpers
-            let prev_type = if index > 0 {tokens[index - 1].token_type}else {TokenType::Unexpected};
-            let next_type = if index < tokens.len() - 1 {tokens[index + 1].token_type}else {TokenType::Unexpected};
-            let prev_char = if index > 0 && tokens[index - 1].chunk.len() == 1 {tokens[index - 1].chunk[0]}else {
-                if index > 0 && tokens[index - 1].token_type == TokenType::Whitespace {' '} else {'\0'}
-            };
-            let cur_char = if tokens[index].chunk.len() == 1 {tokens[index].chunk[0]} else {'\0'};
-            
-            match token_type {
+            match tp.cur_type() {
                 TokenType::Whitespace => {
-                    let last_line = out_lines.last_mut().unwrap();
                     if in_singleline_comment || in_multline_comment {
-                        last_line.extend(chunk);
+                        out.extend(tp.cur_chunk());
                     }
-                    else if !first_on_line && next_type != TokenType::Newline
-                        && prev_type != TokenType::ParenOpen
-                        && prev_type != TokenType::Namespace
-                        && prev_type != TokenType::Operator
-                        && prev_type != TokenType::Delimiter {
-                        out_lines.last_mut().unwrap().push(' ');
+                    else if !first_on_line && tp.next_type() != TokenType::Newline
+                        && tp.prev_type() != TokenType::ParenOpen
+                        && tp.prev_type() != TokenType::Namespace
+                        && tp.prev_type() != TokenType::Operator
+                        && tp.prev_type() != TokenType::Delimiter {
+                        out.add_space();
                     }
                 },
                 TokenType::Newline => {
                     in_singleline_comment = false;
                     //paren_stack.last_mut().unwrap().angle_counter = 0;
                     if first_on_line && !in_singleline_comment && !in_multline_comment {
-                        output_indent(&mut out_lines, expected_indent);
+                        out.indent(expected_indent);
                     }
                     else {
-                        let last_line = out_lines.last_mut().unwrap();
-                        if last_line.len() > 0 && *last_line.last().unwrap() == ' ' {
-                            last_line.pop();
-                        }
+                        out.strip_space();
                     }
                     if first_after_open {
                         paren_stack.last_mut().unwrap().expecting_newlines = true;
@@ -750,60 +713,60 @@ impl JSTokenizer {
                     }
                     if paren_stack.last_mut().unwrap().expecting_newlines { // only insert when expecting newlines
                         first_after_open = false;
-                        out_lines.push(Vec::new());
+                        out.new_line();
                         first_on_line = true;
                     }
                 },
                 TokenType::Eof => {break},
                 TokenType::ParenOpen => {
                     if first_on_line {
-                        output_indent(&mut out_lines, expected_indent);
+                        out.indent(expected_indent);
                     }
                     
                     paren_stack.push(ParenStack {
                         expecting_newlines: false,
                         expected_indent: expected_indent,
                     });
+                    
                     first_after_open = true;
                     is_unary_operator = true;
-                    let last_line = out_lines.last_mut().unwrap();
-                    let is_curly = cur_char == '{';
-                    if cur_char == '(' && index > 0 && (
-                        prev_type == TokenType::Flow || prev_type == TokenType::Looping || prev_type == TokenType::Keyword
+                    
+                    let is_curly = tp.cur_char() == '{';
+                    if tp.cur_char() == '(' && (
+                        tp.prev_type() == TokenType::Flow || tp.prev_type() == TokenType::Looping || tp.prev_type() == TokenType::Keyword
                     ) {
-                        last_line.push(' ');
+                        out.add_space();
                     }
                     if pre_spacey && is_curly && !first_on_line {
-                        if prev_char != ' ' && prev_char != '{' && prev_char != '[' && prev_char != '(' && prev_char != ':' {
-                            last_line.push(' ');
+                        if tp.prev_char() != ' ' && tp.prev_char() != '{' && tp.prev_char() != '['
+                            && tp.prev_char() != '(' && tp.prev_char() != ':' {
+                            out.add_space();
                         }
                     }
                     else if !pre_spacey {
-                        strip_space(last_line);
+                        out.strip_space();
                     }
                     
-                    last_line.extend(chunk);
+                    out.extend(tp.cur_chunk());
                     
-                    if extra_spacey && is_curly && next_type != TokenType::Newline {
-                        last_line.push(' ');
+                    if extra_spacey && is_curly && tp.next_type() != TokenType::Newline {
+                        out.add_space();
                     }
                     first_on_line = false;
                 },
                 TokenType::ParenClose => {
                     
-                    let last_line = out_lines.last_mut().unwrap();
-                    
-                    strip_space(last_line);
+                    out.strip_space();
                     
                     let expecting_newlines = paren_stack.last().unwrap().expecting_newlines;
                     
-                    if extra_spacey && cur_char == '}' && !expecting_newlines && last_line.len()>0 && *last_line.last().unwrap() != ' ' {
-                        last_line.push(' ');
+                    if extra_spacey && tp.cur_char() == '}' && !expecting_newlines {
+                        out.add_space();
                     }
                     
                     first_after_open = false;
                     if !first_on_line && expecting_newlines { // we are expecting newlines!
-                        out_lines.push(Vec::new());
+                        out.new_line();
                         first_on_line = true;
                     }
                     
@@ -815,88 +778,82 @@ impl JSTokenizer {
                     };
                     if first_on_line {
                         first_on_line = false;
-                        output_indent(&mut out_lines, expected_indent);
+                        out.indent(expected_indent);
                     }
-                    if cur_char == '}' {
+                    if tp.cur_char() == '}' {
                         is_unary_operator = true;
                     }
                     else {
                         is_unary_operator = false;
                     }
                     
-                    out_lines.last_mut().unwrap().extend(chunk);
+                    out.extend(tp.cur_chunk());
                 },
                 TokenType::CommentLine => {
                     in_singleline_comment = true;
                     if first_on_line {
                         first_on_line = false;
-                        output_indent(&mut out_lines, expected_indent);
+                        out.indent(expected_indent);
                     }
                     else {
-                        let last_line = out_lines.last_mut().unwrap();
-                        if *last_line.last().unwrap() != ' ' {
-                            last_line.push(' ');
-                        }
+                        out.add_space();
                     }
-                    out_lines.last_mut().unwrap().extend(chunk);
+                    out.extend(tp.cur_chunk());
                 },
                 TokenType::CommentMultiBegin => {
                     in_multline_comment = true;
                     if first_on_line {
                         first_on_line = false;
-                        output_indent(&mut out_lines, expected_indent);
+                        out.indent(expected_indent);
                     }
-                    out_lines.last_mut().unwrap().extend(chunk);
+                    out.extend(tp.cur_chunk());
                 },
                 TokenType::CommentChunk => {
                     if first_on_line {
                         first_on_line = false;
                     }
-                    out_lines.last_mut().unwrap().extend(chunk);
+                    out.extend(tp.cur_chunk());
                 },
                 TokenType::CommentMultiEnd => {
                     in_multline_comment = false;
                     if first_on_line {
                         first_on_line = false;
                     }
-                    let last_line = out_lines.last_mut().unwrap();
-                    last_line.extend(chunk);
+                    out.extend(tp.cur_chunk());
                 },
                 TokenType::Colon => {
                     is_unary_operator = true;
-                    let last_line = out_lines.last_mut().unwrap();
-                    strip_space(last_line);
-                    last_line.extend(chunk);
-                    if next_type != TokenType::Whitespace && next_type != TokenType::Newline {
-                        last_line.push(' ');
+                    out.strip_space();
+                    out.extend(tp.cur_chunk());
+                    if tp.next_type() != TokenType::Whitespace && tp.next_type() != TokenType::Newline {
+                        out.add_space();
                     }
                 },
                 TokenType::Delimiter => {
                     if first_on_line {
                         first_on_line = false;
-                        output_indent(&mut out_lines, expected_indent);
+                        out.indent(expected_indent);
                     }
                     else {
-                        let last_line = out_lines.last_mut().unwrap();
-                        strip_space(last_line);
+                        out.strip_space();
                     }
-                    out_lines.last_mut().unwrap().extend(chunk);
+                    out.extend(tp.cur_chunk());
                     if paren_stack.last().unwrap().expecting_newlines == true
-                        && next_type != TokenType::Newline { // we are expecting newlines!
+                        && tp.next_type() != TokenType::Newline { // we are expecting newlines!
                         // scan forward to see if we really need a newline.
-                        for next in (index + 1)..tokens.len() {
-                            if tokens[next].token_type == TokenType::Newline {
+                        for next in (tp.index + 1)..tp.tokens.len() {
+                            if tp.tokens[next].token_type == TokenType::Newline {
                                 break;
                             }
-                            if !tokens[next].token_type.should_ignore() {
-                                out_lines.push(Vec::new());
+                            if !tp.tokens[next].token_type.should_ignore() {
+                                out.new_line();
                                 first_on_line = true;
                                 break;
                             }
                         }
                     }
-                    else if next_type != TokenType::Newline {
-                        out_lines.last_mut().unwrap().push(' ');
+                    else if tp.next_type() != TokenType::Newline {
+                        out.add_space();
                     }
                     is_unary_operator = true;
                 },
@@ -905,24 +862,23 @@ impl JSTokenizer {
                     if first_on_line {
                         first_on_line = false;
                         let extra_indent = if is_unary_operator {0}else {4};
-                        output_indent(&mut out_lines, expected_indent + extra_indent);
+                        out.indent(expected_indent + extra_indent);
                     }
                     
-                    let last_line = out_lines.last_mut().unwrap();
-                    if (is_unary_operator && (cur_char == '-' || cur_char == '*' || cur_char == '&'))
-                        || cur_char == '.' || cur_char == '!' {
-                        last_line.extend(chunk);
+                    if (is_unary_operator && (tp.cur_char() == '-' || tp.cur_char() == '*' || tp.cur_char() == '&'))
+                        || tp.cur_char() == '.' || tp.cur_char() == '!' {
+                        out.extend(tp.cur_chunk());
                     }
                     else {
-                        if cur_char == '?' {
-                            strip_space(last_line);
+                        if tp.cur_char() == '?' {
+                            out.strip_space();
                         }
-                        else if last_line.len() > 0 && *last_line.last().unwrap() != ' ' {
-                            last_line.push(' ');
+                        else {
+                            out.add_space();
                         }
-                        last_line.extend(chunk);
-                        if next_type != TokenType::Newline {
-                            last_line.push(' ');
+                        out.extend(tp.cur_chunk());
+                        if tp.next_type() != TokenType::Newline {
+                            out.add_space();
                         }
                     }
                     
@@ -936,9 +892,9 @@ impl JSTokenizer {
                     first_after_open = false;
                     if first_on_line {
                         first_on_line = false;
-                        output_indent(&mut out_lines, expected_indent);
+                        out.indent(expected_indent);
                     }
-                    out_lines.last_mut().unwrap().extend(chunk);
+                    out.extend(tp.cur_chunk());
                 },
                 // these are followeable by non unary operators
                 TokenType::Identifier | TokenType::BuiltinType | TokenType::TypeName |
@@ -949,14 +905,14 @@ impl JSTokenizer {
                     first_after_open = false;
                     if first_on_line {
                         first_on_line = false;
-                        output_indent(&mut out_lines, expected_indent);
+                        out.indent(expected_indent);
                     }
-                    out_lines.last_mut().unwrap().extend(chunk);
+                    out.extend(tp.cur_chunk());
                     
                 },
             }
         };
-        out_lines
+        out
     }
 }
 
