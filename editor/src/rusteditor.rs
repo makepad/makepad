@@ -776,7 +776,7 @@ impl RustTokenizer {
             
             let chunk = &tokens[index].chunk;
             let token_type = &tokens[index].token_type;
-            // look ahead and behing helpers
+            // look ahead and behind helpers
             let prev_type = if index > 0 {tokens[index - 1].token_type}else {TokenType::Unexpected};
             let next_type = if index < tokens.len() - 1 {tokens[index + 1].token_type}else {TokenType::Unexpected};
             let prev_char = if index > 0 && tokens[index - 1].chunk.len() == 1 {tokens[index - 1].chunk[0]}else {
@@ -793,6 +793,7 @@ impl RustTokenizer {
                     else if !first_on_line && next_type != TokenType::Newline
                         && prev_type != TokenType::ParenOpen
                         && prev_type != TokenType::Namespace
+                        && prev_type != TokenType::Delimiter
                         && (prev_type != TokenType::Operator || (prev_char == '>' || prev_char == '<')) {
                         out_lines.last_mut().unwrap().push(' ');
                     }
@@ -947,12 +948,12 @@ impl RustTokenizer {
                         strip_space(last_line);
                     }
                     out_lines.last_mut().unwrap().extend(chunk);
-                    if (cur_char != ',' || paren_stack.last_mut().unwrap().angle_counter == 0)  // otherwise our generics multiline
+                    if (cur_char != ',' || paren_stack.last_mut().unwrap().angle_counter == 0) // otherwise our generics multiline
                         && paren_stack.last().unwrap().expecting_newlines == true
                         && next_type != TokenType::Newline { // we are expecting newlines!
                         // scan forward to see if we really need a newline.
                         for next in (index + 1)..tokens.len() {
-                            if tokens[next].token_type == TokenType::Newline{
+                            if tokens[next].token_type == TokenType::Newline {
                                 break;
                             }
                             if !tokens[next].token_type.should_ignore() {
@@ -962,7 +963,7 @@ impl RustTokenizer {
                             }
                         }
                     }
-                    else if next_type != TokenType::Whitespace && next_type != TokenType::Newline {
+                    else if next_type != TokenType::Newline {
                         out_lines.last_mut().unwrap().push(' ');
                     }
                     is_unary_operator = true;

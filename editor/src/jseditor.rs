@@ -636,9 +636,9 @@ impl JSTokenizer {
         }
     }
     
-    // because rustfmt is such an insane shitpile to compile or use as a library, here is a stupid version.
+    // js autoformatter. nothing fancy.
     pub fn auto_format(text_buffer: &mut TextBuffer) -> Vec<Vec<char >> {
-        // extra spacey setting that rustfmt seems to do, but i don't like
+        
         let extra_spacey = false;
         let pre_spacey = true;
         let mut state = TokenizerState::new(text_buffer);
@@ -710,7 +710,7 @@ impl JSTokenizer {
             
             let chunk = &tokens[index].chunk;
             let token_type = &tokens[index].token_type;
-            // look ahead and behing helpers
+            // look ahead and behind helpers
             let prev_type = if index > 0 {tokens[index - 1].token_type}else {TokenType::Unexpected};
             let next_type = if index < tokens.len() - 1 {tokens[index + 1].token_type}else {TokenType::Unexpected};
             let prev_char = if index > 0 && tokens[index - 1].chunk.len() == 1 {tokens[index - 1].chunk[0]}else {
@@ -727,7 +727,8 @@ impl JSTokenizer {
                     else if !first_on_line && next_type != TokenType::Newline
                         && prev_type != TokenType::ParenOpen
                         && prev_type != TokenType::Namespace
-                        && prev_type != TokenType::Operator {
+                        && prev_type != TokenType::Operator
+                        && prev_type != TokenType::Delimiter {
                         out_lines.last_mut().unwrap().push(' ');
                     }
                 },
@@ -884,7 +885,7 @@ impl JSTokenizer {
                         && next_type != TokenType::Newline { // we are expecting newlines!
                         // scan forward to see if we really need a newline.
                         for next in (index + 1)..tokens.len() {
-                            if tokens[next].token_type == TokenType::Newline{
+                            if tokens[next].token_type == TokenType::Newline {
                                 break;
                             }
                             if !tokens[next].token_type.should_ignore() {
@@ -894,7 +895,7 @@ impl JSTokenizer {
                             }
                         }
                     }
-                    else if next_type != TokenType::Whitespace && next_type != TokenType::Newline {
+                    else if next_type != TokenType::Newline {
                         out_lines.last_mut().unwrap().push(' ');
                     }
                     is_unary_operator = true;
@@ -908,12 +909,12 @@ impl JSTokenizer {
                     }
                     
                     let last_line = out_lines.last_mut().unwrap();
-                    if (is_unary_operator && (cur_char == '-' || cur_char == '*' || cur_char == '&'  ))
+                    if (is_unary_operator && (cur_char == '-' || cur_char == '*' || cur_char == '&'))
                         || cur_char == '.' || cur_char == '!' {
                         last_line.extend(chunk);
                     }
                     else {
-                        if cur_char == '?'{
+                        if cur_char == '?' {
                             strip_space(last_line);
                         }
                         else if last_line.len() > 0 && *last_line.last().unwrap() != ' ' {
@@ -928,10 +929,10 @@ impl JSTokenizer {
                     is_unary_operator = true;
                 },
                 // these are followed by unary operators (some)
-                TokenType::TypeDef | TokenType::Fn | TokenType::Hash | TokenType::Splat |TokenType::Namespace|
+                TokenType::TypeDef | TokenType::Fn | TokenType::Hash | TokenType::Splat | TokenType::Namespace |
                 TokenType::Keyword | TokenType::Flow | TokenType::Looping => {
                     is_unary_operator = true;
-
+                    
                     first_after_open = false;
                     if first_on_line {
                         first_on_line = false;
