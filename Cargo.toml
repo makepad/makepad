@@ -5,7 +5,6 @@ authors = ["makepaddev"]
 edition = "2018"
 
 [dependencies]
-rand = "*"
 serde_json = "*"
 serde = { version = "1.0", features = ["derive"] }
 

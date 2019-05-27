@@ -86,7 +86,7 @@ impl JSTokenizer {
     }
     
     pub fn next_token<'a>(&mut self, state: &mut TokenizerState<'a>, chunk: &mut Vec<char>, token_chunks: &Vec<TokenChunk>) -> TokenType {
-        chunk.truncate(0);
+        let start = chunk.len();
         if self.comment_depth >0 { // parse comments
             loop {
                 if state.next == '\0' {
@@ -110,7 +110,7 @@ impl JSTokenizer {
                         self.comment_depth = 0;
                     }
                     // output current line
-                    if chunk.len()>0 {
+                    if (chunk.len()-start)>0 {
                         return TokenType::CommentChunk
                     }
                     
@@ -119,7 +119,7 @@ impl JSTokenizer {
                     return TokenType::Newline
                 }
                 else if state.next == ' ' {
-                    if chunk.len()>0 {
+                    if (chunk.len()-start)>0 {
                         return TokenType::CommentChunk
                     }
                     while state.next == ' ' {

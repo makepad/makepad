@@ -9,6 +9,7 @@ use objc::runtime::YES;
 use metal::*;
 use time::*;
 use std::io::{self, Write};
+use std::net::TcpStream;
 use crate::cx_cocoa::*;
 use crate::cx::*;
 
@@ -299,11 +300,11 @@ impl Cx {
             
             // call redraw event
             if self.redraw_areas.len()>0 {
-                let time_start = cocoa_window.time_now();
+                //let time_start = cocoa_window.time_now();
                 self.call_draw_event(&mut event_handler, &mut root_view);
                 self.paint_dirty = true;
-                let time_end = cocoa_window.time_now();
-                println!("Redraw took: {}", (time_end - time_start));
+                //let time_end = cocoa_window.time_now();
+                //println!("Redraw took: {}", (time_end - time_start));
             }
             
             self.process_desktop_file_read_requests(&mut event_handler);
@@ -396,7 +397,14 @@ impl Cx {
     }
     
     pub fn http_send(&self, verb:&str, path:&str, domain:&str, port:&str, body:&str){
-        
+        let host = format!("{}:{}",domain,port);
+        let stream = TcpStream::connect(&host);
+        if let Ok(mut stream) = stream{
+            let data = format!("{} {} HTTP/1.1\r\nHost: {}\r\nConnect: close\r\n\r\n{}", verb, path, host, body);
+            if let Err(e) = stream.write(data.as_bytes()){
+                println!("ERROR WRITING STREAM {}", e);
+            }
+        }
     }
     
     //pub fn send_custom_event_before_draw(&mut self, id:u64, message:u64){
