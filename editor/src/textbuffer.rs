@@ -95,9 +95,7 @@ impl TextBuffers {
             
             cx.write_file(&format!("{}{}", self.root_path, path), string.as_bytes());
             
-            cx.http_send("POST", path, "127.0.0.1", "2001", &string);
-            // do a basic http write
-            //GET / HTTP/1.1\r\nHost: www.example.com\r\nConnection: close\r\n\r\n
+            //cx.http_send("POST", path, "127.0.0.1", "2001", &string);
         }
     }
     

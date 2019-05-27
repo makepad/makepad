@@ -14,7 +14,7 @@ use crate::cx_cocoa::*;
 use crate::cx::*;
 
 impl Cx {
-    
+     
     pub fn exec_draw_list(&mut self, draw_list_id: usize, device: &Device, encoder: &RenderCommandEncoderRef) {
         
         // tad ugly otherwise the borrow checker locks 'self' and we can't recur
@@ -378,8 +378,8 @@ impl Cx {
         self.timer_id += 1;
         self.platform.start_timer.push((self.timer_id, interval, repeats));
         Timer{timer_id:self.timer_id}
-    }
-    
+    }  
+     
     pub fn stop_timer(&mut self, timer:&mut Timer) {
         if timer.timer_id != 0{
             self.platform.stop_timer.push(timer.timer_id);
@@ -398,12 +398,17 @@ impl Cx {
     
     pub fn http_send(&self, verb:&str, path:&str, domain:&str, port:&str, body:&str){
         let host = format!("{}:{}",domain,port);
+        println!("POSTING {}", host);
         let stream = TcpStream::connect(&host);
         if let Ok(mut stream) = stream{
-            let data = format!("{} {} HTTP/1.1\r\nHost: {}\r\nConnect: close\r\n\r\n{}", verb, path, host, body);
+            let byte_len = body.as_bytes().len();
+            let data = format!("{} /{} HTTP/1.1\r\nHost: {}\r\nConnect: close\r\nContent-Length:{}\r\n\r\n{}", verb, path, domain, byte_len, body);
             if let Err(e) = stream.write(data.as_bytes()){
                 println!("ERROR WRITING STREAM {}", e);
             }
+        }
+        else{
+             println!("ERROR CONNECTInG TCPSTREAM");
         }
     }
     
