@@ -8,6 +8,7 @@ edition = "2018"
 mtl = ["render/mtl"]
 ogl = ["render/ogl"]
 webgl = ["render/webgl"]
+dx11 = ["render/dx11"]
 
 [dependencies]
 serde_json = "*"

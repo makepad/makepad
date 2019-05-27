@@ -11,13 +11,20 @@ mod cx_mtlsl;
 #[cfg(feature = "mtl")]
 mod cx_cocoa; 
 
+#[cfg(feature = "dx11")]
+mod cx_dx11; 
+#[cfg(feature = "dx11")]
+mod cx_hlsl; 
+#[cfg(feature = "dx11")]
+mod cx_windows; 
+
 #[cfg(feature = "webgl")]
 mod cx_webgl; 
 
 #[cfg(any(feature = "webgl", feature = "ogl"))]
 mod cx_glsl; 
 
-#[cfg(any(feature = "ogl", feature="mtl"))]
+#[cfg(any(feature = "ogl", feature="mtl", feature="dx11"))]
 mod cx_desktop; 
 
 // shared modules

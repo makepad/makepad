@@ -12,6 +12,9 @@ mtl = [
 webgl = [
     "bitflags"
 ]
+dx11 = [
+    "time", "bitflags"
+]
 
 [package]
 name = "render"

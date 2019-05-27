@@ -18,21 +18,23 @@ pub use crate::view::*;
 #[cfg(feature = "ogl")]
 pub use crate::cx_ogl::*;
 
-
 #[cfg(feature = "mtl")]
 pub use crate::cx_mtl::*;
 
 #[cfg(feature = "mtl")]
 pub use crate::cx_mtlsl::*;
 
+#[cfg(feature = "dx11")]
+pub use crate::cx_dx11::*;
+
+#[cfg(feature = "dx11")]
+pub use crate::cx_hlsl::*;
 
 #[cfg(feature = "webgl")]
 pub use crate::cx_webgl::*;
 
-
 #[cfg(any(feature = "webgl", feature = "ogl"))]
 pub use crate::cx_glsl::*;
-
 
 #[cfg(any(feature = "ogl", feature = "mtl"))]
 pub use crate::cx_desktop::*;

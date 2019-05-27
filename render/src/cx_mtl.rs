@@ -9,7 +9,6 @@ use objc::runtime::YES;
 use metal::*;
 use time::*;
 use std::io::{self, Write};
-use std::net::TcpStream;
 use crate::cx_cocoa::*;
 use crate::cx::*;
 
@@ -390,61 +389,12 @@ impl Cx {
     pub fn send_signal(signal: Signal, value: u64) {
         CocoaWindow::post_signal(signal.signal_id, value);
     }
-    
-    pub fn write_log(data: &str) {
-        let _ = io::stdout().write(data.as_bytes());
-        let _ = io::stdout().flush();
-    }
-    
-    pub fn http_send(&self, verb:&str, path:&str, domain:&str, port:&str, body:&str){
-        let host = format!("{}:{}",domain,port);
-        println!("POSTING {}", host);
-        let stream = TcpStream::connect(&host);
-        if let Ok(mut stream) = stream{
-            let byte_len = body.as_bytes().len();
-            let data = format!("{} /{} HTTP/1.1\r\nHost: {}\r\nConnect: close\r\nContent-Length:{}\r\n\r\n{}", verb, path, domain, byte_len, body);
-            if let Err(e) = stream.write(data.as_bytes()){
-                println!("ERROR WRITING STREAM {}", e);
-            }
-        }
-        else{
-             println!("ERROR CONNECTInG TCPSTREAM");
-        }
-    }
-    
+   
+   
     //pub fn send_custom_event_before_draw(&mut self, id:u64, message:u64){
     //   self.custom_before_draw.push((id, message));
     //}
-    
-    pub fn profile_clear(&mut self) {
-        self.platform.profiler_totals.truncate(0);
-    }
-    
-    pub fn profile_report(&self) {
-        println!("-----------------------  Profile Report -------------------------");
-        let mut all = 0;
-        for (id, total) in self.platform.profiler_totals.iter().enumerate() {
-            all += total;
-            println!("Profile Id:{} time:{} usec", id, total / 1_000);
-        }
-        println!("Profile total:{} usec", all / 1_000);
-    }
-    
-    pub fn profile_begin(&mut self, id: usize) {
-        while self.platform.profiler_list.len() <= id {
-            self.platform.profiler_list.push(0);
-        }
-        self.platform.profiler_list[id] = precise_time_ns();
-    }
-    
-    pub fn profile_end(&mut self, id: usize) {
-        let delta = precise_time_ns() - self.platform.profiler_list[id];
-        while self.platform.profiler_totals.len() <= id {
-            self.platform.profiler_totals.push(0);
-        }
-        self.platform.profiler_totals[id] += delta;
-    }
-    
+   
 }
 
 #[derive(Clone, Default)]
@@ -458,8 +408,6 @@ pub struct CxPlatform {
     pub stop_timer: Vec<(u64)>,
     pub text_clipboard_response: Option<String>,
     pub desktop: CxDesktop,
-    pub profiler_list: Vec<u64>,
-    pub profiler_totals: Vec<u64>
 }
 
 #[derive(Clone, Default)]

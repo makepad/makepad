@@ -2,18 +2,24 @@ use crate::cx::*;
 use std::io::prelude::*;
 use std::fs::File;
 use std::io;
+use std::net::TcpStream;
+use time::precise_time_ns;
 
 #[derive(Clone)]
 pub struct CxDesktop{
     pub file_read_id:u64,
     pub file_read_requests:Vec<FileReadRequest>,
+    pub profiler_list: Vec<u64>,
+    pub profiler_totals: Vec<u64>
 }
 
 impl Default for CxDesktop{
     fn default()->CxDesktop{
         CxDesktop{
             file_read_id:1,
-            file_read_requests:Vec::new()
+            file_read_requests:Vec::new(),
+            profiler_list:Vec::new(),
+            profiler_totals:Vec::new()
         }
     }
 }
@@ -117,9 +123,62 @@ impl Cx{
         }
     }
 
-    pub fn log(&mut self, val:&str){
+    /*pub fn log(&mut self, val:&str){
         let mut stdout = io::stdout();
         let _e = stdout.write(val.as_bytes());
         let _e = stdout.flush();
+    }*/
+
+    pub fn write_log(data: &str) {
+        let _ = io::stdout().write(data.as_bytes());
+        let _ = io::stdout().flush();
     }
+
+    pub fn http_send(&self, verb:&str, path:&str, domain:&str, port:&str, body:&str){
+        let host = format!("{}:{}",domain,port);
+        let stream = TcpStream::connect(&host);
+        if let Ok(mut stream) = stream{
+            let byte_len = body.as_bytes().len();
+            let data = format!("{} /{} HTTP/1.1\r\nHost: {}\r\nConnect: close\r\nContent-Length:{}\r\n\r\n{}", verb, path, domain, byte_len, body);
+            if let Err(e) = stream.write(data.as_bytes()){
+                println!("http_send error writing stream {}", e);
+            }
+        }
+        else{
+             println!("http_send error connecting");
+        }
+    }
+
+    pub fn profile_clear(&mut self) {
+        self.platform.desktop.profiler_totals.truncate(0);
+    }
+    
+    pub fn profile_report(&self) {
+        let desktop = &self.platform.desktop;
+        println!("-----------------------  Profile Report -------------------------");
+        let mut all = 0;
+        for (id, total) in desktop.profiler_totals.iter().enumerate() {
+            all += total;
+            println!("Profile Id:{} time:{} usec", id, total / 1_000);
+        }
+        println!("Profile total:{} usec", all / 1_000);
+    }
+    
+    pub fn profile_begin(&mut self, id: usize) {
+        let desktop = &mut self.platform.desktop;
+        while desktop.profiler_list.len() <= id {
+            desktop.profiler_list.push(0);
+        }
+        desktop.profiler_list[id] = precise_time_ns();
+    }
+    
+    pub fn profile_end(&mut self, id: usize) {
+        let desktop = &mut self.platform.desktop;
+        let delta = precise_time_ns() - desktop.profiler_list[id];
+        while desktop.profiler_totals.len() <= id {
+            desktop.profiler_totals.push(0);
+        }
+        desktop.profiler_totals[id] += delta;
+    }
+    
 }
