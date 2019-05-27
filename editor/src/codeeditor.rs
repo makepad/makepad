@@ -1173,13 +1173,13 @@ impl CodeEditor {
         }
     }
 
-    pub fn draw_chunk(&mut self, cx: &mut Cx, token_chunks_index:usize, token_chunk: &TokenChunk, message_cursors: &Vec<TextCursor>) {
-        if token_chunk.chunk.len() == 0 {
+    pub fn draw_chunk(&mut self, cx: &mut Cx, token_chunks_index:usize, flat_text:&Vec<char>, token_chunk: &TokenChunk, message_cursors: &Vec<TextCursor>) {
+        if token_chunk.len == 0 {
             return
         }
 
         let token_type = token_chunk.token_type;
-        let chunk = &token_chunk.chunk;
+        let chunk = &flat_text[token_chunk.offset..(token_chunk.offset+token_chunk.len)];//chunk;
         let offset = token_chunk.offset;// end_offset - chunk.len() - 1;
         let next_char = token_chunk.next;
 
@@ -1298,20 +1298,20 @@ impl CodeEditor {
                     self.colors.keyword
                 }
                 TokenType::Identifier => {
-                    if *chunk == self._highlight_token {
+                    if chunk == &self._highlight_token[0..] {
                         self.draw_token_highlight_quad(cx, geom);
                         
                     }
                     self.colors.identifier
                 }
                 TokenType::Call => {
-                    if *chunk == self._highlight_token {
+                    if chunk == &self._highlight_token[0..] {
                         self.draw_token_highlight_quad(cx, geom);
                     }
                     self.colors.call
                 },
                 TokenType::TypeName => {
-                    if *chunk == self._highlight_token {
+                    if chunk == &self._highlight_token[0..] {
                         self.draw_token_highlight_quad(cx, geom);
                     }
                     self.colors.type_name
@@ -1406,7 +1406,7 @@ impl CodeEditor {
         }
     }
     
-    fn draw_paren_open(&mut self, token_chunks_index:usize, offset: usize, next_char: char, chunk: &Vec<char>) {
+    fn draw_paren_open(&mut self, token_chunks_index:usize, offset: usize, next_char: char, chunk: &[char]) {
         let marked = if let Some(pos) = self.cursors.get_last_cursor_singular() {
             pos == offset || pos == offset + 1 && next_char != '(' && next_char != '{' && next_char != '['
         }
@@ -1421,7 +1421,7 @@ impl CodeEditor {
         });
     }
     
-    fn draw_paren_close(&mut self, cx: &mut Cx, token_chunks_index:usize, offset: usize, next_char: char, chunk: &Vec<char>)  {
+    fn draw_paren_close(&mut self, cx: &mut Cx, token_chunks_index:usize, offset: usize, next_char: char, chunk: &[char])  {
         //let token_chunks_len = self.token_chunks.len();
         if self._paren_stack.len() == 0 {
             return

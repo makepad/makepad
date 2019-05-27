@@ -1,7 +1,6 @@
 
 use widget::*;
 use crate::textbuffer::*;
-use crate::textcursor::*;
 use crate::codeeditor::*;
 
 #[derive(Clone)]
@@ -52,9 +51,9 @@ impl JSEditor {
             let mut tokenizer = JSTokenizer::new();
             let mut pair_stack = Vec::new();
             loop {
-                let mut chunk = Vec::new();
-                let token_type = tokenizer.next_token(&mut state, &mut chunk, &text_buffer.token_chunks);
-                TokenChunk::push_with_pairing(&mut text_buffer.token_chunks, &mut pair_stack, &state, chunk, token_type);
+                let offset = text_buffer.flat_text.len();
+                let token_type = tokenizer.next_token(&mut state, &mut text_buffer.flat_text, &text_buffer.token_chunks);
+                TokenChunk::push_with_pairing(&mut text_buffer.token_chunks, &mut pair_stack, state.next, offset, text_buffer.flat_text.len(), token_type);
                 if token_type == TokenType::Eof {
                     break
                 }
@@ -66,7 +65,7 @@ impl JSEditor {
         }
         
         for (index, token_chunk) in text_buffer.token_chunks.iter_mut().enumerate(){
-            self.code_editor.draw_chunk(cx, index, token_chunk, &text_buffer.messages.cursors);
+            self.code_editor.draw_chunk(cx, index, &text_buffer.flat_text, token_chunk, &text_buffer.messages.cursors);
         }
         
         self.code_editor.end_code_editor(cx, text_buffer);
@@ -648,7 +647,7 @@ impl JSTokenizer {
         let extra_spacey = false;
         let pre_spacey = true;
         let mut out = FormatOutput::new();
-        let mut tp = TokenParser::new(&text_buffer.token_chunks);
+        let mut tp = TokenParser::new(&text_buffer.flat_text, &text_buffer.token_chunks);
         
         struct ParenStack {
             expecting_newlines: bool,

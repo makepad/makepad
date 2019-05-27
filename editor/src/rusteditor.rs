@@ -1,6 +1,5 @@
 use widget::*;
 use crate::textbuffer::*;
-use crate::textcursor::*;
 use crate::codeeditor::*;
 
 #[derive(Clone)]
@@ -51,9 +50,9 @@ impl RustEditor {
             let mut tokenizer = RustTokenizer::new();
             let mut pair_stack = Vec::new();
             loop {
-                let mut chunk = Vec::new();
-                let token_type = tokenizer.next_token(&mut state, &mut chunk, &text_buffer.token_chunks);
-                TokenChunk::push_with_pairing(&mut text_buffer.token_chunks, &mut pair_stack, &state, chunk, token_type);
+                let offset = text_buffer.flat_text.len();
+                let token_type = tokenizer.next_token(&mut state, &mut text_buffer.flat_text, &text_buffer.token_chunks);
+                TokenChunk::push_with_pairing(&mut text_buffer.token_chunks, &mut pair_stack, state.next, offset, text_buffer.flat_text.len(), token_type);
                 if token_type == TokenType::Eof {
                     break
                 }
@@ -65,7 +64,7 @@ impl RustEditor {
         }
         
         for (index, token_chunk) in text_buffer.token_chunks.iter_mut().enumerate(){
-            self.code_editor.draw_chunk(cx, index, token_chunk, &text_buffer.messages.cursors);
+            self.code_editor.draw_chunk(cx, index, &text_buffer.flat_text, token_chunk, &text_buffer.messages.cursors);
         }
         
         self.code_editor.end_code_editor(cx, text_buffer);
@@ -86,7 +85,8 @@ impl RustTokenizer {
     }
     
     pub fn next_token<'a>(&mut self, state: &mut TokenizerState<'a>, chunk: &mut Vec<char>, token_chunks: &Vec<TokenChunk>) -> TokenType {
-        chunk.truncate(0);
+        let start = chunk.len();
+        //chunk.truncate(0);
         if self.comment_depth >0 { // parse comments
             loop {
                 if state.next == '\0' {
@@ -119,7 +119,7 @@ impl RustTokenizer {
                         self.comment_depth = 0;
                     }
                     // output current line
-                    if chunk.len()>0 {
+                    if (chunk.len()-start)>0 {
                         return TokenType::CommentChunk
                     }
                     
@@ -128,7 +128,7 @@ impl RustTokenizer {
                     return TokenType::Newline
                 }
                 else if state.next == ' ' {
-                    if chunk.len()>0 {
+                    if (chunk.len()-start)>0 {
                         return TokenType::CommentChunk
                     }
                     while state.next == ' ' {
@@ -714,7 +714,7 @@ impl RustTokenizer {
         let pre_spacey = true;
 
         let mut out = FormatOutput::new();
-        let mut tp = TokenParser::new(&text_buffer.token_chunks);
+        let mut tp = TokenParser::new(&text_buffer.flat_text, &text_buffer.token_chunks);
         
         struct ParenStack {
             expecting_newlines: bool,

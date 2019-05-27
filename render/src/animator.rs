@@ -92,7 +92,7 @@ impl Animator{
                     else{ 
                         self.last_float.push((ident.clone(), val));
                     }
-                }                
+                }
             }
         }
     }
@@ -109,7 +109,7 @@ impl Animator{
         if let Some(current) = &self.current{
             if current.mode.term(){ // can't override a term anim
                 return
-            }    
+            }
         }
 
         if !self.area.is_valid(cx){

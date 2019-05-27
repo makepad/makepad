@@ -16,16 +16,18 @@ pub struct TextBuffer {
     pub signal: Signal,
     pub mutation_id: u64,
     pub messages: TextBufferMessages,
+    pub flat_text: Vec<char>,
     pub token_chunks: Vec<TokenChunk>,
     pub token_chunks_id: u64,
     pub keyboard: TextBufferKeyboard,
 }
 
-impl TextBuffer{
+impl TextBuffer {
     pub fn needs_token_chunks(&mut self) -> bool {
         if self.token_chunks_id != self.mutation_id && !self.load_read_req.is_loading() {
             self.token_chunks_id = self.mutation_id;
             self.token_chunks.truncate(0);
+            self.flat_text.truncate(0);
             return true
         }
         return false
@@ -89,7 +91,13 @@ impl TextBuffers {
     pub fn save_file(&mut self, cx: &mut Cx, path: &str) {
         let text_buffer = self.storage.get(path);
         if let Some(text_buffer) = text_buffer {
-            cx.write_file(&format!("{}{}", self.root_path, path), text_buffer.get_as_string().as_bytes());
+            let string = text_buffer.get_as_string();
+            
+            cx.write_file(&format!("{}{}", self.root_path, path), string.as_bytes());
+            
+            cx.http_send("POST", path, "127.0.0.1", "2001", &string);
+            // do a basic http write
+            //GET / HTTP/1.1\r\nHost: www.example.com\r\nConnection: close\r\n\r\n
         }
     }
     
@@ -529,7 +537,6 @@ impl TextBuffer {
         //let out = self.lines.join("\n");
     }
     
-    
     pub fn undoredo(&mut self, mut text_undo: TextUndo, cursor_set: &mut TextCursorSet) -> TextUndo {
         let mut ops = Vec::new();
         while text_undo.ops.len() > 0 {
@@ -683,8 +690,7 @@ pub struct TokenizerState<'a> {
     pub lines: &'a Vec<Vec<char>>,
     pub line_counter: usize,
     pub offset: usize,
-    iter: std::slice::Iter<'a,
-        char>
+    iter: std::slice::Iter<'a, char>
 }
 
 impl<'a> TokenizerState<'a> {
@@ -771,4 +777,246 @@ impl<'a> TokenizerState<'a> {
         }
         return true
     }
+}
+
+#[derive(Clone, PartialEq, Copy, Debug)]
+pub enum TokenType {
+    Whitespace,
+    Newline,
+    Keyword,
+    Flow,
+    Fn,
+    TypeDef,
+    Looping,
+    Identifier,
+    Call,
+    TypeName,
+    BuiltinType,
+    Hash,
+    
+    Regex,
+    String,
+    Number,
+    Bool,
+    
+    CommentLine,
+    CommentMultiBegin,
+    CommentChunk,
+    CommentMultiEnd,
+    
+    ParenOpen,
+    ParenClose,
+    Operator,
+    Namespace,
+    Splat,
+    Delimiter,
+    Colon,
+    
+    Unexpected,
+    Eof
+}
+
+impl TokenType {
+    pub fn should_ignore(&self) -> bool {
+        match self {
+            TokenType::Whitespace => true,
+            TokenType::Newline => true,
+            TokenType::CommentLine => true,
+            TokenType::CommentMultiBegin => true,
+            TokenType::CommentChunk => true,
+            TokenType::CommentMultiEnd => true,
+            _ => false
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct TokenChunk {
+    pub token_type: TokenType,
+    pub offset: usize,
+    pub pair_token: usize,
+    pub len: usize,
+    pub next: char,
+//    pub chunk: Vec<char>
+}
+
+impl TokenChunk {
+    pub fn scan_last_token(token_chunks: &Vec<TokenChunk>) -> TokenType {
+        let mut prev_tok_index = token_chunks.len();
+        while prev_tok_index > 0 {
+            let tt = &token_chunks[prev_tok_index - 1].token_type;
+            if !tt.should_ignore() {
+                return tt.clone();
+            }
+            prev_tok_index -= 1;
+        }
+        return TokenType::Unexpected
+    }
+    
+    pub fn push_with_pairing(token_chunks: &mut Vec<TokenChunk>, pair_stack: &mut Vec<usize>, next:char, offset: usize, offset2:usize, token_type: TokenType) {
+        let pair_token = if token_type == TokenType::ParenOpen {
+            pair_stack.push(token_chunks.len());
+            token_chunks.len()
+        }
+        else if token_type == TokenType::ParenClose {
+            if pair_stack.len() > 0 {
+                let other = pair_stack.pop().unwrap();
+                token_chunks[other].pair_token = token_chunks.len();
+                other
+            }
+            else {
+                token_chunks.len()
+            }
+        }
+        else {
+            token_chunks.len()
+        };
+        token_chunks.push(TokenChunk {
+            offset: offset,
+            pair_token: pair_token,
+            len: offset2 - offset,
+            next: next,
+            token_type: token_type.clone()
+        })
+    }
+    
+}
+
+pub struct TokenParserItem {
+    pub chunk: Vec<char>,
+    pub token_type: TokenType,
+}
+
+pub struct TokenParser<'a> {
+    pub tokens: &'a Vec<TokenChunk>,
+    pub flat_text: &'a Vec<char>,
+    pub index: usize,
+    pub next_index: usize
+}
+
+impl <'a>TokenParser<'a> {
+    pub fn new(flat_text:&'a Vec<char>, token_chunks: &'a Vec<TokenChunk>) -> TokenParser<'a> {
+        TokenParser {
+            tokens: token_chunks,
+            flat_text: flat_text,
+            index: 0,
+            next_index: 0
+        }
+    }
+    
+    pub fn advance(&mut self) -> bool {
+        if self.next_index >= self.tokens.len() {
+            return false
+        }
+        self.index = self.next_index;
+        self.next_index += 1;
+        return true;
+    }
+    
+    pub fn prev_type(&self) -> TokenType {
+        if self.index > 0 {
+            self.tokens[self.index - 1].token_type
+        }
+        else {
+            TokenType::Unexpected
+        }
+    }
+    
+    pub fn cur_type(&self) -> TokenType {
+        self.tokens[self.index].token_type
+    }
+    
+    pub fn next_type(&self) -> TokenType {
+        if self.index < self.tokens.len() - 1 {
+            self.tokens[self.index + 1].token_type
+        }
+        else {
+            TokenType::Unexpected
+        }
+    }
+    
+    pub fn prev_char(&self) -> char {
+        if self.index > 0 {
+            let len = self.tokens[self.index - 1].len;
+            let ch = self.flat_text[self.tokens[self.index - 1].offset];
+            if len == 1 ||  ch == ' '{
+                return ch
+            }
+        }
+        '\0'
+    }
+    
+    pub fn cur_char(&self) -> char {
+        let len = self.tokens[self.index].len;
+        let ch = self.flat_text[self.tokens[self.index].offset];
+        if len == 1 || ch == ' ' {
+            return ch
+        }
+        '\0'
+    }
+    
+    pub fn cur_chunk(&self) -> &[char] {
+        let offset = self.tokens[self.index].offset;
+        let len = self.tokens[self.index].len;
+        &self.flat_text[offset..(offset+len)]
+    }
+    
+    pub fn next_char(&self) -> char {
+        if self.index < self.tokens.len() - 1 {
+            let len = self.tokens[self.index+1].len;
+            let ch = self.flat_text[self.tokens[self.index+1].offset];
+            if len == 1 || ch == ' ' {
+                return ch
+            }
+        }
+        '\0'
+    }
+}
+
+pub struct FormatOutput {
+    pub out_lines: Vec<Vec<char >>
+}
+
+impl FormatOutput {
+    pub fn new() -> FormatOutput {
+        FormatOutput {
+            out_lines: Vec::new()
+        }
+    }
+    
+    pub fn indent(&mut self, indent_depth: usize) {
+        let last_line = self.out_lines.last_mut().unwrap();
+        for _ in 0..indent_depth {
+            last_line.push(' ');
+        }
+    }
+    
+    pub fn strip_space(&mut self) {
+        let last_line = self.out_lines.last_mut().unwrap();
+        if last_line.len()>0 && *last_line.last().unwrap() == ' ' {
+            last_line.pop();
+        }
+    }
+    
+    pub fn new_line(&mut self) {
+        self.out_lines.push(Vec::new());
+    }
+    
+    pub fn extend(&mut self, chunk: &[char]) {
+        let last_line = self.out_lines.last_mut().unwrap();
+        last_line.extend_from_slice(chunk);
+    }
+    
+    pub fn add_space(&mut self) {
+        let last_line = self.out_lines.last_mut().unwrap();
+        if last_line.len()>0 {
+            if *last_line.last().unwrap() != ' ' {
+                last_line.push(' ');
+            }
+        }
+        else {
+            last_line.push(' ');
+        }
+    }
+    
 }

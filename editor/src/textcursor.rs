@@ -744,43 +744,43 @@ impl TextCursorSet {
     }
     /*
     pub fn toggle_comment(&mut self, text_buffer:&mut TextBuffer, comment_str:&str){
-    let mut delta:usize = 0; // rolling delta to displace cursors
-    let mut ops = Vec::new();
-    let comment_str_chars = comment_str.chars().count();
-    let cursors_clone = self.clone();
-    let mut old_max = (TextPos{row:0,col:0},0);
-    for cursor in &mut self.set{
-    let (start, end) = cursor.delta(delta as isize);
-   
-    let start_pos = text_buffer.offset_to_text_pos_next(start, old_max.0, old_max.1);
-    let end_pos = text_buffer.offset_to_text_pos_next(end, start_pos, start);
-    let mut off = start - start_pos.col;
-    let last_line = if start_pos.row == end_pos.row || end_pos.col>0{1}else{0};
-   
-    for row in start_pos.row..(end_pos.row+last_line){
-    // ok so how do we compute the actual op offset of this line
-    let op = text_buffer.replace_line_with_string(off, row, 0, 0, tab_str);
-    off += text_buffer.lines[row].len() + 1;
-    ops.push(op);
-    }
-    // figure out which way the cursor is
-    if cursor.head > cursor.tail{
-    cursor.tail += tab_str_chars + delta;
-    cursor.head += (end_pos.row - start_pos.row + last_line) * tab_str_chars + delta;
-    }
-    else{
-    cursor.tail += (end_pos.row - start_pos.row + last_line) * tab_str_chars + delta;
-    cursor.head += tab_str_chars + delta;
-    }
-    delta += ((end_pos.row - start_pos.row) + 1) * tab_str_chars;
-    old_max = cursor.calc_max(text_buffer, old_max);
-    }
-    text_buffer.redo_stack.truncate(0);
-    text_buffer.undo_stack.push(TextUndo{
-    ops:ops,
-    grouping:TextUndoGrouping::Tab,
-    cursors:cursors_clone
-    })
+        let mut delta:usize = 0; // rolling delta to displace cursors
+        let mut ops = Vec::new();
+        let comment_str_chars = comment_str.chars().count();
+        let cursors_clone = self.clone();
+        let mut old_max = (TextPos{row:0,col:0},0);
+        for cursor in &mut self.set{
+        let (start, end) = cursor.delta(delta as isize);
+
+        let start_pos = text_buffer.offset_to_text_pos_next(start, old_max.0, old_max.1);
+        let end_pos = text_buffer.offset_to_text_pos_next(end, start_pos, start);
+        let mut off = start - start_pos.col;
+        let last_line = if start_pos.row == end_pos.row || end_pos.col>0{1}else{0};
+
+        for row in start_pos.row..(end_pos.row+last_line){
+        // ok so how do we compute the actual op offset of this line
+        let op = text_buffer.replace_line_with_string(off, row, 0, 0, tab_str);
+        off += text_buffer.lines[row].len() + 1;
+        ops.push(op);
+        }
+        // figure out which way the cursor is
+        if cursor.head > cursor.tail{
+        cursor.tail += tab_str_chars + delta;
+        cursor.head += (end_pos.row - start_pos.row + last_line) * tab_str_chars + delta;
+        }
+        else{
+        cursor.tail += (end_pos.row - start_pos.row + last_line) * tab_str_chars + delta;
+        cursor.head += tab_str_chars + delta;
+        }
+        delta += ((end_pos.row - start_pos.row) + 1) * tab_str_chars;
+        old_max = cursor.calc_max(text_buffer, old_max);
+        }
+        text_buffer.redo_stack.truncate(0);
+        text_buffer.undo_stack.push(TextUndo{
+        ops:ops,
+        grouping:TextUndoGrouping::Tab,
+        cursors:cursors_clone
+        })
     }*/
     
     pub fn remove_tab(&mut self, text_buffer: &mut TextBuffer, num_spaces: usize) {
@@ -791,7 +791,7 @@ impl TextCursorSet {
         let cursors_clone = self.clone();
         let mut old_max = (TextPos {row: 0, col: 0}, 0);
         for cursor in &mut self.set {
-            let (start, end) = cursor.delta( - (delta as isize));
+            let (start, end) = cursor.delta(-(delta as isize));
             let start_pos = text_buffer.offset_to_text_pos_next(start, old_max.0, old_max.1);
             let end_pos = text_buffer.offset_to_text_pos_next(end, start_pos, start);
             let mut off = start - start_pos.col;
@@ -914,7 +914,7 @@ impl TextCursorSet {
                     }
                     if offset == chunks[i].offset {
                         if chunks[i - 1].token_type == TokenType::Whitespace && i>1 {
-                            return chunks[i - 2].offset  // + chunks[i-2].len
+                            return chunks[i - 2].offset // + chunks[i-2].len
                         }
                         return chunks[i - 1].offset
                     }
@@ -932,7 +932,7 @@ impl TextCursorSet {
         0
     }
     
-    pub fn get_nearest_token_chunk(offset: usize, token_chunks: &Vec<TokenChunk>) -> Option<(usize,usize)> {
+    pub fn get_nearest_token_chunk(offset: usize, token_chunks: &Vec<TokenChunk>) -> Option<(usize, usize)> {
         for i in 0..token_chunks.len() {
             if token_chunks[i].token_type == TokenType::Whitespace {
                 if offset == token_chunks[i].offset && i > 0 { // at the start of whitespace
@@ -988,7 +988,7 @@ impl TextCursorSet {
         if cursor.head != cursor.tail {
             return vec![]
         }
-        if let Some((offset,len)) = TextCursorSet::get_nearest_token_chunk(cursor.head, token_chunks) {
+        if let Some((offset, len)) = TextCursorSet::get_nearest_token_chunk(cursor.head, token_chunks) {
             /*
             let add = match chunk.token_type {
                 TokenType::Whitespace => false,
@@ -1002,17 +1002,14 @@ impl TextCursorSet {
                 TokenType::Identifier => true,
                 TokenType::Call => true,
                 TokenType::TypeName => true,
-                
                 TokenType::Bool => true,
                 TokenType::String => true,
                 TokenType::Regex => true,
                 TokenType::Number => true,
-                
                 TokenType::CommentLine => false,
                 TokenType::CommentMultiBegin => false,
                 TokenType::CommentMultiEnd => false,
                 TokenType::CommentChunk => false,
-                
                 TokenType::ParenOpen => false,
                 TokenType::ParenClose => false,
                 TokenType::Operator => false,
@@ -1028,9 +1025,9 @@ impl TextCursorSet {
                 vec![]
             }*/
             //else {
-                let start_pos = text_buffer.offset_to_text_pos(offset);
-                
-                text_buffer.copy_line(start_pos.row, start_pos.col, len)
+            let start_pos = text_buffer.offset_to_text_pos(offset);
+            
+            text_buffer.copy_line(start_pos.row, start_pos.col, len)
             //}
         }
         else {
@@ -1064,244 +1061,6 @@ impl TextCursorSet {
             return vec![]
         }
     }
-    
-    
-}
-
-#[derive(Clone, PartialEq, Copy, Debug)]
-pub enum TokenType {
-    Whitespace,
-    Newline,
-    Keyword,
-    Flow,
-    Fn,
-    TypeDef,
-    Looping,
-    Identifier,
-    Call,
-    TypeName,
-    BuiltinType,
-    Hash,
-    
-    Regex,
-    String,
-    Number,
-    Bool,
-    
-    CommentLine,
-    CommentMultiBegin,
-    CommentChunk,
-    CommentMultiEnd,
-    
-    ParenOpen,
-    ParenClose,
-    Operator,
-    Namespace,
-    Splat,
-    Delimiter,
-    Colon,
-    
-    Unexpected,
-    Eof
-}
-
-impl TokenType{
-    pub fn should_ignore(&self)->bool{
-        match self{
-            TokenType::Whitespace=>true,
-            TokenType::Newline=>true,
-            TokenType::CommentLine=>true,
-            TokenType::CommentMultiBegin=>true,
-            TokenType::CommentChunk=>true,
-            TokenType::CommentMultiEnd=>true,
-            _=>false
-        }
-    }
-}
-
-#[derive(Clone)]
-pub struct TokenChunk {
-    pub token_type: TokenType,
-    pub offset: usize,
-    pub pair_token: usize,
-    pub len: usize,
-    pub next:char,
-    pub chunk:Vec<char>
-}
-
-impl TokenChunk{
-    pub fn scan_last_token(token_chunks:&Vec<TokenChunk>)->TokenType{
-        let mut prev_tok_index = token_chunks.len();
-        while prev_tok_index > 0{
-            let tt = &token_chunks[prev_tok_index - 1].token_type;
-            if !tt.should_ignore(){
-                return tt.clone();
-            }
-            prev_tok_index -= 1;
-        }
-        return TokenType::Unexpected
-    }
-
-    pub fn push_with_pairing(token_chunks:&mut Vec<TokenChunk>, pair_stack:&mut Vec<usize>, state: &TokenizerState, chunk: Vec<char>, token_type: TokenType){
-        let pair_token = if token_type == TokenType::ParenOpen{
-            pair_stack.push(token_chunks.len());
-            token_chunks.len()
-        }
-        else if token_type == TokenType::ParenClose{
-            if pair_stack.len() > 0{
-                let other = pair_stack.pop().unwrap();
-                token_chunks[other].pair_token = token_chunks.len();
-                other
-            }
-            else{
-                token_chunks.len()
-            }
-        }
-        else{
-            token_chunks.len()
-        };
-        token_chunks.push(TokenChunk {
-            offset: state.offset - chunk.len() - 1,
-            pair_token: pair_token,
-            len: chunk.len(),
-            chunk: chunk,
-            next: state.next,
-            token_type: token_type.clone()
-        })
-    }
-
-}
-
-pub struct TokenParserItem{
-    pub chunk:Vec<char>,
-    pub token_type:TokenType,
-}
-
-pub struct TokenParser<'a>{
-    pub tokens:&'a Vec<TokenChunk>,
-    pub index:usize,
-    pub next_index:usize
-}
-
-impl <'a>TokenParser<'a>{
-    pub fn new(token_chunks:&'a Vec<TokenChunk>)->TokenParser{
-        TokenParser{
-            tokens:token_chunks,
-            index:0,
-            next_index:0
-        }
-    }
-
-    pub fn advance(&mut self)->bool{
-        if self.next_index >= self.tokens.len(){
-            return false
-        }
-        self.index = self.next_index;
-        self.next_index += 1;
-        return true;
-    }
-
-    pub fn prev_type(&self)->TokenType{
-        if self.index > 0{
-            self.tokens[self.index - 1].token_type
-        }
-        else{
-            TokenType::Unexpected
-        }
-    }
-
-    pub fn cur_type(&self)->TokenType{
-        self.tokens[self.index].token_type
-    }
-
-    pub fn next_type(&self)->TokenType{
-        if self.index < self.tokens.len() - 1{
-            self.tokens[self.index +1].token_type
-        }
-        else{
-            TokenType::Unexpected
-        }
-    }
-
-    pub fn prev_char(&self)->char{
-        if self.index > 0{
-            let chunk = &self.tokens[self.index -1].chunk;
-            if chunk.len() == 1 || chunk[0] == ' '{
-                return chunk[0]
-            }
-        }
-        '\0'
-    }
-
-    pub fn cur_char(&self)->char{
-        let chunk = &self.tokens[self.index].chunk;
-        if chunk.len() == 1 || chunk[0] == ' '{
-            return chunk[0]
-        }
-        '\0'
-    }
-
-    pub fn cur_chunk(&self)->&Vec<char>{
-        &self.tokens[self.index].chunk
-    }
-
-    pub fn next_char(&self)->char{
-        if self.index < self.tokens.len() - 1{
-            let chunk = &self.tokens[self.index + 1].chunk;
-            if chunk.len() == 1 || chunk[0] == ' '{
-                return chunk[0]
-            }
-        }
-        '\0'
-    }
-}
-
-pub struct FormatOutput{
-    pub out_lines:Vec<Vec<char >>
-}
-
-impl FormatOutput{
-    pub fn new()->FormatOutput{
-        FormatOutput{
-            out_lines:Vec::new()
-        }
-    }
-
-    pub fn indent(&mut self, indent_depth:usize){
-        let last_line = self.out_lines.last_mut().unwrap();
-        for _ in 0..indent_depth {
-            last_line.push(' ');
-        }
-    }
-    
-    pub fn strip_space(&mut self) {
-        let last_line = self.out_lines.last_mut().unwrap();
-        if last_line.len()>0 && *last_line.last().unwrap() == ' ' {
-            last_line.pop();
-        }
-    }
-    
-    pub fn new_line(&mut self){
-        self.out_lines.push(Vec::new());
-    }
-    
-    pub fn extend(&mut self, chunk:&Vec<char>){
-        let last_line = self.out_lines.last_mut().unwrap();
-        last_line.extend(chunk);
-    }
-
-    pub fn add_space(&mut self){
-        let last_line = self.out_lines.last_mut().unwrap();
-        if last_line.len()>0{
-            if *last_line.last().unwrap() != ' '{
-                last_line.push(' ');
-            }
-        }
-        else{
-            last_line.push(' ');
-        }
-    }
-
 }
 
 #[derive(Clone)]

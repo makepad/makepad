@@ -395,6 +395,10 @@ impl Cx {
         let _ = io::stdout().flush();
     }
     
+    pub fn http_send(&self, verb:&str, path:&str, domain:&str, port:&str, body:&str){
+        
+    }
+    
     //pub fn send_custom_event_before_draw(&mut self, id:u64, message:u64){
     //   self.custom_before_draw.push((id, message));
     //}

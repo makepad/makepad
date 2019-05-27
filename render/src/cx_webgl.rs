@@ -448,6 +448,10 @@ impl Cx {
         }
     }
     
+    pub fn http_send(&self, verb:&str, path:&str, domain:&str, port:&str, body:&str){
+        
+    }
+    
     pub fn compile_all_webgl_shaders(&mut self) {
         for sh in &self.shaders {
             let csh = Self::compile_webgl_shader(self.compiled_shaders.len(), &sh, &mut self.platform);

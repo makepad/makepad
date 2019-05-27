@@ -50,7 +50,7 @@ impl Cx{
 
     pub fn process_desktop_file_read_requests<F>(&mut self, mut event_handler:F)
     where F: FnMut(&mut Cx, &mut Event)
-    {   
+    {
         if self.platform.desktop.file_read_requests.len() == 0{
             return
         }
