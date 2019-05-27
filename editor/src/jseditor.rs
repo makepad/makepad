@@ -46,21 +46,27 @@ impl JSEditor {
         ce
     }
     
-    pub fn draw_js_editor(&mut self, cx: &mut Cx, text_buffer: &TextBuffer) {
-        if let Err(()) = self.code_editor.begin_code_editor(cx, text_buffer) {
+    pub fn draw_js_editor(&mut self, cx: &mut Cx, text_buffer: &mut TextBuffer) {
+        if text_buffer.needs_token_chunks(){
+            let mut state = TokenizerState::new(&text_buffer.lines);
+            let mut tokenizer = JSTokenizer::new();
+            let mut pair_stack = Vec::new();
+            loop {
+                let mut chunk = Vec::new();
+                let token_type = tokenizer.next_token(&mut state, &mut chunk, &text_buffer.token_chunks);
+                TokenChunk::push_with_pairing(&mut text_buffer.token_chunks, &mut pair_stack, &state, chunk, token_type);
+                if token_type == TokenType::Eof {
+                    break
+                }
+            }
+        }
+        
+        if let Err(_) = self.code_editor.begin_code_editor(cx, text_buffer) {
             return
         }
         
-        let mut state = TokenizerState::new(text_buffer);
-        let mut tokenizer = JSTokenizer::new();
-        let mut chunk = Vec::new();
-        
-        loop {
-            let token_type = tokenizer.next_token(&mut state, &mut chunk, &self.code_editor.token_chunks);
-            self.code_editor.draw_chunk(cx, &chunk, state.next, state.offset, token_type.clone(), &text_buffer.messages.cursors);
-            if token_type == TokenType::Eof {
-                break
-            }
+        for (index, token_chunk) in text_buffer.token_chunks.iter_mut().enumerate(){
+            self.code_editor.draw_chunk(cx, index, token_chunk, &text_buffer.messages.cursors);
         }
         
         self.code_editor.end_code_editor(cx, text_buffer);
@@ -641,11 +647,8 @@ impl JSTokenizer {
         
         let extra_spacey = false;
         let pre_spacey = true;
-        let mut state = TokenizerState::new(text_buffer);
-        let mut tokenizer = JSTokenizer::new();
         let mut out = FormatOutput::new();
-        let mut token_chunks: Vec<TokenChunk> = Vec::new();
-        let mut tp = TokenParser::new();
+        let mut tp = TokenParser::new(&text_buffer.token_chunks);
         
         struct ParenStack {
             expecting_newlines: bool,
@@ -667,21 +670,6 @@ impl JSTokenizer {
         let mut is_unary_operator = true;
         let mut in_multline_comment = false;
         let mut in_singleline_comment = false;
-        
-        loop {
-            let mut chunk = Vec::new();
-            let token_type = tokenizer.next_token(&mut state, &mut chunk, &token_chunks);
-            token_chunks.push(TokenChunk {
-                offset: state.offset - chunk.len() - 1,
-                pair_token: 0,
-                len: chunk.len(),
-                token_type: token_type.clone()
-            });
-            tp.add_token(token_type, chunk);
-            if token_type == TokenType::Eof {
-                break;
-            }
-        }
         
         while tp.advance() {
             

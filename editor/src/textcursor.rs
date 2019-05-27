@@ -932,14 +932,14 @@ impl TextCursorSet {
         0
     }
     
-    pub fn get_nearest_token_chunk(offset: usize, token_chunks: &Vec<TokenChunk>) -> Option<TokenChunk> {
+    pub fn get_nearest_token_chunk(offset: usize, token_chunks: &Vec<TokenChunk>) -> Option<(usize,usize)> {
         for i in 0..token_chunks.len() {
             if token_chunks[i].token_type == TokenType::Whitespace {
                 if offset == token_chunks[i].offset && i > 0 { // at the start of whitespace
-                    return Some(token_chunks[i - 1].clone())
+                    return Some((token_chunks[i - 1].offset, token_chunks[i - 1].len))
                 }
                 else if offset == token_chunks[i].offset + token_chunks[i].len && i < token_chunks.len() - 1 {
-                    return Some(token_chunks[i + 1].clone())
+                    return Some((token_chunks[i + 1].offset, token_chunks[i + 1].len))
                 }
             };
             
@@ -947,25 +947,15 @@ impl TextCursorSet {
                 let i = if token_chunks[i].token_type == TokenType::Newline && i > 0 {i - 1}else {i};
                 let pair_token = token_chunks[i].pair_token;
                 if pair_token > i {
-                    return Some(TokenChunk {
-                        token_type: TokenType::Unexpected,
-                        offset: token_chunks[i].offset,
-                        len: token_chunks[pair_token].len + (token_chunks[pair_token].offset - token_chunks[i].offset),
-                        pair_token: 0
-                    })
+                    return Some((token_chunks[i].offset, token_chunks[pair_token].len + (token_chunks[pair_token].offset - token_chunks[i].offset)));
                 }
                 if token_chunks[i].token_type == TokenType::String {
                     if token_chunks[i].len <= 2 {
-                        return Some(token_chunks[i].clone())
+                        return Some((token_chunks[i].offset, token_chunks[i].len));
                     }
-                    return Some(TokenChunk {
-                        token_type: TokenType::String,
-                        offset: token_chunks[i].offset + 1,
-                        len: token_chunks[i].len - 2,
-                        pair_token: 0
-                    })
+                    return Some((token_chunks[i].offset + 1, token_chunks[i].len - 2))
                 }
-                return Some(token_chunks[i].clone());
+                return Some((token_chunks[i].offset, token_chunks[i].len));
             }
         };
         None
@@ -998,7 +988,8 @@ impl TextCursorSet {
         if cursor.head != cursor.tail {
             return vec![]
         }
-        if let Some(chunk) = TextCursorSet::get_nearest_token_chunk(cursor.head, token_chunks) {
+        if let Some((offset,len)) = TextCursorSet::get_nearest_token_chunk(cursor.head, token_chunks) {
+            /*
             let add = match chunk.token_type {
                 TokenType::Whitespace => false,
                 TokenType::Newline => false,
@@ -1035,12 +1026,12 @@ impl TextCursorSet {
             };
             if !add {
                 vec![]
-            }
-            else {
-                let start_pos = text_buffer.offset_to_text_pos(chunk.offset);
+            }*/
+            //else {
+                let start_pos = text_buffer.offset_to_text_pos(offset);
                 
-                text_buffer.copy_line(start_pos.row, start_pos.col, chunk.len)
-            }
+                text_buffer.copy_line(start_pos.row, start_pos.col, len)
+            //}
         }
         else {
             vec![]
@@ -1134,6 +1125,8 @@ pub struct TokenChunk {
     pub offset: usize,
     pub pair_token: usize,
     pub len: usize,
+    pub next:char,
+    pub chunk:Vec<char>
 }
 
 impl TokenChunk{
@@ -1148,6 +1141,35 @@ impl TokenChunk{
         }
         return TokenType::Unexpected
     }
+
+    pub fn push_with_pairing(token_chunks:&mut Vec<TokenChunk>, pair_stack:&mut Vec<usize>, state: &TokenizerState, chunk: Vec<char>, token_type: TokenType){
+        let pair_token = if token_type == TokenType::ParenOpen{
+            pair_stack.push(token_chunks.len());
+            token_chunks.len()
+        }
+        else if token_type == TokenType::ParenClose{
+            if pair_stack.len() > 0{
+                let other = pair_stack.pop().unwrap();
+                token_chunks[other].pair_token = token_chunks.len();
+                other
+            }
+            else{
+                token_chunks.len()
+            }
+        }
+        else{
+            token_chunks.len()
+        };
+        token_chunks.push(TokenChunk {
+            offset: state.offset - chunk.len() - 1,
+            pair_token: pair_token,
+            len: chunk.len(),
+            chunk: chunk,
+            next: state.next,
+            token_type: token_type.clone()
+        })
+    }
+
 }
 
 pub struct TokenParserItem{
@@ -1155,23 +1177,19 @@ pub struct TokenParserItem{
     pub token_type:TokenType,
 }
 
-pub struct TokenParser{
-    pub tokens:Vec<TokenParserItem>,
+pub struct TokenParser<'a>{
+    pub tokens:&'a Vec<TokenChunk>,
     pub index:usize,
     pub next_index:usize
 }
 
-impl TokenParser{
-    pub fn new()->TokenParser{
+impl <'a>TokenParser<'a>{
+    pub fn new(token_chunks:&'a Vec<TokenChunk>)->TokenParser{
         TokenParser{
-            tokens:Vec::new(),
+            tokens:token_chunks,
             index:0,
             next_index:0
         }
-    }
-
-    pub fn add_token(&mut self, token_type:TokenType, chunk:Vec<char>){
-        self.tokens.push(TokenParserItem{chunk:chunk, token_type:token_type})
     }
 
     pub fn advance(&mut self)->bool{

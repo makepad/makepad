@@ -16,8 +16,20 @@ pub struct TextBuffer {
     pub signal: Signal,
     pub mutation_id: u64,
     pub messages: TextBufferMessages,
-    
+    pub token_chunks: Vec<TokenChunk>,
+    pub token_chunks_id: u64,
     pub keyboard: TextBufferKeyboard,
+}
+
+impl TextBuffer{
+    pub fn needs_token_chunks(&mut self) -> bool {
+        if self.token_chunks_id != self.mutation_id && !self.load_read_req.is_loading() {
+            self.token_chunks_id = self.mutation_id;
+            self.token_chunks.truncate(0);
+            return true
+        }
+        return false
+    }
 }
 
 pub const SIGNAL_TEXTBUFFER_MESSAGE_UPDATE: u64 = 1;
@@ -67,6 +79,7 @@ impl TextBuffers {
         self.storage.entry(path.to_string()).or_insert_with( || {
             TextBuffer {
                 signal: cx.new_signal(),
+                mutation_id: 1,
                 load_read_req: cx.read_file(&format!("{}{}", root_path, path)),
                 ..Default::default()
             }
@@ -82,15 +95,15 @@ impl TextBuffers {
     
     pub fn handle_file_read(&mut self, fr: &FileReadEvent) -> bool {
         for (_path, text_buffer) in &mut self.storage {
-            if let Some(utf8_data) = text_buffer.load_read_req.as_utf8(fr){
+            if let Some(utf8_data) = text_buffer.load_read_req.as_utf8(fr) {
                 text_buffer.lines = TextBuffer::split_string_to_lines(&utf8_data.to_string());
                 return true
             }
         }
         return false
     }
+    
 }
-
 
 #[derive(Clone, Copy)]
 pub struct TextPos {
@@ -466,7 +479,7 @@ impl TextBuffer {
     pub fn replace_lines(&mut self, start_row: usize, end_row: usize, rep_lines: Vec<Vec<char>>) -> TextOp {
         let start = self.text_pos_to_offset(TextPos {row: start_row, col: 0});
         let end = self.text_pos_to_offset(TextPos {row: end_row, col: 0});
-        let end_mark = if end_row >= self.lines.len(){0}else{1};
+        let end_mark = if end_row >= self.lines.len() {0}else {1};
         let rep_lines_chars = calc_char_count(&rep_lines);
         let lines = self.replace_range(start, end - start - end_mark, rep_lines);
         TextOp {
@@ -667,23 +680,23 @@ pub struct TokenizerState<'a> {
     pub prev: char,
     pub cur: char,
     pub next: char,
-    pub text_buffer: &'a TextBuffer,
+    pub lines: &'a Vec<Vec<char>>,
     pub line_counter: usize,
     pub offset: usize,
     iter: std::slice::Iter<'a,
-    char>
+        char>
 }
 
 impl<'a> TokenizerState<'a> {
-    pub fn new(text_buffer: &'a TextBuffer) -> Self {
+    pub fn new(lines: &'a Vec<Vec<char>>) -> Self {
         let mut ret = Self {
-            text_buffer: text_buffer,
+            lines: lines,
             line_counter: 0,
             offset: 0,
             prev: '\0',
             cur: '\0',
             next: '\0',
-            iter: text_buffer.lines[0].iter()
+            iter: lines[0].iter()
         };
         ret.advance_with_cur();
         ret
@@ -700,10 +713,10 @@ impl<'a> TokenizerState<'a> {
     }
     
     pub fn next_line(&mut self) {
-        if self.line_counter < self.text_buffer.lines.len() - 1 {
+        if self.line_counter < self.lines.len() - 1 {
             self.line_counter += 1;
             self.offset += 1;
-            self.iter = self.text_buffer.lines[self.line_counter].iter();
+            self.iter = self.lines[self.line_counter].iter();
             self.next = '\n'
         }
         else {

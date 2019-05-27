@@ -43,7 +43,6 @@ pub struct CodeEditor {
     
     pub _line_geometry: Vec<LineGeom>,
     pub _anim_select: Vec<AnimSelect>,
-    pub token_chunks: Vec<TokenChunk>,
     pub _visible_lines: usize,
     
     pub _select_scroll: Option<SelectScroll>,
@@ -267,7 +266,6 @@ impl Style for CodeEditor {
             
             
             _line_geometry: Vec::new(),
-            token_chunks: Vec::new(),
             
             _anim_select: Vec::new(),
             _grid_select_corner: None,
@@ -518,16 +516,16 @@ impl CodeEditor {
                 1 => {
                 },
                 2 => {
-                    if let Some(chunk) = TextCursorSet::get_nearest_token_chunk(offset, &self.token_chunks) {
-                        self.cursors.set_last_clamp_range((chunk.offset, chunk.len));
+                    if let Some((coffset, len)) = TextCursorSet::get_nearest_token_chunk(offset, &text_buffer.token_chunks) {
+                        self.cursors.set_last_clamp_range((coffset, len));
                     }
                 },
                 3 => {
-                    if let Some(chunk) = TextCursorSet::get_nearest_token_chunk(offset, &self.token_chunks) {
-                        self.cursors.set_last_clamp_range((chunk.offset, chunk.len));
+                    if let Some((coffset, len)) = TextCursorSet::get_nearest_token_chunk(offset, &text_buffer.token_chunks) {
+                        self.cursors.set_last_clamp_range((coffset, len));
                         let (start, _len) = text_buffer.get_nearest_line_range(offset);
-                        let mut chunk_offset = chunk.offset;
-                        let mut chunk_len = chunk.len;
+                        let mut chunk_offset = offset;
+                        let mut chunk_len = len;
                         if start < chunk_offset {
                             chunk_len += chunk_offset - start;
                             chunk_offset = start;
@@ -635,7 +633,7 @@ impl CodeEditor {
             },
             KeyCode::ArrowLeft => {
                 if ke.modifiers.logo || ke.modifiers.control { // token skipping
-                    self.cursors.move_left_nearest_token(ke.modifiers.shift, &self.token_chunks, text_buffer)
+                    self.cursors.move_left_nearest_token(ke.modifiers.shift, &text_buffer.token_chunks, text_buffer)
                 }
                 else {
                     self.cursors.move_left(1, ke.modifiers.shift, text_buffer);
@@ -644,7 +642,7 @@ impl CodeEditor {
             },
             KeyCode::ArrowRight => {
                 if ke.modifiers.logo || ke.modifiers.control { // token skipping
-                    self.cursors.move_right_nearest_token(ke.modifiers.shift, &self.token_chunks, text_buffer)
+                    self.cursors.move_right_nearest_token(ke.modifiers.shift, &text_buffer.token_chunks, text_buffer)
                 }
                 else {
                     self.cursors.move_right(1, ke.modifiers.shift, text_buffer);
@@ -998,7 +996,6 @@ impl CodeEditor {
             else {
                 self._draw_messages.set_next(&text_buffer.messages.cursors);
             }
-            self.token_chunks.truncate(0);
             self._last_cursor_pos = self.cursors.get_last_cursor_text_pos(text_buffer);
             
             // indent
@@ -1061,7 +1058,7 @@ impl CodeEditor {
     
     fn update_highlight(&mut self, cx: &mut Cx, text_buffer: &TextBuffer) {
         self._highlight_selection = self.cursors.get_selection_highlight(text_buffer);
-        let new_token = self.cursors.get_token_highlight(text_buffer, &self.token_chunks);
+        let new_token = self.cursors.get_token_highlight(text_buffer, &text_buffer.token_chunks);
         if new_token != self._highlight_token {
             self.reset_highlight_visible(cx);
         }
@@ -1175,16 +1172,20 @@ impl CodeEditor {
             inst.push_float(cx, indent_id);
         }
     }
-    // drawing a text chunk
-    pub fn draw_chunk(&mut self, cx: &mut Cx, chunk: &Vec<char>, next_char: char, end_offset: usize, token_type: TokenType, message_cursors: &Vec<TextCursor>) {
-        if chunk.len() == 0 {
+
+    pub fn draw_chunk(&mut self, cx: &mut Cx, token_chunks_index:usize, token_chunk: &TokenChunk, message_cursors: &Vec<TextCursor>) {
+        if token_chunk.chunk.len() == 0 {
             return
         }
-        let offset = end_offset - chunk.len() - 1;
-        
+
+        let token_type = token_chunk.token_type;
+        let chunk = &token_chunk.chunk;
+        let offset = token_chunk.offset;// end_offset - chunk.len() - 1;
+        let next_char = token_chunk.next;
+
         // maintain paren stack
         if token_type == TokenType::ParenOpen {
-            self.draw_paren_open(offset, next_char, chunk);
+            self.draw_paren_open(token_chunks_index, offset, next_char, chunk);
         }
         
         // do indent depth walking
@@ -1386,25 +1387,16 @@ impl CodeEditor {
             }
         }
         self._tokens_on_line += 1;
+
         // Do all the Paren matching highlighting drawing
-        let pair_token;
-        if token_type == TokenType::ParenClose {
-            pair_token = self.draw_paren_close(cx, offset, next_char, chunk);
+        if token_chunk.token_type == TokenType::ParenClose {
+            self.draw_paren_close(cx, token_chunks_index, offset, next_char, chunk);
         }
         else {
-            pair_token = self.token_chunks.len();
             if token_type == TokenType::Newline {
                 self.draw_new_line(cx);
             }
         }
-        
-        //self._instance_count += chunk.len();
-        self.token_chunks.push(TokenChunk {
-            offset: offset,
-            pair_token: pair_token,
-            len: chunk.len(),
-            token_type: token_type
-        });
     }
     
     fn draw_token_highlight_quad(&mut self, cx: &mut Cx, geom: Rect) {
@@ -1414,14 +1406,14 @@ impl CodeEditor {
         }
     }
     
-    fn draw_paren_open(&mut self, offset: usize, next_char: char, chunk: &Vec<char>) {
+    fn draw_paren_open(&mut self, token_chunks_index:usize, offset: usize, next_char: char, chunk: &Vec<char>) {
         let marked = if let Some(pos) = self.cursors.get_last_cursor_singular() {
             pos == offset || pos == offset + 1 && next_char != '(' && next_char != '{' && next_char != '['
         }
         else {false};
         
         self._paren_stack.push(ParenItem {
-            pair_start: self.token_chunks.len(),
+            pair_start: token_chunks_index,//self.token_chunks.len(),
             geom_open: None,
             geom_close: None,
             marked: marked,
@@ -1429,19 +1421,18 @@ impl CodeEditor {
         });
     }
     
-    fn draw_paren_close(&mut self, cx: &mut Cx, offset: usize, next_char: char, chunk: &Vec<char>) -> usize {
-        let token_chunks_len = self.token_chunks.len();
+    fn draw_paren_close(&mut self, cx: &mut Cx, token_chunks_index:usize, offset: usize, next_char: char, chunk: &Vec<char>)  {
+        //let token_chunks_len = self.token_chunks.len();
         if self._paren_stack.len() == 0 {
-            return token_chunks_len
+            return
         }
         let last = self._paren_stack.pop().unwrap();
-        self.token_chunks[last.pair_start].pair_token = token_chunks_len;
-        let pair_token = last.pair_start;
+        // !!!!self.token_chunks[last.pair_start].pair_token = token_chunks_index;
         if last.geom_open.is_none() && last.geom_close.is_none() {
-            return token_chunks_len
+            return
         }
         if !self.has_key_focus(cx) {
-            return pair_token
+            return
         }
         if let Some(pos) = self.cursors.get_last_cursor_singular() {
             // cursor is near the last one or its marked
@@ -1457,7 +1448,7 @@ impl CodeEditor {
             };
             if fail || pos == offset || pos == offset + 1 && next_char != ')' && next_char != '}' && next_char != ']' || last.marked {
                 // fuse the tokens
-                if last.pair_start + 1 == self.token_chunks.len() && !last.geom_open.is_none() && !last.geom_close.is_none() {
+                if last.pair_start + 1 == token_chunks_index && !last.geom_open.is_none() && !last.geom_close.is_none() {
                     let geom_open = last.geom_open.unwrap();
                     let geom_close = last.geom_open.unwrap();
                     let geom = Rect {
@@ -1478,7 +1469,6 @@ impl CodeEditor {
                 }
             }
         };
-        return pair_token
     }
     
     fn draw_paren_unmatched(&mut self, cx: &mut Cx) {

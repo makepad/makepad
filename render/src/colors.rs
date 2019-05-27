@@ -448,7 +448,7 @@ pub fn color(name:&str)->Color{
                     _=>()
                 }
             };
-            return Color{r:1.0,g:1.0,b:1.0,a:1.0}            
+            return Color{r:1.0,g:1.0,b:1.0,a:1.0}
         }
     }
 }
