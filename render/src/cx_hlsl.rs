@@ -36,7 +36,7 @@ impl Cx{
                 });
             }
             else if let Err(err) = mtlsh{
-                println!("GOT ERROR: {}", err.msg);
+                println!("Got shader compile error: {}", err.msg);
                 self.compiled_shaders.push(
                     CompiledShader{..Default::default()}
                 )

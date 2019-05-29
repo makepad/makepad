@@ -259,6 +259,7 @@ impl App {
     }
     
     fn draw_app(&mut self, cx: &mut Cx) {
+        //return;
         if let Err(()) = self.view.begin_view(cx, &Layout {..Default::default()}) {
             return
         }

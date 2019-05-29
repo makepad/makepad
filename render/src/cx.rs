@@ -39,8 +39,6 @@ pub use crate::cx_glsl::*;
 #[cfg(any(feature = "ogl", feature = "mtl"))]
 pub use crate::cx_desktop::*;
 
-
-#[derive(Clone)]
 pub struct Cx {
     pub title: String,
     pub running: bool,

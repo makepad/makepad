@@ -7,8 +7,6 @@ use core_graphics::geometry::CGSize;
 use objc::{msg_send, sel, sel_impl};
 use objc::runtime::YES;
 use metal::*;
-use time::*;
-use std::io::{self, Write};
 use crate::cx_cocoa::*;
 use crate::cx::*;
 
