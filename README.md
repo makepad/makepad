@@ -31,9 +31,9 @@ WebGL compiles cleanly to wasm32-unknown-unknown without emscripten/wasmbindgen
 
 Native metal backend on OSX without winit dep for UI
 
-Desktop OGL on linux/windows, uses winit/glutin
+NOTE untill we complete our own linux/windows layers building on windows/linux is BROKEN
 
-Todo: DX11 / win32 native support
+Todo: DX11 / win32 native support, currently under way.
 
 The project is split out over a few nested crates
 
