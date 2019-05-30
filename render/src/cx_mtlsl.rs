@@ -330,6 +330,10 @@ impl<'a> SlCx<'a> {
         }
     }
     
+    pub fn mat_mul(&self, left:&str, right:&str)->String{
+        format!("{}*{}",left, right)
+    }
+    
     pub fn map_type(&self, ty: &str) -> String {
         Cx::mtl_type_to_metal(ty)
     }
