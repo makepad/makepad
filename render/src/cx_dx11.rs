@@ -3,14 +3,15 @@ use crate::cx::*;
 use crate::cx_desktop::*;
 
 use winapi::shared::guiddef::GUID;
-use winapi::shared::minwindef:: {TRUE, FALSE};
-use winapi::shared:: {dxgi, dxgi1_2, dxgitype, dxgiformat, winerror};
-use winapi::um:: {d3d11, d3d11sdklayers, d3dcommon};
+use winapi::shared::minwindef::{TRUE, FALSE};
+use winapi::shared::{dxgi, dxgi1_2, dxgitype, dxgiformat, winerror};
+use winapi::um::{d3d11, d3d11sdklayers, d3dcommon, d3dcompiler};
 use winapi::um::unknwnbase::IUnknown;
 use winapi::Interface;
 use wio::com::ComPtr;
 use std::mem;
 use std::ptr;
+use std::ffi;
 
 impl Cx {
     
@@ -44,7 +45,7 @@ impl Cx {
     }
     
     pub fn repaint(&mut self) {
-         if let Some(d3d11) = &mut self.platform.d3d11 {
+        if let Some(d3d11) = &mut self.platform.d3d11 {
             d3d11.clear_render_target_view(self.clear_color);
             d3d11.clear_depth_stencil_view();
             
@@ -273,22 +274,56 @@ impl CxD3d11 {
         })
     }
     
-    fn clear_render_target_view(&mut self, color: Color) {
+    fn clear_render_target_view(&self, color: Color) {
         let color = [color.r, color.g, color.b, color.a];
         unsafe {self.context.ClearRenderTargetView(self.render_target_view.as_raw() as *mut _, &color)}
     }
     
-    fn clear_depth_stencil_view(&mut self) {
+    fn clear_depth_stencil_view(&self) {
         unsafe {self.context.ClearDepthStencilView(self.depth_stencil_view.as_raw() as *mut _, d3d11::D3D11_CLEAR_DEPTH, 1.0, 0)}
     }
     
-    fn present(&mut self) {
+    fn present(&self) {
         unsafe {self.swap_chain.Present(1, 0)};
+    }
+    
+    pub fn compile_shader(&self, stage: &str, entry: &[u8], shader: &[u8]) ->Result<ComPtr<d3dcommon::ID3DBlob>, SlErr>{
+        
+        let mut blob = ptr::null_mut();
+        let mut error =  ptr::null_mut();
+        let entry = ffi::CString::new(entry).unwrap();
+        let stage = format!("{}_5_0\0", stage);
+        let hr = unsafe {d3dcompiler::D3DCompile(
+            shader.as_ptr() as *const _,
+            shader.len(),
+            ptr::null(),
+            ptr::null(),
+            ptr::null_mut(),
+            entry.as_ptr() as *const _,
+            stage.as_ptr() as *const i8,
+            1,
+            0,
+            &mut blob as *mut *mut _,
+            &mut error as *mut *mut _
+        )};
+        if !winerror::SUCCEEDED(hr) {
+            let error = unsafe {ComPtr::<d3dcommon::ID3DBlob>::from_raw(error)};
+            let message = unsafe {
+                let pointer = error.GetBufferPointer();
+                let size = error.GetBufferSize();
+                let slice = std::slice::from_raw_parts(pointer as *const u8, size as usize);
+                String::from_utf8_lossy(slice).into_owned()
+            };
+            
+            Err(SlErr{msg:message})
+        } else {
+            Ok(unsafe{ComPtr::<d3dcommon::ID3DBlob>::from_raw(blob)})
+        }
     }
     
     fn create_raster_state(device: &ComPtr<d3d11::ID3D11Device>) -> Result<ComPtr<d3d11::ID3D11RasterizerState>,
     winerror::HRESULT> {
-        let mut raster_state: *mut IUnknown = ptr::null_mut();
+        let mut raster_state = ptr::null_mut();
         let mut raster_desc = d3d11::D3D11_RASTERIZER_DESC {
             AntialiasedLineEnable: FALSE,
             CullMode: d3d11::D3D11_CULL_BACK,
@@ -301,7 +336,7 @@ impl CxD3d11 {
             ScissorEnable: FALSE,
             SlopeScaledDepthBias: 0.0,
         };
-        let hr = unsafe {device.CreateRasterizerState(&raster_desc, &mut raster_state as *mut *mut _ as *mut *mut _)};
+        let hr = unsafe {device.CreateRasterizerState(&raster_desc, &mut raster_state as *mut *mut _)};
         if winerror::SUCCEEDED(hr) {
             Ok(unsafe {ComPtr::from_raw(raster_state as *mut _)})
         }
@@ -312,7 +347,7 @@ impl CxD3d11 {
     
     fn create_depth_stencil_buffer(device: &ComPtr<d3d11::ID3D11Device>) -> Result<ComPtr<d3d11::ID3D11Texture2D>,
     winerror::HRESULT> {
-        let mut depth_stencil_buffer: *mut IUnknown = ptr::null_mut();
+        let mut depth_stencil_buffer = ptr::null_mut();
         let mut texture2d_desc = d3d11::D3D11_TEXTURE2D_DESC {
             Width: 256,
             Height: 256,
@@ -328,7 +363,7 @@ impl CxD3d11 {
             CPUAccessFlags: 0,
             MiscFlags: 0
         };
-        let hr = unsafe {device.CreateTexture2D(&texture2d_desc, ptr::null_mut(), &mut depth_stencil_buffer as *mut *mut _ as *mut *mut _)};
+        let hr = unsafe {device.CreateTexture2D(&texture2d_desc, ptr::null_mut(), &mut depth_stencil_buffer as *mut *mut _)};
         if winerror::SUCCEEDED(hr) {
             Ok(unsafe {ComPtr::from_raw(depth_stencil_buffer as *mut _)})
         }
@@ -339,14 +374,14 @@ impl CxD3d11 {
     
     fn create_depth_stencil_view(buffer: &ComPtr<d3d11::ID3D11Texture2D>, device: &ComPtr<d3d11::ID3D11Device>) -> Result<ComPtr<d3d11::ID3D11DepthStencilView>,
     winerror::HRESULT> {
-        let mut depth_stencil_view: *mut IUnknown = ptr::null_mut();
+        let mut depth_stencil_view = ptr::null_mut();
         let mut dsv_desc: d3d11::D3D11_DEPTH_STENCIL_VIEW_DESC = unsafe {mem::zeroed()};
         dsv_desc.Format = dxgiformat::DXGI_FORMAT_D24_UNORM_S8_UINT;
         dsv_desc.ViewDimension = d3d11::D3D11_DSV_DIMENSION_TEXTURE2D;
         *unsafe {dsv_desc.u.Texture2D_mut()} = d3d11::D3D11_TEX2D_DSV {
             MipSlice: 0,
         };
-        let hr = unsafe {device.CreateDepthStencilView(buffer.as_raw() as *mut _, &dsv_desc, &mut depth_stencil_view as *mut *mut _ as *mut *mut _)};
+        let hr = unsafe {device.CreateDepthStencilView(buffer.as_raw() as *mut _, &dsv_desc, &mut depth_stencil_view as *mut *mut _)};
         if winerror::SUCCEEDED(hr) {
             Ok(unsafe {ComPtr::from_raw(depth_stencil_view as *mut _)})
         }
@@ -357,7 +392,7 @@ impl CxD3d11 {
     
     fn create_depth_stencil_state(device: &ComPtr<d3d11::ID3D11Device>) -> Result<ComPtr<d3d11::ID3D11DepthStencilState>,
     winerror::HRESULT> {
-        let mut depth_stencil_state: *mut IUnknown = ptr::null_mut();
+        let mut depth_stencil_state = ptr::null_mut();
         let mut ds_desc = d3d11::D3D11_DEPTH_STENCIL_DESC {
             DepthEnable: TRUE,
             DepthWriteMask: d3d11::D3D11_DEPTH_WRITE_MASK_ALL,
@@ -379,7 +414,7 @@ impl CxD3d11 {
             },
         };
         
-        let hr = unsafe {device.CreateDepthStencilState(&ds_desc, &mut depth_stencil_state as *mut *mut _ as *mut *mut _)};
+        let hr = unsafe {device.CreateDepthStencilState(&ds_desc, &mut depth_stencil_state as *mut *mut _)};
         if winerror::SUCCEEDED(hr) {
             Ok(unsafe {ComPtr::from_raw(depth_stencil_state as *mut _)})
         }
@@ -391,11 +426,11 @@ impl CxD3d11 {
     fn create_render_target_view(device: &ComPtr<d3d11::ID3D11Device>, swap_chain: &ComPtr<dxgi1_2::IDXGISwapChain1>) -> Result<ComPtr<d3d11::ID3D11RenderTargetView>,
     winerror::HRESULT> {
         let texture = CxD3d11::get_swap_texture(swap_chain) ?;
-        let mut render_target_view: *mut IUnknown = ptr::null_mut();
+        let mut render_target_view= ptr::null_mut();
         let hr = unsafe {device.CreateRenderTargetView(
             texture.as_raw() as *mut _,
             ptr::null(),
-            &mut render_target_view as *mut *mut _ as *mut *mut _
+            &mut render_target_view as *mut *mut _
         )};
         if winerror::SUCCEEDED(hr) {
             Ok(unsafe {ComPtr::from_raw(render_target_view as *mut _)})
@@ -407,11 +442,11 @@ impl CxD3d11 {
     
     fn get_swap_texture(swap_chain: &ComPtr<dxgi1_2::IDXGISwapChain1>) -> Result<ComPtr<d3d11::ID3D11Texture2D>,
     winerror::HRESULT> {
-        let mut texture: *mut IUnknown = ptr::null_mut();
+        let mut texture = ptr::null_mut();
         let hr = unsafe {swap_chain.GetBuffer(
             0,
             &d3d11::ID3D11Texture2D::uuidof(),
-            &mut texture as *mut *mut _ as *mut *mut _
+            &mut texture as *mut *mut _ 
         )};
         if winerror::SUCCEEDED(hr) {
             Ok(unsafe {ComPtr::from_raw(texture as *mut _)})
@@ -423,7 +458,7 @@ impl CxD3d11 {
     
     fn create_swap_chain_for_hwnd(windows_window: &WindowsWindow, factory: &ComPtr<dxgi1_2::IDXGIFactory2>, device: &ComPtr<d3d11::ID3D11Device>) -> Result<ComPtr<dxgi1_2::IDXGISwapChain1>,
     winerror::HRESULT> {
-        let mut swap_chain1: *mut IUnknown = ptr::null_mut();
+        let mut swap_chain1 = ptr::null_mut();
         
         let sc_desc = dxgi1_2::DXGI_SWAP_CHAIN_DESC1 {
             AlphaMode: dxgi1_2::DXGI_ALPHA_MODE_IGNORE,
@@ -445,7 +480,7 @@ impl CxD3d11 {
             &sc_desc,
             ptr::null(),
             ptr::null_mut(),
-            &mut swap_chain1 as *mut *mut _ as *mut *mut _,
+            &mut swap_chain1 as *mut *mut _
         )};
         if winerror::SUCCEEDED(hr) {
             Ok(unsafe {ComPtr::from_raw(swap_chain1 as *mut _)})
@@ -457,8 +492,8 @@ impl CxD3d11 {
     
     fn create_d3d11_device(adapter: &ComPtr<dxgi::IDXGIAdapter>) -> Result<(ComPtr<d3d11::ID3D11Device>, ComPtr<d3d11::ID3D11DeviceContext>),
     winerror::HRESULT> {
-        let mut device: *mut IUnknown = ptr::null_mut();
-        let mut device_context: *mut IUnknown = ptr::null_mut();
+        let mut device = ptr::null_mut();
+        let mut device_context = ptr::null_mut();
         let hr = unsafe {d3d11::D3D11CreateDevice(
             adapter.as_raw() as *mut _,
             d3dcommon::D3D_DRIVER_TYPE_UNKNOWN,
@@ -467,9 +502,9 @@ impl CxD3d11 {
             [d3dcommon::D3D_FEATURE_LEVEL_11_0].as_ptr(),
             1,
             d3d11::D3D11_SDK_VERSION,
-            &mut device as *mut *mut _ as *mut *mut _,
+            &mut device as *mut *mut _,
             ptr::null_mut(),
-            &mut device_context as *mut *mut _ as *mut *mut _,
+            &mut device_context as *mut *mut _,
         )};
         if winerror::SUCCEEDED(hr) {
             Ok((unsafe {ComPtr::from_raw(device as *mut _)}, unsafe {ComPtr::from_raw(device_context as *mut _)}))
@@ -481,10 +516,10 @@ impl CxD3d11 {
     
     fn create_dxgi_factory1(guid: &GUID) -> Result<ComPtr<dxgi1_2::IDXGIFactory2>,
     winerror::HRESULT> {
-        let mut factory: *mut IUnknown = ptr::null_mut();
+        let mut factory = ptr::null_mut();
         let hr = unsafe {dxgi::CreateDXGIFactory1(
             guid,
-            &mut factory as *mut *mut _ as *mut *mut _
+            &mut factory as *mut *mut _
         )};
         if winerror::SUCCEEDED(hr) {
             Ok(unsafe {ComPtr::from_raw(factory as *mut _)})
@@ -496,10 +531,10 @@ impl CxD3d11 {
     
     fn enum_adapters(factory: &ComPtr<dxgi1_2::IDXGIFactory2>) -> Result<ComPtr<dxgi::IDXGIAdapter>,
     winerror::HRESULT> {
-        let mut adapter: *mut IUnknown = ptr::null_mut();
+        let mut adapter = ptr::null_mut();
         let hr = unsafe {factory.EnumAdapters(
             0,
-            &mut adapter as *mut *mut _ as *mut *mut _
+            &mut adapter as *mut *mut _
         )};
         if winerror::SUCCEEDED(hr) {
             Ok(unsafe {ComPtr::from_raw(adapter as *mut _)})
@@ -508,6 +543,8 @@ impl CxD3d11 {
             Err(hr)
         }
     }
+    
+    
     /*
      fn enum_outputs(adapter:&ComPtr<dxgi::IDXGIAdapter>) -> Result<ComPtr<dxgi::IDXGIOutput>,
     winerror::HRESULT> {

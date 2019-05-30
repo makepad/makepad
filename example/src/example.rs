@@ -30,14 +30,14 @@
 // Multi cursor/grid cursor also works with ctrl+click / ctrl+shift+click
 // press alt or escape for animated codefolding outline view!
 
-use widgets::*;
+use widget::*;
 
 struct App {
-    view: View<ScrollBar>,
-    buttons: Elements<u64, Button, Button>,
-    text: Text,
+  //  view: View<ScrollBar>,
+  //  buttons: Elements<u64, Button, Button>,
+  //  text: Text,
     quad: Quad,
-    clickety: u64
+ //   clickety: u64
 }
 
 main_app!(App, "Example");
@@ -45,8 +45,9 @@ main_app!(App, "Example");
 impl Style for App {
     fn style(cx: &mut Cx) -> Self {
         set_dark_style(cx);
-        let quad_sh = App::def_quad_shader(cx);
+        //let quad_sh = App::def_quad_shader(cx);
         Self {
+            /*
             view: View {
                 scroll_h: Some(ScrollBar {
                     ..Style::style(cx)
@@ -55,18 +56,18 @@ impl Style for App {
                     ..Style::style(cx)
                 }),
                 ..Style::style(cx)
-            },
+            },*/
             quad: Quad {
-                shader_id: cx.add_shader(quad_sh, "App.quad"),
+                //shader_id: cx.add_shader(quad_sh, "App.quad"),
                 ..Style::style(cx)
-            },
+            },/*
             text: Text {
                 ..Style::style(cx)
             },
             buttons: Elements::new(Button {
                 ..Style::style(cx)
             }),
-            clickety: 0
+            clickety: 0*/
         }
     }
 }
@@ -88,6 +89,7 @@ impl App {
     }
     
     fn handle_app(&mut self, cx: &mut Cx, event: &mut Event) {
+        /*
         self.view.handle_scroll_bars(cx, event);
         
         for btn in self.buttons.iter() {
@@ -99,11 +101,11 @@ impl App {
                 },
                 _ =>()
             }
-        }
+        }*/
     }
     
     fn draw_app(&mut self, cx: &mut Cx) {
-        
+        /*
         self.view.begin_view(cx, &Layout {
             padding: Padding {l: 10., t: 10., r: 0., b: 0.},
             ..Default::default()
@@ -125,6 +127,6 @@ impl App {
         self.text.draw_text(cx, &format!("Hello World {}", self.clickety));
         self.quad.draw_quad_walk(cx, Bounds::Fix(100.), Bounds::Fix(100.), Margin {l: 15., t: 0., r: 0., b: 0.});
         
-        self.view.end_view(cx);
+        self.view.end_view(cx);*/
     }
 }
