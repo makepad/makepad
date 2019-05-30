@@ -6,7 +6,7 @@ var Os = require('os')
 var NodeWebSocket = require('./devwebsocket')
 var server_port = 2001
 var server_interface = '0.0.0.0'
- 
+
 var mimetable = {
     '.map': 'application/json',
     '.wasm': 'application/wasm',
@@ -116,7 +116,7 @@ function requestHandler(req, res) {
             }
         })
         req.on('end', function() {
-            // lets write it  
+            // lets write it
             
             tags[filefull] = -1
             Fs.writeFile(filefull, Buffer.from(buf), function(err) {

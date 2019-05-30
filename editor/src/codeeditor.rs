@@ -399,6 +399,7 @@ impl CodeEditor {
                     df_box(next_x, h, next_w, h, border_radius);
                     df_gloop(gloopiness);
                 }
+                //df_shape *= cos(pos.x*8.)+cos(pos.y*16.);
                 return df_fill(color);
             }
         }));

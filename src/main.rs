@@ -260,6 +260,7 @@ impl App {
     
     fn draw_app(&mut self, cx: &mut Cx) {
         //return;
+        
         if let Err(()) = self.view.begin_view(cx, &Layout {..Default::default()}) {
             return
         }
@@ -447,17 +448,17 @@ impl FileEditor {
     
     fn create_file_editor_for_path(path: &str, template: &FileEditorTemplates) -> FileEditor {
         // check which file extension we have to spawn a new editor
-        if path.ends_with(".rs"){
+        if path.ends_with(".rs") {
             FileEditor::Rust(RustEditor {
                 ..template.rust_editor.clone()
             })
         }
-        else if path.ends_with(".js"){
+        else if path.ends_with(".js") {
             FileEditor::JS(JSEditor {
                 ..template.js_editor.clone()
             })
         }
-        else{
+        else {
             FileEditor::Rust(RustEditor {
                 ..template.rust_editor.clone()
             })

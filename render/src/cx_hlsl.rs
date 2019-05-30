@@ -43,21 +43,8 @@ impl Cx{
             }
         };
     }
-    /*
-    pub fn mtl_type_to_packed_metal(ty:&str)->String{
-        match ty.as_ref(){
-            "float"=>"float".to_string(),
-            "vec2"=>"packed_float2".to_string(),
-            "vec3"=>"packed_float3".to_string(),
-            "vec4"=>"packed_float4".to_string(),
-            "mat2"=>"packed_float2x2".to_string(),
-            "mat3"=>"packed_float3x3".to_string(),
-            "mat4"=>"float4x4".to_string(),
-            ty=>ty.to_string()
-        }
-    }*/
 
-    pub fn hlsl_type_to(ty:&str)->String{
+    pub fn hlsl_type(ty:&str)->String{
         match ty.as_ref(){
             "float"=>"float".to_string(),
             "vec2"=>"float2".to_string(),
@@ -66,29 +53,28 @@ impl Cx{
             "mat2"=>"float2x2".to_string(),
             "mat3"=>"float3x3".to_string(),
             "mat4"=>"float4x4".to_string(),
-            "texture2d"=>"texture2d<float>".to_string(),
+            "texture2d"=>"Texture2D".to_string(),
             ty=>ty.to_string()
         }
     }
-/*
-    pub fn mtl_assemble_struct(name:&str, vars:&Vec<ShVar>, packed:bool, field:&str)->String{
+
+    pub fn hlsl_assemble_struct(lead:&str, name:&str, vars:&Vec<ShVar>, semantic:&str, field:&str)->String{
         let mut out = String::new();
-        out.push_str("struct ");
+        out.push_str(lead);
+        out.push_str(" ");
         out.push_str(name);
         out.push_str("{\n");
         out.push_str(field);
-        for var in vars{
+        for (index,var) in vars.iter().enumerate(){
             out.push_str("  ");
-            out.push_str(
-                &if packed{
-                    Self::mtl_type_to_packed_metal(&var.ty)
-                }
-                else{
-                    Self::mtl_type_to_metal(&var.ty)
-                }
-            );
+            out.push_str(&Self::hlsl_type(&var.ty));
             out.push_str(" ");
             out.push_str(&var.name);
+            if semantic.len()>0{
+                out.push_str(": ");
+                out.push_str(semantic);
+                out.push_str(&format!("{}",index));
+            }
             out.push_str(";\n")
         };
         out.push_str("};\n\n");
@@ -97,20 +83,17 @@ impl Cx{
 
     pub fn mtl_assemble_texture_slots(textures:&Vec<ShVar>)->String{
         let mut out = String::new();
-        out.push_str("struct ");
-        out.push_str("_Tex{\n");
         for (i, tex) in textures.iter().enumerate(){
-            out.push_str("texture2d<float> ");
+            out.push_str("Texture2D ");
             out.push_str(&tex.name);
-            out.push_str(&format!(" [[texture({})]];\n", i));
+            out.push_str(";\n");
         };
-        out.push_str("};\n\n");
         out
-    }*/
+    }
 
     pub fn hlsl_assemble_shader(_sh:&Shader)->Result<AssembledHlslShader, SlErr>{
-        /*
-        let mut mtl_out = "#include <metal_stdlib>\nusing namespace metal;\n".to_string();
+        
+        let mut hlsl_out = String::new();
 
         // ok now define samplers from our sh. 
         let texture_slots = sh.flat_vars(ShVarStore::Texture);
@@ -127,18 +110,18 @@ impl Cx{
         let instance_slots = sh.compute_slot_total(&instances);
         //let varying_slots = sh.compute_slot_total(&varyings);
 
-        mtl_out.push_str(&Self::mtl_assemble_struct("_Geom", &geometries, true, ""));
-        mtl_out.push_str(&Self::mtl_assemble_struct("_Inst", &instances, true, ""));
-        mtl_out.push_str(&Self::mtl_assemble_struct("_UniCx", &uniforms_cx, true, ""));
-        mtl_out.push_str(&Self::mtl_assemble_struct("_UniDl", &uniforms_dl, true, ""));
-        mtl_out.push_str(&Self::mtl_assemble_struct("_UniDr", &uniforms_dr, true, ""));
-        mtl_out.push_str(&Self::mtl_assemble_struct("_Loc", &locals, false, ""));
+        hlsl_out.push_str(&Self::hlsl_assemble_struct("struct", "_Geom", &geometries, "POSITION", ""));
+        hlsl_out.push_str(&Self::hlsl_assemble_struct("struct", "_Inst", &instances, "TEXCOORD", ""));
+        hlsl_out.push_str(&Self::mtl_assemble_struct("cbuffer", "_UniCx", &uniforms_cx, "", ""));
+        hlsl_out.push_str(&Self::mtl_assemble_struct("cbuffer", "_UniDl", &uniforms_dl, "", ""));
+        hlsl_out.push_str(&Self::mtl_assemble_struct("cbuffer", "_UniDr", &uniforms_dr, "", ""));
+        hlsl_out.push_str(&Self::mtl_assemble_struct("struct", "_Loc", &locals, "", ""));
 
         // we need to figure out which texture slots exist 
-        mtl_out.push_str(&Self::mtl_assemble_texture_slots(&texture_slots));
-
+        hlsl_out.push_str(&Self::hlsl_assemble_texture_slots(&texture_slots));
         // we need to figure out which texture slots exist 
-       // mtl_out.push_str(&Self::assemble_constants(&texture_slots));
+        // mtl_out.push_str(&Self::assemble_constants(&texture_slots));
+        
         let mut const_cx = SlCx{
             depth:0,
             target:SlTarget::Constant,
@@ -154,19 +137,19 @@ impl Cx{
         let consts = sh.flat_consts();
         for cnst in &consts{
             let const_init = assemble_const_init(cnst, &mut const_cx)?;
-            mtl_out.push_str("#define ");
-            mtl_out.push_str(" ");
-            mtl_out.push_str(&cnst.name);
-            mtl_out.push_str(" (");
-            mtl_out.push_str(&const_init.sl);
-            mtl_out.push_str(")\n");
+            hlsl_out.push_str("#define ");
+            hlsl_out.push_str(" ");
+            hlsl_out.push_str(&cnst.name);
+            hlsl_out.push_str(" (");
+            hlsl_out.push_str(&const_init.sl);
+            hlsl_out.push_str(")\n");
         }
 
         let mut vtx_cx = SlCx{
             depth:0,
             target:SlTarget::Vertex,
-            defargs_fn:"_Tex _tex, thread _Loc &_loc, thread _Vary &_vary, thread _Geom &_geom, thread _Inst &_inst, device _UniCx &_uni_cx, device _UniDl &_uni_dl, device _UniDr &_uni_dr".to_string(),
-            defargs_call:"_tex, _loc, _vary, _geom, _inst, _uni_cx, _uni_dl, _uni_dr".to_string(),
+            defargs_fn:"inout _Loc _loc, inout _Vary _vary, in _Geom _geom, in _Inst _inst, in _UniCx _uni_cx, in _UniDl _uni_dl, in _UniDr _uni_dr".to_string(),
+            defargs_call:"_loc, _vary, _geom, _inst, _uni_cx, _uni_dl, _uni_dr".to_string(),
             call_prefix:"_".to_string(),
             shader:sh,
             scope:Vec::new(),
@@ -174,19 +157,20 @@ impl Cx{
             fn_done:Vec::new(),
             auto_vary:Vec::new()
         };
+
         let vtx_fns = assemble_fn_and_deps(sh, &mut vtx_cx)?;
         let mut pix_cx = SlCx{
             depth:0,
             target:SlTarget::Pixel,
-            defargs_fn:"_Tex _tex, thread _Loc &_loc, thread _Vary &_vary, device _UniCx &_uni_cx, device _UniDl &_uni_dl, device _UniDr &_uni_dr".to_string(),
-            defargs_call:"_tex, _loc, _vary, _uni_cx, _uni_dl, _uni_dr".to_string(),
+            defargs_fn:"inout _Loc _loc, inout _Vary _vary, in _UniCx _uni_cx, in _UniDl _uni_dl, in _UniDr _uni_dr".to_string(),
+            defargs_call:"_loc, _vary, _uni_cx, _uni_dl, _uni_dr".to_string(),
             call_prefix:"_".to_string(),
             shader:sh,
             scope:Vec::new(),
             fn_deps:vec!["pixel".to_string()],
             fn_done:vtx_cx.fn_done,
             auto_vary:Vec::new()
-        };        
+        };
 
         let pix_fns = assemble_fn_and_deps(sh, &mut pix_cx)?;
 
@@ -194,55 +178,50 @@ impl Cx{
         for auto in &pix_cx.auto_vary{
             varyings.push(auto.clone());
         }
-        mtl_out.push_str(&Self::mtl_assemble_struct("_Vary", &varyings, false, "  float4 mtl_position [[position]];\n"));
+        hlsl_out.push_str(&Self::mtl_assemble_struct("_Vary", &varyings, false, "  float4 hlsl_position : SV_POSITION;\n"));
 
-        mtl_out.push_str("//Vertex shader\n");
-        mtl_out.push_str(&vtx_fns);
-        mtl_out.push_str("//Pixel shader\n");
-        mtl_out.push_str(&pix_fns);
+        hlsl_out.push_str("//Vertex shader\n");
+        hlsl_out.push_str(&vtx_fns);
+        hlsl_out.push_str("//Pixel shader\n");
+        hlsl_out.push_str(&pix_fns);
 
         // lets define the vertex shader
-        mtl_out.push_str("vertex _Vary _vertex_shader(_Tex _tex, device _Geom *in_geometries [[buffer(0)]], device _Inst *in_instances [[buffer(1)]],\n");
-        mtl_out.push_str("  device _UniCx &_uni_cx [[buffer(2)]], device _UniDl &_uni_dl [[buffer(3)]], device _UniDr &_uni_dr [[buffer(4)]],\n");
-        mtl_out.push_str("  uint vtx_id [[vertex_id]], uint inst_id [[instance_id]]){\n");
-        mtl_out.push_str("  _Loc _loc;\n");
-        mtl_out.push_str("  _Vary _vary;\n");
-        mtl_out.push_str("  _Geom _geom = in_geometries[vtx_id];\n");
-        mtl_out.push_str("  _Inst _inst = in_instances[inst_id];\n");
-        mtl_out.push_str("  _vary.mtl_position = _vertex(");
-        mtl_out.push_str(&vtx_cx.defargs_call);
-        mtl_out.push_str(");\n\n");
+        hlsl_out.push_str("_Vary _vertex_shader(_Geom _geom, _Inst _inst, uint inst_id: SV_InstanceID){\n");
+        hlsl_out.push_str("  _Loc _loc;\n");
+        hlsl_out.push_str("  _Vary _vary;\n");
+        hlsl_out.push_str("  _vary.mtl_position = _vertex(");
+        hlsl_out.push_str(&vtx_cx.defargs_call);
+        hlsl_out.push_str(");\n\n");
 
         for auto in pix_cx.auto_vary{
             if let ShVarStore::Geometry = auto.store{
-              mtl_out.push_str("       _vary.");
-              mtl_out.push_str(&auto.name);
-              mtl_out.push_str(" = _geom.");
-              mtl_out.push_str(&auto.name);
-              mtl_out.push_str(";\n");
+              hlsl_out.push_str("       _vary.");
+              hlsl_out.push_str(&auto.name);
+              hlsl_out.push_str(" = _geom.");
+              hlsl_out.push_str(&auto.name);
+              hlsl_out.push_str(";\n");
             }
             else if let ShVarStore::Instance = auto.store{
-              mtl_out.push_str("       _vary.");
-              mtl_out.push_str(&auto.name);
-              mtl_out.push_str(" = _inst.");
-              mtl_out.push_str(&auto.name);
-              mtl_out.push_str(";\n");
+              hlsl_out.push_str("       _vary.");
+              hlsl_out.push_str(&auto.name);
+              hlsl_out.push_str(" = _inst.");
+              hlsl_out.push_str(&auto.name);
+              hlsl_out.push_str(";\n");
             }
         }
 
-        mtl_out.push_str("       return _vary;\n");
-        mtl_out.push_str("};\n");
+        hlsl_out.push_str("       return _vary;\n");
+        hlsl_out.push_str("};\n");
         // then the fragment shader
-        mtl_out.push_str("fragment float4 _fragment_shader(_Vary _vary[[stage_in]],_Tex _tex,\n");
-        mtl_out.push_str("  device _UniCx &_uni_cx [[buffer(0)]], device _UniDl &_uni_dl [[buffer(1)]], device _UniDr &_uni_dr [[buffer(2)]]){\n");
-        mtl_out.push_str("  _Loc _loc;\n");
-        mtl_out.push_str("  return _pixel(");
-        mtl_out.push_str(&pix_cx.defargs_call);
-        mtl_out.push_str(");\n};\n");
+        hlsl_out.push_str("float4 _fragment_shader(_Vary _vary) :  SV_TARGET{\n");
+        hlsl_out.push_str("  _Loc _loc;\n");
+        hlsl_out.push_str("  return _pixel(");
+        hlsl_out.push_str(&pix_cx.defargs_call);
+        hlsl_out.push_str(");\n};\n");
 
-        if sh.log != 0{
-            println!("---- Metal shader -----\n{}",mtl_out);
-        }
+        //if sh.log != 0{
+            println!("---- HLSL shader -----\n{}",hlsl_out);
+        //}
 
          Ok(AssembledMtlShader{
             rect_instance_props:RectInstanceProps::construct(sh, &instances),
@@ -253,8 +232,8 @@ impl Cx{
             uniforms_dl:uniforms_dl,
             uniforms_cx:uniforms_cx,
             texture_slots:texture_slots,
-            mtlsl:mtl_out
-        })*/
+            hlsl:hlsl_out
+        })
         Err(SlErr{msg:"".to_string()})
     }
 
@@ -328,18 +307,18 @@ impl<'a> SlCx<'a>{
             },
             _=>return MapCallResult::None
         }
-    }    
+    }
 
     pub fn map_type(&self, ty:&str)->String{
-        Cx::hlsl_type_to(ty)
+        Cx::hlsl_type(ty)
     }
 
     pub fn map_var(&mut self, var:&ShVar)->String{
-        let mty = Cx::hlsl_type_to(&var.ty);
+        //let mty = Cx::hlsl_type(&var.ty);
         match var.store{
-            ShVarStore::Uniform=>return format!("{}(_uni_dr.{})", mty, var.name),
-            ShVarStore::UniformDl=>return format!("{}(_uni_dl.{})", mty, var.name),
-            ShVarStore::UniformCx=>return format!("{}(_uni_cx.{})", mty, var.name),
+            ShVarStore::Uniform=>return format!("_uni_dr.{}", var.name),
+            ShVarStore::UniformDl=>return format!("_uni_dl.{}", var.name),
+            ShVarStore::UniformCx=>return format!("_uni_cx.{}", var.name),
             ShVarStore::Instance=>{
                 if let SlTarget::Pixel = self.target{
                     if self.auto_vary.iter().find(|v|v.name == var.name).is_none(){
@@ -348,7 +327,7 @@ impl<'a> SlCx<'a>{
                     return format!("_vary.{}",var.name);
                 }
                 else{
-                    return format!("{}(_inst.{})", mty, var.name);
+                    return format!("_inst.{}", var.name);
                 }
             },
             ShVarStore::Geometry=>{
@@ -360,7 +339,7 @@ impl<'a> SlCx<'a>{
                 }
                 else{
                     
-                    return format!("{}(_geom.{})", mty, var.name);
+                    return format!("_geom.{}", var.name);
                 }
             },
             ShVarStore::Texture=>return format!("_tex.{}",var.name),
