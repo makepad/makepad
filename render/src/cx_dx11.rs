@@ -3,9 +3,9 @@ use crate::cx::*;
 use crate::cx_desktop::*;
 
 use winapi::shared::guiddef::GUID;
-use winapi::shared::minwindef:: {TRUE, FALSE, UINT};
-use winapi::shared:: {dxgi, dxgi1_2, dxgitype, dxgiformat, winerror};
-use winapi::um:: {d3d11, d3d11sdklayers, d3dcommon, d3dcompiler};
+use winapi::shared::minwindef::{TRUE, FALSE, UINT};
+use winapi::shared::{dxgi, dxgi1_2, dxgitype, dxgiformat, winerror};
+use winapi::um::{d3d11, d3d11sdklayers, d3dcommon, d3dcompiler};
 use winapi::um::unknwnbase::IUnknown;
 use winapi::Interface;
 use wio::com::ComPtr;
@@ -52,8 +52,18 @@ impl Cx {
                 d3d11.set_index_buffer(&shc.geom_ibuf);
                 
                 d3d11.set_vertex_buffers(&shc.geom_vbuf, shc.geometry_slots, &draw_call.platform.inst_vbuf, shc.instance_slots);
-
+                
                 d3d11.set_constant_buffers(&self.platform.uni_cx, &draw_list.platform.uni_dl, &draw_call.platform.uni_dr);
+                
+                for (i, texture_id) in draw_call.textures_2d.iter().enumerate() {
+                    let tex = &mut self.textures_2d[*texture_id as usize];
+                    if tex.dirty {
+                        tex.upload_to_device(d3d11);
+                    }
+                    if let Some(shader_resource) = &tex.shader_resource {
+                        d3d11.set_shader_resource(i, shader_resource);
+                    }
+                }
                 
                 d3d11.draw_indexed_instanced(sh.geometry_indices.len(), instances);
             }
@@ -250,7 +260,7 @@ pub struct D3d11 {
 
 impl D3d11 {
     
-    fn init(windows_window: &WindowsWindow, window_geom:&WindowGeom) -> Result<D3d11, winerror::HRESULT> {
+    fn init(windows_window: &WindowsWindow, window_geom: &WindowGeom) -> Result<D3d11, winerror::HRESULT> {
         let factory = D3d11::create_dxgi_factory1(&dxgi1_2::IDXGIFactory2::uuidof()) ?;
         
         let adapter = D3d11::enum_adapters(&factory) ?;
@@ -279,8 +289,8 @@ impl D3d11 {
         
         let blend_state = D3d11::create_blend_state(&device) ?;
         
-        let blend_factor = [0.,0.,0.,0.];
-        unsafe {context.OMSetBlendState(blend_state.as_raw() as *mut _,&blend_factor, 0xffffffff)}
+        let blend_factor = [0., 0., 0., 0.];
+        unsafe {context.OMSetBlendState(blend_state.as_raw() as *mut _, &blend_factor, 0xffffffff)}
         
         
         Ok(D3d11 {
@@ -290,11 +300,11 @@ impl D3d11 {
             depth_stencil_view: depth_stencil_view,
             swap_chain: swap_chain,
             raster_state: raster_state,
-            blend_state:blend_state
+            blend_state: blend_state
         })
     }
     
-    fn set_viewport(&self, window_geom:&WindowGeom) {
+    fn set_viewport(&self, window_geom: &WindowGeom) {
         let mut viewport = d3d11::D3D11_VIEWPORT {
             Width: window_geom.inner_size.x * window_geom.dpi_factor,
             Height: window_geom.inner_size.y * window_geom.dpi_factor,
@@ -332,6 +342,14 @@ impl D3d11 {
         unsafe {self.context.PSSetShader(pixel_shader.as_raw() as *mut _, ptr::null(), 0)}
     }
     
+    fn set_shader_resource(&self, index: usize, texture: &ComPtr<d3d11::ID3D11ShaderResourceView>) {
+        let raw = [texture.as_raw() as *const std::ffi::c_void];
+        println!("INDEX {}", index);
+        unsafe {self.context.PSSetShaderResources(index as u32, 1, raw.as_ptr() as *const *mut _)}
+        unsafe {self.context.VSSetShaderResources(index as u32, 1, raw.as_ptr()  as *const *mut _)}
+    }
+    
+    
     fn set_primitive_topology(&self) {
         unsafe {self.context.IASetPrimitiveTopology(d3dcommon::D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST)}
     }
@@ -339,7 +357,7 @@ impl D3d11 {
     fn set_vertex_buffers(&self, geom_buf: &D3d11Buffer, geom_slots: usize, inst_buf: &D3d11Buffer, inst_slots: usize) {
         let geom_buf = geom_buf.buffer.as_ref().unwrap();
         let inst_buf = inst_buf.buffer.as_ref().unwrap();
-
+        
         let strides = [(geom_slots * 4) as u32, (inst_slots * 4) as u32];
         let offsets = [0u32, 0u32];
         let buffers = [geom_buf.as_raw() as *const std::ffi::c_void, inst_buf.as_raw() as *const std::ffi::c_void];
@@ -507,17 +525,17 @@ impl D3d11 {
         let mut blend_state = ptr::null_mut();
         let mut blend_desc: d3d11::D3D11_BLEND_DESC = unsafe {mem::zeroed()};
         blend_desc.AlphaToCoverageEnable = TRUE;
-        blend_desc.RenderTarget[0] = d3d11::D3D11_RENDER_TARGET_BLEND_DESC{
-            BlendEnable:TRUE,
-            SrcBlend:d3d11::D3D11_BLEND_ONE,
-            SrcBlendAlpha:d3d11::D3D11_BLEND_ONE,
-            DestBlend:d3d11::D3D11_BLEND_INV_SRC_ALPHA,
-            DestBlendAlpha:d3d11::D3D11_BLEND_INV_SRC_ALPHA,
-            BlendOp:d3d11::D3D11_BLEND_OP_ADD,
-            BlendOpAlpha:d3d11::D3D11_BLEND_OP_ADD,
-            RenderTargetWriteMask:d3d11::D3D11_COLOR_WRITE_ENABLE_ALL as u8,
+        blend_desc.RenderTarget[0] = d3d11::D3D11_RENDER_TARGET_BLEND_DESC {
+            BlendEnable: TRUE,
+            SrcBlend: d3d11::D3D11_BLEND_ONE,
+            SrcBlendAlpha: d3d11::D3D11_BLEND_ONE,
+            DestBlend: d3d11::D3D11_BLEND_INV_SRC_ALPHA,
+            DestBlendAlpha: d3d11::D3D11_BLEND_INV_SRC_ALPHA,
+            BlendOp: d3d11::D3D11_BLEND_OP_ADD,
+            BlendOpAlpha: d3d11::D3D11_BLEND_OP_ADD,
+            RenderTargetWriteMask: d3d11::D3D11_COLOR_WRITE_ENABLE_ALL as u8,
         };
-        let hr = unsafe{device.CreateBlendState(&blend_desc, &mut blend_state as *mut *mut _)};
+        let hr = unsafe {device.CreateBlendState(&blend_desc, &mut blend_state as *mut *mut _)};
         if winerror::SUCCEEDED(hr) {
             Ok(unsafe {ComPtr::from_raw(blend_state as *mut _)})
         }
@@ -526,7 +544,7 @@ impl D3d11 {
         }
     }
     
-    fn create_depth_stencil_buffer(window_geom:&WindowGeom, device: &ComPtr<d3d11::ID3D11Device>) -> Result<ComPtr<d3d11::ID3D11Texture2D>,
+    fn create_depth_stencil_buffer(window_geom: &WindowGeom, device: &ComPtr<d3d11::ID3D11Device>) -> Result<ComPtr<d3d11::ID3D11Texture2D>,
     winerror::HRESULT> {
         let mut depth_stencil_buffer = ptr::null_mut();
         let mut texture2d_desc = d3d11::D3D11_TEXTURE2D_DESC {
@@ -637,7 +655,7 @@ impl D3d11 {
         }
     }
     
-    fn create_swap_chain_for_hwnd(window_geom:&WindowGeom, windows_window: &WindowsWindow, factory: &ComPtr<dxgi1_2::IDXGIFactory2>, device: &ComPtr<d3d11::ID3D11Device>) -> Result<ComPtr<dxgi1_2::IDXGISwapChain1>,
+    fn create_swap_chain_for_hwnd(window_geom: &WindowGeom, windows_window: &WindowsWindow, factory: &ComPtr<dxgi1_2::IDXGIFactory2>, device: &ComPtr<d3d11::ID3D11Device>) -> Result<ComPtr<dxgi1_2::IDXGISwapChain1>,
     winerror::HRESULT> {
         let mut swap_chain1 = ptr::null_mut();
         
@@ -645,7 +663,7 @@ impl D3d11 {
             AlphaMode: dxgi1_2::DXGI_ALPHA_MODE_IGNORE,
             BufferCount: 2,
             Width: (window_geom.inner_size.x) as u32,
-            Height: (window_geom.inner_size.y ) as u32,
+            Height: (window_geom.inner_size.y) as u32,
             Format: dxgiformat::DXGI_FORMAT_B8G8R8A8_UNORM,
             Flags: 0,
             BufferUsage: dxgitype::DXGI_USAGE_RENDER_TARGET_OUTPUT,
@@ -679,7 +697,7 @@ impl D3d11 {
             adapter.as_raw() as *mut _,
             d3dcommon::D3D_DRIVER_TYPE_UNKNOWN,
             ptr::null_mut(),
-            0,//d3dcommonLLD3D11_CREATE_DEVICE_DEBUG,
+            0, //d3dcommonLLD3D11_CREATE_DEVICE_DEBUG,
             [d3dcommon::D3D_FEATURE_LEVEL_11_0].as_ptr(),
             1,
             d3d11::D3D11_SDK_VERSION,
@@ -842,7 +860,8 @@ pub struct Texture2D {
     pub image: Vec<u32>,
     pub width: usize,
     pub height: usize,
-    // pub dx11texture: Option<metal::Texture>
+    pub texture: Option<ComPtr<d3d11::ID3D11Texture2D>>,
+    pub shader_resource: Option<ComPtr<d3d11::ID3D11ShaderResourceView>>
 }
 
 impl Texture2D {
@@ -853,7 +872,46 @@ impl Texture2D {
         self.dirty = true;
     }
     
-    pub fn upload_to_device(&mut self) {
+    pub fn upload_to_device(&mut self, d3d11: &D3d11) {
+        
+        let mut texture = ptr::null_mut();
         self.dirty = false;
+        let sub_data = d3d11::D3D11_SUBRESOURCE_DATA {
+            pSysMem: self.image.as_ptr() as *const _,
+            SysMemPitch: (self.width * 4) as u32,
+            SysMemSlicePitch: 0
+        };
+        let texture_desc = d3d11::D3D11_TEXTURE2D_DESC {
+            Width: self.width as u32,
+            Height: self.height as u32,
+            MipLevels: 1,
+            ArraySize: 1,
+            Format: dxgiformat::DXGI_FORMAT_R8G8B8A8_UNORM,
+            SampleDesc: dxgitype::DXGI_SAMPLE_DESC {
+                Count: 1,
+                Quality: 0
+            },
+            Usage: d3d11::D3D11_USAGE_DEFAULT,
+            BindFlags: d3d11::D3D11_BIND_SHADER_RESOURCE,
+            CPUAccessFlags: 0,
+            MiscFlags: 0,
+        };
+        let hr = unsafe {d3d11.device.CreateTexture2D(&texture_desc, &sub_data, &mut texture as *mut *mut _)};
+        if winerror::SUCCEEDED(hr) {
+            println!("TEXTURE UPLOADED {} {}", self.width, self.height);
+            self.texture = Some(unsafe {ComPtr::from_raw(texture as *mut _)});
+            let mut shader_resource = ptr::null_mut();
+            unsafe {d3d11.device.CreateShaderResourceView(
+                self.texture.as_mut().unwrap().as_raw() as *mut _,
+                ptr::null(),
+                &mut shader_resource as *mut *mut _
+            )};
+            self.shader_resource = Some(unsafe {ComPtr::from_raw(shader_resource as *mut _)});
+            
+        }
+        else {
+            panic!("Texture create failed");
+            self.texture = None
+        }
     }
 }

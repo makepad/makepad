@@ -57,7 +57,7 @@ impl Text{
 
         sh.add_ast(shader_ast!({
             let geom:vec2<Geometry>;
-            let texture:texture2d<Texture>;
+            let texturez:texture2d<Texture>;
             let tex_size:vec2<Uniform>;
             //let list_clip:vec4<Uniform>;
             //let instance_clip:vec4<Instance>;
@@ -87,7 +87,7 @@ impl Text{
                     return df_fill(color); 
                 }
                 else{
-                    let s = sample2d(texture, tex_coord.xy);
+                    let s = sample2d(texturez, tex_coord.xy);
                     let sig_dist =  max(min(s.r, s.g), min(max(s.r, s.g), s.b)) - 0.5;
                     //let scale = pow(df_antialias(clipped) * 0.002,0.5);
                     df_viewport(tex_coord * tex_size * (0.1 - dpi_dilate*0.03));

@@ -609,7 +609,7 @@ impl Shader{
 
             fn df_viewport(pos:vec2)->vec2{
                 df_pos = pos;
-                df_result = vec4(0.);
+                df_result = vec4(0.,0.,0.,0.);
                 df_old_shape =
                 df_shape = 1e+20;
                 df_clip = -1e+20;
@@ -738,7 +738,7 @@ impl Shader{
             fn df_box(x:float, y:float, w:float, h:float, r:float) {
                 let p:vec2 = df_pos - vec2(x, y);
                 let size:vec2 = vec2(0.5 * w, 0.5 * h);
-                let bp:vec2 = max(abs(p - size.xy) - (size.xy - vec2(2. * r).xy), vec2(0.));
+                let bp:vec2 = max(abs(p - size.xy) - (size.xy - vec2(2. * r, 2. * r).xy), vec2(0.,0.));
                 df_field = (length(bp) - 2. * r) / df_scale;
                 df_old_shape = df_shape;
                 df_shape = min(df_shape, df_field);
@@ -747,8 +747,8 @@ impl Shader{
             fn df_rect(x:float, y:float, w:float, h:float) {
                 let s:vec2 = vec2(w, h) * 0.5;
                 let d:vec2 = abs(vec2(x, y) - df_pos + s) - s;
-                let dm:vec2 = min(d, vec2(0.));
-                df_field = max(dm.x, dm.y) + length(max(d, vec2(0.)));
+                let dm:vec2 = min(d, vec2(0.,0.));
+                df_field = max(dm.x, dm.y) + length(max(d, vec2(0.,0.)));
                 df_old_shape = df_shape;
                 df_shape = min(df_shape, df_field);
             }

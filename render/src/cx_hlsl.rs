@@ -1,8 +1,8 @@
 use crate::cx::*;
 use crate::cx_dx11::*;
 use std::ffi;
-use winapi::shared:: {dxgiformat};
-use winapi::um:: {d3d11, d3dcommon};
+use winapi::shared::{dxgiformat};
+use winapi::um::{d3d11, d3dcommon};
 use wio::com::ComPtr;
 
 #[derive(Default, Clone)]
@@ -68,7 +68,7 @@ impl Cx {
         }
     }
     
-    pub fn hlsl_assemble_struct(lead: &str, name: &str, vars: &Vec<ShVar>, semantic: &str, field: &str, post:&str) -> String {
+    pub fn hlsl_assemble_struct(lead: &str, name: &str, vars: &Vec<ShVar>, semantic: &str, field: &str, post: &str) -> String {
         let mut out = String::new();
         out.push_str(lead);
         out.push_str(" ");
@@ -108,13 +108,13 @@ impl Cx {
         out.push_str("}");
         out
     }
-
+    
     pub fn hlsl_assemble_texture_slots(textures: &Vec<ShVar>) -> String {
         let mut out = String::new();
         for (i, tex) in textures.iter().enumerate() {
             out.push_str("Texture2D ");
             out.push_str(&tex.name);
-            out.push_str(&format!(": register(t{});\n",i));
+            out.push_str(&format!(": register(t{});\n", i));
         };
         out
     }
@@ -139,6 +139,7 @@ impl Cx {
         let geometry_slots = sh.compute_slot_total(&geometries);
         let instance_slots = sh.compute_slot_total(&instances);
         //let varying_slots = sh.compute_slot_total(&varyings);
+        hlsl_out.push_str(&Self::hlsl_assemble_texture_slots(&texture_slots));
         
         hlsl_out.push_str(&Self::hlsl_assemble_struct("struct", "_Geom", &geometries, "GEOM_", "", ""));
         hlsl_out.push_str(&Self::hlsl_assemble_struct("struct", "_Inst", &instances, "INST_", "", ""));
@@ -148,7 +149,6 @@ impl Cx {
         hlsl_out.push_str(&Self::hlsl_assemble_struct("struct", "_Loc", &locals, "", "", ""));
         
         // we need to figure out which texture slots exist
-        hlsl_out.push_str(&Self::hlsl_assemble_texture_slots(&texture_slots));
         // we need to figure out which texture slots exist
         // mtl_out.push_str(&Self::assemble_constants(&texture_slots));
         
@@ -255,13 +255,13 @@ impl Cx {
         hlsl_out.push_str(&pix_cx.defargs_call);
         hlsl_out.push_str(");\n};\n");
         
-        //if sh.log != 0{
-        println!("---- HLSL shader -----");
-        let lines = hlsl_out.split('\n');
-        for (index, line) in lines.enumerate() {
-            println!("{} {}", index + 1, line);
+        if sh.log != 0 {
+            println!("---- HLSL shader -----");
+            let lines = hlsl_out.split('\n');
+            for (index, line) in lines.enumerate() {
+                println!("{} {}", index + 1, line);
+            }
         }
-        //}
         
         Ok(AssembledHlslShader {
             rect_instance_props: RectInstanceProps::construct(sh, &instances),
@@ -376,6 +376,15 @@ impl<'a> SlCx<'a> {
                     "vec4".to_string()
                 );
             },
+            "mix" => {
+                return MapCallResult::Rename("lerp".to_string())
+            },
+            "dfdx" => {
+                return MapCallResult::Rename("ddx".to_string())
+            },
+            "dfdy" => {
+                return MapCallResult::Rename("ddy".to_string())
+            },
             _ => return MapCallResult::None
         }
     }
@@ -417,7 +426,7 @@ impl<'a> SlCx<'a> {
                     return format!("_geom.{}", var.name);
                 }
             },
-            ShVarStore::Texture => return format!("_tex.{}", var.name),
+            ShVarStore::Texture => return var.name.clone(),
             ShVarStore::Local => return format!("_loc.{}", var.name),
             ShVarStore::Varying => return format!("_vary.{}", var.name),
         }

@@ -459,6 +459,11 @@
             let offset = 0;
             for(let i = 0; i < uniforms.length; i++){
                 let uniform = uniforms[i];
+                // lets align the uniform
+                let slots = this.uniform_size_table[uniform.ty];
+                if((offset&3) + slots > 4){ // goes over the boundary
+                    offset += 4-(offset&3); // make jump to new slot
+                }
                 uniform_locs.push({
                     name:uniform.name,
                     offset:offset<<2,
@@ -467,7 +472,7 @@
                     fn:this.uniform_fn_table[uniform.ty]
                 });
                 
-                offset += 16;//this.uniform_size_table[uniform.ty]
+                offset += slots
             }
             return uniform_locs;
         }
@@ -1372,7 +1377,7 @@
         },
     };
 
-    /*WasmApp.prototype.uniform_size_table = {
+    WasmApp.prototype.uniform_size_table = {
         "float":1,
         "vec2":2,
         "vec3":3,
@@ -1380,7 +1385,7 @@
         "mat2":4,
         "mat3":9,
         "mat4":16
-    }*/
+    }
 
     function add_line_numbers_to_string(code){
         var lines = code.split('\n')
