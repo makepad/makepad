@@ -15,10 +15,10 @@ pub struct AssembledMtlShader {
     pub mtlsl: String,
 }
 
-#[derive(Default, Clone)]
+#[derive(Clone)]
 pub struct CompiledShader {
-    pub library: Option<metal::Library>,
-    pub pipeline_state: Option<metal::RenderPipelineState>,
+    pub library: metal::Library,
+    pub pipeline_state: metal::RenderPipelineState,
     pub shader_id: usize,
     pub geom_vbuf: MetalBuffer,
     pub geom_ibuf: MetalBuffer,
@@ -26,6 +26,11 @@ pub struct CompiledShader {
     pub rect_instance_props: RectInstanceProps,
     pub named_uniform_props: NamedProps,
     pub named_instance_props: NamedProps,
+}
+
+pub enum PackType{
+    Packed,
+    Unpacked
 }
 
 impl Cx {
@@ -39,10 +44,7 @@ impl Cx {
                 });
             }
             else if let Err(err) = mtlsh {
-                println!("GOT ERROR: {}", err.msg);
-                self.compiled_shaders.push(
-                    CompiledShader {..Default::default()}
-                )
+                panic!("GOT ERROR: {}", err.msg);
             }
         };
     }
@@ -73,25 +75,30 @@ impl Cx {
         }
     }
     
-    pub fn mtl_assemble_struct(name: &str, vars: &Vec<ShVar>, packed: bool, field: &str) -> String {
+    pub fn mtl_assemble_struct(sh: &Shader, name: &str, vars: &Vec<ShVar>, pack_type:PackType, field: &str) -> String {
         let mut out = String::new();
+        let mut padding = 0;
         out.push_str("struct ");
         out.push_str(name);
         out.push_str("{\n");
         out.push_str(field);
         for var in vars {
             out.push_str("  ");
-            out.push_str(
-                &if packed {
-                    Self::mtl_type_to_packed_metal(&var.ty)
+            match pack_type{
+                PackType::Packed=>{
+                    out.push_str(&Self::mtl_type_to_packed_metal(&var.ty));
+                    out.push_str(" ");
+                    out.push_str(&var.name);
+                    out.push_str(";\n");
+                },
+                PackType::Unpacked=>{
+                    out.push_str(&Self::mtl_type_to_metal(&var.ty));
+                    out.push_str(" ");
+                    out.push_str(&var.name);
+                    out.push_str(";\n");
                 }
-                else {
-                    Self::mtl_type_to_metal(&var.ty)
-                }
-            );
-            out.push_str(" ");
-            out.push_str(&var.name);
-            out.push_str(";\n")
+            }
+            
         };
         out.push_str("};\n\n");
         out
@@ -129,12 +136,12 @@ impl Cx {
         let instance_slots = sh.compute_slot_total(&instances);
         //let varying_slots = sh.compute_slot_total(&varyings);
         
-        mtl_out.push_str(&Self::mtl_assemble_struct("_Geom", &geometries, true, ""));
-        mtl_out.push_str(&Self::mtl_assemble_struct("_Inst", &instances, true, ""));
-        mtl_out.push_str(&Self::mtl_assemble_struct("_UniCx", &uniforms_cx, true, ""));
-        mtl_out.push_str(&Self::mtl_assemble_struct("_UniDl", &uniforms_dl, true, ""));
-        mtl_out.push_str(&Self::mtl_assemble_struct("_UniDr", &uniforms_dr, true, ""));
-        mtl_out.push_str(&Self::mtl_assemble_struct("_Loc", &locals, false, ""));
+        mtl_out.push_str(&Self::mtl_assemble_struct(sh, "_Geom", &geometries, PackType::Packed, ""));
+        mtl_out.push_str(&Self::mtl_assemble_struct(sh, "_Inst", &instances, PackType::Packed, ""));
+        mtl_out.push_str(&Self::mtl_assemble_struct(sh, "_UniCx", &uniforms_cx, PackType::Unpacked, ""));
+        mtl_out.push_str(&Self::mtl_assemble_struct(sh, "_UniDl", &uniforms_dl, PackType::Unpacked, ""));
+        mtl_out.push_str(&Self::mtl_assemble_struct(sh, "_UniDr", &uniforms_dr, PackType::Unpacked, ""));
+        mtl_out.push_str(&Self::mtl_assemble_struct(sh, "_Loc", &locals, PackType::Unpacked, ""));
         
         // we need to figure out which texture slots exist
         mtl_out.push_str(&Self::mtl_assemble_texture_slots(&texture_slots));
@@ -196,7 +203,7 @@ impl Cx {
         for auto in &pix_cx.auto_vary {
             varyings.push(auto.clone());
         }
-        mtl_out.push_str(&Self::mtl_assemble_struct("_Vary", &varyings, false, "  float4 mtl_position [[position]];\n"));
+        mtl_out.push_str(&Self::mtl_assemble_struct(sh, "_Vary", &varyings, PackType::Unpacked, "  float4 mtl_position [[position]];\n"));
         
         mtl_out.push_str("//Vertex shader\n");
         mtl_out.push_str(&vtx_fns);
@@ -248,8 +255,8 @@ impl Cx {
         
         Ok(AssembledMtlShader {
             rect_instance_props: RectInstanceProps::construct(sh, &instances),
-            named_instance_props: NamedProps::construct(sh, &instances),
-            named_uniform_props: NamedProps::construct(sh, &uniforms_dr),
+            named_instance_props: NamedProps::construct(sh, &instances, false),
+            named_uniform_props: NamedProps::construct(sh, &uniforms_dr, true),
             instance_slots: instance_slots,
             uniforms_dr: uniforms_dr,
             uniforms_dl: uniforms_dl,
@@ -284,9 +291,9 @@ impl Cx {
                     color.set_destination_alpha_blend_factor(MTLBlendFactor::OneMinusSourceAlpha);
                     color.set_rgb_blend_operation(MTLBlendOperation::Add);
                     color.set_alpha_blend_operation(MTLBlendOperation::Add);
-                    Some(device.new_render_pipeline_state(&rpd).unwrap())
+                    device.new_render_pipeline_state(&rpd).unwrap()
                 },
-                library: Some(library),
+                library: library,
                 instance_slots: ash.instance_slots,
                 named_instance_props: ash.named_instance_props.clone(),
                 named_uniform_props: ash.named_uniform_props.clone(),
@@ -341,9 +348,9 @@ impl<'a> SlCx<'a> {
     pub fn map_var(&mut self, var: &ShVar) -> String {
         let mty = Cx::mtl_type_to_metal(&var.ty);
         match var.store {
-            ShVarStore::Uniform => return format!("{}(_uni_dr.{})", mty, var.name),
-            ShVarStore::UniformDl => return format!("{}(_uni_dl.{})", mty, var.name),
-            ShVarStore::UniformCx => return format!("{}(_uni_cx.{})", mty, var.name),
+            ShVarStore::Uniform => return format!("_uni_dr.{}", var.name),
+            ShVarStore::UniformDl => return format!("_uni_dl.{}", var.name),
+            ShVarStore::UniformCx => return format!("_uni_cx.{}", var.name),
             ShVarStore::Instance => {
                 if let SlTarget::Pixel = self.target {
                     if self.auto_vary.iter().find( | v | v.name == var.name).is_none() {

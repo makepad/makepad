@@ -48,6 +48,7 @@ impl Quad{
             let dpi_dilate:float<Uniform>;
 
             fn vertex()->vec4{
+               // return vec4(geom.x-0.5, geom.y, 0., 1.);
                 let shift:vec2 = -draw_list_scroll * draw_list_do_scroll;
                 let clipped:vec2 = clamp(
                     geom*vec2(w, h) + vec2(x, y) + shift,
@@ -60,6 +61,7 @@ impl Quad{
             }
 
             fn pixel()->vec4{
+                //return color("red");
                 return vec4(color.rgb*color.a, color.a);
             }
 

@@ -1,9 +1,16 @@
 use crate::cx::*;
 use crate::cx_dx11::*;
+use std::ffi;
+use winapi::shared:: {dxgiformat};
+use winapi::um:: {d3d11, d3dcommon};
+use wio::com::ComPtr;
 
 #[derive(Default, Clone)]
 pub struct AssembledHlslShader {
+    pub geometry_slots: usize,
     pub instance_slots: usize,
+    pub geometries: Vec<ShVar>,
+    pub instances: Vec<ShVar>,
     pub uniforms_dr: Vec<ShVar>,
     pub uniforms_dl: Vec<ShVar>,
     pub uniforms_cx: Vec<ShVar>,
@@ -14,32 +21,35 @@ pub struct AssembledHlslShader {
     pub hlsl: String,
 }
 
-#[derive(Default, Clone)]
+#[derive(Clone)]
 pub struct CompiledShader {
     pub shader_id: usize,
-    pub geom_vbuf: Dx11Buffer,
-    pub geom_ibuf: Dx11Buffer,
+    pub geom_vbuf: D3d11Buffer,
+    pub geom_ibuf: D3d11Buffer,
+    pub geometry_slots: usize,
     pub instance_slots: usize,
     pub rect_instance_props: RectInstanceProps,
     pub named_uniform_props: NamedProps,
     pub named_instance_props: NamedProps,
+    pub pixel_shader: ComPtr<d3d11::ID3D11PixelShader>,
+    pub vertex_shader: ComPtr<d3d11::ID3D11VertexShader>,
+    pub pixel_shader_blob: ComPtr<d3dcommon::ID3DBlob>,
+    pub vertex_shader_blob: ComPtr<d3dcommon::ID3DBlob>,
+    pub input_layout: ComPtr<d3d11::ID3D11InputLayout>
 }
 
 impl Cx {
-    pub fn hlsl_compile_all_shaders(&mut self) {
+    pub fn hlsl_compile_all_shaders(&mut self, d3d11: &D3d11) {
         for sh in &self.shaders {
-            let mtlsh = Self::hlsl_compile_shader(&sh, self.platform.d3d11.as_ref().unwrap());
-            if let Ok(mtlsh) = mtlsh {
+            let shc = Self::hlsl_compile_shader(&sh, d3d11);
+            if let Ok(shc) = shc {
                 self.compiled_shaders.push(CompiledShader {
                     shader_id: self.compiled_shaders.len(),
-                    ..mtlsh
+                    ..shc
                 });
             }
-            else if let Err(err) = mtlsh {
-                println!("Got shader compile error: {}", err.msg);
-                self.compiled_shaders.push(
-                    CompiledShader {..Default::default()}
-                )
+            else if let Err(err) = shc {
+                panic!("Got shader compile error: {}", err.msg);
             }
         };
     }
@@ -58,11 +68,12 @@ impl Cx {
         }
     }
     
-    pub fn hlsl_assemble_struct(lead: &str, name: &str, vars: &Vec<ShVar>, semantic: &str, field: &str) -> String {
+    pub fn hlsl_assemble_struct(lead: &str, name: &str, vars: &Vec<ShVar>, semantic: &str, field: &str, post:&str) -> String {
         let mut out = String::new();
         out.push_str(lead);
         out.push_str(" ");
         out.push_str(name);
+        out.push_str(post);
         out.push_str("{\n");
         out.push_str(field);
         for (index, var) in vars.iter().enumerate() {
@@ -72,37 +83,38 @@ impl Cx {
             out.push_str(&var.name);
             if semantic.len()>0 {
                 out.push_str(": ");
-                out.push_str(semantic);
-                out.push_str(&format!("{}", index));
+                out.push_str(&format!("{}{}", semantic, var.name.to_uppercase()));
+                //out.push_str(&format!("{}", index));
             }
             out.push_str(";\n")
         };
         out.push_str("};\n\n");
         out
     }
-     pub fn hlsl_init_struct(vars: &Vec<ShVar>, field:&str) -> String {
+    pub fn hlsl_init_struct(vars: &Vec<ShVar>, field: &str) -> String {
         let mut out = String::new();
         out.push_str("{\n");
         out.push_str(field);
         for (index, var) in vars.iter().enumerate() {
-            out.push_str(match Self::hlsl_type(&var.ty).as_ref(){
-                "float"=>"0.0",
-                "float2"=>"float2(0.0,0.0)",
-                "float3"=>"float3(0.0,0.0,0.0)",
-                "float4"=>"float4(0.0,0.0,0.0,0.0)",
-                _=>"",
+            out.push_str(match Self::hlsl_type(&var.ty).as_ref() {
+                "float" => "0.0",
+                "float2" => "float2(0.0,0.0)",
+                "float3" => "float3(0.0,0.0,0.0)",
+                "float4" => "float4(0.0,0.0,0.0,0.0)",
+                _ => "",
             });
             out.push_str(",")
         };
         out.push_str("}");
         out
     }
+
     pub fn hlsl_assemble_texture_slots(textures: &Vec<ShVar>) -> String {
         let mut out = String::new();
         for (i, tex) in textures.iter().enumerate() {
             out.push_str("Texture2D ");
             out.push_str(&tex.name);
-            out.push_str(";\n");
+            out.push_str(&format!(": register(t{});\n",i));
         };
         out
     }
@@ -110,6 +122,8 @@ impl Cx {
     pub fn hlsl_assemble_shader(sh: &Shader) -> Result<AssembledHlslShader, SlErr> {
         
         let mut hlsl_out = String::new();
+        
+        hlsl_out.push_str("SamplerState DefaultTextureSampler{Filter = MIN_MAG_MIP_LINEAR;AddressU = Wrap;AddressV=Wrap;};\n");
         
         // ok now define samplers from our sh.
         let texture_slots = sh.flat_vars(ShVarStore::Texture);
@@ -122,16 +136,16 @@ impl Cx {
         let uniforms_dr = sh.flat_vars(ShVarStore::Uniform);
         
         // lets count the slots
-        //let geometry_slots = sh.compute_slot_total(&geometries);
+        let geometry_slots = sh.compute_slot_total(&geometries);
         let instance_slots = sh.compute_slot_total(&instances);
         //let varying_slots = sh.compute_slot_total(&varyings);
         
-        hlsl_out.push_str(&Self::hlsl_assemble_struct("struct", "_Geom", &geometries, "POSITION", ""));
-        hlsl_out.push_str(&Self::hlsl_assemble_struct("struct", "_Inst", &instances, "TEXCOORD", ""));
-        hlsl_out.push_str(&Self::hlsl_assemble_struct("cbuffer", "_Uni_Cx", &uniforms_cx, "", ""));
-        hlsl_out.push_str(&Self::hlsl_assemble_struct("cbuffer", "_Uni_Dl", &uniforms_dl, "", ""));
-        hlsl_out.push_str(&Self::hlsl_assemble_struct("cbuffer", "_Uni_Dr", &uniforms_dr, "", ""));
-        hlsl_out.push_str(&Self::hlsl_assemble_struct("struct", "_Loc", &locals, "", ""));
+        hlsl_out.push_str(&Self::hlsl_assemble_struct("struct", "_Geom", &geometries, "GEOM_", "", ""));
+        hlsl_out.push_str(&Self::hlsl_assemble_struct("struct", "_Inst", &instances, "INST_", "", ""));
+        hlsl_out.push_str(&Self::hlsl_assemble_struct("cbuffer", "_Uni_Cx", &uniforms_cx, "", "", ": register(b0)"));
+        hlsl_out.push_str(&Self::hlsl_assemble_struct("cbuffer", "_Uni_Dl", &uniforms_dl, "", "", ": register(b1)"));
+        hlsl_out.push_str(&Self::hlsl_assemble_struct("cbuffer", "_Uni_Dr", &uniforms_dr, "", "", ": register(b2)"));
+        hlsl_out.push_str(&Self::hlsl_assemble_struct("struct", "_Loc", &locals, "", "", ""));
         
         // we need to figure out which texture slots exist
         hlsl_out.push_str(&Self::hlsl_assemble_texture_slots(&texture_slots));
@@ -194,7 +208,7 @@ impl Cx {
         for auto in &pix_cx.auto_vary {
             varyings.push(auto.clone());
         }
-        hlsl_out.push_str(&Self::hlsl_assemble_struct("struct", "_Vary", &varyings, "TEXCOORD", "  float4 hlsl_position : SV_POSITION;\n"));
+        hlsl_out.push_str(&Self::hlsl_assemble_struct("struct", "_Vary", &varyings, "VARY_", "  float4 hlsl_position : SV_POSITION;\n", ""));
         
         hlsl_out.push_str("//Vertex shader\n");
         hlsl_out.push_str(&vtx_fns);
@@ -204,10 +218,10 @@ impl Cx {
         // lets define the vertex shader
         hlsl_out.push_str("_Vary _vertex_shader(_Geom _geom, _Inst _inst, uint inst_id: SV_InstanceID){\n");
         hlsl_out.push_str("  _Loc _loc = ");
-        hlsl_out.push_str(&Self::hlsl_init_struct(&locals,""));
+        hlsl_out.push_str(&Self::hlsl_init_struct(&locals, ""));
         hlsl_out.push_str(";\n");
         hlsl_out.push_str("  _Vary _vary = ");
-        hlsl_out.push_str(&Self::hlsl_init_struct(&varyings,"float4(0.0,0.0,0.0,0.0),"));
+        hlsl_out.push_str(&Self::hlsl_init_struct(&varyings, "float4(0.0,0.0,0.0,0.0),"));
         hlsl_out.push_str(";\n");
         hlsl_out.push_str("  _vary.hlsl_position = _vertex(");
         hlsl_out.push_str(&vtx_cx.defargs_call);
@@ -235,9 +249,9 @@ impl Cx {
         // then the fragment shader
         hlsl_out.push_str("float4 _pixel_shader(_Vary _vary) : SV_TARGET{\n");
         hlsl_out.push_str("  _Loc _loc = ");
-        hlsl_out.push_str(&Self::hlsl_init_struct(&locals,""));
+        hlsl_out.push_str(&Self::hlsl_init_struct(&locals, ""));
         hlsl_out.push_str(";\n");
-        hlsl_out.push_str("  return _pixel("); 
+        hlsl_out.push_str("  return _pixel(");
         hlsl_out.push_str(&pix_cx.defargs_call);
         hlsl_out.push_str(");\n};\n");
         
@@ -245,14 +259,17 @@ impl Cx {
         println!("---- HLSL shader -----");
         let lines = hlsl_out.split('\n');
         for (index, line) in lines.enumerate() {
-            println!("{} {}",index+1,line);
+            println!("{} {}", index + 1, line);
         }
         //}
         
         Ok(AssembledHlslShader {
             rect_instance_props: RectInstanceProps::construct(sh, &instances),
-            named_instance_props: NamedProps::construct(sh, &instances),
-            named_uniform_props: NamedProps::construct(sh, &uniforms_dr),
+            named_instance_props: NamedProps::construct(sh, &instances, false),
+            named_uniform_props: NamedProps::construct(sh, &uniforms_dr, true),
+            geometries: geometries,
+            instances: instances,
+            geometry_slots: geometry_slots,
             instance_slots: instance_slots,
             uniforms_dr: uniforms_dr,
             uniforms_dl: uniforms_dl,
@@ -260,60 +277,83 @@ impl Cx {
             texture_slots: texture_slots,
             hlsl: hlsl_out
         })
-        
     }
     
-    pub fn hlsl_compile_shader(sh: &Shader, d3d11: &CxD3d11) -> Result<CompiledShader, SlErr> {
+    fn slots_to_dxgi_format(slots: usize) -> u32 {
+        match slots {
+            1 => dxgiformat::DXGI_FORMAT_R32_FLOAT,
+            2 => dxgiformat::DXGI_FORMAT_R32G32_FLOAT,
+            3 => dxgiformat::DXGI_FORMAT_R32G32B32_FLOAT,
+            4 => dxgiformat::DXGI_FORMAT_R32G32B32A32_FLOAT,
+            _ => panic!("slots_to_dxgi_format unsupported slotcount {}", slots)
+        }
+    }
+    
+    pub fn hlsl_compile_shader(sh: &Shader, d3d11: &D3d11) -> Result<CompiledShader, SlErr> {
         let ash = Self::hlsl_assemble_shader(sh) ?;
         
-        d3d11.compile_shader("vs", "_vertex_shader".as_bytes(), ash.hlsl.as_bytes()) ?;
+        let vs_blob = d3d11.compile_shader("vs", "_vertex_shader".as_bytes(), ash.hlsl.as_bytes()) ?;
+        let ps_blob = d3d11.compile_shader("ps", "_pixel_shader".as_bytes(), ash.hlsl.as_bytes()) ?;
         
-        d3d11.compile_shader("ps", "_pixel_shader".as_bytes(), ash.hlsl.as_bytes()) ?;
+        let vs = d3d11.create_vertex_shader(&vs_blob) ?;
+        let ps = d3d11.create_pixel_shader(&ps_blob) ?;
         
-        Err(SlErr {msg: "".to_string()})
-        /*
-        let options = CompileOptions::new();
-        let library = device.new_library_with_source(&ash.mtlsl, &options);
-
-        match library{
-            Err(library)=>Err(SlErr{msg:library}),
-            Ok(library)=>Ok(CompiledShader{
-                shader_id:0,
-                pipeline_state:{
-                    let vert = library.get_function("_vertex_shader", None).unwrap();
-                    let frag = library.get_function("_fragment_shader", None).unwrap();
-                    let rpd = RenderPipelineDescriptor::new();
-                    rpd.set_vertex_function(Some(&vert));
-                    rpd.set_fragment_function(Some(&frag));
-                    let color = rpd.color_attachments().object_at(0).unwrap();
-                    color.set_pixel_format(MTLPixelFormat::BGRA8Unorm);
-                    color.set_blending_enabled(true);
-                    color.set_source_rgb_blend_factor(MTLBlendFactor::One);
-                    color.set_destination_rgb_blend_factor(MTLBlendFactor::OneMinusSourceAlpha);
-                    color.set_source_alpha_blend_factor(MTLBlendFactor::One);
-                    color.set_destination_alpha_blend_factor(MTLBlendFactor::OneMinusSourceAlpha);
-                    color.set_rgb_blend_operation(MTLBlendOperation::Add);
-                    color.set_alpha_blend_operation(MTLBlendOperation::Add);
-                    Some(device.new_render_pipeline_state(&rpd).unwrap())
-                },
-                library:Some(library),
-                instance_slots:ash.instance_slots,
-                named_instance_props:ash.named_instance_props.clone(),
-                named_uniform_props:ash.named_uniform_props.clone(),
-                rect_instance_props:ash.rect_instance_props.clone(),
-                //assembled_shader:ash,
-                geom_ibuf:{
-                    let mut geom_ibuf = MetalBuffer{..Default::default()};
-                    geom_ibuf.update_with_u32_data(device, &sh.geometry_indices);
-                    geom_ibuf
-                },
-                geom_vbuf:{
-                    let mut geom_vbuf = MetalBuffer{..Default::default()};
-                    geom_vbuf.update_with_f32_data(device, &sh.geometry_vertices);
-                    geom_vbuf
-                }
+        let mut layout_desc = Vec::new();
+        let geom_named = NamedProps::construct(sh, &ash.geometries, false);
+        let inst_named = NamedProps::construct(sh, &ash.instances, false);
+        let mut strings = Vec::new();
+        
+        for (index, geom) in geom_named.props.iter().enumerate() {
+            strings.push(ffi::CString::new(format!("GEOM_{}", geom.name.to_uppercase())).unwrap());
+            layout_desc.push(d3d11::D3D11_INPUT_ELEMENT_DESC {
+                SemanticName: strings.last().unwrap().as_ptr() as *const _,
+                SemanticIndex: 0,
+                Format: Self::slots_to_dxgi_format(geom.slots),
+                InputSlot: 0,
+                AlignedByteOffset: (geom.offset * 4) as u32,
+                InputSlotClass: d3d11::D3D11_INPUT_PER_VERTEX_DATA,
+                InstanceDataStepRate: 0
             })
-        }*/
+        }
+        
+        for (index, inst) in inst_named.props.iter().enumerate() {
+            strings.push(ffi::CString::new(format!("INST_{}", inst.name.to_uppercase())).unwrap());
+            layout_desc.push(d3d11::D3D11_INPUT_ELEMENT_DESC {
+                SemanticName: strings.last().unwrap().as_ptr() as *const _,
+                SemanticIndex: 0,
+                Format: Self::slots_to_dxgi_format(inst.slots),
+                InputSlot: 1,
+                AlignedByteOffset: (inst.offset * 4) as u32,
+                InputSlotClass: d3d11::D3D11_INPUT_PER_INSTANCE_DATA,
+                InstanceDataStepRate: 1
+            })
+        }
+        
+        let input_layout = d3d11.create_input_layout(&vs_blob, &layout_desc) ?;
+        
+        Ok(CompiledShader {
+            shader_id: 0,
+            vertex_shader: vs,
+            pixel_shader: ps,
+            vertex_shader_blob: vs_blob,
+            pixel_shader_blob: ps_blob,
+            input_layout: input_layout,
+            geometry_slots: ash.geometry_slots,
+            instance_slots: ash.instance_slots,
+            named_instance_props: ash.named_instance_props.clone(),
+            named_uniform_props: ash.named_uniform_props.clone(),
+            rect_instance_props: ash.rect_instance_props.clone(),
+            geom_ibuf: {
+                let mut geom_ibuf = D3d11Buffer {..Default::default()};
+                geom_ibuf.update_with_u32_index_data(d3d11, &sh.geometry_indices);
+                geom_ibuf
+            },
+            geom_vbuf: {
+                let mut geom_vbuf = D3d11Buffer {..Default::default()};
+                geom_vbuf.update_with_f32_vertex_data(d3d11, &sh.geometry_vertices);
+                geom_vbuf
+            }
+        })
     }
 }
 
@@ -325,7 +365,7 @@ impl<'a> SlCx<'a> {
                 let base = &args[0];
                 let coord = &args[1];
                 return MapCallResult::Rewrite(
-                    format!("{}.sample(sampler(mag_filter::linear,min_filter::linear),{})", base.sl, coord.sl),
+                    format!("{}.Sample(DefaultTextureSampler,{})", base.sl, coord.sl),
                     "vec4".to_string()
                 )
             },
@@ -340,8 +380,8 @@ impl<'a> SlCx<'a> {
         }
     }
     
-    pub fn mat_mul(&self, left:&str, right:&str) -> String {
-        format!("mul({},{})",left, right)
+    pub fn mat_mul(&self, left: &str, right: &str) -> String {
+        format!("mul({},{})", left, right)
     }
     
     pub fn map_type(&self, ty: &str) -> String {
@@ -351,9 +391,9 @@ impl<'a> SlCx<'a> {
     pub fn map_var(&mut self, var: &ShVar) -> String {
         //let mty = Cx::hlsl_type(&var.ty);
         match var.store {
-            ShVarStore::Uniform => return var.name.clone(),//format!("_uni_dr.{}", var.name),
-            ShVarStore::UniformDl => return var.name.clone(),//format!("_uni_dl.{}", var.name),
-            ShVarStore::UniformCx => return var.name.clone(),//format!("_uni_cx.{}", var.name),
+            ShVarStore::Uniform => return var.name.clone(), //format!("_uni_dr.{}", var.name),
+            ShVarStore::UniformDl => return var.name.clone(), //format!("_uni_dl.{}", var.name),
+            ShVarStore::UniformCx => return var.name.clone(), //format!("_uni_cx.{}", var.name),
             ShVarStore::Instance => {
                 if let SlTarget::Pixel = self.target {
                     if self.auto_vary.iter().find( | v | v.name == var.name).is_none() {

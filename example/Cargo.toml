@@ -24,7 +24,7 @@ default-features = false
 path="../render"
 default-features = false
 
-features=["dx11"]
+features=["mtl"]
 # other options are ["ogl"] and ["webgl"]. 
 # for linux/windows use ["ogl"]. 
 # Webgl doesn't build with this cargo, use the one in webgl/

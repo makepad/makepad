@@ -313,7 +313,7 @@ impl Area{
                     //println!("get_write_ref called on invalid area pointer, use mark/sweep correctly!");
                     return None;
                 }
-                let csh = &cx.compiled_shaders[draw_call.shader_id];
+                let csh =&cx.compiled_shaders[draw_call.shader_id];
                 cx.paint_dirty = true;
                 draw_call.instance_dirty = true;
                 return Some(
@@ -655,6 +655,12 @@ impl InstanceArea{
             return
         }
         let draw_call = &mut draw_list.draw_calls[self.draw_call_id]; 
+        let left = draw_call.uniforms.len()&3;
+        if left > 2{ // align buffer
+            for _ in 0..(4-left){
+                draw_call.uniforms.push(0.0);
+            }
+        }
         draw_call.uniforms.push(x);
         draw_call.uniforms.push(y);
     }
@@ -666,6 +672,12 @@ impl InstanceArea{
             return
         }
         let draw_call = &mut draw_list.draw_calls[self.draw_call_id]; 
+        let left = draw_call.uniforms.len()&3;
+        if left > 1{ // align buffer
+            for _ in 0..(4-left){
+                draw_call.uniforms.push(0.0);
+            }
+        }
         draw_call.uniforms.push(x);
         draw_call.uniforms.push(y);
         draw_call.uniforms.push(z);
@@ -678,6 +690,12 @@ impl InstanceArea{
             return
         }
         let draw_call = &mut draw_list.draw_calls[self.draw_call_id]; 
+        let left = draw_call.uniforms.len()&3;
+        if left > 0{ // align buffer
+            for _ in 0..(4-left){
+                draw_call.uniforms.push(0.0);
+            }
+        }
         draw_call.uniforms.push(x);
         draw_call.uniforms.push(y);
         draw_call.uniforms.push(z);

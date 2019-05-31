@@ -489,8 +489,8 @@ impl Cx{
         
         // lets composite our ShAst structure into a set of methods
         Ok(AssembledGLShader{
-            named_instance_props:NamedProps::construct(sh, &instances),
-            named_uniform_props:NamedProps::construct(sh, &uniforms_dr),
+            named_instance_props:NamedProps::construct(sh, &instances, false),
+            named_uniform_props:NamedProps::construct(sh, &uniforms_dr, true),
             rect_instance_props:RectInstanceProps::construct(sh, &instances),
             geometry_slots:geometry_slots,
             instance_slots:instance_slots,

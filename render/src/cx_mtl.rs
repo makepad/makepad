@@ -41,54 +41,53 @@ impl Cx {
                 
                 // lets verify our instance_offset is not disaligned
                 let instances = (draw_call.instance.len() / shc.instance_slots) as u64;
-                if let Some(pipeline_state) = &shc.pipeline_state {
-                    encoder.set_render_pipeline_state(pipeline_state);
-                    if let Some(buf) = &shc.geom_vbuf.multi_buffer_read().buffer {encoder.set_vertex_buffer(0, Some(&buf), 0);}
-                    else {println!("Drawing error: geom_vbuf None")}
-                    if let Some(buf) = &draw_call.platform.inst_vbuf.multi_buffer_read().buffer {encoder.set_vertex_buffer(1, Some(&buf), 0);}
-                    else {println!("Drawing error: inst_vbuf None")}
-                    if let Some(buf) = &self.platform.uni_cx.multi_buffer_read().buffer {encoder.set_vertex_buffer(2, Some(&buf), 0);}
-                    else {println!("Drawing error: uni_cx None")}
-                    if let Some(buf) = &draw_list.platform.uni_dl.multi_buffer_read().buffer {encoder.set_vertex_buffer(3, Some(&buf), 0);}
-                    else {println!("Drawing error: uni_dl None")}
-                    if let Some(buf) = &draw_call.platform.uni_dr.multi_buffer_read().buffer {encoder.set_vertex_buffer(4, Some(&buf), 0);}
-                    else {println!("Drawing error: uni_dr None")}
-                    
-                    if let Some(buf) = &self.platform.uni_cx.multi_buffer_read().buffer {encoder.set_fragment_buffer(0, Some(&buf), 0);}
-                    else {println!("Drawing error: uni_cx None")}
-                    if let Some(buf) = &draw_list.platform.uni_dl.multi_buffer_read().buffer {encoder.set_fragment_buffer(1, Some(&buf), 0);}
-                    else {println!("Drawing error: uni_dl None")}
-                    if let Some(buf) = &draw_call.platform.uni_dr.multi_buffer_read().buffer {encoder.set_fragment_buffer(2, Some(&buf), 0);}
-                    else {println!("Drawing error: uni_dr None")}
-                    // lets set our textures
-                    for (i, texture_id) in draw_call.textures_2d.iter().enumerate() {
-                        let tex = &mut self.textures_2d[*texture_id as usize];
-                        if tex.dirty {
-                            tex.upload_to_device(device);
-                        }
-                        if let Some(mtltex) = &tex.mtltexture {
-                            encoder.set_fragment_texture(i as NSUInteger, Some(&mtltex));
-                            encoder.set_vertex_texture(i as NSUInteger, Some(&mtltex));
-                        }
+                let pipeline_state = &shc.pipeline_state;
+                encoder.set_render_pipeline_state(pipeline_state);
+                if let Some(buf) = &shc.geom_vbuf.multi_buffer_read().buffer {encoder.set_vertex_buffer(0, Some(&buf), 0);}
+                else {println!("Drawing error: geom_vbuf None")}
+                if let Some(buf) = &draw_call.platform.inst_vbuf.multi_buffer_read().buffer {encoder.set_vertex_buffer(1, Some(&buf), 0);}
+                else {println!("Drawing error: inst_vbuf None")}
+                if let Some(buf) = &self.platform.uni_cx.multi_buffer_read().buffer {encoder.set_vertex_buffer(2, Some(&buf), 0);}
+                else {println!("Drawing error: uni_cx None")}
+                if let Some(buf) = &draw_list.platform.uni_dl.multi_buffer_read().buffer {encoder.set_vertex_buffer(3, Some(&buf), 0);}
+                else {println!("Drawing error: uni_dl None")}
+                if let Some(buf) = &draw_call.platform.uni_dr.multi_buffer_read().buffer {encoder.set_vertex_buffer(4, Some(&buf), 0);}
+                else {println!("Drawing error: uni_dr None")}
+                
+                if let Some(buf) = &self.platform.uni_cx.multi_buffer_read().buffer {encoder.set_fragment_buffer(0, Some(&buf), 0);}
+                else {println!("Drawing error: uni_cx None")}
+                if let Some(buf) = &draw_list.platform.uni_dl.multi_buffer_read().buffer {encoder.set_fragment_buffer(1, Some(&buf), 0);}
+                else {println!("Drawing error: uni_dl None")}
+                if let Some(buf) = &draw_call.platform.uni_dr.multi_buffer_read().buffer {encoder.set_fragment_buffer(2, Some(&buf), 0);}
+                else {println!("Drawing error: uni_dr None")}
+                // lets set our textures
+                for (i, texture_id) in draw_call.textures_2d.iter().enumerate() {
+                    let tex = &mut self.textures_2d[*texture_id as usize];
+                    if tex.dirty {
+                        tex.upload_to_device(device);
                     }
-                    
-                    if let Some(buf) = &shc.geom_ibuf.multi_buffer_read().buffer {
-                        encoder.draw_indexed_primitives_instanced(
-                            MTLPrimitiveType::Triangle,
-                            sh.geometry_indices.len() as u64,
-                            // Index Count
-                            MTLIndexType::UInt32,
-                            // indexType,
-                            &buf,
-                            // index buffer
-                            0,
-                            // index buffer offset
-                            instances,
-                            // instance count
-                        )
+                    if let Some(mtltex) = &tex.mtltexture {
+                        encoder.set_fragment_texture(i as NSUInteger, Some(&mtltex));
+                        encoder.set_vertex_texture(i as NSUInteger, Some(&mtltex));
                     }
-                    else {println!("Drawing error: geom_ibuf None")}
                 }
+                
+                if let Some(buf) = &shc.geom_ibuf.multi_buffer_read().buffer {
+                    encoder.draw_indexed_primitives_instanced(
+                        MTLPrimitiveType::Triangle,
+                        sh.geometry_indices.len() as u64,
+                        // Index Count
+                        MTLIndexType::UInt32,
+                        // indexType,
+                        &buf,
+                        // index buffer
+                        0,
+                        // index buffer offset
+                        instances,
+                        // instance count
+                    )
+                }
+                else {println!("Drawing error: geom_ibuf None")}
             }
         }
     }

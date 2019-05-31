@@ -1,15 +1,24 @@
 use crate::cx::*;
 use time::precise_time_ns;
-use std::{ptr};
-use winapi::um::{libloaderapi, winuser};
-use winapi::shared::minwindef::{LPARAM, LRESULT, UINT, WPARAM};
-use winapi::shared::windef::{HWND};
-use winapi::um::winnt:: {LPCWSTR};
+use std:: {ptr};
+use winapi::um:: {libloaderapi, winuser};
+use winapi::shared::minwindef:: {LPARAM, LRESULT, WPARAM, BOOL, UINT, FALSE};
+use winapi::um::winnt::{LPCWSTR};
 use std::ffi::OsStr;
 use std::os::windows::ffi::OsStrExt;
 use std::mem;
+use std::os::raw::c_void;
+use std::sync:: {Once, ONCE_INIT};
+use winapi::shared::windef:: {RECT, DPI_AWARENESS_CONTEXT, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE, HMONITOR, HWND,};
+use winapi::shared::winerror::S_OK;
+use winapi::um::libloaderapi:: {GetProcAddress, LoadLibraryA};
+use winapi::um::shellscalingapi:: {MDT_EFFECTIVE_DPI, MONITOR_DPI_TYPE, PROCESS_DPI_AWARENESS, PROCESS_PER_MONITOR_DPI_AWARE,};
+use winapi::um::wingdi:: {GetDeviceCaps, LOGPIXELSX};
+use winapi::um::winnt:: {HRESULT, LPCSTR};
+use winapi::um::winuser:: {MONITOR_DEFAULTTONEAREST};
 
-#[derive(Clone, Default)]
+
+#[derive(Default)]
 pub struct WindowsWindow {
     pub last_window_geom: WindowGeom,
     
@@ -21,7 +30,8 @@ pub struct WindowsWindow {
     pub last_mouse_pos: Vec2,
     pub fingers_down: Vec<bool>,
     pub hwnd: Option<HWND>,
-    pub event_callback: Option<*mut FnMut(&mut Vec<Event>)>
+    pub event_callback: Option<*mut FnMut(&mut Vec<Event>)>,
+    pub dpi_functions: Option<DpiFunctions>
 }
 
 impl WindowsWindow {
@@ -48,13 +58,17 @@ impl WindowsWindow {
     }
     
     pub fn on_mouse_move(&self) {
-        println!("WE IZ MOUSEMOVING");
     }
     
     pub fn init(&mut self, title: &str) {
         self.time_start = precise_time_ns();
         for _i in 0..10 {
             self.fingers_down.push(false);
+        }
+        
+        self.dpi_functions = Some(DpiFunctions::new());
+        if let Some(dpi_functions) = &self.dpi_functions {
+            dpi_functions.become_dpi_aware()
         }
         
         let class_name_wstr: Vec<_> = OsStr::new("MakepadWindow").encode_wide().chain(Some(0).into_iter()).collect();
@@ -66,8 +80,8 @@ impl WindowsWindow {
             cbClsExtra: 0,
             cbWndExtra: 0,
             hInstance: unsafe {libloaderapi::GetModuleHandleW(ptr::null())},
-            hIcon: unsafe{winuser::LoadIconW(ptr::null_mut(),winuser::IDI_WINLOGO)}, //h_icon,
-            hCursor: unsafe{winuser::LoadCursorW(ptr::null_mut(),winuser::IDC_ARROW)}, // must be null in order for cursor state to work properly
+            hIcon: unsafe {winuser::LoadIconW(ptr::null_mut(), winuser::IDI_WINLOGO)}, //h_icon,
+            hCursor: unsafe {winuser::LoadCursorW(ptr::null_mut(), winuser::IDC_ARROW)}, // must be null in order for cursor state to work properly
             hbrBackground: ptr::null_mut(),
             lpszMenuName: ptr::null(),
             lpszClassName: class_name_wstr.as_ptr(),
@@ -104,6 +118,10 @@ impl WindowsWindow {
             );
             self.hwnd = Some(hwnd);
             winuser::SetWindowLongPtrW(hwnd, winuser::GWLP_USERDATA, &self as *const _ as isize);
+            
+            if let Some(dpi_functions) = &self.dpi_functions {
+                dpi_functions.enable_non_client_dpi_scaling(self.hwnd.unwrap())
+            }
         }
     }
     
@@ -148,9 +166,13 @@ impl WindowsWindow {
     }
     
     pub fn get_window_geom(&self) -> WindowGeom {
-        WindowGeom {..Default::default()}
+        WindowGeom {
+            inner_size: self.get_inner_size(),
+            outer_size: self.get_outer_size(),
+            dpi_factor: self.get_dpi_factor(),
+            position: self.get_position()
+        }
     }
-    
     
     pub fn time_now(&self) -> f64 {
         let time_now = precise_time_ns();
@@ -161,7 +183,11 @@ impl WindowsWindow {
     }
     
     pub fn get_position(&self) -> Vec2 {
-        Vec2::zero()
+        unsafe {
+            let mut rect = RECT {left: 0, top: 0, bottom: 0, right: 0};
+            winuser::GetWindowRect(self.hwnd.unwrap(), &mut rect);
+            Vec2 {x: rect.left as f32, y: rect.top as f32}
+        }
     }
     
     fn get_ime_origin(&self) -> Vec2 {
@@ -169,20 +195,32 @@ impl WindowsWindow {
     }
     
     pub fn get_inner_size(&self) -> Vec2 {
-        Vec2::zero()
+        unsafe {
+            let mut rect = RECT {left: 0, top: 0, bottom: 0, right: 0};
+            winuser::GetClientRect(self.hwnd.unwrap(), &mut rect);
+            Vec2 {x: (rect.right - rect.left) as f32, y: (rect.bottom - rect.top)as f32}
+        }
     }
     
     pub fn get_outer_size(&self) -> Vec2 {
-        Vec2::zero()
+        unsafe {
+            let mut rect = RECT {left: 0, top: 0, bottom: 0, right: 0};
+            winuser::GetWindowRect(self.hwnd.unwrap(), &mut rect);
+            Vec2 {x: (rect.right - rect.left) as f32, y: (rect.bottom - rect.top)as f32}
+        }
     }
     
     pub fn set_outer_size(&self, _size: Vec2) {
     }
     
     pub fn get_dpi_factor(&self) -> f32 {
-        1.0
+        if let Some(dpi_functions) = &self.dpi_functions {
+            dpi_functions.hwnd_dpi_factor(self.hwnd.unwrap())
+        }
+        else {
+            1.0
+        }
     }
-    
     
     pub fn start_timer(&mut self, _timer_id: u64, _interval: f64, _repeats: bool) {
     }
@@ -286,4 +324,155 @@ impl WindowsWindow {
             replace_last: replace_last
         })])
     }
+}
+
+// reworked from winit windows platform https://github.com/rust-windowing/winit/blob/eventloop-2.0/src/platform_impl/windows/dpi.rs
+
+const DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2: DPI_AWARENESS_CONTEXT = -4isize as _;
+type SetProcessDPIAware = unsafe extern "system" fn () -> BOOL;
+type SetProcessDpiAwareness = unsafe extern "system" fn (value: PROCESS_DPI_AWARENESS,) -> HRESULT;
+type SetProcessDpiAwarenessContext = unsafe extern "system" fn (value: DPI_AWARENESS_CONTEXT,) -> BOOL;
+type GetDpiForWindow = unsafe extern "system" fn (hwnd: HWND) -> UINT;
+type GetDpiForMonitor = unsafe extern "system" fn (hmonitor: HMONITOR, dpi_type: MONITOR_DPI_TYPE, dpi_x: *mut UINT, dpi_y: *mut UINT,) -> HRESULT;
+type EnableNonClientDpiScaling = unsafe extern "system" fn (hwnd: HWND) -> BOOL;
+
+// Helper function to dynamically load function pointer.
+// `library` and `function` must be zero-terminated.
+fn get_function_impl(library: &str, function: &str) -> Option<*const c_void> {
+    // Library names we will use are ASCII so we can use the A version to avoid string conversion.
+    let module = unsafe {LoadLibraryA(library.as_ptr() as LPCSTR)};
+    if module.is_null() {
+        return None;
+    }
+    
+    let function_ptr = unsafe {GetProcAddress(module, function.as_ptr() as LPCSTR)};
+    if function_ptr.is_null() {
+        return None;
+    }
+    
+    Some(function_ptr as _)
+}
+
+macro_rules!get_function {
+    ( $ lib: expr, $ func: ident) => {
+        get_function_impl(concat!( $ lib, '\0'), concat!(stringify!( $ func), '\0'))
+            .map( | f | unsafe {mem::transmute::<*const _, $ func>(f)})
+    }
+}
+
+pub struct DpiFunctions {
+    get_dpi_for_window: Option<GetDpiForWindow>,
+    get_dpi_for_monitor: Option<GetDpiForMonitor>,
+    enable_nonclient_dpi_scaling: Option<EnableNonClientDpiScaling>,
+    set_process_dpi_awareness_context: Option<SetProcessDpiAwarenessContext>,
+    set_process_dpi_awareness: Option<SetProcessDpiAwareness>,
+    set_process_dpi_aware: Option<SetProcessDPIAware>,
+}
+
+const BASE_DPI: u32 = 96;
+
+impl DpiFunctions {
+    fn new() -> DpiFunctions {
+        DpiFunctions {
+            get_dpi_for_window: get_function!("user32.dll", GetDpiForWindow),
+            get_dpi_for_monitor: get_function!("shcore.dll", GetDpiForMonitor),
+            enable_nonclient_dpi_scaling: get_function!("user32.dll", EnableNonClientDpiScaling),
+            set_process_dpi_awareness_context: get_function!("user32.dll", SetProcessDpiAwarenessContext),
+            set_process_dpi_awareness: get_function!("shcore.dll", SetProcessDpiAwareness),
+            set_process_dpi_aware: get_function!("user32.dll", SetProcessDPIAware)
+        }
+    }
+    
+    fn become_dpi_aware(&self) {
+        unsafe {
+            if let Some(set_process_dpi_awareness_context) = self.set_process_dpi_awareness_context {
+                // We are on Windows 10 Anniversary Update (1607) or later.
+                if set_process_dpi_awareness_context(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) == FALSE {
+                    // V2 only works with Windows 10 Creators Update (1703). Try using the older
+                    // V1 if we can't set V2.
+                    set_process_dpi_awareness_context(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE);
+                }
+            }
+            else if let Some(set_process_dpi_awareness) = self.set_process_dpi_awareness {
+                // We are on Windows 8.1 or later.
+                set_process_dpi_awareness(PROCESS_PER_MONITOR_DPI_AWARE);
+            }
+            else if let Some(set_process_dpi_aware) = self.set_process_dpi_aware {
+                // We are on Vista or later.
+                set_process_dpi_aware();
+            }
+        }
+    }
+    
+    pub fn enable_non_client_dpi_scaling(&self, hwnd: HWND) {
+        unsafe {
+            if let Some(enable_nonclient_dpi_scaling) = self.enable_nonclient_dpi_scaling {
+                enable_nonclient_dpi_scaling(hwnd);
+            }
+        }
+    }
+    /*
+    pub fn get_monitor_dpi(hmonitor: HMONITOR) -> Option<u32> {
+        unsafe {
+            if let Some(GetDpiForMonitor) = *GET_DPI_FOR_MONITOR {
+                // We are on Windows 8.1 or later.
+                let mut dpi_x = 0;
+                let mut dpi_y = 0;
+                if GetDpiForMonitor(hmonitor, MDT_EFFECTIVE_DPI, &mut dpi_x, &mut dpi_y) == S_OK {
+                    // MSDN says that "the values of *dpiX and *dpiY are identical. You only need to
+                    // record one of the values to determine the DPI and respond appropriately".
+                    // https://msdn.microsoft.com/en-us/library/windows/desktop/dn280510(v=vs.85).aspx
+                    return Some(dpi_x as u32)
+                }
+            }
+        }
+        None
+    }*/
+    
+    pub fn hwnd_dpi_factor(&self, hwnd: HWND) -> f32 {
+        unsafe {
+            let hdc = winuser::GetDC(hwnd);
+            if hdc.is_null() {
+                panic!("`GetDC` returned null!");
+            }
+            let dpi = if let Some(get_dpi_for_window) = self.get_dpi_for_window {
+                // We are on Windows 10 Anniversary Update (1607) or later.
+                match get_dpi_for_window(hwnd) {
+                    0 => BASE_DPI, // 0 is returned if hwnd is invalid
+                    dpi => dpi as u32,
+                }
+            }
+            else if let Some(get_dpi_for_monitor) = self.get_dpi_for_monitor {
+                // We are on Windows 8.1 or later.
+                let monitor = winuser::MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+                if monitor.is_null() {
+                    BASE_DPI
+                }
+                else {
+                    let mut dpi_x = 0;
+                    let mut dpi_y = 0;
+                    if get_dpi_for_monitor(monitor, MDT_EFFECTIVE_DPI, &mut dpi_x, &mut dpi_y) == S_OK {
+                        dpi_x as u32
+                    } else {
+                        BASE_DPI
+                    }
+                }
+            }
+            else {
+                // We are on Vista or later.
+                if winuser::IsProcessDPIAware() != FALSE {
+                    // If the process is DPI aware, then scaling must be handled by the application using
+                    // this DPI value.
+                    GetDeviceCaps(hdc, LOGPIXELSX) as u32
+                } else {
+                    // If the process is DPI unaware, then scaling is performed by the OS; we thus return
+                    // 96 (scale factor 1.0) to prevent the window from being re-scaled by both the
+                    // application and the WM.
+                    BASE_DPI
+                }
+            };
+            dpi as f32 / BASE_DPI as f32
+        }
+    }
+    
 }

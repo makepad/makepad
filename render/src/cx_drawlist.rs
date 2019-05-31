@@ -3,7 +3,7 @@ use crate::cx::*;
 impl Cx{
 
     pub fn new_instance_layer(&mut self, shader_id:usize, instance_count:usize)->InstanceArea{
-        let sh = &self.compiled_shaders[shader_id];
+        let shc = &self.compiled_shaders[shader_id];
         let draw_list = &mut self.draw_lists[self.current_draw_list_id];
         // we need a new draw call
         let draw_call_id = draw_list.draw_calls_len;
@@ -16,8 +16,8 @@ impl Cx{
                 draw_list_id:self.current_draw_list_id,
                 redraw_id:self.redraw_id,
                 sub_list_id:0,
-                shader_id:sh.shader_id,
-                uniforms_required:sh.named_uniform_props.total_slots,
+                shader_id:shc.shader_id,
+                uniforms_required:shc.named_uniform_props.total_slots,
                 instance:Vec::new(),
                 uniforms:Vec::new(),
                 textures_2d:Vec::new(),
@@ -32,8 +32,8 @@ impl Cx{
 
         // reuse a draw
         let dc = &mut draw_list.draw_calls[draw_call_id];
-        dc.shader_id = sh.shader_id;
-        dc.uniforms_required = sh.named_uniform_props.total_slots;
+        dc.shader_id = shc.shader_id;
+        dc.uniforms_required = shc.named_uniform_props.total_slots;
         dc.sub_list_id = 0; // make sure its recognised as a draw call
         // truncate buffers and set update frame
         dc.redraw_id = self.redraw_id;
@@ -52,18 +52,18 @@ impl Cx{
         }
 
         let draw_list = &mut self.draw_lists[self.current_draw_list_id];
-        let sh = &self.compiled_shaders[shader_id];
+        let shc = &self.compiled_shaders[shader_id];
 
         // find our drawcall to append to the current layer
         if draw_list.draw_calls_len > 0{
             for i in (0..draw_list.draw_calls_len).rev(){
                 let dc = &mut draw_list.draw_calls[i];
-                if dc.sub_list_id == 0 && dc.shader_id == sh.shader_id{
+                if dc.sub_list_id == 0 && dc.shader_id == shc.shader_id{
                     // reuse this drawcmd and add an instance
                     dc.current_instance_offset = dc.instance.len();
-                    let slot_align = dc.instance.len() % sh.instance_slots;
+                    let slot_align = dc.instance.len() % shc.instance_slots;
                     if slot_align != 0{
-                        panic!("Instance offset disaligned! shader: {} misalign: {} slots: {}", shader_id, slot_align, sh.instance_slots);
+                        panic!("Instance offset disaligned! shader: {} misalign: {} slots: {}", shader_id, slot_align, shc.instance_slots);
                     }
                     return dc.get_current_instance_area(instance_count);
                 }
@@ -133,8 +133,8 @@ impl DrawCall{
 
 // CX and DL uniforms
 const DL_UNI_SCROLL:usize = 0;
-const DL_UNI_CLIP:usize = 2;
-const DL_UNI_SIZE:usize = 6;
+const DL_UNI_CLIP:usize = 4;
+const DL_UNI_SIZE:usize = 8;
 
 #[derive(Default,Clone)]
 pub struct DrawList{

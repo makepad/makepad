@@ -814,21 +814,29 @@ pub struct NamedProps {
 }
 
 impl NamedProps {
-    pub fn construct(sh: &Shader, in_props: &Vec<ShVar>) -> NamedProps {
-        let mut slot = 0;
+    pub fn construct(sh: &Shader, in_props: &Vec<ShVar>, aligned:bool) -> NamedProps {
+        let mut offset = 0;
         let mut out_props = Vec::new();
         for prop in in_props {
             let slots = sh.get_type_slots(&prop.ty);
+            
+            if aligned &&  (offset&3) + slots > 4{ // goes over the boundary
+                offset += 4-(offset&3); // make jump to new slot
+            }
+
             out_props.push(NamedProp {
                 name: prop.name.clone(),
-                offset: slot,
+                offset: offset,
                 slots: slots
             });
-            slot += slots
+            offset += slots
         };
+        if aligned && offset&3 > 0{
+            offset += 4-(offset&3);
+        }
         NamedProps {
             props: out_props,
-            total_slots: slot
+            total_slots: offset
         }
     }
 }

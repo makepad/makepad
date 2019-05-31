@@ -45,7 +45,7 @@ impl RustEditor {
     }
     
     pub fn draw_rust_editor(&mut self, cx: &mut Cx, text_buffer: &mut TextBuffer) {
-        if text_buffer.needs_token_chunks(){
+        if text_buffer.needs_token_chunks() && text_buffer.lines.len() >0{
             let mut state = TokenizerState::new(&text_buffer.lines);
             let mut tokenizer = RustTokenizer::new();
             let mut pair_stack = Vec::new();

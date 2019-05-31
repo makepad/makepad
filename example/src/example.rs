@@ -33,7 +33,7 @@
 use widget::*;
 
 struct App {
-  //  view: View<ScrollBar>,
+    view: View<ScrollBar>,
   //  buttons: Elements<u64, Button, Button>,
   //  text: Text,
     quad: Quad,
@@ -47,16 +47,16 @@ impl Style for App {
         set_dark_style(cx);
         //let quad_sh = App::def_quad_shader(cx);
         Self {
-            /*
+            
             view: View {
-                scroll_h: Some(ScrollBar {
+            /*    scroll_h: Some(ScrollBar {
                     ..Style::style(cx)
                 }),
                 scroll_v: Some(ScrollBar {
                     ..Style::style(cx)
-                }),
+                }),*/
                 ..Style::style(cx)
-            },*/
+            },
             quad: Quad {
                 //shader_id: cx.add_shader(quad_sh, "App.quad"),
                 ..Style::style(cx)
@@ -105,12 +105,13 @@ impl App {
     }
     
     fn draw_app(&mut self, cx: &mut Cx) {
-        /*
+        
         self.view.begin_view(cx, &Layout {
             padding: Padding {l: 10., t: 10., r: 0., b: 0.},
             ..Default::default()
         });
-        
+        self.quad.draw_quad_walk(cx, Bounds::Fix(100.), Bounds::Fix(100.), Margin {l: 15., t: 0., r: 0., b: 0.});
+        /*
         
         for i in 0..100 {
             
@@ -126,7 +127,7 @@ impl App {
         
         self.text.draw_text(cx, &format!("Hello World {}", self.clickety));
         self.quad.draw_quad_walk(cx, Bounds::Fix(100.), Bounds::Fix(100.), Margin {l: 15., t: 0., r: 0., b: 0.});
-        
-        self.view.end_view(cx);*/
+        */
+        self.view.end_view(cx);
     }
 }

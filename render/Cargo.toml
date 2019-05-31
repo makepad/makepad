@@ -29,7 +29,7 @@ serde = { version = "1.0", features = ["derive"] }
 
 [dependencies.winapi]
 version = "*"
-features = ["libloaderapi", "winuser", "d3d11", "d3d11sdklayers", "d3dcommon", "d3dcompiler", "dxgi1_2", "dxgiformat", "dxgitype", "winerror"]
+features = ["libloaderapi", "shellscalingapi", "winuser", "d3d11", "d3d11sdklayers", "d3dcommon", "d3dcompiler", "dxgi1_2", "dxgiformat", "dxgitype", "winerror"]
 optional = true
 
 [dependencies.wio]

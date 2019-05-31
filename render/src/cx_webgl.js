@@ -467,7 +467,7 @@
                     fn:this.uniform_fn_table[uniform.ty]
                 });
                 
-                offset += this.uniform_size_table[uniform.ty]
+                offset += 16;//this.uniform_size_table[uniform.ty]
             }
             return uniform_locs;
         }
@@ -1125,7 +1125,7 @@
             let uniforms_cx = shader.uniforms_cx;
             for(let i = 0; i < uniforms_cx.length; i++){
                 let uni = uniforms_cx[i];
-                uni.fn(this, uni.loc, uni.offset + uniforms_cx_ptr);
+                uni.fn(this, uni.loc, i*16 + uniforms_cx_ptr);
             }
             let uniforms_dl = shader.uniforms_dl;
             for(let i = 0; i < uniforms_dl.length; i++){
@@ -1372,7 +1372,7 @@
         },
     };
 
-    WasmApp.prototype.uniform_size_table = {
+    /*WasmApp.prototype.uniform_size_table = {
         "float":1,
         "vec2":2,
         "vec3":3,
@@ -1380,7 +1380,7 @@
         "mat2":4,
         "mat3":9,
         "mat4":16
-    }
+    }*/
 
     function add_line_numbers_to_string(code){
         var lines = code.split('\n')
