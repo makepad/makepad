@@ -793,7 +793,7 @@ impl RustTokenizer {
                     ) {
                         out.add_space();
                     }
-                    if pre_spacey && is_curly && !first_on_line {
+                    if pre_spacey && is_curly && !first_on_line && tp.prev_type() != TokenType::Namespace{
                         if tp.prev_char() != ' ' && tp.prev_char() != '{' 
                         && tp.prev_char() != '[' && tp.prev_char() != '(' && tp.prev_char() != ':' {
                             out.add_space();
@@ -950,7 +950,7 @@ impl RustTokenizer {
                     
                     is_unary_operator = true;
                 },
-                TokenType::BuiltinType | TokenType::TypeName => { // these dont reset the angle counter
+                TokenType::Identifier | TokenType::BuiltinType | TokenType::TypeName => { // these dont reset the angle counter
                     is_unary_operator = false;
                     
                     first_after_open = false;
@@ -985,7 +985,6 @@ impl RustTokenizer {
                     out.extend(tp.cur_chunk());
                 },
                 // these are followeable by non unary operators
-                TokenType::Identifier |
                 TokenType::Call | TokenType::String | TokenType::Regex | TokenType::Number |
                 TokenType::Bool | TokenType::Unexpected => {
                     is_unary_operator = false;

@@ -321,7 +321,11 @@ impl D3d11 {
     }
     
     fn set_rendertargets(&self) {
-        unsafe {self.context.OMSetRenderTargets(1, [self.render_target_view.as_raw() as *mut _].as_ptr(), self.depth_stencil_view.as_raw() as *mut _)}
+        unsafe {self.context.OMSetRenderTargets(
+            1,
+            [self.render_target_view.as_raw() as *mut _].as_ptr(),
+            self.depth_stencil_view.as_raw() as *mut _
+        )}
     }
     
     fn set_viewport(&self, window_geom: &WindowGeom) {
@@ -424,8 +428,8 @@ impl D3d11 {
         unsafe {self.swap_chain.Present(0, 0)};
     }
     
-    pub fn compile_shader(&self, stage: &str, entry: &[u8], shader: &[u8]) -> Result<ComPtr<d3dcommon::ID3DBlob>,
-    SlErr> {
+    pub fn compile_shader(&self, stage: &str, entry: &[u8], shader: &[u8])
+        -> Result<ComPtr<d3dcommon::ID3DBlob>, SlErr> {
         
         let mut blob = ptr::null_mut();
         let mut error = ptr::null_mut();
@@ -459,8 +463,8 @@ impl D3d11 {
         }
     }
     
-    pub fn create_input_layout(&self, vs: &ComPtr<d3dcommon::ID3DBlob>, layout_desc: &Vec<d3d11::D3D11_INPUT_ELEMENT_DESC>) -> Result<ComPtr<d3d11::ID3D11InputLayout>,
-    SlErr> {
+    pub fn create_input_layout(&self, vs: &ComPtr<d3dcommon::ID3DBlob>, layout_desc: &Vec<d3d11::D3D11_INPUT_ELEMENT_DESC>)
+        -> Result<ComPtr<d3d11::ID3D11InputLayout>, SlErr> {
         let mut input_layout = ptr::null_mut();
         let hr = unsafe {self.device.CreateInputLayout(
             layout_desc.as_ptr(),
@@ -477,8 +481,8 @@ impl D3d11 {
         }
     }
     
-    pub fn create_pixel_shader(&self, ps: &ComPtr<d3dcommon::ID3DBlob>) -> Result<ComPtr<d3d11::ID3D11PixelShader>,
-    SlErr> {
+    pub fn create_pixel_shader(&self, ps: &ComPtr<d3dcommon::ID3DBlob>)
+        -> Result<ComPtr<d3d11::ID3D11PixelShader>, SlErr> {
         let mut pixel_shader = ptr::null_mut();
         let hr = unsafe {self.device.CreatePixelShader(
             ps.GetBufferPointer(),
@@ -495,8 +499,8 @@ impl D3d11 {
     }
     
     
-    pub fn create_vertex_shader(&self, vs: &ComPtr<d3dcommon::ID3DBlob>) -> Result<ComPtr<d3d11::ID3D11VertexShader>,
-    SlErr> {
+    pub fn create_vertex_shader(&self, vs: &ComPtr<d3dcommon::ID3DBlob>)
+        -> Result<ComPtr<d3d11::ID3D11VertexShader>, SlErr> {
         let mut vertex_shader = ptr::null_mut();
         let hr = unsafe {self.device.CreateVertexShader(
             vs.GetBufferPointer(),
@@ -513,8 +517,8 @@ impl D3d11 {
     }
     
     
-    fn create_raster_state(device: &ComPtr<d3d11::ID3D11Device>) -> Result<ComPtr<d3d11::ID3D11RasterizerState>,
-    winerror::HRESULT> {
+    fn create_raster_state(device: &ComPtr<d3d11::ID3D11Device>)
+        -> Result<ComPtr<d3d11::ID3D11RasterizerState>, winerror::HRESULT> {
         let mut raster_state = ptr::null_mut();
         let raster_desc = d3d11::D3D11_RASTERIZER_DESC {
             AntialiasedLineEnable: FALSE,
@@ -537,8 +541,8 @@ impl D3d11 {
         }
     }
     
-    fn create_blend_state(device: &ComPtr<d3d11::ID3D11Device>) -> Result<ComPtr<d3d11::ID3D11BlendState>,
-    winerror::HRESULT> {
+    fn create_blend_state(device: &ComPtr<d3d11::ID3D11Device>)
+        -> Result<ComPtr<d3d11::ID3D11BlendState>, winerror::HRESULT> {
         let mut blend_state = ptr::null_mut();
         let mut blend_desc: d3d11::D3D11_BLEND_DESC = unsafe {mem::zeroed()};
         blend_desc.AlphaToCoverageEnable = FALSE;
@@ -561,8 +565,8 @@ impl D3d11 {
         }
     }
     
-    fn create_depth_stencil_view(buffer: &ComPtr<d3d11::ID3D11Texture2D>, device: &ComPtr<d3d11::ID3D11Device>) -> Result<ComPtr<d3d11::ID3D11DepthStencilView>,
-    winerror::HRESULT> {
+    fn create_depth_stencil_view(buffer: &ComPtr<d3d11::ID3D11Texture2D>, device: &ComPtr<d3d11::ID3D11Device>)
+        -> Result<ComPtr<d3d11::ID3D11DepthStencilView>, winerror::HRESULT> {
         let mut depth_stencil_view = ptr::null_mut();
         let mut dsv_desc: d3d11::D3D11_DEPTH_STENCIL_VIEW_DESC = unsafe {mem::zeroed()};
         dsv_desc.Format = dxgiformat::DXGI_FORMAT_D24_UNORM_S8_UINT;
@@ -579,8 +583,8 @@ impl D3d11 {
         }
     }
     
-    fn create_depth_stencil_state(device: &ComPtr<d3d11::ID3D11Device>) -> Result<ComPtr<d3d11::ID3D11DepthStencilState>,
-    winerror::HRESULT> {
+    fn create_depth_stencil_state(device: &ComPtr<d3d11::ID3D11Device>)
+        -> Result<ComPtr<d3d11::ID3D11DepthStencilState>, winerror::HRESULT> {
         let mut depth_stencil_state = ptr::null_mut();
         let ds_desc = d3d11::D3D11_DEPTH_STENCIL_DESC {
             DepthEnable: FALSE,
@@ -612,8 +616,8 @@ impl D3d11 {
         }
     }
     
-    fn create_render_target_view(device: &ComPtr<d3d11::ID3D11Device>, swap_chain: &ComPtr<dxgi1_2::IDXGISwapChain1>) -> Result<ComPtr<d3d11::ID3D11RenderTargetView>,
-    winerror::HRESULT> {
+    fn create_render_target_view(device: &ComPtr<d3d11::ID3D11Device>, swap_chain: &ComPtr<dxgi1_2::IDXGISwapChain1>)
+        -> Result<ComPtr<d3d11::ID3D11RenderTargetView>, winerror::HRESULT> {
         let texture = D3d11::get_swap_texture(swap_chain) ?;
         let mut render_target_view = ptr::null_mut();
         let hr = unsafe {device.CreateRenderTargetView(
@@ -629,8 +633,8 @@ impl D3d11 {
         }
     }
     
-    fn get_swap_texture(swap_chain: &ComPtr<dxgi1_2::IDXGISwapChain1>) -> Result<ComPtr<d3d11::ID3D11Texture2D>,
-    winerror::HRESULT> {
+    fn get_swap_texture(swap_chain: &ComPtr<dxgi1_2::IDXGISwapChain1>)
+        -> Result<ComPtr<d3d11::ID3D11Texture2D>, winerror::HRESULT> {
         let mut texture = ptr::null_mut();
         let hr = unsafe {swap_chain.GetBuffer(
             0,
@@ -645,8 +649,8 @@ impl D3d11 {
         }
     }
     
-    fn create_depth_stencil_buffer(window_geom: &WindowGeom, device: &ComPtr<d3d11::ID3D11Device>) -> Result<ComPtr<d3d11::ID3D11Texture2D>,
-    winerror::HRESULT> {
+    fn create_depth_stencil_buffer(window_geom: &WindowGeom, device: &ComPtr<d3d11::ID3D11Device>)
+        -> Result<ComPtr<d3d11::ID3D11Texture2D>, winerror::HRESULT> {
         let mut depth_stencil_buffer = ptr::null_mut();
         let texture2d_desc = d3d11::D3D11_TEXTURE2D_DESC {
             Width: (window_geom.inner_size.x * window_geom.dpi_factor) as u32,
@@ -672,8 +676,13 @@ impl D3d11 {
         }
     }
     
-    fn create_swap_chain_for_hwnd(window_geom: &WindowGeom, windows_window: &WindowsWindow, factory: &ComPtr<dxgi1_2::IDXGIFactory2>, device: &ComPtr<d3d11::ID3D11Device>) -> Result<ComPtr<dxgi1_2::IDXGISwapChain1>,
-    winerror::HRESULT> {
+    fn create_swap_chain_for_hwnd(
+        window_geom: &WindowGeom,
+        windows_window: &WindowsWindow,
+        factory: &ComPtr<dxgi1_2::IDXGIFactory2>,
+        device: &ComPtr<d3d11::ID3D11Device>
+    )
+        -> Result<ComPtr<dxgi1_2::IDXGISwapChain1>, winerror::HRESULT> {
         let mut swap_chain1 = ptr::null_mut();
         
         let sc_desc = dxgi1_2::DXGI_SWAP_CHAIN_DESC1 {
@@ -706,8 +715,8 @@ impl D3d11 {
         }
     }
     
-    fn create_d3d11_device(adapter: &ComPtr<dxgi::IDXGIAdapter>) -> Result<(ComPtr<d3d11::ID3D11Device>, ComPtr<d3d11::ID3D11DeviceContext>),
-    winerror::HRESULT> {
+    fn create_d3d11_device(adapter: &ComPtr<dxgi::IDXGIAdapter>)
+        -> Result<(ComPtr<d3d11::ID3D11Device>, ComPtr<d3d11::ID3D11DeviceContext>), winerror::HRESULT> {
         let mut device = ptr::null_mut();
         let mut device_context = ptr::null_mut();
         let hr = unsafe {d3d11::D3D11CreateDevice(
@@ -730,8 +739,8 @@ impl D3d11 {
         }
     }
     
-    fn create_dxgi_factory1(guid: &GUID) -> Result<ComPtr<dxgi1_2::IDXGIFactory2>,
-    winerror::HRESULT> {
+    fn create_dxgi_factory1(guid: &GUID)
+        -> Result<ComPtr<dxgi1_2::IDXGIFactory2>, winerror::HRESULT> {
         let mut factory = ptr::null_mut();
         let hr = unsafe {dxgi::CreateDXGIFactory1(
             guid,
@@ -745,8 +754,8 @@ impl D3d11 {
         }
     }
     
-    fn enum_adapters(factory: &ComPtr<dxgi1_2::IDXGIFactory2>) -> Result<ComPtr<dxgi::IDXGIAdapter>,
-    winerror::HRESULT> {
+    fn enum_adapters(factory: &ComPtr<dxgi1_2::IDXGIFactory2>)
+        -> Result<ComPtr<dxgi::IDXGIAdapter>, winerror::HRESULT> {
         let mut adapter = ptr::null_mut();
         let hr = unsafe {factory.EnumAdapters(
             0,
@@ -759,7 +768,6 @@ impl D3d11 {
             Err(hr)
         }
     }
-    
     
     /*
      fn enum_outputs(adapter:&ComPtr<dxgi::IDXGIAdapter>) -> Result<ComPtr<dxgi::IDXGIOutput>,
