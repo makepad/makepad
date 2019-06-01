@@ -20,6 +20,7 @@ enum Panel {
 struct App {
     view: View<ScrollBar>,
     dock: Dock<Panel>,
+    quad: Quad,
     app_state: AppState,
     file_tree: FileTree,
     file_editors: Elements<u64, FileEditor, FileEditorTemplates>,
@@ -44,7 +45,7 @@ impl Style for App {
     fn style(cx: &mut Cx) -> Self {
         set_dark_style(cx);
         Self {
-            
+            quad: Quad{..Style::style(cx)},
             view: View {
                 ..Style::style(cx)
             },
@@ -158,12 +159,12 @@ impl App {
                     self.file_tree.load_from_json(cx, utf8_data);
                 }
                 else if let Some(utf8_data) = self.app_state_read_req.as_utf8(fr) {
-                    if let Ok(app_state) = serde_json::from_str(&utf8_data) {
+                    /*if let Ok(app_state) = serde_json::from_str(&utf8_data) {
                         self.app_state = app_state;
                         // update window pos and size
                         cx.set_window_position(self.app_state.window_position);
                         cx.set_window_outer_size(self.app_state.window_outer_size)
-                    }
+                    }*/
                 }
                 else if self.text_buffers.handle_file_read(&fr) {
                     cx.redraw_area(Area::All);
@@ -264,7 +265,6 @@ impl App {
         if let Err(()) = self.view.begin_view(cx, &Layout {..Default::default()}) {
             return
         }
-        
         self.dock.draw_dock(cx);
         
         let mut dock_walker = self.dock.walker(&mut self.app_state.dock_items);

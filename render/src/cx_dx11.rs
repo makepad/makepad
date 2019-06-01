@@ -3,9 +3,9 @@ use crate::cx::*;
 use crate::cx_desktop::*;
 
 use winapi::shared::guiddef::GUID;
-use winapi::shared::minwindef::{TRUE, FALSE, UINT};
-use winapi::shared::{dxgi, dxgi1_2, dxgitype, dxgiformat, winerror};
-use winapi::um::{d3d11, d3d11sdklayers, d3dcommon, d3dcompiler};
+use winapi::shared::minwindef:: {TRUE, FALSE, UINT};
+use winapi::shared:: {dxgi, dxgi1_2, dxgitype, dxgiformat, winerror};
+use winapi::um:: {d3d11, d3d11sdklayers, d3dcommon, d3dcompiler};
 use winapi::um::unknwnbase::IUnknown;
 use winapi::Interface;
 use wio::com::ComPtr;
@@ -34,6 +34,9 @@ impl Cx {
                 
                 if draw_call.instance_dirty {
                     draw_call.instance_dirty = false;
+                    if draw_call.instance.len() == 0 {
+                        continue;
+                    }
                     // update the instance buffer data
                     draw_call.platform.inst_vbuf.update_with_f32_vertex_data(d3d11, &draw_call.instance);
                 }
@@ -81,6 +84,8 @@ impl Cx {
         
         d3d11.clear_depth_stencil_view();
         
+        d3d11.set_rendertargets();
+        
         self.exec_draw_list(0, d3d11);
         
         d3d11.present();
@@ -122,7 +127,21 @@ impl Cx {
             //println!("{}{} ",self.playing_anim_areas.len(), self.redraw_areas.len());
             windows_window.poll_events(
                 self.playing_anim_areas.len() == 0 && self.redraw_areas.len() == 0 && self.next_frame_callbacks.len() == 0,
-                | _events | {
+                | events | {
+                    for mut event in events {
+                        match event {
+                            Event::WindowChange(re) => { // do this here because mac
+                                self.window_geom = re.new_geom.clone();
+                                self.call_event_handler(&mut event_handler, &mut event);
+                                
+                                self.redraw_area(Area::All);
+                                self.call_draw_event(&mut event_handler, &mut root_view);
+                                self.repaint(&d3d11);
+                                //self.resize_layer_to_turtle(&layer);
+                            },
+                            _=>()
+                        }
+                    }
                 }
             );
             
@@ -281,8 +300,6 @@ impl D3d11 {
         
         //unsafe {context.OMSetDepthStencilState(depth_stencil_state.as_raw() as *mut _, 1)}
         
-        unsafe {context.OMSetRenderTargets(1, [render_target_view.as_raw() as *mut _].as_ptr(), depth_stencil_view.as_raw() as *mut _)}
-        
         let raster_state = D3d11::create_raster_state(&device) ?;
         
         unsafe {context.RSSetState(raster_state.as_raw() as *mut _)}
@@ -302,6 +319,10 @@ impl D3d11 {
             raster_state: raster_state,
             blend_state: blend_state
         })
+    }
+    
+    fn set_rendertargets(&self){
+        unsafe {self.context.OMSetRenderTargets(1, [self.render_target_view.as_raw() as *mut _].as_ptr(), self.depth_stencil_view.as_raw() as *mut _)}
     }
     
     fn set_viewport(&self, window_geom: &WindowGeom) {
@@ -346,7 +367,7 @@ impl D3d11 {
         let raw = [texture.as_raw() as *const std::ffi::c_void];
         println!("INDEX {}", index);
         unsafe {self.context.PSSetShaderResources(index as u32, 1, raw.as_ptr() as *const *mut _)}
-        unsafe {self.context.VSSetShaderResources(index as u32, 1, raw.as_ptr()  as *const *mut _)}
+        unsafe {self.context.VSSetShaderResources(index as u32, 1, raw.as_ptr() as *const *mut _)}
     }
     
     
@@ -404,7 +425,7 @@ impl D3d11 {
     }
     
     fn present(&self) {
-        unsafe {self.swap_chain.Present(1, 0)};
+        unsafe {self.swap_chain.Present(0, 0)};
     }
     
     pub fn compile_shader(&self, stage: &str, entry: &[u8], shader: &[u8]) -> Result<ComPtr<d3dcommon::ID3DBlob>,
@@ -800,7 +821,8 @@ impl D3d11Buffer {
             self.buffer = Some(unsafe {ComPtr::from_raw(buffer as *mut _)});
         }
         else {
-            panic!("Buffer create failed");
+            
+            panic!("Buffer create failed {}", len_slots);
             self.last_size = 0;
             self.buffer = None
         }

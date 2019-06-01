@@ -427,6 +427,7 @@ impl CocoaWindow {
             if !self.init_resize {
                 self.init_resize = true;
                 self.send_change_event();
+               
             }
             
             loop {

@@ -50,7 +50,7 @@ impl CodeIcon{
             fn pixel()->vec4{
                 let col = color;
                 if abs(icon_id - 4.) < 0.1{ //Wait
-                    df_viewport(pos*vec2(10.));// * vec2(w, h));
+                    df_viewport(pos*vec2(10.,10.));// * vec2(w, h));
                     df_circle(5.,5.,4.);
                     df_fill_keep(color("orange"));
                     df_stroke(color("gray"),0.5);
@@ -64,7 +64,7 @@ impl CodeIcon{
                     return df_result;
                 }
                 if abs(icon_id - 3.) < 0.1{ //OK
-                    df_viewport(pos*vec2(10.));// * vec2(w, h));
+                    df_viewport(pos*vec2(10.,10.));// * vec2(w, h));
                     df_circle(5.,5.,4.);
                     df_fill_keep(color("#555"));
                     df_stroke(color("#555"),0.5);
@@ -75,7 +75,7 @@ impl CodeIcon{
                     return df_result;
                 }
                 else if abs(icon_id - 2.) < 0.1{ // Error
-                    df_viewport(pos*vec2(10.));// * vec2(w, h));
+                    df_viewport(pos*vec2(10.,10.));// * vec2(w, h));
                     df_circle(5.,5.,4.);
                     df_fill_keep(color("#c00"));
                     df_stroke(color("gray"),0.5);
@@ -87,8 +87,8 @@ impl CodeIcon{
                     df_stroke(color("black"),0.8);
                     return df_result;
                 }
-                else if abs(icon_id - 1.) < 0.1{ // Warning
-                    df_viewport(pos*vec2(10.));// * vec2(w, h));
+                else { // Warning
+                    df_viewport(pos*vec2(10.,10.));// * vec2(w, h));
                     df_move_to(5.,1.);
                     df_line_to(9.,9.);
                     df_line_to(1.,9.);

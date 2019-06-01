@@ -25,7 +25,7 @@ pub struct WindowsWindow {
     pub time_start: u64,
     pub last_key_mod: KeyModifiers,
     pub ime_spot: Vec2,
-    
+    pub init_resize:bool,
     pub current_cursor: MouseCursor,
     pub last_mouse_pos: Vec2,
     pub fingers_down: Vec<bool>,
@@ -65,7 +65,7 @@ impl WindowsWindow {
         for _i in 0..10 {
             self.fingers_down.push(false);
         }
-        
+        self.init_resize = false;
         self.dpi_functions = Some(DpiFunctions::new());
         if let Some(dpi_functions) = &self.dpi_functions {
             dpi_functions.become_dpi_aware()
@@ -128,11 +128,19 @@ impl WindowsWindow {
     pub fn poll_events<F>(&mut self, first_block: bool, mut event_handler: F)
     where F: FnMut(&mut Vec<Event>),
     {
+        let mut do_first_block = first_block;
         unsafe {
             self.event_callback = Some(&mut event_handler as *const FnMut(&mut Vec<Event>) as *mut FnMut(&mut Vec<Event>));
             let mut msg = mem::uninitialized();
+            
+            if !self.init_resize {
+                self.init_resize = true;
+                self.send_change_event();
+            }
+
             loop {
-                if first_block {
+                if do_first_block {
+                    do_first_block = false;
                     if winuser::GetMessageW(&mut msg, ptr::null_mut(), 0, 0) == 0 {
                         // Only happens if the message is `WM_QUIT`.
                         debug_assert_eq!(msg.message, winuser::WM_QUIT);
@@ -198,6 +206,7 @@ impl WindowsWindow {
         unsafe {
             let mut rect = RECT {left: 0, top: 0, bottom: 0, right: 0};
             winuser::GetClientRect(self.hwnd.unwrap(), &mut rect);
+            println!("{} {} {} {}",rect.right , rect.left,rect.bottom , rect.top);
             Vec2 {x: (rect.right - rect.left) as f32, y: (rect.bottom - rect.top)as f32}
         }
     }

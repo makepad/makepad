@@ -336,11 +336,11 @@ impl CodeEditor {
                 let col = color;
                 let thickness = 0.8 + dpi_dilate * 0.5;
                 if indent_id == indent_sel {
-                    col *= vec4(1.);
+                    col *= vec4(1.,1.,1.,1.);
                     thickness *= 1.3;
                 }
                 else {
-                    col *= vec4(0.75);
+                    col *= vec4(0.75,0.75,0.75,0.75);
                 }
                 df_viewport(pos * vec2(w, h));
                 df_move_to(1., - 1.);
@@ -360,7 +360,7 @@ impl CodeEditor {
                     return vec4(color.rgb * color.a, color.a)
                 }
                 else {
-                    return vec4(0.);
+                    return vec4(0.,0.,0.,0.);
                 }
             }
         }));
@@ -385,7 +385,7 @@ impl CodeEditor {
                     draw_list_clip.zw
                 );
                 pos = (clipped - shift - vec2(x, y)) / vec2(w, h);
-                return vec4(clipped, 0., 1.) * camera_projection;
+                return vec4(clipped.x, clipped.y, 0., 1.) * camera_projection;
             }
             
             fn pixel() -> vec4 {
@@ -460,7 +460,7 @@ impl CodeEditor {
             let visible: float<Uniform>;
             fn pixel() -> vec4 {
                 if visible<0.5 {
-                    return vec4(0.)
+                    return vec4(0.,0.,0.,0.)
                 }
                 df_viewport(pos * vec2(w, h));
                 df_box(0.5, 0.5, w - 1., h - 1., 1.);
