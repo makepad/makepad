@@ -1,4 +1,5 @@
-use widget::*;
+use render::*; 
+
 use crate::textbuffer::*;
 
 #[derive(Clone, Debug, PartialEq)]

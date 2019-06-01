@@ -8,7 +8,7 @@ ogl = [
 mtl = [
     "bitflags","libc","log","block","foreign-types",
     "sema","time","metal","cocoa","core-graphics",
-    "objc-foundation","objc_id","objc"
+    "objc-foundation","objc_id","objc","closefds"
 ]
 webgl = [
     "bitflags"
@@ -26,6 +26,10 @@ edition = "2018"
 [dependencies]
 shader_ast = {path="./shader_ast"}
 serde = { version = "1.0", features = ["derive"] }
+
+[dependencies.closefds]
+version = "*"
+optional = true
 
 [dependencies.winapi]
 version = "*"

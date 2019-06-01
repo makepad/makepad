@@ -1,4 +1,4 @@
-use widget::*;
+use render::*; 
 
 #[derive(Clone)]
 pub struct CodeIcon{

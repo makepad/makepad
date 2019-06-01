@@ -1,4 +1,5 @@
-use widget::*;
+use render::*; 
+
 use crate::textbuffer::*;
 use crate::codeeditor::*;
 
@@ -892,7 +893,7 @@ impl RustTokenizer {
                         out.strip_space();
                     }
                     out.extend(tp.cur_chunk());
-                    if (tp.cur_char() != ',' || paren_stack.last_mut().unwrap().angle_counter == 0) // otherwise our generics multiline
+                    if  paren_stack.last_mut().unwrap().angle_counter == 0 // otherwise our generics multiline
                         && paren_stack.last().unwrap().expecting_newlines == true
                         && tp.next_type() != TokenType::Newline { // we are expecting newlines!
                         // scan forward to see if we really need a newline.

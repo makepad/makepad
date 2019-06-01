@@ -1,11 +1,11 @@
+use render::*;
 use widget::*;
 use editor::*;
 
 use std::io::Read;
-use std::process:: {Command, Child, Stdio};
 use std::sync::mpsc;
+use std::process:: {Child};
 
-//use miniserde::{json,  Deserialize};
 use serde_json:: {Result};
 use serde::*;
 
@@ -498,19 +498,13 @@ impl RustCompiler {
         // start a release build
         self._rustc_build_stages = BuildStage::Building;
         
-        let mut _child = Command::new("cargo")
-        //.args(&["build","--release","--message-format=json"])
-            .args(&["build", "--release", "--message-format=json"])
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .current_dir("./edit_repo")
-            .spawn();
+        let mut _child = spawn_process_command("cargo",&["build", "--release","--message-format=json"],"./edit_repo");
         
         if let Err(_) = _child {
             return;
         }
         
-        let mut child = _child.unwrap();
+        let mut child = _child.unwrap(); 
         
         let mut stdout = child.stdout.take().unwrap();
         let signal = self._check_signal;
@@ -535,12 +529,7 @@ impl RustCompiler {
             let _ = child.kill();
         }
         
-        let mut _child = Command::new("cargo")
-            .args(&["run", "--release"])
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .current_dir("./edit_repo")
-            .spawn();
+        let mut _child = spawn_process_command("cargo",&["run", "--release"],"./edit_repo");
         
         let mut child = _child.unwrap();
         
@@ -588,14 +577,8 @@ impl RustCompiler {
         if let Some(child) = &mut self._build_child {
             let _ = child.kill();
         }
-        
-        let mut _child = Command::new("cargo")
-        //.args(&["build","--release","--message-format=json"])
-            .args(&["check", "--message-format=json"])
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .current_dir("./edit_repo")
-            .spawn();
+
+        let mut _child = spawn_process_command("cargo",&["check", "--message-format=json"],"./edit_repo");
         
         if let Err(_) = _child {
             return;

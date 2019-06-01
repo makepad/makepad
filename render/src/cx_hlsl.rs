@@ -1,8 +1,8 @@
 use crate::cx::*;
 use crate::cx_dx11::*;
 use std::ffi;
-use winapi::shared::{dxgiformat};
-use winapi::um::{d3d11, d3dcommon};
+use winapi::shared:: {dxgiformat};
+use winapi::um:: {d3d11, d3dcommon};
 use wio::com::ComPtr;
 
 #[derive(Default, Clone)]
@@ -76,7 +76,7 @@ impl Cx {
         out.push_str(post);
         out.push_str("{\n");
         out.push_str(field);
-        for (index, var) in vars.iter().enumerate() {
+        for var in vars {
             out.push_str("  ");
             out.push_str(&Self::hlsl_type(&var.ty));
             out.push_str(" ");
@@ -95,7 +95,7 @@ impl Cx {
         let mut out = String::new();
         out.push_str("{\n");
         out.push_str(field);
-        for (index, var) in vars.iter().enumerate() {
+        for var in vars {
             out.push_str(match Self::hlsl_type(&var.ty).as_ref() {
                 "float" => "0.0",
                 "float2" => "float2(0.0,0.0)",
@@ -303,7 +303,7 @@ impl Cx {
         let inst_named = NamedProps::construct(sh, &ash.instances, false);
         let mut strings = Vec::new();
         
-        for (index, geom) in geom_named.props.iter().enumerate() {
+        for geom in &geom_named.props {
             strings.push(ffi::CString::new(format!("GEOM_{}", geom.name.to_uppercase())).unwrap());
             layout_desc.push(d3d11::D3D11_INPUT_ELEMENT_DESC {
                 SemanticName: strings.last().unwrap().as_ptr() as *const _,
@@ -316,7 +316,7 @@ impl Cx {
             })
         }
         
-        for (index, inst) in inst_named.props.iter().enumerate() {
+        for inst in &inst_named.props {
             strings.push(ffi::CString::new(format!("INST_{}", inst.name.to_uppercase())).unwrap());
             layout_desc.push(d3d11::D3D11_INPUT_ELEMENT_DESC {
                 SemanticName: strings.last().unwrap().as_ptr() as *const _,

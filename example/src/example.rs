@@ -30,7 +30,8 @@
 // Multi cursor/grid cursor also works with ctrl+click / ctrl+shift+click
 // press alt or escape for animated codefolding outline view!
 
-use widget::*;
+use render::*; 
+use widget::*; 
 
 struct App {
     view: View<ScrollBar>,

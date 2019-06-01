@@ -1,3 +1,4 @@
+use render::*; 
 use widget::*; 
 use crate::textbuffer::*;
 use crate::textcursor::*;

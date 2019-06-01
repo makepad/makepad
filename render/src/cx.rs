@@ -36,7 +36,7 @@ pub use crate::cx_webgl::*;
 #[cfg(any(feature = "webgl", feature = "ogl"))]
 pub use crate::cx_glsl::*;
 
-#[cfg(any(feature = "ogl", feature = "mtl"))]
+#[cfg(any(feature = "ogl", feature = "mtl", feature = "dx11"))]
 pub use crate::cx_desktop::*;
 
 pub struct Cx {

@@ -8,7 +8,6 @@ use std::ffi::OsStr;
 use std::os::windows::ffi::OsStrExt;
 use std::mem;
 use std::os::raw::c_void;
-use std::sync:: {Once, ONCE_INIT};
 use winapi::shared::windef:: {RECT, DPI_AWARENESS_CONTEXT, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE, HMONITOR, HWND,};
 use winapi::shared::winerror::S_OK;
 use winapi::um::libloaderapi:: {GetProcAddress, LoadLibraryA};
@@ -119,8 +118,8 @@ impl WindowsWindow {
             self.hwnd = Some(hwnd);
             winuser::SetWindowLongPtrW(hwnd, winuser::GWLP_USERDATA, &self as *const _ as isize);
             
-            if let Some(dpi_functions) = &self.dpi_functions {
-                dpi_functions.enable_non_client_dpi_scaling(self.hwnd.unwrap())
+            if let Some(dpi_functions) = &self.dpi_functions { 
+               dpi_functions.enable_non_client_dpi_scaling(self.hwnd.unwrap())
             }
         }
     }
@@ -206,8 +205,8 @@ impl WindowsWindow {
         unsafe {
             let mut rect = RECT {left: 0, top: 0, bottom: 0, right: 0};
             winuser::GetClientRect(self.hwnd.unwrap(), &mut rect);
-            println!("{} {} {} {}",rect.right , rect.left,rect.bottom , rect.top);
-            Vec2 {x: (rect.right - rect.left) as f32, y: (rect.bottom - rect.top)as f32}
+            let dpi = self.get_dpi_factor();
+            Vec2 {x: (rect.right - rect.left) as f32 / dpi, y: (rect.bottom - rect.top)as f32 / dpi}
         }
     }
     

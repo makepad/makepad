@@ -187,10 +187,7 @@ impl Cx {
         
         self.window_geom = cocoa_window.get_window_geom();
         
-        layer.set_drawable_size(CGSize::new(
-            (self.window_geom.inner_size.x * self.window_geom.dpi_factor) as f64,
-            (self.window_geom.inner_size.y * self.window_geom.dpi_factor) as f64
-        ));
+        self.resize_layer_to_turtle(&layer);
         
         let command_queue = device.new_command_queue();
         
@@ -198,6 +195,8 @@ impl Cx {
             ..Style::style(self)
         };
         
+        
+        println!("{:?}", self.window_geom);
         // move it to my second screen. livecompile.
         //cocoa_window.set_position(Vec2 {x: 1920.0, y: 400.0});
         
@@ -296,11 +295,11 @@ impl Cx {
             
             // call redraw event
             if self.redraw_areas.len()>0 {
-                let time_start = cocoa_window.time_now();
+                //let time_start = cocoa_window.time_now();
                 self.call_draw_event(&mut event_handler, &mut root_view);
                 self.paint_dirty = true;
-                let time_end = cocoa_window.time_now();
-                println!("Redraw took: {}", (time_end - time_start));
+               // let time_end = cocoa_window.time_now();
+               // println!("Redraw took: {}", (time_end - time_start));
             }
             
             self.process_desktop_file_read_requests(&mut event_handler);
@@ -554,4 +553,18 @@ impl Texture2D {
         self.dirty = false;
         
     }
+}
+
+use closefds::*;
+use std::process:: {Command, Child, Stdio};
+use std::os::unix::process::{CommandExt};
+
+pub fn spawn_process_command(cmd:&str, args:&[&str], current_dir:&str)->Result<Child, std::io::Error>{
+    unsafe{Command::new(cmd)
+        .args(args)
+        .pre_exec(close_fds_on_exec(vec![0,1,2]).unwrap())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .current_dir(current_dir)
+        .spawn()}
 }

@@ -1,4 +1,6 @@
-use widget::*;
+use render::*; 
+use widget::*; 
+
 use crate::textbuffer::*;
 
 //#[derive(Clone)]

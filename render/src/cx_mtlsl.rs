@@ -75,9 +75,8 @@ impl Cx {
         }
     }
     
-    pub fn mtl_assemble_struct(sh: &Shader, name: &str, vars: &Vec<ShVar>, pack_type:PackType, field: &str) -> String {
+    pub fn mtl_assemble_struct(name: &str, vars: &Vec<ShVar>, pack_type:PackType, field: &str) -> String {
         let mut out = String::new();
-        let mut padding = 0;
         out.push_str("struct ");
         out.push_str(name);
         out.push_str("{\n");
@@ -136,12 +135,12 @@ impl Cx {
         let instance_slots = sh.compute_slot_total(&instances);
         //let varying_slots = sh.compute_slot_total(&varyings);
         
-        mtl_out.push_str(&Self::mtl_assemble_struct(sh, "_Geom", &geometries, PackType::Packed, ""));
-        mtl_out.push_str(&Self::mtl_assemble_struct(sh, "_Inst", &instances, PackType::Packed, ""));
-        mtl_out.push_str(&Self::mtl_assemble_struct(sh, "_UniCx", &uniforms_cx, PackType::Unpacked, ""));
-        mtl_out.push_str(&Self::mtl_assemble_struct(sh, "_UniDl", &uniforms_dl, PackType::Unpacked, ""));
-        mtl_out.push_str(&Self::mtl_assemble_struct(sh, "_UniDr", &uniforms_dr, PackType::Unpacked, ""));
-        mtl_out.push_str(&Self::mtl_assemble_struct(sh, "_Loc", &locals, PackType::Unpacked, ""));
+        mtl_out.push_str(&Self::mtl_assemble_struct("_Geom", &geometries, PackType::Packed, ""));
+        mtl_out.push_str(&Self::mtl_assemble_struct("_Inst", &instances, PackType::Packed, ""));
+        mtl_out.push_str(&Self::mtl_assemble_struct("_UniCx", &uniforms_cx, PackType::Unpacked, ""));
+        mtl_out.push_str(&Self::mtl_assemble_struct("_UniDl", &uniforms_dl, PackType::Unpacked, ""));
+        mtl_out.push_str(&Self::mtl_assemble_struct("_UniDr", &uniforms_dr, PackType::Unpacked, ""));
+        mtl_out.push_str(&Self::mtl_assemble_struct("_Loc", &locals, PackType::Unpacked, ""));
         
         // we need to figure out which texture slots exist
         mtl_out.push_str(&Self::mtl_assemble_texture_slots(&texture_slots));
@@ -203,7 +202,7 @@ impl Cx {
         for auto in &pix_cx.auto_vary {
             varyings.push(auto.clone());
         }
-        mtl_out.push_str(&Self::mtl_assemble_struct(sh, "_Vary", &varyings, PackType::Unpacked, "  float4 mtl_position [[position]];\n"));
+        mtl_out.push_str(&Self::mtl_assemble_struct("_Vary", &varyings, PackType::Unpacked, "  float4 mtl_position [[position]];\n"));
         
         mtl_out.push_str("//Vertex shader\n");
         mtl_out.push_str(&vtx_fns);

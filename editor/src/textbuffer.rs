@@ -1,4 +1,5 @@
-use widget::*;
+use render::*; 
+
 use crate::textcursor::*;
 use std::collections::HashMap;
 
