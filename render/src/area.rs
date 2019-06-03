@@ -93,7 +93,7 @@ impl Area{
         }
     }
 
-    pub fn get_rect_scrolled(&self, cx:&Cx)->Rect{
+    pub fn get_rect(&self, cx:&Cx, no_scrolling:bool)->Rect{
 
         return match self{
             Area::Instance(inst)=>{
@@ -116,7 +116,12 @@ impl Area{
                             let w = draw_call.instance[inst.instance_offset + iw];
                             if let Some(ih) = csh.rect_instance_props.h{
                                 let h = draw_call.instance[inst.instance_offset + ih];
-                                return draw_list.clip_and_scroll_rect(x,y,w,h);
+                                if no_scrolling{
+                                    return Rect{x:x,y:y,w:w,h:h}
+                                }
+                                else{
+                                    return draw_list.clip_and_scroll_rect(x,y,w,h);
+                                }
                             }
                         }
                     }
@@ -131,7 +136,7 @@ impl Area{
         }
     }
 
-    pub fn abs_to_rel_scrolled(&self, cx:&Cx, abs:Vec2)->Vec2{
+    pub fn abs_to_rel(&self, cx:&Cx, abs:Vec2, no_scrolling:bool)->Vec2{
         return match self{
             Area::Instance(inst)=>{
                 if inst.instance_count == 0{
@@ -149,10 +154,18 @@ impl Area{
                     let x = draw_call.instance[inst.instance_offset + ix];
                     if let Some(iy) = csh.rect_instance_props.y{
                         let y = draw_call.instance[inst.instance_offset + iy];
-                        let scroll = draw_list.get_scroll_pos();
-                        return Vec2{
-                            x:abs.x - x + scroll.x,
-                            y:abs.y - y + scroll.y
+                        if no_scrolling{
+                            return Vec2{
+                                x:abs.x - x,
+                                y:abs.y - y
+                            }
+                        }
+                        else{
+                            let scroll = draw_list.get_scroll_pos();
+                            return Vec2{
+                                x:abs.x - x + scroll.x,
+                                y:abs.y - y + scroll.y
+                            }
                         }
                     }
                 }
@@ -166,43 +179,6 @@ impl Area{
                 }
             },
             _=>abs,
-        }
-    }
-
-    pub fn get_rect_not_scrolled(&self, cx:&Cx)->Rect{
-        return match self{
-            Area::Instance(inst)=>{
-                if inst.instance_count == 0{
-                    println!("get_rect called on instance_count ==0 area pointer, use mark/sweep correctly!");
-                    return Rect::zero()
-                }
-                let draw_list = &cx.draw_lists[inst.draw_list_id];
-                if draw_list.redraw_id != inst.redraw_id {
-                    return Rect::zero();
-                }
-                let draw_call = &draw_list.draw_calls[inst.draw_call_id];
-                let csh = &cx.compiled_shaders[draw_call.shader_id];
-                // ok now we have to patch x/y/w/h into it
-                if let Some(ix) = csh.rect_instance_props.x{
-                    let x = draw_call.instance[inst.instance_offset + ix];
-                    if let Some(iy) = csh.rect_instance_props.y{
-                        let y = draw_call.instance[inst.instance_offset + iy];
-                        if let Some(iw) = csh.rect_instance_props.w{
-                            let w = draw_call.instance[inst.instance_offset + iw];
-                            if let Some(ih) = csh.rect_instance_props.h{
-                                let h = draw_call.instance[inst.instance_offset + ih];
-                                return Rect{x:x,y:y,w:w,h:h}
-                            }
-                        }
-                    }
-                }
-                Rect::zero()
-            },
-            Area::DrawList(draw_list_area)=>{
-                let draw_list = &cx.draw_lists[draw_list_area.draw_list_id];
-                draw_list.rect.clone()
-            },
-            _=>Rect::zero(),
         }
     }
 

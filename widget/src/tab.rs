@@ -21,11 +21,6 @@ pub struct Tab{
     pub _is_drag:bool
 }
 
-impl ElementLife for Tab{
-    fn construct(&mut self, _cx:&mut Cx){}
-    fn destruct(&mut self, _cx:&mut Cx){}
-}
-
 impl Style for Tab{
     fn style(cx:&mut Cx)->Self{
         let bg_sh = Self::def_bg_shader(cx);
@@ -183,7 +178,7 @@ impl Tab{
         if !self.animator.term_anim_playing(){
             match self.tab_close.handle_tab_close(cx, event){
                 TabCloseEvent::Clicked=>{
-                    self._close_anim_rect = self._bg_area.get_rect_scrolled(cx);
+                    self._close_anim_rect = self._bg_area.get_rect(cx, false);
                     self.animator.play_anim(cx, self.anim_close(cx));
                     return TabEvent::Closing;
                 },
@@ -275,7 +270,7 @@ impl Tab{
    }
 
     pub fn get_tab_rect(&mut self, cx:&Cx)->Rect{
-        self._bg_area.get_rect_scrolled(cx)
+        self._bg_area.get_rect(cx, false)
     }
 
     pub fn draw_tab(&mut self, cx:&mut Cx){

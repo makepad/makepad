@@ -1,20 +1,20 @@
 use crate::cx::*;
 use time::precise_time_ns;
-use std:: {ptr};
-use winapi::um:: {libloaderapi, winuser};
-use winapi::shared::minwindef:: {LPARAM, LRESULT, WPARAM, BOOL, UINT, FALSE};
+use std::{ptr};
+use winapi::um::{libloaderapi, winuser};
+use winapi::shared::minwindef::{LPARAM, LRESULT, WPARAM, BOOL, UINT, FALSE};
 use winapi::um::winnt::{LPCWSTR};
 use std::ffi::OsStr;
 use std::os::windows::ffi::OsStrExt;
 use std::mem;
 use std::os::raw::c_void;
-use winapi::shared::windef:: {RECT, DPI_AWARENESS_CONTEXT, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE, HMONITOR, HWND,};
+use winapi::shared::windef::{RECT, DPI_AWARENESS_CONTEXT, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE, HMONITOR, HWND,};
 use winapi::shared::winerror::S_OK;
-use winapi::um::libloaderapi:: {GetProcAddress, LoadLibraryA};
-use winapi::um::shellscalingapi:: {MDT_EFFECTIVE_DPI, MONITOR_DPI_TYPE, PROCESS_DPI_AWARENESS, PROCESS_PER_MONITOR_DPI_AWARE,};
-use winapi::um::wingdi:: {GetDeviceCaps, LOGPIXELSX};
-use winapi::um::winnt:: {HRESULT, LPCSTR};
-use winapi::um::winuser:: {MONITOR_DEFAULTTONEAREST};
+use winapi::um::libloaderapi::{GetProcAddress, LoadLibraryA};
+use winapi::um::shellscalingapi::{MDT_EFFECTIVE_DPI, MONITOR_DPI_TYPE, PROCESS_DPI_AWARENESS, PROCESS_PER_MONITOR_DPI_AWARE,};
+use winapi::um::wingdi::{GetDeviceCaps, LOGPIXELSX};
+use winapi::um::winnt::{HRESULT, LPCSTR};
+use winapi::um::winuser::{MONITOR_DEFAULTTONEAREST};
 
 
 #[derive(Default)]
@@ -24,13 +24,19 @@ pub struct WindowsWindow {
     pub time_start: u64,
     pub last_key_mod: KeyModifiers,
     pub ime_spot: Vec2,
-    pub init_resize:bool,
+    pub init_resize: bool,
     pub current_cursor: MouseCursor,
     pub last_mouse_pos: Vec2,
     pub fingers_down: Vec<bool>,
     pub hwnd: Option<HWND>,
     pub event_callback: Option<*mut FnMut(&mut Vec<Event>)>,
     pub dpi_functions: Option<DpiFunctions>
+}
+
+pub enum LoopAction {
+    Block,
+    Poll,
+    Quit
 }
 
 impl WindowsWindow {
@@ -118,16 +124,15 @@ impl WindowsWindow {
             self.hwnd = Some(hwnd);
             winuser::SetWindowLongPtrW(hwnd, winuser::GWLP_USERDATA, &self as *const _ as isize);
             
-            if let Some(dpi_functions) = &self.dpi_functions { 
-               dpi_functions.enable_non_client_dpi_scaling(self.hwnd.unwrap())
+            if let Some(dpi_functions) = &self.dpi_functions {
+                dpi_functions.enable_non_client_dpi_scaling(self.hwnd.unwrap())
             }
         }
     }
     
-    pub fn poll_events<F>(&mut self, first_block: bool, mut event_handler: F)
-    where F: FnMut(&mut Vec<Event>),
+    pub fn event_loop<F>(&mut self, mut event_handler: F)
+    where F: FnMut(&mut Vec<Event>) -> LoopAction,
     {
-        let mut do_first_block = first_block;
         unsafe {
             self.event_callback = Some(&mut event_handler as *const FnMut(&mut Vec<Event>) as *mut FnMut(&mut Vec<Event>));
             let mut msg = mem::uninitialized();
@@ -136,7 +141,7 @@ impl WindowsWindow {
                 self.init_resize = true;
                 self.send_change_event();
             }
-
+            
             loop {
                 if do_first_block {
                     do_first_block = false;

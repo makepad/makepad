@@ -1,6 +1,6 @@
 //use syn::Type;
-use render::*; 
-use widget::*; 
+use render::*;
+use widget::*;
 use editor::*;
 mod rustcompiler;
 pub use crate::rustcompiler::*;
@@ -18,43 +18,50 @@ enum Panel {
     FileEditor {path: String, editor_id: u64}
 }
 
-struct App {
-    view: View<ScrollBar>,
-    dock: Dock<Panel>,
-    app_state: AppState,
+struct AppWindow {
+    window_index:usize,
+    desktop_window: DesktopWindow,
     file_tree: FileTree,
-    file_editors: Elements<u64, FileEditor, FileEditorTemplates>,
-    rust_compiler: RustCompiler,
     keyboard: Keyboard,
+    file_editors: Elements<u64, FileEditor, FileEditorTemplates>,
+    dock: Dock<Panel>,
+}
+
+struct AppGlobal {
+    file_tree_data: String,
+    file_tree_reload: Signal,
     text_buffers: TextBuffers,
+    rust_compiler: RustCompiler,
+    app_state: AppState,
     index_read_req: FileReadRequest,
     app_state_read_req: FileReadRequest,
 }
 
+struct App {
+    app_global: AppGlobal,
+    windows: Vec<AppWindow>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+struct AppStateWindow {
+    window_position: Vec2,
+    window_outer_size: Vec2,
+    dock_items: DockItem<Panel>,
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 struct AppState {
-    window_outer_size: Vec2,
-    window_position: Vec2,
-    dock_items: DockItem<Panel>,
+    windows: Vec<AppStateWindow>
 }
 
 main_app!(App, "Makepad");
 
-impl Style for App {
-    
+impl Style for AppWindow {
     fn style(cx: &mut Cx) -> Self {
-        set_dark_style(cx);
         Self {
-            view: View {
+            desktop_window: DesktopWindow {
                 ..Style::style(cx)
             },
-            text_buffers: TextBuffers {
-                root_path: "./".to_string(),
-                storage: HashMap::new()
-            },
-            file_tree: FileTree {..Style::style(cx)},
-            index_read_req: FileReadRequest::empty(),
-            app_state_read_req: FileReadRequest::empty(),
             file_editors: Elements::new(FileEditorTemplates {
                 rust_editor: RustEditor {
                     ..Style::style(cx)
@@ -63,130 +70,119 @@ impl Style for App {
                     ..Style::style(cx)
                 }
             }),
-            rust_compiler: RustCompiler {
-                ..Style::style(cx)
-            },
             keyboard: Keyboard {
                 ..Style::style(cx)
             },
-            app_state: AppState {
-                window_outer_size: cx.window_geom.outer_size,
-                window_position: cx.window_geom.position,
-                dock_items: DockItem::Splitter {
-                    axis: Axis::Vertical,
-                    align: SplitterAlign::First,
-                    pos: 150.0,
-                    first: Box::new(DockItem::TabControl {
-                        current: 0,
-                        tabs: vec![DockTab {
-                            closeable: false,
-                            title: "Files".to_string(),
-                            item: Panel::FileTree
-                        }]
-                    }),
-                    last: Box::new(DockItem::Splitter {
-                        axis: Axis::Horizontal,
-                        align: SplitterAlign::Last,
-                        pos: 150.0,
-                        first: Box::new(DockItem::TabControl {
-                            current: 1,
-                            tabs: vec![
-                                DockTab {
-                                    closeable: false,
-                                    title: "Edit".to_string(),
-                                    item: Panel::FileEditorTarget
-                                },
-                                DockTab {
-                                    closeable: true,
-                                    title: "example.rs".to_string(),
-                                    item: Panel::FileEditor {path: "example/src/example.rs".to_string(), editor_id: 1}
-                                }
-                            ],
-                        }),
-                        last: Box::new(DockItem::TabControl {
-                            current: 0,
-                            tabs: vec![
-                                DockTab {
-                                    closeable: false,
-                                    title: "Rust Compiler".to_string(),
-                                    item: Panel::RustCompiler
-                                },
-                                DockTab {
-                                    closeable: false,
-                                    title: "Keyboard".to_string(),
-                                    item: Panel::Keyboard
-                                }
-                            ]
-                        })
-                    })
-                },
-            },
+            file_tree: FileTree {..Style::style(cx)},
             dock: Dock {
                 ..Style::style(cx)
+            },
+            window_index:0
+        }
+    }
+}
+
+impl Style for App {
+    
+    fn style(cx: &mut Cx) -> Self {
+        set_dark_style(cx);
+        Self {
+            windows: vec![
+                AppWindow {
+                    ..Style::style(cx)
+                }
+            ],
+            app_global: AppGlobal {
+                rust_compiler: RustCompiler {
+                    ..Style::style(cx)
+                },
+                text_buffers: TextBuffers {
+                    root_path: "./".to_string(),
+                    storage: HashMap::new()
+                },
+                index_read_req: FileReadRequest::empty(),
+                app_state_read_req: FileReadRequest::empty(),
+                file_tree_data: String::new(),
+                file_tree_reload: cx.new_signal(),
+                app_state: AppState {
+                    windows: vec![
+                        AppStateWindow {
+                            window_outer_size: Vec2::zero(),
+                            window_position: Vec2::zero(),
+                            dock_items: DockItem::Splitter {
+                                axis: Axis::Vertical,
+                                align: SplitterAlign::First,
+                                pos: 150.0,
+                                first: Box::new(DockItem::TabControl {
+                                    current: 0,
+                                    tabs: vec![DockTab {
+                                        closeable: false,
+                                        title: "Files".to_string(),
+                                        item: Panel::FileTree
+                                    }]
+                                }),
+                                last: Box::new(DockItem::Splitter {
+                                    axis: Axis::Horizontal,
+                                    align: SplitterAlign::Last,
+                                    pos: 150.0,
+                                    first: Box::new(DockItem::TabControl {
+                                        current: 1,
+                                        tabs: vec![
+                                            DockTab {
+                                                closeable: false,
+                                                title: "Edit".to_string(),
+                                                item: Panel::FileEditorTarget
+                                            },
+                                            DockTab {
+                                                closeable: true,
+                                                title: "example.rs".to_string(),
+                                                item: Panel::FileEditor {path: "example/src/example.rs".to_string(), editor_id: 1}
+                                            }
+                                        ],
+                                    }),
+                                    last: Box::new(DockItem::TabControl {
+                                        current: 0,
+                                        tabs: vec![
+                                            DockTab {
+                                                closeable: false,
+                                                title: "Rust Compiler".to_string(),
+                                                item: Panel::RustCompiler
+                                            },
+                                            DockTab {
+                                                closeable: false,
+                                                title: "Keyboard".to_string(),
+                                                item: Panel::Keyboard
+                                            }
+                                        ]
+                                    })
+                                })
+                            },
+                        },
+                    ]
+                }
             }
         }
     }
 }
 
-fn path_file_name(path: &str) -> String {
-    if let Some(pos) = path.rfind('/') {
-        path[pos + 1..path.len()].to_string()
-    }
-    else {
-        path.to_string()
-    }
-}
 
-impl App {
-    fn handle_app(&mut self, cx: &mut Cx, event: &mut Event) {
-        match event {
-            Event::Construct => {
-                
-                if cx.feature == "mtl" {
-                    self.text_buffers.root_path = "./edit_repo/".to_string();
-                }
-                
-                self.index_read_req = cx.read_file(&format!("{}index.json", self.text_buffers.root_path));
-                self.app_state_read_req = cx.read_file(&format!("{}makepad_state.json", self.text_buffers.root_path));
-                
-                self.rust_compiler.init(cx, &mut self.text_buffers);
-                
-            },
-            Event::FileRead(fr) => {
-                // lets see which file we loaded
-                if let Some(utf8_data) = self.index_read_req.as_utf8(fr) {
-                    self.file_tree.load_from_json(cx, utf8_data);
-                }
-                else if let Some(utf8_data) = self.app_state_read_req.as_utf8(fr) {
-                    if let Ok(app_state) = serde_json::from_str(&utf8_data) {
-                        self.app_state = app_state;
-                        // update window pos and size
-                        cx.set_window_position(self.app_state.window_position);
-                        cx.set_window_outer_size(self.app_state.window_outer_size)
-                    }
-                }
-                else if self.text_buffers.handle_file_read(&fr) {
-                    cx.redraw_area(Area::All);
-                }
-            },
-            Event::WindowChange(wc) => {
-                if !self.app_state_read_req.is_loading() {
-                    self.app_state.window_position = wc.new_geom.position;
-                    self.app_state.window_outer_size = wc.new_geom.outer_size;
-                    self.save_app_state(cx);
-                }
-            },
+impl AppWindow {
+    fn handle_app_window(&mut self, cx: &mut Cx, event: &mut Event, app_global: &mut AppGlobal) {
+        
+        match self.desktop_window.handle_desktop_window(cx, event) {
+            DesktopWindowEvent::EventForOtherWindow => {
+                return
+            }
             _ => ()
         }
         
-        self.view.handle_scroll_bars(cx, event);
-        
-        let mut dock_walker = self.dock.walker(&mut self.app_state.dock_items);
+        let dock_items = &mut app_global.app_state.windows[self.window_index].dock_items;
+        let mut dock_walker = self.dock.walker(dock_items);
         let mut file_tree_event = FileTreeEvent::None;
         while let Some(item) = dock_walker.walk_handle_dock(cx, event) {
             match item {
                 Panel::RustCompiler => {
-                    match self.rust_compiler.handle_rust_compiler(cx, event, &mut self.text_buffers) {
+                    match app_global.rust_compiler.handle_rust_compiler(cx, event, &mut app_global.text_buffers) {
                         RustCompilerEvent::SelectMessage {path} => {
                             // just make it open an editor
                             file_tree_event = FileTreeEvent::SelectFile {path: path};
@@ -196,7 +192,7 @@ impl App {
                     }
                 },
                 Panel::Keyboard => {
-                    self.keyboard.handle_keyboard(cx, event, &mut self.text_buffers);
+                    self.keyboard.handle_keyboard(cx, event, &mut app_global.text_buffers);
                 },
                 Panel::FileEditorTarget => {
                     
@@ -206,13 +202,13 @@ impl App {
                 },
                 Panel::FileEditor {path, editor_id} => {
                     if let Some(file_editor) = &mut self.file_editors.get(*editor_id) {
-                        let text_buffer = self.text_buffers.from_path(cx, path);
+                        let text_buffer = app_global.text_buffers.from_path(cx, path);
                         match file_editor.handle_file_editor(cx, event, text_buffer) {
                             FileEditorEvent::LagChange => {
-                                self.text_buffers.save_file(cx, path);
+                                app_global.text_buffers.save_file(cx, path);
                                 // lets save the textbuffer to disk
                                 // lets re-trigger the rust compiler
-                                self.rust_compiler.restart_rust_checker(cx, &mut self.text_buffers);
+                                app_global.rust_compiler.restart_rust_checker(cx, &mut app_global.text_buffers);
                             },
                             _ => ()
                         }
@@ -231,46 +227,40 @@ impl App {
                 let mut tabs = Vec::new();
                 for path in paths {
                     // find a free editor id
-                    tabs.push(self.new_file_editor_tab(&path));
+                    tabs.push(self.new_file_editor_tab(app_global, &path));
                 }
                 self.dock.dock_drag_end(cx, fe, tabs);
             },
             FileTreeEvent::SelectFile {path} => {
                 // search for the tabcontrol with the maximum amount of editors
-                if self.focus_or_new_editor(cx, &path) {
-                    self.save_app_state(cx);
+                if self.focus_or_new_editor(cx, app_global, &path) {
+                    app_global.save_app_state(cx);
                 }
             },
             _ => {}
         }
         
-        // handle the dock events
-        match self.dock.handle_dock(cx, event, &mut self.app_state.dock_items) {
+        let dock_items = &mut app_global.app_state.windows[self.window_index].dock_items;
+        match self.dock.handle_dock(cx, event, dock_items) {
             DockEvent::DockChanged => { // thats a bit bland event. lets let the thing know which file closed
-                self.save_app_state(cx);
+                app_global.save_app_state(cx);
             },
             _ => ()
         }
     }
     
-    fn save_app_state(&mut self, cx: &mut Cx) {
-        let json = serde_json::to_string(&self.app_state).unwrap();
-        cx.write_file(&format!("{}makepad_state.json", self.text_buffers.root_path), json.as_bytes());
-    }
-    
-    fn draw_app(&mut self, cx: &mut Cx) {
-        //return;
-        
-        if let Err(()) = self.view.begin_view(cx, &Layout {..Default::default()}) {
+    fn draw_app_window(&mut self, cx: &mut Cx, app_global: &mut AppGlobal) {
+        if let Err(()) = self.desktop_window.begin_desktop_window(cx) {
             return
         }
         self.dock.draw_dock(cx);
-        
-        let mut dock_walker = self.dock.walker(&mut self.app_state.dock_items);
+
+        let dock_items = &mut app_global.app_state.windows[self.window_index].dock_items;
+        let mut dock_walker = self.dock.walker(dock_items);
         while let Some(item) = dock_walker.walk_draw_dock(cx) {
             match item {
                 Panel::RustCompiler => {
-                    self.rust_compiler.draw_rust_compiler(cx);
+                    app_global.rust_compiler.draw_rust_compiler(cx);
                 },
                 Panel::Keyboard => {
                     self.keyboard.draw_keyboard(cx);
@@ -280,7 +270,7 @@ impl App {
                     self.file_tree.draw_file_tree(cx);
                 },
                 Panel::FileEditor {path, editor_id} => {
-                    let text_buffer = self.text_buffers.from_path(cx, path);
+                    let text_buffer = app_global.text_buffers.from_path(cx, path);
                     let mut set_key_focus = false;
                     let file_editor = self.file_editors.get_draw(cx, *editor_id, | _cx, tmpl | {
                         set_key_focus = true;
@@ -293,12 +283,13 @@ impl App {
                 }
             }
         }
-        self.view.end_view(cx);
+        self.desktop_window.end_desktop_window(cx);
     }
     
-    fn new_file_editor_tab(&mut self, path: &str) -> DockTab<Panel> {
+    fn new_file_editor_tab(&mut self, app_global: &mut AppGlobal, path: &str) -> DockTab<Panel> {
         let mut max_id = 0;
-        let mut dock_walker = self.dock.walker(&mut self.app_state.dock_items);
+        let dock_items = &mut app_global.app_state.windows[self.window_index].dock_items;
+        let mut dock_walker = self.dock.walker(dock_items);
         while let Some(dock_item) = dock_walker.walk_dock_item() {
             match dock_item {
                 DockItem::TabControl {tabs, ..} => {
@@ -324,10 +315,11 @@ impl App {
         }
     }
     
-    fn focus_or_new_editor(&mut self, cx: &mut Cx, file_path: &str) -> bool {
+    fn focus_or_new_editor(&mut self, cx: &mut Cx, app_global: &mut AppGlobal, file_path: &str) -> bool {
         let mut target_ctrl_id = 0;
         let mut only_focus_editor = false;
-        let mut dock_walker = self.dock.walker(&mut self.app_state.dock_items);
+        let dock_items = &mut app_global.app_state.windows[self.window_index].dock_items;
+        let mut dock_walker = self.dock.walker(dock_items);
         let mut ctrl_id = 1;
         while let Some(dock_item) = dock_walker.walk_dock_item() {
             match dock_item {
@@ -358,8 +350,9 @@ impl App {
             ctrl_id += 1;
         }
         if target_ctrl_id != 0 && !only_focus_editor { // open a new one
-            let new_tab = self.new_file_editor_tab(file_path);
-            let mut dock_walker = self.dock.walker(&mut self.app_state.dock_items);
+            let new_tab = self.new_file_editor_tab(app_global, file_path);
+            let dock_items = &mut app_global.app_state.windows[self.window_index].dock_items;
+            let mut dock_walker = self.dock.walker(dock_items);
             let mut ctrl_id = 1;
             while let Some(dock_item) = dock_walker.walk_dock_item() {
                 if ctrl_id == target_ctrl_id {
@@ -377,6 +370,76 @@ impl App {
     }
 }
 
+impl AppGlobal {
+    fn handle_construct(&mut self, cx: &mut Cx) {
+        if cx.feature == "mtl" {
+            self.text_buffers.root_path = "./edit_repo/".to_string();
+        }
+        
+        self.index_read_req = cx.read_file(&format!("{}index.json", self.text_buffers.root_path));
+        self.app_state_read_req = cx.read_file(&format!("{}makepad_state.json", self.text_buffers.root_path));
+        
+        self.rust_compiler.init(cx, &mut self.text_buffers);
+    }
+    
+    fn handle_file_read(&mut self, cx: &mut Cx, fr: &FileReadEvent) {
+        // lets see which file we loaded
+        if let Some(utf8_data) = self.index_read_req.as_utf8(fr) {
+            self.file_tree_data = utf8_data.to_string();
+            cx.send_signal_before_draw(self.file_tree_reload, 0);
+            //self.file_tree.load_from_json(cx, utf8_data);
+        }
+        else if let Some(utf8_data) = self.app_state_read_req.as_utf8(fr) {
+            if let Ok(app_state) = serde_json::from_str(&utf8_data) {
+                self.app_state = app_state;
+                // update window pos and size
+                //cx.set_window_position(self.app_state.window_position);
+                //cx.set_window_outer_size(self.app_state.window_outer_size)
+            }
+        }
+        else if self.text_buffers.handle_file_read(&fr) {
+            cx.redraw_area(Area::All);
+        }
+    }
+    
+    fn handle_window_change(&mut self, cx: &mut Cx, _wc: &WindowChangeEvent) {
+        if !self.app_state_read_req.is_loading() {
+            //self.app_state.window_position = wc.new_geom.position;
+            //self.app_state.window_outer_size = wc.new_geom.outer_size;
+            self.save_app_state(cx);
+        }
+    }
+    
+    fn save_app_state(&mut self, cx: &mut Cx) {
+        let json = serde_json::to_string(&self.app_state).unwrap();
+        cx.write_file(&format!("{}makepad_state.json", self.text_buffers.root_path), json.as_bytes());
+    }
+}
+
+impl App {
+    fn handle_app(&mut self, cx: &mut Cx, event: &mut Event) {
+        match event {
+            Event::Construct => {
+                self.app_global.handle_construct(cx);
+            },
+            Event::FileRead(fr) => {
+                self.app_global.handle_file_read(cx, fr);
+                
+            },
+            Event::WindowChange(wc) => {
+                self.app_global.handle_window_change(cx, wc);
+            },
+            _ => ()
+        }
+        self.windows[0].handle_app_window(cx, event, &mut self.app_global);
+    }
+    
+    fn draw_app(&mut self, cx: &mut Cx) {
+        //return;
+        self.windows[0].draw_app_window(cx, &mut self.app_global);
+    }
+}
+
 struct FileEditorTemplates {
     rust_editor: RustEditor,
     js_editor: JSEditor,
@@ -388,21 +451,6 @@ enum FileEditor {
     Rust(RustEditor),
     JS(JSEditor),
     //Text(TextEditor)
-}
-
-impl ElementLife for FileEditor {
-    fn construct(&mut self, cx: &mut Cx) {
-        match self {
-            FileEditor::Rust(re) => re.construct(cx),
-            FileEditor::JS(re) => re.construct(cx),
-        }
-    }
-    fn destruct(&mut self, cx: &mut Cx) {
-        match self {
-            FileEditor::Rust(re) => re.destruct(cx),
-            FileEditor::JS(re) => re.destruct(cx),
-        }
-    }
 }
 
 enum FileEditorEvent {
@@ -462,5 +510,15 @@ impl FileEditor {
                 ..template.rust_editor.clone()
             })
         }
+    }
+}
+
+
+fn path_file_name(path: &str) -> String {
+    if let Some(pos) = path.rfind('/') {
+        path[pos + 1..path.len()].to_string()
+    }
+    else {
+        path.to_string()
     }
 }

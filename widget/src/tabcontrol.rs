@@ -19,11 +19,6 @@ pub struct TabControl {
     pub _focussed: bool
 }
 
-impl ElementLife for TabControl {
-    fn construct(&mut self, _cx: &mut Cx) {}
-    fn destruct(&mut self, _cx: &mut Cx) {}
-}
-
 #[derive(Clone, PartialEq)]
 pub enum TabControlEvent {
     None,
@@ -138,7 +133,7 @@ impl TabControl {
                 }
             },
             TabControlEvent::TabClose {..} => { // needed to clear animation state
-                self.tabs.clear(cx);
+                self.tabs.clear(cx, |_,_|());
             },
             _ => ()
         };
@@ -207,7 +202,7 @@ impl TabControl {
     
     pub fn end_tabs(&mut self, cx: &mut Cx) {
         self.tab_fill.draw_quad_walk(cx, Bounds::Fill, Bounds::Fill, Margin::zero());
-        self.tabs.sweep(cx);
+        self.tabs.sweep(cx, |_,_|());
         if let Some((fe, id)) = &self._dragging_tab {
             if let Ok(()) = self.drag_tab_view.begin_view(cx, &Layout {
                 abs_origin: Some(Vec2::zero()),

@@ -25,11 +25,6 @@ pub struct Splitter{
 
 }
 
-impl ElementLife for Splitter{
-    fn construct(&mut self, _cx:&mut Cx){}
-    fn destruct(&mut self, _cx:&mut Cx){}
-}
-
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub enum SplitterAlign{
     First,

@@ -8,11 +8,6 @@ pub struct JSEditor {
     pub code_editor: CodeEditor,
 }
 
-impl ElementLife for JSEditor {
-    fn construct(&mut self, _cx: &mut Cx) {}
-    fn destruct(&mut self, _cx: &mut Cx) {}
-}
-
 impl Style for JSEditor {
     fn style(cx: &mut Cx) -> Self {
         let rust_editor = Self {

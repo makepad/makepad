@@ -176,6 +176,7 @@ pub enum Event {
     Construct,
     Destruct,
     Draw,
+    Idle,
     AppFocus,
     AppFocusLost,
     AnimateEnded(AnimateEvent),
@@ -277,12 +278,7 @@ impl HitState {
                 }
             },
             Event::FingerScroll(fe) => {
-                let rect = if self.no_scrolling {
-                    area.get_rect_not_scrolled(&cx)
-                }
-                else {
-                    area.get_rect_scrolled(&cx)
-                };
+                let rect = area.get_rect(&cx, self.no_scrolling);
                 if !fe.handled && rect.contains_with_margin(fe.abs.x, fe.abs.y, &self.margin) {
                     fe.handled = true;
                     return Event::FingerScroll(FingerScrollEvent {
@@ -293,12 +289,8 @@ impl HitState {
                 }
             },
             Event::FingerHover(fe) => {
-                let rect = if self.no_scrolling {
-                    area.get_rect_not_scrolled(&cx)
-                }
-                else {
-                    area.get_rect_scrolled(&cx)
-                };
+                let rect = area.get_rect(&cx, self.no_scrolling);
+                
                 if self.was_over_last_call {
                     
                     if !fe.handled && rect.contains_with_margin(fe.abs.x, fe.abs.y, &self.margin) {
@@ -307,7 +299,7 @@ impl HitState {
                             self.was_over_last_call = false;
                         }
                         return Event::FingerHover(FingerHoverEvent {
-                            rel: Vec2 {x: fe.abs.x - rect.x, y: fe.abs.y - rect.y},
+                            rel: area.abs_to_rel(cx, fe.abs, self.no_scrolling),
                             rect: rect,
                             ..fe.clone()
                         })
@@ -315,7 +307,7 @@ impl HitState {
                     else {
                         self.was_over_last_call = false;
                         return Event::FingerHover(FingerHoverEvent {
-                            rel: Vec2 {x: fe.abs.x - rect.x, y: fe.abs.y - rect.y},
+                            rel: area.abs_to_rel(cx, fe.abs, self.no_scrolling),
                             rect: rect,
                             hover_state: HoverState::Out,
                             ..fe.clone()
@@ -327,7 +319,7 @@ impl HitState {
                         fe.handled = true;
                         self.was_over_last_call = true;
                         return Event::FingerHover(FingerHoverEvent {
-                            rel: Vec2 {x: fe.abs.x - rect.x, y: fe.abs.y - rect.y},
+                            rel: area.abs_to_rel(cx, fe.abs, self.no_scrolling),
                             rect: rect,
                             hover_state: HoverState::In,
                             ..fe.clone()
@@ -350,15 +342,10 @@ impl HitState {
                     else {
                         self.finger_down_rel_start[fe.digit]
                     };
-                    let rect = if self.no_scrolling {
-                        area.get_rect_not_scrolled(&cx)
-                    }
-                    else {
-                        area.get_rect_scrolled(&cx)
-                    };
+                    let rect = area.get_rect(&cx, self.no_scrolling);
                     return Event::FingerMove(FingerMoveEvent {
                         abs_start: abs_start,
-                        rel: Vec2 {x: fe.abs.x - rect.x, y: fe.abs.y - rect.y},
+                        rel: area.abs_to_rel(cx, fe.abs, self.no_scrolling),
                         rel_start: rel_start,
                         rect: rect,
                         is_over: rect.contains_with_margin(fe.abs.x, fe.abs.y, &self.margin),
@@ -368,12 +355,7 @@ impl HitState {
             },
             Event::FingerDown(fe) => {
                 if !fe.handled {
-                    let rect = if self.no_scrolling {
-                        area.get_rect_not_scrolled(&cx)
-                    }
-                    else {
-                        area.get_rect_scrolled(&cx)
-                    };
+                    let rect = area.get_rect(&cx, self.no_scrolling);
                     if rect.contains_with_margin(fe.abs.x, fe.abs.y, &self.margin) {
                         // scan if any of the fingers already captured this area
                         if !self.use_multi_touch {
@@ -395,11 +377,12 @@ impl HitState {
                                 self.finger_down_rel_start.push(Vec2 {x: 0., y: 0.});
                             }
                         }
+                        let rel = area.abs_to_rel(cx, fe.abs, self.no_scrolling);
                         self.finger_down_abs_start[fe.digit] = fe.abs;
-                        self.finger_down_rel_start[fe.digit] = Vec2 {x: fe.abs.x - rect.x, y: fe.abs.y - rect.y};
+                        self.finger_down_rel_start[fe.digit] = rel;
                         fe.handled = true;
                         return Event::FingerDown(FingerDownEvent {
-                            rel: Vec2 {x: fe.abs.x - rect.x, y: fe.abs.y - rect.y},
+                            rel: rel,
                             rect: rect,
                             ..fe.clone()
                         })
@@ -421,17 +404,12 @@ impl HitState {
                     else {
                         self.finger_down_rel_start[fe.digit]
                     };
-                    let rect = if self.no_scrolling {
-                        area.get_rect_not_scrolled(&cx)
-                    }
-                    else {
-                        area.get_rect_scrolled(&cx)
-                    };
+                    let rect = area.get_rect(&cx, self.no_scrolling);
                     return Event::FingerUp(FingerUpEvent {
                         is_over: rect.contains(fe.abs.x, fe.abs.y),
                         abs_start: abs_start,
                         rel_start: rel_start,
-                        rel: Vec2 {x: fe.abs.x - rect.x, y: fe.abs.y - rect.y},
+                        rel: area.abs_to_rel(cx, fe.abs, self.no_scrolling),
                         rect: rect,
                         ..fe.clone()
                     })

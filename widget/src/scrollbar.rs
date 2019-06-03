@@ -28,11 +28,6 @@ pub struct ScrollBar{
     pub _drag_point:Option<f32>, // the point in pixels where we are dragging
 }
 
-impl ElementLife for ScrollBar{
-    fn construct(&mut self, _cx:&mut Cx){}
-    fn destruct(&mut self, _cx:&mut Cx){}
-}
-
 impl Style for ScrollBar{
     fn style(cx:&mut Cx)->Self{
         let sh = Self::def_shader(cx);
@@ -266,7 +261,7 @@ impl ScrollBarLike<ScrollBar> for ScrollBar{
         // lets check if our view-area gets a mouse-scroll.
         match event{
             Event::FingerScroll(fe)=>{
-                let rect = self._view_area.get_rect_scrolled(cx);
+                let rect = self._view_area.get_rect(cx, false);
                 if rect.contains(fe.abs.x, fe.abs.y){ // handle mousewheel
                     // we should scroll in either x or y
                     let scroll =  match self.axis{

@@ -41,6 +41,7 @@ mod colors;
 mod shader;
 mod area;
 mod view;
+mod window;
 mod shadergen;
 mod quad;
 mod text;

@@ -18,12 +18,6 @@ use std::collections::HashMap;
 // The idea is to use get_draw in a draw function
 // and use the iter/enumerate/get functions in the event handle code
 // This does not work for single item Element though
-
-pub trait ElementLife{
-    fn construct(&mut self, cx: &mut Cx);
-    fn destruct(&mut self, cx: &mut Cx);
-}
-
 // Keep a redraw ID with each element 
 // to make iterating only 'redrawn in last pass' items possible
 #[derive(Clone, Default)]
@@ -116,7 +110,7 @@ where ID:std::cmp::Ord + std::hash::Hash + Clone
 }
 
 impl<ID,T, TEMPL> Elements<ID, T, TEMPL>
-where T:ElementLife, ID:std::cmp::Ord + std::hash::Hash + Clone
+where ID:std::cmp::Ord + std::hash::Hash + Clone
 {
     pub fn new(template:TEMPL)->Elements<ID, T, TEMPL>{
         Elements::<ID, T, TEMPL>{
@@ -137,7 +131,8 @@ where T:ElementLife, ID:std::cmp::Ord + std::hash::Hash + Clone
     }
 
     // destructs all the items that didn't get a mark/get_draw call this time
-    pub fn sweep(&mut self, cx:&mut Cx){
+    pub fn sweep<F>(&mut self, cx:&mut Cx, mut destruct_callback:F)
+    where F: FnMut(&mut Cx, &mut T){
         if !cx.is_in_redraw_cycle{
             panic!("Cannot call sweep outside of redraw cycle!")
         }
@@ -151,7 +146,7 @@ where T:ElementLife, ID:std::cmp::Ord + std::hash::Hash + Clone
             if elem.redraw_id != self.redraw_id{
                 self.element_list.remove(i);
                 let mut elem = self.element_map.remove(&elem_id).unwrap();
-                elem.item.destruct(cx);
+                destruct_callback(cx, &mut elem.item);
             }
             else{
                 i = i + 1;
@@ -160,10 +155,11 @@ where T:ElementLife, ID:std::cmp::Ord + std::hash::Hash + Clone
     }
     
     // clear all the items
-    pub fn clear(&mut self, cx:&mut Cx){
+    pub fn clear<F>(&mut self, cx:&mut Cx, mut destruct_callback:F)
+    where F: FnMut(&mut Cx, &mut T){
         for elem_id in &self.element_list{
             let mut elem = self.element_map.remove(&elem_id).unwrap();
-            elem.item.destruct(cx);
+            destruct_callback(cx, &mut elem.item);
         }
         self.element_list.truncate(0);
     }
@@ -212,9 +208,7 @@ where T:ElementLife, ID:std::cmp::Ord + std::hash::Hash + Clone
         let redraw_id = self.redraw_id;
         let redraw = self.element_map.entry(index.clone()).or_insert_with(||{
             element_list.push(index);
-            //let mut elem = template.clone();
-            let mut elem = insert_callback(cx, &template);
-            elem.construct(cx);
+            let elem = insert_callback(cx, &template);
             ElementsRedraw{
                 redraw_id:redraw_id,
                 item:elem

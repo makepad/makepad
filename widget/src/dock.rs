@@ -30,18 +30,6 @@ pub struct DockTabIdent {
     tab_id: usize
 }
 
-impl<TItem> ElementLife for Dock<TItem>
-where TItem: Clone
-{
-    fn construct(&mut self, _cx: &mut Cx) {
-        //self.handle_dock(cx, &mut Event::Construct);
-    }
-    
-    fn destruct(&mut self, _cx: &mut Cx) {
-        //self.handle_dock(cx, &mut Event::Destruct);
-    }
-}
-
 impl<TItem> Style for Dock<TItem>
 where TItem: Clone
 {

@@ -17,29 +17,19 @@ use time::precise_time_ns;
 
 use crate::cx::*;
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct CocoaWindow {
-    pub window_delegate: Option<id>,
-    pub view: Option<id>,
-    pub window: Option<id>,
-    pub attributes_for_marked_text: Option<id>,
-    pub empty_string: Option<id>,
-    //pub input_context:Option<id>,
-    pub pasteboard: Option<id>,
-    pub init_resize: bool,
-    
-    pub last_window_geom: WindowGeom,
-    
+    pub window_delegate: id,
+    pub view: id,
+    pub window: id,
+    pub attributes_for_marked_text: id,
+    pub empty_string: id,
+    pub cocoa_app: *mut CocoaApp,
+    pub last_window_geom: Option<WindowGeom>,
     pub ime_spot: Vec2,
     pub time_start: u64,
-    pub last_key_mod: KeyModifiers,
     pub fingers_down: Vec<bool>,
-    pub cursors: HashMap<MouseCursor, id>,
-
-    pub timers: Vec<CocoaTimer>,
-    pub current_cursor: MouseCursor,
     pub last_mouse_pos: Vec2,
-    pub event_callback: Option<*mut FnMut(&mut Vec<Event>)>
 }
 
 #[derive(Clone)]
@@ -49,8 +39,47 @@ pub struct CocoaTimer {
     repeats: bool
 }
 
-impl CocoaWindow {
-    pub fn cocoa_app_init() {
+pub struct CocoaApp {
+    pub time_start: u64,
+    pub window_class: *const Class,
+    pub window_delegate_class: *const Class,
+    pub timer_delegate_class: *const Class,
+    pub timer_delegate_instance: id,
+    pub timers: Vec<CocoaTimer>,
+    pub view_class: *const Class,
+    pub last_key_mod: KeyModifiers,
+    pub pasteboard: id,
+    pub event_callback: Option<*mut FnMut(&mut Vec<Event>)>,
+    pub cursors: HashMap<MouseCursor, id>,
+    pub current_cursor: MouseCursor,
+}
+
+impl CocoaApp {
+    pub fn new() -> CocoaApp {
+        unsafe {
+            
+            let timer_delegate_class = define_cocoa_timer_delegate();
+            let timer_delegate_instance: id = msg_send![timer_delegate_class, new];
+            
+            // Construct the bits that are shared between windows
+            CocoaApp {
+                pasteboard: msg_send![class!(NSPasteboard), generalPasteboard],
+                time_start: precise_time_ns(),
+                timer_delegate_instance: timer_delegate_instance,
+                timer_delegate_class: timer_delegate_class,
+                timers: Vec::new(),
+                window_class: define_cocoa_window_class(),
+                window_delegate_class: define_cocoa_window_delegate(),
+                view_class: define_cocoa_view_class(),
+                last_key_mod: KeyModifiers {..Default::default()},
+                event_callback: None,
+                cursors: HashMap::new(),
+                current_cursor: MouseCursor::Default,
+            }
+        }
+    }
+    
+    pub fn init(&mut self) {
         unsafe {
             let ns_app = appkit::NSApp();
             if ns_app == nil {
@@ -60,169 +89,15 @@ impl CocoaWindow {
             ns_app.finishLaunching();
             let current_app = appkit::NSRunningApplication::currentApplication(nil);
             current_app.activateWithOptions_(appkit::NSApplicationActivateIgnoringOtherApps);
+            (*self.timer_delegate_instance).set_ivar("cocoa_app_ptr", self as *mut _ as *mut c_void);
         }
     }
-    
-    pub fn set_mouse_cursor(&mut self, cursor: MouseCursor) {
-        if self.current_cursor != cursor {
-            self.current_cursor = cursor;
-            unsafe {
-                let _: () = msg_send![
-                    self.window.unwrap(),
-                    invalidateCursorRectsForView: self.view.unwrap()
-                ];
-            }
-        }
-    }
-    
-    pub fn init(&mut self, title: &str) {
-        unsafe {
-            
-            let objects = vec![
-                NSString::alloc(nil).init_str("NSMarkedClauseSegment"),
-                NSString::alloc(nil).init_str("NSGlyphInfo")
-            ];
-            self.attributes_for_marked_text = Some(NSArray::arrayWithObjects(nil, &objects));
-            self.empty_string = Some(NSString::alloc(nil).init_str(""));
-            
-            for _i in 0..10 {
-                self.fingers_down.push(false);
-            }
-            let autoreleasepool = NSAutoreleasePool::new(nil);
-            // construct a window with our class
-            let window_class = define_cocoa_window_class();
-            let window: id = msg_send![window_class, alloc];
-            //let window_id:id = msg_send![window_class, alloc];
-            
-            let window_frame = NSRect::new(NSPoint::new(0., 0.), NSSize::new(800., 600.));
-            let window_masks = appkit::NSWindowStyleMask::NSClosableWindowMask
-                | appkit::NSWindowStyleMask::NSMiniaturizableWindowMask
-                | appkit::NSWindowStyleMask::NSResizableWindowMask
-                | appkit::NSWindowStyleMask::NSTitledWindowMask;
-            
-            window.initWithContentRect_styleMask_backing_defer_(
-                window_frame,
-                window_masks,
-                appkit::NSBackingStoreBuffered,
-                NO
-            );
-            
-            let window_delegate_class = define_cocoa_window_delegate();
-            let window_delegate: id = msg_send![window_delegate_class, new];
-            
-            (*window_delegate).set_ivar("cocoa_window_ptr", self as *mut _ as *mut c_void);
-            
-            msg_send![window, setDelegate: window_delegate];
-            
-            
-            let title = NSString::alloc(nil).init_str(title);
-            window.setReleasedWhenClosed_(NO);
-            window.setTitle_(title);
-            window.setAcceptsMouseMovedEvents_(YES);
-            
-            let view_class = define_cocoa_view_class();
-            let view: id = msg_send![view_class, alloc];
-            msg_send![view, initWithPtr: self as *mut _ as *mut c_void];
-            
-            window.setContentView_(view);
-            window.makeFirstResponder_(view);
-            window.makeKeyAndOrderFront_(nil);
-            
-            //let input_context: id = msg_send![class!(NSTextInputContext), alloc];
-            //msg_send![input_context, initWithClient:view];
-            window.center();
-            
-            self.window_delegate = Some(window_delegate);
-            self.window = Some(window);
-            self.view = Some(view);
-            //self.input_context = Some(input_context);
-            self.last_window_geom = self.get_window_geom();
-            
-            let _: () = msg_send![autoreleasepool, drain];
-            
-            let input_context: id = msg_send![view, inputContext];
-            msg_send![input_context, invalidateCharacterCoordinates];
-            
-            // grab the pasteboard
-            let pasteboard: id = msg_send![class!(NSPasteboard), generalPasteboard];
-            self.pasteboard = Some(pasteboard);
-            //msg_send![input_context, activate];
-        }
-    }
-    
-    pub fn get_window_geom(&self) -> WindowGeom {
-        WindowGeom {
-            inner_size: self.get_inner_size(),
-            outer_size: self.get_outer_size(),
-            dpi_factor: self.get_dpi_factor(),
-            position: self.get_position()
-        }
-    }
-    
     
     pub fn time_now(&self) -> f64 {
         let time_now = precise_time_ns();
         (time_now - self.time_start) as f64 / 1_000_000_000.0
     }
     
-    pub fn set_position(&mut self, pos: Vec2) {
-        let mut window_frame = unsafe {NSWindow::frame(self.window.unwrap())};
-        window_frame.origin.x = pos.x as f64;
-        window_frame.origin.y = pos.y as f64;
-        //not very nice: CGDisplay::main().pixels_high() as f64
-        unsafe {msg_send![self.window.unwrap(), setFrame: window_frame display: YES]};
-    }
-    
-    pub fn get_position(&self) -> Vec2 {
-        if self.window.is_none() {
-            return Vec2::zero();
-        }
-        let window_frame = unsafe {NSWindow::frame(self.window.unwrap())};
-        Vec2 {x: window_frame.origin.x as f32, y: window_frame.origin.y as f32}
-    }
-    
-    fn get_ime_origin(&self) -> Vec2 {
-        if self.window.is_none() {
-            return Vec2::zero();
-        }
-        let rect = NSRect::new(
-            NSPoint::new(0.0, 0.0),
-            //view_frame.size.height),
-            NSSize::new(0.0, 0.0),
-        );
-        let out = unsafe {NSWindow::convertRectToScreen_(self.window.unwrap(), rect)};
-        Vec2 {x: out.origin.x as f32, y: out.origin.y as f32}
-    }
-    
-    pub fn get_inner_size(&self) -> Vec2 {
-        if self.view.is_none() {
-            return Vec2::zero();
-        }
-        let view_frame = unsafe {NSView::frame(self.view.unwrap())};
-        Vec2 {x: view_frame.size.width as f32, y: view_frame.size.height as f32}
-    }
-    
-    pub fn get_outer_size(&self) -> Vec2 {
-        if self.window.is_none() {
-            return Vec2::zero();
-        }
-        let window_frame = unsafe {NSWindow::frame(self.window.unwrap())};
-        Vec2 {x: window_frame.size.width as f32, y: window_frame.size.height as f32}
-    }
-    
-    pub fn set_outer_size(&self, size: Vec2) {
-        let mut window_frame = unsafe {NSWindow::frame(self.window.unwrap())};
-        window_frame.size.width = size.x as f64;
-        window_frame.size.height = size.y as f64;
-        unsafe {msg_send![self.window.unwrap(), setFrame: window_frame display: YES]};
-    }
-    
-    pub fn get_dpi_factor(&self) -> f32 {
-        if self.window.is_none() {
-            return 1.0;
-        }
-        unsafe {NSWindow::backingScaleFactor(self.window.unwrap()) as f32}
-    }
     
     unsafe fn process_ns_event(&mut self, ns_event: cocoa::base::id) {
         if ns_event == cocoa::base::nil {
@@ -275,7 +150,7 @@ impl CocoaWindow {
                     let paste_text = if let KeyCode::KeyV = key_code {
                         if modifiers.logo || modifiers.control {
                             // was a paste
-                            let nsstring: id = msg_send![self.pasteboard.unwrap(), stringForType: NSStringPboardType];
+                            let nsstring: id = msg_send![self.pasteboard, stringForType: NSStringPboardType];
                             let string = nsstring_to_string(nsstring);
                             
                             Some(string)
@@ -298,8 +173,8 @@ impl CocoaWindow {
                                     // plug it into the apple clipboard
                                     let nsstring: id = NSString::alloc(nil).init_str(&response);
                                     let array: id = msg_send![class!(NSArray), arrayWithObject: NSStringPboardType];
-                                    msg_send![self.pasteboard.unwrap(), declareTypes: array owner: nil];
-                                    msg_send![self.pasteboard.unwrap(), setString: nsstring forType: NSStringPboardType];
+                                    msg_send![self.pasteboard, declareTypes: array owner: nil];
+                                    msg_send![self.pasteboard, setString: nsstring forType: NSStringPboardType];
                                 },
                                 _ => ()
                             };
@@ -377,12 +252,13 @@ impl CocoaWindow {
             appkit::NSOtherMouseDragged |
             appkit::NSRightMouseDragged => {},
             appkit::NSScrollWheel => {
+                /*
                 return if ns_event.hasPreciseScrollingDeltas() == cocoa::base::YES {
                     self.do_callback(&mut vec![
                         Event::FingerScroll(FingerScrollEvent {
                             scroll: Vec2 {
-                                x: - ns_event.scrollingDeltaX() as f32,
-                                y: - ns_event.scrollingDeltaY() as f32
+                                x: -ns_event.scrollingDeltaX() as f32,
+                                y: -ns_event.scrollingDeltaY() as f32
                             },
                             abs: self.last_mouse_pos,
                             rel: self.last_mouse_pos,
@@ -397,8 +273,8 @@ impl CocoaWindow {
                     self.do_callback(&mut vec![
                         Event::FingerScroll(FingerScrollEvent {
                             scroll: Vec2 {
-                                x: - ns_event.scrollingDeltaX() as f32 * 32.,
-                                y: - ns_event.scrollingDeltaY() as f32 * 32.
+                                x: -ns_event.scrollingDeltaX() as f32 * 32.,
+                                y: -ns_event.scrollingDeltaY() as f32 * 32.
                             },
                             abs: self.last_mouse_pos,
                             rel: self.last_mouse_pos,
@@ -409,7 +285,7 @@ impl CocoaWindow {
                             time: self.time_now()
                         })
                     ]);
-                }
+                }*/
             },
             appkit::NSEventTypePressure => {},
             _ => (),
@@ -423,12 +299,6 @@ impl CocoaWindow {
         
         unsafe {
             self.event_callback = Some(&mut event_handler as *const FnMut(&mut Vec<Event>) as *mut FnMut(&mut Vec<Event>));
-            
-            if !self.init_resize {
-                self.init_resize = true;
-                self.send_change_event();
-               
-            }
             
             loop {
                 let pool = foundation::NSAutoreleasePool::new(cocoa::base::nil);
@@ -472,6 +342,42 @@ impl CocoaWindow {
         }
     }
     
+    pub fn post_signal(signal_id: u64, value: u64) {
+        unsafe {
+            let pool = foundation::NSAutoreleasePool::new(cocoa::base::nil);
+            let nsevent: id = msg_send![
+                class!(NSEvent),
+                otherEventWithType: NSApplicationDefined
+                location: NSPoint::new(0., 0.)
+                modifierFlags: 0u64
+                timestamp: 0f64
+                windowNumber: 1u64
+                context: nil
+                subtype: 0i16
+                data1: signal_id
+                data2: value
+            ];
+            msg_send![appkit::NSApp(), postEvent: nsevent atStart: 0];
+            let _: () = msg_send![pool, release];
+        }
+    }
+    
+    
+    pub fn set_mouse_cursor(&mut self, cursor: MouseCursor) {
+        if self.current_cursor != cursor {
+            self.current_cursor = cursor;
+            // todo set it on all windows
+            /*
+            unsafe {
+                let _: () = msg_send![
+                    self.window,
+                    invalidateCursorRectsForView: self.view
+                ];
+            }*/
+        }
+    }
+    
+    
     pub fn start_timer(&mut self, timer_id: u64, interval: f64, repeats: bool) {
         unsafe {
             let pool = foundation::NSAutoreleasePool::new(cocoa::base::nil);
@@ -479,8 +385,8 @@ impl CocoaWindow {
                 class!(NSTimer),
                 
                 scheduledTimerWithTimeInterval: interval
-                target: self.window_delegate.unwrap()
-                selector: sel!(windowReceivedTimer:)
+                target: self.timer_delegate_instance
+                selector: sel!(receivedTimer:)
                 userInfo: nil
                 repeats: repeats
             ];
@@ -537,31 +443,182 @@ impl CocoaWindow {
         }
     }
     
-    pub fn post_signal(signal_id: u64, value: u64) {
+    pub fn set_ime_spot(&mut self, _spot: Vec2) {
+        // todo set it on all windowes
+    }
+}
+
+impl CocoaWindow {
+    
+    pub fn new(cocoa_app: &mut CocoaApp) -> CocoaWindow {
         unsafe {
-            let pool = foundation::NSAutoreleasePool::new(cocoa::base::nil);
-            let nsevent: id = msg_send![
-                class!(NSEvent),
-                otherEventWithType: NSApplicationDefined
-                location: NSPoint::new(0., 0.)
-                modifierFlags: 0u64
-                timestamp: 0f64
-                windowNumber: 1u64
-                context: nil
-                subtype: 0i16
-                data1: signal_id
-                data2: value
+            
+            let objects = vec![
+                NSString::alloc(nil).init_str("NSMarkedClauseSegment"),
+                NSString::alloc(nil).init_str("NSGlyphInfo")
             ];
-            msg_send![appkit::NSApp(), postEvent: nsevent atStart: 0];
-            let _: () = msg_send![pool, release];
+            
+            let autoreleasepool = NSAutoreleasePool::new(nil);
+            
+            let window: id = msg_send![cocoa_app.window_class, alloc];
+            let window_delegate: id = msg_send![cocoa_app.window_delegate_class, new];
+            let view: id = msg_send![cocoa_app.view_class, alloc];
+            
+            let _: () = msg_send![autoreleasepool, drain];
+            
+            CocoaWindow {
+                time_start: cocoa_app.time_start,
+                attributes_for_marked_text: NSArray::arrayWithObjects(nil, &objects),
+                empty_string: NSString::alloc(nil).init_str(""),
+                cocoa_app: cocoa_app,
+                window_delegate: window_delegate,
+                window: window,
+                view: view,
+                last_window_geom: None,
+                ime_spot: Vec2::zero(),
+                fingers_down: Vec::new(),
+                last_mouse_pos: Vec2::zero(),
+            }
         }
     }
+    
+    // complete window initialization with pointers to self
+    pub fn init(&mut self, title: &str, size: Vec2, position: Option<Vec2>) {
+        unsafe {
+            for _i in 0..10 {
+                self.fingers_down.push(false);
+            }
+            
+            let autoreleasepool = NSAutoreleasePool::new(nil);
+            
+            // set the backpointeers
+            (*self.window_delegate).set_ivar("cocoa_window_ptr", self as *mut _ as *mut c_void);
+            msg_send![self.view, initWithPtr: self as *mut _ as *mut c_void];
+            
+            let left_top = if let Some(position) = position {
+                NSPoint::new(position.x as f64, position.y as f64)
+            }
+            else {
+                NSPoint::new(0., 0.)
+            };
+            let ns_size = NSSize::new(size.x as f64, size.y as f64);
+            let window_frame = NSRect::new(left_top, ns_size);
+            let window_masks = appkit::NSWindowStyleMask::NSClosableWindowMask
+                | appkit::NSWindowStyleMask::NSMiniaturizableWindowMask
+                | appkit::NSWindowStyleMask::NSResizableWindowMask
+                | appkit::NSWindowStyleMask::NSTitledWindowMask;
+            
+            self.window.initWithContentRect_styleMask_backing_defer_(
+                window_frame,
+                window_masks,
+                appkit::NSBackingStoreBuffered,
+                NO
+            );
+            
+            msg_send![self.window, setDelegate: self.window_delegate];
+            
+            let title = NSString::alloc(nil).init_str(title);
+            self.window.setReleasedWhenClosed_(NO);
+            self.window.setTitle_(title);
+            self.window.setAcceptsMouseMovedEvents_(YES);
+            
+            self.window.setContentView_(self.view);
+            self.window.makeFirstResponder_(self.view);
+            self.window.makeKeyAndOrderFront_(nil);
+            self.window.center();
+            let input_context: id = msg_send![self.view, inputContext];
+            msg_send![input_context, invalidateCharacterCoordinates];
+            
+            let _: () = msg_send![autoreleasepool, drain];
+        }
+    }
+    
+    pub fn update_ptrs(&mut self) {
+        unsafe {
+            (*self.window_delegate).set_ivar("cocoa_window_ptr", self as *mut _ as *mut c_void);
+            (*self.view).set_ivar("cocoa_window_ptr", self as *mut _ as *mut c_void);
+        }
+    }
+    
+    pub fn time_now(&self) -> f64 {
+        let time_now = precise_time_ns();
+        (time_now - self.time_start) as f64 / 1_000_000_000.0
+    }
+    
+    pub fn get_window_geom(&self) -> WindowGeom {
+        WindowGeom {
+            inner_size: self.get_inner_size(),
+            outer_size: self.get_outer_size(),
+            dpi_factor: self.get_dpi_factor(),
+            position: self.get_position()
+        }
+    }
+    
+    pub fn do_callback(&mut self, events: &mut Vec<Event>) {
+        unsafe {
+            if (*self.cocoa_app).event_callback.is_none() {
+                return
+            };
+            let callback = (*self.cocoa_app).event_callback.unwrap();
+            (*callback)(events);
+        }
+    }
+    
+    pub fn set_position(&mut self, pos: Vec2) {
+        let mut window_frame = unsafe {NSWindow::frame(self.window)};
+        window_frame.origin.x = pos.x as f64;
+        window_frame.origin.y = pos.y as f64;
+        //not very nice: CGDisplay::main().pixels_high() as f64
+        unsafe {msg_send![self.window, setFrame: window_frame display: YES]};
+    }
+    
+    pub fn get_position(&self) -> Vec2 {
+        let window_frame = unsafe {NSWindow::frame(self.window)};
+        Vec2 {x: window_frame.origin.x as f32, y: window_frame.origin.y as f32}
+    }
+    
+    fn get_ime_origin(&self) -> Vec2 {
+        let rect = NSRect::new(
+            NSPoint::new(0.0, 0.0),
+            //view_frame.size.height),
+            NSSize::new(0.0, 0.0),
+        );
+        let out = unsafe {NSWindow::convertRectToScreen_(self.window, rect)};
+        Vec2 {x: out.origin.x as f32, y: out.origin.y as f32}
+    }
+    
+    pub fn get_inner_size(&self) -> Vec2 {
+        let view_frame = unsafe {NSView::frame(self.view)};
+        Vec2 {x: view_frame.size.width as f32, y: view_frame.size.height as f32}
+    }
+    
+    pub fn get_outer_size(&self) -> Vec2 {
+        let window_frame = unsafe {NSWindow::frame(self.window)};
+        Vec2 {x: window_frame.size.width as f32, y: window_frame.size.height as f32}
+    }
+    
+    pub fn set_outer_size(&self, size: Vec2) {
+        let mut window_frame = unsafe {NSWindow::frame(self.window)};
+        window_frame.size.width = size.x as f64;
+        window_frame.size.height = size.y as f64;
+        unsafe {msg_send![self.window, setFrame: window_frame display: YES]};
+    }
+    
+    pub fn get_dpi_factor(&self) -> f32 {
+        unsafe {NSWindow::backingScaleFactor(self.window) as f32}
+    }
+    
     
     pub fn send_change_event(&mut self) {
         
         let new_geom = self.get_window_geom();
-        let old_geom = self.last_window_geom.clone();
-        self.last_window_geom = new_geom.clone();
+        let old_geom = if let Some(old_geom) = &self.last_window_geom {
+            old_geom.clone()
+        }
+        else {
+            new_geom.clone()
+        };
+        self.last_window_geom = Some(new_geom.clone());
         
         self.do_callback(&mut vec![Event::WindowChange(WindowChangeEvent {
             old_geom: old_geom,
@@ -572,7 +629,7 @@ impl CocoaWindow {
     pub fn send_focus_event(&mut self) {
         self.do_callback(&mut vec![Event::AppFocus]);
     }
-
+    
     pub fn send_focus_lost_event(&mut self) {
         self.do_callback(&mut vec![Event::AppFocusLost]);
     }
@@ -829,12 +886,36 @@ fn get_cocoa_window(this: &Object) -> &mut CocoaWindow {
     }
 }
 
-pub fn define_cocoa_window_delegate() -> *const Class {
-    
-    extern fn window_received_timer(this: &Object, _: Sel, nstimer: id) {
-        let cw = get_cocoa_window(this);
-        cw.send_timer_received(nstimer);
+fn get_cocoa_app(this: &Object) -> &mut CocoaApp {
+    unsafe {
+        let ptr: *mut c_void = *this.get_ivar("cocoa_app_ptr");
+        &mut *(ptr as *mut CocoaApp)
     }
+}
+
+pub fn define_cocoa_timer_delegate() -> *const Class {
+    
+    extern fn received_timer(this: &Object, _: Sel, nstimer: id) {
+        let ca = get_cocoa_app(this);
+        ca.send_timer_received(nstimer);
+    }
+    
+    let superclass = class!(NSObject);
+    let mut decl = ClassDecl::new("TimerDelegate", superclass).unwrap();
+    
+    // Add callback methods
+    unsafe {
+        decl.add_method(sel!(receivedTimer:), received_timer as extern fn(&Object, Sel, id));
+        
+    }
+    // Store internal state as user data
+    decl.add_ivar::<*mut c_void>("cocoa_app_ptr");
+    
+    return decl.register();
+}
+
+
+pub fn define_cocoa_window_delegate() -> *const Class {
     
     extern fn window_should_close(this: &Object, _: Sel, _: id) -> BOOL {
         let cw = get_cocoa_window(this);
@@ -848,32 +929,24 @@ pub fn define_cocoa_window_delegate() -> *const Class {
     
     extern fn window_did_resize(this: &Object, _: Sel, _: id) {
         let cw = get_cocoa_window(this);
-        if !cw.window.is_none(){
-            cw.send_change_event();
-        }
+        cw.send_change_event();
     }
     
     // This won't be triggered if the move was part of a resize.
     extern fn window_did_move(this: &Object, _: Sel, _: id) {
         let cw = get_cocoa_window(this);
-        if !cw.window.is_none(){
-            cw.send_change_event();
-        }
+        cw.send_change_event();
     }
     
     extern fn window_did_change_screen(this: &Object, _: Sel, _: id) {
         let cw = get_cocoa_window(this);
-        if !cw.window.is_none(){
-            cw.send_change_event();
-        }
+        cw.send_change_event();
     }
     
     // This will always be called before `window_did_change_screen`.
     extern fn window_did_change_backing_properties(this: &Object, _: Sel, _: id) {
         let cw = get_cocoa_window(this);
-        if !cw.window.is_none(){
-            cw.send_change_event();
-        }
+        cw.send_change_event();
     }
     
     extern fn window_did_become_key(this: &Object, _: Sel, _: id) {
@@ -957,7 +1030,7 @@ pub fn define_cocoa_window_delegate() -> *const Class {
         decl.add_method(sel!(windowDidExitFullScreen:), window_did_exit_fullscreen as extern fn(&Object, Sel, id));
         decl.add_method(sel!(windowDidFailToEnterFullScreen:), window_did_fail_to_enter_fullscreen as extern fn(&Object, Sel, id));
         // custom timer fn
-        decl.add_method(sel!(windowReceivedTimer:), window_received_timer as extern fn(&Object, Sel, id));
+        //decl.add_method(sel!(windowReceivedTimer:), window_received_timer as extern fn(&Object, Sel, id));
         
     }
     // Store internal state as user data
@@ -1083,13 +1156,18 @@ pub fn define_cocoa_view_class() -> *const Class {
     
     extern fn reset_cursor_rects(this: &Object, _sel: Sel) {
         let cw = get_cocoa_window(this);
-        let current_cursor = cw.current_cursor.clone();
-        let cursor_id = *cw.cursors.entry(current_cursor.clone()).or_insert_with( || {
-            load_mouse_cursor(current_cursor.clone())
-        });
         unsafe {
+            let cocoa_app = &mut (*cw.cocoa_app);
+            let current_cursor = cocoa_app.current_cursor.clone();
+            let cursor_id = *cocoa_app.cursors.entry(current_cursor.clone()).or_insert_with( || {
+                load_mouse_cursor(current_cursor.clone())
+            });
             let bounds: NSRect = msg_send![this, bounds];
-            let _: () = msg_send![this, addCursorRect: bounds cursor: cursor_id];
+            let _: () = msg_send![
+                this,
+                addCursorRect: bounds
+                cursor: cursor_id
+            ];
         }
     }
     
@@ -1144,7 +1222,7 @@ pub fn define_cocoa_view_class() -> *const Class {
         unsafe {
             let marked_text: id = *this.get_ivar("markedText");
             let mutable_string = marked_text.mutable_string();
-            let _: () = msg_send![mutable_string, setString: cw.empty_string.unwrap()];
+            let _: () = msg_send![mutable_string, setString: cw.empty_string];
             let input_context: id = msg_send![this, inputContext];
             let _: () = msg_send![input_context, discardMarkedText];
         }
@@ -1152,7 +1230,7 @@ pub fn define_cocoa_view_class() -> *const Class {
     
     extern fn valid_attributes_for_marked_text(this: &Object, _sel: Sel) -> id {
         let cw = get_cocoa_window(this);
-        cw.attributes_for_marked_text.unwrap()
+        cw.attributes_for_marked_text
     }
     
     extern fn attributed_substring_for_proposed_range(_this: &Object, _sel: Sel, _range: NSRange, _actual_range: *mut c_void) -> id {
@@ -1171,7 +1249,7 @@ pub fn define_cocoa_view_class() -> *const Class {
         //let window_point = event.locationInWindow();
         //et view_point = view.convertPoint_fromView_(window_point, nil);
         let view_rect = unsafe {NSView::frame(view)};
-        let window_rect = unsafe {NSWindow::frame(cw.window.unwrap())};
+        let window_rect = unsafe {NSWindow::frame(cw.window)};
         
         let origin = cw.get_ime_origin();
         let bar = (window_rect.size.height - view_rect.size.height) as f32 - 5.;
@@ -1195,7 +1273,7 @@ pub fn define_cocoa_view_class() -> *const Class {
             cw.send_text_input(string, replacement_range.length != 0);
             let input_context: id = msg_send![this, inputContext];
             msg_send![input_context, invalidateCharacterCoordinates];
-            msg_send![cw.view.unwrap(), setNeedsDisplay: YES];
+            msg_send![cw.view, setNeedsDisplay: YES];
             unmark_text(this, _sel);
             // msg_send![cw.view.unwrap(), unmarkText];
         }

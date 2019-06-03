@@ -15,11 +15,6 @@ pub struct Button{
     pub _bg_area:Area,
 }
 
-impl ElementLife for Button{
-    fn construct(&mut self, _cx:&mut Cx){}
-    fn destruct(&mut self, _cx:&mut Cx){}
-}
-
 impl Style for Button{
     fn style(cx:&mut Cx)->Self{
         let bg_sh = Self::def_bg_shader(cx);

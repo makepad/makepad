@@ -4,7 +4,10 @@ impl Cx{
 
     pub fn new_instance_layer(&mut self, shader_id:usize, instance_count:usize)->InstanceArea{
         let shc = &self.compiled_shaders[shader_id];
-        let draw_list = &mut self.draw_lists[self.current_draw_list_id];
+
+        let current_draw_list_id = *self.draw_list_stack.last().unwrap();
+
+        let draw_list = &mut self.draw_lists[current_draw_list_id];
         // we need a new draw call
         let draw_call_id = draw_list.draw_calls_len;
         draw_list.draw_calls_len = draw_list.draw_calls_len + 1;
@@ -13,7 +16,7 @@ impl Cx{
         if draw_call_id >= draw_list.draw_calls.len(){
             draw_list.draw_calls.push(DrawCall{
                 draw_call_id:draw_call_id,
-                draw_list_id:self.current_draw_list_id,
+                draw_list_id:current_draw_list_id,
                 redraw_id:self.redraw_id,
                 sub_list_id:0,
                 shader_id:shc.shader_id,
@@ -50,8 +53,8 @@ impl Cx{
         if !self.is_in_redraw_cycle{
             panic!("calling get_instance outside of redraw cycle is not possible!");
         }
-
-        let draw_list = &mut self.draw_lists[self.current_draw_list_id];
+        let current_draw_list_id = *self.draw_list_stack.last().unwrap();
+        let draw_list = &mut self.draw_lists[current_draw_list_id];
         let shc = &self.compiled_shaders[shader_id];
 
         // find our drawcall to append to the current layer
@@ -133,6 +136,8 @@ impl DrawCall{
 
 // CX and DL uniforms
 const DL_UNI_SCROLL:usize = 0;
+const DL_UNI_DPI_FACTOR:usize = 2;
+const DL_UNI_DPI_DILATE:usize = 3;
 const DL_UNI_CLIP:usize = 4;
 const DL_UNI_SIZE:usize = 8;
 
@@ -169,9 +174,16 @@ impl DrawList{
         sh.add_ast(shader_ast!({
             let draw_list_scroll:vec2<UniformDl>;
             let draw_list_clip:vec4<UniformDl>;
+            let dpi_dilate:float<UniformDl>;
         }));
     }
 
+    pub fn set_dpi_factor(&mut self, dpi_factor:f32){
+        let dpi_dilate = (2. - dpi_factor).max(0.).min(1.);
+        self.uniforms[DL_UNI_DPI_FACTOR+0] = dpi_factor;
+        self.uniforms[DL_UNI_DPI_DILATE+0] = dpi_dilate;
+    }
+    
     pub fn set_scroll_x(&mut self, x:f32){
         self.uniforms[DL_UNI_SCROLL+0] = x;
     }

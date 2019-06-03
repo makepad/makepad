@@ -14,6 +14,7 @@ pub use crate::elements::*;
 pub use crate::animator::*;
 pub use crate::area::*;
 pub use crate::view::*;
+pub use crate::window::*;
 
 #[cfg(feature = "ogl")]
 pub use crate::cx_ogl::*;
@@ -51,7 +52,11 @@ pub struct Cx {
     pub draw_lists: Vec<DrawList>,
     pub draw_lists_free: Vec<usize>,
     pub draw_list_stack: Vec<usize>,
-    pub current_draw_list_id: usize,
+ 
+    pub window_stack: Vec<usize>,
+    pub windows: Vec<CxWindow>,
+    pub windows_free: Vec<usize>,
+    //pub current_draw_list_id: Option<usize>,
     
     pub compiled_shaders: Vec<CompiledShader>,
     pub shaders: Vec<Shader>,
@@ -77,7 +82,7 @@ pub struct Cx {
     pub turtles: Vec<Turtle>,
     pub align_list: Vec<Area>,
     
-    pub window_geom: WindowGeom,
+    //pub window_geom: WindowGeom,
     
     pub down_mouse_cursor: Option<MouseCursor>,
     pub hover_mouse_cursor: Option<MouseCursor>,
@@ -105,6 +110,7 @@ pub struct Cx {
     pub panic_redraw: bool
 }
 
+
 impl Default for Cx {
     fn default() -> Self {
         let mut uniforms = Vec::<f32>::new();
@@ -128,7 +134,10 @@ impl Default for Cx {
             draw_lists: Vec::new(),
             draw_lists_free: Vec::new(),
             draw_list_stack: Vec::new(),
-            current_draw_list_id: 0,
+
+            window_stack: Vec::new(),
+            windows: Vec::new(),
+            windows_free: Vec::new(),
             
             compiled_shaders: Vec::new(),
             shaders: Vec::new(),
@@ -149,7 +158,7 @@ impl Default for Cx {
             turtles: Vec::new(),
             align_list: Vec::new(),
             
-            window_geom: WindowGeom {..Default::default()},
+            //window_geom: WindowGeom {..Default::default()},
             
             last_key_focus: Area::Empty,
             key_focus: Area::Empty,
@@ -329,14 +338,14 @@ impl Cx {
         );
         &mut self.textures_2d[id]
     }
-    
+    /*
     pub fn prepare_frame(&mut self) {
         let camera_projection = Mat4::ortho(
             0.0,
             self.window_geom.inner_size.x,
             0.0,
             self.window_geom.inner_size.y,
-            - 100.0,
+            -100.0,
             100.0,
             
             1.0,
@@ -344,7 +353,7 @@ impl Cx {
         );
         self.uniform_camera_projection(camera_projection);
         self.align_list.truncate(0);
-    }
+    }*/
     
     pub fn check_ended_anim_areas(&mut self, time: f64) {
         let mut i = 0;
@@ -434,7 +443,7 @@ impl Cx {
         self.keys_down.push(key_event);
     }
     
-    pub fn process_key_up(&mut self, key_event:&KeyEvent) {
+    pub fn process_key_up(&mut self, key_event: &KeyEvent) {
         for i in 0..self.keys_down.len() {
             if self.keys_down[i].key_code == key_event.key_code {
                 self.keys_down.remove(i);
@@ -448,7 +457,7 @@ impl Cx {
     {
         let keys_down = self.keys_down.clone();
         self.keys_down.truncate(0);
-        for key_event in keys_down{
+        for key_event in keys_down {
             self.call_event_handler(&mut event_handler, &mut Event::KeyUp(key_event))
         }
     }
@@ -471,25 +480,16 @@ impl Cx {
         }
     }
     
-    pub fn call_draw_event<F, T>(&mut self, mut event_handler: F, root_view: &mut View<T>)
-    where F: FnMut(&mut Cx, &mut Event),
-    T: ScrollBarLike<T> + Clone + ElementLife
+    pub fn call_draw_event<F>(&mut self, mut event_handler: F)
+    where F: FnMut(&mut Cx, &mut Event)
     {
-        //for i in 0..10{
         self.is_in_redraw_cycle = true;
         self.redraw_id += 1;
-        
-        if let Err(()) = root_view.begin_view(self, &Layout {..Default::default()}) {
-            // nothing to begin i suppose?
-            return;
-        }
         
         self.incr_areas = self.redraw_areas.clone();
         self.redraw_areas.truncate(0);
         self.call_event_handler(&mut event_handler, &mut Event::Draw);
-        root_view.end_view(self);
         self.is_in_redraw_cycle = false;
-        //}
     }
     
     pub fn call_animation_event<F>(&mut self, mut event_handler: F, time: f64)
@@ -578,7 +578,7 @@ impl Cx {
         if draw_list_id == 0{
             println!("---------- Begin Debug draw tree for redraw_id: {} ---------", self.redraw_id)
         }
-        println!("{}list {}: len:{} rect:{:?}", indent, draw_list_id, draw_calls_len, self.draw_lists[draw_list_id].rect);      
+        println!("{}list {}: len:{} rect:{:?}", indent, draw_list_id, draw_calls_len, self.draw_lists[draw_list_id].rect);   
         indent.push_str("  ");
         for draw_call_id in 0..draw_calls_len{
             let sub_list_id = self.draw_lists[draw_list_id].draw_calls[draw_call_id].sub_list_id;
@@ -592,7 +592,7 @@ impl Cx {
                 let shc = &self.compiled_shaders[draw_call.shader_id];
                 let slots = shc.instance_slots;
                 let instances = draw_call.instance.len() / slots;
-                println!("{}call {}: {}({}) x:{}", indent, draw_call_id, sh.name, draw_call.shader_id, instances);      
+                println!("{}call {}: {}({}) x:{}", indent, draw_call_id, sh.name, draw_call.shader_id, instances);   
                 // lets dump the instance geometry
                 for inst in 0..instances.min(1){
                     let mut out = String::new();
@@ -617,7 +617,7 @@ impl Cx {
                         }
                         off += prop.slots;
                     }
-                    println!("  {}instance {}: {}", indent, inst, out);      
+                    println!("  {}instance {}: {}", indent, inst, out);   
                 }
             }
         }
@@ -633,6 +633,51 @@ pub struct WindowGeom {
     pub position: Vec2,
     pub inner_size: Vec2,
     pub outer_size: Vec2,
+}
+
+#[derive(Clone)]
+pub enum CxWindowState{
+    Create{title:String, inner_size:Vec2, position:Option<Vec2>},
+    Created,
+    Destroy,
+    Destroyed
+}
+
+impl Default for CxWindowState{
+    fn default()->Self{CxWindowState::Destroyed}
+}
+
+#[derive(Clone, Default)]
+pub struct CxWindow {
+    pub window_id: usize,
+    pub window_state:CxWindowState,
+    pub window_geom: WindowGeom,
+    pub root_draw_list_id: Option<usize>,
+}
+
+impl CxWindow{
+    pub fn get_inner_size(&mut self)->Vec2{
+        match &self.window_state{
+            CxWindowState::Create{inner_size,..}=>*inner_size,
+            CxWindowState::Created=>self.window_geom.inner_size,
+            _=>Vec2::zero()
+        }
+    }
+
+    pub fn get_position(&mut self)->Option<Vec2>{
+        match &self.window_state{
+            CxWindowState::Create{position,..}=>*position,
+            CxWindowState::Created=>Some(self.window_geom.position),
+            _=>None
+        }
+    }
+
+    pub fn get_dpi_factor(&mut self)->Option<f32>{
+        match &self.window_state{
+            CxWindowState::Created=>Some(self.window_geom.dpi_factor),
+            _=>None
+        }
+    }
 }
 
 #[derive(Clone)]

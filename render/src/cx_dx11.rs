@@ -121,10 +121,10 @@ impl Cx {
         self.call_event_handler(&mut event_handler, &mut Event::Construct);
         
         self.redraw_area(Area::All);
-        
+        let mut lp = 0;
         while self.running {
             //println!("{}{} ",self.playing_anim_areas.len(), self.redraw_areas.len());
-            windows_window.poll_events(
+            event_loop.poll_events(
                 self.playing_anim_areas.len() == 0 && self.redraw_areas.len() == 0 && self.next_frame_callbacks.len() == 0,
                 | events | {
                     for mut event in events {
@@ -143,7 +143,7 @@ impl Cx {
                     }
                 }
             );
-            
+            println!("{}",lp);lp+=1;
             if self.playing_anim_areas.len() != 0 {
                 let time = windows_window.time_now();
                 // keeps the error as low as possible

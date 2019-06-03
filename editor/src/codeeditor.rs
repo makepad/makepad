@@ -123,11 +123,6 @@ pub struct CodeEditorColors {
     pub unexpected: Color
 }
 
-impl ElementLife for CodeEditor {
-    fn construct(&mut self, _cx: &mut Cx) {}
-    fn destruct(&mut self, _cx: &mut Cx) {}
-}
-
 impl Style for CodeEditor {
     fn style(cx: &mut Cx) -> Self {
         let indent_lines_sh = Self::def_indent_lines_shader(cx);
@@ -505,7 +500,7 @@ impl CodeEditor {
         log!("HELLO {}", fe.rel.x);
         
         let offset;
-        
+        //let scroll_pos = self._bg_area.get_scroll_pos(cx);
         if fe.rel.x < self.line_number_width {
             offset = self.compute_offset_from_ypos(cx, fe.abs.y, text_buffer, false);
             let range = text_buffer.get_nearest_line_range(offset);
@@ -1728,7 +1723,7 @@ impl CodeEditor {
     
     fn compute_grid_text_pos_from_abs(&mut self, cx: &Cx, abs: Vec2) -> TextPos {
         //
-        let rel = self._bg_area.abs_to_rel_scrolled(cx, abs);
+        let rel = self._bg_area.abs_to_rel(cx, abs, false);
         let mut mono_size = Vec2::zero();
         for (row, geom) in self._line_geometry.iter().enumerate() {
             //let geom = &self._line_geometry[pos.row];
@@ -1744,7 +1739,7 @@ impl CodeEditor {
     }
     
     fn compute_offset_from_ypos(&mut self, cx: &Cx, ypos_abs: f32, text_buffer: &TextBuffer, end: bool) -> usize {
-        let rel = self._bg_area.abs_to_rel_scrolled(cx, Vec2 {x: 0.0, y: ypos_abs});
+        let rel = self._bg_area.abs_to_rel(cx, Vec2 {x: 0.0, y: ypos_abs}, false);
         let mut mono_size;
         // = Vec2::zero();
         let end_col = if end {1<<31}else {0};
@@ -1857,7 +1852,7 @@ impl CodeEditor {
     
     fn compute_focussed_line_for_folding(&self, cx: &Cx, text_buffer: &TextBuffer) -> usize {
         let scroll = self.view.get_scroll_pos(cx);
-        let rect = self.view.get_view_area(cx).get_rect_scrolled(cx);
+        let rect = self.view.get_view_area(cx).get_rect(cx, false);
         
         // first try if our last cursor is in view
         let pos = self.cursors.get_last_cursor_text_pos(text_buffer);

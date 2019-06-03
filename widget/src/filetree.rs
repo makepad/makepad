@@ -22,11 +22,6 @@ pub struct FileTree{
     pub row_padding:Padding
 }
 
-impl ElementLife for FileTree{
-    fn construct(&mut self, _cx:&mut Cx){}
-    fn destruct(&mut self, _cx:&mut Cx){}
-}
-
 #[derive(Clone, PartialEq)]
 pub enum FileTreeEvent{
     None,

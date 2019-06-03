@@ -1,7 +1,7 @@
 use std::mem;
 
 //use cocoa::base::{id};
-use cocoa::appkit::{NSWindow, NSView};
+use cocoa::appkit::{NSView};
 use cocoa::foundation::{NSAutoreleasePool, NSUInteger, NSRange};
 use core_graphics::geometry::CGSize;
 use objc::{msg_send, sel, sel_impl};
@@ -11,19 +11,20 @@ use crate::cx_cocoa::*;
 use crate::cx::*;
 
 impl Cx {
-     
-    pub fn exec_draw_list(&mut self, draw_list_id: usize, device: &Device, encoder: &RenderCommandEncoderRef) {
+    
+    pub fn exec_draw_list(&mut self, draw_list_id: usize, dpi_factor: f32, device: &Device, encoder: &RenderCommandEncoderRef) {
         
         // tad ugly otherwise the borrow checker locks 'self' and we can't recur
         let draw_calls_len = self.draw_lists[draw_list_id].draw_calls_len;
         for draw_call_id in 0..draw_calls_len {
             let sub_list_id = self.draw_lists[draw_list_id].draw_calls[draw_call_id].sub_list_id;
             if sub_list_id != 0 {
-                self.exec_draw_list(sub_list_id, device, encoder);
+                self.exec_draw_list(sub_list_id, dpi_factor, device, encoder);
             }
             else {
                 let draw_list = &mut self.draw_lists[draw_list_id];
                 draw_list.set_clipping_uniforms();
+                draw_list.set_dpi_factor(dpi_factor);
                 draw_list.platform.uni_dl.update_with_f32_data(device, &draw_list.uniforms);
                 let draw_call = &mut draw_list.draw_calls[draw_call_id];
                 let sh = &self.shaders[draw_call.shader_id];
@@ -92,11 +93,19 @@ impl Cx {
         }
     }
     
-    pub fn repaint(&mut self, layer: &CoreAnimationLayer, device: &Device, command_queue: &CommandQueue, wait: bool) {
+    pub fn repaint(
+        &mut self,
+        root_draw_list_id: usize,
+        dpi_factor: f32,
+        layer: &CoreAnimationLayer,
+        device: &Device,
+        command_queue: &CommandQueue,
+        wait: bool
+    ) {
         let pool = unsafe {NSAutoreleasePool::new(cocoa::base::nil)};
         //let command_buffer = command_queue.new_command_buffer();
         if let Some(drawable) = layer.next_drawable() {
-            self.prepare_frame();
+            //self.prepare_frame();
             
             let render_pass_descriptor = RenderPassDescriptor::new();
             
@@ -121,7 +130,7 @@ impl Cx {
             self.platform.uni_cx.update_with_f32_data(&device, &self.uniforms);
             
             // ok now we should call our render thing
-            self.exec_draw_list(0, &device, encoder);
+            self.exec_draw_list(root_draw_list_id, dpi_factor, &device, encoder);
             /*
             match &self.debug_area{
                 Area::All=>self.debug_draw_tree_recur(0, 0),
@@ -145,60 +154,20 @@ impl Cx {
         }
     }
     
-    fn resize_layer_to_turtle(&mut self, layer: &CoreAnimationLayer) {
-        layer.set_drawable_size(CGSize::new(
-            (self.window_geom.inner_size.x * self.window_geom.dpi_factor) as f64,
-            (self.window_geom.inner_size.y * self.window_geom.dpi_factor) as f64
-        ));
-    }
-    
     pub fn event_loop<F>(&mut self, mut event_handler: F)
     where F: FnMut(&mut Cx, &mut Event),
     {
         self.feature = "mtl".to_string();
-        CocoaWindow::cocoa_app_init();
         
-        let mut cocoa_window = CocoaWindow {..Default::default()};
-        
-        cocoa_window.init(&self.title);
-        
+        let mut cocoa_app = CocoaApp::new();
+
+        cocoa_app.init();
+
         let device = Device::system_default();
-        
-        let layer = CoreAnimationLayer::new();
-        layer.set_device(&device);
-        layer.set_pixel_format(MTLPixelFormat::BGRA8Unorm);
-        layer.set_presents_with_transaction(false);
-        
-        unsafe {
-            //msg_send![layer, displaySyncEnabled:false];
-            let count: u64 = 2;
-            msg_send![layer, setMaximumDrawableCount: count];
-            msg_send![layer, setDisplaySyncEnabled: true];
-        }
-        
-        unsafe {
-            let view = cocoa_window.window.unwrap().contentView();
-            view.setWantsBestResolutionOpenGLSurface_(YES);
-            view.setWantsLayer(YES);
-            view.setLayer(mem::transmute(layer.as_ref()));
-        }
-        
-        // ok get_inner_size eh. lets do this
-        
-        self.window_geom = cocoa_window.get_window_geom();
-        
-        self.resize_layer_to_turtle(&layer);
         
         let command_queue = device.new_command_queue();
         
-        let mut root_view = View::<NoScrollBar> {
-            ..Style::style(self)
-        };
-        
-        
-        println!("{:?}", self.window_geom);
-        // move it to my second screen. livecompile.
-        //cocoa_window.set_position(Vec2 {x: 1920.0, y: 400.0});
+        let mut render_windows = Vec::new();
         
         self.mtl_compile_all_shaders(&device);
         
@@ -207,10 +176,10 @@ impl Cx {
         self.call_event_handler(&mut event_handler, &mut Event::Construct);
         
         self.redraw_area(Area::All);
-        
+
+
         while self.running {
-            //println!("{}{} ",self.playing_anim_areas.len(), self.redraw_areas.len());
-            cocoa_window.poll_events(
+            cocoa_app.poll_events(
                 self.playing_anim_areas.len() == 0 && self.redraw_areas.len() == 0 && self.next_frame_callbacks.len() == 0,
                 | events | {
                     for mut event in events {
@@ -248,17 +217,16 @@ impl Cx {
                             _ => ()
                         };
                         match &event {
+                            /*
                             Event::WindowChange(re) => { // do this here because mac
-                                self.window_geom = re.new_geom.clone();
-                                
+                                //self.window_geom = re.new_geom.clone();
                                 self.call_event_handler(&mut event_handler, &mut event);
-                                
                                 self.redraw_area(Area::All);
                                 self.call_draw_event(&mut event_handler, &mut root_view);
-                                
                                 self.repaint(&layer, &device, &command_queue, false);
                                 self.resize_layer_to_turtle(&layer);
                             },
+                            */
                             Event::None => {
                             },
                             _ => {
@@ -278,15 +246,15 @@ impl Cx {
                     }
                 }
             );
-            
+
             if self.playing_anim_areas.len() != 0 {
-                let time = cocoa_window.time_now();
+                let time = cocoa_app.time_now();
                 // keeps the error as low as possible
                 self.call_animation_event(&mut event_handler, time);
             }
             
             if self.next_frame_callbacks.len() != 0 {
-                let time = cocoa_window.time_now();
+                let time = cocoa_app.time_now();
                 // keeps the error as low as possible
                 self.call_frame_event(&mut event_handler, time);
             }
@@ -296,10 +264,10 @@ impl Cx {
             // call redraw event
             if self.redraw_areas.len()>0 {
                 //let time_start = cocoa_window.time_now();
-                self.call_draw_event(&mut event_handler, &mut root_view);
+                self.call_draw_event(&mut event_handler);
                 self.paint_dirty = true;
-               // let time_end = cocoa_window.time_now();
-               // println!("Redraw took: {}", (time_end - time_start));
+                // let time_end = cocoa_window.time_now();
+                // println!("Redraw took: {}", (time_end - time_start));
             }
             
             self.process_desktop_file_read_requests(&mut event_handler);
@@ -308,48 +276,67 @@ impl Cx {
             
             // set a cursor
             if !self.down_mouse_cursor.is_none() {
-                cocoa_window.set_mouse_cursor(self.down_mouse_cursor.as_ref().unwrap().clone())
+                cocoa_app.set_mouse_cursor(self.down_mouse_cursor.as_ref().unwrap().clone())
             }
             else if !self.hover_mouse_cursor.is_none() {
-                cocoa_window.set_mouse_cursor(self.hover_mouse_cursor.as_ref().unwrap().clone())
+                cocoa_app.set_mouse_cursor(self.hover_mouse_cursor.as_ref().unwrap().clone())
             }
             else {
-                cocoa_window.set_mouse_cursor(MouseCursor::Default)
+                cocoa_app.set_mouse_cursor(MouseCursor::Default)
             }
             
             if let Some(set_ime_position) = self.platform.set_ime_position {
                 self.platform.set_ime_position = None;
-                cocoa_window.ime_spot = set_ime_position;
-            }
-            
-            if let Some(window_position) = self.platform.set_window_position {
-                self.platform.set_window_position = None;
-                cocoa_window.set_position(window_position);
-                self.window_geom = cocoa_window.get_window_geom();
-            }
-            
-            if let Some(window_outer_size) = self.platform.set_window_outer_size {
-                self.platform.set_window_outer_size = None;
-                cocoa_window.set_outer_size(window_outer_size);
-                self.window_geom = cocoa_window.get_window_geom();
-                self.resize_layer_to_turtle(&layer);
+                cocoa_app.set_ime_spot(set_ime_position);
             }
             
             while self.platform.start_timer.len()>0 {
                 let (timer_id, interval, repeats) = self.platform.start_timer.pop().unwrap();
-                cocoa_window.start_timer(timer_id, interval, repeats);
+                cocoa_app.start_timer(timer_id, interval, repeats);
             }
             
             while self.platform.stop_timer.len()>0 {
                 let timer_id = self.platform.stop_timer.pop().unwrap();
-                cocoa_window.stop_timer(timer_id);
+                cocoa_app.stop_timer(timer_id);
             }
             
-            // repaint everything if we need to
+            // construct or destruct windows
+            for (index, window) in self.windows.iter_mut().enumerate() {
+                
+                window.window_state = match &window.window_state {
+                    CxWindowState::Create {inner_size, position, title} => {
+                        // lets create a platformwindow
+                        let render_window = CocoaRenderWindow::new(index, &device, &mut cocoa_app, *inner_size, *position, &title);
+                        window.window_geom = render_window.window_geom.clone();
+                        render_windows.push(render_window);
+                        render_windows.last_mut().unwrap().cocoa_window.update_ptrs();
+                        CxWindowState::Created
+                    },
+                    CxWindowState::Destroy => {
+                        CxWindowState::Destroyed
+                    },
+                    CxWindowState::Created=>CxWindowState::Created,
+                    CxWindowState::Destroyed=>CxWindowState::Destroyed
+                }
+            }
+            
+            // repaint al windows we need to repaint
             if self.paint_dirty {
                 self.paint_dirty = false;
                 self.repaint_id += 1;
-                self.repaint(&layer, &device, &command_queue, true);
+                for render_window in &mut render_windows {
+                    render_window.resize_core_animation_layer();
+                    if let Some(root_draw_list_id) = self.windows[render_window.window_id].root_draw_list_id{
+                        self.repaint(
+                            root_draw_list_id,
+                            render_window.window_geom.dpi_factor,
+                            &render_window.core_animation_layer,
+                            &device,
+                            &command_queue,
+                            true
+                        );
+                    }
+                }
             }
         }
     }
@@ -372,25 +359,23 @@ impl Cx {
     pub fn start_timer(&mut self, interval: f64, repeats: bool) -> Timer {
         self.timer_id += 1;
         self.platform.start_timer.push((self.timer_id, interval, repeats));
-        Timer{timer_id:self.timer_id}
-    }  
-     
-    pub fn stop_timer(&mut self, timer:&mut Timer) {
-        if timer.timer_id != 0{
+        Timer {timer_id: self.timer_id}
+    }
+    
+    pub fn stop_timer(&mut self, timer: &mut Timer) {
+        if timer.timer_id != 0 {
             self.platform.stop_timer.push(timer.timer_id);
             timer.timer_id = 0;
         }
     }
     
     pub fn send_signal(signal: Signal, value: u64) {
-        CocoaWindow::post_signal(signal.signal_id, value);
+        CocoaApp::post_signal(signal.signal_id, value);
     }
-   
-   
+    
     //pub fn send_custom_event_before_draw(&mut self, id:u64, message:u64){
     //   self.custom_before_draw.push((id, message));
     //}
-   
 }
 
 #[derive(Clone, Default)]
@@ -404,6 +389,63 @@ pub struct CxPlatform {
     pub stop_timer: Vec<(u64)>,
     pub text_clipboard_response: Option<String>,
     pub desktop: CxDesktop,
+}
+
+#[derive(Clone)]
+pub struct CocoaRenderWindow {
+    pub window_id: usize,
+    pub window_geom: WindowGeom,
+    pub cal_size: Vec2,
+    pub core_animation_layer: CoreAnimationLayer,
+    pub cocoa_window: CocoaWindow
+}
+
+impl CocoaRenderWindow {
+    fn new(window_id: usize, device: &Device, cocoa_app: &mut CocoaApp, inner_size: Vec2, position: Option<Vec2>, title: &str) -> CocoaRenderWindow {
+        
+        let core_animation_layer = CoreAnimationLayer::new();
+        
+        let mut cocoa_window = CocoaWindow::new(cocoa_app);
+        
+        cocoa_window.init(title, inner_size, position);
+        
+        core_animation_layer.set_device(&device);
+        core_animation_layer.set_pixel_format(MTLPixelFormat::BGRA8Unorm);
+        core_animation_layer.set_presents_with_transaction(false);
+        
+        unsafe {
+            //msg_send![layer, displaySyncEnabled:false];
+            let count: u64 = 2;
+            msg_send![core_animation_layer, setMaximumDrawableCount: count];
+            msg_send![core_animation_layer, setDisplaySyncEnabled: true];
+        }
+        
+        unsafe {
+            let view = cocoa_window.view;
+            view.setWantsBestResolutionOpenGLSurface_(YES);
+            view.setWantsLayer(YES);
+            view.setLayer(mem::transmute(core_animation_layer.as_ref()));
+        }
+        
+        CocoaRenderWindow {
+            window_id,
+            cal_size:Vec2::zero(),
+            core_animation_layer,
+            window_geom: cocoa_window.get_window_geom(),
+            cocoa_window,
+        }
+    }
+    
+    fn resize_core_animation_layer(&mut self) {
+        let cal_size = Vec2 {
+            x: self.window_geom.inner_size.x * self.window_geom.dpi_factor,
+            y: self.window_geom.inner_size.y * self.window_geom.dpi_factor
+        };
+        if self.cal_size != cal_size {
+            self.cal_size = cal_size;
+            self.core_animation_layer.set_drawable_size(CGSize::new(cal_size.x as f64, cal_size.y as f64));
+        }
+    }
 }
 
 #[derive(Clone, Default)]
@@ -556,15 +598,9 @@ impl Texture2D {
 }
 
 use closefds::*;
-use std::process:: {Command, Child, Stdio};
+use std::process::{Command, Child, Stdio};
 use std::os::unix::process::{CommandExt};
 
-pub fn spawn_process_command(cmd:&str, args:&[&str], current_dir:&str)->Result<Child, std::io::Error>{
-    unsafe{Command::new(cmd)
-        .args(args)
-        .pre_exec(close_fds_on_exec(vec![0,1,2]).unwrap())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .current_dir(current_dir)
-        .spawn()}
+pub fn spawn_process_command(cmd: &str, args: &[&str], current_dir: &str) -> Result<Child, std::io::Error> {
+    unsafe {Command::new(cmd) .args(args) .pre_exec(close_fds_on_exec(vec![0, 1, 2]).unwrap()) .stdout(Stdio::piped()) .stderr(Stdio::piped()) .current_dir(current_dir) .spawn()}
 }

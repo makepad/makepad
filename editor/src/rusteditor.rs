@@ -8,11 +8,6 @@ pub struct RustEditor {
     pub code_editor: CodeEditor,
 }
 
-impl ElementLife for RustEditor {
-    fn construct(&mut self, _cx: &mut Cx) {}
-    fn destruct(&mut self, _cx: &mut Cx) {}
-}
-
 impl Style for RustEditor {
     fn style(cx: &mut Cx) -> Self {
         let rust_editor = Self {
