@@ -46,6 +46,7 @@ pub struct CocoaApp {
     pub timer_delegate_class: *const Class,
     pub timer_delegate_instance: id,
     pub timers: Vec<CocoaTimer>,
+    pub cocoa_windows: Vec<(id,id)>,
     pub view_class: *const Class,
     pub last_key_mod: KeyModifiers,
     pub pasteboard: id,
@@ -68,6 +69,7 @@ impl CocoaApp {
                 timer_delegate_instance: timer_delegate_instance,
                 timer_delegate_class: timer_delegate_class,
                 timers: Vec::new(),
+                cocoa_windows: Vec::new(),
                 window_class: define_cocoa_window_class(),
                 window_delegate_class: define_cocoa_window_delegate(),
                 view_class: define_cocoa_view_class(),
@@ -367,13 +369,14 @@ impl CocoaApp {
         if self.current_cursor != cursor {
             self.current_cursor = cursor;
             // todo set it on all windows
-            /*
             unsafe {
-                let _: () = msg_send![
-                    self.window,
-                    invalidateCursorRectsForView: self.view
-                ];
-            }*/
+                for (window,view) in &self.cocoa_windows{
+                    let _: () = msg_send![
+                        *window,
+                        invalidateCursorRectsForView: *view
+                    ];
+                }
+            }
         }
     }
     
@@ -442,10 +445,6 @@ impl CocoaApp {
             }
         }
     }
-    
-    pub fn set_ime_spot(&mut self, _spot: Vec2) {
-        // todo set it on all windowes
-    }
 }
 
 impl CocoaWindow {
@@ -465,7 +464,7 @@ impl CocoaWindow {
             let view: id = msg_send![cocoa_app.view_class, alloc];
             
             let _: () = msg_send![autoreleasepool, drain];
-            
+            cocoa_app.cocoa_windows.push((window,view));
             CocoaWindow {
                 time_start: cocoa_app.time_start,
                 attributes_for_marked_text: NSArray::arrayWithObjects(nil, &objects),
@@ -539,7 +538,11 @@ impl CocoaWindow {
             (*self.view).set_ivar("cocoa_window_ptr", self as *mut _ as *mut c_void);
         }
     }
-    
+        
+    pub fn set_ime_spot(&mut self, spot: Vec2) {
+        self.ime_spot = spot;
+    }
+
     pub fn time_now(&self) -> f64 {
         let time_now = precise_time_ns();
         (time_now - self.time_start) as f64 / 1_000_000_000.0

@@ -33,7 +33,7 @@ impl Cx {
         if let Some(layout_abs_size) = layout.abs_size {
             abs_size = layout_abs_size;
         }
-
+        
         // same for origin
         let is_abs_origin;
         if let Some(abs_origin) = layout.abs_origin {
@@ -45,10 +45,10 @@ impl Cx {
         }
         
         // abs origin overrides the computation of width/height to use the parent abs_origin
-        let width = layout.width.eval_width(self, layout.margin, is_abs_origin);
-        let height = layout.height.eval_height(self, layout.margin, is_abs_origin);
+        let width = layout.width.eval_width(self, layout.margin, is_abs_origin, abs_size.x);
+        let height = layout.height.eval_height(self, layout.margin, is_abs_origin, abs_size.y);
         
-        self.turtles.push(Turtle {
+        let turtle = Turtle {
             align_origin: self.align_list.len(),
             layout: layout.clone(),
             origin: origin,
@@ -63,15 +63,17 @@ impl Cx {
             abs_size: abs_size,
             guard_area: guard_area,
             //..Default::default()
-        });
+        };
+        
+        self.turtles.push(turtle);
     }
     
     // walk the turtle with a 'w/h' and a margin
     pub fn walk_turtle(&mut self, vw: Bounds, vh: Bounds, margin: Margin, old_turtle: Option<&Turtle>) -> Rect {
-        let w = max_zero_keep_nan(vw.eval_width(self, margin, false));
-        let h = max_zero_keep_nan(vh.eval_height(self, margin, false));
         let mut align_dx = 0.0;
         let mut align_dy = 0.0;
+        let w = max_zero_keep_nan(vw.eval_width(self, margin, false, 0.0));
+        let h = max_zero_keep_nan(vh.eval_height(self, margin, false, 0.0));
         let ret = if let Some(turtle) = self.turtles.last_mut() {
             let (x, y) = match turtle.layout.direction {
                 Direction::Right => {
@@ -209,10 +211,10 @@ impl Cx {
         }
     }
     
-    pub fn turtle_new_line_min_height(&mut self, h: f32) {
+    pub fn turtle_new_line_min_height(&mut self, min_height: f32) {
         if let Some(turtle) = self.turtles.last_mut() {
             turtle.walk.x = turtle.origin.x + turtle.layout.padding.l;
-            turtle.walk.y += turtle.biggest.max(h);
+            turtle.walk.y += turtle.biggest.max(min_height);
             turtle.biggest = 0.0;
         }
     }
@@ -349,22 +351,7 @@ impl Cx {
             false
         }
     }
-    
-    /*
-    pub fn set_turtle_walk(&mut self, rel_x:f32, rel_y:f32){
-        if let Some(turtle) = self.turtles.last_mut(){
-            turtle.walk.x = rel_x + turtle.origin.x;
-            turtle.walk.y = rel_y + turtle.origin.y;
-        }
-    }*/
-    /*
-    pub fn reset_turtle_bounds(&mut self){
-        if let Some(turtle) = self.turtles.last_mut(){
-            turtle.bound_left_top = vec2(std::f32::INFINITY,std::f32::INFINITY);
-            turtle.bound_right_bottom = vec2(std::f32::NEG_INFINITY, std::f32::NEG_INFINITY);
-        }
-    }
-*/
+
     fn compute_align_turtle(turtle: &Turtle) -> Vec2 {
         if turtle.layout.align.fx > 0.0 || turtle.layout.align.fy > 0.0 {
             
@@ -454,22 +441,15 @@ impl Cx {
             return Rect {x: abs_origin.x, y: abs_origin.y, w: w, h: h};
         }
         
-        //if self.turtles.len() == 0{
-        //    return Rect{x:0.0, y:0.0, w:old.width, h:old.height};
-        // }
-        
         return self.walk_turtle(w, h, margin, Some(&old))
     }
     
-    fn _get_width_left(&self, abs: bool) -> f32 {
+    fn _get_width_left(&self, abs: bool, abs_size: f32) -> f32 {
         if !abs {
             self.get_width_left()
         }
-        else if let Some(turtle) = self.turtles.last() {
-            turtle.abs_size.x
-        }
         else {
-            0.
+            abs_size
         }
     }
     
@@ -483,25 +463,16 @@ impl Cx {
             }
             return nan_val
         }
-        return if let Some(turtle) = self.turtles.last() {
-            turtle.abs_size.x
-        }
-        else {
-            0.
-        }
+        0.
     }
     
-    fn _get_width_total(&self, abs: bool) -> f32 {
+    fn _get_width_total(&self, abs: bool, abs_size: f32) -> f32 {
         if !abs {
             self.get_width_total()
         }
-        else if let Some(turtle) = self.turtles.last() {
-            turtle.abs_size.x
-        }
         else {
-            0.
+            abs_size
         }
-        
     }
     
     pub fn get_width_total(&self) -> f32 {
@@ -514,23 +485,15 @@ impl Cx {
             }
             return nan_val
         }
-        return if let Some(turtle) = self.turtles.last() {
-            turtle.abs_size.x
-        }
-        else {
-            0.
-        }
+        0.
     }
     
-    fn _get_height_left(&self, abs: bool) -> f32 {
+    fn _get_height_left(&self, abs: bool, abs_size: f32) -> f32 {
         if !abs {
             self.get_height_left()
         }
-        else if let Some(turtle) = self.turtles.last() {
-            turtle.abs_size.y
-        }
         else {
-            0.
+            abs_size
         }
     }
     
@@ -544,23 +507,15 @@ impl Cx {
             }
             return nan_val
         }
-        return if let Some(turtle) = self.turtles.last() {
-            turtle.abs_size.y
-        }
-        else {
-            0.
-        }
+        0.
     }
     
-    fn _get_height_total(&self, abs: bool) -> f32 {
+    fn _get_height_total(&self, abs: bool, abs_size: f32) -> f32 {
         if !abs {
             self.get_height_total()
         }
-        else if let Some(turtle) = self.turtles.last() {
-            turtle.abs_size.y
-        }
         else {
-            0.
+            abs_size
         }
     }
     
@@ -574,12 +529,7 @@ impl Cx {
             }
             return nan_val
         }
-        return if let Some(turtle) = self.turtles.last() {
-            turtle.abs_size.y
-        }
-        else {
-            0.
-        }
+        0.
     }
     
 }
@@ -611,7 +561,7 @@ pub fn debug_pt(x:f32, y:f32, color:i32, s:&str){
         })*/
 
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub enum Bounds {
     Fill,
     Fix(f32),
@@ -630,29 +580,29 @@ impl Default for Bounds {
 }
 
 impl Bounds {
-    pub fn eval_width(&self, cx: &Cx, margin: Margin, abs: bool) -> f32 {
+    pub fn eval_width(&self, cx: &Cx, margin: Margin, abs: bool, abs_pos: f32) -> f32 {
         match self {
             Bounds::Compute => std::f32::NAN,
             Bounds::Fix(v) => *v,
-            Bounds::Fill => cx._get_width_left(abs) - (margin.l + margin.r),
-            Bounds::FillPad(p) => cx._get_width_left(abs) - p - (margin.l + margin.r),
-            Bounds::FillScale(s) => cx._get_width_left(abs) * s - (margin.l + margin.r),
-            Bounds::FillScalePad(s, p) => cx._get_width_left(abs) * s - p - (margin.l + margin.r),
-            Bounds::Scale(s) => cx._get_width_total(abs) * s - (margin.l + margin.r),
-            Bounds::ScalePad(s, p) => cx._get_width_total(abs) * s - p - (margin.l + margin.r),
+            Bounds::Fill => cx._get_width_left(abs, abs_pos) - (margin.l + margin.r),
+            Bounds::FillPad(p) => cx._get_width_left(abs, abs_pos) - p - (margin.l + margin.r),
+            Bounds::FillScale(s) => cx._get_width_left(abs, abs_pos) * s - (margin.l + margin.r),
+            Bounds::FillScalePad(s, p) => cx._get_width_left(abs, abs_pos) * s - p - (margin.l + margin.r),
+            Bounds::Scale(s) => cx._get_width_total(abs, abs_pos) * s - (margin.l + margin.r),
+            Bounds::ScalePad(s, p) => cx._get_width_total(abs, abs_pos) * s - p - (margin.l + margin.r),
         }
     }
     
-    pub fn eval_height(&self, cx: &Cx, margin: Margin, abs: bool) -> f32 {
+    pub fn eval_height(&self, cx: &Cx, margin: Margin, abs: bool, abs_pos: f32) -> f32 {
         match self {
             Bounds::Compute => std::f32::NAN,
             Bounds::Fix(v) => *v,
-            Bounds::Fill => cx._get_height_left(abs) - (margin.t + margin.b),
-            Bounds::FillPad(p) => cx._get_height_left(abs) - p - (margin.t + margin.b),
-            Bounds::FillScale(s) => cx._get_height_left(abs) * s - (margin.t + margin.b),
-            Bounds::FillScalePad(s, p) => cx._get_height_left(abs) * s - p - (margin.t + margin.b),
-            Bounds::Scale(s) => cx._get_height_total(abs) * s - (margin.t + margin.b),
-            Bounds::ScalePad(s, p) => cx._get_height_total(abs) * s - p - (margin.t + margin.b),
+            Bounds::Fill => cx._get_height_left(abs, abs_pos) - (margin.t + margin.b),
+            Bounds::FillPad(p) => cx._get_height_left(abs, abs_pos) - p - (margin.t + margin.b),
+            Bounds::FillScale(s) => cx._get_height_left(abs, abs_pos) * s - (margin.t + margin.b),
+            Bounds::FillScalePad(s, p) => cx._get_height_left(abs, abs_pos) * s - p - (margin.t + margin.b),
+            Bounds::Scale(s) => cx._get_height_total(abs, abs_pos) * s - (margin.t + margin.b),
+            Bounds::ScalePad(s, p) => cx._get_height_total(abs, abs_pos) * s - p - (margin.t + margin.b),
         }
     }
 }
@@ -724,7 +674,7 @@ impl Padding {
 }
 
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub enum Direction {
     Left,
     Right,
@@ -750,7 +700,7 @@ impl Default for Axis {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub enum LineWrap {
     None,
     NewLine
@@ -761,7 +711,7 @@ impl Default for LineWrap {
     }
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone, Default, Debug)]
 pub struct Layout {
     pub margin: Margin,
     pub padding: Padding,
@@ -774,7 +724,7 @@ pub struct Layout {
     pub height: Bounds,
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone, Default, Debug)]
 pub struct Turtle {
     pub align_origin: usize,
     pub walk: Vec2,

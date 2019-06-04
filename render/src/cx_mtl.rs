@@ -160,9 +160,9 @@ impl Cx {
         self.feature = "mtl".to_string();
         
         let mut cocoa_app = CocoaApp::new();
-
+        
         cocoa_app.init();
-
+        
         let device = Device::system_default();
         
         let command_queue = device.new_command_queue();
@@ -176,8 +176,7 @@ impl Cx {
         self.call_event_handler(&mut event_handler, &mut Event::Construct);
         
         self.redraw_area(Area::All);
-
-
+        
         while self.running {
             cocoa_app.poll_events(
                 self.playing_anim_areas.len() == 0 && self.redraw_areas.len() == 0 && self.next_frame_callbacks.len() == 0,
@@ -246,7 +245,7 @@ impl Cx {
                     }
                 }
             );
-
+            
             if self.playing_anim_areas.len() != 0 {
                 let time = cocoa_app.time_now();
                 // keeps the error as low as possible
@@ -274,32 +273,6 @@ impl Cx {
             
             self.call_signals_after_draw(&mut event_handler);
             
-            // set a cursor
-            if !self.down_mouse_cursor.is_none() {
-                cocoa_app.set_mouse_cursor(self.down_mouse_cursor.as_ref().unwrap().clone())
-            }
-            else if !self.hover_mouse_cursor.is_none() {
-                cocoa_app.set_mouse_cursor(self.hover_mouse_cursor.as_ref().unwrap().clone())
-            }
-            else {
-                cocoa_app.set_mouse_cursor(MouseCursor::Default)
-            }
-            
-            if let Some(set_ime_position) = self.platform.set_ime_position {
-                self.platform.set_ime_position = None;
-                cocoa_app.set_ime_spot(set_ime_position);
-            }
-            
-            while self.platform.start_timer.len()>0 {
-                let (timer_id, interval, repeats) = self.platform.start_timer.pop().unwrap();
-                cocoa_app.start_timer(timer_id, interval, repeats);
-            }
-            
-            while self.platform.stop_timer.len()>0 {
-                let timer_id = self.platform.stop_timer.pop().unwrap();
-                cocoa_app.stop_timer(timer_id);
-            }
-            
             // construct or destruct windows
             for (index, window) in self.windows.iter_mut().enumerate() {
                 
@@ -315,9 +288,37 @@ impl Cx {
                     CxWindowState::Destroy => {
                         CxWindowState::Destroyed
                     },
-                    CxWindowState::Created=>CxWindowState::Created,
-                    CxWindowState::Destroyed=>CxWindowState::Destroyed
+                    CxWindowState::Created => CxWindowState::Created,
+                    CxWindowState::Destroyed => CxWindowState::Destroyed
                 }
+            }
+
+            // set a cursor
+            if !self.down_mouse_cursor.is_none() {
+                cocoa_app.set_mouse_cursor(self.down_mouse_cursor.as_ref().unwrap().clone())
+            }
+            else if !self.hover_mouse_cursor.is_none() {
+                cocoa_app.set_mouse_cursor(self.hover_mouse_cursor.as_ref().unwrap().clone())
+            }
+            else {
+                cocoa_app.set_mouse_cursor(MouseCursor::Default)
+            }
+            
+            if let Some(set_ime_position) = self.platform.set_ime_position {
+                self.platform.set_ime_position = None;
+                for render_window in &mut render_windows {
+                    render_window.cocoa_window.set_ime_spot(set_ime_position);
+                }
+            }
+            
+            while self.platform.start_timer.len()>0 {
+                let (timer_id, interval, repeats) = self.platform.start_timer.pop().unwrap();
+                cocoa_app.start_timer(timer_id, interval, repeats);
+            }
+            
+            while self.platform.stop_timer.len()>0 {
+                let timer_id = self.platform.stop_timer.pop().unwrap();
+                cocoa_app.stop_timer(timer_id);
             }
             
             // repaint al windows we need to repaint
@@ -326,7 +327,8 @@ impl Cx {
                 self.repaint_id += 1;
                 for render_window in &mut render_windows {
                     render_window.resize_core_animation_layer();
-                    if let Some(root_draw_list_id) = self.windows[render_window.window_id].root_draw_list_id{
+                    self.set_projection_matrix(&render_window.window_geom);
+                    if let Some(root_draw_list_id) = self.windows[render_window.window_id].root_draw_list_id {
                         self.repaint(
                             root_draw_list_id,
                             render_window.window_geom.dpi_factor,
@@ -429,7 +431,7 @@ impl CocoaRenderWindow {
         
         CocoaRenderWindow {
             window_id,
-            cal_size:Vec2::zero(),
+            cal_size: Vec2::zero(),
             core_animation_layer,
             window_geom: cocoa_window.get_window_geom(),
             cocoa_window,

@@ -140,7 +140,6 @@ where TScrollBar: ScrollBarLike<TScrollBar> + Clone
         
         // push ourselves up the parent draw_stack
         if draw_list_id != parent_draw_list_id {
-            
             // we need a new draw
             let parent_draw_list = &mut cx.draw_lists[parent_draw_list_id];
             
@@ -170,6 +169,7 @@ where TScrollBar: ScrollBarLike<TScrollBar> + Clone
         cx.draw_lists[draw_list_id].nesting_draw_list_id = nesting_draw_list_id;
         
         if cx.draw_lists[draw_list_id].draw_calls_len != 0 && !cx.draw_list_needs_redraw(draw_list_id) {
+
             // walk the turtle because we aren't drawing
             let w = Bounds::Fix(cx.draw_lists[draw_list_id].rect.w);
             let h = Bounds::Fix(cx.draw_lists[draw_list_id].rect.h);
@@ -185,7 +185,7 @@ where TScrollBar: ScrollBarLike<TScrollBar> + Clone
         draw_list.draw_calls_len = 0;
         
         cx.draw_list_stack.push(draw_list_id);
-        
+
         cx.begin_turtle(&override_layout, Area::DrawList(DrawListArea {
             draw_list_id: draw_list_id,
             redraw_id: cx.redraw_id

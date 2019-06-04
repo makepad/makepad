@@ -44,7 +44,9 @@ impl Window {
             }
             self.window_id = Some(window_id);
         }
-        cx.window_stack.push(self.window_id.unwrap());
+        let window_id = self.window_id.unwrap();
+        cx.windows[window_id].root_draw_list_id = None;
+        cx.window_stack.push(window_id);
         
     }
     

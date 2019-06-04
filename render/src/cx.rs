@@ -131,7 +131,7 @@ impl Default for Cx {
             textures_2d: Vec::new(),
             uniforms: Vec::new(),
             
-            draw_lists: Vec::new(),
+            draw_lists: vec![DrawList{..Default::default()}],
             draw_lists_free: Vec::new(),
             draw_list_stack: Vec::new(),
 
@@ -338,13 +338,13 @@ impl Cx {
         );
         &mut self.textures_2d[id]
     }
-    /*
-    pub fn prepare_frame(&mut self) {
+    
+    pub fn set_projection_matrix(&mut self, window_geom:&WindowGeom) {
         let camera_projection = Mat4::ortho(
             0.0,
-            self.window_geom.inner_size.x,
+            window_geom.inner_size.x,
             0.0,
-            self.window_geom.inner_size.y,
+            window_geom.inner_size.y,
             -100.0,
             100.0,
             
@@ -352,8 +352,7 @@ impl Cx {
             1.0
         );
         self.uniform_camera_projection(camera_projection);
-        self.align_list.truncate(0);
-    }*/
+    }
     
     pub fn check_ended_anim_areas(&mut self, time: f64) {
         let mut i = 0;
@@ -485,8 +484,8 @@ impl Cx {
     {
         self.is_in_redraw_cycle = true;
         self.redraw_id += 1;
-        
         self.incr_areas = self.redraw_areas.clone();
+        self.align_list.truncate(0);
         self.redraw_areas.truncate(0);
         self.call_event_handler(&mut event_handler, &mut Event::Draw);
         self.is_in_redraw_cycle = false;

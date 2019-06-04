@@ -27,7 +27,7 @@ pub enum JSEditorEvent {
 }
 
 impl JSEditor {
-    pub fn handle_js_editor(&mut self, cx: &mut Cx, event: &mut Event, text_buffer: &mut TextBuffer) -> CodeEditorEvent {
+    pub fn handle_js_editor(&mut self, cx: &mut Cx, event: &mut Event,  text_buffer: &mut TextBuffer) -> CodeEditorEvent {
         let ce = self.code_editor.handle_code_editor(cx, event, text_buffer);
         match ce {
             CodeEditorEvent::AutoFormat => {

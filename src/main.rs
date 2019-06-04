@@ -29,7 +29,7 @@ struct AppWindow {
 
 struct AppGlobal {
     file_tree_data: String,
-    file_tree_reload: Signal,
+    file_tree_reload_signal: Signal,
     text_buffers: TextBuffers,
     rust_compiler: RustCompiler,
     app_state: AppState,
@@ -103,7 +103,7 @@ impl Style for App {
                 index_read_req: FileReadRequest::empty(),
                 app_state_read_req: FileReadRequest::empty(),
                 file_tree_data: String::new(),
-                file_tree_reload: cx.new_signal(),
+                file_tree_reload_signal: cx.new_signal(),
                 app_state: AppState {
                     windows: vec![
                         AppStateWindow {
@@ -174,6 +174,13 @@ impl AppWindow {
                 return
             }
             _ => ()
+        }
+        
+        match event{
+            Event::Signal(se)=>if app_global.file_tree_reload_signal.is_signal(se){
+                self.file_tree.load_from_json(cx, &app_global.file_tree_data);
+            },
+            _=>()
         }
         
         let dock_items = &mut app_global.app_state.windows[self.window_index].dock_items;
@@ -386,8 +393,7 @@ impl AppGlobal {
         // lets see which file we loaded
         if let Some(utf8_data) = self.index_read_req.as_utf8(fr) {
             self.file_tree_data = utf8_data.to_string();
-            cx.send_signal_before_draw(self.file_tree_reload, 0);
-            //self.file_tree.load_from_json(cx, utf8_data);
+            cx.send_signal_before_draw(self.file_tree_reload_signal, 0);
         }
         else if let Some(utf8_data) = self.app_state_read_req.as_utf8(fr) {
             if let Ok(app_state) = serde_json::from_str(&utf8_data) {
