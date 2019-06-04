@@ -19,7 +19,7 @@ enum Panel {
 }
 
 struct AppWindow {
-    window_index:usize,
+    window_index: usize,
     desktop_window: DesktopWindow,
     file_tree: FileTree,
     keyboard: Keyboard,
@@ -77,7 +77,7 @@ impl Style for AppWindow {
             dock: Dock {
                 ..Style::style(cx)
             },
-            window_index:0
+            window_index: 0
         }
     }
 }
@@ -89,8 +89,13 @@ impl Style for App {
         Self {
             windows: vec![
                 AppWindow {
+                    window_index:0,
                     ..Style::style(cx)
-                }
+                },
+                AppWindow {
+                    window_index:1,
+                    ..Style::style(cx)
+                },
             ],
             app_global: AppGlobal {
                 rust_compiler: RustCompiler {
@@ -158,6 +163,53 @@ impl Style for App {
                                 })
                             },
                         },
+                        AppStateWindow {
+                            window_outer_size: Vec2::zero(),
+                            window_position: Vec2::zero(),
+                            dock_items: DockItem::Splitter {
+                                axis: Axis::Vertical,
+                                align: SplitterAlign::First,
+                                pos: 150.0,
+                                first: Box::new(DockItem::TabControl {
+                                    current: 0,
+                                    tabs: vec![DockTab {
+                                        closeable: false,
+                                        title: "Files".to_string(),
+                                        item: Panel::FileTree
+                                    }]
+                                }),
+                                last: Box::new(DockItem::Splitter {
+                                    axis: Axis::Horizontal,
+                                    align: SplitterAlign::Last,
+                                    pos: 150.0,
+                                    first: Box::new(DockItem::TabControl {
+                                        current: 1,
+                                        tabs: vec![
+                                            DockTab {
+                                                closeable: false,
+                                                title: "Edit".to_string(),
+                                                item: Panel::FileEditorTarget
+                                            },
+                                            DockTab {
+                                                closeable: true,
+                                                title: "example.rs".to_string(),
+                                                item: Panel::FileEditor {path: "example/src/example.rs".to_string(), editor_id: 1}
+                                            }
+                                        ],
+                                    }),
+                                    last: Box::new(DockItem::TabControl {
+                                        current: 0,
+                                        tabs: vec![
+                                            DockTab {
+                                                closeable: false,
+                                                title: "Keyboard".to_string(),
+                                                item: Panel::Keyboard
+                                            }
+                                        ]
+                                    })
+                                })
+                            },
+                        },
                     ]
                 }
             }
@@ -176,11 +228,11 @@ impl AppWindow {
             _ => ()
         }
         
-        match event{
-            Event::Signal(se)=>if app_global.file_tree_reload_signal.is_signal(se){
+        match event {
+            Event::Signal(se) => if app_global.file_tree_reload_signal.is_signal(se) {
                 self.file_tree.load_from_json(cx, &app_global.file_tree_data);
             },
-            _=>()
+            _ => ()
         }
         
         let dock_items = &mut app_global.app_state.windows[self.window_index].dock_items;
@@ -261,7 +313,7 @@ impl AppWindow {
             return
         }
         self.dock.draw_dock(cx);
-
+        
         let dock_items = &mut app_global.app_state.windows[self.window_index].dock_items;
         let mut dock_walker = self.dock.walker(dock_items);
         while let Some(item) = dock_walker.walk_draw_dock(cx) {
@@ -395,20 +447,20 @@ impl AppGlobal {
             self.file_tree_data = utf8_data.to_string();
             cx.send_signal_before_draw(self.file_tree_reload_signal, 0);
         }
-        else if let Some(utf8_data) = self.app_state_read_req.as_utf8(fr) {
-            if let Ok(app_state) = serde_json::from_str(&utf8_data) {
-                self.app_state = app_state;
+        else if let Some(_utf8_data) = self.app_state_read_req.as_utf8(fr) {
+            //if let Ok(app_state) = serde_json::from_str(&utf8_data) {
+                //self.app_state = app_state;
                 // update window pos and size
                 //cx.set_window_position(self.app_state.window_position);
                 //cx.set_window_outer_size(self.app_state.window_outer_size)
-            }
+            //}
         }
         else if self.text_buffers.handle_file_read(&fr) {
             cx.redraw_area(Area::All);
         }
     }
     
-    fn handle_window_change(&mut self, cx: &mut Cx, _wc: &WindowChangeEvent) {
+    fn handle_window_change(&mut self, cx: &mut Cx, _wc: &WindowGeomChangeEvent) {
         if !self.app_state_read_req.is_loading() {
             //self.app_state.window_position = wc.new_geom.position;
             //self.app_state.window_outer_size = wc.new_geom.outer_size;
@@ -432,17 +484,23 @@ impl App {
                 self.app_global.handle_file_read(cx, fr);
                 
             },
-            Event::WindowChange(wc) => {
+            Event::WindowGeomChange(wc) => {
                 self.app_global.handle_window_change(cx, wc);
             },
             _ => ()
         }
-        self.windows[0].handle_app_window(cx, event, &mut self.app_global);
+        for window in &mut self.windows {
+            window.handle_app_window(cx, event, &mut self.app_global);
+            break;
+        }
     }
     
     fn draw_app(&mut self, cx: &mut Cx) {
         //return;
-        self.windows[0].draw_app_window(cx, &mut self.app_global);
+        for window in &mut self.windows {
+            window.draw_app_window(cx, &mut self.app_global);
+            break;
+        }
     }
 }
 

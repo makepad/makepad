@@ -10,6 +10,7 @@ pub struct KeyModifiers {
 
 #[derive(Clone, Default, Debug, PartialEq)]
 pub struct FingerDownEvent {
+    pub window_id:usize,
     pub abs: Vec2,
     pub rel: Vec2,
     pub rect: Rect,
@@ -23,6 +24,7 @@ pub struct FingerDownEvent {
 
 #[derive(Clone, Default, Debug, PartialEq)]
 pub struct FingerMoveEvent {
+    pub window_id:usize,
     pub abs: Vec2,
     pub abs_start: Vec2,
     pub rel: Vec2,
@@ -43,6 +45,7 @@ impl FingerMoveEvent {
 
 #[derive(Clone, Default, Debug, PartialEq)]
 pub struct FingerUpEvent {
+    pub window_id:usize,
     pub abs: Vec2,
     pub abs_start: Vec2,
     pub rel: Vec2,
@@ -70,6 +73,7 @@ impl Default for HoverState {
 
 #[derive(Clone, Default, Debug, PartialEq)]
 pub struct FingerHoverEvent {
+    pub window_id:usize,
     pub abs: Vec2,
     pub rel: Vec2,
     pub rect: Rect,
@@ -81,6 +85,7 @@ pub struct FingerHoverEvent {
 
 #[derive(Clone, Default, Debug, PartialEq)]
 pub struct FingerScrollEvent {
+    pub window_id:usize,
     pub abs: Vec2,
     pub rel: Vec2,
     pub rect: Rect,
@@ -92,13 +97,15 @@ pub struct FingerScrollEvent {
 }
 
 #[derive(Clone, Default, Debug, PartialEq)]
-pub struct WindowChangeEvent {
+pub struct WindowGeomChangeEvent {
+    pub window_id:usize,
     pub old_geom: WindowGeom,
     pub new_geom: WindowGeom,
 }
 
 #[derive(Clone, Default, Debug, PartialEq)]
 pub struct WindowMovedEvent {
+    pub window_id:usize,
     pub old_pos: Vec2,
     pub new_pos: Vec2,
 }
@@ -176,14 +183,14 @@ pub enum Event {
     Construct,
     Destruct,
     Draw,
-    Idle,
+    Paint,
     AppFocus,
     AppFocusLost,
     AnimateEnded(AnimateEvent),
     Animate(AnimateEvent),
     Frame(FrameEvent),
     CloseRequested,
-    WindowChange(WindowChangeEvent),
+    WindowGeomChange(WindowGeomChangeEvent),
     FingerDown(FingerDownEvent),
     FingerMove(FingerMoveEvent),
     FingerHover(FingerHoverEvent),

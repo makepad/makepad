@@ -37,7 +37,7 @@ impl Cx {
                 }
                 if draw_call.uniforms_dirty {
                     draw_call.uniforms_dirty = false;
-                    draw_call.platform.uni_dr.update_with_f32_data(device, &draw_call.uniforms);
+                    //draw_call.platform.uni_dr.update_with_f32_data(device, &draw_call.uniforms);
                 }
                 
                 // lets verify our instance_offset is not disaligned
@@ -46,21 +46,17 @@ impl Cx {
                 encoder.set_render_pipeline_state(pipeline_state);
                 if let Some(buf) = &shc.geom_vbuf.multi_buffer_read().buffer {encoder.set_vertex_buffer(0, Some(&buf), 0);}
                 else {println!("Drawing error: geom_vbuf None")}
+                
                 if let Some(buf) = &draw_call.platform.inst_vbuf.multi_buffer_read().buffer {encoder.set_vertex_buffer(1, Some(&buf), 0);}
                 else {println!("Drawing error: inst_vbuf None")}
-                if let Some(buf) = &self.platform.uni_cx.multi_buffer_read().buffer {encoder.set_vertex_buffer(2, Some(&buf), 0);}
-                else {println!("Drawing error: uni_cx None")}
-                if let Some(buf) = &draw_list.platform.uni_dl.multi_buffer_read().buffer {encoder.set_vertex_buffer(3, Some(&buf), 0);}
-                else {println!("Drawing error: uni_dl None")}
-                if let Some(buf) = &draw_call.platform.uni_dr.multi_buffer_read().buffer {encoder.set_vertex_buffer(4, Some(&buf), 0);}
-                else {println!("Drawing error: uni_dr None")}
                 
-                if let Some(buf) = &self.platform.uni_cx.multi_buffer_read().buffer {encoder.set_fragment_buffer(0, Some(&buf), 0);}
-                else {println!("Drawing error: uni_cx None")}
-                if let Some(buf) = &draw_list.platform.uni_dl.multi_buffer_read().buffer {encoder.set_fragment_buffer(1, Some(&buf), 0);}
-                else {println!("Drawing error: uni_dl None")}
-                if let Some(buf) = &draw_call.platform.uni_dr.multi_buffer_read().buffer {encoder.set_fragment_buffer(2, Some(&buf), 0);}
-                else {println!("Drawing error: uni_dr None")}
+                encoder.set_vertex_bytes(2, (self.uniforms.len() * 4) as u64, self.uniforms.as_ptr() as *const std::ffi::c_void);
+                encoder.set_vertex_bytes(3, (draw_list.uniforms.len() * 4) as u64, draw_list.uniforms.as_ptr() as *const std::ffi::c_void);
+                encoder.set_vertex_bytes(4, (draw_call.uniforms.len() * 4) as u64, draw_call.uniforms.as_ptr() as *const std::ffi::c_void);
+                encoder.set_fragment_bytes(0, (self.uniforms.len() * 4) as u64, self.uniforms.as_ptr() as *const std::ffi::c_void);
+                encoder.set_fragment_bytes(1, (draw_list.uniforms.len() * 4) as u64, draw_list.uniforms.as_ptr() as *const std::ffi::c_void);
+                encoder.set_fragment_bytes(2, (draw_call.uniforms.len() * 4) as u64, draw_call.uniforms.as_ptr() as *const std::ffi::c_void);
+                
                 // lets set our textures
                 for (i, texture_id) in draw_call.textures_2d.iter().enumerate() {
                     let tex = &mut self.textures_2d[*texture_id as usize];
@@ -127,7 +123,7 @@ impl Cx {
             let encoder = command_buffer.new_render_command_encoder(&render_pass_descriptor);
             //let encoder = parallel_encoder.render_command_encoder();
             
-            self.platform.uni_cx.update_with_f32_data(&device, &self.uniforms);
+            //self.platform.uni_cx.update_with_f32_data(&device, &self.uniforms);
             
             // ok now we should call our render thing
             self.exec_draw_list(root_draw_list_id, dpi_factor, &device, encoder);
@@ -145,9 +141,9 @@ impl Cx {
             command_buffer.present_drawable(&drawable);
             command_buffer.commit();
             
-            if wait {
-                command_buffer.wait_until_completed();
-            }
+            //if wait {
+            //    command_buffer.wait_until_completed();
+            // }
         }
         unsafe {
             msg_send![pool, release];
@@ -167,7 +163,7 @@ impl Cx {
         
         let command_queue = device.new_command_queue();
         
-        let mut render_windows = Vec::new();
+        let mut render_windows:Vec<CocoaRenderWindow> = Vec::new();
         
         self.mtl_compile_all_shaders(&device);
         
@@ -177,170 +173,179 @@ impl Cx {
         
         self.redraw_area(Area::All);
         
-        while self.running {
-            cocoa_app.poll_events(
-                self.playing_anim_areas.len() == 0 && self.redraw_areas.len() == 0 && self.next_frame_callbacks.len() == 0,
-                | events | {
-                    for mut event in events {
-                        match &mut event {
-                            Event::FingerHover(_) => {
-                                self.hover_mouse_cursor = None;
-                            },
-                            Event::FingerUp(_) => {
-                                self.down_mouse_cursor = None;
-                            },
-                            Event::CloseRequested => {
-                                self.running = false
-                            },
-                            Event::FingerDown(fe) => {
-                                // lets set the finger tap count
-                                fe.tap_count = self.process_tap_count(fe.digit, fe.abs, fe.time);
-                            },
-                            Event::KeyDown(ke) => {
-                                self.process_key_down(ke.clone());
-                                if ke.key_code == KeyCode::PrintScreen {
-                                    if ke.modifiers.control {
-                                        self.panic_redraw = true;
-                                    }
-                                    else {
-                                        self.panic_now = true;
-                                    }
-                                }
-                            },
-                            Event::KeyUp(ke) => {
-                                self.process_key_up(&ke);
-                            },
-                            Event::AppFocusLost => {
-                                self.call_all_keys_up(&mut event_handler);
-                            },
-                            _ => ()
-                        };
-                        match &event {
-                            /*
-                            Event::WindowChange(re) => { // do this here because mac
-                                //self.window_geom = re.new_geom.clone();
-                                self.call_event_handler(&mut event_handler, &mut event);
-                                self.redraw_area(Area::All);
-                                self.call_draw_event(&mut event_handler, &mut root_view);
-                                self.repaint(&layer, &device, &command_queue, false);
-                                self.resize_layer_to_turtle(&layer);
-                            },
-                            */
-                            Event::None => {
-                            },
-                            _ => {
-                                //let time_now = precise_time_ns();
-                                self.call_event_handler(&mut event_handler, &mut event);
-                                
-                                //let time_now_next = precise_time_ns();
-                                //println!("Animation took: {}", ((time_now_next - time_now) as f64) / 1_000_000_000.0);
+        cocoa_app.event_loop( | cocoa_app, events | {
+            for mut event in events {
+                
+                match &mut event {
+                    Event::FingerHover(_) => {
+                        self.hover_mouse_cursor = None;
+                    },
+                    Event::FingerUp(_) => {
+                        self.down_mouse_cursor = None;
+                    },
+                    Event::CloseRequested => {
+                        self.running = false
+                    },
+                    Event::FingerDown(fe) => {
+                        // lets set the finger tap count
+                        fe.tap_count = self.process_tap_count(fe.digit, fe.abs, fe.time);
+                    },
+                    Event::KeyDown(ke) => {
+                        self.process_key_down(ke.clone());
+                        if ke.key_code == KeyCode::PrintScreen {
+                            if ke.modifiers.control {
+                                self.panic_redraw = true;
+                            }
+                            else {
+                                self.panic_now = true;
                             }
                         }
-                        match &event {
-                            Event::FingerUp(fe) => { // decapture automatically
-                                self.captured_fingers[fe.digit] = Area::Empty;
-                            },
-                            _ => {}
+                    },
+                    Event::KeyUp(ke) => {
+                        self.process_key_up(&ke);
+                    },
+                    Event::AppFocusLost => {
+                        self.call_all_keys_up(&mut event_handler);
+                    },
+                    _ => ()
+                };
+                
+                match &event {
+                    Event::WindowGeomChange(re) => { // do this here because mac
+                        for render_window in &mut render_windows {
+                            if render_window.window_id == re.window_id {
+                                render_window.window_geom = re.new_geom.clone();
+                                self.windows[re.window_id].window_geom = re.new_geom.clone();
+                                break;
+                            }
                         }
+                        self.redraw_area(Area::All);
+                    },
+                    Event::Paint => {
+                        if self.playing_anim_areas.len() != 0 {
+                            let time = cocoa_app.time_now();
+                            // keeps the error as low as possible
+                            self.call_animation_event(&mut event_handler, time);
+                        }
+                        
+                        if self.next_frame_callbacks.len() != 0 {
+                            let time = cocoa_app.time_now();
+                            // keeps the error as low as possible
+                            self.call_frame_event(&mut event_handler, time);
+                        }
+                        
+                        self.call_signals_before_draw(&mut event_handler);
+                        
+                        // call redraw event
+                        if self.redraw_areas.len()>0 {
+                            //let time_start = cocoa_window.time_now();
+                            self.call_draw_event(&mut event_handler);
+                            self.paint_dirty = true;
+                            // let time_end = cocoa_window.time_now();
+                            // println!("Redraw took: {}", (time_end - time_start));
+                        }
+                        
+                        self.process_desktop_file_read_requests(&mut event_handler);
+                        
+                        self.call_signals_after_draw(&mut event_handler);
+                        
+                        // construct or destruct windows
+                        for (index, window) in self.windows.iter_mut().enumerate() {
+                            
+                            window.window_state = match &window.window_state {
+                                CxWindowState::Create {inner_size, position, title} => {
+                                    // lets create a platformwindow
+                                    let render_window = CocoaRenderWindow::new(index, &device, cocoa_app, *inner_size, *position, &title);
+                                    window.window_geom = render_window.window_geom.clone();
+                                    render_windows.push(render_window);
+                                    for render_window in &mut render_windows {
+                                        render_window.cocoa_window.update_ptrs();
+                                    }
+                                    CxWindowState::Created
+                                },
+                                CxWindowState::Destroy => {
+                                    CxWindowState::Destroyed
+                                },
+                                CxWindowState::Created => CxWindowState::Created,
+                                CxWindowState::Destroyed => CxWindowState::Destroyed
+                            }
+                        }
+                        
+                        // set a cursor
+                        if !self.down_mouse_cursor.is_none() {
+                            cocoa_app.set_mouse_cursor(self.down_mouse_cursor.as_ref().unwrap().clone())
+                        }
+                        else if !self.hover_mouse_cursor.is_none() {
+                            cocoa_app.set_mouse_cursor(self.hover_mouse_cursor.as_ref().unwrap().clone())
+                        }
+                        else {
+                            cocoa_app.set_mouse_cursor(MouseCursor::Default)
+                        }
+                        
+                        if let Some(set_ime_position) = self.platform.set_ime_position {
+                            self.platform.set_ime_position = None;
+                            for render_window in &mut render_windows {
+                                render_window.cocoa_window.set_ime_spot(set_ime_position);
+                            }
+                        }
+                        
+                        while self.platform.start_timer.len()>0 {
+                            let (timer_id, interval, repeats) = self.platform.start_timer.pop().unwrap();
+                            cocoa_app.start_timer(timer_id, interval, repeats);
+                        }
+                        
+                        while self.platform.stop_timer.len()>0 {
+                            let timer_id = self.platform.stop_timer.pop().unwrap();
+                            cocoa_app.stop_timer(timer_id);
+                        }
+                        
+                        // repaint al windows we need to repaint
+                        if self.paint_dirty {
+                            self.paint_dirty = false;
+                            self.repaint_id += 1;
+                            //let mut first = true;
+                            for render_window in &mut render_windows {
+                                render_window.set_vsync_enable(true);
+                                //first = false;
+                                self.set_projection_matrix(&render_window.window_geom);
+                                if let Some(root_draw_list_id) = self.windows[render_window.window_id].root_draw_list_id {
+                                    self.repaint(
+                                        root_draw_list_id,
+                                        render_window.window_geom.dpi_factor,
+                                        &render_window.core_animation_layer,
+                                        &device,
+                                        &command_queue,
+                                        true
+                                    );
+                                }
+                                if render_window.resize_core_animation_layer() {
+                                    self.paint_dirty = true;
+                                }
+                            }
+                        }
+                    },
+                    Event::None => {
+                    },
+                    _ => {
+                        
+                        self.call_event_handler(&mut event_handler, &mut event);
                     }
                 }
-            );
-            
-            if self.playing_anim_areas.len() != 0 {
-                let time = cocoa_app.time_now();
-                // keeps the error as low as possible
-                self.call_animation_event(&mut event_handler, time);
-            }
-            
-            if self.next_frame_callbacks.len() != 0 {
-                let time = cocoa_app.time_now();
-                // keeps the error as low as possible
-                self.call_frame_event(&mut event_handler, time);
-            }
-            
-            self.call_signals_before_draw(&mut event_handler);
-            
-            // call redraw event
-            if self.redraw_areas.len()>0 {
-                //let time_start = cocoa_window.time_now();
-                self.call_draw_event(&mut event_handler);
-                self.paint_dirty = true;
-                // let time_end = cocoa_window.time_now();
-                // println!("Redraw took: {}", (time_end - time_start));
-            }
-            
-            self.process_desktop_file_read_requests(&mut event_handler);
-            
-            self.call_signals_after_draw(&mut event_handler);
-            
-            // construct or destruct windows
-            for (index, window) in self.windows.iter_mut().enumerate() {
-                
-                window.window_state = match &window.window_state {
-                    CxWindowState::Create {inner_size, position, title} => {
-                        // lets create a platformwindow
-                        let render_window = CocoaRenderWindow::new(index, &device, &mut cocoa_app, *inner_size, *position, &title);
-                        window.window_geom = render_window.window_geom.clone();
-                        render_windows.push(render_window);
-                        render_windows.last_mut().unwrap().cocoa_window.update_ptrs();
-                        CxWindowState::Created
+                match &event {
+                    Event::FingerUp(fe) => { // decapture automatically
+                        self.captured_fingers[fe.digit] = Area::Empty;
                     },
-                    CxWindowState::Destroy => {
-                        CxWindowState::Destroyed
-                    },
-                    CxWindowState::Created => CxWindowState::Created,
-                    CxWindowState::Destroyed => CxWindowState::Destroyed
+                    _ => {}
                 }
             }
-
-            // set a cursor
-            if !self.down_mouse_cursor.is_none() {
-                cocoa_app.set_mouse_cursor(self.down_mouse_cursor.as_ref().unwrap().clone())
-            }
-            else if !self.hover_mouse_cursor.is_none() {
-                cocoa_app.set_mouse_cursor(self.hover_mouse_cursor.as_ref().unwrap().clone())
+            
+            if self.playing_anim_areas.len() == 0 && self.redraw_areas.len() == 0 && self.next_frame_callbacks.len() == 0 && !self.paint_dirty {
+                CocoaLoopState::Block
             }
             else {
-                cocoa_app.set_mouse_cursor(MouseCursor::Default)
+                CocoaLoopState::Poll
             }
-            
-            if let Some(set_ime_position) = self.platform.set_ime_position {
-                self.platform.set_ime_position = None;
-                for render_window in &mut render_windows {
-                    render_window.cocoa_window.set_ime_spot(set_ime_position);
-                }
-            }
-            
-            while self.platform.start_timer.len()>0 {
-                let (timer_id, interval, repeats) = self.platform.start_timer.pop().unwrap();
-                cocoa_app.start_timer(timer_id, interval, repeats);
-            }
-            
-            while self.platform.stop_timer.len()>0 {
-                let timer_id = self.platform.stop_timer.pop().unwrap();
-                cocoa_app.stop_timer(timer_id);
-            }
-            
-            // repaint al windows we need to repaint
-            if self.paint_dirty {
-                self.paint_dirty = false;
-                self.repaint_id += 1;
-                for render_window in &mut render_windows {
-                    render_window.resize_core_animation_layer();
-                    self.set_projection_matrix(&render_window.window_geom);
-                    if let Some(root_draw_list_id) = self.windows[render_window.window_id].root_draw_list_id {
-                        self.repaint(
-                            root_draw_list_id,
-                            render_window.window_geom.dpi_factor,
-                            &render_window.core_animation_layer,
-                            &device,
-                            &command_queue,
-                            true
-                        );
-                    }
-                }
-            }
-        }
+        });
     }
     
     pub fn show_text_ime(&mut self, x: f32, y: f32) {
@@ -407,7 +412,7 @@ impl CocoaRenderWindow {
         
         let core_animation_layer = CoreAnimationLayer::new();
         
-        let mut cocoa_window = CocoaWindow::new(cocoa_app);
+        let mut cocoa_window = CocoaWindow::new(cocoa_app, window_id);
         
         cocoa_window.init(title, inner_size, position);
         
@@ -438,7 +443,13 @@ impl CocoaRenderWindow {
         }
     }
     
-    fn resize_core_animation_layer(&mut self) {
+    fn set_vsync_enable(&mut self, enable: bool) {
+        unsafe {
+            msg_send![self.core_animation_layer, setDisplaySyncEnabled: enable];
+        }
+    }
+    
+    fn resize_core_animation_layer(&mut self) -> bool {
         let cal_size = Vec2 {
             x: self.window_geom.inner_size.x * self.window_geom.dpi_factor,
             y: self.window_geom.inner_size.y * self.window_geom.dpi_factor
@@ -446,6 +457,10 @@ impl CocoaRenderWindow {
         if self.cal_size != cal_size {
             self.cal_size = cal_size;
             self.core_animation_layer.set_drawable_size(CGSize::new(cal_size.x as f64, cal_size.y as f64));
+            true
+        }
+        else {
+            false
         }
     }
 }
