@@ -178,6 +178,12 @@ pub struct TextCopyEvent {
 }
 
 #[derive(Clone, Debug, PartialEq)]
+pub struct CloseRequestedEvent {
+    pub window_id: usize,
+    pub accept_close: bool
+}
+
+#[derive(Clone, Debug, PartialEq)]
 pub enum Event {
     None,
     Construct,
@@ -189,7 +195,7 @@ pub enum Event {
     AnimateEnded(AnimateEvent),
     Animate(AnimateEvent),
     Frame(FrameEvent),
-    CloseRequested,
+    CloseRequested(CloseRequestedEvent),
     WindowGeomChange(WindowGeomChangeEvent),
     FingerDown(FingerDownEvent),
     FingerMove(FingerMoveEvent),

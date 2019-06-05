@@ -46,15 +46,15 @@ pub struct CocoaTimer {
 }
 
 pub struct CocoaApp {
-    pub time_start: u64,
     pub window_class: *const Class,
     pub window_delegate_class: *const Class,
     pub post_delegate_class: *const Class,
     pub timer_delegate_class: *const Class,
+    pub view_class: *const Class,
+    pub time_start: u64,
     pub timer_delegate_instance: id,
     pub timers: Vec<CocoaTimer>,
     pub cocoa_windows: Vec<(id, id)>,
-    pub view_class: *const Class,
     pub last_key_mod: KeyModifiers,
     pub pasteboard: id,
     pub event_callback: Option<*mut FnMut(&mut CocoaApp, &mut Vec<Event>) -> CocoaLoopState>,
@@ -91,12 +91,12 @@ impl CocoaApp {
                 timer_delegate_instance: timer_delegate_instance,
                 timer_delegate_class: timer_delegate_class,
                 post_delegate_class: define_cocoa_post_delegate(),
-                timers: Vec::new(),
-                cocoa_windows: Vec::new(),
-                loop_state: CocoaLoopState::Poll,
                 window_class: define_cocoa_window_class(),
                 window_delegate_class: define_cocoa_window_delegate(),
                 view_class: define_cocoa_view_class(),
+                timers: Vec::new(),
+                cocoa_windows: Vec::new(),
+                loop_state: CocoaLoopState::Poll,
                 last_key_mod: KeyModifiers {..Default::default()},
                 event_callback: None,
                 event_recur_block: false,
@@ -792,7 +792,7 @@ impl CocoaWindow {
     }
     
     pub fn send_close_requested_event(&mut self) {
-        self.do_callback(&mut vec![Event::CloseRequested])
+        self.do_callback(&mut vec![Event::CloseRequested(CloseRequestedEvent{window_id:self.window_id, accept_close:true})])
     }
     
     pub fn send_text_input(&mut self, input: String, replace_last: bool) {
@@ -1423,7 +1423,6 @@ pub fn define_cocoa_view_class() -> *const Class {
             msg_send![input_context, invalidateCharacterCoordinates];
             msg_send![cw.view, setNeedsDisplay: YES];
             unmark_text(this, _sel);
-            // msg_send![cw.view.unwrap(), unmarkText];
         }
     }
     
@@ -1436,12 +1435,6 @@ pub fn define_cocoa_view_class() -> *const Class {
         unsafe {
             let input_context: id = msg_send![this, inputContext];
             msg_send![input_context, handleEvent: event];
-            //println!("HERE {} ",ret as u32);
-            //let is_repeat:bool = msg_send![event, isARepeat];
-            //if !is_repeat{
-            //    let array: id = msg_send![class!(NSArray), arrayWithObject:event];
-            //    let (): _ = msg_send![this, interpretKeyEvents:array];
-            // }
         }
     }
     

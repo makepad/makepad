@@ -810,7 +810,9 @@ impl CodeEditor {
         // global events
         match event {
             Event::Timer(te) => if self._cursor_blink_timer.is_timer(te)  {
-                self._cursor_blink_timer = cx.start_timer(self.cursor_blink_speed, false);
+                if self.has_key_focus(cx){
+                    self._cursor_blink_timer = cx.start_timer(self.cursor_blink_speed, false);
+                }
                 // update the cursor uniform to blink it.
                 self._cursor_blink_flipflop = 1.0 - self._cursor_blink_flipflop;
                 self._highlight_visibility = 1.0;

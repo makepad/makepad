@@ -40,7 +40,27 @@ impl Style for DesktopWindow{
 impl DesktopWindow{
     pub fn handle_desktop_window(&mut self, cx:&mut Cx, event:&mut Event)->DesktopWindowEvent{
         self.view.handle_scroll_bars(cx, event);
-        DesktopWindowEvent::None
+        if let Some(window_id) = self.window.window_id{
+            let is_for_other_window = match event{
+                Event::CloseRequested(ev)=>ev.window_id != window_id,
+                Event::WindowGeomChange(ev)=>ev.window_id != window_id,
+                Event::FingerDown(ev)=>ev.window_id != window_id,
+                Event::FingerMove(ev)=>ev.window_id != window_id,
+                Event::FingerHover(ev)=>ev.window_id != window_id,
+                Event::FingerUp(ev)=>ev.window_id != window_id,
+                Event::FingerScroll(ev)=>ev.window_id != window_id,
+                _=>false
+            };
+            if is_for_other_window{
+                DesktopWindowEvent::EventForOtherWindow
+            }
+            else{
+                DesktopWindowEvent::None
+            }
+        }
+        else{
+            DesktopWindowEvent::None
+        }
     }
 
     pub fn begin_desktop_window(&mut self, cx:&mut Cx)->ViewRedraw{

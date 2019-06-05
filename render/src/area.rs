@@ -290,7 +290,7 @@ impl Area{
                     return None;
                 }
                 let csh =&cx.compiled_shaders[draw_call.shader_id];
-                cx.paint_dirty = true;
+                cx.windows[draw_list.window_id].paint_dirty = true;
                 draw_call.instance_dirty = true;
                 return Some(
                     InstanceWriteRef{
@@ -314,7 +314,7 @@ impl Area{
                 if draw_list.redraw_id != inst.redraw_id {
                     return None;
                 }
-                cx.paint_dirty = true;
+                cx.windows[draw_list.window_id].paint_dirty = true;
                 draw_call.uniforms_dirty = true;
                 return Some(
                     &mut draw_call.uniforms

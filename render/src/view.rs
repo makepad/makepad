@@ -80,6 +80,9 @@ where TScrollBar: ScrollBarLike<TScrollBar> + Clone
             panic!("calling begin_view outside of redraw cycle is not possible!");
         }
         
+        // check if we have a view parent
+        let window_id = *cx.window_stack.last().expect("No window found when begin_view");
+        
         if self.draw_list_id.is_none() { // we need a draw_list_id
             if cx.draw_lists_free.len() != 0 {
                 self.draw_list_id = Some(cx.draw_lists_free.pop().unwrap());
@@ -89,13 +92,10 @@ where TScrollBar: ScrollBarLike<TScrollBar> + Clone
                 cx.draw_lists.push(DrawList {..Default::default()});
             }
             let draw_list = &mut cx.draw_lists[self.draw_list_id.unwrap()];
-            draw_list.initialize(self.is_clipped, cx.redraw_id);
+            draw_list.initialize(window_id, self.is_clipped, cx.redraw_id);
         }
         
         let draw_list_id = self.draw_list_id.unwrap();
-        
-        // check if we have a view parent
-        let window_id = *cx.window_stack.last().expect("No window found when begin_view");
         
         let nesting_draw_list_id = if cx.draw_list_stack.len() > 0 {
             *cx.draw_list_stack.last().unwrap()
@@ -104,23 +104,22 @@ where TScrollBar: ScrollBarLike<TScrollBar> + Clone
             0
         };
         
-        let override_layout = if cx.windows[window_id].root_draw_list_id.is_none() {
+        let (override_layout, is_root_for_window) = if cx.windows[window_id].root_draw_list_id.is_none() {
             // we are the first view on a window
             let window = &mut cx.windows[window_id];
             window.root_draw_list_id = Some(draw_list_id);
             // we should take the window geometry and abs position as our turtle layout
-            Layout {
+            (Layout {
                 abs_origin: Some(Vec2 {x: 0., y: 0.}),
                 abs_size: Some(window.get_inner_size()),
                 ..layout.clone()
-            }
+            }, true)
         }
         else {
-            layout.clone()
+            (layout.clone(), false)
         };
         
         let window = &mut cx.windows[window_id];
-        
         // find the parent draw list id
         let parent_draw_list_id = if self.is_overlay {
             if window.root_draw_list_id.is_none() {
@@ -169,7 +168,7 @@ where TScrollBar: ScrollBarLike<TScrollBar> + Clone
         cx.draw_lists[draw_list_id].nesting_draw_list_id = nesting_draw_list_id;
         
         if cx.draw_lists[draw_list_id].draw_calls_len != 0 && !cx.draw_list_needs_redraw(draw_list_id) {
-
+            
             // walk the turtle because we aren't drawing
             let w = Bounds::Fix(cx.draw_lists[draw_list_id].rect.w);
             let h = Bounds::Fix(cx.draw_lists[draw_list_id].rect.h);
@@ -185,11 +184,15 @@ where TScrollBar: ScrollBarLike<TScrollBar> + Clone
         draw_list.draw_calls_len = 0;
         
         cx.draw_list_stack.push(draw_list_id);
-
+        
         cx.begin_turtle(&override_layout, Area::DrawList(DrawListArea {
             draw_list_id: draw_list_id,
             redraw_id: cx.redraw_id
         }));
+        
+        if is_root_for_window {
+            cx.windows[window_id].paint_dirty = true;
+        }
         
         Ok(())
     }
@@ -209,7 +212,7 @@ where TScrollBar: ScrollBarLike<TScrollBar> + Clone
             ScrollBarEvent::Scroll {scroll_pos, ..} => {
                 let draw_list = &mut cx.draw_lists[self.draw_list_id.unwrap()];
                 draw_list.set_scroll_x(scroll_pos);
-                cx.paint_dirty = true;
+                cx.windows[draw_list.window_id].paint_dirty = true;
             },
             _ => ()
         };
@@ -218,7 +221,7 @@ where TScrollBar: ScrollBarLike<TScrollBar> + Clone
             ScrollBarEvent::Scroll {scroll_pos, ..} => {
                 let draw_list = &mut cx.draw_lists[self.draw_list_id.unwrap()];
                 draw_list.set_scroll_y(scroll_pos);
-                cx.paint_dirty = true;
+                cx.windows[draw_list.window_id].paint_dirty = true;
             },
             _ => ()
         };

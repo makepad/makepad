@@ -491,7 +491,7 @@ impl App {
         }
         for window in &mut self.windows {
             window.handle_app_window(cx, event, &mut self.app_global);
-            break;
+           // break;
         }
     }
     
@@ -499,7 +499,7 @@ impl App {
         //return;
         for window in &mut self.windows {
             window.draw_app_window(cx, &mut self.app_global);
-            break;
+           // break;
         }
     }
 }

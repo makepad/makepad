@@ -31,6 +31,7 @@ impl Window {
                     inner_size:self.create_inner_size,
                     position:self.create_pos,
                 },
+                paint_dirty:true,
                 ..Default::default()
              };
             let window_id;

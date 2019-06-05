@@ -64,7 +64,7 @@ pub struct Cx {
     
     pub redraw_areas: Vec<Area>,
     pub incr_areas: Vec<Area>,
-    pub paint_dirty: bool,
+    //pub paint_dirty2: bool,
     pub clear_color: Color,
     pub redraw_id: u64,
     pub repaint_id: u64,
@@ -145,7 +145,7 @@ impl Default for Cx {
             
             redraw_areas: Vec::new(),
             incr_areas: Vec::new(),
-            paint_dirty: false,
+            //paint_dirty: false,
             clear_color: Color {r: 0.1, g: 0.1, b: 0.1, a: 1.0},
             
             redraw_id: 1,
@@ -648,6 +648,7 @@ impl Default for CxWindowState{
 
 #[derive(Clone, Default)]
 pub struct CxWindow {
+    pub paint_dirty: bool,
     pub window_id: usize,
     pub window_state:CxWindowState,
     pub window_geom: WindowGeom,
