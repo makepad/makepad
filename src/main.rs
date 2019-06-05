@@ -91,11 +91,7 @@ impl Style for App {
                 AppWindow {
                     window_index:0,
                     ..Style::style(cx)
-                },
-                AppWindow {
-                    window_index:1,
-                    ..Style::style(cx)
-                },
+                }
             ],
             app_global: AppGlobal {
                 rust_compiler: RustCompiler {
@@ -163,53 +159,6 @@ impl Style for App {
                                 })
                             },
                         },
-                        AppStateWindow {
-                            window_outer_size: Vec2::zero(),
-                            window_position: Vec2::zero(),
-                            dock_items: DockItem::Splitter {
-                                axis: Axis::Vertical,
-                                align: SplitterAlign::First,
-                                pos: 150.0,
-                                first: Box::new(DockItem::TabControl {
-                                    current: 0,
-                                    tabs: vec![DockTab {
-                                        closeable: false,
-                                        title: "Files".to_string(),
-                                        item: Panel::FileTree
-                                    }]
-                                }),
-                                last: Box::new(DockItem::Splitter {
-                                    axis: Axis::Horizontal,
-                                    align: SplitterAlign::Last,
-                                    pos: 150.0,
-                                    first: Box::new(DockItem::TabControl {
-                                        current: 1,
-                                        tabs: vec![
-                                            DockTab {
-                                                closeable: false,
-                                                title: "Edit".to_string(),
-                                                item: Panel::FileEditorTarget
-                                            },
-                                            DockTab {
-                                                closeable: true,
-                                                title: "example.rs".to_string(),
-                                                item: Panel::FileEditor {path: "example/src/example.rs".to_string(), editor_id: 1}
-                                            }
-                                        ],
-                                    }),
-                                    last: Box::new(DockItem::TabControl {
-                                        current: 0,
-                                        tabs: vec![
-                                            DockTab {
-                                                closeable: false,
-                                                title: "Keyboard".to_string(),
-                                                item: Panel::Keyboard
-                                            }
-                                        ]
-                                    })
-                                })
-                            },
-                        },
                     ]
                 }
             }
@@ -224,7 +173,10 @@ impl AppWindow {
         match self.desktop_window.handle_desktop_window(cx, event) {
             DesktopWindowEvent::EventForOtherWindow => {
                 return
-            }
+            },
+            DesktopWindowEvent::WindowClosed=>{
+                return
+            },
             _ => ()
         }
         

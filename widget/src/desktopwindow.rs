@@ -5,13 +5,14 @@ use crate::scrollbar::*;
 pub struct DesktopWindow{
     pub window:Window,
     pub layout:Layout,
-    pub root_view:View<ScrollBar>,
-    pub inner_view:View<ScrollBar>,
+    pub root_view:View<ScrollBar>, // we have a root view otherwise is_overlay subviews can't attach topmost
+    pub inner_view:View<ScrollBar>, 
 }
 
 #[derive(Clone, PartialEq)]
 pub enum DesktopWindowEvent{
     EventForOtherWindow,
+    WindowClosed,
     None
 }
 
@@ -22,23 +23,9 @@ impl Style for DesktopWindow{
                 ..Default::default()
             },
             root_view:View{
-                //scroll_h:Some(ScrollBar{
-                //    ..Style::style(cx)
-                //}),
-                //scroll_v:Some(ScrollBar{
-                //    smoothing:Some(0.25),
-                //    ..Style::style(cx)
-                //}),
                 ..Style::style(cx)
             },
             inner_view:View{
-                //scroll_h:Some(ScrollBar{
-                //    ..Style::style(cx)
-                //}),
-                //scroll_v:Some(ScrollBar{
-                //    smoothing:Some(0.25),
-                //    ..Style::style(cx)
-                //}),
                 ..Style::style(cx)
             },
             window:Window{
@@ -55,7 +42,12 @@ impl DesktopWindow{
         if let Some(window_id) = self.window.window_id{
             let is_for_other_window = match event{
                 Event::WindowCloseRequested(ev)=>ev.window_id != window_id,
-                Event::WindowClosed(ev)=>ev.window_id != window_id,
+                Event::WindowClosed(ev)=>{
+                    if ev.window_id == window_id{
+                        return DesktopWindowEvent::WindowClosed
+                    }
+                    true
+                }
                 Event::WindowGeomChange(ev)=>ev.window_id != window_id,
                 Event::FingerDown(ev)=>ev.window_id != window_id,
                 Event::FingerMove(ev)=>ev.window_id != window_id,

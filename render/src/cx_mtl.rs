@@ -173,7 +173,6 @@ impl Cx {
         self.redraw_child_area(Area::All);
         
         cocoa_app.event_loop( | cocoa_app, events | {
-            let mut exit = false;
             let mut paint_dirty = false;
             for mut event in events {
                 
@@ -352,16 +351,13 @@ impl Cx {
                     },
                     Event::WindowClosed(wc)=>{
                         // close window, shutdown layers etc.
-                        
+                        return CocoaLoopState::Exit
                     },
                     _ => {}
                 }
             }
             
-            if exit{
-                CocoaLoopState::Exit
-            }
-            else if self.playing_anim_areas.len() == 0 && self.redraw_parent_areas.len() == 0  && self.redraw_child_areas.len() == 0 && self.frame_callbacks.len() == 0 && !paint_dirty {
+            if self.playing_anim_areas.len() == 0 && self.redraw_parent_areas.len() == 0  && self.redraw_child_areas.len() == 0 && self.frame_callbacks.len() == 0 && !paint_dirty {
                 CocoaLoopState::Block
             }
             else {
@@ -444,7 +440,7 @@ impl CocoaRenderWindow {
         
         unsafe {
             //msg_send![layer, displaySyncEnabled:false];
-            let count: u64 = 3;
+            let count: u64 = 2;
             msg_send![core_animation_layer, setMaximumDrawableCount: count];
             msg_send![core_animation_layer, setDisplaySyncEnabled: true];
         }
