@@ -205,7 +205,7 @@ impl Splitter{
                 };
                 if calc_pos != self._calc_pos{
                     self._calc_pos = calc_pos;
-                    cx.redraw_area(self._split_area);
+                    cx.redraw_child_area(self._split_area);
                     return SplitterEvent::Moving{new_pos:self.pos};
                 }
             }

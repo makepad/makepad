@@ -178,9 +178,14 @@ pub struct TextCopyEvent {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct CloseRequestedEvent {
+pub struct WindowCloseRequestedEvent {
     pub window_id: usize,
     pub accept_close: bool
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct WindowClosedEvent {
+    pub window_id: usize
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -195,7 +200,8 @@ pub enum Event {
     AnimateEnded(AnimateEvent),
     Animate(AnimateEvent),
     Frame(FrameEvent),
-    CloseRequested(CloseRequestedEvent),
+    WindowCloseRequested(WindowCloseRequestedEvent),
+    WindowClosed(WindowClosedEvent),
     WindowGeomChange(WindowGeomChangeEvent),
     FingerDown(FingerDownEvent),
     FingerMove(FingerMoveEvent),
@@ -277,7 +283,7 @@ impl HitState {
                 }
             },
             Event::Frame(_) => {
-                for frame_area in &cx.frame_callbacks {
+                for frame_area in &cx._frame_callbacks {
                     if *frame_area == area {
                         return event.clone()
                     }

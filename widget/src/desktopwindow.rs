@@ -5,7 +5,8 @@ use crate::scrollbar::*;
 pub struct DesktopWindow{
     pub window:Window,
     pub layout:Layout,
-    pub view:View<ScrollBar>,
+    pub root_view:View<ScrollBar>,
+    pub inner_view:View<ScrollBar>,
 }
 
 #[derive(Clone, PartialEq)]
@@ -20,7 +21,17 @@ impl Style for DesktopWindow{
             layout:Layout{
                 ..Default::default()
             },
-            view:View{
+            root_view:View{
+                //scroll_h:Some(ScrollBar{
+                //    ..Style::style(cx)
+                //}),
+                //scroll_v:Some(ScrollBar{
+                //    smoothing:Some(0.25),
+                //    ..Style::style(cx)
+                //}),
+                ..Style::style(cx)
+            },
+            inner_view:View{
                 //scroll_h:Some(ScrollBar{
                 //    ..Style::style(cx)
                 //}),
@@ -39,10 +50,12 @@ impl Style for DesktopWindow{
 
 impl DesktopWindow{
     pub fn handle_desktop_window(&mut self, cx:&mut Cx, event:&mut Event)->DesktopWindowEvent{
-        self.view.handle_scroll_bars(cx, event);
+        self.root_view.handle_scroll_bars(cx, event);
+        self.inner_view.handle_scroll_bars(cx, event);
         if let Some(window_id) = self.window.window_id{
             let is_for_other_window = match event{
-                Event::CloseRequested(ev)=>ev.window_id != window_id,
+                Event::WindowCloseRequested(ev)=>ev.window_id != window_id,
+                Event::WindowClosed(ev)=>ev.window_id != window_id,
                 Event::WindowGeomChange(ev)=>ev.window_id != window_id,
                 Event::FingerDown(ev)=>ev.window_id != window_id,
                 Event::FingerMove(ev)=>ev.window_id != window_id,
@@ -66,7 +79,12 @@ impl DesktopWindow{
     pub fn begin_desktop_window(&mut self, cx:&mut Cx)->ViewRedraw{
 
         self.window.begin_window(cx);
-        if let Err(_) = self.view.begin_view(cx, &self.layout){
+        if let Err(_) = self.root_view.begin_view(cx, &Layout{..Default::default()}){
+            self.window.end_window(cx);
+            return Err(())
+        }
+        if let Err(_) = self.inner_view.begin_view(cx, &self.layout){
+            self.root_view.end_view(cx);
             self.window.end_window(cx);
             return Err(())
         }
@@ -75,7 +93,8 @@ impl DesktopWindow{
     }
     
     pub fn end_desktop_window(&mut self, cx:&mut Cx){
-        self.view.end_view(cx);
+        self.inner_view.end_view(cx);
+        self.root_view.end_view(cx);
         self.window.end_window(cx);
     }
 }

@@ -347,10 +347,10 @@ where TScrollBar: ScrollBarLike<TScrollBar> + Clone
         if let Some(draw_list_id) = self.draw_list_id {
             let draw_list = &cx.draw_lists[draw_list_id];
             let area = Area::DrawList(DrawListArea {draw_list_id: draw_list_id, redraw_id: draw_list.redraw_id});
-            cx.redraw_area(area);
+            cx.redraw_child_area(area);
         }
         else {
-            cx.redraw_area(Area::All)
+            cx.redraw_child_area(Area::All)
         }
     }
     

@@ -791,8 +791,19 @@ impl CocoaWindow {
         self.do_callback(&mut events);
     }
     
-    pub fn send_close_requested_event(&mut self) {
-        self.do_callback(&mut vec![Event::CloseRequested(CloseRequestedEvent{window_id:self.window_id, accept_close:true})])
+    pub fn send_window_close_requested_event(&mut self)->bool{
+        let mut events =vec![Event::WindowCloseRequested(WindowCloseRequestedEvent{window_id:self.window_id, accept_close:true})];
+        self.do_callback(&mut events);
+        if let Event::WindowCloseRequested(cre) = &events[0]{
+            return cre.accept_close
+        }
+        true
+    }
+    
+    pub fn send_window_closed_event(&mut self) {
+        self.do_callback(&mut vec![Event::WindowClosed(WindowClosedEvent{
+            window_id: self.window_id
+        })])
     }
     
     pub fn send_text_input(&mut self, input: String, replace_last: bool) {
@@ -1050,12 +1061,17 @@ pub fn define_cocoa_window_delegate() -> *const Class {
     
     extern fn window_should_close(this: &Object, _: Sel, _: id) -> BOOL {
         let cw = get_cocoa_window(this);
-        cw.send_close_requested_event();
-        NO
+        if cw.send_window_close_requested_event(){
+            YES
+        }
+        else{
+            NO
+        }
     }
     
     extern fn window_will_close(this: &Object, _: Sel, _: id) {
-        let _cw = get_cocoa_window(this);
+        let cw = get_cocoa_window(this);
+        cw.send_window_closed_event();
     }
     
     extern fn window_did_resize(this: &Object, _: Sel, _: id) {
@@ -1127,6 +1143,7 @@ pub fn define_cocoa_window_delegate() -> *const Class {
     // Invoked when entered fullscreen
     extern fn window_did_enter_fullscreen(this: &Object, _: Sel, _: id) {
         let cw = get_cocoa_window(this);
+        println!("DID!");
         cw.send_change_event();
     }
     

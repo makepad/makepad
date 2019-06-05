@@ -62,8 +62,11 @@ pub struct Cx {
     pub shaders: Vec<Shader>,
     pub shader_map: HashMap<Shader, usize>,
     
-    pub redraw_areas: Vec<Area>,
-    pub incr_areas: Vec<Area>,
+    pub redraw_child_areas: Vec<Area>,
+    pub redraw_parent_areas: Vec<Area>,
+    pub _redraw_child_areas: Vec<Area>,
+    pub _redraw_parent_areas: Vec<Area>,
+
     //pub paint_dirty2: bool,
     pub clear_color: Color,
     pub redraw_id: u64,
@@ -95,7 +98,7 @@ pub struct Cx {
     pub ended_anim_areas: Vec<AnimArea>,
     
     pub frame_callbacks: Vec<Area>,
-    pub next_frame_callbacks: Vec<Area>,
+    pub _frame_callbacks: Vec<Area>,
     
     pub signals_before_draw: Vec<(Signal, u64)>,
     pub signals_after_draw: Vec<(Signal, u64)>,
@@ -143,8 +146,10 @@ impl Default for Cx {
             shaders: Vec::new(),
             shader_map: HashMap::new(),
             
-            redraw_areas: Vec::new(),
-            incr_areas: Vec::new(),
+            redraw_parent_areas: Vec::new(),
+            _redraw_parent_areas: Vec::new(),
+            redraw_child_areas: Vec::new(),
+            _redraw_child_areas: Vec::new(),
             //paint_dirty: false,
             clear_color: Color {r: 0.1, g: 0.1, b: 0.1, a: 1.0},
             
@@ -179,7 +184,7 @@ impl Default for Cx {
             ended_anim_areas: Vec::new(),
             
             frame_callbacks: Vec::new(),
-            next_frame_callbacks: Vec::new(),
+            _frame_callbacks: Vec::new(),
             
             //custom_before_draw:Vec::new(),
             signals_before_draw: Vec::new(),
@@ -246,7 +251,40 @@ impl Cx {
         }));
     }
     
-    pub fn redraw_area(&mut self, area: Area) {
+    pub fn redraw_window_of(&mut self, area:Area){
+        // we walk up the stack of area
+        match area {
+            Area::All =>{
+                for window_id in 0..self.windows.len(){
+                    let redraw = match self.windows[window_id].window_state{
+                        CxWindowState::Create{..} | CxWindowState::Created=>{
+                           true
+                        },
+                        _=>false
+                    };
+                    if redraw{
+                         self.redraw_window_id(window_id);
+                    }
+                }
+            },
+            Area::Empty => (),
+            Area::Instance(instance) => {
+                self.redraw_window_id(self.draw_lists[instance.draw_list_id].window_id);
+            },
+            Area::DrawList(drawlist) => {
+                self.redraw_window_id(self.draw_lists[drawlist.draw_list_id].window_id);
+            }
+        }
+    }
+          
+    pub fn redraw_window_id(&mut self, window_id:usize){
+        let window = &self.windows[window_id];
+        if let Some(root_draw_list_id) = window.root_draw_list_id{
+            self.redraw_parent_area(Area::DrawList(DrawListArea{redraw_id:0,draw_list_id:root_draw_list_id}));
+        }
+    }
+    
+    pub fn redraw_child_area(&mut self, area: Area) {
         if self.panic_redraw {
             #[cfg(debug_assertions)]
             panic!("Panic Redraw triggered")
@@ -254,28 +292,53 @@ impl Cx {
         
         // if we are redrawing all, clear the rest
         if area == Area::All {
-            self.redraw_areas.truncate(0);
+            self.redraw_child_areas.truncate(0);
         }
         // check if we are already redrawing all
-        else if self.redraw_areas.len() == 1 && self.redraw_areas[0] == Area::All {
+        else if self.redraw_child_areas.len() == 1 && self.redraw_child_areas[0] == Area::All {
             return;
         };
         // only add it if we dont have it already
-        if let Some(_) = self.redraw_areas.iter().position( | a | *a == area) {
+        if let Some(_) = self.redraw_child_areas.iter().position( | a | *a == area) {
             return;
         }
-        self.redraw_areas.push(area);
+        self.redraw_child_areas.push(area);
+    }
+    
+    pub fn redraw_parent_area(&mut self, area: Area) {
+        if self.panic_redraw {
+            #[cfg(debug_assertions)]
+            panic!("Panic Redraw triggered")
+        }
+        
+        // if we are redrawing all, clear the rest
+        if area == Area::All {
+            self.redraw_parent_areas.truncate(0);
+        }
+        // check if we are already redrawing all
+        else if self.redraw_parent_areas.len() == 1 && self.redraw_parent_areas[0] == Area::All {
+            return;
+        };
+        // only add it if we dont have it already
+        if let Some(_) = self.redraw_parent_areas.iter().position( | a | *a == area) {
+            return;
+        }
+        self.redraw_parent_areas.push(area);
     }
     
     pub fn redraw_previous_areas(&mut self) {
-        for area in self.incr_areas.clone() {
-            self.redraw_area(area);
+        for area in self._redraw_child_areas.clone() {
+            self.redraw_child_area(area);
+        }
+        for area in self._redraw_parent_areas.clone() {
+            self.redraw_parent_area(area);
         }
     }
     
-    // figure out if areas are in some way a child of draw_list_id
     pub fn draw_list_needs_redraw(&self, draw_list_id: usize) -> bool {
-        for area in &self.incr_areas {
+
+        // figure out if areas are in some way a child of draw_list_id, then we need to redraw
+        for area in &self._redraw_child_areas {
             match area {
                 Area::All => {
                     return true;
@@ -308,6 +371,41 @@ impl Cx {
                 }
             }
         }
+        // figure out if areas are in some way a parent of draw_list_id, then redraw
+        for area in &self._redraw_parent_areas {
+            match area {
+                Area::All => {
+                    return true;
+                },
+                Area::Empty => (),
+                Area::Instance(instance) => {
+                    let mut dl = draw_list_id;
+                    if dl == instance.draw_list_id {
+                        return true
+                    }
+                    while dl != 0 {
+                        dl = self.draw_lists[dl].nesting_draw_list_id;
+                        if dl == instance.draw_list_id {
+                            return true
+                        }
+                    }
+                },
+                Area::DrawList(drawlist) => {
+                    let mut dl = draw_list_id;
+                    if dl == drawlist.draw_list_id {
+                        return true
+                    }
+                    while dl != 0 {
+                        dl = self.draw_lists[dl].nesting_draw_list_id;
+                        if dl == drawlist.draw_list_id {
+                            return true
+                        }
+                    }
+                    
+                }
+            }
+        }
+        
         false
     }
     
@@ -389,7 +487,7 @@ impl Cx {
             self.key_focus = new_area.clone()
         }
         //
-        if let Some(next_frame) = self.next_frame_callbacks.iter_mut().find( | v | **v == old_area) {
+        if let Some(next_frame) = self.frame_callbacks.iter_mut().find( | v | **v == old_area) {
             *next_frame = new_area.clone()
         }
     }
@@ -484,9 +582,11 @@ impl Cx {
     {
         self.is_in_redraw_cycle = true;
         self.redraw_id += 1;
-        self.incr_areas = self.redraw_areas.clone();
+        self._redraw_child_areas = self.redraw_child_areas.clone();
+        self._redraw_parent_areas = self.redraw_parent_areas.clone();
         self.align_list.truncate(0);
-        self.redraw_areas.truncate(0);
+        self.redraw_child_areas.truncate(0);
+        self.redraw_parent_areas.truncate(0);
         self.call_event_handler(&mut event_handler, &mut Event::Draw);
         self.is_in_redraw_cycle = false;
     }
@@ -504,16 +604,16 @@ impl Cx {
     pub fn call_frame_event<F>(&mut self, mut event_handler: F, time: f64)
     where F: FnMut(&mut Cx, &mut Event)
     {
-        self.frame_callbacks = self.next_frame_callbacks.clone();
-        self.next_frame_callbacks.truncate(0);
+        self._frame_callbacks = self.frame_callbacks.clone();
+        self.frame_callbacks.truncate(0);
         self.call_event_handler(&mut event_handler, &mut Event::Frame(FrameEvent {time: time, frame: self.repaint_id}));
     }
     
     pub fn next_frame(&mut self, area: Area) {
-        if let Some(_) = self.next_frame_callbacks.iter().position( | a | *a == area) {
+        if let Some(_) = self.frame_callbacks.iter().position( | a | *a == area) {
             return;
         }
-        self.next_frame_callbacks.push(area);
+        self.frame_callbacks.push(area);
     }
     
     pub fn new_signal(&mut self) -> Signal {

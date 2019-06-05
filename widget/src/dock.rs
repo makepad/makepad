@@ -208,7 +208,7 @@ where TItem: Clone
                                 TabControlEvent::TabSelect {tab_id} => {
                                     *current = tab_id;
                                     // someday ill fix this. Luckily entire UI redraws are millisecond span
-                                    cx.redraw_area(Area::All);
+                                    cx.redraw_child_area(Area::All);
                                     *self._tab_select = Some((stack_top.uid, tab_id));
                                     defocus = true;
                                 },
@@ -270,16 +270,16 @@ where TItem: Clone
                         stack_top.uid = self.walk_uid;
                         self.walk_uid += 1;
                         let split = self.splitters.get(stack_top.uid);
-                        if !split.is_none() {
-                            match split.unwrap().handle_splitter(cx, event) {
+                        if let Some(split) = split{
+                            match split.handle_splitter(cx, event) {
                                 SplitterEvent::Moving {new_pos} => {
                                     *pos = new_pos;
-                                    cx.redraw_area(Area::All);
+                                    cx.redraw_window_of(split._split_area);
                                 },
                                 SplitterEvent::MovingEnd {new_align, new_pos} => {
                                     *align = new_align;
                                     *pos = new_pos;
-                                    cx.redraw_area(Area::All);
+                                    cx.redraw_window_of(split._split_area);
                                 },
                                 _ => ()
                             };
@@ -664,7 +664,7 @@ where TItem: Clone
                 }
             }
             Self::recur_collapse_empty(dock_items);
-            cx.redraw_area(Area::All);
+            cx.redraw_child_area(Area::All);
             //Self::recur_debug_dock(self.dock_items.as_mut().unwrap(), &mut 0, 0);
             return DockEvent::DockChanged
         };

@@ -170,7 +170,7 @@ impl Cx {
         
         self.call_event_handler(&mut event_handler, &mut Event::Construct);
         
-        self.redraw_area(Area::All);
+        self.redraw_child_area(Area::All);
         
         cocoa_app.event_loop( | cocoa_app, events | {
             let mut exit = false;
@@ -184,8 +184,8 @@ impl Cx {
                     Event::FingerUp(_) => {
                         self.down_mouse_cursor = None;
                     },
-                    Event::CloseRequested(cr) => {
-                        exit = true
+                    Event::WindowCloseRequested(_cr) => {
+                        println!("CLOSE REQUESTED");
                     },
                     Event::FingerDown(fe) => {
                         // lets set the finger tap count
@@ -217,21 +217,23 @@ impl Cx {
                             if render_window.window_id == re.window_id {
                                 render_window.window_geom = re.new_geom.clone();
                                 self.windows[re.window_id].window_geom = re.new_geom.clone();
+                                // redraw just this windows root draw list
+                                self.redraw_window_id(re.window_id);
                                 break;
                             }
                         }
-                        self.redraw_area(Area::All);
+                        // ok lets not redraw all, just this window
                         self.call_event_handler(&mut event_handler, &mut event);
                     },
                     Event::Paint => {
                         
                         if self.playing_anim_areas.len() != 0 {
-                            let time = cocoa_app.time_now();
+                            let time = cocoa_app.time_now(); 
                             // keeps the error as low as possible
                             self.call_animation_event(&mut event_handler, time);
                         }
                         
-                        if self.next_frame_callbacks.len() != 0 {
+                        if self.frame_callbacks.len() != 0 {
                             let time = cocoa_app.time_now();
                             // keeps the error as low as possible
                             self.call_frame_event(&mut event_handler, time);
@@ -240,7 +242,7 @@ impl Cx {
                         self.call_signals_before_draw(&mut event_handler);
                         
                         // call redraw event
-                        if self.redraw_areas.len()>0 {
+                        if self.redraw_child_areas.len()>0 || self.redraw_parent_areas.len()>0 {
                             //let time_start = cocoa_window.time_now();
                             self.call_draw_event(&mut event_handler);
                             // let time_end = cocoa_window.time_now();
@@ -309,29 +311,31 @@ impl Cx {
                             }
                         }
                         
-                        for render_window in &mut render_windows {
-                            if self.windows[render_window.window_id].paint_dirty{
-                                windows_need_repaint -= 1;
-                                // only vsync the last window. needs fixing properly with a thread. unfortunately
-                                render_window.set_vsync_enable(windows_need_repaint == 0);
-                                //first = false;
-                                self.set_projection_matrix(&render_window.window_geom);
-                                if let Some(root_draw_list_id) = self.windows[render_window.window_id].root_draw_list_id {
-                                    self.repaint(
-                                        root_draw_list_id,
-                                        render_window.window_geom.dpi_factor,
-                                        &render_window.core_animation_layer,
-                                        &device,
-                                        &command_queue
-                                    );
-                                }
-                                // do this after the draw to create jump-free window resizing
-                                if render_window.resize_core_animation_layer() {
-                                    self.windows[render_window.window_id].paint_dirty = true;
-                                    paint_dirty = true;
-                                }
-                                else{
-                                    self.windows[render_window.window_id].paint_dirty = false;
+                        if windows_need_repaint > 0{
+                            for render_window in &mut render_windows {
+                                if self.windows[render_window.window_id].paint_dirty{
+                                    windows_need_repaint -= 1;
+                                    // only vsync the last window. needs fixing properly with a thread. unfortunately
+                                    render_window.set_vsync_enable(windows_need_repaint == 0);
+
+                                    self.set_projection_matrix(&render_window.window_geom);
+                                    if let Some(root_draw_list_id) = self.windows[render_window.window_id].root_draw_list_id {
+                                        self.repaint(
+                                            root_draw_list_id,
+                                            render_window.window_geom.dpi_factor,
+                                            &render_window.core_animation_layer,
+                                            &device,
+                                            &command_queue
+                                        );
+                                    }
+                                    // do this after the draw to create jump-free window resizing
+                                    if render_window.resize_core_animation_layer() {
+                                        self.windows[render_window.window_id].paint_dirty = true;
+                                        paint_dirty = true;
+                                    }
+                                    else{
+                                        self.windows[render_window.window_id].paint_dirty = false;
+                                    }
                                 }
                             }
                         }
@@ -346,6 +350,10 @@ impl Cx {
                     Event::FingerUp(fe) => { // decapture automatically
                         self.captured_fingers[fe.digit] = Area::Empty;
                     },
+                    Event::WindowClosed(wc)=>{
+                        // close window, shutdown layers etc.
+                        
+                    },
                     _ => {}
                 }
             }
@@ -353,7 +361,7 @@ impl Cx {
             if exit{
                 CocoaLoopState::Exit
             }
-            else if self.playing_anim_areas.len() == 0 && self.redraw_areas.len() == 0 && self.next_frame_callbacks.len() == 0 && !paint_dirty {
+            else if self.playing_anim_areas.len() == 0 && self.redraw_parent_areas.len() == 0  && self.redraw_child_areas.len() == 0 && self.frame_callbacks.len() == 0 && !paint_dirty {
                 CocoaLoopState::Block
             }
             else {
@@ -436,7 +444,7 @@ impl CocoaRenderWindow {
         
         unsafe {
             //msg_send![layer, displaySyncEnabled:false];
-            let count: u64 = 2;
+            let count: u64 = 3;
             msg_send![core_animation_layer, setMaximumDrawableCount: count];
             msg_send![core_animation_layer, setDisplaySyncEnabled: true];
         }

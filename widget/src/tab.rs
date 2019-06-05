@@ -191,7 +191,7 @@ impl Tab{
                 // its playing the term anim, run a redraw
                 if self.animator.term_anim_playing(){
                     self.animator.calc_float(cx, "closing", ae.time);
-                    cx.redraw_area(self._bg_area);
+                    cx.redraw_child_area(self._bg_area);
                 }
                 else{
                     self.animator.calc_write(cx, "bg.color", ae.time, self._bg_area);

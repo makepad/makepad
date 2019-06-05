@@ -69,6 +69,12 @@ impl Window {
         false
     }
     
+    pub fn redraw_window_area(&mut self, cx: &mut Cx){
+        if let Some(window_id) = self.window_id{
+            cx.redraw_window_id(window_id);
+        }
+    }
+    
     pub fn end_window(&mut self, cx: &mut Cx) -> Area {
         cx.window_stack.pop();
         Area::Empty

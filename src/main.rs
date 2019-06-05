@@ -394,7 +394,7 @@ impl AppWindow {
                                         file_editor.set_key_focus(cx);
                                     }
                                     only_focus_editor = true;
-                                    cx.redraw_area(Area::All);
+                                    cx.redraw_child_area(Area::All);
                                 }
                             },
                             Panel::FileEditorTarget => { // found the editor target
@@ -418,7 +418,7 @@ impl AppWindow {
                     if let DockItem::TabControl {current, tabs} = dock_item {
                         tabs.insert(*current + 1, new_tab);
                         *current = *current + 1;
-                        cx.redraw_area(Area::All);
+                        cx.redraw_child_area(Area::All);
                         return true;
                     }
                 }
@@ -456,7 +456,7 @@ impl AppGlobal {
             //}
         }
         else if self.text_buffers.handle_file_read(&fr) {
-            cx.redraw_area(Area::All);
+            cx.redraw_child_area(Area::All);
         }
     }
     
