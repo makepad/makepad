@@ -13,6 +13,7 @@ pub struct DesktopWindow{
 pub enum DesktopWindowEvent{
     EventForOtherWindow,
     WindowClosed,
+    WindowGeomChange(WindowGeomChangeEvent),
     None
 }
 
@@ -48,7 +49,12 @@ impl DesktopWindow{
                     }
                     true
                 }
-                Event::WindowGeomChange(ev)=>ev.window_id != window_id,
+                Event::WindowGeomChange(ev)=>{
+                    if ev.window_id == window_id{
+                        return DesktopWindowEvent::WindowGeomChange(ev.clone())
+                    }
+                    true
+                },
                 Event::FingerDown(ev)=>ev.window_id != window_id,
                 Event::FingerMove(ev)=>ev.window_id != window_id,
                 Event::FingerHover(ev)=>ev.window_id != window_id,

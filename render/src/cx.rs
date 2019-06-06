@@ -729,6 +729,7 @@ impl Cx {
 #[derive(Clone, Default, Debug, PartialEq)]
 pub struct WindowGeom {
     pub dpi_factor: f32,
+    pub is_fullscreen: bool,
     pub position: Vec2,
     pub inner_size: Vec2,
     pub outer_size: Vec2,

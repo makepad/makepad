@@ -184,7 +184,6 @@ impl Cx {
                         self.down_mouse_cursor = None;
                     },
                     Event::WindowCloseRequested(_cr) => {
-                        println!("CLOSE REQUESTED");
                     },
                     Event::FingerDown(fe) => {
                         // lets set the finger tap count
@@ -227,7 +226,7 @@ impl Cx {
                     Event::Paint => {
                         
                         if self.playing_anim_areas.len() != 0 {
-                            let time = cocoa_app.time_now(); 
+                            let time = cocoa_app.time_now();
                             // keeps the error as low as possible
                             self.call_animation_event(&mut event_handler, time);
                         }
@@ -305,18 +304,21 @@ impl Cx {
                         // repaint al windows we need to repaint
                         let mut windows_need_repaint = 0;
                         for render_window in &mut render_windows {
-                            if self.windows[render_window.window_id].paint_dirty{
+                            if self.windows[render_window.window_id].paint_dirty {
                                 windows_need_repaint += 1;
                             }
                         }
                         
-                        if windows_need_repaint > 0{
+                        if windows_need_repaint > 0 {
                             for render_window in &mut render_windows {
-                                if self.windows[render_window.window_id].paint_dirty{
+                                if self.windows[render_window.window_id].paint_dirty {
                                     windows_need_repaint -= 1;
                                     // only vsync the last window. needs fixing properly with a thread. unfortunately
                                     render_window.set_vsync_enable(windows_need_repaint == 0);
-
+                                    render_window.set_buffer_count(
+                                        if render_window.window_geom.is_fullscreen {3}else {2}
+                                    );
+                                    
                                     self.set_projection_matrix(&render_window.window_geom);
                                     if let Some(root_draw_list_id) = self.windows[render_window.window_id].root_draw_list_id {
                                         self.repaint(
@@ -332,7 +334,7 @@ impl Cx {
                                         self.windows[render_window.window_id].paint_dirty = true;
                                         paint_dirty = true;
                                     }
-                                    else{
+                                    else {
                                         self.windows[render_window.window_id].paint_dirty = false;
                                     }
                                 }
@@ -349,15 +351,14 @@ impl Cx {
                     Event::FingerUp(fe) => { // decapture automatically
                         self.captured_fingers[fe.digit] = Area::Empty;
                     },
-                    Event::WindowClosed(wc)=>{
-                        // close window, shutdown layers etc.
-                        return CocoaLoopState::Exit
+                    Event::WindowClosed(_wc) => {
+                        cocoa_app.terminate_event_loop();
                     },
                     _ => {}
                 }
             }
             
-            if self.playing_anim_areas.len() == 0 && self.redraw_parent_areas.len() == 0  && self.redraw_child_areas.len() == 0 && self.frame_callbacks.len() == 0 && !paint_dirty {
+            if self.playing_anim_areas.len() == 0 && self.redraw_parent_areas.len() == 0 && self.redraw_child_areas.len() == 0 && self.frame_callbacks.len() == 0 && !paint_dirty {
                 CocoaLoopState::Block
             }
             else {
@@ -464,6 +465,12 @@ impl CocoaRenderWindow {
     fn set_vsync_enable(&mut self, enable: bool) {
         unsafe {
             msg_send![self.core_animation_layer, setDisplaySyncEnabled: enable];
+        }
+    }
+    
+    fn set_buffer_count(&mut self, count: u64) {
+        unsafe {
+            msg_send![self.core_animation_layer, setMaximumDrawableCount: count];
         }
     }
     

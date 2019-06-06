@@ -5,7 +5,7 @@ use crate::cx::*;
 pub struct Window {
     pub window_id: Option<usize>,
     pub create_inner_size: Vec2,
-    pub create_pos: Option<Vec2>,
+    pub create_position: Option<Vec2>,
     pub create_title: String,
 }
 
@@ -14,7 +14,7 @@ impl Style for Window {
         Self {
             window_id: None,
             create_inner_size: Vec2{x:800., y:600.},
-            create_pos: None,
+            create_position: None,
             create_title: "Makepad".to_string()
         }
     }
@@ -29,7 +29,7 @@ impl Window {
                 window_state:CxWindowState::Create{
                     title:self.create_title.clone(),
                     inner_size:self.create_inner_size,
-                    position:self.create_pos,
+                    position:self.create_position,
                 },
                 paint_dirty:true,
                 ..Default::default()

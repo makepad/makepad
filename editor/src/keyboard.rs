@@ -3,7 +3,7 @@ use widget::*;
 
 use crate::textbuffer::*;
 
-//#[derive(Clone)]
+#[derive(Clone)]
 pub struct Keyboard {
     pub view: View<ScrollBar>,
     pub modifiers: KeyModifiers,

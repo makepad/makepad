@@ -9,7 +9,6 @@ use std::collections::HashMap;
 use serde::*;
 
 #[derive(Clone, Serialize, Deserialize)]
-
 enum Panel {
     RustCompiler,
     Keyboard,
@@ -18,8 +17,8 @@ enum Panel {
     FileEditor {path: String, editor_id: u64}
 }
 
+#[derive(Clone)]
 struct AppWindow {
-    window_index: usize,
     desktop_window: DesktopWindow,
     file_tree: FileTree,
     keyboard: Keyboard,
@@ -32,26 +31,28 @@ struct AppGlobal {
     file_tree_reload_signal: Signal,
     text_buffers: TextBuffers,
     rust_compiler: RustCompiler,
-    app_state: AppState,
+    state: AppState,
     index_read_req: FileReadRequest,
     app_state_read_req: FileReadRequest,
 }
 
 struct App {
+    app_window_state_template: AppWindowState,
+    app_window_template: AppWindow,
     app_global: AppGlobal,
     windows: Vec<AppWindow>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
-struct AppStateWindow {
+struct AppWindowState {
     window_position: Vec2,
-    window_outer_size: Vec2,
+    window_inner_size: Vec2,
     dock_items: DockItem<Panel>,
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Default, Clone, Serialize, Deserialize)]
 struct AppState {
-    windows: Vec<AppStateWindow>
+    windows: Vec<AppWindowState>
 }
 
 main_app!(App, "Makepad");
@@ -77,7 +78,6 @@ impl Style for AppWindow {
             dock: Dock {
                 ..Style::style(cx)
             },
-            window_index: 0
         }
     }
 }
@@ -87,12 +87,62 @@ impl Style for App {
     fn style(cx: &mut Cx) -> Self {
         set_dark_style(cx);
         Self {
-            windows: vec![
-                AppWindow {
-                    window_index:0,
-                    ..Style::style(cx)
-                }
-            ],
+            app_window_template: AppWindow {
+                ..Style::style(cx)
+            },
+            app_window_state_template: AppWindowState {
+                window_inner_size: Vec2::zero(),
+                window_position: Vec2::zero(),
+                dock_items: DockItem::Splitter {
+                    axis: Axis::Vertical,
+                    align: SplitterAlign::First,
+                    pos: 150.0,
+                    first: Box::new(DockItem::TabControl {
+                        current: 0,
+                        tabs: vec![DockTab {
+                            closeable: false,
+                            title: "Files".to_string(),
+                            item: Panel::FileTree
+                        }]
+                    }),
+                    last: Box::new(DockItem::Splitter {
+                        axis: Axis::Horizontal,
+                        align: SplitterAlign::Last,
+                        pos: 150.0,
+                        first: Box::new(DockItem::TabControl {
+                            current: 1,
+                            tabs: vec![
+                                DockTab {
+                                    closeable: false,
+                                    title: "Edit".to_string(),
+                                    item: Panel::FileEditorTarget
+                                },
+                                DockTab {
+                                    closeable: true,
+                                    title: "example.rs".to_string(),
+                                    item: Panel::FileEditor {path: "example/src/example.rs".to_string(), editor_id: 1}
+                                }
+                            ],
+                        }),
+                        last: Box::new(DockItem::TabControl {
+                            current: 0,
+                            tabs: vec![
+                                DockTab {
+                                    closeable: false,
+                                    title: "Rust Compiler".to_string(),
+                                    item: Panel::RustCompiler
+                                },
+                                DockTab {
+                                    closeable: false,
+                                    title: "Keyboard".to_string(),
+                                    item: Panel::Keyboard
+                                }
+                            ]
+                        })
+                    })
+                },
+            },
+            windows: vec![],
             app_global: AppGlobal {
                 rust_compiler: RustCompiler {
                     ..Style::style(cx)
@@ -105,62 +155,7 @@ impl Style for App {
                 app_state_read_req: FileReadRequest::empty(),
                 file_tree_data: String::new(),
                 file_tree_reload_signal: cx.new_signal(),
-                app_state: AppState {
-                    windows: vec![
-                        AppStateWindow {
-                            window_outer_size: Vec2::zero(),
-                            window_position: Vec2::zero(),
-                            dock_items: DockItem::Splitter {
-                                axis: Axis::Vertical,
-                                align: SplitterAlign::First,
-                                pos: 150.0,
-                                first: Box::new(DockItem::TabControl {
-                                    current: 0,
-                                    tabs: vec![DockTab {
-                                        closeable: false,
-                                        title: "Files".to_string(),
-                                        item: Panel::FileTree
-                                    }]
-                                }),
-                                last: Box::new(DockItem::Splitter {
-                                    axis: Axis::Horizontal,
-                                    align: SplitterAlign::Last,
-                                    pos: 150.0,
-                                    first: Box::new(DockItem::TabControl {
-                                        current: 1,
-                                        tabs: vec![
-                                            DockTab {
-                                                closeable: false,
-                                                title: "Edit".to_string(),
-                                                item: Panel::FileEditorTarget
-                                            },
-                                            DockTab {
-                                                closeable: true,
-                                                title: "example.rs".to_string(),
-                                                item: Panel::FileEditor {path: "example/src/example.rs".to_string(), editor_id: 1}
-                                            }
-                                        ],
-                                    }),
-                                    last: Box::new(DockItem::TabControl {
-                                        current: 0,
-                                        tabs: vec![
-                                            DockTab {
-                                                closeable: false,
-                                                title: "Rust Compiler".to_string(),
-                                                item: Panel::RustCompiler
-                                            },
-                                            DockTab {
-                                                closeable: false,
-                                                title: "Keyboard".to_string(),
-                                                item: Panel::Keyboard
-                                            }
-                                        ]
-                                    })
-                                })
-                            },
-                        },
-                    ]
-                }
+                state: AppState {..Default::default()}
             }
         }
     }
@@ -168,14 +163,22 @@ impl Style for App {
 
 
 impl AppWindow {
-    fn handle_app_window(&mut self, cx: &mut Cx, event: &mut Event, app_global: &mut AppGlobal) {
+    fn handle_app_window(&mut self, cx: &mut Cx, event: &mut Event, window_index: usize, app_global: &mut AppGlobal) {
         
         match self.desktop_window.handle_desktop_window(cx, event) {
             DesktopWindowEvent::EventForOtherWindow => {
                 return
             },
-            DesktopWindowEvent::WindowClosed=>{
+            DesktopWindowEvent::WindowClosed => {
                 return
+            },
+            DesktopWindowEvent::WindowGeomChange(wc) => {
+                if !app_global.app_state_read_req.is_loading() {
+                    // store our new window geom
+                    app_global.state.windows[window_index].window_position = wc.new_geom.position;
+                    app_global.state.windows[window_index].window_inner_size = wc.new_geom.inner_size;
+                    app_global.save_state(cx);
+                }
             },
             _ => ()
         }
@@ -187,7 +190,7 @@ impl AppWindow {
             _ => ()
         }
         
-        let dock_items = &mut app_global.app_state.windows[self.window_index].dock_items;
+        let dock_items = &mut app_global.state.windows[window_index].dock_items;
         let mut dock_walker = self.dock.walker(dock_items);
         let mut file_tree_event = FileTreeEvent::None;
         while let Some(item) = dock_walker.walk_handle_dock(cx, event) {
@@ -238,35 +241,35 @@ impl AppWindow {
                 let mut tabs = Vec::new();
                 for path in paths {
                     // find a free editor id
-                    tabs.push(self.new_file_editor_tab(app_global, &path));
+                    tabs.push(self.new_file_editor_tab(window_index, app_global, &path));
                 }
                 self.dock.dock_drag_end(cx, fe, tabs);
             },
             FileTreeEvent::SelectFile {path} => {
                 // search for the tabcontrol with the maximum amount of editors
-                if self.focus_or_new_editor(cx, app_global, &path) {
-                    app_global.save_app_state(cx);
+                if self.focus_or_new_editor(cx, window_index, app_global, &path) {
+                    app_global.save_state(cx);
                 }
             },
             _ => {}
         }
         
-        let dock_items = &mut app_global.app_state.windows[self.window_index].dock_items;
+        let dock_items = &mut app_global.state.windows[window_index].dock_items;
         match self.dock.handle_dock(cx, event, dock_items) {
             DockEvent::DockChanged => { // thats a bit bland event. lets let the thing know which file closed
-                app_global.save_app_state(cx);
+                app_global.save_state(cx);
             },
             _ => ()
         }
     }
     
-    fn draw_app_window(&mut self, cx: &mut Cx, app_global: &mut AppGlobal) {
+    fn draw_app_window(&mut self, cx: &mut Cx, window_index: usize, app_global: &mut AppGlobal) {
         if let Err(()) = self.desktop_window.begin_desktop_window(cx) {
             return
         }
         self.dock.draw_dock(cx);
         
-        let dock_items = &mut app_global.app_state.windows[self.window_index].dock_items;
+        let dock_items = &mut app_global.state.windows[window_index].dock_items;
         let mut dock_walker = self.dock.walker(dock_items);
         while let Some(item) = dock_walker.walk_draw_dock(cx) {
             match item {
@@ -297,9 +300,9 @@ impl AppWindow {
         self.desktop_window.end_desktop_window(cx);
     }
     
-    fn new_file_editor_tab(&mut self, app_global: &mut AppGlobal, path: &str) -> DockTab<Panel> {
+    fn new_file_editor_tab(&mut self, window_index: usize, app_global: &mut AppGlobal, path: &str) -> DockTab<Panel> {
         let mut max_id = 0;
-        let dock_items = &mut app_global.app_state.windows[self.window_index].dock_items;
+        let dock_items = &mut app_global.state.windows[window_index].dock_items;
         let mut dock_walker = self.dock.walker(dock_items);
         while let Some(dock_item) = dock_walker.walk_dock_item() {
             match dock_item {
@@ -326,10 +329,10 @@ impl AppWindow {
         }
     }
     
-    fn focus_or_new_editor(&mut self, cx: &mut Cx, app_global: &mut AppGlobal, file_path: &str) -> bool {
+    fn focus_or_new_editor(&mut self, cx: &mut Cx, window_index: usize, app_global: &mut AppGlobal, file_path: &str) -> bool {
         let mut target_ctrl_id = 0;
         let mut only_focus_editor = false;
-        let dock_items = &mut app_global.app_state.windows[self.window_index].dock_items;
+        let dock_items = &mut app_global.state.windows[window_index].dock_items;
         let mut dock_walker = self.dock.walker(dock_items);
         let mut ctrl_id = 1;
         while let Some(dock_item) = dock_walker.walk_dock_item() {
@@ -361,8 +364,8 @@ impl AppWindow {
             ctrl_id += 1;
         }
         if target_ctrl_id != 0 && !only_focus_editor { // open a new one
-            let new_tab = self.new_file_editor_tab(app_global, file_path);
-            let dock_items = &mut app_global.app_state.windows[self.window_index].dock_items;
+            let new_tab = self.new_file_editor_tab(window_index, app_global, file_path);
+            let dock_items = &mut app_global.state.windows[window_index].dock_items;
             let mut dock_walker = self.dock.walker(dock_items);
             let mut ctrl_id = 1;
             while let Some(dock_item) = dock_walker.walk_dock_item() {
@@ -393,35 +396,8 @@ impl AppGlobal {
         self.rust_compiler.init(cx, &mut self.text_buffers);
     }
     
-    fn handle_file_read(&mut self, cx: &mut Cx, fr: &FileReadEvent) {
-        // lets see which file we loaded
-        if let Some(utf8_data) = self.index_read_req.as_utf8(fr) {
-            self.file_tree_data = utf8_data.to_string();
-            cx.send_signal_before_draw(self.file_tree_reload_signal, 0);
-        }
-        else if let Some(_utf8_data) = self.app_state_read_req.as_utf8(fr) {
-            //if let Ok(app_state) = serde_json::from_str(&utf8_data) {
-                //self.app_state = app_state;
-                // update window pos and size
-                //cx.set_window_position(self.app_state.window_position);
-                //cx.set_window_outer_size(self.app_state.window_outer_size)
-            //}
-        }
-        else if self.text_buffers.handle_file_read(&fr) {
-            cx.redraw_child_area(Area::All);
-        }
-    }
-    
-    fn handle_window_change(&mut self, cx: &mut Cx, _wc: &WindowGeomChangeEvent) {
-        if !self.app_state_read_req.is_loading() {
-            //self.app_state.window_position = wc.new_geom.position;
-            //self.app_state.window_outer_size = wc.new_geom.outer_size;
-            self.save_app_state(cx);
-        }
-    }
-    
-    fn save_app_state(&mut self, cx: &mut Cx) {
-        let json = serde_json::to_string(&self.app_state).unwrap();
+    fn save_state(&mut self, cx: &mut Cx) {
+        let json = serde_json::to_string(&self.state).unwrap();
         cx.write_file(&format!("{}makepad_state.json", self.text_buffers.root_path), json.as_bytes());
     }
 }
@@ -433,29 +409,66 @@ impl App {
                 self.app_global.handle_construct(cx);
             },
             Event::FileRead(fr) => {
-                self.app_global.handle_file_read(cx, fr);
-                
+                // lets see which file we loaded
+                if let Some(utf8_data) = self.app_global.index_read_req.as_utf8(fr) {
+                    if let Ok(utf8_data) = utf8_data {
+                        self.app_global.file_tree_data = utf8_data.to_string();
+                        cx.send_signal_before_draw(self.app_global.file_tree_reload_signal, 0);
+                    }
+                }
+                else if let Some(utf8_data) = self.app_global.app_state_read_req.as_utf8(fr) {
+                    if let Ok(utf8_data) = utf8_data {
+                        println!("LOADING DEFAULT");
+
+                        if let Ok(state) = serde_json::from_str(&utf8_data) {
+                            self.app_global.state = state;
+                            
+                            // create our windows with the serialized positions/size
+                            for window_state in &self.app_global.state.windows {
+                                self.windows.push(AppWindow {
+                                    desktop_window: DesktopWindow {window: Window {
+                                        create_inner_size: window_state.window_inner_size,
+                                        create_position: Some(window_state.window_position),
+                                        ..Style::style(cx)
+                                    }, ..Style::style(cx)},
+                                    ..self.app_window_template.clone()
+                                })
+                            }
+
+                            cx.redraw_child_area(Area::All);
+                        }
+                    }
+                    else { // load default window
+                        println!("DOING DEFAULT");
+                        self.app_global.state.windows = vec![self.app_window_state_template.clone()];
+                        self.windows = vec![self.app_window_template.clone()];
+                        cx.redraw_child_area(Area::All);
+                    }
+                }
+                else if self.app_global.text_buffers.handle_file_read(cx, &fr) {
+                    // this should work already
+                    //cx.redraw_child_area(Area::All);
+                }
             },
-            Event::WindowGeomChange(wc) => {
-                self.app_global.handle_window_change(cx, wc);
-            },
+            
             _ => ()
         }
-        for window in &mut self.windows {
-            window.handle_app_window(cx, event, &mut self.app_global);
-           // break;
+        for (window_index, window) in self.windows.iter_mut().enumerate() {
+            window.handle_app_window(cx, event, window_index, &mut self.app_global);
+            // break;
         }
     }
     
     fn draw_app(&mut self, cx: &mut Cx) {
         //return;
-        for window in &mut self.windows {
-            window.draw_app_window(cx, &mut self.app_global);
-           // break;
+        for (window_index, window) in self.windows.iter_mut().enumerate() {
+            window.draw_app_window(cx, window_index, &mut self.app_global);
+            // break;
         }
     }
 }
 
+#[derive(Clone)]
 struct FileEditorTemplates {
     rust_editor: RustEditor,
     js_editor: JSEditor,
@@ -469,6 +482,7 @@ enum FileEditor {
     //Text(TextEditor)
 }
 
+#[derive(Clone)]
 enum FileEditorEvent {
     None,
     LagChange,

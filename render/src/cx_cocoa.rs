@@ -34,6 +34,7 @@ pub struct CocoaWindow {
     pub last_window_geom: Option<WindowGeom>,
     pub ime_spot: Vec2,
     pub time_start: u64,
+    pub is_fullscreen: bool,
     pub fingers_down: Vec<bool>,
     pub last_mouse_pos: Vec2,
 }
@@ -59,6 +60,7 @@ pub struct CocoaApp {
     pub pasteboard: id,
     pub event_callback: Option<*mut FnMut(&mut CocoaApp, &mut Vec<Event>) -> CocoaLoopState>,
     pub event_recur_block: bool,
+    pub event_loop_running: bool,
     pub loop_state: CocoaLoopState,
     pub cursors: HashMap<MouseCursor, id>,
     pub current_cursor: MouseCursor,
@@ -70,7 +72,6 @@ pub struct CocoaApp {
 pub enum CocoaLoopState {
     Block,
     Poll,
-    Exit
 }
 
 impl CocoaApp {
@@ -100,6 +101,7 @@ impl CocoaApp {
                 last_key_mod: KeyModifiers {..Default::default()},
                 event_callback: None,
                 event_recur_block: false,
+                event_loop_running: true,
                 cursors: HashMap::new(),
                 current_cursor: MouseCursor::Default,
             }
@@ -270,21 +272,21 @@ impl CocoaApp {
             appkit::NSOtherMouseDragged |
             appkit::NSRightMouseDragged => {},
             appkit::NSScrollWheel => {
-                let window:id = ns_event.window();
-                if window == nil{
+                let window: id = ns_event.window();
+                if window == nil {
                     return
                 }
                 let window_delegate = NSWindow::delegate(window);
-                if window_delegate == nil{
+                if window_delegate == nil {
                     return
                 }
                 let ptr: *mut c_void = *(*window_delegate).get_ivar("cocoa_window_ptr");
                 let cocoa_window = &mut *(ptr as *mut CocoaWindow);
-
+                
                 return if ns_event.hasPreciseScrollingDeltas() == cocoa::base::YES {
                     self.do_callback(&mut vec![
                         Event::FingerScroll(FingerScrollEvent {
-                            window_id:cocoa_window.window_id,
+                            window_id: cocoa_window.window_id,
                             scroll: Vec2 {
                                 x: -ns_event.scrollingDeltaX() as f32,
                                 y: -ns_event.scrollingDeltaY() as f32
@@ -301,7 +303,7 @@ impl CocoaApp {
                 } else {
                     self.do_callback(&mut vec![
                         Event::FingerScroll(FingerScrollEvent {
-                            window_id:cocoa_window.window_id,
+                            window_id: cocoa_window.window_id,
                             scroll: Vec2 {
                                 x: -ns_event.scrollingDeltaX() as f32 * 32.,
                                 y: -ns_event.scrollingDeltaY() as f32 * 32.
@@ -321,30 +323,26 @@ impl CocoaApp {
             _ => (),
         }
     }
-    
+   
+    pub fn terminate_event_loop(&mut self){
+        self.event_loop_running = false;
+    }
+      
     pub fn event_loop<F>(&mut self, mut event_handler: F)
     where F: FnMut(&mut CocoaApp, &mut Vec<Event>) -> CocoaLoopState,
     {
         unsafe {
             self.event_callback = Some(&mut event_handler as *const FnMut(&mut CocoaApp, &mut Vec<Event>) -> CocoaLoopState as *mut FnMut(&mut CocoaApp, &mut Vec<Event>) -> CocoaLoopState);
             
-            loop {
+            while self.event_loop_running {
                 let pool = foundation::NSAutoreleasePool::new(cocoa::base::nil);
-                
-                let do_block = match self.loop_state {
-                    CocoaLoopState::Block => true,
-                    CocoaLoopState::Poll => false,
-                    CocoaLoopState::Exit => break
-                };
                 
                 // in here the event loop state is handled
                 let ns_event = appkit::NSApp().nextEventMatchingMask_untilDate_inMode_dequeue_(
                     NSEventMask::NSAnyEventMask.bits() | NSEventMask::NSEventMaskPressure.bits(),
-                    if do_block {
-                        foundation::NSDate::distantFuture(cocoa::base::nil)
-                    }
-                    else {
-                        foundation::NSDate::distantPast(cocoa::base::nil)
+                    match self.loop_state {
+                        CocoaLoopState::Block =>foundation::NSDate::distantFuture(cocoa::base::nil),
+                        _=>foundation::NSDate::distantPast(cocoa::base::nil)
                     },
                     foundation::NSDefaultRunLoopMode,
                     cocoa::base::YES
@@ -359,11 +357,6 @@ impl CocoaApp {
                 }
                 
                 let _: () = msg_send![pool, release];
-                
-                // send the Idle event
-                //if !event.is_none(){
-                //    event_handler(&mut vec![event.unwrap()])
-                // }
             }
             self.event_callback = None;
         }
@@ -384,14 +377,14 @@ impl CocoaApp {
     pub fn post_signal(signal_id: u64, value: u64) {
         unsafe {
             let pool = foundation::NSAutoreleasePool::new(cocoa::base::nil);
-
+            
             let cocoa_app = &mut (*GLOBAL_COCOA_APP);
             let post_delegate_instance: id = msg_send![cocoa_app.post_delegate_class, new];
-
+            
             (*post_delegate_instance).set_ivar("cocoa_app_ptr", GLOBAL_COCOA_APP as *mut _ as *mut c_void);
             (*post_delegate_instance).set_ivar("signal_id", signal_id);
             (*post_delegate_instance).set_ivar("value", value);
-
+            
             let nstimer: id = msg_send![
                 class!(NSTimer),
                 timerWithTimeInterval: 0.
@@ -497,7 +490,7 @@ impl CocoaApp {
             })
         ]);
     }
-
+    
     pub fn send_paint_event(&mut self) {
         self.do_callback(&mut vec![Event::Paint]);
     }
@@ -519,6 +512,7 @@ impl CocoaWindow {
             let _: () = msg_send![autoreleasepool, drain];
             cocoa_app.cocoa_windows.push((window, view));
             CocoaWindow {
+                is_fullscreen: false,
                 time_start: cocoa_app.time_start,
                 live_resize_timer: nil,
                 cocoa_app: cocoa_app,
@@ -577,7 +571,9 @@ impl CocoaWindow {
             self.window.setContentView_(self.view);
             self.window.makeFirstResponder_(self.view);
             self.window.makeKeyAndOrderFront_(nil);
-            self.window.center();
+            if position.is_none() {
+                self.window.center();
+            }
             let input_context: id = msg_send![self.view, inputContext];
             msg_send![input_context, invalidateCharacterCoordinates];
             
@@ -597,7 +593,7 @@ impl CocoaWindow {
     }
     
     pub fn start_live_resize(&mut self) {
-         unsafe {
+        unsafe {
             let pool = foundation::NSAutoreleasePool::new(cocoa::base::nil);
             let cocoa_app = &(*self.cocoa_app);
             self.live_resize_timer = msg_send![
@@ -616,7 +612,7 @@ impl CocoaWindow {
     }
     
     pub fn end_live_resize(&mut self) {
-        unsafe{
+        unsafe {
             msg_send![self.live_resize_timer, invalidate];
             self.live_resize_timer = nil;
         }
@@ -629,6 +625,7 @@ impl CocoaWindow {
     
     pub fn get_window_geom(&self) -> WindowGeom {
         WindowGeom {
+            is_fullscreen: self.is_fullscreen,
             inner_size: self.get_inner_size(),
             outer_size: self.get_outer_size(),
             dpi_factor: self.get_dpi_factor(),
@@ -638,15 +635,7 @@ impl CocoaWindow {
     
     pub fn do_callback(&mut self, events: &mut Vec<Event>) {
         unsafe {
-            if (*self.cocoa_app).event_callback.is_none()
-                || (*self.cocoa_app).event_recur_block
-            {
-                return
-            };
-            (*self.cocoa_app).event_recur_block = true;
-            let callback = (*self.cocoa_app).event_callback.unwrap();
-            (*callback)(&mut (*self.cocoa_app), events);
-            (*self.cocoa_app).event_recur_block = false;
+            (*self.cocoa_app).do_callback(events);
         }
     }
     
@@ -791,17 +780,17 @@ impl CocoaWindow {
         self.do_callback(&mut events);
     }
     
-    pub fn send_window_close_requested_event(&mut self)->bool{
-        let mut events =vec![Event::WindowCloseRequested(WindowCloseRequestedEvent{window_id:self.window_id, accept_close:true})];
+    pub fn send_window_close_requested_event(&mut self) -> bool {
+        let mut events = vec![Event::WindowCloseRequested(WindowCloseRequestedEvent {window_id: self.window_id, accept_close: true})];
         self.do_callback(&mut events);
-        if let Event::WindowCloseRequested(cre) = &events[0]{
+        if let Event::WindowCloseRequested(cre) = &events[0] {
             return cre.accept_close
         }
         true
     }
     
     pub fn send_window_closed_event(&mut self) {
-        self.do_callback(&mut vec![Event::WindowClosed(WindowClosedEvent{
+        self.do_callback(&mut vec![Event::WindowClosed(WindowClosedEvent {
             window_id: self.window_id
         })])
     }
@@ -1025,9 +1014,9 @@ pub fn define_cocoa_timer_delegate() -> *const Class {
     return decl.register();
 }
 
-struct CocoaPostInit{
-    cocoa_app_ptr:*mut CocoaApp,
-    signal_id:u64,
+struct CocoaPostInit {
+    cocoa_app_ptr: *mut CocoaApp,
+    signal_id: u64,
     
 }
 
@@ -1061,10 +1050,10 @@ pub fn define_cocoa_window_delegate() -> *const Class {
     
     extern fn window_should_close(this: &Object, _: Sel, _: id) -> BOOL {
         let cw = get_cocoa_window(this);
-        if cw.send_window_close_requested_event(){
+        if cw.send_window_close_requested_event() {
             YES
         }
-        else{
+        else {
             NO
         }
     }
@@ -1143,7 +1132,7 @@ pub fn define_cocoa_window_delegate() -> *const Class {
     // Invoked when entered fullscreen
     extern fn window_did_enter_fullscreen(this: &Object, _: Sel, _: id) {
         let cw = get_cocoa_window(this);
-        println!("DID!");
+        cw.is_fullscreen = true;
         cw.send_change_event();
     }
     
@@ -1155,6 +1144,7 @@ pub fn define_cocoa_window_delegate() -> *const Class {
     // Invoked when exited fullscreen
     extern fn window_did_exit_fullscreen(this: &Object, _: Sel, _: id) {
         let cw = get_cocoa_window(this);
+        cw.is_fullscreen = false;
         cw.send_change_event();
     }
     

@@ -6,6 +6,7 @@ use crate::tabcontrol::*;
 
 use serde::*;
 
+#[derive(Clone)]
 pub struct Dock<TItem>
 where TItem: Clone
 {

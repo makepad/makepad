@@ -479,13 +479,19 @@ impl FileReadRequest {
         self.read_id != 0
     }
     
-    pub fn as_utf8<'a>(&mut self, fr: &'a FileReadEvent) -> Option<&'a str> {
+    pub fn as_utf8<'a>(&mut self, fr: &'a FileReadEvent) -> Option<Result<&'a str, String>> {
         if fr.read_id == self.read_id {
             self.read_id = 0;
             if let Ok(str_data) = &fr.data {
                 if let Ok(utf8_string) = std::str::from_utf8(&str_data) {
-                    return Some(utf8_string)
+                    return Some(Ok(utf8_string))
                 }
+                else{
+                    return Some(Err(format!("can't parse file as utf8 {}", self.path)))
+                }
+            }
+            else if let Err(err) = &fr.data{
+                return Some(Err(format!("can't load file as utf8 {} {}", self.path, err)))
             }
         }
         return None
