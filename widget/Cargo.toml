@@ -4,11 +4,6 @@ version = "0.1.0"
 authors = ["makepaddev"]
 edition = "2018"
 
-[features]
-mtl = ["render/mtl"]
-ogl = ["render/ogl"]
-webgl = ["render/webgl"]
-dx11 = ["render/dx11"]
 
 [dependencies]
 serde_json = "*"
@@ -16,4 +11,3 @@ serde = { version = "1.0", features = ["derive"] }
 
 [dependencies.render]
 path="../render"
-default-features = false

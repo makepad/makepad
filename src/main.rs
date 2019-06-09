@@ -60,24 +60,14 @@ main_app!(App, "Makepad");
 impl Style for AppWindow {
     fn style(cx: &mut Cx) -> Self {
         Self {
-            desktop_window: DesktopWindow {
-                ..Style::style(cx)
-            },
+            desktop_window: DesktopWindow::style(cx),
             file_editors: Elements::new(FileEditorTemplates {
-                rust_editor: RustEditor {
-                    ..Style::style(cx)
-                },
-                js_editor: JSEditor {
-                    ..Style::style(cx)
-                }
+                rust_editor: RustEditor::style(cx),
+                js_editor: JSEditor::style(cx)
             }),
-            keyboard: Keyboard {
-                ..Style::style(cx)
-            },
-            file_tree: FileTree {..Style::style(cx)},
-            dock: Dock {
-                ..Style::style(cx)
-            },
+            keyboard: Keyboard::style(cx),
+            file_tree: FileTree::style(cx),
+            dock: Dock ::style(cx),
         }
     }
 }
@@ -87,9 +77,7 @@ impl Style for App {
     fn style(cx: &mut Cx) -> Self {
         set_dark_style(cx);
         Self {
-            app_window_template: AppWindow {
-                ..Style::style(cx)
-            },
+            app_window_template: AppWindow::style(cx),
             app_window_state_template: AppWindowState {
                 window_inner_size: Vec2::zero(),
                 window_position: Vec2::zero(),
@@ -144,9 +132,7 @@ impl Style for App {
             },
             windows: vec![],
             app_global: AppGlobal {
-                rust_compiler: RustCompiler {
-                    ..Style::style(cx)
-                },
+                rust_compiler: RustCompiler::style(cx),
                 text_buffers: TextBuffers {
                     root_path: "./".to_string(),
                     storage: HashMap::new()
@@ -155,7 +141,7 @@ impl Style for App {
                 app_state_read_req: FileReadRequest::empty(),
                 file_tree_data: String::new(),
                 file_tree_reload_signal: cx.new_signal(),
-                state: AppState {..Default::default()}
+                state: AppState::default()
             }
         }
     }
@@ -386,7 +372,7 @@ impl AppWindow {
 
 impl AppGlobal {
     fn handle_construct(&mut self, cx: &mut Cx) {
-        if cx.feature == "mtl" {
+        if cx.is_desktop_build {
             self.text_buffers.root_path = "./edit_repo/".to_string();
         }
         
@@ -419,7 +405,7 @@ impl App {
                 else if let Some(utf8_data) = self.app_global.app_state_read_req.as_utf8(fr) {
                     if let Ok(utf8_data) = utf8_data {
                         println!("LOADING DEFAULT");
-
+                        
                         if let Ok(state) = serde_json::from_str(&utf8_data) {
                             self.app_global.state = state;
                             
@@ -434,7 +420,7 @@ impl App {
                                     ..self.app_window_template.clone()
                                 })
                             }
-
+                            
                             cx.redraw_child_area(Area::All);
                         }
                     }

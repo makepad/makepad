@@ -12,23 +12,22 @@ use crate::cx::*;
 
 impl Cx {
     
-    pub fn exec_draw_list(&mut self, draw_list_id: usize, dpi_factor: f32, device: &Device, encoder: &RenderCommandEncoderRef) {
+    pub fn render_view(&mut self, pass_id: usize, view_id: usize, device: &Device, encoder: &RenderCommandEncoderRef) {
         
         // tad ugly otherwise the borrow checker locks 'self' and we can't recur
-        let draw_calls_len = self.draw_lists[draw_list_id].draw_calls_len;
+        let draw_calls_len = self.views[view_id].draw_calls_len;
         for draw_call_id in 0..draw_calls_len {
-            let sub_list_id = self.draw_lists[draw_list_id].draw_calls[draw_call_id].sub_list_id;
-            if sub_list_id != 0 {
-                self.exec_draw_list(sub_list_id, dpi_factor, device, encoder);
+            let sub_view_id = self.views[view_id].draw_calls[draw_call_id].sub_view_id;
+            if sub_view_id != 0 {
+                self.render_view(pass_id, sub_view_id, device, encoder);
             }
             else {
-                let draw_list = &mut self.draw_lists[draw_list_id];
-                draw_list.set_clipping_uniforms();
-                draw_list.set_dpi_factor(dpi_factor);
-                draw_list.platform.uni_dl.update_with_f32_data(device, &draw_list.uniforms);
-                let draw_call = &mut draw_list.draw_calls[draw_call_id];
+                let cxview = &mut self.views[view_id];
+                cxview.set_clipping_uniforms();
+                //view.platform.uni_vw.update_with_f32_data(device, &view.uniforms);
+                let draw_call = &mut cxview.draw_calls[draw_call_id];
                 let sh = &self.shaders[draw_call.shader_id];
-                let shc = &self.compiled_shaders[draw_call.shader_id];
+                let shp = sh.platform.as_ref().unwrap();
                 
                 if draw_call.instance_dirty {
                     draw_call.instance_dirty = false;
@@ -41,35 +40,37 @@ impl Cx {
                 }
                 
                 // lets verify our instance_offset is not disaligned
-                let instances = (draw_call.instance.len() / shc.instance_slots) as u64;
-                let pipeline_state = &shc.pipeline_state;
+                let instances = (draw_call.instance.len() / sh.mapping.instance_slots) as u64;
+                let pipeline_state = &shp.pipeline_state;
                 encoder.set_render_pipeline_state(pipeline_state);
-                if let Some(buf) = &shc.geom_vbuf.multi_buffer_read().buffer {encoder.set_vertex_buffer(0, Some(&buf), 0);}
+                if let Some(buf) = &shp.geom_vbuf.multi_buffer_read().buffer {encoder.set_vertex_buffer(0, Some(&buf), 0);}
                 else {println!("Drawing error: geom_vbuf None")}
                 
                 if let Some(buf) = &draw_call.platform.inst_vbuf.multi_buffer_read().buffer {encoder.set_vertex_buffer(1, Some(&buf), 0);}
                 else {println!("Drawing error: inst_vbuf None")}
                 
-                encoder.set_vertex_bytes(2, (self.uniforms.len() * 4) as u64, self.uniforms.as_ptr() as *const std::ffi::c_void);
-                encoder.set_vertex_bytes(3, (draw_list.uniforms.len() * 4) as u64, draw_list.uniforms.as_ptr() as *const std::ffi::c_void);
+                let cxuniforms = &self.passes[pass_id].uniforms;
+                
+                encoder.set_vertex_bytes(2, (cxuniforms.len() * 4) as u64, cxuniforms.as_ptr() as *const std::ffi::c_void);
+                encoder.set_vertex_bytes(3, (cxview.uniforms.len() * 4) as u64, cxview.uniforms.as_ptr() as *const std::ffi::c_void);
                 encoder.set_vertex_bytes(4, (draw_call.uniforms.len() * 4) as u64, draw_call.uniforms.as_ptr() as *const std::ffi::c_void);
-                encoder.set_fragment_bytes(0, (self.uniforms.len() * 4) as u64, self.uniforms.as_ptr() as *const std::ffi::c_void);
-                encoder.set_fragment_bytes(1, (draw_list.uniforms.len() * 4) as u64, draw_list.uniforms.as_ptr() as *const std::ffi::c_void);
+                encoder.set_fragment_bytes(0, (cxuniforms.len() * 4) as u64, cxuniforms.as_ptr() as *const std::ffi::c_void);
+                encoder.set_fragment_bytes(1, (cxview.uniforms.len() * 4) as u64, cxview.uniforms.as_ptr() as *const std::ffi::c_void);
                 encoder.set_fragment_bytes(2, (draw_call.uniforms.len() * 4) as u64, draw_call.uniforms.as_ptr() as *const std::ffi::c_void);
                 
                 // lets set our textures
                 for (i, texture_id) in draw_call.textures_2d.iter().enumerate() {
-                    let tex = &mut self.textures_2d[*texture_id as usize];
-                    if tex.dirty {
-                        tex.upload_to_device(device);
+                    let cxtexture = &mut self.textures[*texture_id as usize];
+                    if cxtexture.upload_buffer {
+                        Self::update_platform_texture_image2d(device, cxtexture);
                     }
-                    if let Some(mtltex) = &tex.mtltexture {
+                    if let Some(mtltex) = &cxtexture.platform.mtltexture {
                         encoder.set_fragment_texture(i as NSUInteger, Some(&mtltex));
                         encoder.set_vertex_texture(i as NSUInteger, Some(&mtltex));
                     }
                 }
                 
-                if let Some(buf) = &shc.geom_ibuf.multi_buffer_read().buffer {
+                if let Some(buf) = &shp.geom_ibuf.multi_buffer_read().buffer {
                     encoder.draw_indexed_primitives_instanced(
                         MTLPrimitiveType::Triangle,
                         sh.geometry_indices.len() as u64,
@@ -89,23 +90,26 @@ impl Cx {
         }
     }
     
-    pub fn repaint(
+    pub fn draw_pass_to_layer(
         &mut self,
-        root_draw_list_id: usize,
+        pass_id: usize,
         dpi_factor: f32,
         layer: &CoreAnimationLayer,
         device: &Device,
         command_queue: &CommandQueue
     ) {
+        let view_id = self.passes[pass_id].main_view_id.unwrap();
         let pool = unsafe {NSAutoreleasePool::new(cocoa::base::nil)};
         //let command_buffer = command_queue.new_command_buffer();
         if let Some(drawable) = layer.next_drawable() {
-            //self.prepare_frame();
             
             let render_pass_descriptor = RenderPassDescriptor::new();
             
+            // TODO add z-buffer attachments and multisample attachments
+            
             let color_attachment = render_pass_descriptor.color_attachments().object_at(0).unwrap();
             color_attachment.set_texture(Some(drawable.texture()));
+            color_attachment.set_store_action(MTLStoreAction::Store);
             color_attachment.set_load_action(MTLLoadAction::Clear);
             color_attachment.set_clear_color(MTLClearColor::new(
                 self.clear_color.r as f64,
@@ -113,46 +117,72 @@ impl Cx {
                 self.clear_color.b as f64,
                 self.clear_color.a as f64
             ));
-            color_attachment.set_store_action(MTLStoreAction::Store);
             
             let command_buffer = command_queue.new_command_buffer();
-            
-            render_pass_descriptor.color_attachments().object_at(0).unwrap().set_load_action(MTLLoadAction::Clear);
-            
             let encoder = command_buffer.new_render_command_encoder(&render_pass_descriptor);
-            //let encoder = parallel_encoder.render_command_encoder();
             
-            //self.platform.uni_cx.update_with_f32_data(&device, &self.uniforms);
-            
-            // ok now we should call our render thing
-            self.exec_draw_list(root_draw_list_id, dpi_factor, &device, encoder);
-            /*
-            match &self.debug_area{
-                Area::All=>self.debug_draw_tree_recur(0, 0),
-                Area::Instance(ia)=>self.debug_draw_tree_recur(ia.draw_list_id, 0),
-                Area::DrawList(dl)=>self.debug_draw_tree_recur(dl.draw_list_id, 0),
-                _=>()
-            }*/
-            
+            self.render_view(pass_id, view_id, &device, encoder);
             encoder.end_encoding();
-            //parallel_encoder.end_encoding();
-            
             command_buffer.present_drawable(&drawable);
             command_buffer.commit();
-            
-            //if wait {
-            //    command_buffer.wait_until_completed();
-            // }
         }
         unsafe {
             msg_send![pool, release];
         }
     }
     
+    pub fn draw_pass_to_texture(
+        &mut self,
+        pass_id: usize,
+        dpi_factor: f32,
+        device: &Device,
+        command_queue: &CommandQueue
+    ) {
+        let view_id = self.passes[pass_id].main_view_id.unwrap();
+        let pass_size = self.passes[pass_id].pass_size;
+        
+        let pool = unsafe {NSAutoreleasePool::new(cocoa::base::nil)};
+        
+        let render_pass_descriptor = RenderPassDescriptor::new();
+        
+        for (index, color_texture) in self.passes[pass_id].color_textures.iter().enumerate() {
+            
+            let cxtexture = &mut self.textures[color_texture.texture_id];
+            
+            Self::update_platform_render_target(device, cxtexture, dpi_factor, pass_size, false);
+            let color_attachment = render_pass_descriptor.color_attachments().object_at(index).unwrap();
+            if let Some(mtltex) = &cxtexture.platform.mtltexture {
+                color_attachment.set_texture(Some(&mtltex));
+            }
+            else {
+                println!("draw_pass_to_texture invalid render target");
+            }
+            color_attachment.set_store_action(MTLStoreAction::Store);
+            if let Some(color) = color_texture.clear_color {
+                color_attachment.set_load_action(MTLLoadAction::Clear);
+                color_attachment.set_clear_color(MTLClearColor::new(color.r as f64, color.g as f64, color.b as f64, color.a as f64));
+            }
+            else {
+                color_attachment.set_load_action(MTLLoadAction::Load);
+            }
+        }
+        // lets loop and connect all color_textures to our render pass descriptors
+        // initializing/allocating/reallocating them to the right size if need be.
+        
+        let command_buffer = command_queue.new_command_buffer();
+        let encoder = command_buffer.new_render_command_encoder(&render_pass_descriptor);
+        self.render_view(pass_id, view_id, &device, encoder);
+        encoder.end_encoding();
+        
+        command_buffer.commit();
+        
+        unsafe {msg_send![pool, release];}
+    }
+    
     pub fn event_loop<F>(&mut self, mut event_handler: F)
     where F: FnMut(&mut Cx, &mut Event),
     {
-        self.feature = "mtl".to_string();
+        self.is_desktop_build = true;
         
         let mut cocoa_app = CocoaApp::new();
         
@@ -166,12 +196,12 @@ impl Cx {
         
         self.mtl_compile_all_shaders(&device);
         
-        self.load_binary_deps_from_file();
+        self.load_fonts_from_file();
         
         self.call_event_handler(&mut event_handler, &mut Event::Construct);
         
         self.redraw_child_area(Area::All);
-        
+        let mut passes_todo = Vec::new();
         cocoa_app.event_loop( | cocoa_app, events | {
             let mut paint_dirty = false;
             for mut event in events {
@@ -216,7 +246,9 @@ impl Cx {
                                 render_window.window_geom = re.new_geom.clone();
                                 self.windows[re.window_id].window_geom = re.new_geom.clone();
                                 // redraw just this windows root draw list
-                                self.redraw_window_id(re.window_id);
+                                if let Some(main_pass_id) = self.windows[re.window_id].main_pass_id {
+                                    self.redraw_pass_and_sub_passes(main_pass_id);
+                                }
                                 break;
                             }
                         }
@@ -291,52 +323,101 @@ impl Cx {
                             }
                         }
                         
-                        while self.platform.start_timer.len()>0 {
+                        while self.platform.start_timer.len() > 0 {
                             let (timer_id, interval, repeats) = self.platform.start_timer.pop().unwrap();
                             cocoa_app.start_timer(timer_id, interval, repeats);
                         }
                         
-                        while self.platform.stop_timer.len()>0 {
+                        while self.platform.stop_timer.len() > 0 {
                             let timer_id = self.platform.stop_timer.pop().unwrap();
                             cocoa_app.stop_timer(timer_id);
                         }
                         
-                        // repaint al windows we need to repaint
+                        // build a list of renderpasses to repaint
+                        passes_todo.truncate(0);
+                        
                         let mut windows_need_repaint = 0;
-                        for render_window in &mut render_windows {
-                            if self.windows[render_window.window_id].paint_dirty {
-                                windows_need_repaint += 1;
+                        for (pass_id, cxpass) in self.passes.iter().enumerate() {
+                            if cxpass.paint_dirty {
+                                let mut inserted = false;
+                                match cxpass.dep_of {
+                                    CxPassDepOf::Window(_) => {
+                                        windows_need_repaint += 1
+                                    },
+                                    CxPassDepOf::Pass(dep_of_pass_id) => {
+                                        for insert_before in 0..passes_todo.len() {
+                                            if passes_todo[insert_before] == dep_of_pass_id {
+                                                passes_todo.insert(insert_before, pass_id);
+                                                inserted = true;
+                                                break;
+                                            }
+                                        }
+                                    },
+                                    _ => ()
+                                }
+                                if !inserted {
+                                    passes_todo.push(pass_id);
+                                }
                             }
                         }
                         
-                        if windows_need_repaint > 0 {
-                            for render_window in &mut render_windows {
-                                if self.windows[render_window.window_id].paint_dirty {
-                                    windows_need_repaint -= 1;
-                                    // only vsync the last window. needs fixing properly with a thread. unfortunately
-                                    render_window.set_vsync_enable(windows_need_repaint == 0);
-                                    render_window.set_buffer_count(
-                                        if render_window.window_geom.is_fullscreen {3}else {2}
-                                    );
-                                    
-                                    self.set_projection_matrix(&render_window.window_geom);
-                                    if let Some(root_draw_list_id) = self.windows[render_window.window_id].root_draw_list_id {
-                                        self.repaint(
-                                            root_draw_list_id,
-                                            render_window.window_geom.dpi_factor,
+                        if passes_todo.len() > 0 {
+                            for pass_id in &passes_todo {
+                                match self.passes[*pass_id].dep_of.clone() {
+                                    CxPassDepOf::Window(window_id) => {
+                                        // find the accompanying render window
+                                        let render_window = render_windows.iter_mut().find( | w | w.window_id == window_id).unwrap();
+                                        
+                                        // its a render window
+                                        windows_need_repaint -= 1;
+                                        render_window.set_vsync_enable(windows_need_repaint == 0);
+                                        render_window.set_buffer_count(
+                                            if render_window.window_geom.is_fullscreen {3}else {2}
+                                        );
+                                        
+                                        let dpi_factor = render_window.window_geom.dpi_factor;
+                                        self.passes[*pass_id].set_dpi_factor(dpi_factor);
+                                        
+                                        self.draw_pass_to_layer(
+                                            *pass_id,
+                                            dpi_factor,
                                             &render_window.core_animation_layer,
                                             &device,
                                             &command_queue
                                         );
+                                        
+                                        if render_window.resize_core_animation_layer(&device) {
+                                            self.passes[*pass_id].paint_dirty = true;
+                                            paint_dirty = true;
+                                        }
+                                        else {
+                                            self.passes[*pass_id].paint_dirty = false;
+                                        }
                                     }
-                                    // do this after the draw to create jump-free window resizing
-                                    if render_window.resize_core_animation_layer() {
-                                        self.windows[render_window.window_id].paint_dirty = true;
-                                        paint_dirty = true;
-                                    }
-                                    else {
-                                        self.windows[render_window.window_id].paint_dirty = false;
-                                    }
+                                    CxPassDepOf::Pass(parent_pass_id) => {
+                                        let mut dpi_factor = 1.0;
+                                        let mut pass_id_walk = parent_pass_id;
+                                        for _ in 0..25 {
+                                            match self.passes[pass_id_walk].dep_of {
+                                                CxPassDepOf::Window(window_id) => {
+                                                    dpi_factor = self.windows[window_id].window_geom.dpi_factor;
+                                                    break;
+                                                },
+                                                CxPassDepOf::Pass(next_pass_id) => {
+                                                    pass_id_walk = next_pass_id;
+                                                },
+                                                _ => {break;}
+                                            }
+                                        }
+                                        self.passes[*pass_id].set_dpi_factor(dpi_factor);
+                                        self.draw_pass_to_texture(
+                                            *pass_id,
+                                            dpi_factor,
+                                            &device,
+                                            &command_queue
+                                        );
+                                    },
+                                    CxPassDepOf::None => ()
                                 }
                             }
                         }
@@ -357,14 +438,12 @@ impl Cx {
                     _ => {}
                 }
             }
-            
             if self.playing_anim_areas.len() == 0 && self.redraw_parent_areas.len() == 0 && self.redraw_child_areas.len() == 0 && self.frame_callbacks.len() == 0 && !paint_dirty {
                 CocoaLoopState::Block
-            }
-            else {
+            } else {
                 CocoaLoopState::Poll
             }
-        });
+        })
     }
     
     pub fn show_text_ime(&mut self, x: f32, y: f32) {
@@ -399,14 +478,149 @@ impl Cx {
         CocoaApp::post_signal(signal.signal_id, value);
     }
     
-    //pub fn send_custom_event_before_draw(&mut self, id:u64, message:u64){
-    //   self.custom_before_draw.push((id, message));
-    //}
+    
+    pub fn update_platform_render_target(device: &Device, cxtexture: &mut CxTexture, dpi_factor: f32, size: Vec2, is_depth: bool) {
+        
+        let width = if let Some(width) = cxtexture.desc.width {width as u64} else {(size.x * dpi_factor) as u64};
+        let height = if let Some(height) = cxtexture.desc.height {height as u64} else {(size.y * dpi_factor) as u64};
+        
+        if cxtexture.platform.width == width && cxtexture.platform.height == height && cxtexture.platform.alloc_desc == cxtexture.desc {
+            return
+        }
+        cxtexture.platform.mtltexture = None;
+        
+        let mdesc = TextureDescriptor::new();
+        if !is_depth {
+            match cxtexture.desc.pixel {
+                TexturePixel::Default | TexturePixel::BGRA8Unorm => {
+                    mdesc.set_pixel_format(MTLPixelFormat::BGRA8Unorm);
+                },
+                _ => {
+                    println!("update_platform_render_target unsupported pixel format");
+                    return;
+                }
+            }
+            match cxtexture.desc.usage {
+                TextureUsage::Default | TextureUsage::RenderTarget2D => {
+                    mdesc.set_texture_type(MTLTextureType::D2);
+                    mdesc.set_storage_mode(MTLStorageMode::Private);
+                    mdesc.set_usage(MTLTextureUsage::RenderTarget);
+                },
+                _ => {
+                    println!("update_platform_render_target unsupported pixel format");
+                    return;
+                }
+            }
+        }
+        else {
+            match cxtexture.desc.pixel {
+                TexturePixel::Default | TexturePixel::Depth24UnormStencil8 => {
+                    mdesc.set_pixel_format(MTLPixelFormat::Depth24Unorm_Stencil8);
+                },
+                _ => {
+                    println!("update_platform_render_targete unsupported pixel format");
+                    return;
+                }
+            }
+            match cxtexture.desc.usage {
+                TextureUsage::Default | TextureUsage::DepthBuffer => {
+                    mdesc.set_texture_type(MTLTextureType::D2);
+                    mdesc.set_storage_mode(MTLStorageMode::Private);
+                    mdesc.set_usage(MTLTextureUsage::RenderTarget);
+                },
+                _ => {
+                    println!("update_platform_render_targete unsupported pixel format");
+                    return;
+                }
+            }
+        }
+        mdesc.set_width(width as u64);
+        mdesc.set_height(height as u64);
+        mdesc.set_depth(1);
+        let tex = device.new_texture(&mdesc);
+        cxtexture.platform.width = width;
+        cxtexture.platform.height = height;
+        cxtexture.platform.alloc_desc = cxtexture.desc.clone();
+        cxtexture.platform.mtltexture = Some(tex);
+    }
+    
+    
+    pub fn update_platform_texture_image2d(device: &Device, cxtexture: &mut CxTexture) {
+        if cxtexture.desc.usage != TextureUsage::Default && cxtexture.desc.usage != TextureUsage::Image2D {
+            println!("update_platform_texture_image2d with wrong usage");
+            return;
+        }
+        
+        if cxtexture.desc.width.is_none() || cxtexture.desc.height.is_none() {
+            println!("update_platform_texture_image2d without width/height");
+            return;
+        }
+        
+        let width = cxtexture.desc.width.unwrap();
+        let height = cxtexture.desc.height.unwrap();
+        
+        // allocate new texture if descriptor change
+        if cxtexture.platform.alloc_desc != cxtexture.desc {
+            cxtexture.platform.mtltexture = None;
+            let mdesc = TextureDescriptor::new();
+            mdesc.set_texture_type(MTLTextureType::D2);
+            mdesc.set_width(width as u64);
+            mdesc.set_height(height as u64);
+            mdesc.set_storage_mode(MTLStorageMode::Managed);
+            
+            match cxtexture.desc.pixel {
+                TexturePixel::BGRA8Unorm => {
+                    mdesc.set_pixel_format(MTLPixelFormat::BGRA8Unorm);
+                }
+                _ => {
+                    println!("update_platform_texture_image2d with unsupported format");
+                    return;
+                }
+            }
+            let tex = device.new_texture(&mdesc);
+            cxtexture.platform.mtltexture = Some(tex);
+            cxtexture.platform.alloc_desc = cxtexture.desc.clone();
+            cxtexture.platform.width = width as u64;
+            cxtexture.platform.height = height as u64;
+        }
+        
+        // upload buffer
+        match cxtexture.desc.pixel {
+            TexturePixel::BGRA8Unorm => {
+                if cxtexture.buffer_u32.len() != width * height {
+                    println!("update_platform_texture_image2d with wrong buffer_u32 size!");
+                    cxtexture.platform.mtltexture = None;
+                    return;
+                }
+                let region = MTLRegion {
+                    origin: MTLOrigin {x: 0, y: 0, z: 0},
+                    size: MTLSize {width: width as u64, height: height as u64, depth: 1}
+                };
+                if let Some(mtltexture) = &cxtexture.platform.mtltexture {
+                    mtltexture.replace_region(
+                        region,
+                        0,
+                        (width * std::mem::size_of::<u32>()) as u64,
+                        cxtexture.buffer_u32.as_ptr() as *const std::ffi::c_void
+                    );
+                }
+                
+            }
+            _ => {
+                println!("update_platform_texture_image2d with unsupported format");
+                return;
+            }
+        }
+        cxtexture.upload_buffer = false;
+    }
 }
+//pub fn send_custom_event_before_draw(&mut self, id:u64, message:u64){
+//   self.custom_before_draw.push((id, message));
+//}
 
 #[derive(Clone, Default)]
 pub struct CxPlatform {
-    pub uni_cx: MetalBuffer,
+    //pub uni_cx: MetalBuffer,
     pub post_id: u64,
     pub set_window_position: Option<Vec2>,
     pub set_window_outer_size: Option<Vec2>,
@@ -423,7 +637,7 @@ pub struct CocoaRenderWindow {
     pub window_geom: WindowGeom,
     pub cal_size: Vec2,
     pub core_animation_layer: CoreAnimationLayer,
-    pub cocoa_window: CocoaWindow
+    pub cocoa_window: CocoaWindow,
 }
 
 impl CocoaRenderWindow {
@@ -458,7 +672,7 @@ impl CocoaRenderWindow {
             cal_size: Vec2::zero(),
             core_animation_layer,
             window_geom: cocoa_window.get_window_geom(),
-            cocoa_window,
+            cocoa_window
         }
     }
     
@@ -474,7 +688,7 @@ impl CocoaRenderWindow {
         }
     }
     
-    fn resize_core_animation_layer(&mut self) -> bool {
+    fn resize_core_animation_layer(&mut self, _device: &Device) -> bool {
         let cal_size = Vec2 {
             x: self.window_geom.inner_size.x * self.window_geom.dpi_factor,
             y: self.window_geom.inner_size.y * self.window_geom.dpi_factor
@@ -482,24 +696,38 @@ impl CocoaRenderWindow {
         if self.cal_size != cal_size {
             self.cal_size = cal_size;
             self.core_animation_layer.set_drawable_size(CGSize::new(cal_size.x as f64, cal_size.y as f64));
+            //self.msam_target = Some(RenderTarget::new(device, self.cal_size.x as u64, self.cal_size.y as u64, 2));
             true
         }
         else {
             false
         }
     }
+    
 }
 
 #[derive(Clone, Default)]
-pub struct DrawListPlatform {
-    pub uni_dl: MetalBuffer
+pub struct CxPlatformView {
 }
 
 #[derive(Default, Clone, Debug)]
-pub struct DrawCallPlatform {
-    pub uni_dr: MetalBuffer,
+pub struct PlatformDrawCall {
+    //pub uni_dr: MetalBuffer,
     pub inst_vbuf: MetalBuffer
 }
+
+#[derive(Default, Clone, Debug)]
+pub struct CxPlatformTexture {
+    pub alloc_desc: TextureDesc,
+    pub width: u64,
+    pub height: u64,
+    pub mtltexture: Option<metal::Texture>
+}
+
+#[derive(Default, Clone, Debug)]
+pub struct CxPlatformPass {
+}
+
 
 #[derive(Default, Clone, Debug)]
 pub struct MultiMetalBuffer {
@@ -514,9 +742,6 @@ pub struct MetalBuffer {
     pub multi1: MultiMetalBuffer,
     pub multi2: MultiMetalBuffer,
     pub multi3: MultiMetalBuffer,
-    pub multi4: MultiMetalBuffer,
-    pub multi5: MultiMetalBuffer,
-    pub multi6: MultiMetalBuffer,
 }
 
 impl MetalBuffer {
@@ -524,10 +749,7 @@ impl MetalBuffer {
         match self.last_written {
             0 => &self.multi1,
             1 => &self.multi2,
-            2 => &self.multi3,
-            3 => &self.multi4,
-            4 => &self.multi5,
-            _ => &self.multi6,
+            _ => &self.multi3,
         }
     }
     
@@ -536,10 +758,7 @@ impl MetalBuffer {
         match self.last_written {
             0 => &mut self.multi1,
             1 => &mut self.multi2,
-            2 => &mut self.multi3,
-            3 => &mut self.multi4,
-            4 => &mut self.multi5,
-            _ => &mut self.multi6,
+            _ => &mut self.multi3,
         }
     }
     
@@ -591,51 +810,6 @@ impl MetalBuffer {
             buffer.did_modify_range(NSRange::new(0 as u64, (data.len() * std::mem::size_of::<u32>()) as u64));
         }
         elem.used = data.len()
-    }
-}
-
-
-#[derive(Default, Clone)]
-pub struct Texture2D {
-    pub texture_id: usize,
-    pub dirty: bool,
-    pub image: Vec<u32>,
-    pub width: usize,
-    pub height: usize,
-    pub mtltexture: Option<metal::Texture>
-}
-
-impl Texture2D {
-    pub fn resize(&mut self, width: usize, height: usize) {
-        self.width = width;
-        self.height = height;
-        self.image.resize((width * height) as usize, 0);
-        self.dirty = true;
-    }
-    
-    pub fn upload_to_device(&mut self, device: &Device) {
-        let desc = TextureDescriptor::new();
-        desc.set_texture_type(MTLTextureType::D2);
-        desc.set_pixel_format(MTLPixelFormat::BGRA8Unorm);
-        desc.set_width(self.width as u64);
-        desc.set_height(self.height as u64);
-        desc.set_storage_mode(MTLStorageMode::Managed);
-        //desc.set_mipmap_level_count(1);
-        //desc.set_depth(1);
-        //desc.set_sample_count(4);
-        let tex = device.new_texture(&desc);
-        
-        let region = MTLRegion {
-            origin: MTLOrigin {x: 0, y: 0, z: 0},
-            size: MTLSize {width: self.width as u64, height: self.height as u64, depth: 1}
-        };
-        tex.replace_region(region, 0, (self.width * mem::size_of::<u32>()) as u64, self.image.as_ptr() as *const std::ffi::c_void);
-        
-        //image_buf.did_modify_range(NSRange::new(0 as u64, (self.image.len() * mem::size_of::<u32>()) as u64));
-        
-        self.mtltexture = Some(tex);
-        self.dirty = false;
-        
     }
 }
 

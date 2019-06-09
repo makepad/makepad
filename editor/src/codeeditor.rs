@@ -180,13 +180,11 @@ impl Style for CodeEditor {
                 unexpected: color256(255, 0, 0),
             },
             indent_lines: Quad {
-                shader_id: cx.add_shader(indent_lines_sh, "Editor.indent_lines"),
+                shader: cx.add_shader(indent_lines_sh, "Editor.indent_lines"),
                 ..Style::style(cx)
             },
             view: View {
-                scroll_h: Some(ScrollBar {
-                    ..Style::style(cx)
-                }),
+                scroll_h: Some(ScrollBar::style(cx)),
                 scroll_v: Some(ScrollBar {
                     smoothing: Some(0.15),
                     ..Style::style(cx)
@@ -198,12 +196,12 @@ impl Style for CodeEditor {
                 ..Style::style(cx)
             },
             selection: Quad {
-                shader_id: cx.add_shader(selection_sh, "Editor.selection"),
+                shader: cx.add_shader(selection_sh, "Editor.selection"),
                 ..Style::style(cx)
             },
             
             token_highlight: Quad {
-                shader_id: cx.add_shader(token_highlight_sh.clone(), "Editor.token_highlight"),
+                shader: cx.add_shader(token_highlight_sh.clone(), "Editor.token_highlight"),
                 ..Style::style(cx)
             },
             //select_highlight:Quad{
@@ -211,19 +209,19 @@ impl Style for CodeEditor {
             // ..Style::style(cx)
             //},
             cursor: Quad {
-                shader_id: cx.add_shader(cursor_sh, "Editor.cursor"),
+                shader: cx.add_shader(cursor_sh, "Editor.cursor"),
                 ..Style::style(cx)
             },
             cursor_row: Quad {
-                shader_id: cx.add_shader(cursor_row_sh, "Editor.cursor_row"),
+                shader: cx.add_shader(cursor_row_sh, "Editor.cursor_row"),
                 ..Style::style(cx)
             },
             paren_pair: Quad {
-                shader_id: cx.add_shader(paren_pair_sh, "Editor.paren_pair"),
+                shader: cx.add_shader(paren_pair_sh, "Editor.paren_pair"),
                 ..Style::style(cx)
             },
             message_marker: Quad {
-                shader_id: cx.add_shader(message_marker_sh, "Editor.message_marker"),
+                shader: cx.add_shader(message_marker_sh, "Editor.message_marker"),
                 ..Style::style(cx)
             },
             code_icon: CodeIcon {
@@ -237,7 +235,7 @@ impl Style for CodeEditor {
                 ..Default::default()
             },
             text: Text {
-                font_id: cx.load_font(&cx.font("mono_font")),
+                font: cx.load_font_style("mono_font"),
                 font_size: 12.0,
                 brightness: 1.0,
                 line_spacing: 1.4,
@@ -323,7 +321,7 @@ pub enum CodeEditorEvent {
 
 impl CodeEditor {
     
-    pub fn def_indent_lines_shader(cx: &mut Cx) -> Shader {
+    pub fn def_indent_lines_shader(cx: &mut Cx) -> CxShader {
         let mut sh = Quad::def_quad_shader(cx);
         sh.add_ast(shader_ast !({
             let indent_id: float<Instance>;
@@ -347,7 +345,7 @@ impl CodeEditor {
         sh
     }
     
-    pub fn def_cursor_shader(cx: &mut Cx) -> Shader {
+    pub fn def_cursor_shader(cx: &mut Cx) -> CxShader {
         let mut sh = Quad::def_quad_shader(cx);
         sh.add_ast(shader_ast !({
             let blink: float<Uniform>;
@@ -363,7 +361,7 @@ impl CodeEditor {
         sh
     }
     
-    pub fn def_selection_shader(cx: &mut Cx) -> Shader {
+    pub fn def_selection_shader(cx: &mut Cx) -> CxShader {
         let mut sh = Quad::def_quad_shader(cx);
         sh.add_ast(shader_ast !({
             let prev_x: float<Instance>;
@@ -374,11 +372,11 @@ impl CodeEditor {
             const border_radius: float = 2.;
             
             fn vertex() -> vec4 { // custom vertex shader because we widen the draweable area a bit for the gloopiness
-                let shift: vec2 = - draw_list_scroll * draw_list_do_scroll;
+                let shift: vec2 = - view_scroll * view_do_scroll;
                 let clipped: vec2 = clamp(
                     geom * vec2(w + 16., h) + vec2(x, y) + shift - vec2(8., 0.),
-                    draw_list_clip.xy,
-                    draw_list_clip.zw
+                    view_clip.xy,
+                    view_clip.zw
                 );
                 pos = (clipped - shift - vec2(x, y)) / vec2(w, h);
                 return vec4(clipped.x, clipped.y, 0., 1.) * camera_projection;
@@ -402,7 +400,7 @@ impl CodeEditor {
         sh
     }
     
-    pub fn def_paren_pair_shader(cx: &mut Cx) -> Shader {
+    pub fn def_paren_pair_shader(cx: &mut Cx) -> CxShader {
         let mut sh = Quad::def_quad_shader(cx);
         sh.add_ast(shader_ast!({
             fn pixel() -> vec4 {
@@ -420,7 +418,7 @@ impl CodeEditor {
         sh
     }
     
-    pub fn def_cursor_row_shader(cx: &mut Cx) -> Shader {
+    pub fn def_cursor_row_shader(cx: &mut Cx) -> CxShader {
         let mut sh = Quad::def_quad_shader(cx);
         sh.add_ast(shader_ast!({
             fn pixel() -> vec4 {
@@ -438,7 +436,7 @@ impl CodeEditor {
         sh
     }
     
-    pub fn def_select_highlight_shader(cx: &mut Cx) -> Shader {
+    pub fn def_select_highlight_shader(cx: &mut Cx) -> CxShader {
         let mut sh = Quad::def_quad_shader(cx);
         sh.add_ast(shader_ast!({
             fn pixel() -> vec4 {
@@ -450,7 +448,7 @@ impl CodeEditor {
         sh
     }
     
-    pub fn def_token_highlight_shader(cx: &mut Cx) -> Shader {
+    pub fn def_token_highlight_shader(cx: &mut Cx) -> CxShader {
         let mut sh = Quad::def_quad_shader(cx);
         sh.add_ast(shader_ast!({
             let visible: float<Uniform>;
@@ -465,7 +463,7 @@ impl CodeEditor {
         }));
         sh
     }
-    pub fn def_message_marker_shader(cx: &mut Cx) -> Shader {
+    pub fn def_message_marker_shader(cx: &mut Cx) -> CxShader {
         let mut sh = Quad::def_quad_shader(cx);
         sh.add_ast(shader_ast!({
             fn pixel() -> vec4 {
@@ -918,7 +916,7 @@ impl CodeEditor {
     
     pub fn begin_code_editor(&mut self, cx: &mut Cx, text_buffer: &TextBuffer) -> Result<(), ()> {
         // adjust dilation based on DPI factor
-        self.view.begin_view(cx, &Layout {..Default::default()}) ?;
+        self.view.begin_view(cx, Layout {..Default::default()}) ?;
         
         // copy over colors
         self._last_indent_color = self.colors.indent_line_unknown;
@@ -948,19 +946,19 @@ impl CodeEditor {
             self._bg_area = bg_area;
             
             // layering, this sets the draw call order
-            self._highlight_area = cx.new_instance_layer(self.token_highlight.shader_id, 0).into_area();
+            self._highlight_area = cx.new_instance_draw_call(&self.token_highlight.shader, 0).into_area();
             //cx.new_instance_layer(self.select_highlight.shader_id, 0);
-            cx.new_instance_layer(self.cursor_row.shader_id, 0);
-            cx.new_instance_layer(self.selection.shader_id, 0);
-            cx.new_instance_layer(self.message_marker.shader_id, 0);
-            cx.new_instance_layer(self.paren_pair.shader_id, 0);
+            cx.new_instance_draw_call(&self.cursor_row.shader, 0);
+            cx.new_instance_draw_call(&self.selection.shader, 0);
+            cx.new_instance_draw_call(&self.message_marker.shader, 0);
+            cx.new_instance_draw_call(&self.paren_pair.shader, 0);
             self._line_number_inst = Some(self.text.begin_text(cx));
-            cx.new_instance_layer(self.text.shader_id, 0);
+            cx.new_instance_draw_call(&self.text.shader, 0);
             // force next begin_text in another drawcall
             self._text_inst = Some(self.text.begin_text(cx));
-            self._indent_line_inst = Some(cx.new_instance_layer(self.indent_lines.shader_id, 0));
+            self._indent_line_inst = Some(cx.new_instance_draw_call(&self.indent_lines.shader, 0));
             
-            self._cursor_area = cx.new_instance_layer(self.cursor.shader_id, 0).into_area();
+            self._cursor_area = cx.new_instance_draw_call(&self.cursor.shader, 0).into_area();
             
             if let Some(select_scroll) = &mut self._select_scroll {
                 let scroll_pos = self.view.get_scroll_pos(cx);

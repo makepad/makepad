@@ -4,46 +4,33 @@ use crate::cx::*;
 
 #[derive(Default, Clone)]
 pub struct AssembledMtlShader {
-    pub instance_slots: usize,
-    pub uniforms_dr: Vec<ShVar>,
-    pub uniforms_dl: Vec<ShVar>,
-    pub uniforms_cx: Vec<ShVar>,
-    pub texture_slots: Vec<ShVar>,
-    pub rect_instance_props: RectInstanceProps,
-    pub named_uniform_props: NamedProps,
-    pub named_instance_props: NamedProps,
+    pub mapping: CxShaderMapping,
     pub mtlsl: String,
 }
 
 #[derive(Clone)]
-pub struct CompiledShader {
+pub struct CxPlatformShader {
     pub library: metal::Library,
     pub pipeline_state: metal::RenderPipelineState,
-    pub shader_id: usize,
+    //pub shader_id: usize,
     pub geom_vbuf: MetalBuffer,
     pub geom_ibuf: MetalBuffer,
-    pub instance_slots: usize,
-    pub rect_instance_props: RectInstanceProps,
-    pub named_uniform_props: NamedProps,
-    pub named_instance_props: NamedProps,
 }
 
-pub enum PackType{
+impl PartialEq for CxPlatformShader {
+    fn eq(&self, other: &Self) -> bool {false}
+}
+
+pub enum PackType {
     Packed,
     Unpacked
 }
 
 impl Cx {
     pub fn mtl_compile_all_shaders(&mut self, device: &Device) {
-        for sh in &self.shaders {
-            let mtlsh = Self::mtl_compile_shader(&sh, device);
-            if let Ok(mtlsh) = mtlsh {
-                self.compiled_shaders.push(CompiledShader {
-                    shader_id: self.compiled_shaders.len(),
-                    ..mtlsh
-                });
-            }
-            else if let Err(err) = mtlsh {
+        for sh in &mut self.shaders {
+            let mtlsh = Self::mtl_compile_shader(sh, device);
+            if let Err(err) = mtlsh {
                 panic!("GOT ERROR: {}", err.msg);
             }
         };
@@ -75,7 +62,7 @@ impl Cx {
         }
     }
     
-    pub fn mtl_assemble_struct(name: &str, vars: &Vec<ShVar>, pack_type:PackType, field: &str) -> String {
+    pub fn mtl_assemble_struct(name: &str, vars: &Vec<ShVar>, pack_type: PackType, field: &str) -> String {
         let mut out = String::new();
         out.push_str("struct ");
         out.push_str(name);
@@ -83,14 +70,14 @@ impl Cx {
         out.push_str(field);
         for var in vars {
             out.push_str("  ");
-            match pack_type{
-                PackType::Packed=>{
+            match pack_type {
+                PackType::Packed => {
                     out.push_str(&Self::mtl_type_to_packed_metal(&var.ty));
                     out.push_str(" ");
                     out.push_str(&var.name);
                     out.push_str(";\n");
                 },
-                PackType::Unpacked=>{
+                PackType::Unpacked => {
                     out.push_str(&Self::mtl_type_to_metal(&var.ty));
                     out.push_str(" ");
                     out.push_str(&var.name);
@@ -116,7 +103,7 @@ impl Cx {
         out
     }
     
-    pub fn mtl_assemble_shader(sh: &Shader) -> Result<AssembledMtlShader, SlErr> {
+    pub fn mtl_assemble_shader(sh: &CxShader) -> Result<AssembledMtlShader, SlErr> {
         
         let mut mtl_out = "#include <metal_stdlib>\nusing namespace metal;\n".to_string();
         
@@ -127,7 +114,7 @@ impl Cx {
         let mut varyings = sh.flat_vars(ShVarStore::Varying);
         let locals = sh.flat_vars(ShVarStore::Local);
         let uniforms_cx = sh.flat_vars(ShVarStore::UniformCx);
-        let uniforms_dl = sh.flat_vars(ShVarStore::UniformDl);
+        let uniforms_vw = sh.flat_vars(ShVarStore::UniformVw);
         let uniforms_dr = sh.flat_vars(ShVarStore::Uniform);
         
         // lets count the slots
@@ -138,7 +125,7 @@ impl Cx {
         mtl_out.push_str(&Self::mtl_assemble_struct("_Geom", &geometries, PackType::Packed, ""));
         mtl_out.push_str(&Self::mtl_assemble_struct("_Inst", &instances, PackType::Packed, ""));
         mtl_out.push_str(&Self::mtl_assemble_struct("_UniCx", &uniforms_cx, PackType::Unpacked, ""));
-        mtl_out.push_str(&Self::mtl_assemble_struct("_UniDl", &uniforms_dl, PackType::Unpacked, ""));
+        mtl_out.push_str(&Self::mtl_assemble_struct("_UniVw", &uniforms_vw, PackType::Unpacked, ""));
         mtl_out.push_str(&Self::mtl_assemble_struct("_UniDr", &uniforms_dr, PackType::Unpacked, ""));
         mtl_out.push_str(&Self::mtl_assemble_struct("_Loc", &locals, PackType::Unpacked, ""));
         
@@ -173,8 +160,8 @@ impl Cx {
         let mut vtx_cx = SlCx {
             depth: 0,
             target: SlTarget::Vertex,
-            defargs_fn: "_Tex _tex, thread _Loc &_loc, thread _Vary &_vary, thread _Geom &_geom, thread _Inst &_inst, device _UniCx &_uni_cx, device _UniDl &_uni_dl, device _UniDr &_uni_dr".to_string(),
-            defargs_call: "_tex, _loc, _vary, _geom, _inst, _uni_cx, _uni_dl, _uni_dr".to_string(),
+            defargs_fn: "_Tex _tex, thread _Loc &_loc, thread _Vary &_vary, thread _Geom &_geom, thread _Inst &_inst, device _UniCx &_uni_cx, device _UniVw &_uni_vw, device _UniDr &_uni_dr".to_string(),
+            defargs_call: "_tex, _loc, _vary, _geom, _inst, _uni_cx, _uni_vw, _uni_dr".to_string(),
             call_prefix: "_".to_string(),
             shader: sh,
             scope: Vec::new(),
@@ -186,8 +173,8 @@ impl Cx {
         let mut pix_cx = SlCx {
             depth: 0,
             target: SlTarget::Pixel,
-            defargs_fn: "_Tex _tex, thread _Loc &_loc, thread _Vary &_vary, device _UniCx &_uni_cx, device _UniDl &_uni_dl, device _UniDr &_uni_dr".to_string(),
-            defargs_call: "_tex, _loc, _vary, _uni_cx, _uni_dl, _uni_dr".to_string(),
+            defargs_fn: "_Tex _tex, thread _Loc &_loc, thread _Vary &_vary, device _UniCx &_uni_cx, device _UniVw &_uni_vw, device _UniDr &_uni_dr".to_string(),
+            defargs_call: "_tex, _loc, _vary, _uni_cx, _uni_vw, _uni_dr".to_string(),
             call_prefix: "_".to_string(),
             shader: sh,
             scope: Vec::new(),
@@ -211,7 +198,7 @@ impl Cx {
         
         // lets define the vertex shader
         mtl_out.push_str("vertex _Vary _vertex_shader(_Tex _tex, device _Geom *in_geometries [[buffer(0)]], device _Inst *in_instances [[buffer(1)]],\n");
-        mtl_out.push_str("  device _UniCx &_uni_cx [[buffer(2)]], device _UniDl &_uni_dl [[buffer(3)]], device _UniDr &_uni_dr [[buffer(4)]],\n");
+        mtl_out.push_str("  device _UniCx &_uni_cx [[buffer(2)]], device _UniVw &_uni_vw [[buffer(3)]], device _UniDr &_uni_dr [[buffer(4)]],\n");
         mtl_out.push_str("  uint vtx_id [[vertex_id]], uint inst_id [[instance_id]]){\n");
         mtl_out.push_str("  _Loc _loc;\n");
         mtl_out.push_str("  _Vary _vary;\n");
@@ -242,7 +229,7 @@ impl Cx {
         mtl_out.push_str("};\n");
         // then the fragment shader
         mtl_out.push_str("fragment float4 _fragment_shader(_Vary _vary[[stage_in]],_Tex _tex,\n");
-        mtl_out.push_str("  device _UniCx &_uni_cx [[buffer(0)]], device _UniDl &_uni_dl [[buffer(1)]], device _UniDr &_uni_dr [[buffer(2)]]){\n");
+        mtl_out.push_str("  device _UniCx &_uni_cx [[buffer(0)]], device _UniVw &_uni_vw [[buffer(1)]], device _UniDr &_uni_dr [[buffer(2)]]){\n");
         mtl_out.push_str("  _Loc _loc;\n");
         mtl_out.push_str("  return _pixel(");
         mtl_out.push_str(&pix_cx.defargs_call);
@@ -253,66 +240,67 @@ impl Cx {
         }
         
         Ok(AssembledMtlShader {
-            rect_instance_props: RectInstanceProps::construct(sh, &instances),
-            named_instance_props: NamedProps::construct(sh, &instances, false),
-            named_uniform_props: NamedProps::construct(sh, &uniforms_dr, true),
-            instance_slots: instance_slots,
-            uniforms_dr: uniforms_dr,
-            uniforms_dl: uniforms_dl,
-            uniforms_cx: uniforms_cx,
-            texture_slots: texture_slots,
+            mapping: CxShaderMapping {
+                rect_instance_props: RectInstanceProps::construct(sh, &instances),
+                named_instance_props: NamedProps::construct(sh, &instances, false),
+                named_uniform_props: NamedProps::construct(sh, &uniforms_dr, true),
+                instance_slots: instance_slots,
+                uniforms_dr: uniforms_dr,
+                uniforms_vw: uniforms_vw,
+                uniforms_cx: uniforms_cx,
+                texture_slots: texture_slots,
+            },
             mtlsl: mtl_out
         })
     }
     
-    pub fn mtl_compile_shader(sh: &Shader, device: &Device) -> Result<CompiledShader, SlErr> {
+    pub fn mtl_compile_shader(sh: &mut CxShader, device: &Device) -> Result<(), SlErr> {
         let ash = Self::mtl_assemble_shader(sh) ?;
         
         let options = CompileOptions::new();
         let library = device.new_library_with_source(&ash.mtlsl, &options);
         
         match library {
-            Err(library) => Err(SlErr {msg: library}),
-            Ok(library) => Ok(CompiledShader {
-                shader_id: 0,
-                pipeline_state: {
-                    let vert = library.get_function("_vertex_shader", None).unwrap();
-                    let frag = library.get_function("_fragment_shader", None).unwrap();
-                    let rpd = RenderPipelineDescriptor::new();
-                    rpd.set_vertex_function(Some(&vert));
-                    rpd.set_fragment_function(Some(&frag));
-                    let color = rpd.color_attachments().object_at(0).unwrap();
-                    color.set_pixel_format(MTLPixelFormat::BGRA8Unorm);
-                    color.set_blending_enabled(true);
-                    color.set_source_rgb_blend_factor(MTLBlendFactor::One);
-                    color.set_destination_rgb_blend_factor(MTLBlendFactor::OneMinusSourceAlpha);
-                    color.set_source_alpha_blend_factor(MTLBlendFactor::One);
-                    color.set_destination_alpha_blend_factor(MTLBlendFactor::OneMinusSourceAlpha);
-                    color.set_rgb_blend_operation(MTLBlendOperation::Add);
-                    color.set_alpha_blend_operation(MTLBlendOperation::Add);
-                    device.new_render_pipeline_state(&rpd).unwrap()
-                },
-                library: library,
-                instance_slots: ash.instance_slots,
-                named_instance_props: ash.named_instance_props.clone(),
-                named_uniform_props: ash.named_uniform_props.clone(),
-                rect_instance_props: ash.rect_instance_props.clone(),
-                //assembled_shader:ash,
-                geom_ibuf: {
-                    let mut geom_ibuf = MetalBuffer {..Default::default()};
-                    geom_ibuf.update_with_u32_data(device, &sh.geometry_indices);
-                    geom_ibuf
-                },
-                geom_vbuf: {
-                    let mut geom_vbuf = MetalBuffer {..Default::default()};
-                    geom_vbuf.update_with_f32_data(device, &sh.geometry_vertices);
-                    geom_vbuf
-                }
-            })
-        }
+            Err(library) => return Err(SlErr {msg: library}),
+            Ok(library) => {
+                sh.mapping = ash.mapping;
+                sh.platform = Some(CxPlatformShader {
+                    pipeline_state: {
+                        let vert = library.get_function("_vertex_shader", None).unwrap();
+                        let frag = library.get_function("_fragment_shader", None).unwrap();
+                        let rpd = RenderPipelineDescriptor::new();
+                        rpd.set_vertex_function(Some(&vert));
+                        rpd.set_fragment_function(Some(&frag));
+                        //rpd.set_sample_count(2);
+                        //rpd.set_alpha_to_coverage_enabled(false);
+                        let color = rpd.color_attachments().object_at(0).unwrap();
+                        color.set_pixel_format(MTLPixelFormat::BGRA8Unorm);
+                        color.set_blending_enabled(true);
+                        color.set_source_rgb_blend_factor(MTLBlendFactor::One);
+                        color.set_destination_rgb_blend_factor(MTLBlendFactor::OneMinusSourceAlpha);
+                        color.set_source_alpha_blend_factor(MTLBlendFactor::One);
+                        color.set_destination_alpha_blend_factor(MTLBlendFactor::OneMinusSourceAlpha);
+                        color.set_rgb_blend_operation(MTLBlendOperation::Add);
+                        color.set_alpha_blend_operation(MTLBlendOperation::Add);
+                        device.new_render_pipeline_state(&rpd).unwrap()
+                    },
+                    library: library,
+                    geom_ibuf: {
+                        let mut geom_ibuf = MetalBuffer {..Default::default()};
+                        geom_ibuf.update_with_u32_data(device, &sh.geometry_indices);
+                        geom_ibuf
+                    },
+                    geom_vbuf: {
+                        let mut geom_vbuf = MetalBuffer {..Default::default()};
+                        geom_vbuf.update_with_f32_data(device, &sh.geometry_vertices);
+                        geom_vbuf
+                    }
+                });
+                return Ok(());
+            }
+        };
     }
 }
-
 
 impl<'a> SlCx<'a> {
     pub fn map_call(&self, name: &str, args: &Vec<Sl>) -> MapCallResult {
@@ -336,8 +324,8 @@ impl<'a> SlCx<'a> {
         }
     }
     
-    pub fn mat_mul(&self, left:&str, right:&str)->String{
-        format!("{}*{}",left, right)
+    pub fn mat_mul(&self, left: &str, right: &str) -> String {
+        format!("{}*{}", left, right)
     }
     
     pub fn map_type(&self, ty: &str) -> String {
@@ -348,7 +336,7 @@ impl<'a> SlCx<'a> {
         let mty = Cx::mtl_type_to_metal(&var.ty);
         match var.store {
             ShVarStore::Uniform => return format!("_uni_dr.{}", var.name),
-            ShVarStore::UniformDl => return format!("_uni_dl.{}", var.name),
+            ShVarStore::UniformVw => return format!("_uni_vw.{}", var.name),
             ShVarStore::UniformCx => return format!("_uni_cx.{}", var.name),
             ShVarStore::Instance => {
                 if let SlTarget::Pixel = self.target {

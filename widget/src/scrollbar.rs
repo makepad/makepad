@@ -47,7 +47,7 @@ impl Style for ScrollBar{
                 Track::color("sb.color", Ease::Lin, vec![(1.0, color("#9"))])
             ]),
             sb:Quad{
-                shader_id:cx.add_shader(sh, "ScrollBar.sb"),
+                shader:cx.add_shader(sh, "ScrollBar.sb"),
                 ..Style::style(cx)
             },
             use_vertical_finger_scroll:false,
@@ -75,7 +75,7 @@ impl Style for ScrollBar{
 
 
 impl ScrollBar{
-    pub fn def_shader(cx:&mut Cx)->Shader{
+    pub fn def_shader(cx:&mut Cx)->CxShader{
         let mut sh = Quad::def_quad_shader(cx);
         sh.add_ast(shader_ast!({
 
@@ -89,8 +89,8 @@ impl ScrollBar{
             fn vertex()->vec4{
                 let clipped:vec2 = clamp(
                     geom*vec2(w, h) + vec2(x, y),
-                    draw_list_clip.xy,
-                    draw_list_clip.zw
+                    view_clip.xy,
+                    view_clip.zw
                 );
                 pos = (clipped - vec2(x,y)) / vec2(w, h);
                 return vec4(clipped,0.,1.) * camera_projection;

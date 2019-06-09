@@ -40,15 +40,9 @@ impl Style for TabControl {
                 }),
                 ..Style::style(cx)
             },
-            page_view: View {
-                ..Style::style(cx)
-            },
-            tabs: Elements::new(Tab {
-                ..Style::style(cx)
-            }),
-            drag_tab: Tab {
-                ..Style::style(cx)
-            },
+            page_view: View::style(cx),
+            tabs: Elements::new(Tab::style(cx)),
+            drag_tab: Tab::style(cx),
             drag_tab_view: View {
                 is_overlay: true,
                 ..Style::style(cx)
@@ -173,7 +167,7 @@ impl TabControl {
     // data free APIs for the win!
     pub fn begin_tabs(&mut self, cx: &mut Cx) -> ViewRedraw {
         //cx.begin_turtle(&Layout{
-        if let Err(_) = self.tabs_view.begin_view(cx, &Layout {
+        if let Err(_) = self.tabs_view.begin_view(cx, Layout {
             width: Bounds::Fill,
             height: Bounds::Compute,
             ..Default::default()
@@ -204,7 +198,7 @@ impl TabControl {
         self.tab_fill.draw_quad_walk(cx, Bounds::Fill, Bounds::Fill, Margin::zero());
         self.tabs.sweep(cx, |_,_|());
         if let Some((fe, id)) = &self._dragging_tab {
-            if let Ok(()) = self.drag_tab_view.begin_view(cx, &Layout {
+            if let Ok(()) = self.drag_tab_view.begin_view(cx, Layout {
                 abs_origin: Some(Vec2::zero()),
                 ..Default::default()
             }) {
@@ -223,7 +217,7 @@ impl TabControl {
     
     pub fn begin_tab_page(&mut self, cx: &mut Cx) -> ViewRedraw {
         cx.turtle_new_line();
-        self.page_view.begin_view(cx, &Layout {..Default::default()})
+        self.page_view.begin_view(cx, Layout::default())
     }
     
     pub fn end_tab_page(&mut self, cx: &mut Cx) {

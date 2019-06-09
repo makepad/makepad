@@ -167,12 +167,10 @@ impl Style for FileTree{
             root_node:FileNode::Folder{name:"".to_string(), state:NodeState::Open, draw:None, folder:vec![
                 FileNode::File{name:"loading...".to_string(), draw:None},
             ]},
-            node_bg:Quad{
-                ..Style::style(cx)
-            },
+            node_bg:Quad::style(cx),
             drag_bg:Quad{
                 color:cx.color("bg_marked"),
-                shader_id:cx.add_shader(drag_bg_shader, "FileTree.drag_bg"),
+                shader:cx.add_shader(drag_bg_shader, "FileTree.drag_bg"),
                 ..Style::style(cx)
             },
             drag_bg_layout:Layout{
@@ -183,14 +181,12 @@ impl Style for FileTree{
             },
             filler:Quad{
                 color:cx.color("icon_color"),
-                shader_id:cx.add_shader(filler_sh, "FileTree.filler"),
+                shader:cx.add_shader(filler_sh, "FileTree.filler"),
                 ..Style::style(cx)
             },
             tree_folder_color:cx.color("text_selected_focus"),
             tree_file_color:cx.color("text_deselected_focus"),
-            tree_text:Text{
-                ..Style::style(cx)
-            },
+            tree_text:Text::style(cx),
             view:View{
                 //scroll_h:Some(ScrollBar{
                 //    ..Style::style(cx)
@@ -226,7 +222,7 @@ struct JsonFile{
 
 impl FileTree{
 
-    pub fn def_drag_bg_shader(cx:&mut Cx)->Shader{
+    pub fn def_drag_bg_shader(cx:&mut Cx)->CxShader{
         let mut sh = Quad::def_quad_shader(cx);
         sh.add_ast(shader_ast!({
             fn pixel()->vec4{
@@ -238,7 +234,7 @@ impl FileTree{
         sh
     }
 
-    pub fn def_filler_shader(cx:&mut Cx)->Shader{
+    pub fn def_filler_shader(cx:&mut Cx)->CxShader{
         let mut sh = Quad::def_quad_shader(cx);
         sh.add_ast(shader_ast!({
 
@@ -461,7 +457,7 @@ impl FileTree{
     }
 
     pub fn draw_file_tree(&mut self, cx:&mut Cx){
-        if let Err(()) = self.view.begin_view(cx, &Layout{..Default::default()}){
+        if let Err(()) = self.view.begin_view(cx, Layout::default()){
             return 
         }
 
@@ -633,7 +629,7 @@ impl FileTree{
 
         // draw the drag item overlay layer if need be
         if let Some(mv) = &self._drag_move{
-            if let Ok(()) =self.drag_view.begin_view(cx, &Layout{
+            if let Ok(()) =self.drag_view.begin_view(cx, Layout{
                 abs_origin:Some(Vec2{x:mv.abs.x + 5., y:mv.abs.y + 5.}),
                 ..Default::default()
             }){

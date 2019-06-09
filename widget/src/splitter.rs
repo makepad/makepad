@@ -61,7 +61,7 @@ impl Style for Splitter{
             split_size:2.0,
             min_size:25.0,
             split:Quad{
-                shader_id:cx.add_shader(split_sh,"Splitter.split"),
+                shader:cx.add_shader(split_sh,"Splitter.split"),
                 ..Style::style(cx)
             },
             animator:Animator::new(Anim::new(Play::Cut{duration:0.5},vec![
@@ -82,7 +82,7 @@ impl Style for Splitter{
 
 impl Splitter{
 
-    pub fn def_split_shader(cx:&mut Cx)->Shader{
+    pub fn def_split_shader(cx:&mut Cx)->CxShader{
         let mut sh = Quad::def_quad_shader(cx);
         sh.add_ast(shader_ast!({
 

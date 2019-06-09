@@ -31,7 +31,7 @@ pub struct SlCx<'a> {
     pub defargs_fn: String,
     pub defargs_call: String,
     pub call_prefix: String,
-    pub shader: &'a Shader,
+    pub shader: &'a CxShader,
     pub scope: Vec<SlDecl>,
     pub fn_deps: Vec<String>,
     pub fn_done: Vec<Sl>,
@@ -713,7 +713,7 @@ impl ShFn {
     }
 }
 
-pub fn assemble_fn_and_deps(sh: &Shader, cx: &mut SlCx) -> Result<String, SlErr> {
+pub fn assemble_fn_and_deps(sh: &CxShader, cx: &mut SlCx) -> Result<String, SlErr> {
     
     let mut fn_local = Vec::new();
     loop {
@@ -765,78 +765,3 @@ pub fn assemble_const_init(cnst: &ShConst, cx: &mut SlCx) -> Result<Sl, SlErr> {
     return Ok(result)
 }
 
-
-#[derive(Default, Clone)]
-pub struct RectInstanceProps {
-    pub x: Option<usize>,
-    pub y: Option<usize>,
-    pub w: Option<usize>,
-    pub h: Option<usize>,
-}
-
-impl RectInstanceProps {
-    pub fn construct(sh: &Shader, instances: &Vec<ShVar>) -> RectInstanceProps {
-        let mut x = None;
-        let mut y = None;
-        let mut w = None;
-        let mut h = None;
-        let mut slot = 0;
-        for inst in instances {
-            match inst.name.as_ref() {
-                "x" => x = Some(slot),
-                "y" => y = Some(slot),
-                "w" => w = Some(slot),
-                "h" => h = Some(slot),
-                _ => ()
-            }
-            slot += sh.get_type_slots(&inst.ty);
-        };
-        RectInstanceProps {
-            x: x,
-            y: y,
-            w: w,
-            h: h
-        }
-    }
-}
-
-#[derive(Default, Clone)]
-pub struct NamedProp {
-    pub name: String,
-    pub offset: usize,
-    pub slots: usize
-}
-
-#[derive(Default, Clone)]
-pub struct NamedProps {
-    pub props: Vec<NamedProp>,
-    pub total_slots: usize,
-}
-
-impl NamedProps {
-    pub fn construct(sh: &Shader, in_props: &Vec<ShVar>, aligned:bool) -> NamedProps {
-        let mut offset = 0;
-        let mut out_props = Vec::new();
-        for prop in in_props {
-            let slots = sh.get_type_slots(&prop.ty);
-            
-            if aligned &&  (offset&3) + slots > 4{ // goes over the boundary
-                offset += 4-(offset&3); // make jump to new slot
-            }
-
-            out_props.push(NamedProp {
-                name: prop.name.clone(),
-                offset: offset,
-                slots: slots
-            });
-            offset += slots
-        };
-        if aligned && offset&3 > 0{
-            offset += 4-(offset&3);
-        }
-        NamedProps {
-            props: out_props,
-            total_slots: offset
-        }
-    }
-}

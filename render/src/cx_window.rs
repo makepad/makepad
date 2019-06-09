@@ -1,7 +1,6 @@
 use crate::cx::*;
 
-
-#[derive(Clone)]
+#[derive(Default, Clone)]
 pub struct Window {
     pub window_id: Option<usize>,
     pub create_inner_size: Vec2,
@@ -31,7 +30,6 @@ impl Window {
                     inner_size:self.create_inner_size,
                     position:self.create_position,
                 },
-                paint_dirty:true,
                 ..Default::default()
              };
             let window_id;
@@ -46,7 +44,7 @@ impl Window {
             self.window_id = Some(window_id);
         }
         let window_id = self.window_id.unwrap();
-        cx.windows[window_id].root_draw_list_id = None;
+        cx.windows[window_id].main_pass_id = None;
         cx.window_stack.push(window_id);
         
     }
@@ -71,12 +69,67 @@ impl Window {
     
     pub fn redraw_window_area(&mut self, cx: &mut Cx){
         if let Some(window_id) = self.window_id{
-            cx.redraw_window_id(window_id);
+            if let Some(pass_id) = cx.windows[window_id].main_pass_id{
+                cx.redraw_pass_and_sub_passes(pass_id);
+            }
         }
     }
     
     pub fn end_window(&mut self, cx: &mut Cx) -> Area {
         cx.window_stack.pop();
         Area::Empty
+    }
+}
+
+#[derive(Clone, Default, Debug, PartialEq)]
+pub struct WindowGeom {
+    pub dpi_factor: f32,
+    pub is_fullscreen: bool,
+    pub position: Vec2,
+    pub inner_size: Vec2,
+    pub outer_size: Vec2,
+}
+
+#[derive(Clone)]
+pub enum CxWindowState{
+    Create{title:String, inner_size:Vec2, position:Option<Vec2>},
+    Created,
+    Destroy,
+    Destroyed
+}
+
+impl Default for CxWindowState{
+    fn default()->Self{CxWindowState::Destroyed}
+}
+
+#[derive(Clone, Default)]
+pub struct CxWindow {
+    pub window_state:CxWindowState,
+    pub window_geom: WindowGeom,
+    pub main_pass_id: Option<usize>,
+}
+
+impl CxWindow{
+    pub fn get_inner_size(&mut self)->Vec2{
+        match &self.window_state{
+            CxWindowState::Create{inner_size,..}=>*inner_size,
+            CxWindowState::Created=>self.window_geom.inner_size,
+            _=>Vec2::zero()
+        }
+    }
+
+    pub fn get_position(&mut self)->Option<Vec2>{
+        match &self.window_state{
+            CxWindowState::Create{position,..}=>*position,
+            CxWindowState::Created=>Some(self.window_geom.position),
+            _=>None
+        }
+    }
+
+    pub fn get_dpi_factor(&mut self)->Option<f32>{
+        match &self.window_state{
+            CxWindowState::Created=>Some(self.window_geom.dpi_factor),
+            _=>None
+        }
     }
 }

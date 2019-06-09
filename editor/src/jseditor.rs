@@ -11,9 +11,7 @@ pub struct JSEditor {
 impl Style for JSEditor {
     fn style(cx: &mut Cx) -> Self {
         let rust_editor = Self {
-            code_editor: CodeEditor {
-                ..Style::style(cx)
-            },
+            code_editor: CodeEditor::style(cx),
         };
         //tab.animator.default = tab.anim_default(cx);
         rust_editor

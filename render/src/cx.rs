@@ -5,68 +5,74 @@ pub use crate::shadergen::*;
 pub use crate::cx_fonts::*;
 pub use crate::cx_turtle::*;
 pub use crate::cx_cursor::*;
-pub use crate::cx_drawlist::*;
+pub use crate::cx_window::*;
+pub use crate::cx_view::*;
+pub use crate::cx_pass::*;
+pub use crate::cx_texture::*;
+pub use crate::cx_shader::*;
 pub use crate::math::*;
 pub use crate::events::*;
-pub use crate::shader::*;
 pub use crate::colors::*;
 pub use crate::elements::*;
 pub use crate::animator::*;
 pub use crate::area::*;
-pub use crate::view::*;
-pub use crate::window::*;
 
-#[cfg(feature = "ogl")]
+#[cfg(target_os = "linux")]
 pub use crate::cx_ogl::*;
 
-#[cfg(feature = "mtl")]
+#[cfg(target_os = "macos")]
 pub use crate::cx_mtl::*;
 
-#[cfg(feature = "mtl")]
+#[cfg(target_os = "macos")]
 pub use crate::cx_mtlsl::*;
 
-#[cfg(feature = "dx11")]
+#[cfg(target_os = "windows")]
 pub use crate::cx_dx11::*;
 
-#[cfg(feature = "dx11")]
+#[cfg(target_os = "windows")]
 pub use crate::cx_hlsl::*;
 
-#[cfg(feature = "webgl")]
+#[cfg(target_arch = "wasm32")]
 pub use crate::cx_webgl::*;
 
-#[cfg(any(feature = "webgl", feature = "ogl"))]
+#[cfg(any(target_arch = "wasm32", target_os = "linux"))]
 pub use crate::cx_glsl::*;
 
-#[cfg(any(feature = "ogl", feature = "mtl", feature = "dx11"))]
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 pub use crate::cx_desktop::*;
 
 pub struct Cx {
     pub title: String,
     pub running: bool,
-    pub feature: String,
+    pub is_desktop_build: bool,
     
-    pub fonts: Vec<Font>,
-    pub textures_2d: Vec<Texture2D>,
-    pub uniforms: Vec<f32>,
+    pub fonts: Vec<CxFont>,
     
-    pub draw_lists: Vec<DrawList>,
-    pub draw_lists_free: Vec<usize>,
-    pub draw_list_stack: Vec<usize>,
- 
+    pub textures: Vec<CxTexture>,
+    pub textures_free: Vec<usize>,
+    
+    pub views: Vec<CxView>,
+    pub views_free: Vec<usize>,
+    pub view_stack: Vec<usize>,
+    
     pub window_stack: Vec<usize>,
     pub windows: Vec<CxWindow>,
     pub windows_free: Vec<usize>,
+    
+    pub pass_stack: Vec<usize>,
+    pub passes: Vec<CxPass>,
+    pub passes_free: Vec<usize>,
+    
     //pub current_draw_list_id: Option<usize>,
     
-    pub compiled_shaders: Vec<CompiledShader>,
-    pub shaders: Vec<Shader>,
-    pub shader_map: HashMap<Shader, usize>,
+    pub shaders: Vec<CxShader>,
+    pub shader_map: HashMap<CxShader, usize>,
     
     pub redraw_child_areas: Vec<Area>,
     pub redraw_parent_areas: Vec<Area>,
     pub _redraw_child_areas: Vec<Area>,
     pub _redraw_parent_areas: Vec<Area>,
-
+    
     //pub paint_dirty2: bool,
     pub clear_color: Color,
     pub redraw_id: u64,
@@ -107,8 +113,6 @@ pub struct Cx {
     
     pub style_values: BTreeMap<String, StyleValue>,
     
-    pub binary_deps: Vec<BinaryDep>,
-    
     pub panic_now: bool,
     pub panic_redraw: bool
 }
@@ -116,8 +120,6 @@ pub struct Cx {
 
 impl Default for Cx {
     fn default() -> Self {
-        let mut uniforms = Vec::<f32>::new();
-        uniforms.resize(CX_UNI_SIZE, 0.0);
         let mut captured_fingers = Vec::new();
         let mut finger_tap_count = Vec::new();
         for _i in 0..10 {
@@ -127,22 +129,26 @@ impl Default for Cx {
         
         Self {
             title: "Hello World".to_string(),
-            feature: "".to_string(),
+            is_desktop_build: false,
             running: true,
             
             fonts: Vec::new(),
-            textures_2d: Vec::new(),
-            uniforms: Vec::new(),
             
-            draw_lists: vec![DrawList{..Default::default()}],
-            draw_lists_free: Vec::new(),
-            draw_list_stack: Vec::new(),
-
+            textures: Vec::new(),
+            textures_free: Vec::new(),
+            
+            views: vec![CxView {..Default::default()}],
+            views_free: Vec::new(),
+            view_stack: Vec::new(),
+            
             window_stack: Vec::new(),
             windows: Vec::new(),
             windows_free: Vec::new(),
             
-            compiled_shaders: Vec::new(),
+            pass_stack: Vec::new(),
+            passes: Vec::new(),
+            passes_free: Vec::new(),
+            
             shaders: Vec::new(),
             shader_map: HashMap::new(),
             
@@ -192,41 +198,37 @@ impl Default for Cx {
             
             platform: CxPlatform {..Default::default()},
             
-            binary_deps: Vec::new(),
-            
             panic_now: false,
             panic_redraw: false
         }
     }
 }
 
-const CX_UNI_CAMERA_PROJECTION: usize = 0;
-const CX_UNI_SIZE: usize = 16;
 
 impl Cx {
-    pub fn new_shader(&mut self) -> Shader {
-        let mut sh = Shader {..Default::default()};
-        Shader::def_builtins(&mut sh);
-        Shader::def_df(&mut sh);
-        Cx::def_uniforms(&mut sh);
-        DrawList::def_uniforms(&mut sh);
+    pub fn new_shader(&mut self) -> CxShader {
+        let mut sh = CxShader {..Default::default()};
+        CxShader::def_builtins(&mut sh);
+        CxShader::def_df(&mut sh);
+        CxPass::def_uniforms(&mut sh);
+        CxView::def_uniforms(&mut sh);
         sh
     }
     
-    pub fn get_shader(&self, id: usize) -> &CompiledShader {
-        &self.compiled_shaders[id]
-    }
+    //pub fn get_shader2(&self, id: usize) -> &CompiledShader {
+    //    &self.compiled_shaders[id]
+   // }
     
-    pub fn add_shader(&mut self, sh: Shader, name: &str) -> usize {
+    pub fn add_shader(&mut self, sh: CxShader, name: &str) -> Shader {
         let next_id = self.shaders.len();
         let store_id = self.shader_map.entry(sh.clone()).or_insert(next_id);
         if *store_id == next_id {
-            self.shaders.push(Shader {
+            self.shaders.push(CxShader {
                 name: name.to_string(),
                 ..sh
             });
         }
-        *store_id
+        Shader{shader_id:Some(*store_id)}
     }
     
     pub fn process_tap_count(&mut self, digit: usize, pos: Vec2, time: f64) -> u32 {
@@ -245,42 +247,64 @@ impl Cx {
         }
     }
     
-    pub fn def_uniforms(sh: &mut Shader) {
-        sh.add_ast(shader_ast!({
-            let camera_projection: mat4<UniformCx>;
-        }));
-    }
     
-    pub fn redraw_window_of(&mut self, area:Area){
+    pub fn redraw_pass_of(&mut self, area: Area) {
         // we walk up the stack of area
         match area {
-            Area::All =>{
-                for window_id in 0..self.windows.len(){
-                    let redraw = match self.windows[window_id].window_state{
-                        CxWindowState::Create{..} | CxWindowState::Created=>{
-                           true
+            Area::All => {
+                for window_id in 0..self.windows.len() {
+                    let redraw = match self.windows[window_id].window_state {
+                        CxWindowState::Create {..} | CxWindowState::Created => {
+                            true
                         },
-                        _=>false
+                        _ => false
                     };
-                    if redraw{
-                         self.redraw_window_id(window_id);
+                    if redraw {
+                        if let Some(pass_id) = self.windows[window_id].main_pass_id {
+                            self.redraw_pass_and_dep_of_passes(pass_id);
+                        }
                     }
                 }
             },
             Area::Empty => (),
             Area::Instance(instance) => {
-                self.redraw_window_id(self.draw_lists[instance.draw_list_id].window_id);
+                self.redraw_pass_and_dep_of_passes(self.views[instance.view_id].pass_id);
             },
-            Area::DrawList(drawlist) => {
-                self.redraw_window_id(self.draw_lists[drawlist.draw_list_id].window_id);
+            Area::View(viewarea) => {
+                self.redraw_pass_and_dep_of_passes(self.views[viewarea.view_id].pass_id);
             }
         }
     }
-          
-    pub fn redraw_window_id(&mut self, window_id:usize){
-        let window = &self.windows[window_id];
-        if let Some(root_draw_list_id) = window.root_draw_list_id{
-            self.redraw_parent_area(Area::DrawList(DrawListArea{redraw_id:0,draw_list_id:root_draw_list_id}));
+    
+    pub fn redraw_pass_and_dep_of_passes(&mut self, pass_id: usize) {
+        let mut walk_pass_id = pass_id;
+        loop {
+            if let Some(main_view_id) = self.passes[walk_pass_id].main_view_id {
+                self.redraw_parent_area(Area::View(ViewArea {redraw_id: 0, view_id: main_view_id}));
+            }
+            match self.passes[walk_pass_id].dep_of.clone() {
+                CxPassDepOf::Pass(next_pass_id) => {
+                    walk_pass_id = next_pass_id;
+                },
+                _ => {
+                    break;
+                }
+            }
+        }
+    }
+    
+    pub fn redraw_pass_and_sub_passes(&mut self, pass_id: usize) {
+        let cxpass = &self.passes[pass_id];
+        if let Some(main_view_id) = cxpass.main_view_id {
+            self.redraw_parent_area(Area::View(ViewArea {redraw_id: 0, view_id: main_view_id}));
+        }
+        // lets redraw all subpasses as well
+        for sub_pass_id in 0..self.passes.len() {
+            if let CxPassDepOf::Pass(dep_pass_id) = self.passes[sub_pass_id].dep_of.clone() {
+                if dep_pass_id == pass_id {
+                    self.redraw_pass_and_sub_passes(sub_pass_id);
+                }
+            }
         }
     }
     
@@ -335,8 +359,8 @@ impl Cx {
         }
     }
     
-    pub fn draw_list_needs_redraw(&self, draw_list_id: usize) -> bool {
-
+    pub fn view_will_redraw(&self, view_id: usize) -> bool {
+        
         // figure out if areas are in some way a child of draw_list_id, then we need to redraw
         for area in &self._redraw_child_areas {
             match area {
@@ -345,25 +369,25 @@ impl Cx {
                 },
                 Area::Empty => (),
                 Area::Instance(instance) => {
-                    let mut dl = instance.draw_list_id;
-                    if dl == draw_list_id {
+                    let mut vw = instance.view_id;
+                    if vw == view_id {
                         return true
                     }
-                    while dl != 0 {
-                        dl = self.draw_lists[dl].nesting_draw_list_id;
-                        if dl == draw_list_id {
+                    while vw != 0 {
+                        vw = self.views[vw].nesting_view_id;
+                        if vw == view_id {
                             return true
                         }
                     }
                 },
-                Area::DrawList(drawlist) => {
-                    let mut dl = drawlist.draw_list_id;
-                    if dl == draw_list_id {
+                Area::View(viewarea) => {
+                    let mut vw = viewarea.view_id;
+                    if vw == view_id {
                         return true
                     }
-                    while dl != 0 {
-                        dl = self.draw_lists[dl].nesting_draw_list_id;
-                        if dl == draw_list_id {
+                    while vw != 0 {
+                        vw = self.views[vw].nesting_view_id;
+                        if vw == view_id {
                             return true
                         }
                     }
@@ -379,25 +403,25 @@ impl Cx {
                 },
                 Area::Empty => (),
                 Area::Instance(instance) => {
-                    let mut dl = draw_list_id;
-                    if dl == instance.draw_list_id {
+                    let mut vw = view_id;
+                    if vw == instance.view_id {
                         return true
                     }
-                    while dl != 0 {
-                        dl = self.draw_lists[dl].nesting_draw_list_id;
-                        if dl == instance.draw_list_id {
+                    while vw != 0 {
+                        vw = self.views[vw].nesting_view_id;
+                        if vw == instance.view_id {
                             return true
                         }
                     }
                 },
-                Area::DrawList(drawlist) => {
-                    let mut dl = draw_list_id;
-                    if dl == drawlist.draw_list_id {
+                Area::View(viewarea) => {
+                    let mut vw = view_id;
+                    if vw == viewarea.view_id {
                         return true
                     }
-                    while dl != 0 {
-                        dl = self.draw_lists[dl].nesting_draw_list_id;
-                        if dl == drawlist.draw_list_id {
+                    while vw != 0 {
+                        vw = self.views[vw].nesting_view_id;
+                        if vw == viewarea.view_id {
                             return true
                         }
                     }
@@ -410,47 +434,6 @@ impl Cx {
     }
     
     
-    pub fn uniform_camera_projection(&mut self, v: Mat4) {
-        //dump in uniforms
-        self.uniforms.resize(CX_UNI_SIZE, 0.0);
-        for i in 0..16 {
-            self.uniforms[CX_UNI_CAMERA_PROJECTION + i] = v.v[i];
-        }
-    }
-    
-    pub fn get_binary_dep(&self, name: &str) -> Option<BinaryDep> {
-        if let Some(dep) = self.binary_deps.iter().find( | v | v.name == name) {
-            return Some(dep.clone());
-        }
-        None
-    }
-    
-    pub fn new_empty_texture_2d(&mut self) -> &mut Texture2D {
-        //let id = self.textures.len();
-        let id = self.textures_2d.len();
-        self.textures_2d.push(
-            Texture2D {
-                texture_id: id,
-                ..Default::default()
-            }
-        );
-        &mut self.textures_2d[id]
-    }
-    
-    pub fn set_projection_matrix(&mut self, window_geom:&WindowGeom) {
-        let camera_projection = Mat4::ortho(
-            0.0,
-            window_geom.inner_size.x,
-            0.0,
-            window_geom.inner_size.y,
-            -100.0,
-            100.0,
-            
-            1.0,
-            1.0
-        );
-        self.uniform_camera_projection(camera_projection);
-    }
     
     pub fn check_ended_anim_areas(&mut self, time: f64) {
         let mut i = 0;
@@ -677,7 +660,7 @@ impl Cx {
         if draw_list_id == 0{
             println!("---------- Begin Debug draw tree for redraw_id: {} ---------", self.redraw_id)
         }
-        println!("{}list {}: len:{} rect:{:?}", indent, draw_list_id, draw_calls_len, self.draw_lists[draw_list_id].rect);   
+        println!("{}list {}: len:{} rect:{:?}", indent, draw_list_id, draw_calls_len, self.draw_lists[draw_list_id].rect);  
         indent.push_str("  ");
         for draw_call_id in 0..draw_calls_len{
             let sub_list_id = self.draw_lists[draw_list_id].draw_calls[draw_call_id].sub_list_id;
@@ -691,7 +674,7 @@ impl Cx {
                 let shc = &self.compiled_shaders[draw_call.shader_id];
                 let slots = shc.instance_slots;
                 let instances = draw_call.instance.len() / slots;
-                println!("{}call {}: {}({}) x:{}", indent, draw_call_id, sh.name, draw_call.shader_id, instances);   
+                println!("{}call {}: {}({}) x:{}", indent, draw_call_id, sh.name, draw_call.shader_id, instances);  
                 // lets dump the instance geometry
                 for inst in 0..instances.min(1){
                     let mut out = String::new();
@@ -716,7 +699,7 @@ impl Cx {
                         }
                         off += prop.slots;
                     }
-                    println!("  {}instance {}: {}", indent, inst, out);   
+                    println!("  {}instance {}: {}", indent, inst, out);  
                 }
             }
         }
@@ -726,60 +709,6 @@ impl Cx {
     }*/
 }
 
-#[derive(Clone, Default, Debug, PartialEq)]
-pub struct WindowGeom {
-    pub dpi_factor: f32,
-    pub is_fullscreen: bool,
-    pub position: Vec2,
-    pub inner_size: Vec2,
-    pub outer_size: Vec2,
-}
-
-#[derive(Clone)]
-pub enum CxWindowState{
-    Create{title:String, inner_size:Vec2, position:Option<Vec2>},
-    Created,
-    Destroy,
-    Destroyed
-}
-
-impl Default for CxWindowState{
-    fn default()->Self{CxWindowState::Destroyed}
-}
-
-#[derive(Clone, Default)]
-pub struct CxWindow {
-    pub paint_dirty: bool,
-    pub window_id: usize,
-    pub window_state:CxWindowState,
-    pub window_geom: WindowGeom,
-    pub root_draw_list_id: Option<usize>,
-}
-
-impl CxWindow{
-    pub fn get_inner_size(&mut self)->Vec2{
-        match &self.window_state{
-            CxWindowState::Create{inner_size,..}=>*inner_size,
-            CxWindowState::Created=>self.window_geom.inner_size,
-            _=>Vec2::zero()
-        }
-    }
-
-    pub fn get_position(&mut self)->Option<Vec2>{
-        match &self.window_state{
-            CxWindowState::Create{position,..}=>*position,
-            CxWindowState::Created=>Some(self.window_geom.position),
-            _=>None
-        }
-    }
-
-    pub fn get_dpi_factor(&mut self)->Option<f32>{
-        match &self.window_state{
-            CxWindowState::Created=>Some(self.window_geom.dpi_factor),
-            _=>None
-        }
-    }
-}
 
 #[derive(Clone)]
 pub enum StyleValue {
@@ -798,10 +727,6 @@ macro_rules!log {
         $ crate::Cx::write_log(&format!("[{}:{}:{}] {}\n", file!(), line!(), column!(), &format!( $ ( $ arg) *)))
     })
 }
-
-pub enum Ty {
-}
-pub fn ty(_ty: Ty) {}
 
 #[macro_export]
 macro_rules!main_app {

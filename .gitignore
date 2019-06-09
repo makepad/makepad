@@ -19,3 +19,5 @@ Cargo.lock
 /webgl/target/wasm32-unknown-unknown/release/makepad_webgl.wasm
 
 /edit_repo
+
+*.bat

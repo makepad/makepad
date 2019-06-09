@@ -39,15 +39,9 @@ where TItem: Clone
             // dock_items:None,
             drop_size: Vec2 {x: 100., y: 70.},
             drop_quad_color: color("#a"),
-            drop_quad: Quad {
-                ..Style::style(cx)
-            },
-            splitters: Elements::new(Splitter {
-                ..Style::style(cx)
-            }),
-            tab_controls: Elements::new(TabControl {
-                ..Style::style(cx)
-            }),
+            drop_quad: Quad ::style(cx),
+            splitters: Elements::new(Splitter::style(cx)),
+            tab_controls: Elements::new(TabControl::style(cx)),
             drop_quad_view: View {
                 is_overlay: true,
                 ..Style::style(cx)
@@ -275,12 +269,12 @@ where TItem: Clone
                             match split.handle_splitter(cx, event) {
                                 SplitterEvent::Moving {new_pos} => {
                                     *pos = new_pos;
-                                    cx.redraw_window_of(split._split_area);
+                                    cx.redraw_pass_of(split._split_area);
                                 },
                                 SplitterEvent::MovingEnd {new_align, new_pos} => {
                                     *align = new_align;
                                     *pos = new_pos;
-                                    cx.redraw_window_of(split._split_area);
+                                    cx.redraw_pass_of(split._split_area);
                                 },
                                 _ => ()
                             };
@@ -676,7 +670,7 @@ where TItem: Clone
     pub fn draw_dock(&mut self, cx: &mut Cx) {
         // lets draw our hover layer if need be
         if let Some(fe) = &self._drag_move {
-            if let Err(()) = self.drop_quad_view.begin_view(cx, &Layout {
+            if let Err(()) = self.drop_quad_view.begin_view(cx, Layout {
                 abs_origin: Some(Vec2::zero()),
                 ..Default::default()
             }) {

@@ -28,7 +28,7 @@ impl Style for Tab{
             label:"Tab".to_string(),
             is_closeable:true,
             bg:Quad{
-                shader_id:cx.add_shader(bg_sh,"Tab.bg"),
+                shader:cx.add_shader(bg_sh,"Tab.bg"),
                 ..Style::style(cx)
             },
             bg_layout:Layout{
@@ -132,7 +132,7 @@ impl Tab{
         ])
     }
 
-    pub fn def_bg_shader(cx:&mut Cx)->Shader{
+    pub fn def_bg_shader(cx:&mut Cx)->CxShader{
         let mut sh = Quad::def_quad_shader(cx);
         sh.add_ast(shader_ast!({
 

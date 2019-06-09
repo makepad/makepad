@@ -19,7 +19,7 @@ impl Style for TabClose{
         let bg_sh = Self::def_bg_shader(cx);
         Self{
             bg:Quad{
-                shader_id:cx.add_shader(bg_sh, "TabClose.bg"),
+                shader:cx.add_shader(bg_sh, "TabClose.bg"),
                 ..Style::style(cx)
             }, 
             text:Text{..Style::style(cx)},
@@ -59,7 +59,7 @@ pub enum TabCloseEvent{
 }
 
 impl TabClose{
-    pub fn def_bg_shader(cx:&mut Cx)->Shader{
+    pub fn def_bg_shader(cx:&mut Cx)->CxShader{
         let mut sh = Quad::def_quad_shader(cx);
         sh.add_ast(shader_ast!({
             let hover:float<Instance>;

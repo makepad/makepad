@@ -12,8 +12,8 @@ pub enum Wrapping{
 
 #[derive(Clone)]
 pub struct Text{
-    pub font_id:usize,
-    pub shader_id:usize,
+    pub font:Font,
+    pub shader:Shader,
     pub text:String,
     pub color: Color,
     pub font_size:f32,
@@ -27,8 +27,8 @@ impl Style for Text{
     fn style(cx:&mut Cx)->Self{
         let sh = Self::def_text_shader(cx);
         Self{
-            shader_id:cx.add_shader(sh, "Text"),
-            font_id:cx.load_font(&cx.font("normal_font")),
+            shader:cx.add_shader(sh, "Text"),
+            font:cx.load_font_style("normal_font"),
             text:"".to_string(),
             font_size:cx.size("font_size") as f32,
             line_spacing:1.15,
@@ -41,7 +41,7 @@ impl Style for Text{
 }
 
 impl Text{
-    pub fn def_text_shader(cx:&mut Cx)->Shader{
+    pub fn def_text_shader(cx:&mut Cx)->CxShader{
         // lets add the draw shader lib
         let mut sh = cx.new_shader();
         sh.geometry_vertices = vec![
@@ -96,7 +96,7 @@ impl Text{
             }
             
             fn vertex()->vec4{
-                let shift:vec2 = -draw_list_scroll;
+                let shift:vec2 = -view_scroll;
 
                 let min_pos = vec2(
                     x + font_size * font_geom.x,
@@ -110,8 +110,8 @@ impl Text{
                 
                 clipped = clamp(
                     mix(min_pos, max_pos, geom) + shift,
-                    draw_list_clip.xy,
-                    draw_list_clip.zw
+                    view_clip.xy,
+                    view_clip.zw
                 );
 
                 let normalized:vec2 = (clipped - min_pos - shift) / (max_pos - min_pos);
@@ -130,15 +130,18 @@ impl Text{
     }
 
     pub fn begin_text(&mut self, cx:&mut Cx)->AlignedInstance{
-        if !cx.fonts[self.font_id].loaded{
-            self.font_id = 0;
+        let font_id = self.font.font_id.unwrap();
+        if !cx.fonts[font_id].loaded{
+            panic!("Font not loaded")
         }
-        let aligned = cx.new_aligned_instance(self.shader_id, 0);
+        let inst = cx.new_instance(&self.shader, 0); 
+        let aligned = cx.align_instance(inst);
+        
         if aligned.inst.need_uniforms_now(cx){
             //texture,
-            aligned.inst.push_uniform_texture_2d(cx, cx.fonts[self.font_id].texture_id);
+            aligned.inst.push_uniform_texture_2d(cx, &self.font.texture);
             //tex_size
-            aligned.inst.push_uniform_vec2f(cx, cx.fonts[self.font_id].width as f32, cx.fonts[self.font_id].height as f32);
+            aligned.inst.push_uniform_vec2f(cx, cx.fonts[font_id].width as f32, cx.fonts[font_id].height as f32);
             aligned.inst.push_uniform_float(cx, self.brightness);
 
             //list_clip
@@ -152,11 +155,12 @@ impl Text{
     {
         let mut geom_x = geom_x;
         let mut char_offset = char_offset;
-        let unicodes = &cx.fonts[self.font_id].unicodes;
-        let glyphs = &cx.fonts[self.font_id].glyphs;
+        let font_id = self.font.font_id.unwrap();
+        let unicodes = &cx.fonts[font_id].unicodes;
+        let glyphs = &cx.fonts[font_id].glyphs;
         let instance = {
-            let draw_list = &mut cx.draw_lists[aligned.inst.draw_list_id];
-            let draw_call = &mut draw_list.draw_calls[ aligned.inst.draw_call_id];
+            let cxview = &mut cx.views[aligned.inst.view_id];
+            let draw_call = &mut cxview.draw_calls[ aligned.inst.draw_call_id];
             &mut draw_call.instance
         };
 
@@ -203,19 +207,19 @@ impl Text{
         let mut elipct = 0;
         let font_size = self.font_size;
         let mut iter = text.chars().peekable();
-
+        let font_id = self.font.font_id.unwrap();
         while let Some(c) = iter.next(){
             let last = iter.peek().is_none();
 
             let mut emit = last;
             let slot = if c < '\u{10000}'{
-                cx.fonts[self.font_id].unicodes[c as usize]
+                cx.fonts[font_id].unicodes[c as usize]
             } else{
                 0
             };
 
             if slot != 0 {
-                let glyph = &cx.fonts[self.font_id].glyphs[slot];
+                let glyph = &cx.fonts[font_id].glyphs[slot];
                 width += glyph.advance * self.font_size;
                 match self.wrapping{
                     Wrapping::Char=>{
@@ -323,8 +327,9 @@ impl Text{
     }
 
     pub fn get_monospace_base(&self, cx:&Cx)->Vec2{
-        let slot = cx.fonts[self.font_id].unicodes[33 as usize];
-        let glyph = &cx.fonts[self.font_id].glyphs[slot];
+        let font_id = self.font.font_id.unwrap();
+        let slot = cx.fonts[font_id].unicodes[33 as usize];
+        let glyph = &cx.fonts[font_id].glyphs[slot];
         //let font_size = if let Some(font_size) = font_size{font_size}else{self.font_size};
         Vec2{
             x: glyph.advance,

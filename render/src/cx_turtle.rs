@@ -228,23 +228,22 @@ impl Cx {
                     if inst.instance_count == 0 {
                         return;
                     }
-                    let draw_list = &mut self.draw_lists[inst.draw_list_id];
-                    let draw_call = &mut draw_list.draw_calls[inst.draw_call_id];
-                    let csh = &self.compiled_shaders[draw_call.shader_id];
-                    
+                    let cxview = &mut self.views[inst.view_id];
+                    let draw_call = &mut cxview.draw_calls[inst.draw_call_id];
+                    let sh = &self.shaders[draw_call.shader_id];
                     for i in 0..inst.instance_count {
-                        if let Some(x) = csh.rect_instance_props.x {
-                            draw_call.instance[inst.instance_offset + x + i * csh.instance_slots] += dx;
+                        if let Some(x) = sh.mapping.rect_instance_props.x {
+                            draw_call.instance[inst.instance_offset + x + i * sh.mapping.instance_slots] += dx;
                         }
-                        if let Some(y) = csh.rect_instance_props.y {
-                            draw_call.instance[inst.instance_offset + y + i * csh.instance_slots] += dy;
+                        if let Some(y) = sh.mapping.rect_instance_props.y {
+                            draw_call.instance[inst.instance_offset + y + i * sh.mapping.instance_slots] += dy;
                         }
                     }
                 },
-                Area::DrawList(area_draw_list) => {
-                    let draw_list = &mut self.draw_lists[area_draw_list.draw_list_id];
-                    draw_list.rect.x += dx;
-                    draw_list.rect.y += dy;
+                Area::View(viewarea) => {
+                    let cxview = &mut self.views[viewarea.view_id];
+                    cxview.rect.x += dx;
+                    cxview.rect.y += dy;
                 }
                 _ => (),
             }

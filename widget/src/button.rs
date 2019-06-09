@@ -20,7 +20,7 @@ impl Style for Button{
         let bg_sh = Self::def_bg_shader(cx);
         Self{
             bg:Quad{
-                shader_id:cx.add_shader(bg_sh, "Button.bg"),
+                shader:cx.add_shader(bg_sh, "Button.bg"),
                 ..Style::style(cx)
             },
             bg_layout:Layout{
@@ -76,7 +76,7 @@ pub enum ButtonEvent{
 }
 
 impl Button{
-    pub fn def_bg_shader(cx:&mut Cx)->Shader{
+    pub fn def_bg_shader(cx:&mut Cx)->CxShader{
         let mut sh = Quad::def_quad_shader(cx);
         sh.add_ast(shader_ast!({
 

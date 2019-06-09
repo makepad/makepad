@@ -1,30 +1,30 @@
 #![allow(dead_code)]
 
 // renderer specific modules
-#[cfg(feature = "ogl")]
+#[cfg(target_os = "linux")]
 mod cx_ogl; 
 
-#[cfg(feature = "mtl")]
+#[cfg(target_os = "macos")]
 mod cx_mtl; 
-#[cfg(feature = "mtl")]
+#[cfg(target_os = "macos")]
 mod cx_mtlsl; 
-#[cfg(feature = "mtl")]
+#[cfg(target_os = "macos")]
 mod cx_cocoa; 
 
-#[cfg(feature = "dx11")]
+#[cfg(target_os = "windows")]
 mod cx_dx11; 
-#[cfg(feature = "dx11")]
+#[cfg(target_os = "windows")]
 mod cx_hlsl; 
-#[cfg(feature = "dx11")]
+#[cfg(target_os = "windows")]
 mod cx_windows; 
 
-#[cfg(feature = "webgl")]
+#[cfg(target_arch = "wasm32")]
 mod cx_webgl; 
 
-#[cfg(any(feature = "webgl", feature = "ogl"))]
+#[cfg(any(target_arch = "wasm32", target_os = "linux"))]
 mod cx_glsl; 
 
-#[cfg(any(feature = "ogl", feature="mtl", feature="dx11"))]
+#[cfg(any(target_os = "linux", target_os="macos", target_os="windows"))]
 mod cx_desktop; 
 
 // shared modules
@@ -33,21 +33,24 @@ mod cx;
 mod cx_turtle;
 mod cx_fonts;
 mod cx_cursor;
-mod cx_drawlist; 
+mod cx_window; 
+mod cx_view; 
+mod cx_pass;
+mod cx_texture;
+mod cx_shader;
 mod animator;
 mod elements;
 mod math;
 mod colors;
-mod shader;
 mod area;
-mod view;
-mod window;
 mod shadergen;
 mod quad;
+mod blit;
 mod text;
 mod events;
 
 pub use crate::cx::*;
 pub use crate::quad::*;
+pub use crate::blit::*;
 pub use crate::text::*;
 pub use crate::elements::*;

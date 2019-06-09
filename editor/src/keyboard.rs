@@ -122,7 +122,7 @@ impl Keyboard {
     }
     
     pub fn draw_keyboard(&mut self, cx: &mut Cx) {
-        if let Err(_) = self.view.begin_view(cx, &Layout {..Default::default()}) {
+        if let Err(_) = self.view.begin_view(cx, Layout {..Default::default()}) {
             return
         }
         

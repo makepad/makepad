@@ -16,7 +16,7 @@ impl Style for CodeIcon{
             height:14.0,
             margin:Margin{l:0.,t:0.5,r:4.,b:0.},
             quad:Quad{
-                shader_id:cx.add_shader(sh, "CodeIcon"),
+                shader:cx.add_shader(sh, "CodeIcon"),
                 ..Style::style(cx)
             }
         }
@@ -42,7 +42,7 @@ impl CodeIconType{
 }
 
 impl CodeIcon{
-    pub fn def_code_icon_shader(cx:&mut Cx)->Shader{
+    pub fn def_code_icon_shader(cx:&mut Cx)->CxShader{
         let mut sh = Quad::def_quad_shader(cx);
         sh.add_ast(shader_ast!({
             let icon_id:float<Instance>;
