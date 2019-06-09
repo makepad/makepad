@@ -550,8 +550,8 @@ impl CxView {
         }
     }
     
-    pub fn def_uniforms(sh: &mut CxShader) {
-        sh.add_ast(shader_ast!({
+    pub fn def_uniforms(sg: &mut ShaderGen) {
+        sg.add_ast(shader_ast!({
             let view_scroll: vec2<UniformVw>;
             let view_clip: vec4<UniformVw>;
         }));

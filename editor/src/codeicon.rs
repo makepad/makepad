@@ -10,13 +10,13 @@ pub struct CodeIcon{
 
 impl Style for CodeIcon{
     fn style(cx:&mut Cx)->Self{
-        let sh = Self::def_code_icon_shader(cx);
+        let sb = Self::def_code_icon_shader(cx);
         Self{
             width:14.0,
             height:14.0,
             margin:Margin{l:0.,t:0.5,r:4.,b:0.},
             quad:Quad{
-                shader:cx.add_shader(sh, "CodeIcon"),
+                shader:cx.add_shader(sb, "CodeIcon"),
                 ..Style::style(cx)
             }
         }
@@ -42,9 +42,9 @@ impl CodeIconType{
 }
 
 impl CodeIcon{
-    pub fn def_code_icon_shader(cx:&mut Cx)->CxShader{
-        let mut sh = Quad::def_quad_shader(cx);
-        sh.add_ast(shader_ast!({
+    pub fn def_code_icon_shader(cx:&mut Cx)->ShaderGen{
+        let mut sg = Quad::def_quad_shader(cx);
+        sg.add_ast(shader_ast!({
             let icon_id:float<Instance>;
 
             fn pixel()->vec4{
@@ -105,7 +105,7 @@ impl CodeIcon{
                 }
             }
         }));
-        sh
+        sg
     }
 
     pub fn draw_icon_abs(&mut self, cx:&mut Cx, x:f32, y:f32, icon_type:CodeIconType)->InstanceArea{

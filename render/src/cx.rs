@@ -66,7 +66,7 @@ pub struct Cx {
     //pub current_draw_list_id: Option<usize>,
     
     pub shaders: Vec<CxShader>,
-    pub shader_map: HashMap<CxShader, usize>,
+    pub shader_map: HashMap<ShaderGen, usize>,
     
     pub redraw_child_areas: Vec<Area>,
     pub redraw_parent_areas: Vec<Area>,
@@ -206,26 +206,28 @@ impl Default for Cx {
 
 
 impl Cx {
-    pub fn new_shader(&mut self) -> CxShader {
-        let mut sh = CxShader {..Default::default()};
-        CxShader::def_builtins(&mut sh);
-        CxShader::def_df(&mut sh);
-        CxPass::def_uniforms(&mut sh);
-        CxView::def_uniforms(&mut sh);
-        sh
+    pub fn new_shader_gen(&mut self) -> ShaderGen {
+        let mut sg = ShaderGen::default();
+        CxShader::def_builtins(&mut sg);
+        CxShader::def_df(&mut sg);
+        CxPass::def_uniforms(&mut sg);
+        CxView::def_uniforms(&mut sg);
+        sg
     }
     
     //pub fn get_shader2(&self, id: usize) -> &CompiledShader {
     //    &self.compiled_shaders[id]
    // }
     
-    pub fn add_shader(&mut self, sh: CxShader, name: &str) -> Shader {
+    pub fn add_shader(&mut self, sg: ShaderGen, name: &str) -> Shader {
         let next_id = self.shaders.len();
-        let store_id = self.shader_map.entry(sh.clone()).or_insert(next_id);
+        let store_id = self.shader_map.entry(sg.clone()).or_insert(next_id);
         if *store_id == next_id {
             self.shaders.push(CxShader {
                 name: name.to_string(),
-                ..sh
+                shader_gen:sg,
+                platform:None,
+                mapping:CxShaderMapping::default()
             });
         }
         Shader{shader_id:Some(*store_id)}

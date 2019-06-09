@@ -125,14 +125,14 @@ pub struct CodeEditorColors {
 
 impl Style for CodeEditor {
     fn style(cx: &mut Cx) -> Self {
-        let indent_lines_sh = Self::def_indent_lines_shader(cx);
-        let selection_sh = Self::def_selection_shader(cx);
-        let token_highlight_sh = Self::def_token_highlight_shader(cx);
+        let indent_lines_sb = Self::def_indent_lines_shader(cx);
+        let selection_sb = Self::def_selection_shader(cx);
+        let token_highlight_sb = Self::def_token_highlight_shader(cx);
         //let select_highlight_sh = Self::def_select_highlight_shader(cx);
-        let cursor_sh = Self::def_cursor_shader(cx);
-        let cursor_row_sh = Self::def_cursor_row_shader(cx);
-        let paren_pair_sh = Self::def_paren_pair_shader(cx);
-        let message_marker_sh = Self::def_message_marker_shader(cx);
+        let cursor_sb = Self::def_cursor_shader(cx);
+        let cursor_row_sb = Self::def_cursor_row_shader(cx);
+        let paren_pair_sb = Self::def_paren_pair_shader(cx);
+        let message_marker_sb = Self::def_message_marker_shader(cx);
         Self {
             cursors: TextCursorSet::new(),
             colors: CodeEditorColors {
@@ -180,7 +180,7 @@ impl Style for CodeEditor {
                 unexpected: color256(255, 0, 0),
             },
             indent_lines: Quad {
-                shader: cx.add_shader(indent_lines_sh, "Editor.indent_lines"),
+                shader: cx.add_shader(indent_lines_sb, "Editor.indent_lines"),
                 ..Style::style(cx)
             },
             view: View {
@@ -196,12 +196,12 @@ impl Style for CodeEditor {
                 ..Style::style(cx)
             },
             selection: Quad {
-                shader: cx.add_shader(selection_sh, "Editor.selection"),
+                shader: cx.add_shader(selection_sb, "Editor.selection"),
                 ..Style::style(cx)
             },
             
             token_highlight: Quad {
-                shader: cx.add_shader(token_highlight_sh.clone(), "Editor.token_highlight"),
+                shader: cx.add_shader(token_highlight_sb.clone(), "Editor.token_highlight"),
                 ..Style::style(cx)
             },
             //select_highlight:Quad{
@@ -209,19 +209,19 @@ impl Style for CodeEditor {
             // ..Style::style(cx)
             //},
             cursor: Quad {
-                shader: cx.add_shader(cursor_sh, "Editor.cursor"),
+                shader: cx.add_shader(cursor_sb, "Editor.cursor"),
                 ..Style::style(cx)
             },
             cursor_row: Quad {
-                shader: cx.add_shader(cursor_row_sh, "Editor.cursor_row"),
+                shader: cx.add_shader(cursor_row_sb, "Editor.cursor_row"),
                 ..Style::style(cx)
             },
             paren_pair: Quad {
-                shader: cx.add_shader(paren_pair_sh, "Editor.paren_pair"),
+                shader: cx.add_shader(paren_pair_sb, "Editor.paren_pair"),
                 ..Style::style(cx)
             },
             message_marker: Quad {
-                shader: cx.add_shader(message_marker_sh, "Editor.message_marker"),
+                shader: cx.add_shader(message_marker_sb, "Editor.message_marker"),
                 ..Style::style(cx)
             },
             code_icon: CodeIcon {
@@ -321,9 +321,9 @@ pub enum CodeEditorEvent {
 
 impl CodeEditor {
     
-    pub fn def_indent_lines_shader(cx: &mut Cx) -> CxShader {
-        let mut sh = Quad::def_quad_shader(cx);
-        sh.add_ast(shader_ast !({
+    pub fn def_indent_lines_shader(cx: &mut Cx) -> ShaderGen {
+        let mut sg = Quad::def_quad_shader(cx);
+        sg.add_ast(shader_ast !({
             let indent_id: float<Instance>;
             let indent_sel: float<Uniform>;
             fn pixel() -> vec4 {
@@ -342,12 +342,12 @@ impl CodeEditor {
                 return df_stroke(col, thickness);
             }
         }));
-        sh
+        sg
     }
     
-    pub fn def_cursor_shader(cx: &mut Cx) -> CxShader {
-        let mut sh = Quad::def_quad_shader(cx);
-        sh.add_ast(shader_ast !({
+    pub fn def_cursor_shader(cx: &mut Cx) -> ShaderGen {
+        let mut sg = Quad::def_quad_shader(cx);
+        sg.add_ast(shader_ast !({
             let blink: float<Uniform>;
             fn pixel() -> vec4 {
                 if blink<0.5 {
@@ -358,12 +358,12 @@ impl CodeEditor {
                 }
             }
         }));
-        sh
+        sg
     }
     
-    pub fn def_selection_shader(cx: &mut Cx) -> CxShader {
-        let mut sh = Quad::def_quad_shader(cx);
-        sh.add_ast(shader_ast !({
+    pub fn def_selection_shader(cx: &mut Cx) -> ShaderGen {
+        let mut sg = Quad::def_quad_shader(cx);
+        sg.add_ast(shader_ast !({
             let prev_x: float<Instance>;
             let prev_w: float<Instance>;
             let next_x: float<Instance>;
@@ -397,12 +397,12 @@ impl CodeEditor {
                 return df_fill(color);
             }
         }));
-        sh
+        sg
     }
     
-    pub fn def_paren_pair_shader(cx: &mut Cx) -> CxShader {
-        let mut sh = Quad::def_quad_shader(cx);
-        sh.add_ast(shader_ast!({
+    pub fn def_paren_pair_shader(cx: &mut Cx) -> ShaderGen {
+        let mut sg = Quad::def_quad_shader(cx);
+        sg.add_ast(shader_ast!({
             fn pixel() -> vec4 {
                 df_viewport(pos * vec2(w, h));
                 //df_rect(0.,0.,w,h);
@@ -415,12 +415,12 @@ impl CodeEditor {
                 //return df_fill(color);
             }
         }));
-        sh
+        sg
     }
     
-    pub fn def_cursor_row_shader(cx: &mut Cx) -> CxShader {
-        let mut sh = Quad::def_quad_shader(cx);
-        sh.add_ast(shader_ast!({
+    pub fn def_cursor_row_shader(cx: &mut Cx) -> ShaderGen {
+        let mut sg = Quad::def_quad_shader(cx);
+        sg.add_ast(shader_ast!({
             fn pixel() -> vec4 {
                 df_viewport(pos * vec2(w, h));
                 df_rect(0., 0., w, h);
@@ -433,24 +433,24 @@ impl CodeEditor {
                 returndf_stroke(color,0.75+dpi_dilate*0.75);*/
             }
         }));
-        sh
+        sg
     }
     
-    pub fn def_select_highlight_shader(cx: &mut Cx) -> CxShader {
-        let mut sh = Quad::def_quad_shader(cx);
-        sh.add_ast(shader_ast!({
+    pub fn def_select_highlight_shader(cx: &mut Cx) -> ShaderGen {
+        let mut sg = Quad::def_quad_shader(cx);
+        sg.add_ast(shader_ast!({
             fn pixel() -> vec4 {
                 df_viewport(pos * vec2(w, h));
                 df_box(0.5, 0.5, w - 1., h - 1., 1.);
                 return df_fill(color);
             }
         }));
-        sh
+        sg
     }
     
-    pub fn def_token_highlight_shader(cx: &mut Cx) -> CxShader {
-        let mut sh = Quad::def_quad_shader(cx);
-        sh.add_ast(shader_ast!({
+    pub fn def_token_highlight_shader(cx: &mut Cx) -> ShaderGen {
+        let mut sg = Quad::def_quad_shader(cx);
+        sg.add_ast(shader_ast!({
             let visible: float<Uniform>;
             fn pixel() -> vec4 {
                 if visible<0.5 {
@@ -461,11 +461,11 @@ impl CodeEditor {
                 return df_fill(color);
             }
         }));
-        sh
+        sg
     }
-    pub fn def_message_marker_shader(cx: &mut Cx) -> CxShader {
-        let mut sh = Quad::def_quad_shader(cx);
-        sh.add_ast(shader_ast!({
+    pub fn def_message_marker_shader(cx: &mut Cx) -> ShaderGen {
+        let mut sg = Quad::def_quad_shader(cx);
+        sg.add_ast(shader_ast!({
             fn pixel() -> vec4 {
                 let pos2 = vec2(pos.x, pos.y + 0.03 * sin(pos.x * w));
                 df_viewport(pos2 * vec2(w, h));
@@ -475,7 +475,7 @@ impl CodeEditor {
                 return df_stroke(color, 0.8);
             }
         }));
-        sh
+        sg
     }
     
     fn reset_highlight_visible(&mut self, cx: &mut Cx) {

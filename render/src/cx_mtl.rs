@@ -73,7 +73,7 @@ impl Cx {
                 if let Some(buf) = &shp.geom_ibuf.multi_buffer_read().buffer {
                     encoder.draw_indexed_primitives_instanced(
                         MTLPrimitiveType::Triangle,
-                        sh.geometry_indices.len() as u64,
+                        sh.shader_gen.geometry_indices.len() as u64,
                         // Index Count
                         MTLIndexType::UInt32,
                         // indexType,

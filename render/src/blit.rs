@@ -8,23 +8,23 @@ pub struct Blit {
 
 impl Style for Blit {
     fn style(cx: &mut Cx) -> Self {
-        let sh = Self::def_blit_shader(cx);
+        let sb = Self::def_blit_shader(cx);
         Self {
-            shader: cx.add_shader(sh, "Blit"),
+            shader: cx.add_shader(sb, "Blit"),
             do_scroll:false,
         }
     }
 }
 
 impl Blit {
-    pub fn def_blit_shader(cx: &mut Cx) -> CxShader {
+    pub fn def_blit_shader(cx: &mut Cx) -> ShaderGen {
         // lets add the draw shader lib
-        let mut sh = cx.new_shader();
+        let mut sb = cx.new_shader_gen();
         
-        sh.geometry_vertices = vec![0.0, 0.0, 1.0, 0.0, 1.0, 1.0, 0.0, 1.0];
-        sh.geometry_indices = vec![0, 1, 2, 2, 3, 0];
+        sb.geometry_vertices = vec![0.0, 0.0, 1.0, 0.0, 1.0, 1.0, 0.0, 1.0];
+        sb.geometry_indices = vec![0, 1, 2, 2, 3, 0];
         
-        sh.add_ast(shader_ast!({
+        sb.add_ast(shader_ast!({
             
             let geom: vec2<Geometry>;
             let x: float<Instance>;
@@ -55,7 +55,7 @@ impl Blit {
             }
             
         }));
-        sh
+        sb
     }
     
     

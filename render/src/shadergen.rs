@@ -1,6 +1,435 @@
 // Shared shader-compiler code for generating GLSL and Metal shading language
 
-use crate::cx::*;
+use std::hash::{Hash, Hasher};
+
+#[derive(Default, Clone, PartialEq)]
+pub struct ShaderGen{
+    pub log:i32,
+    pub name:String,
+    pub geometry_vertices:Vec<f32>,
+    pub geometry_indices:Vec<u32>,
+    pub asts:Vec<ShAst>,
+}
+
+impl Eq for ShaderGen{}
+
+impl Hash for ShaderGen{
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.log.hash(state);
+        self.name.hash(state);
+        self.geometry_indices.hash(state);
+        for vertex in &self.geometry_vertices{
+            vertex.to_bits().hash(state);
+        }
+        self.asts.hash(state);
+    }
+}
+
+impl ShaderGen{
+    pub fn add_ast(&mut self, ast:ShAst){
+        self.asts.push(ast);
+    }
+
+    // flatten our
+    pub fn flat_vars(&self, store:ShVarStore)->Vec<ShVar>{
+        let mut ret = Vec::new();
+        for ast in self.asts.iter(){
+            for shvar in &ast.vars{
+                // abusing an enum with flags complicates flattening a bit
+                if shvar.store == store{
+                    ret.push(shvar.clone());
+                }
+            }
+        }
+        ret
+    }
+
+    // flatten our
+    pub fn flat_consts(&self)->Vec<ShConst>{
+        let mut ret = Vec::new();
+        for ast in self.asts.iter().rev(){
+            for shconst in &ast.consts{
+                ret.push(shconst.clone());
+            }
+        };
+        ret
+    }
+
+    // find a function
+    pub fn find_fn(&self, name:&str)->Option<&ShFn>{
+        for ast in self.asts.iter().rev(){
+            for shfn in &ast.fns{
+                if shfn.name == name{
+                    return Some(&shfn)
+                }
+            }
+        }
+        None
+    }
+
+    pub fn find_var(&self, name:&str)->Option<&ShVar>{
+        for ast in self.asts.iter().rev(){
+            for shvar in &ast.vars{
+                if shvar.name == name{
+                    return Some(&shvar)
+                }
+            }
+        }
+        None
+    }
+
+    pub fn find_const(&self, name:&str)->Option<&ShConst>{
+        for ast in self.asts.iter().rev(){
+            for shconst in &ast.consts{
+                if shconst.name == name{
+                    return Some(&shconst)
+                }
+            }
+        }
+        None
+    }
+
+    pub fn find_type(&self, name:&str)->Option<&ShType>{
+        for ast in self.asts.iter().rev(){
+            for shtype in &ast.types{
+                if shtype.name == name{
+                    return Some(&shtype)
+                }
+            }
+        }
+        None
+    }
+
+    pub fn get_type_slots(&self, name:&str)->usize{
+        if let Some(ty) = self.find_type(name){
+            return ty.slots;
+        }
+        0
+    }
+
+    pub fn compute_slot_total(&self, vars:&Vec<ShVar>)->usize{
+        let mut slots:usize = 0;
+        for var in vars{
+            slots += self.get_type_slots(&var.ty);
+        }
+        slots
+    }
+}
+
+
+// The AST block
+#[derive(Clone, Hash, PartialEq)]
+pub struct ShAst{
+    pub types:Vec<ShType>,
+    pub vars:Vec<ShVar>,
+    pub consts:Vec<ShConst>,
+    pub fns:Vec<ShFn>
+}
+
+#[derive(Clone, Hash, PartialEq)]
+pub struct ShFnArg{
+    pub name:String,
+    pub ty:String
+}
+
+impl ShFnArg{
+    pub fn new(name:&str, ty:&str)->Self{
+        Self{
+            name:name.to_string(),
+            ty:ty.to_string()
+        }
+    }
+}
+
+#[derive(Clone, Hash, PartialEq)]
+pub struct ShFn{
+    pub name:String,
+    pub args:Vec<ShFnArg>,
+    pub ret:String,
+    pub block:Option<ShBlock>,
+}
+
+#[derive(Clone, Hash, PartialEq)]
+pub enum ShVarStore{
+    Uniform,
+    UniformVw,
+    UniformCx,
+    Instance,
+    Geometry,
+    Texture,
+    Local,
+    Varying,
+}
+
+#[derive(Clone, Hash, PartialEq)]
+pub struct ShVar{
+    pub name:String,
+    pub ty:String,
+    pub store:ShVarStore
+}
+
+#[derive(Clone, Hash, PartialEq)]
+pub struct ShConst{
+    pub name:String,
+    pub ty:String,
+    pub value:ShExpr
+}
+
+#[derive(Clone, Hash, PartialEq)]
+pub struct ShTypeField{
+    pub name:String,
+    pub ty:String,
+}
+
+impl ShTypeField{
+    pub fn new(name:&str, ty:&str)->Self{
+        Self{
+            name:name.to_string(),
+            ty:ty.to_string()
+        }
+    }
+}
+
+#[derive(Clone, Hash, PartialEq)]
+pub struct ShType{
+    pub name:String,
+    pub slots:usize,
+    pub prim:bool,
+    pub fields:Vec<ShTypeField>
+}
+
+// AST tree nodes
+
+#[derive(Clone, Hash, PartialEq)]
+pub enum ShExpr{
+    ShId(ShId),
+    ShLit(ShLit),
+    ShField(ShField),
+    ShIndex(ShIndex),
+    ShAssign(ShAssign),
+    ShAssignOp(ShAssignOp),
+    ShBinary(ShBinary),
+    ShUnary(ShUnary),
+    ShParen(ShParen),
+    ShBlock(ShBlock),
+    ShCall(ShCall),
+    ShIf(ShIf),
+    ShWhile(ShWhile),
+    ShForLoop(ShForLoop),
+    ShReturn(ShReturn),
+    ShBreak(ShBreak),
+    ShContinue(ShContinue)
+}
+
+#[derive(Clone, Hash, PartialEq)]
+pub enum ShBinOp{
+    Add,Sub,Mul,Div,
+    Rem,
+    And,Or,
+    BitXor,BitAnd,BitOr,
+    Shl,Shr,
+    Eq, Lt, Le, Ne, Ge, Gt,
+    AddEq,SubEq,MulEq,DivEq,RemEq,
+    BitXorEq,BitAndEq,BitOrEq,ShlEq,ShrEq
+}
+
+impl ShBinOp{
+    pub fn to_string(&self)->&str{
+        match self{
+            ShBinOp::Add=>"+",
+            ShBinOp::Sub=>"-",
+            ShBinOp::Mul=>"*",
+            ShBinOp::Div=>"/",
+            ShBinOp::Rem=>"%",
+            ShBinOp::And=>"&&",
+            ShBinOp::Or=>"||",
+            ShBinOp::BitXor=>"^",
+            ShBinOp::BitAnd=>"&",
+            ShBinOp::BitOr=>"|",
+            ShBinOp::Shl=>"<<",
+            ShBinOp::Shr=>">>",
+            ShBinOp::Eq=>"==",
+            ShBinOp::Lt=>"<",
+            ShBinOp::Le=>"<=",
+            ShBinOp::Ne=>"!=",
+            ShBinOp::Ge=>">=",
+            ShBinOp::Gt=>">",
+            ShBinOp::AddEq=>"+=",
+            ShBinOp::SubEq=>"-=",
+            ShBinOp::MulEq=>"*=",
+            ShBinOp::DivEq=>"/=",
+            ShBinOp::RemEq=>"%=",
+            ShBinOp::BitXorEq=>"^=",
+            ShBinOp::BitAndEq=>"&=",
+            ShBinOp::BitOrEq=>"|=",
+            ShBinOp::ShlEq=>"<<=",
+            ShBinOp::ShrEq=>">>=",
+        }
+    }
+}
+
+#[derive(Clone, Hash, PartialEq)]
+pub struct ShId{
+    pub name:String
+}
+
+#[derive(Clone)]
+pub enum ShLit{
+    Int(i64),
+    Float(f64),
+    Str(String),
+    Bool(bool)
+}
+
+impl Hash for ShLit{
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        match self{
+            ShLit::Int(iv)=>iv.hash(state),
+            ShLit::Float(fv)=>fv.to_bits().hash(state),
+            ShLit::Str(sv)=>sv.hash(state),
+            ShLit::Bool(bv)=>bv.hash(state)
+        }
+    }
+}
+
+impl PartialEq for ShLit{
+    fn eq(&self, other:&ShLit)->bool {
+        match self{
+            ShLit::Int(iv)=>match other{
+                ShLit::Int(ov)=>iv == ov,
+                _=>false
+            },
+            ShLit::Float(iv)=>match other{
+                ShLit::Float(ov)=>iv.to_bits() == ov.to_bits(),
+                _=>false
+            },
+            ShLit::Str(iv)=>match other{
+                ShLit::Str(ov)=>iv == ov,
+                _=>false
+            },
+            ShLit::Bool(iv)=>match other{
+                ShLit::Bool(ov)=>iv == ov,
+                _=>false
+            },
+        }
+    }
+}
+
+#[derive(Clone, Hash, PartialEq)]
+pub struct ShField{
+    pub base:Box<ShExpr>,
+    pub member:String
+}
+
+#[derive(Clone, Hash, PartialEq)]
+pub struct ShIndex{
+    pub base:Box<ShExpr>,
+    pub index:Box<ShExpr>
+}
+
+#[derive(Clone, Hash, PartialEq)]
+pub struct ShAssign{
+    pub left:Box<ShExpr>,
+    pub right:Box<ShExpr>
+}
+
+#[derive(Clone, Hash, PartialEq)]
+pub struct ShAssignOp{
+    pub left:Box<ShExpr>,
+    pub right:Box<ShExpr>,
+    pub op:ShBinOp
+}
+
+#[derive(Clone, Hash, PartialEq)]
+pub struct ShBinary{
+    pub left:Box<ShExpr>,
+    pub right:Box<ShExpr>,
+    pub op:ShBinOp
+}
+
+#[derive(Clone, Hash, PartialEq)]
+pub enum ShUnaryOp{
+    Not, Neg
+}
+
+impl ShUnaryOp{
+    pub fn to_string(&self)->&str{
+        match self{
+            ShUnaryOp::Not=>"!",
+            ShUnaryOp::Neg=>"-"
+        }
+    }
+}
+
+#[derive(Clone, Hash, PartialEq)]
+pub struct ShUnary{
+    pub expr:Box<ShExpr>,
+    pub op:ShUnaryOp
+}
+
+#[derive(Clone, Hash, PartialEq)]
+pub struct ShParen{
+    pub expr:Box<ShExpr>,
+}
+
+#[derive(Clone, Hash, PartialEq)]
+pub enum ShStmt{
+    ShLet(ShLet),
+    ShExpr(ShExpr),
+    ShSemi(ShExpr)
+}
+
+#[derive(Clone, Hash, PartialEq)]
+pub struct ShBlock{
+    pub stmts:Vec<Box<ShStmt>>
+}
+
+#[derive(Clone, Hash, PartialEq)]
+pub struct ShCall{
+    pub call:String,
+    pub args:Vec<Box<ShExpr>>
+}
+
+#[derive(Clone, Hash, PartialEq)]
+pub struct ShIf{
+    pub cond:Box<ShExpr>,
+    pub then_branch:ShBlock,
+    pub else_branch:Option<Box<ShExpr>>,
+}
+
+#[derive(Clone, Hash, PartialEq)]
+pub struct ShWhile{
+    pub cond:Box<ShExpr>,
+    pub body:ShBlock,
+}
+
+#[derive(Clone, Hash, PartialEq)]
+pub struct ShForLoop{
+    pub iter:String,
+    pub from:Box<ShExpr>,
+    pub to:Box<ShExpr>,
+    pub body:ShBlock
+}
+
+#[derive(Clone, Hash, PartialEq)]
+pub struct ShReturn{
+    pub expr:Option<Box<ShExpr>>
+}
+
+#[derive(Clone, Hash, PartialEq)]
+pub struct ShBreak{
+}
+
+#[derive(Clone, Hash, PartialEq)]
+pub struct ShContinue{
+}
+
+#[derive(Clone, Hash, PartialEq)]
+pub struct ShLet{
+    pub name:String,
+    pub ty:String,
+    pub init:Box<ShExpr>
+}
 
 #[derive(Clone)]
 pub struct Sl {
@@ -31,7 +460,7 @@ pub struct SlCx<'a> {
     pub defargs_fn: String,
     pub defargs_call: String,
     pub call_prefix: String,
-    pub shader: &'a CxShader,
+    pub shader_gen: &'a ShaderGen,
     pub scope: Vec<SlDecl>,
     pub fn_deps: Vec<String>,
     pub fn_done: Vec<Sl>,
@@ -53,7 +482,7 @@ impl<'a> SlCx<'a> {
     }
     pub fn get_type(&self, name: &str) -> Result<&ShType,
     SlErr> {
-        if let Some(ty) = self.shader.find_type(name) {
+        if let Some(ty) = self.shader_gen.find_type(name) {
             return Ok(ty);
         }
         Err(SlErr {msg: format!("Cannot find type {}", name)})
@@ -61,41 +490,41 @@ impl<'a> SlCx<'a> {
 }
 
 impl ShExpr {
-    pub fn sl(&self, cx: &mut SlCx) -> Result<Sl, SlErr> {
+    pub fn sl(&self, slcx: &mut SlCx) -> Result<Sl, SlErr> {
         match self {
-            ShExpr::ShId(x) => x.sl(cx),
-            ShExpr::ShLit(x) => x.sl(cx),
-            ShExpr::ShAssign(x) => x.sl(cx),
-            ShExpr::ShCall(x) => x.sl(cx),
-            ShExpr::ShBinary(x) => x.sl(cx),
-            ShExpr::ShUnary(x) => x.sl(cx),
-            ShExpr::ShAssignOp(x) => x.sl(cx),
-            ShExpr::ShIf(x) => x.sl(cx),
-            ShExpr::ShWhile(x) => x.sl(cx),
-            ShExpr::ShForLoop(x) => x.sl(cx),
-            ShExpr::ShBlock(x) => x.sl(cx),
-            ShExpr::ShField(x) => x.sl(cx),
-            ShExpr::ShIndex(x) => x.sl(cx),
-            ShExpr::ShParen(x) => x.sl(cx),
-            ShExpr::ShReturn(x) => x.sl(cx),
-            ShExpr::ShBreak(x) => x.sl(cx),
-            ShExpr::ShContinue(x) => x.sl(cx),
+            ShExpr::ShId(x) => x.sl(slcx),
+            ShExpr::ShLit(x) => x.sl(slcx),
+            ShExpr::ShAssign(x) => x.sl(slcx),
+            ShExpr::ShCall(x) => x.sl(slcx),
+            ShExpr::ShBinary(x) => x.sl(slcx),
+            ShExpr::ShUnary(x) => x.sl(slcx),
+            ShExpr::ShAssignOp(x) => x.sl(slcx),
+            ShExpr::ShIf(x) => x.sl(slcx),
+            ShExpr::ShWhile(x) => x.sl(slcx),
+            ShExpr::ShForLoop(x) => x.sl(slcx),
+            ShExpr::ShBlock(x) => x.sl(slcx),
+            ShExpr::ShField(x) => x.sl(slcx),
+            ShExpr::ShIndex(x) => x.sl(slcx),
+            ShExpr::ShParen(x) => x.sl(slcx),
+            ShExpr::ShReturn(x) => x.sl(slcx),
+            ShExpr::ShBreak(x) => x.sl(slcx),
+            ShExpr::ShContinue(x) => x.sl(slcx),
         }
     }
 }
 
 
 impl ShId {
-    pub fn sl(&self, cx: &mut SlCx) -> Result<Sl, SlErr> {
+    pub fn sl(&self, slcx: &mut SlCx) -> Result<Sl, SlErr> {
         // ok so. we have to find our id on
-        if let Some(ty) = cx.scan_scope(&self.name) {
+        if let Some(ty) = slcx.scan_scope(&self.name) {
             Ok(Sl {sl: self.name.to_string(), ty: ty.to_string()})
         }
-        else if let Some(cnst) = cx.shader.find_const(&self.name) {
+        else if let Some(cnst) = slcx.shader_gen.find_const(&self.name) {
             Ok(Sl {sl: self.name.to_string(), ty: cnst.ty.to_string()})
         }
-        else if let Some(var) = cx.shader.find_var(&self.name) {
-            Ok(Sl {sl: cx.map_var(var), ty: var.ty.to_string()})
+        else if let Some(var) = slcx.shader_gen.find_var(&self.name) {
+            Ok(Sl {sl: slcx.map_var(var), ty: var.ty.to_string()})
         }
         else { // id not found.. lets give an error
             Err(SlErr {
@@ -106,7 +535,7 @@ impl ShId {
 }
 
 impl ShLit {
-    pub fn sl(&self, _cx: &mut SlCx) -> Result<Sl, SlErr> {
+    pub fn sl(&self, _slcx: &mut SlCx) -> Result<Sl, SlErr> {
         // we do a literal
         match self {
             ShLit::Int(val) => {
@@ -131,10 +560,10 @@ impl ShLit {
 }
 
 impl ShField {
-    pub fn sl(&self, cx: &mut SlCx) -> Result<Sl, SlErr> {
-        let base = self.base.sl(cx) ?;
+    pub fn sl(&self, slcx: &mut SlCx) -> Result<Sl, SlErr> {
+        let base = self.base.sl(slcx) ?;
         // we now have to figure out the type of member
-        let shty = cx.get_type(&base.ty) ?;
+        let shty = slcx.get_type(&base.ty) ?;
         // lets get our member
         if let Some(field) = shty.fields.iter().find( | i | i.name == self.member) {
             Ok(Sl {
@@ -207,9 +636,9 @@ impl ShField {
 }
 
 impl ShIndex {
-    pub fn sl(&self, cx: &mut SlCx) -> Result<Sl, SlErr> {
-        let base = self.base.sl(cx) ?;
-        let index = self.index.sl(cx) ?;
+    pub fn sl(&self, slcx: &mut SlCx) -> Result<Sl, SlErr> {
+        let base = self.base.sl(slcx) ?;
+        let index = self.index.sl(slcx) ?;
         // limit base type to vec2/3/4
         if base.ty != "vec2" && base.ty != "vec3" && base.ty != "vec4" {
             Err(SlErr {
@@ -226,11 +655,11 @@ impl ShIndex {
 }
 
 impl ShAssign {
-    pub fn sl(&self, cx: &mut SlCx) -> Result<Sl, SlErr> {
+    pub fn sl(&self, slcx: &mut SlCx) -> Result<Sl, SlErr> {
         // if we are assigning to a geom
         
-        let left = self.left.sl(cx) ?;
-        let right = self.right.sl(cx) ?;
+        let left = self.left.sl(slcx) ?;
+        let right = self.right.sl(slcx) ?;
         if left.ty != right.ty {
             Err(SlErr {
                 msg: format!("Left type {} not the same as right {} in assign {}={}", left.ty, right.ty, left.sl, right.sl)
@@ -246,9 +675,9 @@ impl ShAssign {
 }
 
 impl ShAssignOp {
-    pub fn sl(&self, cx: &mut SlCx) -> Result<Sl, SlErr> {
-        let left = self.left.sl(cx) ?;
-        let right = self.right.sl(cx) ?;
+    pub fn sl(&self, slcx: &mut SlCx) -> Result<Sl, SlErr> {
+        let left = self.left.sl(slcx) ?;
+        let right = self.right.sl(slcx) ?;
         
         if left.ty != right.ty {
             Err(SlErr {
@@ -265,9 +694,9 @@ impl ShAssignOp {
 }
 
 impl ShBinary {
-    pub fn sl(&self, cx: &mut SlCx) -> Result<Sl, SlErr> {
-        let left = self.left.sl(cx) ?;
-        let right = self.right.sl(cx) ?;
+    pub fn sl(&self, slcx: &mut SlCx) -> Result<Sl, SlErr> {
+        let left = self.left.sl(slcx) ?;
+        let right = self.right.sl(slcx) ?;
         if left.ty != right.ty {
             if left.ty == "float" && (right.ty == "vec2" || right.ty == "vec3" || right.ty == "vec4") {
                 Ok(Sl {
@@ -283,19 +712,19 @@ impl ShBinary {
             }
             else if right.ty == "mat4" && left.ty == "vec4" {
                 Ok(Sl {
-                    sl: cx.mat_mul(&left.sl, &right.sl),
+                    sl: slcx.mat_mul(&left.sl, &right.sl),
                     ty: left.ty
                 })
             }
             else if right.ty == "mat3" && left.ty == "vec3" {
                 Ok(Sl {
-                    sl: cx.mat_mul(&left.sl, &right.sl),
+                    sl: slcx.mat_mul(&left.sl, &right.sl),
                     ty: left.ty
                 })
             }
             else if right.ty == "mat2" && left.ty == "vec2" {
                 Ok(Sl {
-                    sl: cx.mat_mul(&left.sl, &right.sl),
+                    sl: slcx.mat_mul(&left.sl, &right.sl),
                     ty: left.ty
                 })
             }
@@ -308,7 +737,7 @@ impl ShBinary {
         else {
             if left.ty == "mat4" || left.ty == "mat3" || left.ty == "mat2" {
                 Ok(Sl {
-                    sl: cx.mat_mul(&left.sl, &right.sl),
+                    sl: slcx.mat_mul(&left.sl, &right.sl),
                     ty: left.ty
                 })
                 
@@ -324,8 +753,8 @@ impl ShBinary {
 }
 
 impl ShUnary {
-    pub fn sl(&self, cx: &mut SlCx) -> Result<Sl, SlErr> {
-        let expr = self.expr.sl(cx) ?;
+    pub fn sl(&self, slcx: &mut SlCx) -> Result<Sl, SlErr> {
+        let expr = self.expr.sl(slcx) ?;
         Ok(Sl {
             sl: format!("{}{}", self.op.to_string(), expr.sl),
             ty: expr.ty
@@ -334,8 +763,8 @@ impl ShUnary {
 }
 
 impl ShParen {
-    pub fn sl(&self, cx: &mut SlCx) -> Result<Sl, SlErr> {
-        let expr = self.expr.sl(cx) ?;
+    pub fn sl(&self, slcx: &mut SlCx) -> Result<Sl, SlErr> {
+        let expr = self.expr.sl(slcx) ?;
         Ok(Sl {
             sl: format!("({})", expr.sl),
             ty: expr.ty
@@ -344,31 +773,31 @@ impl ShParen {
 }
 
 impl ShBlock {
-    pub fn sl(&self, cx: &mut SlCx) -> Result<Sl, SlErr> {
+    pub fn sl(&self, slcx: &mut SlCx) -> Result<Sl, SlErr> {
         let mut sl = String::new();
         sl.push_str("{\n");
-        cx.depth += 1;
+        slcx.depth += 1;
         for stmt in &self.stmts {
-            for _i in 0..cx.depth {
+            for _i in 0..slcx.depth {
                 sl.push_str("  ");
             }
             match &**stmt {
                 ShStmt::ShLet(stmt) => {
-                    let out = stmt.sl(cx) ?;
+                    let out = stmt.sl(slcx) ?;
                     sl.push_str(&out.sl);
                 },
                 ShStmt::ShExpr(stmt) => {
-                    let out = stmt.sl(cx) ?;
+                    let out = stmt.sl(slcx) ?;
                     sl.push_str(&out.sl);
                 }
                 ShStmt::ShSemi(stmt) => {
-                    let out = stmt.sl(cx) ?;
+                    let out = stmt.sl(slcx) ?;
                     sl.push_str(&out.sl);
                 }
             }
             sl.push_str(";\n");
         }
-        cx.depth -= 1;
+        slcx.depth -= 1;
         sl.push_str("}");
         Ok(Sl {
             sl: sl,
@@ -378,20 +807,20 @@ impl ShBlock {
 }
 
 impl ShCall {
-    pub fn sl(&self, cx: &mut SlCx) -> Result<Sl, SlErr> {
+    pub fn sl(&self, slcx: &mut SlCx) -> Result<Sl, SlErr> {
         // we have a call, look up the call type on cx
         let mut out = String::new();
-        if let Some(shfn) = cx.shader.find_fn(&self.call) {
+        if let Some(shfn) = slcx.shader_gen.find_fn(&self.call) {
             let mut defargs_call = "".to_string();
             
             if let Some(_block) = &shfn.block { // not internal, so its a dep
-                let index = cx.fn_deps.iter().position( | i | **i == self.call);
+                let index = slcx.fn_deps.iter().position( | i | **i == self.call);
                 if let Some(index) = index {
-                    cx.fn_deps.remove(index);
+                    slcx.fn_deps.remove(index);
                 }
-                cx.fn_deps.push(self.call.clone());
-                defargs_call = cx.defargs_call.to_string();
-                out.push_str(&cx.call_prefix);
+                slcx.fn_deps.push(self.call.clone());
+                defargs_call = slcx.defargs_call.to_string();
+                out.push_str(&slcx.call_prefix);
             };
             
             
@@ -401,11 +830,11 @@ impl ShCall {
             let mut args_gl = Vec::new();
             // loop over args and typecheck / fill in generics
             for arg in &self.args {
-                let arg_gl = arg.sl(cx) ?;
+                let arg_gl = arg.sl(slcx) ?;
                 args_gl.push(arg_gl);
             };
             
-            let map_call = cx.map_call(&self.call, &args_gl);
+            let map_call = slcx.map_call(&self.call, &args_gl);
             let ret_ty;
             
             if let MapCallResult::Rewrite(rewrite, rty) = map_call {
@@ -505,12 +934,12 @@ impl ShCall {
         }
         else {
             // its a constructor call
-            if let Some(glty) = cx.shader.find_type(&self.call) {
-                out.push_str(&cx.map_type(&self.call));
+            if let Some(glty) = slcx.shader_gen.find_type(&self.call) {
+                out.push_str(&slcx.map_type(&self.call));
                 out.push_str("(");
                 // TODO check args
                 for (i, arg) in self.args.iter().enumerate() {
-                    let arg_gl = arg.sl(cx) ?;
+                    let arg_gl = arg.sl(slcx) ?;
                     if i != 0 {
                         out.push_str(", ");
                     }
@@ -713,7 +1142,7 @@ impl ShFn {
     }
 }
 
-pub fn assemble_fn_and_deps(sh: &CxShader, cx: &mut SlCx) -> Result<String, SlErr> {
+pub fn assemble_fn_and_deps(sg: &ShaderGen, cx: &mut SlCx) -> Result<String, SlErr> {
     
     let mut fn_local = Vec::new();
     loop {
@@ -730,7 +1159,7 @@ pub fn assemble_fn_and_deps(sh: &CxShader, cx: &mut SlCx) -> Result<String, SlEr
         // do that dep.
         if let Some(fn_not_done) = fn_not_done {
             let fn_name = fn_not_done.clone();
-            let fn_to_do = sh.find_fn(&fn_name);
+            let fn_to_do = sg.find_fn(&fn_name);
             if let Some(fn_to_do) = fn_to_do {
                 cx.scope.clear();
                 let result = fn_to_do.sl(cx) ?;

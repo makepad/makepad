@@ -158,8 +158,8 @@ const CX_UNI_DPI_DILATE: usize = 17;
 const CX_UNI_SIZE: usize = 20;
 
 impl CxPass {
-    pub fn def_uniforms(sh: &mut CxShader) {
-        sh.add_ast(shader_ast!({
+    pub fn def_uniforms(sg: &mut ShaderGen) {
+        sg.add_ast(shader_ast!({
             let camera_projection: mat4<UniformCx>;
             let dpi_factor: float<UniformCx>;
             let dpi_dilate: float<UniformCx>;

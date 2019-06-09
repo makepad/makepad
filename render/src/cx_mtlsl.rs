@@ -96,23 +96,23 @@ impl Cx {
         out
     }
     
-    pub fn mtl_assemble_shader(sh: &CxShader) -> Result<(String, CxShaderMapping), SlErr> {
+    pub fn mtl_assemble_shader(sg: &ShaderGen) -> Result<(String, CxShaderMapping), SlErr> {
         
         let mut mtl_out = "#include <metal_stdlib>\nusing namespace metal;\n".to_string();
         
         // ok now define samplers from our sh.
-        let texture_slots = sh.flat_vars(ShVarStore::Texture);
-        let geometries = sh.flat_vars(ShVarStore::Geometry);
-        let instances = sh.flat_vars(ShVarStore::Instance);
-        let mut varyings = sh.flat_vars(ShVarStore::Varying);
-        let locals = sh.flat_vars(ShVarStore::Local);
-        let uniforms_cx = sh.flat_vars(ShVarStore::UniformCx);
-        let uniforms_vw = sh.flat_vars(ShVarStore::UniformVw);
-        let uniforms_dr = sh.flat_vars(ShVarStore::Uniform);
+        let texture_slots = sg.flat_vars(ShVarStore::Texture);
+        let geometries = sg.flat_vars(ShVarStore::Geometry);
+        let instances = sg.flat_vars(ShVarStore::Instance);
+        let mut varyings = sg.flat_vars(ShVarStore::Varying);
+        let locals = sg.flat_vars(ShVarStore::Local);
+        let uniforms_cx = sg.flat_vars(ShVarStore::UniformCx);
+        let uniforms_vw = sg.flat_vars(ShVarStore::UniformVw);
+        let uniforms_dr = sg.flat_vars(ShVarStore::Uniform);
         
         // lets count the slots
         //let geometry_slots = sh.compute_slot_total(&geometries);
-        let instance_slots = sh.compute_slot_total(&instances);
+        let instance_slots = sg.compute_slot_total(&instances);
         //let varying_slots = sh.compute_slot_total(&varyings);
         
         mtl_out.push_str(&Self::mtl_assemble_struct("_Geom", &geometries, PackType::Packed, ""));
@@ -133,13 +133,13 @@ impl Cx {
             defargs_fn: "".to_string(),
             defargs_call: "".to_string(),
             call_prefix: "_".to_string(),
-            shader: sh,
+            shader_gen: sg,
             scope: Vec::new(),
             fn_deps: Vec::new(),
             fn_done: Vec::new(),
             auto_vary: Vec::new()
         };
-        let consts = sh.flat_consts();
+        let consts = sg.flat_consts();
         for cnst in &consts {
             let const_init = assemble_const_init(cnst, &mut const_cx) ?;
             mtl_out.push_str("#define ");
@@ -156,27 +156,27 @@ impl Cx {
             defargs_fn: "_Tex _tex, thread _Loc &_loc, thread _Vary &_vary, thread _Geom &_geom, thread _Inst &_inst, device _UniCx &_uni_cx, device _UniVw &_uni_vw, device _UniDr &_uni_dr".to_string(),
             defargs_call: "_tex, _loc, _vary, _geom, _inst, _uni_cx, _uni_vw, _uni_dr".to_string(),
             call_prefix: "_".to_string(),
-            shader: sh,
+            shader_gen: sg,
             scope: Vec::new(),
             fn_deps: vec!["vertex".to_string()],
             fn_done: Vec::new(),
             auto_vary: Vec::new()
         };
-        let vtx_fns = assemble_fn_and_deps(sh, &mut vtx_cx) ?;
+        let vtx_fns = assemble_fn_and_deps(sg, &mut vtx_cx) ?;
         let mut pix_cx = SlCx {
             depth: 0,
             target: SlTarget::Pixel,
             defargs_fn: "_Tex _tex, thread _Loc &_loc, thread _Vary &_vary, device _UniCx &_uni_cx, device _UniVw &_uni_vw, device _UniDr &_uni_dr".to_string(),
             defargs_call: "_tex, _loc, _vary, _uni_cx, _uni_vw, _uni_dr".to_string(),
             call_prefix: "_".to_string(),
-            shader: sh,
+            shader_gen: sg,
             scope: Vec::new(),
             fn_deps: vec!["pixel".to_string()],
             fn_done: vtx_cx.fn_done,
             auto_vary: Vec::new()
         };
         
-        let pix_fns = assemble_fn_and_deps(sh, &mut pix_cx) ?;
+        let pix_fns = assemble_fn_and_deps(sg, &mut pix_cx) ?;
         
         // lets add the auto_vary ones to the varyings struct
         for auto in &pix_cx.auto_vary {
@@ -228,14 +228,14 @@ impl Cx {
         mtl_out.push_str(&pix_cx.defargs_call);
         mtl_out.push_str(");\n};\n");
         
-        if sh.log != 0 {
+        if sg.log != 0 {
             println!("---- Metal shader -----\n{}", mtl_out);
         }
         
         Ok((mtl_out, CxShaderMapping {
-            rect_instance_props: RectInstanceProps::construct(sh, &instances),
-            named_instance_props: NamedProps::construct(sh, &instances, false),
-            named_uniform_props: NamedProps::construct(sh, &uniforms_dr, true),
+            rect_instance_props: RectInstanceProps::construct(sg, &instances),
+            named_instance_props: NamedProps::construct(sg, &instances, false),
+            named_uniform_props: NamedProps::construct(sg, &uniforms_dr, true),
             instance_slots: instance_slots,
             uniforms_dr: uniforms_dr,
             uniforms_vw: uniforms_vw,
@@ -245,7 +245,7 @@ impl Cx {
     }
     
     pub fn mtl_compile_shader(sh: &mut CxShader, device: &Device) -> Result<(), SlErr> {
-        let (mtlsl, mapping) = Self::mtl_assemble_shader(sh) ?;
+        let (mtlsl, mapping) = Self::mtl_assemble_shader(&sh.shader_gen) ?;
         
         let options = CompileOptions::new();
         let library = device.new_library_with_source(&mtlsl, &options);
@@ -277,12 +277,12 @@ impl Cx {
                     library: library,
                     geom_ibuf: {
                         let mut geom_ibuf = MetalBuffer {..Default::default()};
-                        geom_ibuf.update_with_u32_data(device, &sh.geometry_indices);
+                        geom_ibuf.update_with_u32_data(device, &sh.shader_gen.geometry_indices);
                         geom_ibuf
                     },
                     geom_vbuf: {
                         let mut geom_vbuf = MetalBuffer {..Default::default()};
-                        geom_vbuf.update_with_f32_data(device, &sh.geometry_vertices);
+                        geom_vbuf.update_with_f32_data(device, &sh.shader_gen.geometry_vertices);
                         geom_vbuf
                     }
                 });

@@ -159,8 +159,8 @@ impl<'a> FileWalker<'a>{
 
 impl Style for FileTree{
     fn style(cx:&mut Cx)->Self{
-        let filler_sh = Self::def_filler_shader(cx);
-        let drag_bg_shader = Self::def_drag_bg_shader(cx);
+        let filler_sb = Self::def_filler_shader(cx);
+        let drag_bg_sb = Self::def_drag_bg_shader(cx);
         Self{
             row_height:20.,
             row_padding:Padding{l:5.,t:0.,r:0.,b:1.},
@@ -170,7 +170,7 @@ impl Style for FileTree{
             node_bg:Quad::style(cx),
             drag_bg:Quad{
                 color:cx.color("bg_marked"),
-                shader:cx.add_shader(drag_bg_shader, "FileTree.drag_bg"),
+                shader:cx.add_shader(drag_bg_sb, "FileTree.drag_bg"),
                 ..Style::style(cx)
             },
             drag_bg_layout:Layout{
@@ -181,7 +181,7 @@ impl Style for FileTree{
             },
             filler:Quad{
                 color:cx.color("icon_color"),
-                shader:cx.add_shader(filler_sh, "FileTree.filler"),
+                shader:cx.add_shader(filler_sb, "FileTree.filler"),
                 ..Style::style(cx)
             },
             tree_folder_color:cx.color("text_selected_focus"),
@@ -222,21 +222,21 @@ struct JsonFile{
 
 impl FileTree{
 
-    pub fn def_drag_bg_shader(cx:&mut Cx)->CxShader{
-        let mut sh = Quad::def_quad_shader(cx);
-        sh.add_ast(shader_ast!({
+    pub fn def_drag_bg_shader(cx:&mut Cx)->ShaderGen{
+        let mut sg = Quad::def_quad_shader(cx);
+        sg.add_ast(shader_ast!({
             fn pixel()->vec4{
                 df_viewport(pos * vec2(w, h));
                 df_box(0., 0., w, h, 2.);
                 return df_fill(color);
             }
         }));
-        sh
+        sg
     }
 
-    pub fn def_filler_shader(cx:&mut Cx)->CxShader{
-        let mut sh = Quad::def_quad_shader(cx);
-        sh.add_ast(shader_ast!({
+    pub fn def_filler_shader(cx:&mut Cx)->ShaderGen{
+        let mut sg = Quad::def_quad_shader(cx);
+        sg.add_ast(shader_ast!({
 
             let line_vec:vec2<Instance>;
             let anim_pos:float<Instance>;
@@ -257,7 +257,7 @@ impl FileTree{
                 }
             }
         }));
-        sh
+        sg
     }
 
     fn json_to_file_node(node:JsonFolder)->FileNode{

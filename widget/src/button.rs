@@ -17,10 +17,10 @@ pub struct Button{
 
 impl Style for Button{
     fn style(cx:&mut Cx)->Self{
-        let bg_sh = Self::def_bg_shader(cx);
+        let bg_sb = Self::def_bg_shader(cx);
         Self{
             bg:Quad{
-                shader:cx.add_shader(bg_sh, "Button.bg"),
+                shader:cx.add_shader(bg_sb, "Button.bg"),
                 ..Style::style(cx)
             },
             bg_layout:Layout{
@@ -76,9 +76,9 @@ pub enum ButtonEvent{
 }
 
 impl Button{
-    pub fn def_bg_shader(cx:&mut Cx)->CxShader{
-        let mut sh = Quad::def_quad_shader(cx);
-        sh.add_ast(shader_ast!({
+    pub fn def_bg_shader(cx:&mut Cx)->ShaderGen{
+        let mut sg = Quad::def_quad_shader(cx);
+        sg.add_ast(shader_ast!({
 
             let border_color:vec4<Instance>;
             let glow_size:float<Instance>;
@@ -97,7 +97,7 @@ impl Button{
                 return df_glow(glow_color, glow_size);
             }
         }));
-        sh
+        sg
     }
 
     pub fn handle_button(&mut self, cx:&mut Cx, event:&mut Event)->ButtonEvent{

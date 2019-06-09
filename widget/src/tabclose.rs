@@ -16,10 +16,10 @@ pub struct TabClose{
 
 impl Style for TabClose{
     fn style(cx:&mut Cx)->Self{
-        let bg_sh = Self::def_bg_shader(cx);
+        let bg_sb = Self::def_bg_shader(cx);
         Self{
             bg:Quad{
-                shader:cx.add_shader(bg_sh, "TabClose.bg"),
+                shader:cx.add_shader(bg_sb, "TabClose.bg"),
                 ..Style::style(cx)
             }, 
             text:Text{..Style::style(cx)},
@@ -59,9 +59,9 @@ pub enum TabCloseEvent{
 }
 
 impl TabClose{
-    pub fn def_bg_shader(cx:&mut Cx)->CxShader{
-        let mut sh = Quad::def_quad_shader(cx);
-        sh.add_ast(shader_ast!({
+    pub fn def_bg_shader(cx:&mut Cx)->ShaderGen{
+        let mut sg = Quad::def_quad_shader(cx);
+        sg.add_ast(shader_ast!({
             let hover:float<Instance>;
             let down:float<Instance>;
             fn pixel()->vec4{
@@ -78,7 +78,7 @@ impl TabClose{
                 //return df_fill(color);
             }
         }));
-        sh
+        sg
     }
 
     pub fn handle_tab_close(&mut self, cx:&mut Cx, event:&mut Event)->TabCloseEvent{
