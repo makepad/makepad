@@ -5,7 +5,8 @@ use crate::scrollbar::*;
 pub struct DesktopWindow {
     pub window: Window,
     pub pass: Pass,
-    pub layout: Layout,
+    pub color_texture: Texture,
+    pub depth_texture: Texture,
     pub main_view: View<ScrollBar>, // we have a root view otherwise is_overlay subviews can't attach topmost
     pub inner_view: View<ScrollBar>,
     
@@ -28,11 +29,13 @@ pub enum DesktopWindowEvent {
 impl Style for DesktopWindow {
     fn style(cx: &mut Cx) -> Self {
         Self {
-            layout: Layout ::default(),
+            window: Window::style(cx),
+            pass: Pass::default(),
+            color_texture: Texture::default(),
+            depth_texture: Texture::default(),
             main_view: View::style(cx),
             inner_view: View::style(cx),
-            window: Window ::style(cx),
-            pass: Pass::default(),
+
             test_rtt: false,
             sub_pass: Pass::default(),
             sub_view: View::style(cx),
@@ -88,14 +91,18 @@ impl DesktopWindow {
         
         self.window.begin_window(cx);
         self.pass.begin_pass(cx);
+        self.pass.add_color_texture(cx, &mut self.color_texture, Some(Color::zero()));
+        
+        // for z-buffering add a depth texture here
+        
         if self.test_rtt {
             // ok so how does subpass know its size.
             self.sub_pass.begin_pass(cx);
-            self.sub_pass.add_color_texture(cx, &mut self.blitbuffer, Some(color("red")));
+            self.sub_pass.add_color_texture(cx, &mut self.blitbuffer, Some(Color::zero()));
         }
         
         let _ = self.main_view.begin_view(cx, Layout::default());
-        let _ = self.inner_view.begin_view(cx, self.layout.clone());
+        let _ = self.inner_view.begin_view(cx, Layout::default());
         
         Ok(())
     }

@@ -61,7 +61,7 @@ impl Cx {
                 // lets set our textures
                 for (i, texture_id) in draw_call.textures_2d.iter().enumerate() {
                     let cxtexture = &mut self.textures[*texture_id as usize];
-                    if cxtexture.upload_buffer {
+                    if cxtexture.upload_image {
                         Self::update_platform_texture_image2d(device, cxtexture);
                     }
                     if let Some(mtltex) = &cxtexture.platform.mtltexture {
@@ -104,19 +104,28 @@ impl Cx {
         if let Some(drawable) = layer.next_drawable() {
             
             let render_pass_descriptor = RenderPassDescriptor::new();
-            
-            // TODO add z-buffer attachments and multisample attachments
-            
-            let color_attachment = render_pass_descriptor.color_attachments().object_at(0).unwrap();
-            color_attachment.set_texture(Some(drawable.texture()));
-            color_attachment.set_store_action(MTLStoreAction::Store);
-            color_attachment.set_load_action(MTLLoadAction::Clear);
-            color_attachment.set_clear_color(MTLClearColor::new(
-                self.clear_color.r as f64,
-                self.clear_color.g as f64,
-                self.clear_color.b as f64,
-                self.clear_color.a as f64
-            ));
+
+            if self.passes[pass_id].color_textures.len()>0{
+                // TODO add z-buffer attachments and multisample attachments
+                let color_texture = &self.passes[pass_id].color_textures[0];
+                let color_attachment = render_pass_descriptor.color_attachments().object_at(0).unwrap();
+                color_attachment.set_texture(Some(drawable.texture()));
+                color_attachment.set_store_action(MTLStoreAction::Store);
+                if let Some(color) = color_texture.clear_color {
+                    color_attachment.set_load_action(MTLLoadAction::Clear);
+                    color_attachment.set_clear_color(MTLClearColor::new(color.r as f64, color.g as f64, color.b as f64, color.a as f64));
+                }
+                else {
+                    color_attachment.set_load_action(MTLLoadAction::Load);
+                }
+            }
+            else{
+                let color_attachment = render_pass_descriptor.color_attachments().object_at(0).unwrap();
+                color_attachment.set_texture(Some(drawable.texture()));
+                color_attachment.set_store_action(MTLStoreAction::Store);
+                color_attachment.set_load_action(MTLLoadAction::Clear);
+                color_attachment.set_clear_color(MTLClearColor::new(0.0,0.0,0.0,0.0))
+            }
             
             let command_buffer = command_queue.new_command_buffer();
             let encoder = command_buffer.new_render_command_encoder(&render_pass_descriptor);
@@ -491,45 +500,29 @@ impl Cx {
         
         let mdesc = TextureDescriptor::new();
         if !is_depth {
-            match cxtexture.desc.pixel {
-                TexturePixel::Default | TexturePixel::BGRA8Unorm => {
+            match cxtexture.desc.format {
+                TextureFormat::Default | TextureFormat::RenderBGRA => {
                     mdesc.set_pixel_format(MTLPixelFormat::BGRA8Unorm);
-                },
-                _ => {
-                    println!("update_platform_render_target unsupported pixel format");
-                    return;
-                }
-            }
-            match cxtexture.desc.usage {
-                TextureUsage::Default | TextureUsage::RenderTarget2D => {
                     mdesc.set_texture_type(MTLTextureType::D2);
                     mdesc.set_storage_mode(MTLStorageMode::Private);
                     mdesc.set_usage(MTLTextureUsage::RenderTarget);
                 },
                 _ => {
-                    println!("update_platform_render_target unsupported pixel format");
+                    println!("update_platform_render_target unsupported texture format");
                     return;
                 }
             }
         }
         else {
-            match cxtexture.desc.pixel {
-                TexturePixel::Default | TexturePixel::Depth24UnormStencil8 => {
+            match cxtexture.desc.format {
+                TextureFormat::Default | TextureFormat::Depth24Stencil8 => {
                     mdesc.set_pixel_format(MTLPixelFormat::Depth24Unorm_Stencil8);
-                },
-                _ => {
-                    println!("update_platform_render_targete unsupported pixel format");
-                    return;
-                }
-            }
-            match cxtexture.desc.usage {
-                TextureUsage::Default | TextureUsage::DepthBuffer => {
                     mdesc.set_texture_type(MTLTextureType::D2);
                     mdesc.set_storage_mode(MTLStorageMode::Private);
                     mdesc.set_usage(MTLTextureUsage::RenderTarget);
                 },
                 _ => {
-                    println!("update_platform_render_targete unsupported pixel format");
+                    println!("update_platform_render_targete unsupported texture format");
                     return;
                 }
             }
@@ -546,10 +539,6 @@ impl Cx {
     
     
     pub fn update_platform_texture_image2d(device: &Device, cxtexture: &mut CxTexture) {
-        if cxtexture.desc.usage != TextureUsage::Default && cxtexture.desc.usage != TextureUsage::Image2D {
-            println!("update_platform_texture_image2d with wrong usage");
-            return;
-        }
         
         if cxtexture.desc.width.is_none() || cxtexture.desc.height.is_none() {
             println!("update_platform_texture_image2d without width/height");
@@ -568,60 +557,46 @@ impl Cx {
             mdesc.set_height(height as u64);
             mdesc.set_storage_mode(MTLStorageMode::Managed);
             
-            match cxtexture.desc.pixel {
-                TexturePixel::BGRA8Unorm => {
+            match cxtexture.desc.format {
+                TextureFormat::Default | TextureFormat::ImageBGRA => {
                     mdesc.set_pixel_format(MTLPixelFormat::BGRA8Unorm);
+                    let tex = device.new_texture(&mdesc);
+                    cxtexture.platform.mtltexture = Some(tex);
+
+                    if cxtexture.image_u32.len() != width * height {
+                        println!("update_platform_texture_image2d with wrong buffer_u32 size!");
+                        cxtexture.platform.mtltexture = None;
+                        return;
+                    }
+                    let region = MTLRegion {
+                        origin: MTLOrigin {x: 0, y: 0, z: 0},
+                        size: MTLSize {width: width as u64, height: height as u64, depth: 1}
+                    };
+                    if let Some(mtltexture) = &cxtexture.platform.mtltexture {
+                        mtltexture.replace_region(
+                            region,
+                            0,
+                            (width * std::mem::size_of::<u32>()) as u64,
+                            cxtexture.image_u32.as_ptr() as *const std::ffi::c_void
+                        );
+                    }
                 }
                 _ => {
                     println!("update_platform_texture_image2d with unsupported format");
                     return;
                 }
             }
-            let tex = device.new_texture(&mdesc);
-            cxtexture.platform.mtltexture = Some(tex);
             cxtexture.platform.alloc_desc = cxtexture.desc.clone();
             cxtexture.platform.width = width as u64;
             cxtexture.platform.height = height as u64;
         }
         
-        // upload buffer
-        match cxtexture.desc.pixel {
-            TexturePixel::BGRA8Unorm => {
-                if cxtexture.buffer_u32.len() != width * height {
-                    println!("update_platform_texture_image2d with wrong buffer_u32 size!");
-                    cxtexture.platform.mtltexture = None;
-                    return;
-                }
-                let region = MTLRegion {
-                    origin: MTLOrigin {x: 0, y: 0, z: 0},
-                    size: MTLSize {width: width as u64, height: height as u64, depth: 1}
-                };
-                if let Some(mtltexture) = &cxtexture.platform.mtltexture {
-                    mtltexture.replace_region(
-                        region,
-                        0,
-                        (width * std::mem::size_of::<u32>()) as u64,
-                        cxtexture.buffer_u32.as_ptr() as *const std::ffi::c_void
-                    );
-                }
-                
-            }
-            _ => {
-                println!("update_platform_texture_image2d with unsupported format");
-                return;
-            }
-        }
-        cxtexture.upload_buffer = false;
+        cxtexture.upload_image = false;
     }
 }
-//pub fn send_custom_event_before_draw(&mut self, id:u64, message:u64){
-//   self.custom_before_draw.push((id, message));
-//}
 
 #[derive(Clone, Default)]
 pub struct CxPlatform {
-    //pub uni_cx: MetalBuffer,
-    pub post_id: u64,
     pub set_window_position: Option<Vec2>,
     pub set_window_outer_size: Option<Vec2>,
     pub set_ime_position: Option<Vec2>,

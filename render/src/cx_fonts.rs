@@ -141,14 +141,13 @@ impl CxFont{
         // just directly access cxtexture
         let cxtex = &mut cx.textures[texture_id];
         cxtex.desc = TextureDesc{
-            pixel: TexturePixel::BGRA8Unorm,
-            usage: TextureUsage::Image2D,
+            format: TextureFormat::ImageBGRA,
             width: Some(ff.width),
             height:Some(ff.height),
             samples: 1
         };
-        cxtex.buffer_u32.resize(ff.width*ff.height, 0);
-        cxtex.upload_buffer = true;
+        cxtex.image_u32.resize(ff.width*ff.height, 0);
+        cxtex.upload_image = true;
         
         // ok lets read the different buffers
         inp.read(r_buf.as_mut_slice())?;
@@ -177,7 +176,7 @@ impl CxFont{
                 for y in 0..b.th{
                     for x in 0..b.tw{
                         let v = s_buf[ow as usize] as u32;
-                        cxtex.buffer_u32[ (x + ox + ((y + oy) * ff.width))] = (v<<16) | (v<<8) | v;
+                        cxtex.image_u32[ (x + ox + ((y + oy) * ff.width))] = (v<<16) | (v<<8) | v;
                         ow = ow + 1;
                     }
                 }
@@ -189,7 +188,7 @@ impl CxFont{
                         let r = r_buf[ow as usize] as u32;
                         let g = g_buf[ow as usize] as u32;
                         let b = b_buf[ow as usize] as u32;
-                        cxtex.buffer_u32[ (x + ox + ((y + oy) * ff.width))] = (r<<16) | (g<<8) | b;
+                        cxtex.image_u32[ (x + ox + ((y + oy) * ff.width))] = (r<<16) | (g<<8) | b;
                         ow = ow + 1;
                     }
                 }

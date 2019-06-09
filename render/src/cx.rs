@@ -46,41 +46,36 @@ pub struct Cx {
     pub running: bool,
     pub is_desktop_build: bool,
     
-    pub fonts: Vec<CxFont>,
-    
-    pub textures: Vec<CxTexture>,
-    pub textures_free: Vec<usize>,
-    
-    pub views: Vec<CxView>,
-    pub views_free: Vec<usize>,
-    pub view_stack: Vec<usize>,
-    
-    pub window_stack: Vec<usize>,
     pub windows: Vec<CxWindow>,
     pub windows_free: Vec<usize>,
-    
-    pub pass_stack: Vec<usize>,
     pub passes: Vec<CxPass>,
     pub passes_free: Vec<usize>,
-    
-    //pub current_draw_list_id: Option<usize>,
-    
+    pub views: Vec<CxView>,
+    pub views_free: Vec<usize>,
+
+    pub fonts: Vec<CxFont>,
+    pub textures: Vec<CxTexture>,
+    pub textures_free: Vec<usize>,
     pub shaders: Vec<CxShader>,
     pub shader_map: HashMap<ShaderGen, usize>,
+    
+    pub is_in_redraw_cycle: bool,
+    pub window_stack: Vec<usize>,
+    pub pass_stack: Vec<usize>,
+    pub view_stack: Vec<usize>,
+    pub turtles: Vec<Turtle>,
+    pub align_list: Vec<Area>,
     
     pub redraw_child_areas: Vec<Area>,
     pub redraw_parent_areas: Vec<Area>,
     pub _redraw_child_areas: Vec<Area>,
     pub _redraw_parent_areas: Vec<Area>,
     
-    //pub paint_dirty2: bool,
-    pub clear_color: Color,
     pub redraw_id: u64,
     pub repaint_id: u64,
     pub event_id: u64,
     pub timer_id: u64,
     pub signal_id: u64,
-    pub is_in_redraw_cycle: bool,
     
     pub last_key_focus: Area,
     pub key_focus: Area,
@@ -88,17 +83,10 @@ pub struct Cx {
     
     pub debug_area: Area,
     
-    pub turtles: Vec<Turtle>,
-    pub align_list: Vec<Area>,
-    
-    //pub window_geom: WindowGeom,
-    
     pub down_mouse_cursor: Option<MouseCursor>,
     pub hover_mouse_cursor: Option<MouseCursor>,
     pub captured_fingers: Vec<Area>,
     pub finger_tap_count: Vec<(Vec2, f64, u32)>,
-    
-    //pub user_events:Vec<Event>,
     
     pub playing_anim_areas: Vec<AnimArea>,
     pub ended_anim_areas: Vec<AnimArea>,
@@ -109,12 +97,12 @@ pub struct Cx {
     pub signals_before_draw: Vec<(Signal, u64)>,
     pub signals_after_draw: Vec<(Signal, u64)>,
     
-    pub platform: CxPlatform,
-    
     pub style_values: BTreeMap<String, StyleValue>,
     
     pub panic_now: bool,
-    pub panic_redraw: bool
+    pub panic_redraw: bool,
+
+    pub platform: CxPlatform,
 }
 
 
@@ -132,44 +120,36 @@ impl Default for Cx {
             is_desktop_build: false,
             running: true,
             
-            fonts: Vec::new(),
-            
-            textures: Vec::new(),
-            textures_free: Vec::new(),
-            
-            views: vec![CxView {..Default::default()}],
-            views_free: Vec::new(),
-            view_stack: Vec::new(),
-            
-            window_stack: Vec::new(),
             windows: Vec::new(),
             windows_free: Vec::new(),
-            
-            pass_stack: Vec::new(),
             passes: Vec::new(),
             passes_free: Vec::new(),
+            views: vec![CxView {..Default::default()}],
+            views_free: Vec::new(),
             
+            fonts: Vec::new(),
+            textures: Vec::new(),
+            textures_free: Vec::new(),
             shaders: Vec::new(),
             shader_map: HashMap::new(),
+
+            is_in_redraw_cycle: false,
+            window_stack: Vec::new(),
+            pass_stack: Vec::new(),
+            view_stack: Vec::new(),
+            turtles: Vec::new(),
+            align_list: Vec::new(),
             
             redraw_parent_areas: Vec::new(),
             _redraw_parent_areas: Vec::new(),
             redraw_child_areas: Vec::new(),
             _redraw_child_areas: Vec::new(),
-            //paint_dirty: false,
-            clear_color: Color {r: 0.1, g: 0.1, b: 0.1, a: 1.0},
             
             redraw_id: 1,
             event_id: 1,
             repaint_id: 1,
             timer_id: 1,
             signal_id: 1,
-            
-            is_in_redraw_cycle: false,
-            turtles: Vec::new(),
-            align_list: Vec::new(),
-            
-            //window_geom: WindowGeom {..Default::default()},
             
             last_key_focus: Area::Empty,
             key_focus: Area::Empty,
@@ -181,8 +161,6 @@ impl Default for Cx {
             hover_mouse_cursor: None,
             captured_fingers: captured_fingers,
             finger_tap_count: finger_tap_count,
-            
-            //user_events:Vec::new(),
             
             style_values: BTreeMap::new(),
             
@@ -196,10 +174,10 @@ impl Default for Cx {
             signals_before_draw: Vec::new(),
             signals_after_draw: Vec::new(),
             
-            platform: CxPlatform {..Default::default()},
-            
             panic_now: false,
-            panic_redraw: false
+            panic_redraw: false,
+            
+            platform: CxPlatform {..Default::default()},
         }
     }
 }

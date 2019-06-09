@@ -1,26 +1,19 @@
 use crate::cx::*;
 
 #[derive(Clone, PartialEq, Debug)]
-pub enum TextureUsage {
+pub enum TextureFormat {
     Default,
-    Image2D,
-    RenderTarget2D,
-    DepthBuffer,
-}
-
-#[derive(Clone, PartialEq, Debug)]
-pub enum TexturePixel {
-    Default,
-    BGRA8Unorm,
-    BGRAFloat16,
-    BGRAFloat32,
-    Depth24UnormStencil8
+    ImageBGRA,
+    ImageBGRAf32,
+    Depth24Stencil8,
+    RenderBGRA,
+    RenderBGRAf16,
+    RenderBGRAf32,
 }
 
 #[derive(Clone, PartialEq, Debug)]
 pub struct TextureDesc {
-    pub pixel: TexturePixel,
-    pub usage: TextureUsage,
+    pub format: TextureFormat,
     pub width: Option<usize>,
     pub height: Option<usize>,
     pub samples: usize
@@ -34,8 +27,7 @@ pub struct Texture {
 impl Default for TextureDesc {
     fn default() -> Self {
         TextureDesc {
-            pixel: TexturePixel::Default,
-            usage: TextureUsage::Default,
+            format: TextureFormat::Default,
             width: None,
             height: None,
             samples: 1
@@ -81,8 +73,8 @@ impl Texture{
 #[derive(Default, Clone)]
 pub struct CxTexture{
     pub desc:TextureDesc,
-    pub buffer_u32: Vec<u32>,
-    pub buffer_f32: Vec<f32>,
-    pub upload_buffer: bool,
+    pub image_u32: Vec<u32>,
+    pub image_f32: Vec<f32>,
+    pub upload_image: bool,
     pub platform: CxPlatformTexture
 }
