@@ -2,23 +2,16 @@
 use metal::*;
 use crate::cx::*;
 
-#[derive(Default, Clone)]
-pub struct AssembledMtlShader {
-    pub mapping: CxShaderMapping,
-    pub mtlsl: String,
-}
-
 #[derive(Clone)]
 pub struct CxPlatformShader {
     pub library: metal::Library,
     pub pipeline_state: metal::RenderPipelineState,
-    //pub shader_id: usize,
     pub geom_vbuf: MetalBuffer,
     pub geom_ibuf: MetalBuffer,
 }
 
 impl PartialEq for CxPlatformShader {
-    fn eq(&self, other: &Self) -> bool {false}
+    fn eq(&self, _other: &Self) -> bool {false}
 }
 
 pub enum PackType {
@@ -103,7 +96,7 @@ impl Cx {
         out
     }
     
-    pub fn mtl_assemble_shader(sh: &CxShader) -> Result<AssembledMtlShader, SlErr> {
+    pub fn mtl_assemble_shader(sh: &CxShader) -> Result<(String, CxShaderMapping), SlErr> {
         
         let mut mtl_out = "#include <metal_stdlib>\nusing namespace metal;\n".to_string();
         
@@ -239,31 +232,28 @@ impl Cx {
             println!("---- Metal shader -----\n{}", mtl_out);
         }
         
-        Ok(AssembledMtlShader {
-            mapping: CxShaderMapping {
-                rect_instance_props: RectInstanceProps::construct(sh, &instances),
-                named_instance_props: NamedProps::construct(sh, &instances, false),
-                named_uniform_props: NamedProps::construct(sh, &uniforms_dr, true),
-                instance_slots: instance_slots,
-                uniforms_dr: uniforms_dr,
-                uniforms_vw: uniforms_vw,
-                uniforms_cx: uniforms_cx,
-                texture_slots: texture_slots,
-            },
-            mtlsl: mtl_out
-        })
+        Ok((mtl_out, CxShaderMapping {
+            rect_instance_props: RectInstanceProps::construct(sh, &instances),
+            named_instance_props: NamedProps::construct(sh, &instances, false),
+            named_uniform_props: NamedProps::construct(sh, &uniforms_dr, true),
+            instance_slots: instance_slots,
+            uniforms_dr: uniforms_dr,
+            uniforms_vw: uniforms_vw,
+            uniforms_cx: uniforms_cx,
+            texture_slots: texture_slots,
+        }))
     }
     
     pub fn mtl_compile_shader(sh: &mut CxShader, device: &Device) -> Result<(), SlErr> {
-        let ash = Self::mtl_assemble_shader(sh) ?;
+        let (mtlsl, mapping) = Self::mtl_assemble_shader(sh) ?;
         
         let options = CompileOptions::new();
-        let library = device.new_library_with_source(&ash.mtlsl, &options);
+        let library = device.new_library_with_source(&mtlsl, &options);
         
         match library {
             Err(library) => return Err(SlErr {msg: library}),
             Ok(library) => {
-                sh.mapping = ash.mapping;
+                sh.mapping = mapping;
                 sh.platform = Some(CxPlatformShader {
                     pipeline_state: {
                         let vert = library.get_function("_vertex_shader", None).unwrap();

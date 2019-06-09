@@ -93,7 +93,7 @@ impl Cx {
     pub fn draw_pass_to_layer(
         &mut self,
         pass_id: usize,
-        dpi_factor: f32,
+        _dpi_factor: f32,
         layer: &CoreAnimationLayer,
         device: &Device,
         command_queue: &CommandQueue
