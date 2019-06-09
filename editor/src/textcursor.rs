@@ -1,4 +1,4 @@
-use render::*; 
+use render::*;
 
 use crate::textbuffer::*;
 
@@ -372,20 +372,19 @@ impl TextCursorSet {
         for cursor in &mut self.set {
             let (start, end) = cursor.delta(delta);
             // lets find where we are as a cursor in the textbuffer
-            if start == end && start > 0 {
+            if start == end && start > 0 && start < text_buffer.flat_text.len(){
                 // insert spaces till indent level
-                let (_pre_base, pre_spaces) = text_buffer.calc_next_line_indent_depth(start, 4);
-                let mut text = String::new();
-                //let warp = pre_spaces - (start - pre_base).min(pre_spaces);
-                //println!("{}", warp);
-                text.push_str("\n");
-                for _ in 0..pre_spaces {
-                    text.push_str(" ");
-                }
-                let mut next = String::new();
-                text_buffer.get_range_as_string(start - 1, 2, &mut next);
+                let (pre_base, pre_spaces) = text_buffer.calc_next_line_indent_depth(start, 4);
+                
+                let pch = text_buffer.flat_text[start-1];
+                let nch = text_buffer.flat_text[start];
                 // we have to insert more newlines and spaces because we were between () {} or []
-                if next == "{}" || next == "()" || next == "[]" {
+                if pch == '{' && nch == '}' || pch == '(' && nch == ')' || pch == '[' && nch == ']' {
+                    let mut text = String::new();
+                    text.push_str("\n");
+                    for _ in 0..pre_spaces {
+                        text.push_str(" ");
+                    }
                     let post_spaces = pre_spaces.max(4) - 4;
                     text.push_str("\n");
                     for _ in 0..post_spaces {
@@ -397,7 +396,22 @@ impl TextCursorSet {
                     delta += (pre_spaces + post_spaces + 2) as isize;
                     ops.push(op);
                 }
-                else {
+                else if pre_spaces != (start-pre_base) && nch == '}' || nch == ')' || nch == ']'{ // deindent next one
+                    let mut text = String::new();
+                    text.push_str("\n");
+                    for _ in 0..(pre_spaces.max(4)-4) {
+                        text.push_str(" ");
+                    }
+                    let op = text_buffer.replace_lines_with_string(start, end - start, &text);
+                    delta += cursor.collapse(start, end, op.len);
+                    ops.push(op);
+                }
+                else{ // just do a newline with indenting
+                    let mut text = String::new();
+                    text.push_str("\n");
+                    for _ in 0..pre_spaces{
+                        text.push_str(" ");
+                    }
                     let op = text_buffer.replace_lines_with_string(start, end - start, &text);
                     delta += cursor.collapse(start, end, op.len);
                     ops.push(op);
@@ -588,6 +602,9 @@ impl TextCursorSet {
         for cursor in &mut self.set {
             let (start, end) = cursor.delta(delta);
             if start == end {
+                if start >= text_buffer.flat_text.len(){
+                    return
+                }
                 let op = if let Some((rstart, l1ws, l1len, l2ws)) = text_buffer.calc_deletion_whitespace(start) {
                     if l1ws == l1len { // we wanna delete a whole line
                         delta -= l1len as isize + 1;
@@ -902,38 +919,40 @@ impl TextCursorSet {
         self.fuse_adjacent(text_buffer)
     }
     
-    pub fn get_nearest_token_chunk_boundary(left: bool, offset: usize, chunks: &Vec<TokenChunk>) -> usize {
-        for i in 0..chunks.len() {
+    pub fn get_nearest_token_chunk_boundary(left: bool, offset: usize, text_buffer: &TextBuffer) -> usize {
+        let token_chunks = &text_buffer.token_chunks;
+        for i in 0..token_chunks.len() {
             // if we are in the chunk, decide what to do
-            if offset >= chunks[i].offset && offset < chunks[i].offset + chunks[i].len {
+            if offset >= token_chunks[i].offset && offset < token_chunks[i].offset + token_chunks[i].len {
                 if left { // we want to to the beginning of the prev token
-                    if offset > chunks[i].offset {
-                        return chunks[i].offset
+                    if offset > token_chunks[i].offset {
+                        return token_chunks[i].offset
                     }
                     if i == 0 {
                         return 0
                     }
-                    if offset == chunks[i].offset {
-                        if chunks[i - 1].token_type == TokenType::Whitespace && i>1 {
-                            return chunks[i - 2].offset // + chunks[i-2].len
+                    if offset == token_chunks[i].offset {
+                        if token_chunks[i - 1].token_type == TokenType::Whitespace && i>1 {
+                            return token_chunks[i - 2].offset // + chunks[i-2].len
                         }
-                        return chunks[i - 1].offset
+                        return token_chunks[i - 1].offset
                     }
-                    return chunks[i - 1].offset + chunks[i - 1].len
+                    return token_chunks[i - 1].offset + token_chunks[i - 1].len
                 }
                 else { // jump right
                     
-                    if i < chunks.len() - 1 && chunks[i].token_type == TokenType::Whitespace {
-                        return chunks[i + 1].offset + chunks[i + 1].len;
+                    if i < token_chunks.len() - 1 && token_chunks[i].token_type == TokenType::Whitespace {
+                        return token_chunks[i + 1].offset + token_chunks[i + 1].len;
                     }
-                    return chunks[i].offset + chunks[i].len
+                    return token_chunks[i].offset + token_chunks[i].len
                 }
             }
         };
         0
     }
     
-    pub fn get_nearest_token_chunk(offset: usize, token_chunks: &Vec<TokenChunk>) -> Option<(usize, usize)> {
+    pub fn get_nearest_token_chunk(offset: usize, text_buffer: &TextBuffer) -> Option<(usize, usize)> {
+        let token_chunks = &text_buffer.token_chunks;
         for i in 0..token_chunks.len() {
             if token_chunks[i].token_type == TokenType::Whitespace {
                 if offset == token_chunks[i].offset && i > 0 { // at the start of whitespace
@@ -954,7 +973,29 @@ impl TextCursorSet {
                     if token_chunks[i].len <= 2 {
                         return Some((token_chunks[i].offset, token_chunks[i].len));
                     }
-                    return Some((token_chunks[i].offset + 1, token_chunks[i].len - 2))
+                    else { // scan for the nearest left and right space in the string
+                        let mut scan_left = offset;
+                        while scan_left > 0 && scan_left > token_chunks[i].offset + 1 {
+                            if text_buffer.flat_text[scan_left] == ' ' {
+                                scan_left += 1;
+                                break
+                            }
+                            scan_left -= 1;
+                        }
+                        let mut scan_right = offset;
+                        while scan_right < token_chunks[i].offset + token_chunks[i].len - 1 {
+                            if text_buffer.flat_text[scan_right] == ' ' {
+                                break
+                            }
+                            scan_right += 1;
+                        }
+                        if scan_right <= scan_left {
+                            return Some((token_chunks[i].offset + 1, token_chunks[i].len - 2))
+                        }
+                        else {
+                            return Some((scan_left, scan_right - scan_left))
+                        }
+                    }
                 }
                 return Some((token_chunks[i].offset, token_chunks[i].len));
             }
@@ -962,34 +1003,34 @@ impl TextCursorSet {
         None
     }
     
-    pub fn move_left_nearest_token(&mut self, only_head: bool, token_chunks: &Vec<TokenChunk>, text_buffer: &TextBuffer) {
+    pub fn move_left_nearest_token(&mut self, only_head: bool, text_buffer: &TextBuffer) {
         self.insert_undo_group += 1;
         for cursor in &mut self.set {
             // take the cursor head and find nearest token left
-            let pos = TextCursorSet::get_nearest_token_chunk_boundary(true, cursor.head, token_chunks);
+            let pos = TextCursorSet::get_nearest_token_chunk_boundary(true, cursor.head, text_buffer);
             cursor.head = pos;
             if !only_head {cursor.tail = cursor.head}
         }
         self.fuse_adjacent(text_buffer)
     }
     
-    pub fn move_right_nearest_token(&mut self, only_head: bool, token_chunks: &Vec<TokenChunk>, text_buffer: &TextBuffer) {
+    pub fn move_right_nearest_token(&mut self, only_head: bool, text_buffer: &TextBuffer) {
         self.insert_undo_group += 1;
         for cursor in &mut self.set {
             // take the cursor head and find nearest token left
-            let pos = TextCursorSet::get_nearest_token_chunk_boundary(false, cursor.head, token_chunks);
+            let pos = TextCursorSet::get_nearest_token_chunk_boundary(false, cursor.head, text_buffer);
             cursor.head = pos;
             if !only_head {cursor.tail = cursor.head}
         }
         self.fuse_adjacent(text_buffer)
     }
     
-    pub fn get_token_highlight(&self, text_buffer: &TextBuffer, token_chunks: &Vec<TokenChunk>) -> Vec<char> {
+    pub fn get_token_highlight(&self, text_buffer: &TextBuffer) -> Vec<char> {
         let cursor = &self.set[self.last_cursor];
         if cursor.head != cursor.tail {
             return vec![]
         }
-        if let Some((offset, len)) = TextCursorSet::get_nearest_token_chunk(cursor.head, token_chunks) {
+        if let Some((offset, len)) = TextCursorSet::get_nearest_token_chunk(cursor.head, text_buffer) {
             /*
             let add = match chunk.token_type {
                 TokenType::Whitespace => false,

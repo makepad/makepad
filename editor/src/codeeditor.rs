@@ -495,8 +495,6 @@ impl CodeEditor {
         // give us the focus
         self.set_key_focus(cx);
         
-        log!("HELLO {}", fe.rel.x);
-        
         let offset;
         //let scroll_pos = self._bg_area.get_scroll_pos(cx);
         if fe.rel.x < self.line_number_width {
@@ -511,12 +509,12 @@ impl CodeEditor {
                 1 => {
                 },
                 2 => {
-                    if let Some((coffset, len)) = TextCursorSet::get_nearest_token_chunk(offset, &text_buffer.token_chunks) {
+                    if let Some((coffset, len)) = TextCursorSet::get_nearest_token_chunk(offset, &text_buffer) {
                         self.cursors.set_last_clamp_range((coffset, len));
                     }
                 },
                 3 => {
-                    if let Some((coffset, len)) = TextCursorSet::get_nearest_token_chunk(offset, &text_buffer.token_chunks) {
+                    if let Some((coffset, len)) = TextCursorSet::get_nearest_token_chunk(offset, &text_buffer) {
                         self.cursors.set_last_clamp_range((coffset, len));
                         let (start, _len) = text_buffer.get_nearest_line_range(offset);
                         let mut chunk_offset = offset;
@@ -628,7 +626,7 @@ impl CodeEditor {
             },
             KeyCode::ArrowLeft => {
                 if ke.modifiers.logo || ke.modifiers.control { // token skipping
-                    self.cursors.move_left_nearest_token(ke.modifiers.shift, &text_buffer.token_chunks, text_buffer)
+                    self.cursors.move_left_nearest_token(ke.modifiers.shift, text_buffer)
                 }
                 else {
                     self.cursors.move_left(1, ke.modifiers.shift, text_buffer);
@@ -637,7 +635,7 @@ impl CodeEditor {
             },
             KeyCode::ArrowRight => {
                 if ke.modifiers.logo || ke.modifiers.control { // token skipping
-                    self.cursors.move_right_nearest_token(ke.modifiers.shift, &text_buffer.token_chunks, text_buffer)
+                    self.cursors.move_right_nearest_token(ke.modifiers.shift, text_buffer)
                 }
                 else {
                     self.cursors.move_right(1, ke.modifiers.shift, text_buffer);
@@ -1055,7 +1053,7 @@ impl CodeEditor {
     
     fn update_highlight(&mut self, cx: &mut Cx, text_buffer: &TextBuffer) {
         self._highlight_selection = self.cursors.get_selection_highlight(text_buffer);
-        let new_token = self.cursors.get_token_highlight(text_buffer, &text_buffer.token_chunks);
+        let new_token = self.cursors.get_token_highlight(text_buffer);
         if new_token != self._highlight_token {
             self.reset_highlight_visible(cx);
         }

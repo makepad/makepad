@@ -1,4 +1,4 @@
-use render::*; 
+use render::*;
 
 use crate::textbuffer::*;
 use crate::codeeditor::*;
@@ -39,7 +39,7 @@ impl RustEditor {
     }
     
     pub fn draw_rust_editor(&mut self, cx: &mut Cx, text_buffer: &mut TextBuffer) {
-        if text_buffer.needs_token_chunks() && text_buffer.lines.len() >0{
+        if text_buffer.needs_token_chunks() && text_buffer.lines.len() >0 {
             let mut state = TokenizerState::new(&text_buffer.lines);
             let mut tokenizer = RustTokenizer::new();
             let mut pair_stack = Vec::new();
@@ -57,13 +57,13 @@ impl RustEditor {
             return
         }
         
-        for (index, token_chunk) in text_buffer.token_chunks.iter_mut().enumerate(){
+        for (index, token_chunk) in text_buffer.token_chunks.iter_mut().enumerate() {
             self.code_editor.draw_chunk(cx, index, &text_buffer.flat_text, token_chunk, &text_buffer.messages.cursors);
         }
         
         self.code_editor.end_code_editor(cx, text_buffer);
     }
- }
+}
 
 pub struct RustTokenizer {
     pub comment_single: bool,
@@ -113,7 +113,7 @@ impl RustTokenizer {
                         self.comment_depth = 0;
                     }
                     // output current line
-                    if (chunk.len()-start)>0 {
+                    if (chunk.len() - start)>0 {
                         return TokenType::CommentChunk
                     }
                     
@@ -122,7 +122,7 @@ impl RustTokenizer {
                     return TokenType::Newline
                 }
                 else if state.next == ' ' {
-                    if (chunk.len()-start)>0 {
+                    if (chunk.len() - start)>0 {
                         return TokenType::CommentChunk
                     }
                     while state.next == ' ' {
@@ -455,6 +455,16 @@ impl RustTokenizer {
                 state.advance();
             }
         }
+        else if state.next == 'o' { // parse a octal
+            chunk.push(state.next);
+            state.advance();
+            while state.next == '0' || state.next == '1' || state.next == '2'
+                || state.next == '3' || state.next == '4' || state.next == '5'
+                || state.next == '6' || state.next == '7' || state.next == '_' {
+                chunk.push(state.next);
+                state.advance();
+            }
+        }
         else {
             while state.next_is_digit() || state.next == '_' {
                 chunk.push(state.next);
@@ -472,13 +482,29 @@ impl RustTokenizer {
                 else if state.keyword(chunk, "64") {
                 }
             }
-            else if state.next == '.' || state.next == 'f' {
-                chunk.push(state.next);
-                state.advance();
-                // again eat as many numbers as possible
-                while state.next_is_digit() || state.next == '_' {
+            else if state.next == '.' || state.next == 'f' || state.next == 'e' || state.next == 'E' {
+                if state.next == '.' || state.next == 'f' {
                     chunk.push(state.next);
                     state.advance();
+                    while state.next_is_digit() || state.next == '_' {
+                        chunk.push(state.next);
+                        state.advance();
+                    }
+                }
+                if state.next == 'E' || state.next == 'e' {
+                    chunk.push(state.next);
+                    state.advance();
+                    if state.next == '+' || state.next == '-'{
+                        chunk.push(state.next);
+                        state.advance();
+                        while state.next_is_digit() || state.next == '_' {
+                            chunk.push(state.next);
+                            state.advance();
+                        }
+                    }
+                    else {
+                        return
+                    }
                 }
                 if state.next == 'f' { // the f32, f64 postfix
                     chunk.push(state.next);
@@ -706,7 +732,7 @@ impl RustTokenizer {
         // extra spacey setting that rustfmt seems to do, but i don't like
         let extra_spacey = false;
         let pre_spacey = true;
-
+        
         let mut out = FormatOutput::new();
         let mut tp = TokenParser::new(&text_buffer.flat_text, &text_buffer.token_chunks);
         
@@ -732,7 +758,7 @@ impl RustTokenizer {
         let mut in_multline_comment = false;
         let mut in_singleline_comment = false;
         
-        while tp.advance(){
+        while tp.advance() {
             
             match tp.cur_type() {
                 TokenType::Whitespace => {
@@ -779,16 +805,16 @@ impl RustTokenizer {
                     });
                     first_after_open = true;
                     is_unary_operator = true;
-
+                    
                     let is_curly = tp.cur_char() == '{';
-                    if tp.cur_char() == '('  && (
+                    if tp.cur_char() == '(' && (
                         tp.prev_type() == TokenType::Flow || tp.prev_type() == TokenType::Looping || tp.prev_type() == TokenType::Keyword
                     ) {
                         out.add_space();
                     }
-                    if pre_spacey && is_curly && !first_on_line && tp.prev_type() != TokenType::Namespace{
-                        if tp.prev_char() != ' ' && tp.prev_char() != '{' 
-                        && tp.prev_char() != '[' && tp.prev_char() != '(' && tp.prev_char() != ':' {
+                    if pre_spacey && is_curly && !first_on_line && tp.prev_type() != TokenType::Namespace {
+                        if tp.prev_char() != ' ' && tp.prev_char() != '{'
+                            && tp.prev_char() != '[' && tp.prev_char() != '(' && tp.prev_char() != ':' {
                             out.add_space();
                         }
                     }
@@ -809,7 +835,7 @@ impl RustTokenizer {
                     
                     let expecting_newlines = paren_stack.last().unwrap().expecting_newlines;
                     
-                    if extra_spacey && tp.cur_char() == '}' && !expecting_newlines{
+                    if extra_spacey && tp.cur_char() == '}' && !expecting_newlines {
                         out.add_space();
                     }
                     
@@ -886,7 +912,7 @@ impl RustTokenizer {
                         out.strip_space();
                     }
                     out.extend(tp.cur_chunk());
-                    if  paren_stack.last_mut().unwrap().angle_counter == 0 // otherwise our generics multiline
+                    if paren_stack.last_mut().unwrap().angle_counter == 0 // otherwise our generics multiline
                         && paren_stack.last().unwrap().expecting_newlines == true
                         && tp.next_type() != TokenType::Newline { // we are expecting newlines!
                         // scan forward to see if we really need a newline.

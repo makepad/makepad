@@ -1,4 +1,4 @@
-use render::*; 
+use render::*;
 
 use crate::textcursor::*;
 use std::collections::HashMap;
@@ -100,10 +100,10 @@ impl TextBuffers {
         }
     }
     
-    pub fn handle_file_read(&mut self, cx: &mut Cx, fr: &FileReadEvent)->bool{
+    pub fn handle_file_read(&mut self, cx: &mut Cx, fr: &FileReadEvent) -> bool {
         for (_path, text_buffer) in &mut self.storage {
             if let Some(utf8_data) = text_buffer.load_read_req.as_utf8(fr) {
-                if let Ok(utf8_data) = utf8_data{
+                if let Ok(utf8_data) = utf8_data {
                     // TODO HANDLE ERROR CASE
                     text_buffer.lines = TextBuffer::split_string_to_lines(&utf8_data.to_string());
                     cx.send_signal_before_draw(text_buffer.signal, SIGNAL_TEXTBUFFER_LOADED);
@@ -206,7 +206,7 @@ impl TextBuffer {
             }
             char_count = next_char_count;
         }
-        TextPos {row: 0, col: 0}
+        TextPos {row: self.lines.len()-1, col: 0}
     }
     
     pub fn offset_to_text_pos_next(&self, query_off: usize, old_pos: TextPos, old_off: usize) -> TextPos {
@@ -221,7 +221,7 @@ impl TextBuffer {
             iter_off = next_off;
             row += 1;
         }
-        TextPos {row: 0, col: 0}
+        TextPos {row: self.lines.len()-1, col: 0}
     }
     
     pub fn text_pos_to_offset(&self, pos: TextPos) -> usize {
@@ -247,12 +247,23 @@ impl TextBuffer {
     pub fn calc_next_line_indent_depth(&self, offset: usize, tabsize: usize) -> (usize, usize) {
         let pos = self.offset_to_text_pos(offset);
         let line = &self.lines[pos.row];
-        let prev_index = pos.col;
+        let mut prev_index = pos.col;
         if prev_index == 0 || prev_index > line.len() {
             return (offset - pos.col, 0);
         };
-        let prev = line[prev_index - 1];
-        let instep = if prev == '{' || prev == '(' || prev == '[' {tabsize}else {0};
+        
+        let mut instep = 0;
+        while prev_index > 0 {
+            let prev = line[prev_index - 1];
+            if prev == ')' || prev == '}' || prev == ']' {
+                break;
+            }
+            if prev == '{' || prev == '(' || prev == '[' {
+                instep = tabsize;
+                break;
+            }
+            prev_index -= 1;
+        }
         for (i, ch) in line.iter().enumerate() {
             if *ch != ' ' {
                 return (offset - pos.col, i + instep);
@@ -419,6 +430,10 @@ impl TextBuffer {
         
         if start_pos.row == end_pos.row && rep_lines.len() == 1 { // replace in one line
             let rep_line_zero = rep_lines.drain(0..1).next().unwrap();
+            if end_pos.col >= self.lines[start_pos.row].len(){
+               
+                return vec![vec![]];
+            }
             let line = self.lines[start_pos.row].splice(start_pos.col..end_pos.col, rep_line_zero).collect();
             return vec![line];
         }
@@ -840,7 +855,7 @@ pub struct TokenChunk {
     pub pair_token: usize,
     pub len: usize,
     pub next: char,
-//    pub chunk: Vec<char>
+    //    pub chunk: Vec<char>
 }
 
 impl TokenChunk {
@@ -856,7 +871,7 @@ impl TokenChunk {
         return TokenType::Unexpected
     }
     
-    pub fn push_with_pairing(token_chunks: &mut Vec<TokenChunk>, pair_stack: &mut Vec<usize>, next:char, offset: usize, offset2:usize, token_type: TokenType) {
+    pub fn push_with_pairing(token_chunks: &mut Vec<TokenChunk>, pair_stack: &mut Vec<usize>, next: char, offset: usize, offset2: usize, token_type: TokenType) {
         let pair_token = if token_type == TokenType::ParenOpen {
             pair_stack.push(token_chunks.len());
             token_chunks.len()
@@ -898,7 +913,7 @@ pub struct TokenParser<'a> {
 }
 
 impl <'a>TokenParser<'a> {
-    pub fn new(flat_text:&'a Vec<char>, token_chunks: &'a Vec<TokenChunk>) -> TokenParser<'a> {
+    pub fn new(flat_text: &'a Vec<char>, token_chunks: &'a Vec<TokenChunk>) -> TokenParser<'a> {
         TokenParser {
             tokens: token_chunks,
             flat_text: flat_text,
@@ -942,7 +957,7 @@ impl <'a>TokenParser<'a> {
         if self.index > 0 {
             let len = self.tokens[self.index - 1].len;
             let ch = self.flat_text[self.tokens[self.index - 1].offset];
-            if len == 1 ||  ch == ' '{
+            if len == 1 || ch == ' ' {
                 return ch
             }
         }
@@ -961,13 +976,13 @@ impl <'a>TokenParser<'a> {
     pub fn cur_chunk(&self) -> &[char] {
         let offset = self.tokens[self.index].offset;
         let len = self.tokens[self.index].len;
-        &self.flat_text[offset..(offset+len)]
+        &self.flat_text[offset..(offset + len)]
     }
     
     pub fn next_char(&self) -> char {
         if self.index < self.tokens.len() - 1 {
-            let len = self.tokens[self.index+1].len;
-            let ch = self.flat_text[self.tokens[self.index+1].offset];
+            let len = self.tokens[self.index + 1].len;
+            let ch = self.flat_text[self.tokens[self.index + 1].offset];
             if len == 1 || ch == ' ' {
                 return ch
             }
