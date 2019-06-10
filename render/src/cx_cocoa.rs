@@ -60,18 +60,12 @@ pub struct CocoaApp {
     pub cocoa_windows: Vec<(id, id)>,
     pub last_key_mod: KeyModifiers,
     pub pasteboard: id,
-    pub event_callback: Option<*mut FnMut(&mut CocoaApp, &mut Vec<Event>) -> CocoaLoopState>,
+    pub event_callback: Option<*mut FnMut(&mut CocoaApp, &mut Vec<Event>) -> bool>,
     pub event_recur_block: bool,
     pub event_loop_running: bool,
-    pub loop_state: CocoaLoopState,
+    pub loop_block: bool,
     pub cursors: HashMap<MouseCursor, id>,
     pub current_cursor: MouseCursor,
-}
-
-#[derive(PartialEq)]
-pub enum CocoaLoopState {
-    Block,
-    Poll,
 }
 
 impl CocoaApp {
@@ -97,7 +91,7 @@ impl CocoaApp {
                 view_class: define_cocoa_view_class(),
                 timers: Vec::new(),
                 cocoa_windows: Vec::new(),
-                loop_state: CocoaLoopState::Poll,
+                loop_block: false,
                 last_key_mod: KeyModifiers {..Default::default()},
                 event_callback: None,
                 event_recur_block: false,
@@ -127,7 +121,6 @@ impl CocoaApp {
         let time_now = precise_time_ns();
         (time_now - self.time_start) as f64 / 1_000_000_000.0
     }
-    
     
     unsafe fn process_ns_event(&mut self, ns_event: cocoa::base::id) {
         if ns_event == cocoa::base::nil {
@@ -323,16 +316,16 @@ impl CocoaApp {
             _ => (),
         }
     }
-   
-    pub fn terminate_event_loop(&mut self){
+    
+    pub fn terminate_event_loop(&mut self) {
         self.event_loop_running = false;
     }
-      
+    
     pub fn event_loop<F>(&mut self, mut event_handler: F)
-    where F: FnMut(&mut CocoaApp, &mut Vec<Event>) -> CocoaLoopState,
+    where F: FnMut(&mut CocoaApp, &mut Vec<Event>) -> bool,
     {
         unsafe {
-            self.event_callback = Some(&mut event_handler as *const FnMut(&mut CocoaApp, &mut Vec<Event>) -> CocoaLoopState as *mut FnMut(&mut CocoaApp, &mut Vec<Event>) -> CocoaLoopState);
+            self.event_callback = Some(&mut event_handler as *const FnMut(&mut CocoaApp, &mut Vec<Event>) -> bool as *mut FnMut(&mut CocoaApp, &mut Vec<Event>) -> bool);
             
             while self.event_loop_running {
                 let pool = foundation::NSAutoreleasePool::new(cocoa::base::nil);
@@ -340,9 +333,10 @@ impl CocoaApp {
                 // in here the event loop state is handled
                 let ns_event = appkit::NSApp().nextEventMatchingMask_untilDate_inMode_dequeue_(
                     NSEventMask::NSAnyEventMask.bits() | NSEventMask::NSEventMaskPressure.bits(),
-                    match self.loop_state {
-                        CocoaLoopState::Block =>foundation::NSDate::distantFuture(cocoa::base::nil),
-                        _=>foundation::NSDate::distantPast(cocoa::base::nil)
+                    if self.loop_block {
+                        foundation::NSDate::distantFuture(cocoa::base::nil)
+                    }else {
+                        foundation::NSDate::distantPast(cocoa::base::nil)
                     },
                     foundation::NSDefaultRunLoopMode,
                     cocoa::base::YES
@@ -352,7 +346,7 @@ impl CocoaApp {
                     self.process_ns_event(ns_event);
                 }
                 
-                if ns_event == nil || self.loop_state == CocoaLoopState::Block {
+                if ns_event == nil || self.loop_block {
                     self.do_callback(&mut vec![Event::Paint]);
                 }
                 
@@ -369,7 +363,7 @@ impl CocoaApp {
             };
             self.event_recur_block = true;
             let callback = self.event_callback.unwrap();
-            self.loop_state = (*callback)(self, events);
+            self.loop_block = (*callback)(self, events);
             self.event_recur_block = false;
         }
     }

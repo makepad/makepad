@@ -52,7 +52,7 @@ pub struct Cx {
     pub passes_free: Vec<usize>,
     pub views: Vec<CxView>,
     pub views_free: Vec<usize>,
-
+    
     pub fonts: Vec<CxFont>,
     pub textures: Vec<CxTexture>,
     pub textures_free: Vec<usize>,
@@ -105,7 +105,7 @@ pub struct Cx {
     
     pub panic_now: bool,
     pub panic_redraw: bool,
-
+    
     pub platform: CxPlatform,
 }
 
@@ -140,7 +140,7 @@ impl Default for Cx {
             textures_free: Vec::new(),
             shaders: Vec::new(),
             shader_map: HashMap::new(),
-
+            
             is_in_redraw_cycle: false,
             window_stack: Vec::new(),
             pass_stack: Vec::new(),
@@ -207,7 +207,7 @@ impl Cx {
     
     //pub fn get_shader2(&self, id: usize) -> &CompiledShader {
     //    &self.compiled_shaders[id]
-   // }
+    // }
     
     pub fn add_shader(&mut self, sg: ShaderGen, name: &str) -> Shader {
         let next_id = self.shaders.len();
@@ -215,12 +215,12 @@ impl Cx {
         if *store_id == next_id {
             self.shaders.push(CxShader {
                 name: name.to_string(),
-                shader_gen:sg,
-                platform:None,
-                mapping:CxShaderMapping::default()
+                shader_gen: sg,
+                platform: None,
+                mapping: CxShaderMapping::default()
             });
         }
-        Shader{shader_id:Some(*store_id)}
+        Shader {shader_id: Some(*store_id)}
     }
     
     pub fn process_tap_count(&mut self, digit: usize, pos: Vec2, time: f64) -> u32 {
@@ -239,6 +239,51 @@ impl Cx {
         }
     }
     
+    pub fn get_delegated_dpi_factor(&mut self, pass_id:usize) -> f32 {
+        let mut dpi_factor = 1.0;
+        let mut pass_id_walk = pass_id;
+        for _ in 0..25 {
+            match self.passes[pass_id_walk].dep_of {
+                CxPassDepOf::Window(window_id) => {
+                    dpi_factor = self.windows[window_id].window_geom.dpi_factor;
+                    break;
+                },
+                CxPassDepOf::Pass(next_pass_id) => {
+                    pass_id_walk = next_pass_id;
+                },
+                _ => {break;}
+            }
+        }
+        dpi_factor
+    }
+    
+    pub fn compute_passes_to_repaint(&mut self, passes_todo: &mut Vec<usize>, windows_need_repaint: &mut usize) {
+        passes_todo.truncate(0);
+        
+        for (pass_id, cxpass) in self.passes.iter().enumerate() {
+            if cxpass.paint_dirty {
+                let mut inserted = false;
+                match cxpass.dep_of {
+                    CxPassDepOf::Window(_) => {
+                        *windows_need_repaint += 1
+                    },
+                    CxPassDepOf::Pass(dep_of_pass_id) => {
+                        for insert_before in 0..passes_todo.len() {
+                            if passes_todo[insert_before] == dep_of_pass_id {
+                                passes_todo.insert(insert_before, pass_id);
+                                inserted = true;
+                                break;
+                            }
+                        }
+                    },
+                    _ => ()
+                }
+                if !inserted {
+                    passes_todo.push(pass_id);
+                }
+            }
+        }
+    }
     
     pub fn redraw_pass_of(&mut self, area: Area) {
         // we walk up the stack of area

@@ -18,12 +18,13 @@ use winapi::um::winuser::{MONITOR_DEFAULTTONEAREST};
 
 pub struct Win32App {
     pub time_start: u64,
-    pub event_callback: Option<*mut FnMut(&mut Win32App, &mut Vec<Event>) -> Win32LoopState>,
+    pub event_callback: Option<*mut FnMut(&mut Win32App, &mut Vec<Event>) -> bool>,
     pub event_recur_block: bool,
     pub event_loop_running: bool,
     pub class_name_wstr: Vec<u16>,
-    pub loop_state: Win32LoopState,
+    pub loop_block: bool,
     pub dpi_functions: DpiFunctions,
+    pub current_cursor: MouseCursor,
 }
 
 #[derive(Clone)]
@@ -43,11 +44,6 @@ pub struct Win32Window {
     pub hwnd: Option<HWND>,
 }
 
-#[derive(PartialEq)]
-pub enum Win32LoopState {
-    Block,
-    Poll,
-}
 
 impl Win32App {
     pub fn new() -> Win32App {
@@ -69,7 +65,10 @@ impl Win32App {
             hIconSm: ptr::null_mut(),
         };
         
-        unsafe {winuser::RegisterClassExW(&class);}
+        unsafe {
+            winuser::RegisterClassExW(&class);
+            winuser::IsGUIThread(1);
+        }
         
         let win32_app = Win32App {
             class_name_wstr: class_name_wstr,
@@ -77,8 +76,9 @@ impl Win32App {
             event_callback: None,
             event_recur_block: false,
             event_loop_running: true,
-            loop_state: Win32LoopState::Poll,
-            dpi_functions: DpiFunctions::new()
+            loop_block: false,
+            dpi_functions: DpiFunctions::new(),
+            current_cursor: MouseCursor::Default
         };
         
         win32_app.dpi_functions.become_dpi_aware();
@@ -112,44 +112,36 @@ impl Win32App {
     
     
     pub fn event_loop<F>(&mut self, mut event_handler: F)
-    where F: FnMut(&mut Win32App, &mut Vec<Event>) -> Win32LoopState,
+    where F: FnMut(&mut Win32App, &mut Vec<Event>) -> bool,
     {
         unsafe {
             self.event_callback = Some(
-                &mut event_handler as *const FnMut(&mut Win32App, &mut Vec<Event>) -> Win32LoopState
-                as *mut FnMut(&mut Win32App, &mut Vec<Event>) -> Win32LoopState
+                &mut event_handler as *const FnMut(&mut Win32App, &mut Vec<Event>) -> bool
+                as *mut FnMut(&mut Win32App, &mut Vec<Event>) -> bool
             );
             
             while self.event_loop_running {
                 let mut msg = mem::uninitialized();
-                let mut do_paint = false;
-                match self.loop_state {
-                    Win32LoopState::Block => {
-                        if winuser::GetMessageW(&mut msg, ptr::null_mut(), 0, 0) == 0 {
-                            // Only happens if the message is `WM_QUIT`.
-                            debug_assert_eq!(msg.message, winuser::WM_QUIT);
-                            self.event_loop_running = false;
-                            do_paint = false;
-                        }
-                        else {
-                            winuser::TranslateMessage(&msg);
-                            winuser::DispatchMessageW(&msg);
-                            do_paint = true;
-                        }
-                    },
-                    Win32LoopState::Poll => {
-                        if winuser::PeekMessageW(&mut msg, ptr::null_mut(), 0, 0, 1) == 0 {
-                            do_paint = true;
-                        }
-                        else {
-                            winuser::TranslateMessage(&msg);
-                            winuser::DispatchMessageW(&msg);
-                            do_paint = false;
-                        }
+                if self.loop_block {
+                    if winuser::GetMessageW(&mut msg, ptr::null_mut(), 0, 0) == 0 {
+                        // Only happens if the message is `WM_QUIT`.
+                        debug_assert_eq!(msg.message, winuser::WM_QUIT);
+                        self.event_loop_running = false;
+                    }
+                    else {
+                        winuser::TranslateMessage(&msg);
+                        winuser::DispatchMessageW(&msg);
+                        self.do_callback(&mut vec![Event::Paint]);
                     }
                 }
-                if do_paint {
-                    self.do_callback(&mut vec![Event::Paint]);
+                else {
+                    if winuser::PeekMessageW(&mut msg, ptr::null_mut(), 0, 0, 1) == 0 {
+                        self.do_callback(&mut vec![Event::Paint])
+                    }
+                    else {
+                        winuser::TranslateMessage(&msg);
+                        winuser::DispatchMessageW(&msg);
+                    }
                 }
             }
             self.event_callback = None;
@@ -163,7 +155,7 @@ impl Win32App {
             };
             self.event_recur_block = true;
             let callback = self.event_callback.unwrap();
-            self.loop_state = (*callback)(self, events);
+            self.loop_block = (*callback)(self, events);
             self.event_recur_block = false;
         }
     }
@@ -177,6 +169,22 @@ impl Win32App {
     pub fn post_signal(_signal_id: u64, _value: u64) {
     }
     
+    pub fn terminate_event_loop(&mut self) {
+        self.event_loop_running = false;
+    }
+    
+    pub fn time_now(&self) -> f64 {
+        let time_now = precise_time_ns();
+        (time_now - self.time_start) as f64 / 1_000_000_000.0
+    }
+    
+    
+    pub fn set_mouse_cursor(&mut self, cursor: MouseCursor) {
+        if self.current_cursor != cursor {
+            self.current_cursor = cursor;
+            //TODO
+        }
+    }
 }
 
 impl Win32Window {
@@ -201,24 +209,31 @@ impl Win32Window {
     pub fn init(&mut self, title: &str, size: Vec2, position: Option<Vec2>) {
         
         let style = winuser::WS_SIZEBOX | winuser::WS_MAXIMIZEBOX | winuser::WS_CAPTION
-            | winuser::WS_MINIMIZEBOX | winuser::WS_BORDER | winuser::WS_VISIBLE
+            | winuser::WS_MINIMIZEBOX | winuser::WS_BORDER
             | winuser::WS_CLIPSIBLINGS | winuser::WS_CLIPCHILDREN | winuser::WS_SYSMENU;
         
         let style_ex = winuser::WS_EX_WINDOWEDGE | winuser::WS_EX_APPWINDOW | winuser::WS_EX_ACCEPTFILES;
         
         unsafe {
-            // lets store the window
-            winuser::IsGUIThread(1);
-            
             let title_wstr: Vec<_> = OsStr::new(title).encode_wide().chain(Some(0).into_iter()).collect();
+            
+            let x;
+            let y;
+            if let Some(position) = position {
+                x = position.x as i32;
+                y = position.y as i32;
+            }
+            else {
+                x = winuser::CW_USEDEFAULT;
+                y = winuser::CW_USEDEFAULT
+            }
             
             let hwnd = winuser::CreateWindowExW(
                 style_ex,
                 (*self.win32_app).class_name_wstr.as_ptr(),
                 title_wstr.as_ptr() as LPCWSTR,
                 style,
-                winuser::CW_USEDEFAULT,
-                winuser::CW_USEDEFAULT,
+                x,y,
                 winuser::CW_USEDEFAULT,
                 winuser::CW_USEDEFAULT,
                 ptr::null_mut(),
@@ -231,7 +246,20 @@ impl Win32Window {
             
             winuser::SetWindowLongPtrW(hwnd, winuser::GWLP_USERDATA, &self as *const _ as isize);
             
-            (*self.win32_app).dpi_functions.enable_non_client_dpi_scaling(self.hwnd.unwrap())
+            // fetch the DPI
+            let dpi_factor = self.get_dpi_factor();
+            
+            self.set_inner_size(size);
+            
+            winuser::ShowWindow(hwnd, winuser::SW_SHOW);
+            
+            (*self.win32_app).dpi_functions.enable_non_client_dpi_scaling(self.hwnd.unwrap());
+        }
+    }
+    
+    pub fn update_ptrs(&mut self) {
+        unsafe {
+            winuser::SetWindowLongPtrW(self.hwnd.unwrap(), winuser::GWLP_USERDATA, &self as *const _ as isize);
         }
     }
     
@@ -257,8 +285,10 @@ impl Win32Window {
         (time_now - self.time_start) as f64 / 1_000_000_000.0
     }
     
-    pub fn set_position(&mut self, _pos: Vec2) {
+    pub fn set_ime_spot(&mut self, spot: Vec2) {
+        self.ime_spot = spot;
     }
+    
     
     pub fn get_position(&self) -> Vec2 {
         unsafe {
@@ -266,10 +296,6 @@ impl Win32Window {
             winuser::GetWindowRect(self.hwnd.unwrap(), &mut rect);
             Vec2 {x: rect.left as f32, y: rect.top as f32}
         }
-    }
-    
-    fn get_ime_origin(&self) -> Vec2 {
-        Vec2::zero()
     }
     
     pub fn get_inner_size(&self) -> Vec2 {
@@ -289,7 +315,28 @@ impl Win32Window {
         }
     }
     
-    pub fn set_outer_size(&self, _size: Vec2) {
+    pub fn set_position(&mut self, _pos: Vec2) {
+        
+    }
+    
+    pub fn set_inner_size(&self, size: Vec2) {
+        unsafe {
+            let mut window_rect = RECT {left: 0, top: 0, bottom: 0, right: 0};
+            winuser::GetWindowRect(self.hwnd.unwrap(), &mut window_rect);
+            let mut client_rect = RECT {left: 0, top: 0, bottom: 0, right: 0};
+            winuser::GetClientRect(self.hwnd.unwrap(), &mut client_rect);
+            let dpi = self.get_dpi_factor();
+            winuser::MoveWindow(
+                self.hwnd.unwrap(),
+                window_rect.left,
+                window_rect.top,
+                (size.x * dpi) as i32
+                    + ((window_rect.right - window_rect.left) - (client_rect.right - client_rect.left)),
+                (size.y * dpi) as i32
+                    + ((window_rect.bottom - window_rect.top) - (client_rect.bottom - client_rect.top)),
+                FALSE
+            );
+        }
     }
     
     pub fn get_dpi_factor(&self) -> f32 {
@@ -449,7 +496,7 @@ pub struct DpiFunctions {
     enable_nonclient_dpi_scaling: Option<EnableNonClientDpiScaling>,
     set_process_dpi_awareness_context: Option<SetProcessDpiAwarenessContext>,
     set_process_dpi_awareness: Option<SetProcessDpiAwareness>,
-    set_process_dpi_aware: Option<SetProcessDPIAware>,
+    set_process_dpi_aware: Option<SetProcessDPIAware>
 }
 
 const BASE_DPI: u32 = 96;

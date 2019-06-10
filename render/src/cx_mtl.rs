@@ -103,8 +103,8 @@ impl Cx {
         if let Some(drawable) = layer.next_drawable() {
             
             let render_pass_descriptor = RenderPassDescriptor::new();
-
-            if self.passes[pass_id].color_textures.len()>0{
+            
+            if self.passes[pass_id].color_textures.len()>0 {
                 // TODO add z-buffer attachments and multisample attachments
                 let color_texture = &self.passes[pass_id].color_textures[0];
                 let color_attachment = render_pass_descriptor.color_attachments().object_at(0).unwrap();
@@ -118,12 +118,12 @@ impl Cx {
                     color_attachment.set_load_action(MTLLoadAction::Load);
                 }
             }
-            else{
+            else {
                 let color_attachment = render_pass_descriptor.color_attachments().object_at(0).unwrap();
                 color_attachment.set_texture(Some(drawable.texture()));
                 color_attachment.set_store_action(MTLStoreAction::Store);
                 color_attachment.set_load_action(MTLLoadAction::Clear);
-                color_attachment.set_clear_color(MTLClearColor::new(0.0,0.0,0.0,0.0))
+                color_attachment.set_clear_color(MTLClearColor::new(0.0, 0.0, 0.0, 0.0))
             }
             
             let command_buffer = metal_cx.command_queue.new_command_buffer();
@@ -206,43 +206,14 @@ impl Cx {
         self.call_event_handler(&mut event_handler, &mut Event::Construct);
         
         self.redraw_child_area(Area::All);
+        
         let mut passes_todo = Vec::new();
+        
         cocoa_app.event_loop( | cocoa_app, events | {
             let mut paint_dirty = false;
             for mut event in events {
                 
-                match &mut event {
-                    Event::FingerHover(_) => {
-                        self.finger_over_last_area = Area::Empty;
-                    },
-                    Event::FingerUp(_) => {
-                        self.down_mouse_cursor = None;
-                    },
-                    Event::WindowCloseRequested(_cr) => {
-                    },
-                    Event::FingerDown(fe) => {
-                        // lets set the finger tap count
-                        fe.tap_count = self.process_tap_count(fe.digit, fe.abs, fe.time);
-                    },
-                    Event::KeyDown(ke) => {
-                        self.process_key_down(ke.clone());
-                        if ke.key_code == KeyCode::PrintScreen {
-                            if ke.modifiers.control {
-                                self.panic_redraw = true;
-                            }
-                            else {
-                                self.panic_now = true;
-                            }
-                        }
-                    },
-                    Event::KeyUp(ke) => {
-                        self.process_key_up(&ke);
-                    },
-                    Event::AppFocusLost => {
-                        self.call_all_keys_up(&mut event_handler);
-                    },
-                    _ => ()
-                };
+                self.process_desktop_pre_event(&mut event, &mut event_handler);
                 
                 match &event {
                     Event::WindowGeomChange(re) => { // do this here because mac
@@ -262,31 +233,7 @@ impl Cx {
                     },
                     Event::Paint => {
                         
-                        if self.playing_anim_areas.len() != 0 {
-                            let time = cocoa_app.time_now();
-                            // keeps the error as low as possible
-                            self.call_animation_event(&mut event_handler, time);
-                        }
-                        
-                        if self.frame_callbacks.len() != 0 {
-                            let time = cocoa_app.time_now();
-                            // keeps the error as low as possible
-                            self.call_frame_event(&mut event_handler, time);
-                        }
-                        
-                        self.call_signals_before_draw(&mut event_handler);
-                        
-                        // call redraw event
-                        if self.redraw_child_areas.len()>0 || self.redraw_parent_areas.len()>0 {
-                            //let time_start = cocoa_window.time_now();
-                            self.call_draw_event(&mut event_handler);
-                            // let time_end = cocoa_window.time_now();
-                            // println!("Redraw took: {}", (time_end - time_start));
-                        }
-                        
-                        self.process_desktop_file_read_requests(&mut event_handler);
-                        
-                        self.call_signals_after_draw(&mut event_handler);
+                        self.process_desktop_paint_callbacks(cocoa_app.time_now(), &mut event_handler);
                         
                         // construct or destruct windows
                         for (index, window) in self.windows.iter_mut().enumerate() {
@@ -339,32 +286,8 @@ impl Cx {
                         }
                         
                         // build a list of renderpasses to repaint
-                        passes_todo.truncate(0);
-                        
                         let mut windows_need_repaint = 0;
-                        for (pass_id, cxpass) in self.passes.iter().enumerate() {
-                            if cxpass.paint_dirty {
-                                let mut inserted = false;
-                                match cxpass.dep_of {
-                                    CxPassDepOf::Window(_) => {
-                                        windows_need_repaint += 1
-                                    },
-                                    CxPassDepOf::Pass(dep_of_pass_id) => {
-                                        for insert_before in 0..passes_todo.len() {
-                                            if passes_todo[insert_before] == dep_of_pass_id {
-                                                passes_todo.insert(insert_before, pass_id);
-                                                inserted = true;
-                                                break;
-                                            }
-                                        }
-                                    },
-                                    _ => ()
-                                }
-                                if !inserted {
-                                    passes_todo.push(pass_id);
-                                }
-                            }
-                        }
+                        self.compute_passes_to_repaint(&mut passes_todo, &mut windows_need_repaint);
                         
                         if passes_todo.len() > 0 {
                             for pass_id in &passes_todo {
@@ -399,20 +322,7 @@ impl Cx {
                                         }
                                     }
                                     CxPassDepOf::Pass(parent_pass_id) => {
-                                        let mut dpi_factor = 1.0;
-                                        let mut pass_id_walk = parent_pass_id;
-                                        for _ in 0..25 {
-                                            match self.passes[pass_id_walk].dep_of {
-                                                CxPassDepOf::Window(window_id) => {
-                                                    dpi_factor = self.windows[window_id].window_geom.dpi_factor;
-                                                    break;
-                                                },
-                                                CxPassDepOf::Pass(next_pass_id) => {
-                                                    pass_id_walk = next_pass_id;
-                                                },
-                                                _ => {break;}
-                                            }
-                                        }
+                                        let dpi_factor = self.get_delegated_dpi_factor(parent_pass_id);
                                         self.passes[*pass_id].set_dpi_factor(dpi_factor);
                                         self.draw_pass_to_texture(
                                             *pass_id,
@@ -431,23 +341,14 @@ impl Cx {
                         self.call_event_handler(&mut event_handler, &mut event);
                     }
                 }
-                match &event {
-                    Event::FingerUp(fe) => { // decapture automatically
-                        self.captured_fingers[fe.digit] = Area::Empty;
-                    },
-                    Event::FingerHover(_fe) => { // new last area finger over
-                        self._finger_over_last_area = self.finger_over_last_area
-                    },
-                    Event::WindowClosed(_wc) => {
-                        cocoa_app.terminate_event_loop();
-                    },
-                    _ => {}
+                if self.process_desktop_post_event(event) {
+                    cocoa_app.terminate_event_loop();
                 }
             }
             if self.playing_anim_areas.len() == 0 && self.redraw_parent_areas.len() == 0 && self.redraw_child_areas.len() == 0 && self.frame_callbacks.len() == 0 && !paint_dirty {
-                CocoaLoopState::Block
+                true
             } else {
-                CocoaLoopState::Poll
+                false
             }
         })
     }
@@ -485,21 +386,21 @@ impl Cx {
     }
 }
 
-pub struct MetalCx{
-    pub device:Device,
-    pub command_queue:CommandQueue
+pub struct MetalCx {
+    pub device: Device,
+    pub command_queue: CommandQueue
 }
 
-impl MetalCx{
+impl MetalCx {
     
-    pub fn new()->MetalCx{
-        let device = Device::system_default(); 
-        MetalCx{
+    pub fn new() -> MetalCx {
+        let device = Device::system_default();
+        MetalCx {
             command_queue: device.new_command_queue(),
-            device:device
+            device: device
         }
     }
- 
+    
     pub fn update_platform_render_target(&self, cxtexture: &mut CxTexture, dpi_factor: f32, size: Vec2, is_depth: bool) {
         
         let width = if let Some(width) = cxtexture.desc.width {width as u64} else {(size.x * dpi_factor) as u64};
@@ -573,7 +474,7 @@ impl MetalCx{
                     mdesc.set_pixel_format(MTLPixelFormat::BGRA8Unorm);
                     let tex = self.device.new_texture(&mdesc);
                     cxtexture.platform.mtltexture = Some(tex);
-
+                    
                     if cxtexture.image_u32.len() != width * height {
                         println!("update_platform_texture_image2d with wrong buffer_u32 size!");
                         cxtexture.platform.mtltexture = None;

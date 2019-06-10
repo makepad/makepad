@@ -53,6 +53,82 @@ impl Cx {
         0
     }
     
+    pub fn process_desktop_pre_event<F>(&mut self, event: &mut Event, mut event_handler: F)
+    where F: FnMut(&mut Cx, &mut Event)
+    {
+        match event {
+            Event::FingerHover(_) => {
+                self.finger_over_last_area = Area::Empty;
+            },
+            Event::FingerUp(_) => {
+                self.down_mouse_cursor = None;
+            },
+            Event::WindowCloseRequested(_cr) => {
+            },
+            Event::FingerDown(fe) => {
+                // lets set the finger tap count
+                fe.tap_count = self.process_tap_count(fe.digit, fe.abs, fe.time);
+            },
+            Event::KeyDown(ke) => {
+                self.process_key_down(ke.clone());
+                if ke.key_code == KeyCode::PrintScreen {
+                    if ke.modifiers.control {
+                        self.panic_redraw = true;
+                    }
+                    else {
+                        self.panic_now = true;
+                    }
+                }
+            },
+            Event::KeyUp(ke) => {
+                self.process_key_up(&ke);
+            },
+            Event::AppFocusLost => {
+                self.call_all_keys_up(&mut event_handler);
+            },
+            _ => ()
+        };
+    }
+    
+    pub fn process_desktop_post_event(&mut self, event: &mut Event)->bool{
+        match event {
+            Event::FingerUp(fe) => { // decapture automatically
+                self.captured_fingers[fe.digit] = Area::Empty;
+            },
+            Event::FingerHover(_fe) => { // new last area finger over
+                self._finger_over_last_area = self.finger_over_last_area
+            },
+            Event::WindowClosed(_wc) => {
+                return true
+            },
+            _ => {}
+        }
+        false
+    }
+    
+    pub fn process_desktop_paint_callbacks<F>(&mut self, time: f64, mut event_handler: F)
+    where F: FnMut(&mut Cx, &mut Event)
+    {
+        if self.playing_anim_areas.len() != 0 {
+            self.call_animation_event(&mut event_handler, time);
+        }
+        
+        if self.frame_callbacks.len() != 0 {
+            self.call_frame_event(&mut event_handler, time);
+        }
+        
+        self.call_signals_before_draw(&mut event_handler);
+        
+        // call redraw event
+        if self.redraw_child_areas.len()>0 || self.redraw_parent_areas.len()>0 {
+            self.call_draw_event(&mut event_handler);
+        }
+        
+        self.process_desktop_file_read_requests(&mut event_handler);
+        
+        self.call_signals_after_draw(&mut event_handler);
+    }
+    
     
     pub fn process_desktop_file_read_requests<F>(&mut self, mut event_handler: F)
     where F: FnMut(&mut Cx, &mut Event)
