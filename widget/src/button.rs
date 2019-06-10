@@ -10,7 +10,6 @@ pub struct Button{
     pub anim_over:Anim,
     pub anim_down:Anim,
 
-    pub _hit_state:HitState,
     pub _is_down:bool,
     pub _bg_area:Area,
 }
@@ -60,7 +59,6 @@ impl Style for Button{
                 ]),
             ]),
 
-            _hit_state:HitState{..Default::default()},
             _is_down:false,
             _bg_area:Area::Empty,
         }
@@ -103,7 +101,7 @@ impl Button{
     pub fn handle_button(&mut self, cx:&mut Cx, event:&mut Event)->ButtonEvent{
         
         //let mut ret_event = ButtonEvent::None;
-        match self._hit_state.hits(cx, self._bg_area, event){
+        match event.hits(cx, self._bg_area, HitOpt::default()){
             Event::Animate(ae)=>{
                 self.animator.calc_write(cx, "bg.color", ae.time, self._bg_area);
                 self.animator.calc_write(cx, "bg.border_color", ae.time, self._bg_area);

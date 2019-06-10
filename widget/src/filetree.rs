@@ -41,7 +41,6 @@ pub enum NodeState{
 
 #[derive(Clone)]
 pub struct NodeDraw{
-    hit_state:HitState,
     animator:Animator,
     marked:u64
 }
@@ -335,7 +334,7 @@ impl FileTree{
 
             let node_draw = if let Some(node_draw) = node.get_draw(){node_draw}else{continue};
 
-            match node_draw.hit_state.hits(cx, node_draw.animator.area, event){
+            match event.hits(cx, node_draw.animator.area, HitOpt::default()){
                 Event::Animate(ae)=>{
                     node_draw.animator.calc_write(cx, "bg.color", ae.time, node_draw.animator.area);
                 },
@@ -484,7 +483,6 @@ impl FileTree{
             let node_draw = node.get_draw();
             if node_draw.is_none(){
                 *node_draw = Some(NodeDraw{
-                    hit_state:HitState{..Default::default()},
                     animator:Animator::new(Self::get_default_anim(cx, counter, false)),
                     marked:0
                 })

@@ -55,7 +55,6 @@ pub enum BuildStage {
 
 #[derive(Clone)]
 pub struct RustDrawMessage {
-    hit_state: HitState,
     animator: Animator,
     path: String,
     body: String,
@@ -305,7 +304,7 @@ impl RustCompiler {
         
         //let mut unmark_nodes = false;
         for (counter, dm) in self._draw_messages.iter_mut().enumerate() {
-            match dm.hit_state.hits(cx, dm.animator.area, event) {
+            match event.hits(cx, dm.animator.area, HitOpt::default()) {
                 Event::Animate(ae) => {
                     dm.animator.calc_write(cx, "bg.color", ae.time, dm.animator.area);
                 },
@@ -669,7 +668,6 @@ impl RustCompiler {
                                             //span.file_name = format!("/{}",span.file_name);
                                             span.level = Some(parsed.message.level.clone());
                                             self._draw_messages.push(RustDrawMessage {
-                                                hit_state: HitState {..Default::default()},
                                                 animator: Animator::new(Self::get_default_anim(cx, self._draw_messages.len(), false)),
                                                 is_selected: false,
                                                 path: span.file_name,
@@ -749,7 +747,6 @@ impl RustCompiler {
                         let col = if let Ok(col) = col_str.parse::<u32>() {col as usize}else {0};
                         
                         self._draw_messages.push(RustDrawMessage {
-                            hit_state: HitState {..Default::default()},
                             animator: Animator::new(Self::get_default_anim(cx, self._draw_messages.len(), false)),
                             is_selected: false,
                             more_lines: Vec::new(),

@@ -228,7 +228,7 @@ impl Area{
             }
             _=>(),
         }
-        println!("get_instance_offset {} called on invalid prop", prop_name);
+        //println!("get_instance_offset {} called on invalid prop", prop_name);
         0
     }
 
@@ -251,7 +251,7 @@ impl Area{
             }
             _=>(),
         }
-        println!("get_uniform_offset {} called on invalid prop", prop_name);
+        //println!("get_uniform_offset {} called on invalid prop", prop_name);
         0
     }
 

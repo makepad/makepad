@@ -62,7 +62,6 @@ impl TextCursor {
         for (index, ch) in text_buffer.lines[pos.row].iter().enumerate() {
             if *ch != '\t' && *ch != ' ' {
                 self.head = text_buffer.text_pos_to_offset(TextPos {row: pos.row, col: index});
-                //self.calc_max(text_buffer);
                 return
             }
         }
@@ -72,7 +71,6 @@ impl TextCursor {
         let pos = text_buffer.offset_to_text_pos(self.head);
         // alright lets walk the line from the left till its no longer 9 or 32
         self.head = text_buffer.text_pos_to_offset(TextPos {row: pos.row, col: text_buffer.lines[pos.row].len()});
-        //self.calc_max(text_buffer);
     }
     
     pub fn move_left(&mut self, char_count: usize, _text_buffer: &TextBuffer) {
@@ -82,7 +80,6 @@ impl TextCursor {
         else {
             self.head = 0;
         }
-        //self.calc_max(text_buffer);
     }
     
     pub fn move_right(&mut self, char_count: usize, total_char_count: usize, _text_buffer: &TextBuffer) {
@@ -92,7 +89,6 @@ impl TextCursor {
         else {
             self.head = total_char_count;
         }
-        //self.calc_max(text_buffer);
     }
     
     pub fn move_up(&mut self, line_count: usize, text_buffer: &TextBuffer) {

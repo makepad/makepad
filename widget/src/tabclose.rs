@@ -9,7 +9,6 @@ pub struct TabClose{
     pub anim_over:Anim,
     pub anim_down:Anim,
     pub margin:Margin,
-    pub _hit_state:HitState,
     pub _is_down:bool,
     pub _bg_area:Area,
 }
@@ -39,12 +38,6 @@ impl Style for TabClose{
                 Track::float("bg.down", Ease::OutExp, vec![(0.0, 0.0),(1.0, 3.1415*0.5)]),
             ]),
             margin:Margin::zero(),
-            _hit_state:HitState{
-                margin:Some(Margin{
-                    l:5.,t:5.,r:5.,b:5.
-                }),
-                ..Default::default()
-            },
             _is_down:false,
             _bg_area:Area::Empty,
         }
@@ -84,7 +77,7 @@ impl TabClose{
     pub fn handle_tab_close(&mut self, cx:&mut Cx, event:&mut Event)->TabCloseEvent{
         
         //let mut ret_event = ButtonEvent::None;
-        match self._hit_state.hits(cx, self._bg_area, event){
+        match event.hits(cx, self._bg_area, HitOpt{margin:Some(Margin{l:5.,t:5.,r:5.,b:5.}),..Default::default()}){
             Event::Animate(ae)=>{
                 self.animator.calc_write(cx, "bg.color", ae.time, self._bg_area);
                 self.animator.calc_write(cx, "bg.hover", ae.time, self._bg_area);

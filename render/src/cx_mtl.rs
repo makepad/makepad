@@ -217,7 +217,7 @@ impl Cx {
                 
                 match &mut event {
                     Event::FingerHover(_) => {
-                        self.hover_mouse_cursor = None;
+                        self.finger_over_last_area = Area::Empty;
                     },
                     Event::FingerUp(_) => {
                         self.down_mouse_cursor = None;
@@ -440,6 +440,9 @@ impl Cx {
                 match &event {
                     Event::FingerUp(fe) => { // decapture automatically
                         self.captured_fingers[fe.digit] = Area::Empty;
+                    },
+                    Event::FingerHover(_fe) => { // new last area finger over
+                        self._finger_over_last_area = self.finger_over_last_area
                     },
                     Event::WindowClosed(_wc) => {
                         cocoa_app.terminate_event_loop();

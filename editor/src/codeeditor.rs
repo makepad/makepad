@@ -1,5 +1,5 @@
-use render::*; 
-use widget::*; 
+use render::*;
+use widget::*;
 use crate::textbuffer::*;
 use crate::textcursor::*;
 use crate::codeicon::*;
@@ -20,14 +20,13 @@ pub struct CodeEditor {
     pub message_marker: Quad,
     pub text: Text,
     pub cursors: TextCursorSet,
-
+    
     pub open_font_size: f32,
     pub folded_font_size: f32,
     pub line_number_width: f32,
     pub top_padding: f32,
-    pub colors: CodeEditorColors, 
+    pub colors: CodeEditorColors,
     pub cursor_blink_speed: f64,
-    pub _hit_state: HitState,
     pub _bg_area: Area,
     pub _highlight_area: Area,
     pub _text_inst: Option<AlignedInstance>,
@@ -248,7 +247,6 @@ impl Style for CodeEditor {
             line_number_width: 45.,
             cursor_blink_speed: 0.5,
             top_padding: 27.,
-            _hit_state: HitState {no_scrolling: true, ..Default::default()},
             _monospace_size: Vec2::zero(),
             _monospace_base: Vec2::zero(),
             _last_finger_move: None,
@@ -330,14 +328,14 @@ impl CodeEditor {
                 let col = color;
                 let thickness = 0.8 + dpi_dilate * 0.5;
                 if indent_id == indent_sel {
-                    col *= vec4(1.,1.,1.,1.);
+                    col *= vec4(1., 1., 1., 1.);
                     thickness *= 1.3;
                 }
                 else {
-                    col *= vec4(0.75,0.75,0.75,0.75);
+                    col *= vec4(0.75, 0.75, 0.75, 0.75);
                 }
                 df_viewport(pos * vec2(w, h));
-                df_move_to(1., - 1.);
+                df_move_to(1., -1.);
                 df_line_to(1., h + 1.);
                 return df_stroke(col, thickness);
             }
@@ -354,7 +352,7 @@ impl CodeEditor {
                     return vec4(color.rgb * color.a, color.a)
                 }
                 else {
-                    return vec4(0.,0.,0.,0.);
+                    return vec4(0., 0., 0., 0.);
                 }
             }
         }));
@@ -372,7 +370,7 @@ impl CodeEditor {
             const border_radius: float = 2.;
             
             fn vertex() -> vec4 { // custom vertex shader because we widen the draweable area a bit for the gloopiness
-                let shift: vec2 = - view_scroll * view_do_scroll;
+                let shift: vec2 = -view_scroll * view_do_scroll;
                 let clipped: vec2 = clamp(
                     geom * vec2(w + 16., h) + vec2(x, y) + shift - vec2(8., 0.),
                     view_clip.xy,
@@ -386,7 +384,7 @@ impl CodeEditor {
                 df_viewport(pos * vec2(w, h));
                 df_box(0., 0., w, h, border_radius);
                 if prev_w > 0. {
-                    df_box(prev_x, - h, prev_w, h, border_radius);
+                    df_box(prev_x, -h, prev_w, h, border_radius);
                     df_gloop(gloopiness);
                 }
                 if next_w > 0. {
@@ -454,7 +452,7 @@ impl CodeEditor {
             let visible: float<Uniform>;
             fn pixel() -> vec4 {
                 if visible<0.5 {
-                    return vec4(0.,0.,0.,0.)
+                    return vec4(0., 0., 0., 0.)
                 }
                 df_viewport(pos * vec2(w, h));
                 df_box(0.5, 0.5, w - 1., h - 1., 1.);
@@ -515,13 +513,16 @@ impl CodeEditor {
                 },
                 3 => {
                     if let Some((coffset, len)) = TextCursorSet::get_nearest_token_chunk(offset, &text_buffer) {
-                        self.cursors.set_last_clamp_range((coffset, len));
-                        let (start, _len) = text_buffer.get_nearest_line_range(offset);
-                        let mut chunk_offset = offset;
+                        //self.cursors.set_last_clamp_range((coffset, len));
+                        let (start, line_len) = text_buffer.get_nearest_line_range(offset);
+                        let mut chunk_offset = coffset;
                         let mut chunk_len = len;
                         if start < chunk_offset {
                             chunk_len += chunk_offset - start;
                             chunk_offset = start;
+                            if line_len > chunk_len {
+                                chunk_len = line_len;
+                            }
                         }
                         self.cursors.set_last_clamp_range((chunk_offset, chunk_len));
                     }
@@ -531,8 +532,8 @@ impl CodeEditor {
                     }
                 },
                 _ => {
-                    let range = (0, text_buffer.calc_char_count());
-                    self.cursors.set_last_clamp_range(range);
+                    //let range = (0, text_buffer.calc_char_count());
+                    //self.cursors.set_last_clamp_range(range);
                 }
             }
             // ok so we should scan a range
@@ -805,8 +806,8 @@ impl CodeEditor {
         }
         // global events
         match event {
-            Event::Timer(te) => if self._cursor_blink_timer.is_timer(te)  {
-                if self.has_key_focus(cx){
+            Event::Timer(te) => if self._cursor_blink_timer.is_timer(te) {
+                if self.has_key_focus(cx) {
                     self._cursor_blink_timer = cx.start_timer(self.cursor_blink_speed, false);
                 }
                 // update the cursor uniform to blink it.
@@ -816,20 +817,20 @@ impl CodeEditor {
                 self._highlight_area.write_uniform_float(cx, "visible", self._highlight_visibility);
                 // ok see if we changed.
                 if self._last_lag_mutation_id != text_buffer.mutation_id {
+                    let was_filechange = self._last_lag_mutation_id != 0;
                     self._last_lag_mutation_id = text_buffer.mutation_id;
-                    return CodeEditorEvent::LagChange;
+                    if was_filechange{
+                        return CodeEditorEvent::LagChange;
+                    }
                 }
             },
             Event::Signal(se) => if text_buffer.signal.is_signal(se) {
                 match se.value {
-                    SIGNAL_TEXTBUFFER_MESSAGE_UPDATE => {
+                    SIGNAL_TEXTBUFFER_MESSAGE_UPDATE | SIGNAL_TEXTBUFFER_LOADED | SIGNAL_TEXTBUFFER_DATA_UPDATE => {
                         self.view.redraw_view_area(cx);
                     },
                     SIGNAL_TEXTBUFFER_JUMP_TO_OFFSET => {
                         self.do_jump_to_offset(cx, text_buffer);
-                    },
-                    SIGNAL_TEXTBUFFER_DATA_UPDATE => {
-                        self.view.redraw_view_area(cx);
                     },
                     SIGNAL_TEXTBUFFER_KEYBOARD_UPDATE => {
                         if let Some(key_down) = &text_buffer.keyboard.key_down {
@@ -855,7 +856,7 @@ impl CodeEditor {
             _ => ()
         }
         // editor local
-        match self._hit_state.hits(cx, self._bg_area, event) {
+        match event.hits(cx, self._bg_area, HitOpt {no_scrolling: true, ..Default::default()}) {
             Event::KeyFocusLost(_kf) => {
                 self.view.redraw_view_area(cx)
             },
@@ -1167,17 +1168,17 @@ impl CodeEditor {
             inst.push_float(cx, indent_id);
         }
     }
-
-    pub fn draw_chunk(&mut self, cx: &mut Cx, token_chunks_index:usize, flat_text:&Vec<char>, token_chunk: &TokenChunk, message_cursors: &Vec<TextCursor>) {
+    
+    pub fn draw_chunk(&mut self, cx: &mut Cx, token_chunks_index: usize, flat_text: &Vec<char>, token_chunk: &TokenChunk, message_cursors: &Vec<TextCursor>) {
         if token_chunk.len == 0 {
             return
         }
-
+        
         let token_type = token_chunk.token_type;
-        let chunk = &flat_text[token_chunk.offset..(token_chunk.offset+token_chunk.len)];//chunk;
-        let offset = token_chunk.offset;// end_offset - chunk.len() - 1;
+        let chunk = &flat_text[token_chunk.offset..(token_chunk.offset + token_chunk.len)]; //chunk;
+        let offset = token_chunk.offset; // end_offset - chunk.len() - 1;
         let next_char = token_chunk.next;
-
+        
         // maintain paren stack
         if token_type == TokenType::ParenOpen {
             self.draw_paren_open(token_chunks_index, offset, next_char, chunk);
@@ -1237,7 +1238,7 @@ impl CodeEditor {
                 TokenType::TypeDef => {
                     self._last_indent_color = self.colors.indent_line_typedef;
                 },
-                TokenType::Fn|TokenType::Call => {
+                TokenType::Fn | TokenType::Call => {
                     self._last_indent_color = self.colors.indent_line_fn;
                 }
                 _ => ()
@@ -1382,7 +1383,7 @@ impl CodeEditor {
             }
         }
         self._tokens_on_line += 1;
-
+        
         // Do all the Paren matching highlighting drawing
         if token_chunk.token_type == TokenType::ParenClose {
             self.draw_paren_close(cx, token_chunks_index, offset, next_char, chunk);
@@ -1401,14 +1402,14 @@ impl CodeEditor {
         }
     }
     
-    fn draw_paren_open(&mut self, token_chunks_index:usize, offset: usize, next_char: char, chunk: &[char]) {
+    fn draw_paren_open(&mut self, token_chunks_index: usize, offset: usize, next_char: char, chunk: &[char]) {
         let marked = if let Some(pos) = self.cursors.get_last_cursor_singular() {
             pos == offset || pos == offset + 1 && next_char != '(' && next_char != '{' && next_char != '['
         }
         else {false};
         
         self._paren_stack.push(ParenItem {
-            pair_start: token_chunks_index,//self.token_chunks.len(),
+            pair_start: token_chunks_index, //self.token_chunks.len(),
             geom_open: None,
             geom_close: None,
             marked: marked,
@@ -1416,7 +1417,7 @@ impl CodeEditor {
         });
     }
     
-    fn draw_paren_close(&mut self, cx: &mut Cx, token_chunks_index:usize, offset: usize, next_char: char, chunk: &[char])  {
+    fn draw_paren_close(&mut self, cx: &mut Cx, token_chunks_index: usize, offset: usize, next_char: char, chunk: &[char]) {
         //let token_chunks_len = self.token_chunks.len();
         if self._paren_stack.len() == 0 {
             return
@@ -1560,7 +1561,7 @@ impl CodeEditor {
                 // prev_x, prev_w
             }
             else {
-                mk_inst.push_vec2(cx, Vec2 {x: 0., y: - 1.});
+                mk_inst.push_vec2(cx, Vec2 {x: 0., y: -1.});
                 // prev_x, prev_w
             }
             // do we have a next
@@ -1570,7 +1571,7 @@ impl CodeEditor {
                 // prev_x, prev_w
             }
             else {
-                mk_inst.push_vec2(cx, Vec2 {x: 0., y: - 1.});
+                mk_inst.push_vec2(cx, Vec2 {x: 0., y: -1.});
                 // prev_x, prev_w
             }
         }
@@ -1740,7 +1741,7 @@ impl CodeEditor {
         let rel = self._bg_area.abs_to_rel(cx, Vec2 {x: 0.0, y: ypos_abs}, false);
         let mut mono_size;
         // = Vec2::zero();
-        let end_col = if end {1<<31}else {0};
+        let end_col = if end {1 << 31}else {0};
         for (row, geom) in self._line_geometry.iter().enumerate() {
             //let geom = &self._line_geometry[pos.row];
             mono_size = Vec2 {x: self._monospace_base.x * geom.font_size, y: self._monospace_base.y * geom.font_size};
@@ -1785,7 +1786,7 @@ impl CodeEditor {
         };
         let delta = Vec2 {
             x: if fe.abs.x < rect.x {
-                - ((rect.x - fe.abs.x) * pow_scale).powf(pow_fac).min(max_speed)
+                -((rect.x - fe.abs.x) * pow_scale).powf(pow_fac).min(max_speed)
             }
             else if fe.abs.x > rect.x + rect.w {
                 ((fe.abs.x - (rect.x + rect.w)) * pow_scale).powf(pow_fac).min(max_speed)
@@ -1794,7 +1795,7 @@ impl CodeEditor {
                 0.
             },
             y: if fe.abs.y < rect.y {
-                - ((rect.y - fe.abs.y) * pow_scale).powf(pow_fac).min(max_speed)
+                -((rect.y - fe.abs.y) * pow_scale).powf(pow_fac).min(max_speed)
             }
             else if fe.abs.y > rect.y + rect.h {
                 ((fe.abs.y - (rect.y + rect.h)) * pow_scale).powf(pow_fac).min(max_speed)

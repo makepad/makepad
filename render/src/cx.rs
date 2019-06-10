@@ -87,6 +87,10 @@ pub struct Cx {
     pub hover_mouse_cursor: Option<MouseCursor>,
     pub captured_fingers: Vec<Area>,
     pub finger_tap_count: Vec<(Vec2, f64, u32)>,
+    pub finger_down_abs_start: Vec<Vec2>,
+    pub finger_down_rel_start: Vec<Vec2>,
+    pub finger_over_last_area: Area,
+    pub _finger_over_last_area: Area,
     
     pub playing_anim_areas: Vec<AnimArea>,
     pub ended_anim_areas: Vec<AnimArea>,
@@ -110,9 +114,13 @@ impl Default for Cx {
     fn default() -> Self {
         let mut captured_fingers = Vec::new();
         let mut finger_tap_count = Vec::new();
+        let mut finger_down_abs_start = Vec::new();
+        let mut finger_down_rel_start = Vec::new();
         for _i in 0..10 {
             captured_fingers.push(Area::Empty);
             finger_tap_count.push((Vec2::zero(), 0.0, 0));
+            finger_down_abs_start.push(Vec2::zero());
+            finger_down_rel_start.push(Vec2::zero());
         }
         
         Self {
@@ -161,6 +169,10 @@ impl Default for Cx {
             hover_mouse_cursor: None,
             captured_fingers: captured_fingers,
             finger_tap_count: finger_tap_count,
+            finger_down_abs_start: finger_down_abs_start,
+            finger_down_rel_start: finger_down_rel_start,
+            finger_over_last_area: Area::Empty,
+            _finger_over_last_area: Area::Empty,
             
             style_values: BTreeMap::new(),
             

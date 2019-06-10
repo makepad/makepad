@@ -147,7 +147,6 @@ impl Style for App {
     }
 }
 
-
 impl AppWindow {
     fn handle_app_window(&mut self, cx: &mut Cx, event: &mut Event, window_index: usize, app_global: &mut AppGlobal) {
         
@@ -404,8 +403,6 @@ impl App {
                 }
                 else if let Some(utf8_data) = self.app_global.app_state_read_req.as_utf8(fr) {
                     if let Ok(utf8_data) = utf8_data {
-                        println!("LOADING DEFAULT");
-                        
                         if let Ok(state) = serde_json::from_str(&utf8_data) {
                             self.app_global.state = state;
                             

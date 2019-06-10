@@ -776,20 +776,26 @@ impl RustTokenizer {
                 TokenType::Newline => {
                     in_singleline_comment = false;
                     //paren_stack.last_mut().unwrap().angle_counter = 0;
-                    if first_on_line && !in_singleline_comment && !in_multline_comment {
-                        out.indent(expected_indent);
-                    }
-                    else {
-                        out.strip_space();
-                    }
-                    if first_after_open {
-                        paren_stack.last_mut().unwrap().expecting_newlines = true;
-                        expected_indent += 4;
-                    }
-                    if paren_stack.last_mut().unwrap().expecting_newlines { // only insert when expecting newlines
-                        first_after_open = false;
+                    if  in_singleline_comment || in_multline_comment{
                         out.new_line();
                         first_on_line = true;
+                    }
+                    else{
+                        if first_on_line {
+                            out.indent(expected_indent);
+                        }
+                        else {
+                            out.strip_space();
+                        }
+                        if first_after_open {
+                            paren_stack.last_mut().unwrap().expecting_newlines = true;
+                            expected_indent += 4;
+                        }
+                        if paren_stack.last_mut().unwrap().expecting_newlines { // only insert when expecting newlines
+                            first_after_open = false;
+                            out.new_line();
+                            first_on_line = true;
+                        }
                     }
                 },
                 TokenType::Eof => {break},

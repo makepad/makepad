@@ -13,7 +13,6 @@ pub struct Tab{
 
     pub _is_selected:bool,
     pub _is_focussed:bool,
-    pub _hit_state:HitState,
     pub _bg_area:Area,
     pub _text_area:Area,
     pub _close_anim_rect:Rect,
@@ -47,7 +46,6 @@ impl Style for Tab{
             animator:Animator::new(Anim::empty()),
             _is_selected:false,
             _is_focussed:false,
-            _hit_state:HitState{..Default::default()},
             _is_down:false,
             _is_drag:false,
             _close_anim_rect:Rect::zero(),
@@ -186,7 +184,7 @@ impl Tab{
             }
         }
         
-        match self._hit_state.hits(cx, self._bg_area, event){
+        match event.hits(cx, self._bg_area, HitOpt::default()){
             Event::Animate(ae)=>{
                 // its playing the term anim, run a redraw
                 if self.animator.term_anim_playing(){

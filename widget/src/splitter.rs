@@ -16,12 +16,12 @@ pub struct Splitter{
     pub realign_dist:f32,
 
     pub _split_area:Area,
-    pub _hit_state:HitState,
     pub _calc_pos:f32,
     pub _is_moving:bool,
     pub _drag_point:f32,
     pub _drag_pos_start:f32,
     pub _drag_max_pos:f32,
+    pub _hit_state_margin:Option<Margin>,
 
 }
 
@@ -49,14 +49,12 @@ impl Style for Splitter{
             pos:0.0,
 
             _split_area:Area::Empty,
-            _hit_state:HitState{
-                ..Default::default()
-            },
             _calc_pos:0.0,
             _is_moving:false,
             _drag_point:0.,
             _drag_pos_start:0.,
             _drag_max_pos:0.0,
+            _hit_state_margin:None,
             realign_dist:30.,
             split_size:2.0,
             min_size:25.0,
@@ -98,7 +96,7 @@ impl Splitter{
     }
 
     pub fn handle_splitter(&mut self, cx:&mut Cx, event:&mut Event)->SplitterEvent{
-        match self._hit_state.hits(cx, self._split_area, event){
+        match event.hits(cx, self._split_area, HitOpt{margin:self._hit_state_margin,..Default::default()}){
             Event::Animate(ae)=>{
                 self.animator.calc_write(cx, "split.color", ae.time, self._split_area);
             },
@@ -220,12 +218,12 @@ impl Splitter{
        self.pos = pos;
        match self.axis{
             Axis::Horizontal=>{
-                self._hit_state.margin = Some(Margin{
+                self._hit_state_margin = Some(Margin{
                     l:0., t:3., r:0., b:7.,
                 })
             },
             Axis::Vertical=>{
-                self._hit_state.margin = Some(Margin{
+                self._hit_state_margin = Some(Margin{
                     l:3., t:0., r:7., b:0.,
                 })
             }

@@ -95,7 +95,7 @@ impl TextBuffers {
         if let Some(text_buffer) = text_buffer {
             let string = text_buffer.get_as_string();
             cx.write_file(&format!("{}{}", self.root_path, path), string.as_bytes());
-            //cx.http_send("POST", path, "192.168.0.20", "2001", &string);
+            cx.http_send("POST", path, "192.168.0.20", "2001", &string);
             
         }
     }
@@ -206,7 +206,7 @@ impl TextBuffer {
             }
             char_count = next_char_count;
         }
-        TextPos {row: self.lines.len()-1, col: 0}
+        TextPos {row: self.lines.len() - 1, col: 0}
     }
     
     pub fn offset_to_text_pos_next(&self, query_off: usize, old_pos: TextPos, old_off: usize) -> TextPos {
@@ -221,7 +221,7 @@ impl TextBuffer {
             iter_off = next_off;
             row += 1;
         }
-        TextPos {row: self.lines.len()-1, col: 0}
+        TextPos {row: self.lines.len() - 1, col: 0}
     }
     
     pub fn text_pos_to_offset(&self, pos: TextPos) -> usize {
@@ -430,10 +430,6 @@ impl TextBuffer {
         
         if start_pos.row == end_pos.row && rep_lines.len() == 1 { // replace in one line
             let rep_line_zero = rep_lines.drain(0..1).next().unwrap();
-            if end_pos.col >= self.lines[start_pos.row].len(){
-               
-                return vec![vec![]];
-            }
             let line = self.lines[start_pos.row].splice(start_pos.col..end_pos.col, rep_line_zero).collect();
             return vec![line];
         }
