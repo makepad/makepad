@@ -40,7 +40,7 @@ pub struct Win32Window {
     pub current_cursor: MouseCursor,
     pub last_mouse_pos: Vec2,
     pub fingers_down: Vec<bool>,
-    
+    pub ignore_wmsize: usize,
     pub hwnd: Option<HWND>,
 }
 
@@ -96,10 +96,18 @@ impl Win32App {
             return winuser::DefWindowProcW(hwnd, msg, wparam, lparam);
         };
         
-        let window = &(*(user_data as *mut Win32Window));
+        let window = &mut (*(user_data as *mut Win32Window));
         match msg {
             winuser::WM_MOUSEMOVE => {
                 window.on_mouse_move();
+            },
+            winuser::WM_SIZE => {
+                //if window.ignore_wmsize > 1{
+                window.send_change_event();
+                // }
+                //else{
+                //    window.ignore_wmsize += 1;
+                // }
             },
             _ => ()
         }
@@ -201,6 +209,7 @@ impl Win32Window {
                 current_cursor: MouseCursor::Default,
                 last_mouse_pos: Vec2::zero(),
                 fingers_down: Vec::new(),
+                ignore_wmsize: 0,
                 hwnd: None
             }
         }
@@ -217,23 +226,20 @@ impl Win32Window {
         unsafe {
             let title_wstr: Vec<_> = OsStr::new(title).encode_wide().chain(Some(0).into_iter()).collect();
             
-            let x;
-            let y;
-            if let Some(position) = position {
-                x = position.x as i32;
-                y = position.y as i32;
+            let (x, y) = if let Some(position) = position {
+                (position.x as i32, position.y as i32)
             }
             else {
-                x = winuser::CW_USEDEFAULT;
-                y = winuser::CW_USEDEFAULT
-            }
+                (winuser::CW_USEDEFAULT, winuser::CW_USEDEFAULT)
+            };
             
             let hwnd = winuser::CreateWindowExW(
                 style_ex,
                 (*self.win32_app).class_name_wstr.as_ptr(),
                 title_wstr.as_ptr() as LPCWSTR,
                 style,
-                x,y,
+                x,
+                y,
                 winuser::CW_USEDEFAULT,
                 winuser::CW_USEDEFAULT,
                 ptr::null_mut(),
@@ -244,7 +250,7 @@ impl Win32Window {
             
             self.hwnd = Some(hwnd);
             
-            winuser::SetWindowLongPtrW(hwnd, winuser::GWLP_USERDATA, &self as *const _ as isize);
+            winuser::SetWindowLongPtrW(hwnd, winuser::GWLP_USERDATA, self as *const _ as isize);
             
             // fetch the DPI
             let dpi_factor = self.get_dpi_factor();
@@ -259,7 +265,7 @@ impl Win32Window {
     
     pub fn update_ptrs(&mut self) {
         unsafe {
-            winuser::SetWindowLongPtrW(self.hwnd.unwrap(), winuser::GWLP_USERDATA, &self as *const _ as isize);
+            winuser::SetWindowLongPtrW(self.hwnd.unwrap(), winuser::GWLP_USERDATA, self as *const _ as isize);
         }
     }
     
@@ -357,11 +363,14 @@ impl Win32Window {
         let old_geom = self.last_window_geom.clone();
         self.last_window_geom = new_geom.clone();
         
-        self.do_callback(&mut vec![Event::WindowGeomChange(WindowGeomChangeEvent {
-            window_id: self.window_id,
-            old_geom: old_geom,
-            new_geom: new_geom
-        })]);
+        self.do_callback(&mut vec![
+            Event::WindowGeomChange(WindowGeomChangeEvent {
+                window_id: self.window_id,
+                old_geom: old_geom,
+                new_geom: new_geom
+            }),
+            Event::Paint
+        ]);
     }
     
     pub fn send_focus_event(&mut self) {

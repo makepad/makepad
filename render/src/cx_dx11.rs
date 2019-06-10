@@ -73,7 +73,7 @@ impl Cx {
         }
     }
     
-    fn draw_pass_to_layer(&mut self, pass_id: usize, _dpi_factor:f32, d3d11_window: &D3d11Window, d3d11_cx: &D3d11Cx) {
+    fn draw_pass_to_layer(&mut self, pass_id: usize, _dpi_factor: f32, d3d11_window: &D3d11Window, d3d11_cx: &D3d11Cx) {
         let view_id = self.passes[pass_id].main_view_id.unwrap();
         
         self.platform.uni_cx.update_with_f32_constant_data(&d3d11_cx, &mut self.passes[pass_id].uniforms);
@@ -207,7 +207,9 @@ impl Cx {
                                         
                                         let dpi_factor = d3d11_window.window_geom.dpi_factor;
                                         self.passes[*pass_id].set_dpi_factor(dpi_factor);
-                                        println!("DRAWING WINDOW");
+                                        
+                                        d3d11_window.resize_buffers(&d3d11_cx);
+                                        
                                         self.draw_pass_to_layer(
                                             *pass_id,
                                             dpi_factor,
@@ -278,8 +280,11 @@ struct D3d11Window {
     pub window_id: usize,
     pub window_geom: WindowGeom,
     pub win32_window: Win32Window,
-    pub render_target_view: ComPtr<d3d11::ID3D11RenderTargetView>,
-    pub depth_stencil_view: ComPtr<d3d11::ID3D11DepthStencilView>,
+    pub render_target_view: Option<ComPtr<d3d11::ID3D11RenderTargetView>>,
+    pub depth_stencil_view: Option<ComPtr<d3d11::ID3D11DepthStencilView>>,
+    pub depth_stencil_buffer: Option<ComPtr<d3d11::ID3D11Texture2D>>,
+    pub swap_texture: Option<ComPtr<d3d11::ID3D11Texture2D>>,
+    pub alloc_size: Vec2,
     pub swap_chain: ComPtr<dxgi1_2::IDXGISwapChain1>,
     pub raster_state: ComPtr<d3d11::ID3D11RasterizerState>,
     pub blend_state: ComPtr<d3d11::ID3D11BlendState>,
@@ -292,14 +297,14 @@ impl D3d11Window {
         win32_window.init(title, inner_size, position);
         let window_geom = win32_window.get_window_geom();
         let swap_chain = d3d11_cx.create_swap_chain_for_hwnd(&window_geom, &win32_window).expect("Cannot create_swap_chain_for_hwnd");
-        
-        let render_target_view = d3d11_cx.create_render_target_view(&swap_chain).expect("Cannot create_render_target_view");
+
+        let swap_texture = D3d11Cx::get_swap_texture(&swap_chain).expect("Cannot get swap texture");
+        let render_target_view = d3d11_cx.create_render_target_view(&swap_texture).expect("Cannot create_render_target_view");
         let depth_stencil_buffer = d3d11_cx.create_depth_stencil_buffer(&window_geom).expect("Cannot create_depth_stencil_buffer");
-        let depth_stencil_state = d3d11_cx.create_depth_stencil_state().expect("Cannot create_depth_stencil_state");
-        
-        unsafe {d3d11_cx.context.OMSetDepthStencilState(depth_stencil_state.as_raw() as *mut _, 1)}
-        
         let depth_stencil_view = d3d11_cx.create_depth_stencil_view(&depth_stencil_buffer).expect("Cannot create_depth_stencil_view");
+
+        let depth_stencil_state = d3d11_cx.create_depth_stencil_state().expect("Cannot create_depth_stencil_state");
+        unsafe {d3d11_cx.context.OMSetDepthStencilState(depth_stencil_state.as_raw() as *mut _, 1)}
         
         //unsafe {context.OMSetDepthStencilState(depth_stencil_state.as_raw() as *mut _, 1)}
         
@@ -314,14 +319,44 @@ impl D3d11Window {
         
         D3d11Window {
             window_id: window_id,
+            alloc_size: window_geom.inner_size,
             window_geom: window_geom,
             win32_window: win32_window,
-            render_target_view: render_target_view,
-            depth_stencil_view: depth_stencil_view,
+            swap_texture: Some(swap_texture),
+            depth_stencil_buffer: Some(depth_stencil_buffer),
+            render_target_view: Some(render_target_view),
+            depth_stencil_view: Some(depth_stencil_view),
             swap_chain: swap_chain,
             raster_state: raster_state,
             blend_state: blend_state
         }
+    }
+    
+    fn resize_buffers(&mut self, d3d11_cx: &D3d11Cx) {
+        if self.alloc_size == self.window_geom.inner_size{
+            return
+        }
+        // release render target
+        self.render_target_view = None;
+        self.depth_stencil_view = None;
+        self.swap_texture = None;
+        self.depth_stencil_buffer = None;
+
+        let window_geom = &self.window_geom;
+        
+        d3d11_cx.disconnect_rendertargets();
+        d3d11_cx.resize_swap_chain(window_geom, &self.swap_chain);
+        
+        let swap_texture = D3d11Cx::get_swap_texture(&self.swap_chain).expect("Cannot get swap texture");
+        let render_target_view = d3d11_cx.create_render_target_view(&swap_texture).expect("Cannot create_render_target_view");
+        let depth_stencil_buffer = d3d11_cx.create_depth_stencil_buffer(window_geom).expect("Cannot create_depth_stencil_buffer");
+        let depth_stencil_view = d3d11_cx.create_depth_stencil_view(&depth_stencil_buffer).expect("Cannot create_depth_stencil_view");
+
+        self.alloc_size = window_geom.inner_size;
+        self.render_target_view = Some(render_target_view);
+        self.depth_stencil_view = Some(depth_stencil_view);
+        self.swap_texture = Some(swap_texture);
+        self.depth_stencil_buffer = Some(depth_stencil_buffer);
     }
 }
 
@@ -360,9 +395,13 @@ impl D3d11Cx {
     fn set_rendertargets(&self, d3d11_window: &D3d11Window) {
         unsafe {self.context.OMSetRenderTargets(
             1,
-            [d3d11_window.render_target_view.as_raw() as *mut _].as_ptr(),
-            d3d11_window.depth_stencil_view.as_raw() as *mut _
+            [d3d11_window.render_target_view.as_ref().unwrap().as_raw() as *mut _].as_ptr(),
+            d3d11_window.depth_stencil_view.as_ref().unwrap().as_raw() as *mut _
         )}
+    }
+    
+    fn disconnect_rendertargets(&self) {
+        unsafe {self.context.OMSetRenderTargets(0, ptr::null(), ptr::null_mut())}
     }
     
     fn set_viewport(&self, d3d11_window: &D3d11Window) {
@@ -380,11 +419,11 @@ impl D3d11Cx {
     
     fn clear_render_target_view(&self, d3d11_window: &D3d11Window, color: Color) {
         let color = [color.r, color.g, color.b, color.a];
-        unsafe {self.context.ClearRenderTargetView(d3d11_window.render_target_view.as_raw() as *mut _, &color)}
+        unsafe {self.context.ClearRenderTargetView(d3d11_window.render_target_view.as_ref().unwrap().as_raw() as *mut _, &color)}
     }
     
     fn clear_depth_stencil_view(&self, d3d11_window: &D3d11Window) {
-        unsafe {self.context.ClearDepthStencilView(d3d11_window.depth_stencil_view.as_raw() as *mut _, d3d11::D3D11_CLEAR_DEPTH, 1.0, 0)}
+        unsafe {self.context.ClearDepthStencilView(d3d11_window.depth_stencil_view.as_ref().unwrap().as_raw() as *mut _, d3d11::D3D11_CLEAR_DEPTH, 1.0, 0)}
     }
     
     fn set_input_layout(&self, input_layout: &ComPtr<d3d11::ID3D11InputLayout>) {
@@ -656,10 +695,10 @@ impl D3d11Cx {
             Err(hr)
         }
     }
-    
-    fn create_render_target_view(&self, swap_chain: &ComPtr<dxgi1_2::IDXGISwapChain1>)
+
+    fn create_render_target_view(&self, texture: &ComPtr<d3d11::ID3D11Texture2D>)
         -> Result<ComPtr<d3d11::ID3D11RenderTargetView>, winerror::HRESULT> {
-        let texture = D3d11Cx::get_swap_texture(swap_chain) ?;
+        //let texture = D3d11Cx::get_swap_texture(swap_chain) ?;
         let mut render_target_view = ptr::null_mut();
         let hr = unsafe {self.device.CreateRenderTargetView(
             texture.as_raw() as *mut _,
@@ -751,6 +790,25 @@ impl D3d11Cx {
         }
         else {
             Err(hr)
+        }
+    }
+    
+    fn resize_swap_chain(
+        &self,
+        wg: &WindowGeom,
+        swap_chain: &ComPtr<dxgi1_2::IDXGISwapChain1>,
+    ) {
+        unsafe {
+            let hr = swap_chain.ResizeBuffers(
+                2,
+                (wg.inner_size.x * wg.dpi_factor) as u32,
+                (wg.inner_size.y * wg.dpi_factor) as u32,
+                dxgiformat::DXGI_FORMAT_B8G8R8A8_UNORM,
+                0
+            );
+            if !winerror::SUCCEEDED(hr) {
+                panic!("Could not resize swapchain");
+            }
         }
     }
     
