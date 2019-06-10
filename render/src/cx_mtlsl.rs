@@ -20,11 +20,11 @@ pub enum PackType {
 }
 
 impl Cx {
-    pub fn mtl_compile_all_shaders(&mut self, device: &Device) {
+    pub fn mtl_compile_all_shaders(&mut self, metal_cx: &MetalCx) {
         for sh in &mut self.shaders {
-            let mtlsh = Self::mtl_compile_shader(sh, device);
+            let mtlsh = Self::mtl_compile_shader(sh, metal_cx);
             if let Err(err) = mtlsh {
-                panic!("GOT ERROR: {}", err.msg);
+                panic!("Got metal shader compile error: {}", err.msg);
             }
         };
     }
@@ -111,7 +111,7 @@ impl Cx {
         let uniforms_dr = sg.flat_vars(ShVarStore::Uniform);
         
         // lets count the slots
-        //let geometry_slots = sh.compute_slot_total(&geometries);
+        let geometry_slots = sg.compute_slot_total(&geometries);
         let instance_slots = sg.compute_slot_total(&instances);
         //let varying_slots = sh.compute_slot_total(&varyings);
         
@@ -236,7 +236,10 @@ impl Cx {
             rect_instance_props: RectInstanceProps::construct(sg, &instances),
             named_instance_props: NamedProps::construct(sg, &instances, false),
             named_uniform_props: NamedProps::construct(sg, &uniforms_dr, true),
+            instances: instances,
+            geometries: geometries,
             instance_slots: instance_slots,
+            geometry_slots: geometry_slots,
             uniforms_dr: uniforms_dr,
             uniforms_vw: uniforms_vw,
             uniforms_cx: uniforms_cx,
@@ -244,11 +247,11 @@ impl Cx {
         }))
     }
     
-    pub fn mtl_compile_shader(sh: &mut CxShader, device: &Device) -> Result<(), SlErr> {
+    pub fn mtl_compile_shader(sh: &mut CxShader, metal_cx: &MetalCx) -> Result<(), SlErr> {
         let (mtlsl, mapping) = Self::mtl_assemble_shader(&sh.shader_gen) ?;
         
         let options = CompileOptions::new();
-        let library = device.new_library_with_source(&mtlsl, &options);
+        let library = metal_cx.device.new_library_with_source(&mtlsl, &options);
         
         match library {
             Err(library) => return Err(SlErr {msg: library}),
@@ -272,17 +275,17 @@ impl Cx {
                         color.set_destination_alpha_blend_factor(MTLBlendFactor::OneMinusSourceAlpha);
                         color.set_rgb_blend_operation(MTLBlendOperation::Add);
                         color.set_alpha_blend_operation(MTLBlendOperation::Add);
-                        device.new_render_pipeline_state(&rpd).unwrap()
+                        metal_cx.device.new_render_pipeline_state(&rpd).unwrap()
                     },
                     library: library,
                     geom_ibuf: {
                         let mut geom_ibuf = MetalBuffer {..Default::default()};
-                        geom_ibuf.update_with_u32_data(device, &sh.shader_gen.geometry_indices);
+                        geom_ibuf.update_with_u32_data(metal_cx, &sh.shader_gen.geometry_indices);
                         geom_ibuf
                     },
                     geom_vbuf: {
                         let mut geom_vbuf = MetalBuffer {..Default::default()};
-                        geom_vbuf.update_with_f32_data(device, &sh.shader_gen.geometry_vertices);
+                        geom_vbuf.update_with_f32_data(metal_cx, &sh.shader_gen.geometry_vertices);
                         geom_vbuf
                     }
                 });

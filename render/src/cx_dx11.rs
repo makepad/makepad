@@ -1,4 +1,4 @@
-use crate::cx_windows::*;
+use crate::cx_win32::*;
 use crate::cx::*;
 use crate::cx_desktop::*;
 
@@ -14,22 +14,23 @@ use std::ffi;
 
 impl Cx {
     
-    pub fn exec_draw_list(&mut self, draw_list_id: usize, d3d11: &D3d11) {
+    pub fn render_view(&mut self, pass_id: usize, view_id: usize, d3d11: &D3d11) {
         
         // tad ugly otherwise the borrow checker locks 'self' and we can't recur
-        let draw_calls_len = self.draw_lists[draw_list_id].draw_calls_len;
+        let draw_calls_len = self.views[view_id].draw_calls_len;
         for draw_call_id in 0..draw_calls_len {
-            let sub_list_id = self.draw_lists[draw_list_id].draw_calls[draw_call_id].sub_list_id;
-            if sub_list_id != 0 {
-                self.exec_draw_list(sub_list_id, d3d11);
+            let sub_view_id = self.views[view_id].draw_calls[draw_call_id].sub_view_id;
+            if sub_view_id != 0 {
+                self.render_view(pass_id, sub_view_id, d3d11);
             }
             else {
-                let draw_list = &mut self.draw_lists[draw_list_id];
-                draw_list.set_clipping_uniforms();
-                draw_list.platform.uni_dl.update_with_f32_constant_data(d3d11, &mut draw_list.uniforms);
-                let draw_call = &mut draw_list.draw_calls[draw_call_id];
+                let cxview = &mut self.views[view_id];
+                cxview.set_clipping_uniforms();
+                cxview.platform.uni_dl.update_with_f32_constant_data(d3d11, &mut cxview.uniforms);
+                
+                let draw_call = &mut cxview.draw_calls[draw_call_id];
                 let sh = &self.shaders[draw_call.shader_id];
-                let shc = &self.compiled_shaders[draw_call.shader_id];
+                let shp = sh.platform.as_ref().unwrap();
                 
                 if draw_call.instance_dirty {
                     draw_call.instance_dirty = false;
@@ -44,25 +45,25 @@ impl Cx {
                     draw_call.platform.uni_dr.update_with_f32_constant_data(d3d11, &mut draw_call.uniforms);
                 }
                 
-                let instances = (draw_call.instance.len() / shc.instance_slots) as usize;
-                d3d11.set_shaders(&shc.vertex_shader, &shc.pixel_shader);
+                let instances = (draw_call.instance.len() / sh.mapping.instance_slots) as usize;
+                d3d11.set_shaders(&shp.vertex_shader, &shp.pixel_shader);
                 
                 d3d11.set_primitive_topology();
                 
-                d3d11.set_input_layout(&shc.input_layout);
+                d3d11.set_input_layout(&shp.input_layout);
                 
-                d3d11.set_index_buffer(&shc.geom_ibuf);
+                d3d11.set_index_buffer(&shp.geom_ibuf);
                 
-                d3d11.set_vertex_buffers(&shc.geom_vbuf, shc.geometry_slots, &draw_call.platform.inst_vbuf, shc.instance_slots);
+                d3d11.set_vertex_buffers(&shp.geom_vbuf, sh.mapping.geometry_slots, &draw_call.platform.inst_vbuf, sh.mapping.instance_slots);
                 
-                d3d11.set_constant_buffers(&self.platform.uni_cx, &draw_list.platform.uni_dl, &draw_call.platform.uni_dr);
+                d3d11.set_constant_buffers(&self.platform.uni_cx, &cxview.platform.uni_dl, &draw_call.platform.uni_dr);
                 
                 for (i, texture_id) in draw_call.textures_2d.iter().enumerate() {
-                    let tex = &mut self.textures_2d[*texture_id as usize];
-                    if tex.dirty {
-                        tex.upload_to_device(d3d11);
+                    let cxtexture = &mut self.textures[*texture_id as usize];
+                    if cxtexture.upload_image {
+                        d3d11.update_platform_texture_image2d(cxtexture)
                     }
-                    if let Some(shader_resource) = &tex.shader_resource {
+                    if let Some(shader_resource) = &cxtexture.platform.shader_resource {
                         d3d11.set_shader_resource(i, shader_resource);
                     }
                 }
@@ -98,20 +99,23 @@ impl Cx {
     {
         self.feature = "dx11".to_string();
         
-        let mut windows_window = WindowsWindow {..Default::default()};
+        let mut win32_app = Win32App::new();
+        
+        win32_app.init();
+        
+        let mut render_windows: Vec<Win32RenderWindow> = Vec::new();
         
         let mut root_view = View::<NoScrollBar> {
             ..Style::style(self)
         };
         
-        windows_window.init(&self.title);
-        
-        self.window_geom = windows_window.get_window_geom();
         
         let d3d11 = D3d11::init(&windows_window, &self.window_geom);
+        
         if let Err(msg) = d3d11 {
             panic!("Cannot initialize d3d11 {}", msg);
         }
+        
         let d3d11 = d3d11.unwrap();
         
         self.hlsl_compile_all_shaders(&d3d11);
@@ -120,7 +124,9 @@ impl Cx {
         
         self.call_event_handler(&mut event_handler, &mut Event::Construct);
         
-        self.redraw_area(Area::All);
+        self.redraw_child_area(Area::All);
+
+        /*
         let mut lp = 0;
         while self.running {
             //println!("{}{} ",self.playing_anim_areas.len(), self.redraw_areas.len());
@@ -143,7 +149,8 @@ impl Cx {
                     }
                 }
             );
-            println!("{}",lp);lp+=1;
+            println!("{}", lp);
+            lp += 1;
             if self.playing_anim_areas.len() != 0 {
                 let time = windows_window.time_now();
                 // keeps the error as low as possible
@@ -211,12 +218,14 @@ impl Cx {
             }
             
             // repaint everything if we need to
+            /*
             if self.paint_dirty {
                 self.paint_dirty = false;
                 self.repaint_id += 1;
                 self.repaint(&d3d11);
             }
-        }
+            */
+        }*/
     }
     
     pub fn show_text_ime(&mut self, x: f32, y: f32) {
@@ -248,7 +257,27 @@ impl Cx {
     }
     
     pub fn send_signal(signal: Signal, value: u64) {
-        WindowsWindow::post_signal(signal.signal_id, value);
+        Win32App::post_signal(signal.signal_id, value);
+    }
+}
+
+struct Win32RenderWindow{
+    pub window_id: usize,
+    pub window_geom: WindowGeom,
+    pub win32_window: Win32Window
+}
+
+impl Win32RenderWindow {
+    fn new(window_id: usize, d3d11: &D3d11, win32_app: &mut Win32App, inner_size: Vec2, position: Option<Vec2>, title: &str) -> Win32RenderWindow {
+        let mut win32_window = Win32Window::new(win32_app, window_id);
+        
+        win32_window.init(title, inner_size, position);
+        
+        Win32RenderWindow{
+            window_id: window_id,
+            window_geom: win32_window.get_window_geom(),
+            win32_window:win32_window
+        }
     }
 }
 
@@ -256,8 +285,6 @@ impl Cx {
 pub struct CxPlatform {
     pub uni_cx: D3d11Buffer,
     pub post_id: u64,
-    pub set_window_position: Option<Vec2>,
-    pub set_window_outer_size: Option<Vec2>,
     pub set_ime_position: Option<Vec2>,
     pub start_timer: Vec<(u64, f64, bool)>,
     pub stop_timer: Vec<(u64)>,
@@ -769,6 +796,73 @@ impl D3d11 {
         }
     }
     
+    pub fn update_platform_texture_image2d(&self, cxtexture: &mut CxTexture) {
+        
+        if cxtexture.desc.width.is_none() || cxtexture.desc.height.is_none() {
+            println!("update_platform_texture_image2d without width/height");
+            return;
+        }
+        
+        let width = cxtexture.desc.width.unwrap();
+        let height = cxtexture.desc.height.unwrap();
+        
+        // allocate new texture if descriptor change
+        if cxtexture.platform.alloc_desc != cxtexture.desc {
+            match cxtexture.desc.format {
+                TextureFormat::Default | TextureFormat::ImageBGRA => {
+                    if cxtexture.image_u32.len() != width * height {
+                        println!("update_platform_texture_image2d with wrong buffer_u32 size!");
+                        cxtexture.platform.mtltexture = None;
+                        return;
+                    }
+
+                    let mut texture = ptr::null_mut();
+                    let sub_data = d3d11::D3D11_SUBRESOURCE_DATA {
+                        pSysMem: cxtexture.image_u32.as_ptr() as *const _,
+                        SysMemPitch: (width * 4) as u32,
+                        SysMemSlicePitch: 0
+                    };
+                    
+                    let texture_desc = d3d11::D3D11_TEXTURE2D_DESC {
+                        Width: width as u32,
+                        Height: height as u32,
+                        MipLevels: 1,
+                        ArraySize: 1,
+                        Format: dxgiformat::DXGI_FORMAT_R8G8B8A8_UNORM,
+                        SampleDesc: dxgitype::DXGI_SAMPLE_DESC {
+                            Count: 1,
+                            Quality: 0
+                        },
+                        Usage: d3d11::D3D11_USAGE_DEFAULT,
+                        BindFlags: d3d11::D3D11_BIND_SHADER_RESOURCE,
+                        CPUAccessFlags: 0,
+                        MiscFlags: 0,
+                    };
+                    
+                    let hr = unsafe {self.device.CreateTexture2D(&texture_desc, &sub_data, &mut texture as *mut *mut _)};
+                    if winerror::SUCCEEDED(hr) {
+                        cxtexture.platform.texture = Some(unsafe {ComPtr::from_raw(texture as *mut _)});
+                        let mut shader_resource = ptr::null_mut();
+                        unsafe {self.device.CreateShaderResourceView(
+                            self.texture.as_mut().unwrap().as_raw() as *mut _,
+                            ptr::null(),
+                            &mut shader_resource as *mut *mut _
+                        )};
+                        cxtexture.platform.shader_resource = Some(unsafe {ComPtr::from_raw(shader_resource as *mut _)});
+                        cxtexture.upload_image = false;
+                    }
+                    else {
+                        panic!("Texture create failed");
+                    }
+                },
+                _ => {
+                    println!("update_platform_texture_image2d with unsupported format");
+                    return;
+                }
+            }
+        }
+    }
+    
     /*
      fn enum_outputs(adapter:&ComPtr<dxgi::IDXGIAdapter>) -> Result<ComPtr<dxgi::IDXGIOutput>,
     winerror::HRESULT> {
@@ -875,65 +969,19 @@ impl D3d11Buffer {
 }
 
 #[derive(Default, Clone)]
-pub struct Texture2D {
-    pub texture_id: usize,
-    pub dirty: bool,
-    pub image: Vec<u32>,
-    pub width: usize,
-    pub height: usize,
+pub struct CxPlatformTexture {
+    pub alloc_desc: TextureDesc,
+    pub width: u64,
+    pub height: u64,
     pub texture: Option<ComPtr<d3d11::ID3D11Texture2D>>,
     pub shader_resource: Option<ComPtr<d3d11::ID3D11ShaderResourceView>>
 }
 
-impl Texture2D {
-    pub fn resize(&mut self, width: usize, height: usize) {
-        self.width = width;
-        self.height = height;
-        self.image.resize((width * height) as usize, 0);
-        self.dirty = true;
-    }
-    
-    pub fn upload_to_device(&mut self, d3d11: &D3d11) {
-        
-        let mut texture = ptr::null_mut();
-        self.dirty = false;
-        let sub_data = d3d11::D3D11_SUBRESOURCE_DATA {
-            pSysMem: self.image.as_ptr() as *const _,
-            SysMemPitch: (self.width * 4) as u32,
-            SysMemSlicePitch: 0
-        };
-        let texture_desc = d3d11::D3D11_TEXTURE2D_DESC {
-            Width: self.width as u32,
-            Height: self.height as u32,
-            MipLevels: 1,
-            ArraySize: 1,
-            Format: dxgiformat::DXGI_FORMAT_R8G8B8A8_UNORM,
-            SampleDesc: dxgitype::DXGI_SAMPLE_DESC {
-                Count: 1,
-                Quality: 0
-            },
-            Usage: d3d11::D3D11_USAGE_DEFAULT,
-            BindFlags: d3d11::D3D11_BIND_SHADER_RESOURCE,
-            CPUAccessFlags: 0,
-            MiscFlags: 0,
-        };
-        let hr = unsafe {d3d11.device.CreateTexture2D(&texture_desc, &sub_data, &mut texture as *mut *mut _)};
-        if winerror::SUCCEEDED(hr) {
-            self.texture = Some(unsafe {ComPtr::from_raw(texture as *mut _)});
-            let mut shader_resource = ptr::null_mut();
-            unsafe {d3d11.device.CreateShaderResourceView(
-                self.texture.as_mut().unwrap().as_raw() as *mut _,
-                ptr::null(),
-                &mut shader_resource as *mut *mut _
-            )};
-            self.shader_resource = Some(unsafe {ComPtr::from_raw(shader_resource as *mut _)});
-            
-        }
-        else {
-            panic!("Texture create failed");
-        }
-    }
+
+#[derive(Default, Clone, Debug)]
+pub struct CxPlatformPass {
 }
+
 
 use std::process::{Command, Child, Stdio};
 

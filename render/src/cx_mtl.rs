@@ -12,14 +12,14 @@ use crate::cx::*;
 
 impl Cx {
     
-    pub fn render_view(&mut self, pass_id: usize, view_id: usize, device: &Device, encoder: &RenderCommandEncoderRef) {
+    pub fn render_view(&mut self, pass_id: usize, view_id: usize, metal_cx: &MetalCx, encoder: &RenderCommandEncoderRef) {
         
         // tad ugly otherwise the borrow checker locks 'self' and we can't recur
         let draw_calls_len = self.views[view_id].draw_calls_len;
         for draw_call_id in 0..draw_calls_len {
             let sub_view_id = self.views[view_id].draw_calls[draw_call_id].sub_view_id;
             if sub_view_id != 0 {
-                self.render_view(pass_id, sub_view_id, device, encoder);
+                self.render_view(pass_id, sub_view_id, metal_cx, encoder);
             }
             else {
                 let cxview = &mut self.views[view_id];
@@ -32,7 +32,7 @@ impl Cx {
                 if draw_call.instance_dirty {
                     draw_call.instance_dirty = false;
                     // update the instance buffer data
-                    draw_call.platform.inst_vbuf.update_with_f32_data(device, &draw_call.instance);
+                    draw_call.platform.inst_vbuf.update_with_f32_data(metal_cx, &draw_call.instance);
                 }
                 if draw_call.uniforms_dirty {
                     draw_call.uniforms_dirty = false;
@@ -62,7 +62,7 @@ impl Cx {
                 for (i, texture_id) in draw_call.textures_2d.iter().enumerate() {
                     let cxtexture = &mut self.textures[*texture_id as usize];
                     if cxtexture.upload_image {
-                        Self::update_platform_texture_image2d(device, cxtexture);
+                        metal_cx.update_platform_texture_image2d(cxtexture);
                     }
                     if let Some(mtltex) = &cxtexture.platform.mtltexture {
                         encoder.set_fragment_texture(i as NSUInteger, Some(&mtltex));
@@ -95,8 +95,7 @@ impl Cx {
         pass_id: usize,
         _dpi_factor: f32,
         layer: &CoreAnimationLayer,
-        device: &Device,
-        command_queue: &CommandQueue
+        metal_cx: &MetalCx,
     ) {
         let view_id = self.passes[pass_id].main_view_id.unwrap();
         let pool = unsafe {NSAutoreleasePool::new(cocoa::base::nil)};
@@ -127,10 +126,10 @@ impl Cx {
                 color_attachment.set_clear_color(MTLClearColor::new(0.0,0.0,0.0,0.0))
             }
             
-            let command_buffer = command_queue.new_command_buffer();
+            let command_buffer = metal_cx.command_queue.new_command_buffer();
             let encoder = command_buffer.new_render_command_encoder(&render_pass_descriptor);
             
-            self.render_view(pass_id, view_id, &device, encoder);
+            self.render_view(pass_id, view_id, &metal_cx, encoder);
             encoder.end_encoding();
             command_buffer.present_drawable(&drawable);
             command_buffer.commit();
@@ -144,8 +143,7 @@ impl Cx {
         &mut self,
         pass_id: usize,
         dpi_factor: f32,
-        device: &Device,
-        command_queue: &CommandQueue
+        metal_cx: &MetalCx,
     ) {
         let view_id = self.passes[pass_id].main_view_id.unwrap();
         let pass_size = self.passes[pass_id].pass_size;
@@ -158,7 +156,7 @@ impl Cx {
             
             let cxtexture = &mut self.textures[color_texture.texture_id];
             
-            Self::update_platform_render_target(device, cxtexture, dpi_factor, pass_size, false);
+            metal_cx.update_platform_render_target(cxtexture, dpi_factor, pass_size, false);
             let color_attachment = render_pass_descriptor.color_attachments().object_at(index).unwrap();
             if let Some(mtltex) = &cxtexture.platform.mtltexture {
                 color_attachment.set_texture(Some(&mtltex));
@@ -178,9 +176,9 @@ impl Cx {
         // lets loop and connect all color_textures to our render pass descriptors
         // initializing/allocating/reallocating them to the right size if need be.
         
-        let command_buffer = command_queue.new_command_buffer();
+        let command_buffer = metal_cx.command_queue.new_command_buffer();
         let encoder = command_buffer.new_render_command_encoder(&render_pass_descriptor);
-        self.render_view(pass_id, view_id, &device, encoder);
+        self.render_view(pass_id, view_id, &metal_cx, encoder);
         encoder.end_encoding();
         
         command_buffer.commit();
@@ -197,13 +195,11 @@ impl Cx {
         
         cocoa_app.init();
         
-        let device = Device::system_default();
-        
-        let command_queue = device.new_command_queue();
+        let metal_cx = MetalCx::new();
         
         let mut render_windows: Vec<CocoaRenderWindow> = Vec::new();
         
-        self.mtl_compile_all_shaders(&device);
+        self.mtl_compile_all_shaders(&metal_cx);
         
         self.load_fonts_from_file();
         
@@ -298,7 +294,7 @@ impl Cx {
                             window.window_state = match &window.window_state {
                                 CxWindowState::Create {inner_size, position, title} => {
                                     // lets create a platformwindow
-                                    let render_window = CocoaRenderWindow::new(index, &device, cocoa_app, *inner_size, *position, &title);
+                                    let render_window = CocoaRenderWindow::new(index, &metal_cx, cocoa_app, *inner_size, *position, &title);
                                     window.window_geom = render_window.window_geom.clone();
                                     render_windows.push(render_window);
                                     for render_window in &mut render_windows {
@@ -391,11 +387,10 @@ impl Cx {
                                             *pass_id,
                                             dpi_factor,
                                             &render_window.core_animation_layer,
-                                            &device,
-                                            &command_queue
+                                            &metal_cx,
                                         );
                                         
-                                        if render_window.resize_core_animation_layer(&device) {
+                                        if render_window.resize_core_animation_layer(&metal_cx) {
                                             self.passes[*pass_id].paint_dirty = true;
                                             paint_dirty = true;
                                         }
@@ -422,8 +417,7 @@ impl Cx {
                                         self.draw_pass_to_texture(
                                             *pass_id,
                                             dpi_factor,
-                                            &device,
-                                            &command_queue
+                                            &metal_cx,
                                         );
                                     },
                                     CxPassDepOf::None => ()
@@ -489,9 +483,24 @@ impl Cx {
     pub fn send_signal(signal: Signal, value: u64) {
         CocoaApp::post_signal(signal.signal_id, value);
     }
+}
+
+pub struct MetalCx{
+    pub device:Device,
+    pub command_queue:CommandQueue
+}
+
+impl MetalCx{
     
-    
-    pub fn update_platform_render_target(device: &Device, cxtexture: &mut CxTexture, dpi_factor: f32, size: Vec2, is_depth: bool) {
+    pub fn new()->MetalCx{
+        let device = Device::system_default(); 
+        MetalCx{
+            command_queue: device.new_command_queue(),
+            device:device
+        }
+    }
+ 
+    pub fn update_platform_render_target(&self, cxtexture: &mut CxTexture, dpi_factor: f32, size: Vec2, is_depth: bool) {
         
         let width = if let Some(width) = cxtexture.desc.width {width as u64} else {(size.x * dpi_factor) as u64};
         let height = if let Some(height) = cxtexture.desc.height {height as u64} else {(size.y * dpi_factor) as u64};
@@ -533,15 +542,14 @@ impl Cx {
         mdesc.set_width(width as u64);
         mdesc.set_height(height as u64);
         mdesc.set_depth(1);
-        let tex = device.new_texture(&mdesc);
+        let tex = self.device.new_texture(&mdesc);
         cxtexture.platform.width = width;
         cxtexture.platform.height = height;
         cxtexture.platform.alloc_desc = cxtexture.desc.clone();
         cxtexture.platform.mtltexture = Some(tex);
     }
     
-    
-    pub fn update_platform_texture_image2d(device: &Device, cxtexture: &mut CxTexture) {
+    pub fn update_platform_texture_image2d(&self, cxtexture: &mut CxTexture) {
         
         if cxtexture.desc.width.is_none() || cxtexture.desc.height.is_none() {
             println!("update_platform_texture_image2d without width/height");
@@ -563,7 +571,7 @@ impl Cx {
             match cxtexture.desc.format {
                 TextureFormat::Default | TextureFormat::ImageBGRA => {
                     mdesc.set_pixel_format(MTLPixelFormat::BGRA8Unorm);
-                    let tex = device.new_texture(&mdesc);
+                    let tex = self.device.new_texture(&mdesc);
                     cxtexture.platform.mtltexture = Some(tex);
 
                     if cxtexture.image_u32.len() != width * height {
@@ -583,7 +591,7 @@ impl Cx {
                             cxtexture.image_u32.as_ptr() as *const std::ffi::c_void
                         );
                     }
-                }
+                },
                 _ => {
                     println!("update_platform_texture_image2d with unsupported format");
                     return;
@@ -597,6 +605,7 @@ impl Cx {
         cxtexture.upload_image = false;
     }
 }
+
 
 #[derive(Clone, Default)]
 pub struct CxPlatform {
@@ -619,7 +628,7 @@ pub struct CocoaRenderWindow {
 }
 
 impl CocoaRenderWindow {
-    fn new(window_id: usize, device: &Device, cocoa_app: &mut CocoaApp, inner_size: Vec2, position: Option<Vec2>, title: &str) -> CocoaRenderWindow {
+    fn new(window_id: usize, metal_cx: &MetalCx, cocoa_app: &mut CocoaApp, inner_size: Vec2, position: Option<Vec2>, title: &str) -> CocoaRenderWindow {
         
         let core_animation_layer = CoreAnimationLayer::new();
         
@@ -627,7 +636,7 @@ impl CocoaRenderWindow {
         
         cocoa_window.init(title, inner_size, position);
         
-        core_animation_layer.set_device(&device);
+        core_animation_layer.set_device(&metal_cx.device);
         core_animation_layer.set_pixel_format(MTLPixelFormat::BGRA8Unorm);
         core_animation_layer.set_presents_with_transaction(false);
         
@@ -666,7 +675,7 @@ impl CocoaRenderWindow {
         }
     }
     
-    fn resize_core_animation_layer(&mut self, _device: &Device) -> bool {
+    fn resize_core_animation_layer(&mut self, _metal_cx: &MetalCx) -> bool {
         let cal_size = Vec2 {
             x: self.window_geom.inner_size.x * self.window_geom.dpi_factor,
             y: self.window_geom.inner_size.y * self.window_geom.dpi_factor
@@ -740,14 +749,14 @@ impl MetalBuffer {
         }
     }
     
-    pub fn update_with_f32_data(&mut self, device: &Device, data: &Vec<f32>) {
+    pub fn update_with_f32_data(&mut self, metal_cx: &MetalCx, data: &Vec<f32>) {
         let elem = self.multi_buffer_write();
         if elem.size < data.len() {
             elem.buffer = None;
         }
         if let None = &elem.buffer {
             elem.buffer = Some(
-                device.new_buffer(
+                metal_cx.device.new_buffer(
                     (data.len() * std::mem::size_of::<f32>()) as u64,
                     MTLResourceOptions::CPUCacheModeDefaultCache
                 )
@@ -765,14 +774,14 @@ impl MetalBuffer {
         elem.used = data.len()
     }
     
-    pub fn update_with_u32_data(&mut self, device: &Device, data: &Vec<u32>) {
+    pub fn update_with_u32_data(&mut self, metal_cx: &MetalCx, data: &Vec<u32>) {
         let elem = self.multi_buffer_write();
         if elem.size < data.len() {
             elem.buffer = None;
         }
         if let None = &elem.buffer {
             elem.buffer = Some(
-                device.new_buffer(
+                metal_cx.device.new_buffer(
                     (data.len() * std::mem::size_of::<u32>()) as u64,
                     MTLResourceOptions::CPUCacheModeDefaultCache
                 )

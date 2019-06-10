@@ -89,6 +89,9 @@ impl NamedProps {
 #[derive(Default, Clone)]
 pub struct CxShaderMapping {
     pub instance_slots: usize,
+    pub geometry_slots: usize,
+    pub geometries: Vec<ShVar>,
+    pub instances: Vec<ShVar>,
     pub uniforms_dr: Vec<ShVar>,
     pub uniforms_vw: Vec<ShVar>,
     pub uniforms_cx: Vec<ShVar>,

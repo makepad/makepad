@@ -16,39 +16,88 @@ use winapi::um::wingdi::{GetDeviceCaps, LOGPIXELSX};
 use winapi::um::winnt::{HRESULT, LPCSTR};
 use winapi::um::winuser::{MONITOR_DEFAULTTONEAREST};
 
+#[derive(Default)]
+pub struct Win32App {
+    pub time_start: u64,
+    pub event_callback: Option<*mut FnMut(&mut Win32App, &mut Vec<Event>) -> Win32LoopState>,
+    pub event_recur_block: bool,
+    pub event_loop_running: bool,
+    pub loop_state: Win32LoopState,
+    pub dpi_functions: DpiFunctions,
+}
 
 #[derive(Default)]
-pub struct WindowsWindow {
+pub struct Win32Window {
+    pub window_id: usize,
+    pub win32_app: *mut Win32App,
     pub last_window_geom: WindowGeom,
     
     pub time_start: u64,
+    
     pub last_key_mod: KeyModifiers,
     pub ime_spot: Vec2,
     pub init_resize: bool,
     pub current_cursor: MouseCursor,
     pub last_mouse_pos: Vec2,
     pub fingers_down: Vec<bool>,
+    
     pub hwnd: Option<HWND>,
-    pub event_callback: Option<*mut FnMut(&mut Vec<Event>)>,
-    pub dpi_functions: Option<DpiFunctions>
 }
 
-pub enum LoopAction {
+#[derive(PartialEq)]
+pub enum Win32LoopState {
     Block,
     Poll,
-    Quit
 }
 
-impl WindowsWindow {
+impl Win32App {
+    pub fn new() -> Win32App {
+        
+        let class_name_wstr: Vec<_> = OsStr::new("MakepadWindow").encode_wide().chain(Some(0).into_iter()).collect();
+        
+        let class = winuser::WNDCLASSEXW {
+            cbSize: mem::size_of::<winuser::WNDCLASSEXW>() as UINT,
+            style: winuser::CS_HREDRAW | winuser::CS_VREDRAW | winuser::CS_OWNDC,
+            lpfnWndProc: Some(Win32App::window_class_proc),
+            cbClsExtra: 0,
+            cbWndExtra: 0,
+            hInstance: unsafe {libloaderapi::GetModuleHandleW(ptr::null())},
+            hIcon: unsafe {winuser::LoadIconW(ptr::null_mut(), winuser::IDI_WINLOGO)}, //h_icon,
+            hCursor: unsafe {winuser::LoadCursorW(ptr::null_mut(), winuser::IDC_ARROW)}, // must be null in order for cursor state to work properly
+            hbrBackground: ptr::null_mut(),
+            lpszMenuName: ptr::null(),
+            lpszClassName: class_name_wstr.as_ptr(),
+            hIconSm: ptr::null_mut(),
+        };
+        
+        unsafe {winuser::RegisterClassExW(&class);}
+        
+        
+        let win32_app = Win32App {
+            time_start: precise_time_ns(),
+            event_callback: None,
+            event_recur_block: false,
+            event_loop_running: true,
+            loop_state: Win32LoopState::Poll,
+            dpi_functions: DpiFunctions::new()
+        };
+        
+        win32_app.dpi_functions.become_dpi_aware();
+        
+        win32_app
+    }
     
-    pub unsafe extern "system" fn window_proc(hwnd: HWND, msg: UINT, wparam: WPARAM, lparam: LPARAM,) -> LRESULT {
+    pub fn init(&mut self) {
+    }
+    
+    pub unsafe extern "system" fn window_class_proc(hwnd: HWND, msg: UINT, wparam: WPARAM, lparam: LPARAM,) -> LRESULT {
         
         let user_data = winuser::GetWindowLongPtrW(hwnd, winuser::GWLP_USERDATA);
         if user_data == 0 {
             return winuser::DefWindowProcW(hwnd, msg, wparam, lparam);
         };
         
-        let window = &(*(user_data as *mut WindowsWindow));
+        let window = &(*(user_data as *mut Win32Window));
         match msg {
             winuser::WM_MOUSEMOVE => {
                 window.on_mouse_move();
@@ -62,38 +111,27 @@ impl WindowsWindow {
         return winuser::DefWindowProcW(hwnd, msg, wparam, lparam)
     }
     
-    pub fn on_mouse_move(&self) {
+    pub fn start_timer(&mut self, _timer_id: u64, _interval: f64, _repeats: bool) {
     }
     
-    pub fn init(&mut self, title: &str) {
-        self.time_start = precise_time_ns();
-        for _i in 0..10 {
-            self.fingers_down.push(false);
+    pub fn stop_timer(&mut self, _timer_id: u64) {
+    }
+    
+    pub fn post_signal(_signal_id: u64, _value: u64) {
+    }
+    
+}
+
+impl Win32Window {
+    
+    pub fn new(window_id: usize, win32_app: &Win32App) -> Win32Window {
+        Win32Window {
+            time_start: win32_app.time_start,
+            
         }
-        self.init_resize = false;
-        self.dpi_functions = Some(DpiFunctions::new());
-        if let Some(dpi_functions) = &self.dpi_functions {
-            dpi_functions.become_dpi_aware()
-        }
-        
-        let class_name_wstr: Vec<_> = OsStr::new("MakepadWindow").encode_wide().chain(Some(0).into_iter()).collect();
-        
-        let class = winuser::WNDCLASSEXW {
-            cbSize: mem::size_of::<winuser::WNDCLASSEXW>() as UINT,
-            style: winuser::CS_HREDRAW | winuser::CS_VREDRAW | winuser::CS_OWNDC,
-            lpfnWndProc: Some(WindowsWindow::window_proc),
-            cbClsExtra: 0,
-            cbWndExtra: 0,
-            hInstance: unsafe {libloaderapi::GetModuleHandleW(ptr::null())},
-            hIcon: unsafe {winuser::LoadIconW(ptr::null_mut(), winuser::IDI_WINLOGO)}, //h_icon,
-            hCursor: unsafe {winuser::LoadCursorW(ptr::null_mut(), winuser::IDC_ARROW)}, // must be null in order for cursor state to work properly
-            hbrBackground: ptr::null_mut(),
-            lpszMenuName: ptr::null(),
-            lpszClassName: class_name_wstr.as_ptr(),
-            hIconSm: ptr::null_mut(),
-        };
-        
-        unsafe {winuser::RegisterClassExW(&class);}
+    }
+    
+    pub fn init(&mut self, title: &str, size: Vec2, position: Option<Vec2>) {
         
         let style = winuser::WS_SIZEBOX | winuser::WS_MAXIMIZEBOX | winuser::WS_CAPTION
             | winuser::WS_MINIMIZEBOX | winuser::WS_BORDER | winuser::WS_VISIBLE
@@ -121,13 +159,31 @@ impl WindowsWindow {
                 libloaderapi::GetModuleHandleW(ptr::null()),
                 ptr::null_mut(),
             );
+            
             self.hwnd = Some(hwnd);
+            
             winuser::SetWindowLongPtrW(hwnd, winuser::GWLP_USERDATA, &self as *const _ as isize);
             
-            if let Some(dpi_functions) = &self.dpi_functions {
-                dpi_functions.enable_non_client_dpi_scaling(self.hwnd.unwrap())
-            }
+            self.win32_app.dpi_functions.enable_non_client_dpi_scaling(self.hwnd.unwrap())
         }
+    }
+    
+    
+    pub fn on_mouse_move(&self) {
+    }
+    
+    pub fn init(&mut self, title: &str) {
+        self.time_start = precise_time_ns();
+        for _i in 0..10 {
+            self.fingers_down.push(false);
+        }
+        self.init_resize = false;
+        self.dpi_functions = Some(DpiFunctions::new());
+        if let Some(dpi_functions) = &self.dpi_functions {
+            dpi_functions.become_dpi_aware()
+        }
+        
+        
     }
     
     pub fn event_loop<F>(&mut self, mut event_handler: F)
@@ -233,15 +289,6 @@ impl WindowsWindow {
         else {
             1.0
         }
-    }
-    
-    pub fn start_timer(&mut self, _timer_id: u64, _interval: f64, _repeats: bool) {
-    }
-    
-    pub fn stop_timer(&mut self, _timer_id: u64) {
-    }
-    
-    pub fn post_signal(_signal_id: u64, _value: u64) {
     }
     
     pub fn send_change_event(&mut self) {

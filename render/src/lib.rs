@@ -14,7 +14,7 @@ mod cx_cocoa;
 #[cfg(target_os = "windows")]
 mod cx_dx11; 
 #[cfg(target_os = "windows")]
-mod cx_hlsl; 
+mod cx_hlsl;  
 #[cfg(target_os = "windows")]
 mod cx_win32; 
 

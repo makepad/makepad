@@ -52,6 +52,8 @@ pub struct CocoaApp {
     pub post_delegate_class: *const Class,
     pub timer_delegate_class: *const Class,
     pub view_class: *const Class,
+    pub const_attributes_for_marked_text: id,
+    pub const_empty_string: id,
     pub time_start: u64,
     pub timer_delegate_instance: id,
     pub timers: Vec<CocoaTimer>,
@@ -64,8 +66,6 @@ pub struct CocoaApp {
     pub loop_state: CocoaLoopState,
     pub cursors: HashMap<MouseCursor, id>,
     pub current_cursor: MouseCursor,
-    pub const_attributes_for_marked_text: id,
-    pub const_empty_string: id,
 }
 
 #[derive(PartialEq)]
