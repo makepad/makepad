@@ -785,7 +785,7 @@ impl D3d11Cx {
             ptr::null_mut(),
             &mut swap_chain1 as *mut *mut _
         )};
-        if winerror::SUCCEEDED(hr) {
+        if winerror::SUCCEEDED(hr) { 
             Ok(unsafe {ComPtr::from_raw(swap_chain1 as *mut _)})
         }
         else {
