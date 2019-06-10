@@ -16,17 +16,17 @@ use winapi::um::wingdi::{GetDeviceCaps, LOGPIXELSX};
 use winapi::um::winnt::{HRESULT, LPCSTR};
 use winapi::um::winuser::{MONITOR_DEFAULTTONEAREST};
 
-#[derive(Default)]
 pub struct Win32App {
     pub time_start: u64,
     pub event_callback: Option<*mut FnMut(&mut Win32App, &mut Vec<Event>) -> Win32LoopState>,
     pub event_recur_block: bool,
     pub event_loop_running: bool,
+    pub class_name_wstr: Vec<u16>,
     pub loop_state: Win32LoopState,
     pub dpi_functions: DpiFunctions,
 }
 
-#[derive(Default)]
+#[derive(Clone)]
 pub struct Win32Window {
     pub window_id: usize,
     pub win32_app: *mut Win32App,
@@ -36,7 +36,6 @@ pub struct Win32Window {
     
     pub last_key_mod: KeyModifiers,
     pub ime_spot: Vec2,
-    pub init_resize: bool,
     pub current_cursor: MouseCursor,
     pub last_mouse_pos: Vec2,
     pub fingers_down: Vec<bool>,
@@ -53,7 +52,7 @@ pub enum Win32LoopState {
 impl Win32App {
     pub fn new() -> Win32App {
         
-        let class_name_wstr: Vec<_> = OsStr::new("MakepadWindow").encode_wide().chain(Some(0).into_iter()).collect();
+        let class_name_wstr: Vec<u16> = OsStr::new("MakepadWindow").encode_wide().chain(Some(0).into_iter()).collect();
         
         let class = winuser::WNDCLASSEXW {
             cbSize: mem::size_of::<winuser::WNDCLASSEXW>() as UINT,
@@ -72,8 +71,8 @@ impl Win32App {
         
         unsafe {winuser::RegisterClassExW(&class);}
         
-        
         let win32_app = Win32App {
+            class_name_wstr: class_name_wstr,
             time_start: precise_time_ns(),
             event_callback: None,
             event_recur_block: false,
@@ -111,6 +110,64 @@ impl Win32App {
         return winuser::DefWindowProcW(hwnd, msg, wparam, lparam)
     }
     
+    
+    pub fn event_loop<F>(&mut self, mut event_handler: F)
+    where F: FnMut(&mut Win32App, &mut Vec<Event>) -> Win32LoopState,
+    {
+        unsafe {
+            self.event_callback = Some(
+                &mut event_handler as *const FnMut(&mut Win32App, &mut Vec<Event>) -> Win32LoopState
+                as *mut FnMut(&mut Win32App, &mut Vec<Event>) -> Win32LoopState
+            );
+            
+            while self.event_loop_running {
+                let mut msg = mem::uninitialized();
+                let mut do_paint = false;
+                match self.loop_state {
+                    Win32LoopState::Block => {
+                        if winuser::GetMessageW(&mut msg, ptr::null_mut(), 0, 0) == 0 {
+                            // Only happens if the message is `WM_QUIT`.
+                            debug_assert_eq!(msg.message, winuser::WM_QUIT);
+                            self.event_loop_running = false;
+                            do_paint = false;
+                        }
+                        else {
+                            winuser::TranslateMessage(&msg);
+                            winuser::DispatchMessageW(&msg);
+                            do_paint = true;
+                        }
+                    },
+                    Win32LoopState::Poll => {
+                        if winuser::PeekMessageW(&mut msg, ptr::null_mut(), 0, 0, 1) == 0 {
+                            do_paint = true;
+                        }
+                        else {
+                            winuser::TranslateMessage(&msg);
+                            winuser::DispatchMessageW(&msg);
+                            do_paint = false;
+                        }
+                    }
+                }
+                if do_paint {
+                    self.do_callback(&mut vec![Event::Paint]);
+                }
+            }
+            self.event_callback = None;
+        }
+    }
+    
+    pub fn do_callback(&mut self, events: &mut Vec<Event>) {
+        unsafe {
+            if self.event_callback.is_none() || self.event_recur_block {
+                return
+            };
+            self.event_recur_block = true;
+            let callback = self.event_callback.unwrap();
+            self.loop_state = (*callback)(self, events);
+            self.event_recur_block = false;
+        }
+    }
+    
     pub fn start_timer(&mut self, _timer_id: u64, _interval: f64, _repeats: bool) {
     }
     
@@ -124,10 +181,20 @@ impl Win32App {
 
 impl Win32Window {
     
-    pub fn new(window_id: usize, win32_app: &Win32App) -> Win32Window {
-        Win32Window {
-            time_start: win32_app.time_start,
-            
+    pub fn new(win32_app: &mut Win32App, window_id: usize) -> Win32Window {
+        unsafe {
+            Win32Window {
+                window_id: window_id,
+                win32_app: win32_app,
+                last_window_geom: WindowGeom::default(),
+                time_start: win32_app.time_start,
+                last_key_mod: KeyModifiers::default(),
+                ime_spot: Vec2::zero(),
+                current_cursor: MouseCursor::Default,
+                last_mouse_pos: Vec2::zero(),
+                fingers_down: Vec::new(),
+                hwnd: None
+            }
         }
     }
     
@@ -147,7 +214,7 @@ impl Win32Window {
             
             let hwnd = winuser::CreateWindowExW(
                 style_ex,
-                class_name_wstr.as_ptr(),
+                (*self.win32_app).class_name_wstr.as_ptr(),
                 title_wstr.as_ptr() as LPCWSTR,
                 style,
                 winuser::CW_USEDEFAULT,
@@ -164,77 +231,20 @@ impl Win32Window {
             
             winuser::SetWindowLongPtrW(hwnd, winuser::GWLP_USERDATA, &self as *const _ as isize);
             
-            self.win32_app.dpi_functions.enable_non_client_dpi_scaling(self.hwnd.unwrap())
+            (*self.win32_app).dpi_functions.enable_non_client_dpi_scaling(self.hwnd.unwrap())
         }
     }
-    
     
     pub fn on_mouse_move(&self) {
     }
     
-    pub fn init(&mut self, title: &str) {
-        self.time_start = precise_time_ns();
-        for _i in 0..10 {
-            self.fingers_down.push(false);
-        }
-        self.init_resize = false;
-        self.dpi_functions = Some(DpiFunctions::new());
-        if let Some(dpi_functions) = &self.dpi_functions {
-            dpi_functions.become_dpi_aware()
-        }
-        
-        
-    }
-    
-    pub fn event_loop<F>(&mut self, mut event_handler: F)
-    where F: FnMut(&mut Vec<Event>) -> LoopAction,
-    {
-        unsafe {
-            self.event_callback = Some(&mut event_handler as *const FnMut(&mut Vec<Event>) as *mut FnMut(&mut Vec<Event>));
-            let mut msg = mem::uninitialized();
-            
-            if !self.init_resize {
-                self.init_resize = true;
-                self.send_change_event();
-            }
-            
-            loop {
-                if do_first_block {
-                    do_first_block = false;
-                    if winuser::GetMessageW(&mut msg, ptr::null_mut(), 0, 0) == 0 {
-                        // Only happens if the message is `WM_QUIT`.
-                        debug_assert_eq!(msg.message, winuser::WM_QUIT);
-                        break;
-                    }
-                }
-                else {
-                    if winuser::PeekMessageW(&mut msg, ptr::null_mut(), 0, 0, 1) == 0 {
-                        break;
-                    }
-                }
-                // Calls `callback` below.
-                winuser::TranslateMessage(&msg);
-                winuser::DispatchMessageW(&msg);
-            }
-            self.event_callback = None;
-        }
-    }
-    
-    pub fn do_callback(&mut self, events: &mut Vec<Event>) {
-        unsafe {
-            if self.event_callback.is_none() {
-                return
-            };
-            let callback = self.event_callback.unwrap();
-            (*callback)(events);
-        }
-    }
     
     pub fn set_mouse_cursor(&mut self, _cursor: MouseCursor) {
     }
     
     pub fn get_window_geom(&self) -> WindowGeom {
         WindowGeom {
+            is_fullscreen: false,
             inner_size: self.get_inner_size(),
             outer_size: self.get_outer_size(),
             dpi_factor: self.get_dpi_factor(),
@@ -283,11 +293,14 @@ impl Win32Window {
     }
     
     pub fn get_dpi_factor(&self) -> f32 {
-        if let Some(dpi_functions) = &self.dpi_functions {
-            dpi_functions.hwnd_dpi_factor(self.hwnd.unwrap())
+        unsafe {
+            (*self.win32_app).dpi_functions.hwnd_dpi_factor(self.hwnd.unwrap())
         }
-        else {
-            1.0
+    }
+    
+    pub fn do_callback(&mut self, events: &mut Vec<Event>) {
+        unsafe {
+            (*self.win32_app).do_callback(events);
         }
     }
     
@@ -297,7 +310,8 @@ impl Win32Window {
         let old_geom = self.last_window_geom.clone();
         self.last_window_geom = new_geom.clone();
         
-        self.do_callback(&mut vec![Event::WindowChange(WindowChangeEvent {
+        self.do_callback(&mut vec![Event::WindowGeomChange(WindowGeomChangeEvent {
+            window_id: self.window_id,
             old_geom: old_geom,
             new_geom: new_geom
         })]);
@@ -314,6 +328,7 @@ impl Win32Window {
     pub fn send_finger_down(&mut self, digit: usize, modifiers: KeyModifiers) {
         self.fingers_down[digit] = true;
         self.do_callback(&mut vec![Event::FingerDown(FingerDownEvent {
+            window_id: self.window_id,
             abs: self.last_mouse_pos,
             rel: self.last_mouse_pos,
             rect: Rect::zero(),
@@ -329,6 +344,7 @@ impl Win32Window {
     pub fn send_finger_up(&mut self, digit: usize, modifiers: KeyModifiers) {
         self.fingers_down[digit] = false;
         self.do_callback(&mut vec![Event::FingerUp(FingerUpEvent {
+            window_id: self.window_id,
             abs: self.last_mouse_pos,
             rel: self.last_mouse_pos,
             rect: Rect::zero(),
@@ -348,6 +364,7 @@ impl Win32Window {
         for (digit, down) in self.fingers_down.iter().enumerate() {
             if *down {
                 events.push(Event::FingerMove(FingerMoveEvent {
+                    window_id: self.window_id,
                     abs: pos,
                     rel: pos,
                     rect: Rect::zero(),
@@ -362,6 +379,7 @@ impl Win32Window {
             }
         };
         events.push(Event::FingerHover(FingerHoverEvent {
+            window_id: self.window_id,
             abs: pos,
             rel: pos,
             rect: Rect::zero(),
@@ -373,8 +391,13 @@ impl Win32Window {
         self.do_callback(&mut events);
     }
     
-    pub fn send_close_requested_event(&mut self) {
-        self.do_callback(&mut vec![Event::CloseRequested])
+    pub fn send_close_requested_event(&mut self) -> bool {
+        let mut events = vec![Event::WindowCloseRequested(WindowCloseRequestedEvent {window_id: self.window_id, accept_close: true})];
+        self.do_callback(&mut events);
+        if let Event::WindowCloseRequested(cre) = &events[0] {
+            return cre.accept_close
+        }
+        true
     }
     
     pub fn send_text_input(&mut self, input: String, replace_last: bool) {

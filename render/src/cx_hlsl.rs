@@ -17,9 +17,9 @@ pub struct CxPlatformShader {
 }
 
 impl Cx {
-    pub fn hlsl_compile_all_shaders(&mut self, d3d11: &D3d11) {
+    pub fn hlsl_compile_all_shaders(&mut self, d3d11_cx: &D3d11Cx) {
         for sh in &mut self.shaders {
-            let err = Self::hlsl_compile_shader(sh, d3d11);
+            let err = Self::hlsl_compile_shader(sh, d3d11_cx);
             if let Err(err) = err {
                 panic!("Got hlsl shader compile error: {}", err.msg);
             }
@@ -105,7 +105,7 @@ impl Cx {
         let mut varyings = sg.flat_vars(ShVarStore::Varying);
         let locals = sg.flat_vars(ShVarStore::Local);
         let uniforms_cx = sg.flat_vars(ShVarStore::UniformCx);
-        let uniforms_dl = sg.flat_vars(ShVarStore::UniformDl);
+        let uniforms_vw = sg.flat_vars(ShVarStore::UniformVw);
         let uniforms_dr = sg.flat_vars(ShVarStore::Uniform);
         
         // lets count the slots
@@ -117,7 +117,7 @@ impl Cx {
         hlsl_out.push_str(&Self::hlsl_assemble_struct("struct", "_Geom", &geometries, "GEOM_", "", ""));
         hlsl_out.push_str(&Self::hlsl_assemble_struct("struct", "_Inst", &instances, "INST_", "", ""));
         hlsl_out.push_str(&Self::hlsl_assemble_struct("cbuffer", "_Uni_Cx", &uniforms_cx, "", "", ": register(b0)"));
-        hlsl_out.push_str(&Self::hlsl_assemble_struct("cbuffer", "_Uni_Dl", &uniforms_dl, "", "", ": register(b1)"));
+        hlsl_out.push_str(&Self::hlsl_assemble_struct("cbuffer", "_Uni_Vw", &uniforms_vw, "", "", ": register(b1)"));
         hlsl_out.push_str(&Self::hlsl_assemble_struct("cbuffer", "_Uni_Dr", &uniforms_dr, "", "", ": register(b2)"));
         hlsl_out.push_str(&Self::hlsl_assemble_struct("struct", "_Loc", &locals, "", "", ""));
         
@@ -245,7 +245,7 @@ impl Cx {
             geometry_slots: geometry_slots,
             instance_slots: instance_slots,
             uniforms_dr: uniforms_dr,
-            uniforms_dl: uniforms_dl,
+            uniforms_vw: uniforms_vw,
             uniforms_cx: uniforms_cx,
             texture_slots: texture_slots,
         }))
@@ -261,18 +261,18 @@ impl Cx {
         }
     }
     
-    pub fn hlsl_compile_shader(sh: &mut CxShader, d3d11: &D3d11) -> Result<(), SlErr> {
+    pub fn hlsl_compile_shader(sh: &mut CxShader, d3d11_cx: &D3d11Cx) -> Result<(), SlErr> {
         let (hlsl, mapping) = Self::hlsl_assemble_shader(&sh.shader_gen) ?;
         
-        let vs_blob = d3d11.compile_shader("vs", "_vertex_shader".as_bytes(), hlsl.as_bytes()) ?;
-        let ps_blob = d3d11.compile_shader("ps", "_pixel_shader".as_bytes(), hlsl.as_bytes()) ?;
+        let vs_blob = d3d11_cx.compile_shader("vs", "_vertex_shader".as_bytes(), hlsl.as_bytes()) ?;
+        let ps_blob = d3d11_cx.compile_shader("ps", "_pixel_shader".as_bytes(), hlsl.as_bytes()) ?;
         
-        let vs = d3d11.create_vertex_shader(&vs_blob) ?;
-        let ps = d3d11.create_pixel_shader(&ps_blob) ?;
+        let vs = d3d11_cx.create_vertex_shader(&vs_blob) ?;
+        let ps = d3d11_cx.create_pixel_shader(&ps_blob) ?;
         
         let mut layout_desc = Vec::new();
-        let geom_named = NamedProps::construct(sh, &mapping.geometries, false);
-        let inst_named = NamedProps::construct(sh, &mapping.instances, false);
+        let geom_named = NamedProps::construct(&sh.shader_gen, &mapping.geometries, false);
+        let inst_named = NamedProps::construct(&sh.shader_gen, &mapping.instances, false);
         let mut strings = Vec::new();
         
         for geom in &geom_named.props {
@@ -301,18 +301,18 @@ impl Cx {
             })
         }
         
-        let input_layout = d3d11.create_input_layout(&vs_blob, &layout_desc) ?;
+        let input_layout = d3d11_cx.create_input_layout(&vs_blob, &layout_desc) ?;
 
         sh.mapping = mapping;
         sh.platform = Some(CxPlatformShader{
             geom_ibuf: {
                 let mut geom_ibuf = D3d11Buffer {..Default::default()};
-                geom_ibuf.update_with_u32_index_data(d3d11, &sh.geometry_indices);
+                geom_ibuf.update_with_u32_index_data(d3d11_cx, &sh.shader_gen.geometry_indices);
                 geom_ibuf
             },
             geom_vbuf: {
                 let mut geom_vbuf = D3d11Buffer {..Default::default()};
-                geom_vbuf.update_with_f32_vertex_data(d3d11, &sh.geometry_vertices);
+                geom_vbuf.update_with_f32_vertex_data(d3d11_cx, &sh.shader_gen.geometry_vertices);
                 geom_vbuf
             },
             vertex_shader: vs,
@@ -370,7 +370,7 @@ impl<'a> SlCx<'a> {
         //let mty = Cx::hlsl_type(&var.ty);
         match var.store {
             ShVarStore::Uniform => return var.name.clone(), //format!("_uni_dr.{}", var.name),
-            ShVarStore::UniformDl => return var.name.clone(), //format!("_uni_dl.{}", var.name),
+            ShVarStore::UniformVw => return var.name.clone(), //format!("_uni_dl.{}", var.name),
             ShVarStore::UniformCx => return var.name.clone(), //format!("_uni_cx.{}", var.name),
             ShVarStore::Instance => {
                 if let SlTarget::Pixel = self.target {

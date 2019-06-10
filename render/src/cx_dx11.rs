@@ -14,19 +14,19 @@ use std::ffi;
 
 impl Cx {
     
-    pub fn render_view(&mut self, pass_id: usize, view_id: usize, d3d11: &D3d11) {
+    pub fn render_view(&mut self, pass_id: usize, view_id: usize, d3d11_cx: &D3d11Cx) {
         
         // tad ugly otherwise the borrow checker locks 'self' and we can't recur
         let draw_calls_len = self.views[view_id].draw_calls_len;
         for draw_call_id in 0..draw_calls_len {
             let sub_view_id = self.views[view_id].draw_calls[draw_call_id].sub_view_id;
             if sub_view_id != 0 {
-                self.render_view(pass_id, sub_view_id, d3d11);
+                self.render_view(pass_id, sub_view_id, d3d11_cx);
             }
             else {
                 let cxview = &mut self.views[view_id];
                 cxview.set_clipping_uniforms();
-                cxview.platform.uni_dl.update_with_f32_constant_data(d3d11, &mut cxview.uniforms);
+                cxview.platform.uni_dl.update_with_f32_constant_data(d3d11_cx, &mut cxview.uniforms);
                 
                 let draw_call = &mut cxview.draw_calls[draw_call_id];
                 let sh = &self.shaders[draw_call.shader_id];
@@ -38,57 +38,57 @@ impl Cx {
                         continue;
                     }
                     // update the instance buffer data
-                    draw_call.platform.inst_vbuf.update_with_f32_vertex_data(d3d11, &draw_call.instance);
+                    draw_call.platform.inst_vbuf.update_with_f32_vertex_data(d3d11_cx, &draw_call.instance);
                 }
                 if draw_call.uniforms_dirty {
                     draw_call.uniforms_dirty = false;
-                    draw_call.platform.uni_dr.update_with_f32_constant_data(d3d11, &mut draw_call.uniforms);
+                    draw_call.platform.uni_dr.update_with_f32_constant_data(d3d11_cx, &mut draw_call.uniforms);
                 }
                 
                 let instances = (draw_call.instance.len() / sh.mapping.instance_slots) as usize;
-                d3d11.set_shaders(&shp.vertex_shader, &shp.pixel_shader);
+                d3d11_cx.set_shaders(&shp.vertex_shader, &shp.pixel_shader);
                 
-                d3d11.set_primitive_topology();
+                d3d11_cx.set_primitive_topology();
                 
-                d3d11.set_input_layout(&shp.input_layout);
+                d3d11_cx.set_input_layout(&shp.input_layout);
                 
-                d3d11.set_index_buffer(&shp.geom_ibuf);
+                d3d11_cx.set_index_buffer(&shp.geom_ibuf);
                 
-                d3d11.set_vertex_buffers(&shp.geom_vbuf, sh.mapping.geometry_slots, &draw_call.platform.inst_vbuf, sh.mapping.instance_slots);
+                d3d11_cx.set_vertex_buffers(&shp.geom_vbuf, sh.mapping.geometry_slots, &draw_call.platform.inst_vbuf, sh.mapping.instance_slots);
                 
-                d3d11.set_constant_buffers(&self.platform.uni_cx, &cxview.platform.uni_dl, &draw_call.platform.uni_dr);
+                d3d11_cx.set_constant_buffers(&self.platform.uni_cx, &cxview.platform.uni_dl, &draw_call.platform.uni_dr);
                 
                 for (i, texture_id) in draw_call.textures_2d.iter().enumerate() {
                     let cxtexture = &mut self.textures[*texture_id as usize];
                     if cxtexture.upload_image {
-                        d3d11.update_platform_texture_image2d(cxtexture)
+                        d3d11_cx.update_platform_texture_image2d(cxtexture)
                     }
                     if let Some(shader_resource) = &cxtexture.platform.shader_resource {
-                        d3d11.set_shader_resource(i, shader_resource);
+                        d3d11_cx.set_shader_resource(i, shader_resource);
                     }
                 }
                 
-                d3d11.draw_indexed_instanced(sh.geometry_indices.len(), instances);
+                d3d11_cx.draw_indexed_instanced(sh.shader_gen.geometry_indices.len(), instances);
             }
         }
     }
     
-    pub fn repaint(&mut self, d3d11: &D3d11) {
-        self.prepare_frame();
+    fn draw_pass_to_layer(&mut self, pass_id: usize, d3d11_window:&D3d11Window, d3d11_cx: &D3d11Cx) {
+        let view_id = self.passes[pass_id].main_view_id.unwrap();
         
-        self.platform.uni_cx.update_with_f32_constant_data(&d3d11, &mut self.uniforms);
+        self.platform.uni_cx.update_with_f32_constant_data(&d3d11_cx, &mut self.passes[pass_id].uniforms);
         
-        d3d11.set_viewport(&self.window_geom);
+        d3d11_cx.set_viewport(d3d11_window);
         
-        d3d11.clear_render_target_view(self.clear_color);
+        d3d11_cx.clear_render_target_view(d3d11_window, color("red"));//self.clear_color);
         
-        d3d11.clear_depth_stencil_view();
+        d3d11_cx.clear_depth_stencil_view(d3d11_window);
         
-        d3d11.set_rendertargets();
+        d3d11_cx.set_rendertargets(d3d11_window);
+        d3d11_cx.set_raster_state(d3d11_window);
+        self.render_view(pass_id, view_id, d3d11_cx);
         
-        self.exec_draw_list(0, d3d11);
-        
-        d3d11.present();
+        d3d11_cx.present(d3d11_window);
     }
     
     fn resize_layer_to_turtle(&mut self) {
@@ -97,35 +97,34 @@ impl Cx {
     pub fn event_loop<F>(&mut self, mut event_handler: F)
     where F: FnMut(&mut Cx, &mut Event),
     {
-        self.feature = "dx11".to_string();
+        self.is_desktop_build = true;
         
         let mut win32_app = Win32App::new();
         
         win32_app.init();
         
-        let mut render_windows: Vec<Win32RenderWindow> = Vec::new();
+        let mut render_windows: Vec<D3d11Window> = Vec::new();
         
         let mut root_view = View::<NoScrollBar> {
             ..Style::style(self)
         };
         
+        let d3d11_cx = D3d11Cx::new();
         
-        let d3d11 = D3d11::init(&windows_window, &self.window_geom);
-        
-        if let Err(msg) = d3d11 {
+        if let Err(msg) = d3d11_cx {
             panic!("Cannot initialize d3d11 {}", msg);
         }
         
-        let d3d11 = d3d11.unwrap();
+        let d3d11_cx = d3d11_cx.unwrap();
         
-        self.hlsl_compile_all_shaders(&d3d11);
+        self.hlsl_compile_all_shaders(&d3d11_cx);
         
-        self.load_binary_deps_from_file();
+        self.load_fonts_from_file();
         
         self.call_event_handler(&mut event_handler, &mut Event::Construct);
         
         self.redraw_child_area(Area::All);
-
+        
         /*
         let mut lp = 0;
         while self.running {
@@ -235,14 +234,6 @@ impl Cx {
     pub fn hide_text_ime(&mut self) {
     }
     
-    pub fn set_window_outer_size(&mut self, size: Vec2) {
-        self.platform.set_window_outer_size = Some(size);
-    }
-    
-    pub fn set_window_position(&mut self, pos: Vec2) {
-        self.platform.set_window_position = Some(pos);
-    }
-    
     pub fn start_timer(&mut self, interval: f64, repeats: bool) -> Timer {
         self.timer_id += 1;
         self.platform.start_timer.push((self.timer_id, interval, repeats));
@@ -261,23 +252,54 @@ impl Cx {
     }
 }
 
-struct Win32RenderWindow{
+struct D3d11Window {
     pub window_id: usize,
     pub window_geom: WindowGeom,
-    pub win32_window: Win32Window
+    pub win32_window: Win32Window,
+    pub render_target_view: ComPtr<d3d11::ID3D11RenderTargetView>,
+    pub depth_stencil_view: ComPtr<d3d11::ID3D11DepthStencilView>,
+    pub swap_chain: ComPtr<dxgi1_2::IDXGISwapChain1>,
+    pub raster_state: ComPtr<d3d11::ID3D11RasterizerState>,
+    pub blend_state: ComPtr<d3d11::ID3D11BlendState>,
 }
 
-impl Win32RenderWindow {
-    fn new(window_id: usize, d3d11: &D3d11, win32_app: &mut Win32App, inner_size: Vec2, position: Option<Vec2>, title: &str) -> Win32RenderWindow {
+impl D3d11Window {
+    fn new(window_id: usize, d3d11_cx: &D3d11Cx, win32_app: &mut Win32App, inner_size: Vec2, position: Option<Vec2>, title: &str) -> Result<D3d11Window, winerror::HRESULT> {
         let mut win32_window = Win32Window::new(win32_app, window_id);
         
         win32_window.init(title, inner_size, position);
+        let window_geom = win32_window.get_window_geom();
+        let swap_chain = d3d11_cx.create_swap_chain_for_hwnd(&window_geom, &win32_window) ?;
         
-        Win32RenderWindow{
+        let render_target_view = d3d11_cx.create_render_target_view(&swap_chain) ?;
+        let depth_stencil_buffer = d3d11_cx.create_depth_stencil_buffer(&window_geom) ?;
+        let depth_stencil_state = d3d11_cx.create_depth_stencil_state() ?;
+        
+        unsafe {d3d11_cx.context.OMSetDepthStencilState(depth_stencil_state.as_raw() as *mut _, 1)}
+        
+        let depth_stencil_view = d3d11_cx.create_depth_stencil_view(&depth_stencil_buffer) ?;
+        
+        //unsafe {context.OMSetDepthStencilState(depth_stencil_state.as_raw() as *mut _, 1)}
+        
+        let raster_state = d3d11_cx.create_raster_state() ?;
+        
+        unsafe {d3d11_cx.context.RSSetState(raster_state.as_raw() as *mut _)}
+        
+        let blend_state = d3d11_cx.create_blend_state() ?;
+        
+        let blend_factor = [0., 0., 0., 0.];
+        unsafe {d3d11_cx.context.OMSetBlendState(blend_state.as_raw() as *mut _, &blend_factor, 0xffffffff)}
+        
+        Ok(D3d11Window {
             window_id: window_id,
-            window_geom: win32_window.get_window_geom(),
-            win32_window:win32_window
-        }
+            window_geom: window_geom,
+            win32_window: win32_window,
+            render_target_view: render_target_view,
+            depth_stencil_view: depth_stencil_view,
+            swap_chain: swap_chain,
+            raster_state: raster_state,
+            blend_state: blend_state
+        })
     }
 }
 
@@ -293,72 +315,39 @@ pub struct CxPlatform {
 }
 
 #[derive(Clone)]
-pub struct D3d11 {
+pub struct D3d11Cx {
     pub device: ComPtr<d3d11::ID3D11Device>,
     pub context: ComPtr<d3d11::ID3D11DeviceContext>,
-    pub render_target_view: ComPtr<d3d11::ID3D11RenderTargetView>,
-    pub depth_stencil_view: ComPtr<d3d11::ID3D11DepthStencilView>,
-    pub swap_chain: ComPtr<dxgi1_2::IDXGISwapChain1>,
-    pub raster_state: ComPtr<d3d11::ID3D11RasterizerState>,
-    pub blend_state: ComPtr<d3d11::ID3D11BlendState>,
+    pub factory: ComPtr<dxgi1_2::IDXGIFactory2>,
 }
 
-impl D3d11 {
+impl D3d11Cx {
     
-    fn init(windows_window: &WindowsWindow, window_geom: &WindowGeom) -> Result<D3d11, winerror::HRESULT> {
-        let factory = D3d11::create_dxgi_factory1(&dxgi1_2::IDXGIFactory2::uuidof()) ?;
+    fn new() -> Result<D3d11Cx, winerror::HRESULT> {
+        let factory = D3d11Cx::create_dxgi_factory1(&dxgi1_2::IDXGIFactory2::uuidof()) ?;
+        let adapter = D3d11Cx::enum_adapters(&factory) ?;
+        let (device, context) = D3d11Cx::create_d3d11_device(&adapter) ?;
         
-        let adapter = D3d11::enum_adapters(&factory) ?;
-        
-        let (device, context) = D3d11::create_d3d11_device(&adapter) ?;
-        
-        let swap_chain = D3d11::create_swap_chain_for_hwnd(window_geom, &windows_window, &factory, &device) ?;
-        
-        let render_target_view = D3d11::create_render_target_view(&device, &swap_chain) ?;
-        
-        let depth_stencil_buffer = D3d11::create_depth_stencil_buffer(window_geom, &device) ?;
-        
-        let depth_stencil_state = D3d11::create_depth_stencil_state(&device) ?;
-        
-        unsafe {context.OMSetDepthStencilState(depth_stencil_state.as_raw() as *mut _, 1)}
-        
-        let depth_stencil_view = D3d11::create_depth_stencil_view(&depth_stencil_buffer, &device) ?;
-        
-        //unsafe {context.OMSetDepthStencilState(depth_stencil_state.as_raw() as *mut _, 1)}
-        
-        let raster_state = D3d11::create_raster_state(&device) ?;
-        
-        unsafe {context.RSSetState(raster_state.as_raw() as *mut _)}
-        
-        let blend_state = D3d11::create_blend_state(&device) ?;
-        
-        let blend_factor = [0., 0., 0., 0.];
-        unsafe {context.OMSetBlendState(blend_state.as_raw() as *mut _, &blend_factor, 0xffffffff)}
-        
-        
-        Ok(D3d11 {
+        Ok(D3d11Cx {
             device: device,
             context: context,
-            render_target_view: render_target_view,
-            depth_stencil_view: depth_stencil_view,
-            swap_chain: swap_chain,
-            raster_state: raster_state,
-            blend_state: blend_state
+            factory: factory
         })
     }
     
-    fn set_rendertargets(&self) {
+    fn set_rendertargets(&self, d3d11_window:&D3d11Window) {
         unsafe {self.context.OMSetRenderTargets(
             1,
-            [self.render_target_view.as_raw() as *mut _].as_ptr(),
-            self.depth_stencil_view.as_raw() as *mut _
+            [d3d11_window.render_target_view.as_raw() as *mut _].as_ptr(),
+            d3d11_window.depth_stencil_view.as_raw() as *mut _
         )}
     }
     
-    fn set_viewport(&self, window_geom: &WindowGeom) {
+    fn set_viewport(&self, d3d11_window:&D3d11Window) {
+        let wg = &d3d11_window.window_geom;
         let viewport = d3d11::D3D11_VIEWPORT {
-            Width: window_geom.inner_size.x * window_geom.dpi_factor,
-            Height: window_geom.inner_size.y * window_geom.dpi_factor,
+            Width: wg.inner_size.x * wg.dpi_factor,
+            Height: wg.inner_size.y * wg.dpi_factor,
             MinDepth: 0.,
             MaxDepth: 1.,
             TopLeftX: 0.0,
@@ -367,13 +356,13 @@ impl D3d11 {
         unsafe {self.context.RSSetViewports(1, &viewport)}
     }
     
-    fn clear_render_target_view(&self, color: Color) {
+    fn clear_render_target_view(&self, d3d11_window:&D3d11Window, color: Color) {
         let color = [color.r, color.g, color.b, color.a];
-        unsafe {self.context.ClearRenderTargetView(self.render_target_view.as_raw() as *mut _, &color)}
+        unsafe {self.context.ClearRenderTargetView(d3d11_window.render_target_view.as_raw() as *mut _, &color)}
     }
     
-    fn clear_depth_stencil_view(&self) {
-        unsafe {self.context.ClearDepthStencilView(self.depth_stencil_view.as_raw() as *mut _, d3d11::D3D11_CLEAR_DEPTH, 1.0, 0)}
+    fn clear_depth_stencil_view(&self, d3d11_window:&D3d11Window) {
+        unsafe {self.context.ClearDepthStencilView(d3d11_window.depth_stencil_view.as_raw() as *mut _, d3d11::D3D11_CLEAR_DEPTH, 1.0, 0)}
     }
     
     fn set_input_layout(&self, input_layout: &ComPtr<d3d11::ID3D11InputLayout>) {
@@ -397,6 +386,9 @@ impl D3d11 {
         unsafe {self.context.VSSetShaderResources(index as u32, 1, raw.as_ptr() as *const *mut _)}
     }
     
+    fn set_raster_state(&self, d3d11_window:&D3d11Window){
+        unsafe {self.context.RSSetState(d3d11_window.raster_state.as_raw() as *mut _)};
+    }
     
     fn set_primitive_topology(&self) {
         unsafe {self.context.IASetPrimitiveTopology(d3dcommon::D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST)}
@@ -440,7 +432,7 @@ impl D3d11 {
     }
     
     fn draw_indexed_instanced(&self, num_vertices: usize, num_instances: usize) {
-        unsafe {self.context.RSSetState(self.raster_state.as_raw() as *mut _)};
+        
         
         unsafe {self.context.DrawIndexedInstanced(
             num_vertices as u32,
@@ -451,8 +443,8 @@ impl D3d11 {
         )};
     }
     
-    fn present(&self) {
-        unsafe {self.swap_chain.Present(0, 0)};
+    fn present(&self, d3d11_window:&D3d11Window) {
+        unsafe {d3d11_window.swap_chain.Present(0, 0)};
     }
     
     pub fn compile_shader(&self, stage: &str, entry: &[u8], shader: &[u8])
@@ -544,7 +536,7 @@ impl D3d11 {
     }
     
     
-    fn create_raster_state(device: &ComPtr<d3d11::ID3D11Device>)
+    fn create_raster_state(&self)
         -> Result<ComPtr<d3d11::ID3D11RasterizerState>, winerror::HRESULT> {
         let mut raster_state = ptr::null_mut();
         let raster_desc = d3d11::D3D11_RASTERIZER_DESC {
@@ -559,7 +551,7 @@ impl D3d11 {
             ScissorEnable: FALSE,
             SlopeScaledDepthBias: 0.0,
         };
-        let hr = unsafe {device.CreateRasterizerState(&raster_desc, &mut raster_state as *mut *mut _)};
+        let hr = unsafe {self.device.CreateRasterizerState(&raster_desc, &mut raster_state as *mut *mut _)};
         if winerror::SUCCEEDED(hr) {
             Ok(unsafe {ComPtr::from_raw(raster_state as *mut _)})
         }
@@ -568,7 +560,7 @@ impl D3d11 {
         }
     }
     
-    fn create_blend_state(device: &ComPtr<d3d11::ID3D11Device>)
+    fn create_blend_state(&self)
         -> Result<ComPtr<d3d11::ID3D11BlendState>, winerror::HRESULT> {
         let mut blend_state = ptr::null_mut();
         let mut blend_desc: d3d11::D3D11_BLEND_DESC = unsafe {mem::zeroed()};
@@ -583,7 +575,7 @@ impl D3d11 {
             BlendOpAlpha: d3d11::D3D11_BLEND_OP_ADD,
             RenderTargetWriteMask: d3d11::D3D11_COLOR_WRITE_ENABLE_ALL as u8,
         };
-        let hr = unsafe {device.CreateBlendState(&blend_desc, &mut blend_state as *mut *mut _)};
+        let hr = unsafe {self.device.CreateBlendState(&blend_desc, &mut blend_state as *mut *mut _)};
         if winerror::SUCCEEDED(hr) {
             Ok(unsafe {ComPtr::from_raw(blend_state as *mut _)})
         }
@@ -592,7 +584,7 @@ impl D3d11 {
         }
     }
     
-    fn create_depth_stencil_view(buffer: &ComPtr<d3d11::ID3D11Texture2D>, device: &ComPtr<d3d11::ID3D11Device>)
+    fn create_depth_stencil_view(&self, buffer: &ComPtr<d3d11::ID3D11Texture2D>)
         -> Result<ComPtr<d3d11::ID3D11DepthStencilView>, winerror::HRESULT> {
         let mut depth_stencil_view = ptr::null_mut();
         let mut dsv_desc: d3d11::D3D11_DEPTH_STENCIL_VIEW_DESC = unsafe {mem::zeroed()};
@@ -601,7 +593,7 @@ impl D3d11 {
         *unsafe {dsv_desc.u.Texture2D_mut()} = d3d11::D3D11_TEX2D_DSV {
             MipSlice: 0,
         };
-        let hr = unsafe {device.CreateDepthStencilView(buffer.as_raw() as *mut _, &dsv_desc, &mut depth_stencil_view as *mut *mut _)};
+        let hr = unsafe {self.device.CreateDepthStencilView(buffer.as_raw() as *mut _, &dsv_desc, &mut depth_stencil_view as *mut *mut _)};
         if winerror::SUCCEEDED(hr) {
             Ok(unsafe {ComPtr::from_raw(depth_stencil_view as *mut _)})
         }
@@ -610,7 +602,7 @@ impl D3d11 {
         }
     }
     
-    fn create_depth_stencil_state(device: &ComPtr<d3d11::ID3D11Device>)
+    fn create_depth_stencil_state(&self)
         -> Result<ComPtr<d3d11::ID3D11DepthStencilState>, winerror::HRESULT> {
         let mut depth_stencil_state = ptr::null_mut();
         let ds_desc = d3d11::D3D11_DEPTH_STENCIL_DESC {
@@ -634,7 +626,7 @@ impl D3d11 {
             },
         };
         
-        let hr = unsafe {device.CreateDepthStencilState(&ds_desc, &mut depth_stencil_state as *mut *mut _)};
+        let hr = unsafe {self.device.CreateDepthStencilState(&ds_desc, &mut depth_stencil_state as *mut *mut _)};
         if winerror::SUCCEEDED(hr) {
             Ok(unsafe {ComPtr::from_raw(depth_stencil_state as *mut _)})
         }
@@ -643,11 +635,11 @@ impl D3d11 {
         }
     }
     
-    fn create_render_target_view(device: &ComPtr<d3d11::ID3D11Device>, swap_chain: &ComPtr<dxgi1_2::IDXGISwapChain1>)
+    fn create_render_target_view(&self, swap_chain: &ComPtr<dxgi1_2::IDXGISwapChain1>)
         -> Result<ComPtr<d3d11::ID3D11RenderTargetView>, winerror::HRESULT> {
-        let texture = D3d11::get_swap_texture(swap_chain) ?;
+        let texture = D3d11Cx::get_swap_texture(swap_chain) ?;
         let mut render_target_view = ptr::null_mut();
-        let hr = unsafe {device.CreateRenderTargetView(
+        let hr = unsafe {self.device.CreateRenderTargetView(
             texture.as_raw() as *mut _,
             ptr::null(),
             &mut render_target_view as *mut *mut _
@@ -676,12 +668,12 @@ impl D3d11 {
         }
     }
     
-    fn create_depth_stencil_buffer(window_geom: &WindowGeom, device: &ComPtr<d3d11::ID3D11Device>)
+    fn create_depth_stencil_buffer(&self, wg: &WindowGeom)
         -> Result<ComPtr<d3d11::ID3D11Texture2D>, winerror::HRESULT> {
         let mut depth_stencil_buffer = ptr::null_mut();
         let texture2d_desc = d3d11::D3D11_TEXTURE2D_DESC {
-            Width: (window_geom.inner_size.x * window_geom.dpi_factor) as u32,
-            Height: (window_geom.inner_size.y * window_geom.dpi_factor) as u32,
+            Width: (wg.inner_size.x * wg.dpi_factor) as u32,
+            Height: (wg.inner_size.y * wg.dpi_factor) as u32,
             MipLevels: 1,
             ArraySize: 1,
             Format: dxgiformat::DXGI_FORMAT_D24_UNORM_S8_UINT,
@@ -694,7 +686,7 @@ impl D3d11 {
             CPUAccessFlags: 0,
             MiscFlags: 0
         };
-        let hr = unsafe {device.CreateTexture2D(&texture2d_desc, ptr::null_mut(), &mut depth_stencil_buffer as *mut *mut _)};
+        let hr = unsafe {self.device.CreateTexture2D(&texture2d_desc, ptr::null_mut(), &mut depth_stencil_buffer as *mut *mut _)};
         if winerror::SUCCEEDED(hr) {
             Ok(unsafe {ComPtr::from_raw(depth_stencil_buffer as *mut _)})
         }
@@ -704,19 +696,17 @@ impl D3d11 {
     }
     
     fn create_swap_chain_for_hwnd(
-        window_geom: &WindowGeom,
-        windows_window: &WindowsWindow,
-        factory: &ComPtr<dxgi1_2::IDXGIFactory2>,
-        device: &ComPtr<d3d11::ID3D11Device>
+        &self,
+        wg:&WindowGeom,
+        win32_window: &Win32Window,
     )
         -> Result<ComPtr<dxgi1_2::IDXGISwapChain1>, winerror::HRESULT> {
         let mut swap_chain1 = ptr::null_mut();
-        
         let sc_desc = dxgi1_2::DXGI_SWAP_CHAIN_DESC1 {
             AlphaMode: dxgi1_2::DXGI_ALPHA_MODE_IGNORE,
             BufferCount: 2,
-            Width: (window_geom.inner_size.x * window_geom.dpi_factor) as u32,
-            Height: (window_geom.inner_size.y * window_geom.dpi_factor) as u32,
+            Width: (wg.inner_size.x * wg.dpi_factor) as u32,
+            Height: (wg.inner_size.y * wg.dpi_factor) as u32,
             Format: dxgiformat::DXGI_FORMAT_B8G8R8A8_UNORM,
             Flags: 0,
             BufferUsage: dxgitype::DXGI_USAGE_RENDER_TARGET_OUTPUT,
@@ -726,9 +716,9 @@ impl D3d11 {
             SwapEffect: dxgi::DXGI_SWAP_EFFECT_FLIP_DISCARD,
         };
         
-        let hr = unsafe {factory.CreateSwapChainForHwnd(
-            device.as_raw() as *mut _,
-            windows_window.hwnd.unwrap(),
+        let hr = unsafe {self.factory.CreateSwapChainForHwnd(
+            self.device.as_raw() as *mut _,
+            win32_window.hwnd.unwrap(),
             &sc_desc,
             ptr::null(),
             ptr::null_mut(),
@@ -812,10 +802,9 @@ impl D3d11 {
                 TextureFormat::Default | TextureFormat::ImageBGRA => {
                     if cxtexture.image_u32.len() != width * height {
                         println!("update_platform_texture_image2d with wrong buffer_u32 size!");
-                        cxtexture.platform.mtltexture = None;
                         return;
                     }
-
+                    
                     let mut texture = ptr::null_mut();
                     let sub_data = d3d11::D3D11_SUBRESOURCE_DATA {
                         pSysMem: cxtexture.image_u32.as_ptr() as *const _,
@@ -844,7 +833,7 @@ impl D3d11 {
                         cxtexture.platform.texture = Some(unsafe {ComPtr::from_raw(texture as *mut _)});
                         let mut shader_resource = ptr::null_mut();
                         unsafe {self.device.CreateShaderResourceView(
-                            self.texture.as_mut().unwrap().as_raw() as *mut _,
+                            cxtexture.platform.texture.as_mut().unwrap().as_raw() as *mut _,
                             ptr::null(),
                             &mut shader_resource as *mut *mut _
                         )};
@@ -878,12 +867,12 @@ impl D3d11 {
 }
 
 #[derive(Clone, Default)]
-pub struct DrawListPlatform {
+pub struct CxPlatformView {
     pub uni_dl: D3d11Buffer
 }
 
 #[derive(Default, Clone, Debug)]
-pub struct DrawCallPlatform {
+pub struct PlatformDrawCall {
     pub uni_dr: D3d11Buffer,
     pub inst_vbuf: D3d11Buffer
 }
@@ -895,7 +884,7 @@ pub struct D3d11Buffer {
 }
 
 impl D3d11Buffer {
-    pub fn update_with_data(&mut self, d3d11: &D3d11, bind_flags: u32, len_slots: usize, data: *const std::ffi::c_void) {
+    pub fn update_with_data(&mut self, d3d11_cx: &D3d11Cx, bind_flags: u32, len_slots: usize, data: *const std::ffi::c_void) {
         let mut buffer = ptr::null_mut();
         
         let buffer_desc = d3d11::D3D11_BUFFER_DESC {
@@ -913,7 +902,7 @@ impl D3d11Buffer {
             SysMemSlicePitch: 0
         };
         
-        let hr = unsafe {d3d11.device.CreateBuffer(&buffer_desc, &sub_data, &mut buffer as *mut *mut _)};
+        let hr = unsafe {d3d11_cx.device.CreateBuffer(&buffer_desc, &sub_data, &mut buffer as *mut *mut _)};
         if winerror::SUCCEEDED(hr) {
             self.last_size = len_slots;
             self.buffer = Some(unsafe {ComPtr::from_raw(buffer as *mut _)});
@@ -923,15 +912,15 @@ impl D3d11Buffer {
         }
     }
     
-    pub fn update_with_u32_index_data(&mut self, d3d11: &D3d11, data: &[u32]) {
-        self.update_with_data(d3d11, d3d11::D3D11_BIND_INDEX_BUFFER, data.len(), data.as_ptr() as *const _);
+    pub fn update_with_u32_index_data(&mut self, d3d11_cx: &D3d11Cx, data: &[u32]) {
+        self.update_with_data(d3d11_cx, d3d11::D3D11_BIND_INDEX_BUFFER, data.len(), data.as_ptr() as *const _);
     }
     
-    pub fn update_with_f32_vertex_data(&mut self, d3d11: &D3d11, data: &[f32]) {
-        self.update_with_data(d3d11, d3d11::D3D11_BIND_VERTEX_BUFFER, data.len(), data.as_ptr() as *const _);
+    pub fn update_with_f32_vertex_data(&mut self, d3d11_cx: &D3d11Cx, data: &[f32]) {
+        self.update_with_data(d3d11_cx, d3d11::D3D11_BIND_VERTEX_BUFFER, data.len(), data.as_ptr() as *const _);
     }
     
-    pub fn update_with_f32_constant_data(&mut self, d3d11: &D3d11, data: &mut Vec<f32>) {
+    pub fn update_with_f32_constant_data(&mut self, d3d11_cx: &D3d11Cx, data: &mut Vec<f32>) {
         let mut buffer = ptr::null_mut();
         
         if (data.len() & 3) != 0 { // we have to align the data at the end
@@ -956,7 +945,7 @@ impl D3d11Buffer {
             StructureByteStride: 0
         };
         
-        let hr = unsafe {d3d11.device.CreateBuffer(&buffer_desc, &sub_data, &mut buffer as *mut *mut _)};
+        let hr = unsafe {d3d11_cx.device.CreateBuffer(&buffer_desc, &sub_data, &mut buffer as *mut *mut _)};
         if winerror::SUCCEEDED(hr) {
             // println!("Buffer create OK! {} {}",  len_bytes, bind_flags);
             self.last_size = len_slots;
