@@ -233,7 +233,7 @@ impl Cx {
                     },
                     Event::Paint => {
                         
-                        self.process_desktop_paint_callbacks(cocoa_app.time_now(), &mut event_handler);
+                        let vsync = self.process_desktop_paint_callbacks(cocoa_app.time_now(), &mut event_handler);
                         
                         // construct or destruct windows
                         for (index, window) in self.windows.iter_mut().enumerate() {
@@ -298,7 +298,7 @@ impl Cx {
                                         
                                         // its a render window
                                         windows_need_repaint -= 1;
-                                        render_window.set_vsync_enable(windows_need_repaint == 0);
+                                        render_window.set_vsync_enable(windows_need_repaint == 0 && vsync);
                                         render_window.set_buffer_count(
                                             if render_window.window_geom.is_fullscreen {3}else {2}
                                         );
@@ -566,7 +566,7 @@ impl CocoaRenderWindow {
     
     fn set_vsync_enable(&mut self, enable: bool) {
         unsafe {
-            msg_send![self.core_animation_layer, setDisplaySyncEnabled: false];
+            msg_send![self.core_animation_layer, setDisplaySyncEnabled: enable];
         }
     }
     

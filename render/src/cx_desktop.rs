@@ -120,9 +120,11 @@ impl Cx {
         self.call_signals_before_draw(&mut event_handler);
         
         // call redraw event
-        let vsync;
         if self.redraw_child_areas.len()>0 || self.redraw_parent_areas.len()>0 {
             self.call_draw_event(&mut event_handler);
+        }
+        let vsync;
+        if self.redraw_child_areas.len()>0 || self.redraw_parent_areas.len()>0 {
             vsync = true;
         }
         else{
