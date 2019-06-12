@@ -1,7 +1,7 @@
 use crate::cx::*;
 use time::precise_time_ns;
 use std::{ptr};
-use winapi::um::{libloaderapi, winuser};
+use winapi::um::{libloaderapi, winuser, winbase};
 use winapi::shared::minwindef::{LPARAM, LRESULT, DWORD, WPARAM, BOOL, UINT, FALSE};
 use winapi::shared::ntdef::{NULL};
 use winapi::um::winnt::{LPCWSTR, HRESULT, LPCSTR};
@@ -233,12 +233,12 @@ impl Win32App {
     pub fn start_resize(&mut self) {
         let slot = self.get_free_timer_slot();
         let win32_id = unsafe {winuser::SetTimer(NULL as HWND, 0, 16 as u32, Some(Self::timer_proc))};
-        self.timers[slot] = Win32Timer::Resize{win32_id:win32_id}; 
+        self.timers[slot] = Win32Timer::Resize {win32_id: win32_id};
     }
-
+    
     pub fn stop_resize(&mut self) {
         for slot in 0..self.timers.len() {
-            if let Win32Timer::Resize{win32_id} = self.timers[slot] {
+            if let Win32Timer::Resize {win32_id} = self.timers[slot] {
                 self.timers[slot] = Win32Timer::Free;
                 self.free_timers.push(slot);
                 unsafe {winuser::KillTimer(NULL as HWND, win32_id);}
@@ -385,12 +385,71 @@ impl Win32Window {
             winuser::WM_MBUTTONUP => window.send_finger_up(2, Self::get_key_modifiers()),
             winuser::WM_KEYDOWN | winuser::WM_SYSKEYDOWN => {
                 // detect control/cmd - c / v / x
-                
+                let modifiers = Self::get_key_modifiers();
+                let key_code = Self::virtual_key_to_key_code(wparam);
+                if modifiers.control || modifiers.logo {
+                    match key_code {
+                        KeyCode::KeyV => { // paste
+                            if winuser::OpenClipboard(ptr::null_mut()) != 0 {
+                                let mut data: Vec<u16> = Vec::new();
+                                let h_clipboard_data = winuser::GetClipboardData(winuser::CF_UNICODETEXT);
+                                let h_clipboard_ptr = winbase::GlobalLock(h_clipboard_data) as *mut u16;
+                                let clipboard_size = winbase::GlobalSize(h_clipboard_data);
+                                if clipboard_size > 2{
+                                    data.resize((clipboard_size>>1)-1, 0);
+                                    std::ptr::copy_nonoverlapping(h_clipboard_ptr, data.as_mut_ptr(), data.len());
+                                    winuser::CloseClipboard();
+                                    if let Ok(utf8) = String::from_utf16(&data) {
+                                        window.do_callback(&mut vec![
+                                            Event::TextInput(TextInputEvent {
+                                                input: utf8,
+                                                was_paste: true,
+                                                replace_last: false
+                                            })
+                                        ]);
+                                    }
+                                }
+                            }
+                        }
+                        KeyCode::KeyX | KeyCode::KeyC => {
+                            let mut events = vec![
+                                Event::TextCopy(TextCopyEvent {
+                                    response: None
+                                })
+                            ];
+                            window.do_callback(&mut events);
+                            match &events[0] {
+                                Event::TextCopy(req) => if let Some(response) = &req.response {
+                                    // plug it into the windows clipboard
+                                    // make utf16 dta
+                                    if winuser::OpenClipboard(ptr::null_mut()) != 0 {
+                                        winuser::EmptyClipboard();
+                                        
+                                        let data: Vec<u16> = OsStr::new(response).encode_wide().chain(Some(0).into_iter()).collect();
+                                        
+                                        let h_clipboard_data = winbase::GlobalAlloc(winbase::GMEM_DDESHARE, 2 * data.len());
+                                        
+                                        let h_clipboard_ptr = winbase::GlobalLock(h_clipboard_data) as *mut u16;
+                                        
+                                        std::ptr::copy_nonoverlapping(data.as_ptr(), h_clipboard_ptr, data.len());
+                                        
+                                        winbase::GlobalUnlock(h_clipboard_data);
+                                        winuser::SetClipboardData(winuser::CF_UNICODETEXT, h_clipboard_data);
+                                        winuser::CloseClipboard();
+                                    }
+                                    
+                                },
+                                _ => ()
+                            };
+                        }
+                        _ => ()
+                    }
+                }
                 window.do_callback(&mut vec![
-                    Event::KeyDown(KeyEvent { 
-                        key_code: Self::virtual_key_to_key_code(wparam),
+                    Event::KeyDown(KeyEvent {
+                        key_code: key_code,
                         is_repeat: lparam & 0x7fff>0,
-                        modifiers: Self::get_key_modifiers(),
+                        modifiers: modifiers,
                         time: window.time_now()
                     })
                 ]);
@@ -423,7 +482,7 @@ impl Win32Window {
             winuser::WM_ENTERSIZEMOVE => {
                 (*window.win32_app).start_resize();
             }
-            winuser::WM_EXITSIZEMOVE=>{
+            winuser::WM_EXITSIZEMOVE => {
                 (*window.win32_app).stop_resize();
             },
             winuser::WM_SIZE => {

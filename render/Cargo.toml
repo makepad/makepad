@@ -25,4 +25,4 @@ time = "0.1.4"
 
 [target.x86_64-pc-windows-gnu.dependencies.winapi]
 version = "*"
-features = ["libloaderapi", "shellscalingapi", "winuser", "d3d11", "d3d11sdklayers", "d3dcommon", "d3dcompiler", "dxgi1_2", "dxgiformat", "dxgitype", "winerror"]
+features = ["libloaderapi", "shellscalingapi", "winuser", "winbase", "d3d11", "d3d11sdklayers", "d3dcommon", "d3dcompiler", "dxgi1_2", "dxgiformat", "dxgitype", "winerror"]

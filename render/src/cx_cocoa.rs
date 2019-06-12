@@ -159,20 +159,21 @@ impl CocoaApp {
                     let is_repeat: bool = msg_send![ns_event, isARepeat];
                     //let is_return = if let KeyCode::Return = key_code{true} else{false};
                     
-                    // see if its is paste, ifso TextInput was_paste the text
-                    let paste_text = if let KeyCode::KeyV = key_code {
-                        if modifiers.logo || modifiers.control {
+                    
+                    match key_code {
+                        KeyCode::KeyV => if modifiers.logo || modifiers.control {
                             // was a paste
                             let nsstring: id = msg_send![self.pasteboard, stringForType: NSStringPboardType];
                             let string = nsstring_to_string(nsstring);
                             
-                            Some(string)
-                        }
-                        else {None}
-                    }
-                    else {None};
-                    
-                    match key_code {
+                            self.do_callback(&mut vec![
+                                Event::TextInput(TextInputEvent {
+                                    input: string,
+                                    was_paste: true,
+                                    replace_last: false
+                                })
+                            ]);
+                        },
                         KeyCode::KeyX | KeyCode::KeyC => if modifiers.logo || modifiers.control {
                             // cut or copy.
                             let mut events = vec![
@@ -194,7 +195,7 @@ impl CocoaApp {
                         },
                         _ => {}
                     }
-                    
+
                     self.do_callback(&mut vec![
                         Event::KeyDown(KeyEvent {
                             key_code: key_code,
@@ -214,15 +215,7 @@ impl CocoaApp {
                             })
                         ]);
                     }*/
-                    if let Some(paste_text) = paste_text {
-                        self.do_callback(&mut vec![
-                            Event::TextInput(TextInputEvent {
-                                input: paste_text,
-                                was_paste: true,
-                                replace_last: false
-                            })
-                        ]);
-                    }
+                    
                     
                     
                 }
@@ -525,7 +518,7 @@ impl CocoaWindow {
     // complete window initialization with pointers to self
     pub fn init(&mut self, title: &str, size: Vec2, position: Option<Vec2>) {
         unsafe {
-            self.fingers_down.resize(NUM_FINGERS,false);
+            self.fingers_down.resize(NUM_FINGERS, false);
             
             let autoreleasepool = NSAutoreleasePool::new(nil);
             
