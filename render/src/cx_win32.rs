@@ -384,8 +384,10 @@ impl Win32Window {
             winuser::WM_MBUTTONDOWN => window.send_finger_down(2, Self::get_key_modifiers()),
             winuser::WM_MBUTTONUP => window.send_finger_up(2, Self::get_key_modifiers()),
             winuser::WM_KEYDOWN | winuser::WM_SYSKEYDOWN => {
+                // detect control/cmd - c / v / x
+                
                 window.do_callback(&mut vec![
-                    Event::KeyDown(KeyEvent {
+                    Event::KeyDown(KeyEvent { 
                         key_code: Self::virtual_key_to_key_code(wparam),
                         is_repeat: lparam & 0x7fff>0,
                         modifiers: Self::get_key_modifiers(),

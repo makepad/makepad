@@ -55,7 +55,7 @@ struct AppState {
     windows: Vec<AppWindowState>
 }
 
-main_app!(App, "Makepad");
+main_app!(App, "HALLO WORLD");
 
 impl Style for AppWindow {
     fn style(cx: &mut Cx) -> Self {

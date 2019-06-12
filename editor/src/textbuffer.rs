@@ -96,7 +96,7 @@ impl TextBuffers {
         if let Some(text_buffer) = text_buffer {
             let string = text_buffer.get_as_string();
             cx.write_file(&format!("{}{}", self.root_path, path), string.as_bytes());
-            cx.http_send("POST", path, "192.168.0.20", "2001", &string);
+            //cx.http_send("POST", path, "192.168.0.20", "2001", &string);
             
         }
     }

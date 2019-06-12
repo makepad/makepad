@@ -206,7 +206,7 @@ impl Cx {
     }
     
     //pub fn get_shader2(&self, id: usize) -> &CompiledShader {
-    //    &self.compiled_shaders[id]
+    //    &self.compiled_shaders[id] 
     // }
     
     pub fn add_shader(&mut self, sg: ShaderGen, name: &str) -> Shader {
