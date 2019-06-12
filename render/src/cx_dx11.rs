@@ -81,7 +81,7 @@ impl Cx {
         }
     }
     
-    fn draw_pass_to_layer(&mut self, pass_id: usize, _dpi_factor: f32, d3d11_window: &D3d11Window, d3d11_cx: &D3d11Cx) {
+    fn draw_pass_to_layer(&mut self, pass_id: usize, vsync:bool, _dpi_factor: f32, d3d11_window: &D3d11Window, d3d11_cx: &D3d11Cx) {
         let view_id = self.passes[pass_id].main_view_id.unwrap();
         
         self.platform.uni_cx.update_with_f32_constant_data(&d3d11_cx, &mut self.passes[pass_id].uniforms);
@@ -103,7 +103,7 @@ impl Cx {
         d3d11_cx.set_raster_state(d3d11_window);
         self.render_view(pass_id, view_id, d3d11_cx);
         
-        d3d11_cx.present(d3d11_window);
+        d3d11_cx.present(vsync, d3d11_window);
     }
     
     fn resize_layer_to_turtle(&mut self) {
@@ -155,7 +155,7 @@ impl Cx {
                     },
                     Event::Paint => {
                         
-                        self.process_desktop_paint_callbacks(win32_app.time_now(), &mut event_handler);
+                        let vsync = self.process_desktop_paint_callbacks(win32_app.time_now(), &mut event_handler);
                         
                         // construct or destruct windows
                         for (index, window) in self.windows.iter_mut().enumerate() {
@@ -227,6 +227,7 @@ impl Cx {
                                         
                                         self.draw_pass_to_layer(
                                             *pass_id,
+                                            vsync,
                                             dpi_factor,
                                             &d3d11_window,
                                             &d3d11_cx,
@@ -519,8 +520,8 @@ impl D3d11Cx {
         )};
     }
     
-    fn present(&self, d3d11_window: &D3d11Window) {
-        unsafe {d3d11_window.swap_chain.Present(0, 0)};
+    fn present(&self, vsync: bool, d3d11_window: &D3d11Window) {
+        unsafe {d3d11_window.swap_chain.Present(if vsync{1}else{0}, 0)};
     }
     
     pub fn compile_shader(&self, stage: &str, entry: &[u8], shader: &[u8])

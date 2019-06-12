@@ -106,7 +106,7 @@ impl Cx {
         false
     }
     
-    pub fn process_desktop_paint_callbacks<F>(&mut self, time: f64, mut event_handler: F)
+    pub fn process_desktop_paint_callbacks<F>(&mut self, time: f64, mut event_handler: F) -> bool
     where F: FnMut(&mut Cx, &mut Event)
     {
         if self.playing_anim_areas.len() != 0 {
@@ -120,13 +120,20 @@ impl Cx {
         self.call_signals_before_draw(&mut event_handler);
         
         // call redraw event
+        let vsync;
         if self.redraw_child_areas.len()>0 || self.redraw_parent_areas.len()>0 {
             self.call_draw_event(&mut event_handler);
+            vsync = true;
+        }
+        else{
+            vsync = false;
         }
         
         self.process_desktop_file_read_requests(&mut event_handler);
         
         self.call_signals_after_draw(&mut event_handler);
+        
+        vsync
     }
     
     
