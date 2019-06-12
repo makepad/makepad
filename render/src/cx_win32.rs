@@ -174,6 +174,7 @@ impl Win32App {
                         break;
                     },
                     Win32Timer::Resize {win32_id, ..} => if win32_id == in_win32_id {
+                        hit_timer = Some(win32_app.timers[slot].clone());
                         break;
                     },
                     _ => ()
@@ -224,8 +225,23 @@ impl Win32App {
                     self.timers[slot] = Win32Timer::Free;
                     self.free_timers.push(slot);
                     unsafe {winuser::KillTimer(NULL as HWND, win32_id);}
-                    return
                 }
+            }
+        }
+    }
+    
+    pub fn start_resize(&mut self) {
+        let slot = self.get_free_timer_slot();
+        let win32_id = unsafe {winuser::SetTimer(NULL as HWND, 0, 16 as u32, Some(Self::timer_proc))};
+        self.timers[slot] = Win32Timer::Resize{win32_id:win32_id}; 
+    }
+
+    pub fn stop_resize(&mut self) {
+        for slot in 0..self.timers.len() {
+            if let Win32Timer::Resize{win32_id} = self.timers[slot] {
+                self.timers[slot] = Win32Timer::Free;
+                self.free_timers.push(slot);
+                unsafe {winuser::KillTimer(NULL as HWND, win32_id);}
             }
         }
     }
@@ -402,6 +418,12 @@ impl Win32Window {
                     }
                 }
             },
+            winuser::WM_ENTERSIZEMOVE => {
+                (*window.win32_app).start_resize();
+            }
+            winuser::WM_EXITSIZEMOVE=>{
+                (*window.win32_app).stop_resize();
+            },
             winuser::WM_SIZE => {
                 //if window.ignore_wmsize > 1{
                 window.send_change_event();
@@ -411,7 +433,6 @@ impl Win32Window {
                 // }
             },
             winuser::WM_USER => {
-                println!("{}", wparam);
                 window.do_callback(&mut vec![
                     Event::Signal(SignalEvent {
                         signal_id: wparam as usize,

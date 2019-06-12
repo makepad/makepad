@@ -1492,7 +1492,7 @@ impl CodeEditor {
         // unmatched highlighting
         self.draw_paren_unmatched(cx);
         self.draw_cursors(cx);
-        self.do_selection_animations(cx);
+        //self.do_selection_animations(cx);
         self.draw_selections(cx);
         self.draw_message_markers(cx, text_buffer);
         
