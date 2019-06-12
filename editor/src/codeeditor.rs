@@ -583,7 +583,7 @@ impl CodeEditor {
         if cursor_moved {
             self.update_highlight(cx, text_buffer);
         };
-        if repaint_scroll && cursor_moved {
+        if repaint_scroll || cursor_moved {
             self.view.redraw_view_area(cx);
         }
         if cursor_moved {
@@ -1615,10 +1615,11 @@ impl CodeEditor {
             if select_scroll.at_end {
                 self._select_scroll = None;
             }
+            self.view.redraw_view_area(cx);
         }
     }
     
-    fn do_selection_animations(&mut self, cx: &mut Cx) {
+    fn _do_selection_animations(&mut self, cx: &mut Cx) {
         if !self._anim_folding.state.is_animating() {
             let sel = &mut self._draw_cursors.selections;
             
@@ -1810,7 +1811,7 @@ impl CodeEditor {
                 abs: fe.abs,
                 delta: delta,
                 at_end: false
-            })
+            });
         }
         else {
             self._select_scroll = None;
