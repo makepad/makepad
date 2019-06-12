@@ -297,6 +297,7 @@ impl ScrollBarLike<ScrollBar> for ScrollBar {
                         Axis::Horizontal => fe.rel.x,
                         Axis::Vertical => fe.rel.y
                     };
+                    cx.set_down_mouse_cursor(MouseCursor::Default);
                     let (norm_scroll, norm_handle) = self.get_normalized_scroll_pos();
                     let bar_start = norm_scroll * self._scroll_size;
                     let bar_size = norm_handle * self._scroll_size;
@@ -310,6 +311,7 @@ impl ScrollBarLike<ScrollBar> for ScrollBar {
                 },
                 Event::FingerHover(fe) => {
                     if self._drag_point.is_none() {
+                        cx.set_hover_mouse_cursor(MouseCursor::Default);
                         match fe.hover_state {
                             HoverState::In => {
                                 self.animator.play_anim(cx, self.anim_over.clone());

@@ -42,10 +42,18 @@ impl Cx {
                 }
                 if draw_call.uniforms_dirty {
                     draw_call.uniforms_dirty = false;
+                    if draw_call.uniforms.len() == 0{
+                        continue;
+                    }
                     draw_call.platform.uni_dr.update_with_f32_constant_data(d3d11_cx, &mut draw_call.uniforms);
                 }
                 
                 let instances = (draw_call.instance.len() / sh.mapping.instance_slots) as usize;
+                
+                if instances == 0{
+                    continue;
+                }
+                
                 d3d11_cx.set_shaders(&shp.vertex_shader, &shp.pixel_shader);
                 
                 d3d11_cx.set_primitive_topology();
@@ -80,8 +88,15 @@ impl Cx {
         
         d3d11_cx.set_viewport(d3d11_window);
         
-        d3d11_cx.clear_render_target_view(d3d11_window, color("red")); //self.clear_color);
-        
+        if self.passes[pass_id].color_textures.len()>0 {
+            let color_texture = &self.passes[pass_id].color_textures[0];
+            if let Some(color) = color_texture.clear_color {
+                d3d11_cx.clear_render_target_view(d3d11_window, color); //self.clear_color);
+            }
+        }
+        else {
+            d3d11_cx.clear_render_target_view(d3d11_window, Color::zero()); //self.clear_color);
+        }
         d3d11_cx.clear_depth_stencil_view(d3d11_window);
         
         d3d11_cx.set_rendertargets(d3d11_window);
@@ -117,7 +132,7 @@ impl Cx {
         let mut passes_todo = Vec::new();
         
         win32_app.event_loop( | win32_app, events | {
-            let mut paint_dirty = false;
+
             for mut event in events {
                 
                 self.process_desktop_pre_event(&mut event, &mut event_handler);
@@ -243,7 +258,7 @@ impl Cx {
                     win32_app.terminate_event_loop();
                 }
             }
-            if self.playing_anim_areas.len() == 0 && self.redraw_parent_areas.len() == 0 && self.redraw_child_areas.len() == 0 && self.frame_callbacks.len() == 0 && !paint_dirty {
+            if self.playing_anim_areas.len() == 0 && self.redraw_parent_areas.len() == 0 && self.redraw_child_areas.len() == 0 && self.frame_callbacks.len() == 0 {
                 true
             } else {
                 false
@@ -297,12 +312,12 @@ impl D3d11Window {
         win32_window.init(title, inner_size, position);
         let window_geom = win32_window.get_window_geom();
         let swap_chain = d3d11_cx.create_swap_chain_for_hwnd(&window_geom, &win32_window).expect("Cannot create_swap_chain_for_hwnd");
-
+        
         let swap_texture = D3d11Cx::get_swap_texture(&swap_chain).expect("Cannot get swap texture");
         let render_target_view = d3d11_cx.create_render_target_view(&swap_texture).expect("Cannot create_render_target_view");
         let depth_stencil_buffer = d3d11_cx.create_depth_stencil_buffer(&window_geom).expect("Cannot create_depth_stencil_buffer");
         let depth_stencil_view = d3d11_cx.create_depth_stencil_view(&depth_stencil_buffer).expect("Cannot create_depth_stencil_view");
-
+        
         let depth_stencil_state = d3d11_cx.create_depth_stencil_state().expect("Cannot create_depth_stencil_state");
         unsafe {d3d11_cx.context.OMSetDepthStencilState(depth_stencil_state.as_raw() as *mut _, 1)}
         
@@ -333,7 +348,7 @@ impl D3d11Window {
     }
     
     fn resize_buffers(&mut self, d3d11_cx: &D3d11Cx) {
-        if self.alloc_size == self.window_geom.inner_size{
+        if self.alloc_size == self.window_geom.inner_size {
             return
         }
         // release render target
@@ -341,7 +356,7 @@ impl D3d11Window {
         self.depth_stencil_view = None;
         self.swap_texture = None;
         self.depth_stencil_buffer = None;
-
+        
         let window_geom = &self.window_geom;
         
         d3d11_cx.disconnect_rendertargets();
@@ -351,7 +366,7 @@ impl D3d11Window {
         let render_target_view = d3d11_cx.create_render_target_view(&swap_texture).expect("Cannot create_render_target_view");
         let depth_stencil_buffer = d3d11_cx.create_depth_stencil_buffer(window_geom).expect("Cannot create_depth_stencil_buffer");
         let depth_stencil_view = d3d11_cx.create_depth_stencil_view(&depth_stencil_buffer).expect("Cannot create_depth_stencil_view");
-
+        
         self.alloc_size = window_geom.inner_size;
         self.render_target_view = Some(render_target_view);
         self.depth_stencil_view = Some(depth_stencil_view);
@@ -695,7 +710,7 @@ impl D3d11Cx {
             Err(hr)
         }
     }
-
+    
     fn create_render_target_view(&self, texture: &ComPtr<d3d11::ID3D11Texture2D>)
         -> Result<ComPtr<d3d11::ID3D11RenderTargetView>, winerror::HRESULT> {
         //let texture = D3d11Cx::get_swap_texture(swap_chain) ?;
@@ -785,7 +800,7 @@ impl D3d11Cx {
             ptr::null_mut(),
             &mut swap_chain1 as *mut *mut _
         )};
-        if winerror::SUCCEEDED(hr) { 
+        if winerror::SUCCEEDED(hr) {
             Ok(unsafe {ComPtr::from_raw(swap_chain1 as *mut _)})
         }
         else {
@@ -1032,7 +1047,7 @@ impl D3d11Buffer {
             self.buffer = Some(unsafe {ComPtr::from_raw(buffer as *mut _)});
         }
         else {
-            panic!("Buffer create failed");
+            panic!("Buffer create failed {}", len_slots);
         }
     }
 }

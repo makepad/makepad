@@ -109,6 +109,7 @@ pub struct Cx {
     pub platform: CxPlatform,
 }
 
+pub const NUM_FINGERS:usize = 10;
 
 impl Default for Cx {
     fn default() -> Self {
@@ -116,12 +117,11 @@ impl Default for Cx {
         let mut finger_tap_count = Vec::new();
         let mut finger_down_abs_start = Vec::new();
         let mut finger_down_rel_start = Vec::new();
-        for _i in 0..10 {
-            captured_fingers.push(Area::Empty);
-            finger_tap_count.push((Vec2::zero(), 0.0, 0));
-            finger_down_abs_start.push(Vec2::zero());
-            finger_down_rel_start.push(Vec2::zero());
-        }
+
+        captured_fingers.resize(NUM_FINGERS,Area::Empty);
+        finger_tap_count.resize(NUM_FINGERS, (Vec2::zero(), 0.0, 0));
+        finger_down_abs_start.resize(NUM_FINGERS,Vec2::zero());
+        finger_down_rel_start.resize(NUM_FINGERS,Vec2::zero());
         
         Self {
             title: "Hello World".to_string(),
@@ -505,6 +505,10 @@ impl Cx {
         // update capture keyboard
         if self.key_focus == old_area {
             self.key_focus = new_area.clone()
+        }
+        
+        if self._finger_over_last_area == old_area{
+            self._finger_over_last_area = new_area.clone()
         }
         //
         if let Some(next_frame) = self.frame_callbacks.iter_mut().find( | v | **v == old_area) {

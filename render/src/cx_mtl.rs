@@ -545,7 +545,7 @@ impl CocoaRenderWindow {
             //msg_send![layer, displaySyncEnabled:false];
             let count: u64 = 2;
             msg_send![core_animation_layer, setMaximumDrawableCount: count];
-            msg_send![core_animation_layer, setDisplaySyncEnabled: true];
+            msg_send![core_animation_layer, setDisplaySyncEnabled: false];
         }
         
         unsafe {
@@ -566,7 +566,7 @@ impl CocoaRenderWindow {
     
     fn set_vsync_enable(&mut self, enable: bool) {
         unsafe {
-            msg_send![self.core_animation_layer, setDisplaySyncEnabled: enable];
+            msg_send![self.core_animation_layer, setDisplaySyncEnabled: false];
         }
     }
     

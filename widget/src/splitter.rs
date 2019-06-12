@@ -22,7 +22,6 @@ pub struct Splitter{
     pub _drag_pos_start:f32,
     pub _drag_max_pos:f32,
     pub _hit_state_margin:Option<Margin>,
-
 }
 
 #[derive(Clone, PartialEq, Serialize, Deserialize)]

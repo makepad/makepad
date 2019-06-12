@@ -16,12 +16,13 @@ pub struct TextBuffer {
     pub load_read_req: FileReadRequest,
     pub signal: Signal,
     pub mutation_id: u64,
+    pub is_crlf: bool,
     pub messages: TextBufferMessages,
     pub flat_text: Vec<char>,
     pub token_chunks: Vec<TokenChunk>,
     pub token_chunks_id: u64,
     pub keyboard: TextBufferKeyboard,
-}
+} 
 
 impl TextBuffer {
     pub fn needs_token_chunks(&mut self) -> bool {
@@ -105,6 +106,7 @@ impl TextBuffers {
             if let Some(utf8_data) = text_buffer.load_read_req.as_utf8(fr) {
                 if let Ok(utf8_data) = utf8_data {
                     // TODO HANDLE ERROR CASE
+                    text_buffer.is_crlf = !utf8_data.find("\r\n").is_none();
                     text_buffer.lines = TextBuffer::split_string_to_lines(&utf8_data.to_string());
                     cx.send_signal_before_draw(text_buffer.signal, SIGNAL_TEXTBUFFER_LOADED);
                 }
@@ -399,7 +401,13 @@ impl TextBuffer {
                 ret.push(*ch);
             }
             if i != self.lines.len() - 1 {
-                ret.push('\n');
+                if self.is_crlf{
+                    ret.push('\r');
+                    ret.push('\n');
+                }
+                else{
+                    ret.push('\n');
+                }
             }
         }
         return ret
@@ -512,7 +520,12 @@ impl TextBuffer {
     }
     
     pub fn split_string_to_lines(string: &str) -> Vec<Vec<char>> {
-        return string.split("\n").map( | s | s.chars().collect()).collect()
+        if !string.find("\r\n").is_none(){
+            return string.split("\r\n").map( | s | s.chars().collect()).collect()
+        }
+        else{
+            return string.split("\n").map( | s | s.chars().collect()).collect()
+        }
     }
     
     pub fn replace_lines_with_string(&mut self, start: usize, len: usize, string: &str) -> TextOp {

@@ -153,7 +153,7 @@ pub struct FileWriteEvent {
 #[derive(Clone, Debug, PartialEq)]
 pub struct KeyEvent {
     pub key_code: KeyCode,
-    pub key_char: char,
+    //pub key_char: char,
     pub is_repeat: bool,
     pub modifiers: KeyModifiers,
     pub time: f64

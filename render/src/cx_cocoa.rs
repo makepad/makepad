@@ -139,12 +139,12 @@ impl CocoaApp {
             appkit::NSKeyUp => {
                 if let Some(key_code) = get_event_keycode(ns_event) {
                     let modifiers = get_event_key_modifier(ns_event);
-                    let key_char = get_event_char(ns_event);
+                    //let key_char = get_event_char(ns_event);
                     let is_repeat: bool = msg_send![ns_event, isARepeat];
                     self.do_callback(&mut vec![
                         Event::KeyUp(KeyEvent {
                             key_code: key_code,
-                            key_char: key_char,
+                            //key_char: key_char,
                             is_repeat: is_repeat,
                             modifiers: modifiers,
                             time: self.time_now()
@@ -155,7 +155,7 @@ impl CocoaApp {
             appkit::NSKeyDown => {
                 if let Some(key_code) = get_event_keycode(ns_event) {
                     let modifiers = get_event_key_modifier(ns_event);
-                    let key_char = get_event_char(ns_event);
+                    //let key_char = get_event_char(ns_event);
                     let is_repeat: bool = msg_send![ns_event, isARepeat];
                     //let is_return = if let KeyCode::Return = key_code{true} else{false};
                     
@@ -198,7 +198,7 @@ impl CocoaApp {
                     self.do_callback(&mut vec![
                         Event::KeyDown(KeyEvent {
                             key_code: key_code,
-                            key_char: key_char,
+                            //key_char: key_char,
                             is_repeat: is_repeat,
                             modifiers: modifiers,
                             time: self.time_now()
@@ -236,7 +236,7 @@ impl CocoaApp {
                     if old != new {
                         let event = KeyEvent {
                             key_code: key_code,
-                            key_char: '\0',
+                            //key_char: '\0',
                             is_repeat: false,
                             modifiers: modifiers,
                             time: time
@@ -525,9 +525,7 @@ impl CocoaWindow {
     // complete window initialization with pointers to self
     pub fn init(&mut self, title: &str, size: Vec2, position: Option<Vec2>) {
         unsafe {
-            for _i in 0..10 {
-                self.fingers_down.push(false);
-            }
+            self.fingers_down.resize(NUM_FINGERS,false);
             
             let autoreleasepool = NSAutoreleasePool::new(nil);
             
