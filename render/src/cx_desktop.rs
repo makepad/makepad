@@ -112,9 +112,14 @@ impl Cx {
         if self.playing_anim_areas.len() != 0 {
             self.call_animation_event(&mut event_handler, time);
         }
+
+        let mut vsync = false;
         
         if self.frame_callbacks.len() != 0 {
             self.call_frame_event(&mut event_handler, time);
+            if self.frame_callbacks.len() != 0 {
+                vsync = true;
+            }
         }
         
         self.call_signals_before_draw(&mut event_handler);
@@ -123,12 +128,8 @@ impl Cx {
         if self.redraw_child_areas.len()>0 || self.redraw_parent_areas.len()>0 {
             self.call_draw_event(&mut event_handler);
         }
-        let vsync;
         if self.redraw_child_areas.len()>0 || self.redraw_parent_areas.len()>0 {
             vsync = true;
-        }
-        else{
-            vsync = false;
         }
         
         self.process_desktop_file_read_requests(&mut event_handler);
