@@ -398,6 +398,7 @@ impl Win32Window {
                                 if clipboard_size > 2{
                                     data.resize((clipboard_size>>1)-1, 0);
                                     std::ptr::copy_nonoverlapping(h_clipboard_ptr, data.as_mut_ptr(), data.len());
+                                    winbase::GlobalUnlock(h_clipboard_data);
                                     winuser::CloseClipboard();
                                     if let Ok(utf8) = String::from_utf16(&data) {
                                         window.do_callback(&mut vec![
@@ -408,6 +409,10 @@ impl Win32Window {
                                             })
                                         ]);
                                     }
+                                }
+                                else{
+                                    winbase::GlobalUnlock(h_clipboard_data);
+                                    winuser::CloseClipboard();
                                 }
                             }
                         }
