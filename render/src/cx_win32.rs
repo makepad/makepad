@@ -378,7 +378,7 @@ impl Win32Window {
                     })
                 ]);
             },
-            winuser::WM_LBUTTONDOWN => window.send_finger_down(0, Self::get_key_modifiers()),
+            winuser::WM_LBUTTONDOWN =>window.send_finger_down(0, Self::get_key_modifiers()),
             winuser::WM_LBUTTONUP => window.send_finger_up(0, Self::get_key_modifiers()),
             winuser::WM_RBUTTONDOWN => window.send_finger_down(1, Self::get_key_modifiers()),
             winuser::WM_RBUTTONUP => window.send_finger_up(1, Self::get_key_modifiers()),
@@ -576,6 +576,15 @@ impl Win32Window {
     }
     
     pub fn send_finger_down(&mut self, digit: usize, modifiers: KeyModifiers) {
+        let mut down_count = 0;
+        for is_down in &self.fingers_down{
+            if *is_down{
+                down_count += 1;
+            }
+        }
+        if down_count == 0{
+            unsafe{winuser::SetCapture(self.hwnd.unwrap());}
+        }
         self.fingers_down[digit] = true;
         self.do_callback(&mut vec![Event::FingerDown(FingerDownEvent {
             window_id: self.window_id,
@@ -593,6 +602,15 @@ impl Win32Window {
     
     pub fn send_finger_up(&mut self, digit: usize, modifiers: KeyModifiers) {
         self.fingers_down[digit] = false;
+        let mut down_count = 0;
+        for is_down in &self.fingers_down{
+            if *is_down{
+                down_count += 1;
+            }
+        }
+        if down_count == 0{
+            unsafe{winuser::ReleaseCapture();}
+        }
         self.do_callback(&mut vec![Event::FingerUp(FingerUpEvent {
             window_id: self.window_id,
             abs: self.last_mouse_pos,
