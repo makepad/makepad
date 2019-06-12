@@ -36,11 +36,11 @@ impl TextBuffer {
     }
 }
 
-pub const SIGNAL_TEXTBUFFER_LOADED: u64 = 1;
-pub const SIGNAL_TEXTBUFFER_MESSAGE_UPDATE: u64 = 2;
-pub const SIGNAL_TEXTBUFFER_JUMP_TO_OFFSET: u64 = 3;
-pub const SIGNAL_TEXTBUFFER_DATA_UPDATE: u64 = 4;
-pub const SIGNAL_TEXTBUFFER_KEYBOARD_UPDATE: u64 = 5;
+pub const SIGNAL_TEXTBUFFER_LOADED: usize = 1;
+pub const SIGNAL_TEXTBUFFER_MESSAGE_UPDATE: usize = 2;
+pub const SIGNAL_TEXTBUFFER_JUMP_TO_OFFSET: usize = 3;
+pub const SIGNAL_TEXTBUFFER_DATA_UPDATE: usize = 4;
+pub const SIGNAL_TEXTBUFFER_KEYBOARD_UPDATE: usize = 5;
 
 #[derive(Clone, Default)]
 pub struct TextBufferKeyboard {

@@ -42,9 +42,9 @@ pub struct RustCompiler {
     pub _rustc_done: bool,
 }
 
-const SIGNAL_RUST_CHECKER: u64 = 1;
-const SIGNAL_BUILD_COMPLETE: u64 = 2;
-const SIGNAL_RUN_OUTPUT: u64 = 3;
+const SIGNAL_RUST_CHECKER: usize = 1;
+const SIGNAL_BUILD_COMPLETE: usize = 2;
+const SIGNAL_RUN_OUTPUT: usize = 3;
 
 #[derive(PartialEq, Debug)]
 pub enum BuildStage {

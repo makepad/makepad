@@ -697,8 +697,8 @@ where TItem: Clone
                     }
                     else {
                         let (id, old_rc, old_alpha) = self._tweening_quad.unwrap();
-                        let move_speed = 0.7;
-                        let alpha_speed = 0.90;
+                        let move_speed = 0.0;
+                        let alpha_speed = 0.0;
                         let alpha = old_alpha * alpha_speed + (1. - alpha_speed);
                         let rc = Rect {
                             x: old_rc.x * move_speed + rect.x * (1. - move_speed),
@@ -713,7 +713,7 @@ where TItem: Clone
                             .max((rc.h - rect.h).abs())
                             .max(100. - alpha * 100.);
                         if dist>0.5 { // keep redrawing until we are close
-                            cx.redraw_previous_areas();
+                           // cx.redraw_previous_areas();
                             //self.drop_quad_view.redraw_view_area(cx);
                         }
                         self._tweening_quad = Some((id, rc, alpha));

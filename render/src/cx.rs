@@ -75,7 +75,7 @@ pub struct Cx {
     pub repaint_id: u64,
     pub event_id: u64,
     pub timer_id: u64,
-    pub signal_id: u64,
+    pub signal_id: usize,
     
     pub last_key_focus: Area,
     pub key_focus: Area,
@@ -98,8 +98,8 @@ pub struct Cx {
     pub frame_callbacks: Vec<Area>,
     pub _frame_callbacks: Vec<Area>,
     
-    pub signals_before_draw: Vec<(Signal, u64)>,
-    pub signals_after_draw: Vec<(Signal, u64)>,
+    pub signals_before_draw: Vec<(Signal, usize)>,
+    pub signals_after_draw: Vec<(Signal, usize)>,
     
     pub style_values: BTreeMap<String, StyleValue>,
     
@@ -645,11 +645,11 @@ impl Cx {
         return Signal {signal_id: self.signal_id}
     }
     
-    pub fn send_signal_before_draw(&mut self, signal: Signal, message: u64) {
+    pub fn send_signal_before_draw(&mut self, signal: Signal, message: usize) {
         self.signals_before_draw.push((signal, message));
     }
     
-    pub fn send_signal_after_draw(&mut self, signal: Signal, message: u64) {
+    pub fn send_signal_after_draw(&mut self, signal: Signal, message: usize) {
         self.signals_after_draw.push((signal, message));
     }
     

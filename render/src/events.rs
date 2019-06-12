@@ -140,8 +140,8 @@ pub struct TimerEvent {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct SignalEvent {
-    pub signal_id: u64,
-    pub value: u64
+    pub signal_id: usize,
+    pub value: usize
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -412,7 +412,7 @@ impl Event {
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Signal {
-    pub signal_id: u64
+    pub signal_id: usize
 }
 
 impl Signal {

@@ -368,7 +368,7 @@ impl CocoaApp {
         }
     }
     
-    pub fn post_signal(signal_id: u64, value: u64) {
+    pub fn post_signal(signal_id: usize, value: usize) {
         unsafe {
             let pool = foundation::NSAutoreleasePool::new(cocoa::base::nil);
             
@@ -476,7 +476,7 @@ impl CocoaApp {
         }
     }
     
-    pub fn send_signal_event(&mut self, signal_id: u64, value: u64) {
+    pub fn send_signal_event(&mut self, signal_id: usize, value: usize) {
         self.do_callback(&mut vec![
             Event::Signal(SignalEvent {
                 signal_id: signal_id,
@@ -1017,8 +1017,8 @@ pub fn define_cocoa_post_delegate() -> *const Class {
     extern fn received_post(this: &Object, _: Sel, _nstimer: id) {
         let ca = get_cocoa_app(this);
         unsafe {
-            let signal_id: u64 = *this.get_ivar("signal_id");
-            let value: u64 = *this.get_ivar("value");
+            let signal_id: usize = *this.get_ivar("signal_id");
+            let value: usize = *this.get_ivar("value");
             ca.send_signal_event(signal_id, value);
         }
     }

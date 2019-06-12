@@ -381,7 +381,7 @@ impl Cx {
         }
     }
     
-    pub fn send_signal(signal: Signal, value: u64) {
+    pub fn send_signal(signal: Signal, value: usize) {
         CocoaApp::post_signal(signal.signal_id, value);
     }
 }
