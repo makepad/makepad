@@ -103,6 +103,10 @@ impl Animator{
         }
         return false
     }
+    
+    pub fn play_default(&mut self, cx:&mut Cx){
+        self.play_anim(cx, self.default.clone());
+    }
 
     pub fn play_anim(&mut self, cx:&mut Cx, anim:Anim){
         // if our area is invalid, we should just set our default value 
@@ -865,7 +869,7 @@ impl Ease{
     }
 }
 
-#[derive(Clone,Debug)]
+#[derive(Clone, Debug)]
 pub struct FloatTrack{
     pub ident:String,
     pub ease:Ease,

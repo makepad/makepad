@@ -256,6 +256,11 @@ impl Win32App {
     }
     
     pub fn terminate_event_loop(&mut self) {
+        unsafe {
+            if self.all_windows.len()>0 {
+                winuser::PostMessageW(self.all_windows[0], winuser::WM_QUIT, 0,0);
+            }
+        }
         self.event_loop_running = false;
     }
     
@@ -506,6 +511,13 @@ impl Win32Window {
                     })
                 ]);
             },
+            winuser::WM_CLOSE=>{
+                window.do_callback(&mut vec![
+                    Event::WindowClosed(WindowClosedEvent {
+                        window_id: window.window_id,
+                    })
+                ]);
+            },
             _ => {
                 return winuser::DefWindowProcW(hwnd, msg, wparam, lparam)
             }
@@ -729,6 +741,7 @@ impl Win32Window {
             window_id: self.window_id,
             abs: pos,
             rel: pos,
+            any_down: false,
             rect: Rect::zero(),
             handled: false,
             hover_state: HoverState::Over,

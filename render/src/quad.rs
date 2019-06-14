@@ -9,9 +9,8 @@ pub struct Quad {
 
 impl Style for Quad {
     fn style(cx: &mut Cx) -> Self {
-        let sb = Self::def_quad_shader(cx);
         Self {
-            shader: cx.add_shader(sb, "Quad"),
+            shader: cx.add_shader(Self::def_quad_shader(), "Quad"),
             do_scroll: true,
             color: color("green")
         }
@@ -19,13 +18,13 @@ impl Style for Quad {
 }
 
 impl Quad {
-    pub fn def_quad_shader(cx: &mut Cx) -> ShaderGen {
+    pub fn def_quad_shader() -> ShaderGen {
         // lets add the draw shader lib
-        let mut sg = cx.new_shader_gen();
+        let mut sg = ShaderGen::new();
         sg.geometry_vertices = vec![0.0, 0.0, 1.0, 0.0, 1.0, 1.0, 0.0, 1.0];
         sg.geometry_indices = vec![0, 1, 2, 2, 3, 0];
         
-        sg.add_ast(shader_ast!({
+        sg.compose(shader_ast!({
             
             let geom: vec2<Geometry>;
             let x: float<Instance>;
@@ -55,8 +54,7 @@ impl Quad {
                 return vec4(color.rgb * color.a, color.a);
             }
             
-        }));
-        sg
+        }))
     }
     
     pub fn begin_quad(&mut self, cx: &mut Cx, layout: &Layout) -> InstanceArea {

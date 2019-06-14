@@ -29,7 +29,6 @@ pub struct ScrollBar {
 
 impl Style for ScrollBar {
     fn style(cx: &mut Cx) -> Self {
-        let sb = Self::def_shader(cx);
         Self {
             bar_size: 12.0,
             min_handle_size: 30.0,
@@ -46,7 +45,7 @@ impl Style for ScrollBar {
                 Track::color("sb.color", Ease::Lin, vec![(1.0, color("#9"))])
             ]),
             sb: Quad {
-                shader: cx.add_shader(sb, "ScrollBar.sb"),
+                shader: cx.add_shader(Self::def_shader(), "ScrollBar.sb"),
                 ..Style::style(cx)
             },
             use_vertical_finger_scroll: false,
@@ -70,9 +69,8 @@ impl Style for ScrollBar {
 
 
 impl ScrollBar {
-    pub fn def_shader(cx: &mut Cx) -> ShaderGen {
-        let mut sg = Quad::def_quad_shader(cx);
-        sg.add_ast(shader_ast!({
+    pub fn def_shader() -> ShaderGen {
+        Quad::def_quad_shader().compose(shader_ast!({
             
             let is_vertical: float<Instance>;
             
@@ -101,8 +99,7 @@ impl ScrollBar {
                 }
                 return df_fill_keep(color);
             }
-        }));
-        sg
+        }))
     }
     
     // reads back normalized scroll position info

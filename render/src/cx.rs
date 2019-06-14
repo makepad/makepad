@@ -196,15 +196,6 @@ impl Default for Cx {
 
 
 impl Cx {
-    pub fn new_shader_gen(&mut self) -> ShaderGen {
-        let mut sg = ShaderGen::default();
-        CxShader::def_builtins(&mut sg);
-        CxShader::def_df(&mut sg);
-        CxPass::def_uniforms(&mut sg);
-        CxView::def_uniforms(&mut sg);
-        sg
-    }
-    
     //pub fn get_shader2(&self, id: usize) -> &CompiledShader {
     //    &self.compiled_shaders[id] 
     // }

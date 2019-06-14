@@ -40,7 +40,6 @@ pub enum SplitterEvent{
 
 impl Style for Splitter{
     fn style(cx:&mut Cx)->Self{
-        let split_sb = Self::def_split_shader(cx);
         Self{
 
             axis:Axis::Vertical,
@@ -58,7 +57,7 @@ impl Style for Splitter{
             split_size:2.0,
             min_size:25.0,
             split:Quad{
-                shader:cx.add_shader(split_sb,"Splitter.split"),
+                shader:cx.add_shader(Self::def_split_shader(),"Splitter.split"),
                 ..Style::style(cx)
             },
             animator:Animator::new(Anim::new(Play::Cut{duration:0.5},vec![
@@ -79,9 +78,8 @@ impl Style for Splitter{
 
 impl Splitter{
 
-    pub fn def_split_shader(cx:&mut Cx)->ShaderGen{
-        let mut sg = Quad::def_quad_shader(cx);
-        sg.add_ast(shader_ast!({
+    pub fn def_split_shader()->ShaderGen{
+        Quad::def_quad_shader().compose(shader_ast!({
 
             const border_radius:float = 1.5;
 
@@ -90,8 +88,7 @@ impl Splitter{
                 df_box(0., 0., w, h, 0.5);
                 return df_fill(color);
             }
-        }));
-        sg
+        }))
     }
 
     pub fn handle_splitter(&mut self, cx:&mut Cx, event:&mut Event)->SplitterEvent{

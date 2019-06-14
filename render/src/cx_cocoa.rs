@@ -756,6 +756,7 @@ impl CocoaWindow {
             window_id: self.window_id,
             abs: pos,
             rel: pos,
+            any_down: false,
             rect: Rect::zero(),
             handled: false,
             hover_state: HoverState::Over,

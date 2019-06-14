@@ -25,9 +25,8 @@ pub struct Text{
 
 impl Style for Text{
     fn style(cx:&mut Cx)->Self{
-        let sb = Self::def_text_shader(cx);
         Self{
-            shader:cx.add_shader(sb, "Text"),
+            shader:cx.add_shader(Self::def_text_shader(), "Text"),
             font:cx.load_font_style("normal_font"),
             text:"".to_string(),
             font_size:cx.size("font_size") as f32,
@@ -41,9 +40,9 @@ impl Style for Text{
 }
 
 impl Text{
-    pub fn def_text_shader(cx:&mut Cx)->ShaderGen{
+    pub fn def_text_shader()->ShaderGen{
         // lets add the draw shader lib
-        let mut sg = cx.new_shader_gen();
+        let mut sg = ShaderGen::new();
         sg.geometry_vertices = vec![
             0.0,0.0,
             1.0,0.0,
@@ -55,7 +54,7 @@ impl Text{
             0,3,2
         ];
 
-        sg.add_ast(shader_ast!({
+        sg.compose(shader_ast!({
             let geom:vec2<Geometry>;
             let texturez:texture2d<Texture>;
             let tex_size:vec2<Uniform>;
@@ -125,8 +124,7 @@ impl Text{
 
                 return vec4(clipped,0.,1.) * camera_projection;
             }
-        }));
-        sg
+        }))
     }
 
     pub fn begin_text(&mut self, cx:&mut Cx)->AlignedInstance{

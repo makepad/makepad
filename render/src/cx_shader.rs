@@ -111,8 +111,8 @@ pub struct CxShader {
 
 impl CxShader {
     
-    pub fn def_builtins(sg: &mut ShaderGen) {
-        sg.asts.push(
+    pub fn def_builtins(sg: ShaderGen)->ShaderGen{
+        sg.compose(
             ShAst {
                 types: vec![
                     ShType {name: "float".to_string(), slots: 1, prim: true, fields: Vec::new()},
@@ -273,8 +273,8 @@ impl CxShader {
         )
     }
     
-    pub fn def_df(sg: &mut ShaderGen) {
-        sg.add_ast(shader_ast!({
+    pub fn def_df(sg: ShaderGen)->ShaderGen{
+        sg.compose(shader_ast!({
             const PI: float = 3.141592653589793;
             const E: float = 2.718281828459045;
             const LN2: float = 0.6931471805599453;
@@ -483,7 +483,6 @@ impl CxShader {
                 let e: float = 1.0e-10;
                 return vec4(abs(q.z + (q.w - q.y) / (6.0 * d + e)), d / (q.x + e), q.x, c.w);
             }
-            
-        }));
+        }))
     }
 }

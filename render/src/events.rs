@@ -10,7 +10,7 @@ pub struct KeyModifiers {
 
 #[derive(Clone, Default, Debug, PartialEq)]
 pub struct FingerDownEvent {
-    pub window_id:usize,
+    pub window_id: usize,
     pub abs: Vec2,
     pub rel: Vec2,
     pub rect: Rect,
@@ -24,7 +24,7 @@ pub struct FingerDownEvent {
 
 #[derive(Clone, Default, Debug, PartialEq)]
 pub struct FingerMoveEvent {
-    pub window_id:usize,
+    pub window_id: usize,
     pub abs: Vec2,
     pub abs_start: Vec2,
     pub rel: Vec2,
@@ -45,7 +45,7 @@ impl FingerMoveEvent {
 
 #[derive(Clone, Default, Debug, PartialEq)]
 pub struct FingerUpEvent {
-    pub window_id:usize,
+    pub window_id: usize,
     pub abs: Vec2,
     pub abs_start: Vec2,
     pub rel: Vec2,
@@ -73,10 +73,11 @@ impl Default for HoverState {
 
 #[derive(Clone, Default, Debug, PartialEq)]
 pub struct FingerHoverEvent {
-    pub window_id:usize,
+    pub window_id: usize,
     pub abs: Vec2,
     pub rel: Vec2,
     pub rect: Rect,
+    pub any_down: bool,
     pub handled: bool,
     pub hover_state: HoverState,
     pub modifiers: KeyModifiers,
@@ -85,7 +86,7 @@ pub struct FingerHoverEvent {
 
 #[derive(Clone, Default, Debug, PartialEq)]
 pub struct FingerScrollEvent {
-    pub window_id:usize,
+    pub window_id: usize,
     pub abs: Vec2,
     pub rel: Vec2,
     pub rect: Rect,
@@ -98,14 +99,14 @@ pub struct FingerScrollEvent {
 
 #[derive(Clone, Default, Debug, PartialEq)]
 pub struct WindowGeomChangeEvent {
-    pub window_id:usize,
+    pub window_id: usize,
     pub old_geom: WindowGeom,
     pub new_geom: WindowGeom,
 }
 
 #[derive(Clone, Default, Debug, PartialEq)]
 pub struct WindowMovedEvent {
-    pub window_id:usize,
+    pub window_id: usize,
     pub old_pos: Vec2,
     pub new_pos: Vec2,
 }
@@ -232,7 +233,7 @@ pub enum HitTouch {
 }
 
 #[derive(Clone, Debug, Default)]
-pub struct HitOpt{
+pub struct HitOpt {
     pub use_multi_touch: bool,
     pub no_scrolling: bool,
     pub margin: Option<Margin>,
@@ -240,7 +241,7 @@ pub struct HitOpt{
 
 impl Event {
     
-    pub fn hits(&mut self, cx: &mut Cx, area: Area, opt:HitOpt) -> Event {
+    pub fn hits(&mut self, cx: &mut Cx, area: Area, opt: HitOpt) -> Event {
         match self {
             Event::KeyFocus(kf) => {
                 if area == kf.last {
@@ -308,18 +309,25 @@ impl Event {
                 let rect = area.get_rect(&cx, opt.no_scrolling);
                 
                 if cx._finger_over_last_area == area {
-                    
+                    let mut any_down = false;
+                    for fin_area in &cx.captured_fingers {
+                        if *fin_area == area {
+                            any_down = true;
+                            break;
+                        }
+                    }
                     if !fe.handled && rect.contains_with_margin(fe.abs.x, fe.abs.y, &opt.margin) {
                         fe.handled = true;
                         if let HoverState::Out = fe.hover_state {
-                        //    cx.finger_over_last_area = Area::Empty;
+                            //    cx.finger_over_last_area = Area::Empty;
                         }
-                        else{
+                        else {
                             cx.finger_over_last_area = area;
                         }
                         return Event::FingerHover(FingerHoverEvent {
                             rel: area.abs_to_rel(cx, fe.abs, opt.no_scrolling),
                             rect: rect,
+                            any_down:any_down,
                             ..fe.clone()
                         })
                     }
@@ -328,6 +336,7 @@ impl Event {
                         return Event::FingerHover(FingerHoverEvent {
                             rel: area.abs_to_rel(cx, fe.abs, opt.no_scrolling),
                             rect: rect,
+                            any_down:any_down,
                             hover_state: HoverState::Out,
                             ..fe.clone()
                         })
@@ -335,12 +344,20 @@ impl Event {
                 }
                 else {
                     if !fe.handled && rect.contains_with_margin(fe.abs.x, fe.abs.y, &opt.margin) {
+                        let mut any_down = false;
+                        for fin_area in &cx.captured_fingers {
+                            if *fin_area == area {
+                                any_down = true;
+                                break;
+                            }
+                        }
                         cx.finger_over_last_area = area;
                         fe.handled = true;
                         //self.was_over_last_call = true;
                         return Event::FingerHover(FingerHoverEvent {
                             rel: area.abs_to_rel(cx, fe.abs, opt.no_scrolling),
                             rect: rect,
+                            any_down:any_down,
                             hover_state: HoverState::In,
                             ..fe.clone()
                         })
@@ -391,7 +408,7 @@ impl Event {
             Event::FingerUp(fe) => {
                 if cx.captured_fingers[fe.digit] == area {
                     cx.captured_fingers[fe.digit] = Area::Empty;
-                    let abs_start =  cx.finger_down_abs_start[fe.digit];
+                    let abs_start = cx.finger_down_abs_start[fe.digit];
                     let rel_start = cx.finger_down_rel_start[fe.digit];
                     let rect = area.get_rect(&cx, opt.no_scrolling);
                     return Event::FingerUp(FingerUpEvent {
@@ -449,18 +466,19 @@ impl FileReadRequest {
         self.read_id != 0
     }
     
-    pub fn as_utf8<'a>(&mut self, fr: &'a FileReadEvent) -> Option<Result<&'a str, String>> {
+    pub fn as_utf8<'a>(&mut self, fr: &'a FileReadEvent) -> Option<Result<&'a str,
+    String>> {
         if fr.read_id == self.read_id {
             self.read_id = 0;
             if let Ok(str_data) = &fr.data {
                 if let Ok(utf8_string) = std::str::from_utf8(&str_data) {
                     return Some(Ok(utf8_string))
                 }
-                else{
+                else {
                     return Some(Err(format!("can't parse file as utf8 {}", self.path)))
                 }
             }
-            else if let Err(err) = &fr.data{
+            else if let Err(err) = &fr.data {
                 return Some(Err(format!("can't load file as utf8 {} {}", self.path, err)))
             }
         }

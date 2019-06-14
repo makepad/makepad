@@ -1,4 +1,5 @@
 use render::*;
+use crate::button::*;
 use crate::tabclose::*;
 
 #[derive(Clone)]
@@ -22,12 +23,11 @@ pub struct Tab{
 
 impl Style for Tab{
     fn style(cx:&mut Cx)->Self{
-        let bg_sb = Self::def_bg_shader(cx);
         let mut tab = Self{
             label:"Tab".to_string(),
             is_closeable:true,
             bg:Quad{
-                shader:cx.add_shader(bg_sb,"Tab.bg"),
+                shader:cx.add_shader(Self::def_bg_shader(), "Tab.bg"),
                 ..Style::style(cx)
             },
             bg_layout:Layout{
@@ -130,9 +130,8 @@ impl Tab{
         ])
     }
 
-    pub fn def_bg_shader(cx:&mut Cx)->ShaderGen{
-        let mut sg = Quad::def_quad_shader(cx);
-        sg.add_ast(shader_ast!({
+    pub fn def_bg_shader()->ShaderGen{
+        Quad::def_quad_shader().compose(shader_ast!({
 
             let border_color:vec4<Instance>;
             const border_width:float = 1.0;
@@ -147,8 +146,7 @@ impl Tab{
                 df_line_to(0.,h);
                 return df_stroke(border_color, 1.);
             }
-        }));
-        sg
+        }))
     }
 
     pub fn set_tab_focus(&mut self, cx:&mut Cx, focus:bool){
@@ -175,7 +173,7 @@ impl Tab{
 
         if !self.animator.term_anim_playing(){
             match self.tab_close.handle_tab_close(cx, event){
-                TabCloseEvent::Clicked=>{
+                ButtonEvent::Clicked=>{
                     self._close_anim_rect = self._bg_area.get_rect(cx, false);
                     self.animator.play_anim(cx, self.anim_close(cx));
                     return TabEvent::Closing;
