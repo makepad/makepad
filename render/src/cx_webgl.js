@@ -382,7 +382,8 @@
             canvas.style.width = w + 'px';
             canvas.style.height = h + 'px';
             this.gl.viewport(0,0,sw,sh);
-    
+            document.body.scrollTop = 0;
+            document.body.scrollLeft = 0;
             this.dpi_factor = dpi_factor;
             this.width = canvas.offsetWidth;
             this.height = canvas.offsetHeight;
@@ -739,6 +740,9 @@
                 this.do_wasm_io();
             })
             let mouse_move = e=>{
+                document.body.scrollTop = 0;
+                document.body.scrollLeft = 0;
+
                 for(var i = 0; i < mouse_buttons_down.length; i++){
                     if(mouse_buttons_down[i]){
                         this.to_wasm.finger_move({
