@@ -779,7 +779,7 @@ impl D3d11Cx {
     )
         -> Result<ComPtr<dxgi1_2::IDXGISwapChain1>, winerror::HRESULT> {
         let mut swap_chain1 = ptr::null_mut();
-        let sc_desc = dxgi1_2::DXGI_SWAP_CHAIN_DESC1 {
+        let sc_desc = dxgi1_2::DXGI_SWAP_CHAIN_DESC1 { 
             AlphaMode: dxgi1_2::DXGI_ALPHA_MODE_IGNORE,
             BufferCount: 2,
             Width: (wg.inner_size.x * wg.dpi_factor) as u32,
@@ -790,7 +790,7 @@ impl D3d11Cx {
             SampleDesc: dxgitype::DXGI_SAMPLE_DESC {Count: 1, Quality: 0,},
             Scaling: dxgi1_2::DXGI_SCALING_NONE,
             Stereo: FALSE,
-            SwapEffect: dxgi::DXGI_SWAP_EFFECT_FLIP_DISCARD,
+            SwapEffect: dxgi::DXGI_SWAP_EFFECT_SEQUENTIAL,
         };
         
         let hr = unsafe {self.factory.CreateSwapChainForHwnd(

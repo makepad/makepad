@@ -927,15 +927,15 @@ impl Track{
             track:track
         })
     }
-/*
+
     pub fn to_float(ident:&str, value:f32)->Track{
         Track::Float(FloatTrack{
             cut_init:None,
-            ease:Ease::Linear,
+            ease:Ease::Lin,
             ident:ident.to_string(),
             track:vec![(1.0,value)]
         })
-    }*/
+    }
 
     pub fn vec2(ident:&str, ease:Ease, track:Vec<(f64,Vec2)>)->Track{
         Track::Vec2(Vec2Track{
@@ -945,15 +945,15 @@ impl Track{
             track:track
         })
     }
-    /*
+    
     pub fn to_vec2(ident:&str, value:Vec2)->Track{
         Track::Vec2(Vec2Track{
             cut_init:None,
-            ease:Ease::Linear,
+            ease:Ease::Lin,
             ident:ident.to_string(),
             track:vec![(1.0,value)]
         })
-    }*/
+    }
 
     pub fn vec3(ident:&str, ease:Ease, track:Vec<(f64,Vec3)>)->Track{
         Track::Vec3(Vec3Track{
@@ -963,15 +963,15 @@ impl Track{
             track:track
         })
     }
-    /*
+    
     pub fn to_vec3(ident:&str, value:Vec3)->Track{
         Track::Vec3(Vec3Track{
             cut_init:None,
-            ease:Ease::Linear,
+            ease:Ease::Lin,
             ident:ident.to_string(),
             track:vec![(1.0,value)]
         })
-    }*/
+    }
 
     pub fn vec4(ident:&str, ease:Ease, track:Vec<(f64,Vec4)>)->Track{
         Track::Vec4(Vec4Track{
@@ -982,6 +982,15 @@ impl Track{
         })
     }
         
+    pub fn to_vec4(ident:&str, value:Vec4)->Track{
+        Track::Vec4(Vec4Track{
+            cut_init:None,
+            ease:Ease::Lin,
+            ident:ident.to_string(),
+            track:vec![(1.0,value)]
+        })
+    }
+    
     pub fn color(ident:&str, ease:Ease, track:Vec<(f64,Color)>)->Track{
         Track::Color(ColorTrack{
             cut_init:None,
@@ -990,15 +999,15 @@ impl Track{
             track:track
         })
     }
-    /*
-    pub fn to_vec4(ident:&str, value:Vec4)->Track{
-        Track::Vec4(Vec4Track{
+    
+    pub fn to_color(ident:&str, value:Color)->Track{
+        Track::Color(ColorTrack{
             cut_init:None,
-            ease:Ease::Linear,
+            ease:Ease::Lin,
             ident:ident.to_string(),
             track:vec![(1.0,value)]
         })
-    }*/
+    }
 
     fn compute_track_value<T>(time:f64, track:&Vec<(f64,T)>, cut_init:&mut Option<T>, init:T, ease:&Ease) -> T
     where T:ComputeTrackValue<T> + Clone
