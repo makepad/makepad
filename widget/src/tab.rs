@@ -190,9 +190,9 @@ impl Tab{
                     cx.redraw_child_area(self._bg_area);
                 }
                 else{
-                    self.animator.calc_write(cx, "bg.color", ae.time, self._bg_area);
-                    self.animator.calc_write(cx, "bg.border_color", ae.time, self._bg_area);
-                    self.animator.calc_write(cx, "text.color", ae.time, self._text_area);
+                    self.animator.calc(cx, ae.time, self._bg_area, "bg.color");
+                    self.animator.calc(cx, ae.time, self._bg_area, "bg.border_color");
+                    self.animator.calc(cx, ae.time, self._text_area, "text.color");
                 }
             },
             Event::AnimateEnded(_ae)=>{

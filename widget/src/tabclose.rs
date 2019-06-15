@@ -67,9 +67,9 @@ impl TabClose {
         //let mut ret_event = ButtonEvent::None;
         match event.hits(cx, self._bg_area, HitOpt {margin: Some(Margin {l: 5., t: 5., r: 5., b: 5.}), ..Default::default()}) {
             Event::Animate(ae) => {
-                self.animator.calc_write(cx, "bg.color", ae.time, self._bg_area);
-                self.animator.calc_write(cx, "bg.hover", ae.time, self._bg_area);
-                self.animator.calc_write(cx, "bg.down", ae.time, self._bg_area);
+                self.animator.calc(cx, ae.time, self._bg_area, "bg.color");
+                self.animator.calc(cx, ae.time, self._bg_area, "bg.hover");
+                self.animator.calc(cx, ae.time, self._bg_area, "bg.down");
             },
             Event::FingerDown(_fe) => {
                 self.animator.play_anim(cx, self.anim_down.clone());

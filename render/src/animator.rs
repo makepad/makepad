@@ -372,7 +372,7 @@ impl Animator{
         }
     }
 
-    pub fn calc_write(&mut self, cx:&mut Cx, ident:&str, time:f64, area:Area){
+    pub fn calc(&mut self, cx:&mut Cx, time:f64, area:Area, ident:&str){
         if let Some(dot) = ident.find('.'){
             let field = ident.get((dot+1)..ident.len()).unwrap();
 

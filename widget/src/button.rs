@@ -85,9 +85,9 @@ impl Button {
         //let mut ret_event = ButtonEvent::None;
         match event.hits(cx, self._bg_area, HitOpt::default()) {
             Event::Animate(ae) => {
-                self.animator.calc_write(cx, "bg.color", ae.time, self._bg_area);
-                self.animator.calc_write(cx, "bg.border_color", ae.time, self._bg_area);
-                self.animator.calc_write(cx, "bg.glow_size", ae.time, self._bg_area);
+                self.animator.calc(cx, ae.time, self._bg_area, "bg.color");
+                self.animator.calc(cx, ae.time, self._bg_area, "bg.border_color");
+                self.animator.calc(cx, ae.time, self._bg_area, "bg.glow_size");
             },
             Event::FingerDown(_fe) => {
                 self.animator.play_anim(cx, self.anim_down.clone());

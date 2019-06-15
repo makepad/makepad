@@ -330,7 +330,7 @@ impl FileTree{
 
             match event.hits(cx, node_draw.animator.area, HitOpt::default()){
                 Event::Animate(ae)=>{
-                    node_draw.animator.calc_write(cx, "bg.color", ae.time, node_draw.animator.area);
+                    node_draw.animator.calc(cx,ae.time, node_draw.animator.area,"bg.color");
                 },
                 Event::FingerDown(_fe)=>{
                     // mark ourselves, unmark others
