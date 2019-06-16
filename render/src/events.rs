@@ -190,6 +190,12 @@ pub struct WindowClosedEvent {
 }
 
 #[derive(Clone, Debug, PartialEq)]
+pub struct WindowResizeLoopEvent {
+    pub was_started: bool,
+    pub window_id: usize
+}
+
+#[derive(Clone, Debug, PartialEq)]
 pub enum Event {
     None,
     Construct,
@@ -204,6 +210,7 @@ pub enum Event {
     WindowCloseRequested(WindowCloseRequestedEvent),
     WindowClosed(WindowClosedEvent),
     WindowGeomChange(WindowGeomChangeEvent),
+    WindowResizeLoop(WindowResizeLoopEvent),
     FingerDown(FingerDownEvent),
     FingerMove(FingerMoveEvent),
     FingerHover(FingerHoverEvent),

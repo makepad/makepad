@@ -25,7 +25,7 @@ time = "0.1.4"
 
 [target.x86_64-pc-windows-gnu.dependencies.winapi]
 version = "*"
-features = ["libloaderapi", "shellscalingapi", "winuser", "winbase", "d3d11", "d3d11sdklayers", "d3dcommon", "d3dcompiler", "dxgi1_2", "dxgiformat", "dxgitype", "winerror"]
+features = ["d2d1", "libloaderapi", "shellscalingapi", "winuser", "winbase", "d3d11", "d3d11sdklayers", "d3dcommon", "d3dcompiler", "dxgi1_2", "dxgiformat", "dxgitype", "winerror"]
 
 [target.x86_64-pc-windows-msvc.dependencies]
 wio = "*"
@@ -33,4 +33,4 @@ time = "0.1.4"
 
 [target.x86_64-pc-windows-msvc.dependencies.winapi]
 version = "*"
-features = ["libloaderapi", "shellscalingapi", "winuser", "winbase", "d3d11", "d3d11sdklayers", "d3dcommon", "d3dcompiler", "dxgi1_2", "dxgiformat", "dxgitype", "winerror"]
+features = ["d2d1","libloaderapi", "shellscalingapi", "winuser", "winbase", "d3d11", "d3d11sdklayers", "d3dcommon", "d3dcompiler", "dxgi1_2", "dxgiformat", "dxgitype", "winerror"]

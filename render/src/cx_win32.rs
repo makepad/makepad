@@ -258,7 +258,7 @@ impl Win32App {
     pub fn terminate_event_loop(&mut self) {
         unsafe {
             if self.all_windows.len()>0 {
-                winuser::PostMessageW(self.all_windows[0], winuser::WM_QUIT, 0,0);
+                winuser::PostMessageW(self.all_windows[0], winuser::WM_QUIT, 0, 0);
             }
         }
         self.event_loop_running = false;
@@ -301,11 +301,11 @@ impl Win32Window {
     
     pub fn init(&mut self, title: &str, size: Vec2, position: Option<Vec2>) {
         
-        let style = winuser::WS_SIZEBOX | winuser::WS_MAXIMIZEBOX | winuser::WS_CAPTION
-            | winuser::WS_MINIMIZEBOX | winuser::WS_BORDER
+        let style = winuser::WS_SIZEBOX | winuser::WS_MAXIMIZEBOX
+            | winuser::WS_MINIMIZEBOX | winuser::WS_POPUP
             | winuser::WS_CLIPSIBLINGS | winuser::WS_CLIPCHILDREN | winuser::WS_SYSMENU;
         
-        let style_ex = winuser::WS_EX_WINDOWEDGE | winuser::WS_EX_APPWINDOW | winuser::WS_EX_ACCEPTFILES;
+        let style_ex = winuser::WS_EX_WINDOWEDGE | winuser::WS_EX_APPWINDOW | winuser::WS_EX_ACCEPTFILES | winuser::WS_EX_TOPMOST;
         
         unsafe {
             let title_wstr: Vec<_> = OsStr::new(title).encode_wide().chain(Some(0).into_iter()).collect();
@@ -357,6 +357,17 @@ impl Win32Window {
         
         let window = &mut (*(user_data as *mut Win32Window));
         match msg {
+            //winuser::WM_NCCALCSIZE=>{
+            //    if wparam == 1{
+            //        return 0
+            //    }
+            //},
+            //winuser::WM_NCHITTEST=>{
+            //    return winuser::HTCAPTION;
+            //},
+            winuser::WM_ERASEBKGND => {
+                return 0
+            },
             winuser::WM_MOUSEMOVE => {
                 window.send_finger_hover_and_move(
                     window.get_mouse_pos_from_lparam(lparam),
@@ -400,8 +411,8 @@ impl Win32Window {
                                 let h_clipboard_data = winuser::GetClipboardData(winuser::CF_UNICODETEXT);
                                 let h_clipboard_ptr = winbase::GlobalLock(h_clipboard_data) as *mut u16;
                                 let clipboard_size = winbase::GlobalSize(h_clipboard_data);
-                                if clipboard_size > 2{
-                                    data.resize((clipboard_size>>1)-1, 0);
+                                if clipboard_size > 2 {
+                                    data.resize((clipboard_size>>1) - 1, 0);
                                     std::ptr::copy_nonoverlapping(h_clipboard_ptr, data.as_mut_ptr(), data.len());
                                     winbase::GlobalUnlock(h_clipboard_data);
                                     winuser::CloseClipboard();
@@ -415,7 +426,7 @@ impl Win32Window {
                                         ]);
                                     }
                                 }
-                                else{
+                                else {
                                     winbase::GlobalUnlock(h_clipboard_data);
                                     winuser::CloseClipboard();
                                 }
@@ -491,9 +502,17 @@ impl Win32Window {
             },
             winuser::WM_ENTERSIZEMOVE => {
                 (*window.win32_app).start_resize();
+                window.do_callback(&mut vec![Event::WindowResizeLoop(WindowResizeLoopEvent {
+                    was_started:true,
+                    window_id: window.window_id
+                })]);
             }
             winuser::WM_EXITSIZEMOVE => {
                 (*window.win32_app).stop_resize();
+                window.do_callback(&mut vec![Event::WindowResizeLoop(WindowResizeLoopEvent {
+                    was_started:false,
+                    window_id: window.window_id
+                })]);
             },
             winuser::WM_SIZE => {
                 //if window.ignore_wmsize > 1{
@@ -511,7 +530,7 @@ impl Win32Window {
                     })
                 ]);
             },
-            winuser::WM_CLOSE=>{
+            winuser::WM_CLOSE => {
                 window.do_callback(&mut vec![
                     Event::WindowClosed(WindowClosedEvent {
                         window_id: window.window_id,

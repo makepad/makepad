@@ -5,7 +5,8 @@ use crate::cx_desktop::*;
 use winapi::shared::guiddef::GUID;
 use winapi::shared::minwindef::{TRUE, FALSE};
 use winapi::shared::{dxgi, dxgi1_2, dxgitype, dxgiformat, winerror};
-use winapi::um::{d3d11, d3dcommon, d3dcompiler};
+use winapi::um::{d3d11, dcommon, d3dcommon, d3dcompiler};
+use winapi::um::{d2d1};
 use winapi::Interface;
 use wio::com::ComPtr;
 use std::mem;
@@ -42,7 +43,7 @@ impl Cx {
                 }
                 if draw_call.uniforms_dirty {
                     draw_call.uniforms_dirty = false;
-                    if draw_call.uniforms.len() == 0{
+                    if draw_call.uniforms.len() == 0 {
                         continue;
                     }
                     draw_call.platform.uni_dr.update_with_f32_constant_data(d3d11_cx, &mut draw_call.uniforms);
@@ -50,7 +51,7 @@ impl Cx {
                 
                 let instances = (draw_call.instance.len() / sh.mapping.instance_slots) as usize;
                 
-                if instances == 0{
+                if instances == 0 {
                     continue;
                 }
                 
@@ -81,7 +82,7 @@ impl Cx {
         }
     }
     
-    fn draw_pass_to_layer(&mut self, pass_id: usize, vsync:bool, _dpi_factor: f32, d3d11_window: &D3d11Window, d3d11_cx: &D3d11Cx) {
+    fn draw_pass_to_layer(&mut self, pass_id: usize, vsync: bool, _dpi_factor: f32, d3d11_window: &mut D3d11Window, d3d11_cx: &D3d11Cx) {
         let view_id = self.passes[pass_id].main_view_id.unwrap();
         
         self.platform.uni_cx.update_with_f32_constant_data(&d3d11_cx, &mut self.passes[pass_id].uniforms);
@@ -103,7 +104,7 @@ impl Cx {
         d3d11_cx.set_raster_state(d3d11_window);
         self.render_view(pass_id, view_id, d3d11_cx);
         
-        d3d11_cx.present(vsync, d3d11_window);
+        d3d11_window.present(vsync, d3d11_cx);
     }
     
     fn resize_layer_to_turtle(&mut self) {
@@ -132,12 +133,24 @@ impl Cx {
         let mut passes_todo = Vec::new();
         
         win32_app.event_loop( | win32_app, events | {
-
+            
             for mut event in events {
                 
                 self.process_desktop_pre_event(&mut event, &mut event_handler);
                 
                 match &event {
+                    Event::WindowResizeLoop(wr) => {
+                        for d3d11_window in &mut d3d11_windows {
+                            if d3d11_window.window_id == wr.window_id {
+                                if wr.was_started {
+                                    d3d11_window.start_resize(&d3d11_cx);
+                                }
+                                else {
+                                    d3d11_window.stop_resize(&d3d11_cx);
+                                }
+                            }
+                        }
+                    },
                     Event::WindowGeomChange(re) => { // do this here because mac
                         for d3d11_window in &mut d3d11_windows {
                             if d3d11_window.window_id == re.window_id {
@@ -229,7 +242,7 @@ impl Cx {
                                             *pass_id,
                                             vsync,
                                             dpi_factor,
-                                            &d3d11_window,
+                                            d3d11_window,
                                             &d3d11_cx,
                                         );
                                         
@@ -294,12 +307,15 @@ impl Cx {
 
 struct D3d11Window {
     pub window_id: usize,
+    pub is_in_resize: bool,
     pub window_geom: WindowGeom,
     pub win32_window: Win32Window,
     pub render_target_view: Option<ComPtr<d3d11::ID3D11RenderTargetView>>,
     pub depth_stencil_view: Option<ComPtr<d3d11::ID3D11DepthStencilView>>,
     pub depth_stencil_buffer: Option<ComPtr<d3d11::ID3D11Texture2D>>,
     pub swap_texture: Option<ComPtr<d3d11::ID3D11Texture2D>>,
+   // pub d2d1_hwnd_target: Option<ComPtr<d2d1::ID2D1HwndRenderTarget>>,
+   // pub d2d1_bitmap: Option<ComPtr<d2d1::ID2D1Bitmap>>,
     pub alloc_size: Vec2,
     pub swap_chain: ComPtr<dxgi1_2::IDXGISwapChain1>,
     pub raster_state: ComPtr<d3d11::ID3D11RasterizerState>,
@@ -312,6 +328,7 @@ impl D3d11Window {
         
         win32_window.init(title, inner_size, position);
         let window_geom = win32_window.get_window_geom();
+        
         let swap_chain = d3d11_cx.create_swap_chain_for_hwnd(&window_geom, &win32_window).expect("Cannot create_swap_chain_for_hwnd");
         
         let swap_texture = D3d11Cx::get_swap_texture(&swap_chain).expect("Cannot get swap texture");
@@ -334,6 +351,7 @@ impl D3d11Window {
         unsafe {d3d11_cx.context.OMSetBlendState(blend_state.as_raw() as *mut _, &blend_factor, 0xffffffff)}
         
         D3d11Window {
+            is_in_resize: false,
             window_id: window_id,
             alloc_size: window_geom.inner_size,
             window_geom: window_geom,
@@ -342,37 +360,99 @@ impl D3d11Window {
             depth_stencil_buffer: Some(depth_stencil_buffer),
             render_target_view: Some(render_target_view),
             depth_stencil_view: Some(depth_stencil_view),
+            //d2d1_hwnd_target: None,
+            //d2d1_bitmap: None,
             swap_chain: swap_chain,
             raster_state: raster_state,
             blend_state: blend_state
         }
     }
     
-    fn resize_buffers(&mut self, d3d11_cx: &D3d11Cx) {
-        if self.alloc_size == self.window_geom.inner_size {
-            return
-        }
+    fn start_resize(&mut self, _d3d11_cx: &D3d11Cx) {
+        self.is_in_resize = true;
+    }
+    
+    // switch back to swapchain
+    fn stop_resize(&mut self, _d3d11_cx: &D3d11Cx) {
+        self.is_in_resize = false;
+        self.alloc_size = Vec2::zero();
+    }
+    
+    
+    fn disconnect_render_targets(&mut self, d3d11_cx: &D3d11Cx) {
         // release render target
         self.render_target_view = None;
         self.depth_stencil_view = None;
         self.swap_texture = None;
         self.depth_stencil_buffer = None;
-        
-        let window_geom = &self.window_geom;
-        
+        //self.d2d1_hwnd_target = None;
+        //self.d2d1_bitmap = None;
         d3d11_cx.disconnect_rendertargets();
+    }
+    
+    fn alloc_buffers_from_texture(&mut self, d3d11_cx: &D3d11Cx) {
+        let swap_texture = self.swap_texture.as_ref().unwrap();
+        let render_target_view = d3d11_cx.create_render_target_view(&swap_texture).expect("Cannot create_render_target_view");
+        let depth_stencil_buffer = d3d11_cx.create_depth_stencil_buffer(&self.window_geom).expect("Cannot create_depth_stencil_buffer");
+        let depth_stencil_view = d3d11_cx.create_depth_stencil_view(&depth_stencil_buffer).expect("Cannot create_depth_stencil_view");
+        self.alloc_size = self.window_geom.inner_size;
+        self.render_target_view = Some(render_target_view);
+        self.depth_stencil_view = Some(depth_stencil_view);
+        self.depth_stencil_buffer = Some(depth_stencil_buffer);
+    }
+    
+    fn resize_buffers(&mut self, d3d11_cx: &D3d11Cx) {
+        if self.alloc_size == self.window_geom.inner_size {
+            return
+        }
+        
+        // check if we are in a resize, then we use the d2d fallback
+        /*if self.is_in_resize {
+            self.disconnect_render_targets(d3d11_cx);
+            self.d2d1_hwnd_target = Some(d3d11_cx.create_d2d1_hwnd_target(&self.window_geom, &self.win32_window).expect("cannot create_d2d1_hwnd_target"));
+            // create a normal backbuffer texture
+            let swap_texture = d3d11_cx.create_render_d2d1_target_texture(&self.window_geom).expect("Cannot create_render_d2d1_target_texture");
+            
+            let dxgi_surface = D3d11Cx::get_dxgi_surface(&swap_texture).expect("Cannot get_dxgi_surface");
+            
+            let d2d1_bitmap = D3d11Cx::create_d2d1_shared_bitmap(self.d2d1_hwnd_target.as_ref().unwrap(), &dxgi_surface).expect("Cannot create_d2d1_shared_bitmap");
+            
+            self.swap_texture = Some(swap_texture);
+            self.d2d1_bitmap = Some(d2d1_bitmap);
+            self.alloc_buffers_from_texture(d3d11_cx);
+        }*/
+        //else {
+            self.disconnect_render_targets(d3d11_cx);
+            
+            d3d11_cx.resize_swap_chain(&self.window_geom, &self.swap_chain);
+            let swap_texture = D3d11Cx::get_swap_texture(&self.swap_chain).expect("Cannot get swap texture");
+            self.swap_texture = Some(swap_texture);
+            self.alloc_buffers_from_texture(d3d11_cx);
+        //}
+        
+        /*
+        self.disconnect_render_targets(d3d11_cx);
+        
         d3d11_cx.resize_swap_chain(window_geom, &self.swap_chain);
         
         let swap_texture = D3d11Cx::get_swap_texture(&self.swap_chain).expect("Cannot get swap texture");
-        let render_target_view = d3d11_cx.create_render_target_view(&swap_texture).expect("Cannot create_render_target_view");
-        let depth_stencil_buffer = d3d11_cx.create_depth_stencil_buffer(window_geom).expect("Cannot create_depth_stencil_buffer");
-        let depth_stencil_view = d3d11_cx.create_depth_stencil_view(&depth_stencil_buffer).expect("Cannot create_depth_stencil_view");
-        
-        self.alloc_size = window_geom.inner_size;
-        self.render_target_view = Some(render_target_view);
-        self.depth_stencil_view = Some(depth_stencil_view);
         self.swap_texture = Some(swap_texture);
-        self.depth_stencil_buffer = Some(depth_stencil_buffer);
+
+        self.alloc_buffers_from_texture();
+        */
+    }
+    
+    fn present(&mut self, vsync: bool, d3d11_cx: &D3d11Cx) {
+        //if !self.is_in_resize {
+            d3d11_cx.present(vsync, self);
+        //}
+        //else {
+        //    D3d11Cx::draw_d2d1_bitmap(
+        //        self.d2d1_hwnd_target.as_ref().unwrap(),
+        //        self.d2d1_bitmap.as_ref().unwrap(),
+        //        &self.window_geom
+        //    );
+        //}
     }
 }
 
@@ -392,6 +472,7 @@ pub struct D3d11Cx {
     pub device: ComPtr<d3d11::ID3D11Device>,
     pub context: ComPtr<d3d11::ID3D11DeviceContext>,
     pub factory: ComPtr<dxgi1_2::IDXGIFactory2>,
+//    pub d2d1_factory: ComPtr<d2d1::ID2D1Factory>
 }
 
 impl D3d11Cx {
@@ -400,21 +481,15 @@ impl D3d11Cx {
         let factory = D3d11Cx::create_dxgi_factory1(&dxgi1_2::IDXGIFactory2::uuidof()).expect("cannot create_dxgi_factory1");
         let adapter = D3d11Cx::enum_adapters(&factory).expect("cannot enum_adapters");
         let (device, context) = D3d11Cx::create_d3d11_device(&adapter).expect("cannot create_d3d11_device");
-        
+       // let d2d1_factory = D3d11Cx::create_d2d1_factory().expect("cannot create_d2d1_factory");
         D3d11Cx {
             device: device,
             context: context,
-            factory: factory
+            factory: factory,
+        //    d2d1_factory: d2d1_factory
         }
     }
     
-    fn set_rendertargets(&self, d3d11_window: &D3d11Window) {
-        unsafe {self.context.OMSetRenderTargets(
-            1,
-            [d3d11_window.render_target_view.as_ref().unwrap().as_raw() as *mut _].as_ptr(),
-            d3d11_window.depth_stencil_view.as_ref().unwrap().as_raw() as *mut _
-        )}
-    }
     
     fn disconnect_rendertargets(&self) {
         unsafe {self.context.OMSetRenderTargets(0, ptr::null(), ptr::null_mut())}
@@ -431,6 +506,14 @@ impl D3d11Cx {
             TopLeftY: 0.0
         };
         unsafe {self.context.RSSetViewports(1, &viewport)}
+    }
+    
+    fn set_rendertargets(&self, d3d11_window: &D3d11Window) {
+        unsafe {self.context.OMSetRenderTargets(
+            1,
+            [d3d11_window.render_target_view.as_ref().unwrap().as_raw() as *mut _].as_ptr(),
+            d3d11_window.depth_stencil_view.as_ref().unwrap().as_raw() as *mut _
+        )}
     }
     
     fn clear_render_target_view(&self, d3d11_window: &D3d11Window, color: Color) {
@@ -521,7 +604,7 @@ impl D3d11Cx {
     }
     
     fn present(&self, vsync: bool, d3d11_window: &D3d11Window) {
-        unsafe {d3d11_window.swap_chain.Present(if vsync{1}else{0}, 0)};
+        unsafe {d3d11_window.swap_chain.Present(if vsync {1}else {0}, 0)};
     }
     
     pub fn compile_shader(&self, stage: &str, entry: &[u8], shader: &[u8])
@@ -779,7 +862,7 @@ impl D3d11Cx {
     )
         -> Result<ComPtr<dxgi1_2::IDXGISwapChain1>, winerror::HRESULT> {
         let mut swap_chain1 = ptr::null_mut();
-        let sc_desc = dxgi1_2::DXGI_SWAP_CHAIN_DESC1 { 
+        let sc_desc = dxgi1_2::DXGI_SWAP_CHAIN_DESC1 {
             AlphaMode: dxgi1_2::DXGI_ALPHA_MODE_IGNORE,
             BufferCount: 2,
             Width: (wg.inner_size.x * wg.dpi_factor) as u32,
@@ -790,7 +873,7 @@ impl D3d11Cx {
             SampleDesc: dxgitype::DXGI_SAMPLE_DESC {Count: 1, Quality: 0,},
             Scaling: dxgi1_2::DXGI_SCALING_NONE,
             Stereo: FALSE,
-            SwapEffect: dxgi::DXGI_SWAP_EFFECT_SEQUENTIAL,
+            SwapEffect: dxgi::DXGI_SWAP_EFFECT_FLIP_DISCARD,
         };
         
         let hr = unsafe {self.factory.CreateSwapChainForHwnd(
@@ -827,6 +910,168 @@ impl D3d11Cx {
             }
         }
     }
+    /*
+    fn create_render_d2d1_target_texture(&self, wg: &WindowGeom)
+        -> Result<ComPtr<d3d11::ID3D11Texture2D>, winerror::HRESULT> {
+        let mut texture = ptr::null_mut();
+        
+        let texture_desc = d3d11::D3D11_TEXTURE2D_DESC {
+            Width: (wg.inner_size.x * wg.dpi_factor) as u32,
+            Height: (wg.inner_size.y * wg.dpi_factor) as u32,
+            MipLevels: 1,
+            ArraySize: 1,
+            Format: dxgiformat::DXGI_FORMAT_B8G8R8A8_UNORM,
+            SampleDesc: dxgitype::DXGI_SAMPLE_DESC {
+                Count: 1,
+                Quality: 0
+            },
+            Usage: d3d11::D3D11_USAGE_DEFAULT,
+            BindFlags: d3d11::D3D11_BIND_RENDER_TARGET,// | d3d11::D3D11_BIND_SHADER_RESOURCE,
+            CPUAccessFlags: 0,
+            MiscFlags: d3d11::D3D11_RESOURCE_MISC_SHARED,
+        };
+        
+        let hr = unsafe {self.device.CreateTexture2D(&texture_desc, ptr::null(), &mut texture as *mut *mut _)};
+        if winerror::SUCCEEDED(hr) {
+            Ok(unsafe {ComPtr::from_raw(texture as *mut _)})
+        }
+        else {
+            Err(hr)
+        }
+    }
+    
+    fn create_d2d1_factory()
+        -> Result<ComPtr<d2d1::ID2D1Factory>, winerror::HRESULT> {
+        let mut d2d1_factory = ptr::null_mut();
+        let fac_opt = d2d1::D2D1_FACTORY_OPTIONS {
+            debugLevel: d2d1::D2D1_DEBUG_LEVEL_NONE
+        };
+        let hr = unsafe {d2d1::D2D1CreateFactory(
+            d2d1::D2D1_FACTORY_TYPE_SINGLE_THREADED,
+            &d2d1::ID2D1Factory::uuidof(),
+            &fac_opt,
+            &mut d2d1_factory as *mut *mut _,
+        )};
+        if winerror::SUCCEEDED(hr) {
+            Ok(unsafe {ComPtr::from_raw(d2d1_factory as *mut _)})
+        }
+        else {
+            Err(hr)
+        }
+    }
+    
+    fn create_d2d1_hwnd_target(&self, wg: &WindowGeom, win32_window: &Win32Window)
+        -> Result<ComPtr<d2d1::ID2D1HwndRenderTarget>, winerror::HRESULT> {
+        
+        let mut d2d1_hwnd_rendertarget = ptr::null_mut();
+        let d2d_opt = d2d1::D2D1_RENDER_TARGET_PROPERTIES {
+            _type: d2d1::D2D1_RENDER_TARGET_TYPE_DEFAULT,
+            pixelFormat: dcommon::D2D1_PIXEL_FORMAT {
+                format: dxgiformat::DXGI_FORMAT_B8G8R8A8_UNORM,
+                alphaMode: 3 //dcommon::D2D1_ALPHA_MODE_IGNORE
+            },
+            dpiX: 0.,
+            dpiY: 0.,
+            //
+            usage: d2d1::D2D1_RENDER_TARGET_USAGE_GDI_COMPATIBLE,
+            minLevel: d2d1::D2D1_FEATURE_LEVEL_10
+        };
+        let d2d_hwnd_opt = d2d1::D2D1_HWND_RENDER_TARGET_PROPERTIES {
+            hwnd: win32_window.hwnd.unwrap(),
+            pixelSize: d2d1::D2D1_SIZE_U {
+                width: (wg.inner_size.x * wg.dpi_factor) as u32,
+                height: (wg.inner_size.y * wg.dpi_factor) as u32,
+            },
+            //D2D1_PRESENT_OPTIONS_NONE
+            presentOptions: d2d1::D2D1_PRESENT_OPTIONS_IMMEDIATELY
+        };
+        let hr = unsafe {self.d2d1_factory.CreateHwndRenderTarget(
+            &d2d_opt,
+            &d2d_hwnd_opt,
+            &mut d2d1_hwnd_rendertarget as *mut *mut _,
+        )};
+        if winerror::SUCCEEDED(hr) {
+            Ok(unsafe {ComPtr::from_raw(d2d1_hwnd_rendertarget as *mut _)})
+        }
+        else {
+            Err(hr)
+        }
+    }
+    
+    fn get_dxgi_surface(texture: &ComPtr<d3d11::ID3D11Texture2D>)
+        -> Result<ComPtr<dxgi::IDXGISurface>, winerror::HRESULT> {
+        
+        let mut dxgi_surface = ptr::null_mut();
+        let hr = unsafe {texture.QueryInterface(
+            &dxgi::IDXGISurface::uuidof(),
+            &mut dxgi_surface as *mut *mut _
+        )};
+        if winerror::SUCCEEDED(hr) {
+            Ok(unsafe {ComPtr::from_raw(dxgi_surface as *mut _)})
+        }
+        else {
+            Err(hr)
+        }
+    }
+    
+    fn draw_d2d1_bitmap(render_target: &ComPtr<d2d1::ID2D1HwndRenderTarget>, bitmap: &ComPtr<d2d1::ID2D1Bitmap>, wg: &WindowGeom) {
+        unsafe {
+            let mut tag1: u64 = 0;
+            let mut tag2: u64 = 0;
+            let rect = d2d1::D2D1_RECT_F{
+                left:0.,
+                top:0.,
+                right: (wg.inner_size.x * wg.dpi_factor),
+                bottom: (wg.inner_size.y * wg.dpi_factor)
+            };
+            render_target.BeginDraw();
+            render_target.DrawBitmap(
+                bitmap.as_raw() as *mut _,
+                &rect,
+                1.0,
+                d2d1::D2D1_BITMAP_INTERPOLATION_MODE_NEAREST_NEIGHBOR,
+                ptr::null()
+            );
+            render_target.EndDraw(&mut tag1, &mut tag2);
+        }
+    }
+    
+    fn create_d2d1_shared_bitmap(render_target: &ComPtr<d2d1::ID2D1HwndRenderTarget>, dxgi_surface: &ComPtr<dxgi::IDXGISurface>)
+        -> Result<ComPtr<d2d1::ID2D1Bitmap>, winerror::HRESULT> {
+        
+        println!("{} {}", render_target.as_raw() as u64, dxgi_surface.as_raw() as u64);
+        let mut d2d1_bitmap = ptr::null_mut();
+        
+        //D2D1_BITMAP_PROPERTIES bp;
+        let format = unsafe{
+            let mut desc = mem::uninitialized();//dxgi::DXGI_SURFACE_DESC;
+            dxgi_surface.GetDesc(&mut desc);
+            desc.Format
+        };
+        //bp.pixelFormat = PixelFormat(desc.Format, D2D1_ALPHA_MODE_IGNORE);
+
+        
+        let d2d1_prop = d2d1::D2D1_BITMAP_PROPERTIES{
+            pixelFormat:dcommon::D2D1_PIXEL_FORMAT {
+                format: dxgiformat::DXGI_FORMAT_B8G8R8A8_UNORM,
+                alphaMode: 3 //dcommon::D2D1_ALPHA_MODE_IGNORE
+            },
+            dpiX:0.,
+            dpiY:0.
+        };
+        let hr = unsafe {render_target.CreateSharedBitmap(
+            &dxgi::IDXGISurface::uuidof(),
+            dxgi_surface.as_raw() as *mut _,
+            &d2d1_prop,
+            &mut d2d1_bitmap as *mut *mut _
+        )};
+        if winerror::SUCCEEDED(hr) {
+            Ok(unsafe {ComPtr::from_raw(d2d1_bitmap as *mut _)})
+        }
+        else {
+            Err(hr)
+        }
+    }*/
     
     fn create_d3d11_device(adapter: &ComPtr<dxgi::IDXGIAdapter>)
         -> Result<(ComPtr<d3d11::ID3D11Device>, ComPtr<d3d11::ID3D11DeviceContext>), winerror::HRESULT> {
@@ -836,7 +1081,7 @@ impl D3d11Cx {
             adapter.as_raw() as *mut _,
             d3dcommon::D3D_DRIVER_TYPE_UNKNOWN,
             ptr::null_mut(),
-            0, //d3dcommonLLD3D11_CREATE_DEVICE_DEBUG,
+            d3d11::D3D11_CREATE_DEVICE_SINGLETHREADED|d3d11::D3D11_CREATE_DEVICE_BGRA_SUPPORT, //d3dcommonLLD3D11_CREATE_DEVICE_DEBUG,
             [d3dcommon::D3D_FEATURE_LEVEL_11_0].as_ptr(),
             1,
             d3d11::D3D11_SDK_VERSION,
@@ -867,6 +1112,7 @@ impl D3d11Cx {
         }
     }
     
+    
     fn enum_adapters(factory: &ComPtr<dxgi1_2::IDXGIFactory2>)
         -> Result<ComPtr<dxgi::IDXGIAdapter>, winerror::HRESULT> {
         let mut adapter = ptr::null_mut();
@@ -881,6 +1127,8 @@ impl D3d11Cx {
             Err(hr)
         }
     }
+    
+    
     
     pub fn update_platform_texture_image2d(&self, cxtexture: &mut CxTexture) {
         

@@ -408,10 +408,27 @@ impl App {
                             
                             // create our windows with the serialized positions/size
                             for window_state in &self.app_global.state.windows {
+                                let mut size = window_state.window_inner_size;
+                                
+                                if size.x <= 10. {
+                                    size.x = 800.;
+                                }
+                                if size.y <= 10. { 
+                                    size.y = 600.;
+                                }
+                                let last_pos = window_state.window_position;
+                                let create_pos;
+                                if last_pos.x < -1000. || last_pos.y < -1000.{
+                                    create_pos = None;
+                                }
+                                else{
+                                    create_pos = Some(last_pos);
+                                }
+                                println!("{:?} {:?}", size, window_state.window_position);
                                 self.windows.push(AppWindow {
                                     desktop_window: DesktopWindow {window: Window {
-                                        create_inner_size: window_state.window_inner_size,
-                                        create_position: Some(window_state.window_position),
+                                        create_inner_size: size,
+                                        create_position: create_pos,
                                         ..Style::style(cx)
                                     }, ..Style::style(cx)},
                                     ..self.app_window_template.clone()
