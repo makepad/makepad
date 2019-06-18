@@ -41,10 +41,28 @@ pub use crate::cx_glsl::*;
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 pub use crate::cx_desktop::*;
 
+pub enum PlatformType {
+    Windows,
+    OSX,
+    Linux,
+    WASM
+}
+
+impl PlatformType {
+    pub fn is_desktop(&self) -> bool {
+        match self {
+            PlatformType::Windows=>true,
+            PlatformType::OSX=>true,
+            PlatformType::Linux=>true,
+            PlatformType::WASM=>false
+        }
+    }
+}
+
 pub struct Cx {
     pub title: String,
     pub running: bool,
-    pub is_desktop_build: bool,
+    pub platform_type: PlatformType,
     
     pub windows: Vec<CxWindow>,
     pub windows_free: Vec<usize>,
@@ -105,11 +123,11 @@ pub struct Cx {
     
     pub panic_now: bool,
     pub panic_redraw: bool,
-    
+
     pub platform: CxPlatform,
 }
 
-pub const NUM_FINGERS:usize = 10;
+pub const NUM_FINGERS: usize = 10;
 
 impl Default for Cx {
     fn default() -> Self {
@@ -117,15 +135,15 @@ impl Default for Cx {
         let mut finger_tap_count = Vec::new();
         let mut finger_down_abs_start = Vec::new();
         let mut finger_down_rel_start = Vec::new();
-
-        captured_fingers.resize(NUM_FINGERS,Area::Empty);
+        
+        captured_fingers.resize(NUM_FINGERS, Area::Empty);
         finger_tap_count.resize(NUM_FINGERS, (Vec2::zero(), 0.0, 0));
-        finger_down_abs_start.resize(NUM_FINGERS,Vec2::zero());
-        finger_down_rel_start.resize(NUM_FINGERS,Vec2::zero());
+        finger_down_abs_start.resize(NUM_FINGERS, Vec2::zero());
+        finger_down_rel_start.resize(NUM_FINGERS, Vec2::zero());
         
         Self {
             title: "Hello World".to_string(),
-            is_desktop_build: false,
+            platform_type: PlatformType::Windows,
             running: true,
             
             windows: Vec::new(),
@@ -197,7 +215,7 @@ impl Default for Cx {
 
 impl Cx {
     //pub fn get_shader2(&self, id: usize) -> &CompiledShader {
-    //    &self.compiled_shaders[id] 
+    //    &self.compiled_shaders[id]
     // }
     
     pub fn add_shader(&mut self, sg: ShaderGen, name: &str) -> Shader {
@@ -230,7 +248,7 @@ impl Cx {
         }
     }
     
-    pub fn get_delegated_dpi_factor(&mut self, pass_id:usize) -> f32 {
+    pub fn get_delegated_dpi_factor(&mut self, pass_id: usize) -> f32 {
         let mut dpi_factor = 1.0;
         let mut pass_id_walk = pass_id;
         for _ in 0..25 {
@@ -498,7 +516,7 @@ impl Cx {
             self.key_focus = new_area.clone()
         }
         
-        if self._finger_over_last_area == old_area{
+        if self._finger_over_last_area == old_area {
             self._finger_over_last_area = new_area.clone()
         }
         //

@@ -371,7 +371,7 @@ impl AppWindow {
 
 impl AppGlobal {
     fn handle_construct(&mut self, cx: &mut Cx) {
-        if cx.is_desktop_build {
+        if cx.platform_type.is_desktop() {
             self.text_buffers.root_path = "./edit_repo/".to_string();
         }
         

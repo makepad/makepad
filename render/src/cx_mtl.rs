@@ -189,7 +189,7 @@ impl Cx {
     pub fn event_loop<F>(&mut self, mut event_handler: F)
     where F: FnMut(&mut Cx, &mut Event),
     {
-        self.is_desktop_build = true;
+        self.platform_type = PlatformType::OSX;
         
         let mut cocoa_app = CocoaApp::new();
         

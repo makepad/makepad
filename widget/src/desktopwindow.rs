@@ -157,28 +157,47 @@ impl DesktopWindow {
         let _ = self.main_view.begin_view(cx, Layout::default());
         
         // alright here we draw our platform buttons.
-        let bg_inst = self.caption_bg.begin_quad(cx, &Layout {
-            align: Align::right_center(),
-            width: Bounds::Fill,
-            height: Bounds::Compute,
-            ..Default::default()
-        });
-        
-        self.min_btn.draw_desktop_button(cx, DesktopButtonType::WindowsMin);
-        if self.window.is_fullscreen(cx) {self.max_btn.draw_desktop_button(cx, DesktopButtonType::WindowsMaxToggled);}
-        else {self.max_btn.draw_desktop_button(cx, DesktopButtonType::WindowsMax);}
-        self.close_btn.draw_desktop_button(cx, DesktopButtonType::WindowsClose);
-        
-        // change alignment
-        cx.realign_turtle(Align::center());
-        cx.lock_turtle_height();
-        cx.reset_turtle_walk();
-        cx.move_turtle(50., 0.);
-        // we need to store our caption rect somewhere.
-        self.caption_size = Vec2 {x: cx.get_width_left(), y: cx.get_height_left()};
-        self.caption_text.draw_text(cx, &self.caption);
-        self.caption_bg.end_quad(cx, &bg_inst);
-        cx.turtle_new_line();
+        match cx.platform_type {
+            PlatformType::Windows => {
+                let bg_inst = self.caption_bg.begin_quad(cx, &Layout {
+                    align: Align::right_center(),
+                    width: Bounds::Fill,
+                    height: Bounds::Compute,
+                    ..Default::default()
+                });
+                
+                self.min_btn.draw_desktop_button(cx, DesktopButtonType::WindowsMin);
+                if self.window.is_fullscreen(cx) {self.max_btn.draw_desktop_button(cx, DesktopButtonType::WindowsMaxToggled);}
+                else {self.max_btn.draw_desktop_button(cx, DesktopButtonType::WindowsMax);}
+                self.close_btn.draw_desktop_button(cx, DesktopButtonType::WindowsClose);
+                
+                // change alignment
+                cx.realign_turtle(Align::center());
+                cx.lock_turtle_height();
+                cx.reset_turtle_walk();
+                cx.move_turtle(50., 0.);
+                // we need to store our caption rect somewhere.
+                self.caption_size = Vec2 {x: cx.get_width_left(), y: cx.get_height_left()};
+                self.caption_text.draw_text(cx, &self.caption);
+                self.caption_bg.end_quad(cx, &bg_inst);
+                cx.turtle_new_line();
+            },
+            PlatformType::OSX => {
+                let bg_inst = self.caption_bg.begin_quad(cx, &Layout {
+                    align: Align::center(),
+                    width: Bounds::Fill,
+                    height: Bounds::Fix(22.),
+                    ..Default::default()
+                });
+                self.caption_size = Vec2 {x: cx.get_width_left(), y: cx.get_height_left()};
+                self.caption_text.draw_text(cx, &self.caption);
+                self.caption_bg.end_quad(cx, &bg_inst);
+                cx.turtle_new_line();
+            },
+            _ => {
+                
+            }
+        }
         
         let _ = self.inner_view.begin_view(cx, Layout::default());
         
