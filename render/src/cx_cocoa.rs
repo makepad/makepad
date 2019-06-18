@@ -555,7 +555,8 @@ impl CocoaWindow {
             let window_masks = appkit::NSWindowStyleMask::NSClosableWindowMask
                 | appkit::NSWindowStyleMask::NSMiniaturizableWindowMask
                 | appkit::NSWindowStyleMask::NSResizableWindowMask
-                | appkit::NSWindowStyleMask::NSBorderlessWindowMask;
+                | appkit::NSWindowStyleMask::NSTitledWindowMask
+                | appkit::NSWindowStyleMask::NSFullSizeContentViewWindowMask;
             
             self.window.initWithContentRect_styleMask_backing_defer_(
                 window_frame,
@@ -569,6 +570,8 @@ impl CocoaWindow {
             let title = NSString::alloc(nil).init_str(title);
             self.window.setReleasedWhenClosed_(NO);
             self.window.setTitle_(title);
+            msg_send![self.window, setTitleVisibility: appkit::NSWindowTitleVisibility::NSWindowTitleHidden];
+            msg_send![self.window, setTitlebarAppearsTransparent: YES];
             self.window.setAcceptsMouseMovedEvents_(YES);
             
             self.window.setContentView_(self.view);
@@ -623,31 +626,19 @@ impl CocoaWindow {
     
     pub fn restore(&mut self) {
         unsafe {
-            
-            msg_send![self.window, toggleFullScreen: nil];
-            let mask = appkit::NSWindowStyleMask::NSClosableWindowMask
-                | appkit::NSWindowStyleMask::NSMiniaturizableWindowMask
-                | appkit::NSWindowStyleMask::NSResizableWindowMask
-                | appkit::NSWindowStyleMask::NSBorderlessWindowMask;
             msg_send![self.window, setStyleMask: mask];
         }
     }
     
     pub fn maximize(&mut self) {
         unsafe {
-            let mask = appkit::NSWindowStyleMask::NSClosableWindowMask
-                | appkit::NSWindowStyleMask::NSMiniaturizableWindowMask
-                | appkit::NSWindowStyleMask::NSResizableWindowMask
-                | appkit::NSWindowStyleMask::NSTitledWindowMask;
-            
-            msg_send![self.window, setStyleMask: mask];
             msg_send![self.window, toggleFullScreen: nil];
         }
     }
     
     pub fn minimize(&mut self) {
         unsafe {
-            msg_send![self.window, miniaturize:nil];
+            msg_send![self.window, miniaturize: nil];
         }
     }
     
