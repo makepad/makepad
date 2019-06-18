@@ -572,6 +572,10 @@ impl CocoaWindow {
             self.window.setTitle_(title);
             msg_send![self.window, setTitleVisibility: appkit::NSWindowTitleVisibility::NSWindowTitleHidden];
             msg_send![self.window, setTitlebarAppearsTransparent: YES];
+            
+            //let subviews:id = msg_send![self.window, getSubviews];
+            //println!("{}", subviews as u64);
+            
             self.window.setAcceptsMouseMovedEvents_(YES);
             
             self.window.setContentView_(self.view);

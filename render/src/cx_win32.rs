@@ -446,7 +446,7 @@ impl Win32Window {
                     if ycoord > rect.bottom - EDGE {
                         return winuser::HTBOTTOMRIGHT;
                     }
-                    return winuser::HTLEFT;
+                    return winuser::HTRIGHT;
                 }
                 if ycoord < rect.top + EDGE {
                     return winuser::HTTOP;
