@@ -408,6 +408,14 @@ impl Win32Window {
         
         let window = &mut (*(user_data as *mut Win32Window));
         match msg {
+            winuser::WM_ACTIVATE=>{
+                if wparam&0xffff == winuser::WA_ACTIVE as usize{
+                     window.do_callback(&mut vec![Event::AppFocus]);
+                }
+                else{
+                     window.do_callback(&mut vec![Event::AppFocusLost]);
+                }
+            },
             winuser::WM_NCCALCSIZE => {
                 // check if we are maximised
                 if window.get_is_maximized() {
