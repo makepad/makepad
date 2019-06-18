@@ -626,7 +626,7 @@ impl CocoaWindow {
     
     pub fn restore(&mut self) {
         unsafe {
-            msg_send![self.window, setStyleMask: mask];
+            msg_send![self.window, toggleFullScreen: nil];
         }
     }
     
