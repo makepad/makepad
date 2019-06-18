@@ -12,6 +12,7 @@ Cargo.lock
 .DS_Store
 /shui/target/
 /webgl/target/
+/example/target/
 
 /shui/fontencoder/fontencoder
 /shui/fontencoder/ttf/

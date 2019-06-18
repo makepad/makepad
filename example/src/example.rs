@@ -29,10 +29,11 @@
 // Multi cursor/grid cursor also works with ctrl+click / ctrl+shift+click
 // press alt or escape for animated codefolding outline view!
 
-use render::*; 
-use widget::*; 
+use render::*;
+use widget::*;
 
 struct App {
+    desktop_window: DesktopWindow,
     view: View<ScrollBar>,
     buttons: Elements<u64, Button, Button>,
     text: Text,
@@ -45,9 +46,11 @@ main_app!(App, "Example");
 impl Style for App {
     fn style(cx: &mut Cx) -> Self {
         set_dark_style(cx);
-        let quad_sh = App::def_quad_shader(cx);
+        let quad_sh = App::def_quad_shader();
         Self {
-            
+            desktop_window: DesktopWindow {
+                ..Style::style(cx)
+            },
             view: View {
                 scroll_h: Some(ScrollBar {
                     ..Style::style(cx)
@@ -58,7 +61,7 @@ impl Style for App {
                 ..Style::style(cx)
             },
             quad: Quad {
-                shader_id: cx.add_shader(quad_sh, "App.quad"),
+                shader: cx.add_shader(quad_sh, "App.quad"),
                 ..Style::style(cx)
             },
             text: Text {
@@ -73,9 +76,8 @@ impl Style for App {
 }
 
 impl App {
-    fn def_quad_shader(cx: &mut Cx) -> Shader {
-        let mut sh = Quad::def_quad_shader(cx);
-        sh.add_ast(shader_ast!({
+    pub fn def_quad_shader() -> ShaderGen {
+        Quad::def_quad_shader().compose(shader_ast!({
             fn pixel() -> vec4 {
                 df_viewport(pos * vec2(w, h));
                 df_rect(0., 0., w, h);
@@ -84,51 +86,64 @@ impl App {
                 df_line_to(w, h);
                 return df_stroke(color, 4.);
             }
-        }));
-        sh
+        }))
     }
-    
+
     fn handle_app(&mut self, cx: &mut Cx, event: &mut Event) {
-        
+        match self.desktop_window.handle_desktop_window(cx, event) {
+            DesktopWindowEvent::EventForOtherWindow => {
+                return
+            },
+            DesktopWindowEvent::WindowClosed => {
+                return
+            },
+            _ => ()
+        }
+
         self.view.handle_scroll_bars(cx, event);
-        
+
         for btn in self.buttons.iter() {
             match btn.handle_button(cx, event) {
                 ButtonEvent::Clicked => {
                     // boop
                     self.clickety += 1;
-                    cx.redraw_area(Area::All);
+                    self.view.redraw_view_area(cx);
                 },
                 _ =>()
             }
         }
     }
-    
+
     fn draw_app(&mut self, cx: &mut Cx) {
-        
-        self.view.begin_view(cx, &Layout {
+        if let Err(()) = self.desktop_window.begin_desktop_window(cx) {
+            return
+        }
+
+        if let Err(()) = self.view.begin_view(cx, Layout {
             padding: Padding {l: 10., t: 10., r: 0., b: 0.},
             ..Default::default()
-        });
+        }) {
+            return // no need to redraw
+        }
         //self.quad.draw_quad_walk(cx, Bounds::Fix(100.), Bounds::Fix(100.), Margin {l: 15., t: 0., r: 0., b: 0.});
         //self.text.draw_text(cx, &format!("Hello World!"));
-        
-        
+
+
         for i in 0..100 {
-            
             self.buttons.get_draw(cx, i, | _cx, templ | {templ.clone()})
                 .draw_button_with_label(cx, &format!("Btn {}", i));
-            
+
             if i % 10 == 9 {
                 cx.turtle_new_line()
             }
         }
-        
+
         cx.turtle_new_line();
-        
+
         self.text.draw_text(cx, &format!("Hello World {}", self.clickety));
         self.quad.draw_quad_walk(cx, Bounds::Fix(100.), Bounds::Fix(100.), Margin {l: 15., t: 0., r: 0., b: 0.});
-        
+
         self.view.end_view(cx);
+        self.desktop_window.end_desktop_window(cx);
     }
 }
