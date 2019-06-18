@@ -63,54 +63,45 @@ impl TabClose {
     }
     
     pub fn handle_tab_close(&mut self, cx: &mut Cx, event: &mut Event) -> ButtonEvent {
-        
-        //let mut ret_event = ButtonEvent::None;
-        match event.hits(cx, self._bg_area, HitOpt {margin: Some(Margin {l: 5., t: 5., r: 5., b: 5.}), ..Default::default()}) {
-            Event::Animate(ae) => {
-                self.animator.calc(cx, ae.time, self._bg_area, "bg.color");
-                self.animator.calc(cx, ae.time, self._bg_area, "bg.hover");
-                self.animator.calc(cx, ae.time, self._bg_area, "bg.down");
-            },
+        match event.hits(cx, self._bg_area, HitOpt {
+            margin: Some(Margin {l: 5., t: 5., r: 5., b: 5.}),
+            ..Default::default()
+        }) {
+            Event::Animate(ae) => self.animator.write_area(cx, self._bg_area, "bg.", ae.time),
             Event::FingerDown(_fe) => {
                 self.animator.play_anim(cx, self.anim_down.clone());
                 return ButtonEvent::Down;
             },
-            Event::FingerHover(fe) => {
-                match fe.hover_state {
-                    HoverState::In => {
-                        if fe.any_down {self.animator.play_anim(cx, self.anim_down.clone())}
-                        else {self.animator.play_anim(cx, self.anim_over.clone())}
-                    },
-                    HoverState::Out => {
-                        self.animator.play_default(cx);
-                    },
-                    _ => ()
-                }
-            },
-            Event::FingerUp(fe) => {
-                if fe.is_over {
-                    if !fe.is_touch {self.animator.play_anim(cx, self.anim_over.clone())}
-                    else {self.animator.play_default(cx)}
-                    return ButtonEvent::Clicked;
+            Event::FingerHover(fe) => match fe.hover_state {
+                HoverState::In => if fe.any_down {
+                    self.animator.play_anim(cx, self.anim_down.clone())
                 }
                 else {
-                    self.animator.play_default(cx);
-                    return ButtonEvent::Up;
-                }
+                    self.animator.play_anim(cx, self.anim_over.clone())
+                },
+                HoverState::Out => self.animator.play_default(cx),
+                _ => ()
             },
+            Event::FingerUp(fe) => if fe.is_over {
+                if !fe.is_touch {self.animator.play_anim(cx, self.anim_over.clone())}
+                else {self.animator.play_default(cx)}
+                return ButtonEvent::Clicked;
+            }
+            else {
+                self.animator.play_default(cx);
+                return ButtonEvent::Up;
+            }
             _ => ()
         };
         ButtonEvent::None
     }
     
-    pub fn draw_tab_close(&mut self, cx: &mut Cx) -> InstanceArea {
-        
+    pub fn draw_tab_close(&mut self, cx: &mut Cx) {
         self.bg.color = self.animator.last_color("bg.color");
         let bg_inst = self.bg.draw_quad_walk(cx, Bounds::Fix(10.), Bounds::Fix(10.), self.margin);
         bg_inst.push_float(cx, self.animator.last_float("bg.hover"));
         bg_inst.push_float(cx, self.animator.last_float("bg.down"));
         self._bg_area = bg_inst.into_area();
         self.animator.update_area_refs(cx, self._bg_area); // if our area changed, update animation
-        bg_inst
     }
 }

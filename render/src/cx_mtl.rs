@@ -197,7 +197,7 @@ impl Cx {
         
         let metal_cx = MetalCx::new();
         
-        let mut render_windows: Vec<CocoaRenderWindow> = Vec::new();
+        let mut metal_windows: Vec<MetalWindow> = Vec::new();
         
         self.mtl_compile_all_shaders(&metal_cx);
         
@@ -217,9 +217,9 @@ impl Cx {
                 
                 match &event {
                     Event::WindowGeomChange(re) => { // do this here because mac
-                        for render_window in &mut render_windows {
-                            if render_window.window_id == re.window_id {
-                                render_window.window_geom = re.new_geom.clone();
+                        for metal_window in &mut metal_windows {
+                            if metal_window.window_id == re.window_id {
+                                metal_window.window_geom = re.new_geom.clone();
                                 self.windows[re.window_id].window_geom = re.new_geom.clone();
                                 // redraw just this windows root draw list
                                 if let Some(main_pass_id) = self.windows[re.window_id].main_pass_id {
@@ -229,6 +229,25 @@ impl Cx {
                             }
                         }
                         // ok lets not redraw all, just this window
+                        self.call_event_handler(&mut event_handler, &mut event);
+                    },
+                    Event::WindowClosed(wc) => { // do this here because mac
+                        // lets remove the window from the set
+                        self.windows[wc.window_id].window_state = CxWindowState::Closed;
+                        self.windows_free.push(wc.window_id);
+                        // remove the d3d11/win32 window
+                        
+                        for index in 0..metal_windows.len() {
+                            if metal_windows[index].window_id == wc.window_id {
+                                metal_windows.remove(index);
+                                if metal_windows.len() == 0 {
+                                    cocoa_app.terminate_event_loop();
+                                }
+                                for metal_window in &mut metal_windows {
+                                    metal_window.cocoa_window.update_ptrs();
+                                }
+                            }
+                        }
                         self.call_event_handler(&mut event_handler, &mut event);
                     },
                     Event::Paint => {
@@ -241,19 +260,51 @@ impl Cx {
                             window.window_state = match &window.window_state {
                                 CxWindowState::Create {inner_size, position, title} => {
                                     // lets create a platformwindow
-                                    let render_window = CocoaRenderWindow::new(index, &metal_cx, cocoa_app, *inner_size, *position, &title);
-                                    window.window_geom = render_window.window_geom.clone();
-                                    render_windows.push(render_window);
-                                    for render_window in &mut render_windows {
-                                        render_window.cocoa_window.update_ptrs();
+                                    let metal_window = MetalWindow::new(index, &metal_cx, cocoa_app, *inner_size, *position, &title);
+                                    window.window_geom = metal_window.window_geom.clone();
+                                    metal_windows.push(metal_window);
+                                    for metal_window in &mut metal_windows {
+                                        metal_window.cocoa_window.update_ptrs();
                                     }
                                     CxWindowState::Created
                                 },
-                                CxWindowState::Destroy => {
-                                    CxWindowState::Destroyed
+                                CxWindowState::Close => {
+                                    for metal_window in &mut metal_windows {if metal_window.window_id == index {
+                                        metal_window.cocoa_window.close_window();
+                                        break;
+                                    }}
+                                    CxWindowState::Closed
                                 },
                                 CxWindowState::Created => CxWindowState::Created,
-                                CxWindowState::Destroyed => CxWindowState::Destroyed
+                                CxWindowState::Closed => CxWindowState::Closed
+                            };
+                            
+                            window.window_command = match &window.window_command {
+                                CxWindowCmd::None => CxWindowCmd::None,
+                                CxWindowCmd::Restore => {
+                                    for metal_window in &mut metal_windows {if metal_window.window_id == index {
+                                        metal_window.cocoa_window.restore();
+                                    }}
+                                    CxWindowCmd::None
+                                },
+                                CxWindowCmd::Maximize => {
+                                    for metal_window in &mut metal_windows {if metal_window.window_id == index {
+                                        metal_window.cocoa_window.maximize();
+                                    }}
+                                    CxWindowCmd::None
+                                },
+                                CxWindowCmd::Minimize => {
+                                    for metal_window in &mut metal_windows {if metal_window.window_id == index {
+                                        metal_window.cocoa_window.minimize();
+                                    }}
+                                    CxWindowCmd::None
+                                },
+                            };
+                            
+                            if let Some(topmost) = window.window_topmost {
+                                for metal_window in &mut metal_windows {if metal_window.window_id == index {
+                                    metal_window.cocoa_window.set_topmost(topmost);
+                                }}
                             }
                         }
                         
@@ -270,8 +321,8 @@ impl Cx {
                         
                         if let Some(set_ime_position) = self.platform.set_ime_position {
                             self.platform.set_ime_position = None;
-                            for render_window in &mut render_windows {
-                                render_window.cocoa_window.set_ime_spot(set_ime_position);
+                            for metal_window in &mut metal_windows {
+                                metal_window.cocoa_window.set_ime_spot(set_ime_position);
                             }
                         }
                         
@@ -294,31 +345,31 @@ impl Cx {
                                 match self.passes[*pass_id].dep_of.clone() {
                                     CxPassDepOf::Window(window_id) => {
                                         // find the accompanying render window
-                                        let render_window = render_windows.iter_mut().find( | w | w.window_id == window_id).unwrap();
-                                        
                                         // its a render window
                                         windows_need_repaint -= 1;
-                                        render_window.set_vsync_enable(windows_need_repaint == 0 && vsync);
-                                        render_window.set_buffer_count(
-                                            if render_window.window_geom.is_fullscreen {3}else {2}
-                                        );
-                                        
-                                        let dpi_factor = render_window.window_geom.dpi_factor;
-                                        self.passes[*pass_id].set_dpi_factor(dpi_factor);
-                                        
-                                        self.draw_pass_to_layer(
-                                            *pass_id,
-                                            dpi_factor,
-                                            &render_window.core_animation_layer,
-                                            &metal_cx,
-                                        );
-                                        
-                                        if render_window.resize_core_animation_layer(&metal_cx) {
-                                            self.passes[*pass_id].paint_dirty = true;
-                                            paint_dirty = true;
-                                        }
-                                        else {
-                                            self.passes[*pass_id].paint_dirty = false;
+                                        if let Some(render_window) = metal_windows.iter_mut().find( | w | w.window_id == window_id) {
+                                            render_window.set_vsync_enable(windows_need_repaint == 0 && vsync);
+                                            render_window.set_buffer_count(
+                                                if render_window.window_geom.is_fullscreen {3}else {2}
+                                            );
+                                            
+                                            let dpi_factor = render_window.window_geom.dpi_factor;
+                                            self.passes[*pass_id].set_dpi_factor(dpi_factor);
+                                            
+                                            self.draw_pass_to_layer(
+                                                *pass_id,
+                                                dpi_factor,
+                                                &render_window.core_animation_layer,
+                                                &metal_cx,
+                                            );
+                                            
+                                            if render_window.resize_core_animation_layer(&metal_cx) {
+                                                self.passes[*pass_id].paint_dirty = true;
+                                                paint_dirty = true;
+                                            }
+                                            else {
+                                                self.passes[*pass_id].paint_dirty = false;
+                                            }
                                         }
                                     }
                                     CxPassDepOf::Pass(parent_pass_id) => {
@@ -520,7 +571,7 @@ pub struct CxPlatform {
 }
 
 #[derive(Clone)]
-pub struct CocoaRenderWindow {
+pub struct MetalWindow {
     pub window_id: usize,
     pub window_geom: WindowGeom,
     pub cal_size: Vec2,
@@ -528,8 +579,8 @@ pub struct CocoaRenderWindow {
     pub cocoa_window: CocoaWindow,
 }
 
-impl CocoaRenderWindow {
-    fn new(window_id: usize, metal_cx: &MetalCx, cocoa_app: &mut CocoaApp, inner_size: Vec2, position: Option<Vec2>, title: &str) -> CocoaRenderWindow {
+impl MetalWindow {
+    fn new(window_id: usize, metal_cx: &MetalCx, cocoa_app: &mut CocoaApp, inner_size: Vec2, position: Option<Vec2>, title: &str) -> MetalWindow {
         
         let core_animation_layer = CoreAnimationLayer::new();
         
@@ -555,7 +606,7 @@ impl CocoaRenderWindow {
             view.setLayer(mem::transmute(core_animation_layer.as_ref()));
         }
         
-        CocoaRenderWindow {
+        MetalWindow {
             window_id,
             cal_size: Vec2::zero(),
             core_animation_layer,

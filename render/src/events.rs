@@ -196,6 +196,21 @@ pub struct WindowResizeLoopEvent {
 }
 
 #[derive(Clone, Debug, PartialEq)]
+pub enum WindowDragQueryResponse {
+    NoAnswer,
+    Client,
+    Caption,
+    SysMenu, // windows only
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct WindowDragQueryEvent {
+    pub window_id: usize,
+    pub abs: Vec2,
+    pub response: WindowDragQueryResponse,
+}
+
+#[derive(Clone, Debug, PartialEq)]
 pub enum Event {
     None,
     Construct,
@@ -207,6 +222,7 @@ pub enum Event {
     AnimateEnded(AnimateEvent),
     Animate(AnimateEvent),
     Frame(FrameEvent),
+    WindowDragQuery(WindowDragQueryEvent),
     WindowCloseRequested(WindowCloseRequestedEvent),
     WindowClosed(WindowClosedEvent),
     WindowGeomChange(WindowGeomChangeEvent),

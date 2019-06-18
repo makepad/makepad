@@ -306,7 +306,7 @@ impl RustCompiler {
         for (counter, dm) in self._draw_messages.iter_mut().enumerate() {
             match event.hits(cx, dm.animator.area, HitOpt::default()) {
                 Event::Animate(ae) => {
-                    dm.animator.calc(cx, ae.time, dm.animator.area, "bg.color");
+                    dm.animator.write_area(cx, dm.animator.area, "bg.", ae.time);
                 },
                 Event::FingerDown(_fe) => {
                     cx.set_down_mouse_cursor(MouseCursor::Hand);
@@ -412,8 +412,6 @@ impl RustCompiler {
             cx.turtle_new_line();
             
             counter += 1;
-            
-            
         }
         
         let bg_even = cx.color("bg_selected");

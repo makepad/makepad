@@ -18,6 +18,8 @@ mod filetree;
 pub use crate::filetree::*;
 mod desktopwindow;
 pub use crate::desktopwindow::*;
+mod desktopbutton;
+pub use crate::desktopbutton::*;
 //mod textbuffer;
 //pub use crate::textbuffer::*;
 //mod editor;

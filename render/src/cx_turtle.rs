@@ -152,8 +152,8 @@ impl Cx {
         ret
     }
     
-    // high perf text only no wrap turtle
-    pub fn walk_turtle_text(&mut self, w: f32, h: f32, scroll: Vec2) -> Option<Rect> {
+    // high perf turtle with no indirections and compute visibility 
+    pub fn walk_turtle_right_no_wrap(&mut self, w: f32, h: f32, scroll: Vec2) -> Option<Rect> {
         if let Some(turtle) = self.turtles.last_mut() {
             let x = turtle.walk.x;
             let y = turtle.walk.y;
@@ -219,15 +219,19 @@ impl Cx {
         }
     }
     
+    pub fn turtle_align_origin(&mut self) -> usize {
+        if let Some(turtle) = self.turtles.last_mut() {
+            return turtle.align_origin
+        }
+        return 0
+    }
+    
     fn do_align(&mut self, dx: f32, dy: f32, align_origin: usize) {
         
         for i in align_origin..self.align_list.len() {
             let align_item = &self.align_list[i];
-            return match align_item {
+            match align_item {
                 Area::Instance(inst) => {
-                    if inst.instance_count == 0 {
-                        return;
-                    }
                     let cxview = &mut self.views[inst.view_id];
                     let draw_call = &mut cxview.draw_calls[inst.draw_call_id];
                     let sh = &self.shaders[draw_call.shader_id];
@@ -350,10 +354,9 @@ impl Cx {
             false
         }
     }
-
+    
     fn compute_align_turtle(turtle: &Turtle) -> Vec2 {
         if turtle.layout.align.fx > 0.0 || turtle.layout.align.fy > 0.0 {
-            
             let mut dx = turtle.layout.align.fx *
             ((turtle.width - turtle.width_used - (turtle.layout.padding.l + turtle.layout.padding.r)) - (turtle.bound_right_bottom.x - (turtle.origin.x + turtle.layout.padding.l)));
             let mut dy = turtle.layout.align.fy *
@@ -367,8 +370,32 @@ impl Cx {
         }
     }
     
+    pub fn lock_turtle_width(&mut self) {
+        if let Some(turtle) = self.turtles.last_mut() {
+            if turtle.width.is_nan() {
+                if turtle.bound_right_bottom.x != std::f32::NEG_INFINITY { // nothing happened, use padding
+                    turtle.width = max_zero_keep_nan(turtle.bound_right_bottom.x - turtle.origin.x + turtle.layout.padding.r);
+                    turtle.width_used = 0.;
+                    turtle.bound_right_bottom.x = 0.;
+                }
+            }
+        }
+    }
+    
+    pub fn lock_turtle_height(&mut self) {
+        if let Some(turtle) = self.turtles.last_mut() {
+            if turtle.height.is_nan() {
+                if turtle.bound_right_bottom.y != std::f32::NEG_INFINITY { // nothing happened use the padding
+                    turtle.height = max_zero_keep_nan(turtle.bound_right_bottom.y - turtle.origin.y + turtle.layout.padding.b);
+                    turtle.height_used = 0.;
+                    turtle.bound_right_bottom.y = 0.;
+                }
+            }
+        }
+    }
+    
     // reorigins the turtle with a new alignment, used for a<b>c layouts
-    pub fn realign_turtle(&mut self, align: Align, set_used: bool) {
+    pub fn realign_turtle(&mut self, align: Align) {
         let (align_delta, align_origin) = if let Some(turtle) = self.turtles.last_mut() {
             (Self::compute_align_turtle(&turtle), turtle.align_origin)
         }
@@ -380,19 +407,29 @@ impl Cx {
         }
         // reset turtle props
         if let Some(turtle) = self.turtles.last_mut() {
-            // reorigin align_list for the next pass
             turtle.align_origin = self.align_list.len();
-            // subtract used size so 'fill' works
             turtle.layout.align = align;
-            if set_used {
-                turtle.width_used = turtle.bound_right_bottom.x - turtle.origin.x;
-                turtle.height_used = turtle.bound_right_bottom.y - turtle.origin.y;
-            }
+            turtle.width_used = turtle.bound_right_bottom.x - turtle.origin.x;
+            turtle.height_used = turtle.bound_right_bottom.y - turtle.origin.y;
+        }
+    }
+    
+    pub fn reset_turtle_bounds(&mut self) {
+        if let Some(turtle) = self.turtles.last_mut() {
             turtle.bound_left_top = Vec2 {x: std::f32::INFINITY, y: std::f32::INFINITY};
             turtle.bound_right_bottom = Vec2 {x: std::f32::NEG_INFINITY, y: std::f32::NEG_INFINITY};
         }
     }
     
+    pub fn reset_turtle_walk(&mut self) {
+        if let Some(turtle) = self.turtles.last_mut() {
+            // subtract used size so 'fill' works
+            turtle.walk = Vec2 {
+                x: turtle.origin.x + turtle.layout.padding.l,
+                y: turtle.origin.y + turtle.layout.padding.t
+            };
+        }
+    }
     
     // end a turtle returning computed geometry
     pub fn end_turtle(&mut self, guard_area: Area) -> Rect {

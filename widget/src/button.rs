@@ -84,56 +84,42 @@ impl Button {
     pub fn handle_button(&mut self, cx: &mut Cx, event: &mut Event) -> ButtonEvent {
         //let mut ret_event = ButtonEvent::None;
         match event.hits(cx, self._bg_area, HitOpt::default()) {
-            Event::Animate(ae) => {
-                self.animator.calc(cx, ae.time, self._bg_area, "bg.color");
-                self.animator.calc(cx, ae.time, self._bg_area, "bg.border_color");
-                self.animator.calc(cx, ae.time, self._bg_area, "bg.glow_size");
-            },
+            Event::Animate(ae) => self.animator.write_area(cx, self._bg_area, "bg.", ae.time),
             Event::FingerDown(_fe) => {
                 self.animator.play_anim(cx, self.anim_down.clone());
                 return ButtonEvent::Down;
             },
-            Event::FingerHover(fe) => {
-                match fe.hover_state {
-                    HoverState::In => {
-                        if fe.any_down {self.animator.play_anim(cx, self.anim_down.clone())}
-                        else {self.animator.play_anim(cx, self.anim_over.clone())}
-                    },
-                    HoverState::Out => {
-                        self.animator.play_default(cx);
-                    },
-                    _ => ()
-                }
-            },
-            Event::FingerUp(fe) => {
-                if fe.is_over {
-                    if !fe.is_touch {self.animator.play_anim(cx, self.anim_over.clone())}
-                    else {self.animator.play_default(cx)}
-                    return ButtonEvent::Clicked;
+            Event::FingerHover(fe) => match fe.hover_state {
+                HoverState::In => if fe.any_down {
+                    self.animator.play_anim(cx, self.anim_down.clone())
                 }
                 else {
-                    self.animator.play_default(cx);
-                    return ButtonEvent::Up;
-                }
+                    self.animator.play_anim(cx, self.anim_over.clone())
+                },
+                HoverState::Out => self.animator.play_default(cx),
+                _ => ()
             },
+            Event::FingerUp(fe) => if fe.is_over {
+                if !fe.is_touch {self.animator.play_anim(cx, self.anim_over.clone())}
+                else {self.animator.play_default(cx)}
+                return ButtonEvent::Clicked;
+            }
+            else {
+                self.animator.play_default(cx);
+                return ButtonEvent::Up;
+            }
             _ => ()
         };
         ButtonEvent::None
     }
     
     pub fn draw_button_with_label(&mut self, cx: &mut Cx, label: &str) {
-        
-        // pull the bg color from our animation system, uses 'default' value otherwise
         self.bg.color = self.animator.last_color("bg.color");
         let bg_inst = self.bg.begin_quad(cx, &self.bg_layout);
-        // push the 2 vars we added to bg shader
         bg_inst.push_color(cx, self.animator.last_color("bg.border_color"));
         bg_inst.push_float(cx, self.animator.last_float("bg.glow_size"));
-        
         self.text.draw_text(cx, label);
-        
         self._bg_area = self.bg.end_quad(cx, &bg_inst);
-        
-        self.animator.update_area_refs(cx, self._bg_area); // if our area changed, update animation
+        self.animator.update_area_refs(cx, self._bg_area);
     }
 }

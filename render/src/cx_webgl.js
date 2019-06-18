@@ -1169,7 +1169,7 @@
             gl.blendFuncSeparate(gl.ONE, gl.ONE_MINUS_SRC_ALPHA, gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
             gl.enable(gl.BLEND);
             gl.clearColor(r,g,b,a);
-            gl.clear(gl.COLOR_BUFFER_BIT|gl.DEPTH_BUFFER_BIT);            
+            gl.clear(gl.COLOR_BUFFER_BIT|gl.DEPTH_BUFFER_BIT);
         }
 
         set_mouse_cursor(id){

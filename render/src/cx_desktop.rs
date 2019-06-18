@@ -57,10 +57,11 @@ impl Cx {
     where F: FnMut(&mut Cx, &mut Event)
     {
         match event {
-            Event::FingerHover(_) => {
+            Event::FingerHover(_fe) => {
                 self.finger_over_last_area = Area::Empty;
+                self.hover_mouse_cursor = None;
             },
-            Event::FingerUp(_) => {
+            Event::FingerUp(_fe) => {
                 self.down_mouse_cursor = None;
             },
             Event::WindowCloseRequested(_cr) => {
@@ -97,9 +98,6 @@ impl Cx {
             },
             Event::FingerHover(_fe) => { // new last area finger over
                 self._finger_over_last_area = self.finger_over_last_area
-            },
-            Event::WindowClosed(_wc) => {
-                return true
             },
             _ => {}
         }
@@ -196,7 +194,7 @@ impl Cx {
                 // read the whole file
                 if file.read_to_end(&mut buffer).is_ok() {
                     let mut read = BinaryReader::new_from_vec(path.clone(), buffer);
-                    let result = CxFont::from_binary_reader(self, self.fonts[i].texture_id, &mut read);
+                    let result = CxFont::from_binary_reader(self, path.clone(), self.fonts[i].texture_id, &mut read);
                     if let Ok(cxfont) = result {
                         self.fonts[i] = cxfont;
                         continue;

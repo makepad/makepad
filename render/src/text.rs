@@ -130,7 +130,7 @@ impl Text{
     pub fn begin_text(&mut self, cx:&mut Cx)->AlignedInstance{
         let font_id = self.font.font_id.unwrap();
         if !cx.fonts[font_id].loaded{
-            panic!("Font not loaded")
+            panic!("Font not loaded {}", font_id);
         }
         let inst = cx.new_instance(&self.shader, 0); 
         let aligned = cx.align_instance(inst);

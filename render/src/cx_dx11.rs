@@ -5,8 +5,7 @@ use crate::cx_desktop::*;
 use winapi::shared::guiddef::GUID;
 use winapi::shared::minwindef::{TRUE, FALSE};
 use winapi::shared::{dxgi, dxgi1_2, dxgitype, dxgiformat, winerror};
-use winapi::um::{d3d11, dcommon, d3dcommon, d3dcompiler};
-use winapi::um::{d2d1, winuser, wingdi};
+use winapi::um::{d3d11, d3dcommon, d3dcompiler};
 use winapi::Interface;
 use wio::com::ComPtr;
 use std::mem;
@@ -43,10 +42,9 @@ impl Cx {
                 }
                 if draw_call.uniforms_dirty {
                     draw_call.uniforms_dirty = false;
-                    if draw_call.uniforms.len() == 0 {
-                        continue;
+                    if draw_call.uniforms.len() != 0 {
+                        draw_call.platform.uni_dr.update_with_f32_constant_data(d3d11_cx, &mut draw_call.uniforms);
                     }
-                    draw_call.platform.uni_dr.update_with_f32_constant_data(d3d11_cx, &mut draw_call.uniforms);
                 }
                 
                 let instances = (draw_call.instance.len() / sh.mapping.instance_slots) as usize;
@@ -86,9 +84,7 @@ impl Cx {
         let view_id = self.passes[pass_id].main_view_id.unwrap();
         
         self.platform.uni_cx.update_with_f32_constant_data(&d3d11_cx, &mut self.passes[pass_id].uniforms);
-        if d3d11_window.swap_texture.is_none(){
-            return
-        }
+        
         d3d11_cx.set_viewport(d3d11_window);
         
         if self.passes[pass_id].color_textures.len()>0 {
@@ -135,7 +131,6 @@ impl Cx {
         let mut passes_todo = Vec::new();
         
         win32_app.event_loop( | win32_app, events | {
-            
             for mut event in events {
                 
                 self.process_desktop_pre_event(&mut event, &mut event_handler);
@@ -168,6 +163,25 @@ impl Cx {
                         // ok lets not redraw all, just this window
                         self.call_event_handler(&mut event_handler, &mut event);
                     },
+                    Event::WindowClosed(wc) => { // do this here because mac
+                        // lets remove the window from the set
+                        self.windows[wc.window_id].window_state = CxWindowState::Closed;
+                        self.windows_free.push(wc.window_id);
+                        // remove the d3d11/win32 window
+                       
+                        for index in 0..d3d11_windows.len() {
+                            if d3d11_windows[index].window_id == wc.window_id {
+                                d3d11_windows.remove(index);
+                                if d3d11_windows.len() == 0 {
+                                    win32_app.terminate_event_loop();
+                                }
+                                for d3d11_window in &mut d3d11_windows {
+                                    d3d11_window.win32_window.update_ptrs();
+                                }
+                            }
+                        }
+                        self.call_event_handler(&mut event_handler, &mut event);
+                    },
                     Event::Paint => {
                         
                         let vsync = self.process_desktop_paint_callbacks(win32_app.time_now(), &mut event_handler);
@@ -186,11 +200,45 @@ impl Cx {
                                     }
                                     CxWindowState::Created
                                 },
-                                CxWindowState::Destroy => {
-                                    CxWindowState::Destroyed
+                                CxWindowState::Close => {
+                                    // ok we close the window
+                                    // lets send it a WM_CLOSE event
+                                    for d3d11_window in &mut d3d11_windows {if d3d11_window.window_id == index {
+                                        d3d11_window.win32_window.close_window();
+                                        break;
+                                    }}
+                                    CxWindowState::Closed
                                 },
                                 CxWindowState::Created => CxWindowState::Created,
-                                CxWindowState::Destroyed => CxWindowState::Destroyed
+                                CxWindowState::Closed => CxWindowState::Closed
+                            };
+                            
+                            window.window_command = match &window.window_command {
+                                CxWindowCmd::None => CxWindowCmd::None,
+                                CxWindowCmd::Restore => {
+                                    for d3d11_window in &mut d3d11_windows {if d3d11_window.window_id == index {
+                                        d3d11_window.win32_window.restore();
+                                    }}
+                                    CxWindowCmd::None
+                                },
+                                CxWindowCmd::Maximize => {
+                                    for d3d11_window in &mut d3d11_windows {if d3d11_window.window_id == index {
+                                        d3d11_window.win32_window.maximize();
+                                    }}
+                                    CxWindowCmd::None
+                                },
+                                CxWindowCmd::Minimize => {
+                                    for d3d11_window in &mut d3d11_windows {if d3d11_window.window_id == index {
+                                        d3d11_window.win32_window.minimize();
+                                    }}
+                                    CxWindowCmd::None
+                                },
+                            };
+                            
+                            if let Some(topmost) = window.window_topmost {
+                                for d3d11_window in &mut d3d11_windows {if d3d11_window.window_id == index {
+                                    d3d11_window.win32_window.set_topmost(topmost);
+                                }}
                             }
                         }
                         
@@ -231,23 +279,22 @@ impl Cx {
                                 match self.passes[*pass_id].dep_of.clone() {
                                     CxPassDepOf::Window(window_id) => {
                                         // find the accompanying render window
-                                        let d3d11_window = d3d11_windows.iter_mut().find( | w | w.window_id == window_id).unwrap();
-                                        
-                                        windows_need_repaint -= 1;
-                                        
-                                        let dpi_factor = d3d11_window.window_geom.dpi_factor;
-                                        self.passes[*pass_id].set_dpi_factor(dpi_factor);
-                                        
-                                        d3d11_window.resize_buffers(&d3d11_cx);
-                                        
-                                        self.draw_pass_to_layer(
-                                            *pass_id,
-                                            vsync,
-                                            dpi_factor,
-                                            d3d11_window,
-                                            &d3d11_cx,
-                                        );
-                                        
+                                        if let Some(d3d11_window) = d3d11_windows.iter_mut().find( | w | w.window_id == window_id){
+                                            windows_need_repaint -= 1;
+                                            
+                                            let dpi_factor = d3d11_window.window_geom.dpi_factor;
+                                            self.passes[*pass_id].set_dpi_factor(dpi_factor);
+                                            
+                                            d3d11_window.resize_buffers(&d3d11_cx);
+                                            
+                                            self.draw_pass_to_layer(
+                                                *pass_id,
+                                                vsync,
+                                                dpi_factor,
+                                                d3d11_window,
+                                                &d3d11_cx,
+                                            );
+                                        }
                                         self.passes[*pass_id].paint_dirty = false;
                                     }
                                     CxPassDepOf::Pass(parent_pass_id) => {
@@ -270,9 +317,7 @@ impl Cx {
                         self.call_event_handler(&mut event_handler, &mut event);
                     }
                 }
-                if self.process_desktop_post_event(event) {
-                    win32_app.terminate_event_loop();
-                }
+                self.process_desktop_post_event(event);
             }
             if self.playing_anim_areas.len() == 0 && self.redraw_parent_areas.len() == 0 && self.redraw_child_areas.len() == 0 && self.frame_callbacks.len() == 0 {
                 true
@@ -316,10 +361,10 @@ struct D3d11Window {
     pub depth_stencil_view: Option<ComPtr<d3d11::ID3D11DepthStencilView>>,
     pub depth_stencil_buffer: Option<ComPtr<d3d11::ID3D11Texture2D>>,
     pub swap_texture: Option<ComPtr<d3d11::ID3D11Texture2D>>,
-   // pub d2d1_hwnd_target: Option<ComPtr<d2d1::ID2D1HwndRenderTarget>>,
-   // pub d2d1_bitmap: Option<ComPtr<d2d1::ID2D1Bitmap>>,
+    // pub d2d1_hwnd_target: Option<ComPtr<d2d1::ID2D1HwndRenderTarget>>,
+    // pub d2d1_bitmap: Option<ComPtr<d2d1::ID2D1Bitmap>>,
     pub alloc_size: Vec2,
-    pub swap_chain: Option<ComPtr<dxgi1_2::IDXGISwapChain1>>,
+    pub swap_chain: ComPtr<dxgi1_2::IDXGISwapChain1>,
     pub raster_state: ComPtr<d3d11::ID3D11RasterizerState>,
     pub blend_state: ComPtr<d3d11::ID3D11BlendState>,
 }
@@ -331,12 +376,12 @@ impl D3d11Window {
         win32_window.init(title, inner_size, position);
         let window_geom = win32_window.get_window_geom();
         
-        //let swap_chain = d3d11_cx.create_swap_chain_for_hwnd(&window_geom, &win32_window).expect("Cannot create_swap_chain_for_hwnd");
+        let swap_chain = d3d11_cx.create_swap_chain_for_hwnd(&window_geom, &win32_window).expect("Cannot create_swap_chain_for_hwnd");
         
-        //let swap_texture = D3d11Cx::get_swap_texture(&swap_chain).expect("Cannot get swap texture");
-        //let render_target_view = d3d11_cx.create_render_target_view(&swap_texture).expect("Cannot create_render_target_view");
-        //let depth_stencil_buffer = d3d11_cx.create_depth_stencil_buffer(&window_geom).expect("Cannot create_depth_stencil_buffer");
-        //let depth_stencil_view = d3d11_cx.create_depth_stencil_view(&depth_stencil_buffer).expect("Cannot create_depth_stencil_view");
+        let swap_texture = D3d11Cx::get_swap_texture(&swap_chain).expect("Cannot get swap texture");
+        let render_target_view = d3d11_cx.create_render_target_view(&swap_texture).expect("Cannot create_render_target_view");
+        let depth_stencil_buffer = d3d11_cx.create_depth_stencil_buffer(&window_geom).expect("Cannot create_depth_stencil_buffer");
+        let depth_stencil_view = d3d11_cx.create_depth_stencil_view(&depth_stencil_buffer).expect("Cannot create_depth_stencil_view");
         
         let depth_stencil_state = d3d11_cx.create_depth_stencil_state().expect("Cannot create_depth_stencil_state");
         unsafe {d3d11_cx.context.OMSetDepthStencilState(depth_stencil_state.as_raw() as *mut _, 1)}
@@ -358,13 +403,13 @@ impl D3d11Window {
             alloc_size: window_geom.inner_size,
             window_geom: window_geom,
             win32_window: win32_window,
-            swap_texture: None,//Some(swap_texture),
-            depth_stencil_buffer: None,//Some(depth_stencil_buffer),
-            render_target_view: None,//Some(render_target_view),
-            depth_stencil_view: None,//Some(depth_stencil_view),
+            swap_texture: Some(swap_texture),
+            depth_stencil_buffer: Some(depth_stencil_buffer),
+            render_target_view: Some(render_target_view),
+            depth_stencil_view: Some(depth_stencil_view),
             //d2d1_hwnd_target: None,
             //d2d1_bitmap: None,
-            swap_chain: None,//swap_chain,
+            swap_chain: swap_chain,
             raster_state: raster_state,
             blend_state: blend_state
         }
@@ -409,25 +454,28 @@ impl D3d11Window {
         }
         
         // check if we are in a resize, then we use the d2d fallback
-        if self.is_in_resize {
+        /*if self.is_in_resize {
             self.disconnect_render_targets(d3d11_cx);
-            //self.d2d1_hwnd_target = Some(d3d11_cx.create_d2d1_hwnd_target(&self.window_geom, &self.win32_window).expect("cannot create_d2d1_hwnd_target"));
+            self.d2d1_hwnd_target = Some(d3d11_cx.create_d2d1_hwnd_target(&self.window_geom, &self.win32_window).expect("cannot create_d2d1_hwnd_target"));
             // create a normal backbuffer texture
             let swap_texture = d3d11_cx.create_render_d2d1_target_texture(&self.window_geom).expect("Cannot create_render_d2d1_target_texture");
-            //let dxgi_surface = D3d11Cx::get_dxgi_surface(&swap_texture).expect("Cannot get_dxgi_surface");
-            //let d2d1_bitmap = D3d11Cx::create_d2d1_shared_bitmap(self.d2d1_hwnd_target.as_ref().unwrap(), &dxgi_surface).expect("Cannot create_d2d1_shared_bitmap");
-            self.swap_texture = Some(swap_texture);
-            //self.d2d1_bitmap = Some(d2d1_bitmap);
-            self.alloc_buffers_from_texture(d3d11_cx);
-        }
-        else {
-            self.disconnect_render_targets(d3d11_cx);
             
-            d3d11_cx.resize_swap_chain(&self.window_geom, self.swap_chain.as_ref().unwrap());
-            let swap_texture = D3d11Cx::get_swap_texture(self.swap_chain.as_ref().unwrap()).expect("Cannot get swap texture");
+            let dxgi_surface = D3d11Cx::get_dxgi_surface(&swap_texture).expect("Cannot get_dxgi_surface");
+            
+            let d2d1_bitmap = D3d11Cx::create_d2d1_shared_bitmap(self.d2d1_hwnd_target.as_ref().unwrap(), &dxgi_surface).expect("Cannot create_d2d1_shared_bitmap");
+            
             self.swap_texture = Some(swap_texture);
+            self.d2d1_bitmap = Some(d2d1_bitmap);
             self.alloc_buffers_from_texture(d3d11_cx);
-        }
+        }*/
+        //else {
+        self.disconnect_render_targets(d3d11_cx);
+        
+        d3d11_cx.resize_swap_chain(&self.window_geom, &self.swap_chain);
+        let swap_texture = D3d11Cx::get_swap_texture(&self.swap_chain).expect("Cannot get swap texture");
+        self.swap_texture = Some(swap_texture);
+        self.alloc_buffers_from_texture(d3d11_cx);
+        //}
         
         /*
         self.disconnect_render_targets(d3d11_cx);
@@ -442,29 +490,16 @@ impl D3d11Window {
     }
     
     fn present(&mut self, vsync: bool, d3d11_cx: &D3d11Cx) {
-        if !self.is_in_resize {
-            //d3d11_cx.present(vsync, self);
-        }
-        else {
-            let dxgi_surface = D3d11Cx::get_dxgi_surface1(self.swap_texture.as_ref().unwrap()).expect("fail get_dxgi_surface1");
-            unsafe{
-                let mut src_dc = mem::uninitialized();
-                dxgi_surface.GetDC(0,&mut src_dc);
-                let width = (self.window_geom.inner_size.x * self.window_geom.dpi_factor) as i32;
-                let height = (self.window_geom.inner_size.y * self.window_geom.dpi_factor) as i32;
-                println!("{} {} {}", src_dc as u64, width, height);
-                let mut ps = mem::uninitialized();
-                let dest_dc = winuser::BeginPaint(self.win32_window.hwnd.unwrap(), &mut ps);
-                wingdi::BitBlt(dest_dc, 0, 0, width, height, src_dc, 0, 0, wingdi::SRCCOPY);
-                winuser::EndPaint(self.win32_window.hwnd.unwrap(), &mut ps);
-                dxgi_surface.ReleaseDC(ptr::null_mut());
-            }
+        //if !self.is_in_resize {
+        d3d11_cx.present(vsync, self);
+        //}
+        //else {
         //    D3d11Cx::draw_d2d1_bitmap(
         //        self.d2d1_hwnd_target.as_ref().unwrap(),
         //        self.d2d1_bitmap.as_ref().unwrap(),
         //        &self.window_geom
         //    );
-        }
+        //}
     }
 }
 
@@ -484,7 +519,7 @@ pub struct D3d11Cx {
     pub device: ComPtr<d3d11::ID3D11Device>,
     pub context: ComPtr<d3d11::ID3D11DeviceContext>,
     pub factory: ComPtr<dxgi1_2::IDXGIFactory2>,
-//    pub d2d1_factory: ComPtr<d2d1::ID2D1Factory>
+    //    pub d2d1_factory: ComPtr<d2d1::ID2D1Factory>
 }
 
 impl D3d11Cx {
@@ -493,12 +528,12 @@ impl D3d11Cx {
         let factory = D3d11Cx::create_dxgi_factory1(&dxgi1_2::IDXGIFactory2::uuidof()).expect("cannot create_dxgi_factory1");
         let adapter = D3d11Cx::enum_adapters(&factory).expect("cannot enum_adapters");
         let (device, context) = D3d11Cx::create_d3d11_device(&adapter).expect("cannot create_d3d11_device");
-       // let d2d1_factory = D3d11Cx::create_d2d1_factory().expect("cannot create_d2d1_factory");
+        // let d2d1_factory = D3d11Cx::create_d2d1_factory().expect("cannot create_d2d1_factory");
         D3d11Cx {
             device: device,
             context: context,
             factory: factory,
-        //    d2d1_factory: d2d1_factory
+            //    d2d1_factory: d2d1_factory
         }
     }
     
@@ -616,7 +651,7 @@ impl D3d11Cx {
     }
     
     fn present(&self, vsync: bool, d3d11_window: &D3d11Window) {
-        unsafe {d3d11_window.swap_chain.as_ref().unwrap().Present(if vsync {1}else {0}, 0)};
+        unsafe {d3d11_window.swap_chain.Present(if vsync {1}else {0}, 0)};
     }
     
     pub fn compile_shader(&self, stage: &str, entry: &[u8], shader: &[u8])
@@ -880,7 +915,7 @@ impl D3d11Cx {
             Width: (wg.inner_size.x * wg.dpi_factor) as u32,
             Height: (wg.inner_size.y * wg.dpi_factor) as u32,
             Format: dxgiformat::DXGI_FORMAT_B8G8R8A8_UNORM,
-            Flags: dxgi::DXGI_SWAP_CHAIN_FLAG_GDI_COMPATIBLE,
+            Flags: 0,
             BufferUsage: dxgitype::DXGI_USAGE_RENDER_TARGET_OUTPUT,
             SampleDesc: dxgitype::DXGI_SAMPLE_DESC {Count: 1, Quality: 0,},
             Scaling: dxgi1_2::DXGI_SCALING_NONE,
@@ -922,24 +957,7 @@ impl D3d11Cx {
             }
         }
     }
-    
-    fn get_dxgi_surface1(texture: &ComPtr<d3d11::ID3D11Texture2D>)
-        -> Result<ComPtr<dxgi::IDXGISurface1>, winerror::HRESULT> {
-        
-        let mut dxgi_surface = ptr::null_mut();
-        let hr = unsafe {texture.QueryInterface(
-            &dxgi::IDXGISurface1::uuidof(),
-            &mut dxgi_surface as *mut *mut _
-        )};
-        if winerror::SUCCEEDED(hr) {
-            Ok(unsafe {ComPtr::from_raw(dxgi_surface as *mut _)})
-        }
-        else {
-            Err(hr)
-        }
-    }
-    
-    
+    /*
     fn create_render_d2d1_target_texture(&self, wg: &WindowGeom)
         -> Result<ComPtr<d3d11::ID3D11Texture2D>, winerror::HRESULT> {
         let mut texture = ptr::null_mut();
@@ -957,7 +975,7 @@ impl D3d11Cx {
             Usage: d3d11::D3D11_USAGE_DEFAULT,
             BindFlags: d3d11::D3D11_BIND_RENDER_TARGET,// | d3d11::D3D11_BIND_SHADER_RESOURCE,
             CPUAccessFlags: 0,
-            MiscFlags: d3d11::D3D11_RESOURCE_MISC_GDI_COMPATIBLE,
+            MiscFlags: d3d11::D3D11_RESOURCE_MISC_SHARED,
         };
         
         let hr = unsafe {self.device.CreateTexture2D(&texture_desc, ptr::null(), &mut texture as *mut *mut _)};
@@ -968,7 +986,7 @@ impl D3d11Cx {
             Err(hr)
         }
     }
-    /*
+    
     fn create_d2d1_factory()
         -> Result<ComPtr<d2d1::ID2D1Factory>, winerror::HRESULT> {
         let mut d2d1_factory = ptr::null_mut();
@@ -1027,6 +1045,21 @@ impl D3d11Cx {
         }
     }
     
+    fn get_dxgi_surface(texture: &ComPtr<d3d11::ID3D11Texture2D>)
+        -> Result<ComPtr<dxgi::IDXGISurface>, winerror::HRESULT> {
+        
+        let mut dxgi_surface = ptr::null_mut();
+        let hr = unsafe {texture.QueryInterface(
+            &dxgi::IDXGISurface::uuidof(),
+            &mut dxgi_surface as *mut *mut _
+        )};
+        if winerror::SUCCEEDED(hr) {
+            Ok(unsafe {ComPtr::from_raw(dxgi_surface as *mut _)})
+        }
+        else {
+            Err(hr)
+        }
+    }
     
     fn draw_d2d1_bitmap(render_target: &ComPtr<d2d1::ID2D1HwndRenderTarget>, bitmap: &ComPtr<d2d1::ID2D1Bitmap>, wg: &WindowGeom) {
         unsafe {
@@ -1095,7 +1128,7 @@ impl D3d11Cx {
             adapter.as_raw() as *mut _,
             d3dcommon::D3D_DRIVER_TYPE_UNKNOWN,
             ptr::null_mut(),
-            d3d11::D3D11_CREATE_DEVICE_SINGLETHREADED|d3d11::D3D11_CREATE_DEVICE_BGRA_SUPPORT, //d3dcommonLLD3D11_CREATE_DEVICE_DEBUG,
+            d3d11::D3D11_CREATE_DEVICE_SINGLETHREADED | d3d11::D3D11_CREATE_DEVICE_BGRA_SUPPORT, //d3dcommonLLD3D11_CREATE_DEVICE_DEBUG,
             [d3dcommon::D3D_FEATURE_LEVEL_11_0].as_ptr(),
             1,
             d3d11::D3D11_SDK_VERSION,

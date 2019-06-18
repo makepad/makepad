@@ -1,7 +1,7 @@
 use crate::cx::*;
 use time::precise_time_ns;
 use std::{ptr};
-use winapi::um::{libloaderapi, winuser, winbase};
+use winapi::um::{libloaderapi, winuser, winbase, dwmapi};
 use winapi::shared::minwindef::{LPARAM, LRESULT, DWORD, WPARAM, BOOL, UINT, FALSE};
 use winapi::shared::ntdef::{NULL};
 use winapi::um::winnt::{LPCWSTR, HRESULT, LPCSTR};
@@ -15,7 +15,8 @@ use winapi::shared::winerror::S_OK;
 use winapi::um::libloaderapi::{GetProcAddress, LoadLibraryA};
 use winapi::um::shellscalingapi::{MDT_EFFECTIVE_DPI, MONITOR_DPI_TYPE, PROCESS_DPI_AWARENESS, PROCESS_PER_MONITOR_DPI_AWARE,};
 use winapi::um::wingdi::{GetDeviceCaps, LOGPIXELSX};
-use winapi::um::winuser::{MONITOR_DEFAULTTONEAREST};
+use winapi::um::winuser::{MONITOR_DEFAULTTONEAREST, TRACKMOUSEEVENT};
+use winapi::um::uxtheme::MARGINS;
 
 static mut GLOBAL_WIN32_APP: *mut Win32App = 0 as *mut _;
 
@@ -49,6 +50,7 @@ pub struct Win32Window {
     pub fingers_down: Vec<bool>,
     pub ignore_wmsize: usize,
     pub hwnd: Option<HWND>,
+    pub track_mouse_event: bool
 }
 
 #[derive(Clone)]
@@ -72,7 +74,7 @@ impl Win32App {
             cbWndExtra: 0,
             hInstance: unsafe {libloaderapi::GetModuleHandleW(ptr::null())},
             hIcon: unsafe {winuser::LoadIconW(ptr::null_mut(), winuser::IDI_WINLOGO)}, //h_icon,
-            hCursor: unsafe {winuser::LoadCursorW(ptr::null_mut(), winuser::IDC_ARROW)}, // must be null in order for cursor state to work properly
+            hCursor: ptr::null_mut(),//unsafe {winuser::LoadCursorW(ptr::null_mut(), winuser::IDC_ARROW)}, // must be null in order for cursor state to work properly
             hbrBackground: ptr::null_mut(),
             lpszMenuName: ptr::null(),
             lpszClassName: class_name_wstr.as_ptr(),
@@ -120,6 +122,7 @@ impl Win32App {
             
             while self.event_loop_running {
                 let mut msg = mem::uninitialized();
+                
                 if self.loop_block {
                     if winuser::GetMessageW(&mut msg, ptr::null_mut(), 0, 0) == 0 {
                         // Only happens if the message is `WM_QUIT`.
@@ -272,7 +275,56 @@ impl Win32App {
     
     pub fn set_mouse_cursor(&mut self, cursor: MouseCursor) {
         if self.current_cursor != cursor {
+            let win32_cursor = match cursor {
+                MouseCursor::Hidden => {
+                    ptr::null()
+                },
+                MouseCursor::Default => winuser::IDC_ARROW,
+                MouseCursor::Crosshair => winuser::IDC_CROSS,
+                MouseCursor::Hand => winuser::IDC_HAND,
+                MouseCursor::Arrow => winuser::IDC_ARROW,
+                MouseCursor::Move => winuser::IDC_SIZEALL,
+                MouseCursor::Text => winuser::IDC_IBEAM,
+                MouseCursor::Wait => winuser::IDC_ARROW,
+                MouseCursor::Help => winuser::IDC_HELP,
+                MouseCursor::Progress => winuser::IDC_ARROW,
+                MouseCursor::NotAllowed => winuser::IDC_NO,
+                MouseCursor::ContextMenu => winuser::IDC_ARROW,
+                MouseCursor::Cell => winuser::IDC_ARROW,
+                MouseCursor::VerticalText => winuser::IDC_ARROW,
+                MouseCursor::Alias => winuser::IDC_ARROW,
+                MouseCursor::Copy => winuser::IDC_ARROW,
+                MouseCursor::NoDrop => winuser::IDC_ARROW,
+                MouseCursor::Grab => winuser::IDC_ARROW,
+                MouseCursor::Grabbing => winuser::IDC_ARROW,
+                MouseCursor::AllScroll => winuser::IDC_ARROW,
+                MouseCursor::ZoomIn => winuser::IDC_ARROW,
+                MouseCursor::ZoomOut => winuser::IDC_ARROW,
+                //MouseCursor::NResize => winuser::IDC_UPARROW,
+                //MouseCursor::NeResize => winuser::IDC_ARROW,
+                //MouseCursor::EResize => winuser::IDC_ARROW,
+                //MouseCursor::SeResize => winuser::IDC_ARROW,
+                //MouseCursor::SResize => winuser::IDC_ARROW,
+                //MouseCursor::SwResize => winuser::IDC_ARROW,
+                //MouseCursor::WResize => winuser::IDC_ARROW,
+                //MouseCursor::NwResize => winuser::IDC_ARROW,
+                MouseCursor::NsResize => winuser::IDC_SIZENS,
+                MouseCursor::NeswResize => winuser::IDC_SIZENESW,
+                MouseCursor::EwResize => winuser::IDC_SIZEWE,
+                MouseCursor::NwseResize => winuser::IDC_SIZENWSE,
+                MouseCursor::ColResize => winuser::IDC_SIZEWE,
+                MouseCursor::RowResize => winuser::IDC_SIZEWE,
+            };
             self.current_cursor = cursor;
+            unsafe {
+                if win32_cursor ==  ptr::null() {
+                    winuser::ShowCursor(0);
+                }
+                else {
+                    winuser::SetCursor(winuser::LoadCursorW(ptr::null_mut(), win32_cursor));
+                    winuser::ShowCursor(1);
+                }
+            }
             //TODO
         }
     }
@@ -295,17 +347,17 @@ impl Win32Window {
             last_mouse_pos: Vec2::zero(),
             fingers_down: fingers_down,
             ignore_wmsize: 0,
-            hwnd: None
+            hwnd: None,
+            track_mouse_event: false
         }
     }
     
     pub fn init(&mut self, title: &str, size: Vec2, position: Option<Vec2>) {
         
-        let style = winuser::WS_SIZEBOX | winuser::WS_MAXIMIZEBOX
-            | winuser::WS_MINIMIZEBOX | winuser::WS_POPUP
+        let style = winuser::WS_SIZEBOX | winuser::WS_MAXIMIZEBOX | winuser::WS_MINIMIZEBOX | winuser::WS_POPUP
             | winuser::WS_CLIPSIBLINGS | winuser::WS_CLIPCHILDREN | winuser::WS_SYSMENU;
         
-        let style_ex = winuser::WS_EX_WINDOWEDGE | winuser::WS_EX_APPWINDOW | winuser::WS_EX_ACCEPTFILES | winuser::WS_EX_TOPMOST;
+        let style_ex = winuser::WS_EX_WINDOWEDGE | winuser::WS_EX_APPWINDOW | winuser::WS_EX_ACCEPTFILES;
         
         unsafe {
             let title_wstr: Vec<_> = OsStr::new(title).encode_wide().chain(Some(0).into_iter()).collect();
@@ -339,14 +391,13 @@ impl Win32Window {
             
             winuser::SetWindowLongPtrW(hwnd, winuser::GWLP_USERDATA, self as *const _ as isize);
             
-            self.set_inner_size(size);
+            self.set_outer_size(size);
             
             winuser::ShowWindow(hwnd, winuser::SW_SHOW);
             
             (*self.win32_app).dpi_functions.enable_non_client_dpi_scaling(self.hwnd.unwrap());
         }
     }
-    
     
     pub unsafe extern "system" fn window_class_proc(hwnd: HWND, msg: UINT, wparam: WPARAM, lparam: LPARAM,) -> LRESULT {
         
@@ -357,22 +408,109 @@ impl Win32Window {
         
         let window = &mut (*(user_data as *mut Win32Window));
         match msg {
-            //winuser::WM_NCCALCSIZE=>{
-            //    if wparam == 1{
-            //        return 0
-            //    }
-            //},
-            //winuser::WM_NCHITTEST=>{
-            //    return winuser::HTCAPTION;
-            //},
+            winuser::WM_NCCALCSIZE => {
+                // check if we are maximised
+                if window.get_is_maximized() {
+                    return winuser::DefWindowProcW(hwnd, msg, wparam, lparam);
+                }
+                if wparam == 1 {
+                    let margins = MARGINS {
+                        cxLeftWidth: 0,
+                        cxRightWidth: 0,
+                        cyTopHeight: 0,
+                        cyBottomHeight: 1
+                    };
+                    dwmapi::DwmExtendFrameIntoClientArea(hwnd, &margins);
+                    return 0
+                }
+            },
+            winuser::WM_NCHITTEST => {
+                let ycoord = (lparam >> 16) as u16 as i16 as i32;
+                let xcoord = (lparam & 0xffff) as u16 as i16 as i32;
+                let mut rect = RECT {left: 0, top: 0, bottom: 0, right: 0};
+                const EDGE: i32 = 8;
+                winuser::GetWindowRect(hwnd, &mut rect);
+                if xcoord < rect.left + EDGE {
+                    if ycoord < rect.top + EDGE {
+                        return winuser::HTTOPLEFT;
+                    }
+                    if ycoord > rect.bottom - EDGE {
+                        return winuser::HTBOTTOMLEFT;
+                    }
+                    return winuser::HTLEFT;
+                }
+                if xcoord > rect.right - EDGE {
+                    if ycoord < rect.top + EDGE {
+                        return winuser::HTTOPRIGHT;
+                    }
+                    if ycoord > rect.bottom - EDGE {
+                        return winuser::HTBOTTOMRIGHT;
+                    }
+                    return winuser::HTLEFT;
+                }
+                if ycoord < rect.top + EDGE {
+                    return winuser::HTTOP;
+                }
+                if ycoord > rect.bottom - EDGE {
+                    return winuser::HTBOTTOM;
+                }
+                let mut events = vec![
+                    Event::WindowDragQuery(WindowDragQueryEvent {
+                        window_id: window.window_id,
+                        abs: window.get_mouse_pos_from_lparam(lparam),
+                        response: WindowDragQueryResponse::NoAnswer
+                    })
+                ];
+                window.do_callback(&mut events);
+                match &events[0] {
+                    Event::WindowDragQuery(wd) => match &wd.response {
+                        WindowDragQueryResponse::Client => return winuser::HTCLIENT,
+                        WindowDragQueryResponse::Caption => return winuser::HTCAPTION,
+                        WindowDragQueryResponse::SysMenu => return winuser::HTSYSMENU,
+                        _ => ()
+                    },
+                    _ => ()
+                }
+                if ycoord < rect.top + 50 && xcoord < rect.left + 50 {
+                    return winuser::HTSYSMENU;
+                }
+                if ycoord < rect.top + 50 && xcoord < rect.right - 300 {
+                    return winuser::HTCAPTION;
+                }
+                return winuser::HTCLIENT;
+            },
             winuser::WM_ERASEBKGND => {
-                return 0
+                return 1
             },
             winuser::WM_MOUSEMOVE => {
+                if !window.track_mouse_event {
+                    window.track_mouse_event = true;
+                    let mut tme = TRACKMOUSEEVENT {
+                        cbSize: mem::size_of::<TRACKMOUSEEVENT>() as u32,
+                        dwFlags: winuser::TME_LEAVE,
+                        hwndTrack: hwnd,
+                        dwHoverTime: 0
+                    };
+                    winuser::TrackMouseEvent(&mut tme);
+                }
                 window.send_finger_hover_and_move(
                     window.get_mouse_pos_from_lparam(lparam),
                     Self::get_key_modifiers()
                 )
+            },
+            winuser::WM_MOUSELEAVE => {
+                window.track_mouse_event = false;
+                window.do_callback(&mut vec![Event::FingerHover(FingerHoverEvent {
+                    window_id: window.window_id,
+                    any_down: false,
+                    abs: window.last_mouse_pos,
+                    rel: window.last_mouse_pos,
+                    rect: Rect::zero(),
+                    handled: false,
+                    hover_state: HoverState::Out,
+                    modifiers: Self::get_key_modifiers(),
+                    time: window.time_now()
+                })]);
             },
             winuser::WM_MOUSEWHEEL => {
                 let delta = (wparam>>16) as u16 as i16 as f32;
@@ -403,6 +541,9 @@ impl Win32Window {
                 // detect control/cmd - c / v / x
                 let modifiers = Self::get_key_modifiers();
                 let key_code = Self::virtual_key_to_key_code(wparam);
+                if modifiers.alt && key_code == KeyCode::F4 {
+                    winuser::PostMessageW(hwnd, winuser::WM_CLOSE, 0, 0);
+                }
                 if modifiers.control || modifiers.logo {
                     match key_code {
                         KeyCode::KeyV => { // paste
@@ -503,18 +644,18 @@ impl Win32Window {
             winuser::WM_ENTERSIZEMOVE => {
                 (*window.win32_app).start_resize();
                 window.do_callback(&mut vec![Event::WindowResizeLoop(WindowResizeLoopEvent {
-                    was_started:true,
+                    was_started: true,
                     window_id: window.window_id
                 })]);
             }
             winuser::WM_EXITSIZEMOVE => {
                 (*window.win32_app).stop_resize();
                 window.do_callback(&mut vec![Event::WindowResizeLoop(WindowResizeLoopEvent {
-                    was_started:false,
+                    was_started: false,
                     window_id: window.window_id
                 })]);
             },
-            winuser::WM_SIZE => {
+            winuser::WM_SIZE | winuser::WM_DPICHANGED => {
                 //if window.ignore_wmsize > 1{
                 window.send_change_event();
                 // }
@@ -530,7 +671,20 @@ impl Win32Window {
                     })
                 ]);
             },
-            winuser::WM_CLOSE => {
+            winuser::WM_CLOSE => { // close requested
+                let mut events = vec![Event::WindowCloseRequested(WindowCloseRequestedEvent {
+                    window_id: window.window_id,
+                    accept_close: true
+                })];
+                window.do_callback(&mut events);
+                if let Event::WindowCloseRequested(cre) = &events[0] {
+                    if cre.accept_close {
+                        winuser::DestroyWindow(hwnd);
+                    }
+                }
+            },
+            winuser::WM_DESTROY => { // window actively destroyed
+                (*window.win32_app).event_recur_block = false; //exception case
                 window.do_callback(&mut vec![
                     Event::WindowClosed(WindowClosedEvent {
                         window_id: window.window_id,
@@ -580,13 +734,89 @@ impl Win32Window {
     pub fn set_mouse_cursor(&mut self, _cursor: MouseCursor) {
     }
     
+    pub fn restore(&self) {
+        unsafe {
+            winuser::ShowWindow(self.hwnd.unwrap(), winuser::SW_RESTORE);
+            winuser::PostMessageW(self.hwnd.unwrap(), winuser::WM_SIZE, 0, 0);
+        }
+    }
+    
+    pub fn maximize(&self) {
+        unsafe {
+            winuser::ShowWindow(self.hwnd.unwrap(), winuser::SW_MAXIMIZE);
+            winuser::PostMessageW(self.hwnd.unwrap(), winuser::WM_SIZE, 0, 0);
+        }
+    }
+    
+    pub fn close_window(&self) {
+        unsafe {
+            winuser::DestroyWindow(self.hwnd.unwrap());
+        }
+    }
+    
+    pub fn minimize(&self) {
+        unsafe {
+            winuser::ShowWindow(self.hwnd.unwrap(), winuser::SW_MINIMIZE);
+        }
+    }
+    
+    pub fn set_topmost(&self, topmost: bool) {
+        unsafe {
+            if topmost {
+                winuser::SetWindowPos(
+                    self.hwnd.unwrap(),
+                    winuser::HWND_TOPMOST,
+                    0,
+                    0,
+                    0,
+                    0,
+                    winuser::SWP_NOMOVE | winuser::SWP_NOSIZE
+                );
+            }
+            else {
+                winuser::SetWindowPos(
+                    self.hwnd.unwrap(),
+                    winuser::HWND_NOTOPMOST,
+                    0,
+                    0,
+                    0,
+                    0,
+                    winuser::SWP_NOMOVE | winuser::SWP_NOSIZE
+                );
+            }
+        }
+    }
+    
+    pub fn get_is_topmost(&self) -> bool {
+        unsafe {
+            let ex_style = winuser::GetWindowLongW(self.hwnd.unwrap(), winuser::GWL_EXSTYLE) as u32;
+            if (ex_style & winuser::WS_EX_TOPMOST) != 0 {
+                return true
+            }
+            return false
+        }
+    }
+    
     pub fn get_window_geom(&self) -> WindowGeom {
         WindowGeom {
-            is_fullscreen: false,
+            is_topmost: self.get_is_topmost(),
+            is_fullscreen: self.get_is_maximized(),
             inner_size: self.get_inner_size(),
             outer_size: self.get_outer_size(),
             dpi_factor: self.get_dpi_factor(),
             position: self.get_position()
+        }
+    }
+    
+    pub fn get_is_maximized(&self) -> bool {
+        unsafe {
+            let mut wp: winuser::WINDOWPLACEMENT = mem::uninitialized();
+            wp.length = mem::size_of::<winuser::WINDOWPLACEMENT>() as u32;
+            winuser::GetWindowPlacement(self.hwnd.unwrap(), &mut wp);
+            if wp.showCmd as i32 == winuser::SW_MAXIMIZE {
+                return true
+            }
+            return false
         }
     }
     
@@ -627,6 +857,22 @@ impl Win32Window {
     
     pub fn set_position(&mut self, _pos: Vec2) {
         
+    }
+    
+    pub fn set_outer_size(&self, size: Vec2) {
+        unsafe {
+            let mut window_rect = RECT {left: 0, top: 0, bottom: 0, right: 0};
+            winuser::GetWindowRect(self.hwnd.unwrap(), &mut window_rect);
+            let dpi = self.get_dpi_factor();
+            winuser::MoveWindow(
+                self.hwnd.unwrap(),
+                window_rect.left,
+                window_rect.top,
+                (size.x * dpi) as i32,
+                (size.y * dpi) as i32,
+                FALSE
+            );
+        }
     }
     
     pub fn set_inner_size(&self, size: Vec2) {

@@ -94,7 +94,7 @@ impl Splitter{
     pub fn handle_splitter(&mut self, cx:&mut Cx, event:&mut Event)->SplitterEvent{
         match event.hits(cx, self._split_area, HitOpt{margin:self._hit_state_margin,..Default::default()}){
             Event::Animate(ae)=>{
-                self.animator.calc(cx, ae.time, self._split_area, "split.color");
+                self.animator.write_area(cx, self._split_area, "split.", ae.time);
             },
             Event::FingerDown(fe)=>{
                 self._is_moving = true;

@@ -1221,9 +1221,8 @@ impl CodeEditor {
             }
         }
         // lets check if the geom is visible
-        if let Some(geom) = cx.walk_turtle_text(
+        if let Some(geom) = cx.walk_turtle_right_no_wrap(
             self._monospace_size.x * (chunk.len() as f32),
-            
             self._monospace_size.y,
             self._scroll_pos
         ) {

@@ -14,18 +14,9 @@ serde = { version = "1.0", features = ["derive"] }
 
 [dependencies.widget]
 path="../widget"
-default-features = false
- 
+
 [dependencies.editor]
 path="../editor"
-default-features = false
 
 [dependencies.render]
 path="../render"
-default-features = false
-
-features=["mtl"]
-# other options are ["ogl"] and ["webgl"]. 
-# for linux/windows use ["ogl"]. 
-# Webgl doesn't build with this cargo, use the one in webgl/
-# but it can be needed to be set if you want RLS to show webGL errors

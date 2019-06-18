@@ -20,6 +20,7 @@ impl Cx{
                 texture: Texture{texture_id:Some(self.fonts[font_id].texture_id)}
             }
         }
+
         let mut texture = Texture{..Default::default()};
         texture.set_desc(self, None);
         let font_id = self.fonts.len();
@@ -80,7 +81,7 @@ pub struct CxFont{
 }
 
 impl CxFont{
-    pub fn from_binary_reader(cx:&mut Cx, texture_id:usize, inp: &mut BinaryReader) -> Result<CxFont, String> {
+    pub fn from_binary_reader(cx:&mut Cx, path:String, texture_id:usize, inp: &mut BinaryReader) -> Result<CxFont, String> {
         let _type_id = inp.u32()?;
 
         let mut ff = CxFont{
@@ -92,6 +93,7 @@ impl CxFont{
             onesize: inp.u32()? as usize,
             kernsize:inp.u32()? as usize,
             scale:inp.f32()?,
+            path:path,
             texture_id:texture_id,
             loaded:true,
             ..Default::default()

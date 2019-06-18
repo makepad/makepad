@@ -280,7 +280,7 @@ impl ScrollBarLike<ScrollBar> for ScrollBar {
         if self._visible {
             match event.hits(cx, self._sb_area, HitOpt {no_scrolling: true, ..Default::default()}) {
                 Event::Animate(ae) => {
-                    self.animator.calc(cx, ae.time, self._sb_area, "sb.color");
+                    self.animator.write_area(cx, self._sb_area, "sb.", ae.time);
                 },
                 Event::Frame(_ae) => {
                     if self.move_towards_scroll_target(cx) {

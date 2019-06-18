@@ -173,7 +173,7 @@ impl Tab{
 
         if !self.animator.term_anim_playing(){
             match self.tab_close.handle_tab_close(cx, event){
-                ButtonEvent::Clicked=>{
+                ButtonEvent::Down=>{
                     self._close_anim_rect = self._bg_area.get_rect(cx, false);
                     self.animator.play_anim(cx, self.anim_close(cx));
                     return TabEvent::Closing;
@@ -190,9 +190,8 @@ impl Tab{
                     cx.redraw_child_area(self._bg_area);
                 }
                 else{
-                    self.animator.calc(cx, ae.time, self._bg_area, "bg.color");
-                    self.animator.calc(cx, ae.time, self._bg_area, "bg.border_color");
-                    self.animator.calc(cx, ae.time, self._text_area, "text.color");
+                    self.animator.write_area(cx, self._bg_area,"bg.", ae.time);
+                    self.animator.write_area(cx, self._text_area, "text.", ae.time);
                 }
             },
             Event::AnimateEnded(_ae)=>{

@@ -195,7 +195,7 @@ impl CocoaApp {
                         },
                         _ => {}
                     }
-
+                    
                     self.do_callback(&mut vec![
                         Event::KeyDown(KeyEvent {
                             key_code: key_code,
@@ -256,7 +256,25 @@ impl CocoaApp {
             appkit::NSMouseMoved |
             appkit::NSLeftMouseDragged |
             appkit::NSOtherMouseDragged |
-            appkit::NSRightMouseDragged => {},
+            appkit::NSRightMouseDragged => {
+                let window: id = ns_event.window();
+                if window == nil {
+                    return
+                }
+                let window_delegate = NSWindow::delegate(window);
+                if window_delegate == nil {
+                    return
+                }
+                let ptr: *mut c_void = *(*window_delegate).get_ivar("cocoa_window_ptr");
+                let cocoa_window = &mut *(ptr as *mut CocoaWindow);
+                
+                let window_point = ns_event.locationInWindow();
+                let view_point = cocoa_window.view.convertPoint_fromView_(window_point, nil);
+                let view_rect = NSView::frame(cocoa_window.view);
+                let mouse_pos = Vec2 {x: view_point.x as f32, y: view_rect.size.height as f32 - view_point.y as f32};
+                
+                cocoa_window.send_finger_hover_and_move(mouse_pos, get_event_key_modifier(ns_event));
+            },
             appkit::NSScrollWheel => {
                 let window: id = ns_event.window();
                 if window == nil {
@@ -537,7 +555,7 @@ impl CocoaWindow {
             let window_masks = appkit::NSWindowStyleMask::NSClosableWindowMask
                 | appkit::NSWindowStyleMask::NSMiniaturizableWindowMask
                 | appkit::NSWindowStyleMask::NSResizableWindowMask
-                | appkit::NSWindowStyleMask::NSTitledWindowMask;
+                | appkit::NSWindowStyleMask::NSBorderlessWindowMask;
             
             self.window.initWithContentRect_styleMask_backing_defer_(
                 window_frame,
@@ -596,6 +614,49 @@ impl CocoaWindow {
         }
     }
     
+    pub fn close_window(&mut self) {
+        unsafe {
+            (*self.cocoa_app).event_recur_block = false;
+            msg_send![self.window, close];
+        }
+    }
+    
+    pub fn restore(&mut self) {
+        unsafe {
+            
+            msg_send![self.window, toggleFullScreen: nil];
+            let mask = appkit::NSWindowStyleMask::NSClosableWindowMask
+                | appkit::NSWindowStyleMask::NSMiniaturizableWindowMask
+                | appkit::NSWindowStyleMask::NSResizableWindowMask
+                | appkit::NSWindowStyleMask::NSBorderlessWindowMask;
+            msg_send![self.window, setStyleMask: mask];
+        }
+    }
+    
+    pub fn maximize(&mut self) {
+        unsafe {
+            let mask = appkit::NSWindowStyleMask::NSClosableWindowMask
+                | appkit::NSWindowStyleMask::NSMiniaturizableWindowMask
+                | appkit::NSWindowStyleMask::NSResizableWindowMask
+                | appkit::NSWindowStyleMask::NSTitledWindowMask;
+            
+            msg_send![self.window, setStyleMask: mask];
+            msg_send![self.window, toggleFullScreen: nil];
+        }
+    }
+    
+    pub fn minimize(&mut self) {
+        unsafe {
+            msg_send![self.window, miniaturize:nil];
+        }
+    }
+    
+    pub fn set_topmost(&mut self, topmost: bool) {
+        unsafe {
+            msg_send![self.window, close];
+        }
+    }
+    
     pub fn end_live_resize(&mut self) {
         unsafe {
             msg_send![self.live_resize_timer, invalidate];
@@ -610,6 +671,7 @@ impl CocoaWindow {
     
     pub fn get_window_geom(&self) -> WindowGeom {
         WindowGeom {
+            is_topmost: false,
             is_fullscreen: self.is_fullscreen,
             inner_size: self.get_inner_size(),
             outer_size: self.get_outer_size(),
@@ -699,6 +761,29 @@ impl CocoaWindow {
         self.do_callback(&mut vec![Event::AppFocusLost]);
     }
     
+    pub fn mouse_down_can_drag_window(&mut self) -> bool {
+        let mut events = vec![
+            Event::WindowDragQuery(WindowDragQueryEvent {
+                window_id: self.window_id,
+                abs: self.last_mouse_pos,
+                response: WindowDragQueryResponse::NoAnswer
+            })
+        ];
+        self.do_callback(&mut events);
+        match &events[0] {
+            Event::WindowDragQuery(wd) => match &wd.response {
+                WindowDragQueryResponse::Client => (),
+                WindowDragQueryResponse::Caption | WindowDragQueryResponse::SysMenu => {
+                    // we start a window drag
+                    return true
+                },
+                _ => ()
+            },
+            _ => ()
+        }
+        return false
+    }
+    
     pub fn send_finger_down(&mut self, digit: usize, modifiers: KeyModifiers) {
         self.fingers_down[digit] = true;
         self.do_callback(&mut vec![Event::FingerDown(FingerDownEvent {
@@ -767,7 +852,10 @@ impl CocoaWindow {
     }
     
     pub fn send_window_close_requested_event(&mut self) -> bool {
-        let mut events = vec![Event::WindowCloseRequested(WindowCloseRequestedEvent {window_id: self.window_id, accept_close: true})];
+        let mut events = vec![Event::WindowCloseRequested(WindowCloseRequestedEvent {
+            window_id: self.window_id,
+            accept_close: true
+        })];
         self.do_callback(&mut events);
         if let Event::WindowCloseRequested(cre) = &events[0] {
             return cre.accept_close
@@ -1181,6 +1269,11 @@ pub fn define_cocoa_window_class() -> *const Class {
         YES
     }
     
+    extern fn is_movable_by_window_background(_: &Object, _: Sel) -> BOOL {
+        println!("CALLED!");
+        YES
+    }
+    
     let window_superclass = class!(NSWindow);
     let mut decl = ClassDecl::new("RenderWindow", window_superclass).unwrap();
     unsafe {
@@ -1214,7 +1307,14 @@ pub fn define_cocoa_view_class() -> *const Class {
     }
     
     extern fn mouse_down(this: &Object, _sel: Sel, event: id) {
+        
         let cw = get_cocoa_window(this);
+        unsafe {
+            if cw.mouse_down_can_drag_window() {
+                msg_send![cw.window, performWindowDragWithEvent: event];
+                return
+            }
+        }
         let modifiers = get_event_key_modifier(event);
         cw.send_finger_down(0, modifiers);
     }
@@ -1249,38 +1349,20 @@ pub fn define_cocoa_view_class() -> *const Class {
         cw.send_finger_up(2, modifiers);
     }
     
-    fn mouse_pos_from_event(this: &Object, event: id) -> Vec2 {
-        // We have to do this to have access to the `NSView` trait...
-        unsafe {
-            let view: id = this as *const _ as *mut _;
-            let window_point = event.locationInWindow();
-            let view_point = view.convertPoint_fromView_(window_point, nil);
-            let view_rect = NSView::frame(view);
-            Vec2 {x: view_point.x as f32, y: view_rect.size.height as f32 - view_point.y as f32}
-        }
+    extern fn mouse_moved(_this: &Object, _sel: Sel, _event: id) {
+        // mouse_motion(this, event);
     }
     
-    fn mouse_motion(this: &Object, event: id) {
-        let cw = get_cocoa_window(this);
-        let pos = mouse_pos_from_event(this, event);
-        let modifiers = get_event_key_modifier(event);
-        cw.send_finger_hover_and_move(pos, modifiers);
+    extern fn mouse_dragged(_this: &Object, _sel: Sel, _event: id) {
+        //  mouse_motion(this, event);
     }
     
-    extern fn mouse_moved(this: &Object, _sel: Sel, event: id) {
-        mouse_motion(this, event);
+    extern fn right_mouse_dragged(_this: &Object, _sel: Sel, _event: id) {
+        //  mouse_motion(this, event);
     }
     
-    extern fn mouse_dragged(this: &Object, _sel: Sel, event: id) {
-        mouse_motion(this, event);
-    }
-    
-    extern fn right_mouse_dragged(this: &Object, _sel: Sel, event: id) {
-        mouse_motion(this, event);
-    }
-    
-    extern fn other_mouse_dragged(this: &Object, _sel: Sel, event: id) {
-        mouse_motion(this, event);
+    extern fn other_mouse_dragged(_this: &Object, _sel: Sel, _event: id) {
+        //  mouse_motion(this, event);
     }
     
     extern fn draw_rect(this: &Object, _sel: Sel, rect: NSRect) {
@@ -1541,21 +1623,22 @@ fn load_mouse_cursor(cursor: MouseCursor) -> id {
         MouseCursor::NotAllowed | MouseCursor::NoDrop => load_native_cursor("operationNotAllowedCursor"),
         MouseCursor::ContextMenu => load_native_cursor("contextualMenuCursor"),
         MouseCursor::Crosshair => load_native_cursor("crosshairCursor"),
+        /*
         MouseCursor::EResize => load_native_cursor("resizeRightCursor"),
         MouseCursor::NResize => load_native_cursor("resizeUpCursor"),
         MouseCursor::WResize => load_native_cursor("resizeLeftCursor"),
-        MouseCursor::SResize => load_native_cursor("resizeDownCursor"),
+        MouseCursor::SResize => load_native_cursor("resizeDownCursor"),*/
         MouseCursor::EwResize | MouseCursor::ColResize => load_native_cursor("resizeLeftRightCursor"),
         MouseCursor::NsResize | MouseCursor::RowResize => load_native_cursor("resizeUpDownCursor"),
         
         // Undocumented cursors: https://stackoverflow.com/a/46635398/5435443
         MouseCursor::Help => load_undocumented_cursor("_helpCursor"),
         MouseCursor::ZoomIn => load_undocumented_cursor("_zoomInCursor"),
-        MouseCursor::ZoomOut => load_undocumented_cursor("_zoomOutCursor"),
+        MouseCursor::ZoomOut => load_undocumented_cursor("_zoomOutCursor"),/*
         MouseCursor::NeResize => load_undocumented_cursor("_windowResizeNorthEastCursor"),
         MouseCursor::NwResize => load_undocumented_cursor("_windowResizeNorthWestCursor"),
         MouseCursor::SeResize => load_undocumented_cursor("_windowResizeSouthEastCursor"),
-        MouseCursor::SwResize => load_undocumented_cursor("_windowResizeSouthWestCursor"),
+        MouseCursor::SwResize => load_undocumented_cursor("_windowResizeSouthWestCursor"),*/
         MouseCursor::NeswResize => load_undocumented_cursor("_windowResizeNorthEastSouthWestCursor"),
         MouseCursor::NwseResize => load_undocumented_cursor("_windowResizeNorthWestSouthEastCursor"),
         
