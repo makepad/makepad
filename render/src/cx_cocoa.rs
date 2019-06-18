@@ -646,10 +646,7 @@ impl CocoaWindow {
         }
     }
     
-    pub fn set_topmost(&mut self, topmost: bool) {
-        unsafe {
-            msg_send![self.window, close];
-        }
+    pub fn set_topmost(&mut self, _topmost: bool) {
     }
     
     pub fn end_live_resize(&mut self) {

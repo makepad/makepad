@@ -108,9 +108,6 @@ impl App {
             padding: Padding {l: 10., t: 10., r: 0., b: 0.},
             ..Default::default()
         });
-        //self.quad.draw_quad_walk(cx, Bounds::Fix(100.), Bounds::Fix(100.), Margin {l: 15., t: 0., r: 0., b: 0.});
-        //self.text.draw_text(cx, &format!("Hello World!"));
-        
         
         for i in 0..100 {
             
@@ -124,7 +121,7 @@ impl App {
         
         cx.turtle_new_line();
         
-        self.text.draw_text(cx, &format!("Hello World {}", self.clickety));
+        self.text.draw_text(cx, &format!("Hello World! {}", self.clickety));
         
         self.quad.draw_quad_walk(cx, Bounds::Fix(100.), Bounds::Fix(100.), Margin {l: 15., t: 0., r: 0., b: 0.});
         

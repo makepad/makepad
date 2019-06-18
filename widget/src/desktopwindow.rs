@@ -69,24 +69,19 @@ impl DesktopWindow {
     pub fn handle_desktop_window(&mut self, cx: &mut Cx, event: &mut Event) -> DesktopWindowEvent {
         //self.main_view.handle_scroll_bars(cx, event);
         //self.inner_view.handle_scroll_bars(cx, event);
-        match self.min_btn.handle_button(cx, event) {
-            ButtonEvent::Clicked => self.window.minimize_window(cx),
-            _ => ()
+        if let ButtonEvent::Clicked = self.min_btn.handle_button(cx, event) {
+            self.window.minimize_window(cx);
         }
-        match self.max_btn.handle_button(cx, event) {
-            ButtonEvent::Clicked => {
-                if self.window.is_fullscreen(cx) {
-                    self.window.restore_window(cx);
-                }
-                else {
-                    self.window.maximize_window(cx);
-                }
-            },
-            _ => ()
+        if let ButtonEvent::Clicked = self.max_btn.handle_button(cx, event) {
+            if self.window.is_fullscreen(cx) {
+                self.window.restore_window(cx);
+            }
+            else {
+                self.window.maximize_window(cx);
+            }
         }
-        match self.close_btn.handle_button(cx, event) {
-            ButtonEvent::Clicked => self.window.close_window(cx),
-            _ => ()
+        if let ButtonEvent::Clicked = self.close_btn.handle_button(cx, event) {
+            self.window.close_window(cx);
         }
         if let Some(window_id) = self.window.window_id {
             let is_for_other_window = match event {
@@ -144,7 +139,7 @@ impl DesktopWindow {
         
         self.window.begin_window(cx);
         self.pass.begin_pass(cx);
-        self.pass.add_color_texture(cx, &mut self.color_texture, Some(Color::zero()));
+        self.pass.add_color_texture(cx, &mut self.color_texture, Some(color256(30,30,30)));
         
         // for z-buffering add a depth texture here
         
@@ -182,7 +177,7 @@ impl DesktopWindow {
                 self.caption_bg.end_quad(cx, &bg_inst);
                 cx.turtle_new_line();
             },
-            PlatformType::OSX => {
+            PlatformType::OSX => { // mac still uses the built in buttons, TODO, replace that.
                 let bg_inst = self.caption_bg.begin_quad(cx, &Layout {
                     align: Align::center(),
                     width: Bounds::Fill,

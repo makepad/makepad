@@ -424,7 +424,6 @@ impl App {
                                 else{
                                     create_pos = Some(last_pos);
                                 }
-                                println!("{:?} {:?}", size, window_state.window_position);
                                 self.windows.push(AppWindow {
                                     desktop_window: DesktopWindow {window: Window {
                                         create_inner_size: size,

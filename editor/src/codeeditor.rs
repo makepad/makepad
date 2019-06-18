@@ -8,7 +8,7 @@ use crate::codeicon::*;
 pub struct CodeEditor {
     pub view: View<ScrollBar>,
     pub bg_layout: Layout,
-    pub bg: Quad,
+    //pub bg: Quad,
     pub cursor: Quad,
     pub selection: Quad,
     pub token_highlight: Quad,
@@ -27,7 +27,8 @@ pub struct CodeEditor {
     pub top_padding: f32,
     pub colors: CodeEditorColors,
     pub cursor_blink_speed: f64,
-    pub _bg_area: Area,
+    //pub _bg_area: Area,
+    pub _view_area: Area,
     pub _highlight_area: Area,
     pub _text_inst: Option<AlignedInstance>,
     pub _line_number_inst: Option<AlignedInstance>,
@@ -85,7 +86,7 @@ pub struct CodeEditor {
 #[derive(Clone)]
 pub struct CodeEditorColors {
     // UI
-    pub bg: Color,
+    //pub bg: Color,
     pub indent_line_unknown: Color,
     pub indent_line_fn: Color,
     pub indent_line_typedef: Color,
@@ -127,7 +128,7 @@ impl Style for CodeEditor {
         Self {
             cursors: TextCursorSet::new(),
             colors: CodeEditorColors {
-                bg: color256(30, 30, 30),
+                //bg: color256(30, 30, 30),
                 indent_line_unknown: color("#5"),
                 indent_line_fn: color256(220, 220, 174),
                 indent_line_typedef: color256(91, 155, 211),
@@ -182,10 +183,10 @@ impl Style for CodeEditor {
                 }),
                 ..Style::style(cx)
             },
-            bg: Quad {
-                do_scroll: false,
-                ..Style::style(cx)
-            },
+            //bg: Quad {
+            //    do_scroll: false,
+            //    ..Style::style(cx)
+            //},
             selection: Quad {
                 shader: cx.add_shader(Self::def_selection_shader(), "Editor.selection"),
                 ..Style::style(cx)
@@ -254,8 +255,8 @@ impl Style for CodeEditor {
             _anim_select: Vec::new(),
             _grid_select_corner: None,
             _is_row_select: false,
-            
-            _bg_area: Area::Empty,
+            _view_area: Area::Empty,
+            //_bg_area: Area::Empty,
             _highlight_area: Area::Empty,
             _highlight_visibility: 0.,
             
@@ -832,7 +833,7 @@ impl CodeEditor {
             _ => ()
         }
         // editor local
-        match event.hits(cx, self._bg_area, HitOpt {no_scrolling: true, ..Default::default()}) {
+        match event.hits(cx, self.view.get_view_area(cx), HitOpt {no_scrolling: true, ..Default::default()}) {
             Event::KeyFocusLost(_kf) => {
                 self.view.redraw_view_area(cx)
             },
@@ -881,11 +882,11 @@ impl CodeEditor {
     }
     
     pub fn has_key_focus(&self, cx: &Cx) -> bool {
-        cx.has_key_focus(self._bg_area)
+        cx.has_key_focus(self._view_area)
     }
     
     pub fn set_key_focus(&mut self, cx: &mut Cx) {
-        cx.set_key_focus(self._bg_area);
+        cx.set_key_focus(self._view_area);
         self.reset_cursor_blinker(cx);
     }
     
@@ -895,7 +896,7 @@ impl CodeEditor {
         
         // copy over colors
         self._last_indent_color = self.colors.indent_line_unknown;
-        self.bg.color = self.colors.bg;
+        //self.bg.color = self.colors.bg;
         self.selection.color = if self.has_key_focus(cx) {self.colors.selection}else {self.colors.selection_defocus};
         //self.select_highlight.color = self.colors.highlight;
         self.token_highlight.color = self.colors.highlight;
@@ -903,23 +904,24 @@ impl CodeEditor {
         self.cursor_row.color = self.colors.cursor_row;
         
         if text_buffer.load_read_req.is_loading() {
-            let bg_inst = self.bg.begin_quad(cx, &Layout {
-                align: Align::left_top(),
-                ..self.bg_layout.clone()
-            });
+            //et bg_inst = self.bg.begin_quad(cx, &Layout {
+            //    align: Align::left_top(),
+            //    ..self.bg_layout.clone()
+            //});
             self.text.color = color("#666");
             self.text.draw_text(cx, "...");
-            self.bg.end_quad(cx, &bg_inst);
-            self._bg_area = bg_inst.into_area();
+            //self.bg.end_quad(cx, &bg_inst);
+            //self._bg_area = bg_inst.into_area();
             self.view.end_view(cx);
             return Err(())
         }
         else {
-            let bg_inst = self.bg.draw_quad(cx, Rect {x: 0., y: 0., w: cx.get_width_total(), h: cx.get_height_total()});
-            let bg_area = bg_inst.into_area();
-            cx.update_area_refs(self._bg_area, bg_area);
-            self._bg_area = bg_area;
-            
+            //let bg_inst = self.bg.draw_quad(cx, Rect {x: 0., y: 0., w: cx.get_width_total(), h: cx.get_height_total()});
+            //let bg_area = bg_inst.into_area();
+            let view_area = self.view.get_view_area(cx);
+            cx.update_area_refs(self._view_area, view_area);
+            //self._bg_area = bg_area;
+            self._view_area = view_area;
             // layering, this sets the draw call order
             self._highlight_area = cx.new_instance_draw_call(&self.token_highlight.shader, 0).into_area();
             //cx.new_instance_layer(self.select_highlight.shader_id, 0);
@@ -1565,7 +1567,7 @@ impl CodeEditor {
                     h: rc.h
                 });
             }
-            if cx.has_key_focus(self._bg_area) {
+            if cx.has_key_focus(self.view.get_view_area(cx)) {
                 let scroll_pos = self.view.get_scroll_pos(cx);
                 cx.show_text_ime(rc.x - scroll_pos.x, rc.y - scroll_pos.y);
             }
@@ -1698,7 +1700,7 @@ impl CodeEditor {
     
     fn compute_grid_text_pos_from_abs(&mut self, cx: &Cx, abs: Vec2) -> TextPos {
         //
-        let rel = self._bg_area.abs_to_rel(cx, abs, false);
+        let rel = self.view.get_view_area(cx).abs_to_rel(cx, abs, false);
         let mut mono_size = Vec2::zero();
         for (row, geom) in self._line_geometry.iter().enumerate() {
             //let geom = &self._line_geometry[pos.row];
@@ -1714,7 +1716,7 @@ impl CodeEditor {
     }
     
     fn compute_offset_from_ypos(&mut self, cx: &Cx, ypos_abs: f32, text_buffer: &TextBuffer, end: bool) -> usize {
-        let rel = self._bg_area.abs_to_rel(cx, Vec2 {x: 0.0, y: ypos_abs}, false);
+        let rel = self.view.get_view_area(cx).abs_to_rel(cx, Vec2 {x: 0.0, y: ypos_abs}, false);
         let mut mono_size;
         // = Vec2::zero();
         let end_col = if end {1 << 31}else {0};
