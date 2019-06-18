@@ -253,6 +253,7 @@ impl CocoaApp {
             },
             appkit::NSMouseEntered => {},
             appkit::NSMouseExited => {},
+            /*
             appkit::NSMouseMoved |
             appkit::NSLeftMouseDragged |
             appkit::NSOtherMouseDragged |
@@ -274,7 +275,7 @@ impl CocoaApp {
                 let mouse_pos = Vec2 {x: view_point.x as f32, y: view_rect.size.height as f32 - view_point.y as f32};
                 
                 cocoa_window.send_finger_hover_and_move(mouse_pos, get_event_key_modifier(ns_event));
-            },
+            },*/
             appkit::NSScrollWheel => {
                 let window: id = ns_event.window();
                 if window == nil {
@@ -1341,20 +1342,38 @@ pub fn define_cocoa_view_class() -> *const Class {
         cw.send_finger_up(2, modifiers);
     }
     
-    extern fn mouse_moved(_this: &Object, _sel: Sel, _event: id) {
-        // mouse_motion(this, event);
+    fn mouse_pos_from_event(this: &Object, event: id) -> Vec2 {
+        // We have to do this to have access to the `NSView` trait...
+        unsafe {
+            let view: id = this as *const _ as *mut _;
+            let window_point = event.locationInWindow();
+            let view_point = view.convertPoint_fromView_(window_point, nil);
+            let view_rect = NSView::frame(view);
+            Vec2 {x: view_point.x as f32, y: view_rect.size.height as f32 - view_point.y as f32}
+        }
     }
     
-    extern fn mouse_dragged(_this: &Object, _sel: Sel, _event: id) {
-        //  mouse_motion(this, event);
+    fn mouse_motion(this: &Object, event: id) {
+        let cw = get_cocoa_window(this);
+        let pos = mouse_pos_from_event(this, event);
+        let modifiers = get_event_key_modifier(event);
+        cw.send_finger_hover_and_move(pos, modifiers);
     }
     
-    extern fn right_mouse_dragged(_this: &Object, _sel: Sel, _event: id) {
-        //  mouse_motion(this, event);
+    extern fn mouse_moved(this: &Object, _sel: Sel, event: id) {
+        mouse_motion(this, event);
     }
     
-    extern fn other_mouse_dragged(_this: &Object, _sel: Sel, _event: id) {
-        //  mouse_motion(this, event);
+    extern fn mouse_dragged(this: &Object, _sel: Sel, event: id) {
+        mouse_motion(this, event);
+    }
+    
+    extern fn right_mouse_dragged(this: &Object, _sel: Sel, event: id) {
+        mouse_motion(this, event);
+    }
+    
+    extern fn other_mouse_dragged(this: &Object, _sel: Sel, event: id) {
+        mouse_motion(this, event);
     }
     
     extern fn draw_rect(this: &Object, _sel: Sel, rect: NSRect) {
