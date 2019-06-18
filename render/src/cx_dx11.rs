@@ -136,6 +136,9 @@ impl Cx {
                 self.process_desktop_pre_event(&mut event, &mut event_handler);
                 
                 match &event {
+                    Event::WindowSetHoverCursor(mc)=>{
+                        self.set_hover_mouse_cursor(mc.clone());
+                    },
                     Event::WindowResizeLoop(wr) => {
                         for d3d11_window in &mut d3d11_windows {
                             if d3d11_window.window_id == wr.window_id {

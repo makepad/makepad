@@ -74,7 +74,7 @@ impl Win32App {
             cbWndExtra: 0,
             hInstance: unsafe {libloaderapi::GetModuleHandleW(ptr::null())},
             hIcon: unsafe {winuser::LoadIconW(ptr::null_mut(), winuser::IDI_WINLOGO)}, //h_icon,
-            hCursor: ptr::null_mut(),//unsafe {winuser::LoadCursorW(ptr::null_mut(), winuser::IDC_ARROW)}, // must be null in order for cursor state to work properly
+            hCursor: ptr::null_mut(), //unsafe {winuser::LoadCursorW(ptr::null_mut(), winuser::IDC_ARROW)}, // must be null in order for cursor state to work properly
             hbrBackground: ptr::null_mut(),
             lpszMenuName: ptr::null(),
             lpszClassName: class_name_wstr.as_ptr(),
@@ -317,7 +317,7 @@ impl Win32App {
             };
             self.current_cursor = cursor;
             unsafe {
-                if win32_cursor ==  ptr::null() {
+                if win32_cursor == ptr::null() {
                     winuser::ShowCursor(0);
                 }
                 else {
@@ -431,27 +431,37 @@ impl Win32Window {
                 const EDGE: i32 = 8;
                 winuser::GetWindowRect(hwnd, &mut rect);
                 if xcoord < rect.left + EDGE {
+                    (*window.win32_app).current_cursor = MouseCursor::Hidden;
                     if ycoord < rect.top + EDGE {
+                        window.do_callback(&mut vec![Event::WindowSetHoverCursor(MouseCursor::NwseResize)]);
                         return winuser::HTTOPLEFT;
                     }
                     if ycoord > rect.bottom - EDGE {
+                        window.do_callback(&mut vec![Event::WindowSetHoverCursor(MouseCursor::NeswResize)]);
                         return winuser::HTBOTTOMLEFT;
                     }
+                    window.do_callback(&mut vec![Event::WindowSetHoverCursor(MouseCursor::EwResize)]);
                     return winuser::HTLEFT;
                 }
                 if xcoord > rect.right - EDGE {
+                    (*window.win32_app).current_cursor = MouseCursor::Hidden;
                     if ycoord < rect.top + EDGE {
+                        window.do_callback(&mut vec![Event::WindowSetHoverCursor(MouseCursor::NeswResize)]);
                         return winuser::HTTOPRIGHT;
                     }
                     if ycoord > rect.bottom - EDGE {
+                        window.do_callback(&mut vec![Event::WindowSetHoverCursor(MouseCursor::NwseResize)]);
                         return winuser::HTBOTTOMRIGHT;
                     }
+                    window.do_callback(&mut vec![Event::WindowSetHoverCursor(MouseCursor::EwResize)]);
                     return winuser::HTRIGHT;
                 }
                 if ycoord < rect.top + EDGE {
+                    window.do_callback(&mut vec![Event::WindowSetHoverCursor(MouseCursor::NsResize)]);
                     return winuser::HTTOP;
                 }
                 if ycoord > rect.bottom - EDGE {
+                    window.do_callback(&mut vec![Event::WindowSetHoverCursor(MouseCursor::NsResize)]);
                     return winuser::HTBOTTOM;
                 }
                 let mut events = vec![
@@ -464,9 +474,17 @@ impl Win32Window {
                 window.do_callback(&mut events);
                 match &events[0] {
                     Event::WindowDragQuery(wd) => match &wd.response {
-                        WindowDragQueryResponse::Client => return winuser::HTCLIENT,
-                        WindowDragQueryResponse::Caption => return winuser::HTCAPTION,
-                        WindowDragQueryResponse::SysMenu => return winuser::HTSYSMENU,
+                        WindowDragQueryResponse::Client => {
+                            return winuser::HTCLIENT
+                        }
+                        WindowDragQueryResponse::Caption => {
+                            window.do_callback(&mut vec![Event::WindowSetHoverCursor(MouseCursor::Default)]);
+                            return winuser::HTCAPTION
+                        },
+                        WindowDragQueryResponse::SysMenu => {
+                            window.do_callback(&mut vec![Event::WindowSetHoverCursor(MouseCursor::Default)]);
+                            return winuser::HTSYSMENU
+                        }
                         _ => ()
                     },
                     _ => ()
@@ -511,6 +529,7 @@ impl Win32Window {
                     modifiers: Self::get_key_modifiers(),
                     time: window.time_now()
                 })]);
+                (*window.win32_app).current_cursor = MouseCursor::Hidden;
             },
             winuser::WM_MOUSEWHEEL => {
                 let delta = (wparam>>16) as u16 as i16 as f32;

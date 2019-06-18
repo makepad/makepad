@@ -103,7 +103,7 @@ impl DesktopButton {
                     return df_result;
                 }
                 // WindowsClose
-                if abs(button_type - 4.) < 0.1 { 
+                if abs(button_type - 4.) < 0.1 {
                     df_clear(mix(color("#3"), mix(color("#e00"), color("#c00"), down), hover));
                     df_move_to(c.x - sz, c.y - sz);
                     df_line_to(c.x + sz, c.y + sz);
@@ -133,15 +133,20 @@ impl DesktopButton {
                 self.animator.play_anim(cx, self.anim_down.clone());
                 return ButtonEvent::Down;
             },
-            Event::FingerHover(fe) => match fe.hover_state {
-                HoverState::In => if fe.any_down {
-                    self.animator.play_anim(cx, self.anim_down.clone())
+            Event::FingerHover(fe) => {
+                cx.set_hover_mouse_cursor(MouseCursor::Default);
+                match fe.hover_state {
+                    HoverState::In => if fe.any_down {
+                        self.animator.play_anim(cx, self.anim_down.clone())
+                    }
+                    else {
+                        self.animator.play_anim(cx, self.anim_over.clone())
+                    },
+                    HoverState::Out => {
+                        self.animator.play_default(cx)
+                    }
+                    _ => ()
                 }
-                else {
-                    self.animator.play_anim(cx, self.anim_over.clone())
-                },
-                HoverState::Out => self.animator.play_default(cx),
-                _ => ()
             },
             Event::FingerUp(fe) => if fe.is_over {
                 if !fe.is_touch {self.animator.play_anim(cx, self.anim_over.clone())}

@@ -222,6 +222,7 @@ pub enum Event {
     AnimateEnded(AnimateEvent),
     Animate(AnimateEvent),
     Frame(FrameEvent),
+    WindowSetHoverCursor(MouseCursor),
     WindowDragQuery(WindowDragQueryEvent),
     WindowCloseRequested(WindowCloseRequestedEvent),
     WindowClosed(WindowClosedEvent),
