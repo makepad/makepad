@@ -21,10 +21,6 @@ rand = "*"
 
 [dependencies.widget]
 path="../widget"
-default-features = false
-features=["webgl"]
 
 [dependencies.render]
 path="../render"
-default-features = false
-features=["webgl"]

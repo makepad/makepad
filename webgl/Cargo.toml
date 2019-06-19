@@ -21,15 +21,9 @@ serde = { version = "1.0", features = ["derive"] }
 
 [dependencies.widget]
 path="../widget"
-default-features = false
-features=["webgl"]
 
 [dependencies.render]
 path="../render"
-default-features = false
-features=["webgl"]
 
 [dependencies.editor]
 path="../editor"
-default-features = false
-features=["webgl"]

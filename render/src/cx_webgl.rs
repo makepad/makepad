@@ -5,28 +5,28 @@ use crate::cx::*;
 use std::alloc;
 
 impl Cx {
-    pub fn exec_draw_list(&mut self, draw_list_id: usize) {
+    pub fn render_view(&mut self, pass_id: usize, view_id: usize) {
         // tad ugly otherwise the borrow checker locks 'self' and we can't recur
-        let draw_calls_len = self.draw_lists[draw_list_id].draw_calls_len;
+        let draw_calls_len = self.views[view_id].draw_calls_len;
         
         for draw_call_id in 0..draw_calls_len {
             
-            let sub_list_id = self.draw_lists[draw_list_id].draw_calls[draw_call_id].sub_list_id;
-            if sub_list_id != 0 {
-                self.exec_draw_list(sub_list_id);
+            let sub_view_id = self.views[view_id].draw_calls[draw_call_id].sub_view_id;
+            if sub_view_id != 0 {
+                self.render_view(pass_id, sub_view_id);
             }
             else {
-                let draw_list = &mut self.draw_lists[draw_list_id];
+                let cxview = &mut self.views[view_id];
                 
-                draw_list.set_clipping_uniforms();
+                cxview.set_clipping_uniforms();
                 
-                let draw_call = &mut draw_list.draw_calls[draw_call_id];
-                let csh = &self.compiled_shaders[draw_call.shader_id];
+                let draw_call = &mut cxview.draw_calls[draw_call_id];
+                let sh = &self.shaders[draw_call.shader_id];
                 
                 if draw_call.instance_dirty {
                     draw_call.instance_dirty = false;
                     // update the instance buffer data
-                    draw_call.platform.check_attached_vao(csh, &mut self.platform);
+                    draw_call.platform.check_attached_vao(draw_call.shader_id, sh, &mut self.platform);
                     
                     self.platform.from_wasm.alloc_array_buffer(
                         draw_call.platform.inst_vb_id,
@@ -36,20 +36,24 @@ impl Cx {
                 }
                 
                 // update/alloc textures?
-                for tex_id in &draw_call.textures_2d {
-                    let tex = &mut self.textures_2d[*tex_id as usize];
-                    if tex.dirty {
-                        tex.upload_to_device(&mut self.platform);
+                for texture_id in &draw_call.textures_2d {
+                    let cxtexture = &mut self.textures[*texture_id as usize];
+                    if cxtexture.upload_image {
+                        cxtexture.upload_image = false;
+                        self.platform.from_wasm.update_texture_image2d(*texture_id as usize, cxtexture);
+                        //Self::update_platform_texture_image2d(&mut self.platform);
                     }
                 }
+                let cxuniforms = &self.passes[pass_id].uniforms;
+                
                 self.platform.from_wasm.draw_call(
                     draw_call.shader_id,
                     draw_call.platform.vao_id,
-                    &self.uniforms,
+                    cxuniforms,
                     self.redraw_id as usize,
                     // update once a frame
-                    &draw_list.uniforms,
-                    draw_list_id,
+                    &cxview.uniforms,
+                    view_id,
                     // update on drawlist change
                     &draw_call.uniforms,
                     draw_call.draw_call_id,
@@ -60,16 +64,16 @@ impl Cx {
         }
     }
     
-    pub fn repaint(&mut self) {
-        self.platform.from_wasm.clear(
-            self.clear_color.r,
-            self.clear_color.g,
-            self.clear_color.b,
-            self.clear_color.a
-        );
-        self.prepare_frame();
+    pub fn draw_pass_to_canvas(&mut self, pass_id: usize) {
+        let view_id = self.passes[pass_id].main_view_id.unwrap();
         
-        self.exec_draw_list(0);
+        if self.passes[pass_id].color_textures.len()>0 {
+            let color_texture = &self.passes[pass_id].color_textures[0];
+            if let Some(color) = color_texture.clear_color {
+                self.platform.from_wasm.clear(color.r, color.g, color.b, color.a);
+            }
+        }
+        self.render_view(pass_id, view_id);
     }
     
     // incoming to_wasm. There is absolutely no other entrypoint
@@ -85,9 +89,10 @@ impl Cx {
             for _i in 0..10 {
                 self.platform.fingers_down.push(false);
             }
-            self.feature = "webgl".to_string();
+            self.platform_type = PlatformType::WASM;
         }
-        let root_view = unsafe {&mut *(self.platform.root_view_ptr as *mut View<NoScrollBar>)};
+        
+        //let root_view = unsafe {&mut *(self.platform.root_view_ptr as *mut View<NoScrollBar>)};
         let mut to_wasm = ToWasm::from(msg);
         self.platform.from_wasm = FromWasm::new();
         let mut is_animation_frame = false;
@@ -98,64 +103,79 @@ impl Cx {
                     break;
                 },
                 1 => { // fetch_deps
-                    self.platform.from_wasm.set_document_title(&self.title);
+                    
                     // compile all the shaders
                     self.platform.from_wasm.log(&self.title);
                     
                     // send the UI our deps, overlap with shadercompiler
                     let mut load_deps = Vec::new();
                     for font in &self.fonts {
-                        load_deps.push(font.name.clone());
+                        load_deps.push(font.path.clone());
                     }
                     // other textures, things
                     self.platform.from_wasm.load_deps(load_deps);
                     
-                    self.compile_all_webgl_shaders();
+                    self.webgl_compile_all_shaders();
                 },
                 2 => { // deps_loaded
                     let len = to_wasm.mu32();
-                    for _i in 0..len {
-                        let name = to_wasm.parse_string();
+                    
+                    for _ in 0..len {
+                        let dep_path = to_wasm.parse_string();
                         let vec_ptr = to_wasm.mu32() as *mut u8;
                         let vec_len = to_wasm.mu32() as usize;
-                        let vec_rec = unsafe {Vec::<u8>::from_raw_parts(vec_ptr, vec_len, vec_len)};
-                        self.binary_deps.push(BinaryDep::new_from_vec(name, vec_rec))
-                    }
-                    
-                    // lets load the fonts from binary deps
-                    let num_fonts = self.fonts.len();
-                    for i in 0..num_fonts {
-                        let font_file = self.fonts[i].name.clone();
-                        let bin_dep = self.get_binary_dep(&font_file);
-                        if let Some(mut bin_dep) = bin_dep {
-                            if let Err(msg) = self.load_font_from_binary_dep(&mut bin_dep) {
-                                self.platform.from_wasm.log(&format!("Error loading font! {}", msg));
+                        
+                        let len = self.fonts.len();
+                        for i in 0..len {
+                            let path = self.fonts[i].path.clone();
+                            // lets find path in deps
+                            if dep_path == path {
+                                let vec_rec = unsafe {Vec::<u8>::from_raw_parts(vec_ptr, vec_len, vec_len)};
+                                let mut read = BinaryReader::new_from_vec(path.clone(), vec_rec);
+                                let result = CxFont::from_binary_reader(self, path.clone(), self.fonts[i].texture_id, &mut read);
+                                if let Ok(cxfont) = result {
+                                    self.fonts[i] = cxfont;
+                                }
+                                continue;
                             }
                         }
                     }
+                    
                 },
                 3 => { // init
-                    self.window_geom = WindowGeom{
-                        inner_size:Vec2 {x: to_wasm.mf32(), y: to_wasm.mf32()},
-                        dpi_factor:to_wasm.mf32(),
-                        outer_size:Vec2{x:0.,y:0.},
-                        position:Vec2{x:0.,y:0.}
+                    self.platform.window_geom = WindowGeom {
+                        is_fullscreen: false,
+                        is_topmost: false,
+                        inner_size: Vec2 {x: to_wasm.mf32(), y: to_wasm.mf32()},
+                        dpi_factor: to_wasm.mf32(),
+                        outer_size: Vec2 {x: 0., y: 0.},
+                        position: Vec2 {x: 0., y: 0.}
                     };
-
+                    
+                    if self.windows.len()>0 {
+                        self.windows[0].window_geom = self.platform.window_geom.clone();
+                    }
+                    
                     self.call_event_handler(&mut event_handler, &mut Event::Construct);
                     
-                    self.redraw_area(Area::All);
+                    self.redraw_child_area(Area::All);
                 },
                 4 => { // resize
-                    self.window_geom = WindowGeom{
-                        inner_size:Vec2 {x: to_wasm.mf32(), y: to_wasm.mf32()},
-                        dpi_factor:to_wasm.mf32(),
-                        outer_size:Vec2{x:0.,y:0.},
-                        position:Vec2{x:0.,y:0.}
+                    self.platform.window_geom = WindowGeom {
+                        is_fullscreen: false,
+                        is_topmost: false,
+                        inner_size: Vec2 {x: to_wasm.mf32(), y: to_wasm.mf32()},
+                        dpi_factor: to_wasm.mf32(),
+                        outer_size: Vec2 {x: 0., y: 0.},
+                        position: Vec2 {x: 0., y: 0.}
                     };
-
+                    
+                    if self.windows.len()>0 {
+                        self.windows[0].window_geom = self.platform.window_geom.clone();
+                    }
+                    
                     // do our initial redraw and repaint
-                    self.redraw_area(Area::All);
+                    self.redraw_child_area(Area::All);
                 },
                 5 => { // animation_frame
                     is_animation_frame = true;
@@ -164,7 +184,7 @@ impl Cx {
                     if self.playing_anim_areas.len() != 0 {
                         self.call_animation_event(&mut event_handler, time);
                     }
-                    if self.next_frame_callbacks.len() != 0 {
+                    if self.frame_callbacks.len() != 0 {
                         self.call_frame_event(&mut event_handler, time);
                     }
                 },
@@ -177,9 +197,10 @@ impl Cx {
                     let time = to_wasm.mf64();
                     let tap_count = self.process_tap_count(digit, abs, time);
                     self.call_event_handler(&mut event_handler, &mut Event::FingerDown(FingerDownEvent {
+                        window_id: 0,
                         abs: abs,
                         rel: abs,
-                        rect: Rect::zero(), 
+                        rect: Rect::zero(),
                         handled: false,
                         digit: digit,
                         is_touch: is_touch,
@@ -199,6 +220,7 @@ impl Cx {
                     let modifiers = unpack_key_modifier(to_wasm.mu32());
                     let time = to_wasm.mf64();
                     self.call_event_handler(&mut event_handler, &mut Event::FingerUp(FingerUpEvent {
+                        window_id: 0,
                         abs: abs,
                         rel: abs,
                         rect: Rect::zero(),
@@ -211,6 +233,7 @@ impl Cx {
                         time: time
                     }));
                     self.captured_fingers[digit] = Area::Empty;
+                    self.down_mouse_cursor = None;
                 },
                 8 => { // finger move
                     let abs = Vec2 {x: to_wasm.mf32(), y: to_wasm.mf32()};
@@ -219,6 +242,7 @@ impl Cx {
                     let modifiers = unpack_key_modifier(to_wasm.mu32());
                     let time = to_wasm.mf64();
                     self.call_event_handler(&mut event_handler, &mut Event::FingerMove(FingerMoveEvent {
+                        window_id: 0,
                         abs: abs,
                         rel: abs,
                         rect: Rect::zero(),
@@ -232,11 +256,14 @@ impl Cx {
                     }));
                 },
                 9 => { // finger hover
+                    self.finger_over_last_area = Area::Empty;
                     let abs = Vec2 {x: to_wasm.mf32(), y: to_wasm.mf32()};
                     self.hover_mouse_cursor = None;
                     let modifiers = unpack_key_modifier(to_wasm.mu32());
                     let time = to_wasm.mf64();
                     self.call_event_handler(&mut event_handler, &mut Event::FingerHover(FingerHoverEvent {
+                        any_down: false,
+                        window_id: 0,
                         abs: abs,
                         rel: abs,
                         rect: Rect::zero(),
@@ -245,6 +272,10 @@ impl Cx {
                         modifiers: modifiers,
                         time: time
                     }));
+                    self._finger_over_last_area = self.finger_over_last_area;
+                    //if fe.hover_state == HoverState::Out {
+                    //    self.hover_mouse_cursor = None;
+                   // }
                 },
                 10 => { // finger scroll
                     let abs = Vec2 {x: to_wasm.mf32(), y: to_wasm.mf32()};
@@ -256,6 +287,7 @@ impl Cx {
                     let modifiers = unpack_key_modifier(to_wasm.mu32());
                     let time = to_wasm.mf64();
                     self.call_event_handler(&mut event_handler, &mut Event::FingerScroll(FingerScrollEvent {
+                        window_id: 0,
                         abs: abs,
                         rel: abs,
                         rect: Rect::zero(),
@@ -271,6 +303,8 @@ impl Cx {
                     let modifiers = unpack_key_modifier(to_wasm.mu32());
                     let time = to_wasm.mf64();
                     self.call_event_handler(&mut event_handler, &mut Event::FingerHover(FingerHoverEvent {
+                        window_id: 0,
+                        any_down: false,
                         abs: abs,
                         rel: abs,
                         rect: Rect::zero(),
@@ -283,7 +317,7 @@ impl Cx {
                 12 => { // key_down
                     let key_event = KeyEvent {
                         key_code: web_to_key_code(to_wasm.mu32()),
-                        key_char: if let Some(c) = std::char::from_u32(to_wasm.mu32()) {c}else {'?'},
+                        //key_char: if let Some(c) = std::char::from_u32(to_wasm.mu32()) {c}else {'?'},
                         is_repeat: to_wasm.mu32() > 0,
                         modifiers: unpack_key_modifier(to_wasm.mu32()),
                         time: to_wasm.mf64()
@@ -294,7 +328,7 @@ impl Cx {
                 13 => { // key up
                     let key_event = KeyEvent {
                         key_code: web_to_key_code(to_wasm.mu32()),
-                        key_char: if let Some(c) = std::char::from_u32(to_wasm.mu32()) {c}else {'?'},
+                        //key_char: if let Some(c) = std::char::from_u32(to_wasm.mu32()) {c}else {'?'},
                         is_repeat: to_wasm.mu32() > 0,
                         modifiers: unpack_key_modifier(to_wasm.mu32()),
                         time: to_wasm.mf64()
@@ -338,14 +372,14 @@ impl Cx {
                         timer_id: timer_id
                     }));
                 },
-                18 =>{ // window focus lost
+                18 => { // window focus lost
                     let focus = to_wasm.mu32();
-                    if focus == 0{
+                    if focus == 0 {
                         self.call_all_keys_up(&mut event_handler);
-                        self.call_event_handler(&mut event_handler,&mut Event::AppFocusLost);
+                        self.call_event_handler(&mut event_handler, &mut Event::AppFocusLost);
                     }
-                    else{
-                        self.call_event_handler(&mut event_handler,&mut Event::AppFocus);
+                    else {
+                        self.call_event_handler(&mut event_handler, &mut Event::AppFocus);
                     }
                 },
                 _ => {
@@ -356,12 +390,28 @@ impl Cx {
         
         self.call_signals_before_draw(&mut event_handler);
         
-        if is_animation_frame && self.redraw_areas.len()>0 {
-            self.call_draw_event(&mut event_handler, root_view);
-            self.paint_dirty = true;
+        if self.redraw_child_areas.len()>0 || self.redraw_parent_areas.len()>0 {
+            self.call_draw_event(&mut event_handler);
         }
         
         self.call_signals_after_draw(&mut event_handler);
+        
+        for window in &mut self.windows {
+            
+            window.window_state = match &window.window_state {
+                CxWindowState::Create {title, ..} => {
+                    self.platform.from_wasm.set_document_title(&title);
+                    window.window_geom = self.platform.window_geom.clone();
+                    
+                    CxWindowState::Created
+                },
+                CxWindowState::Close => {
+                    CxWindowState::Closed
+                },
+                CxWindowState::Created => CxWindowState::Created,
+                CxWindowState::Closed => CxWindowState::Closed
+            };
+        }
         
         // check if we need to send a cursor
         if !self.down_mouse_cursor.is_none() {
@@ -369,27 +419,52 @@ impl Cx {
         }
         else if !self.hover_mouse_cursor.is_none() {
             self.platform.from_wasm.set_mouse_cursor(self.hover_mouse_cursor.as_ref().unwrap().clone())
-        }else {
+        }
+        else {
             self.platform.from_wasm.set_mouse_cursor(MouseCursor::Default);
         }
         
-        if is_animation_frame && self.paint_dirty {
-            self.paint_dirty = false;
-            self.repaint_id += 1;
-            self.repaint();
-        }
+        let mut passes_todo = Vec::new();
+        let mut windows_need_repaint = 0;
+        self.compute_passes_to_repaint(&mut passes_todo, &mut windows_need_repaint);
         
+        if is_animation_frame { // only repaint in animation frame
+            
+            if passes_todo.len() > 0 {
+                for pass_id in &passes_todo {
+                    match self.passes[*pass_id].dep_of.clone() {
+                        CxPassDepOf::Window(_) => {
+                            
+                            
+                            // find the accompanying render window
+                            // its a render window
+                            windows_need_repaint -= 1;
+                            let dpi_factor = self.platform.window_geom.dpi_factor;
+                            self.passes[*pass_id].set_dpi_factor(dpi_factor);
+                            self.passes[*pass_id].paint_dirty = false;
+                            self.draw_pass_to_canvas(*pass_id);
+                        }
+                        CxPassDepOf::Pass(parent_pass_id) => {
+                            let dpi_factor = self.get_delegated_dpi_factor(parent_pass_id);
+                            self.passes[*pass_id].set_dpi_factor(dpi_factor);
+                            // TODO
+                        },
+                        CxPassDepOf::None => ()
+                    }
+                }
+            }
+        }
         // free the received message
         to_wasm.dealloc();
         
         // request animation frame if still need to redraw, or repaint
         // we use request animation frame for that.
-        if self.redraw_areas.len() > 0 || self.playing_anim_areas.len()> 0 || self.paint_dirty || self.next_frame_callbacks.len() != 0 {
+        if !(passes_todo.len() == 0 && self.playing_anim_areas.len() == 0 && self.redraw_parent_areas.len() == 0 && self.redraw_child_areas.len() == 0 && self.frame_callbacks.len() == 0) {
             self.platform.from_wasm.request_animation_frame();
         }
+        
         // mark the end of the message
         self.platform.from_wasm.end();
-        
         
         //return wasm pointer to caller
         self.platform.from_wasm.wasm_ptr()
@@ -406,7 +481,7 @@ impl Cx {
         //let _=io::stdout().flush();
     }
     
-    pub fn send_signal(_signal: Signal, _value: u64) {
+    pub fn send_signal(_signal: Signal, _value: usize) {
         // todo
     }
     
@@ -414,19 +489,19 @@ impl Cx {
         let id = self.platform.file_read_id;
         self.platform.from_wasm.read_file(id as u32, path);
         self.platform.file_read_id += 1;
-        FileReadRequest{read_id:id, path:path.to_string()}
+        FileReadRequest {read_id: id, path: path.to_string()}
     }
     
     pub fn write_file(&mut self, _path: &str, _data: &[u8]) -> u64 {
         return 0
     }
-
+    
     pub fn set_window_outer_size(&mut self, _size: Vec2) {
     }
     
     pub fn set_window_position(&mut self, _pos: Vec2) {
     }
-
+    
     pub fn show_text_ime(&mut self, x: f32, y: f32) {
         self.platform.from_wasm.show_text_ime(x, y);
     }
@@ -438,76 +513,58 @@ impl Cx {
     pub fn start_timer(&mut self, interval: f64, repeats: bool) -> Timer {
         self.timer_id += 1;
         self.platform.from_wasm.start_timer(self.timer_id, interval, repeats);
-        Timer{timer_id:self.timer_id}
+        Timer {timer_id: self.timer_id}
     }
     
-    pub fn stop_timer(&mut self, timer:&mut Timer) {
-        if timer.timer_id != 0{
+    pub fn stop_timer(&mut self, timer: &mut Timer) {
+        if timer.timer_id != 0 {
             self.platform.from_wasm.stop_timer(timer.timer_id);
             timer.timer_id = 0;
         }
     }
     
-    pub fn http_send(&self, verb:&str, path:&str, domain:&str, port:&str, body:&str){
+    pub fn http_send(&self, _verb: &str, _path: &str, _domain: &str, _port: &str, _body: &str) {
         
     }
     
-    pub fn compile_all_webgl_shaders(&mut self) {
-        for sh in &self.shaders {
-            let csh = Self::compile_webgl_shader(self.compiled_shaders.len(), &sh, &mut self.platform);
-            if let Ok(csh) = csh {
-                self.compiled_shaders.push(CompiledShader {
-                    shader_id: self.compiled_shaders.len(),
-                    ..csh
-                });
+    pub fn webgl_compile_all_shaders(&mut self) {
+        for (shader_id, sh) in self.shaders.iter_mut().enumerate() {
+            let glsh = Self::webgl_compile_shader(shader_id, sh, &mut self.platform);
+            if let Err(err) = glsh {
+                self.platform.from_wasm.log(&format!("Got GLSL shader compile error: {}", err.msg))
             }
-            else if let Err(err) = csh {
-                self.platform.from_wasm.log(&format!("GOT ERROR: {}", err.msg));
-                self.compiled_shaders.push(
-                    CompiledShader {..Default::default()}
-                )
-            }
-        };
+        }
     }
     
-    pub fn compile_webgl_shader(shader_id: usize, sh: &Shader, platform: &mut CxPlatform) -> Result<CompiledShader, SlErr> {
-        let ash = Self::gl_assemble_shader(sh, GLShaderType::WebGL1) ?;
+    pub fn webgl_compile_shader(shader_id: usize, sh: &mut CxShader, platform: &mut CxPlatform) -> Result<(), SlErr> {
+        let (vertex, fragment, mapping) = Self::gl_assemble_shader(&sh.shader_gen, GLShaderType::WebGL1) ?;
         //let shader_id = self.compiled_shaders.len();
-        platform.from_wasm.compile_webgl_shader(shader_id, &ash);
+        platform.from_wasm.compile_webgl_shader(shader_id, &vertex, &fragment, &mapping);
         
         let geom_ib_id = platform.get_free_index_buffer();
         let geom_vb_id = platform.get_free_index_buffer();
         
         platform.from_wasm.alloc_array_buffer(
             geom_vb_id,
-            sh.geometry_vertices.len(),
-            sh.geometry_vertices.as_ptr() as *const f32
+            sh.shader_gen.geometry_vertices.len(),
+            sh.shader_gen.geometry_vertices.as_ptr() as *const f32
         );
         
         platform.from_wasm.alloc_index_buffer(
             geom_ib_id,
-            sh.geometry_indices.len(),
-            sh.geometry_indices.as_ptr() as *const u32
+            sh.shader_gen.geometry_indices.len(),
+            sh.shader_gen.geometry_indices.as_ptr() as *const u32
         );
         
-        let csh = CompiledShader {
-            shader_id: 0,
-            geometry_slots: ash.geometry_slots,
-            instance_slots: ash.instance_slots,
+        sh.mapping = mapping;
+        sh.platform = Some(CxPlatformShader {
             geom_vb_id: geom_vb_id,
             geom_ib_id: geom_ib_id,
-            uniforms_cx: ash.uniforms_cx.clone(),
-            uniforms_dl: ash.uniforms_dl.clone(),
-            uniforms_dr: ash.uniforms_dr.clone(),
-            texture_slots: ash.texture_slots.clone(),
-            rect_instance_props: ash.rect_instance_props.clone(),
-            named_instance_props: ash.named_instance_props.clone(),
-            named_uniform_props: ash.named_uniform_props.clone(),
-            //assembled_shader:ash,
-            ..Default::default()
-        };
+            vertex: vertex,
+            fragment: fragment
+        });
         
-        Ok(csh)
+        Ok(())
     }
     
 }
@@ -649,37 +706,11 @@ fn web_to_key_code(key_code: u32) -> KeyCode {
     }
 }
 
-#[derive(Default, Clone)]
-pub struct CompiledShader {
-    pub shader_id: usize,
-    pub geom_vb_id: usize,
-    pub geom_ib_id: usize,
-    pub instance_slots: usize,
-    pub geometry_slots: usize,
-    pub uniforms_dr: Vec<ShVar>,
-    pub uniforms_dl: Vec<ShVar>,
-    pub uniforms_cx: Vec<ShVar>,
-    pub texture_slots: Vec<ShVar>,
-    pub named_uniform_props: NamedProps,
-    pub named_instance_props: NamedProps,
-    pub rect_instance_props: RectInstanceProps,
-}
-
-#[derive(Default, Clone)]
-pub struct WebGLTexture2D {
-    pub texture_id: usize
-}
-
-
-#[derive(Clone, Default)]
-pub struct CxShaders {
-    pub compiled_shaders: Vec<CompiledShader>,
-    pub shaders: Vec<Shader>,
-}
 
 // storage buffers for graphics API related platform
 #[derive(Clone)]
 pub struct CxPlatform {
+    pub window_geom: WindowGeom,
     pub from_wasm: FromWasm,
     pub vertex_buffers: usize,
     pub vertex_buffers_free: Vec<usize>,
@@ -695,6 +726,7 @@ pub struct CxPlatform {
 impl Default for CxPlatform {
     fn default() -> CxPlatform {
         CxPlatform {
+            window_geom: WindowGeom::default(),
             from_wasm: FromWasm::zero(),
             vertex_buffers: 1,
             vertex_buffers_free: Vec::new(),
@@ -739,26 +771,42 @@ impl CxPlatform {
     }
 }
 
+#[derive(Default, Clone, Debug)]
+pub struct CxPlatformPass {
+}
+
 #[derive(Clone, Default)]
-pub struct DrawListPlatform {
+pub struct CxPlatformView {
 }
 
 #[derive(Default, Clone)]
-pub struct DrawCallPlatform {
+pub struct PlatformDrawCall {
     pub resource_shader_id: Option<usize>,
     pub vao_id: usize,
     pub inst_vb_id: usize
 }
 
-impl DrawCallPlatform {
+#[derive(Clone)]
+pub struct CxPlatformShader {
+    pub vertex: String,
+    pub fragment: String,
+    pub geom_vb_id: usize,
+    pub geom_ib_id: usize,
+}
+
+#[derive(Clone, Default)]
+pub struct CxPlatformTexture {
+}
+
+impl PlatformDrawCall {
     
-    pub fn check_attached_vao(&mut self, csh: &CompiledShader, platform: &mut CxPlatform) {
-        if self.resource_shader_id.is_none() || self.resource_shader_id.unwrap() != csh.shader_id {
+    pub fn check_attached_vao(&mut self, shader_id: usize, sh: &CxShader, platform: &mut CxPlatform) {
+        if self.resource_shader_id.is_none() || self.resource_shader_id.unwrap() != shader_id {
             self.free(platform);
             // dont reuse vaos accross shader ids
             
             // create the VAO
-            self.resource_shader_id = Some(csh.shader_id);
+            self.resource_shader_id = Some(shader_id);
             
             // get a free vao ID
             self.vao_id = platform.get_free_vao();
@@ -771,10 +819,10 @@ impl DrawCallPlatform {
             );
             
             platform.from_wasm.alloc_vao(
-                csh.shader_id,
+                shader_id,
                 self.vao_id,
-                csh.geom_ib_id,
-                csh.geom_vb_id,
+                sh.platform.as_ref().unwrap().geom_ib_id,
+                sh.platform.as_ref().unwrap().geom_vb_id,
                 self.inst_vb_id,
             );
         }
@@ -795,39 +843,7 @@ impl DrawCallPlatform {
 
 
 
-
-//  Texture
-
-
-
-#[derive(Default, Clone)]
-pub struct Texture2D {
-    pub texture_id: usize,
-    pub dirty: bool,
-    pub image: Vec<u32>,
-    pub width: usize,
-    pub height: usize
-}
-
-impl Texture2D {
-    pub fn resize(&mut self, width: usize, height: usize) {
-        self.width = width;
-        self.height = height;
-        self.image.resize((width * height) as usize, 0);
-        self.dirty = true;
-    }
-    
-    pub fn upload_to_device(&mut self, platform: &mut CxPlatform) {
-        platform.from_wasm.alloc_texture(self.texture_id, self.width, self.height, &self.image);
-        self.dirty = false;
-    }
-}
-
-
-
-
 //  Wasm API
-
 
 
 
@@ -879,8 +895,8 @@ impl FromWasm {
                 if new_slots & 1 != 0 { // f64 align
                     new_slots += 1;
                 }
-                let new_bytes = new_slots<<2;
-                let old_bytes = self.slots<<2;
+                let new_bytes = new_slots << 2;
+                let old_bytes = self.slots << 2;
                 let new_buf = alloc::alloc(alloc::Layout::from_size_align(new_bytes as usize, mem::align_of::<u64>()).unwrap()) as *mut u32;
                 ptr::copy_nonoverlapping(self.mu32, new_buf, self.slots);
                 alloc::dealloc(
@@ -959,19 +975,19 @@ impl FromWasm {
         self.add_string(msg);
     }
     
-    pub fn compile_webgl_shader(&mut self, shader_id: usize, ash: &AssembledGLShader) {
+    pub fn compile_webgl_shader(&mut self, shader_id: usize, vertex: &str, fragment: &str, mapping: &CxShaderMapping) {
         self.fit(2);
         self.mu32(2);
         self.mu32(shader_id as u32);
-        self.add_string(&ash.fragment);
-        self.add_string(&ash.vertex);
+        self.add_string(fragment);
+        self.add_string(vertex);
         self.fit(2);
-        self.mu32(ash.geometry_slots as u32);
-        self.mu32(ash.instance_slots as u32);
-        self.add_shvarvec(&ash.uniforms_cx);
-        self.add_shvarvec(&ash.uniforms_dl);
-        self.add_shvarvec(&ash.uniforms_dr);
-        self.add_shvarvec(&ash.texture_slots);
+        self.mu32(mapping.geometry_slots as u32);
+        self.mu32(mapping.instance_slots as u32);
+        self.add_shvarvec(&mapping.uniforms_cx);
+        self.add_shvarvec(&mapping.uniforms_vw);
+        self.add_shvarvec(&mapping.uniforms_dr);
+        self.add_shvarvec(&mapping.texture_slots);
     }
     
     pub fn alloc_array_buffer(&mut self, buffer_id: usize, len: usize, data: *const f32) {
@@ -1033,13 +1049,14 @@ impl FromWasm {
         }
     }
     
-    pub fn alloc_texture(&mut self, texture_id: usize, width: usize, height: usize, data: &Vec<u32>) {
+    pub fn update_texture_image2d(&mut self, texture_id: usize, texture: &mut CxTexture) {
+        //usize, width: usize, height: usize, data: &Vec<u32>
         self.fit(5);
         self.mu32(9);
         self.mu32(texture_id as u32);
-        self.mu32(width as u32);
-        self.mu32(height as u32);
-        self.mu32(data.as_ptr() as u32)
+        self.mu32(texture.desc.width.unwrap() as u32);
+        self.mu32(texture.desc.height.unwrap() as u32);
+        self.mu32(texture.image_u32.as_ptr() as u32)
     }
     
     pub fn request_animation_frame(&mut self) {
@@ -1079,20 +1096,12 @@ impl FromWasm {
             MouseCursor::AllScroll => 19,
             MouseCursor::ZoomIn => 20,
             MouseCursor::ZoomOut => 21,
-            MouseCursor::NResize => 22,
-            MouseCursor::NeResize => 23,
-            MouseCursor::EResize => 24,
-            MouseCursor::SeResize => 25,
-            MouseCursor::SResize => 26,
-            MouseCursor::SwResize => 27,
-            MouseCursor::WResize => 28,
-            MouseCursor::NwResize => 29,
-            MouseCursor::NsResize => 30,
-            MouseCursor::NeswResize => 31,
-            MouseCursor::EwResize => 32,
-            MouseCursor::NwseResize => 33,
-            MouseCursor::ColResize => 34,
-            MouseCursor::RowResize => 35,
+            MouseCursor::NsResize => 22,
+            MouseCursor::NeswResize => 23,
+            MouseCursor::EwResize => 24,
+            MouseCursor::NwseResize => 25,
+            MouseCursor::ColResize => 26,
+            MouseCursor::RowResize => 27,
             
         };
         self.mu32(cursor_id);
@@ -1256,4 +1265,9 @@ pub unsafe extern "C" fn dealloc_wasm_message(in_buf: u32) {
     let buf = in_buf as *mut u8;
     let bytes = buf.read() as usize;
     std::alloc::dealloc(buf as *mut u8, std::alloc::Layout::from_size_align(bytes as usize, mem::align_of::<u64>()).unwrap());
+}
+
+use std::process::{Child};
+pub fn spawn_process_command(_cmd: &str, _args: &[&str], _current_dir: &str) -> Result<Child, std::io::Error> {
+    Err(std::io::Error::new(std::io::ErrorKind::NotFound, ""))
 }

@@ -80,7 +80,7 @@ impl Cx {
         }
     }
     
-    fn draw_pass_to_layer(&mut self, pass_id: usize, vsync: bool, _dpi_factor: f32, d3d11_window: &mut D3d11Window, d3d11_cx: &D3d11Cx) {
+    fn draw_pass_to_window(&mut self, pass_id: usize, vsync: bool, _dpi_factor: f32, d3d11_window: &mut D3d11Window, d3d11_cx: &D3d11Cx) {
         let view_id = self.passes[pass_id].main_view_id.unwrap();
         
         self.platform.uni_cx.update_with_f32_constant_data(&d3d11_cx, &mut self.passes[pass_id].uniforms);
@@ -290,7 +290,7 @@ impl Cx {
                                             
                                             d3d11_window.resize_buffers(&d3d11_cx);
                                             
-                                            self.draw_pass_to_layer(
+                                            self.draw_pass_to_window(
                                                 *pass_id,
                                                 vsync,
                                                 dpi_factor,

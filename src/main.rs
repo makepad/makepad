@@ -433,7 +433,7 @@ impl App {
                                     ..self.app_window_template.clone()
                                 })
                             }
-                            
+                            cx.send_signal_before_draw(self.app_global.file_tree_reload_signal, 0);
                             cx.redraw_child_area(Area::All);
                         }
                     }
@@ -441,6 +441,7 @@ impl App {
                         println!("DOING DEFAULT");
                         self.app_global.state.windows = vec![self.app_window_state_template.clone()];
                         self.windows = vec![self.app_window_template.clone()];
+                        cx.send_signal_before_draw(self.app_global.file_tree_reload_signal, 0);
                         cx.redraw_child_area(Area::All);
                     }
                 }

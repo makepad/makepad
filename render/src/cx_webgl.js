@@ -162,20 +162,18 @@
         }
 
         key_down(key){
-            let pos = this.fit(5);
+            let pos = this.fit(4);
             this.mu32[pos++] = 12;
             this.mu32[pos++] = key.key_code;
-            this.mu32[pos++] = key.char_code;
             this.mu32[pos++] = key.is_repeat?1:0;
             this.mu32[pos++] = key.modifiers;
             this.send_f64(key.time);
         }
 
         key_up(key){
-            let pos = this.fit(5);
+            let pos = this.fit(4);
             this.mu32[pos++] = 13;
             this.mu32[pos++] = key.key_code;
-            this.mu32[pos++] = key.char_code;
             this.mu32[pos++] = key.is_repeat?1:0;
             this.mu32[pos++] = key.modifiers;
             this.send_f64(key.time);
@@ -615,20 +613,12 @@
                 "all-scroll",//AllScroll=>19,
                 "zoom-in",//ZoomIn=>20,
                 "zoom-out",//ZoomOut=>21,
-                "n-resize",//NResize=>22,
-                "ne-resize",//NeResize=>23,
-                "e-resize",//EResize=>24,
-                "se-resize",//SeResize=>25,
-                "s-resize",//SResize=>26,
-                "sw-resize",//SwResize=>27,
-                "w-resize",//WResize=>28,
-                "nw-resize",//NwResize=>29,
-                "ns-resize",//NsResize=>30,
-                "nesw-resize",//NeswResize=>31,
-                "ew-resize",//EwResize=>32,
-                "nwse-resize",//NwseResize=>33,
-                "col-resize",//ColResize=>34,
-                "row-resize",//RowResize=>35,
+                "ns-resize",//NsResize=>22,
+                "nesw-resize",//NeswResize=>23,
+                "ew-resize",//EwResize=>24,
+                "nwse-resize",//NwseResize=>25,
+                "col-resize",//ColResize=>26,
+                "row-resize",//RowResize=>27,
             ]
 
             var canvas = this.canvas
