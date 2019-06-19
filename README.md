@@ -28,8 +28,11 @@ then run
 Platforms:
 
 OSX + Metal - WORKING
+
 Win32 + DirectX11 - WORKING
+
 WASM + WebGL - BROKEN(in progress)
+
 Linux - TODO
 
 The project is split out over a few nested crates
@@ -39,12 +42,14 @@ src/main.rs - application 'main'
 webgl/ - webGL build crate info (actual source is src/main.rs)
 
 widget/src/*.rs - nested crate for the widgets
+
 render/src/*.rs - nested crate for the render engine
 
 The only 'web' JS code sits here, its a typed-array RPC driven simplification of the webGL API
 widgets/render/src/cx_webgl.js
 
 IMPORTANT, on windows may need to do manually with git:
+
 ./run_first_init.sh - just downloads the repository again in ./edit_repo for the editor to have something to do
 
 ./serve_webgl.sh (uses node to start a tiny server on 127.0.0.1:2001)
