@@ -123,6 +123,7 @@ impl ScrollBar {
             (self._view_total * (1. - vy) * (finger / self._scroll_size)) / (1. - norm_handle)
         ).max(0.).min(self._view_total - self._view_visible);
         
+        // lets snap new_scroll_pos
         let changed = self._scroll_pos != new_scroll_pos;
         self._scroll_pos = new_scroll_pos;
         self._scroll_target = new_scroll_pos;

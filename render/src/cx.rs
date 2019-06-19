@@ -247,6 +247,21 @@ impl Cx {
             1
         }
     }
+
+    pub fn get_dpi_factor_of(&mut self, area:Area) -> f32 {
+        match area{
+            Area::Instance(ia)=>{
+                let pass_id = self.views[ia.view_id].pass_id;
+                return self.get_delegated_dpi_factor(pass_id)
+            },
+            Area::View(va)=>{
+                let pass_id = self.views[va.view_id].pass_id;
+                return self.get_delegated_dpi_factor(pass_id)
+            },
+            _=>()
+        }
+        return 1.0;
+    }
     
     pub fn get_delegated_dpi_factor(&mut self, pass_id: usize) -> f32 {
         let mut dpi_factor = 1.0;
