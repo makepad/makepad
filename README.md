@@ -27,13 +27,10 @@ then run
 
 Platforms:
 
-WebGL compiles cleanly to wasm32-unknown-unknown without emscripten/wasmbindgen
-
-Native metal backend on OSX without winit dep for UI
-
-NOTE untill we complete our own linux/windows layers building on windows/linux is BROKEN
-
-Todo: DX11 / win32 native support, currently under way.
+OSX + Metal - WORKING
+Win32 + DirectX11 - WORKING
+WASM + WebGL - BROKEN(in progress)
+Linux - TODO
 
 The project is split out over a few nested crates
 
@@ -42,23 +39,19 @@ src/main.rs - application 'main'
 webgl/ - webGL build crate info (actual source is src/main.rs)
 
 widget/src/*.rs - nested crate for the widgets
-
-widgets/render/src/*.rs - nested crate for the render engine
+render/src/*.rs - nested crate for the render engine
 
 The only 'web' JS code sits here, its a typed-array RPC driven simplification of the webGL API
 widgets/render/src/cx_webgl.js
 
+IMPORTANT, on windows may need to do manually with git:
 ./run_first_init.sh - just downloads the repository again in ./edit_repo for the editor to have something to do
 
 ./serve_webgl.sh (uses node to start a tiny server on 127.0.0.1:2001)
 
-./build_webgl.sh - compiles the webGL thing
+./build_webgl.sh - compiles the webGL version
 
 ./build_release.sh - compiles the native ap
-
-You can choose the render backend by editing ./Cargo.toml
-At the bottom is features=["mtl"], default set for OSX
-set it to features=["ogl"] if you are on win/linux 
 
 Since webassembly can't really use a void main(){} because of the message loop,
 makepad uses a macro, in main.rs you see: main_app!(App, "My App!");
