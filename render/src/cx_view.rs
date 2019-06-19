@@ -17,7 +17,7 @@ pub enum ScrollBarEvent {
     None,
     Scroll {scroll_pos: f32, view_total: f32, view_visible: f32},
     ScrollDone
-}
+} 
 
 #[derive(Clone)]
 pub struct ViewTexture{
@@ -332,18 +332,18 @@ where TScrollBar: ScrollBarLike<TScrollBar> + Clone
         }
         
         if let Some(scroll_h) = &mut self.scroll_h {
-            let  scroll_pos = scroll_h.draw_scroll_bar(cx, Axis::Horizontal, view_area, rect_now, view_total);
+            let scroll_pos = scroll_h.draw_scroll_bar(cx, Axis::Horizontal, view_area, rect_now, view_total);
             // so, in a virtual viewport widget this isn't actually allowed
             let fac = cx.get_delegated_dpi_factor(cx.views[view_id].pass_id);
             let snapped_scroll_pos = scroll_pos - scroll_pos % (1.0 / fac);
-            cx.views[view_id].set_scroll_x(scroll_pos);
+            cx.views[view_id].set_scroll_x(snapped_scroll_pos);
         }
         if let Some(scroll_v) = &mut self.scroll_v {
             //println!("SET SCROLLBAR {} {}", rect_now.h, view_total.y);
-            let mut scroll_pos = scroll_v.draw_scroll_bar(cx, Axis::Vertical, view_area, rect_now, view_total);
+            let scroll_pos = scroll_v.draw_scroll_bar(cx, Axis::Vertical, view_area, rect_now, view_total);
             let fac = cx.get_delegated_dpi_factor(cx.views[view_id].pass_id);
             let snapped_scroll_pos = scroll_pos - scroll_pos % (1.0 / fac);
-            cx.views[view_id].set_scroll_y(scroll_pos);
+            cx.views[view_id].set_scroll_y(snapped_scroll_pos);
         }
         
         let rect = cx.end_turtle(view_area);
