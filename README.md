@@ -31,7 +31,7 @@ OSX + Metal - WORKING
 
 Win32 + DirectX11 - WORKING
 
-WASM + WebGL - BROKEN(in progress)
+WASM + WebGL - WORKING
 
 Linux - TODO
 
