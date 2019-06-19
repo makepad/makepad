@@ -26,6 +26,10 @@ impl Default for CxDesktop {
 
 impl Cx {
     
+    pub fn get_default_window_size(&self)->Vec2{
+        return Vec2{x:800., y:600.}
+    }
+    
     pub fn read_file(&mut self, path: &str) -> FileReadRequest {
         let desktop = &mut self.platform.desktop;
         desktop.file_read_id += 1;

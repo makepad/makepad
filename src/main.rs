@@ -426,7 +426,7 @@ impl App {
                                 }
                                 self.windows.push(AppWindow {
                                     desktop_window: DesktopWindow {window: Window {
-                                        create_inner_size: size,
+                                        create_inner_size: Some(size),
                                         create_position: create_pos,
                                         ..Style::style(cx)
                                     }, ..Style::style(cx)},

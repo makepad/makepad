@@ -3,7 +3,7 @@ use crate::cx::*;
 #[derive(Default, Clone)]
 pub struct Window {
     pub window_id: Option<usize>,
-    pub create_inner_size: Vec2,
+    pub create_inner_size: Option<Vec2>,
     pub create_position: Option<Vec2>,
     pub create_title: String,
 }
@@ -12,7 +12,7 @@ impl Style for Window {
     fn style(_cx: &mut Cx) -> Self {
         Self {
             window_id: None,
-            create_inner_size: Vec2 {x: 800., y: 600.},
+            create_inner_size: None,
             create_position: None,
             create_title: "Makepad".to_string()
         }
@@ -27,7 +27,12 @@ impl Window {
             let new_window = CxWindow {
                 window_state: CxWindowState::Create {
                     title: self.create_title.clone(),
-                    inner_size: self.create_inner_size,
+                    inner_size: if let Some(inner_size) = self.create_inner_size {
+                        inner_size
+                    }
+                    else {
+                        cx.get_default_window_size()
+                    },
                     position: self.create_position,
                 },
                 ..Default::default()
@@ -92,7 +97,7 @@ impl Window {
         }
     }
     
-    pub fn is_fullscreen(&mut self, cx: &mut Cx)->bool {
+    pub fn is_fullscreen(&mut self, cx: &mut Cx) -> bool {
         if let Some(window_id) = self.window_id {
             cx.windows[window_id].window_geom.is_fullscreen
         }
@@ -101,7 +106,7 @@ impl Window {
         }
     }
     
-    pub fn is_topmost(&mut self, cx: &mut Cx)->bool {
+    pub fn is_topmost(&mut self, cx: &mut Cx) -> bool {
         if let Some(window_id) = self.window_id {
             cx.windows[window_id].window_geom.is_topmost
         }

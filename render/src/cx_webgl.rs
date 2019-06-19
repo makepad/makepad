@@ -76,6 +76,10 @@ impl Cx {
         self.render_view(pass_id, view_id);
     }
     
+    pub fn get_default_window_size(&self)->Vec2{
+        return self.platform.window_geom.inner_size;
+    }
+    
     // incoming to_wasm. There is absolutely no other entrypoint
     // to general rust codeflow than this function. Only the allocators and init
     pub fn process_to_wasm<F>(&mut self, msg: u32, mut event_handler: F) -> u32
