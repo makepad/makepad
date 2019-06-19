@@ -31,6 +31,8 @@
 
 use render::*;
 use widget::*;
+pub mod cap_dshow;
+pub use crate::cap_dshow::*;
 
 struct App {
     view: View<ScrollBar>,
@@ -121,7 +123,7 @@ impl App {
         
         cx.turtle_new_line();
         
-        self.text.draw_text(cx, &format!("Hello World! {}", self.clickety));
+        self.text.draw_text(cx, &format!("Hi {}", self.clickety));
         
         self.quad.draw_quad_walk(cx, Bounds::Fix(100.), Bounds::Fix(100.), Margin {l: 15., t: 0., r: 0., b: 0.});
         

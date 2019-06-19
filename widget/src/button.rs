@@ -89,15 +89,18 @@ impl Button {
                 self.animator.play_anim(cx, self.anim_down.clone());
                 return ButtonEvent::Down;
             },
-            Event::FingerHover(fe) => match fe.hover_state {
-                HoverState::In => if fe.any_down {
-                    self.animator.play_anim(cx, self.anim_down.clone())
+            Event::FingerHover(fe) => {
+                
+                match fe.hover_state {
+                    HoverState::In => if fe.any_down {
+                        self.animator.play_anim(cx, self.anim_down.clone())
+                    }
+                    else {
+                        self.animator.play_anim(cx, self.anim_over.clone())
+                    },
+                    HoverState::Out => self.animator.play_default(cx),
+                    _ => ()
                 }
-                else {
-                    self.animator.play_anim(cx, self.anim_over.clone())
-                },
-                HoverState::Out => self.animator.play_default(cx),
-                _ => ()
             },
             Event::FingerUp(fe) => if fe.is_over {
                 if !fe.is_touch {self.animator.play_anim(cx, self.anim_over.clone())}
