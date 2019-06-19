@@ -354,7 +354,15 @@ impl Cx {
                         data: Ok(vec_buf)
                     }));
                 },
-                16 => { // text copy
+                16 => { // file error
+                    let read_id = to_wasm.mu32();
+                    
+                    self.call_event_handler(&mut event_handler, &mut Event::FileRead(FileReadEvent {
+                        read_id: read_id as u64,
+                        data: Err("Cannot load".to_string())
+                    }));
+                },
+                17 => { // text copy
                     let mut event = Event::TextCopy(TextCopyEvent {
                         response: None
                     });
@@ -366,13 +374,13 @@ impl Cx {
                         _ => ()
                     };
                 },
-                17 => { // timer fired
+                18 => { // timer fired
                     let timer_id = to_wasm.mf64() as u64;
                     self.call_event_handler(&mut event_handler, &mut Event::Timer(TimerEvent {
                         timer_id: timer_id
                     }));
                 },
-                18 => { // window focus lost
+                19 => { // window focus lost
                     let focus = to_wasm.mu32();
                     if focus == 0 {
                         self.call_all_keys_up(&mut event_handler);

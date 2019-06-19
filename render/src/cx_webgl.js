@@ -195,14 +195,21 @@
             this.mu32[pos++] = buf_len;
         }
 
+        read_file_error(id){
+            let pos = this.fit(2);
+            this.mu32[pos++] = 16;
+            this.mu32[pos++] = id;
+        }
+
+
         text_copy(){
             let pos = this.fit(1);
-            this.mu32[pos++] = 16;
+            this.mu32[pos++] = 17;
         }
 
         timer(id){
             let pos = this.fit(1);
-            this.mu32[pos++] = 17;
+            this.mu32[pos++] = 18;
             this.send_f64(id);
         }
 
@@ -248,7 +255,6 @@
             // ok now, we wait for our resources to load.
             Promise.all(this.resources).then(results=>{
                 let deps = []
-
                 // copy our reslts into wasm pointers
                 for(let i = 0; i < results.length; i++){
                     var result = results[i]
@@ -1167,6 +1173,7 @@
         }
 
         read_file(id, file_path){
+                
             fetch_path(file_path).then(result=>{
                 let byte_len = result.buffer.byteLength
                 let output_ptr = this.exports.alloc_wasm_vec(byte_len);
@@ -1174,6 +1181,8 @@
                 this.to_wasm.read_file_data(id, output_ptr, byte_len)
                 this.do_wasm_io();
             }, err=>{
+                this.to_wasm.read_file_error(id)
+                this.do_wasm_io();
             })
         }
 
