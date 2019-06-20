@@ -359,13 +359,9 @@ impl Cx {
                                             let dpi_factor = render_window.window_geom.dpi_factor;
                                             self.passes[*pass_id].set_dpi_factor(dpi_factor);
                                             
-                                            if render_window.resize_core_animation_layer(&metal_cx) {
-                                                self.passes[*pass_id].paint_dirty = true;
-                                                paint_dirty = true;
-                                            }
-                                            else {
-                                                self.passes[*pass_id].paint_dirty = false;
-                                            }
+                                            render_window.resize_core_animation_layer(&metal_cx);
+                                            
+                                            self.passes[*pass_id].paint_dirty = false;
                                             
                                             self.draw_pass_to_layer(
                                                 *pass_id,
