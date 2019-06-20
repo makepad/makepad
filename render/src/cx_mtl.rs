@@ -4,6 +4,7 @@ use std::mem;
 use cocoa::appkit::{NSView};
 use cocoa::foundation::{NSAutoreleasePool, NSUInteger, NSRange};
 use core_graphics::geometry::CGSize;
+use core_graphics::color::CGColor;
 use objc::{msg_send, sel, sel_impl};
 use objc::runtime::YES;
 use metal::*;
@@ -132,10 +133,9 @@ impl Cx {
             
             self.render_view(pass_id, view_id, &metal_cx, encoder);
             encoder.end_encoding();
-            //command_buffer.present_drawable(&drawable);
+            command_buffer.present_drawable(&drawable);
             command_buffer.commit();
             //command_buffer.wait_until_scheduled();
-            drawable.present();
         }
         unsafe {
             msg_send![pool, release];
@@ -601,13 +601,14 @@ impl MetalWindow {
             msg_send![core_animation_layer, setAutoresizingMask: (1 << 4) | (1 << 1)];
             msg_send![core_animation_layer, setAllowsNextDrawableTimeout: false];
             msg_send![core_animation_layer, setDelegate: cocoa_window.view];
+            msg_send![core_animation_layer, setBackgroundColor: CGColor::rgb(0.0, 0.0, 0.0, 1.0)];
         }
         
         unsafe {
             let view = cocoa_window.view;
             view.setWantsBestResolutionOpenGLSurface_(YES);
             view.setWantsLayer(YES);
-            msg_send![view, setLayerContentsPlacement: 0];
+            msg_send![view, setLayerContentsPlacement: 11];
             view.setLayer(mem::transmute(core_animation_layer.as_ref()));
         }
         
@@ -640,6 +641,7 @@ impl MetalWindow {
         if self.cal_size != cal_size {
             self.cal_size = cal_size;
             self.core_animation_layer.set_drawable_size(CGSize::new(cal_size.x as f64, cal_size.y as f64));
+            self.core_animation_layer.set_contents_scale(self.window_geom.dpi_factor as f64);
             //self.msam_target = Some(RenderTarget::new(device, self.cal_size.x as u64, self.cal_size.y as u64, 2));
             true
         }

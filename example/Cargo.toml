@@ -20,7 +20,8 @@ path="../render"
 
 [target.x86_64-pc-windows-gnu.dependencies]
 wio = "*"
+com-impl = "*"
 
 [target.x86_64-pc-windows-gnu.dependencies.winapi]
 version = "*"
-features = ["d3d11"]
+features = ["d3d11","propidl"]

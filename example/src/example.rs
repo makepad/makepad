@@ -89,7 +89,7 @@ impl App {
     fn handle_app(&mut self, cx: &mut Cx, event: &mut Event) {
         
         if let Event::Construct = event{
-            self.winmf.init();
+            self.winmf.init(cx);
         }
         self.window.handle_desktop_window(cx, event);
         
