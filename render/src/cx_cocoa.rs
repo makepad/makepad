@@ -27,6 +27,7 @@ use crate::cx::*;
 pub struct CocoaWindow {
     pub window_id: usize,
     pub window_delegate: id,
+    //pub layer_delegate: id,
     pub view: id,
     pub window: id,
     pub live_resize_timer: id,
@@ -51,6 +52,7 @@ pub struct CocoaApp {
     pub window_delegate_class: *const Class,
     pub post_delegate_class: *const Class,
     pub timer_delegate_class: *const Class,
+    //pub layer_delegate_class: *const Class,
     pub view_class: *const Class,
     pub const_attributes_for_marked_text: id,
     pub const_empty_string: id,
@@ -89,6 +91,7 @@ impl CocoaApp {
                 window_class: define_cocoa_window_class(),
                 window_delegate_class: define_cocoa_window_delegate(),
                 view_class: define_cocoa_view_class(),
+                //layer_delegate_class: define_layer_delegate(),
                 timers: Vec::new(),
                 cocoa_windows: Vec::new(),
                 loop_block: false,
@@ -513,6 +516,7 @@ impl CocoaWindow {
             
             let window: id = msg_send![cocoa_app.window_class, alloc];
             let window_delegate: id = msg_send![cocoa_app.window_delegate_class, new];
+            //let layer_delegate: id = msg_send![cocoa_app.layer_delegate_class, new];
             let view: id = msg_send![cocoa_app.view_class, alloc];
             
             let _: () = msg_send![autoreleasepool, drain];
@@ -523,6 +527,7 @@ impl CocoaWindow {
                 live_resize_timer: nil,
                 cocoa_app: cocoa_app,
                 window_delegate: window_delegate,
+                //layer_delegate:layer_delegate,
                 window: window,
                 window_id: window_id,
                 view: view,
@@ -543,6 +548,7 @@ impl CocoaWindow {
             
             // set the backpointeers
             (*self.window_delegate).set_ivar("cocoa_window_ptr", self as *mut _ as *mut c_void);
+            //(*self.layer_delegate).set_ivar("cocoa_window_ptr", self as *mut _ as *mut c_void);
             msg_send![self.view, initWithPtr: self as *mut _ as *mut c_void];
             
             let left_top = if let Some(position) = position {
@@ -579,6 +585,8 @@ impl CocoaWindow {
             
             self.window.setAcceptsMouseMovedEvents_(YES);
             
+            msg_send![self.view, setLayerContentsRedrawPolicy: 2];//duringViewResize
+            
             self.window.setContentView_(self.view);
             self.window.makeFirstResponder_(self.view);
             self.window.makeKeyAndOrderFront_(nil);
@@ -594,6 +602,7 @@ impl CocoaWindow {
     
     pub fn update_ptrs(&mut self) {
         unsafe {
+            //(*self.layer_delegate).set_ivar("cocoa_window_ptr", self as *mut _ as *mut c_void);
             (*self.window_delegate).set_ivar("cocoa_window_ptr", self as *mut _ as *mut c_void);
             (*self.view).set_ivar("cocoa_window_ptr", self as *mut _ as *mut c_void);
         }
@@ -724,7 +733,7 @@ impl CocoaWindow {
     }
     
     pub fn send_change_event(&mut self) {
-        
+        //return;
         let new_geom = self.get_window_geom();
         let old_geom = if let Some(old_geom) = &self.last_window_geom {
             old_geom.clone()
@@ -1054,6 +1063,30 @@ fn get_cocoa_app(this: &Object) -> &mut CocoaApp {
         &mut *(ptr as *mut CocoaApp)
     }
 }
+/*
+pub fn define_layer_delegate() -> *const Class {
+    
+    extern fn display(this: &Object, _: Sel, nstimer: id) {
+        println!("DISPLAY!");
+        let cw = get_cocoa_window(this);
+        cw.send_change_event();
+    }
+    
+    let superclass = class!(NSObject);
+    let mut decl = ClassDecl::new("LayerDelegate", superclass).unwrap();
+    
+    // Add callback methods
+    unsafe {
+        decl.add_method(sel!(display:), display as extern fn(&Object, Sel, id));
+    }
+    // Store internal state as user data
+    decl.add_ivar::<*mut c_void>("cocoa_window_ptr");
+    let protocol = Protocol::get("CALayerDelegate").unwrap();
+    //println!("NTextInputClient {}", protocol);
+    decl.add_protocol(&protocol);
+    
+    return decl.register();
+}*/
 
 pub fn define_cocoa_timer_delegate() -> *const Class {
     
@@ -1132,7 +1165,7 @@ pub fn define_cocoa_window_delegate() -> *const Class {
     
     extern fn window_did_resize(this: &Object, _: Sel, _: id) {
         let cw = get_cocoa_window(this);
-        cw.send_change_event();
+        //cw.send_change_event();
     }
     
     extern fn window_will_start_live_resize(this: &Object, _: Sel, _: id) {
@@ -1552,6 +1585,24 @@ pub fn define_cocoa_view_class() -> *const Class {
     extern fn yes_function(_this: &Object, _se: Sel, _event: id) -> BOOL {
         YES
     }
+
+    extern fn display_layer(this: &Object, _: Sel, _calayer: id) {
+        let cw = get_cocoa_window(this);
+        cw.send_change_event();
+    }
+/*
+    extern fn draw(this: &Object, _: Sel, _calayer: id, _cgcontext: id) {
+        println!("draw");
+        //let cw = get_cocoa_window(this);
+        //cw.send_change_event();
+    }
+
+    extern fn layer_will_draw(this: &Object, _: Sel, _calayer: id) {
+        println!("layer_will_draw");
+        //let cw = get_cocoa_window(this);
+        //cw.send_change_event();
+    }*/
+
     
     let superclass = class!(NSView);
     let mut decl = ClassDecl::new("RenderViewClass", superclass).unwrap();
@@ -1603,13 +1654,13 @@ pub fn define_cocoa_view_class() -> *const Class {
         decl.add_method(sel!(acceptsFirstResponder:), yes_function as extern fn(&Object, Sel, id) -> BOOL);
         decl.add_method(sel!(becomeFirstResponder:), yes_function as extern fn(&Object, Sel, id) -> BOOL);
         decl.add_method(sel!(resignFirstResponder:), yes_function as extern fn(&Object, Sel, id) -> BOOL);
+
+        decl.add_method(sel!(displayLayer:), display_layer as extern fn(&Object, Sel, id));
     }
     decl.add_ivar::<*mut c_void>("cocoa_window_ptr");
     decl.add_ivar::<id>("markedText");
-    let protocol = Protocol::get("NSTextInputClient").unwrap();
-    //println!("NTextInputClient {}", protocol);
-    decl.add_protocol(&protocol);
-    
+    decl.add_protocol(&Protocol::get("NSTextInputClient").unwrap());
+    decl.add_protocol(&Protocol::get("CALayerDelegate").unwrap());
     return decl.register();
 }
 

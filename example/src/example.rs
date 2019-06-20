@@ -40,6 +40,7 @@ struct App {
     buttons: Elements<u64, Button, Button>,
     text: Text,
     quad: Quad,
+    winmf:CapWinMF,
     clickety: u64
 }
 
@@ -49,6 +50,7 @@ impl Style for App {
     fn style(cx: &mut Cx) -> Self {
         set_dark_style(cx);
         Self {
+            winmf:CapWinMF::default(),
             window:DesktopWindow::style(cx),
             view: View {
                 scroll_h: Some(ScrollBar::style(cx)),
@@ -86,6 +88,9 @@ impl App {
     
     fn handle_app(&mut self, cx: &mut Cx, event: &mut Event) {
         
+        if let Event::Construct = event{
+            self.winmf.init();
+        }
         self.window.handle_desktop_window(cx, event);
         
         self.view.handle_scroll_bars(cx, event);
@@ -104,9 +109,9 @@ impl App {
     
     fn draw_app(&mut self, cx: &mut Cx) {
         
-        self.window.begin_desktop_window(cx);
+        let _ = self.window.begin_desktop_window(cx);
         
-        self.view.begin_view(cx, Layout {
+        let _ =  self.view.begin_view(cx, Layout {
             padding: Padding {l: 10., t: 10., r: 0., b: 0.},
             ..Default::default()
         });
@@ -123,7 +128,7 @@ impl App {
         
         cx.turtle_new_line();
         
-        self.text.draw_text(cx, &format!("Hi {}", self.clickety));
+        self.text.draw_text(cx, &format!("It works {}", self.clickety));
         
         self.quad.draw_quad_walk(cx, Bounds::Fix(100.), Bounds::Fix(100.), Margin {l: 15., t: 0., r: 0., b: 0.});
         

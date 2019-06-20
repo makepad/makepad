@@ -90,7 +90,7 @@ impl Button {
                 return ButtonEvent::Down;
             },
             Event::FingerHover(fe) => {
-                
+                cx.set_hover_mouse_cursor(MouseCursor::Default);
                 match fe.hover_state {
                     HoverState::In => if fe.any_down {
                         self.animator.play_anim(cx, self.anim_down.clone())

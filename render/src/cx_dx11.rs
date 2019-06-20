@@ -121,6 +121,8 @@ impl Cx {
         
         let d3d11_cx = D3d11Cx::new();
         
+        self.platform.d3d11_cx = Some(&d3d11_cx);
+        
         self.hlsl_compile_all_shaders(&d3d11_cx);
         
         self.load_fonts_from_file();
@@ -515,6 +517,7 @@ pub struct CxPlatform {
     pub stop_timer: Vec<(u64)>,
     pub text_clipboard_response: Option<String>,
     pub desktop: CxDesktop,
+    pub d3d11_cx: Option<*const D3d11Cx>
 }
 
 #[derive(Clone)]

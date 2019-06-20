@@ -9,6 +9,7 @@ use objc::runtime::YES;
 use metal::*;
 use crate::cx_cocoa::*;
 use crate::cx::*;
+use cocoa::base::{id};
 
 impl Cx {
     
@@ -131,8 +132,10 @@ impl Cx {
             
             self.render_view(pass_id, view_id, &metal_cx, encoder);
             encoder.end_encoding();
-            command_buffer.present_drawable(&drawable);
+            //command_buffer.present_drawable(&drawable);
             command_buffer.commit();
+            //command_buffer.wait_until_scheduled();
+            drawable.present();
         }
         unsafe {
             msg_send![pool, release];
@@ -356,13 +359,6 @@ impl Cx {
                                             let dpi_factor = render_window.window_geom.dpi_factor;
                                             self.passes[*pass_id].set_dpi_factor(dpi_factor);
                                             
-                                            self.draw_pass_to_layer(
-                                                *pass_id,
-                                                dpi_factor,
-                                                &render_window.core_animation_layer,
-                                                &metal_cx,
-                                            );
-                                            
                                             if render_window.resize_core_animation_layer(&metal_cx) {
                                                 self.passes[*pass_id].paint_dirty = true;
                                                 paint_dirty = true;
@@ -370,6 +366,13 @@ impl Cx {
                                             else {
                                                 self.passes[*pass_id].paint_dirty = false;
                                             }
+                                            
+                                            self.draw_pass_to_layer(
+                                                *pass_id,
+                                                dpi_factor,
+                                                &render_window.core_animation_layer,
+                                                &metal_cx,
+                                            );
                                         }
                                     }
                                     CxPassDepOf::Pass(parent_pass_id) => {
@@ -579,6 +582,7 @@ pub struct MetalWindow {
     pub cocoa_window: CocoaWindow,
 }
 
+
 impl MetalWindow {
     fn new(window_id: usize, metal_cx: &MetalCx, cocoa_app: &mut CocoaApp, inner_size: Vec2, position: Option<Vec2>, title: &str) -> MetalWindow {
         
@@ -597,12 +601,17 @@ impl MetalWindow {
             let count: u64 = 2;
             msg_send![core_animation_layer, setMaximumDrawableCount: count];
             msg_send![core_animation_layer, setDisplaySyncEnabled: false];
+            msg_send![core_animation_layer, setNeedsDisplayOnBoundsChange: true];
+            msg_send![core_animation_layer, setAutoresizingMask: (1 << 4) | (1 << 1)];
+            msg_send![core_animation_layer, setAllowsNextDrawableTimeout: false];
+            msg_send![core_animation_layer, setDelegate: cocoa_window.view];
         }
         
         unsafe {
             let view = cocoa_window.view;
             view.setWantsBestResolutionOpenGLSurface_(YES);
             view.setWantsLayer(YES);
+            msg_send![view, setLayerContentsPlacement: 0];
             view.setLayer(mem::transmute(core_animation_layer.as_ref()));
         }
         

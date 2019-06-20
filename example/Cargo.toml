@@ -17,3 +17,10 @@ path="../widget"
 
 [dependencies.render]
 path="../render"
+
+[target.x86_64-pc-windows-gnu.dependencies]
+wio = "*"
+
+[target.x86_64-pc-windows-gnu.dependencies.winapi]
+version = "*"
+features = ["d3d11"]
