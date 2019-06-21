@@ -33,19 +33,111 @@ use render::*;
 use widget::*;
 pub mod cap_winmf;
 pub use crate::cap_winmf::*;
+use std::sync::Mutex;
 
-struct Mandelbrot{
-    texture:Texture
+#[derive(Default)]
+struct Mandelbrot {
+    texture: Texture,
+    num_threads: usize,
+    width: usize,
+    zoom: f64,
+    height: usize,
+    image_signal: Signal,
+    image_front: Mutex<Vec<u32>>
 }
 
-impl Mandelbrot{
-    fn init(&mut self, cx:&Cx){
+impl Mandelbrot {
+    fn init(&mut self, cx: &mut Cx) {
         // lets start a mandelbrot thread that produces frames
-        
+        self.image_signal = cx.new_signal();
+        self.width = 3840;
+        self.height = 2160;
+        self.zoom = 1.0;
+        self.num_threads = 32;
+        self.texture.set_desc(cx, Some(TextureDesc {
+            format: TextureFormat::ImageBGRA,
+            width: Some(self.width),
+            height: Some(self.height),
+            multisample: None
+        }));
+        self.image_thread();
     }
     
-    fn handle_signal(&mut self, event:&Event){
+    fn image_thread(&mut self) {
+        fn draw_mandel(x: f64, y: f64) -> u32 {
+            let mut rr = x;
+            let mut ri = y;
+            let mut n = 0;
+            while n < 80 {
+                let mut tr = rr * rr - ri * ri + x;
+                let mut ti = 2.0 * rr * ri + y;
+                rr = tr;
+                ri = ti;
+                n = n + 1;
+                if rr * ri > 5.0 {
+                    return n;
+                }
+            }
+            return n;
+        }
         
+        let mut zoom = self.zoom;
+        self.zoom /= 1.01;
+        // lets spawn fractal.height over 32 threads
+        let num_threads = self.num_threads;
+        let width = self.width;
+        let height = self.height;
+        let fwidth = self.width as f64;
+        let fheight = self.height as f64;
+        let center_x = 0;
+        let center_y = 0;
+        let chunk_height = height / num_threads;
+        let mut thread_pool = scoped_threadpool::Pool::new(self.num_threads as u32);
+        let mut image_back:Vec<u32> = Vec::new();
+        let mut image_front = &mut self.image_front;
+        let mut image_signal = self.image_signal.clone();
+        std::thread::spawn(move || {
+            loop {
+                thread_pool.scoped( | scope | {
+                    image_back.resize(width * height, 0);
+                    let mut iter = image_back.chunks_mut((chunk_height * width) as usize);
+                    for i in 0..num_threads {
+                        let thread_num = i;
+                        let slice = iter.next().unwrap();
+                        
+                        scope.execute(move || {
+                            let start = thread_num * chunk_height as usize;
+                            for y in start..(start + chunk_height) {
+                                for x in 0..width {
+                                    let c_re = (x as f64 - fwidth * 0.5) * 4.0 / fwidth;
+                                    let c_im = (y as f64 - fheight * 0.5) * 4.0 / fheight;
+                                    let mandel = draw_mandel(c_re, c_im) * 3;
+                                    slice[(x + (y - start) * width) as usize] = mandel | (mandel << 8) | (mandel << 16);
+                                }
+                            }
+                        })
+                    }
+                    
+                });
+                // alright we have a texture ready. now what.
+                let mut front = image_front.lock().unwrap();
+                std::mem::swap(&mut (*front), &mut image_back);
+                Cx::send_signal(image_signal, 0);
+            }
+        });
+    }
+    
+    fn handle_signal(&mut self, cx:&mut Cx, event: &Event)->bool{
+        if let Event::Signal(se) = event {
+            if self.image_signal.is_signal(se) { // we haz new texture
+                let mut front = self.image_front.lock().unwrap();
+                let cxtex = &mut cx.textures[self.texture.texture_id.unwrap()];
+                std::mem::swap(&mut (*front), &mut cxtex.image_u32);
+                cxtex.update_image = true;
+                return true
+            }
+        }
+        false
     }
 }
 
@@ -56,7 +148,8 @@ struct App {
     text: Text,
     quad: Quad,
     blit: Blit,
-    cap:CapWinMF,
+    cap: CapWinMF,
+    mandel: Mandelbrot,
     clickety: u64
 }
 
@@ -66,8 +159,9 @@ impl Style for App {
     fn style(cx: &mut Cx) -> Self {
         set_dark_style(cx);
         Self {
-            cap:CapWinMF::default(),
-            window:DesktopWindow::style(cx),
+            mandel: Mandelbrot::default(),
+            cap: CapWinMF::default(),
+            window: DesktopWindow::style(cx),
             view: View {
                 scroll_h: Some(ScrollBar::style(cx)),
                 scroll_v: Some(ScrollBar::style(cx)),
@@ -103,15 +197,20 @@ impl App {
     
     fn handle_app(&mut self, cx: &mut Cx, event: &mut Event) {
         
-        if let Event::Construct = event{
+        if let Event::Construct = event {
             self.cap.init(cx, 0, 3840, 2160, 30.0);
+            self.mandel.init(cx);
         }
         
         self.window.handle_desktop_window(cx, event);
         
         self.view.handle_scroll_bars(cx, event);
         
-        if let CapEvent::NewImage =  self.cap.handle_signal(cx, event){
+        if let CapEvent::NewImage = self.cap.handle_signal(cx, event) {
+            self.view.redraw_view_area(cx);
+        }
+        
+        if self.mandel.handle_signal(cx, event) {
             self.view.redraw_view_area(cx);
         }
         /*
@@ -131,12 +230,13 @@ impl App {
         
         let _ = self.window.begin_desktop_window(cx);
         
-        let _ =  self.view.begin_view(cx, Layout {
+        let _ = self.view.begin_view(cx, Layout {
             padding: Padding {l: 0., t: 0., r: 0., b: 0.},
             ..Default::default()
         });
         
-        self.blit.draw_blit_walk(cx, &self.cap.texture, Bounds::Fill, Bounds::Fill, Margin::zero());
+        self.view.redraw_view_area(cx);
+        self.blit.draw_blit_walk(cx, &self.mandel.texture, Bounds::Fill, Bounds::Fill, Margin::zero());
         
         
         

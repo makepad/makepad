@@ -75,6 +75,6 @@ pub struct CxTexture{
     pub desc:TextureDesc,
     pub image_u32: Vec<u32>,
     pub image_f32: Vec<f32>,
-    pub upload_image: bool,
+    pub update_image: bool,
     pub platform: CxPlatformTexture
 }

@@ -63,7 +63,7 @@ impl Cx {
                 // lets set our textures
                 for (i, texture_id) in draw_call.textures_2d.iter().enumerate() {
                     let cxtexture = &mut self.textures[*texture_id as usize];
-                    if cxtexture.upload_image {
+                    if cxtexture.update_image {
                         metal_cx.update_platform_texture_image2d(cxtexture);
                     }
                     if let Some(mtltex) = &cxtexture.platform.mtltexture {
@@ -553,7 +553,7 @@ impl MetalCx {
             cxtexture.platform.height = height as u64;
         }
         
-        cxtexture.upload_image = false;
+        cxtexture.update_image = false;
     }
 }
 

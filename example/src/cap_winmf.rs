@@ -23,24 +23,215 @@ use std::mem;
 use com_impl::{Refcount, VTable};
 use std::sync::Mutex;
 
+
+#[derive(Default)]
+pub struct CapWinMF {
+    pub width: usize,
+    pub height: usize,
+    pub convert: CapConvert,
+    pub image_signal: Signal,
+    pub texture: Texture,
+    pub image_back: Vec<u32>,
+    pub image_front: Mutex<Vec<u32>>,
+    pub source: Option<ComPtr<IMFMediaSource>>,
+    pub reader: Option<ComPtr<IMFSourceReader>>,
+}
+
+
+pub enum CapConvert {
+    YUY2,
+    NV12,
+    RGB24,
+    RGB32
+}
+
+impl Default for CapConvert {
+    fn default() -> CapConvert {CapConvert::YUY2}
+}
+
+pub enum CapEvent {
+    NewImage,
+    None
+}
+
+impl CapWinMF {
+    
+    fn mf_create_attributes(num_attrs: DWORD) -> Result<ComPtr<IMFAttributes>, HRESULT> {
+        let mut attributes = ptr::null_mut();
+        let hr = unsafe {MFCreateAttributes(
+            &mut attributes as *mut *mut _,
+            num_attrs
+        )};
+        if winerror::SUCCEEDED(hr) {Ok(unsafe {ComPtr::from_raw(attributes as *mut _)})} else {Err(hr)}
+    }
+    
+    fn mf_create_source_reader(attributes: &ComPtr<IMFAttributes>, source: &ComPtr<IMFMediaSource>) -> Result<ComPtr<IMFSourceReader>, HRESULT> {
+        let mut source_reader = ptr::null_mut();
+        let hr = unsafe {MFCreateSourceReaderFromMediaSource(
+            source.as_raw(),
+            attributes.as_raw(),
+            &mut source_reader as *mut *mut _
+        )};
+        if winerror::SUCCEEDED(hr) {Ok(unsafe {ComPtr::from_raw(source_reader as *mut _)})} else {Err(hr)}
+    }
+    
+    unsafe fn select_format(reader: &ComPtr<IMFSourceReader>, pref_width: usize, pref_height: usize, pref_fps: f64) -> Option<(CapConvert, ComPtr<IMFMediaType>)> {
+        let mut counter = 0;
+        loop {
+            let mut native_type_raw = ptr::null_mut();
+            if reader.GetNativeMediaType(MF_SOURCE_READER_FIRST_VIDEO_STREAM, counter, &mut native_type_raw) == S_OK {
+                let native_type: ComPtr<IMFMediaType> = ComPtr::from_raw(native_type_raw as *mut _);
+                let mut guid = mem::uninitialized();
+                if native_type.GetGUID(&MF_MT_SUBTYPE, &mut guid) != S_OK {
+                    continue;
+                }
+                
+                let mut frame_size: u64 = 0;
+                check("native_type.GetUINT64", native_type.GetUINT64(&MF_MT_FRAME_SIZE, &mut frame_size));
+                let height = frame_size & 0xffffffff;
+                let width = frame_size>>32;
+                
+                let mut frame_rate: u64 = 0;
+                check("native_type.GetDouble", native_type.GetUINT64(&MF_MT_FRAME_RATE, &mut frame_rate));
+                let fps = (frame_rate >> 32) as f64 / ((frame_rate & 0xffffffff)as f64);
+                if (fps - pref_fps).abs()<0.0001 && pref_width == width as usize && pref_height == height as usize {
+                    let convert = if guid_equal(&guid, &MFVideoFormat_YUY2) {
+                        CapConvert::YUY2
+                    } else if guid_equal(&guid, &MFVideoFormat_NV12) {
+                        CapConvert::NV12
+                    } else if guid_equal(&guid, &MFVideoFormat_RGB24) {
+                        CapConvert::RGB24
+                    } else if guid_equal(&guid, &MFVideoFormat_RGB32) {
+                        CapConvert::RGB32
+                    } else {
+                        continue;
+                    };
+                    //println!("Selected format {} {} {}", width, height, fps);
+                    return Some((convert, native_type));
+                }
+            }
+            else {
+                break
+            }
+            counter += 1;
+        }
+        return None
+    }
+    
+    pub fn handle_signal(&mut self, cx: &mut Cx, event: &mut Event) -> CapEvent {
+        if let Event::Signal(se) = event {
+            if self.image_signal.is_signal(se) { // we haz new texture
+                let mut front = self.image_front.lock().unwrap();
+                let cxtex = &mut cx.textures[self.texture.texture_id.unwrap()];
+                std::mem::swap(&mut (*front), &mut cxtex.image_u32);
+                cxtex.update_image = true;
+                return CapEvent::NewImage
+            }
+        }
+        return CapEvent::None
+    }
+    
+    pub fn init(&mut self, cx: &mut Cx, device_id: usize, pref_width: usize, pref_height: usize, pref_fps: f64) {
+        
+        check("cannot mf_startup", unsafe {
+            MFStartup(0)
+        });
+        
+        let attributes = Self::mf_create_attributes(1).expect("cannot mf_create_attributes");
+        
+        check("attributes.SetGUID", unsafe {
+            attributes.SetGUID(
+                &MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE,
+                &MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_GUID
+            )
+        });
+        
+        unsafe {
+            let mut devices_raw: *mut *mut IMFActivate = 0 as _;
+            let mut count: u32 = 0;
+            check("attributes.SetGUID", MFEnumDeviceSources(attributes.as_raw() as *mut _, &mut devices_raw, &mut count));
+            
+            let devices = std::slice::from_raw_parts(devices_raw, count as usize);
+            
+            let mut source_raw = ptr::null_mut();
+            
+            check("ActivateObject", (*devices[if device_id >= count as usize{0} else{device_id}]).ActivateObject(
+                &IMFMediaSource::uuidof(),
+                &mut source_raw
+            ));
+            
+            let source: ComPtr<IMFMediaSource> = ComPtr::from_raw(source_raw as *mut _);
+            
+            let attributes = Self::mf_create_attributes(2).expect("cannot mf_create_attributes");
+            
+            check("attributes.SetUINT32", attributes.SetUINT32(
+                &MF_READWRITE_DISABLE_CONVERTERS,
+                TRUE as u32
+            ));
+            
+            let source_reader = SourceReaderCallback::new(self);
+            check("attributes.SetUnknown", attributes.SetUnknown(
+                &MF_SOURCE_READER_ASYNC_CALLBACK,
+                source_reader.as_raw() as *mut _
+            ));
+            
+            let reader = Self::mf_create_source_reader(&attributes, &source).expect("cannot mf_create_source_reader");
+            // set reader async callback
+            
+            if let Some((convert, media_type)) = Self::select_format(&reader, pref_width, pref_height, pref_fps) {
+                //println!("Selected format!");
+                check("SetCurrentMediaType", reader.SetCurrentMediaType(
+                    MF_SOURCE_READER_FIRST_VIDEO_STREAM,
+                    ptr::null(),
+                    media_type.as_raw()
+                ));
+                check("ReadSample", reader.ReadSample(
+                    MF_SOURCE_READER_FIRST_VIDEO_STREAM,
+                    0,
+                    ptr::null_mut(),
+                    ptr::null_mut(),
+                    ptr::null_mut(),
+                    ptr::null_mut()
+                ));
+                self.texture.set_desc(cx, Some(TextureDesc {
+                    format: TextureFormat::ImageBGRA,
+                    width: Some(pref_width),
+                    height: Some(pref_height),
+                    multisample: None
+                }));
+                self.convert = convert;
+                self.width = pref_width as usize;
+                self.height = pref_height as usize;
+                self.source = Some(source);
+                self.reader = Some(reader);
+                self.image_signal = cx.new_signal();
+                
+            }
+            else {
+                println!("FORMAT NOT FOUND");
+            }
+        }
+    }
+}
+
 #[repr(C)]
 #[derive(com_impl::ComImpl)]
-pub struct SourceReader {
+pub struct SourceReaderCallback {
     vtbl: VTable<IMFSourceReaderCallbackVtbl>,
     refcount: Refcount,
     cap_win_mf: *mut CapWinMF,
 }
 
-impl SourceReader {
+impl SourceReaderCallback {
     unsafe fn new(cap_win_mf: *mut CapWinMF) -> ComPtr<IMFSourceReaderCallback> {
-        let ptr = SourceReader::create_raw(cap_win_mf);
+        let ptr = SourceReaderCallback::create_raw(cap_win_mf);
         let ptr = ptr as *mut IMFSourceReaderCallback;
         ComPtr::from_raw(ptr) 
     }
 }
 
 #[com_impl::com_impl]
-unsafe impl IMFSourceReaderCallback for SourceReader {
+unsafe impl IMFSourceReaderCallback for SourceReaderCallback {
     unsafe fn on_read_sample(&self, hrState: HRESULT, _dwStreamIndex: DWORD, _dwStreamFlags: DWORD, _llTimeStamp: LONGLONG, pSample: *const IMFSample,) -> HRESULT {
         if hrState != S_OK {
             println!("read sample returned failure!");
@@ -131,19 +322,6 @@ unsafe impl IMFSourceReaderCallback for SourceReader {
     }
 }
 
-#[derive(Default)]
-pub struct CapWinMF {
-    pub width: usize,
-    pub height: usize,
-    pub convert: CapConvert,
-    pub image_signal: Signal,
-    pub texture: Texture,
-    pub image_back: Vec<u32>,
-    pub image_front: Mutex<Vec<u32>>,
-    pub source: Option<ComPtr<IMFMediaSource>>,
-    pub reader: Option<ComPtr<IMFSourceReader>>,
-}
-
 fn convert_ycrcb_to_rgba(y: u16, cr: u16, cb: u16) -> u32 {
     fn clip(a: i32) -> u32 {
         if a< 0 {
@@ -179,183 +357,11 @@ fn guid_equal(a: &GUID, b: &GUID) -> bool {
     a.Data1 == b.Data1 && a.Data2 == b.Data2 && a.Data3 == b.Data3 && a.Data4 == b.Data4
 }
 
-pub enum CapConvert {
-    YUY2,
-    NV12,
-    RGB24,
-    RGB32
-}
 
-impl Default for CapConvert {
-    fn default() -> CapConvert {CapConvert::YUY2}
-}
 
-pub enum CapEvent {
-    NewImage,
-    None
-}
+// Missing windows media foundation bits from winapi
 
-impl CapWinMF {
-    
-    pub fn mf_create_attributes(num_attrs: DWORD) -> Result<ComPtr<IMFAttributes>, HRESULT> {
-        let mut attributes = ptr::null_mut();
-        let hr = unsafe {MFCreateAttributes(
-            &mut attributes as *mut *mut _,
-            num_attrs
-        )};
-        if winerror::SUCCEEDED(hr) {Ok(unsafe {ComPtr::from_raw(attributes as *mut _)})} else {Err(hr)}
-    }
-    
-    pub fn mf_create_source_reader(attributes: &ComPtr<IMFAttributes>, source: &ComPtr<IMFMediaSource>) -> Result<ComPtr<IMFSourceReader>, HRESULT> {
-        let mut source_reader = ptr::null_mut();
-        let hr = unsafe {MFCreateSourceReaderFromMediaSource(
-            source.as_raw(),
-            attributes.as_raw(),
-            &mut source_reader as *mut *mut _
-        )};
-        if winerror::SUCCEEDED(hr) {Ok(unsafe {ComPtr::from_raw(source_reader as *mut _)})} else {Err(hr)}
-    }
-    
-    unsafe fn select_format(reader: &ComPtr<IMFSourceReader>, pref_width: usize, pref_height: usize, pref_fps: f64) -> Option<(CapConvert, ComPtr<IMFMediaType>)> {
-        let mut counter = 0;
-        loop {
-            let mut native_type_raw = ptr::null_mut();
-            if reader.GetNativeMediaType(MF_SOURCE_READER_FIRST_VIDEO_STREAM, counter, &mut native_type_raw) == S_OK {
-                let native_type: ComPtr<IMFMediaType> = ComPtr::from_raw(native_type_raw as *mut _);
-                let mut guid = mem::uninitialized();
-                if native_type.GetGUID(&MF_MT_SUBTYPE, &mut guid) != S_OK {
-                    continue;
-                }
-                
-                let mut frame_size: u64 = 0;
-                check("native_type.GetUINT64", native_type.GetUINT64(&MF_MT_FRAME_SIZE, &mut frame_size));
-                let height = frame_size & 0xffffffff;
-                let width = frame_size>>32;
-                
-                let mut frame_rate: u64 = 0;
-                check("native_type.GetDouble", native_type.GetUINT64(&MF_MT_FRAME_RATE, &mut frame_rate));
-                let fps = (frame_rate >> 32) as f64 / ((frame_rate & 0xffffffff)as f64);
-                if (fps - pref_fps).abs()<0.0001 && pref_width == width as usize && pref_height == height as usize {
-                    let convert = if guid_equal(&guid, &MFVideoFormat_YUY2) {
-                        CapConvert::YUY2
-                    } else if guid_equal(&guid, &MFVideoFormat_NV12) {
-                        CapConvert::NV12
-                    } else if guid_equal(&guid, &MFVideoFormat_RGB24) {
-                        CapConvert::RGB24
-                    } else if guid_equal(&guid, &MFVideoFormat_RGB32) {
-                        CapConvert::RGB32
-                    } else {
-                        continue;
-                    };
-                    println!("Selected format {} {} {}", width, height, fps);
-                    return Some((convert, native_type));
-                }
-            }
-            else {
-                break
-            }
-            counter += 1;
-        }
-        return None
-    }
-    
-    pub fn handle_signal(&mut self, cx: &mut Cx, event: &mut Event) -> CapEvent {
-        if let Event::Signal(se) = event {
-            if self.image_signal.is_signal(se) { // we haz new texture
-                let mut front = self.image_front.lock().unwrap();
-                let cxtex = &mut cx.textures[self.texture.texture_id.unwrap()];
-                std::mem::swap(&mut (*front), &mut cxtex.image_u32);
-                cxtex.upload_image = true;
-                return CapEvent::NewImage
-            }
-        }
-        return CapEvent::None
-    }
-    
-    pub fn init(&mut self, cx: &mut Cx, device_id: usize, pref_width: usize, pref_height: usize, pref_fps: f64) {
-        
-        check("cannot mf_startup", unsafe {
-            MFStartup(0)
-        });
-        
-        let attributes = Self::mf_create_attributes(1).expect("cannot mf_create_attributes");
-        
-        check("attributes.SetGUID", unsafe {
-            attributes.SetGUID(
-                &MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE,
-                &MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_GUID
-            )
-        });
-        
-        unsafe {
-            let mut devices_raw: *mut *mut IMFActivate = 0 as _;
-            let mut count: u32 = 0;
-            check("attributes.SetGUID", MFEnumDeviceSources(attributes.as_raw() as *mut _, &mut devices_raw, &mut count));
-            
-            let devices = std::slice::from_raw_parts(devices_raw, count as usize);
-            
-            let mut source_raw = ptr::null_mut();
-            
-            check("ActivateObject", (*devices[if device_id >= count as usize{0} else{device_id}]).ActivateObject(
-                &IMFMediaSource::uuidof(),
-                &mut source_raw
-            ));
-            
-            let source: ComPtr<IMFMediaSource> = ComPtr::from_raw(source_raw as *mut _);
-            
-            let attributes = Self::mf_create_attributes(2).expect("cannot mf_create_attributes");
-            
-            check("attributes.SetUINT32", attributes.SetUINT32(
-                &MF_READWRITE_DISABLE_CONVERTERS,
-                TRUE as u32
-            ));
-            
-            let source_reader = SourceReader::new(self);
-            check("attributes.SetUnknown", attributes.SetUnknown(
-                &MF_SOURCE_READER_ASYNC_CALLBACK,
-                source_reader.as_raw() as *mut _
-            ));
-            
-            let reader = Self::mf_create_source_reader(&attributes, &source).expect("cannot mf_create_source_reader");
-            // set reader async callback
-            
-            if let Some((convert, media_type)) = Self::select_format(&reader, pref_width, pref_height, pref_fps) {
-                println!("Selected format!");
-                check("SetCurrentMediaType", reader.SetCurrentMediaType(
-                    MF_SOURCE_READER_FIRST_VIDEO_STREAM,
-                    ptr::null(),
-                    media_type.as_raw()
-                ));
-                check("ReadSample", reader.ReadSample(
-                    MF_SOURCE_READER_FIRST_VIDEO_STREAM,
-                    0,
-                    ptr::null_mut(),
-                    ptr::null_mut(),
-                    ptr::null_mut(),
-                    ptr::null_mut()
-                ));
-                self.texture.set_desc(cx, Some(TextureDesc {
-                    format: TextureFormat::ImageBGRA,
-                    width: Some(pref_width),
-                    height: Some(pref_height),
-                    multisample: None
-                }));
-                self.convert = convert;
-                self.width = pref_width as usize;
-                self.height = pref_height as usize;
-                self.source = Some(source);
-                self.reader = Some(reader);
-                self.image_signal = cx.new_signal();
-                
-            }
-            else {
-                println!("FORMAT NOT FOUND");
-            }
-        }
-    }
-}
 
-// the missing bits from winapi
 
 ENUM! {enum MF_ATTRIBUTE_TYPE {
     MF_ATTRIBUTE_UINT32 = VT_UI4,
@@ -629,7 +635,6 @@ RIDL! {
         ) -> HRESULT,
     }
 }
-
 
 #[link(name = "winapi_mfplat")]extern "system" {
     pub fn MFStartup(version: UINT) -> HRESULT;

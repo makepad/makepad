@@ -149,7 +149,7 @@ impl CxFont{
             multisample: None
         };
         cxtex.image_u32.resize(ff.width*ff.height, 0);
-        cxtex.upload_image = true;
+        cxtex.update_image = true;
         
         // ok lets read the different buffers
         inp.read(r_buf.as_mut_slice())?;

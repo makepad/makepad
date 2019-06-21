@@ -67,7 +67,7 @@ impl Cx {
                 
                 for (i, texture_id) in draw_call.textures_2d.iter().enumerate() {
                     let cxtexture = &mut self.textures[*texture_id as usize];
-                    if cxtexture.upload_image {
+                    if cxtexture.update_image {
                         d3d11_cx.update_platform_texture_image2d(cxtexture)
                     }
                     if let Some(shader_resource) = &cxtexture.platform.shader_resource {
@@ -1238,7 +1238,7 @@ impl D3d11Cx {
                             &mut shader_resource as *mut *mut _
                         )};
                         cxtexture.platform.shader_resource = Some(unsafe {ComPtr::from_raw(shader_resource as *mut _)});
-                        cxtexture.upload_image = false;
+                        cxtexture.update_image = false;
                     }
                     else {
                         panic!("Texture create failed");
