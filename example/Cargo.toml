@@ -10,6 +10,7 @@ path="src/example.rs"
 
 [dependencies]
 serde_json = "*"
+rayon = "*"
 serde = { version = "1.0", features = ["derive"] }
 
 [dependencies.widget]

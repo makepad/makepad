@@ -242,6 +242,11 @@ impl Cx {
         self.platform.desktop.profiler_totals.truncate(0);
     }
     
+    pub fn profile_time_ns()->u64{
+        return precise_time_ns()
+    }
+    
+    
     pub fn profile_report(&self) {
         let desktop = &self.platform.desktop;
         println!("-----------------------  Profile Report -------------------------");

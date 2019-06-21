@@ -81,6 +81,7 @@ impl Cx {
     }
     
     fn draw_pass_to_window(&mut self, pass_id: usize, vsync: bool, _dpi_factor: f32, d3d11_window: &mut D3d11Window, d3d11_cx: &D3d11Cx) {
+        //let time1 = Cx::profile_time_ns();
         let view_id = self.passes[pass_id].main_view_id.unwrap();
         
         self.platform.uni_cx.update_with_f32_constant_data(&d3d11_cx, &mut self.passes[pass_id].uniforms);
@@ -103,6 +104,8 @@ impl Cx {
         self.render_view(pass_id, view_id, d3d11_cx);
         
         d3d11_window.present(vsync, d3d11_cx);
+        //let time2 = Cx::profile_time_ns();
+        //println!("{}",(time2-time1)as f64 / 1000.0);
     }
     
     fn resize_layer_to_turtle(&mut self) {
@@ -138,7 +141,7 @@ impl Cx {
                 self.process_desktop_pre_event(&mut event, &mut event_handler);
                 
                 match &event {
-                    Event::WindowSetHoverCursor(mc)=>{
+                    Event::WindowSetHoverCursor(mc) => {
                         self.set_hover_mouse_cursor(mc.clone());
                     },
                     Event::WindowResizeLoop(wr) => {
@@ -173,7 +176,7 @@ impl Cx {
                         self.windows[wc.window_id].window_state = CxWindowState::Closed;
                         self.windows_free.push(wc.window_id);
                         // remove the d3d11/win32 window
-                       
+                        
                         for index in 0..d3d11_windows.len() {
                             if d3d11_windows[index].window_id == wc.window_id {
                                 d3d11_windows.remove(index);
@@ -284,7 +287,7 @@ impl Cx {
                                 match self.passes[*pass_id].dep_of.clone() {
                                     CxPassDepOf::Window(window_id) => {
                                         // find the accompanying render window
-                                        if let Some(d3d11_window) = d3d11_windows.iter_mut().find( | w | w.window_id == window_id){
+                                        if let Some(d3d11_window) = d3d11_windows.iter_mut().find( | w | w.window_id == window_id) {
                                             windows_need_repaint -= 1;
                                             
                                             let dpi_factor = d3d11_window.window_geom.dpi_factor;

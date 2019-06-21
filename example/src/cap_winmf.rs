@@ -1,7 +1,5 @@
 #![allow(non_snake_case)]
 #![allow(non_camel_case_types)]
-#![allow(dead_code)]
-#![allow(unused_variables)]
 #![allow(non_upper_case_globals)]
 
 use render::*;
@@ -37,13 +35,13 @@ impl SourceReader {
     unsafe fn new(cap_win_mf: *mut CapWinMF) -> ComPtr<IMFSourceReaderCallback> {
         let ptr = SourceReader::create_raw(cap_win_mf);
         let ptr = ptr as *mut IMFSourceReaderCallback;
-        unsafe {ComPtr::from_raw(ptr)}
+        ComPtr::from_raw(ptr) 
     }
 }
 
 #[com_impl::com_impl]
 unsafe impl IMFSourceReaderCallback for SourceReader {
-    unsafe fn on_read_sample(&self, hrState: HRESULT, dwStreamIndex: DWORD, dwStreamFlags: DWORD, llTimeStamp: LONGLONG, pSample: *const IMFSample,) -> HRESULT {
+    unsafe fn on_read_sample(&self, hrState: HRESULT, _dwStreamIndex: DWORD, _dwStreamFlags: DWORD, _llTimeStamp: LONGLONG, pSample: *const IMFSample,) -> HRESULT {
         if hrState != S_OK {
             println!("read sample returned failure!");
             return S_OK;
@@ -122,12 +120,12 @@ unsafe impl IMFSourceReaderCallback for SourceReader {
         return S_OK
     }
     
-    unsafe fn on_flush(&self, dwStreamIndex: DWORD,) -> HRESULT {
+    unsafe fn on_flush(&self, _dwStreamIndex: DWORD,) -> HRESULT {
         println!("GOT FLUSH!");
         return S_OK
     }
     
-    unsafe fn on_event(&self, dwStreamIndex: DWORD, pEvent: *const IMFMediaEvent,) -> HRESULT {
+    unsafe fn on_event(&self, _dwStreamIndex: DWORD, _pEvent: *const IMFMediaEvent,) -> HRESULT {
         println!("GOT EVENT!");
         return S_OK
     }
@@ -147,7 +145,6 @@ pub struct CapWinMF {
 }
 
 fn convert_ycrcb_to_rgba(y: u16, cr: u16, cb: u16) -> u32 {
-    
     fn clip(a: i32) -> u32 {
         if a< 0 {
             return 0
@@ -237,7 +234,7 @@ impl CapWinMF {
                 
                 let mut frame_rate: u64 = 0;
                 check("native_type.GetDouble", native_type.GetUINT64(&MF_MT_FRAME_RATE, &mut frame_rate));
-                let mut fps = (frame_rate >> 32) as f64 / ((frame_rate & 0xffffffff)as f64);
+                let fps = (frame_rate >> 32) as f64 / ((frame_rate & 0xffffffff)as f64);
                 if (fps - pref_fps).abs()<0.0001 && pref_width == width as usize && pref_height == height as usize {
                     let convert = if guid_equal(&guid, &MFVideoFormat_YUY2) {
                         CapConvert::YUY2
@@ -298,7 +295,8 @@ impl CapWinMF {
             let devices = std::slice::from_raw_parts(devices_raw, count as usize);
             
             let mut source_raw = ptr::null_mut();
-            check("ActivateObject", (*devices[0]).ActivateObject(
+            
+            check("ActivateObject", (*devices[if device_id >= count as usize{0} else{device_id}]).ActivateObject(
                 &IMFMediaSource::uuidof(),
                 &mut source_raw
             ));

@@ -34,6 +34,21 @@ use widget::*;
 pub mod cap_winmf;
 pub use crate::cap_winmf::*;
 
+struct Mandelbrot{
+    texture:Texture
+}
+
+impl Mandelbrot{
+    fn init(&mut self, cx:&Cx){
+        // lets start a mandelbrot thread that produces frames
+        
+    }
+    
+    fn handle_signal(&mut self, event:&Event){
+        
+    }
+}
+
 struct App {
     view: View<ScrollBar>,
     window: DesktopWindow,
@@ -120,7 +135,11 @@ impl App {
             padding: Padding {l: 0., t: 0., r: 0., b: 0.},
             ..Default::default()
         });
+        
         self.blit.draw_blit_walk(cx, &self.cap.texture, Bounds::Fill, Bounds::Fill, Margin::zero());
+        
+        
+        
         /*
         for i in 0..100 {
             
