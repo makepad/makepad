@@ -111,7 +111,7 @@ pub struct CxShader {
 
 impl CxShader {
     
-    pub fn def_builtins(sg: ShaderGen)->ShaderGen{
+    pub fn def_builtins(sg: ShaderGen) -> ShaderGen {
         sg.compose(
             ShAst {
                 types: vec![
@@ -273,7 +273,7 @@ impl CxShader {
         )
     }
     
-    pub fn def_df(sg: ShaderGen)->ShaderGen{
+    pub fn def_df(sg: ShaderGen) -> ShaderGen {
         sg.compose(shader_ast!({
             const PI: float = 3.141592653589793;
             const E: float = 2.718281828459045;
@@ -297,6 +297,40 @@ impl CxShader {
             let df_aa: float<Local>;
             let df_scale: float<Local>;
             let df_field: float<Local>;
+            
+            fn df_iq_pal(t: float, a: vec3, b: vec3, c: vec3, d: vec3)->vec3{
+                return a + b * cos(6.28318 * (c * t + d));
+            }
+            
+            fn df_iq_pal0(t: float)->vec3{
+                return mix(vec3(0.,0.,0.),vec3(1.,1.,1.),t)
+            }
+            fn df_iq_pal1(t: float)->vec3{
+                return df_iq_pal(t, vec3(0.5, 0.5, 0.5), vec3(0.5, 0.5, 0.5), vec3(1., 1., 1.), vec3(0., 0.33, 0.67));
+            }
+            fn df_iq_pal2(t: float)->vec3{
+                return df_iq_pal(t, vec3(0.5,0.5,0.5), vec3(0.5,0.5,0.5), vec3(1.,1.,1.), vec3(0., 0.1, 0.2));
+            }
+            
+            fn df_iq_pal3(t: float)->vec3{
+                return df_iq_pal(t, vec3(0.5,0.5,0.5), vec3(0.5,0.5,0.5), vec3(1.,1.,1.), vec3(0.3, 0.2, 0.2));
+            }
+            
+            fn df_iq_pal4(t: float)->vec3{
+                return df_iq_pal(t, vec3(0.5,0.5,0.5), vec3(0.5,0.5,0.5), vec3(1., 1., 0.5), vec3(0.8, 0.9, 0.3));
+            }
+            
+            fn df_iq_pal5(t: float)->vec3{
+                return df_iq_pal(t, vec3(0.5,0.5,0.5), vec3(0.5,0.5,0.5), vec3(1., 0.7, 0.4), vec3(0, 0.15, 0.20));
+            }
+            
+            fn df_iq_pal6(t: float)->vec3{
+                return df_iq_pal(t, vec3(0.5,0.5,0.5), vec3(0.5,0.5,0.5), vec3(2., 1.0, 0.), vec3(0.5, 0.2, 0.25));
+            }
+            
+            fn df_iq_pal7(t: float)->vec3{
+                return df_iq_pal(t, vec3(0.8, 0.5, 0.4), vec3(0.2, 0.4, 0.2), vec3(2., 1.0, 1.0), vec3(0., 0.25, 0.25));
+            }
             
             fn df_viewport(pos: vec2) -> vec2 {
                 df_pos = pos;

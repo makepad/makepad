@@ -3,12 +3,14 @@ use crate::cx::*;
 #[derive(Clone)]
 pub struct Blit {
     pub shader: Shader,
+    pub alpha: f32,
     pub do_scroll: bool
 }
 
 impl Style for Blit {
     fn style(cx: &mut Cx) -> Self {
         Self {
+            alpha: 1.0,
             shader: cx.add_shader(Self::def_blit_shader(), "Blit"),
             do_scroll:false,
         }
@@ -32,6 +34,7 @@ impl Blit {
             let h: float<Instance>;
             let pos: vec2<Varying>;
             let view_do_scroll: float<Uniform>;
+            let alpha: float<Uniform>;
             let texturez:texture2d<Texture>;
             //let dpi_dilate: float<Uniform>;
             
@@ -42,7 +45,7 @@ impl Blit {
                     geom * vec2(w, h) + vec2(x, y) + shift,
                     view_clip.xy,
                     view_clip.zw
-                );
+                ); 
                 pos = (clipped - shift - vec2(x, y)) / vec2(w, h);
                 // only pass the clipped position forward
                 return vec4(clipped.x, clipped.y, 0., 1.) * camera_projection;
@@ -50,7 +53,7 @@ impl Blit {
             
             fn pixel() -> vec4 {
                 //return color("red");
-                return vec4(sample2d(texturez, geom.xy).rgb, 1.0);
+                return vec4(sample2d(texturez, geom.xy).rgb, alpha);
             }
             
         }))
@@ -89,6 +92,7 @@ impl Blit {
         let inst = cx.new_instance_draw_call(&self.shader, 1);
         if inst.need_uniforms_now(cx) {
             inst.push_uniform_float(cx, if self.do_scroll {1.0}else {0.0});
+            inst.push_uniform_float(cx, self.alpha);
             inst.push_uniform_texture_2d(cx, texture);
         }
         //println!("{:?} {}", area, cx.current_draw_list_id);

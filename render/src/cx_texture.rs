@@ -5,6 +5,8 @@ pub enum TextureFormat {
     Default,
     ImageBGRA,
     ImageBGRAf32,
+    ImageRf32,
+    ImageRGf32,
     Depth24Stencil8,
     RenderBGRA,
     RenderBGRAf16,

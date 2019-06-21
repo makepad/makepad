@@ -1244,6 +1244,96 @@ impl D3d11Cx {
                         panic!("Texture create failed");
                     }
                 },
+                TextureFormat::ImageRf32 => {
+                    if cxtexture.image_f32.len() != width * height {
+                        println!("update_platform_texture_image2d with wrong buffer_u32 size!");
+                        return;
+                    }
+                    
+                    let mut texture = ptr::null_mut();
+                    let sub_data = d3d11::D3D11_SUBRESOURCE_DATA {
+                        pSysMem: cxtexture.image_f32.as_ptr() as *const _,
+                        SysMemPitch: (width * 4) as u32,
+                        SysMemSlicePitch: 0
+                    };
+                    
+                    let texture_desc = d3d11::D3D11_TEXTURE2D_DESC {
+                        Width: width as u32,
+                        Height: height as u32,
+                        MipLevels: 1,
+                        ArraySize: 1,
+                        Format: dxgiformat::DXGI_FORMAT_R32_FLOAT,
+                        SampleDesc: dxgitype::DXGI_SAMPLE_DESC {
+                            Count: 1,
+                            Quality: 0
+                        },
+                        Usage: d3d11::D3D11_USAGE_DEFAULT,
+                        BindFlags: d3d11::D3D11_BIND_SHADER_RESOURCE,
+                        CPUAccessFlags: 0,
+                        MiscFlags: 0,
+                    };
+                    
+                    let hr = unsafe {self.device.CreateTexture2D(&texture_desc, &sub_data, &mut texture as *mut *mut _)};
+                    if winerror::SUCCEEDED(hr) {
+                        cxtexture.platform.texture = Some(unsafe {ComPtr::from_raw(texture as *mut _)});
+                        let mut shader_resource = ptr::null_mut();
+                        unsafe {self.device.CreateShaderResourceView(
+                            cxtexture.platform.texture.as_mut().unwrap().as_raw() as *mut _,
+                            ptr::null(),
+                            &mut shader_resource as *mut *mut _
+                        )};
+                        cxtexture.platform.shader_resource = Some(unsafe {ComPtr::from_raw(shader_resource as *mut _)});
+                        cxtexture.update_image = false;
+                    }
+                    else {
+                        panic!("Texture create failed");
+                    }
+                },
+                TextureFormat::ImageRGf32 => {
+                    if cxtexture.image_f32.len() != width * height * 2 {
+                        println!("update_platform_texture_image2d with wrong buffer_f32 size {} {}!", width*height*2, cxtexture.image_f32.len());
+                        return;
+                    }
+                    
+                    let mut texture = ptr::null_mut();
+                    let sub_data = d3d11::D3D11_SUBRESOURCE_DATA {
+                        pSysMem: cxtexture.image_f32.as_ptr() as *const _,
+                        SysMemPitch: (width * 8) as u32,
+                        SysMemSlicePitch: 0
+                    };
+                    
+                    let texture_desc = d3d11::D3D11_TEXTURE2D_DESC {
+                        Width: width as u32,
+                        Height: height as u32,
+                        MipLevels: 1,
+                        ArraySize: 1,
+                        Format: dxgiformat::DXGI_FORMAT_R32G32_FLOAT,
+                        SampleDesc: dxgitype::DXGI_SAMPLE_DESC {
+                            Count: 1,
+                            Quality: 0
+                        },
+                        Usage: d3d11::D3D11_USAGE_DEFAULT,
+                        BindFlags: d3d11::D3D11_BIND_SHADER_RESOURCE,
+                        CPUAccessFlags: 0,
+                        MiscFlags: 0,
+                    };
+                    
+                    let hr = unsafe {self.device.CreateTexture2D(&texture_desc, &sub_data, &mut texture as *mut *mut _)};
+                    if winerror::SUCCEEDED(hr) {
+                        cxtexture.platform.texture = Some(unsafe {ComPtr::from_raw(texture as *mut _)});
+                        let mut shader_resource = ptr::null_mut();
+                        unsafe {self.device.CreateShaderResourceView(
+                            cxtexture.platform.texture.as_mut().unwrap().as_raw() as *mut _,
+                            ptr::null(),
+                            &mut shader_resource as *mut *mut _
+                        )};
+                        cxtexture.platform.shader_resource = Some(unsafe {ComPtr::from_raw(shader_resource as *mut _)});
+                        cxtexture.update_image = false;
+                    }
+                    else {
+                        panic!("Texture create failed");
+                    }
+                },
                 _ => {
                     println!("update_platform_texture_image2d with unsupported format");
                     return;

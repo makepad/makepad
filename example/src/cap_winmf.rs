@@ -258,7 +258,7 @@ unsafe impl IMFSourceReaderCallback for SourceReaderCallback {
                                 let in_buf = std::slice::from_raw_parts(scanline0 as *mut u16, width * height);
                                 for y in 0..height {
                                     for x in (0..width).step_by(2) {
-                                        let off = y * width * x;
+                                        let off = y * width + x;
                                         let y0 = in_buf[off] & 0xff;
                                         let u0 = in_buf[off] >> 8;
                                         let y1 = in_buf[off + 1] & 0xff;
