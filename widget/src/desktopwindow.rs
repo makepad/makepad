@@ -207,7 +207,7 @@ impl DesktopWindow {
             self.sub_pass.end_pass(cx);
             // alright so sub_pass rendered a texture, now we blit it inside the outer pass
             let _ = self.sub_view.begin_view(cx, Layout::default());
-            self.blit.draw_blit_abs(cx, &self.blitbuffer, Rect {x: 0., y: 0., w: 512., h: 512.});
+            self.blit.draw_blit_walk(cx, &self.blitbuffer, Bounds::Fill, Bounds::Fill, Margin::zero());
             self.sub_view.end_view(cx);
         }
         self.pass.end_pass(cx);

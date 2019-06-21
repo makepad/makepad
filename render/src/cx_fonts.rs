@@ -146,7 +146,7 @@ impl CxFont{
             format: TextureFormat::ImageBGRA,
             width: Some(ff.width),
             height:Some(ff.height),
-            samples: 1
+            multisample: None
         };
         cxtex.image_u32.resize(ff.width*ff.height, 0);
         cxtex.upload_image = true;

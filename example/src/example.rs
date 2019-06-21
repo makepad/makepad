@@ -31,8 +31,8 @@
 
 use render::*;
 use widget::*;
-pub mod cap_dshow;
-pub use crate::cap_dshow::*;
+pub mod cap_winmf;
+pub use crate::cap_winmf::*;
 
 struct App {
     view: View<ScrollBar>,
@@ -40,7 +40,8 @@ struct App {
     buttons: Elements<u64, Button, Button>,
     text: Text,
     quad: Quad,
-    winmf:CapWinMF,
+    blit: Blit,
+    cap:CapWinMF,
     clickety: u64
 }
 
@@ -50,7 +51,7 @@ impl Style for App {
     fn style(cx: &mut Cx) -> Self {
         set_dark_style(cx);
         Self {
-            winmf:CapWinMF::default(),
+            cap:CapWinMF::default(),
             window:DesktopWindow::style(cx),
             view: View {
                 scroll_h: Some(ScrollBar::style(cx)),
@@ -61,9 +62,8 @@ impl Style for App {
                 shader: cx.add_shader(App::def_quad_shader(), "App.quad"),
                 ..Style::style(cx)
             },
-            text: Text {
-                ..Style::style(cx)
-            },
+            text: Text ::style(cx),
+            blit: Blit::style(cx),
             buttons: Elements::new(Button {
                 ..Style::style(cx)
             }),
@@ -89,12 +89,17 @@ impl App {
     fn handle_app(&mut self, cx: &mut Cx, event: &mut Event) {
         
         if let Event::Construct = event{
-            self.winmf.init(cx);
+            self.cap.init(cx, 0, 3840, 2160, 30.0);
         }
+        
         self.window.handle_desktop_window(cx, event);
         
         self.view.handle_scroll_bars(cx, event);
         
+        if let CapEvent::NewImage =  self.cap.handle_signal(cx, event){
+            self.view.redraw_view_area(cx);
+        }
+        /*
         for btn in self.buttons.iter() {
             match btn.handle_button(cx, event) {
                 ButtonEvent::Clicked => {
@@ -104,7 +109,7 @@ impl App {
                 },
                 _ => ()
             }
-        }
+        }*/
     }
     
     fn draw_app(&mut self, cx: &mut Cx) {
@@ -112,10 +117,11 @@ impl App {
         let _ = self.window.begin_desktop_window(cx);
         
         let _ =  self.view.begin_view(cx, Layout {
-            padding: Padding {l: 10., t: 10., r: 0., b: 0.},
+            padding: Padding {l: 0., t: 0., r: 0., b: 0.},
             ..Default::default()
         });
-        
+        self.blit.draw_blit_walk(cx, &self.cap.texture, Bounds::Fill, Bounds::Fill, Margin::zero());
+        /*
         for i in 0..100 {
             
             self.buttons.get_draw(cx, i, | _cx, templ | {templ.clone()})
@@ -124,13 +130,11 @@ impl App {
             if i % 10 == 9 {
                 cx.turtle_new_line()
             }
-        }
+        }*/
         
-        cx.turtle_new_line();
-        
-        self.text.draw_text(cx, &format!("It works {}", self.clickety));
-        
-        self.quad.draw_quad_walk(cx, Bounds::Fix(100.), Bounds::Fix(100.), Margin {l: 15., t: 0., r: 0., b: 0.});
+        //cx.turtle_new_line();
+        //self.text.draw_text(cx, &format!("It works {}", self.clickety));
+        //self.quad.draw_quad_walk(cx, Bounds::Fix(100.), Bounds::Fix(100.), Margin {l: 15., t: 0., r: 0., b: 0.});
         
         self.view.end_view(cx);
         
