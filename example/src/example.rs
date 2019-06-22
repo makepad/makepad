@@ -43,7 +43,7 @@ struct Mandelbrot {
     width: usize,
     zoom: f64,
     height: usize,
-    image_read:bool,
+    image_read: bool,
     image_signal: Signal,
     image_front: Mutex<Vec<f32>>
 }
@@ -52,8 +52,8 @@ impl Mandelbrot {
     fn init(&mut self, cx: &mut Cx) {
         // lets start a mandelbrot thread that produces frames
         self.image_signal = cx.new_signal();
-        self.width = 3000;
-        self.height = 1500;
+        self.width = 3840;
+        self.height = 2160;
         self.image_read = true;
         self.zoom = 1.0;
         self.num_threads = 30;
@@ -86,7 +86,7 @@ impl Mandelbrot {
                 if mask_u32 == 0 { // is a i8
                     return (count, _mm256_sqrt_pd(merge_sum));
                 }
-                merge_sum = _mm256_or_pd(_mm256_and_pd(sum, mask),_mm256_andnot_pd(mask, merge_sum));
+                merge_sum = _mm256_or_pd(_mm256_and_pd(sum, mask), _mm256_andnot_pd(mask, merge_sum));
                 count = _mm256_add_pd(count, _mm256_and_pd(add, mask));
                 x = _mm256_add_pd(_mm256_sub_pd(xx, yy), c_x);
                 y = _mm256_add_pd(_mm256_add_pd(xy, xy), c_y);
@@ -134,6 +134,9 @@ impl Mandelbrot {
             let mut center_y = 0.0;
             loop {
                 zoom = zoom / 1.003;
+                if zoom < 0.000000000002 {
+                    zoom = 1.0;
+                }
                 let time1 = Cx::profile_time_ns();
                 thread_pool.scoped( | scope | {
                     image_back.resize(width * height * 2, 0.0);
@@ -167,14 +170,14 @@ impl Mandelbrot {
                                         _mm256_store_pd(it_v.as_ptr(), it256);
                                         _mm256_store_pd(su_v.as_ptr(), sum256);
                                         
-                                        slice[(x* 2 + (y - start) * width * 2) as usize] = it_v[3] as f32;
-                                        slice[(x* 2 + 2 + (y - start) * width* 2) as usize] = it_v[2] as f32;
-                                        slice[(x* 2 + (1 + y - start) * width* 2) as usize] = it_v[1] as f32;
-                                        slice[(x* 2 + 2 + (1 + y - start) * width* 2) as usize] = it_v[0] as f32;
-                                        slice[1+(x* 2 + (y - start) * width * 2) as usize] = su_v[3] as f32;
-                                        slice[1+(x* 2 + 2 + (y - start) * width* 2) as usize] = su_v[2] as f32;
-                                        slice[1+(x* 2 + (1 + y - start) * width* 2) as usize] = su_v[1] as f32;
-                                        slice[1+(x* 2 + 2 + (1 + y - start) * width* 2) as usize] = su_v[0] as f32;
+                                        slice[(x * 2 + (y - start) * width * 2) as usize] = it_v[3] as f32;
+                                        slice[(x * 2 + 2 + (y - start) * width * 2) as usize] = it_v[2] as f32;
+                                        slice[(x * 2 + (1 + y - start) * width * 2) as usize] = it_v[1] as f32;
+                                        slice[(x * 2 + 2 + (1 + y - start) * width * 2) as usize] = it_v[0] as f32;
+                                        slice[1 + (x * 2 + (y - start) * width * 2) as usize] = su_v[3] as f32;
+                                        slice[1 + (x * 2 + 2 + (y - start) * width * 2) as usize] = su_v[2] as f32;
+                                        slice[1 + (x * 2 + (1 + y - start) * width * 2) as usize] = su_v[1] as f32;
+                                        slice[1 + (x * 2 + 2 + (1 + y - start) * width * 2) as usize] = su_v[0] as f32;
                                     }
                                 }
                             }
@@ -185,11 +188,11 @@ impl Mandelbrot {
                 let time2 = Cx::profile_time_ns();
                 //println!("{}", (time2-time1)as f64 /1000.0);
                 // alright we have a texture ready. now what.
-                let mandel_ref = unsafe{&mut (*(mandel as *mut Mandelbrot))};
-                while !mandel_ref.image_read{
+                let mandel_ref = unsafe {&mut (*(mandel as *mut Mandelbrot))};
+                while !mandel_ref.image_read {
                     std::thread::sleep(std::time::Duration::from_millis(1));
                 }
-                let mut front =  mandel_ref.image_front.lock().unwrap();
+                let mut front = mandel_ref.image_front.lock().unwrap();
                 mandel_ref.image_read = false;
                 std::mem::swap(&mut (*front), &mut image_back);
                 Cx::send_signal(image_signal, 0);
@@ -232,17 +235,17 @@ impl Style for App {
             cap: CapWinMF::default(),
             window: DesktopWindow::style(cx),
             view: View {
-                is_overlay:true,
+                is_overlay: true,
                 scroll_h: Some(ScrollBar::style(cx)),
                 scroll_v: Some(ScrollBar::style(cx)),
                 ..Style::style(cx)
             },
             blit: Blit::style(cx),
-            mandel_blit: Blit{
+            mandel_blit: Blit {
                 shader: cx.add_shader(App::def_blit_shader(), "App.blit"),
                 ..Blit::style(cx)
             },
-            frame:0.
+            frame: 0.
         }
     }
 }
@@ -250,18 +253,24 @@ impl Style for App {
 impl App {
     fn def_blit_shader() -> ShaderGen {
         Blit::def_blit_shader().compose(shader_ast!({
-            let texcam:texture2d<Texture>; 
-            let time:float<Uniform>; 
+            let texcam: texture2d<Texture>;
+            let time: float<Uniform>;
+            
+            
+            fn kaleido(uv:vec2, angle:float, base:float, spin:float)->vec2{
+                let a = atan(uv.y, uv.x);
+                if a<0.{a = PI + a}
+                let d = length(uv);
+                a = abs(fmod (a + spin, angle * 2.0) - angle);
+                return vec2(abs(sin(a + base)) * d, abs(cos(a + base)) * d);
+            }
+            
             fn pixel() -> vec4 {
-                let fr1 = sample2d(texturez, geom.xy).rg;
-                let fr2 = sample2d(texturez, vec2(1.0-geom.x,geom.y)).rg;
-                let cam = sample2d(texcam, vec2(1.0-geom.x,geom.y)); 
-                //return vec4(df_iq_pal4(fr.x*2.0).xyz, alpha);
-                //if fr1.x == 0.{
-                //    return vec4(0.,0.,0.,1.);
-               // }
-                //let fract = df_iq_pal4(fr1.x*0.03 +fr2.x*0.03 - 0.1*log(fr1.y*fr2.y));
-                return vec4(cam.xyz, alpha);
+                let fr1 = sample2d(texturez, geom.xy).rg;//kaleido(geom.xy-vec2(0.5,0.5), 3.14/8., time, 2.*time)).rg;
+                let fr2 = sample2d(texturez, vec2(1.0 - geom.x, geom.y)).rg;
+                let cam = sample2d(texcam, geom.xy);//kaleido(geom.xy-vec2(0.5,0.5), 3.14/8., time, 2.*time));
+                let fract = df_iq_pal3(time + fr1.x * 0.03 + fr2.x * 0.03 - 0.1 * log(fr1.y * fr2.y));
+                return vec4(cam.xyz*fract.xyz, alpha);
             }
         }))
     }
@@ -294,15 +303,15 @@ impl App {
             abs_origin: Some(Vec2::zero()),
             padding: Padding {l: 0., t: 0., r: 0., b: 0.},
             ..Default::default()
-        }); 
+        });
         
         self.view.redraw_view_area(cx);
         let inst = self.mandel_blit.draw_blit_walk(cx, &self.mandel.texture, Bounds::Fill, Bounds::Fill, Margin::zero());
         inst.push_uniform_texture_2d(cx, &self.cap.texture);
         inst.push_uniform_float(cx, self.frame);
-        self.frame += 1.;
+        self.frame += 0.001;
         cx.reset_turtle_walk();
-
+        
         self.view.redraw_view_area(cx);
         self.view.end_view(cx);
         

@@ -206,7 +206,7 @@ impl CxShader {
                     ShFn {name: "tan".to_string(), args: vec![ShFnArg::new("x", "T")], ret: "T".to_string(), block: None},
                     ShFn {name: "asin".to_string(), args: vec![ShFnArg::new("x", "T")], ret: "T".to_string(), block: None},
                     ShFn {name: "acos".to_string(), args: vec![ShFnArg::new("x", "T")], ret: "T".to_string(), block: None},
-                    ShFn {name: "atan".to_string(), args: vec![ShFnArg::new("x", "T"), ShFnArg::new("y", "O")], ret: "T".to_string(), block: None},
+                    ShFn {name: "atan".to_string(), args: vec![ShFnArg::new("x", "T"), ShFnArg::new("y", "T")], ret: "T".to_string(), block: None},
                     
                     ShFn {name: "pow".to_string(), args: vec![ShFnArg::new("x", "T"), ShFnArg::new("y", "T")], ret: "T".to_string(), block: None},
                     ShFn {name: "exp".to_string(), args: vec![ShFnArg::new("x", "T")], ret: "T".to_string(), block: None},

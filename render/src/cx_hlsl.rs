@@ -354,6 +354,9 @@ impl<'a> SlCx<'a> {
             "dfdy" => {
                 return MapCallResult::Rename("ddy".to_string())
             },
+            "atan" => {
+                return MapCallResult::Rename("atan2".to_string())
+            },
             _ => return MapCallResult::None
         }
     }
