@@ -33,6 +33,7 @@ pub struct CapWinMF {
     pub convert: CapConvert,
     pub image_signal: Signal,
     pub texture: Texture,
+    pub last_time: u64,
     pub image_back: Vec<u32>,
     pub image_front: Mutex<Vec<u32>>,
     pub source: Option<ComPtr<IMFMediaSource>>,
@@ -123,6 +124,10 @@ impl CapWinMF {
     pub fn handle_signal(&mut self, cx: &mut Cx, event: &mut Event) -> CapEvent {
         if let Event::Signal(se) = event {
             if self.image_signal.is_signal(se) { // we haz new texture
+                let last_time = self.last_time;
+                let new_time = Cx::profile_time_ns();
+                //println!("{}",1000000000./(new_time-last_time) as f64);
+                self.last_time = new_time;
                 let mut front = self.image_front.lock().unwrap();
                 let cxtex = &mut cx.textures[self.texture.texture_id.unwrap()];
                 std::mem::swap(&mut (*front), &mut cxtex.image_u32);
@@ -237,7 +242,7 @@ unsafe impl IMFSourceReaderCallback for SourceReaderCallback {
     unsafe fn on_read_sample(&self, hrState: HRESULT, _dwStreamIndex: DWORD, _dwStreamFlags: DWORD, _llTimeStamp: LONGLONG, pSample: *const IMFSample,) -> HRESULT {
         if hrState != S_OK {
             println!("read sample returned failure!");
-            return S_OK;
+            return S_OK; 
         }
         if pSample != ptr::null() {
             let mut media_buffer_raw = ptr::null_mut();
@@ -254,7 +259,7 @@ unsafe impl IMFSourceReaderCallback for SourceReaderCallback {
                         let height = (*self.cap_win_mf).height;
                         let out_buf = &mut (*self.cap_win_mf).image_back;
                         out_buf.resize(width * height, 0);
-                        let time1 = Cx::profile_time_ns();
+                        //let time1 = Cx::profile_time_ns();
                         match (*self.cap_win_mf).convert {
                             CapConvert::YUY2 => {
                                 // lets convert YUY2 to RGB
@@ -334,8 +339,8 @@ unsafe impl IMFSourceReaderCallback for SourceReaderCallback {
                             },
                             _ => ()
                         }
-                        let time2 = Cx::profile_time_ns();
-                        println!("{}", (time2 - time1)as f64 / 1000.0);
+                        //let time2 = Cx::profile_time_ns();
+                        //println!("{}", (time2 - time1)as f64 / 1000.0);
                         let mut front = (*self.cap_win_mf).image_front.lock().unwrap();
                         std::mem::swap(&mut (*front), out_buf);
                         Cx::send_signal((*self.cap_win_mf).image_signal, 0);

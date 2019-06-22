@@ -7,6 +7,10 @@ pub enum TextureFormat {
     ImageBGRAf32,
     ImageRf32,
     ImageRGf32,
+    MappedBGRA,
+    MappedBGRAf32,
+    MappedRf32,
+    MappedRGf32,
     Depth24Stencil8,
     RenderBGRA,
     RenderBGRAf16,
@@ -72,7 +76,7 @@ impl Texture{
     }
 }
 
-#[derive(Default, Clone)]
+#[derive(Default)]
 pub struct CxTexture{
     pub desc:TextureDesc,
     pub image_u32: Vec<u32>,

@@ -42,31 +42,30 @@ struct Mandelbrot {
     num_threads: usize,
     width: usize,
     zoom: f64,
-    height: usize,
+    height: usize, 
     image_read: bool,
     image_signal: Signal,
-    image_front: Mutex<Vec<f32>>
+    //image_front: Mutex<Vec<f32>>
 }
 
 impl Mandelbrot {
     fn init(&mut self, cx: &mut Cx) {
         // lets start a mandelbrot thread that produces frames
         self.image_signal = cx.new_signal();
-        self.width = 3840;
+        self.width = 3840; 
         self.height = 2160;
-        self.image_read = true;
         self.zoom = 1.0;
         self.num_threads = 30;
         self.texture.set_desc(cx, Some(TextureDesc {
-            format: TextureFormat::ImageRGf32,
+            format: TextureFormat::MappedRGf32,
             width: Some(self.width),
             height: Some(self.height),
             multisample: None
         }));
-        self.image_thread();
+        self.start_image_thread(cx);
     }
     
-    fn image_thread(&mut self) {
+    fn start_image_thread(&mut self, cx: &mut Cx) {
         #[inline]
         unsafe fn calc_mandel_avx2(c_x: __m256d, c_y: __m256d, max_iter: u32) -> (__m256d, __m256d) {
             let mut x = c_x;
@@ -126,7 +125,10 @@ impl Mandelbrot {
         let mut image_back: Vec<f32> = Vec::new();
         
         let mut image_signal = self.image_signal.clone();
-        let mandel: u64 = self as *mut _ as u64; // this is safe. sure :)
+        // find a way to fix this nicely
+        let mandel_u64: u64 = self as *mut _ as u64; 
+        let cx_u64:u64 = cx as *mut _ as u64;
+        let texture_id:usize = self.texture.texture_id.unwrap();
         
         std::thread::spawn(move || {
             let mut zoom = 1.0;
@@ -137,64 +139,63 @@ impl Mandelbrot {
                 if zoom < 0.000000000002 {
                     zoom = 1.0;
                 }
-                let time1 = Cx::profile_time_ns();
+                //let time1 = Cx::profile_time_ns();
+
                 thread_pool.scoped( | scope | {
-                    image_back.resize(width * height * 2, 0.0);
-                    let mut iter = image_back.chunks_mut((chunk_height * width * 2) as usize);
-                    for i in 0..num_threads {
-                        let thread_num = i;
-                        let slice = iter.next().unwrap();
-                        //println!("{}", chunk_height);
-                        scope.execute(move || {
-                            let mut it_v = [0f64, 0f64, 0f64, 0f64];
-                            let mut su_v = [0f64, 0f64, 0f64, 0f64];
-                            let start = thread_num * chunk_height as usize;
-                            for y in (start..(start + chunk_height)).step_by(2) {
-                                for x in (0..width).step_by(2) {
-                                    //continue;
-                                    // ok lets now do the simd mandel
-                                    unsafe {
-                                        let c_re = _mm256_set_pd(
-                                            (x as f64 - fwidth * 0.5) * 4.0 / fwidth * zoom + center_x,
-                                            ((x + 1) as f64 - fwidth * 0.5) * 4.0 / fwidth * zoom + center_x,
-                                            (x as f64 - fwidth * 0.5) * 4.0 / fwidth * zoom + center_x,
-                                            ((x + 1) as f64 - fwidth * 0.5) * 4.0 / fwidth * zoom + center_x
-                                        );
-                                        let c_im = _mm256_set_pd(
-                                            (y as f64 - fheight * 0.5) * 3.0 / fheight * zoom + center_y,
-                                            (y as f64 - fheight * 0.5) * 3.0 / fheight * zoom + center_y,
-                                            ((y + 1) as f64 - fheight * 0.5) * 3.0 / fheight * zoom + center_y,
-                                            ((y + 1) as f64 - fheight * 0.5) * 3.0 / fheight * zoom + center_y
-                                        );
-                                        let (it256, sum256) = calc_mandel_avx2(c_re, c_im, 130);
-                                        _mm256_store_pd(it_v.as_ptr(), it256);
-                                        _mm256_store_pd(su_v.as_ptr(), sum256);
-                                        
-                                        slice[(x * 2 + (y - start) * width * 2) as usize] = it_v[3] as f32;
-                                        slice[(x * 2 + 2 + (y - start) * width * 2) as usize] = it_v[2] as f32;
-                                        slice[(x * 2 + (1 + y - start) * width * 2) as usize] = it_v[1] as f32;
-                                        slice[(x * 2 + 2 + (1 + y - start) * width * 2) as usize] = it_v[0] as f32;
-                                        slice[1 + (x * 2 + (y - start) * width * 2) as usize] = su_v[3] as f32;
-                                        slice[1 + (x * 2 + 2 + (y - start) * width * 2) as usize] = su_v[2] as f32;
-                                        slice[1 + (x * 2 + (1 + y - start) * width * 2) as usize] = su_v[1] as f32;
-                                        slice[1 + (x * 2 + 2 + (1 + y - start) * width * 2) as usize] = su_v[0] as f32;
+                    let cx = unsafe {&mut (*(cx_u64 as *mut Cx))};
+                    if let Some(mapped_texture) = unsafe{cx.lock_mapped_texture_f32(texture_id)}{
+                        let mut iter = mapped_texture.chunks_mut((chunk_height * width * 2) as usize);
+                        for i in 0..num_threads {
+                            let thread_num = i;
+                            let slice = iter.next().unwrap();
+                            //println!("{}", chunk_height);
+                            scope.execute(move || {
+                                let mut it_v = [0f64, 0f64, 0f64, 0f64];
+                                let mut su_v = [0f64, 0f64, 0f64, 0f64];
+                                let start = thread_num * chunk_height as usize;
+                                for y in (start..(start + chunk_height)).step_by(2) {
+                                    for x in (0..width).step_by(2) {
+                                        //continue;
+                                        // ok lets now do the simd mandel
+                                        unsafe {
+                                            let c_re = _mm256_set_pd(
+                                                (x as f64 - fwidth * 0.5) * 4.0 / fwidth * zoom + center_x,
+                                                ((x + 1) as f64 - fwidth * 0.5) * 4.0 / fwidth * zoom + center_x,
+                                                (x as f64 - fwidth * 0.5) * 4.0 / fwidth * zoom + center_x,
+                                                ((x + 1) as f64 - fwidth * 0.5) * 4.0 / fwidth * zoom + center_x
+                                            );
+                                            let c_im = _mm256_set_pd(
+                                                (y as f64 - fheight * 0.5) * 3.0 / fheight * zoom + center_y,
+                                                (y as f64 - fheight * 0.5) * 3.0 / fheight * zoom + center_y,
+                                                ((y + 1) as f64 - fheight * 0.5) * 3.0 / fheight * zoom + center_y,
+                                                ((y + 1) as f64 - fheight * 0.5) * 3.0 / fheight * zoom + center_y
+                                            );
+                                            let (it256, sum256) = calc_mandel_avx2(c_re, c_im, 130);
+                                            _mm256_store_pd(it_v.as_ptr(), it256);
+                                            _mm256_store_pd(su_v.as_ptr(), sum256);
+                                            
+                                            slice[(x * 2 + (y - start) * width * 2) as usize] = it_v[3] as f32;
+                                            slice[(x * 2 + 2 + (y - start) * width * 2) as usize] = it_v[2] as f32;
+                                            slice[(x * 2 + (1 + y - start) * width * 2) as usize] = it_v[1] as f32;
+                                            slice[(x * 2 + 2 + (1 + y - start) * width * 2) as usize] = it_v[0] as f32;
+                                            slice[1 + (x * 2 + (y - start) * width * 2) as usize] = su_v[3] as f32;
+                                            slice[1 + (x * 2 + 2 + (y - start) * width * 2) as usize] = su_v[2] as f32;
+                                            slice[1 + (x * 2 + (1 + y - start) * width * 2) as usize] = su_v[1] as f32;
+                                            slice[1 + (x * 2 + 2 + (1 + y - start) * width * 2) as usize] = su_v[0] as f32;
+                                        }
                                     }
                                 }
-                            }
-                        })
+                            })
+                        }
                     }
-                    
+                    else{
+                        std::thread::sleep(std::time::Duration::from_millis(1));
+                        return
+                    }
                 });
-                let time2 = Cx::profile_time_ns();
-                //println!("{}", (time2-time1)as f64 /1000.0);
-                // alright we have a texture ready. now what.
-                let mandel_ref = unsafe {&mut (*(mandel as *mut Mandelbrot))};
-                while !mandel_ref.image_read {
-                    std::thread::sleep(std::time::Duration::from_millis(1));
-                }
-                let mut front = mandel_ref.image_front.lock().unwrap();
-                mandel_ref.image_read = false;
-                std::mem::swap(&mut (*front), &mut image_back);
+                let cx = unsafe {&mut (*(cx_u64 as *mut Cx))};
+                unsafe{cx.unlock_mapped_texture(texture_id)}
+                //println!("{}", (Cx::profile_time_ns()-time1) as f64/1000.);
                 Cx::send_signal(image_signal, 0);
             }
         });
@@ -203,11 +204,6 @@ impl Mandelbrot {
     fn handle_signal(&mut self, cx: &mut Cx, event: &Event) -> bool {
         if let Event::Signal(se) = event {
             if self.image_signal.is_signal(se) { // we haz new texture
-                let mut front = self.image_front.lock().unwrap();
-                let cxtex = &mut cx.textures[self.texture.texture_id.unwrap()];
-                std::mem::swap(&mut (*front), &mut cxtex.image_f32);
-                cxtex.update_image = true;
-                self.image_read = true;
                 return true
             }
         }
@@ -269,7 +265,7 @@ impl App {
                 let fr1 = sample2d(texturez, geom.xy).rg;//kaleido(geom.xy-vec2(0.5,0.5), 3.14/8., time, 2.*time)).rg;
                 let fr2 = sample2d(texturez, vec2(1.0 - geom.x, geom.y)).rg;
                 let cam = sample2d(texcam, geom.xy);//kaleido(geom.xy-vec2(0.5,0.5), 3.14/8., time, 2.*time));
-                let fract = df_iq_pal3(time + fr1.x * 0.03 + fr2.x * 0.03 - 0.1 * log(fr1.y * fr2.y));
+                let fract = df_iq_pal4(time*3. + fr1.x * 0.03 + fr2.x * 0.03 - 0.1 * log(fr1.y * fr2.y));
                 return vec4(cam.xyz*fract.xyz, alpha);
             }
         }))
