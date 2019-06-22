@@ -83,10 +83,10 @@ impl Mandelbrot {
                 let sum = _mm256_add_pd(xx, yy);
                 let mask = _mm256_cmp_pd(sum, max_dist, _CMP_LT_OS);
                 let mask_u32 = _mm256_movemask_pd(mask);
-                merge_sum = _mm256_or_pd(_mm256_and_pd(sum, mask),_mm256_andnot_pd(mask, merge_sum));
                 if mask_u32 == 0 { // is a i8
                     return (count, _mm256_sqrt_pd(merge_sum));
                 }
+                merge_sum = _mm256_or_pd(_mm256_and_pd(sum, mask),_mm256_andnot_pd(mask, merge_sum));
                 count = _mm256_add_pd(count, _mm256_and_pd(add, mask));
                 x = _mm256_add_pd(_mm256_sub_pd(xx, yy), c_x);
                 y = _mm256_add_pd(_mm256_add_pd(xy, xy), c_y);
@@ -257,11 +257,11 @@ impl App {
                 let fr2 = sample2d(texturez, vec2(1.0-geom.x,geom.y)).rg;
                 let cam = sample2d(texcam, vec2(1.0-geom.x,geom.y)); 
                 //return vec4(df_iq_pal4(fr.x*2.0).xyz, alpha);
-                if fr1.x == 0.{
-                    return vec4(0.,0.,0.,1.);
-                }
-                let fract = df_iq_pal4(fr1.x*0.03 +fr2.x*0.03 - 0.1*log(fr1.y*fr2.y));
-                return vec4(fract.xyz*cam.xyz, alpha);
+                //if fr1.x == 0.{
+                //    return vec4(0.,0.,0.,1.);
+               // }
+                //let fract = df_iq_pal4(fr1.x*0.03 +fr2.x*0.03 - 0.1*log(fr1.y*fr2.y));
+                return vec4(cam.xyz, alpha);
             }
         }))
     }
@@ -284,17 +284,6 @@ impl App {
         if self.mandel.handle_signal(cx, event) {
             self.view.redraw_view_area(cx);
         }
-        /*
-        for btn in self.buttons.iter() {
-            match btn.handle_button(cx, event) {
-                ButtonEvent::Clicked => {
-                    // boop
-                    self.clickety += 1;
-                    cx.redraw_child_area(Area::All);
-                },
-                _ => ()
-            }
-        }*/
     }
     
     fn draw_app(&mut self, cx: &mut Cx) {

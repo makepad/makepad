@@ -2,6 +2,8 @@
 #![allow(non_camel_case_types)]
 #![allow(non_upper_case_globals)]
 
+use core::arch::x86_64::*;
+
 use render::*;
 
 use winapi::shared::minwindef::{DWORD, BYTE, BOOL, UINT, TRUE};
@@ -155,7 +157,7 @@ impl CapWinMF {
             
             let mut source_raw = ptr::null_mut();
             
-            check("ActivateObject", (*devices[if device_id >= count as usize{0} else{device_id}]).ActivateObject(
+            check("ActivateObject", (*devices[if device_id >= count as usize {0} else {device_id}]).ActivateObject(
                 &IMFMediaSource::uuidof(),
                 &mut source_raw
             ));
@@ -226,7 +228,7 @@ impl SourceReaderCallback {
     unsafe fn new(cap_win_mf: *mut CapWinMF) -> ComPtr<IMFSourceReaderCallback> {
         let ptr = SourceReaderCallback::create_raw(cap_win_mf);
         let ptr = ptr as *mut IMFSourceReaderCallback;
-        ComPtr::from_raw(ptr) 
+        ComPtr::from_raw(ptr)
     }
 }
 
@@ -252,45 +254,88 @@ unsafe impl IMFSourceReaderCallback for SourceReaderCallback {
                         let height = (*self.cap_win_mf).height;
                         let out_buf = &mut (*self.cap_win_mf).image_back;
                         out_buf.resize(width * height, 0);
+                        let time1 = Cx::profile_time_ns();
                         match (*self.cap_win_mf).convert {
                             CapConvert::YUY2 => {
                                 // lets convert YUY2 to RGB
                                 let in_buf = std::slice::from_raw_parts(scanline0 as *mut u16, width * height);
                                 for y in 0..height {
-                                    for x in (0..width).step_by(2) {
+                                    for x in (0..width).step_by(2 * 4) {
                                         let off = y * width + x;
-                                        let y0 = in_buf[off] & 0xff;
-                                        let u0 = in_buf[off] >> 8;
-                                        let y1 = in_buf[off + 1] & 0xff;
-                                        let v0 = in_buf[off + 1] >> 8;
-                                        out_buf[off] = convert_ycrcb_to_rgba(y0, v0, u0);
-                                        out_buf[off + 1] = convert_ycrcb_to_rgba(y1, v0, u0);
+                                        
+                                        let ay0 = (in_buf[off + 0] & 0xff) as i32;
+                                        let au0 = (in_buf[off + 0] >> 8) as i32;
+                                        let ay1 = (in_buf[off + 1] & 0xff) as i32;
+                                        let av0 = (in_buf[off + 1] >> 8) as i32;
+                                        
+                                        let by0 = (in_buf[off + 2] & 0xff) as i32;
+                                        let bu0 = (in_buf[off + 2] >> 8) as i32;
+                                        let by1 = (in_buf[off + 3] & 0xff) as i32;
+                                        let bv0 = (in_buf[off + 3] >> 8) as i32;
+                                        
+                                        let cy0 = (in_buf[off + 4] & 0xff) as i32;
+                                        let cu0 = (in_buf[off + 4] >> 8) as i32;
+                                        let cy1 = (in_buf[off + 5] & 0xff) as i32;
+                                        let cv0 = (in_buf[off + 5] >> 8) as i32;
+                                        
+                                        let dy0 = (in_buf[off + 6] & 0xff) as i32;
+                                        let du0 = (in_buf[off + 6] >> 8) as i32;
+                                        let dy1 = (in_buf[off + 7] & 0xff) as i32;
+                                        let dv0 = (in_buf[off + 7] >> 8) as i32;
+                                        
+                                        let abcd1 = convert_ycrcb_to_rgba_sse2(
+                                            _mm_set_epi32(ay0, by0, cy0, dy0),
+                                            _mm_set_epi32(av0, bv0, cv0, dv0),
+                                            _mm_set_epi32(au0, bu0, cu0, du0)
+                                        );
+                                        
+                                        let abcd2 = convert_ycrcb_to_rgba_sse2(
+                                            _mm_set_epi32(ay1, by1, cy1, dy1),
+                                            _mm_set_epi32(av0, bv0, cv0, dv0),
+                                            _mm_set_epi32(au0, bu0, cu0, du0)
+                                        );
+                                        out_buf[off + 0] = _mm_extract_epi32(abcd1, 3) as u32;
+                                        out_buf[off + 1] = _mm_extract_epi32(abcd2, 3) as u32;
+                                        out_buf[off + 2] = _mm_extract_epi32(abcd1, 2) as u32;
+                                        out_buf[off + 3] = _mm_extract_epi32(abcd2, 2) as u32;
+                                        out_buf[off + 4] = _mm_extract_epi32(abcd1, 1) as u32;
+                                        out_buf[off + 5] = _mm_extract_epi32(abcd2, 1) as u32;
+                                        out_buf[off + 6] = _mm_extract_epi32(abcd1, 0) as u32;
+                                        out_buf[off + 7] = _mm_extract_epi32(abcd2, 0) as u32;
                                     }
                                 }
                             },
-                            CapConvert::NV12=>{
+                            CapConvert::NV12 => {
                                 // lets convert NV12 to RGB
-                                let in_buf = std::slice::from_raw_parts(scanline0 as *mut u8, (width * height) *3);
+                                let in_buf = std::slice::from_raw_parts(scanline0 as *mut u8, (width * height) * 3);
                                 let mut v_off = width * height;
                                 for y in (0..height).step_by(2) {
-                                    for x in (0..width).step_by(2) { 
+                                    for x in (0..width).step_by(2) {
                                         let off = y * width + x;
-                                        let y0 = in_buf[off] as u16;
-                                        let y1 = in_buf[off + 1] as u16;
-                                        let y2 = in_buf[off + width] as u16;
-                                        let y3 = in_buf[off + width + 1] as u16;
-                                        let u = in_buf[v_off] as u16;
-                                        let v = in_buf[v_off+1] as u16;
+                                        let y0 = in_buf[off] as i32;
+                                        let y1 = in_buf[off + 1] as i32;
+                                        let y2 = in_buf[off + width] as i32;
+                                        let y3 = in_buf[off + width + 1] as i32;
+                                        let u = in_buf[v_off] as i32;
+                                        let v = in_buf[v_off + 1] as i32;
                                         v_off += 2;
-                                        out_buf[off] = convert_ycrcb_to_rgba(y0, v, u);
-                                        out_buf[off + 1] = convert_ycrcb_to_rgba(y1, v, u);
-                                        out_buf[off + width] = convert_ycrcb_to_rgba(y2, v, u);
-                                        out_buf[off + width + 1] = convert_ycrcb_to_rgba(y3, v, u);
+                                        let abcd1 = convert_ycrcb_to_rgba_sse2(
+                                            _mm_set_epi32(y0, y1, y2, y3),
+                                            _mm_set_epi32(v, v, v, v),
+                                            _mm_set_epi32(u, u, u, u)
+                                        );
+                                        
+                                        out_buf[off] =  _mm_extract_epi32(abcd1, 3) as u32;
+                                        out_buf[off + 1] = _mm_extract_epi32(abcd1, 2) as u32;
+                                        out_buf[off + width] =  _mm_extract_epi32(abcd1, 1) as u32;
+                                        out_buf[off + width + 1] = _mm_extract_epi32(abcd1, 0) as u32;
                                     }
                                 }
                             },
-                            _=>()
+                            _ => ()
                         }
+                        let time2 = Cx::profile_time_ns();
+                        println!("{}", (time2 - time1)as f64 / 1000.0);
                         let mut front = (*self.cap_win_mf).image_front.lock().unwrap();
                         std::mem::swap(&mut (*front), out_buf);
                         Cx::send_signal((*self.cap_win_mf).image_signal, 0);
@@ -343,6 +388,31 @@ fn convert_ycrcb_to_rgba(y: u16, cr: u16, cb: u16) -> u32 {
         | (255 << 24);
 }
 
+
+unsafe fn convert_ycrcb_to_rgba_sse2(y: __m128i, cr: __m128i, cb: __m128i) -> __m128i {
+    
+    unsafe fn clip(a: __m128i) -> __m128i {
+         _mm_srl_epi32(_mm_max_epi32(_mm_min_epi32(a, _mm_set1_epi32(65535)), _mm_set1_epi32(0)), _mm_setr_epi32(8,0,0,0))
+    }
+    
+    let c = _mm_add_epi32(y, _mm_set1_epi32(-16));
+    let d = _mm_add_epi32(cb, _mm_set1_epi32(-128));
+    let e = _mm_add_epi32(cr, _mm_set1_epi32(-128));
+    
+    // red
+    let m128 = _mm_set1_epi32(128);
+    let mc = _mm_mullo_epi32(c, _mm_set1_epi32(298));
+    let r = _mm_add_epi32(_mm_add_epi32(mc, _mm_mullo_epi32(d, _mm_set1_epi32(516))), m128);
+    let g = _mm_add_epi32(_mm_add_epi32(_mm_add_epi32(mc, _mm_mullo_epi32(d, _mm_set1_epi32(-100))), _mm_mullo_epi32(e, _mm_set1_epi32(-208))), m128);
+    let b = _mm_add_epi32(_mm_add_epi32(mc, _mm_mullo_epi32(e, _mm_set1_epi32(409))), m128);
+    _mm_or_si128(
+        _mm_or_si128(
+            _mm_sll_epi32(clip(r), _mm_setr_epi32(16,0,0,0)),
+            _mm_sll_epi32(clip(g), _mm_setr_epi32(8,0,0,0))
+        ),
+        clip(b)
+    )
+}
 
 fn check(msg: &str, hr: HRESULT) {
     if winerror::SUCCEEDED(hr) {
