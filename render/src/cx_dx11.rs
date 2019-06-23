@@ -1179,7 +1179,7 @@ impl D3d11Cx {
                 panic!("init_mapped_textures failed");
             }
         }
-    }
+    } 
     
     fn flip_mapped_textures(&self, mapped: &mut CxPlatformTextureMapped) -> Option<usize> {
         for i in 0..MAPPED_TEXTURE_BUFFER_COUNT {
@@ -1196,13 +1196,12 @@ impl D3d11Cx {
         if mapped.read != mapped.write && mapped.textures[mapped.read % MAPPED_TEXTURE_BUFFER_COUNT].map_ptr.is_none() {
             let read = mapped.read;
             if mapped.read != mapped.write && mapped.write > mapped.read {
-                if mapped.write > mapped.read + 1 { // space ahead
+                if mapped.write > mapped.read + 2 { // space ahead
                     mapped.read += 1;
                 }
             }
             return Some(read % MAPPED_TEXTURE_BUFFER_COUNT)
         }
-        println!("ERROR FLIPPING");
         return None
     }
     

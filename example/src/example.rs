@@ -100,14 +100,14 @@ impl Mandelbrot {
                 let mask = _mm256_cmp_pd(sum, max_dist, _CMP_LT_OS);
                 let mask_u32 = _mm256_movemask_pd(mask);
                 if mask_u32 == 0 { // is a i8
-                    return (count, _mm256_sqrt_pd(merge_sum));
+                    return (_mm256_div_pd(count, _mm256_set1_pd(max_iter as f64)), _mm256_sqrt_pd(merge_sum));
                 }
                 merge_sum = _mm256_or_pd(_mm256_and_pd(sum, mask), _mm256_andnot_pd(mask, merge_sum));
                 count = _mm256_add_pd(count, _mm256_and_pd(add, mask));
                 x = _mm256_add_pd(_mm256_sub_pd(xx, yy), c_x);
                 y = _mm256_add_pd(_mm256_add_pd(xy, xy), c_y);
             }
-            return (count, add);
+            return (_mm256_set1_pd(2.0), merge_sum);
         }
         
         // lets spawn fractal.height over 32 threads
@@ -168,7 +168,7 @@ impl Mandelbrot {
                                                 (((y + 1) as f64 - fheight * 0.5) * 3.0 / fheight) * loc.zoom + loc.center_y,
                                                 (((y + 1) as f64 - fheight * 0.5) * 3.0 / fheight) * loc.zoom + loc.center_y
                                             );
-                                            let (it256, sum256) = calc_mandel_avx2(c_re, c_im, 256);
+                                            let (it256, sum256) = calc_mandel_avx2(c_re, c_im, 2048);
                                             _mm256_store_pd(it_v.as_ptr(), it256);
                                             _mm256_store_pd(su_v.as_ptr(), sum256);
                                             
@@ -224,6 +224,7 @@ struct App {
     current_loc: MandelbrotLoc,
     loc_history: Vec<MandelbrotLoc>,
     mandel: Mandelbrot,
+    color_offset: f32,
 }
 
 main_app!(App, "Example");
@@ -237,6 +238,7 @@ impl Style for App {
                 center_x: -1.5,
                 center_y: 0.0
             },
+            color_offset:0.0,
             loc_history: Vec::new(),
             mandel: Mandelbrot::style(cx),
             capture: Capture::default(),
@@ -265,6 +267,7 @@ impl App {
             
             let scale_delta: float<Uniform>;
             let offset_delta: vec2<Uniform>;
+            let color_offset: float<Uniform>;
             
             fn kaleido(uv: vec2, angle: float, base: float, spin: float) -> vec2 {
                 let a = atan(uv.y, uv.x);
@@ -275,11 +278,14 @@ impl App {
             }
             
             fn pixel() -> vec4 {
-                let comp_texpos = (geom.xy - vec2(0.5, 0.5)) * scale_delta*0.7 + vec2(0.5, 0.5) + offset_delta;
+                let comp_texpos = (geom.xy - vec2(0.5, 0.5)) * scale_delta*0.9 + vec2(0.5, 0.5) + offset_delta;
                 let fr1 = sample2d(texturez, comp_texpos).rg; //kaleido(geom.xy-vec2(0.5,0.5), 3.14/8., time, 2.*time)).rg;
                 let fr2 = sample2d(texturez, vec2(1.0 - geom.x, geom.y)).rg;
+                if fr1.x > 1.0{
+                    return vec4(0.,0.,0.,1.0);
+                }
                 let cam = sample2d(texcam, geom.xy); //kaleido(geom.xy-vec2(0.5,0.5), 3.14/8., time, 2.*time));
-                let fract = df_iq_pal4(time * 3. + fr1.x * 0.03 - 0.1 * log(fr1.y));
+                let fract = df_iq_pal5(color_offset + fr1.x*8.0  - 0.1 * log(fr1.y));
                 return vec4(fract.xyz, alpha);
             }
         }))
@@ -290,7 +296,7 @@ impl App {
         if let Event::Construct = event {
             self.capture.init(cx, 0, CaptureFormat::NV12, 3840, 2160, 30.0);
             self.mandel.init(cx);
-            self.gamepad.init(0, 0.08);
+            self.gamepad.init(0, 0.1);
         }
         
         self.window.handle_desktop_window(cx, event);
@@ -314,6 +320,8 @@ impl App {
         self.current_loc.zoom = self.current_loc.zoom * (1.0 - 0.03 * self.gamepad.left_thumb.y as f64);
         
         self.mandel.send_new_loc(self.loc_history.len(), self.current_loc.clone());
+        self.color_offset += 0.01*self.gamepad.right_trigger;
+        self.color_offset -= 0.01*self.gamepad.left_trigger;
         self.loc_history.push(self.current_loc.clone());
     }
     
@@ -338,6 +346,7 @@ impl App {
             let screen_dx = ((self.loc_history[index].center_x - self.current_loc.center_x) / self.loc_history[index].zoom) / 4.0;
             let screen_dy = ((self.loc_history[index].center_y - self.current_loc.center_y) / self.loc_history[index].zoom) / 3.0;
             inst.push_uniform_vec2f(cx, -screen_dx as f32, -screen_dy as f32);
+            inst.push_uniform_float(cx, self.color_offset);
         }
         else{
             println!("ERROR")
