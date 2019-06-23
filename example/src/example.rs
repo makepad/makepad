@@ -32,8 +32,7 @@
 use render::*;
 use widget::*;
 pub mod cap_winmf;
-pub use crate::cap_winmf::*;
-use std::sync::Mutex;
+pub use crate::capture_winmf::*;
 use core::arch::x86_64::*;
 
 #[derive(Default)]
@@ -43,15 +42,13 @@ struct Mandelbrot {
     width: usize,
     zoom: f64,
     height: usize, 
-    image_read: bool,
-    image_signal: Signal,
-    //image_front: Mutex<Vec<f32>>
+    frame_signal: Signal,
 }
 
 impl Mandelbrot {
     fn init(&mut self, cx: &mut Cx) {
         // lets start a mandelbrot thread that produces frames
-        self.image_signal = cx.new_signal();
+        self.frame_signal = cx.new_signal();
         self.width = 3840; 
         self.height = 2160;
         self.zoom = 1.0;
@@ -62,10 +59,7 @@ impl Mandelbrot {
             height: Some(self.height),
             multisample: None
         }));
-        self.start_image_thread(cx);
-    }
-    
-    fn start_image_thread(&mut self, cx: &mut Cx) {
+
         #[inline]
         unsafe fn calc_mandel_avx2(c_x: __m256d, c_y: __m256d, max_iter: u32) -> (__m256d, __m256d) {
             let mut x = c_x;
@@ -92,7 +86,7 @@ impl Mandelbrot {
             }
             return (count, add);
         }
-        
+        /*
         fn calc_mandel(x: f64, y: f64) -> u32 {
             let mut rr = x;
             let mut ri = y;
@@ -108,32 +102,26 @@ impl Mandelbrot {
                 }
             }
             return n;
-        }
-        
-        let mut zoom = self.zoom;
-        self.zoom /= 1.1;
+        }*/
+
         // lets spawn fractal.height over 32 threads
         let num_threads = self.num_threads;
         let width = self.width;
         let height = self.height;
         let fwidth = self.width as f64;
         let fheight = self.height as f64;
-        let center_x = 0;
-        let center_y = 0;
         let chunk_height = height / num_threads;
-        let mut thread_pool = scoped_threadpool::Pool::new(self.num_threads as u32);
-        let mut image_back: Vec<f32> = Vec::new();
         
-        let mut image_signal = self.image_signal.clone();
-        // find a way to fix this nicely
-        let mandel_u64: u64 = self as *mut _ as u64; 
-        let cx_u64:u64 = cx as *mut _ as u64;
-        let texture_id:usize = self.texture.texture_id.unwrap();
+        // stuff that goes into the threads
+        let mut thread_pool = scoped_threadpool::Pool::new(self.num_threads as u32);
+        let frame_signal = self.frame_signal.clone();
+        let mut cxthread = cx.new_cxthread();
+        let texture = self.texture.clone();
         
         std::thread::spawn(move || {
             let mut zoom = 1.0;
-            let mut center_x = -1.5;
-            let mut center_y = 0.0;
+            let center_x = -1.5;
+            let center_y = 0.0;
             loop {
                 zoom = zoom / 1.003;
                 if zoom < 0.000000000002 {
@@ -142,22 +130,20 @@ impl Mandelbrot {
                 //let time1 = Cx::profile_time_ns();
 
                 thread_pool.scoped( | scope | {
-                    let cx = unsafe {&mut (*(cx_u64 as *mut Cx))};
-                    if let Some(mapped_texture) = unsafe{cx.lock_mapped_texture_f32(texture_id)}{
+                    if let Some(mapped_texture) = cxthread.lock_mapped_texture_f32(&texture){
                         let mut iter = mapped_texture.chunks_mut((chunk_height * width * 2) as usize);
                         for i in 0..num_threads {
                             let thread_num = i;
                             let slice = iter.next().unwrap();
                             //println!("{}", chunk_height);
                             scope.execute(move || {
-                                let mut it_v = [0f64, 0f64, 0f64, 0f64];
-                                let mut su_v = [0f64, 0f64, 0f64, 0f64];
+                                let it_v = [0f64, 0f64, 0f64, 0f64];
+                                let su_v = [0f64, 0f64, 0f64, 0f64];
                                 let start = thread_num * chunk_height as usize;
                                 for y in (start..(start + chunk_height)).step_by(2) {
                                     for x in (0..width).step_by(2) {
-                                        //continue;
-                                        // ok lets now do the simd mandel
                                         unsafe {
+                                            // TODO simd these things too
                                             let c_re = _mm256_set_pd(
                                                 (x as f64 - fwidth * 0.5) * 4.0 / fwidth * zoom + center_x,
                                                 ((x + 1) as f64 - fwidth * 0.5) * 4.0 / fwidth * zoom + center_x,
@@ -188,22 +174,21 @@ impl Mandelbrot {
                             })
                         }
                     }
-                    else{
+                    else{ // wait a bit
                         std::thread::sleep(std::time::Duration::from_millis(1));
                         return
                     }
                 });
-                let cx = unsafe {&mut (*(cx_u64 as *mut Cx))};
-                unsafe{cx.unlock_mapped_texture(texture_id)}
+                cxthread.unlock_mapped_texture(&texture);
                 //println!("{}", (Cx::profile_time_ns()-time1) as f64/1000.);
-                Cx::send_signal(image_signal, 0);
+                Cx::send_signal(frame_signal, 0);
             }
         });
     }
     
-    fn handle_signal(&mut self, cx: &mut Cx, event: &Event) -> bool {
+    fn handle_signal(&mut self, _cx: &mut Cx, event: &Event) -> bool {
         if let Event::Signal(se) = event {
-            if self.image_signal.is_signal(se) { // we haz new texture
+            if self.frame_signal.is_signal(se) { // we haz new texture
                 return true
             }
         }
@@ -217,7 +202,7 @@ struct App {
     blit: Blit,
     mandel_blit: Blit,
     frame: f32,
-    cap: CapWinMF,
+    capture: Capture,
     mandel: Mandelbrot,
 }
 
@@ -228,7 +213,7 @@ impl Style for App {
         set_dark_style(cx);
         Self {
             mandel: Mandelbrot::default(),
-            cap: CapWinMF::default(),
+            capture: Capture::default(),
             window: DesktopWindow::style(cx),
             view: View {
                 is_overlay: true,
@@ -274,7 +259,7 @@ impl App {
     fn handle_app(&mut self, cx: &mut Cx, event: &mut Event) {
         
         if let Event::Construct = event {
-            self.cap.init(cx, 0, 3840, 2160, 30.0);
+            self.capture.init(cx, 0, CaptureFormat::NV12, 3840, 2160, 30.0);
             self.mandel.init(cx);
         }
         
@@ -282,7 +267,7 @@ impl App {
         
         self.view.handle_scroll_bars(cx, event);
         
-        if let CapEvent::NewImage = self.cap.handle_signal(cx, event) {
+        if let CaptureEvent::NewFrame = self.capture.handle_signal(cx, event) {
             self.view.redraw_view_area(cx);
         }
         
@@ -303,7 +288,7 @@ impl App {
         
         self.view.redraw_view_area(cx);
         let inst = self.mandel_blit.draw_blit_walk(cx, &self.mandel.texture, Bounds::Fill, Bounds::Fill, Margin::zero());
-        inst.push_uniform_texture_2d(cx, &self.cap.texture);
+        inst.push_uniform_texture_2d(cx, &self.capture.texture);
         inst.push_uniform_float(cx, self.frame);
         self.frame += 0.001;
         cx.reset_turtle_walk();

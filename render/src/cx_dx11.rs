@@ -11,9 +11,85 @@ use wio::com::ComPtr;
 use std::mem;
 use std::ptr;
 use std::ffi;
+use std::ffi::c_void;
 use std::sync::Mutex;
 
+pub struct CxThread {
+    cx: u64
+}
+
+impl CxThread {
+    
+    pub fn lock_mapped_texture_f32(&mut self, texture: &Texture) -> Option<&mut [f32]> {
+        if let Some(texture_id) = texture.texture_id {
+            let cx = unsafe {&mut *(self.cx as *mut Cx)};
+            let cxtexture = &mut cx.textures[texture_id];
+            if let Ok(mut mapped) = cxtexture.platform.mapped.lock() {
+                let write = mapped.write;
+                let texture = &mut mapped.textures[write % MAPPED_TEXTURE_BUFFER_COUNT];
+                if let Some(ptr) = texture.map_ptr {
+                    if texture.locked == true {
+                        panic!("lock_mapped_texture_f32 ran twice for the same texture, pair with unlock_mapped_texture!")
+                    }
+                    texture.locked = true;
+                    return Some(unsafe {std::slice::from_raw_parts_mut(
+                        ptr as *mut f32,
+                        texture.width * texture.height * texture.slots_per_pixel
+                    )});
+                }
+            };
+        }
+        None
+    }
+    
+    pub fn lock_mapped_texture_u32(&mut self, texture: &Texture) -> Option<&mut [u32]> {
+        if let Some(texture_id) = texture.texture_id {
+            let cx = unsafe {&mut *(self.cx as *mut Cx)};
+            let cxtexture = &mut cx.textures[texture_id];
+            if let Ok(mut mapped) = cxtexture.platform.mapped.lock() {
+                let write = mapped.write;
+                let texture = &mut mapped.textures[write % MAPPED_TEXTURE_BUFFER_COUNT];
+                if let Some(ptr) = texture.map_ptr {
+                    if texture.locked == true {
+                        panic!("lock_mapped_texture_u32 ran twice for the same texture, pair with unlock_mapped_texture!")
+                    }
+                    texture.locked = true;
+                    return Some(unsafe {std::slice::from_raw_parts_mut(
+                        ptr as *mut u32,
+                        texture.width * texture.height * texture.slots_per_pixel
+                    )});
+                }
+            };
+        }
+        None
+    }
+    
+    pub fn unlock_mapped_texture(&mut self, texture: &Texture) {
+        if let Some(texture_id) = texture.texture_id {
+            let cx = unsafe {&mut *(self.cx as *mut Cx)};
+            let cxtexture = &mut cx.textures[texture_id];
+            if let Ok(mut mapped) = cxtexture.platform.mapped.lock() {
+                // lets try to get the texture at mapped.write
+                let write = mapped.write;
+                let texture = &mut mapped.textures[write % MAPPED_TEXTURE_BUFFER_COUNT];
+                if !texture.locked { // no-op
+                    return
+                }
+                texture.locked = false;
+                mapped.write += 1; // increase the write pointer
+            };
+        }
+    }
+}
+
 impl Cx {
+    pub fn send_signal(signal: Signal, value: usize) {
+        Win32App::post_signal(signal.signal_id, value);
+    }
+    
+    pub fn new_cxthread(&mut self) -> CxThread {
+        CxThread {cx: self as *mut _ as u64}
+    }
     
     pub fn render_view(&mut self, pass_id: usize, view_id: usize, d3d11_cx: &D3d11Cx) {
         
@@ -106,24 +182,20 @@ impl Cx {
                             }
                             d3d11_cx.set_shader_resource(i, &cxtexture.platform.single.shader_resource);
                         },
-                        TextureFormat::MappedBGRA => {},
-                        TextureFormat::MappedBGRAf32 => {},
-                        TextureFormat::MappedRf32 => {},
-                        TextureFormat::MappedRGf32 => { // make a mapped texture
-                            let mapped = &mut cxtexture.platform.mapped;
-                            if !mapped.initialized {
-                                d3d11_cx.init_mapped_textures_rgf32(&mut *mapped, cxtexture.desc.width.unwrap(), cxtexture.desc.height.unwrap());
-                            }
-                            if mapped.read != mapped.write { // read and write are not the same
-                                //check if write is ahead of read by more than one
-                                if mapped.write > mapped.read {
-                                    if mapped.write > mapped.read + 1 {
-                                        mapped.read += 1;
-                                    }
-                                    d3d11_cx.set_shader_resource(i, &mapped.textures[mapped.read % 4].shader_resource);
+                        TextureFormat::MappedRGf32 | TextureFormat::MappedRf32 | TextureFormat::MappedBGRA | TextureFormat::MappedBGRAf32 => {
+                            if let Ok(mut mapped) = cxtexture.platform.mapped.lock() {
+                                if mapped.textures[0].texture.is_none() {
+                                    d3d11_cx.init_mapped_textures(
+                                        &mut *mapped,
+                                        &cxtexture.desc.format,
+                                        cxtexture.desc.width.unwrap(),
+                                        cxtexture.desc.height.unwrap()
+                                    );
+                                }
+                                if d3d11_cx.flip_mapped_textures(&mut mapped) {
+                                    d3d11_cx.set_shader_resource(i, &mapped.textures[mapped.read % MAPPED_TEXTURE_BUFFER_COUNT].shader_resource);
                                 }
                             }
-                            
                         },
                         _ => ()
                     }
@@ -131,36 +203,32 @@ impl Cx {
                 d3d11_cx.draw_indexed_instanced(sh.shader_gen.geometry_indices.len(), instances);
             }
         }
-    } 
+    }
     
-    fn draw_pass_to_window(&mut self, pass_id: usize, vsync: bool, _dpi_factor: f32, d3d11_window: &mut D3d11Window, d3d11_cx: &Mutex<D3d11Cx>) {
-        if let Ok(d3d11_cx) = d3d11_cx.lock(){
-           // let time1 = Cx::profile_time_ns();
-            let view_id = self.passes[pass_id].main_view_id.unwrap();
-            
-            self.platform.uni_cx.update_with_f32_constant_data(&d3d11_cx, &mut self.passes[pass_id].uniforms);
-            
-            d3d11_cx.set_viewport(d3d11_window);
-            
-            if self.passes[pass_id].color_textures.len()>0 {
-                let color_texture = &self.passes[pass_id].color_textures[0];
-                if let Some(color) = color_texture.clear_color {
-                    d3d11_cx.clear_render_target_view(d3d11_window, color); //self.clear_color);
-                }
+    fn draw_pass_to_window(&mut self, pass_id: usize, vsync: bool, _dpi_factor: f32, d3d11_window: &mut D3d11Window, d3d11_cx: &D3d11Cx) {
+        // let time1 = Cx::profile_time_ns();
+        let view_id = self.passes[pass_id].main_view_id.unwrap();
+        
+        self.platform.uni_cx.update_with_f32_constant_data(&d3d11_cx, &mut self.passes[pass_id].uniforms);
+        
+        d3d11_cx.set_viewport(d3d11_window);
+        
+        if self.passes[pass_id].color_textures.len()>0 {
+            let color_texture = &self.passes[pass_id].color_textures[0];
+            if let Some(color) = color_texture.clear_color {
+                d3d11_cx.clear_render_target_view(d3d11_window, color); //self.clear_color);
             }
-            else {
-                d3d11_cx.clear_render_target_view(d3d11_window, Color::zero()); //self.clear_color);
-            }
-            d3d11_cx.clear_depth_stencil_view(d3d11_window);
-            
-            d3d11_cx.set_rendertargets(d3d11_window);
-            d3d11_cx.set_raster_state(d3d11_window);
-            self.render_view(pass_id, view_id, &d3d11_cx);
-            d3d11_window.present(vsync);
-            //println!("{}", (Cx::profile_time_ns() - time1)as f64 / 1000.0);
-        }   
-        std::thread::sleep(std::time::Duration::from_millis(2));
-        //let time2 = ;
+        }
+        else {
+            d3d11_cx.clear_render_target_view(d3d11_window, Color::zero()); //self.clear_color);
+        }
+        d3d11_cx.clear_depth_stencil_view(d3d11_window);
+        
+        d3d11_cx.set_rendertargets(d3d11_window);
+        d3d11_cx.set_raster_state(d3d11_window);
+        self.render_view(pass_id, view_id, &d3d11_cx);
+        d3d11_window.present(vsync);
+        //println!("{}", (Cx::profile_time_ns() - time1)as f64 / 1000.0);
     }
     
     fn resize_layer_to_turtle(&mut self) {
@@ -177,13 +245,11 @@ impl Cx {
         
         let mut d3d11_windows: Vec<D3d11Window> = Vec::new();
         
-        let d3d11_cx = Mutex::new(D3d11Cx::new());
+        let d3d11_cx = D3d11Cx::new();
         
         self.platform.d3d11_cx = Some(&d3d11_cx);
         
-        if let Ok(d3d11_cx) = d3d11_cx.lock(){
-            self.hlsl_compile_all_shaders(&*d3d11_cx);
-        }
+        self.hlsl_compile_all_shaders(&d3d11_cx);
         
         self.load_fonts_from_file();
         
@@ -192,7 +258,7 @@ impl Cx {
         self.redraw_child_area(Area::All);
         let mut passes_todo = Vec::new();
         
-        win32_app.event_loop( | win32_app, events | {//if let Ok(d3d11_cx) = d3d11_cx.lock(){
+        win32_app.event_loop( | win32_app, events | { //if let Ok(d3d11_cx) = d3d11_cx.lock(){
             // acquire d3d11_cx exclusive
             for mut event in events {
                 
@@ -412,79 +478,6 @@ impl Cx {
             timer.timer_id = 0;
         }
     }
-    
-    pub fn send_signal(signal: Signal, value: usize) {
-        Win32App::post_signal(signal.signal_id, value);
-    }
-    /*
-    pub unsafe fn lock_mapped_texture_u32(&mut self, texture_id: usize) -> &[u32] {
-
-        let ptr = 0 as *mut u32;
-        return std::slice::from_raw_parts(ptr, 10 * 10);
-    }
-    */
-    pub unsafe fn lock_mapped_texture_f32(&mut self, texture_id: usize) -> Option<&mut [f32]> {
-        if let Ok(d3d11_cx) = (*self.platform.d3d11_cx.unwrap()).lock() {
-            let cxtexture = &mut self.textures[texture_id];
-            let mapped = &mut cxtexture.platform.mapped;
-            if !mapped.initialized {
-                return None;
-            }
-            if mapped.locked {
-                panic!("lock_mapped_texture_f32 on locked texture");
-            }
-            // only return a buffer if there is room
-            if mapped.write <= mapped.read + 2 {
-                mapped.locked = true;
-                // lets just return the mapped pointer we have.
-                let ptr = d3d11_cx.lock_mapped_texture_write(&mut *mapped);
-                let texture = &mapped.textures[mapped.write % 4];
-                return Some(std::slice::from_raw_parts_mut(ptr as *mut f32, texture.width * texture.height * texture.slots_per_pixel));
-            }
-            return None;
-        }
-        else{ // wait until we can lock it
-            None
-        }
-    }
-
-    pub unsafe fn lock_mapped_texture_u32(&mut self, texture_id: usize) -> Option<&mut [u32]> {
-        if let Ok(d3d11_cx) = (*self.platform.d3d11_cx.unwrap()).lock() {
-            let cxtexture = &mut self.textures[texture_id];
-            let mapped = &mut cxtexture.platform.mapped;
-            if !mapped.initialized {
-                return None;
-            }
-            if mapped.locked {
-                panic!("lock_mapped_texture_f32 on locked texture");
-            }
-            // only return a buffer if there is room
-            if mapped.write <= mapped.read + 2 {
-                mapped.locked = true;
-                // lets just return the mapped pointer we have.
-                let ptr = d3d11_cx.lock_mapped_texture_write(&mut *mapped);
-                let texture = &mapped.textures[mapped.write % 4];
-                return Some(std::slice::from_raw_parts_mut(ptr as *mut u32, texture.width * texture.height * texture.slots_per_pixel));
-            }
-            return None;
-        }
-        else{ // wait until we can lock it
-            None
-        }
-    }
-
-
-    pub unsafe fn unlock_mapped_texture(&mut self, texture_id: usize) {
-        if let Ok(d3d11_cx) = (*self.platform.d3d11_cx.unwrap()).lock() {
-            let cxtexture = &mut self.textures[texture_id];
-            let mapped = &mut cxtexture.platform.mapped ;
-            if !mapped.initialized || !mapped.locked {
-                return
-            }
-            mapped.locked = false;
-            d3d11_cx.unlock_mapped_texture_write(&mut *mapped);
-        }
-    }
 }
 
 struct D3d11Window {
@@ -505,8 +498,7 @@ struct D3d11Window {
 }
 
 impl D3d11Window {
-    fn new(window_id: usize, d3d11_cx: &Mutex<D3d11Cx>, win32_app: &mut Win32App, inner_size: Vec2, position: Option<Vec2>, title: &str) -> D3d11Window {
-        let d3d11_cx = d3d11_cx.lock().unwrap();
+    fn new(window_id: usize, d3d11_cx: &D3d11Cx, win32_app: &mut Win32App, inner_size: Vec2, position: Option<Vec2>, title: &str) -> D3d11Window {
         let mut win32_window = Win32Window::new(win32_app, window_id);
         
         win32_window.init(title, inner_size, position);
@@ -584,8 +576,7 @@ impl D3d11Window {
         self.depth_stencil_buffer = Some(depth_stencil_buffer);
     }
     
-    fn resize_buffers(&mut self, d3d11_cx: &Mutex<D3d11Cx>) {
-        let d3d11_cx = d3d11_cx.lock().unwrap();
+    fn resize_buffers(&mut self, d3d11_cx: &D3d11Cx) {
         if self.alloc_size == self.window_geom.inner_size {
             return
         }
@@ -614,7 +605,7 @@ pub struct CxPlatform {
     pub stop_timer: Vec<(u64)>,
     pub text_clipboard_response: Option<String>,
     pub desktop: CxDesktop,
-    pub d3d11_cx: Option<*const Mutex<D3d11Cx>>
+    pub d3d11_cx: Option<*const D3d11Cx>
 }
 
 #[derive(Clone)]
@@ -1113,26 +1104,49 @@ impl D3d11Cx {
         }
     }
     
-    pub fn init_mapped_textures_rgf32(&self, mapped: &mut CxPlatformTextureMapped, width: usize, height: usize) {
+    pub fn init_mapped_textures(&self, mapped: &mut CxPlatformTextureMapped, texture_format: &TextureFormat, width: usize, height: usize) {
+        let slots_per_pixel;
+        let format;
+        match texture_format {
+            TextureFormat::MappedRGf32 => {
+                slots_per_pixel = 2;
+                format = dxgiformat::DXGI_FORMAT_R32G32_FLOAT;
+            }
+            TextureFormat::MappedRf32 => {
+                slots_per_pixel = 1;
+                format = dxgiformat::DXGI_FORMAT_R32_FLOAT;
+            }
+            TextureFormat::MappedBGRA => {
+                slots_per_pixel = 1;
+                format = dxgiformat::DXGI_FORMAT_R8G8B8A8_UNORM;
+            }
+            TextureFormat::MappedBGRAf32 => {
+                slots_per_pixel = 4;
+                format = dxgiformat::DXGI_FORMAT_R32G32B32A32_FLOAT;
+            },
+            _ => {
+                panic!("Wrong format for init_mapped_texures");
+            }
+        }
         let texture_desc = d3d11::D3D11_TEXTURE2D_DESC {
             Width: width as u32,
             Height: height as u32,
             MipLevels: 1,
             ArraySize: 1,
-            Format: dxgiformat::DXGI_FORMAT_R32G32_FLOAT,
+            Format: format,
             SampleDesc: dxgitype::DXGI_SAMPLE_DESC {Count: 1, Quality: 0},
             Usage: d3d11::D3D11_USAGE_DYNAMIC,
             BindFlags: d3d11::D3D11_BIND_SHADER_RESOURCE,
             CPUAccessFlags: d3d11::D3D11_CPU_ACCESS_WRITE,
             MiscFlags: 0,
         };
-        for i in 0..4 {
+        for i in 0..MAPPED_TEXTURE_BUFFER_COUNT {
             let mut texture = ptr::null_mut();
             let hr = unsafe {self.device.CreateTexture2D(&texture_desc, ptr::null(), &mut texture as *mut *mut _)};
             if winerror::SUCCEEDED(hr) {
                 let mut shader_resource = ptr::null_mut();
                 unsafe {self.device.CreateShaderResourceView(texture as *mut _, ptr::null(), &mut shader_resource as *mut *mut _)};
-                mapped.textures[i].slots_per_pixel = 2;
+                mapped.textures[i].slots_per_pixel = slots_per_pixel;
                 mapped.textures[i].width = width;
                 mapped.textures[i].height = height;
                 mapped.textures[i].texture = Some(unsafe {ComPtr::from_raw(texture as *mut _)});
@@ -1146,25 +1160,61 @@ impl D3d11Cx {
                     &mut d3d11_resource as *mut *mut _
                 )};
                 mapped.textures[i].d3d11_resource = Some(unsafe {ComPtr::from_raw(d3d11_resource as *mut _)});
+                // map them by default
+                self.map_texture(&mut mapped.textures[i]);
             }
             else {
-                panic!("init_mapped_textures_rgf32 failed");
+                panic!("init_mapped_textures failed");
             }
         }
-        mapped.initialized = true;
     }
     
-    unsafe fn lock_mapped_texture_write(&self, mapped: &CxPlatformTextureMapped) -> *mut std::ffi::c_void {
-        let mut mapped_resource = std::mem::zeroed();
-        let d3d11_resource = mapped.textures[mapped.write % 4].d3d11_resource.as_ref().unwrap();
-        self.context.Map(d3d11_resource.as_raw(), 0, d3d11::D3D11_MAP_WRITE_DISCARD, 0, &mut mapped_resource);
-        mapped_resource.pData
+    fn flip_mapped_textures(&self, mapped: &mut CxPlatformTextureMapped) -> bool {
+        if mapped.read != mapped.write && mapped.write > mapped.read {
+            if mapped.write > mapped.read + 1 { // space ahead
+                mapped.read += 1;
+            }
+        }
+        for i in 0..MAPPED_TEXTURE_BUFFER_COUNT {
+            if mapped.write > mapped.read && i == mapped.read % MAPPED_TEXTURE_BUFFER_COUNT {
+                if mapped.textures[i].locked {
+                    panic!("Texture locked whilst unmapping, should never happen!")
+                }
+                self.unmap_texture(&mut mapped.textures[i]);
+            }
+            else if mapped.read == 0 || i != (mapped.read - 1) % MAPPED_TEXTURE_BUFFER_COUNT { // keep a safety for not stalling gpu
+                self.map_texture(&mut mapped.textures[i]);
+            }
+        }
+        if mapped.read != mapped.write && mapped.textures[mapped.read % MAPPED_TEXTURE_BUFFER_COUNT].map_ptr.is_none() {
+            return true
+        }
+        return false
     }
     
-    unsafe fn unlock_mapped_texture_write(&self, mapped: &mut CxPlatformTextureMapped) {
-        let d3d11_resource = mapped.textures[mapped.write % 4].d3d11_resource.as_ref().unwrap();
-        self.context.Unmap(d3d11_resource.as_raw(), 0);
-        mapped.write += 1;
+    fn map_texture(&self, texture: &mut CxPlatformTextureResource) {
+        if !texture.map_ptr.is_none() {
+            return
+        }
+        unsafe {
+            let mut mapped_resource = std::mem::zeroed();
+            let d3d11_resource = texture.d3d11_resource.as_ref().unwrap();
+            let hr = self.context.Map(d3d11_resource.as_raw(), 0, d3d11::D3D11_MAP_WRITE_DISCARD, 0, &mut mapped_resource);
+            if winerror::SUCCEEDED(hr) {
+                texture.map_ptr = Some(mapped_resource.pData);
+            }
+        }
+    }
+    
+    fn unmap_texture(&self, texture: &mut CxPlatformTextureResource) {
+        if texture.map_ptr.is_none() {
+            return
+        }
+        let d3d11_resource = texture.d3d11_resource.as_ref().unwrap();
+        unsafe {
+            self.context.Unmap(d3d11_resource.as_raw(), 0);
+        }
+        texture.map_ptr = None;
     }
     
     pub fn update_platform_texture_image_bgra(&self, res: &mut CxPlatformTextureResource, width: usize, height: usize, image_u32: &Vec<u32>) {
@@ -1173,7 +1223,6 @@ impl D3d11Cx {
             println!("update_platform_texture_image_bgra with wrong buffer_u32 size!");
             return;
         }
-        
         
         let sub_data = d3d11::D3D11_SUBRESOURCE_DATA {
             pSysMem: image_u32.as_ptr() as *const _,
@@ -1402,8 +1451,12 @@ impl D3d11Buffer {
     }
 }
 
+const MAPPED_TEXTURE_BUFFER_COUNT: usize = 4;
+
 #[derive(Default, Clone)]
 pub struct CxPlatformTextureResource {
+    map_ptr: Option<*mut c_void>,
+    locked: bool,
     width: usize,
     height: usize,
     slots_per_pixel: usize,
@@ -1416,15 +1469,13 @@ pub struct CxPlatformTextureResource {
 pub struct CxPlatformTextureMapped {
     read: usize,
     write: usize,
-    locked: bool,
-    textures: [CxPlatformTextureResource; 4],
-    initialized: bool
+    textures: [CxPlatformTextureResource; MAPPED_TEXTURE_BUFFER_COUNT],
 }
 
 #[derive(Default)]
 pub struct CxPlatformTexture {
     single: CxPlatformTextureResource,
-    mapped: CxPlatformTextureMapped,
+    mapped: Mutex<CxPlatformTextureMapped>,
 }
 
 #[derive(Default, Clone, Debug)]

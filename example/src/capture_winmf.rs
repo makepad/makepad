@@ -2,8 +2,6 @@
 #![allow(non_camel_case_types)]
 #![allow(non_upper_case_globals)]
 
-use core::arch::x86_64::*;
-
 use render::*;
 
 use winapi::shared::minwindef::{DWORD, BYTE, BOOL, UINT, TRUE};
@@ -23,41 +21,39 @@ use winapi::shared::wtypes::{VT_UI4, VT_UI8, VT_R8, VT_CLSID, VT_LPWSTR, VT_VECT
 use std::ptr;
 use std::mem;
 use com_impl::{Refcount, VTable};
-use std::sync::Mutex;
-
+use core::arch::x86_64::*;
 
 #[derive(Default)]
-pub struct CapWinMF {
+pub struct Capture {
+    pub texture: Texture,
+    pub platform: Option<CapturePlatform>
+}
+
+pub struct CapturePlatform {
     pub width: usize,
     pub height: usize,
-    pub convert: CapConvert,
-    pub image_signal: Signal,
+    pub format: CaptureFormat,
+    pub cxthread: CxThread,
     pub texture: Texture,
-    pub last_time: u64,
-    pub image_back: Vec<u32>,
-    pub image_front: Mutex<Vec<u32>>,
-    pub source: Option<ComPtr<IMFMediaSource>>,
-    pub reader: Option<ComPtr<IMFSourceReader>>,
+    pub frame_signal: Signal,
+    pub source: ComPtr<IMFMediaSource>,
+    pub reader: ComPtr<IMFSourceReader>,
 }
 
-
-pub enum CapConvert {
+#[derive(PartialEq)]
+pub enum CaptureFormat {
     YUY2,
     NV12,
-    RGB24,
-    RGB32
+//   RGB24,
+//   RGB32 todo
 }
 
-impl Default for CapConvert {
-    fn default() -> CapConvert {CapConvert::YUY2}
-}
-
-pub enum CapEvent {
-    NewImage,
+pub enum CaptureEvent {
+    NewFrame,
     None
 }
 
-impl CapWinMF {
+impl Capture {
     
     fn mf_create_attributes(num_attrs: DWORD) -> Result<ComPtr<IMFAttributes>, HRESULT> {
         let mut attributes = ptr::null_mut();
@@ -78,7 +74,7 @@ impl CapWinMF {
         if winerror::SUCCEEDED(hr) {Ok(unsafe {ComPtr::from_raw(source_reader as *mut _)})} else {Err(hr)}
     }
     
-    unsafe fn select_format(reader: &ComPtr<IMFSourceReader>, pref_width: usize, pref_height: usize, pref_fps: f64) -> Option<(CapConvert, ComPtr<IMFMediaType>)> {
+    unsafe fn select_format(reader: &ComPtr<IMFSourceReader>, pref_format:&CaptureFormat, pref_width: usize, pref_height: usize, pref_fps: f64) -> Option<ComPtr<IMFMediaType>> {
         let mut counter = 0;
         loop {
             let mut native_type_raw = ptr::null_mut();
@@ -98,19 +94,13 @@ impl CapWinMF {
                 check("native_type.GetDouble", native_type.GetUINT64(&MF_MT_FRAME_RATE, &mut frame_rate));
                 let fps = (frame_rate >> 32) as f64 / ((frame_rate & 0xffffffff)as f64);
                 if (fps - pref_fps).abs()<0.0001 && pref_width == width as usize && pref_height == height as usize {
-                    let convert = if guid_equal(&guid, &MFVideoFormat_YUY2) {
-                        CapConvert::YUY2
-                    } else if guid_equal(&guid, &MFVideoFormat_NV12) {
-                        CapConvert::NV12
-                    } else if guid_equal(&guid, &MFVideoFormat_RGB24) {
-                        CapConvert::RGB24
-                    } else if guid_equal(&guid, &MFVideoFormat_RGB32) {
-                        CapConvert::RGB32
-                    } else {
-                        continue;
-                    };
-                    //println!("Selected format {} {} {}", width, height, fps);
-                    return Some((convert, native_type));
+                    if guid_equal(&guid, &MFVideoFormat_YUY2) && *pref_format == CaptureFormat::YUY2 
+                    || guid_equal(&guid, &MFVideoFormat_NV12) && *pref_format == CaptureFormat::NV12
+                    //|| guid_equal(&guid, &MFVideoFormat_RGB24) && pref_convert == CapConvert::RGB24
+                    //|| guid_equal(&guid, &MFVideoFormat_RGB32) && pref_convert == CapConvert::RGB32
+                    {
+                        return Some(native_type);
+                    } 
                 }
             }
             else {
@@ -121,24 +111,26 @@ impl CapWinMF {
         return None
     }
     
-    pub fn handle_signal(&mut self, cx: &mut Cx, event: &mut Event) -> CapEvent {
-        if let Event::Signal(se) = event {
-            if self.image_signal.is_signal(se) { // we haz new texture
-                let last_time = self.last_time;
-                let new_time = Cx::profile_time_ns();
-                //println!("{}",1000000000./(new_time-last_time) as f64);
-                self.last_time = new_time;
-                let mut front = self.image_front.lock().unwrap();
-                let cxtex = &mut cx.textures[self.texture.texture_id.unwrap()];
-                std::mem::swap(&mut (*front), &mut cxtex.image_u32);
-                cxtex.update_image = true;
-                return CapEvent::NewImage
+    pub fn handle_signal(&mut self, _cx: &mut Cx, event: &mut Event) -> CaptureEvent {
+        if let Some(platform) = &self.platform{
+            if let Event::Signal(se) = event {
+                if platform.frame_signal.is_signal(se) { // we haz new texture
+                    //let last_time = self.last_time;
+                    //let new_time = Cx::profile_time_ns();
+                    //println!("{}",1000000000./(new_time-last_time) as f64);
+                    //self.last_time = new_time;
+                    //let mut front = self.image_front.lock().unwrap();
+                    //let cxtex = &mut cx.textures[self.texture.texture_id.unwrap()];
+                    //std::mem::swap(&mut (*front), &mut cxtex.image_u32);
+                    //cxtex.update_image = true;
+                    return CaptureEvent::NewFrame
+                }
             }
         }
-        return CapEvent::None
+        return CaptureEvent::None
     }
     
-    pub fn init(&mut self, cx: &mut Cx, device_id: usize, pref_width: usize, pref_height: usize, pref_fps: f64) {
+    pub fn init(&mut self, cx: &mut Cx, device_id: usize, pref_format:CaptureFormat, pref_width: usize, pref_height: usize, pref_fps: f64)->bool {
         
         check("cannot mf_startup", unsafe {
             MFStartup(0)
@@ -185,7 +177,7 @@ impl CapWinMF {
             let reader = Self::mf_create_source_reader(&attributes, &source).expect("cannot mf_create_source_reader");
             // set reader async callback
             
-            if let Some((convert, media_type)) = Self::select_format(&reader, pref_width, pref_height, pref_fps) {
+            if let Some(media_type) = Self::select_format(&reader, &pref_format, pref_width, pref_height, pref_fps) {
                 //println!("Selected format!");
                 check("SetCurrentMediaType", reader.SetCurrentMediaType(
                     MF_SOURCE_READER_FIRST_VIDEO_STREAM,
@@ -200,24 +192,31 @@ impl CapWinMF {
                     ptr::null_mut(),
                     ptr::null_mut()
                 ));
+
                 self.texture.set_desc(cx, Some(TextureDesc {
-                    format: TextureFormat::ImageBGRA,
+                    format: TextureFormat::MappedBGRA,
                     width: Some(pref_width),
                     height: Some(pref_height),
                     multisample: None
                 }));
-                self.convert = convert;
-                self.width = pref_width as usize;
-                self.height = pref_height as usize;
-                self.source = Some(source);
-                self.reader = Some(reader);
-                self.image_signal = cx.new_signal();
                 
+                self.platform = Some(CapturePlatform{
+                    format:pref_format,
+                    width: pref_width as usize,
+                    height: pref_height as usize,
+                    texture: self.texture.clone(),
+                    source: source,
+                    reader: reader,
+                    cxthread: cx.new_cxthread(),
+                    frame_signal: cx.new_signal(),
+                });
+                return true
             }
             else {
                 println!("FORMAT NOT FOUND");
             }
         }
+        return false;
     }
 }
 
@@ -226,12 +225,12 @@ impl CapWinMF {
 pub struct SourceReaderCallback {
     vtbl: VTable<IMFSourceReaderCallbackVtbl>,
     refcount: Refcount,
-    cap_win_mf: *mut CapWinMF,
+    capture: *mut Capture,
 }
 
 impl SourceReaderCallback {
-    unsafe fn new(cap_win_mf: *mut CapWinMF) -> ComPtr<IMFSourceReaderCallback> {
-        let ptr = SourceReaderCallback::create_raw(cap_win_mf);
+    unsafe fn new(capture: *mut Capture) -> ComPtr<IMFSourceReaderCallback> {
+        let ptr = SourceReaderCallback::create_raw(capture);
         let ptr = ptr as *mut IMFSourceReaderCallback;
         ComPtr::from_raw(ptr)
     }
@@ -244,6 +243,11 @@ unsafe impl IMFSourceReaderCallback for SourceReaderCallback {
             println!("read sample returned failure!");
             return S_OK; 
         }
+
+        let capture_platform = (*self.capture).platform.as_mut().unwrap();
+        let width = capture_platform.width;
+        let height = capture_platform.height;
+
         if pSample != ptr::null() {
             let mut media_buffer_raw = ptr::null_mut();
             if (*pSample).GetBufferByIndex(0, &mut media_buffer_raw as *mut *mut _) == S_OK {
@@ -255,101 +259,96 @@ unsafe impl IMFSourceReaderCallback for SourceReaderCallback {
                     let mut stride: LONG = 0;
                     let mut scanline0: *mut BYTE = ptr::null_mut();
                     if media_buffer2d.Lock2D(&mut scanline0, &mut stride) == S_OK {
-                        let width = (*self.cap_win_mf).width;
-                        let height = (*self.cap_win_mf).height;
-                        let out_buf = &mut (*self.cap_win_mf).image_back;
-                        out_buf.resize(width * height, 0);
-                        //let time1 = Cx::profile_time_ns();
-                        match (*self.cap_win_mf).convert {
-                            CapConvert::YUY2 => {
-                                // lets convert YUY2 to RGB
-                                let in_buf = std::slice::from_raw_parts(scanline0 as *mut u16, width * height);
-                                for y in 0..height {
-                                    for x in (0..width).step_by(2 * 4) {
-                                        let off = y * width + x;
-                                        
-                                        let ay0 = (in_buf[off + 0] & 0xff) as i32;
-                                        let au0 = (in_buf[off + 0] >> 8) as i32;
-                                        let ay1 = (in_buf[off + 1] & 0xff) as i32;
-                                        let av0 = (in_buf[off + 1] >> 8) as i32;
-                                        
-                                        let by0 = (in_buf[off + 2] & 0xff) as i32;
-                                        let bu0 = (in_buf[off + 2] >> 8) as i32;
-                                        let by1 = (in_buf[off + 3] & 0xff) as i32;
-                                        let bv0 = (in_buf[off + 3] >> 8) as i32;
-                                        
-                                        let cy0 = (in_buf[off + 4] & 0xff) as i32;
-                                        let cu0 = (in_buf[off + 4] >> 8) as i32;
-                                        let cy1 = (in_buf[off + 5] & 0xff) as i32;
-                                        let cv0 = (in_buf[off + 5] >> 8) as i32;
-                                        
-                                        let dy0 = (in_buf[off + 6] & 0xff) as i32;
-                                        let du0 = (in_buf[off + 6] >> 8) as i32;
-                                        let dy1 = (in_buf[off + 7] & 0xff) as i32;
-                                        let dv0 = (in_buf[off + 7] >> 8) as i32;
-                                        
-                                        let abcd1 = convert_ycrcb_to_rgba_sse2(
-                                            _mm_set_epi32(ay0, by0, cy0, dy0),
-                                            _mm_set_epi32(av0, bv0, cv0, dv0),
-                                            _mm_set_epi32(au0, bu0, cu0, du0)
-                                        );
-                                        
-                                        let abcd2 = convert_ycrcb_to_rgba_sse2(
-                                            _mm_set_epi32(ay1, by1, cy1, dy1),
-                                            _mm_set_epi32(av0, bv0, cv0, dv0),
-                                            _mm_set_epi32(au0, bu0, cu0, du0)
-                                        );
-                                        out_buf[off + 0] = _mm_extract_epi32(abcd1, 3) as u32;
-                                        out_buf[off + 1] = _mm_extract_epi32(abcd2, 3) as u32;
-                                        out_buf[off + 2] = _mm_extract_epi32(abcd1, 2) as u32;
-                                        out_buf[off + 3] = _mm_extract_epi32(abcd2, 2) as u32;
-                                        out_buf[off + 4] = _mm_extract_epi32(abcd1, 1) as u32;
-                                        out_buf[off + 5] = _mm_extract_epi32(abcd2, 1) as u32;
-                                        out_buf[off + 6] = _mm_extract_epi32(abcd1, 0) as u32;
-                                        out_buf[off + 7] = _mm_extract_epi32(abcd2, 0) as u32;
+                        
+                        if let Some(out_u32) = capture_platform.cxthread.lock_mapped_texture_u32(&capture_platform.texture){
+
+                            match capture_platform.format {
+                                CaptureFormat::YUY2 => {
+                                    // lets convert YUY2 to RGB
+                                    let in_buf = std::slice::from_raw_parts(scanline0 as *mut u16, width * height);
+                                    for y in 0..height {
+                                        for x in (0..width).step_by(2 * 4) {
+                                            let off = y * width + x;
+                                            
+                                            let ay0 = (in_buf[off + 0] & 0xff) as i32;
+                                            let au0 = (in_buf[off + 0] >> 8) as i32;
+                                            let ay1 = (in_buf[off + 1] & 0xff) as i32;
+                                            let av0 = (in_buf[off + 1] >> 8) as i32;
+                                            
+                                            let by0 = (in_buf[off + 2] & 0xff) as i32;
+                                            let bu0 = (in_buf[off + 2] >> 8) as i32;
+                                            let by1 = (in_buf[off + 3] & 0xff) as i32;
+                                            let bv0 = (in_buf[off + 3] >> 8) as i32;
+                                            
+                                            let cy0 = (in_buf[off + 4] & 0xff) as i32;
+                                            let cu0 = (in_buf[off + 4] >> 8) as i32;
+                                            let cy1 = (in_buf[off + 5] & 0xff) as i32;
+                                            let cv0 = (in_buf[off + 5] >> 8) as i32;
+                                            
+                                            let dy0 = (in_buf[off + 6] & 0xff) as i32;
+                                            let du0 = (in_buf[off + 6] >> 8) as i32;
+                                            let dy1 = (in_buf[off + 7] & 0xff) as i32;
+                                            let dv0 = (in_buf[off + 7] >> 8) as i32;
+                                            
+                                            let abcd1 = convert_ycrcb_to_rgba_sse2(
+                                                _mm_set_epi32(ay0, by0, cy0, dy0),
+                                                _mm_set_epi32(av0, bv0, cv0, dv0),
+                                                _mm_set_epi32(au0, bu0, cu0, du0)
+                                            );
+                                            
+                                            let abcd2 = convert_ycrcb_to_rgba_sse2(
+                                                _mm_set_epi32(ay1, by1, cy1, dy1),
+                                                _mm_set_epi32(av0, bv0, cv0, dv0),
+                                                _mm_set_epi32(au0, bu0, cu0, du0)
+                                            );
+                                            out_u32[off + 0] = _mm_extract_epi32(abcd1, 3) as u32;
+                                            out_u32[off + 1] = _mm_extract_epi32(abcd2, 3) as u32;
+                                            out_u32[off + 2] = _mm_extract_epi32(abcd1, 2) as u32;
+                                            out_u32[off + 3] = _mm_extract_epi32(abcd2, 2) as u32;
+                                            out_u32[off + 4] = _mm_extract_epi32(abcd1, 1) as u32;
+                                            out_u32[off + 5] = _mm_extract_epi32(abcd2, 1) as u32;
+                                            out_u32[off + 6] = _mm_extract_epi32(abcd1, 0) as u32;
+                                            out_u32[off + 7] = _mm_extract_epi32(abcd2, 0) as u32;
+                                        }
                                     }
-                                }
-                            },
-                            CapConvert::NV12 => {
-                                // lets convert NV12 to RGB
-                                let in_buf = std::slice::from_raw_parts(scanline0 as *mut u8, (width * height) * 3);
-                                let mut v_off = width * height;
-                                for y in (0..height).step_by(2) {
-                                    for x in (0..width).step_by(2) {
-                                        let off = y * width + x;
-                                        let y0 = in_buf[off] as i32;
-                                        let y1 = in_buf[off + 1] as i32;
-                                        let y2 = in_buf[off + width] as i32;
-                                        let y3 = in_buf[off + width + 1] as i32;
-                                        let u = in_buf[v_off] as i32;
-                                        let v = in_buf[v_off + 1] as i32;
-                                        v_off += 2;
-                                        let abcd1 = convert_ycrcb_to_rgba_sse2(
-                                            _mm_set_epi32(y0, y1, y2, y3),
-                                            _mm_set_epi32(v, v, v, v),
-                                            _mm_set_epi32(u, u, u, u)
-                                        );
-                                        
-                                        out_buf[off] =  _mm_extract_epi32(abcd1, 3) as u32;
-                                        out_buf[off + 1] = _mm_extract_epi32(abcd1, 2) as u32;
-                                        out_buf[off + width] =  _mm_extract_epi32(abcd1, 1) as u32;
-                                        out_buf[off + width + 1] = _mm_extract_epi32(abcd1, 0) as u32;
+                                },
+                                CaptureFormat::NV12 => {
+                                    // lets convert NV12 to RGB
+                                    let in_buf = std::slice::from_raw_parts(scanline0 as *mut u8, (width * height) * 3);
+                                    let mut v_off = width * height;
+                                    for y in (0..height).step_by(2) {
+                                        for x in (0..width).step_by(2) {
+                                            let off = y * width + x;
+                                            let y0 = in_buf[off] as i32;
+                                            let y1 = in_buf[off + 1] as i32;
+                                            let y2 = in_buf[off + width] as i32;
+                                            let y3 = in_buf[off + width + 1] as i32;
+                                            let u = in_buf[v_off] as i32;
+                                            let v = in_buf[v_off + 1] as i32;
+                                            v_off += 2;
+                                            let abcd1 = convert_ycrcb_to_rgba_sse2(
+                                                _mm_set_epi32(y0, y1, y2, y3),
+                                                _mm_set_epi32(v, v, v, v),
+                                                _mm_set_epi32(u, u, u, u)
+                                            );
+                                            
+                                            out_u32[off] =  _mm_extract_epi32(abcd1, 3) as u32;
+                                            out_u32[off + 1] = _mm_extract_epi32(abcd1, 2) as u32;
+                                            out_u32[off + width] =  _mm_extract_epi32(abcd1, 1) as u32;
+                                            out_u32[off + width + 1] = _mm_extract_epi32(abcd1, 0) as u32;
+                                        }
                                     }
-                                }
-                            },
-                            _ => ()
+                                },
+                            }
+                            capture_platform.cxthread.unlock_mapped_texture(&capture_platform.texture)
                         }
-                        //let time2 = Cx::profile_time_ns();
-                        //println!("{}", (time2 - time1)as f64 / 1000.0);
-                        let mut front = (*self.cap_win_mf).image_front.lock().unwrap();
-                        std::mem::swap(&mut (*front), out_buf);
-                        Cx::send_signal((*self.cap_win_mf).image_signal, 0);
+                        Cx::send_signal(capture_platform.frame_signal, 0);
                     };
                 }
             }
         }
         
-        check("ReadSample", (*self.cap_win_mf).reader.as_ref().unwrap().ReadSample(
+        check("ReadSample", capture_platform.reader.ReadSample(
             MF_SOURCE_READER_FIRST_VIDEO_STREAM,
             0,
             ptr::null_mut(),
