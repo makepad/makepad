@@ -31,7 +31,7 @@
 
 use render::*;
 use widget::*;
-pub mod cap_winmf;
+pub mod capture_winmf;
 pub use crate::capture_winmf::*;
 use core::arch::x86_64::*;
 
