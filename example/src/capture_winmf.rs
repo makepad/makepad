@@ -44,8 +44,8 @@ pub struct CapturePlatform {
 pub enum CaptureFormat {
     YUY2,
     NV12,
-//   RGB24,
-//   RGB32 todo
+    //   RGB24,
+    //   RGB32 todo
 }
 
 pub enum CaptureEvent {
@@ -74,7 +74,7 @@ impl Capture {
         if winerror::SUCCEEDED(hr) {Ok(unsafe {ComPtr::from_raw(source_reader as *mut _)})} else {Err(hr)}
     }
     
-    unsafe fn select_format(reader: &ComPtr<IMFSourceReader>, pref_format:&CaptureFormat, pref_width: usize, pref_height: usize, pref_fps: f64) -> Option<ComPtr<IMFMediaType>> {
+    unsafe fn select_format(reader: &ComPtr<IMFSourceReader>, pref_format: &CaptureFormat, pref_width: usize, pref_height: usize, pref_fps: f64) -> Option<ComPtr<IMFMediaType>> {
         let mut counter = 0;
         loop {
             let mut native_type_raw = ptr::null_mut();
@@ -94,13 +94,13 @@ impl Capture {
                 check("native_type.GetDouble", native_type.GetUINT64(&MF_MT_FRAME_RATE, &mut frame_rate));
                 let fps = (frame_rate >> 32) as f64 / ((frame_rate & 0xffffffff)as f64);
                 if (fps - pref_fps).abs()<0.0001 && pref_width == width as usize && pref_height == height as usize {
-                    if guid_equal(&guid, &MFVideoFormat_YUY2) && *pref_format == CaptureFormat::YUY2 
-                    || guid_equal(&guid, &MFVideoFormat_NV12) && *pref_format == CaptureFormat::NV12
+                    if guid_equal(&guid, &MFVideoFormat_YUY2) && *pref_format == CaptureFormat::YUY2
+                        || guid_equal(&guid, &MFVideoFormat_NV12) && *pref_format == CaptureFormat::NV12
                     //|| guid_equal(&guid, &MFVideoFormat_RGB24) && pref_convert == CapConvert::RGB24
                     //|| guid_equal(&guid, &MFVideoFormat_RGB32) && pref_convert == CapConvert::RGB32
                     {
                         return Some(native_type);
-                    } 
+                    }
                 }
             }
             else {
@@ -112,7 +112,7 @@ impl Capture {
     }
     
     pub fn handle_signal(&mut self, _cx: &mut Cx, event: &mut Event) -> CaptureEvent {
-        if let Some(platform) = &self.platform{
+        if let Some(platform) = &self.platform {
             if let Event::Signal(se) = event {
                 if platform.frame_signal.is_signal(se) { // we haz new texture
                     //let last_time = self.last_time;
@@ -130,7 +130,7 @@ impl Capture {
         return CaptureEvent::None
     }
     
-    pub fn init(&mut self, cx: &mut Cx, device_id: usize, pref_format:CaptureFormat, pref_width: usize, pref_height: usize, pref_fps: f64)->bool {
+    pub fn init(&mut self, cx: &mut Cx, device_id: usize, pref_format: CaptureFormat, pref_width: usize, pref_height: usize, pref_fps: f64) -> bool {
         
         check("cannot mf_startup", unsafe {
             MFStartup(0)
@@ -192,7 +192,7 @@ impl Capture {
                     ptr::null_mut(),
                     ptr::null_mut()
                 ));
-
+                
                 self.texture.set_desc(cx, Some(TextureDesc {
                     format: TextureFormat::MappedBGRA,
                     width: Some(pref_width),
@@ -200,8 +200,8 @@ impl Capture {
                     multisample: None
                 }));
                 
-                self.platform = Some(CapturePlatform{
-                    format:pref_format,
+                self.platform = Some(CapturePlatform {
+                    format: pref_format,
                     width: pref_width as usize,
                     height: pref_height as usize,
                     texture: self.texture.clone(),
@@ -241,13 +241,13 @@ unsafe impl IMFSourceReaderCallback for SourceReaderCallback {
     unsafe fn on_read_sample(&self, hrState: HRESULT, _dwStreamIndex: DWORD, _dwStreamFlags: DWORD, _llTimeStamp: LONGLONG, pSample: *const IMFSample,) -> HRESULT {
         if hrState != S_OK {
             println!("read sample returned failure!");
-            return S_OK; 
+            return S_OK;
         }
-
+        
         let capture_platform = (*self.capture).platform.as_mut().unwrap();
         let width = capture_platform.width;
         let height = capture_platform.height;
-
+        
         if pSample != ptr::null() {
             let mut media_buffer_raw = ptr::null_mut();
             if (*pSample).GetBufferByIndex(0, &mut media_buffer_raw as *mut *mut _) == S_OK {
@@ -260,8 +260,8 @@ unsafe impl IMFSourceReaderCallback for SourceReaderCallback {
                     let mut scanline0: *mut BYTE = ptr::null_mut();
                     if media_buffer2d.Lock2D(&mut scanline0, &mut stride) == S_OK {
                         
-                        if let Some(out_u32) = capture_platform.cxthread.lock_mapped_texture_u32(&capture_platform.texture){
-
+                        if let Some(out_u32) = capture_platform.cxthread.lock_mapped_texture_u32(&capture_platform.texture, 0) {
+                            
                             match capture_platform.format {
                                 CaptureFormat::YUY2 => {
                                     // lets convert YUY2 to RGB
@@ -332,9 +332,9 @@ unsafe impl IMFSourceReaderCallback for SourceReaderCallback {
                                                 _mm_set_epi32(u, u, u, u)
                                             );
                                             
-                                            out_u32[off] =  _mm_extract_epi32(abcd1, 3) as u32;
+                                            out_u32[off] = _mm_extract_epi32(abcd1, 3) as u32;
                                             out_u32[off + 1] = _mm_extract_epi32(abcd1, 2) as u32;
-                                            out_u32[off + width] =  _mm_extract_epi32(abcd1, 1) as u32;
+                                            out_u32[off + width] = _mm_extract_epi32(abcd1, 1) as u32;
                                             out_u32[off + width + 1] = _mm_extract_epi32(abcd1, 0) as u32;
                                         }
                                     }
@@ -370,7 +370,7 @@ unsafe impl IMFSourceReaderCallback for SourceReaderCallback {
         return S_OK
     }
 }
-
+/*
 fn convert_ycrcb_to_rgba(y: u16, cr: u16, cb: u16) -> u32 {
     fn clip(a: i32) -> u32 {
         if a< 0 {
@@ -390,13 +390,12 @@ fn convert_ycrcb_to_rgba(y: u16, cr: u16, cb: u16) -> u32 {
         | (clip((298 * c - 100 * d - 208 * e + 128) >> 8) << 8)
         | (clip((298 * c + 409 * e + 128) >> 8) << 0)
         | (255 << 24);
-}
-
+}*/
 
 unsafe fn convert_ycrcb_to_rgba_sse2(y: __m128i, cr: __m128i, cb: __m128i) -> __m128i {
     
     unsafe fn clip(a: __m128i) -> __m128i {
-         _mm_srl_epi32(_mm_max_epi32(_mm_min_epi32(a, _mm_set1_epi32(65535)), _mm_set1_epi32(0)), _mm_setr_epi32(8,0,0,0))
+        _mm_srl_epi32(_mm_max_epi32(_mm_min_epi32(a, _mm_set1_epi32(65535)), _mm_set1_epi32(0)), _mm_setr_epi32(8, 0, 0, 0))
     }
     
     let c = _mm_add_epi32(y, _mm_set1_epi32(-16));
@@ -411,8 +410,8 @@ unsafe fn convert_ycrcb_to_rgba_sse2(y: __m128i, cr: __m128i, cb: __m128i) -> __
     let b = _mm_add_epi32(_mm_add_epi32(mc, _mm_mullo_epi32(e, _mm_set1_epi32(409))), m128);
     _mm_or_si128(
         _mm_or_si128(
-            _mm_sll_epi32(clip(r), _mm_setr_epi32(16,0,0,0)),
-            _mm_sll_epi32(clip(g), _mm_setr_epi32(8,0,0,0))
+            _mm_sll_epi32(clip(r), _mm_setr_epi32(16, 0, 0, 0)),
+            _mm_sll_epi32(clip(g), _mm_setr_epi32(8, 0, 0, 0))
         ),
         clip(b)
     )
@@ -437,7 +436,7 @@ fn guid_equal(a: &GUID, b: &GUID) -> bool {
 
 
 
-ENUM! {enum MF_ATTRIBUTE_TYPE {
+ENUM!{enum MF_ATTRIBUTE_TYPE {
     MF_ATTRIBUTE_UINT32 = VT_UI4,
     MF_ATTRIBUTE_UINT64 = VT_UI8,
     MF_ATTRIBUTE_DOUBLE = VT_R8,
@@ -447,7 +446,7 @@ ENUM! {enum MF_ATTRIBUTE_TYPE {
     MF_ATTRIBUTE_IUNKNOWN = VT_UNKNOWN,
 }}
 
-ENUM! {enum MF_ATTRIBUTES_MATCH_TYPE {
+ENUM!{enum MF_ATTRIBUTES_MATCH_TYPE {
     MF_ATTRIBUTES_MATCH_OUR_ITEMS = 0,
     MF_ATTRIBUTES_MATCH_THEIR_ITEMS = 1,
     MF_ATTRIBUTES_MATCH_ALL_ITEMS = 2,
@@ -455,26 +454,26 @@ ENUM! {enum MF_ATTRIBUTES_MATCH_TYPE {
     MF_ATTRIBUTES_MATCH_SMALLER = 4,
 }}
 
-ENUM! {enum MediaEventType {
+ENUM!{enum MediaEventType {
     MAKE_DWORD = 0u32,
 }}
 
 const MF_SOURCE_READER_FIRST_VIDEO_STREAM: DWORD = 0xfffffffc;
 
-DEFINE_GUID! {MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE, 0xc60ac5fe, 0x252a, 0x478f, 0xa0, 0xef, 0xbc, 0x8f, 0xa5, 0xf7, 0xca, 0xd3}
-DEFINE_GUID! {MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_GUID, 0x8ac3587a, 0x4ae7, 0x42d8, 0x99, 0xe0, 0x0a, 0x60, 0x13, 0xee, 0xf9, 0x0f}
-DEFINE_GUID! {MF_READWRITE_DISABLE_CONVERTERS, 0x98d5b065, 0x1374, 0x4847, 0x8d, 0x5d, 0x31, 0x52, 0x0f, 0xee, 0x71, 0x56}
-DEFINE_GUID! {MF_SOURCE_READER_ASYNC_CALLBACK, 0x1e3dbeac, 0xbb43, 0x4c35, 0xb5, 0x07, 0xcd, 0x64, 0x44, 0x64, 0xc9, 0x65}
-DEFINE_GUID! {MF_MT_SUBTYPE, 0xf7e34c9a, 0x42e8, 0x4714, 0xb7, 0x4b, 0xcb, 0x29, 0xd7, 0x2c, 0x35, 0xe5}
-DEFINE_GUID! {MF_MT_FRAME_SIZE, 0x1652c33d, 0xd6b2, 0x4012, 0xb8, 0x34, 0x72, 0x03, 0x08, 0x49, 0xa3, 0x7d}
-DEFINE_GUID! {MF_MT_FRAME_RATE, 0xc459a2e8, 0x3d2c, 0x4e44, 0xb1, 0x32, 0xfe, 0xe5, 0x15, 0x6c, 0x7b, 0xb0}
+DEFINE_GUID!{MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE, 0xc60ac5fe, 0x252a, 0x478f, 0xa0, 0xef, 0xbc, 0x8f, 0xa5, 0xf7, 0xca, 0xd3}
+DEFINE_GUID!{MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_GUID, 0x8ac3587a, 0x4ae7, 0x42d8, 0x99, 0xe0, 0x0a, 0x60, 0x13, 0xee, 0xf9, 0x0f}
+DEFINE_GUID!{MF_READWRITE_DISABLE_CONVERTERS, 0x98d5b065, 0x1374, 0x4847, 0x8d, 0x5d, 0x31, 0x52, 0x0f, 0xee, 0x71, 0x56}
+DEFINE_GUID!{MF_SOURCE_READER_ASYNC_CALLBACK, 0x1e3dbeac, 0xbb43, 0x4c35, 0xb5, 0x07, 0xcd, 0x64, 0x44, 0x64, 0xc9, 0x65}
+DEFINE_GUID!{MF_MT_SUBTYPE, 0xf7e34c9a, 0x42e8, 0x4714, 0xb7, 0x4b, 0xcb, 0x29, 0xd7, 0x2c, 0x35, 0xe5}
+DEFINE_GUID!{MF_MT_FRAME_SIZE, 0x1652c33d, 0xd6b2, 0x4012, 0xb8, 0x34, 0x72, 0x03, 0x08, 0x49, 0xa3, 0x7d}
+DEFINE_GUID!{MF_MT_FRAME_RATE, 0xc459a2e8, 0x3d2c, 0x4e44, 0xb1, 0x32, 0xfe, 0xe5, 0x15, 0x6c, 0x7b, 0xb0}
 
-DEFINE_GUID! {MFVideoFormat_RGB32, 22, 0x0000, 0x0010, 0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71}
-DEFINE_GUID! {MFVideoFormat_RGB24, 20, 0x0000, 0x0010, 0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71}
-DEFINE_GUID! {MFVideoFormat_YUY2, 0x32595559, 0x0000, 0x0010, 0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71}
-DEFINE_GUID! {MFVideoFormat_NV12, 0x3231564e, 0x0000, 0x0010, 0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71}
+DEFINE_GUID!{MFVideoFormat_RGB32, 22, 0x0000, 0x0010, 0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71}
+DEFINE_GUID!{MFVideoFormat_RGB24, 20, 0x0000, 0x0010, 0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71}
+DEFINE_GUID!{MFVideoFormat_YUY2, 0x32595559, 0x0000, 0x0010, 0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71}
+DEFINE_GUID!{MFVideoFormat_NV12, 0x3231564e, 0x0000, 0x0010, 0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71}
 
-RIDL! {
+RIDL!{
     #[uuid(0x2cd2d921, 0xc447, 0x44a7, 0xa1, 0x3c, 0x4a, 0xda, 0xbf, 0xc2, 0x47, 0xe3)]
     interface IMFAttributes(IMFAttributesVtbl): IUnknown(IUnknownVtbl) {
         
@@ -511,7 +510,7 @@ RIDL! {
     }
 }
 
-RIDL! {
+RIDL!{
     #[uuid(0x7FEE9E9A, 0x4A89, 0x47a6, 0x89, 0x9c, 0xb6, 0xa5, 0x3a, 0x70, 0xfb, 0x67)]
     interface IMFActivate(IMFActivateVtbl): IMFAttributes(IMFAttributesVtbl) {
         fn ActivateObject(riid: REFIID, ppv: *mut *mut c_void,) -> HRESULT,
@@ -520,7 +519,7 @@ RIDL! {
     }
 }
 
-RIDL! {
+RIDL!{
     #[uuid(0x44ae0fa8, 0xea31, 0x4109, 0x8d, 0x2e, 0x4c, 0xae, 0x49, 0x97, 0xc5, 0x55)]
     interface IMFMediaType(IMFMediaTypeVtbl): IMFAttributes(IMFAttributesVtbl) {
         fn GetMajorType(pguidMajorType: *mut GUID,) -> HRESULT,
@@ -531,7 +530,7 @@ RIDL! {
     }
 }
 
-RIDL! {
+RIDL!{
     #[uuid(0x2CD0BD52, 0xBCD5, 0x4B89, 0xb6, 0x2c, 0xea, 0xdc, 0x0c, 0x03, 0x1e, 0x7d)]
     interface IMFMediaEventGenerator(IMFMediaEventGeneratorVtbl): IUnknown(IUnknownVtbl) {
         fn GetEvent(dwFlags: DWORD, ppEvent: *mut *mut IMFMediaEvent,) -> HRESULT,
@@ -541,7 +540,7 @@ RIDL! {
     }
 }
 
-RIDL! {
+RIDL!{
     #[uuid(0xDF598932, 0xF10C, 0x4E39, 0xbb, 0xa2, 0xc3, 0x08, 0xf1, 0x01, 0xda, 0xa3)]
     interface IMFMediaEvent(IMFMediaEventVtbl): IMFAttributes(IMFAttributesVtbl) {
         fn GetType(pmet: *mut MediaEventType,) -> HRESULT,
@@ -551,7 +550,7 @@ RIDL! {
     }
 }
 
-RIDL! {
+RIDL!{
     #[uuid(0x279a808d, 0xaec7, 0x40c8, 0x9c, 0x6b, 0xa6, 0xb4, 0x92, 0xc7, 0x8a, 0x66)]
     interface IMFMediaSource(IMFMediaSourceVtbl): IMFMediaEventGenerator(IMFMediaEventGeneratorVtbl) {
         fn GetCharacteristics(pdwCharacteristics: *mut DWORD,) -> HRESULT,
@@ -567,7 +566,7 @@ RIDL! {
     }
 }
 
-RIDL! {
+RIDL!{
     #[uuid(0xa27003cf, 0x2354, 0x4f2a, 0x8d, 0x6a, 0xab, 0x7c, 0xff, 0x15, 0x43, 0x7e)]
     interface IMFAsyncCallback(IMFAsyncCallbackVtbl): IUnknown(IUnknownVtbl) {
         fn GetParameters(pdwFlags: *mut DWORD, pdwQueue: *mut DWORD,) -> HRESULT,
@@ -576,7 +575,7 @@ RIDL! {
 }
 
 
-RIDL! {
+RIDL!{
     #[uuid(0xac6b7889, 0x0740, 0x4d51, 0x86, 0x19, 0x90, 0x59, 0x94, 0xa5, 0x5c, 0xc6)]
     interface IMFAsyncResult(IMFAsyncResultVtbl): IUnknown(IUnknownVtbl) {
         fn GetState(ppunkState: *mut *mut IUnknown,) -> HRESULT,
@@ -587,7 +586,7 @@ RIDL! {
     }
 }
 
-RIDL! {
+RIDL!{
     #[uuid(0x03cb2711, 0x24d7, 0x4db6, 0xa1, 0x7f, 0xf3, 0xa7, 0xa4, 0x79, 0xa5, 0x36)]
     interface IMFPresentationDescriptor(IMFPresentationDescriptorVtbl): IMFAttributes(IMFAttributesVtbl) {
         fn GetStreamDescriptorCount(pdwDescriptorCount: *mut DWORD,) -> HRESULT,
@@ -598,7 +597,7 @@ RIDL! {
     }
 }
 
-RIDL! {
+RIDL!{
     #[uuid(0x56c03d9c, 0x9dbb, 0x45f5, 0xab, 0x4b, 0xd8, 0x0f, 0x47, 0xc0, 0x59, 0x38)]
     interface IMFStreamDescriptor(IMFStreamDescriptorVtbl): IMFAttributes(IMFAttributesVtbl) {
         fn GetStreamIdentifier(pdwStreamIdentifier: *mut DWORD,) -> HRESULT,
@@ -607,7 +606,7 @@ RIDL! {
 }
 
 
-RIDL! {
+RIDL!{
     #[uuid(0xe93dcf6c, 0x4b07, 0x4e1e, 0x81, 0x23, 0xaa, 0x16, 0xed, 0x6e, 0xad, 0xf5)]
     interface IMFMediaTypeHandler(IMFMediaTypeHandlerVtbl): IUnknown(IUnknownVtbl) {
         fn IsMediaTypeSupported(pMediaType: *const IMFMediaType, ppMediaType: *mut *mut IMFMediaType,) -> HRESULT,
@@ -619,7 +618,7 @@ RIDL! {
     }
 }
 
-RIDL! {
+RIDL!{
     #[uuid(0xdeec8d99, 0xfa1d, 0x4d82, 0x84, 0xc2, 0x2c, 0x89, 0x69, 0x94, 0x48, 0x67)]
     interface IMFSourceReaderCallback(IMFSourceReaderCallbackVtbl): IUnknown(IUnknownVtbl) {
         fn OnReadSample(
@@ -635,7 +634,7 @@ RIDL! {
 }
 
 
-RIDL! {
+RIDL!{
     #[uuid(0xc40a00f2, 0xb93a, 0x4d80, 0xae, 0x8c, 0x5a, 0x1c, 0x63, 0x4f, 0x58, 0xe4)]
     interface IMFSample(IMFSampleVtbl): IMFAttributes(IMFAttributesVtbl) {
         fn GetSampleFlags(pdwSampleFlags: *mut DWORD,) -> HRESULT,
@@ -655,7 +654,7 @@ RIDL! {
     }
 }
 
-RIDL! {
+RIDL!{
     #[uuid(0x045FA593, 0x8799, 0x42b8, 0xbc, 0x8d, 0x89, 0x68, 0xc6, 0x45, 0x35, 0x07)]
     interface IMFMediaBuffer(IMFMediaBufferVtbl): IUnknown(IUnknownVtbl) {
         fn Lock(ppbBuffer: *mut *mut BYTE, pcbMaxLength: *mut DWORD, pcbCurrentLength: *mut DWORD,) -> HRESULT,
@@ -665,7 +664,7 @@ RIDL! {
     }
 }
 
-RIDL! {
+RIDL!{
     #[uuid(0x7DC9D5F9, 0x9ED9, 0x44ec, 0x9b, 0xbf, 0x06, 0x00, 0xbb, 0x58, 0x9f, 0xbb)]
     interface IMF2DBuffer(IMF2DBufferVtbl): IUnknown(IUnknownVtbl) {
         fn Lock2D(ppbScanline0: *mut *mut BYTE, plPitch: *mut LONG,) -> HRESULT,
@@ -678,7 +677,7 @@ RIDL! {
     }
 }
 
-RIDL! {
+RIDL!{
     #[uuid(0x70ae66f2, 0xc809, 0x4e4f, 0x89, 0x15, 0xbd, 0xcb, 0x40, 0x6b, 0x79, 0x93)]
     interface IMFSourceReader(IMFSourceReaderVtbl): IUnknown(IUnknownVtbl) {
         fn GetStreamSelection(dwStreamIndex: DWORD, pfSelected: *mut BOOL,) -> HRESULT,

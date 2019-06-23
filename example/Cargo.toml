@@ -25,4 +25,4 @@ com-impl = "*"
 
 [target.x86_64-pc-windows-gnu.dependencies.winapi]
 version = "*"
-features = ["d3d11","propidl"]
+features = ["d3d11","propidl","xinput"]

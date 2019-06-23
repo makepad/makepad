@@ -33,34 +33,57 @@ use render::*;
 use widget::*;
 pub mod capture_winmf;
 pub use crate::capture_winmf::*;
+pub mod gamepad_winxinput;
+pub use crate::gamepad_winxinput::*;
 use core::arch::x86_64::*;
+use std::sync::mpsc;
+
+#[derive(Default, Clone)]
+struct MandelbrotLoc {
+    zoom: f64,
+    center_x: f64,
+    center_y: f64
+}
 
 #[derive(Default)]
 struct Mandelbrot {
+    start_loc: MandelbrotLoc,
     texture: Texture,
     num_threads: usize,
     width: usize,
-    zoom: f64,
-    height: usize, 
+    height: usize,
     frame_signal: Signal,
+    sender: Option<mpsc::Sender<(usize, MandelbrotLoc)>>,
 }
 
+impl Style for Mandelbrot {
+    fn style(_cx: &mut Cx) -> Self {
+        Self {
+            start_loc: MandelbrotLoc {
+                zoom: 1.0,
+                center_x: -1.5,
+                center_y: 0.0
+            },
+            texture: Texture::default(),
+            num_threads: 30,
+            width: 3840,
+            height: 2160,
+            frame_signal: Signal::empty(),
+            sender: None,
+        }
+    }
+}
 impl Mandelbrot {
     fn init(&mut self, cx: &mut Cx) {
         // lets start a mandelbrot thread that produces frames
         self.frame_signal = cx.new_signal();
-        self.width = 3840; 
-        self.height = 2160;
-        self.zoom = 1.0;
-        self.num_threads = 30;
         self.texture.set_desc(cx, Some(TextureDesc {
             format: TextureFormat::MappedRGf32,
             width: Some(self.width),
             height: Some(self.height),
             multisample: None
         }));
-
-        #[inline]
+        
         unsafe fn calc_mandel_avx2(c_x: __m256d, c_y: __m256d, max_iter: u32) -> (__m256d, __m256d) {
             let mut x = c_x;
             let mut y = c_y;
@@ -86,24 +109,7 @@ impl Mandelbrot {
             }
             return (count, add);
         }
-        /*
-        fn calc_mandel(x: f64, y: f64) -> u32 {
-            let mut rr = x;
-            let mut ri = y;
-            let mut n = 0;
-            while n < 80 {
-                let mut tr = rr * rr - ri * ri + x;
-                let mut ti = 2.0 * rr * ri + y;
-                rr = tr;
-                ri = ti;
-                n = n + 1;
-                if rr * ri > 5.0 {
-                    return n;
-                }
-            }
-            return n;
-        }*/
-
+        
         // lets spawn fractal.height over 32 threads
         let num_threads = self.num_threads;
         let width = self.width;
@@ -117,24 +123,30 @@ impl Mandelbrot {
         let frame_signal = self.frame_signal.clone();
         let mut cxthread = cx.new_cxthread();
         let texture = self.texture.clone();
+        let mut loc = self.start_loc.clone();
         
+        let (tx, rx) = mpsc::channel();
+        self.sender = Some(tx);
         std::thread::spawn(move || {
-            let mut zoom = 1.0;
-            let center_x = -1.5;
-            let center_y = 0.0;
+            let mut user_data = 0;
             loop {
-                zoom = zoom / 1.003;
-                if zoom < 0.000000000002 {
-                    zoom = 1.0;
+                while let Ok((recv_user_data, new_loc)) = rx.try_recv() {
+                    user_data = recv_user_data;
+                    loc = new_loc;
                 }
+                //zoom = zoom / 1.003;
+                //if zoom < 0.000000000002 {
+                //    zoom = 1.0;
+                // }
                 //let time1 = Cx::profile_time_ns();
-
+                
                 thread_pool.scoped( | scope | {
-                    if let Some(mapped_texture) = cxthread.lock_mapped_texture_f32(&texture){
+                    if let Some(mapped_texture) = cxthread.lock_mapped_texture_f32(&texture, user_data) {
                         let mut iter = mapped_texture.chunks_mut((chunk_height * width * 2) as usize);
                         for i in 0..num_threads {
                             let thread_num = i;
                             let slice = iter.next().unwrap();
+                            let loc = loc.clone();
                             //println!("{}", chunk_height);
                             scope.execute(move || {
                                 let it_v = [0f64, 0f64, 0f64, 0f64];
@@ -145,18 +157,18 @@ impl Mandelbrot {
                                         unsafe {
                                             // TODO simd these things too
                                             let c_re = _mm256_set_pd(
-                                                (x as f64 - fwidth * 0.5) * 4.0 / fwidth * zoom + center_x,
-                                                ((x + 1) as f64 - fwidth * 0.5) * 4.0 / fwidth * zoom + center_x,
-                                                (x as f64 - fwidth * 0.5) * 4.0 / fwidth * zoom + center_x,
-                                                ((x + 1) as f64 - fwidth * 0.5) * 4.0 / fwidth * zoom + center_x
+                                                ((x as f64 - fwidth * 0.5) * 4.0 / fwidth) * loc.zoom + loc.center_x,
+                                                (((x + 1) as f64 - fwidth * 0.5) * 4.0 / fwidth) * loc.zoom + loc.center_x,
+                                                ((x as f64 - fwidth * 0.5) * 4.0 / fwidth) * loc.zoom + loc.center_x,
+                                                (((x + 1) as f64 - fwidth * 0.5) * 4.0 / fwidth) * loc.zoom + loc.center_x
                                             );
                                             let c_im = _mm256_set_pd(
-                                                (y as f64 - fheight * 0.5) * 3.0 / fheight * zoom + center_y,
-                                                (y as f64 - fheight * 0.5) * 3.0 / fheight * zoom + center_y,
-                                                ((y + 1) as f64 - fheight * 0.5) * 3.0 / fheight * zoom + center_y,
-                                                ((y + 1) as f64 - fheight * 0.5) * 3.0 / fheight * zoom + center_y
+                                                ((y as f64 - fheight * 0.5) * 3.0 / fheight) * loc.zoom + loc.center_y,
+                                                ((y as f64 - fheight * 0.5) * 3.0 / fheight) * loc.zoom + loc.center_y,
+                                                (((y + 1) as f64 - fheight * 0.5) * 3.0 / fheight) * loc.zoom + loc.center_y,
+                                                (((y + 1) as f64 - fheight * 0.5) * 3.0 / fheight) * loc.zoom + loc.center_y
                                             );
-                                            let (it256, sum256) = calc_mandel_avx2(c_re, c_im, 130);
+                                            let (it256, sum256) = calc_mandel_avx2(c_re, c_im, 256);
                                             _mm256_store_pd(it_v.as_ptr(), it256);
                                             _mm256_store_pd(su_v.as_ptr(), sum256);
                                             
@@ -174,7 +186,7 @@ impl Mandelbrot {
                             })
                         }
                     }
-                    else{ // wait a bit
+                    else { // wait a bit
                         std::thread::sleep(std::time::Duration::from_millis(1));
                         return
                     }
@@ -194,15 +206,23 @@ impl Mandelbrot {
         }
         false
     }
+    
+    fn send_new_loc(&mut self, index: usize, new_loc: MandelbrotLoc) {
+        if let Some(sender) = &self.sender {
+            let _ = sender.send((index, new_loc));
+        }
+    }
 }
 
 struct App {
     view: View<ScrollBar>,
     window: DesktopWindow,
-    blit: Blit,
     mandel_blit: Blit,
     frame: f32,
     capture: Capture,
+    gamepad: Gamepad,
+    current_loc: MandelbrotLoc,
+    loc_history: Vec<MandelbrotLoc>,
     mandel: Mandelbrot,
 }
 
@@ -212,8 +232,15 @@ impl Style for App {
     fn style(cx: &mut Cx) -> Self {
         set_dark_style(cx);
         Self {
-            mandel: Mandelbrot::default(),
+            current_loc: MandelbrotLoc {
+                zoom: 1.0,
+                center_x: -1.5,
+                center_y: 0.0
+            },
+            loc_history: Vec::new(),
+            mandel: Mandelbrot::style(cx),
             capture: Capture::default(),
+            gamepad: Gamepad::default(),
             window: DesktopWindow::style(cx),
             view: View {
                 is_overlay: true,
@@ -221,7 +248,6 @@ impl Style for App {
                 scroll_v: Some(ScrollBar::style(cx)),
                 ..Style::style(cx)
             },
-            blit: Blit::style(cx),
             mandel_blit: Blit {
                 shader: cx.add_shader(App::def_blit_shader(), "App.blit"),
                 ..Blit::style(cx)
@@ -237,21 +263,24 @@ impl App {
             let texcam: texture2d<Texture>;
             let time: float<Uniform>;
             
+            let scale_delta: float<Uniform>;
+            let offset_delta: vec2<Uniform>;
             
-            fn kaleido(uv:vec2, angle:float, base:float, spin:float)->vec2{
+            fn kaleido(uv: vec2, angle: float, base: float, spin: float) -> vec2 {
                 let a = atan(uv.y, uv.x);
-                if a<0.{a = PI + a}
+                if a<0. {a = PI + a}
                 let d = length(uv);
                 a = abs(fmod (a + spin, angle * 2.0) - angle);
                 return vec2(abs(sin(a + base)) * d, abs(cos(a + base)) * d);
             }
             
             fn pixel() -> vec4 {
-                let fr1 = sample2d(texturez, geom.xy).rg;//kaleido(geom.xy-vec2(0.5,0.5), 3.14/8., time, 2.*time)).rg;
+                let comp_texpos = (geom.xy - vec2(0.5, 0.5)) * scale_delta*0.7 + vec2(0.5, 0.5) + offset_delta;
+                let fr1 = sample2d(texturez, comp_texpos).rg; //kaleido(geom.xy-vec2(0.5,0.5), 3.14/8., time, 2.*time)).rg;
                 let fr2 = sample2d(texturez, vec2(1.0 - geom.x, geom.y)).rg;
-                let cam = sample2d(texcam, geom.xy);//kaleido(geom.xy-vec2(0.5,0.5), 3.14/8., time, 2.*time));
-                let fract = df_iq_pal4(time*3. + fr1.x * 0.03 + fr2.x * 0.03 - 0.1 * log(fr1.y * fr2.y));
-                return vec4(cam.xyz*fract.xyz, alpha);
+                let cam = sample2d(texcam, geom.xy); //kaleido(geom.xy-vec2(0.5,0.5), 3.14/8., time, 2.*time));
+                let fract = df_iq_pal4(time * 3. + fr1.x * 0.03 - 0.1 * log(fr1.y));
+                return vec4(fract.xyz, alpha);
             }
         }))
     }
@@ -261,6 +290,7 @@ impl App {
         if let Event::Construct = event {
             self.capture.init(cx, 0, CaptureFormat::NV12, 3840, 2160, 30.0);
             self.mandel.init(cx);
+            self.gamepad.init(0, 0.08);
         }
         
         self.window.handle_desktop_window(cx, event);
@@ -276,6 +306,17 @@ impl App {
         }
     }
     
+    fn do_gamepad_interaction(&mut self, _cx: &mut Cx) {
+        self.gamepad.poll();
+        // update the mandelbrot location
+        self.current_loc.center_x += 0.05 * self.gamepad.right_thumb.x as f64 * self.current_loc.zoom;
+        self.current_loc.center_y -= 0.05 * self.gamepad.right_thumb.y as f64 * self.current_loc.zoom;
+        self.current_loc.zoom = self.current_loc.zoom * (1.0 - 0.03 * self.gamepad.left_thumb.y as f64);
+        
+        self.mandel.send_new_loc(self.loc_history.len(), self.current_loc.clone());
+        self.loc_history.push(self.current_loc.clone());
+    }
+    
     fn draw_app(&mut self, cx: &mut Cx) {
         
         let _ = self.window.begin_desktop_window(cx);
@@ -286,10 +327,22 @@ impl App {
             ..Default::default()
         });
         
+        self.do_gamepad_interaction(cx);
+        
         self.view.redraw_view_area(cx);
         let inst = self.mandel_blit.draw_blit_walk(cx, &self.mandel.texture, Bounds::Fill, Bounds::Fill, Margin::zero());
         inst.push_uniform_texture_2d(cx, &self.capture.texture);
         inst.push_uniform_float(cx, self.frame);
+        if let Some(index) = cx.get_mapped_texture_user_data(&self.mandel.texture) {
+            inst.push_uniform_float(cx, (self.current_loc.zoom / self.loc_history[index].zoom) as f32);
+            let screen_dx = ((self.loc_history[index].center_x - self.current_loc.center_x) / self.loc_history[index].zoom) / 4.0;
+            let screen_dy = ((self.loc_history[index].center_y - self.current_loc.center_y) / self.loc_history[index].zoom) / 3.0;
+            inst.push_uniform_vec2f(cx, -screen_dx as f32, -screen_dy as f32);
+        }
+        else{
+            println!("ERROR")
+        }
+        
         self.frame += 0.001;
         cx.reset_turtle_walk();
         

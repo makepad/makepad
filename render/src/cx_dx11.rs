@@ -20,7 +20,7 @@ pub struct CxThread {
 
 impl CxThread {
     
-    pub fn lock_mapped_texture_f32(&mut self, texture: &Texture) -> Option<&mut [f32]> {
+    pub fn lock_mapped_texture_f32(&mut self, texture: &Texture, user_data:usize) -> Option<&mut [f32]> {
         if let Some(texture_id) = texture.texture_id {
             let cx = unsafe {&mut *(self.cx as *mut Cx)};
             let cxtexture = &mut cx.textures[texture_id];
@@ -28,6 +28,7 @@ impl CxThread {
                 let write = mapped.write;
                 let texture = &mut mapped.textures[write % MAPPED_TEXTURE_BUFFER_COUNT];
                 if let Some(ptr) = texture.map_ptr {
+                    texture.user_data = Some(user_data);
                     if texture.locked == true {
                         panic!("lock_mapped_texture_f32 ran twice for the same texture, pair with unlock_mapped_texture!")
                     }
@@ -42,7 +43,7 @@ impl CxThread {
         None
     }
     
-    pub fn lock_mapped_texture_u32(&mut self, texture: &Texture) -> Option<&mut [u32]> {
+    pub fn lock_mapped_texture_u32(&mut self, texture: &Texture, user_data:usize) -> Option<&mut [u32]> {
         if let Some(texture_id) = texture.texture_id {
             let cx = unsafe {&mut *(self.cx as *mut Cx)};
             let cxtexture = &mut cx.textures[texture_id];
@@ -50,6 +51,7 @@ impl CxThread {
                 let write = mapped.write;
                 let texture = &mut mapped.textures[write % MAPPED_TEXTURE_BUFFER_COUNT];
                 if let Some(ptr) = texture.map_ptr {
+                    texture.user_data = Some(user_data);
                     if texture.locked == true {
                         panic!("lock_mapped_texture_u32 ran twice for the same texture, pair with unlock_mapped_texture!")
                     }
@@ -89,6 +91,16 @@ impl Cx {
     
     pub fn new_cxthread(&mut self) -> CxThread {
         CxThread {cx: self as *mut _ as u64}
+    }
+    
+    pub fn get_mapped_texture_user_data(&mut self, texture:&Texture)->Option<usize>{
+        if let Some(texture_id) = texture.texture_id{
+            let cxtexture = &self.textures[texture_id];
+            if let Ok(mapped) = cxtexture.platform.mapped.lock() {
+                return mapped.textures[mapped.read % MAPPED_TEXTURE_BUFFER_COUNT].user_data;
+            }
+        }
+        None
     }
     
     pub fn render_view(&mut self, pass_id: usize, view_id: usize, d3d11_cx: &D3d11Cx) {
@@ -192,8 +204,8 @@ impl Cx {
                                         cxtexture.desc.height.unwrap()
                                     );
                                 }
-                                if d3d11_cx.flip_mapped_textures(&mut mapped) {
-                                    d3d11_cx.set_shader_resource(i, &mapped.textures[mapped.read % MAPPED_TEXTURE_BUFFER_COUNT].shader_resource);
+                                if let Some(index) = d3d11_cx.flip_mapped_textures(&mut mapped) {
+                                    d3d11_cx.set_shader_resource(i, &mapped.textures[index].shader_resource);
                                 }
                             }
                         },
@@ -1169,12 +1181,7 @@ impl D3d11Cx {
         }
     }
     
-    fn flip_mapped_textures(&self, mapped: &mut CxPlatformTextureMapped) -> bool {
-        if mapped.read != mapped.write && mapped.write > mapped.read {
-            if mapped.write > mapped.read + 1 { // space ahead
-                mapped.read += 1;
-            }
-        }
+    fn flip_mapped_textures(&self, mapped: &mut CxPlatformTextureMapped) -> Option<usize> {
         for i in 0..MAPPED_TEXTURE_BUFFER_COUNT {
             if mapped.write > mapped.read && i == mapped.read % MAPPED_TEXTURE_BUFFER_COUNT {
                 if mapped.textures[i].locked {
@@ -1187,9 +1194,16 @@ impl D3d11Cx {
             }
         }
         if mapped.read != mapped.write && mapped.textures[mapped.read % MAPPED_TEXTURE_BUFFER_COUNT].map_ptr.is_none() {
-            return true
+            let read = mapped.read;
+            if mapped.read != mapped.write && mapped.write > mapped.read {
+                if mapped.write > mapped.read + 1 { // space ahead
+                    mapped.read += 1;
+                }
+            }
+            return Some(read % MAPPED_TEXTURE_BUFFER_COUNT)
         }
-        return false
+        println!("ERROR FLIPPING");
+        return None
     }
     
     fn map_texture(&self, texture: &mut CxPlatformTextureResource) {
@@ -1451,12 +1465,13 @@ impl D3d11Buffer {
     }
 }
 
-const MAPPED_TEXTURE_BUFFER_COUNT: usize = 4;
+pub const MAPPED_TEXTURE_BUFFER_COUNT: usize = 4;
 
 #[derive(Default, Clone)]
 pub struct CxPlatformTextureResource {
     map_ptr: Option<*mut c_void>,
     locked: bool,
+    user_data:Option<usize>,
     width: usize,
     height: usize,
     slots_per_pixel: usize,
