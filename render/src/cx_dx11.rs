@@ -1196,7 +1196,7 @@ impl D3d11Cx {
         if mapped.read != mapped.write && mapped.textures[mapped.read % MAPPED_TEXTURE_BUFFER_COUNT].map_ptr.is_none() {
             let read = mapped.read;
             if mapped.read != mapped.write && mapped.write > mapped.read {
-                if mapped.write > mapped.read + 2 { // space ahead
+                if mapped.write > mapped.read + 1 { // space ahead
                     mapped.read += 1;
                 }
             }

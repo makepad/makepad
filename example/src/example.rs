@@ -38,7 +38,7 @@ pub use crate::gamepad_winxinput::*;
 use core::arch::x86_64::*;
 use std::sync::mpsc;
 
-#[derive(Default, Clone)]
+#[derive(Default, Clone, PartialEq)]
 struct MandelbrotLoc {
     zoom: f64,
     center_x: f64,
@@ -124,7 +124,7 @@ impl Mandelbrot {
         let mut cxthread = cx.new_cxthread();
         let texture = self.texture.clone();
         let mut loc = self.start_loc.clone();
-        
+        let mut re_render = true;
         let (tx, rx) = mpsc::channel();
         self.sender = Some(tx);
         std::thread::spawn(move || {
@@ -132,6 +132,9 @@ impl Mandelbrot {
             loop {
                 while let Ok((recv_user_data, new_loc)) = rx.try_recv() {
                     user_data = recv_user_data;
+                    if loc != new_loc {
+                        re_render = true;
+                    }
                     loc = new_loc;
                 }
                 //zoom = zoom / 1.003;
@@ -139,61 +142,68 @@ impl Mandelbrot {
                 //    zoom = 1.0;
                 // }
                 //let time1 = Cx::profile_time_ns();
-                
-                thread_pool.scoped( | scope | {
-                    if let Some(mapped_texture) = cxthread.lock_mapped_texture_f32(&texture, user_data) {
-                        let mut iter = mapped_texture.chunks_mut((chunk_height * width * 2) as usize);
-                        for i in 0..num_threads {
-                            let thread_num = i;
-                            let slice = iter.next().unwrap();
-                            let loc = loc.clone();
-                            //println!("{}", chunk_height);
-                            scope.execute(move || {
-                                let it_v = [0f64, 0f64, 0f64, 0f64];
-                                let su_v = [0f64, 0f64, 0f64, 0f64];
-                                let start = thread_num * chunk_height as usize;
-                                for y in (start..(start + chunk_height)).step_by(2) {
-                                    for x in (0..width).step_by(2) {
-                                        unsafe {
-                                            // TODO simd these things too
-                                            let c_re = _mm256_set_pd(
-                                                ((x as f64 - fwidth * 0.5) * 4.0 / fwidth) * loc.zoom + loc.center_x,
-                                                (((x + 1) as f64 - fwidth * 0.5) * 4.0 / fwidth) * loc.zoom + loc.center_x,
-                                                ((x as f64 - fwidth * 0.5) * 4.0 / fwidth) * loc.zoom + loc.center_x,
-                                                (((x + 1) as f64 - fwidth * 0.5) * 4.0 / fwidth) * loc.zoom + loc.center_x
-                                            );
-                                            let c_im = _mm256_set_pd(
-                                                ((y as f64 - fheight * 0.5) * 3.0 / fheight) * loc.zoom + loc.center_y,
-                                                ((y as f64 - fheight * 0.5) * 3.0 / fheight) * loc.zoom + loc.center_y,
-                                                (((y + 1) as f64 - fheight * 0.5) * 3.0 / fheight) * loc.zoom + loc.center_y,
-                                                (((y + 1) as f64 - fheight * 0.5) * 3.0 / fheight) * loc.zoom + loc.center_y
-                                            );
-                                            let (it256, sum256) = calc_mandel_avx2(c_re, c_im, 2048);
-                                            _mm256_store_pd(it_v.as_ptr(), it256);
-                                            _mm256_store_pd(su_v.as_ptr(), sum256);
-                                            
-                                            slice[(x * 2 + (y - start) * width * 2) as usize] = it_v[3] as f32;
-                                            slice[(x * 2 + 2 + (y - start) * width * 2) as usize] = it_v[2] as f32;
-                                            slice[(x * 2 + (1 + y - start) * width * 2) as usize] = it_v[1] as f32;
-                                            slice[(x * 2 + 2 + (1 + y - start) * width * 2) as usize] = it_v[0] as f32;
-                                            slice[1 + (x * 2 + (y - start) * width * 2) as usize] = su_v[3] as f32;
-                                            slice[1 + (x * 2 + 2 + (y - start) * width * 2) as usize] = su_v[2] as f32;
-                                            slice[1 + (x * 2 + (1 + y - start) * width * 2) as usize] = su_v[1] as f32;
-                                            slice[1 + (x * 2 + 2 + (1 + y - start) * width * 2) as usize] = su_v[0] as f32;
+                if re_render {
+                    thread_pool.scoped( | scope | {
+                        if let Some(mapped_texture) = cxthread.lock_mapped_texture_f32(&texture, user_data) {
+                            let mut iter = mapped_texture.chunks_mut((chunk_height * width * 2) as usize);
+                            for i in 0..num_threads {
+                                let thread_num = i;
+                                let slice = iter.next().unwrap();
+                                let loc = loc.clone();
+                                //println!("{}", chunk_height);
+                                scope.execute(move || {
+                                    let it_v = [0f64, 0f64, 0f64, 0f64];
+                                    let su_v = [0f64, 0f64, 0f64, 0f64];
+                                    let start = thread_num * chunk_height as usize;
+                                    for y in (start..(start + chunk_height)).step_by(2) {
+                                        for x in (0..width).step_by(2) {
+                                            unsafe {
+                                                // TODO simd these things too
+                                                let c_re = _mm256_set_pd(
+                                                    ((x as f64 - fwidth * 0.5) * 4.0 / fwidth) * loc.zoom + loc.center_x,
+                                                    (((x + 1) as f64 - fwidth * 0.5) * 4.0 / fwidth) * loc.zoom + loc.center_x,
+                                                    ((x as f64 - fwidth * 0.5) * 4.0 / fwidth) * loc.zoom + loc.center_x,
+                                                    (((x + 1) as f64 - fwidth * 0.5) * 4.0 / fwidth) * loc.zoom + loc.center_x
+                                                );
+                                                let c_im = _mm256_set_pd(
+                                                    ((y as f64 - fheight * 0.5) * 3.0 / fheight) * loc.zoom + loc.center_y,
+                                                    ((y as f64 - fheight * 0.5) * 3.0 / fheight) * loc.zoom + loc.center_y,
+                                                    (((y + 1) as f64 - fheight * 0.5) * 3.0 / fheight) * loc.zoom + loc.center_y,
+                                                    (((y + 1) as f64 - fheight * 0.5) * 3.0 / fheight) * loc.zoom + loc.center_y
+                                                );
+                                                let (it256, sum256) = calc_mandel_avx2(c_re, c_im, 2048);
+                                                _mm256_store_pd(it_v.as_ptr(), it256);
+                                                _mm256_store_pd(su_v.as_ptr(), sum256);
+                                                
+                                                slice[(x * 2 + (y - start) * width * 2) as usize] = it_v[3] as f32;
+                                                slice[(x * 2 + 2 + (y - start) * width * 2) as usize] = it_v[2] as f32;
+                                                slice[(x * 2 + (1 + y - start) * width * 2) as usize] = it_v[1] as f32;
+                                                slice[(x * 2 + 2 + (1 + y - start) * width * 2) as usize] = it_v[0] as f32;
+                                                slice[1 + (x * 2 + (y - start) * width * 2) as usize] = su_v[3] as f32;
+                                                slice[1 + (x * 2 + 2 + (y - start) * width * 2) as usize] = su_v[2] as f32;
+                                                slice[1 + (x * 2 + (1 + y - start) * width * 2) as usize] = su_v[1] as f32;
+                                                slice[1 + (x * 2 + 2 + (1 + y - start) * width * 2) as usize] = su_v[0] as f32;
+                                            }
                                         }
                                     }
-                                }
-                            })
+                                })
+                            }
+                            re_render = false;
                         }
-                    }
-                    else { // wait a bit
-                        std::thread::sleep(std::time::Duration::from_millis(1));
-                        return
-                    }
-                });
-                cxthread.unlock_mapped_texture(&texture);
-                //println!("{}", (Cx::profile_time_ns()-time1) as f64/1000.);
-                Cx::send_signal(frame_signal, 0);
+                        else { // wait a bit
+                            re_render = true;
+                            std::thread::sleep(std::time::Duration::from_millis(1));
+                            return
+                        }
+                    });
+                    cxthread.unlock_mapped_texture(&texture);
+                    //println!("{}", (Cx::profile_time_ns()-time1) as f64/1000.);
+                    Cx::send_signal(frame_signal, 0);
+                }
+                else {
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                }
+                
             }
         });
     }
@@ -219,6 +229,9 @@ struct App {
     window: DesktopWindow,
     mandel_blit: Blit,
     frame: f32,
+    palette: f32,
+    palette_scale: f32,
+    outer_scale: f32,
     capture: Capture,
     gamepad: Gamepad,
     current_loc: MandelbrotLoc,
@@ -238,7 +251,10 @@ impl Style for App {
                 center_x: -1.5,
                 center_y: 0.0
             },
-            color_offset:0.0,
+            color_offset: 0.0,
+            palette: 1.0,
+            palette_scale: 1.0,
+            outer_scale: 1.0,
             loc_history: Vec::new(),
             mandel: Mandelbrot::style(cx),
             capture: Capture::default(),
@@ -268,6 +284,9 @@ impl App {
             let scale_delta: float<Uniform>;
             let offset_delta: vec2<Uniform>;
             let color_offset: float<Uniform>;
+            let palette: float<Uniform>;
+            let palette_scale: float<Uniform>;
+            let outer_scale: float<Uniform>;
             
             fn kaleido(uv: vec2, angle: float, base: float, spin: float) -> vec2 {
                 let a = atan(uv.y, uv.x);
@@ -278,14 +297,29 @@ impl App {
             }
             
             fn pixel() -> vec4 {
-                let comp_texpos = (geom.xy - vec2(0.5, 0.5)) * scale_delta*0.9 + vec2(0.5, 0.5) + offset_delta;
-                let fr1 = sample2d(texturez, comp_texpos).rg; //kaleido(geom.xy-vec2(0.5,0.5), 3.14/8., time, 2.*time)).rg;
-                let fr2 = sample2d(texturez, vec2(1.0 - geom.x, geom.y)).rg;
-                if fr1.x > 1.0{
-                    return vec4(0.,0.,0.,1.0);
-                }
+                let comp_texpos1 = (geom.xy - vec2(0.5, 0.5)) * scale_delta + vec2(0.5, 0.5) + offset_delta;
+                let comp_texpos2 = (vec2(1.0 - geom.x, geom.y) - vec2(0.5, 0.5)) * scale_delta + vec2(0.5, 0.5) + offset_delta;
+                let fr1 = sample2d(texturez, comp_texpos1).rg; //kaleido(geom.xy-vec2(0.5,0.5), 3.14/8., time, 2.*time)).rg;
+                let fr2 = sample2d(texturez, comp_texpos2).rg;
                 let cam = sample2d(texcam, geom.xy); //kaleido(geom.xy-vec2(0.5,0.5), 3.14/8., time, 2.*time));
-                let fract = df_iq_pal5(color_offset + fr1.x*8.0  - 0.1 * log(fr1.y));
+                if fr1.x > 1.0 {
+                    return vec4(cam.xyz, 1.0);
+                }
+                let dx = sin(2. * atan(dfdx(fr1.y), dfdy(fr1.y)) + time * 10.) * 0.5 + 0.5;
+                let index = (color_offset + fr1.x * 8.0 - outer_scale * 0.05 * log(fr1.y)) * palette_scale;
+                let fract = mix(df_iq_pal0(index), mix(
+                    df_iq_pal1(index),
+                    mix(df_iq_pal2(index), mix(df_iq_pal3(index), mix(
+                        df_iq_pal4(index),
+                        mix(df_iq_pal5(index), mix(
+                            df_iq_pal6(index),
+                            df_iq_pal7(index),
+                            clamp(palette - 6.0, 0., 1.)
+                        ), clamp(palette - 5.0, 0., 1.)),
+                        clamp(palette - 4.0, 0., 1.)
+                    ), clamp(palette - 3.0, 0., 1.)), clamp(palette - 2.0, 0., 1.)),
+                    clamp(palette - 1.0, 0., 1.)
+                ), clamp(palette, 0., 1.));
                 return vec4(fract.xyz, alpha);
             }
         }))
@@ -315,14 +349,50 @@ impl App {
     fn do_gamepad_interaction(&mut self, _cx: &mut Cx) {
         self.gamepad.poll();
         // update the mandelbrot location
+        
         self.current_loc.center_x += 0.05 * self.gamepad.right_thumb.x as f64 * self.current_loc.zoom;
         self.current_loc.center_y -= 0.05 * self.gamepad.right_thumb.y as f64 * self.current_loc.zoom;
         self.current_loc.zoom = self.current_loc.zoom * (1.0 - 0.03 * self.gamepad.left_thumb.y as f64);
+        let mut pred_loc = self.current_loc.clone();
+        for _ in 0..10 {
+            pred_loc.center_x += 0.05 * self.gamepad.right_thumb.x as f64 * pred_loc.zoom;
+            pred_loc.center_y -= 0.05 * self.gamepad.right_thumb.y as f64 * pred_loc.zoom;
+            if self.gamepad.left_thumb.y<0.0 {
+                pred_loc.zoom = pred_loc.zoom * (1.0 - 0.03 * self.gamepad.left_thumb.y as f64);
+                pred_loc.zoom = pred_loc.zoom * (1.0 - 0.03 * self.gamepad.left_thumb.y as f64);
+                pred_loc.zoom = pred_loc.zoom * (1.0 - 0.03 * self.gamepad.left_thumb.y as f64);
+                pred_loc.zoom = pred_loc.zoom * (1.0 - 0.03 * self.gamepad.left_thumb.y as f64);
+            };
+        }
         
-        self.mandel.send_new_loc(self.loc_history.len(), self.current_loc.clone());
-        self.color_offset += 0.01*self.gamepad.right_trigger;
-        self.color_offset -= 0.01*self.gamepad.left_trigger;
-        self.loc_history.push(self.current_loc.clone());
+        self.mandel.send_new_loc(self.loc_history.len(), pred_loc.clone());
+        self.loc_history.push(pred_loc.clone());
+        if self.gamepad.buttons & GamepadButtonLeftShoulder > 0 {
+            if self.palette > 0.0 {self.palette -= 0.02;}
+            else {self.palette = 0.0;}
+        }
+        if self.gamepad.buttons & GamepadButtonRightShoulder > 0 {
+            if self.palette < 7.0 {self.palette += 0.02;}
+            else {self.palette = 7.0;}
+        }
+        if self.gamepad.buttons_down_edge & GamepadButtonDpadUp > 0 {
+            if self.palette_scale > 0.5 {self.palette_scale -= 0.50;}
+            else {self.palette_scale = 0.5;}
+        }
+        if self.gamepad.buttons_down_edge & GamepadButtonDpadDown > 0 {
+            if self.palette_scale < 10.0 {self.palette_scale += 0.5;}
+            else {self.palette_scale = 10.0;}
+        }
+       if self.gamepad.buttons_down_edge & GamepadButtonDpadLeft > 0 {
+            if self.outer_scale > 0.02 {self.outer_scale -= 0.5;}
+            else {self.outer_scale = 0.02;}
+        }
+        if self.gamepad.buttons_down_edge & GamepadButtonDpadRight > 0 {
+            if self.outer_scale < 5.0 {self.outer_scale += 0.5;}
+            else {self.outer_scale = 5.0;}
+        }
+         self.color_offset += 0.02 * self.gamepad.right_trigger;
+        self.color_offset -= 0.02 * self.gamepad.left_trigger;
     }
     
     fn draw_app(&mut self, cx: &mut Cx) {
@@ -347,8 +417,11 @@ impl App {
             let screen_dy = ((self.loc_history[index].center_y - self.current_loc.center_y) / self.loc_history[index].zoom) / 3.0;
             inst.push_uniform_vec2f(cx, -screen_dx as f32, -screen_dy as f32);
             inst.push_uniform_float(cx, self.color_offset);
+            inst.push_uniform_float(cx, self.palette as f32);
+            inst.push_uniform_float(cx, self.palette_scale as f32);
+            inst.push_uniform_float(cx, self.outer_scale as f32);
         }
-        else{
+        else {
             println!("ERROR")
         }
         
