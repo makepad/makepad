@@ -35,246 +35,33 @@ pub mod capture_winmf;
 pub use crate::capture_winmf::*;
 pub mod gamepad_winxinput;
 pub use crate::gamepad_winxinput::*;
-use core::arch::x86_64::*;
-use std::sync::mpsc;
-
-#[derive(Default, Clone, PartialEq)]
-struct MandelbrotLoc {
-    zoom: f64,
-    center_x: f64,
-    center_y: f64
-}
-
-#[derive(Default)]
-struct Mandelbrot {
-    start_loc: MandelbrotLoc,
-    texture: Texture,
-    num_threads: usize,
-    width: usize,
-    height: usize,
-    frame_signal: Signal,
-    sender: Option<mpsc::Sender<(usize, MandelbrotLoc)>>,
-}
-
-impl Style for Mandelbrot {
-    fn style(_cx: &mut Cx) -> Self {
-        Self {
-            start_loc: MandelbrotLoc {
-                zoom: 1.0,
-                center_x: -1.5,
-                center_y: 0.0
-            },
-            texture: Texture::default(),
-            num_threads: 30,
-            width: 3840,
-            height: 2160,
-            frame_signal: Signal::empty(),
-            sender: None,
-        }
-    }
-}
-impl Mandelbrot {
-    fn init(&mut self, cx: &mut Cx) {
-        // lets start a mandelbrot thread that produces frames
-        self.frame_signal = cx.new_signal();
-        self.texture.set_desc(cx, Some(TextureDesc {
-            format: TextureFormat::MappedRGf32,
-            width: Some(self.width),
-            height: Some(self.height),
-            multisample: None
-        }));
-        
-        unsafe fn calc_mandel_avx2(c_x: __m256d, c_y: __m256d, max_iter: u32) -> (__m256d, __m256d) {
-            let mut x = c_x;
-            let mut y = c_y;
-            let mut count = _mm256_set1_pd(0.0);
-            let mut merge_sum = _mm256_set1_pd(0.0);
-            let add = _mm256_set1_pd(1.0);
-            let max_dist = _mm256_set1_pd(4.0);
-            
-            for _ in 0..max_iter as usize {
-                let xy = _mm256_mul_pd(x, y);
-                let xx = _mm256_mul_pd(x, x);
-                let yy = _mm256_mul_pd(y, y);
-                let sum = _mm256_add_pd(xx, yy);
-                let mask = _mm256_cmp_pd(sum, max_dist, _CMP_LT_OS);
-                let mask_u32 = _mm256_movemask_pd(mask);
-                if mask_u32 == 0 { // is a i8
-                    return (_mm256_div_pd(count, _mm256_set1_pd(max_iter as f64)), _mm256_sqrt_pd(merge_sum));
-                }
-                merge_sum = _mm256_or_pd(_mm256_and_pd(sum, mask), _mm256_andnot_pd(mask, merge_sum));
-                count = _mm256_add_pd(count, _mm256_and_pd(add, mask));
-                x = _mm256_add_pd(_mm256_sub_pd(xx, yy), c_x);
-                y = _mm256_add_pd(_mm256_add_pd(xy, xy), c_y);
-            }
-            return (_mm256_set1_pd(2.0), merge_sum);
-        }
-        
-        // lets spawn fractal.height over 32 threads
-        let num_threads = self.num_threads;
-        let width = self.width;
-        let height = self.height;
-        let center_x = 0.5 * self.width as f64;
-        let center_y = 0.5 * self.height as f64;
-        let awidth = 4.0 / self.width as f64;
-        let aheight = 3.0 / self.height as f64;
-        let chunk_height = height / num_threads;
-        
-        // stuff that goes into the threads
-        let mut thread_pool = scoped_threadpool::Pool::new(self.num_threads as u32);
-        let frame_signal = self.frame_signal.clone();
-        let mut cxthread = cx.new_cxthread();
-        let texture = self.texture.clone();
-        let mut loc = self.start_loc.clone();
-        let mut re_render = true;
-        let (tx, rx) = mpsc::channel();
-        self.sender = Some(tx);
-
-        std::thread::spawn(move || {
-            let mut user_data = 0;
-            let mut has_hires = false;
-            loop {
-                while let Ok((recv_user_data, new_loc)) = rx.try_recv() {
-                    user_data = recv_user_data;
-                    if loc != new_loc {
-                        re_render = true;
-                    }
-                    loc = new_loc;
-                }
-                if re_render {
-                    has_hires = false;
-                    // fast 2x2 pixel version
-                    thread_pool.scoped( | scope | {
-                        if let Some(mapped_texture) = cxthread.lock_mapped_texture_f32(&texture, user_data) {
-                            let mut iter = mapped_texture.chunks_mut((chunk_height * width * 2) as usize);
-                            let dx = awidth * loc.zoom;
-                            let dy = aheight * loc.zoom;
-                            for i in 0..num_threads {
-                                let thread_num = i;
-                                let slice = iter.next().unwrap();
-                                let loc = loc.clone();
-                                scope.execute(move || {
-                                    let it_v = [0f64, 0f64, 0f64, 0f64];
-                                    let su_v = [0f64, 0f64, 0f64, 0f64];
-                                    let start = thread_num * chunk_height as usize;
-                                    for y in (start..(start + chunk_height)).step_by(2) {
-                                        for x in (0..width).step_by(2) {
-                                            unsafe {
-                                                let vx = (x as f64 - center_x) * awidth * loc.zoom + loc.center_x;
-                                                let c_re = _mm256_set_pd(vx, vx+dx, vx, vx+dx);
-                                                let vy = (y as f64 - center_y) * aheight * loc.zoom + loc.center_y;
-                                                let c_im = _mm256_set_pd(vy, vy, vy+dy, vy+dy);
-
-                                                let (it256, sum256) = calc_mandel_avx2(c_re, c_im, 2048);
-                                                _mm256_store_pd(it_v.as_ptr(), it256);
-                                                _mm256_store_pd(su_v.as_ptr(), sum256);
-                                                let off = (x * 2 + (y - start) * width * 2) as usize;
-                                                let off_dy = off + width * 2 as usize;
-                                                slice[off] = it_v[3] as f32;
-                                                slice[off + 1] = su_v[3] as f32;
-                                                slice[off + 2] = it_v[2] as f32;
-                                                slice[off + 3] = su_v[2] as f32;
-                                                slice[off_dy] = it_v[1] as f32;
-                                                slice[off_dy + 1] = su_v[1] as f32;
-                                                slice[off_dy + 2] = it_v[0] as f32;
-                                                slice[off_dy + 3] = su_v[0] as f32;
-                                            }
-                                        }
-                                    }
-                                })
-                            }
-                            re_render = false;
-                        }
-                        else { // wait a bit
-                            re_render = true;
-                            std::thread::sleep(std::time::Duration::from_millis(1));
-                            return
-                        }
-                    });
-                    cxthread.unlock_mapped_texture(&texture);
-                    Cx::send_signal(frame_signal, 0);
-                }
-                else if !has_hires { 
-                     // fancy antialised version rendering 8k effectively
-                     thread_pool.scoped( | scope | {
-                        if let Some(mapped_texture) = cxthread.lock_mapped_texture_f32(&texture, user_data) {
-                            let dx = 0.5 * awidth * loc.zoom;
-                            let dy = 0.5 * aheight * loc.zoom;
-
-                            let mut iter = mapped_texture.chunks_mut((chunk_height * width * 2) as usize);
-                            for i in 0..num_threads {
-                                let thread_num = i;
-                                let slice = iter.next().unwrap();
-                                let loc = loc.clone();
-                                //println!("{}", chunk_height);
-                                scope.execute(move || {
-                                    let it_v = [0f64, 0f64, 0f64, 0f64];
-                                    let su_v = [0f64, 0f64, 0f64, 0f64];
-                                    let start = thread_num * chunk_height as usize;
-                                    for y in (start..(start + chunk_height)).step_by(1) {
-                                        for x in (0..width).step_by(1) {
-                                            unsafe {
-                                                let vx = (x as f64 - center_x) * awidth * loc.zoom + loc.center_x;
-                                                let c_re = _mm256_set_pd(vx, vx+dx, vx, vx+dx);
-                                                let vy = (y as f64 - center_y) * aheight * loc.zoom + loc.center_y;
-                                                let c_im = _mm256_set_pd(vy, vy, vy+dy, vy+dy);
-                                                let (it256, sum256) = calc_mandel_avx2(c_re, c_im, 2048);
-                                                _mm256_store_pd(it_v.as_ptr(), it256);
-                                                _mm256_store_pd(su_v.as_ptr(), sum256);
-                                                let off = (x * 2 + (y - start) * width * 2) as usize;
-                                                slice[off] = ((it_v[3]+it_v[2]+it_v[1]+it_v[0])/4.0)  as f32;
-                                                slice[off + 1] = ((su_v[3]+su_v[2]+su_v[1]+su_v[0])/4.0) as f32;
-                                            }
-                                        }
-                                    }
-                                })
-                            }
-                            has_hires = true;
-                        }
-                        else { // wait a bit
-                            std::thread::sleep(std::time::Duration::from_millis(1));
-                            return
-                        }
-                    });
-                    cxthread.unlock_mapped_texture(&texture);
-                    Cx::send_signal(frame_signal, 0);
-                    std::thread::sleep(std::time::Duration::from_millis(1));
-                }
-                
-            }
-        });
-    }
-    
-    fn handle_signal(&mut self, _cx: &mut Cx, event: &Event) -> bool {
-        if let Event::Signal(se) = event {
-            if self.frame_signal.is_signal(se) { // we haz new texture
-                return true
-            }
-        }
-        false
-    }
-    
-    fn send_new_loc(&mut self, index: usize, new_loc: MandelbrotLoc) {
-        if let Some(sender) = &self.sender {
-            let _ = sender.send((index, new_loc));
-        }
-    }
-}
+pub mod mandelbrot;
+pub use crate::mandelbrot::*;
 
 struct App {
-    view: View<ScrollBar>,
     window: DesktopWindow,
-    mandel_blit: Blit,
+    view: View<ScrollBar>,
     frame: f32,
+
+    capture: Capture,
+    gamepad: Gamepad,
+
+    mandel: Mandelbrot,
+    current_loc: MandelbrotLoc,
+    loc_history: Vec<MandelbrotLoc>,
+    mandel_blit: Blit,
+
+    color_offset: f32,
     palette: f32,
     palette_scale: f32,
     outer_scale: f32,
-    capture: Capture,
-    gamepad: Gamepad,
-    current_loc: MandelbrotLoc,
-    loc_history: Vec<MandelbrotLoc>,
-    mandel: Mandelbrot,
-    color_offset: f32,
+    alpha_offset: f32,
+
+    cam_blit: Blit,
+    cam_pass: Pass,
+    cam_view: View<ScrollBar>, // we have a root view otherwise is_overlay subviews can't attach topmost
+    cam_buffer: Texture,
+    
 }
 
 main_app!(App, "Example");
@@ -283,19 +70,6 @@ impl Style for App {
     fn style(cx: &mut Cx) -> Self {
         set_dark_style(cx);
         Self {
-            current_loc: MandelbrotLoc {
-                zoom: 1.0,
-                center_x: -1.5,
-                center_y: 0.0
-            },
-            color_offset: 0.0,
-            palette: 1.0,
-            palette_scale: 1.0,
-            outer_scale: 1.0,
-            loc_history: Vec::new(),
-            mandel: Mandelbrot::style(cx),
-            capture: Capture::default(),
-            gamepad: Gamepad::default(),
             window: DesktopWindow::style(cx),
             view: View {
                 is_overlay: true,
@@ -303,17 +77,41 @@ impl Style for App {
                 scroll_v: Some(ScrollBar::style(cx)),
                 ..Style::style(cx)
             },
+            frame: 0.,
+
+            capture: Capture::default(),
+            gamepad: Gamepad::default(),
+
+            mandel: Mandelbrot::style(cx),
+            current_loc: MandelbrotLoc {
+                zoom: 1.0,
+                center_x: -1.5,
+                center_y: 0.0
+            },
+            loc_history: Vec::new(),
             mandel_blit: Blit {
-                shader: cx.add_shader(App::def_blit_shader(), "App.blit"),
+                shader: cx.add_shader(App::def_mandel_blit_shader(), "App.mandelblit"),
                 ..Blit::style(cx)
             },
-            frame: 0.
+
+            color_offset: 0.0,
+            palette: 1.0,
+            palette_scale: 1.0,
+            outer_scale: 1.0,
+            alpha_offset: 0.0,
+            cam_blit: Blit {
+                shader: cx.add_shader(App::def_cam_blit_shader(), "App.camblit"),
+                ..Blit::style(cx)
+            },
+            cam_pass: Pass::default(),
+            cam_view: View::style(cx),
+            cam_buffer: Texture::default(),
         }
     }
 }
 
 impl App {
-    fn def_blit_shader() -> ShaderGen {
+    fn def_mandel_blit_shader() -> ShaderGen {
         Blit::def_blit_shader().compose(shader_ast!({
             let texcam: texture2d<Texture>;
             let time: float<Uniform>;
@@ -327,7 +125,7 @@ impl App {
             
             fn kaleido(uv: vec2, angle: float, base: float, spin: float) -> vec2 {
                 let a = atan(uv.y, uv.x);
-                if a<0. {a = PI + a} 
+                if a<0. {a = PI + a}
                 let d = length(uv);
                 a = abs(fmod (a + spin, angle * 2.0) - angle);
                 return vec2(abs(sin(a + base)) * d, abs(cos(a + base)) * d);
@@ -335,10 +133,12 @@ impl App {
             
             fn pixel() -> vec4 {
                 let comp_texpos1 = (geom.xy - vec2(0.5, 0.5)) * scale_delta + vec2(0.5, 0.5) + offset_delta;
-                let comp_texpos2 = (vec2(1.0 - geom.x, geom.y) - vec2(0.5, 0.5)) * scale_delta + vec2(0.5, 0.5) + offset_delta;
                 let fr1 = sample2d(texturez, comp_texpos1).rg; //kaleido(geom.xy-vec2(0.5,0.5), 3.14/8., time, 2.*time)).rg;
-                let fr2 = sample2d(texturez, comp_texpos2).rg;
-                let cam = sample2d(texcam, geom.xy); //kaleido(geom.xy-vec2(0.5,0.5), 3.14/8., time, 2.*time));
+                
+                //let fr2 = sample2d(texturez, comp_texpos2).rg;
+                //let comp_texpos2 = (vec2(1.0 - geom.x, geom.y) - vec2(0.5, 0.5)) * scale_delta + vec2(0.5, 0.5) + offset_delta;
+                let cam = sample2d(texcam, geom.xy);
+                //kaleido(geom.xy-vec2(0.5,0.5), 3.14/8., time, 2.*time));
                 if fr1.x > 1.0 {
                     return vec4(cam.xyz, 1.0);
                 }
@@ -357,10 +157,55 @@ impl App {
                     ), clamp(palette - 3.0, 0., 1.)), clamp(palette - 2.0, 0., 1.)),
                     clamp(palette - 1.0, 0., 1.)
                 ), clamp(palette, 0., 1.));
-                return vec4(fract.xyz, alpha);
+                
+                return vec4(fract.xyz, 1.0);
+            }
+        }))
+    } 
+    
+    fn def_cam_blit_shader() -> ShaderGen {
+        Blit::def_blit_shader().compose(shader_ast!({
+            let alpha_offset: float<Uniform>;
+            
+            fn sample_camera_depth(dpix: vec2) -> vec4 {
+                let cam1 = sample2d(texturez, geom.xy + dpix * vec2(0., 0.));
+                let cam2 = sample2d(texturez, geom.xy + dpix * vec2(1., 0.));
+                let cam3 = sample2d(texturez, geom.xy + dpix * vec2(0., 1.));
+                let cam4 = sample2d(texturez, geom.xy + dpix * vec2(1., 1.));
+                
+                let cam5 = sample2d(texturez, geom.xy + dpix * vec2(2., 0.));
+                let cam6 = sample2d(texturez, geom.xy + dpix * vec2(3., 0.));
+                let cam7 = sample2d(texturez, geom.xy + dpix * vec2(2., 1.));
+                let cam8 = sample2d(texturez, geom.xy + dpix * vec2(3., 1.));
+                
+                let cam9 = sample2d(texturez, geom.xy + dpix * vec2(0., 2.));
+                let cam10 = sample2d(texturez, geom.xy + dpix * vec2(1., 3.));
+                let cam11 = sample2d(texturez, geom.xy + dpix * vec2(0., 2.));
+                let cam12 = sample2d(texturez, geom.xy + dpix * vec2(1., 3.));
+                
+                let cam13 = sample2d(texturez, geom.xy + dpix * vec2(2., 2.));
+                let cam14 = sample2d(texturez, geom.xy + dpix * vec2(3., 2.));
+                let cam15 = sample2d(texturez, geom.xy + dpix * vec2(2., 3.));
+                let cam16 = sample2d(texturez, geom.xy + dpix * vec2(3., 3.));
+                
+                let cama = cam1.y + cam2.y + cam3.y + cam4.y;
+                let camb = cam5.y + cam6.y + cam7.y + cam8.y;
+                let camc = cam9.y + cam10.y + cam11.y + cam12.y;
+                let camd = cam13.y + cam14.y + cam15.y + cam16.y;
+                
+                let delta = smoothstep(0.35, 0.5, abs(cama - camb) + abs(cama - camc) + abs(cama - camd) + abs(camb - camd) + abs(camc - camd));
+                return vec4(cam1.xyz, delta);
+            }
+            
+            fn pixel() -> vec4 {
+                //return color("pink");
+                let cam = sample_camera_depth(vec2(1.0 / 3840.0, 1.0 / 2160.0));
+                let alpha = min(cam.w + alpha_offset,1.0);
+                return vec4(cam.xyz*alpha, alpha); 
             }
         }))
     }
+    
     
     fn handle_app(&mut self, cx: &mut Cx, event: &mut Event) {
         
@@ -395,10 +240,9 @@ impl App {
             pred_loc.center_x += 0.05 * self.gamepad.right_thumb.x as f64 * pred_loc.zoom;
             pred_loc.center_y -= 0.05 * self.gamepad.right_thumb.y as f64 * pred_loc.zoom;
             if self.gamepad.left_thumb.y<0.0 {
-                pred_loc.zoom = pred_loc.zoom * (1.0 - 0.03 * self.gamepad.left_thumb.y as f64);
-                pred_loc.zoom = pred_loc.zoom * (1.0 - 0.03 * self.gamepad.left_thumb.y as f64);
-                pred_loc.zoom = pred_loc.zoom * (1.0 - 0.03 * self.gamepad.left_thumb.y as f64);
-                pred_loc.zoom = pred_loc.zoom * (1.0 - 0.03 * self.gamepad.left_thumb.y as f64);
+                for _ in 0..4 {
+                    pred_loc.zoom = pred_loc.zoom * (1.0 - 0.03 * self.gamepad.left_thumb.y as f64);
+                }
             };
         }
         
@@ -420,7 +264,7 @@ impl App {
             if self.palette_scale < 10.0 {self.palette_scale += 0.5;}
             else {self.palette_scale = 10.0;}
         }
-       if self.gamepad.buttons_down_edge & GamepadButtonDpadLeft > 0 {
+        if self.gamepad.buttons_down_edge & GamepadButtonDpadLeft > 0 {
             if self.outer_scale > 0.02 {self.outer_scale -= 0.5;}
             else {self.outer_scale = 0.02;}
         }
@@ -428,27 +272,42 @@ impl App {
             if self.outer_scale < 5.0 {self.outer_scale += 0.5;}
             else {self.outer_scale = 5.0;}
         }
-         self.color_offset += 0.02 * self.gamepad.right_trigger;
+        if self.gamepad.buttons_down_edge & GamepadButtonY > 0 {
+            self.alpha_offset = 1.0 - self.alpha_offset;
+        }
+        self.color_offset += 0.02 * self.gamepad.right_trigger;
         self.color_offset -= 0.02 * self.gamepad.left_trigger;
     }
     
     fn draw_app(&mut self, cx: &mut Cx) {
+        self.do_gamepad_interaction(cx);
         
         let _ = self.window.begin_desktop_window(cx);
         
+        // do our cam buffer pass
+        if self.capture.initialized{
+            self.cam_pass.begin_pass(cx);
+            self.cam_pass.add_color_texture(cx, &mut self.cam_buffer, None);
+            let _ = self.cam_view.begin_view(cx, Layout::default());
+            let inst = self.cam_blit.draw_blit_walk(cx, &self.capture.texture, Bounds::Fill, Bounds::Fill, Margin::zero());
+            inst.push_uniform_float(cx, self.alpha_offset);
+            self.cam_view.redraw_view_area(cx);
+            self.cam_view.end_view(cx);
+            self.cam_pass.end_pass(cx); 
+        }
+
+        // render our camera to a cumulation buffer / rtt animationloop
         let _ = self.view.begin_view(cx, Layout {
             abs_origin: Some(Vec2::zero()),
             padding: Padding {l: 0., t: 0., r: 0., b: 0.},
             ..Default::default()
         });
         
-        self.do_gamepad_interaction(cx);
-        
-        self.view.redraw_view_area(cx);
+        // draw our mandelbrot
         let inst = self.mandel_blit.draw_blit_walk(cx, &self.mandel.texture, Bounds::Fill, Bounds::Fill, Margin::zero());
-        inst.push_uniform_texture_2d(cx, &self.capture.texture);
-        inst.push_uniform_float(cx, self.frame);
         if let Some(index) = cx.get_mapped_texture_user_data(&self.mandel.texture) {
+            inst.push_uniform_texture_2d(cx, &self.cam_buffer);
+            inst.push_uniform_float(cx, self.frame);
             inst.push_uniform_float(cx, (self.current_loc.zoom / self.loc_history[index].zoom) as f32);
             let screen_dx = ((self.loc_history[index].center_x - self.current_loc.center_x) / self.loc_history[index].zoom) / 4.0;
             let screen_dy = ((self.loc_history[index].center_y - self.current_loc.center_y) / self.loc_history[index].zoom) / 3.0;
@@ -457,13 +316,10 @@ impl App {
             inst.push_uniform_float(cx, self.palette as f32);
             inst.push_uniform_float(cx, self.palette_scale as f32);
             inst.push_uniform_float(cx, self.outer_scale as f32);
-        }
-        else {
-            println!("ERROR")
+            cx.reset_turtle_walk();
         }
         
         self.frame += 0.001;
-        cx.reset_turtle_walk();
         
         self.view.redraw_view_area(cx);
         self.view.end_view(cx);

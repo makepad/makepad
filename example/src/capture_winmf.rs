@@ -25,6 +25,7 @@ use core::arch::x86_64::*;
 
 #[derive(Default)]
 pub struct Capture {
+    pub initialized: bool,
     pub texture: Texture,
     pub platform: Option<CapturePlatform>
 }
@@ -153,8 +154,11 @@ impl Capture {
             let devices = std::slice::from_raw_parts(devices_raw, count as usize);
             
             let mut source_raw = ptr::null_mut();
-            
-            check("ActivateObject", (*devices[if device_id >= count as usize {0} else {device_id}]).ActivateObject(
+            if device_id as u32 >= count{
+                println!("Capture device with id {} not found", device_id);
+                return false
+            }
+            check("ActivateObject", (*devices[device_id]).ActivateObject(
                 &IMFMediaSource::uuidof(),
                 &mut source_raw
             ));
@@ -210,6 +214,7 @@ impl Capture {
                     cxthread: cx.new_cxthread(),
                     frame_signal: cx.new_signal(),
                 });
+                self.initialized = true;
                 return true
             }
             else {

@@ -141,6 +141,19 @@ impl Default for Cx {
         finger_down_abs_start.resize(NUM_FINGERS, Vec2::zero());
         finger_down_rel_start.resize(NUM_FINGERS, Vec2::zero());
         
+        let textures = vec![CxTexture {
+            desc: TextureDesc {
+                format: TextureFormat::ImageBGRA,
+                width: Some(4),
+                height: Some(4),
+                multisample: None
+            },
+            image_u32:vec![0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+            image_f32:Vec::new(),
+            update_image:true,
+            platform:CxPlatformTexture::default()
+        }];
+        
         Self {
             title: "Hello World".to_string(),
             platform_type: PlatformType::Windows,
@@ -154,7 +167,7 @@ impl Default for Cx {
             views_free: Vec::new(),
             
             fonts: Vec::new(),
-            textures: Vec::new(),
+            textures: textures,
             textures_free: Vec::new(),
             shaders: Vec::new(),
             shader_map: HashMap::new(),
