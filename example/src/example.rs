@@ -114,8 +114,10 @@ impl Mandelbrot {
         let num_threads = self.num_threads;
         let width = self.width;
         let height = self.height;
-        let fwidth = self.width as f64;
-        let fheight = self.height as f64;
+        let center_x = 0.5 * self.width as f64;
+        let center_y = 0.5 * self.height as f64;
+        let awidth = 4.0 / self.width as f64;
+        let aheight = 3.0 / self.height as f64;
         let chunk_height = height / num_threads;
         
         // stuff that goes into the threads
@@ -127,8 +129,10 @@ impl Mandelbrot {
         let mut re_render = true;
         let (tx, rx) = mpsc::channel();
         self.sender = Some(tx);
+
         std::thread::spawn(move || {
             let mut user_data = 0;
+            let mut has_hires = false;
             loop {
                 while let Ok((recv_user_data, new_loc)) = rx.try_recv() {
                     user_data = recv_user_data;
@@ -137,20 +141,18 @@ impl Mandelbrot {
                     }
                     loc = new_loc;
                 }
-                //zoom = zoom / 1.003;
-                //if zoom < 0.000000000002 {
-                //    zoom = 1.0;
-                // }
-                //let time1 = Cx::profile_time_ns();
                 if re_render {
+                    has_hires = false;
+                    // fast 2x2 pixel version
                     thread_pool.scoped( | scope | {
                         if let Some(mapped_texture) = cxthread.lock_mapped_texture_f32(&texture, user_data) {
                             let mut iter = mapped_texture.chunks_mut((chunk_height * width * 2) as usize);
+                            let dx = awidth * loc.zoom;
+                            let dy = aheight * loc.zoom;
                             for i in 0..num_threads {
                                 let thread_num = i;
                                 let slice = iter.next().unwrap();
                                 let loc = loc.clone();
-                                //println!("{}", chunk_height);
                                 scope.execute(move || {
                                     let it_v = [0f64, 0f64, 0f64, 0f64];
                                     let su_v = [0f64, 0f64, 0f64, 0f64];
@@ -158,31 +160,24 @@ impl Mandelbrot {
                                     for y in (start..(start + chunk_height)).step_by(2) {
                                         for x in (0..width).step_by(2) {
                                             unsafe {
-                                                // TODO simd these things too
-                                                let c_re = _mm256_set_pd(
-                                                    ((x as f64 - fwidth * 0.5) * 4.0 / fwidth) * loc.zoom + loc.center_x,
-                                                    (((x + 1) as f64 - fwidth * 0.5) * 4.0 / fwidth) * loc.zoom + loc.center_x,
-                                                    ((x as f64 - fwidth * 0.5) * 4.0 / fwidth) * loc.zoom + loc.center_x,
-                                                    (((x + 1) as f64 - fwidth * 0.5) * 4.0 / fwidth) * loc.zoom + loc.center_x
-                                                );
-                                                let c_im = _mm256_set_pd(
-                                                    ((y as f64 - fheight * 0.5) * 3.0 / fheight) * loc.zoom + loc.center_y,
-                                                    ((y as f64 - fheight * 0.5) * 3.0 / fheight) * loc.zoom + loc.center_y,
-                                                    (((y + 1) as f64 - fheight * 0.5) * 3.0 / fheight) * loc.zoom + loc.center_y,
-                                                    (((y + 1) as f64 - fheight * 0.5) * 3.0 / fheight) * loc.zoom + loc.center_y
-                                                );
+                                                let vx = (x as f64 - center_x) * awidth * loc.zoom + loc.center_x;
+                                                let c_re = _mm256_set_pd(vx, vx+dx, vx, vx+dx);
+                                                let vy = (y as f64 - center_y) * aheight * loc.zoom + loc.center_y;
+                                                let c_im = _mm256_set_pd(vy, vy, vy+dy, vy+dy);
+
                                                 let (it256, sum256) = calc_mandel_avx2(c_re, c_im, 2048);
                                                 _mm256_store_pd(it_v.as_ptr(), it256);
                                                 _mm256_store_pd(su_v.as_ptr(), sum256);
-                                                
-                                                slice[(x * 2 + (y - start) * width * 2) as usize] = it_v[3] as f32;
-                                                slice[(x * 2 + 2 + (y - start) * width * 2) as usize] = it_v[2] as f32;
-                                                slice[(x * 2 + (1 + y - start) * width * 2) as usize] = it_v[1] as f32;
-                                                slice[(x * 2 + 2 + (1 + y - start) * width * 2) as usize] = it_v[0] as f32;
-                                                slice[1 + (x * 2 + (y - start) * width * 2) as usize] = su_v[3] as f32;
-                                                slice[1 + (x * 2 + 2 + (y - start) * width * 2) as usize] = su_v[2] as f32;
-                                                slice[1 + (x * 2 + (1 + y - start) * width * 2) as usize] = su_v[1] as f32;
-                                                slice[1 + (x * 2 + 2 + (1 + y - start) * width * 2) as usize] = su_v[0] as f32;
+                                                let off = (x * 2 + (y - start) * width * 2) as usize;
+                                                let off_dy = off + width * 2 as usize;
+                                                slice[off] = it_v[3] as f32;
+                                                slice[off + 1] = su_v[3] as f32;
+                                                slice[off + 2] = it_v[2] as f32;
+                                                slice[off + 3] = su_v[2] as f32;
+                                                slice[off_dy] = it_v[1] as f32;
+                                                slice[off_dy + 1] = su_v[1] as f32;
+                                                slice[off_dy + 2] = it_v[0] as f32;
+                                                slice[off_dy + 3] = su_v[0] as f32;
                                             }
                                         }
                                     }
@@ -197,10 +192,52 @@ impl Mandelbrot {
                         }
                     });
                     cxthread.unlock_mapped_texture(&texture);
-                    //println!("{}", (Cx::profile_time_ns()-time1) as f64/1000.);
                     Cx::send_signal(frame_signal, 0);
                 }
-                else {
+                else if !has_hires { 
+                     // fancy antialised version rendering 8k effectively
+                     thread_pool.scoped( | scope | {
+                        if let Some(mapped_texture) = cxthread.lock_mapped_texture_f32(&texture, user_data) {
+                            let dx = 0.5 * awidth * loc.zoom;
+                            let dy = 0.5 * aheight * loc.zoom;
+
+                            let mut iter = mapped_texture.chunks_mut((chunk_height * width * 2) as usize);
+                            for i in 0..num_threads {
+                                let thread_num = i;
+                                let slice = iter.next().unwrap();
+                                let loc = loc.clone();
+                                //println!("{}", chunk_height);
+                                scope.execute(move || {
+                                    let it_v = [0f64, 0f64, 0f64, 0f64];
+                                    let su_v = [0f64, 0f64, 0f64, 0f64];
+                                    let start = thread_num * chunk_height as usize;
+                                    for y in (start..(start + chunk_height)).step_by(1) {
+                                        for x in (0..width).step_by(1) {
+                                            unsafe {
+                                                let vx = (x as f64 - center_x) * awidth * loc.zoom + loc.center_x;
+                                                let c_re = _mm256_set_pd(vx, vx+dx, vx, vx+dx);
+                                                let vy = (y as f64 - center_y) * aheight * loc.zoom + loc.center_y;
+                                                let c_im = _mm256_set_pd(vy, vy, vy+dy, vy+dy);
+                                                let (it256, sum256) = calc_mandel_avx2(c_re, c_im, 2048);
+                                                _mm256_store_pd(it_v.as_ptr(), it256);
+                                                _mm256_store_pd(su_v.as_ptr(), sum256);
+                                                let off = (x * 2 + (y - start) * width * 2) as usize;
+                                                slice[off] = ((it_v[3]+it_v[2]+it_v[1]+it_v[0])/4.0)  as f32;
+                                                slice[off + 1] = ((su_v[3]+su_v[2]+su_v[1]+su_v[0])/4.0) as f32;
+                                            }
+                                        }
+                                    }
+                                })
+                            }
+                            has_hires = true;
+                        }
+                        else { // wait a bit
+                            std::thread::sleep(std::time::Duration::from_millis(1));
+                            return
+                        }
+                    });
+                    cxthread.unlock_mapped_texture(&texture);
+                    Cx::send_signal(frame_signal, 0);
                     std::thread::sleep(std::time::Duration::from_millis(1));
                 }
                 
@@ -290,7 +327,7 @@ impl App {
             
             fn kaleido(uv: vec2, angle: float, base: float, spin: float) -> vec2 {
                 let a = atan(uv.y, uv.x);
-                if a<0. {a = PI + a}
+                if a<0. {a = PI + a} 
                 let d = length(uv);
                 a = abs(fmod (a + spin, angle * 2.0) - angle);
                 return vec2(abs(sin(a + base)) * d, abs(cos(a + base)) * d);
