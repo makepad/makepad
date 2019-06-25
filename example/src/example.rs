@@ -170,7 +170,9 @@ impl App {
             fn pixel() -> vec4 {
                 let geom_cen = (geom.xy - vec2(0.5, 0.5)) * vec2(5.33, 3.0);
                 let geom_rot = vec2(geom_cen.x * rotate_cos - geom_cen.y * rotate_sin, geom_cen.y * rotate_cos + geom_cen.x * rotate_sin) / vec2(5.33, 3.0);
+
                 let comp_texpos1 = geom_rot * scale_delta + vec2(0.5, 0.5) + offset_delta;
+
                 let fr1 = sample2d(texturez, comp_texpos1).rg; //kaleido(geom.xy-vec2(0.5,0.5), 3.14/8., time, 2.*time)).rg;
                 
                 let cam = sample2d(texcam, geom.xy).xyz;
@@ -416,7 +418,7 @@ fn do_gamepad_interaction(&mut self, cx: &mut Cx) {
     state.loc.center_y += dy_rot;
     state.loc.zoom = state.loc.zoom * (1.0 - zoom as f64);
     
-    if state.loc.zoom < 0.00000000000002 {
+    if state.loc.zoom < 0.0000000000002 {
         state.loc.zoom = 1.0;
     }
     else if state.loc.zoom > 1.0 {
