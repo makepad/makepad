@@ -103,14 +103,14 @@ impl Cx {
         None
     }
     
-    pub fn render_view(&mut self, pass_id: usize, view_id: usize, d3d11_cx: &D3d11Cx) {
+    pub fn render_view(&mut self, pass_id: usize, view_id: usize, repaint_id: u64, d3d11_cx: &D3d11Cx) {
         
         // tad ugly otherwise the borrow checker locks 'self' and we can't recur
         let draw_calls_len = self.views[view_id].draw_calls_len;
         for draw_call_id in 0..draw_calls_len {
             let sub_view_id = self.views[view_id].draw_calls[draw_call_id].sub_view_id;
             if sub_view_id != 0 {
-                self.render_view(pass_id, sub_view_id, d3d11_cx);
+                self.render_view(pass_id, sub_view_id, repaint_id, d3d11_cx);
             }
             else {
                 let cxview = &mut self.views[view_id];
@@ -204,7 +204,7 @@ impl Cx {
                                         cxtexture.desc.height.unwrap()
                                     );
                                 }
-                                if let Some(index) = d3d11_cx.flip_mapped_textures(&mut mapped) {
+                                if let Some(index) = d3d11_cx.flip_mapped_textures(&mut mapped, repaint_id) {
                                     d3d11_cx.set_shader_resource(i, &mapped.textures[index].shader_resource);
                                 }
                             }
@@ -242,7 +242,7 @@ impl Cx {
         }
         //d3d11_cx.clear_depth_stencil_view(d3d11_window);
         
-        self.render_view(pass_id, view_id, &d3d11_cx);
+        self.render_view(pass_id, view_id, self.repaint_id, &d3d11_cx);
         
         d3d11_window.present(vsync);
         //println!("{}", (Cx::profile_time_ns() - time1)as f64 / 1000.0);
@@ -273,7 +273,7 @@ impl Cx {
             if let Some(color) = color_texture.clear_color {
                 d3d11_cx.clear_render_target_view(render, color);
             }
-            self.render_view(pass_id, view_id, &d3d11_cx);
+            self.render_view(pass_id, view_id, self.repaint_id, &d3d11_cx);
         }
     }
     
@@ -306,7 +306,6 @@ impl Cx {
             for mut event in events {
                 
                 self.process_desktop_pre_event(&mut event, &mut event_handler);
-                
                 match &event {
                     Event::WindowSetHoverCursor(mc) => {
                         self.set_hover_mouse_cursor(mc.clone());
@@ -358,7 +357,7 @@ impl Cx {
                         self.call_event_handler(&mut event_handler, &mut event);
                     },
                     Event::Paint => {
-                        
+                        self.repaint_id += 1;
                         let vsync = self.process_desktop_paint_callbacks(win32_app.time_now(), &mut event_handler);
                         
                         // construct or destruct windows
@@ -380,6 +379,9 @@ impl Cx {
                                     // lets send it a WM_CLOSE event
                                     for d3d11_window in &mut d3d11_windows {if d3d11_window.window_id == index {
                                         d3d11_window.win32_window.close_window();
+                                        if win32_app.event_loop_running == false{
+                                            return false;
+                                        }
                                         break;
                                     }}
                                     CxWindowState::Closed
@@ -387,6 +389,12 @@ impl Cx {
                                 CxWindowState::Created => CxWindowState::Created,
                                 CxWindowState::Closed => CxWindowState::Closed
                             };
+                            
+                            if let Some(set_position) = window.window_set_position {
+                                for d3d11_window in &mut d3d11_windows {if d3d11_window.window_id == index {
+                                    d3d11_window.win32_window.set_position(set_position);
+                                }}
+                            }
                             
                             window.window_command = match &window.window_command {
                                 CxWindowCmd::None => CxWindowCmd::None,
@@ -409,6 +417,9 @@ impl Cx {
                                     CxWindowCmd::None
                                 },
                             };
+                            
+                            
+                            window.window_set_position = None;
                             
                             if let Some(topmost) = window.window_topmost {
                                 for d3d11_window in &mut d3d11_windows {if d3d11_window.window_id == index {
@@ -1286,7 +1297,11 @@ impl D3d11Cx {
         }
     }
     
-    fn flip_mapped_textures(&self, mapped: &mut CxPlatformTextureMapped) -> Option<usize> {
+    fn flip_mapped_textures(&self, mapped: &mut CxPlatformTextureMapped, repaint_id: u64) -> Option<usize> {
+        if mapped.repaint_id == repaint_id {
+            return mapped.repaint_read
+        }
+        mapped.repaint_id = repaint_id;
         for i in 0..MAPPED_TEXTURE_BUFFER_COUNT {
             if mapped.write > mapped.read && i == mapped.read % MAPPED_TEXTURE_BUFFER_COUNT {
                 if mapped.textures[i].locked {
@@ -1305,8 +1320,10 @@ impl D3d11Cx {
                     mapped.read += 1;
                 }
             }
-            return Some(read % MAPPED_TEXTURE_BUFFER_COUNT)
+            mapped.repaint_read = Some(read % MAPPED_TEXTURE_BUFFER_COUNT);
+            return mapped.repaint_read;
         }
+        mapped.repaint_read = None;
         return None
     }
     
@@ -1588,6 +1605,8 @@ pub struct CxPlatformTextureResource {
 pub struct CxPlatformTextureMapped {
     read: usize,
     write: usize,
+    repaint_read: Option<usize>,
+    repaint_id: u64,
     textures: [CxPlatformTextureResource; MAPPED_TEXTURE_BUFFER_COUNT],
 }
 

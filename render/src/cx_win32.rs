@@ -882,8 +882,20 @@ impl Win32Window {
         }
     }
     
-    pub fn set_position(&mut self, _pos: Vec2) {
-        
+    pub fn set_position(&mut self, pos: Vec2) {
+        unsafe {
+            let mut window_rect = RECT {left: 0, top: 0, bottom: 0, right: 0};
+            winuser::GetWindowRect(self.hwnd.unwrap(), &mut window_rect);
+            let dpi = self.get_dpi_factor();
+            winuser::MoveWindow(
+                self.hwnd.unwrap(),
+                (pos.x * dpi) as i32,
+                (pos.y * dpi) as i32,
+                window_rect.right - window_rect.left,
+                window_rect.bottom - window_rect.top,
+                FALSE
+            );
+        }
     }
     
     pub fn set_outer_size(&self, size: Vec2) {

@@ -68,6 +68,13 @@ impl Window {
         return None
     }
     
+        
+    pub fn set_position(&mut self, cx: &mut Cx, pos:Vec2) {
+        if let Some(window_id) = self.window_id {
+            return cx.windows[window_id].window_set_position = Some(pos);
+        }
+    }
+    
     pub fn handle_window(&mut self, _cx: &mut Cx, _event: &mut Event) -> bool {
         false
     }
@@ -172,6 +179,7 @@ impl Default for CxWindowState {
 pub struct CxWindow {
     pub window_state: CxWindowState,
     pub window_command: CxWindowCmd,
+    pub window_set_position: Option<Vec2>,
     pub window_topmost: Option<bool>,
     pub window_geom: WindowGeom,
     pub main_pass_id: Option<usize>,

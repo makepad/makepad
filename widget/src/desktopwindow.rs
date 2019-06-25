@@ -21,6 +21,7 @@ pub struct DesktopWindow {
     pub caption: String,
     
     // testing
+    pub inner_over_chrome: bool,
     pub test_rtt: bool,
     pub blit: Blit,
     pub sub_pass: Pass,
@@ -56,6 +57,7 @@ impl Style for DesktopWindow {
             },
             caption_size: Vec2::zero(),
             caption: "Makepad".to_string(),
+            inner_over_chrome:false,
             test_rtt: false,
             sub_pass: Pass::default(),
             sub_view: View::style(cx),
@@ -194,8 +196,12 @@ impl DesktopWindow {
             }
         }
         
-        let _ = self.inner_view.begin_view(cx, Layout::default());
-        
+        if self.inner_over_chrome{
+            let _ = self.inner_view.begin_view(cx, Layout{abs_origin: Some(Vec2::zero()),..Layout::default()});
+        }
+        else{
+            let _ = self.inner_view.begin_view(cx, Layout::default());
+        }
         Ok(())
     }
     
