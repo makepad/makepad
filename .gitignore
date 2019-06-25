@@ -21,3 +21,4 @@ Cargo.lock
 /edit_repo
 
 *.bat
+mandelbrot_presets.json
