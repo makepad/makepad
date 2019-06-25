@@ -119,10 +119,10 @@ impl Mandelbrot {
                     user_data = recv_user_data;
                     if loc != new_loc {
                         re_render = true;
-                        sin_theta = loc.rotate.sin();
-                        cos_theta = loc.rotate.cos();
+                        sin_theta = new_loc.rotate.sin();
+                        cos_theta = new_loc.rotate.cos();
+                        loc = new_loc;
                     }
-                    loc = new_loc;
                 }
                 if re_render { 
                     has_hires = false;
