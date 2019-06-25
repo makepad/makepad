@@ -1,12 +1,14 @@
 use core::arch::x86_64::*;
 use std::sync::mpsc;
 use render::*;
+use serde::*;
 
-#[derive(Default, Clone, PartialEq)]
+#[derive(Default, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MandelbrotLoc {
     pub zoom: f64,
     pub center_x: f64,
-    pub center_y: f64
+    pub center_y: f64,
+    pub rotate: f64,
 }
 
 #[derive(Default)]
@@ -26,12 +28,13 @@ impl Style for Mandelbrot {
         Self {
             start_loc: MandelbrotLoc {
                 zoom: 1.0,
+                rotate: 0.0,
                 center_x: -1.5,
                 center_y: 0.0
             },
             texture: Texture::default(),
-            num_threads: 8,
-            num_iters: 512,
+            num_threads: 30,
+            num_iters: 2048,
             width: 3840,
             height: 2160,
             frame_signal: Signal::empty(),
@@ -50,9 +53,19 @@ impl Mandelbrot {
             multisample: None
         }));
         
-        unsafe fn calc_mandel_avx2(c_x: __m256d, c_y: __m256d, max_iter: usize) -> (__m256d, __m256d) {
-            let mut x = c_x;
-            let mut y = c_y;
+        unsafe fn calc_mandel_avx2(c_x: __m256d, c_y: __m256d, max_iter: usize, cen_x:f64, cen_y:f64, sin_t:f64, cos_t:f64) -> (__m256d, __m256d) {
+            // rotate points with simd
+            let mcen_x = _mm256_set1_pd(cen_x);
+            let mcen_y = _mm256_set1_pd(cen_y);
+            let msin_t = _mm256_set1_pd(sin_t);
+            let mcos_t = _mm256_set1_pd(cos_t);
+            let mx = _mm256_sub_pd(c_x, mcen_x);
+            let my = _mm256_sub_pd(c_y, mcen_y);
+            let start_x = _mm256_add_pd(_mm256_sub_pd(_mm256_mul_pd(mx, mcos_t), _mm256_mul_pd(my, msin_t)), mcen_x);
+            let start_y =  _mm256_add_pd(_mm256_add_pd(_mm256_mul_pd(my, mcos_t), _mm256_mul_pd(mx, msin_t)), mcen_y);
+            let mut x = start_x;
+            let mut y = start_y;
+
             let mut count = _mm256_set1_pd(0.0);
             let mut merge_sum = _mm256_set1_pd(0.0);
             let add = _mm256_set1_pd(1.0);
@@ -70,8 +83,8 @@ impl Mandelbrot {
                 }
                 merge_sum = _mm256_or_pd(_mm256_and_pd(sum, mask), _mm256_andnot_pd(mask, merge_sum));
                 count = _mm256_add_pd(count, _mm256_and_pd(add, mask));
-                x = _mm256_add_pd(_mm256_sub_pd(xx, yy), c_x);
-                y = _mm256_add_pd(_mm256_add_pd(xy, xy), c_y);
+                x = _mm256_add_pd(_mm256_sub_pd(xx, yy), start_x);
+                y = _mm256_add_pd(_mm256_add_pd(xy, xy), start_y);
             }
             return (_mm256_set1_pd(2.0), merge_sum);
         }
@@ -83,7 +96,7 @@ impl Mandelbrot {
         let height = self.height;
         let center_x = 0.5 * self.width as f64;
         let center_y = 0.5 * self.height as f64;
-        let awidth = 4.0 / self.width as f64;
+        let awidth = 5.33 / self.width as f64;
         let aheight = 3.0 / self.height as f64;
         let chunk_height = height / num_threads;
         
@@ -94,6 +107,8 @@ impl Mandelbrot {
         let texture = self.texture.clone();
         let mut loc = self.start_loc.clone();
         let mut re_render = true;
+        let mut sin_theta = 0.0;
+        let mut cos_theta = 1.0;
         let (tx, rx) = mpsc::channel();
         self.sender = Some(tx);
         std::thread::spawn(move || {
@@ -104,6 +119,8 @@ impl Mandelbrot {
                     user_data = recv_user_data;
                     if loc != new_loc {
                         re_render = true;
+                        sin_theta = loc.rotate.sin();
+                        cos_theta = loc.rotate.cos();
                     }
                     loc = new_loc;
                 }
@@ -127,11 +144,10 @@ impl Mandelbrot {
                                         for x in (0..width).step_by(2) {
                                             unsafe {
                                                 let vx = (x as f64 - center_x) * awidth * loc.zoom + loc.center_x;
-                                                let c_re = _mm256_set_pd(vx, vx+dx, vx, vx+dx);
                                                 let vy = (y as f64 - center_y) * aheight * loc.zoom + loc.center_y;
+                                                let c_re = _mm256_set_pd(vx, vx+dx, vx, vx+dx);
                                                 let c_im = _mm256_set_pd(vy, vy, vy+dy, vy+dy);
-
-                                                let (it256, sum256) = calc_mandel_avx2(c_re, c_im, num_iters);
+                                                let (it256, sum256) = calc_mandel_avx2(c_re, c_im, num_iters, loc.center_x, loc.center_y, sin_theta, cos_theta);
                                                 _mm256_store_pd(it_v.as_ptr(), it256);
                                                 _mm256_store_pd(su_v.as_ptr(), sum256);
                                                 let off = (x * 2 + (y - start) * width * 2) as usize;
@@ -179,10 +195,10 @@ impl Mandelbrot {
                                         for x in (0..width).step_by(1) {
                                             unsafe {
                                                 let vx = (x as f64 - center_x) * awidth * loc.zoom + loc.center_x;
-                                                let c_re = _mm256_set_pd(vx, vx+dx, vx, vx+dx);
                                                 let vy = (y as f64 - center_y) * aheight * loc.zoom + loc.center_y;
+                                                let c_re = _mm256_set_pd(vx, vx+dx, vx, vx+dx);
                                                 let c_im = _mm256_set_pd(vy, vy, vy+dy, vy+dy);
-                                                let (it256, sum256) = calc_mandel_avx2(c_re, c_im, num_iters);
+                                                let (it256, sum256) = calc_mandel_avx2(c_re, c_im, num_iters, loc.center_x, loc.center_y, sin_theta, cos_theta);
                                                 _mm256_store_pd(it_v.as_ptr(), it256);
                                                 _mm256_store_pd(su_v.as_ptr(), sum256);
                                                 let off = (x * 2 + (y - start) * width * 2) as usize;

@@ -8,7 +8,7 @@ use time::precise_time_ns;
 #[derive(Clone)]
 pub struct CxDesktop {
     pub file_read_id: u64,
-    pub file_read_requests: Vec<FileReadRequest>,
+    pub file_reads: Vec<FileRead>,
     pub profiler_list: Vec<u64>,
     pub profiler_totals: Vec<u64>
 }
@@ -17,7 +17,7 @@ impl Default for CxDesktop {
     fn default() -> CxDesktop {
         CxDesktop {
             file_read_id: 1,
-            file_read_requests: Vec::new(),
+            file_reads: Vec::new(),
             profiler_list: Vec::new(),
             profiler_totals: Vec::new()
         }
@@ -30,19 +30,19 @@ impl Cx {
         return Vec2{x:800., y:600.}
     }
     
-    pub fn read_file(&mut self, path: &str) -> FileReadRequest {
+    pub fn file_read(&mut self, path: &str) -> FileRead {
         let desktop = &mut self.platform.desktop;
         desktop.file_read_id += 1;
         let read_id = desktop.file_read_id;
-        let file_read_req = FileReadRequest {
+        let file_read = FileRead {
             read_id: read_id,
             path: path.to_string()
         };
-        desktop.file_read_requests.push(file_read_req.clone());
-        file_read_req
+        desktop.file_reads.push(file_read.clone());
+        file_read
     }
     
-    pub fn write_file(&mut self, path: &str, data: &[u8]) -> u64 {
+    pub fn file_write(&mut self, path: &str, data: &[u8]) -> u64 {
         // just write it right now
         if let Ok(mut file) = File::create(path) {
             if let Ok(_) = file.write_all(&data) {
@@ -137,7 +137,7 @@ impl Cx {
             vsync = true;
         }
         
-        self.process_desktop_file_read_requests(&mut event_handler);
+        self.process_desktop_file_reads(&mut event_handler);
         
         self.call_signals_after_draw(&mut event_handler);
         
@@ -145,15 +145,15 @@ impl Cx {
     }
     
     
-    pub fn process_desktop_file_read_requests<F>(&mut self, mut event_handler: F)
+    pub fn process_desktop_file_reads<F>(&mut self, mut event_handler: F)
     where F: FnMut(&mut Cx, &mut Event)
     {
-        if self.platform.desktop.file_read_requests.len() == 0 {
+        if self.platform.desktop.file_reads.len() == 0 {
             return
         }
         
-        let file_read_requests = self.platform.desktop.file_read_requests.clone();
-        self.platform.desktop.file_read_requests.truncate(0);
+        let file_read_requests = self.platform.desktop.file_reads.clone();
+        self.platform.desktop.file_reads.truncate(0);
         
         for read_req in file_read_requests {
             let file_result = File::open(&read_req.path);
@@ -181,8 +181,8 @@ impl Cx {
             }
         }
         
-        if self.platform.desktop.file_read_requests.len() != 0 {
-            self.process_desktop_file_read_requests(event_handler);
+        if self.platform.desktop.file_reads.len() != 0 {
+            self.process_desktop_file_reads(event_handler);
         }
     }
     

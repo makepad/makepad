@@ -473,24 +473,17 @@ impl Signal {
 }
 
 #[derive(Clone, Debug, Default)]
-pub struct FileReadRequest {
+pub struct FileRead {
     pub path: String,
     pub read_id: u64
 }
 
-impl FileReadRequest {
-    pub fn empty() -> FileReadRequest {
-        FileReadRequest {
-            read_id: 0,
-            path: String::new()
-        }
-    }
-    
-    pub fn is_loading(&self) -> bool {
+impl FileRead {
+    pub fn is_pending(&self) -> bool {
         self.read_id != 0
     }
     
-    pub fn as_utf8<'a>(&mut self, fr: &'a FileReadEvent) -> Option<Result<&'a str,
+    pub fn resolve_utf8<'a>(&mut self, fr: &'a FileReadEvent) -> Option<Result<&'a str,
     String>> {
         if fr.read_id == self.read_id {
             self.read_id = 0;

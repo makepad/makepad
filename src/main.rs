@@ -32,8 +32,8 @@ struct AppGlobal {
     text_buffers: TextBuffers,
     rust_compiler: RustCompiler,
     state: AppState,
-    index_read_req: FileReadRequest,
-    app_state_read_req: FileReadRequest,
+    index_file_read: FileRead,
+    app_state_file_read: FileRead,
 }
 
 struct App {
@@ -137,8 +137,8 @@ impl Style for App {
                     root_path: "./".to_string(),
                     storage: HashMap::new()
                 },
-                index_read_req: FileReadRequest::empty(),
-                app_state_read_req: FileReadRequest::empty(),
+                index_file_read: FileRead::default(),
+                app_state_file_read: FileRead::default(),
                 file_tree_data: String::new(),
                 file_tree_reload_signal: cx.new_signal(),
                 state: AppState::default()
@@ -158,7 +158,7 @@ impl AppWindow {
                 return
             },
             DesktopWindowEvent::WindowGeomChange(wc) => {
-                if !app_global.app_state_read_req.is_loading() {
+                if !app_global.app_state_file_read.is_pending() {
                     // store our new window geom
                     app_global.state.windows[window_index].window_position = wc.new_geom.position;
                     app_global.state.windows[window_index].window_inner_size = wc.new_geom.inner_size;
@@ -375,15 +375,12 @@ impl AppGlobal {
             self.text_buffers.root_path = "./edit_repo/".to_string();
         }
         
-        self.index_read_req = cx.read_file(&format!("{}index.json", self.text_buffers.root_path));
-        self.app_state_read_req = cx.read_file(&format!("{}makepad_state.json", self.text_buffers.root_path));
-        
         self.rust_compiler.init(cx, &mut self.text_buffers);
     }
     
     fn save_state(&mut self, cx: &mut Cx) {
         let json = serde_json::to_string(&self.state).unwrap();
-        cx.write_file(&format!("{}makepad_state.json", self.text_buffers.root_path), json.as_bytes());
+        cx.file_write(&format!("{}makepad_state.json", self.text_buffers.root_path), json.as_bytes());
     }
 }
 
@@ -392,16 +389,18 @@ impl App {
         match event {
             Event::Construct => {
                 self.app_global.handle_construct(cx);
+                self.app_global.index_file_read = cx.file_read(&format!("{}index.json", self.app_global.text_buffers.root_path));
+                self.app_global.app_state_file_read = cx.file_read(&format!("{}makepad_state.json", self.app_global.text_buffers.root_path));
             },
             Event::FileRead(fr) => {
                 // lets see which file we loaded
-                if let Some(utf8_data) = self.app_global.index_read_req.as_utf8(fr) {
+                if let Some(utf8_data) = self.app_global.index_file_read.resolve_utf8(fr) {
                     if let Ok(utf8_data) = utf8_data {
                         self.app_global.file_tree_data = utf8_data.to_string();
                         cx.send_signal_before_draw(self.app_global.file_tree_reload_signal, 0);
                     }
                 }
-                else if let Some(utf8_data) = self.app_global.app_state_read_req.as_utf8(fr) {
+                else if let Some(utf8_data) = self.app_global.app_state_file_read.resolve_utf8(fr) {
                     if let Ok(utf8_data) = utf8_data {
                         if let Ok(state) = serde_json::from_str(&utf8_data) {
                             self.app_global.state = state;
@@ -413,15 +412,15 @@ impl App {
                                 if size.x <= 10. {
                                     size.x = 800.;
                                 }
-                                if size.y <= 10. { 
+                                if size.y <= 10. {
                                     size.y = 600.;
                                 }
                                 let last_pos = window_state.window_position;
                                 let create_pos;
-                                if last_pos.x < -1000. || last_pos.y < -1000.{
+                                if last_pos.x < -1000. || last_pos.y < -1000. {
                                     create_pos = None;
                                 }
-                                else{
+                                else {
                                     create_pos = Some(last_pos);
                                 }
                                 self.windows.push(AppWindow {

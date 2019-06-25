@@ -13,7 +13,7 @@ pub struct TextBuffer {
     pub lines: Vec<Vec<char>>,
     pub undo_stack: Vec<TextUndo>,
     pub redo_stack: Vec<TextUndo>,
-    pub load_read_req: FileReadRequest,
+    pub load_file_read: FileRead,
     pub signal: Signal,
     pub mutation_id: u64,
     pub is_crlf: bool,
@@ -26,7 +26,7 @@ pub struct TextBuffer {
 
 impl TextBuffer {
     pub fn needs_token_chunks(&mut self) -> bool {
-        if self.token_chunks_id != self.mutation_id && !self.load_read_req.is_loading() {
+        if self.token_chunks_id != self.mutation_id && !self.load_file_read.is_pending() {
             self.token_chunks_id = self.mutation_id;
             self.token_chunks.truncate(0);
             self.flat_text.truncate(0);
@@ -85,7 +85,7 @@ impl TextBuffers {
             TextBuffer {
                 signal: cx.new_signal(),
                 mutation_id: 1,
-                load_read_req: cx.read_file(&format!("{}{}", root_path, path)),
+                load_file_read: cx.file_read(&format!("{}{}", root_path, path)),
                 ..Default::default()
             }
         })
@@ -95,7 +95,7 @@ impl TextBuffers {
         let text_buffer = self.storage.get(path);
         if let Some(text_buffer) = text_buffer {
             let string = text_buffer.get_as_string();
-            cx.write_file(&format!("{}{}", self.root_path, path), string.as_bytes());
+            cx.file_write(&format!("{}{}", self.root_path, path), string.as_bytes());
             //cx.http_send("POST", path, "192.168.0.20", "2001", &string);
             
         }
@@ -103,7 +103,7 @@ impl TextBuffers {
     
     pub fn handle_file_read(&mut self, cx: &mut Cx, fr: &FileReadEvent) -> bool {
         for (_path, text_buffer) in &mut self.storage {
-            if let Some(utf8_data) = text_buffer.load_read_req.as_utf8(fr) {
+            if let Some(utf8_data) = text_buffer.load_file_read.resolve_utf8(fr) {
                 if let Ok(utf8_data) = utf8_data {
                     // TODO HANDLE ERROR CASE
                     text_buffer.is_crlf = !utf8_data.find("\r\n").is_none();

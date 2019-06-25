@@ -903,7 +903,7 @@ impl CodeEditor {
         self.cursor.color = self.colors.cursor;
         self.cursor_row.color = self.colors.cursor_row;
         
-        if text_buffer.load_read_req.is_loading() {
+        if text_buffer.load_file_read.is_pending() {
             //et bg_inst = self.bg.begin_quad(cx, &Layout {
             //    align: Align::left_top(),
             //    ..self.bg_layout.clone()
