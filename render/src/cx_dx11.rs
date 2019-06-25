@@ -1272,7 +1272,6 @@ impl D3d11Cx {
             unsafe {self.device.CreateShaderResourceView(texture as *mut _, ptr::null(), &mut shader_resource as *mut *mut _)};
             cxtexture.platform.single.width = width;
             cxtexture.platform.single.height = height;
-            println!("{} {}", width, height);
             cxtexture.platform.single.texture = Some(unsafe {ComPtr::from_raw(texture as *mut _)});
             let mut shader_resource = ptr::null_mut();
             unsafe {self.device.CreateShaderResourceView(texture as *mut _, ptr::null(), &mut shader_resource as *mut *mut _)};

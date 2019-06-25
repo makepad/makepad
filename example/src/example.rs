@@ -418,8 +418,11 @@ fn do_gamepad_interaction(&mut self, cx: &mut Cx) {
     state.loc.center_y += dy_rot;
     state.loc.zoom = state.loc.zoom * (1.0 - zoom as f64);
     
-    if state.loc.zoom < 0.0000000000002 {
-        state.loc.zoom = 1.0;
+    if state.loc.zoom < 0.00000000000002 {
+        state.loc.zoom = 0.00000000000002;
+        if state.lock_mode && state.lock_zoom != 0.0{
+            state.loc.zoom = 1.0;
+        }
     }
     else if state.loc.zoom > 1.0 {
         state.loc.zoom = 1.0;
