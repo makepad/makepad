@@ -235,7 +235,7 @@ impl Win32App {
     
     pub fn start_resize(&mut self) {
         let slot = self.get_free_timer_slot();
-        let win32_id = unsafe {winuser::SetTimer(NULL as HWND, 0, 16 as u32, Some(Self::timer_proc))};
+        let win32_id = unsafe {winuser::SetTimer(NULL as HWND, 0, 8 as u32, Some(Self::timer_proc))};
         self.timers[slot] = Win32Timer::Resize {win32_id: win32_id};
     }
     
