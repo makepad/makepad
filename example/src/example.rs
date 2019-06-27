@@ -94,6 +94,7 @@ struct App {
     state: AppState,
     
     presets: Vec<AppState>,
+    current_preset: usize,
     preset_file_read: FileRead,
     
     blit: Blit,
@@ -122,7 +123,7 @@ impl Style for App {
                 ..Style::style(cx)
             },*/
             frame: 0.,
-            
+            current_preset:0,
             capture: Capture::default(),
             gamepad: Gamepad::default(),
             
@@ -189,6 +190,7 @@ impl App {
                 let center_blend = 0.0;
                 
                 let dx = sin(2. * atan(dfdx(fr1.y), dfdy(fr1.y)) + time * 10.) * 0.5 + 0.5;
+                let df = dfdx(fr1.x)+dfdy(fr1.x);
                 let index = abs(color_offset + fr1.x * 8.0 - outer_scale * 0.05 * log(fr1.y)) * palette_scale;
                 let fract = vec3(0., 0., 0.);
                 
@@ -345,29 +347,48 @@ impl App {
         let mut preset_handled = false;
         if self.gamepad.buttons & GamepadButtonBack>0 || self.gamepad.buttons & GamepadButtonStart>0 {
             preset_handled = true;
-            let id = if self.gamepad.buttons_down_edge & GamepadButtonDpadUp > 0 {Some(0)}
-            else if self.gamepad.buttons_down_edge & GamepadButtonDpadDown > 0 {Some(1)}
-            else if self.gamepad.buttons_down_edge & GamepadButtonDpadLeft > 0 {Some(2)}
-            else if self.gamepad.buttons_down_edge & GamepadButtonDpadRight > 0 {Some(3)}
-            else if self.gamepad.buttons_down_edge & GamepadButtonLeftShoulder > 0 {Some(4)}
-            else if self.gamepad.buttons_down_edge & GamepadButtonRightShoulder > 0 {Some(5)}
-            else if self.gamepad.buttons_down_edge & GamepadButtonA > 0 {Some(6)}
-            else if self.gamepad.buttons_down_edge & GamepadButtonB > 0 {Some(7)}
-            else if self.gamepad.buttons_down_edge & GamepadButtonX > 0 {Some(8)}
-            else if self.gamepad.buttons_down_edge & GamepadButtonY > 0 {Some(9)} else {None};
             
-            if let Some(id) = id {
-                if self.gamepad.buttons & GamepadButtonBack>0 && self.gamepad.buttons & GamepadButtonStart>0 {
-                    self.presets[id] = self.state.clone();
-                    let json = serde_json::to_string(&self.presets).unwrap();
-                    cx.file_write("mandelbrot_presets.json", json.as_bytes());
+            // add 
+            if self.gamepad.buttons & GamepadButtonBack>0 && self.gamepad.buttons & GamepadButtonStart>0 && 
+                self.gamepad.buttons_down_edge & GamepadButtonA > 0{
+                self.current_preset = self.presets.len(); 
+                self.presets.push(self.state.clone());
+                let json = serde_json::to_string(&self.presets).unwrap();
+                cx.file_write("mandelbrot_presets.json", json.as_bytes());
+            }
+            // remove
+            else if self.gamepad.buttons & GamepadButtonBack>0 && self.gamepad.buttons & GamepadButtonStart>0 && 
+                self.gamepad.buttons_down_edge & GamepadButtonB > 0{
+                self.presets.remove(self.current_preset);
+                if self.current_preset>0{
+                    self.current_preset -= 1;
                 }
-                else {
-                    self.state = self.presets[id].clone();
+                if self.presets.len() == 0{
+                    self.presets.push(self.state.clone());
                 }
+                self.state = self.presets[self.current_preset].clone();
+                let json = serde_json::to_string(&self.presets).unwrap();
+                cx.file_write("mandelbrot_presets.json", json.as_bytes());
+            }
+            // next
+            else if self.gamepad.buttons_down_edge & GamepadButtonB > 0{
+                self.current_preset += 1;
+                if self.current_preset >= self.presets.len(){
+                    self.current_preset = 0;
+                }
+                self.state = self.presets[self.current_preset].clone();
+            }
+            //prev
+            else if self.gamepad.buttons_down_edge & GamepadButtonA > 0{
+                if self.current_preset >0{
+                    self.current_preset -= 1;
+                }
+                else{
+                    self.current_preset = self.presets.len() - 1;
+                }
+                self.state = self.presets[self.current_preset].clone();
             }
         }
-        
         
         // update the mandelbrot location
         let state = &mut self.state;
@@ -434,8 +455,26 @@ impl App {
                 pred_loc.zoom = pred_loc.zoom * (1.0 - zoom as f64);
            };
         }
-        self.mandel.send_new_loc(self.loc_history.len(), pred_loc.clone());
-        self.loc_history.push(pred_loc.clone());
+        
+        // we only send a new loc when we move more than 10% or zoom more than 25%
+        if self.loc_history.len()>0{
+            let last_loc = &self.loc_history[self.loc_history.len()-1];
+            if 
+            (last_loc.center_x != pred_loc.center_x || last_loc.center_y != pred_loc.center_y) &&  dx == 0.0 && dy ==0.0
+            || (last_loc.center_x-pred_loc.center_x).abs()>0.1*pred_loc.zoom 
+            || (last_loc.center_y-pred_loc.center_y).abs()>0.1*pred_loc.zoom
+            || last_loc.zoom > pred_loc.zoom && last_loc.zoom > pred_loc.zoom*1.1
+            || last_loc.zoom < pred_loc.zoom && last_loc.zoom < pred_loc.zoom*0.9{
+                self.mandel.send_new_loc(self.loc_history.len(), pred_loc.clone());
+                self.loc_history.push(pred_loc.clone());
+            }
+            
+        }
+        else{
+            self.mandel.send_new_loc(self.loc_history.len(), pred_loc.clone());
+            self.loc_history.push(pred_loc.clone());
+        }
+        
         if !preset_handled {
             if self.gamepad.buttons_down_edge & GamepadButtonA > 0 {
                 if state.palette > 0.0 {state.palette -= 1.0;}
