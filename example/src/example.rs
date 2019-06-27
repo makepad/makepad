@@ -328,6 +328,15 @@ impl App {
         }
     }
     
+    fn map_input(val:f32, dead_zone:f32, exp:f32)->f32{
+         if val > dead_zone {
+           return ((val- dead_zone) / (1.-dead_zone)).powf(exp); //self.gamepad.right_trigger;
+        }
+        else if val < -dead_zone {
+           return - ((-val- dead_zone) / (1.-dead_zone)).powf(exp); //self.gamepad.right_trigger;
+        }
+        0.0
+    }
     
     fn do_gamepad_interaction(&mut self, cx: &mut Cx) {
         self.gamepad.poll();
@@ -376,39 +385,18 @@ impl App {
             }
         }
         if state.lock_mode == false {
-            state.lock_rotate = 0.03 * (self.gamepad.left_trigger - self.gamepad.right_trigger).powf(3.0) as f64;
+            state.lock_rotate = 0.03 * Self::map_input(self.gamepad.left_trigger - self.gamepad.right_trigger, 0.0, 3.0) as f64;
             state.lock_zoom = 0.;
-            if self.gamepad.left_thumb.y > 0.4 {
-                state.lock_zoom = 0.06 * ((self.gamepad.left_thumb.y - 0.4) / 0.6).powf(3.0); //self.gamepad.right_trigger;
-            }
-            else if self.gamepad.left_thumb.y < -0.4 {
-                state.lock_zoom = -0.06 * ((-self.gamepad.left_thumb.y - 0.4) / 0.6).powf(3.0); //self.gamepad.right_trigger;
-            }
-            state.lock_cycle = 0.0;
-            if self.gamepad.left_thumb.x > 0.4 {
-                state.lock_cycle = 0.03 * ((self.gamepad.left_thumb.x - 0.4) / 0.6).powf(3.0); //self.gamepad.right_trigger;
-            }
-            if self.gamepad.left_thumb.x < -0.4 {
-                state.lock_cycle = -0.03 * ((-self.gamepad.left_thumb.x - 0.4) / 0.6).powf(3.0); //self.gamepad.right_trigger;
-            }
+            state.lock_zoom = 0.06 * Self::map_input(self.gamepad.left_thumb.y, 0.4, 2.0);
+            state.lock_cycle = 0.03 * Self::map_input(self.gamepad.left_thumb.x, 0.4, 3.0);
         }
         let mut zoom = state.lock_zoom;
         let mut rotate = state.lock_rotate;
         let mut cycle = state.lock_cycle;
         if state.lock_mode == true {
-            rotate += 0.03 * (self.gamepad.left_trigger - self.gamepad.right_trigger).powf(3.0) as f64;
-            if self.gamepad.left_thumb.y > 0.4 {
-                zoom += 0.06 * ((self.gamepad.left_thumb.y - 0.4) / 0.6).powf(2.0); //self.gamepad.right_trigger;
-            }
-            else if self.gamepad.left_thumb.y < -0.4 {
-                zoom += -0.06 * ((-self.gamepad.left_thumb.y - 0.4) / 0.6).powf(2.0); //self.gamepad.right_trigger;
-            }
-            if self.gamepad.left_thumb.x > 0.4 {
-                cycle += 0.03 * ((self.gamepad.left_thumb.x - 0.4) / 0.6).powf(3.0); //self.gamepad.right_trigger;
-            }
-            if self.gamepad.left_thumb.x < -0.4 {
-                cycle += -0.03 * ((-self.gamepad.left_thumb.x - 0.4) / 0.6).powf(3.0); //self.gamepad.right_trigger;
-            }
+            rotate += 0.03 * Self::map_input(self.gamepad.left_trigger - self.gamepad.right_trigger, 0.0, 3.0) as f64;
+            zoom += 0.06 *  Self::map_input(self.gamepad.left_thumb.y, 0.4, 2.0);
+            cycle += 0.03 * Self::map_input(self.gamepad.left_thumb.x, 0.4, 3.0);
         }
         if last_lock_mode == true && self.gamepad.buttons_down_edge & GamepadButtonRightShoulder > 0 {
             state.lock_zoom = zoom;
@@ -418,8 +406,8 @@ impl App {
         state.loc.rotate += rotate;
         state.color_offset += cycle;
         //state.color_offset -= 0.02 * self.gamepad.left_trigger;
-        let dx = 0.05 * self.gamepad.right_thumb.x as f64 * state.loc.zoom;
-        let dy = -0.05 * self.gamepad.right_thumb.y as f64 * state.loc.zoom;
+        let dx = 0.1 * Self::map_input(self.gamepad.right_thumb.x, 0., 2.0) as f64 * state.loc.zoom;
+        let dy = -0.1 * Self::map_input(self.gamepad.right_thumb.y, 0., 2.0) as f64 * state.loc.zoom;
         
         let dx_rot = dx * state.loc.rotate.cos() - dy * state.loc.rotate.sin();
         let dy_rot = dy * state.loc.rotate.cos() + dx * state.loc.rotate.sin();
@@ -443,10 +431,8 @@ impl App {
             pred_loc.center_x += dx_rot;
             pred_loc.center_y += dy_rot;
             if zoom<0.0 {
-                for _ in 0..4 {
-                    pred_loc.zoom = pred_loc.zoom * (1.0 - zoom as f64);
-                }
-            };
+                pred_loc.zoom = pred_loc.zoom * (1.0 - zoom as f64);
+           };
         }
         self.mandel.send_new_loc(self.loc_history.len(), pred_loc.clone());
         self.loc_history.push(pred_loc.clone());
