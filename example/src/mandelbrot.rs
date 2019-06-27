@@ -20,7 +20,7 @@ pub struct Mandelbrot {
     pub width: usize,
     pub height: usize,
     pub frame_signal: Signal,
-    pub sender: Option<mpsc::Sender<(usize, MandelbrotLoc)>>,
+    pub sender: Option<mpsc::Sender<(usize, MandelbrotLoc, bool)>>,
 }
 
 impl Style for Mandelbrot {
@@ -115,7 +115,11 @@ impl Mandelbrot {
             let mut user_data = 0;
             let mut has_hires = false;
             loop {
-                while let Ok((recv_user_data, new_loc)) = rx.try_recv() {
+                let mut high_delta_zoom = false;
+                while let Ok((recv_user_data, new_loc, high_delta)) = rx.try_recv() {
+                    if high_delta{
+                        high_delta_zoom = true;
+                    }
                     user_data = recv_user_data;
                     if loc != new_loc {
                         re_render = true;
@@ -124,7 +128,7 @@ impl Mandelbrot {
                         loc = new_loc;
                     }
                 }
-                if re_render { 
+                if re_render && high_delta_zoom{ 
                     has_hires = false;
                     // fast 2x2 pixel version
                     thread_pool.scoped( | scope | {
@@ -174,10 +178,12 @@ impl Mandelbrot {
                     cxthread.unlock_mapped_texture(&texture);
                     Cx::send_signal(frame_signal, 0);
                 }
-                else if !has_hires { 
+                else if !has_hires || !high_delta_zoom && re_render{ 
                      // fancy antialised version rendering 8k effectively
+                     
                      thread_pool.scoped( | scope | {
                         if let Some(mapped_texture) = cxthread.lock_mapped_texture_f32(&texture, user_data) {
+                            
                             let dx = 0.5 * awidth * loc.zoom;
                             let dy = 0.5 * aheight * loc.zoom;
 
@@ -209,9 +215,11 @@ impl Mandelbrot {
                                     }
                                 })
                             }
+                            re_render = false;
                             has_hires = true;
                         }
                         else{
+                            re_render = true;
                             has_hires = false;
                         }
                     });
@@ -233,9 +241,9 @@ impl Mandelbrot {
         false
     }
     
-    pub fn send_new_loc(&mut self, index: usize, new_loc: MandelbrotLoc) {
+    pub fn send_new_loc(&mut self, index: usize, new_loc: MandelbrotLoc, high_delta_zoom:bool) {
         if let Some(sender) = &self.sender {
-            let _ = sender.send((index, new_loc));
+            let _ = sender.send((index, new_loc,high_delta_zoom));
         }
     }
 }

@@ -465,13 +465,13 @@ impl App {
             || (last_loc.center_y-pred_loc.center_y).abs()>0.1*pred_loc.zoom
             || last_loc.zoom > pred_loc.zoom && last_loc.zoom > pred_loc.zoom*1.1
             || last_loc.zoom < pred_loc.zoom && last_loc.zoom < pred_loc.zoom*0.9{
-                self.mandel.send_new_loc(self.loc_history.len(), pred_loc.clone());
+                self.mandel.send_new_loc(self.loc_history.len(), pred_loc.clone(), zoom.abs()>0.01);
                 self.loc_history.push(pred_loc.clone());
             }
             
         }
         else{
-            self.mandel.send_new_loc(self.loc_history.len(), pred_loc.clone());
+            self.mandel.send_new_loc(self.loc_history.len(), pred_loc.clone(), true);
             self.loc_history.push(pred_loc.clone());
         }
         
