@@ -22,6 +22,8 @@ mod desktopbutton;
 pub use crate::desktopbutton::*;
 mod graphnode;
 pub use crate::graphnode::*;
+mod graphedge;
+pub use crate::graphedge::*;
 //mod textbuffer;
 //pub use crate::textbuffer::*;
 //mod editor;
