@@ -20,6 +20,8 @@ mod desktopwindow;
 pub use crate::desktopwindow::*;
 mod desktopbutton;
 pub use crate::desktopbutton::*;
+mod graphnode;
+pub use crate::graphnode::*;
 //mod textbuffer;
 //pub use crate::textbuffer::*;
 //mod editor;

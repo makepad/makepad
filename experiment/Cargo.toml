@@ -1,0 +1,18 @@
+[package]
+name = "experiments"
+version = "0.1.0"
+authors = ["tmpvar"]
+edition = "2018"
+
+[dependencies]
+serde_json = "*"
+serde = { version = "1.0", features = ["derive"] }
+
+[dependencies.widget]
+path="../widget"
+
+[dependencies.editor]
+path="../editor"
+
+[dependencies.render]
+path="../render"

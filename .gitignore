@@ -22,3 +22,4 @@ Cargo.lock
 
 *.bat
 mandelbrot_presets.json
+target
