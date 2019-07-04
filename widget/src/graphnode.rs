@@ -57,7 +57,7 @@ impl GraphNode {
         Quad::def_quad_shader().compose(shader_ast!({
             fn pixel() -> vec4 {
                 df_viewport(pos * vec2(w, h));
-                df_box(0.0, 0.0, w, h, 2.);
+                df_box(1.0, 1.0, w-2., h-2., 2.);
                 return df_stroke(color, 2.);
             }
         }))
@@ -69,7 +69,7 @@ impl GraphNode {
         // TODO: eliminate all of these hardcoded offsets. maybe there is
         // value in defining sub views for inputs/outputs
         cx.begin_turtle(&Layout::default(), Area::default());
-        cx.move_turtle(-10., 0.0);
+        cx.move_turtle(-10., 2.0);
         for input in &mut self.inputs {
             input.draw(cx);
             cx.move_turtle(-20., 25.);
@@ -77,7 +77,7 @@ impl GraphNode {
         cx.end_turtle(Area::default());
 
         cx.begin_turtle(&Layout::default(), Area::default());
-        cx.move_turtle(-10., 0.0);
+        cx.move_turtle(-10., 2.0);
         for output in &mut self.outputs {
             output.draw(cx);
             cx.move_turtle(-20., 25.);
