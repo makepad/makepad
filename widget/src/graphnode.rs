@@ -35,7 +35,8 @@ impl Style for GraphNode {
     fn style(cx: &mut Cx) -> Self {
         Self {
             node_bg: Quad {
-                color: color("#F0F"),
+                color: color("#DDD"),
+                shader: cx.add_shader(Self::def_node_bg_shader(), "GraphNode.node_bg"),
                 ..Quad::style(cx)
             },
             node_bg_layout: Layout {
@@ -51,12 +52,24 @@ impl Style for GraphNode {
 }
 
 impl GraphNode {
+
+    pub fn def_node_bg_shader() -> ShaderGen {
+        Quad::def_quad_shader().compose(shader_ast!({
+            fn pixel() -> vec4 {
+                df_viewport(pos * vec2(w, h));
+                df_box(0.0, 0.0, w, h, 2.);
+                return df_stroke(color, 2.);
+            }
+        }))
+    }
+
     pub fn draw_graph_node(&mut self, cx: &mut Cx) {
         let inst = self.node_bg.begin_quad(cx, &self.node_bg_layout);
 
         // TODO: eliminate all of these hardcoded offsets. maybe there is
         // value in defining sub views for inputs/outputs
         cx.begin_turtle(&Layout::default(), Area::default());
+        cx.move_turtle(-10., 0.0);
         for input in &mut self.inputs {
             input.draw(cx);
             cx.move_turtle(-20., 25.);
@@ -64,7 +77,7 @@ impl GraphNode {
         cx.end_turtle(Area::default());
 
         cx.begin_turtle(&Layout::default(), Area::default());
-        cx.move_turtle(-20., 0.0);
+        cx.move_turtle(-10., 0.0);
         for output in &mut self.outputs {
             output.draw(cx);
             cx.move_turtle(-20., 25.);
@@ -83,9 +96,7 @@ impl GraphNode {
                 },
                 _ => ()
             }
-            cx.move_turtle(-20., 25.);
         }
-
 
         for output in &mut self.outputs {
             match output.handle(cx, event) {
@@ -94,9 +105,7 @@ impl GraphNode {
                 },
                 _ => ()
             }
-            cx.move_turtle(-20., 25.);
         }
-
 
         match event.hits(cx, self.animator.area, HitOpt::default()) {
             Event::Animate(ae) => {

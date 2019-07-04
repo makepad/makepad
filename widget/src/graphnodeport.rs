@@ -23,7 +23,8 @@ impl Style for GraphNodePort {
     fn style(cx: &mut Cx) -> Self {
         Self {
             node_bg: Quad {
-                color: color("#00F"),
+                color: color("#BBB"),
+                shader: cx.add_shader(Self::def_node_bg_shader(), "GraphNodePort.node_bg"),
                 ..Quad::style(cx)
             },
             node_bg_layout: Layout {
@@ -37,6 +38,17 @@ impl Style for GraphNodePort {
 }
 
 impl GraphNodePort {
+
+    pub fn def_node_bg_shader() -> ShaderGen {
+        Quad::def_quad_shader().compose(shader_ast!({
+            fn pixel() -> vec4 {
+                df_viewport(pos * vec2(w, h));
+                df_circle(0. + w/2.0, 0. + w/2.0, w / 2.0 - 2.);
+                return df_fill(color);
+            }
+        }))
+    }
+
     pub fn draw(&mut self, cx: &mut Cx) {
         let inst = self.node_bg.begin_quad(cx, &self.node_bg_layout);
         self.animator.update_area_refs(cx, inst.clone().into_area());

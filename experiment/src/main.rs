@@ -79,17 +79,9 @@ impl Style for AppWindow {
                     ],
                     outputs: vec![
                         GraphNodePort{
-                            node_bg: Quad {
-                                color: color("#0F0"),
-                                ..Quad::style(cx)
-                            },
                             ..Style::style(cx)
                         },
                         GraphNodePort{
-                            node_bg: Quad {
-                                color: color("#0F0"),
-                                ..Quad::style(cx)
-                            },
                             ..Style::style(cx)
                         },
                     ],
