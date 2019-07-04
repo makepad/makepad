@@ -11,8 +11,5 @@ serde = { version = "1.0", features = ["derive"] }
 [dependencies.widget]
 path="../widget"
 
-[dependencies.editor]
-path="../editor"
-
 [dependencies.render]
 path="../render"

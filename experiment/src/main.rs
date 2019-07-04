@@ -69,6 +69,30 @@ impl Style for AppWindow {
                         height: Bounds::Fix(50.0),
                         ..Layout::default()
                     },
+                    inputs: vec![
+                        GraphNodePort{
+                            ..Style::style(cx)
+                        },
+                        GraphNodePort{
+                            ..Style::style(cx)
+                        },
+                    ],
+                    outputs: vec![
+                        GraphNodePort{
+                            node_bg: Quad {
+                                color: color("#0F0"),
+                                ..Quad::style(cx)
+                            },
+                            ..Style::style(cx)
+                        },
+                        GraphNodePort{
+                            node_bg: Quad {
+                                color: color("#0F0"),
+                                ..Quad::style(cx)
+                            },
+                            ..Style::style(cx)
+                        },
+                    ],
                     ..Style::style(cx)
                 },
             ],
