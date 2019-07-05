@@ -1,4 +1,5 @@
 use render::*;
+use serde::*;
 
 #[derive(Clone, PartialEq)]
 pub enum GraphNodePortEvent {
@@ -17,6 +18,11 @@ pub struct GraphNodePort {
     pub node_bg_layout: Layout,
     pub node_bg: Quad,
     pub animator: Animator,
+}
+
+#[derive(Default, Clone, Serialize, Deserialize)]
+struct GraphNodePortState {
+    pos: Vec2,
 }
 
 impl Style for GraphNodePort {

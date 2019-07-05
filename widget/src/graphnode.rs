@@ -57,7 +57,7 @@ impl GraphNode {
         Quad::def_quad_shader().compose(shader_ast!({
             fn pixel() -> vec4 {
                 df_viewport(pos * vec2(w, h));
-                df_box(1.0, 1.0, w-2., h-2., 2.);
+                df_box(2.0, 2.0, w-4., h-4., 3.);
                 return df_stroke(color, 2.);
             }
         }))

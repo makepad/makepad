@@ -10,6 +10,7 @@ use serde::*;
 struct AppWindow {
     desktop_window: DesktopWindow,
     graph_nodes: Vec<GraphNode>,
+    graph_edges: Vec<GraphEdge>,
     graph_view: View<NoScrollBar>,
 }
 
@@ -51,6 +52,22 @@ impl Style for AppWindow {
                         height: Bounds::Fix(50.0),
                         ..Default::default()
                     },
+                    inputs: vec![
+                        GraphNodePort{
+                            ..Style::style(cx)
+                        },
+                        GraphNodePort{
+                            ..Style::style(cx)
+                        },
+                    ],
+                    outputs: vec![
+                        GraphNodePort{
+                            ..Style::style(cx)
+                        },
+                        GraphNodePort{
+                            ..Style::style(cx)
+                        },
+                    ],
                     ..Style::style(cx)
                 },
                 GraphNode {
@@ -60,6 +77,22 @@ impl Style for AppWindow {
                         height: Bounds::Fix(50.0),
                         ..Layout::default()
                     },
+                    inputs: vec![
+                        GraphNodePort{
+                            ..Style::style(cx)
+                        },
+                        GraphNodePort{
+                            ..Style::style(cx)
+                        },
+                    ],
+                    outputs: vec![
+                        GraphNodePort{
+                            ..Style::style(cx)
+                        },
+                        GraphNodePort{
+                            ..Style::style(cx)
+                        },
+                    ],
                     ..Style::style(cx)
                 },
                 GraphNode {
@@ -87,6 +120,13 @@ impl Style for AppWindow {
                     ],
                     ..Style::style(cx)
                 },
+            ],
+            graph_edges: vec![
+                GraphEdge {
+                    start: Vec2{x: 300., y: 100.},
+                    end: Vec2{ x: 500., y: 150.},
+                    ..Style::style(cx)
+                }
             ],
             graph_view: View {
                 // QUESTION: what is is_overlay for?
@@ -146,7 +186,6 @@ impl AppWindow {
                 },
                 _ => ()
             }
-
         }
     }
 
@@ -162,6 +201,11 @@ impl AppWindow {
 
         for node in &mut self.graph_nodes {
             node.draw_graph_node(cx);
+        }
+
+
+        for edge in &mut self.graph_edges {
+            edge.draw_graph_edge(cx);
         }
 
         self.graph_view.end_view(cx);
