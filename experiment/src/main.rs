@@ -3,15 +3,16 @@ use render::*;
 use widget::*;
 mod style;
 
+mod graph;
+use crate::graph::Graph;
+
 use std::collections::HashMap;
 use serde::*;
 
 #[derive(Clone)]
 struct AppWindow {
     desktop_window: DesktopWindow,
-    graph_nodes: Vec<GraphNode>,
-    graph_edges: Vec<GraphEdge>,
-    graph_view: View<NoScrollBar>,
+    graph: Graph,
 }
 
 struct AppGlobal {
@@ -44,95 +45,9 @@ impl Style for AppWindow {
     fn style(cx: &mut Cx) -> Self {
         Self {
             desktop_window: DesktopWindow::style(cx),
-            graph_nodes: vec![
-                GraphNode {
-                    node_bg_layout: Layout {
-                        abs_origin: Some(Vec2{x: 100.0, y: 100.0}),
-                        width: Bounds::Fix(100.0),
-                        height: Bounds::Fix(50.0),
-                        ..Default::default()
-                    },
-                    inputs: vec![
-                        GraphNodePort{
-                            ..Style::style(cx)
-                        },
-                        GraphNodePort{
-                            ..Style::style(cx)
-                        },
-                    ],
-                    outputs: vec![
-                        GraphNodePort{
-                            ..Style::style(cx)
-                        },
-                        GraphNodePort{
-                            ..Style::style(cx)
-                        },
-                    ],
-                    ..Style::style(cx)
-                },
-                GraphNode {
-                    node_bg_layout: Layout {
-                        abs_origin: Some(Vec2{x: 100.0, y: 200.0}),
-                        width: Bounds::Fix(100.0),
-                        height: Bounds::Fix(50.0),
-                        ..Layout::default()
-                    },
-                    inputs: vec![
-                        GraphNodePort{
-                            ..Style::style(cx)
-                        },
-                        GraphNodePort{
-                            ..Style::style(cx)
-                        },
-                    ],
-                    outputs: vec![
-                        GraphNodePort{
-                            ..Style::style(cx)
-                        },
-                        GraphNodePort{
-                            ..Style::style(cx)
-                        },
-                    ],
-                    ..Style::style(cx)
-                },
-                GraphNode {
-                    node_bg_layout: Layout {
-                        abs_origin: Some(Vec2{x: 100.0, y: 300.0}),
-                        width: Bounds::Fix(100.0),
-                        height: Bounds::Fix(50.0),
-                        ..Layout::default()
-                    },
-                    inputs: vec![
-                        GraphNodePort{
-                            ..Style::style(cx)
-                        },
-                        GraphNodePort{
-                            ..Style::style(cx)
-                        },
-                    ],
-                    outputs: vec![
-                        GraphNodePort{
-                            ..Style::style(cx)
-                        },
-                        GraphNodePort{
-                            ..Style::style(cx)
-                        },
-                    ],
-                    ..Style::style(cx)
-                },
-            ],
-            graph_edges: vec![
-                GraphEdge {
-                    start: Vec2{x: 300., y: 100.},
-                    end: Vec2{ x: 500., y: 150.},
-                    ..Style::style(cx)
-                }
-            ],
-            graph_view: View {
-                // QUESTION: what is is_overlay for?
-                is_overlay: true,
+            graph: Graph{
                 ..Style::style(cx)
-            },
+            }
         }
     }
 }
@@ -179,14 +94,7 @@ impl AppWindow {
             _ => ()
         }
 
-        for node in &mut self.graph_nodes {
-            match node.handle_graph_node(cx, event) {
-                GraphNodeEvent::DragMove {..} => {
-                    self.graph_view.redraw_view_area(cx);
-                },
-                _ => ()
-            }
-        }
+        self.graph.handle_graph(cx, event);
     }
 
     fn draw_app_window(&mut self, cx: &mut Cx, window_index: usize, app_global: &mut AppGlobal) {
@@ -195,20 +103,7 @@ impl AppWindow {
         }
 
         // self.dock.draw_dock(cx);
-        if let Err(()) = self.graph_view.begin_view(cx, Layout::default()){
-            return
-        }
-
-        for node in &mut self.graph_nodes {
-            node.draw_graph_node(cx);
-        }
-
-
-        for edge in &mut self.graph_edges {
-            edge.draw_graph_edge(cx);
-        }
-
-        self.graph_view.end_view(cx);
+        self.graph.draw_graph(cx);
         self.desktop_window.end_desktop_window(cx);
     }
 }
