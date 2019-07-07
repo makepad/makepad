@@ -5,7 +5,7 @@ impl Cx {
     //pub fn debug_pt(&self, x:f32, y:f32, color:i32){
     //self.debug_pts.borrow_mut().push((x,y,color));
     //}
-    
+
     pub fn set_count_of_aligned_instance(&mut self, instance_count: usize) -> Area {
         let mut area = self.align_list.last_mut().unwrap();
         if let Area::Instance(inst) = &mut area {
@@ -13,14 +13,14 @@ impl Cx {
         }
         area.clone()
     }
-    
+
     // begin a new turtle with a layout
     pub fn begin_turtle(&mut self, layout: &Layout, guard_area: Area) {
-        
+
         if !self.is_in_redraw_cycle {
             panic!("calling begin_turtle outside of redraw cycle is not possible!");
         }
-        
+
         // fetch origin and size from parent
         let (mut origin, mut abs_size) = if let Some(parent) = self.turtles.last() {
             (Vec2 {x: layout.margin.l + parent.walk.x, y: layout.margin.t + parent.walk.y}, parent.abs_size)
@@ -28,12 +28,12 @@ impl Cx {
         else {
             (Vec2 {x: layout.margin.l, y: layout.margin.t}, Vec2::zero())
         };
-        
+
         // see if layout overrode size
         if let Some(layout_abs_size) = layout.abs_size {
             abs_size = layout_abs_size;
         }
-        
+
         // same for origin
         let is_abs_origin;
         if let Some(abs_origin) = layout.abs_origin {

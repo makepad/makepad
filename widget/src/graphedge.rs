@@ -1,5 +1,5 @@
 use render::*;
-
+use serde::*;
 #[derive(Clone, PartialEq)]
 pub enum GraphEdgeEvent {
     None,
@@ -35,12 +35,15 @@ impl Style for GraphEdge {
 
             connector_bg: Quad {
                 color: color("#0F0"),
-                shader: cx.add_shader(Self::def_connector_bg_shader(), "GraphEdgeConnector.node_bg"),
+                shader: cx.add_shader(
+                    Self::def_connector_bg_shader(),
+                    "GraphEdgeConnector.node_bg",
+                ),
                 ..Quad::style(cx)
             },
 
-            start: Vec2{x: 0.0, y: 0.0},
-            end: Vec2{x: 100.0, y: 100.0},
+            start: Vec2 { x: 0.0, y: 0.0 },
+            end: Vec2 { x: 100.0, y: 100.0 },
             animator: Animator::new(Anim::empty()),
         }
     }
@@ -51,7 +54,7 @@ impl GraphEdge {
         Quad::def_quad_shader().compose(shader_ast!({
             fn pixel() -> vec4 {
                 df_viewport(pos * vec2(w, h));
-                df_circle(0. + w/2.0, 0. + w/2.0, w / 2.0 - 2.);
+                df_circle(0. + w / 2.0, 0. + w / 2.0, w / 2.0 - 2.);
                 return df_fill(color);
             }
         }))
@@ -61,7 +64,7 @@ impl GraphEdge {
             let start: vec2<Instance>;
             let end: vec2<Instance>;
 
-            fn pixel() -> vec4 { 
+            fn pixel() -> vec4 {
                 df_viewport(pos * vec2(w, h));
 
                 df_move_to(start.x, start.y);
@@ -77,7 +80,6 @@ impl GraphEdge {
         }))
     }
     pub fn draw_graph_edge(&mut self, cx: &mut Cx) {
-
         let layout = Layout {
             abs_origin: Some(Vec2 {
                 x: self.start.x - 5.0,
@@ -90,27 +92,31 @@ impl GraphEdge {
             ..Default::default()
         };
 
-        let inst = self.connector_bg.draw_quad(cx, Rect {
-            x: self.start.x - 20.0,
-            y: self.start.y - 20.0,
-            w: (self.end.x - self.start.x).abs() + 20.0,
-            h: (self.end.y - self.start.y).abs() + 20.0,
-        });
+        let inst = self.connector_bg.draw_quad(
+            cx,
+            Rect {
+                x: self.start.x - 20.0,
+                y: self.start.y - 20.0,
+                w: (self.end.x - self.start.x).abs() + 20.0,
+                h: (self.end.y - self.start.y).abs() + 20.0,
+            },
+        );
 
-        let end = Vec2{
+        let end = Vec2 {
             x: (self.end.x - self.start.x),
             y: (self.end.y - self.start.y),
         };
 
-        inst.push_vec2(cx, Vec2{x:10.0, y:10.0});
-        inst.push_vec2(cx, Vec2{
-            x: end.x + 10.0,
-            y: end.y + 10.0,
-        });
+        inst.push_vec2(cx, Vec2 { x: 10.0, y: 10.0 });
+        inst.push_vec2(
+            cx,
+            Vec2 {
+                x: end.x + 10.0,
+                y: end.y + 10.0,
+            },
+        );
 
-        // let inst = self.node_bg.begin_quad(cx, &layout);        
-
-  
+        // let inst = self.node_bg.begin_quad(cx, &layout);
 
         // if (end.x.abs() > end.y.abs()) {
         //     // horizontal diagonal
@@ -131,7 +137,6 @@ impl GraphEdge {
         //     area.push_vec2(cx, Vec2{x:10.0, y:10.0});
         //     area.push_vec2(cx, half);
 
-
         //     let next = Vec2{ x: end.x - half.x, y: end.y - half.y };
         //     let area = self.connector_bg.draw_quad(cx, Rect {
         //         x: half.x + 10.,
@@ -141,7 +146,6 @@ impl GraphEdge {
         //     });
         //     area.push_vec2(cx, Vec2{x:2.0, y:2.0});
         //     area.push_vec2(cx, next);
-
 
         // } else if (end.y.abs() > end.x.abs()) {
         //     // vertical diagonal

@@ -74,8 +74,9 @@ impl Style for App {
 
 impl AppWindow {
     fn handle_app_window(&mut self, cx: &mut Cx, event: &mut Event, window_index: usize, app_global: &mut AppGlobal) {
-
+        self.graph.handle_graph(cx, event);
         match self.desktop_window.handle_desktop_window(cx, event) {
+
             DesktopWindowEvent::EventForOtherWindow => {
                 return
             },
@@ -94,7 +95,7 @@ impl AppWindow {
             _ => ()
         }
 
-        self.graph.handle_graph(cx, event);
+
     }
 
     fn draw_app_window(&mut self, cx: &mut Cx, window_index: usize, app_global: &mut AppGlobal) {
@@ -163,9 +164,12 @@ impl App {
 
                         cx.redraw_child_area(Area::All);
                     }
+                    for (window_index, window) in self.windows.iter_mut().enumerate() {
+                        window.handle_app_window(cx, &mut Event::Construct, window_index, &mut self.app_global);
+                    }
                 }
             },
-            _ => ()
+            _ => (),
         }
 
         for (window_index, window) in self.windows.iter_mut().enumerate() {
