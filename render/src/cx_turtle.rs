@@ -596,8 +596,7 @@ pub fn debug_pt(x:f32, y:f32, color:i32, s:&str){
             store.truncate(0);
         })*/
 
-
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum Bounds {
     Fill,
     Fix(f32),
@@ -643,7 +642,7 @@ impl Bounds {
     }
 }
 
-#[derive(Clone, Copy, Default, Debug)]
+#[derive(Clone, Copy, Default, Debug, Serialize, Deserialize)]
 pub struct Align {
     pub fx: f32,
     pub fy: f32
@@ -661,7 +660,7 @@ impl Align {
     pub fn right_bottom() -> Align {Align {fx: 1.0, fy: 1.0}}
 }
 
-#[derive(Clone, Copy, Default, Debug)]
+#[derive(Clone, Copy, Default, Debug, Serialize, Deserialize)]
 pub struct Margin {
     pub l: f32,
     pub t: f32,
@@ -692,7 +691,7 @@ impl Rect {
     }
 }
 
-#[derive(Clone, Copy, Default, Debug)]
+#[derive(Clone, Copy, Default, Debug, Serialize, Deserialize)]
 pub struct Padding {
     pub l: f32,
     pub t: f32,
@@ -710,7 +709,7 @@ impl Padding {
 }
 
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum Direction {
     Left,
     Right,
@@ -736,7 +735,7 @@ impl Default for Axis {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum LineWrap {
     None,
     NewLine
@@ -747,7 +746,7 @@ impl Default for LineWrap {
     }
 }
 
-#[derive(Clone, Default, Debug)]
+#[derive(Clone, Default, Debug, Serialize, Deserialize)]
 pub struct Layout {
     pub margin: Margin,
     pub padding: Padding,
@@ -774,19 +773,17 @@ pub struct Turtle {
     pub height_used: f32,
     pub biggest: f32,
     pub layout: Layout,
-    pub guard_area: Area
+    pub guard_area: Area,
 }
 //#[derive(Clone, Default)]
 //pub struct CxTurtle{
 //   pub debug_pts:RefCell<Vec<(f32,f32,i32)>>
 //}
 
-
 pub fn max_zero_keep_nan(v: f32) -> f32 {
     if v.is_nan() {
         v
-    }
-    else {
+    } else {
         f32::max(v, 0.0)
     }
 }
