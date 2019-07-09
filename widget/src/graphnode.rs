@@ -9,6 +9,7 @@ pub enum GraphNodeEvent {
     DragMove { fe: FingerMoveEvent },
     DragEnd { fe: FingerUpEvent },
     DragOut,
+    PortDragMove { port_id: Uuid, port_dir: PortDirection, fe: FingerMoveEvent },
 }
 
 /*
@@ -141,8 +142,8 @@ impl GraphNode {
     pub fn handle_graph_node(&mut self, cx: &mut Cx, event: &mut Event) -> GraphNodeEvent {
         for input in &mut self.inputs {
             match input.handle(cx, event) {
-                GraphNodePortEvent::Handled => {
-                    return GraphNodeEvent::None;
+                GraphNodePortEvent::DragMove {fe} => {
+                    return GraphNodeEvent::PortDragMove { port_id: input.id, port_dir: PortDirection::Input, fe: fe };
                 }
                 _ => (),
             }
@@ -150,8 +151,8 @@ impl GraphNode {
 
         for output in &mut self.outputs {
             match output.handle(cx, event) {
-                GraphNodePortEvent::Handled => {
-                    return GraphNodeEvent::None;
+                GraphNodePortEvent::DragMove {fe} => {
+                    return GraphNodeEvent::PortDragMove { port_id: output.id, port_dir: PortDirection::Output, fe: fe };
                 }
                 _ => (),
             }

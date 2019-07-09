@@ -6,6 +6,7 @@ use uuid::Uuid;
 pub enum GraphNodePortEvent {
     None,
     Handled,
+    DragMove { fe: FingerMoveEvent },
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -76,7 +77,7 @@ impl GraphNodePort {
                     .write_area(cx, self.animator.area, "bg.", ae.time);
             }
             Event::FingerMove(fe) => {
-                return GraphNodePortEvent::Handled;
+                return GraphNodePortEvent::DragMove {fe: fe};
             }
             _ => (),
         }

@@ -34,6 +34,9 @@ pub struct Graph {
     pub state: GraphState,
     pub graph_nodes: Vec<GraphNode>,
     pub graph_edges: Vec<GraphEdge>,
+
+    pub temp_graph_edge: Option<TempGraphEdge>,
+
     pub graph_view: View<NoScrollBar>,
     pub animator: Animator,
     pub state_file_read: FileRead,
@@ -62,6 +65,7 @@ impl Style for Graph {
         Self {
             state: Default::default(),
 
+            temp_graph_edge: None,
             //state: Default::default(),
             graph_view: View {
                 ..Style::style(cx)
@@ -262,11 +266,32 @@ impl Graph {
         }
 
         let mut save = false;
-        for (id, node) in &mut self.state.nodes {
+        for (node_id, node) in &mut self.state.nodes {
             match node.handle_graph_node(cx, event) {
                 GraphNodeEvent::DragMove {..} => {
                     self.graph_view.redraw_view_area(cx);
                     save = true;
+                },
+                GraphNodeEvent::PortDragMove {port_id, port_dir, fe } => {
+                    self.graph_view.redraw_view_area(cx);
+                    match &mut self.temp_graph_edge {
+                        Some(edge) => {
+                            edge.end = fe.abs.clone();
+                            println!("update temp graph edge");
+                        },
+                        None => {
+                            println!("create new temp graph edge");
+                            self.temp_graph_edge = Some(TempGraphEdge {
+                                start: GraphNodePortAddress{
+                                    node: node_id.clone(),
+                                    port: port_id,
+                                    dir: port_dir
+                                },
+                                end: fe.abs.clone(),
+                                ..Default::default()
+                            });
+                        }
+                    }
                 },
                 _ => ()
             }
@@ -320,6 +345,25 @@ impl Graph {
                 &mut self.graph_edge_connector_bg
             );
             loc = loc + 1;
+        }
+
+        match &mut self.temp_graph_edge {
+            Some(edge) => {
+                println!("a tmp graph edge exists");
+                match self.state.get_port_rect(&edge.start) {
+                    Some(start) => {
+                        println!("found the starting port rect");
+                        edge.draw_graph_edge(cx,
+                            Vec2{x: start.x, y: start.y},
+                            edge.end,
+                            &mut self.graph_edge_end_bg,
+                            &mut self.graph_edge_connector_bg
+                        );
+                    }
+                    _ => ()
+                }
+            },
+            _ => ()
         }
 
         // TODO: render partial edges (e.g., anchored to one port and still dragging)
