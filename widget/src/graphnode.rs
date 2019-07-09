@@ -87,7 +87,6 @@ impl GraphNode {
         match dir {
             PortDirection::Input => port_id = self.inputs[index].id,
             PortDirection::Output => port_id = self.outputs[index].id,
-            PortDirection::None => return None,
         }
 
         Some(GraphNodePortAddress {
@@ -113,7 +112,6 @@ impl GraphNode {
                     }
                 }
             }
-            _ => (),
         }
         None
     }
@@ -203,7 +201,7 @@ impl GraphNode {
                         port_dir: PortDirection::Output,
                     };
                 }
-                GraphNodePortEvent::DropHit => {
+                GraphNodePortEvent::DropMiss => {
                     return GraphNodeEvent::PortDropMiss;
                 }
                 _ => (),

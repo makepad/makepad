@@ -125,6 +125,7 @@ impl TempGraphEdge {
         &mut self,
         cx: &mut Cx,
         start: Vec2,
+        start_dir: PortDirection,
         end: Vec2,
         bg: &mut Quad,
         connector_bg: &mut Quad,
@@ -147,19 +148,38 @@ impl TempGraphEdge {
 
         let inst = connector_bg.draw_quad_abs(cx, aabb);
 
+        let mut start_vec: Vec2;
+        let mut end_vec: Vec2;
+        match start_dir {
+            PortDirection::Input => {
+                start_vec = Vec2 {
+                    x: end.x - 10.0,
+                    y: end.y - 10.0,
+                };
+                end_vec = Vec2 {
+                    x: start.x + 10.0,
+                    y: start.y + 10.0,
+                };
+            }
+            PortDirection::Output => {
+                start_vec = start.clone();
+                end_vec = end.clone();
+            }
+        }
+
         inst.push_vec2(
             cx,
             Vec2 {
-                x: (start.x - aabb.x).abs() + 10.,
-                y: (start.y - aabb.y).abs() + 10.,
+                x: (start_vec.x - aabb.x).abs() + 10.,
+                y: (start_vec.y - aabb.y).abs() + 10.,
             },
         );
 
         inst.push_vec2(
             cx,
             Vec2 {
-                x: (end.x - aabb.x).abs(),
-                y: (end.y - aabb.y).abs(),
+                x: (end_vec.x - aabb.x).abs(),
+                y: (end_vec.y - aabb.y).abs(),
             },
         );
 

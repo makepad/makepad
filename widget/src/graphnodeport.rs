@@ -14,14 +14,13 @@ pub enum GraphNodePortEvent {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum PortDirection {
-    None,
     Input,
     Output,
 }
 
 impl Default for PortDirection {
     fn default() -> Self {
-        PortDirection::None
+        PortDirection::Input
     }
 }
 

@@ -326,8 +326,19 @@ impl Graph {
                         Some(edge) => {
                             match &edge.target {
                                 Some(target) => {
+                                    if edge.start.dir == target.dir {
+                                        self.temp_graph_edge = None;
+                                        return;
+                                    }
+
+                                    if edge.start.node == target.node {
+                                        self.temp_graph_edge = None;
+                                        return;
+                                    }
+                                    
                                     match edge.start.dir {
                                         PortDirection::Input => {
+
                                             let edge = GraphEdge {
                                                 start: target.clone(),
                                                 end: edge.start.clone(),
@@ -426,6 +437,7 @@ impl Graph {
                     Some(start) => {
                         edge.draw_graph_edge(cx,
                             Vec2{x: start.x, y: start.y},
+                            edge.start.dir.clone(),
                             edge.end,
                             &mut self.graph_edge_end_bg,
                             &mut self.graph_edge_connector_bg
