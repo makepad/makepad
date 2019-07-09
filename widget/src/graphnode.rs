@@ -175,10 +175,9 @@ impl GraphNode {
                         port_dir: PortDirection::Input,
                     };
                 }
-                GraphNodePortEvent::DropHit => {
+                GraphNodePortEvent::DropMiss => {
                     return GraphNodeEvent::PortDropMiss;
                 }
-
                 _ => (),
             }
         }
