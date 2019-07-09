@@ -6,10 +6,24 @@ use uuid::Uuid;
 #[derive(Clone, PartialEq)]
 pub enum GraphNodeEvent {
     None,
-    DragMove { fe: FingerMoveEvent },
-    DragEnd { fe: FingerUpEvent },
+    DragMove {
+        fe: FingerMoveEvent,
+    },
+    DragEnd {
+        fe: FingerUpEvent,
+    },
     DragOut,
-    PortDragMove { port_id: Uuid, port_dir: PortDirection, fe: FingerMoveEvent },
+    PortDragMove {
+        port_id: Uuid,
+        port_dir: PortDirection,
+        fe: FingerMoveEvent,
+    },
+    PortDrop,
+    PortDropHit {
+        port_id: Uuid,
+        port_dir: PortDirection,
+    },
+    PortDropMiss,
 }
 
 /*
@@ -139,20 +153,58 @@ impl GraphNode {
         self.animator.update_area_refs(cx, inst.clone().into_area());
     }
 
-    pub fn handle_graph_node(&mut self, cx: &mut Cx, event: &mut Event) -> GraphNodeEvent {
+    pub fn handle_graph_node(
+        &mut self,
+        cx: &mut Cx,
+        event: &mut Event,
+        skip: &Option<Uuid>,
+    ) -> GraphNodeEvent {
         for input in &mut self.inputs {
             match input.handle(cx, event) {
-                GraphNodePortEvent::DragMove {fe} => {
-                    return GraphNodeEvent::PortDragMove { port_id: input.id, port_dir: PortDirection::Input, fe: fe };
+                GraphNodePortEvent::DragMove { fe } => {
+                    return GraphNodeEvent::PortDragMove {
+                        port_id: input.id,
+                        port_dir: PortDirection::Input,
+                        fe: fe,
+                    };
                 }
+                GraphNodePortEvent::DragEnd { fe } => {
+                    return GraphNodeEvent::PortDrop;
+                }
+                GraphNodePortEvent::DropHit => {
+                    return GraphNodeEvent::PortDropHit {
+                        port_id: input.id,
+                        port_dir: PortDirection::Input,
+                    };
+                }
+                GraphNodePortEvent::DropHit => {
+                    return GraphNodeEvent::PortDropMiss;
+                }
+
                 _ => (),
             }
         }
 
         for output in &mut self.outputs {
             match output.handle(cx, event) {
-                GraphNodePortEvent::DragMove {fe} => {
-                    return GraphNodeEvent::PortDragMove { port_id: output.id, port_dir: PortDirection::Output, fe: fe };
+                GraphNodePortEvent::DragMove { fe } => {
+                    return GraphNodeEvent::PortDragMove {
+                        port_id: output.id,
+                        port_dir: PortDirection::Output,
+                        fe: fe,
+                    };
+                }
+                GraphNodePortEvent::DragEnd { fe } => {
+                    return GraphNodeEvent::PortDrop;
+                }
+                GraphNodePortEvent::DropHit => {
+                    return GraphNodeEvent::PortDropHit {
+                        port_id: output.id,
+                        port_dir: PortDirection::Output,
+                    };
+                }
+                GraphNodePortEvent::DropHit => {
+                    return GraphNodeEvent::PortDropMiss;
                 }
                 _ => (),
             }

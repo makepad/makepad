@@ -29,6 +29,7 @@ pub struct GraphEdge {
 pub struct TempGraphEdge {
     pub start: GraphNodePortAddress,
     pub end: Vec2,
+    pub target: Option<GraphNodePortAddress>,
     pub animator: Animator,
 }
 
@@ -37,6 +38,7 @@ impl Default for TempGraphEdge {
         return Self {
             start: GraphNodePortAddress::default(),
             end: Vec2::zero(),
+            target: None,
             animator: Animator::new(Anim::empty()),
         };
     }

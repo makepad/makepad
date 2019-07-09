@@ -7,6 +7,9 @@ pub enum GraphNodePortEvent {
     None,
     Handled,
     DragMove { fe: FingerMoveEvent },
+    DragEnd { fe: FingerUpEvent },
+    DropHit,
+    DropMiss,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -77,8 +80,20 @@ impl GraphNodePort {
                     .write_area(cx, self.animator.area, "bg.", ae.time);
             }
             Event::FingerMove(fe) => {
-                return GraphNodePortEvent::DragMove {fe: fe};
+                return GraphNodePortEvent::DragMove { fe: fe };
             }
+            Event::FingerUp(fe) => {
+                return GraphNodePortEvent::DragEnd { fe: fe };
+            }
+            Event::FingerHover(fe) => match fe.hover_state {
+                HoverState::In => {
+                    return GraphNodePortEvent::DropHit;
+                }
+                HoverState::Out => {
+                    return GraphNodePortEvent::DropMiss;
+                }
+                _ => (),
+            },
             _ => (),
         }
         GraphNodePortEvent::None

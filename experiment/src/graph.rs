@@ -27,6 +27,18 @@ impl GraphState {
         None
     }
 
+    pub fn add_edge(&mut self, src: GraphNodePortAddress, dest: GraphNodePortAddress) -> Uuid {
+        let edge = GraphEdge {
+            start: src.clone(),
+            end: dest.clone(),
+            id: Uuid::new_v4(),
+            animator: Animator::new(Anim::empty())
+        };
+        let id = edge.id.clone();
+        self.edges.insert(id, edge);
+        return id;
+    }
+
 }
 
 #[derive(Clone)]
@@ -163,18 +175,6 @@ impl Graph {
         return id;
     }
 
-    pub fn add_edge(&mut self, src: GraphNodePortAddress, dest: GraphNodePortAddress) -> Uuid {
-        let edge = GraphEdge {
-            start: src.clone(),
-            end: dest.clone(),
-            id: Uuid::new_v4(),
-            animator: Animator::new(Anim::empty())
-        };
-        let id = edge.id.clone();
-        self.state.edges.insert(id, edge);
-        return id;
-    }
-
     // TODO: return graph event?
     pub fn handle_graph(&mut self, cx: &mut Cx, event: &mut Event) {
         match event {
@@ -259,15 +259,23 @@ impl Graph {
 
                     let dest_addr = node2.get_port_address(PortDirection::Input, 1);
                     self.add_node(node2);
-                    self.add_edge(src_addr.unwrap(), dest_addr.unwrap());
+                    self.state.add_edge(src_addr.unwrap(), dest_addr.unwrap());
                 }
             },
             _ => ()
         }
 
         let mut save = false;
+        let mut new_edge: Option<GraphEdge> = None;
+        let mut skip: Option<Uuid> = None;
+        match &mut self.temp_graph_edge {
+            Some(edge) => {
+                skip = Some(edge.start.port.clone());
+            },
+            _ => ()
+        }
         for (node_id, node) in &mut self.state.nodes {
-            match node.handle_graph_node(cx, event) {
+            match node.handle_graph_node(cx, event, &skip) {
                 GraphNodeEvent::DragMove {..} => {
                     self.graph_view.redraw_view_area(cx);
                     save = true;
@@ -277,10 +285,8 @@ impl Graph {
                     match &mut self.temp_graph_edge {
                         Some(edge) => {
                             edge.end = fe.abs.clone();
-                            println!("update temp graph edge");
                         },
                         None => {
-                            println!("create new temp graph edge");
                             self.temp_graph_edge = Some(TempGraphEdge {
                                 start: GraphNodePortAddress{
                                     node: node_id.clone(),
@@ -293,8 +299,75 @@ impl Graph {
                         }
                     }
                 },
+                GraphNodeEvent::PortDropHit {port_id, port_dir} => {
+                    match &mut self.temp_graph_edge {
+                        Some(edge) => {
+                            edge.target = Some(GraphNodePortAddress{
+                                node: node_id.clone(),
+                                port: port_id,
+                                dir: port_dir
+                            });
+                        },
+                        _ => ()
+                    }
+                },
+                GraphNodeEvent::PortDropMiss => {
+                    match &mut self.temp_graph_edge {
+                        Some(edge) => {
+                            edge.target = None;
+                        },
+                        _ => ()
+                    }
+                },
+                GraphNodeEvent::PortDrop => {
+
+                    self.graph_view.redraw_view_area(cx);
+                    match &mut self.temp_graph_edge {
+                        Some(edge) => {
+                            match &edge.target {
+                                Some(target) => {
+                                    match edge.start.dir {
+                                        PortDirection::Input => {
+                                            let edge = GraphEdge {
+                                                start: target.clone(),
+                                                end: edge.start.clone(),
+                                                id: Uuid::new_v4(),
+                                                animator: Animator::new(Anim::empty())
+                                            };
+                                            let id = edge.id.clone();
+                                            self.state.edges.insert(id, edge);
+                                        },
+                                        PortDirection::Output => {
+                                            let edge = GraphEdge {
+                                                start: edge.start.clone(),
+                                                end: target.clone(),
+                                                id: Uuid::new_v4(),
+                                                animator: Animator::new(Anim::empty())
+                                            };
+                                            let id = edge.id.clone();
+                                            self.state.edges.insert(id, edge);
+                                        },
+                                        _ => ()
+                                    }
+                                },
+                                None => {
+                                    self.temp_graph_edge = None;
+                                }
+                            }
+                        },
+                        _ => ()
+                    }
+                },
                 _ => ()
             }
+        }
+
+        match event {
+            Event::FingerUp(fe) => {
+                self.temp_graph_edge = None;
+                self.graph_view.redraw_view_area(cx);
+            },
+            _ => ()
         }
 
         if save {
@@ -349,10 +422,8 @@ impl Graph {
 
         match &mut self.temp_graph_edge {
             Some(edge) => {
-                println!("a tmp graph edge exists");
                 match self.state.get_port_rect(&edge.start) {
                     Some(start) => {
-                        println!("found the starting port rect");
                         edge.draw_graph_edge(cx,
                             Vec2{x: start.x, y: start.y},
                             edge.end,
