@@ -88,6 +88,9 @@ impl GraphNodePort {
                 HoverState::In => {
                     return GraphNodePortEvent::DropHit;
                 }
+                HoverState::Over => {
+                    return GraphNodePortEvent::DropHit;
+                }
                 HoverState::Out => {
                     return GraphNodePortEvent::DropMiss;
                 }
