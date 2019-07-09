@@ -8,8 +8,25 @@ use uuid::Uuid;
 #[derive(Default, Clone, Serialize, Deserialize)]
 pub struct GraphState {
     pub nodes: HashMap<Uuid, GraphNode>,
-//    pub ports: HashMap<Uuid, GraphNodePort>,
-//    pub edges: HashMap<Uuid, GraphEdge>,
+    pub edges: HashMap<Uuid, GraphEdge>,
+}
+
+impl GraphState {
+    pub fn get_port_rect(&self, addr: &GraphNodePortAddress) -> Option<Rect> {
+        match self.nodes.get(&addr.node) {
+            Some(node) => {
+                match node.get_port_by_address(&addr) {
+                    Some(port) => {
+                        return Some(port.aabb.clone());
+                    },
+                    _ => ()
+                }
+            },
+            _ => ()
+        };
+        None
+    }
+
 }
 
 #[derive(Clone)]
@@ -22,6 +39,9 @@ pub struct Graph {
     pub state_file_read: FileRead,
     pub state_file: String,
     pub graph_node_bg: Quad,
+    pub graph_node_port_bg: Quad,
+    pub graph_edge_end_bg: Quad,
+    pub graph_edge_connector_bg: Quad,
 }
 
 impl Serialize for Graph {
@@ -32,7 +52,7 @@ impl Serialize for Graph {
         // 3 is the number of fields in the struct.
         let mut state = serializer.serialize_struct("Graph", 2)?;
         state.serialize_field("nodes", &self.state.nodes)?;
-        //state.serialize_field("edges", &self.graph_edges)?;
+        state.serialize_field("edges", &self.state.edges)?;
         state.end()
     }
 }
@@ -48,7 +68,25 @@ impl Style for Graph {
             },
             graph_node_bg: Quad {
                 color: color("#DDD"),
-                shader: cx.add_shader(Self::def_node_bg_shader(), "GraphNode.node_bg"),
+                shader: cx.add_shader(Self::def_graph_node_bg_shader(), "GraphNode.node_bg"),
+                ..Quad::style(cx)
+            },
+            graph_node_port_bg: Quad {
+                color: color("#BBB"),
+                shader: cx.add_shader(Self::def_graph_node_port_bg_shader(), "GraphNodePort.node_bg"),
+                ..Quad::style(cx)
+            },
+            graph_edge_end_bg: Quad {
+                color: color("#F00"),
+                shader: cx.add_shader(Self::def_graph_edge_end_bg_shader(), "GraphEdgeEnd.node_bg"),
+                ..Quad::style(cx)
+            },
+            graph_edge_connector_bg: Quad {
+                color: color("#0F0"),
+                shader: cx.add_shader(
+                    Self::def_graph_edge_connector_bg_shader(),
+                    "GraphEdgeConnector.node_bg",
+                ),
                 ..Quad::style(cx)
             },
             state_file_read: FileRead::default(),
@@ -57,24 +95,60 @@ impl Style for Graph {
             //render_state: Default::default(),
 
             graph_nodes: Vec::new(),
-            graph_edges: vec![
-                GraphEdge {
-                    start: Vec2{x: 300., y: 100.},
-                    end: Vec2{ x: 500., y: 150.},
-                    ..Style::style(cx)
-                }
-            ],
+            graph_edges: Vec::new(),
         }
     }
 }
 
 impl Graph {
-    pub fn def_node_bg_shader() -> ShaderGen {
+    pub fn def_graph_node_bg_shader() -> ShaderGen {
         Quad::def_quad_shader().compose(shader_ast!({
             fn pixel() -> vec4 {
                 df_viewport(pos * vec2(w, h));
                 df_box(2.0, 2.0, w - 4., h - 4., 3.);
                 return df_stroke(color, 2.);
+            }
+        }))
+    }
+
+    pub fn def_graph_node_port_bg_shader() -> ShaderGen {
+        Quad::def_quad_shader().compose(shader_ast!({
+            fn pixel() -> vec4 {
+                df_viewport(pos * vec2(w, h));
+                df_circle(0. + w/2.0, 0. + w/2.0, w / 2.0 - 2.);
+                return df_fill(color);
+            }
+        }))
+    }
+
+    pub fn def_graph_edge_end_bg_shader() -> ShaderGen {
+        Quad::def_quad_shader().compose(shader_ast!({
+            fn pixel() -> vec4 {
+                df_viewport(pos * vec2(w, h));
+                //df_circle(0. + w / 2.0, 0. + w / 2.0, w / 2.0 - 2.);
+                df_box(2.0, 2.0, w - 4., h - 4., 3.);
+                return df_fill(color);
+            }
+        }))
+    }
+
+    pub fn def_graph_edge_connector_bg_shader() -> ShaderGen {
+        Quad::def_quad_shader().compose(shader_ast!({
+            let start: vec2<Instance>;
+            let end: vec2<Instance>;
+
+            fn pixel() -> vec4 {
+                df_viewport(pos * vec2(w, h));
+
+                df_move_to(start.x, start.y);
+                df_line_to(end.x, end.y);
+                df_stroke(color, 2.);
+
+                df_circle(end.x, end.y, 6.);
+                df_fill(color("#00F"));
+
+                df_circle(start.x, start.y, 6.);
+                return df_fill(color("#F00"));
             }
         }))
     }
@@ -85,6 +159,18 @@ impl Graph {
         return id;
     }
 
+    pub fn add_edge(&mut self, src: GraphNodePortAddress, dest: GraphNodePortAddress) -> Uuid {
+        let edge = GraphEdge {
+            start: src.clone(),
+            end: dest.clone(),
+            id: Uuid::new_v4(),
+            animator: Animator::new(Anim::empty()),
+            node_bg_layout: Layout::default(),
+        };
+        let id = edge.id.clone();
+        self.state.edges.insert(id, edge);
+        return id;
+    }
 
     // TODO: return graph event?
     pub fn handle_graph(&mut self, cx: &mut Cx, event: &mut Event) {
@@ -113,11 +199,10 @@ impl Graph {
                     }
                     cx.redraw_child_area(Area::All);
                 } else {
-                    let node = GraphNode {
+                    let node1 = GraphNode {
                         layout: Layout {
                             abs_origin: Some(Vec2{x: 100.0, y: 300.0}),
-                            width: Bounds::Fix(100.0),
-                            height: Bounds::Fix(50.0),
+                            abs_size: Some(Vec2{x: 100.0, y: 50.0}),
                             ..Layout::default()
                         },
                         inputs: vec![
@@ -139,7 +224,37 @@ impl Graph {
                         ..Style::style(cx)
                     };
 
-                    self.add_node(node);
+                    let src_addr = node1.get_port_address(PortDirection::Output, 0);
+                    self.add_node(node1);
+
+                    let node2 = GraphNode {
+                        layout: Layout {
+                            abs_origin: Some(Vec2{x: 300.0, y: 300.0}),
+                            abs_size: Some(Vec2{x: 100.0, y: 50.0}),
+                            ..Layout::default()
+                        },
+                        inputs: vec![
+                            GraphNodePort{
+                                ..Style::style(cx)
+                            },
+                            GraphNodePort{
+                                ..Style::style(cx)
+                            },
+                        ],
+                        outputs: vec![
+                            GraphNodePort{
+                                ..Style::style(cx)
+                            },
+                            GraphNodePort{
+                                ..Style::style(cx)
+                            },
+                        ],
+                        ..Style::style(cx)
+                    };
+
+                    let dest_addr = node2.get_port_address(PortDirection::Input, 1);
+                    self.add_node(node2);
+                    self.add_edge(src_addr.unwrap(), dest_addr.unwrap());
                 }
             },
             _ => ()
@@ -162,25 +277,51 @@ impl Graph {
         }
     }
 
-
     pub fn draw_graph(&mut self, cx: &mut Cx) {
         if let Err(()) = self.graph_view.begin_view(cx, Layout::default()){
             return
         }
 
-        let l = self.graph_nodes.len();
         for (id, node) in &mut self.state.nodes {
-            // TODO: build layout off of current state
-            let inst = self.graph_node_bg.begin_quad(cx, &node.layout);
-
-            node.draw_graph_node(cx);
-            node.animator.update_area_refs(cx, inst.clone().into_area());
-            self.graph_node_bg.end_quad(cx, &inst);
+            node.draw_graph_node(cx, &mut self.graph_node_bg, &mut self.graph_node_port_bg);
         }
 
-        for edge in &mut self.graph_edges {
-            edge.draw_graph_edge(cx);
+        // Only fully set edges
+        let mut edge_list = vec![];
+        for (id, edge) in &self.state.edges {
+            match self.state.get_port_rect(&edge.start) {
+                Some(start) => {
+                    match self.state.get_port_rect(&edge.end) {
+                        Some(end) => {
+                            edge_list.push((
+                                Vec2{x: start.x, y: start.y},
+                                Vec2{x: end.x, y: end.y}
+                            ));
+                        },
+                        _ => ()
+                    }
+                },
+                _ => ()
+            }
         }
+
+        // FIXME: this assumes nothing changed between the vec construction and now.
+        let mut loc = 0;
+        for (id, edge) in &mut self.state.edges {
+            if (loc >= edge_list.len()) {
+                break;
+            }
+            let (start, end) = edge_list[loc];
+            edge.draw_graph_edge(cx,
+                start,
+                end,
+                &mut self.graph_edge_end_bg,
+                &mut self.graph_edge_connector_bg
+            );
+            loc = loc + 1;
+        }
+
+        // TODO: render partial edges (e.g., anchored to one port and still dragging)
 
         self.graph_view.end_view(cx);
     }

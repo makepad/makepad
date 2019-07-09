@@ -1,6 +1,5 @@
 use crate::graphnodeport::*;
 use render::*;
-use serde::ser::{Serialize, SerializeStruct, Serializer};
 use serde::*;
 use uuid::Uuid;
 
@@ -28,16 +27,16 @@ pub enum GraphNodeEvent {
 pub struct GraphNode {
     pub layout: Layout,
     pub id: Uuid,
-    #[serde(skip_serializing, skip_deserializing, default = "build_animator")]
-    pub animator: Animator,
-    #[serde(skip_serializing, skip_deserializing)]
-    pub inputs: Vec<GraphNodePort>,
-    #[serde(skip_serializing, skip_deserializing)]
-    pub outputs: Vec<GraphNodePort>,
-}
 
-fn build_animator() -> Animator {
-    Animator::new(Anim::empty())
+    pub inputs: Vec<GraphNodePort>,
+    pub outputs: Vec<GraphNodePort>,
+
+    #[serde(
+        skip_serializing,
+        skip_deserializing,
+        default = "build_default_animator"
+    )]
+    pub animator: Animator,
 }
 
 impl Style for GraphNode {
@@ -56,25 +55,87 @@ impl Style for GraphNode {
     }
 }
 
+fn build_default_animator() -> Animator {
+    Animator::new(Anim::empty())
+}
+
 impl GraphNode {
-    pub fn draw_graph_node(&mut self, cx: &mut Cx) {
+    pub fn get_port_address(
+        &self,
+        dir: PortDirection,
+        index: usize,
+    ) -> Option<GraphNodePortAddress> {
+        let port_id: Uuid;
+
+        // TODO: ensure the thing exists before blindly using it.
+        match dir {
+            PortDirection::Input => port_id = self.inputs[index].id,
+            PortDirection::Output => port_id = self.outputs[index].id,
+            PortDirection::None => return None,
+        }
+
+        Some(GraphNodePortAddress {
+            node: self.id.clone(),
+            port: port_id,
+            dir: dir,
+        })
+    }
+
+    pub fn get_port_by_address(&self, addr: &GraphNodePortAddress) -> Option<&GraphNodePort> {
+        match addr.dir {
+            PortDirection::Input => {
+                for input in &self.inputs {
+                    if input.id == addr.port {
+                        return Some(input);
+                    }
+                }
+            }
+            PortDirection::Output => {
+                for output in &self.outputs {
+                    if output.id == addr.port {
+                        return Some(output);
+                    }
+                }
+            }
+            _ => (),
+        }
+        None
+    }
+
+    pub fn draw_graph_node(&mut self, cx: &mut Cx, bg: &mut Quad, port_bg: &mut Quad) {
+        // TODO: build layout off of current state
+        let inst = bg.begin_quad(cx, &self.layout);
+
         // TODO: eliminate all of these hardcoded offsets. maybe there is
         // value in defining sub views for inputs/outputs
-        cx.begin_turtle(&Layout::default(), Area::default());
-        cx.move_turtle(-10., 2.0);
+        let mut y = 5.0;
+        let origin = self.layout.abs_origin.unwrap();
+        let size = self.layout.abs_size.unwrap();
         for input in &mut self.inputs {
-            input.draw(cx);
-            cx.move_turtle(-20., 25.);
+            let rect = Rect {
+                x: origin.x - 10.0,
+                y: origin.y + y,
+                w: 20.0,
+                h: 20.0,
+            };
+            input.draw(cx, port_bg, rect);
+            y += 20.0;
         }
-        cx.end_turtle(Area::default());
 
-        cx.begin_turtle(&Layout::default(), Area::default());
-        cx.move_turtle(-10., 2.0);
+        y = 5.0;
         for output in &mut self.outputs {
-            output.draw(cx);
-            cx.move_turtle(-20., 25.);
+            let rect = Rect {
+                x: size.x + origin.x - 10.0,
+                y: origin.y + y,
+                w: 20.0,
+                h: 20.0,
+            };
+            output.draw(cx, port_bg, rect);
+            y += 20.0;
         }
-        cx.end_turtle(Area::default());
+
+        self.animator.update_area_refs(cx, inst.clone().into_area());
+        bg.end_quad(cx, &inst);
     }
 
     pub fn handle_graph_node(&mut self, cx: &mut Cx, event: &mut Event) -> GraphNodeEvent {
