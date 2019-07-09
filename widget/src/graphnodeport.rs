@@ -32,7 +32,6 @@ pub struct GraphNodePortAddress {
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct GraphNodePort {
-    pub node_bg_layout: Layout,
     pub id: Uuid,
     pub aabb: Rect,
     #[serde(
@@ -52,13 +51,8 @@ fn build_default_animator() -> Animator {
 }
 
 impl Style for GraphNodePort {
-    fn style(cx: &mut Cx) -> Self {
+    fn style(_cx: &mut Cx) -> Self {
         Self {
-            node_bg_layout: Layout {
-                width: Bounds::Fix(20.0),
-                height: Bounds::Fix(20.0),
-                ..Default::default()
-            },
             aabb: Rect::default(),
             id: Uuid::new_v4(),
             animator: Animator::new(Anim::empty()),

@@ -14,7 +14,6 @@ pub enum GraphEdgeEvent {
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct GraphEdge {
-    pub node_bg_layout: Layout,
     pub start: GraphNodePortAddress,
     pub end: GraphNodePortAddress,
     pub id: Uuid,
@@ -33,13 +32,6 @@ fn build_default_animator() -> Animator {
 impl Style for GraphEdge {
     fn style(cx: &mut Cx) -> Self {
         Self {
-            node_bg_layout: Layout {
-                abs_origin: Some(Vec2 { x: 100.0, y: 200.0 }),
-                width: Bounds::Fix(200.0),
-                height: Bounds::Fix(100.0),
-                ..Default::default()
-            },
-
             start: GraphNodePortAddress::default(),
             end: GraphNodePortAddress::default(),
             id: Uuid::new_v4(),
@@ -102,14 +94,6 @@ impl GraphEdge {
             }
             Event::FingerUp(fe) => {
                 return GraphEdgeEvent::DragEnd { fe: fe.clone() };
-            }
-            Event::FingerMove(fe) => {
-                self.node_bg_layout.abs_origin = Some(Vec2 {
-                    x: fe.abs.x - fe.rel_start.x,
-                    y: fe.abs.y - fe.rel_start.y,
-                });
-
-                return GraphEdgeEvent::DragMove { fe: fe.clone() };
             }
             _ => (),
         }

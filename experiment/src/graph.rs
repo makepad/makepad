@@ -164,8 +164,7 @@ impl Graph {
             start: src.clone(),
             end: dest.clone(),
             id: Uuid::new_v4(),
-            animator: Animator::new(Anim::empty()),
-            node_bg_layout: Layout::default(),
+            animator: Animator::new(Anim::empty())
         };
         let id = edge.id.clone();
         self.state.edges.insert(id, edge);
@@ -200,10 +199,11 @@ impl Graph {
                     cx.redraw_child_area(Area::All);
                 } else {
                     let node1 = GraphNode {
-                        layout: Layout {
-                            abs_origin: Some(Vec2{x: 100.0, y: 300.0}),
-                            abs_size: Some(Vec2{x: 100.0, y: 50.0}),
-                            ..Layout::default()
+                        aabb: Rect {
+                            x: 100.0,
+                            y: 300.0,
+                            w: 100.0,
+                            h: 50.0,
                         },
                         inputs: vec![
                             GraphNodePort{
@@ -228,10 +228,11 @@ impl Graph {
                     self.add_node(node1);
 
                     let node2 = GraphNode {
-                        layout: Layout {
-                            abs_origin: Some(Vec2{x: 300.0, y: 300.0}),
-                            abs_size: Some(Vec2{x: 100.0, y: 50.0}),
-                            ..Layout::default()
+                        aabb: Rect {
+                            x: 300.0,
+                            y: 300.0,
+                            w: 100.0,
+                            h: 50.0,
                         },
                         inputs: vec![
                             GraphNodePort{

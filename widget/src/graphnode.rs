@@ -25,7 +25,7 @@ pub enum GraphNodeEvent {
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct GraphNode {
-    pub layout: Layout,
+    pub aabb: Rect,
     pub id: Uuid,
 
     pub inputs: Vec<GraphNodePort>,
@@ -42,10 +42,11 @@ pub struct GraphNode {
 impl Style for GraphNode {
     fn style(cx: &mut Cx) -> Self {
         Self {
-            layout: Layout {
-                // width: Bounds::Fix(200.0),
-                // height: Bounds::Fix(100.0),
-                ..Default::default()
+            aabb: Rect {
+                x: 100.0,
+                y: 100.0,
+                w: 200.0,
+                h: 100.0,
             },
             id: Uuid::new_v4(),
             animator: Animator::new(Anim::empty()),
@@ -104,17 +105,17 @@ impl GraphNode {
 
     pub fn draw_graph_node(&mut self, cx: &mut Cx, bg: &mut Quad, port_bg: &mut Quad) {
         // TODO: build layout off of current state
-        let inst = bg.begin_quad(cx, &self.layout);
+        let aabb = self.aabb;
+
+        let inst = bg.draw_quad_abs(cx, aabb);
 
         // TODO: eliminate all of these hardcoded offsets. maybe there is
         // value in defining sub views for inputs/outputs
         let mut y = 5.0;
-        let origin = self.layout.abs_origin.unwrap();
-        let size = self.layout.abs_size.unwrap();
         for input in &mut self.inputs {
             let rect = Rect {
-                x: origin.x - 10.0,
-                y: origin.y + y,
+                x: aabb.x - 10.0,
+                y: aabb.y + y,
                 w: 20.0,
                 h: 20.0,
             };
@@ -125,8 +126,8 @@ impl GraphNode {
         y = 5.0;
         for output in &mut self.outputs {
             let rect = Rect {
-                x: size.x + origin.x - 10.0,
-                y: origin.y + y,
+                x: aabb.w + aabb.x - 10.0,
+                y: aabb.y + y,
                 w: 20.0,
                 h: 20.0,
             };
@@ -135,7 +136,6 @@ impl GraphNode {
         }
 
         self.animator.update_area_refs(cx, inst.clone().into_area());
-        bg.end_quad(cx, &inst);
     }
 
     pub fn handle_graph_node(&mut self, cx: &mut Cx, event: &mut Event) -> GraphNodeEvent {
@@ -166,10 +166,8 @@ impl GraphNode {
                 return GraphNodeEvent::DragEnd { fe: fe.clone() };
             }
             Event::FingerMove(fe) => {
-                self.layout.abs_origin = Some(Vec2 {
-                    x: fe.abs.x - fe.rel_start.x,
-                    y: fe.abs.y - fe.rel_start.y,
-                });
+                self.aabb.x = fe.abs.x - fe.rel_start.x;
+                self.aabb.y = fe.abs.y - fe.rel_start.y;
 
                 return GraphNodeEvent::DragMove { fe: fe.clone() };
             }
