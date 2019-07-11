@@ -118,9 +118,11 @@ impl Button {
     
     pub fn draw_button_with_label(&mut self, cx: &mut Cx, label: &str) {
         self.bg.color = self.animator.last_color("bg.color");
+
         let bg_inst = self.bg.begin_quad(cx, &self.bg_layout);
         bg_inst.push_color(cx, self.animator.last_color("bg.border_color"));
         bg_inst.push_float(cx, self.animator.last_float("bg.glow_size"));
+
         self.text.draw_text(cx, label);
         self._bg_area = self.bg.end_quad(cx, &bg_inst);
         self.animator.update_area_refs(cx, self._bg_area);

@@ -441,7 +441,7 @@ impl Cx {
     pub fn new_instance(&mut self, shader: &Shader, instance_count: usize) -> InstanceArea {
         let shader_id = shader.shader_id.unwrap();
         if !self.is_in_redraw_cycle {
-            panic!("calling get_instance outside of redraw cycle is not possible!");
+            panic!("calling new_instance outside of redraw cycle is not possible!");
         }
         let current_view_id = *self.view_stack.last().unwrap();
         let draw_list = &mut self.views[current_view_id];
@@ -521,7 +521,6 @@ impl DrawCall {
     }
 }
 
-// CX and DL uniforms
 const VW_UNI_SCROLL: usize = 0;
 const VW_UNI_CLIP: usize = 4;
 const VW_UNI_SIZE: usize = 8;

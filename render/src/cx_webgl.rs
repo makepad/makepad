@@ -38,8 +38,8 @@ impl Cx {
                 // update/alloc textures?
                 for texture_id in &draw_call.textures_2d {
                     let cxtexture = &mut self.textures[*texture_id as usize];
-                    if cxtexture.upload_image {
-                        cxtexture.upload_image = false;
+                    if cxtexture.update_image {
+                        cxtexture.update_image = false;
                         self.platform.from_wasm.update_texture_image2d(*texture_id as usize, cxtexture);
                         //Self::update_platform_texture_image2d(&mut self.platform);
                     }
@@ -107,9 +107,6 @@ impl Cx {
                     break;
                 },
                 1 => { // fetch_deps
-                    
-                    // compile all the shaders
-                    self.platform.from_wasm.log(&self.title);
                     
                     // send the UI our deps, overlap with shadercompiler
                     let mut load_deps = Vec::new();
@@ -497,14 +494,14 @@ impl Cx {
         // todo
     }
     
-    pub fn read_file(&mut self, path: &str) -> FileReadRequest {
+    pub fn file_read(&mut self, path: &str) -> FileRead {
         let id = self.platform.file_read_id;
         self.platform.from_wasm.read_file(id as u32, path);
         self.platform.file_read_id += 1;
-        FileReadRequest {read_id: id, path: path.to_string()}
+        FileRead {read_id: id, path: path.to_string()}
     }
     
-    pub fn write_file(&mut self, _path: &str, _data: &[u8]) -> u64 {
+    pub fn file_write(&mut self, _path: &str, _data: &[u8]) -> u64 {
         return 0
     }
     

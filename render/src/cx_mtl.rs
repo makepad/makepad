@@ -10,7 +10,6 @@ use objc::runtime::YES;
 use metal::*;
 use crate::cx_cocoa::*;
 use crate::cx::*;
-use cocoa::base::{id};
 
 impl Cx {
     
@@ -215,7 +214,7 @@ impl Cx {
         let mut passes_todo = Vec::new();
         
         cocoa_app.event_loop( | cocoa_app, events | {
-            let mut paint_dirty = false;
+            //let mut paint_dirty = false;
             for mut event in events {
                 
                 self.process_desktop_pre_event(&mut event, &mut event_handler);
@@ -397,7 +396,7 @@ impl Cx {
                     cocoa_app.terminate_event_loop();
                 }
             }
-            if self.playing_anim_areas.len() == 0 && self.redraw_parent_areas.len() == 0 && self.redraw_child_areas.len() == 0 && self.frame_callbacks.len() == 0 && !paint_dirty {
+            if self.playing_anim_areas.len() == 0 && self.redraw_parent_areas.len() == 0 && self.redraw_child_areas.len() == 0 && self.frame_callbacks.len() == 0 {
                 true
             } else {
                 false

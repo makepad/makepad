@@ -1164,7 +1164,7 @@ pub fn define_cocoa_window_delegate() -> *const Class {
     }
     
     extern fn window_did_resize(this: &Object, _: Sel, _: id) {
-        let cw = get_cocoa_window(this);
+        let _cw = get_cocoa_window(this);
         //cw.send_change_event();
     }
     

@@ -1,6 +1,6 @@
 //use syn::Type;
 use render::*;
-use widget::*;
+use widget::*; 
 use editor::*;
 mod rustcompiler;
 pub use crate::rustcompiler::*;
@@ -55,12 +55,15 @@ struct AppState {
     windows: Vec<AppWindowState>
 }
 
-main_app!(App, "HALLO WORLD");
+main_app!(App);
 
 impl Style for AppWindow {
     fn style(cx: &mut Cx) -> Self {
         Self {
-            desktop_window: DesktopWindow::style(cx),
+            desktop_window: DesktopWindow{
+                caption:"Makepad".to_string(),
+                ..DesktopWindow::style(cx)
+            },
             file_editors: Elements::new(FileEditorTemplates {
                 rust_editor: RustEditor::style(cx),
                 js_editor: JSEditor::style(cx)
@@ -428,7 +431,7 @@ impl App {
                                         create_inner_size: Some(size),
                                         create_position: create_pos,
                                         ..Style::style(cx)
-                                    }, ..Style::style(cx)},
+                                    },  ..self.app_window_template.desktop_window.clone()},
                                     ..self.app_window_template.clone()
                                 })
                             }

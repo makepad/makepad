@@ -29,6 +29,22 @@
 // Multi cursor/grid cursor also works with ctrl+click / ctrl+shift+click
 // press alt or escape for animated codefolding outline view!
 
+/*
+Vision of makepad is to build 'learnable programming' for Rust.
+Easy to learn, hard to master. Few if any barriers to high perf.
+
+Reinventing UI as simple as possible, but not simpler.
+
+Quick makepad UI demo - tree, codefold, dock
+
+Future - live editing of programs, sliders, colorpickers
+
+Web - marketing tool not real target for makepad itself but possible for user programs.
+
+Shaders as first class citizen 
+
+UI system design
+*/
 use render::*;
 use widget::*;
 pub mod capture_winmf;
@@ -460,7 +476,8 @@ impl App {
         if self.loc_history.len()>0{
             let last_loc = &self.loc_history[self.loc_history.len()-1];
             if 
-            (last_loc.center_x != pred_loc.center_x || last_loc.center_y != pred_loc.center_y) &&  dx == 0.0 && dy ==0.0
+            (last_loc.rotate-pred_loc.rotate).abs()>0.05 
+            || (last_loc.center_x != pred_loc.center_x || last_loc.center_y != pred_loc.center_y) &&  dx == 0.0 && dy ==0.0
             || (last_loc.center_x-pred_loc.center_x).abs()>0.1*pred_loc.zoom 
             || (last_loc.center_y-pred_loc.center_y).abs()>0.1*pred_loc.zoom
             || last_loc.zoom > pred_loc.zoom && last_loc.zoom > pred_loc.zoom*1.1

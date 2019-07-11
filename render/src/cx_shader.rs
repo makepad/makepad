@@ -305,9 +305,11 @@ impl CxShader {
             fn df_iq_pal0(t: float)->vec3{
                 return mix(vec3(0.,0.,0.),vec3(1.,1.,1.),cos(t*PI)*0.5+0.5)
             }
+            
             fn df_iq_pal1(t: float)->vec3{
                 return df_iq_pal(t, vec3(0.5, 0.5, 0.5), vec3(0.5, 0.5, 0.5), vec3(1., 1., 1.), vec3(0., 0.33, 0.67));
             }
+            
             fn df_iq_pal2(t: float)->vec3{
                 return df_iq_pal(t, vec3(0.5,0.5,0.5), vec3(0.5,0.5,0.5), vec3(1.,1.,1.), vec3(0., 0.1, 0.2));
             }
