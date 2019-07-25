@@ -754,5 +754,5 @@ use std::process::{Command, Child, Stdio};
 use std::os::unix::process::{CommandExt};
 
 pub fn spawn_process_command(cmd: &str, args: &[&str], current_dir: &str) -> Result<Child, std::io::Error> {
-    unsafe {Command::new(cmd) .args(args) .pre_exec(close_fds_on_exec(vec![0, 1, 2]).unwrap()) .stdout(Stdio::piped()) .stderr(Stdio::piped()) .current_dir(current_dir) .spawn()}
+    Err(std::io::Error::new(std::io::ErrorKind::NotFound, ""))
 }
