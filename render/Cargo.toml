@@ -21,11 +21,17 @@ objc = "0.2.3"
 
 [target.x86_64-unknown-linux-gnu.dependencies]
 closefds = "*"
+gl = "*"
+libc = "*"
 time = "0.1.4"
+x11-dl = "*"
 
 [target.armv7-unknown-linux-gnueabihf.dependencies]
 closefds = "*"
+gl = "*"
+libc = "*"
 time = "0.1.4"
+x11-dl = "*"
 
 [target.x86_64-pc-windows-gnu.dependencies]
 wio = "*"

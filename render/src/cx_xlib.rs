@@ -1,28 +1,43 @@
 use crate::cx::*;
+use libc;
+use std::collections::HashMap;
+use std::ffi::CString;
+use std::mem;
+use std::os::raw::{c_int, c_ulong};
+use std::ptr;
 use time::precise_time_ns;
+use x11_dl::xlib;
+use x11_dl::xlib::{Display, XVisualInfo, Xlib};
 
 static mut GLOBAL_XLIB_APP: *mut XlibApp = 0 as *mut _;
 
 pub struct XlibApp {
+    pub xlib: Xlib,
+    pub display: *mut Display,
+    pub display_fd: c_int,
+    pub window_map: HashMap<c_ulong, *mut XlibWindow>,
+
     pub time_start: u64,
     pub event_callback: Option<*mut FnMut(&mut XlibApp, &mut Vec<Event>) -> bool>,
     pub event_recur_block: bool,
     pub event_loop_running: bool,
     pub timers: Vec<XlibTimer>,
     pub free_timers: Vec<usize>,
-    
+
     pub loop_block: bool,
     pub current_cursor: MouseCursor,
 }
 
 #[derive(Clone)]
 pub struct XlibWindow {
+    pub window: Option<c_ulong>,
+
     pub window_id: usize,
     pub xlib_app: *mut XlibApp,
     pub last_window_geom: WindowGeom,
-    
+
     pub time_start: u64,
-    
+
     pub last_key_mod: KeyModifiers,
     pub ime_spot: Vec2,
     pub current_cursor: MouseCursor,
@@ -38,64 +53,93 @@ pub enum XlibTimer {
 
 impl XlibApp {
     pub fn new() -> XlibApp {
-        let xlib_app = XlibApp {
-            time_start: precise_time_ns(),
-            event_callback: None,
-            event_recur_block: false,
-            event_loop_running: true,
-            loop_block: false,
-            timers: Vec::new(),
-            free_timers: Vec::new(),
-            current_cursor: MouseCursor::Default
-        };
-        
-        xlib_app
+        unsafe {
+            let xlib = Xlib::open().unwrap();
+            let display = (xlib.XOpenDisplay)(ptr::null());
+            let display_fd = (xlib.XConnectionNumber)(display);
+            XlibApp {
+                xlib,
+                display,
+                display_fd,
+                window_map: HashMap::new(),
+                time_start: precise_time_ns(),
+                event_callback: None,
+                event_recur_block: false,
+                event_loop_running: true,
+                loop_block: false,
+                timers: Vec::new(),
+                free_timers: Vec::new(),
+                current_cursor: MouseCursor::Default
+            }
+        }
     }
-    
+
     pub fn init(&mut self) {
         unsafe {
             GLOBAL_XLIB_APP = self;
         }
     }
-    
+
     pub fn event_loop<F>(&mut self, mut event_handler: F)
     where F: FnMut(&mut XlibApp, &mut Vec<Event>) -> bool,
     {
-        //unsafe {
+        unsafe {
             self.event_callback = Some(
                 &mut event_handler as *const FnMut(&mut XlibApp, &mut Vec<Event>) -> bool
                 as *mut FnMut(&mut XlibApp, &mut Vec<Event>) -> bool
             );
-            
+
+            self.do_callback(&mut vec![
+                Event::Paint,
+                Event::Paint,
+            ]);
+
+            let xlib = &self.xlib;
+            let display = self.display;
+            let display_fd = self.display_fd;
+
             while self.event_loop_running {
-                //let mut msg = mem::uninitialized();
-                
                 if self.loop_block {
-                    //if winuser::GetMessageW(&mut msg, ptr::null_mut(), 0, 0) == 0 {
-                    //    // Only happens if the message is `WM_QUIT`.
-                    //    debug_assert_eq!(msg.message, winuser::WM_QUIT);
-                    //    self.event_loop_running = false;
-                   // }
-                   // else {
-                   //     winuser::TranslateMessage(&msg);
-                    //    winuser::DispatchMessageW(&msg);
-                    //    self.do_callback(&mut vec![Event::Paint]);
-                    //}
+                    let mut fds = mem::uninitialized();
+                    libc::FD_ZERO(&mut fds);
+                    libc::FD_SET(self.display_fd, &mut fds);
+                    let nfds = libc::select(
+                        self.display_fd + 1,
+                        &mut fds,
+                        ptr::null_mut(),
+                        ptr::null_mut(),
+                        ptr::null_mut(),
+                    );
                 }
-                else {
-                   // if winuser::PeekMessageW(&mut msg, ptr::null_mut(), 0, 0, 1) == 0 {
-                   //     self.do_callback(&mut vec![Event::Paint])
-                   // }
-                   // else {
-                   //     winuser::TranslateMessage(&msg);
-                   //     winuser::DispatchMessageW(&msg);
-                   // }
+
+                while (xlib.XPending)(display) != 0 {
+                    let mut event = mem::uninitialized();
+                    (xlib.XNextEvent)(display, &mut event);
+                    match event.type_ {
+                        xlib::ClientMessage => {
+                            /*
+                            if event.client_message.data.get_long(0) as u64 == wm_delete_message {
+                                self.event_loop_running = false;
+                            }
+                            */
+                        }
+                        xlib::Expose => {
+                            /*
+                            (glx.glXMakeCurrent)(display, window, context);
+                            gl::ClearColor(1.0, 0.0, 0.0, 1.0);
+                            gl::Clear(gl::COLOR_BUFFER_BIT);
+                            (glx.glXSwapBuffers)(display, window);
+                            */
+                        }
+                        _ => {}
+                    }
                 }
             }
+
             self.event_callback = None;
-        //}
+        }
     }
-    
+
     pub fn do_callback(&mut self, events: &mut Vec<Event>) {
         unsafe {
             if self.event_callback.is_none() || self.event_recur_block {
@@ -107,7 +151,7 @@ impl XlibApp {
             self.event_recur_block = false;
         }
     }
-    
+
     pub fn get_free_timer_slot(&mut self) -> usize {
         if self.free_timers.len()>0 {
             self.free_timers.pop().unwrap()
@@ -118,7 +162,7 @@ impl XlibApp {
             slot
         }
     }
-    
+
     pub fn start_timer(&mut self, timer_id: u64, interval: f64, repeats: bool) {
         let slot = self.get_free_timer_slot();
         //let win32_id = unsafe {winuser::SetTimer(NULL as HWND, 0, (interval * 1000.0) as u32, Some(Self::timer_proc))};
@@ -128,7 +172,7 @@ impl XlibApp {
             repeats: repeats
         };
     }
-    
+
     pub fn stop_timer(&mut self, which_timer_id: u64) {
         for slot in 0..self.timers.len() {
             if let XlibTimer::Timer {timer_id, ..} = self.timers[slot] {
@@ -140,7 +184,7 @@ impl XlibApp {
             }
         }
     }
-    
+
     pub fn post_signal(_signal_id: usize, _value: usize) {
         //unsafe {
             //let win32_app = &mut (*GLOBAL_WIN32_APP);
@@ -149,17 +193,19 @@ impl XlibApp {
            // }
         //}
     }
-    
+
     pub fn terminate_event_loop(&mut self) {
         // maybe need to do more here
         self.event_loop_running = false;
+
+        unsafe { (self.xlib.XCloseDisplay)(self.display) };
     }
-    
+
     pub fn time_now(&self) -> f64 {
         let time_now = precise_time_ns();
         (time_now - self.time_start) as f64 / 1_000_000_000.0
     }
-    
+
     pub fn set_mouse_cursor(&mut self, cursor: MouseCursor) {
         if self.current_cursor != cursor {
             /*
@@ -203,12 +249,14 @@ impl XlibApp {
 }
 
 impl XlibWindow {
-    
+
     pub fn new(xlib_app: &mut XlibApp, window_id: usize) -> XlibWindow {
         let mut fingers_down = Vec::new();
         fingers_down.resize(NUM_FINGERS, false);
-        
+
         XlibWindow {
+            window: None,
+
             window_id: window_id,
             xlib_app: xlib_app,
             last_window_geom: WindowGeom::default(),
@@ -220,13 +268,57 @@ impl XlibWindow {
             fingers_down: fingers_down,
         }
     }
-    
-    pub fn init(&mut self, _title: &str, _size: Vec2, _position: Option<Vec2>) {
-        
-        //unsafe {
-        //}
+
+    pub fn init(&mut self, _title: &str, _size: Vec2, _position: Option<Vec2>, visual_info: *mut XVisualInfo) {
+        unsafe {
+            let xlib = &(*self.xlib_app).xlib;
+            let display = (*self.xlib_app).display;
+
+            // The default screen of the display
+            let default_screen = (xlib.XDefaultScreen)(display);
+
+            // The root window of the default screen
+            let root_window = (xlib.XRootWindow)(display, default_screen);
+
+            let mut attributes = mem::zeroed::<xlib::XSetWindowAttributes>();
+            attributes.border_pixel = 0;
+            attributes.colormap =
+                (xlib.XCreateColormap)(display, root_window, (*visual_info).visual, xlib::AllocNone);
+            attributes.event_mask = xlib::ExposureMask | xlib::StructureNotifyMask;
+
+            // Create a window
+            let window = (xlib.XCreateWindow)(
+                display,
+                root_window,
+                464,
+                194,
+                512,
+                512,
+                0,
+                (*visual_info).depth,
+                xlib::InputOutput as u32,
+                (*visual_info).visual,
+                xlib::CWBorderPixel | xlib::CWColormap | xlib::CWEventMask,
+                &mut attributes,
+            );
+
+            // Tell the window manager that we want to be notified when the window is closed
+            let mut wm_delete_message = (xlib.XInternAtom)(
+                display,
+                CString::new("WM_DELETE_WINDOW").unwrap().as_ptr(),
+                xlib::False,
+            );
+            (xlib.XSetWMProtocols)(display, window, &mut wm_delete_message, 1);
+
+            // Map the window to the screen
+            (xlib.XMapWindow)(display, window);
+
+            (xlib.XFlush)(display);
+
+            self.window = Some(window);
+        }
     }
-    
+
     pub fn get_key_modifiers() -> KeyModifiers {
         //unsafe {
             KeyModifiers {
@@ -237,38 +329,38 @@ impl XlibWindow {
             }
         //}
     }
-    
+
     pub fn update_ptrs(&mut self) {
         //unsafe {
         //}
     }
-    
+
     pub fn on_mouse_move(&self) {
     }
-    
-    
+
+
     pub fn set_mouse_cursor(&mut self, _cursor: MouseCursor) {
     }
-    
+
     pub fn restore(&self) {
     }
-    
+
     pub fn maximize(&self) {
     }
-    
+
     pub fn close_window(&self) {
     }
-    
+
     pub fn minimize(&self) {
     }
-    
+
     pub fn set_topmost(&self, _topmost: bool) {
     }
-    
+
     pub fn get_is_topmost(&self) -> bool {
         false
     }
-    
+
     pub fn get_window_geom(&self) -> WindowGeom {
         WindowGeom {
             is_topmost: self.get_is_topmost(),
@@ -279,57 +371,57 @@ impl XlibWindow {
             position: self.get_position()
         }
     }
-    
+
     pub fn get_is_maximized(&self) -> bool {
         false
     }
-    
+
     pub fn time_now(&self) -> f64 {
         let time_now = precise_time_ns();
         (time_now - self.time_start) as f64 / 1_000_000_000.0
     }
-    
+
     pub fn set_ime_spot(&mut self, spot: Vec2) {
         self.ime_spot = spot;
     }
-    
+
     pub fn get_position(&self) -> Vec2 {
         Vec2::zero()
     }
-    
+
     pub fn get_inner_size(&self) -> Vec2 {
         Vec2::zero()
     }
-    
+
     pub fn get_outer_size(&self) -> Vec2 {
         Vec2::zero()
     }
-    
+
     pub fn set_position(&mut self, _pos: Vec2) {
     }
-    
+
     pub fn set_outer_size(&self, _size: Vec2) {
     }
-    
+
     pub fn set_inner_size(&self, _size: Vec2) {
     }
-    
+
     pub fn get_dpi_factor(&self) -> f32 {
         1.0
     }
-    
+
     pub fn do_callback(&mut self, events: &mut Vec<Event>) {
         unsafe {
             (*self.xlib_app).do_callback(events);
         }
     }
-    
+
     pub fn send_change_event(&mut self) {
-        
+
         let new_geom = self.get_window_geom();
         let old_geom = self.last_window_geom.clone();
         self.last_window_geom = new_geom.clone();
-        
+
         self.do_callback(&mut vec![
             Event::WindowGeomChange(WindowGeomChangeEvent {
                 window_id: self.window_id,
@@ -339,15 +431,15 @@ impl XlibWindow {
             Event::Paint
         ]);
     }
-    
+
     pub fn send_focus_event(&mut self) {
         self.do_callback(&mut vec![Event::AppFocus]);
     }
-    
+
     pub fn send_focus_lost_event(&mut self) {
         self.do_callback(&mut vec![Event::AppFocusLost]);
     }
-    
+
     pub fn send_finger_down(&mut self, digit: usize, modifiers: KeyModifiers) {
         let mut down_count = 0;
         for is_down in &self.fingers_down {
@@ -372,7 +464,7 @@ impl XlibWindow {
             time: self.time_now()
         })]);
     }
-    
+
     pub fn send_finger_up(&mut self, digit: usize, modifiers: KeyModifiers) {
         self.fingers_down[digit] = false;
         let mut down_count = 0;
@@ -398,7 +490,7 @@ impl XlibWindow {
             time: self.time_now()
         })]);
     }
-    
+
     pub fn send_finger_hover_and_move(&mut self, pos: Vec2, modifiers: KeyModifiers) {
         self.last_mouse_pos = pos;
         let mut events = Vec::new();
@@ -432,7 +524,7 @@ impl XlibWindow {
         }));
         self.do_callback(&mut events);
     }
-    
+
     pub fn send_close_requested_event(&mut self) -> bool {
         let mut events = vec![Event::WindowCloseRequested(WindowCloseRequestedEvent {window_id: self.window_id, accept_close: true})];
         self.do_callback(&mut events);
@@ -441,7 +533,7 @@ impl XlibWindow {
         }
         true
     }
-    
+
     pub fn send_text_input(&mut self, input: String, replace_last: bool) {
         self.do_callback(&mut vec![Event::TextInput(TextInputEvent {
             input: input,
@@ -449,5 +541,5 @@ impl XlibWindow {
             replace_last: replace_last
         })])
     }
-    
+
 }
