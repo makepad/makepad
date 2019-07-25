@@ -749,10 +749,10 @@ impl OpenglBuffer {
     }
 }
 
-use closefds::*;
-use std::process::{Command, Child, Stdio};
-use std::os::unix::process::{CommandExt};
+//use closefds::*;
+//use std::process::{Command, Child, Stdio};
+//use std::os::unix::process::{CommandExt};
 
-pub fn spawn_process_command(cmd: &str, args: &[&str], current_dir: &str) -> Result<Child, std::io::Error> {
+pub fn spawn_process_command(_cmd: &str, _args: &[&str], _current_dir: &str) -> Result<Child, std::io::Error> {
     Err(std::io::Error::new(std::io::ErrorKind::NotFound, ""))
 }
