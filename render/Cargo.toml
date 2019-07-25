@@ -10,14 +10,22 @@ serde = { version = "1.0", features = ["derive"] }
 
 [target.x86_64-apple-darwin.dependencies]
 closefds = "*"
-libc = "0.2"
 time = "0.1.4"
+libc = "0.2"
 metal = "0.14"
 cocoa = "0.18"
 core-graphics = "*"
 objc-foundation = "0.1"
 objc_id = "0.1"
 objc = "0.2.3"
+
+[target.x86_64-unknown-linux-gnu.dependencies]
+closefds = "*"
+time = "0.1.4"
+
+[target.armv7-unknown-linux-gnueabihf.dependencies]
+closefds = "*"
+time = "0.1.4"
 
 [target.x86_64-pc-windows-gnu.dependencies]
 wio = "*"
