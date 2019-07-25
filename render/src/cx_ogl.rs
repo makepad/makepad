@@ -74,7 +74,7 @@ impl Cx{
             gl::ClearColor(self.clear_color.r, self.clear_color.g, self.clear_color.b, self.clear_color.a);
             gl::Clear(gl::COLOR_BUFFER_BIT|gl::DEPTH_BUFFER_BIT);
         }
-        self.prepare_frame();        
+        self.prepare_frame();
         self.exec_draw_list(0);
 
         glutin_window.swap_buffers().unwrap();
@@ -681,7 +681,7 @@ impl Cx{
             let id = texture_2d_ids[o] as usize;
             unsafe{
                 gl::ActiveTexture(gl::TEXTURE0 + o as u32);
-            }        
+            }
             
             if loc.loc >=0{
                 let tex = &mut textures_2d[id];

@@ -370,7 +370,7 @@ impl Cx {
         }
     }
     
-    pub fn lock_turtle_width(&mut self) {
+    pub fn compute_turtle_width(&mut self) {
         if let Some(turtle) = self.turtles.last_mut() {
             if turtle.width.is_nan() {
                 if turtle.bound_right_bottom.x != std::f32::NEG_INFINITY { // nothing happened, use padding
@@ -382,7 +382,7 @@ impl Cx {
         }
     }
     
-    pub fn lock_turtle_height(&mut self) {
+    pub fn compute_turtle_height(&mut self) {
         if let Some(turtle) = self.turtles.last_mut() {
             if turtle.height.is_nan() {
                 if turtle.bound_right_bottom.y != std::f32::NEG_INFINITY { // nothing happened use the padding

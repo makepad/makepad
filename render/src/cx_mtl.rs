@@ -235,7 +235,7 @@ impl Cx {
                         // ok lets not redraw all, just this window
                         self.call_event_handler(&mut event_handler, &mut event);
                     },
-                    Event::WindowClosed(wc) => { // do this here because mac
+                    Event::WindowClosed(wc) => { 
                         // lets remove the window from the set
                         self.windows[wc.window_id].window_state = CxWindowState::Closed;
                         self.windows_free.push(wc.window_id);
@@ -351,26 +351,26 @@ impl Cx {
                                         // find the accompanying render window
                                         // its a render window
                                         windows_need_repaint -= 1;
-                                        if let Some(render_window) = metal_windows.iter_mut().find( | w | w.window_id == window_id) {
-                                            render_window.set_vsync_enable(windows_need_repaint == 0 && vsync);
-                                            render_window.set_buffer_count(
-                                                if render_window.window_geom.is_fullscreen {3}else {2}
+                                        for metal_window in &mut metal_windows {if metal_window.window_id == window_id {
+                                            metal_window.set_vsync_enable(windows_need_repaint == 0 && vsync);
+                                            metal_window.set_buffer_count(
+                                                if metal_window.window_geom.is_fullscreen {3}else {2}
                                             );
                                             
-                                            let dpi_factor = render_window.window_geom.dpi_factor;
+                                            let dpi_factor = metal_window.window_geom.dpi_factor;
                                             self.passes[*pass_id].set_dpi_factor(dpi_factor);
                                             
-                                            render_window.resize_core_animation_layer(&metal_cx);
+                                            metal_window.resize_core_animation_layer(&metal_cx);
                                             
                                             self.passes[*pass_id].paint_dirty = false;
                                             
                                             self.draw_pass_to_layer(
                                                 *pass_id,
                                                 dpi_factor,
-                                                &render_window.core_animation_layer,
+                                                &metal_window.core_animation_layer,
                                                 &metal_cx,
                                             );
-                                        }
+                                        }}
                                     }
                                     CxPassDepOf::Pass(parent_pass_id) => {
                                         let dpi_factor = self.get_delegated_dpi_factor(parent_pass_id);

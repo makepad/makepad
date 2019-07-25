@@ -170,7 +170,7 @@ impl DesktopWindow {
                 
                 // change alignment
                 cx.realign_turtle(Align::center());
-                cx.lock_turtle_height();
+                cx.compute_turtle_height();
                 cx.reset_turtle_walk();
                 cx.move_turtle(50., 0.);
                 // we need to store our caption rect somewhere.

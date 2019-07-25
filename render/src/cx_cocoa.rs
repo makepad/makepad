@@ -112,6 +112,23 @@ impl CocoaApp {
             if ns_app == nil {
                 panic!("App is nil");
             }
+            
+            let menu: id = msg_send![class!(NSMenu), init: NSString::alloc(nil).init_str("MainMenu")];
+            let makepad_menu: id = msg_send![class!(NSMenu), init: NSString::alloc(nil).init_str("Apple")];
+            let makepad_item: id = msg_send![class!(NSMenuItem), title: NSString::alloc(nil).init_str("MakePad")];
+            let makepad_quit: id = msg_send![
+                class!(NSMenuItem),
+                title: NSString::alloc(nil).init_str("MakePad")
+                action: NSString::alloc(nil).init_str("terminate:")
+                keyEquivalent: NSString::alloc(nil).init_str("q")
+            ];
+            
+            // add our menu
+            msg_send![
+                ns_app,
+                setMainMenu: menu
+            ];
+            
             ns_app.setActivationPolicy_(appkit::NSApplicationActivationPolicy::NSApplicationActivationPolicyRegular);
             ns_app.finishLaunching();
             let current_app = appkit::NSRunningApplication::currentApplication(nil);
@@ -585,7 +602,7 @@ impl CocoaWindow {
             
             self.window.setAcceptsMouseMovedEvents_(YES);
             
-            msg_send![self.view, setLayerContentsRedrawPolicy: 2];//duringViewResize
+            msg_send![self.view, setLayerContentsRedrawPolicy: 2]; //duringViewResize
             
             self.window.setContentView_(self.view);
             self.window.makeFirstResponder_(self.view);
@@ -1063,30 +1080,6 @@ fn get_cocoa_app(this: &Object) -> &mut CocoaApp {
         &mut *(ptr as *mut CocoaApp)
     }
 }
-/*
-pub fn define_layer_delegate() -> *const Class {
-    
-    extern fn display(this: &Object, _: Sel, nstimer: id) {
-        println!("DISPLAY!");
-        let cw = get_cocoa_window(this);
-        cw.send_change_event();
-    }
-    
-    let superclass = class!(NSObject);
-    let mut decl = ClassDecl::new("LayerDelegate", superclass).unwrap();
-    
-    // Add callback methods
-    unsafe {
-        decl.add_method(sel!(display:), display as extern fn(&Object, Sel, id));
-    }
-    // Store internal state as user data
-    decl.add_ivar::<*mut c_void>("cocoa_window_ptr");
-    let protocol = Protocol::get("CALayerDelegate").unwrap();
-    //println!("NTextInputClient {}", protocol);
-    decl.add_protocol(&protocol);
-    
-    return decl.register();
-}*/
 
 pub fn define_cocoa_timer_delegate() -> *const Class {
     
@@ -1585,12 +1578,12 @@ pub fn define_cocoa_view_class() -> *const Class {
     extern fn yes_function(_this: &Object, _se: Sel, _event: id) -> BOOL {
         YES
     }
-
+    
     extern fn display_layer(this: &Object, _: Sel, _calayer: id) {
         let cw = get_cocoa_window(this);
         cw.send_change_event();
     }
-/*
+    /*
     extern fn draw(this: &Object, _: Sel, _calayer: id, _cgcontext: id) {
         println!("draw");
         //let cw = get_cocoa_window(this);
@@ -1602,7 +1595,7 @@ pub fn define_cocoa_view_class() -> *const Class {
         //let cw = get_cocoa_window(this);
         //cw.send_change_event();
     }*/
-
+    
     
     let superclass = class!(NSView);
     let mut decl = ClassDecl::new("RenderViewClass", superclass).unwrap();
@@ -1654,7 +1647,7 @@ pub fn define_cocoa_view_class() -> *const Class {
         decl.add_method(sel!(acceptsFirstResponder:), yes_function as extern fn(&Object, Sel, id) -> BOOL);
         decl.add_method(sel!(becomeFirstResponder:), yes_function as extern fn(&Object, Sel, id) -> BOOL);
         decl.add_method(sel!(resignFirstResponder:), yes_function as extern fn(&Object, Sel, id) -> BOOL);
-
+        
         decl.add_method(sel!(displayLayer:), display_layer as extern fn(&Object, Sel, id));
     }
     decl.add_ivar::<*mut c_void>("cocoa_window_ptr");
