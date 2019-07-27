@@ -1,12 +1,8 @@
 [package]
-name = "example"
+name = "mandelbrot"
 version = "0.1.0"
 authors = ["makepaddev"]
 edition = "2018"
-
-[[bin]]
-name="example"
-path="src/example.rs"
 
 [dependencies]
 serde_json = "*"
@@ -14,10 +10,10 @@ scoped_threadpool = "*"
 serde = { version = "1.0", features = ["derive"] }
 
 [dependencies.widget]
-path="../widget"
+path="../../widget"
 
 [dependencies.render]
-path="../render"
+path="../../render"
 
 [target.x86_64-pc-windows-gnu.dependencies]
 wio = "*"

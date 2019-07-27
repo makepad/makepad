@@ -1,0 +1,13 @@
+[package]
+name = "quad"
+version = "0.1.0"
+authors = ["makepaddev"]
+edition = "2018"
+
+[dependencies]
+
+[dependencies.widget]
+path="../../widget"
+
+[dependencies.render]
+path="../../render"

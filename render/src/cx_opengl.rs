@@ -315,6 +315,7 @@ impl Cx {
                                         for opengl_window in &mut opengl_windows {if opengl_window.window_id == window_id {
                                             
                                             let dpi_factor = opengl_window.window_geom.dpi_factor;
+
                                             self.passes[*pass_id].set_dpi_factor(dpi_factor);
                                             
                                             opengl_window.resize_framebuffer(&opengl_cx);

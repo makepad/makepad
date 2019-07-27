@@ -113,7 +113,7 @@ impl CocoaApp {
                 panic!("App is nil");
             }
             
-            let menu: id = msg_send![class!(NSMenu), init: NSString::alloc(nil).init_str("MainMenu")];
+            /*let menu: id = msg_send![class!(NSMenu), init: NSString::alloc(nil).init_str("MainMenu")];
             let makepad_menu: id = msg_send![class!(NSMenu), init: NSString::alloc(nil).init_str("Apple")];
             let makepad_item: id = msg_send![class!(NSMenuItem), title: NSString::alloc(nil).init_str("MakePad")];
             let makepad_quit: id = msg_send![
@@ -128,7 +128,7 @@ impl CocoaApp {
                 ns_app,
                 setMainMenu: menu
             ];
-            
+            */
             ns_app.setActivationPolicy_(appkit::NSApplicationActivationPolicy::NSApplicationActivationPolicyRegular);
             ns_app.finishLaunching();
             let current_app = appkit::NSRunningApplication::currentApplication(nil);
