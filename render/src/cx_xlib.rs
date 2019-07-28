@@ -496,7 +496,6 @@ impl XlibWindow {
             let display = (*self.xlib_app).display;
             let resource_string = (xlib.XResourceManagerString)(display);
             let db = (xlib.XrmGetStringDatabase)(resource_string);
-            println!("{}", db as *const _ as u64);
             let mut ty = mem::uninitialized();
             let mut value = mem::uninitialized();
             (xlib.XrmGetResource)(
@@ -506,6 +505,7 @@ impl XlibWindow {
                 &mut ty,
                 &mut value
             );
+            println!("{}", value.addr as *const _ as u64);
             let dpi: f32 = CStr::from_ptr(value.addr).to_str().unwrap().parse().unwrap();
             return dpi / 96.0;
         }
