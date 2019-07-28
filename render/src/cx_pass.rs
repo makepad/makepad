@@ -81,7 +81,7 @@ impl Pass {
     pub fn set_ortho_matrix(&mut self, cx: &mut Cx, offset: Vec2, size: Vec2,) {
         let ortho_matrix = Mat4::ortho(
             offset.x,
-            offset.x + size.x,
+            offset.x + size.x*0.25,
             offset.y,
             offset.y + size.y,
             -100.0,

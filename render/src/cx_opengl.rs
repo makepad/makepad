@@ -90,7 +90,7 @@ impl Cx {
             gl::Viewport(
                 0,
                 0,
-                (opengl_window.window_geom.inner_size.x * opengl_window.window_geom.dpi_factor) as i32,
+                (opengl_window.window_geom.inner_size.x * opengl_window.window_geom.dpi_factor * 0.25) as i32,
                 (opengl_window.window_geom.inner_size.y * opengl_window.window_geom.dpi_factor) as i32
             );
         }
