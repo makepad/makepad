@@ -9,18 +9,18 @@ use x11_dl::xlib;
 
 impl Cx {
     
-    pub fn render_view(&mut self, pass_id: usize, view_id: usize, partial: bool, opengl_cx: &OpenglCx) {
+    pub fn render_view(&mut self, pass_id: usize, view_id: usize, full_repaint: bool, opengl_cx: &OpenglCx) {
         
         // tad ugly otherwise the borrow checker locks 'self' and we can't recur
         let draw_calls_len = self.views[view_id].draw_calls_len;
-        if partial && !self.views[view_id].partial_repaint {
+        if !full_repaint && !self.views[view_id].partial_repaint {
             return
         }
         self.views[view_id].set_clipping_uniforms();
         for draw_call_id in 0..draw_calls_len {
             let sub_view_id = self.views[view_id].draw_calls[draw_call_id].sub_view_id;
             if sub_view_id != 0 {
-                self.render_view(pass_id, sub_view_id, partial, opengl_cx);
+                self.render_view(pass_id, sub_view_id, full_repaint, opengl_cx);
             }
             else {
                 let cxview = &mut self.views[view_id];
@@ -110,7 +110,7 @@ impl Cx {
         pass_id: usize,
         _dpi_factor: f32,
         xlib_app: &XlibApp,
-        opengl_window: &OpenglWindow,
+        opengl_window: &mut OpenglWindow,
         opengl_cx: &OpenglCx,
     ) {
         let view_id = self.passes[pass_id].main_view_id.unwrap();
@@ -120,58 +120,66 @@ impl Cx {
         
         self.calc_dirty_bounds(pass_id, view_id, &mut view_bounds);
         
-        let pixel_width = opengl_window.window_geom.inner_size.x;
-        let pixel_height = opengl_window.window_geom.inner_size.y;
+        let mut full_repaint = view_bounds.max_x - view_bounds.min_x == opengl_window.window_geom.inner_size.x
+            && view_bounds.max_y - view_bounds.min_y == opengl_window.window_geom.inner_size.y;
         
-        let full_repaint = view_bounds.max_x - view_bounds.min_x == pixel_width &&
-        view_bounds.max_y - view_bounds.min_y == pixel_height;
         //println!("{} {}", view_bounds.max_x - view_bounds.min_x, pixel_width);
         let window;
         if full_repaint {
+            println!("DOING A FULL REPAINT!");
+            opengl_window.xlib_window.move_resize_window_dirty(0, 0, 1, 1);
             window = opengl_window.xlib_window.window.unwrap();
             let pass_size = self.passes[pass_id].pass_size;
             self.passes[pass_id].set_ortho_matrix(Vec2::zero(), pass_size);
+            let pix_width = opengl_window.window_geom.inner_size.x * opengl_window.window_geom.dpi_factor;
+            let pix_height = opengl_window.window_geom.inner_size.y * opengl_window.window_geom.dpi_factor;
+            
+            unsafe {
+                (opengl_cx.glx.glXMakeCurrent)(xlib_app.display, window, opengl_cx.context);
+                gl::Viewport(0, 0, pix_width as i32, pix_height as i32);
+            }
         }
         else {
+            if view_bounds.max_x == std::f32::NEG_INFINITY {
+                return
+            }
+            let pix_width = ((view_bounds.max_x - view_bounds.min_x) * opengl_window.window_geom.dpi_factor);
+            let pix_height = ((view_bounds.max_y - view_bounds.min_y) * opengl_window.window_geom.dpi_factor);
+
+             println!("DOING A PARTIAL REPAINT! {} {}", pix_width, pix_height);
+            
             opengl_window.xlib_window.move_resize_window_dirty(
-                view_bounds.min_x as i32,
-                view_bounds.min_y as i32,
-                ((view_bounds.max_x - view_bounds.min_x) * opengl_window.window_geom.dpi_factor) as u32,
-                ((view_bounds.max_y - view_bounds.min_y) * opengl_window.window_geom.dpi_factor) as u32
+                (view_bounds.min_x * opengl_window.window_geom.dpi_factor) as i32,
+                (view_bounds.min_y * opengl_window.window_geom.dpi_factor) as i32,
+                pix_width as u32,
+                pix_height as u32
             );
             window = opengl_window.xlib_window.window_dirty.unwrap();
             let pass_size = self.passes[pass_id].pass_size;
-            println!("{}", view_bounds.min_y);
             self.passes[pass_id].set_ortho_matrix(
-                Vec2 {
-                    x: -view_bounds.min_x / opengl_window.window_geom.dpi_factor,
-                    y: -view_bounds.min_y / opengl_window.window_geom.dpi_factor
-                },
-                pass_size
+                Vec2 {x: view_bounds.min_x, y: view_bounds.min_y},
+                Vec2 {x: pix_width / opengl_window.window_geom.dpi_factor, y: pix_height / opengl_window.window_geom.dpi_factor}
             );
+            
+            unsafe {
+                (opengl_cx.glx.glXMakeCurrent)(xlib_app.display, window, opengl_cx.context);
+                gl::Viewport(0, 0, pix_width as i32, pix_height as i32);
+            }
         }
         
         unsafe {
             //(opengl_cx.glx.glXMakeCurrent)(xlib_app.display, opengl_window.xlib_window.window.unwrap(), opengl_cx.context);
-            (opengl_cx.glx.glXMakeCurrent)(xlib_app.display, window, opengl_cx.context);
             gl::Disable(gl::DEPTH_TEST);
-            //gl::DepthFunc(gl::LEQUAL);
             gl::BlendEquationSeparate(gl::FUNC_ADD, gl::FUNC_ADD);
             gl::BlendFuncSeparate(gl::ONE, gl::ONE_MINUS_SRC_ALPHA, gl::ONE, gl::ONE_MINUS_SRC_ALPHA);
             gl::Enable(gl::BLEND);
-            gl::Viewport(
-                0,
-                0,
-                (pixel_width * opengl_window.window_geom.dpi_factor) as i32,
-                (pixel_height * opengl_window.window_geom.dpi_factor) as i32
-            );
         }
         
         if self.passes[pass_id].color_textures.len()>0 {
             let color_texture = &self.passes[pass_id].color_textures[0];
             if let Some(color) = color_texture.clear_color {
                 unsafe {
-                    gl::ClearColor(color.r, color.g, color.b, color.a);
+                    gl::ClearColor(if full_repaint {color.r}else {0.5}, color.g, color.b, color.a);
                     gl::Clear(gl::COLOR_BUFFER_BIT | gl::DEPTH_BUFFER_BIT);
                 }
             }
@@ -184,7 +192,7 @@ impl Cx {
                 gl::Clear(gl::COLOR_BUFFER_BIT | gl::DEPTH_BUFFER_BIT);
             }
         }
-        self.render_view(pass_id, view_id, false, &opengl_cx);
+        self.render_view(pass_id, view_id, full_repaint, &opengl_cx);
         //glutin_window.swap_buffers().unwrap();
         // command_buffer.present_drawable(&drawable);
         unsafe {
@@ -401,7 +409,7 @@ impl Cx {
                                                 *pass_id,
                                                 dpi_factor,
                                                 xlib_app,
-                                                &opengl_window,
+                                                opengl_window,
                                                 &opengl_cx,
                                             );
                                         }}

@@ -39,7 +39,9 @@ pub struct XlibWindow {
     pub window: Option<c_ulong>,
 
     pub window_dirty: Option<c_ulong>,
-
+    pub window_dirty_x: i32,
+    pub window_dirty_y: i32,
+    
     pub window_id: usize,
     pub xlib_app: *mut XlibApp,
     pub last_window_geom: WindowGeom,
@@ -132,14 +134,22 @@ impl XlibApp {
                             let cfg = event.configure;
                             if let Some(window_ptr) = self.window_map.get(&cfg.window) {
                                 let window = &mut (**window_ptr);
-                                window.send_change_event();
+                                if cfg.window == window.window.unwrap(){
+                                    window.send_change_event();
+                                }
                             }
                         },
                         xlib::MotionNotify => { // mousemove
                             let motion = event.motion;
                             if let Some(window_ptr) = self.window_map.get(&motion.window) {
                                 let window = &mut (**window_ptr);
-                                window.send_finger_hover_and_move(Vec2{x:motion.x as f32 / window.last_window_geom.dpi_factor, y:motion.y as f32 / window.last_window_geom.dpi_factor}, KeyModifiers::default());
+                                let mut x = motion.x;
+                                let mut y = motion.y;
+                                if motion.window == window.window_dirty.unwrap(){
+                                    x += window.window_dirty_x;
+                                    y += window.window_dirty_y;
+                                }
+                                window.send_finger_hover_and_move(Vec2{x:x as f32 / window.last_window_geom.dpi_factor, y:y as f32 / window.last_window_geom.dpi_factor}, KeyModifiers::default());
                             }
                         },
                         xlib::ButtonPress =>{ // mouse down
@@ -316,6 +326,8 @@ impl XlibWindow {
         XlibWindow {
             window: None,
             window_dirty: None,
+            window_dirty_x:0,
+            window_dirty_y:0,
             window_id: window_id,
             xlib_app: xlib_app,
             last_window_geom: WindowGeom::default(),
@@ -415,11 +427,13 @@ impl XlibWindow {
         }
     }
     
-    pub fn move_resize_window_dirty(&self, x:i32, y:i32, w:u32, h:u32) {
+    pub fn move_resize_window_dirty(&mut self, x:i32, y:i32, w:u32, h:u32) {
         unsafe{
             let display = (*self.xlib_app).display;
             let xlib = &(*self.xlib_app).xlib;
             //println!("{} {} {} {}", x,y,w,h);
+            self.window_dirty_x = x;
+            self.window_dirty_y = y;
             (xlib.XMoveResizeWindow)(display, self.window_dirty.unwrap(), x, y, w, h);
         }
     }
