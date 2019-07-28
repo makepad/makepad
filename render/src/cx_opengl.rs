@@ -75,16 +75,13 @@ impl Cx {
         }
     }
     
-    fn calc_dirty_bounds(&mut self, pass_id: usize, view_id: usize, view_bounds: &mut ViewBounds) -> bool {
+    fn calc_dirty_bounds(&mut self, pass_id: usize, view_id: usize, view_bounds: &mut ViewBounds){
         // tad ugly otherwise the borrow checker locks 'self' and we can't recur
         let draw_calls_len = self.views[view_id].draw_calls_len;
-        self.views[view_id].partial_repaint = false;
         for draw_call_id in 0..draw_calls_len {
             let sub_view_id = self.views[view_id].draw_calls[draw_call_id].sub_view_id;
             if sub_view_id != 0 {
-                if self.calc_dirty_bounds(pass_id, sub_view_id, view_bounds) {
-                    self.views[view_id].partial_repaint = true;
-                }
+                self.calc_dirty_bounds(pass_id, sub_view_id, view_bounds)
             }
             else {
                 let cxview = &mut self.views[view_id];
@@ -94,14 +91,11 @@ impl Cx {
                 let shp = sh.platform.as_ref().unwrap();
                 
                 if draw_call.instance_dirty {
-                    cxview.partial_repaint = true;
-                    // put the cview into the bounds
                     //println!(" ADDING {} {} {}", sh.name, cxview.rect.w, cxview.rect.h);
                     view_bounds.add_rect(&cxview.rect);
                 }
             }
         }
-        return self.views[view_id].partial_repaint;
     }
     
     

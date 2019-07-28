@@ -530,7 +530,6 @@ pub struct CxView {
     pub nesting_view_id: usize, // the id of the parent we nest in, codeflow wise
     pub redraw_id: u64,
     pub pass_id: usize,
-    pub partial_repaint: bool,
     pub draw_calls: Vec<DrawCall>,
     pub draw_calls_len: usize,
     pub uniforms: Vec<f32>, // cmdlist uniforms
