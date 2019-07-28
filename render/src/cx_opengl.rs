@@ -126,7 +126,7 @@ impl Cx {
         //println!("{} {}", view_bounds.max_x - view_bounds.min_x, pixel_width);
         let window;
         if full_repaint {
-            println!("DOING A FULL REPAINT!");
+            //println!("DOING A FULL REPAINT!");
             opengl_window.xlib_window.move_resize_window_dirty(0, 0, 1, 1);
             window = opengl_window.xlib_window.window.unwrap();
             let pass_size = self.passes[pass_id].pass_size;
@@ -146,7 +146,7 @@ impl Cx {
             let pix_width = ((view_bounds.max_x - view_bounds.min_x) * opengl_window.window_geom.dpi_factor);
             let pix_height = ((view_bounds.max_y - view_bounds.min_y) * opengl_window.window_geom.dpi_factor);
 
-             println!("DOING A PARTIAL REPAINT! {} {}", pix_width, pix_height);
+             //println!("DOING A PARTIAL REPAINT! {} {}", pix_width, pix_height);
             
             opengl_window.xlib_window.move_resize_window_dirty(
                 (view_bounds.min_x * opengl_window.window_geom.dpi_factor) as i32,
