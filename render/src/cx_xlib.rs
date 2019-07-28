@@ -505,9 +505,13 @@ impl XlibWindow {
                 &mut ty,
                 &mut value
             );
-            println!("{}", value.addr as *const _ as u64);
-            let dpi: f32 = CStr::from_ptr(value.addr).to_str().unwrap().parse().unwrap();
-            return dpi / 96.0;
+            if value.addr == std::ptr::null_mut(){
+                return 2.0;
+            }
+            else{
+                let dpi: f32 = CStr::from_ptr(value.addr).to_str().unwrap().parse().unwrap();
+                return dpi / 96.0;
+            }
         }
     }
     
