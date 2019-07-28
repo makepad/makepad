@@ -137,7 +137,7 @@ impl DesktopWindow {
     
     pub fn begin_desktop_window(&mut self, cx: &mut Cx) -> ViewRedraw {
         
-        if !self.main_view.view_will_redraw(cx) || !self.inner_view.view_will_redraw(cx) || !self.sub_view.view_will_redraw(cx) {
+        if !self.main_view.view_will_redraw(cx)  {
             return Err(())
         }
         
