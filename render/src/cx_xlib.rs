@@ -37,7 +37,9 @@ pub struct XlibApp {
 #[derive(Clone)]
 pub struct XlibWindow {
     pub window: Option<c_ulong>,
-    
+
+    pub window_dirty: Option<c_ulong>,
+
     pub window_id: usize,
     pub xlib_app: *mut XlibApp,
     pub last_window_geom: WindowGeom,
@@ -313,7 +315,7 @@ impl XlibWindow {
         
         XlibWindow {
             window: None,
-            
+            window_dirty: None,
             window_id: window_id,
             xlib_app: xlib_app,
             last_window_geom: WindowGeom::default(),
@@ -338,6 +340,7 @@ impl XlibWindow {
             let root_window = (xlib.XRootWindow)(display, default_screen);
             
             let mut attributes = mem::zeroed::<xlib::XSetWindowAttributes>();
+
             attributes.border_pixel = 0;
             attributes.override_redirect = 1;
             attributes.colormap =
@@ -358,7 +361,7 @@ impl XlibWindow {
             let window = (xlib.XCreateWindow)(
                 display,
                 root_window,
-                if position.is_some() {position.unwrap().x}else {120.0} as i32,
+                if position.is_some() {position.unwrap().x}else {150.0} as i32,
                 if position.is_some() {position.unwrap().y}else {60.0} as i32,
                 (size.x * dpi_factor) as u32,
                 (size.y * dpi_factor) as u32,
@@ -382,9 +385,42 @@ impl XlibWindow {
             (xlib.XMapWindow)(display, window);
             
             (xlib.XFlush)(display);
+            
+            // Create a window
+            let window_dirty = (xlib.XCreateWindow)(
+                display,
+                window,
+                0,
+                0,
+                1,
+                1,
+                0,
+                (*visual_info).depth,
+                xlib::InputOutput as u32,
+                (*visual_info).visual,
+                xlib::CWBorderPixel | xlib::CWColormap | xlib::CWEventMask | xlib::CWOverrideRedirect,
+                &mut attributes,
+            );
+            
+            // Map the window to the screen
+            (xlib.XMapWindow)(display, window_dirty);
+            
+            (xlib.XFlush)(display);
+            
             (*self.xlib_app).window_map.insert(window, self);
+            (*self.xlib_app).window_map.insert(window_dirty, self);
             self.window = Some(window);
+            self.window_dirty = Some(window_dirty);
             self.last_window_geom = self.get_window_geom();
+        }
+    }
+    
+    pub fn move_resize_window_dirty(&self, x:i32, y:i32, w:u32, h:u32) {
+        unsafe{
+            let display = (*self.xlib_app).display;
+            let xlib = &(*self.xlib_app).xlib;
+            println!("{} {} {} {}", x,y,w,h);
+            (xlib.XMoveResizeWindow)(display, self.window_dirty.unwrap(), x, y, w, h);
         }
     }
     
@@ -402,6 +438,7 @@ impl XlibWindow {
     pub fn update_ptrs(&mut self) {
         unsafe {
             (*self.xlib_app).window_map.insert(self.window.unwrap(), self);
+            (*self.xlib_app).window_map.insert(self.window_dirty.unwrap(), self);
         }
     }
     

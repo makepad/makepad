@@ -9,15 +9,18 @@ use x11_dl::xlib;
 
 impl Cx {
     
-    pub fn render_view(&mut self, pass_id: usize, view_id: usize, opengl_cx: &OpenglCx) {
+    pub fn render_view(&mut self, pass_id: usize, view_id: usize, partial: bool, opengl_cx: &OpenglCx) {
         
         // tad ugly otherwise the borrow checker locks 'self' and we can't recur
         let draw_calls_len = self.views[view_id].draw_calls_len;
+        if partial && !self.views[view_id].partial_repaint {
+            return
+        }
         self.views[view_id].set_clipping_uniforms();
         for draw_call_id in 0..draw_calls_len {
             let sub_view_id = self.views[view_id].draw_calls[draw_call_id].sub_view_id;
             if sub_view_id != 0 {
-                self.render_view(pass_id, sub_view_id, opengl_cx);
+                self.render_view(pass_id, sub_view_id, partial, opengl_cx);
             }
             else {
                 let cxview = &mut self.views[view_id];
@@ -72,7 +75,37 @@ impl Cx {
         }
     }
     
-    pub fn draw_pass_to_window(
+    fn calc_dirty_bounds(&mut self, pass_id: usize, view_id: usize, view_bounds: &mut ViewBounds) -> bool {
+        // tad ugly otherwise the borrow checker locks 'self' and we can't recur
+        let draw_calls_len = self.views[view_id].draw_calls_len;
+        self.views[view_id].partial_repaint = false;
+        for draw_call_id in 0..draw_calls_len {
+            let sub_view_id = self.views[view_id].draw_calls[draw_call_id].sub_view_id;
+            if sub_view_id != 0 {
+                if self.calc_dirty_bounds(pass_id, sub_view_id, view_bounds) {
+                    self.views[view_id].partial_repaint = true;
+                }
+            }
+            else {
+                let cxview = &mut self.views[view_id];
+                //view.platform.uni_vw.update_with_f32_data(device, &view.uniforms);
+                let draw_call = &mut cxview.draw_calls[draw_call_id];
+                let sh = &self.shaders[draw_call.shader_id];
+                let shp = sh.platform.as_ref().unwrap();
+                
+                if draw_call.instance_dirty {
+                    cxview.partial_repaint = true;
+                    // put the cview into the bounds
+                    //println!(" ADDING {} {}", cxview.rect.w, cxview.rect.h);
+                    view_bounds.add_rect(&cxview.rect);
+                }
+            }
+        }
+        return self.views[view_id].partial_repaint;
+    }
+    
+    
+    fn draw_pass_to_window(
         &mut self,
         pass_id: usize,
         _dpi_factor: f32,
@@ -80,8 +113,36 @@ impl Cx {
         opengl_window: &OpenglWindow,
         opengl_cx: &OpenglCx,
     ) {
+        let view_id = self.passes[pass_id].main_view_id.unwrap();
+        
+        // lets see where we should position our 'dirty rect window'
+        let mut view_bounds = ViewBounds::new();
+        
+        self.calc_dirty_bounds(pass_id, view_id, &mut view_bounds);
+        
+        let pixel_width = opengl_window.window_geom.inner_size.x;
+        let pixel_height = opengl_window.window_geom.inner_size.y ;
+        
+        let full_repaint = view_bounds.max_x - view_bounds.min_x == pixel_width &&
+        view_bounds.max_y - view_bounds.min_y == pixel_height;
+        println!("{} {}", view_bounds.max_x - view_bounds.min_x, pixel_width);
+        let window;
+        if full_repaint {
+            window = opengl_window.xlib_window.window.unwrap();
+        }
+        else {
+            opengl_window.xlib_window.move_resize_window_dirty(
+                view_bounds.min_x as i32,
+                view_bounds.min_y as i32,
+                ((view_bounds.max_x - view_bounds.min_x)* opengl_window.window_geom.dpi_factor) as u32,
+                ((view_bounds.max_y - view_bounds.min_y)* opengl_window.window_geom.dpi_factor) as u32
+            );
+            window = opengl_window.xlib_window.window_dirty.unwrap();
+        }
+        
         unsafe {
-            (opengl_cx.glx.glXMakeCurrent)(xlib_app.display, opengl_window.xlib_window.window.unwrap(), opengl_cx.context);
+            //(opengl_cx.glx.glXMakeCurrent)(xlib_app.display, opengl_window.xlib_window.window.unwrap(), opengl_cx.context);
+            (opengl_cx.glx.glXMakeCurrent)(xlib_app.display, window, opengl_cx.context);
             gl::Disable(gl::DEPTH_TEST);
             //gl::DepthFunc(gl::LEQUAL);
             gl::BlendEquationSeparate(gl::FUNC_ADD, gl::FUNC_ADD);
@@ -90,12 +151,10 @@ impl Cx {
             gl::Viewport(
                 0,
                 0,
-                (opengl_window.window_geom.inner_size.x * opengl_window.window_geom.dpi_factor) as i32,
-                (opengl_window.window_geom.inner_size.y * opengl_window.window_geom.dpi_factor) as i32
+                (pixel_width* opengl_window.window_geom.dpi_factor) as i32,
+                (pixel_height* opengl_window.window_geom.dpi_factor) as i32
             );
         }
-        
-        let view_id = self.passes[pass_id].main_view_id.unwrap();
         
         if self.passes[pass_id].color_textures.len()>0 {
             let color_texture = &self.passes[pass_id].color_textures[0];
@@ -114,16 +173,15 @@ impl Cx {
                 gl::Clear(gl::COLOR_BUFFER_BIT | gl::DEPTH_BUFFER_BIT);
             }
         }
-        
-        self.render_view(pass_id, view_id, &opengl_cx);
+        self.render_view(pass_id, view_id, false, &opengl_cx);
         //glutin_window.swap_buffers().unwrap();
         // command_buffer.present_drawable(&drawable);
         unsafe {
-            (opengl_cx.glx.glXSwapBuffers)(xlib_app.display, opengl_window.xlib_window.window.unwrap());
+            (opengl_cx.glx.glXSwapBuffers)(xlib_app.display, window);
         }
     }
     
-    pub fn draw_pass_to_texture(
+    fn draw_pass_to_texture(
         &mut self,
         pass_id: usize,
         _dpi_factor: f32,
@@ -155,7 +213,7 @@ impl Cx {
             }
         }
         */
-        self.render_view(pass_id, view_id, &opengl_cx);
+        self.render_view(pass_id, view_id, true, &opengl_cx);
         // commit
     }
     
@@ -589,6 +647,39 @@ impl Cx {
     }
 }
 
+struct ViewBounds {
+    min_x: f32,
+    min_y: f32,
+    max_x: f32,
+    max_y: f32
+}
+
+impl ViewBounds {
+    fn new() -> ViewBounds {
+        ViewBounds {
+            min_x: std::f32::INFINITY,
+            min_y: std::f32::INFINITY,
+            max_x: std::f32::NEG_INFINITY,
+            max_y: std::f32::NEG_INFINITY,
+        }
+    }
+    
+    fn add_rect(&mut self, rect: &Rect) {
+        if rect.x < self.min_x {
+            self.min_x = rect.x;
+        }
+        if rect.x + rect.w > self.max_x {
+            self.max_x = rect.x + rect.w;
+        }
+        if rect.y < self.min_y {
+            self.min_y = rect.y;
+        }
+        if rect.y + rect.h > self.max_y {
+            self.max_y = rect.y + rect.h;
+        }
+    }
+}
+
 pub struct OpenglCx {
     pub glx: Glx,
     pub context: GLXContext,
@@ -659,8 +750,8 @@ impl OpenglCx {
             if o + loc.size > uni.len() {
                 return
             }
-            if (o&3)!=0 && (o&3) + loc.size > 4{ // goes over the boundary
-                o += 4-(o&3); // make jump to new slot 
+            if (o & 3) != 0 && (o & 3) + loc.size > 4 { // goes over the boundary
+                o += 4 - (o & 3); // make jump to new slot
             }
             if loc.loc >= 0 {
                 unsafe {
@@ -685,7 +776,7 @@ impl OpenglCx {
         }
         
     }
-
+    
     
     pub fn update_platform_texture_image2d(&self, cxtexture: &mut CxTexture) {
         
