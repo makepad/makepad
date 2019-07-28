@@ -62,6 +62,10 @@ impl Style for AppWindow {
         Self {
             desktop_window: DesktopWindow{
                 caption:"Makepad".to_string(),
+                window:Window{
+                    create_inner_size:Some(Vec2{x:1400.0,y:1000.0}),
+                    ..Window::style(cx)
+                },
                 ..DesktopWindow::style(cx)
             },
             file_editors: Elements::new(FileEditorTemplates {
