@@ -93,8 +93,6 @@ impl Cx {
                 (opengl_window.window_geom.inner_size.x * opengl_window.window_geom.dpi_factor) as i32,
                 (opengl_window.window_geom.inner_size.y * opengl_window.window_geom.dpi_factor) as i32
             );
-            gl::Enable(gl::SCISSOR_TEST);
-            gl::Scissor(0,0,400,2400);
         }
         
         let view_id = self.passes[pass_id].main_view_id.unwrap();
