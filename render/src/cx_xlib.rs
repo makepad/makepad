@@ -419,7 +419,7 @@ impl XlibWindow {
         unsafe{
             let display = (*self.xlib_app).display;
             let xlib = &(*self.xlib_app).xlib;
-            println!("{} {} {} {}", x,y,w,h);
+            //println!("{} {} {} {}", x,y,w,h);
             (xlib.XMoveResizeWindow)(display, self.window_dirty.unwrap(), x, y, w, h);
         }
     }

@@ -125,7 +125,7 @@ impl Cx {
         
         let full_repaint = view_bounds.max_x - view_bounds.min_x == pixel_width &&
         view_bounds.max_y - view_bounds.min_y == pixel_height;
-        println!("{} {}", view_bounds.max_x - view_bounds.min_x, pixel_width);
+        //println!("{} {}", view_bounds.max_x - view_bounds.min_x, pixel_width);
         let window;
         if full_repaint {
             window = opengl_window.xlib_window.window.unwrap();
