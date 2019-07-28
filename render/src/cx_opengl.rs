@@ -96,7 +96,7 @@ impl Cx {
                 if draw_call.instance_dirty {
                     cxview.partial_repaint = true;
                     // put the cview into the bounds
-                    println!(" ADDING {} {} {}", sh.name, cxview.rect.w, cxview.rect.h);
+                    //println!(" ADDING {} {} {}", sh.name, cxview.rect.w, cxview.rect.h);
                     view_bounds.add_rect(&cxview.rect);
                 }
             }
