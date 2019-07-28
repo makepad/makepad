@@ -155,7 +155,7 @@ impl DesktopWindow {
         
         // alright here we draw our platform buttons.
         match cx.platform_type {
-            PlatformType::Windows => {
+            PlatformType::Linux | PlatformType::Windows => {
                 let bg_inst = self.caption_bg.begin_quad(cx, &Layout {
                     align: Align::right_center(),
                     width: Bounds::Fill,

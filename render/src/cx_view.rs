@@ -548,7 +548,6 @@ impl CxView {
     
     pub fn set_clipping_uniforms(&mut self) {
         if self.clipped {
-            //println!("SET CLIPPING {} {} {} {} {}", self.draw_list_id, self.rect.x, self.rect.y, self.rect.x+self.rect.w, self.rect.y+self.rect.h);
             self.uniform_view_clip(self.rect.x, self.rect.y, self.rect.x + self.rect.w, self.rect.y + self.rect.h);
         }
         else {

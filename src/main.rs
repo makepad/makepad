@@ -110,8 +110,8 @@ impl Style for App {
                                 },
                                 DockTab {
                                     closeable: true,
-                                    title: "example.rs".to_string(),
-                                    item: Panel::FileEditor {path: "example/src/example.rs".to_string(), editor_id: 1}
+                                    title: "main.rs".to_string(),
+                                    item: Panel::FileEditor {path: "examples/quad/src/main.rs".to_string(), editor_id: 1}
                                 }
                             ],
                         }),

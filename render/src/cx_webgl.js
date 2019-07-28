@@ -466,7 +466,7 @@
                 let uniform = uniforms[i];
                 // lets align the uniform
                 let slots = this.uniform_size_table[uniform.ty];
-                if((offset&3) + slots > 4){ // goes over the boundary
+                if((offset&3) !=0 && (offset&3) + slots > 4){ // goes over the boundary
                     offset += 4-(offset&3); // make jump to new slot
                 }
                 uniform_locs.push({

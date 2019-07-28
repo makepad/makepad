@@ -13,6 +13,7 @@ impl Cx {
         
         // tad ugly otherwise the borrow checker locks 'self' and we can't recur
         let draw_calls_len = self.views[view_id].draw_calls_len;
+        self.views[view_id].set_clipping_uniforms();
         for draw_call_id in 0..draw_calls_len {
             let sub_view_id = self.views[view_id].draw_calls[draw_call_id].sub_view_id;
             if sub_view_id != 0 {
@@ -20,7 +21,6 @@ impl Cx {
             }
             else {
                 let cxview = &mut self.views[view_id];
-                cxview.set_clipping_uniforms();
                 //view.platform.uni_vw.update_with_f32_data(device, &view.uniforms);
                 let draw_call = &mut cxview.draw_calls[draw_call_id];
                 let sh = &self.shaders[draw_call.shader_id];
@@ -87,6 +87,12 @@ impl Cx {
             gl::BlendEquationSeparate(gl::FUNC_ADD, gl::FUNC_ADD);
             gl::BlendFuncSeparate(gl::ONE, gl::ONE_MINUS_SRC_ALPHA, gl::ONE, gl::ONE_MINUS_SRC_ALPHA);
             gl::Enable(gl::BLEND);
+            gl::Viewport(
+                0,
+                0,
+                (opengl_window.window_geom.inner_size.x * opengl_window.window_geom.dpi_factor) as i32,
+                (opengl_window.window_geom.inner_size.y * opengl_window.window_geom.dpi_factor) as i32
+            );
         }
         
         let view_id = self.passes[pass_id].main_view_id.unwrap();
@@ -315,7 +321,7 @@ impl Cx {
                                         for opengl_window in &mut opengl_windows {if opengl_window.window_id == window_id {
                                             
                                             let dpi_factor = opengl_window.window_geom.dpi_factor;
-
+                                            
                                             self.passes[*pass_id].set_dpi_factor(dpi_factor);
                                             
                                             opengl_window.resize_framebuffer(&opengl_cx);
@@ -653,43 +659,23 @@ impl OpenglCx {
             if o + loc.size > uni.len() {
                 return
             }
+            if (o&3)!=0 && (o&3) + loc.size > 4{ // goes over the boundary
+                o += 4-(o&3); // make jump to new slot 
+            }
             if loc.loc >= 0 {
                 unsafe {
                     
                     match loc.size {
                         1 => {
                             gl::Uniform1f(loc.loc as i32, uni[o]);
-                            /*println!("{} {}", loc.loc, uni[o]);*/
                         },
                         2 => gl::Uniform2f(loc.loc as i32, uni[o], uni[o + 1]),
                         3 => gl::Uniform3f(loc.loc as i32, uni[o], uni[o + 1], uni[o + 2]),
                         4 => {
                             gl::Uniform4f(loc.loc as i32, uni[o], uni[o + 1], uni[o + 2], uni[o + 3]);
-                            /*println!("{} {} {} {} {}", loc.loc, uni[o], uni[o + 1], uni[o + 2], uni[o + 3]);*/
                         },
                         16 => {
                             gl::UniformMatrix4fv(loc.loc as i32, 1, 0, uni.as_ptr().offset((o) as isize));
-                            /*
-                            println!(
-                                "{} {} {} {} {} - {} {} {} {} - {} {} {} {} - {} {} {} {}",
-                                loc.loc,
-                                uni[o],
-                                uni[o + 1],
-                                uni[o + 2],
-                                uni[o + 3],
-                                uni[o + 4],
-                                uni[o + 5],
-                                uni[o + 6],
-                                uni[o + 7],
-                                uni[o + 8],
-                                uni[o + 9],
-                                uni[o + 10],
-                                uni[o + 11],
-                                uni[o + 12],
-                                uni[o + 13],
-                                uni[o + 14],
-                                uni[o + 15]
-                            );*/
                         },
                         _ => ()
                     }
@@ -699,6 +685,7 @@ impl OpenglCx {
         }
         
     }
+
     
     pub fn update_platform_texture_image2d(&self, cxtexture: &mut CxTexture) {
         
@@ -718,19 +705,19 @@ impl OpenglCx {
             cxtexture.platform.height = height as u64;
             
             let mut tex_handle;
-            match cxtexture.platform.gl_texture{
-                None=>{
-                    unsafe{
+            match cxtexture.platform.gl_texture {
+                None => {
+                    unsafe {
                         tex_handle = mem::uninitialized();
                         gl::GenTextures(1, &mut tex_handle);
                         cxtexture.platform.gl_texture = Some(tex_handle);
                     }
                 }
-                Some(gl_texture)=>{
+                Some(gl_texture) => {
                     tex_handle = gl_texture
                 }
             }
-            unsafe{
+            unsafe {
                 gl::BindTexture(gl::TEXTURE_2D, tex_handle);
                 gl::TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_MIN_FILTER, gl::LINEAR as i32);
                 gl::TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_MAG_FILTER, gl::LINEAR as i32);

@@ -30,10 +30,12 @@
 // press alt or escape for animated codefolding outline view!
 
 use render::*;
-use widget::*;
 
 struct App {
-    window: DesktopWindow,
+    window: Window,
+    pass: Pass,
+    color_texture: Texture,
+    main_view: View<NoScrollBar>,
     quad: Quad
 }
 
@@ -41,16 +43,38 @@ main_app!(App);
 
 impl Style for App {
     fn style(cx: &mut Cx) -> Self {
-        set_dark_style(cx);
         Self {
-            window: DesktopWindow::style(cx),
-            quad: Quad::style(cx)
+            window: Window::style(cx),
+            pass: Pass::default(),
+            color_texture: Texture::default(),
+            main_view: View::style(cx),
+            quad: Quad {
+                shader: cx.add_shader(Self::def_quad_shader(), "quad"),
+                ..Style::style(cx)
+            },
         }
     }
 }
 
 impl App {
-    
+    pub fn def_quad_shader() -> ShaderGen {
+        Quad::def_quad_shader().compose(shader_ast !({
+            
+            fn vertex() -> vec4 {
+                // return vec4(geom.x-0.5, geom.y, 0., 1.);
+                //let shift: vec2 = -view_scroll * view_do_scroll;
+                let clipped: vec2 = geom * vec2(w, h) + vec2(x, y);
+                //pos = (clipped  - vec2(x, y)) / vec2(w, h);
+                // only pass the clipped position forward
+                return vec4(clipped.x, clipped.y, 0., 1.) * camera_projection;
+            }
+            
+            
+            fn pixel() -> vec4 {
+                return vec4(1.0,0.0,0.0,1.0);
+            }
+        }))
+    }
     fn handle_app(&mut self, cx: &mut Cx, event: &mut Event) {
         
         match event {
@@ -58,17 +82,19 @@ impl App {
             },
             _ => ()
         }
-        
-        self.window.handle_desktop_window(cx, event);
     }
    
     fn draw_app(&mut self, cx: &mut Cx) {
-        if let Err(_) = self.window.begin_desktop_window(cx) {
-            return
-        }
+        self.window.begin_window(cx);
+        self.pass.begin_pass(cx);
+        self.pass.add_color_texture(cx, &mut self.color_texture, Some(color256(30,30,30)));
+
+        let _ = self.main_view.begin_view(cx, Layout::default());
         
-        self.quad.draw_quad_abs(cx, Rect{x:0.,y:0.,w:100.,h:100.});
+        self.quad.draw_quad_abs(cx, Rect{x:30.,y:30.,w:100.,h:100.});
         
-        self.window.end_desktop_window(cx);
+        self.main_view.end_view(cx);
+        self.pass.end_pass(cx);
+        self.window.end_window(cx);
     }
 }

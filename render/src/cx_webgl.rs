@@ -8,7 +8,7 @@ impl Cx {
     pub fn render_view(&mut self, pass_id: usize, view_id: usize) {
         // tad ugly otherwise the borrow checker locks 'self' and we can't recur
         let draw_calls_len = self.views[view_id].draw_calls_len;
-        
+        self.views[view_id].set_clipping_uniforms();
         for draw_call_id in 0..draw_calls_len {
             
             let sub_view_id = self.views[view_id].draw_calls[draw_call_id].sub_view_id;
@@ -17,9 +17,6 @@ impl Cx {
             }
             else {
                 let cxview = &mut self.views[view_id];
-                
-                cxview.set_clipping_uniforms();
-                
                 let draw_call = &mut cxview.draw_calls[draw_call_id];
                 let sh = &self.shaders[draw_call.shader_id];
                 

@@ -309,14 +309,15 @@ impl XlibWindow {
                 | xlib::VisibilityChangeMask
                 | xlib::FocusChangeMask;
             
+            let dpi_factor = self.get_dpi_factor();
             // Create a window
             let window = (xlib.XCreateWindow)(
                 display,
                 root_window,
                 if position.is_some() {position.unwrap().x}else {10.0} as i32,
                 if position.is_some() {position.unwrap().y}else {10.0} as i32,
-                size.x as u32,
-                size.y as u32,
+                (size.x*dpi_factor) as u32,
+                (size.y*dpi_factor) as u32, 
                 0,
                 (*visual_info).depth,
                 xlib::InputOutput as u32,
@@ -428,12 +429,13 @@ impl XlibWindow {
     }
     
     pub fn get_inner_size(&self) -> Vec2 {
+        let dpi_factor = self.get_dpi_factor();
         unsafe {
             let mut xwa = mem::uninitialized();
             let xlib = &(*self.xlib_app).xlib;
             let display = (*self.xlib_app).display;
             (xlib.XGetWindowAttributes)(display, self.window.unwrap(), &mut xwa);
-            return Vec2 {x: xwa.width as f32, y: xwa.height as f32}
+            return Vec2 {x: xwa.width as f32 / dpi_factor, y: xwa.height as f32 / dpi_factor}
         }
     }
     
