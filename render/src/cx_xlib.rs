@@ -317,14 +317,11 @@ impl XlibWindow {
             let xlib = &(*self.xlib_app).xlib;
             let display = (*self.xlib_app).display;
             
-            println!("INIT STEP 1");
             // The default screen of the display
             let default_screen = (xlib.XDefaultScreen)(display);
             
-            println!("INIT STEP 2");
             // The root window of the default screen
             let root_window = (xlib.XRootWindow)(display, default_screen);
-            println!("INIT STEP 3");
             
             let mut attributes = mem::zeroed::<xlib::XSetWindowAttributes>();
             attributes.border_pixel = 0;
@@ -341,11 +338,9 @@ impl XlibWindow {
                 | xlib::KeyReleaseMask
                 | xlib::VisibilityChangeMask
                 | xlib::FocusChangeMask;
-            println!("INIT STEP 4");
             
             let dpi_factor = self.get_dpi_factor();
             // Create a window
-            println!("INIT STEP 5");
             let window = (xlib.XCreateWindow)(
                 display,
                 root_window,
@@ -361,25 +356,21 @@ impl XlibWindow {
                 &mut attributes,
             );
             
-            println!("INIT STEP 6");
             // Tell the window manager that we want to be notified when the window is closed
             let mut wm_delete_message = (xlib.XInternAtom)(
                 display,
                 CString::new("WM_DELETE_WINDOW").unwrap().as_ptr(),
                 xlib::False,
             );
-            println!("INIT STEP 7");
             (xlib.XSetWMProtocols)(display, window, &mut wm_delete_message, 1);
             
             // Map the window to the screen
             (xlib.XMapWindow)(display, window);
-            println!("INIT STEP 8");
             
             (xlib.XFlush)(display);
             (*self.xlib_app).window_map.insert(window, self);
             self.window = Some(window);
             self.last_window_geom = self.get_window_geom();
-            println!("INIT STEP 9");
         }
     }
     
@@ -500,6 +491,7 @@ impl XlibWindow {
     
     pub fn get_dpi_factor(&self) -> f32 {
         unsafe {
+            return 2.0;
             let xlib = &(*self.xlib_app).xlib;
             let display = (*self.xlib_app).display;
             let resource_string = (xlib.XResourceManagerString)(display);
