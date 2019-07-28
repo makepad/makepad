@@ -140,6 +140,20 @@ impl XlibApp {
                                 window.send_finger_hover_and_move(Vec2{x:motion.x as f32 / window.last_window_geom.dpi_factor, y:motion.y as f32 / window.last_window_geom.dpi_factor}, KeyModifiers::default());
                             }
                         },
+                        xlib::ButtonPress =>{ // mouse down
+                            let button = event.button;
+                            if let Some(window_ptr) = self.window_map.get(&button.window) {
+                                let window = &mut (**window_ptr);
+                                window.send_finger_down(button.button as usize, KeyModifiers::default())
+                            }
+                        },
+                        xlib::ButtonRelease=>{ // mouse up
+                            let button = event.button;
+                            if let Some(window_ptr) = self.window_map.get(&button.window) {
+                                let window = &mut (**window_ptr);
+                                window.send_finger_up(button.button as usize, KeyModifiers::default())
+                            }
+                        },
                         xlib::KeyRelease => {
                         },
                         xlib::ClientMessage => {
@@ -506,7 +520,7 @@ impl XlibWindow {
                 &mut value
             );
             if value.addr == std::ptr::null_mut(){
-                return 2.0;
+                return 2.0; // TODO find some other way to figure it out
             }
             else{
                 let dpi: f32 = CStr::from_ptr(value.addr).to_str().unwrap().parse().unwrap();
