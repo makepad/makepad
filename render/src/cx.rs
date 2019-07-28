@@ -129,8 +129,7 @@ pub struct Cx {
     pub frame_callbacks: Vec<Area>,
     pub _frame_callbacks: Vec<Area>,
     
-    pub signals_before_draw: Vec<(Signal, usize)>,
-    pub signals_after_draw: Vec<(Signal, usize)>,
+    pub signals: Vec<(Signal, usize)>,
     
     pub style_values: BTreeMap<String, StyleValue>,
     
@@ -226,8 +225,7 @@ impl Default for Cx {
             _frame_callbacks: Vec::new(),
             
             //custom_before_draw:Vec::new(),
-            signals_before_draw: Vec::new(),
-            signals_after_draw: Vec::new(),
+            signals: Vec::new(),
             
             panic_now: false,
             panic_redraw: false,
@@ -694,41 +692,20 @@ impl Cx {
         return Signal {signal_id: self.signal_id}
     }
     
-    pub fn send_signal_before_draw(&mut self, signal: Signal, message: usize) {
-        self.signals_before_draw.push((signal, message));
+    pub fn send_signal(&mut self, signal: Signal, message: usize) {
+        self.signals.push((signal, message));
     }
     
-    pub fn send_signal_after_draw(&mut self, signal: Signal, message: usize) {
-        self.signals_after_draw.push((signal, message));
-    }
-    
-    pub fn call_signals_before_draw<F>(&mut self, mut event_handler: F)
+    pub fn call_signals<F>(&mut self, mut event_handler: F)
     where F: FnMut(&mut Cx, &mut Event)
     {
-        if self.signals_before_draw.len() == 0 {
+         if self.signals.len() == 0 {
             return
         }
         
-        let signals_before_draw = self.signals_before_draw.clone();
-        self.signals_before_draw.truncate(0);
-        for (signal, value) in signals_before_draw {
-            self.call_event_handler(&mut event_handler, &mut Event::Signal(SignalEvent {
-                signal_id: signal.signal_id,
-                value: value
-            }));
-        }
-    }
-    
-    pub fn call_signals_after_draw<F>(&mut self, mut event_handler: F)
-    where F: FnMut(&mut Cx, &mut Event)
-    {
-        if self.signals_after_draw.len() == 0 {
-            return
-        }
-        
-        let signals_after_draw = self.signals_after_draw.clone();
-        self.signals_after_draw.truncate(0);
-        for (signal, value) in signals_after_draw {
+        let signals = self.signals.clone();
+        self.signals.truncate(0);
+        for (signal, value) in signals {
             self.call_event_handler(&mut event_handler, &mut Event::Signal(SignalEvent {
                 signal_id: signal.signal_id,
                 value: value

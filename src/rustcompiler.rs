@@ -152,10 +152,10 @@ impl RustCompiler {
             if text_buffer.messages.gc_id != cx.event_id {
                 text_buffer.messages.cursors.truncate(0);
                 text_buffer.messages.bodies.truncate(0);
-                cx.send_signal_before_draw(text_buffer.signal, SIGNAL_TEXTBUFFER_MESSAGE_UPDATE);
+                cx.send_signal(text_buffer.signal, SIGNAL_TEXTBUFFER_MESSAGE_UPDATE);
             }
             else {
-                cx.send_signal_before_draw(text_buffer.signal, SIGNAL_TEXTBUFFER_MESSAGE_UPDATE);
+                cx.send_signal(text_buffer.signal, SIGNAL_TEXTBUFFER_MESSAGE_UPDATE);
             }
         }
     }
@@ -356,7 +356,7 @@ impl RustCompiler {
                     dm.head
                 };
                 
-                cx.send_signal_after_draw(text_buffer.signal, SIGNAL_TEXTBUFFER_JUMP_TO_OFFSET);
+                cx.send_signal(text_buffer.signal, SIGNAL_TEXTBUFFER_JUMP_TO_OFFSET);
                 return RustCompilerEvent::SelectMessage {path: dm.path.clone()}
             }
         }
@@ -511,7 +511,7 @@ impl RustCompiler {
                 let n_bytes_read = stdout.read(&mut data).expect("cannot read");
                 data.truncate(n_bytes_read);
                 if n_bytes_read == 0 {
-                    Cx::send_signal(signal, SIGNAL_BUILD_COMPLETE);
+                    Cx::post_signal(signal, SIGNAL_BUILD_COMPLETE);
                     return
                 }
             }
@@ -546,7 +546,7 @@ impl RustCompiler {
                 let n_bytes_read = stdout.read(&mut data).expect("cannot read");
                 data.truncate(n_bytes_read);
                 let _ = tx.send(data);
-                Cx::send_signal(signal, SIGNAL_RUN_OUTPUT);
+                Cx::post_signal(signal, SIGNAL_RUN_OUTPUT);
                 if n_bytes_read == 0 {
                     return
                 }
@@ -599,7 +599,7 @@ impl RustCompiler {
                 let n_bytes_read = stdout.read(&mut data).expect("cannot read");
                 data.truncate(n_bytes_read);
                 let _ = tx.send(data);
-                Cx::send_signal(signal, SIGNAL_RUST_CHECKER);
+                Cx::post_signal(signal, SIGNAL_RUST_CHECKER);
                 if n_bytes_read == 0 {
                     return
                 }

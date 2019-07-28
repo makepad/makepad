@@ -400,7 +400,7 @@ impl App {
                 if let Some(utf8_data) = self.app_global.index_file_read.resolve_utf8(fr) {
                     if let Ok(utf8_data) = utf8_data {
                         self.app_global.file_tree_data = utf8_data.to_string();
-                        cx.send_signal_before_draw(self.app_global.file_tree_reload_signal, 0);
+                        cx.send_signal(self.app_global.file_tree_reload_signal, 0);
                     }
                 }
                 else if let Some(utf8_data) = self.app_global.app_state_file_read.resolve_utf8(fr) {
@@ -435,7 +435,7 @@ impl App {
                                     ..self.app_window_template.clone()
                                 })
                             }
-                            cx.send_signal_before_draw(self.app_global.file_tree_reload_signal, 0);
+                            cx.send_signal(self.app_global.file_tree_reload_signal, 0);
                             cx.redraw_child_area(Area::All);
                         }
                     }
@@ -443,7 +443,7 @@ impl App {
                         println!("DOING DEFAULT");
                         self.app_global.state.windows = vec![self.app_window_state_template.clone()];
                         self.windows = vec![self.app_window_template.clone()];
-                        cx.send_signal_before_draw(self.app_global.file_tree_reload_signal, 0);
+                        cx.send_signal(self.app_global.file_tree_reload_signal, 0);
                         cx.redraw_child_area(Area::All);
                     }
                 }

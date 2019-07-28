@@ -191,7 +191,6 @@ impl Style for CodeEditor {
                 shader: cx.add_shader(Self::def_selection_shader(), "Editor.selection"),
                 ..Style::style(cx)
             },
-            
             token_highlight: Quad {
                 shader: cx.add_shader(Self::def_token_highlight_shader(), "Editor.token_highlight"),
                 ..Style::style(cx)
@@ -759,7 +758,7 @@ impl CodeEditor {
         self.view.redraw_view_area(cx);
         self.reset_cursor_blinker(cx);
         
-        cx.send_signal_after_draw(text_buffer.signal, SIGNAL_TEXTBUFFER_DATA_UPDATE);
+        cx.send_signal(text_buffer.signal, SIGNAL_TEXTBUFFER_DATA_UPDATE);
         
     }
     
@@ -804,6 +803,7 @@ impl CodeEditor {
             Event::Signal(se) => if text_buffer.signal.is_signal(se) {
                 match se.value {
                     SIGNAL_TEXTBUFFER_MESSAGE_UPDATE | SIGNAL_TEXTBUFFER_LOADED | SIGNAL_TEXTBUFFER_DATA_UPDATE => {
+                        println!("GOT SIGNAL");
                         self.view.redraw_view_area(cx);
                     },
                     SIGNAL_TEXTBUFFER_JUMP_TO_OFFSET => {

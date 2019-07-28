@@ -127,7 +127,7 @@ impl Cx {
             }
         }
         
-        self.call_signals_before_draw(&mut event_handler);
+        self.call_signals(&mut event_handler);
         
         // call redraw event
         if self.redraw_child_areas.len()>0 || self.redraw_parent_areas.len()>0 {
@@ -139,7 +139,7 @@ impl Cx {
         
         self.process_desktop_file_reads(&mut event_handler);
         
-        self.call_signals_after_draw(&mut event_handler);
+        self.call_signals(&mut event_handler);
         
         vsync
     }

@@ -3,6 +3,10 @@ use libc;
 use std::collections::HashMap;
 use std::ffi::CString;
 use std::ffi::CStr;
+use std::sync::Mutex;
+use std::fs::File;
+use std::io::Write;
+use std::os::unix::io::FromRawFd;
 use std::mem;
 use std::os::raw::{c_int, c_ulong};
 use std::ptr;
@@ -25,7 +29,7 @@ pub struct XlibApp {
     pub event_loop_running: bool,
     pub timers: Vec<XlibTimer>,
     pub free_timers: Vec<usize>,
-    
+    pub signals: Mutex<Vec<Event>>,
     pub loop_block: bool,
     pub current_cursor: MouseCursor,
 }
@@ -53,6 +57,12 @@ pub enum XlibTimer {
     Timer {timer_id: u64, interval: f64, repeats: bool}
 }
 
+#[derive(Clone)]
+pub struct XlibSignal {
+    pub signal_id: u64,
+    pub value: u64
+}
+
 impl XlibApp {
     pub fn new() -> XlibApp {
         unsafe {
@@ -64,6 +74,7 @@ impl XlibApp {
                 display,
                 display_fd,
                 window_map: HashMap::new(),
+                signals: Mutex::new(Vec::new()),
                 time_start: precise_time_ns(),
                 event_callback: None,
                 event_recur_block: false,
@@ -117,13 +128,17 @@ impl XlibApp {
                     match event.type_ {
                         xlib::ConfigureNotify => {
                             let cfg = event.configure;
-                            if let Some(window) = self.window_map.get(&cfg.window) {
-                                (**window).send_change_event();
+                            if let Some(window_ptr) = self.window_map.get(&cfg.window) {
+                                let window = &mut (**window_ptr);
+                                window.send_change_event();
                             }
                         },
-                        xlib::MotionNotify => { // mousemove 
+                        xlib::MotionNotify => { // mousemove
                             let motion = event.motion;
-                            //println!("Motion {} {}", motion.x, motion.y);
+                            if let Some(window_ptr) = self.window_map.get(&motion.window) {
+                                let window = &mut (**window_ptr);
+                                window.send_finger_hover_and_move(Vec2{x:motion.x as f32 / window.last_window_geom.dpi_factor, y:motion.y as f32 / window.last_window_geom.dpi_factor}, KeyModifiers::default());
+                            }
                         },
                         xlib::KeyRelease => {
                         },
@@ -144,6 +159,19 @@ impl XlibApp {
                         _ => {}
                     }
                 }
+                // process all signals in the queue
+                let mut proc_signals = if let Ok(mut signals) = self.signals.lock() {
+                    let sigs = signals.clone();
+                    signals.truncate(0);
+                    sigs
+                }
+                else {
+                    Vec::new()
+                };
+                if proc_signals.len() > 0 {
+                    self.do_callback(&mut proc_signals);
+                }
+                
                 self.do_callback(&mut vec![
                     Event::Paint,
                 ]);
@@ -198,13 +226,15 @@ impl XlibApp {
         }
     }
     
-    pub fn post_signal(_signal_id: usize, _value: usize) {
-        //unsafe {
-        //let win32_app = &mut (*GLOBAL_WIN32_APP);
-        //if win32_app.all_windows.len()>0 {
-        //    winuser::PostMessageW(win32_app.all_windows[0], winuser::WM_USER, signal_id as usize, value as isize);
-        // }
-        //}
+    pub fn post_signal(signal_id: usize, value: usize) {
+        unsafe {
+            if let Ok(mut signals) = (*GLOBAL_XLIB_APP).signals.lock() {
+                signals.push(Event::Signal(SignalEvent {signal_id, value}));
+                //let mut f = unsafe { File::from_raw_fd((*GLOBAL_XLIB_APP).display_fd) };
+                //let _ = write!(&mut f, "\0");
+                // !TODO unblock the select!
+            }
+        }
     }
     
     pub fn terminate_event_loop(&mut self) {
@@ -314,10 +344,10 @@ impl XlibWindow {
             let window = (xlib.XCreateWindow)(
                 display,
                 root_window,
-                if position.is_some() {position.unwrap().x}else {10.0} as i32,
-                if position.is_some() {position.unwrap().y}else {10.0} as i32,
-                (size.x*dpi_factor) as u32,
-                (size.y*dpi_factor) as u32, 
+                if position.is_some() {position.unwrap().x}else {120.0} as i32,
+                if position.is_some() {position.unwrap().y}else {60.0} as i32,
+                (size.x * dpi_factor) as u32,
+                (size.y * dpi_factor) as u32,
                 0,
                 (*visual_info).depth,
                 xlib::InputOutput as u32,
@@ -340,6 +370,7 @@ impl XlibWindow {
             (xlib.XFlush)(display);
             (*self.xlib_app).window_map.insert(window, self);
             self.window = Some(window);
+            self.last_window_geom = self.get_window_geom();
         }
     }
     
@@ -473,7 +504,7 @@ impl XlibWindow {
                 &mut ty,
                 &mut value
             );
-            let dpi:f32 = CStr::from_ptr(value.addr).to_str().unwrap().parse().unwrap();
+            let dpi: f32 = CStr::from_ptr(value.addr).to_str().unwrap().parse().unwrap();
             return dpi / 96.0;
         }
     }
@@ -486,7 +517,7 @@ impl XlibWindow {
     
     pub fn send_change_event(&mut self) {
         
-        let new_geom = self.get_window_geom(); 
+        let new_geom = self.get_window_geom();
         let old_geom = self.last_window_geom.clone();
         self.last_window_geom = new_geom.clone();
         

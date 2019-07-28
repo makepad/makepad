@@ -60,7 +60,7 @@ impl Keyboard {
             text_buffer.keyboard.modifiers = self.modifiers.clone();
             text_buffer.keyboard.key_down = self.key_down.clone();
             text_buffer.keyboard.key_up = self.key_up.clone();
-            cx.send_signal_before_draw(text_buffer.signal, SIGNAL_TEXTBUFFER_KEYBOARD_UPDATE);
+            cx.send_signal(text_buffer.signal, SIGNAL_TEXTBUFFER_KEYBOARD_UPDATE);
         }
     }
     

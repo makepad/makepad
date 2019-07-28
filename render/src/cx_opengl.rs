@@ -398,7 +398,7 @@ impl Cx {
         }
     }
     
-    pub fn send_signal(signal: Signal, value: usize) {
+    pub fn post_signal(signal: Signal, value: usize) {
         XlibApp::post_signal(signal.signal_id, value);
     }
     
