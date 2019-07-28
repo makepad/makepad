@@ -121,7 +121,7 @@ impl Cx {
         self.calc_dirty_bounds(pass_id, view_id, &mut view_bounds);
         
         let pixel_width = opengl_window.window_geom.inner_size.x;
-        let pixel_height = opengl_window.window_geom.inner_size.y ;
+        let pixel_height = opengl_window.window_geom.inner_size.y;
         
         let full_repaint = view_bounds.max_x - view_bounds.min_x == pixel_width &&
         view_bounds.max_y - view_bounds.min_y == pixel_height;
@@ -129,15 +129,26 @@ impl Cx {
         let window;
         if full_repaint {
             window = opengl_window.xlib_window.window.unwrap();
+            let pass_size = self.passes[pass_id].pass_size;
+            self.passes[pass_id].set_ortho_matrix(Vec2::zero(), pass_size);
         }
         else {
             opengl_window.xlib_window.move_resize_window_dirty(
                 view_bounds.min_x as i32,
                 view_bounds.min_y as i32,
-                ((view_bounds.max_x - view_bounds.min_x)* opengl_window.window_geom.dpi_factor) as u32,
-                ((view_bounds.max_y - view_bounds.min_y)* opengl_window.window_geom.dpi_factor) as u32
+                ((view_bounds.max_x - view_bounds.min_x) * opengl_window.window_geom.dpi_factor) as u32,
+                ((view_bounds.max_y - view_bounds.min_y) * opengl_window.window_geom.dpi_factor) as u32
             );
             window = opengl_window.xlib_window.window_dirty.unwrap();
+            let pass_size = self.passes[pass_id].pass_size;
+            println!("{}", view_bounds.min_y);
+            self.passes[pass_id].set_ortho_matrix(
+                Vec2 {
+                    x: -view_bounds.min_x / opengl_window.window_geom.dpi_factor,
+                    y: -view_bounds.min_y / opengl_window.window_geom.dpi_factor
+                },
+                pass_size
+            );
         }
         
         unsafe {
@@ -151,8 +162,8 @@ impl Cx {
             gl::Viewport(
                 0,
                 0,
-                (pixel_width* opengl_window.window_geom.dpi_factor) as i32,
-                (pixel_height* opengl_window.window_geom.dpi_factor) as i32
+                (pixel_width * opengl_window.window_geom.dpi_factor) as i32,
+                (pixel_height * opengl_window.window_geom.dpi_factor) as i32
             );
         }
         

@@ -42,8 +42,8 @@ impl Pass {
         cxpass.color_textures.truncate(0);
         cx.pass_stack.push(pass_id);
         
-        let pass_size = cxpass.pass_size;
-        self.set_ortho_matrix(cx, Vec2::zero(), pass_size);
+        //let pass_size = cxpass.pass_size;
+        //self.set_ortho_matrix(cx, Vec2::zero(), pass_size);
     }
     
     pub fn make_dep_of_pass(&mut self, cx: &mut Cx, pass: &Pass) {
@@ -78,25 +78,6 @@ impl Pass {
         cxpass.depth_texture = texture.texture_id;
     }
     
-    pub fn set_ortho_matrix(&mut self, cx: &mut Cx, offset: Vec2, size: Vec2,) {
-        let ortho_matrix = Mat4::ortho(
-            offset.x,
-            offset.x + size.x,
-            offset.y,
-            offset.y + size.y,
-            -100.0,
-            100.0,
-            1.0,
-            1.0
-        );
-        self.set_matrix(cx, &ortho_matrix);
-    }
-    
-    pub fn set_matrix(&mut self, cx: &mut Cx, matrix: &Mat4) {
-        let pass_id = self.pass_id.expect("Please call set_ortho_matrix after begin_pass");
-        let cxpass = &mut cx.passes[pass_id];
-        cxpass.uniform_camera_projection(matrix);
-    }
     
     pub fn end_pass(&mut self, cx: &mut Cx) {
         cx.pass_stack.pop();
@@ -179,4 +160,23 @@ impl CxPass {
         self.uniforms[CX_UNI_DPI_DILATE + 0] = dpi_dilate;
     }
     
+    pub fn set_ortho_matrix(&mut self, offset: Vec2, size: Vec2) {
+        let ortho_matrix = Mat4::ortho(
+            offset.x,
+            offset.x + size.x,
+            offset.y,
+            offset.y + size.y,
+            -100.0,
+            100.0,
+            1.0,
+            1.0
+        );
+        self.uniform_camera_projection(&ortho_matrix);
+        //self.set_matrix(cx, &ortho_matrix);
+    }
+    
+    //pub fn set_matrix(&mut self, cx: &mut Cx, matrix: &Mat4) {
+        //let pass_id = self.pass_id.expect("Please call set_ortho_matrix after begin_pass");
+        //let cxpass = &mut cx.passes[pass_id];
+   // }
 }

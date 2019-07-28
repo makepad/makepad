@@ -389,7 +389,7 @@ impl XlibWindow {
             // Create a window
             let window_dirty = (xlib.XCreateWindow)(
                 display,
-                root_window,
+                window,
                 0,
                 0,
                 1,
