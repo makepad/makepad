@@ -491,11 +491,12 @@ impl XlibWindow {
     
     pub fn get_dpi_factor(&self) -> f32 {
         unsafe {
-            return 2.0;
+            //return 2.0;
             let xlib = &(*self.xlib_app).xlib;
             let display = (*self.xlib_app).display;
             let resource_string = (xlib.XResourceManagerString)(display);
             let db = (xlib.XrmGetStringDatabase)(resource_string);
+            println!("{}", db as *const _ as u64);
             let mut ty = mem::uninitialized();
             let mut value = mem::uninitialized();
             (xlib.XrmGetResource)(
