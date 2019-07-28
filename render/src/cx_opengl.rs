@@ -9,18 +9,18 @@ use x11_dl::xlib;
 
 impl Cx {
     
-    pub fn render_view(&mut self, pass_id: usize, view_id: usize, full_repaint: bool, opengl_cx: &OpenglCx) {
+    pub fn render_view(&mut self, pass_id: usize, view_id: usize, full_repaint: bool, view_rect: &Rect, opengl_cx: &OpenglCx) { 
         
         // tad ugly otherwise the borrow checker locks 'self' and we can't recur
         let draw_calls_len = self.views[view_id].draw_calls_len;
-        if !full_repaint && !self.views[view_id].partial_repaint {
+        if !full_repaint && !view_rect.intersects(self.views[view_id].rect) {
             return
         }
         self.views[view_id].set_clipping_uniforms();
         for draw_call_id in 0..draw_calls_len {
             let sub_view_id = self.views[view_id].draw_calls[draw_call_id].sub_view_id;
             if sub_view_id != 0 {
-                self.render_view(pass_id, sub_view_id, full_repaint, opengl_cx);
+                self.render_view(pass_id, sub_view_id, full_repaint, view_rect, opengl_cx);
             }
             else {
                 let cxview = &mut self.views[view_id];
@@ -126,6 +126,7 @@ impl Cx {
         
         //println!("{} {}", view_bounds.max_x - view_bounds.min_x, pixel_width);
         let window;
+        let view_rect;
         if full_repaint {
             opengl_window.view_bounds = view_bounds;
             //println!("DOING A FULL REPAINT!");
@@ -140,6 +141,7 @@ impl Cx {
                 (opengl_cx.glx.glXMakeCurrent)(xlib_app.display, window, opengl_cx.context);
                 gl::Viewport(0, 0, pix_width as i32, pix_height as i32);
             }
+            view_rect = Rect::zero();
         }
         else {
             if view_bounds.max_x == std::f32::NEG_INFINITY || view_bounds.min_x == view_bounds.max_x{
@@ -181,6 +183,7 @@ impl Cx {
                 (opengl_cx.glx.glXMakeCurrent)(xlib_app.display, window, opengl_cx.context);
                 gl::Viewport(0, 0, pix_width as i32, pix_height as i32);
             }
+            view_rect = Rect{x:view_bounds.min_x, y:view_bounds.min_y, w:view_bounds.max_x - view_bounds.min_x, h:view_bounds.max_y - view_bounds.min_y}
         }
         
         unsafe {
@@ -195,7 +198,7 @@ impl Cx {
             let color_texture = &self.passes[pass_id].color_textures[0];
             if let Some(color) = color_texture.clear_color {
                 unsafe {
-                    gl::ClearColor(if full_repaint {color.r}else {0.5}, color.g, color.b, color.a);
+                    gl::ClearColor(color.r, color.g, color.b, color.a);
                     gl::Clear(gl::COLOR_BUFFER_BIT | gl::DEPTH_BUFFER_BIT);
                 }
             }
@@ -208,7 +211,7 @@ impl Cx {
                 gl::Clear(gl::COLOR_BUFFER_BIT | gl::DEPTH_BUFFER_BIT);
             }
         }
-        self.render_view(pass_id, view_id, full_repaint, &opengl_cx);
+        self.render_view(pass_id, view_id, full_repaint, &view_rect, &opengl_cx);
         //glutin_window.swap_buffers().unwrap();
         // command_buffer.present_drawable(&drawable);
         unsafe {
@@ -248,7 +251,7 @@ impl Cx {
             }
         }
         */
-        self.render_view(pass_id, view_id, true, &opengl_cx);
+        self.render_view(pass_id, view_id, true, &Rect::zero(), &opengl_cx);
         // commit
     }
     
