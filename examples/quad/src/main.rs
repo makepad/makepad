@@ -60,16 +60,6 @@ impl App {
     pub fn def_quad_shader() -> ShaderGen {
         Quad::def_quad_shader().compose(shader_ast !({
             
-            fn vertex() -> vec4 {
-                // return vec4(geom.x-0.5, geom.y, 0., 1.);
-                //let shift: vec2 = -view_scroll * view_do_scroll;
-                let clipped: vec2 = geom * vec2(w, h) + vec2(x, y);
-                //pos = (clipped  - vec2(x, y)) / vec2(w, h);
-                // only pass the clipped position forward
-                return vec4(clipped.x, clipped.y, 0., 1.) * camera_projection;
-            }
-            
-            
             fn pixel() -> vec4 {
                 return vec4(1.0,0.0,0.0,1.0);
             }
