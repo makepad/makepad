@@ -4,9 +4,9 @@ use std::collections::HashMap;
 use std::ffi::CString;
 use std::ffi::CStr;
 use std::sync::Mutex;
-use std::fs::File;
-use std::io::Write;
-use std::os::unix::io::FromRawFd;
+//use std::fs::File;
+//use std::io::Write;
+//use std::os::unix::io::FromRawFd;
 use std::mem;
 use std::os::raw::{c_int, c_ulong};
 use std::ptr;
@@ -89,9 +89,9 @@ impl XlibApp {
     
     pub fn init(&mut self) {
         unsafe {
-            unsafe {
-                (self.xlib.XrmInitialize)();
-            }
+            //unsafe {
+            (self.xlib.XrmInitialize)();
+            //}
             GLOBAL_XLIB_APP = self;
         }
     }

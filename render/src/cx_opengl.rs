@@ -172,7 +172,9 @@ impl Cx {
         
         let mut opengl_windows: Vec<OpenglWindow> = Vec::new();
         
+        println!("COMPILING SHADERS");
         self.opengl_compile_all_shaders(&xlib_app, &opengl_cx);
+        println!("COMPILED SHADERS");
         
         self.load_fonts_from_file();
         
@@ -230,12 +232,15 @@ impl Cx {
                             window.window_state = match &window.window_state {
                                 CxWindowState::Create {inner_size, position, title} => {
                                     // lets create a platformwindow
+                                    println!("OPENING WINDOW");
+                                    
                                     let opengl_window = OpenglWindow::new(index, &opengl_cx, xlib_app, *inner_size, *position, &title);
                                     window.window_geom = opengl_window.window_geom.clone();
                                     opengl_windows.push(opengl_window);
                                     for opengl_window in &mut opengl_windows {
                                         opengl_window.xlib_window.update_ptrs();
                                     }
+                                    println!("WINDOW OPEN");
                                     
                                     CxWindowState::Created
                                 },
@@ -900,7 +905,7 @@ impl OpenglBuffer {
         }
     }
     
-    pub fn update_with_f32_data(&mut self, opengl_cx: &OpenglCx, data: &Vec<f32>) {
+    pub fn update_with_f32_data(&mut self, _opengl_cx: &OpenglCx, data: &Vec<f32>) {
         if self.gl_buffer.is_none() {
             self.alloc_gl_buffer();
         }
@@ -910,7 +915,7 @@ impl OpenglBuffer {
         }
     }
     
-    pub fn update_with_u32_data(&mut self, opengl_cx: &OpenglCx, data: &Vec<u32>) {
+    pub fn update_with_u32_data(&mut self, _opengl_cx: &OpenglCx, data: &Vec<u32>) {
         if self.gl_buffer.is_none() {
             self.alloc_gl_buffer();
         }
