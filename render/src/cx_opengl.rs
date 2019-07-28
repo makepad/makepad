@@ -121,11 +121,13 @@ impl Cx {
         self.calc_dirty_bounds(pass_id, view_id, &mut view_bounds);
         
         let mut full_repaint = view_bounds.max_x - view_bounds.min_x == opengl_window.window_geom.inner_size.x
-            && view_bounds.max_y - view_bounds.min_y == opengl_window.window_geom.inner_size.y;
+            && view_bounds.max_y - view_bounds.min_y == opengl_window.window_geom.inner_size.y 
+            || opengl_window.view_bounds != view_bounds; 
         
         //println!("{} {}", view_bounds.max_x - view_bounds.min_x, pixel_width);
         let window;
         if full_repaint {
+            opengl_window.view_bounds = view_bounds;
             //println!("DOING A FULL REPAINT!");
             opengl_window.xlib_window.move_resize_window_dirty(0, 0, 1, 1);
             window = opengl_window.xlib_window.window.unwrap();
@@ -143,10 +145,24 @@ impl Cx {
             if view_bounds.max_x == std::f32::NEG_INFINITY {
                 return
             }
+            /*
+            unsafe {
+                (opengl_cx.glx.glXMakeCurrent)(xlib_app.display, opengl_window.xlib_window.window.unwrap(), opengl_cx.context);
+                gl::Viewport(
+                    0,
+                    0,
+                    (opengl_window.window_geom.inner_size.x * opengl_window.window_geom.dpi_factor) as i32,
+                    (opengl_window.window_geom.inner_size.y * opengl_window.window_geom.dpi_factor) as i32
+                );
+                gl::ClearColor(0.0, 1.0, 0.0, 0.0);
+                gl::Clear(gl::COLOR_BUFFER_BIT | gl::DEPTH_BUFFER_BIT);
+                (opengl_cx.glx.glXSwapBuffers)(xlib_app.display, opengl_window.xlib_window.window.unwrap());
+            }*/
+            
             let pix_width = ((view_bounds.max_x - view_bounds.min_x) * opengl_window.window_geom.dpi_factor);
             let pix_height = ((view_bounds.max_y - view_bounds.min_y) * opengl_window.window_geom.dpi_factor);
-
-             //println!("DOING A PARTIAL REPAINT! {} {}", pix_width, pix_height);
+            
+            //println!("DOING A PARTIAL REPAINT! {}-{} {}-{}", opengl_window.window_geom.inner_size.x, pix_width, opengl_window.window_geom.inner_size.y, pix_height);
             
             opengl_window.xlib_window.move_resize_window_dirty(
                 (view_bounds.min_x * opengl_window.window_geom.dpi_factor) as i32,
@@ -666,6 +682,7 @@ impl Cx {
     }
 }
 
+#[derive(Clone, PartialEq)]
 struct ViewBounds {
     min_x: f32,
     min_y: f32,
@@ -866,11 +883,12 @@ pub struct CxPlatformShader {
 
 
 #[derive(Clone)]
-pub struct OpenglWindow {
+struct OpenglWindow {
     pub window_id: usize,
     pub window_geom: WindowGeom,
     pub cal_size: Vec2,
     pub xlib_window: XlibWindow,
+    pub view_bounds: ViewBounds,
 }
 
 impl OpenglWindow {
@@ -882,6 +900,7 @@ impl OpenglWindow {
         
         OpenglWindow {
             window_id,
+            view_bounds: ViewBounds::new(),
             cal_size: Vec2::zero(),
             window_geom: xlib_window.get_window_geom(),
             xlib_window
