@@ -63,7 +63,7 @@ impl Style for AppWindow {
             desktop_window: DesktopWindow{
                 caption:"Makepad".to_string(),
                 window:Window{
-                    create_inner_size:Some(Vec2{x:1400.0,y:1000.0}),
+                    create_inner_size:Some(Vec2{x:350.0,y:1000.0}),
                     ..Window::style(cx)
                 },
                 ..DesktopWindow::style(cx)
