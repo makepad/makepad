@@ -9,7 +9,8 @@ pub struct DesktopWindow {
     pub pass: Pass,
     pub color_texture: Texture,
     pub depth_texture: Texture,
-    pub main_view: View<ScrollBar>, // we have a root view otherwise is_overlay subviews can't attach topmost
+    pub caption_view: View<NoScrollBar>, // we have a root view otherwise is_overlay subviews can't attach topmost
+    pub main_view: View<NoScrollBar>, // we have a root view otherwise is_overlay subviews can't attach topmost
     pub inner_view: View<ScrollBar>,
     
     pub min_btn: DesktopButton,
@@ -45,6 +46,7 @@ impl Style for DesktopWindow {
             color_texture: Texture::default(),
             depth_texture: Texture::default(),
             main_view: View::style(cx),
+            caption_view: View::style(cx),
             inner_view: View::style(cx),
             
             min_btn: DesktopButton::style(cx),
@@ -153,49 +155,58 @@ impl DesktopWindow {
         
         let _ = self.main_view.begin_view(cx, Layout::default());
         
-        // alright here we draw our platform buttons.
-        match cx.platform_type {
-            PlatformType::Linux | PlatformType::Windows => {
-                let bg_inst = self.caption_bg.begin_quad(cx, &Layout {
-                    align: Align::right_center(),
-                    width: Bounds::Fill,
-                    height: Bounds::Compute,
-                    ..Default::default()
-                });
-                
-                self.min_btn.draw_desktop_button(cx, DesktopButtonType::WindowsMin);
-                if self.window.is_fullscreen(cx) {self.max_btn.draw_desktop_button(cx, DesktopButtonType::WindowsMaxToggled);}
-                else {self.max_btn.draw_desktop_button(cx, DesktopButtonType::WindowsMax);}
-                self.close_btn.draw_desktop_button(cx, DesktopButtonType::WindowsClose);
-                
-                // change alignment
-                cx.realign_turtle(Align::center());
-                cx.compute_turtle_height();
-                cx.reset_turtle_walk();
-                cx.move_turtle(50., 0.);
-                // we need to store our caption rect somewhere.
-                self.caption_size = Vec2 {x: cx.get_width_left(), y: cx.get_height_left()};
-                self.caption_text.draw_text(cx, &self.caption);
-                self.caption_bg.end_quad(cx, &bg_inst);
-                cx.turtle_new_line();
-            },
-            PlatformType::OSX => { // mac still uses the built in buttons, TODO, replace that.
-                let bg_inst = self.caption_bg.begin_quad(cx, &Layout {
-                    align: Align::center(),
-                    width: Bounds::Fill,
-                    height: Bounds::Fix(22.),
-                    ..Default::default()
-                });
-                self.caption_size = Vec2 {x: cx.get_width_left(), y: cx.get_height_left()};
-                self.caption_text.draw_text(cx, &self.caption);
-                self.caption_bg.end_quad(cx, &bg_inst);
-                cx.turtle_new_line();
-            },
-            _ => {
-                
+        if let Ok(_) = self.caption_view.begin_view(cx, Layout{
+            width:Bounds::Fill,
+            height:Bounds::Compute,
+            ..Layout::default()
+        }){
+            
+            // alright here we draw our platform buttons.
+            match cx.platform_type {
+                PlatformType::Linux | PlatformType::Windows => {
+                    let bg_inst = self.caption_bg.begin_quad(cx, &Layout {
+                        align: Align::right_center(),
+                        width: Bounds::Fill,
+                        height: Bounds::Compute,
+                        ..Default::default()
+                    });
+                    
+                    self.min_btn.draw_desktop_button(cx, DesktopButtonType::WindowsMin);
+                    if self.window.is_fullscreen(cx) {self.max_btn.draw_desktop_button(cx, DesktopButtonType::WindowsMaxToggled);}
+                    else {self.max_btn.draw_desktop_button(cx, DesktopButtonType::WindowsMax);}
+                    self.close_btn.draw_desktop_button(cx, DesktopButtonType::WindowsClose);
+                    
+                    // change alignment
+                    cx.realign_turtle(Align::center());
+                    cx.compute_turtle_height();
+                    cx.reset_turtle_walk();
+                    cx.move_turtle(50., 0.);
+                    // we need to store our caption rect somewhere.
+                    self.caption_size = Vec2 {x: cx.get_width_left(), y: cx.get_height_left()};
+                    self.caption_text.draw_text(cx, &self.caption);
+                    self.caption_bg.end_quad(cx, &bg_inst);
+                    cx.turtle_new_line();
+                },
+                PlatformType::OSX => { // mac still uses the built in buttons, TODO, replace that.
+                    let bg_inst = self.caption_bg.begin_quad(cx, &Layout {
+                        align: Align::center(),
+                        width: Bounds::Fill,
+                        height: Bounds::Fix(22.),
+                        ..Default::default()
+                    });
+                    self.caption_size = Vec2 {x: cx.get_width_left(), y: cx.get_height_left()};
+                    self.caption_text.draw_text(cx, &self.caption);
+                    self.caption_bg.end_quad(cx, &bg_inst);
+                    cx.turtle_new_line();
+                },
+                _ => {
+                    
+                }
             }
+            self.caption_view.end_view(cx);
         }
-        
+        cx.turtle_new_line(); 
+            
         if self.inner_over_chrome{
             let _ = self.inner_view.begin_view(cx, Layout{abs_origin: Some(Vec2::zero()),..Layout::default()});
         }
