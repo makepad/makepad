@@ -93,6 +93,8 @@ impl Cx {
                 (opengl_window.window_geom.inner_size.x * opengl_window.window_geom.dpi_factor) as i32,
                 (opengl_window.window_geom.inner_size.y * opengl_window.window_geom.dpi_factor) as i32
             );
+            gl::Enable(gl::SCISSOR_TEST);
+            gl::Scissor(0,0,400,2400);
         }
         
         let view_id = self.passes[pass_id].main_view_id.unwrap();
@@ -101,8 +103,8 @@ impl Cx {
             let color_texture = &self.passes[pass_id].color_textures[0];
             if let Some(color) = color_texture.clear_color {
                 unsafe {
-                    //gl::ClearColor(color.r, color.g, color.b, color.a);
-                    //gl::Clear(gl::COLOR_BUFFER_BIT | gl::DEPTH_BUFFER_BIT);
+                    gl::ClearColor(color.r, color.g, color.b, color.a);
+                    gl::Clear(gl::COLOR_BUFFER_BIT | gl::DEPTH_BUFFER_BIT);
                 }
             }
             else { // dont clear
