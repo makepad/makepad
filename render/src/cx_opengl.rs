@@ -101,8 +101,8 @@ impl Cx {
             let color_texture = &self.passes[pass_id].color_textures[0];
             if let Some(color) = color_texture.clear_color {
                 unsafe {
-                    gl::ClearColor(color.r, color.g, color.b, color.a);
-                    gl::Clear(gl::COLOR_BUFFER_BIT | gl::DEPTH_BUFFER_BIT);
+                    //gl::ClearColor(color.r, color.g, color.b, color.a);
+                    //gl::Clear(gl::COLOR_BUFFER_BIT | gl::DEPTH_BUFFER_BIT);
                 }
             }
             else { // dont clear
