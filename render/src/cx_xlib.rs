@@ -441,30 +441,28 @@ impl XlibWindow {
             let xlib = &(*self.xlib_app).xlib;
             
             // ok lets find a childwindow that matches x/y/w/h and show it if need be
-            let mut any_invisible = false;
             for child in &mut self.child_windows{
                 if child.x == x && child.y == y && child.w == w && child.h == h{
-                    (xlib.XMapWindow)(display, child.window);
-                    child.visible = true;
+                    if!child.visible{
+                        (xlib.XMapWindow)(display, child.window);
+                        child.visible = true;
+                    }
+                    (xlib.XRaiseWindow)(display, child.window);
                     return Some(child.window);
-                }
-                if !child.visible{
-                    any_invisible = true;
                 }
             }
             
-            if any_invisible{
-                for child in &mut self.child_windows{
-                    if !child.visible{
-                        child.x = x;
-                        child.y = y;
-                        child.w = w;
-                        child.h = h;
-                        (xlib.XMoveResizeWindow)(display, child.window, x, y, w, h);
-                        (xlib.XMapWindow)(display, child.window);
-                        child.visible = true;
-                        return Some(child.window);
-                    }
+            for child in &mut self.child_windows{
+                if !child.visible{
+                    child.x = x;
+                    child.y = y;
+                    child.w = w;
+                    child.h = h;
+                    (xlib.XMoveResizeWindow)(display, child.window, x, y, w, h);
+                    (xlib.XMapWindow)(display, child.window);
+                    (xlib.XRaiseWindow)(display, child.window);
+                    child.visible = true;
+                    return Some(child.window);
                 }
             }
             
