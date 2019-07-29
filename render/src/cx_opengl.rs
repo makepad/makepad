@@ -119,7 +119,7 @@ impl Cx {
             || opengl_window.view_bounds != view_bounds; 
         
         //println!("{} {}", view_bounds.max_x - view_bounds.min_x, pixel_width);
-        println!("{} {}", view_bounds.max_x - view_bounds.min_x, view_bounds.max_y - view_bounds.min_y);
+        //println!("{} {}", view_bounds.max_x - view_bounds.min_x, view_bounds.max_y - view_bounds.min_y);
         let window;
         let view_rect;
         if full_repaint {
