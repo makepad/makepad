@@ -115,8 +115,7 @@ impl Cx {
         self.calc_dirty_bounds(pass_id, view_id, &mut view_bounds);
         
         let mut full_repaint = view_bounds.max_x - view_bounds.min_x == opengl_window.window_geom.inner_size.x
-            && view_bounds.max_y - view_bounds.min_y == opengl_window.window_geom.inner_size.y 
-            || opengl_window.view_bounds != view_bounds; 
+            && view_bounds.max_y - view_bounds.min_y == opengl_window.window_geom.inner_size.y; 
         
         //println!("{} {}", view_bounds.max_x - view_bounds.min_x, pixel_width);
         //println!("{} {}", view_bounds.max_x - view_bounds.min_x, view_bounds.max_y - view_bounds.min_y);
@@ -125,8 +124,10 @@ impl Cx {
         if full_repaint {
             opengl_window.view_bounds = view_bounds;
             //println!("DOING A FULL REPAINT!");
-            opengl_window.xlib_window.hide_window_dirty();//move_resize_window_dirty(0, 0, 1, 1);
+            opengl_window.xlib_window.hide_child_windows();//move_resize_window_dirty(0, 0, 1, 1);
+
             window = opengl_window.xlib_window.window.unwrap();
+
             let pass_size = self.passes[pass_id].pass_size;
             self.passes[pass_id].set_ortho_matrix(Vec2::zero(), pass_size);
             let pix_width = opengl_window.window_geom.inner_size.x * opengl_window.window_geom.dpi_factor;
@@ -161,14 +162,14 @@ impl Cx {
             
             //println!("DOING A PARTIAL REPAINT! {}-{} {}-{}", opengl_window.window_geom.inner_size.x, pix_width, opengl_window.window_geom.inner_size.y, pix_height);
             
-            opengl_window.xlib_window.move_resize_window_dirty(
+            //(opengl_cx.glx.glXSwapBuffers)(xlib_app.display, window);
+            window = opengl_window.xlib_window.alloc_child_window(
                 (view_bounds.min_x * opengl_window.window_geom.dpi_factor) as i32,
                 (view_bounds.min_y * opengl_window.window_geom.dpi_factor) as i32,
                 pix_width as u32,
                 pix_height as u32
-            );
-            opengl_window.xlib_window.show_window_dirty();
-            window = opengl_window.xlib_window.window_dirty.unwrap();
+            ).unwrap();
+            
             let pass_size = self.passes[pass_id].pass_size;
             self.passes[pass_id].set_ortho_matrix(
                 Vec2 {x: view_bounds.min_x, y: view_bounds.min_y},

@@ -37,10 +37,9 @@ pub struct XlibApp {
 #[derive(Clone)]
 pub struct XlibWindow {
     pub window: Option<c_ulong>,
-
-    pub window_dirty: Option<c_ulong>,
-    pub window_dirty_x: i32,
-    pub window_dirty_y: i32,
+    pub attributes: Option<xlib::XSetWindowAttributes>,
+    pub visual_info: Option<XVisualInfo>,
+    pub child_windows: Vec<XlibChildWindow>,
     
     pub window_id: usize,
     pub xlib_app: *mut XlibApp,
@@ -54,6 +53,17 @@ pub struct XlibWindow {
     pub last_mouse_pos: Vec2,
     pub fingers_down: Vec<bool>,
 }
+
+#[derive(Clone)]
+pub struct XlibChildWindow{
+    pub window: c_ulong,
+    visible:bool,
+    x:i32,
+    y:i32,
+    w:u32,
+    h:u32
+}
+
 
 #[derive(Clone)]
 pub enum XlibTimer {
@@ -145,9 +155,15 @@ impl XlibApp {
                                 let window = &mut (**window_ptr);
                                 let mut x = motion.x;
                                 let mut y = motion.y;
-                                if motion.window == window.window_dirty.unwrap(){
-                                    x += window.window_dirty_x;
-                                    y += window.window_dirty_y;
+                                if motion.window != window.window.unwrap(){
+                                    // find the right child
+                                    for child in &window.child_windows{
+                                        if child.window == motion.window{
+                                            x += child.x;
+                                            y += child.y;
+                                            break
+                                        }
+                                    }
                                 }
                                 window.send_finger_hover_and_move(Vec2{x:x as f32 / window.last_window_geom.dpi_factor, y:y as f32 / window.last_window_geom.dpi_factor}, KeyModifiers::default());
                             }
@@ -325,9 +341,9 @@ impl XlibWindow {
         
         XlibWindow {
             window: None,
-            window_dirty: None,
-            window_dirty_x:0,
-            window_dirty_y:0,
+            attributes: None,
+            visual_info: None,
+            child_windows: Vec::new(),
             window_id: window_id,
             xlib_app: xlib_app,
             last_window_geom: WindowGeom::default(),
@@ -395,63 +411,97 @@ impl XlibWindow {
             
             // Map the window to the screen
             (xlib.XMapWindow)(display, window);
-            
             (xlib.XFlush)(display);
             
             // Create a window
-            let window_dirty = (xlib.XCreateWindow)(
-                display,
-                window,
-                0,
-                0,
-                1,
-                1,
-                0,
-                (*visual_info).depth,
-                xlib::InputOutput as u32,
-                (*visual_info).visual,
-                xlib::CWBorderPixel | xlib::CWColormap | xlib::CWEventMask | xlib::CWOverrideRedirect,
-                &mut attributes,
-            );
-            
-            // Map the window to the screen
-            //(xlib.XMapWindow)(display, window_dirty);
-            
-            (xlib.XFlush)(display);
-            
             (*self.xlib_app).window_map.insert(window, self);
-            (*self.xlib_app).window_map.insert(window_dirty, self);
+            self.attributes = Some(attributes);
+            self.visual_info = Some((*visual_info));
             self.window = Some(window);
-            self.window_dirty = Some(window_dirty);
             self.last_window_geom = self.get_window_geom();
         }
     }
     
-    pub fn hide_window_dirty(&mut self) {
+    pub fn hide_child_windows(&mut self) {
         unsafe{
             let display = (*self.xlib_app).display;
             let xlib = &(*self.xlib_app).xlib;
-            (xlib.XUnmapWindow)(display, self.window_dirty.unwrap());
+            for child in &mut self.child_windows{
+                if child.visible{
+                    (xlib.XUnmapWindow)(display, child.window);
+                    child.visible = false
+                }
+            }
         }
     }
 
-    pub fn show_window_dirty(&mut self) {
+    pub fn alloc_child_window(&mut self, x:i32, y:i32, w:u32, h:u32)->Option<c_ulong>{
         unsafe{
             let display = (*self.xlib_app).display;
             let xlib = &(*self.xlib_app).xlib;
-            (xlib.XMapWindow)(display, self.window_dirty.unwrap());
-        }
-    }
-
-    
-    pub fn move_resize_window_dirty(&mut self, x:i32, y:i32, w:u32, h:u32) {
-        unsafe{
-            let display = (*self.xlib_app).display;
-            let xlib = &(*self.xlib_app).xlib;
-            //println!("{} {} {} {}", x,y,w,h);
-            self.window_dirty_x = x;
-            self.window_dirty_y = y;
-            (xlib.XMoveResizeWindow)(display, self.window_dirty.unwrap(), x, y, w, h);
+            
+            // ok lets find a childwindow that matches x/y/w/h and show it if need be
+            let mut any_invisible = false;
+            for child in &mut self.child_windows{
+                if child.x == x && child.y == y && child.w == w && child.h == h{
+                    (xlib.XMapWindow)(display, child.window);
+                    child.visible = true;
+                    return Some(child.window);
+                }
+                if !child.visible{
+                    any_invisible = true;
+                }
+            }
+            
+            if any_invisible{
+                for child in &mut self.child_windows{
+                    if !child.visible{
+                        child.x = x;
+                        child.y = y;
+                        child.w = w;
+                        child.h = h;
+                        (xlib.XMoveResizeWindow)(display, child.window, x, y, w, h);
+                        (xlib.XMapWindow)(display, child.window);
+                        child.visible = true;
+                        return Some(child.window);
+                    }
+                }
+            }
+            
+            println!("{}", self.child_windows.len());
+            
+            let new_child = (xlib.XCreateWindow)(
+                display,
+                self.window.unwrap(),
+                x,
+                y,
+                w,
+                h,
+                0,
+                self.visual_info.unwrap().depth,
+                xlib::InputOutput as u32,
+                self.visual_info.unwrap().visual,
+                xlib::CWBorderPixel | xlib::CWColormap | xlib::CWEventMask | xlib::CWOverrideRedirect,
+                self.attributes.as_mut().unwrap(),
+            );
+            
+            // Map the window to the screen
+            //(xlib.XMapWindow)(display, window_dirty);
+            (*self.xlib_app).window_map.insert(new_child, self);
+            (xlib.XMapWindow)(display, new_child);
+            (xlib.XFlush)(display);
+            
+            self.child_windows.push(XlibChildWindow{
+                window:new_child,
+                x:x,
+                y:y,
+                w:w,
+                h:h,
+                visible:true
+            });
+            
+            return Some(new_child)
+           
         }
     }
     
@@ -469,7 +519,9 @@ impl XlibWindow {
     pub fn update_ptrs(&mut self) {
         unsafe {
             (*self.xlib_app).window_map.insert(self.window.unwrap(), self);
-            (*self.xlib_app).window_map.insert(self.window_dirty.unwrap(), self);
+            for i in 0..self.child_windows.len(){
+                (*self.xlib_app).window_map.insert(self.child_windows[i].window, self);
+            }
         }
     }
     
