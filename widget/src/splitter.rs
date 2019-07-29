@@ -282,6 +282,7 @@ impl Splitter {
                     self._split_area = self.split.draw_quad(cx, Rect {x: 0., y: 0., w: rect.w, h: self.split_size}).into_area();
                     self.split_view.end_view(cx);
                 }
+                cx.set_turtle_walk(Vec2 {x: origin.x, y: origin.y + self._calc_pos+self.split_size});
             },
             Axis::Vertical => {
                 cx.set_turtle_walk(Vec2 {x: origin.x + self._calc_pos, y: origin.y});
