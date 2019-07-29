@@ -119,12 +119,13 @@ impl Cx {
             || opengl_window.view_bounds != view_bounds; 
         
         //println!("{} {}", view_bounds.max_x - view_bounds.min_x, pixel_width);
+        println!("{} {}", view_bounds.max_x - view_bounds.min_x, view_bounds.max_y - view_bounds.min_y);
         let window;
         let view_rect;
         if full_repaint {
             opengl_window.view_bounds = view_bounds;
             //println!("DOING A FULL REPAINT!");
-            opengl_window.xlib_window.move_resize_window_dirty(0, 0, 1, 1);
+            opengl_window.xlib_window.hide_window_dirty();//move_resize_window_dirty(0, 0, 1, 1);
             window = opengl_window.xlib_window.window.unwrap();
             let pass_size = self.passes[pass_id].pass_size;
             self.passes[pass_id].set_ortho_matrix(Vec2::zero(), pass_size);
@@ -166,6 +167,7 @@ impl Cx {
                 pix_width as u32,
                 pix_height as u32
             );
+            opengl_window.xlib_window.show_window_dirty();
             window = opengl_window.xlib_window.window_dirty.unwrap();
             let pass_size = self.passes[pass_id].pass_size;
             self.passes[pass_id].set_ortho_matrix(

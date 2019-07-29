@@ -415,7 +415,7 @@ impl XlibWindow {
             );
             
             // Map the window to the screen
-            (xlib.XMapWindow)(display, window_dirty);
+            //(xlib.XMapWindow)(display, window_dirty);
             
             (xlib.XFlush)(display);
             
@@ -426,6 +426,23 @@ impl XlibWindow {
             self.last_window_geom = self.get_window_geom();
         }
     }
+    
+    pub fn hide_window_dirty(&mut self) {
+        unsafe{
+            let display = (*self.xlib_app).display;
+            let xlib = &(*self.xlib_app).xlib;
+            (xlib.XUnmapWindow)(display, self.window_dirty.unwrap());
+        }
+    }
+
+    pub fn show_window_dirty(&mut self) {
+        unsafe{
+            let display = (*self.xlib_app).display;
+            let xlib = &(*self.xlib_app).xlib;
+            (xlib.XMapWindow)(display, self.window_dirty.unwrap());
+        }
+    }
+
     
     pub fn move_resize_window_dirty(&mut self, x:i32, y:i32, w:u32, h:u32) {
         unsafe{
