@@ -14,7 +14,7 @@ pub struct Splitter {
     pub anim_over: Anim,
     pub anim_moving: Anim,
     pub realign_dist: f32,
-    
+    pub split_view: View<NoScrollBar>,
     pub _split_area: Area,
     pub _calc_pos: f32,
     pub _is_moving: bool,
@@ -56,6 +56,7 @@ impl Style for Splitter {
             realign_dist: 30.,
             split_size: 2.0,
             min_size: 25.0,
+            split_view: View::style(cx),
             split: Quad {
                 shader: cx.add_shader(Self::def_split_shader(), "Splitter.split"),
                 ..Style::style(cx)
@@ -267,13 +268,31 @@ impl Splitter {
     
     pub fn mid_splitter(&mut self, cx: &mut Cx) {
         cx.end_turtle(Area::Empty);
+        let rect = cx.get_turtle_rect();
         let origin = cx.get_turtle_origin();
+        self.split.color = self.animator.last_color("split.color");
         match self.axis {
             Axis::Horizontal => {
-                cx.set_turtle_walk(Vec2 {x: origin.x, y: origin.y + self._calc_pos + self.split_size});
+                cx.set_turtle_walk(Vec2 {x: origin.x, y: origin.y + self._calc_pos});
+                if let Ok(_) = self.split_view.begin_view(cx, Layout {
+                    width: Bounds::Fix(rect.w),
+                    height: Bounds::Fix(self.split_size),
+                    ..Layout::default()
+                }) {
+                    self._split_area = self.split.draw_quad(cx, Rect {x: 0., y: 0., w: rect.w, h: self.split_size}).into_area();
+                    self.split_view.end_view(cx);
+                }
             },
             Axis::Vertical => {
-                cx.set_turtle_walk(Vec2 {x: origin.x + self._calc_pos + self.split_size, y: origin.y});
+                cx.set_turtle_walk(Vec2 {x: origin.x + self._calc_pos, y: origin.y});
+                if let Ok(_) = self.split_view.begin_view(cx, Layout {
+                    width: Bounds::Fix(self.split_size),
+                    height: Bounds::Fix(rect.h),
+                    ..Layout::default()
+                }) {
+                    self._split_area = self.split.draw_quad(cx, Rect {x: 0., y: 0., w: self.split_size, h: rect.h}).into_area();
+                    self.split_view.end_view(cx);
+                }
             }
         };
         cx.begin_turtle(&Layout {..Default::default()}, Area::Empty);
@@ -283,17 +302,16 @@ impl Splitter {
         cx.end_turtle(Area::Empty);
         // draw the splitter in the middle of the turtle
         let rect = cx.get_turtle_rect();
-        self.split.color = self.animator.last_color("split.color");
+        
         match self.axis {
             Axis::Horizontal => {
-                self._split_area = self.split.draw_quad(cx, Rect {x: 0., y: self._calc_pos, w: rect.w, h: self.split_size}).into_area();
                 self._drag_max_pos = rect.h;
             },
             Axis::Vertical => {
-                self._split_area = self.split.draw_quad(cx, Rect {x: self._calc_pos, y: 0., w: self.split_size, h: rect.h}).into_area();
                 self._drag_max_pos = rect.w;
             }
         };
+        
         self.animator.update_area_refs(cx, self._split_area);
     }
 }
