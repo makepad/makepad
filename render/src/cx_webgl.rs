@@ -63,6 +63,8 @@ impl Cx {
     
     pub fn draw_pass_to_canvas(&mut self, pass_id: usize) {
         let view_id = self.passes[pass_id].main_view_id.unwrap();
+        let pass_size = self.passes[pass_id].pass_size;
+        self.passes[pass_id].set_ortho_matrix(Vec2::zero(), pass_size);
         
         if self.passes[pass_id].color_textures.len()>0 {
             let color_texture = &self.passes[pass_id].color_textures[0];

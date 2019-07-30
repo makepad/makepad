@@ -8,11 +8,12 @@ use std::sync::Mutex;
 //use std::io::Write;
 //use std::os::unix::io::FromRawFd;
 use std::mem;
-use std::os::raw::{c_int, c_ulong};
+use std::os::raw::{c_int, c_ulong, c_long};
 use std::ptr;
 use time::precise_time_ns;
 use x11_dl::xlib;
 use x11_dl::xlib::{Display, XVisualInfo, Xlib};
+use x11_dl::keysym;
 
 static mut GLOBAL_XLIB_APP: *mut XlibApp = 0 as *mut _;
 
@@ -55,13 +56,13 @@ pub struct XlibWindow {
 }
 
 #[derive(Clone)]
-pub struct XlibChildWindow{
+pub struct XlibChildWindow {
     pub window: c_ulong,
-    visible:bool,
-    x:i32,
-    y:i32,
-    w:u32,
-    h:u32
+    visible: bool,
+    x: i32,
+    y: i32,
+    w: u32,
+    h: u32
 }
 
 
@@ -144,7 +145,7 @@ impl XlibApp {
                             let cfg = event.configure;
                             if let Some(window_ptr) = self.window_map.get(&cfg.window) {
                                 let window = &mut (**window_ptr);
-                                if cfg.window == window.window.unwrap(){
+                                if cfg.window == window.window.unwrap() {
                                     window.send_change_event();
                                 }
                             }
@@ -155,32 +156,37 @@ impl XlibApp {
                                 let window = &mut (**window_ptr);
                                 let mut x = motion.x;
                                 let mut y = motion.y;
-                                if motion.window != window.window.unwrap(){
+                                if motion.window != window.window.unwrap() {
                                     // find the right child
-                                    for child in &window.child_windows{
-                                        if child.window == motion.window{
+                                    for child in &window.child_windows {
+                                        if child.window == motion.window {
                                             x += child.x;
                                             y += child.y;
                                             break
                                         }
                                     }
                                 }
-                                window.send_finger_hover_and_move(Vec2{x:x as f32 / window.last_window_geom.dpi_factor, y:y as f32 / window.last_window_geom.dpi_factor}, KeyModifiers::default());
+                                window.send_finger_hover_and_move(Vec2 {x: x as f32 / window.last_window_geom.dpi_factor, y: y as f32 / window.last_window_geom.dpi_factor}, KeyModifiers::default());
                             }
                         },
-                        xlib::ButtonPress =>{ // mouse down
+                        xlib::ButtonPress => { // mouse down
                             let button = event.button;
                             if let Some(window_ptr) = self.window_map.get(&button.window) {
                                 let window = &mut (**window_ptr);
+                                (self.xlib.XSetInputFocus)(self.display, window.window.unwrap(), xlib::RevertToNone, xlib::CurrentTime);
                                 window.send_finger_down(button.button as usize, KeyModifiers::default())
                             }
                         },
-                        xlib::ButtonRelease=>{ // mouse up
+                        xlib::ButtonRelease => { // mouse up
                             let button = event.button;
                             if let Some(window_ptr) = self.window_map.get(&button.window) {
                                 let window = &mut (**window_ptr);
                                 window.send_finger_up(button.button as usize, KeyModifiers::default())
                             }
+                        },
+                        xlib::KeyPress => {
+                            let key_code = self.xkeyevent_to_keycode(&mut event.key);
+                            println!("GOT KEYPRESS {:?}", key_code);
                         },
                         xlib::KeyRelease => {
                         },
@@ -331,6 +337,144 @@ impl XlibApp {
             //TODO
         }
     }
+    
+    fn xkeyevent_to_keycode(&self, key_event:&mut xlib::XKeyEvent)->KeyCode{
+        let mut keysym = 0;
+        unsafe {
+            (self.xlib.XLookupString)(
+                key_event,
+                ptr::null_mut(),
+                0,
+                &mut keysym,
+                ptr::null_mut(),
+            );
+        }
+        match keysym as u32{
+            keysym::XK_a=>KeyCode::KeyA,
+            keysym::XK_A=>KeyCode::KeyA,
+            keysym::XK_b=>KeyCode::KeyB,
+            keysym::XK_B=>KeyCode::KeyB,
+            keysym::XK_c=>KeyCode::KeyC,
+            keysym::XK_C=>KeyCode::KeyC,
+            keysym::XK_d=>KeyCode::KeyD,
+            keysym::XK_D=>KeyCode::KeyD,
+            keysym::XK_e=>KeyCode::KeyE,
+            keysym::XK_E=>KeyCode::KeyE,
+            keysym::XK_f=>KeyCode::KeyF,
+            keysym::XK_F=>KeyCode::KeyF,
+            keysym::XK_g=>KeyCode::KeyG,
+            keysym::XK_G=>KeyCode::KeyG,
+            keysym::XK_h=>KeyCode::KeyH,
+            keysym::XK_H=>KeyCode::KeyH,
+            keysym::XK_i=>KeyCode::KeyI,
+            keysym::XK_I=>KeyCode::KeyI,
+            keysym::XK_j=>KeyCode::KeyJ,
+            keysym::XK_J=>KeyCode::KeyJ,
+            keysym::XK_k=>KeyCode::KeyK,
+            keysym::XK_K=>KeyCode::KeyK,
+            keysym::XK_l=>KeyCode::KeyL,
+            keysym::XK_L=>KeyCode::KeyL,
+            keysym::XK_m=>KeyCode::KeyM,
+            keysym::XK_M=>KeyCode::KeyM,
+            keysym::XK_n=>KeyCode::KeyN,
+            keysym::XK_N=>KeyCode::KeyN,
+            keysym::XK_o=>KeyCode::KeyO,
+            keysym::XK_O=>KeyCode::KeyO,
+            keysym::XK_p=>KeyCode::KeyP,
+            keysym::XK_P=>KeyCode::KeyP,
+            keysym::XK_q=>KeyCode::KeyQ,
+            keysym::XK_Q=>KeyCode::KeyQ,
+            keysym::XK_r=>KeyCode::KeyR,
+            keysym::XK_R=>KeyCode::KeyR,
+            keysym::XK_s=>KeyCode::KeyS,
+            keysym::XK_S=>KeyCode::KeyS,
+            keysym::XK_t=>KeyCode::KeyT,
+            keysym::XK_T=>KeyCode::KeyT,
+            keysym::XK_u=>KeyCode::KeyU,
+            keysym::XK_U=>KeyCode::KeyU,
+            keysym::XK_v=>KeyCode::KeyV,
+            keysym::XK_V=>KeyCode::KeyV,
+            keysym::XK_w=>KeyCode::KeyW,
+            keysym::XK_W=>KeyCode::KeyW,
+            keysym::XK_x=>KeyCode::KeyX,
+            keysym::XK_X=>KeyCode::KeyX,
+            keysym::XK_y=>KeyCode::KeyY,
+            keysym::XK_Y=>KeyCode::KeyY,
+            keysym::XK_z=>KeyCode::KeyZ,
+            keysym::XK_Z=>KeyCode::KeyZ,
+
+            keysym::XK_0 => KeyCode::Key0,
+            keysym::XK_1 => KeyCode::Key1,
+            keysym::XK_2 => KeyCode::Key2,
+            keysym::XK_3 => KeyCode::Key3,
+            keysym::XK_4 => KeyCode::Key4,
+            keysym::XK_5 => KeyCode::Key5,
+            keysym::XK_6 => KeyCode::Key6,
+            keysym::XK_7 => KeyCode::Key7,
+            keysym::XK_8 => KeyCode::Key8,
+            keysym::XK_9 => KeyCode::Key9,
+
+            keysym::XK_equal => KeyCode::Equals,
+            keysym::XK_minus => KeyCode::Minus,
+            keysym::XK_bracketright => KeyCode::RBracket,
+            keysym::XK_bracketleft => KeyCode::LBracket,
+            keysym::XK_Return => KeyCode::Return,
+            keysym::XK_grave => KeyCode::Backtick,
+            keysym::XK_semicolon => KeyCode::Semicolon,
+            keysym::XK_backslash => KeyCode::Backslash,
+            keysym::XK_comma => KeyCode::Comma,
+            keysym::XK_slash => KeyCode::Slash,
+            keysym::XK_period => KeyCode::Period,
+            keysym::XK_Tab => KeyCode::Tab,
+            keysym::XK_space => KeyCode::Space,
+            keysym::XK_BackSpace => KeyCode::Backspace,
+            keysym::XK_Escape => KeyCode::Escape,
+            keysym::XK_Caps_Lock => KeyCode::Capslock,
+            keysym::XK_KP_Decimal => KeyCode::NumpadDecimal,
+            keysym::XK_KP_Multiply => KeyCode::NumpadMultiply,
+            keysym::XK_KP_Add => KeyCode::NumpadAdd,
+            keysym::XK_Num_Lock => KeyCode::Numlock,
+            keysym::XK_KP_Divide => KeyCode::NumpadDivide,
+            keysym::XK_KP_Enter => KeyCode::NumpadEnter,
+            keysym::XK_KP_Subtract => KeyCode::NumpadSubtract,
+            //keysim::XK_9 => KeyCode::NumpadEquals,
+            keysym::XK_KP_0 => KeyCode::Numpad0,
+            keysym::XK_KP_1 => KeyCode::Numpad1,
+            keysym::XK_KP_2 => KeyCode::Numpad2,
+            keysym::XK_KP_3 => KeyCode::Numpad3,
+            keysym::XK_KP_4 => KeyCode::Numpad4,
+            keysym::XK_KP_5 => KeyCode::Numpad5,
+            keysym::XK_KP_6 => KeyCode::Numpad6,
+            keysym::XK_KP_7 => KeyCode::Numpad7,
+            keysym::XK_KP_8 => KeyCode::Numpad8,
+            keysym::XK_KP_9 => KeyCode::Numpad9,
+
+            keysym::XK_F1 => KeyCode::F1,
+            keysym::XK_F2 => KeyCode::F2,
+            keysym::XK_F3 => KeyCode::F3,
+            keysym::XK_F4 => KeyCode::F4,
+            keysym::XK_F5 => KeyCode::F5,
+            keysym::XK_F6 => KeyCode::F6,
+            keysym::XK_F7 => KeyCode::F7,
+            keysym::XK_F8 => KeyCode::F8,
+            keysym::XK_F9 => KeyCode::F9,
+            keysym::XK_F10 => KeyCode::F10,
+            keysym::XK_F11 => KeyCode::F11,
+            keysym::XK_F12 => KeyCode::F12,
+
+            keysym::XK_Print => KeyCode::PrintScreen,
+            keysym::XK_Home => KeyCode::Home,
+            keysym::XK_Page_Up => KeyCode::PageUp,
+            keysym::XK_Delete => KeyCode::Delete,
+            keysym::XK_End => KeyCode::End,
+            keysym::XK_Page_Down => KeyCode::PageDown,
+            keysym::XK_Left => KeyCode::ArrowLeft,
+            keysym::XK_Right => KeyCode::ArrowRight,
+            keysym::XK_Down => KeyCode::ArrowDown,
+            keysym::XK_Up => KeyCode::ArrowUp,
+            _ => KeyCode::Unknown,
+        }
+    }
 }
 
 impl XlibWindow {
@@ -368,9 +512,9 @@ impl XlibWindow {
             let root_window = (xlib.XRootWindow)(display, default_screen);
             
             let mut attributes = mem::zeroed::<xlib::XSetWindowAttributes>();
-
+            
             attributes.border_pixel = 0;
-            attributes.override_redirect = 1;
+            //attributes.override_redirect = 1;
             attributes.colormap =
             (xlib.XCreateColormap)(display, root_window, (*visual_info).visual, xlib::AllocNone);
             attributes.event_mask = xlib::ExposureMask
@@ -397,7 +541,7 @@ impl XlibWindow {
                 (*visual_info).depth,
                 xlib::InputOutput as u32,
                 (*visual_info).visual,
-                xlib::CWBorderPixel | xlib::CWColormap | xlib::CWEventMask | xlib::CWOverrideRedirect,
+                xlib::CWBorderPixel | xlib::CWColormap | xlib::CWEventMask,// | xlib::CWOverrideRedirect,
                 &mut attributes,
             );
             
@@ -409,6 +553,15 @@ impl XlibWindow {
             );
             (xlib.XSetWMProtocols)(display, window, &mut wm_delete_message, 1);
             
+            let hints_prop = (xlib.XInternAtom)(display, CString::new("_MOTIF_WM_HINTS").unwrap().as_ptr(), 0);
+            let hints = MwmHints{
+                  flags: MWM_HINTS_DECORATIONS,
+                  functions: 0,
+                  decorations: 0,
+                  input_mode: 0,
+                  status: 0,
+            };
+            (xlib.XChangeProperty)(display, window, hints_prop, hints_prop, 32, xlib::PropModeReplace, &hints as *const _ as *const u8, 5);
             // Map the window to the screen
             (xlib.XMapWindow)(display, window);
             (xlib.XFlush)(display);
@@ -419,31 +572,42 @@ impl XlibWindow {
             self.visual_info = Some((*visual_info));
             self.window = Some(window);
             self.last_window_geom = self.get_window_geom();
+            
+            (*self.xlib_app).event_recur_block = false;
+            let new_geom = self.get_window_geom();
+            self.do_callback(&mut vec![
+                Event::WindowGeomChange(WindowGeomChangeEvent {
+                    window_id: self.window_id,
+                    old_geom: new_geom.clone(),
+                    new_geom: new_geom
+                })
+            ]);
+            (*self.xlib_app).event_recur_block = true;
         }
     }
     
     pub fn hide_child_windows(&mut self) {
-        unsafe{
+        unsafe {
             let display = (*self.xlib_app).display;
             let xlib = &(*self.xlib_app).xlib;
-            for child in &mut self.child_windows{
-                if child.visible{
+            for child in &mut self.child_windows {
+                if child.visible {
                     (xlib.XUnmapWindow)(display, child.window);
                     child.visible = false
                 }
             }
         }
     }
-
-    pub fn alloc_child_window(&mut self, x:i32, y:i32, w:u32, h:u32)->Option<c_ulong>{
-        unsafe{
+    
+    pub fn alloc_child_window(&mut self, x: i32, y: i32, w: u32, h: u32) -> Option<c_ulong> {
+        unsafe {
             let display = (*self.xlib_app).display;
             let xlib = &(*self.xlib_app).xlib;
             
             // ok lets find a childwindow that matches x/y/w/h and show it if need be
-            for child in &mut self.child_windows{
-                if child.x == x && child.y == y && child.w == w && child.h == h{
-                    if!child.visible{
+            for child in &mut self.child_windows {
+                if child.x == x && child.y == y && child.w == w && child.h == h {
+                    if!child.visible {
                         (xlib.XMapWindow)(display, child.window);
                         child.visible = true;
                     }
@@ -452,8 +616,8 @@ impl XlibWindow {
                 }
             }
             
-            for child in &mut self.child_windows{
-                if !child.visible{
+            for child in &mut self.child_windows {
+                if !child.visible {
                     child.x = x;
                     child.y = y;
                     child.w = w;
@@ -465,8 +629,6 @@ impl XlibWindow {
                     return Some(child.window);
                 }
             }
-            
-            println!("{}", self.child_windows.len());
             
             let new_child = (xlib.XCreateWindow)(
                 display,
@@ -489,17 +651,17 @@ impl XlibWindow {
             (xlib.XMapWindow)(display, new_child);
             (xlib.XFlush)(display);
             
-            self.child_windows.push(XlibChildWindow{
-                window:new_child,
-                x:x,
-                y:y,
-                w:w,
-                h:h,
-                visible:true
+            self.child_windows.push(XlibChildWindow {
+                window: new_child,
+                x: x,
+                y: y,
+                w: w,
+                h: h,
+                visible: true
             });
             
             return Some(new_child)
-           
+            
         }
     }
     
@@ -517,7 +679,7 @@ impl XlibWindow {
     pub fn update_ptrs(&mut self) {
         unsafe {
             (*self.xlib_app).window_map.insert(self.window.unwrap(), self);
-            for i in 0..self.child_windows.len(){
+            for i in 0..self.child_windows.len() {
                 (*self.xlib_app).window_map.insert(self.child_windows[i].window, self);
             }
         }
@@ -637,10 +799,10 @@ impl XlibWindow {
                 &mut ty,
                 &mut value
             );
-            if value.addr == std::ptr::null_mut(){
+            if value.addr == std::ptr::null_mut() {
                 return 2.0; // TODO find some other way to figure it out
             }
-            else{
+            else {
                 let dpi: f32 = CStr::from_ptr(value.addr).to_str().unwrap().parse().unwrap();
                 return dpi / 96.0;
             }
@@ -780,3 +942,23 @@ impl XlibWindow {
     }
     
 }
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+#[repr(C)]
+struct MwmHints {
+  pub flags: c_ulong,
+  pub functions: c_ulong,
+  pub decorations: c_ulong,
+  pub input_mode: c_long,
+  pub status: c_ulong,
+}
+
+const MWM_HINTS_FUNCTIONS:c_ulong = (1 << 0);
+const MWM_HINTS_DECORATIONS:c_ulong =  (1 << 1);
+
+const MWM_FUNC_ALL:c_ulong = (1 << 0);
+const MWM_FUNC_RESIZE:c_ulong = (1 << 1);
+const MWM_FUNC_MOVE:c_ulong = (1 << 2);
+const MWM_FUNC_MINIMIZE:c_ulong = (1 << 3);
+const MWM_FUNC_MAXIMIZE:c_ulong = (1 << 4);
+const MWM_FUNC_CLOSE:c_ulong = (1 << 5);

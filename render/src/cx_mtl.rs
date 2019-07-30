@@ -99,6 +99,8 @@ impl Cx {
         metal_cx: &MetalCx,
     ) {
         let view_id = self.passes[pass_id].main_view_id.unwrap();
+        let pass_size = self.passes[pass_id].pass_size;
+        self.passes[pass_id].set_ortho_matrix(Vec2::zero(), pass_size);
         let pool = unsafe {NSAutoreleasePool::new(cocoa::base::nil)};
         //let command_buffer = command_queue.new_command_buffer();
         if let Some(drawable) = layer.next_drawable() {
@@ -149,6 +151,7 @@ impl Cx {
     ) {
         let view_id = self.passes[pass_id].main_view_id.unwrap();
         let pass_size = self.passes[pass_id].pass_size;
+        self.passes[pass_id].set_ortho_matrix(Vec2::zero(), pass_size);
         
         let pool = unsafe {NSAutoreleasePool::new(cocoa::base::nil)};
         

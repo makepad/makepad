@@ -9,7 +9,7 @@ use x11_dl::xlib;
 
 impl Cx {
     
-    pub fn render_view(&mut self, pass_id: usize, view_id: usize, full_repaint: bool, view_rect: &Rect, opengl_cx: &OpenglCx) { 
+    pub fn render_view(&mut self, pass_id: usize, view_id: usize, full_repaint: bool, view_rect: &Rect, opengl_cx: &OpenglCx) {
         
         // tad ugly otherwise the borrow checker locks 'self' and we can't recur
         let draw_calls_len = self.views[view_id].draw_calls_len;
@@ -75,8 +75,7 @@ impl Cx {
         }
     }
     
-    fn calc_dirty_bounds(&mut self, pass_id: usize, view_id: usize, view_bounds: &mut ViewBounds){
-        // tad ugly otherwise the borrow checker locks 'self' and we can't recur
+    fn calc_dirty_bounds(&mut self, pass_id: usize, view_id: usize, view_bounds: &mut ViewBounds) {
         let draw_calls_len = self.views[view_id].draw_calls_len;
         for draw_call_id in 0..draw_calls_len {
             let sub_view_id = self.views[view_id].draw_calls[draw_call_id].sub_view_id;
@@ -85,13 +84,11 @@ impl Cx {
             }
             else {
                 let cxview = &mut self.views[view_id];
-                //view.platform.uni_vw.update_with_f32_data(device, &view.uniforms);
                 let draw_call = &mut cxview.draw_calls[draw_call_id];
                 let sh = &self.shaders[draw_call.shader_id];
                 let shp = sh.platform.as_ref().unwrap();
                 
                 if draw_call.instance_dirty {
-                    //println!(" ADDING {} {} {}", sh.name, cxview.rect.w, cxview.rect.h);
                     view_bounds.add_rect(&cxview.rect);
                 }
             }
@@ -109,25 +106,20 @@ impl Cx {
     ) {
         let view_id = self.passes[pass_id].main_view_id.unwrap();
         
-        // lets see where we should position our 'dirty rect window'
         let mut view_bounds = ViewBounds::new();
         
         self.calc_dirty_bounds(pass_id, view_id, &mut view_bounds);
         
-        let mut full_repaint = view_bounds.max_x - view_bounds.min_x == opengl_window.window_geom.inner_size.x
-            && view_bounds.max_y - view_bounds.min_y == opengl_window.window_geom.inner_size.y; 
+        let mut full_repaint = view_bounds.max_x - view_bounds.min_x > opengl_window.window_geom.inner_size.x - 100.
+            && view_bounds.max_y - view_bounds.min_y > opengl_window.window_geom.inner_size.y - 100.;
         
-        //println!("{} {}", view_bounds.max_x - view_bounds.min_x, pixel_width);
-        //println!("{} {}", view_bounds.max_x - view_bounds.min_x, view_bounds.max_y - view_bounds.min_y);
         let window;
         let view_rect;
         if full_repaint {
-            opengl_window.view_bounds = view_bounds;
-            //println!("DOING A FULL REPAINT!");
-            opengl_window.xlib_window.hide_child_windows();//move_resize_window_dirty(0, 0, 1, 1);
-
+            opengl_window.xlib_window.hide_child_windows();
+            
             window = opengl_window.xlib_window.window.unwrap();
-
+            
             let pass_size = self.passes[pass_id].pass_size;
             self.passes[pass_id].set_ortho_matrix(Vec2::zero(), pass_size);
             let pix_width = opengl_window.window_geom.inner_size.x * opengl_window.window_geom.dpi_factor;
@@ -140,7 +132,12 @@ impl Cx {
             view_rect = Rect::zero();
         }
         else {
-            if view_bounds.max_x == std::f32::NEG_INFINITY || view_bounds.min_x == view_bounds.max_x{
+            if view_bounds.max_x == std::f32::NEG_INFINITY
+                || view_bounds.max_y == std::f32::NEG_INFINITY
+                || view_bounds.min_x == std::f32::INFINITY
+                || view_bounds.min_x == std::f32::INFINITY
+                || view_bounds.min_x == view_bounds.max_x
+                || view_bounds.min_y == view_bounds.max_y {
                 return
             }
             /*
@@ -160,9 +157,6 @@ impl Cx {
             let pix_width = ((view_bounds.max_x - view_bounds.min_x) * opengl_window.window_geom.dpi_factor);
             let pix_height = ((view_bounds.max_y - view_bounds.min_y) * opengl_window.window_geom.dpi_factor);
             
-            //println!("DOING A PARTIAL REPAINT! {}-{} {}-{}", opengl_window.window_geom.inner_size.x, pix_width, opengl_window.window_geom.inner_size.y, pix_height);
-            
-            //(opengl_cx.glx.glXSwapBuffers)(xlib_app.display, window);
             window = opengl_window.xlib_window.alloc_child_window(
                 (view_bounds.min_x * opengl_window.window_geom.dpi_factor) as i32,
                 (view_bounds.min_y * opengl_window.window_geom.dpi_factor) as i32,
@@ -180,11 +174,10 @@ impl Cx {
                 (opengl_cx.glx.glXMakeCurrent)(xlib_app.display, window, opengl_cx.context);
                 gl::Viewport(0, 0, pix_width as i32, pix_height as i32);
             }
-            view_rect = Rect{x:view_bounds.min_x, y:view_bounds.min_y, w:view_bounds.max_x - view_bounds.min_x, h:view_bounds.max_y - view_bounds.min_y}
+            view_rect = Rect {x: view_bounds.min_x, y: view_bounds.min_y, w: view_bounds.max_x - view_bounds.min_x, h: view_bounds.max_y - view_bounds.min_y}
         }
         
         unsafe {
-            //(opengl_cx.glx.glXMakeCurrent)(xlib_app.display, opengl_window.xlib_window.window.unwrap(), opengl_cx.context);
             gl::Disable(gl::DEPTH_TEST);
             gl::BlendEquationSeparate(gl::FUNC_ADD, gl::FUNC_ADD);
             gl::BlendFuncSeparate(gl::ONE, gl::ONE_MINUS_SRC_ALPHA, gl::ONE, gl::ONE_MINUS_SRC_ALPHA);
@@ -209,8 +202,7 @@ impl Cx {
             }
         }
         self.render_view(pass_id, view_id, full_repaint, &view_rect, &opengl_cx);
-        //glutin_window.swap_buffers().unwrap();
-        // command_buffer.present_drawable(&drawable);
+        
         unsafe {
             (opengl_cx.glx.glXSwapBuffers)(xlib_app.display, window);
         }
@@ -888,7 +880,6 @@ struct OpenglWindow {
     pub window_geom: WindowGeom,
     pub cal_size: Vec2,
     pub xlib_window: XlibWindow,
-    pub view_bounds: ViewBounds,
 }
 
 impl OpenglWindow {
@@ -900,7 +891,6 @@ impl OpenglWindow {
         
         OpenglWindow {
             window_id,
-            view_bounds: ViewBounds::new(),
             cal_size: Vec2::zero(),
             window_geom: xlib_window.get_window_geom(),
             xlib_window
