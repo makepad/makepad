@@ -108,7 +108,10 @@ impl Cx {
         // tad ugly otherwise the borrow checker locks 'self' and we can't recur
         let draw_calls_len = self.views[view_id].draw_calls_len;
         self.views[view_id].set_clipping_uniforms();
-        self.views[view_id].platform.uni_dl.update_with_f32_constant_data(d3d11_cx, &mut self.views[view_id].uniforms);
+        {
+            let cxview = &mut self.views[view_id];
+            cxview.platform.uni_dl.update_with_f32_constant_data(d3d11_cx, &mut cxview.uniforms)
+        }
         for draw_call_id in 0..draw_calls_len {
             let sub_view_id = self.views[view_id].draw_calls[draw_call_id].sub_view_id;
             if sub_view_id != 0 {
