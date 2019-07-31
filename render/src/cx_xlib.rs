@@ -413,7 +413,16 @@ impl XlibApp {
             keysym::XK_7 => KeyCode::Key7,
             keysym::XK_8 => KeyCode::Key8,
             keysym::XK_9 => KeyCode::Key9,
-
+            
+            keysym::XK_Alt_L => KeyCode::Alt,
+            keysym::XK_Alt_R => KeyCode::Alt,
+            keysym::XK_Meta_L => KeyCode::Logo,
+            keysym::XK_Meta_R => KeyCode::Logo,
+            keysym::XK_Shift_L => KeyCode::Shift,
+            keysym::XK_Shift_R => KeyCode::Shift,
+            keysym::XK_Control_L => KeyCode::Control,
+            keysym::XK_Control_R => KeyCode::Control,
+            
             keysym::XK_equal => KeyCode::Equals,
             keysym::XK_minus => KeyCode::Minus,
             keysym::XK_bracketright => KeyCode::RBracket,
