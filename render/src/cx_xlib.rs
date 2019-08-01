@@ -8,7 +8,7 @@ use std::sync::Mutex;
 //use std::io::Write;
 //use std::os::unix::io::FromRawFd;
 use std::mem;
-use std::os::raw::{c_int, c_ulong, c_long};
+use std::os::raw::{c_int, c_uint, c_ulong, c_long};
 use std::ptr;
 use time::precise_time_ns;
 use x11_dl::xlib;
@@ -16,12 +16,13 @@ use x11_dl::xlib::{Display, XVisualInfo, Xlib};
 use x11_dl::keysym;
 
 static mut GLOBAL_XLIB_APP: *mut XlibApp = 0 as *mut _;
-
+ 
 pub struct XlibApp {
     pub xlib: Xlib,
     pub display: *mut Display,
     
     pub display_fd: c_int,
+    pub signal_fd: c_int,
     pub window_map: HashMap<c_ulong, *mut XlibWindow>,
     
     pub time_start: u64,
@@ -65,7 +66,6 @@ pub struct XlibChildWindow {
     h: u32
 }
 
-
 #[derive(Clone)]
 pub enum XlibTimer {
     Free,
@@ -84,10 +84,12 @@ impl XlibApp {
             let xlib = Xlib::open().unwrap();
             let display = (xlib.XOpenDisplay)(ptr::null());
             let display_fd = (xlib.XConnectionNumber)(display);
+            let signal_fd = 0i32;//libc::pipe();
             XlibApp {
                 xlib,
                 display,
                 display_fd,
+                signal_fd,
                 window_map: HashMap::new(),
                 signals: Mutex::new(Vec::new()),
                 time_start: precise_time_ns(),
@@ -129,6 +131,7 @@ impl XlibApp {
                     let mut fds = mem::uninitialized();
                     libc::FD_ZERO(&mut fds);
                     libc::FD_SET(self.display_fd, &mut fds);
+                    //libc::FD_SET(self.signal_fd, &mut fds);
                     let _nfds = libc::select(
                         self.display_fd + 1,
                         &mut fds,
@@ -185,10 +188,20 @@ impl XlibApp {
                             }
                         },
                         xlib::KeyPress => {
-                            let key_code = self.xkeyevent_to_keycode(&mut event.key);
-                            println!("GOT KEYPRESS {:?}", key_code);
+                            self.do_callback(&mut vec![Event::KeyDown(KeyEvent {
+                                key_code: self.xkeyevent_to_keycode(&mut event.key),
+                                is_repeat: false,
+                                modifiers: self.xkeystate_to_modifiers(event.key.state),
+                                time: self.time_now()
+                            })]);
                         },
                         xlib::KeyRelease => {
+                            self.do_callback(&mut vec![Event::KeyUp(KeyEvent {
+                                key_code: self.xkeyevent_to_keycode(&mut event.key),
+                                is_repeat: false,
+                                modifiers: self.xkeystate_to_modifiers(event.key.state),
+                                time: self.time_now()
+                            })]);
                         },
                         xlib::ClientMessage => {
                             /*
@@ -335,6 +348,15 @@ impl XlibApp {
             */
             self.current_cursor = cursor;
             //TODO
+        }
+    }
+    
+    fn xkeystate_to_modifiers(&self, state:c_uint)->KeyModifiers{
+        KeyModifiers{
+            alt:state&xlib::Mod1Mask != 0,
+            shift:state&xlib::ShiftMask != 0,
+            control:state&xlib::ControlMask != 0,
+            logo:state&xlib::Mod4Mask != 0,
         }
     }
     
@@ -578,7 +600,7 @@ impl XlibWindow {
             // Create a window
             (*self.xlib_app).window_map.insert(window, self);
             self.attributes = Some(attributes);
-            self.visual_info = Some((*visual_info));
+            self.visual_info = Some(*visual_info);
             self.window = Some(window);
             self.last_window_geom = self.get_window_geom();
             

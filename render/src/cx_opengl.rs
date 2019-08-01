@@ -85,8 +85,8 @@ impl Cx {
             else {
                 let cxview = &mut self.views[view_id];
                 let draw_call = &mut cxview.draw_calls[draw_call_id];
-                let sh = &self.shaders[draw_call.shader_id];
-                let shp = sh.platform.as_ref().unwrap();
+                //let sh = &self.shaders[draw_call.shader_id];
+                //let shp = sh.platform.as_ref().unwrap();
                 
                 if draw_call.instance_dirty {
                     view_bounds.add_rect(&cxview.rect);
@@ -110,7 +110,7 @@ impl Cx {
         
         self.calc_dirty_bounds(pass_id, view_id, &mut view_bounds);
         
-        let mut full_repaint = view_bounds.max_x - view_bounds.min_x > opengl_window.window_geom.inner_size.x - 100.
+        let full_repaint = view_bounds.max_x - view_bounds.min_x > opengl_window.window_geom.inner_size.x - 100.
             && view_bounds.max_y - view_bounds.min_y > opengl_window.window_geom.inner_size.y - 100.;
         
         let window;
@@ -154,8 +154,8 @@ impl Cx {
                 (opengl_cx.glx.glXSwapBuffers)(xlib_app.display, opengl_window.xlib_window.window.unwrap());
             }*/
             
-            let pix_width = ((view_bounds.max_x - view_bounds.min_x) * opengl_window.window_geom.dpi_factor);
-            let pix_height = ((view_bounds.max_y - view_bounds.min_y) * opengl_window.window_geom.dpi_factor);
+            let pix_width = (view_bounds.max_x - view_bounds.min_x) * opengl_window.window_geom.dpi_factor;
+            let pix_height = (view_bounds.max_y - view_bounds.min_y) * opengl_window.window_geom.dpi_factor;
             
             window = opengl_window.xlib_window.alloc_child_window(
                 (view_bounds.min_x * opengl_window.window_geom.dpi_factor) as i32,
@@ -164,7 +164,7 @@ impl Cx {
                 pix_height as u32
             ).unwrap();
             
-            let pass_size = self.passes[pass_id].pass_size;
+            //let pass_size = self.passes[pass_id].pass_size;
             self.passes[pass_id].set_ortho_matrix(
                 Vec2 {x: view_bounds.min_x, y: view_bounds.min_y},
                 Vec2 {x: pix_width / opengl_window.window_geom.dpi_factor, y: pix_height / opengl_window.window_geom.dpi_factor}
