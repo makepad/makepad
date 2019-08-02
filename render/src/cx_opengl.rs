@@ -115,9 +115,9 @@ impl Cx {
         
         let window;
         let view_rect;
-        if full_repaint {
+        if full_repaint { 
             opengl_window.xlib_window.hide_child_windows();
-            
+             
             window = opengl_window.xlib_window.window.unwrap();
             
             let pass_size = self.passes[pass_id].pass_size;

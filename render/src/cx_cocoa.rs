@@ -1670,15 +1670,15 @@ fn load_mouse_cursor(cursor: MouseCursor) -> id {
     match cursor {
         MouseCursor::Arrow | MouseCursor::Default | MouseCursor::Hidden => load_native_cursor("arrowCursor"),
         MouseCursor::Hand => load_native_cursor("pointingHandCursor"),
-        MouseCursor::Grabbing | MouseCursor::Grab => load_native_cursor("closedHandCursor"),
         MouseCursor::Text => load_native_cursor("IBeamCursor"),
+        MouseCursor::NotAllowed /*| MouseCursor::NoDrop*/ => load_native_cursor("operationNotAllowedCursor"),
+        MouseCursor::Crosshair => load_native_cursor("crosshairCursor"),
+/*
+        MouseCursor::Grabbing | MouseCursor::Grab => load_native_cursor("closedHandCursor"),
         MouseCursor::VerticalText => load_native_cursor("IBeamCursorForVerticalLayout"),
         MouseCursor::Copy => load_native_cursor("dragCopyCursor"),
         MouseCursor::Alias => load_native_cursor("dragLinkCursor"),
-        MouseCursor::NotAllowed | MouseCursor::NoDrop => load_native_cursor("operationNotAllowedCursor"),
         MouseCursor::ContextMenu => load_native_cursor("contextualMenuCursor"),
-        MouseCursor::Crosshair => load_native_cursor("crosshairCursor"),
-        /*
         MouseCursor::EResize => load_native_cursor("resizeRightCursor"),
         MouseCursor::NResize => load_native_cursor("resizeUpCursor"),
         MouseCursor::WResize => load_native_cursor("resizeLeftCursor"),
@@ -1688,8 +1688,9 @@ fn load_mouse_cursor(cursor: MouseCursor) -> id {
         
         // Undocumented cursors: https://stackoverflow.com/a/46635398/5435443
         MouseCursor::Help => load_undocumented_cursor("_helpCursor"),
-        MouseCursor::ZoomIn => load_undocumented_cursor("_zoomInCursor"),
-        MouseCursor::ZoomOut => load_undocumented_cursor("_zoomOutCursor"),/*
+        //MouseCursor::ZoomIn => load_undocumented_cursor("_zoomInCursor"),
+        //MouseCursor::ZoomOut => load_undocumented_cursor("_zoomOutCursor"),
+        /*
         MouseCursor::NeResize => load_undocumented_cursor("_windowResizeNorthEastCursor"),
         MouseCursor::NwResize => load_undocumented_cursor("_windowResizeNorthWestCursor"),
         MouseCursor::SeResize => load_undocumented_cursor("_windowResizeSouthEastCursor"),
@@ -1705,14 +1706,14 @@ fn load_mouse_cursor(cursor: MouseCursor) -> id {
         // https://bugs.eclipse.org/bugs/show_bug.cgi?id=522349
         // This is the wrong semantics for `Wait`, but it's the same as
         // what's used in Safari and Chrome.
-        MouseCursor::Wait | MouseCursor::Progress => load_undocumented_cursor("busyButClickableCursor"),
+        MouseCursor::Wait/* | MouseCursor::Progress*/ => load_undocumented_cursor("busyButClickableCursor"),
         
         // For the rest, we can just snatch the cursors from WebKit...
         // They fit the style of the native cursors, and will seem
         // completely standard to macOS users.
         // https://stackoverflow.com/a/21786835/5435443
-        MouseCursor::Move | MouseCursor::AllScroll => load_webkit_cursor("move"),
-        MouseCursor::Cell => load_webkit_cursor("cell"),
+        MouseCursor::Move /*| MouseCursor::AllScroll*/ => load_webkit_cursor("move"),
+       // MouseCursor::Cell => load_webkit_cursor("cell"),
     }
 }
 

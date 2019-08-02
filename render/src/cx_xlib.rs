@@ -8,23 +8,24 @@ use std::sync::Mutex;
 //use std::io::Write;
 //use std::os::unix::io::FromRawFd;
 use std::mem;
-use std::os::raw::{c_int, c_uint, c_ulong, c_long};
+use std::os::raw::{c_char, c_int, c_uint, c_ulong, c_long};
 use std::ptr;
 use time::precise_time_ns;
 use x11_dl::xlib;
 use x11_dl::xlib::{Display, XVisualInfo, Xlib};
 use x11_dl::keysym;
+use x11_dl::xcursor::Xcursor;
 
 static mut GLOBAL_XLIB_APP: *mut XlibApp = 0 as *mut _;
  
 pub struct XlibApp {
     pub xlib: Xlib,
+    pub xcursor: Xcursor,
     pub display: *mut Display,
     
     pub display_fd: c_int,
     pub signal_fd: c_int,
     pub window_map: HashMap<c_ulong, *mut XlibWindow>,
-    
     pub time_start: u64,
     pub event_callback: Option<*mut FnMut(&mut XlibApp, &mut Vec<Event>) -> bool>,
     pub event_recur_block: bool,
@@ -82,11 +83,13 @@ impl XlibApp {
     pub fn new() -> XlibApp {
         unsafe {
             let xlib = Xlib::open().unwrap();
+            let xcursor = Xcursor::open().unwrap();
             let display = (xlib.XOpenDisplay)(ptr::null());
             let display_fd = (xlib.XConnectionNumber)(display);
             let signal_fd = 0i32;//libc::pipe();
             XlibApp {
                 xlib,
+                xcursor,
                 display,
                 display_fd,
                 signal_fd,
@@ -139,7 +142,7 @@ impl XlibApp {
                         ptr::null_mut(),
                         ptr::null_mut(),
                     );
-                }
+                } 
                 while (self.xlib.XPending)(self.display) != 0 {
                     let mut event = mem::uninitialized();
                     (self.xlib.XNextEvent)(self.display, &mut event);
@@ -177,6 +180,9 @@ impl XlibApp {
                             if let Some(window_ptr) = self.window_map.get(&button.window) {
                                 let window = &mut (**window_ptr);
                                 (self.xlib.XSetInputFocus)(self.display, window.window.unwrap(), xlib::RevertToNone, xlib::CurrentTime);
+                                // lets do a window query to figure out of we need to start
+                                // windowdrag
+                                
                                 window.send_finger_down(button.button as usize, KeyModifiers::default())
                             }
                         },
@@ -310,44 +316,52 @@ impl XlibApp {
         (time_now - self.time_start) as f64 / 1_000_000_000.0
     }
     
+    pub fn load_first_cursor(&self, names:&[&[u8]])->Option<c_ulong>{
+        unsafe{
+            for name in names{
+                let cursor = (self.xcursor.XcursorLibraryLoadCursor)(
+                    self.display,
+                    name.as_ptr() as *const c_char,
+                );
+                if cursor != 0{
+                    return Some(cursor)
+                }
+            }
+        }
+        return None
+    }
+    
     pub fn set_mouse_cursor(&mut self, cursor: MouseCursor) {
         if self.current_cursor != cursor {
-            /*
-            let win32_cursor = match cursor {
+            self.current_cursor = cursor.clone();
+            let x11_cursor = match cursor {
                 MouseCursor::Hidden => {
-                    ptr::null()
+                    return;
                 },
-                MouseCursor::Default => winuser::IDC_ARROW,
-                MouseCursor::Crosshair => winuser::IDC_CROSS,
-                MouseCursor::Hand => winuser::IDC_HAND,
-                MouseCursor::Arrow => winuser::IDC_ARROW,
-                MouseCursor::Move => winuser::IDC_SIZEALL,
-                MouseCursor::Text => winuser::IDC_IBEAM,
-                MouseCursor::Wait => winuser::IDC_ARROW,
-                MouseCursor::Help => winuser::IDC_HELP,
-                MouseCursor::Progress => winuser::IDC_ARROW,
-                MouseCursor::NotAllowed => winuser::IDC_NO,
-                MouseCursor::ContextMenu => winuser::IDC_ARROW,
-                MouseCursor::Cell => winuser::IDC_ARROW,
-                MouseCursor::VerticalText => winuser::IDC_ARROW,
-                MouseCursor::Alias => winuser::IDC_ARROW,
-                MouseCursor::Copy => winuser::IDC_ARROW,
-                MouseCursor::NoDrop => winuser::IDC_ARROW,
-                MouseCursor::Grab => winuser::IDC_ARROW,
-                MouseCursor::Grabbing => winuser::IDC_ARROW,
-                MouseCursor::AllScroll => winuser::IDC_ARROW,
-                MouseCursor::ZoomIn => winuser::IDC_ARROW,
-                MouseCursor::ZoomOut => winuser::IDC_ARROW,
-                MouseCursor::NsResize => winuser::IDC_SIZENS,
-                MouseCursor::NeswResize => winuser::IDC_SIZENESW,
-                MouseCursor::EwResize => winuser::IDC_SIZEWE,
-                MouseCursor::NwseResize => winuser::IDC_SIZENWSE,
-                MouseCursor::ColResize => winuser::IDC_SIZEWE,
-                MouseCursor::RowResize => winuser::IDC_SIZEWE,
+                MouseCursor::Default => self.load_first_cursor(&[b"left_ptr\0"]),
+                MouseCursor::Crosshair => self.load_first_cursor(&[b"crosshair"]),
+                MouseCursor::Hand => self.load_first_cursor(&[b"hand2\0",b"hand1\0"]),
+                MouseCursor::Arrow => self.load_first_cursor(&[b"arrow\0"]),
+                MouseCursor::Move => self.load_first_cursor(&[b"move\0"]),
+                MouseCursor::NotAllowed => self.load_first_cursor(&[b"crossed_circle\0"]),
+                MouseCursor::Text => self.load_first_cursor(&[b"text\0",b"xterm\0"]),
+                MouseCursor::Wait => self.load_first_cursor(&[b"watch\0"]),
+                MouseCursor::Help => self.load_first_cursor(&[b"question_arrow\0"]),
+                MouseCursor::NsResize => self.load_first_cursor(&[b"v_double_arrow\0"]),
+                MouseCursor::NeswResize => self.load_first_cursor(&[b"fd_double_arrow\0", b"size_fdiag\0"]),
+                MouseCursor::EwResize => self.load_first_cursor(&[b"h_double_arrow\0"]),
+                MouseCursor::NwseResize => self.load_first_cursor(&[b"bd_double_arrow\0", b"size_bdiag\0"]),
+                MouseCursor::ColResize => self.load_first_cursor(&[b"split_h\0", b"h_double_arrow\0"]),
+                MouseCursor::RowResize => self.load_first_cursor(&[b"split_v\0", b"v_double_arrow\0"]),
             };
-            */
-            self.current_cursor = cursor;
-            //TODO
+            if let Some(x11_cursor) = x11_cursor{
+                unsafe{
+                    for (k,v) in &self.window_map{
+                        (self.xlib.XDefineCursor)(self.display, (**v).window.unwrap(), x11_cursor);
+                    }
+                    (self.xlib.XFreeCursor)(self.display, x11_cursor);
+                }
+            }
         }
     }
     
@@ -599,6 +613,7 @@ impl XlibWindow {
             
             // Create a window
             (*self.xlib_app).window_map.insert(window, self);
+            
             self.attributes = Some(attributes);
             self.visual_info = Some(*visual_info);
             self.window = Some(window);
