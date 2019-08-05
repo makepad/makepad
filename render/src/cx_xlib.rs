@@ -47,10 +47,10 @@ pub struct XlibWindow {
     pub visual_info: Option<XVisualInfo>,
     pub child_windows: Vec<XlibChildWindow>,
 
+    pub last_nc_mouse_pos: XlibNcMousePos,
     pub window_id: usize,
     pub xlib_app: *mut XlibApp,
     pub last_window_geom: WindowGeom,
-
     pub time_start: u64,
 
     pub last_key_mod: KeyModifiers,
@@ -60,7 +60,21 @@ pub struct XlibWindow {
     pub fingers_down: Vec<bool>,
 }
 
-#[derive(Clone)]
+#[derive(Clone)] 
+pub enum XlibNcMousePos{
+    Client,
+    Caption,
+    TopLeft,
+    Top,
+    TopRight,
+    Right,
+    BottomRight,
+    Bottom,
+    BottomLeft,
+    Left,
+}
+
+#[derive(Clone)] 
 pub struct XlibChildWindow {
     pub window: c_ulong,
     visible: bool,
@@ -226,9 +240,34 @@ impl XlibApp {
                                         }
                                     }
                                 }
-                                // query window for chrome
+                                let pos = Vec2 {x: x as f32 / window.last_window_geom.dpi_factor, y: y as f32 / window.last_window_geom.dpi_factor};
+                                // query window for chrome 
+                                let mut events = vec![
+                                    Event::WindowDragQuery(WindowDragQueryEvent {
+                                        window_id: window.window_id,
+                                        abs: window.last_mouse_pos,
+                                        response: WindowDragQueryResponse::NoAnswer
+                                    })
+                                ];
+                                window.do_callback(&mut events);
+                                match &events[0] {
+                                    Event::WindowDragQuery(wd) => match &wd.response {
+                                        WindowDragQueryResponse::Client => {
+                                            window.last_nc_mouse_pos = XlibNcMousePos::Client;
+                                        }
+                                        WindowDragQueryResponse::Caption => {
+                                            window.last_nc_mouse_pos = XlibNcMousePos::Client;
+                                        },
+                                        _ => ()
+                                    },
+                                    _ => ()
+                                }
+                                // otherwise lets check if we are hover the window edge to resize the window
+                                //println!("{} {}", window.last_window_geom.inner_size.x, pos.x);
+                                
+                                
+                                window.send_finger_hover_and_move(pos, KeyModifiers::default());
 
-                                window.send_finger_hover_and_move(Vec2 {x: x as f32 / window.last_window_geom.dpi_factor, y: y as f32 / window.last_window_geom.dpi_factor}, KeyModifiers::default());
                             }
                         },
                         xlib::ButtonPress => { // mouse down
@@ -639,6 +678,7 @@ impl XlibApp {
     }
 }
 
+
 impl XlibWindow {
 
     pub fn new(xlib_app: &mut XlibApp, window_id: usize) -> XlibWindow {
@@ -654,6 +694,7 @@ impl XlibWindow {
             xlib_app: xlib_app,
             last_window_geom: WindowGeom::default(),
             time_start: xlib_app.time_start,
+            last_nc_mouse_pos: XlibNcMousePos::Client,
             last_key_mod: KeyModifiers::default(),
             ime_spot: Vec2::zero(),
             current_cursor: MouseCursor::Default,

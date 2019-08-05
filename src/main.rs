@@ -17,7 +17,7 @@ enum Panel {
     FileEditor {path: String, editor_id: u64}
 }
 
-#[derive(Clone)]
+#[derive(Clone)] 
 struct AppWindow {
     desktop_window: DesktopWindow,
     file_tree: FileTree,
@@ -26,7 +26,7 @@ struct AppWindow {
     dock: Dock<Panel>,
 }
 
-struct AppGlobal {
+struct AppGlobal { 
     file_tree_data: String,
     file_tree_reload_signal: Signal,
     text_buffers: TextBuffers,
