@@ -33,7 +33,7 @@ Win32 + DirectX11 - WORKING
 
 WASM + WebGL - WORKING
 
-Linux - TODO
+Linux - NEARLY COMPLETE
 
 The project is split out over a few nested crates
 
