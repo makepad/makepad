@@ -88,7 +88,7 @@ impl Cx {
                 //let sh = &self.shaders[draw_call.shader_id];
                 //let shp = sh.platform.as_ref().unwrap();
                 
-                if draw_call.instance_dirty {
+                if draw_call.instance_dirty || draw_call.uniforms_dirty{
                     view_bounds.add_rect(&cxview.rect);
                 }
             }

@@ -160,7 +160,7 @@ impl XlibApp {
                     // If there are any timers, we set the timeout for select to the `delta_timeout`
                     // of the first timer that should be fired. Otherwise, we set the timeout to
                     // None, so that select will block indefinitely.
-                    let timeout = self.timers.front().map(|timer| {
+                    let timeout = if let Some(timer) = self.timers.front(){
                         Some(timeval {
                             // `tv_sec` is in seconds, so take the integer part of `delta_timeout`
                             tv_sec: timer.delta_timeout.trunc() as i64,
@@ -168,16 +168,19 @@ impl XlibApp {
                             // `delta_timeout` 1000000.0.
                             tv_usec: (timer.delta_timeout.fract() * 1000000.0) as i64,
                         })
-                    }).unwrap_or(None);
+                    }
+                    else{
+                        None
+                    };
                     let _nfds = libc::select(
                         self.display_fd + 1,
                         &mut fds,
                         ptr::null_mut(),
                         ptr::null_mut(),
-                        timeout.map_or(ptr::null_mut(), |mut timeout| &mut timeout),
+                        if let Some(mut timeout) = timeout{&mut timeout} else{ptr::null_mut()}
                     );
                 }
-
+                //println!("SELECT COMPLETE");  
                 // Update the current time, and compute the amount of time that elapsed since we
                 // last recorded the current time.
                 let then = now;
@@ -197,8 +200,6 @@ impl XlibApp {
 
                     // Stop the timer to remove it from the list.
                     self.stop_timer(timer.id);
-
-                    println!("FIRING TIMER {:?}", timer.id);
 
                     // Fire the timer
                     self.do_callback(&mut vec![
@@ -376,7 +377,7 @@ impl XlibApp {
     }
 
     pub fn start_timer(&mut self, id: u64, timeout: f64, repeats: bool) {
-        println!("STARTING TIMER {:?} {:?} {:?}", id, timeout, repeats);
+        //println!("STARTING TIMER {:?} {:?} {:?}", id, timeout, repeats);
 
         // Timers are stored in an ordered list. Each timer stores the amount of time between
         // when its predecessor in the list should fire and when the timer itself should fire
@@ -425,15 +426,11 @@ impl XlibApp {
     }
 
     pub fn stop_timer(&mut self, id: u64) {
-        println!("STOPPING TIMER {:?}", id);
+        //println!("STOPPING TIMER {:?}", id);
 
         // Since we are stopping an existing timer, our first step is to find where in the list this
         // timer should be removed.
-        let index = if let Some(index) = self
-            .timers
-            .iter()
-            .position(|timer| timer.id == id)
-        {
+        let index = if let Some(index) = self.timers.iter().position(|timer| timer.id == id){
             index
         } else {
             return;

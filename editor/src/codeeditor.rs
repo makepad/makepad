@@ -803,7 +803,6 @@ impl CodeEditor {
             Event::Signal(se) => if text_buffer.signal.is_signal(se) {
                 match se.value {
                     SIGNAL_TEXTBUFFER_MESSAGE_UPDATE | SIGNAL_TEXTBUFFER_LOADED | SIGNAL_TEXTBUFFER_DATA_UPDATE => {
-                        println!("GOT SIGNAL");
                         self.view.redraw_view_area(cx);
                     },
                     SIGNAL_TEXTBUFFER_JUMP_TO_OFFSET => {
