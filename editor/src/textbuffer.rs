@@ -209,7 +209,7 @@ impl TextBuffer {
             }
             char_count = next_char_count;
         }
-        TextPos {row: self.lines.len() - 1, col: 0}
+        TextPos {row: self.lines.len().max(1) - 1, col: 0}
     }
     
     pub fn offset_to_text_pos_next(&self, query_off: usize, old_pos: TextPos, old_off: usize) -> TextPos {
@@ -224,7 +224,7 @@ impl TextBuffer {
             iter_off = next_off;
             row += 1;
         }
-        TextPos {row: self.lines.len() - 1, col: 0}
+        TextPos {row: self.lines.len().max(1) - 1, col: 0}
     }
     
     pub fn text_pos_to_offset(&self, pos: TextPos) -> usize {

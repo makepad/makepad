@@ -40,7 +40,7 @@ impl Cx {
                     draw_call.uniforms_dirty = false;
                 }
                 
-                unsafe {
+                unsafe { 
                     gl::UseProgram(shp.program);
                     gl::BindVertexArray(draw_call.platform.vao.unwrap());
                     let instances = draw_call.instance.len() / sh.mapping.instance_slots;
@@ -274,6 +274,9 @@ impl Cx {
                 self.process_desktop_pre_event(&mut event, &mut event_handler);
                 
                 match &event {
+                    Event::WindowSetHoverCursor(mc) => {
+                        self.set_hover_mouse_cursor(mc.clone());
+                    },
                     Event::WindowGeomChange(re) => { // do this here because mac
                         for opengl_window in &mut opengl_windows {if opengl_window.window_id == re.window_id {
                             opengl_window.window_geom = re.new_geom.clone();
