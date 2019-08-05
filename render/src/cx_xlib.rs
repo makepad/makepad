@@ -150,7 +150,7 @@ impl XlibApp {
             ]);
 
             // Record the current time.
-            let mut now = Instant::now();
+            let mut select_time = self.time_now();
 
             while self.event_loop_running {
                 if self.loop_block {
@@ -161,6 +161,7 @@ impl XlibApp {
                     // of the first timer that should be fired. Otherwise, we set the timeout to
                     // None, so that select will block indefinitely.
                     let timeout = if let Some(timer) = self.timers.front(){
+                       // println!("Select wait {}",(timer.delta_timeout.fract() * 1000000.0) as i64);
                         Some(timeval {
                             // `tv_sec` is in seconds, so take the integer part of `delta_timeout`
                             tv_sec: timer.delta_timeout.trunc() as i64,
@@ -169,7 +170,7 @@ impl XlibApp {
                             tv_usec: (timer.delta_timeout.fract() * 1000000.0) as i64,
                         })
                     }
-                    else{
+                    else{  
                         None
                     };
                     let _nfds = libc::select(
@@ -180,36 +181,33 @@ impl XlibApp {
                         if let Some(mut timeout) = timeout{&mut timeout} else{ptr::null_mut()}
                     );
                 }
-                //println!("SELECT COMPLETE");  
                 // Update the current time, and compute the amount of time that elapsed since we
                 // last recorded the current time.
-                let then = now;
-                now = Instant::now();
-                let mut elapsed = (now - then).as_millis() as f64 / 1000.0;
+                let last_select_time = select_time;
+                select_time = self.time_now();
+                let mut select_time_used = (select_time - last_select_time);
 
                 while let Some(timer) = self.timers.front_mut() {
                     // If the amount of time that elapsed is less than `delta_timeout` for the
                     // next timer, then no more timers need to be fired.
-                    if elapsed < timer.delta_timeout {
-                        timer.delta_timeout -= elapsed;
+                    if select_time_used < timer.delta_timeout {
+                        timer.delta_timeout -= select_time_used;
                         break;
                     }
 
                     let timer = *self.timers.front().unwrap();
-                    elapsed -= timer.delta_timeout;
+                    select_time_used -= timer.delta_timeout;
 
                     // Stop the timer to remove it from the list.
                     self.stop_timer(timer.id);
-
-                    // Fire the timer
-                    self.do_callback(&mut vec![
-                        Event::Timer(TimerEvent {timer_id: timer.id})
-                    ]);
-
                     // If the timer is repeating, simply start it again.
                     if timer.repeats {
                         self.start_timer(timer.id, timer.timeout, timer.repeats);
                     }
+                    // Fire the timer, and allow the callback to cancel the repeat
+                    self.do_callback(&mut vec![
+                        Event::Timer(TimerEvent {timer_id: timer.id})
+                    ]);
                 }
 
                 while (self.xlib.XPending)(self.display) != 0 {
