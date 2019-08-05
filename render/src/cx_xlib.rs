@@ -17,7 +17,7 @@ use x11_dl::keysym;
 use x11_dl::xcursor::Xcursor;
 
 static mut GLOBAL_XLIB_APP: *mut XlibApp = 0 as *mut _;
- 
+
 pub struct XlibApp {
     pub xlib: Xlib,
     pub xcursor: Xcursor,
@@ -27,6 +27,7 @@ pub struct XlibApp {
     pub signal_fd: c_int,
     pub window_map: HashMap<c_ulong, *mut XlibWindow>,
     pub time_start: u64,
+    pub last_scroll_time: f64,
     pub event_callback: Option<*mut FnMut(&mut XlibApp, &mut Vec<Event>) -> bool>,
     pub event_recur_block: bool,
     pub event_loop_running: bool,
@@ -86,13 +87,14 @@ impl XlibApp {
             let xcursor = Xcursor::open().unwrap();
             let display = (xlib.XOpenDisplay)(ptr::null());
             let display_fd = (xlib.XConnectionNumber)(display);
-            let signal_fd = 0i32;//libc::pipe();
+            let signal_fd = 0i32; //libc::pipe();
             XlibApp {
                 xlib,
                 xcursor,
                 display,
                 display_fd,
                 signal_fd,
+                last_scroll_time: 0.0,
                 window_map: HashMap::new(),
                 signals: Mutex::new(Vec::new()),
                 time_start: precise_time_ns(),
@@ -142,7 +144,7 @@ impl XlibApp {
                         ptr::null_mut(),
                         ptr::null_mut(),
                     );
-                } 
+                }
                 while (self.xlib.XPending)(self.display) != 0 {
                     let mut event = mem::uninitialized();
                     (self.xlib.XNextEvent)(self.display, &mut event);
@@ -172,6 +174,8 @@ impl XlibApp {
                                         }
                                     }
                                 }
+                                // query window for chrome 
+                                
                                 window.send_finger_hover_and_move(Vec2 {x: x as f32 / window.last_window_geom.dpi_factor, y: y as f32 / window.last_window_geom.dpi_factor}, KeyModifiers::default());
                             }
                         },
@@ -180,10 +184,30 @@ impl XlibApp {
                             if let Some(window_ptr) = self.window_map.get(&button.window) {
                                 let window = &mut (**window_ptr);
                                 (self.xlib.XSetInputFocus)(self.display, window.window.unwrap(), xlib::RevertToNone, xlib::CurrentTime);
-                                // lets do a window query to figure out of we need to start
-                                // windowdrag
-                                
-                                window.send_finger_down(button.button as usize, KeyModifiers::default())
+                                // its a mousewheel
+                                if button.button >= 4 && button.button <= 7 {
+                                    let last_scroll_time = self.last_scroll_time;
+                                    self.last_scroll_time = self.time_now();
+                                    // completely arbitrary scroll acceleration curve.
+                                    let speed = 1200.0 * (0.2 - 2.*(self.last_scroll_time - last_scroll_time)).max(0.01) ; 
+                                    self.do_callback(&mut vec![Event::FingerScroll(FingerScrollEvent {
+                                        window_id: window.window_id,
+                                        scroll: Vec2 {
+                                            x: 0.0,
+                                            y: if button.button == 4{ -speed as f32 } else {speed as f32}
+                                        },
+                                        abs: window.last_mouse_pos,
+                                        rel: window.last_mouse_pos,
+                                        rect: Rect::zero(),
+                                        is_wheel: true,
+                                        modifiers: KeyModifiers::default(),
+                                        handled: false,
+                                        time: self.last_scroll_time
+                                    })])
+                                }
+                                else{
+                                    window.send_finger_down(button.button as usize, KeyModifiers::default())
+                                }
                             }
                         },
                         xlib::ButtonRelease => { // mouse up
@@ -316,14 +340,14 @@ impl XlibApp {
         (time_now - self.time_start) as f64 / 1_000_000_000.0
     }
     
-    pub fn load_first_cursor(&self, names:&[&[u8]])->Option<c_ulong>{
-        unsafe{
-            for name in names{
+    pub fn load_first_cursor(&self, names: &[&[u8]]) -> Option<c_ulong> {
+        unsafe {
+            for name in names {
                 let cursor = (self.xcursor.XcursorLibraryLoadCursor)(
                     self.display,
                     name.as_ptr() as *const c_char,
                 );
-                if cursor != 0{
+                if cursor != 0 {
                     return Some(cursor)
                 }
             }
@@ -340,11 +364,11 @@ impl XlibApp {
                 },
                 MouseCursor::Default => self.load_first_cursor(&[b"left_ptr\0"]),
                 MouseCursor::Crosshair => self.load_first_cursor(&[b"crosshair"]),
-                MouseCursor::Hand => self.load_first_cursor(&[b"hand2\0",b"hand1\0"]),
+                MouseCursor::Hand => self.load_first_cursor(&[b"hand2\0", b"hand1\0"]),
                 MouseCursor::Arrow => self.load_first_cursor(&[b"arrow\0"]),
                 MouseCursor::Move => self.load_first_cursor(&[b"move\0"]),
                 MouseCursor::NotAllowed => self.load_first_cursor(&[b"crossed_circle\0"]),
-                MouseCursor::Text => self.load_first_cursor(&[b"text\0",b"xterm\0"]),
+                MouseCursor::Text => self.load_first_cursor(&[b"text\0", b"xterm\0"]),
                 MouseCursor::Wait => self.load_first_cursor(&[b"watch\0"]),
                 MouseCursor::Help => self.load_first_cursor(&[b"question_arrow\0"]),
                 MouseCursor::NsResize => self.load_first_cursor(&[b"v_double_arrow\0"]),
@@ -354,10 +378,10 @@ impl XlibApp {
                 MouseCursor::ColResize => self.load_first_cursor(&[b"split_h\0", b"h_double_arrow\0"]),
                 MouseCursor::RowResize => self.load_first_cursor(&[b"split_v\0", b"v_double_arrow\0"]),
             };
-            if let Some(x11_cursor) = x11_cursor{
-                unsafe{
-                    for (k,v) in &self.window_map{
-                        (self.xlib.XDefineCursor)(self.display, (**v).window.unwrap(), x11_cursor);
+            if let Some(x11_cursor) = x11_cursor {
+                unsafe {
+                    for (k, v) in &self.window_map {
+                        (self.xlib.XDefineCursor)(self.display, *k, x11_cursor);
                     }
                     (self.xlib.XFreeCursor)(self.display, x11_cursor);
                 }
@@ -365,16 +389,16 @@ impl XlibApp {
         }
     }
     
-    fn xkeystate_to_modifiers(&self, state:c_uint)->KeyModifiers{
-        KeyModifiers{
-            alt:state&xlib::Mod1Mask != 0,
-            shift:state&xlib::ShiftMask != 0,
-            control:state&xlib::ControlMask != 0,
-            logo:state&xlib::Mod4Mask != 0,
+    fn xkeystate_to_modifiers(&self, state: c_uint) -> KeyModifiers {
+        KeyModifiers {
+            alt: state & xlib::Mod1Mask != 0,
+            shift: state & xlib::ShiftMask != 0,
+            control: state & xlib::ControlMask != 0,
+            logo: state & xlib::Mod4Mask != 0,
         }
     }
     
-    fn xkeyevent_to_keycode(&self, key_event:&mut xlib::XKeyEvent)->KeyCode{
+    fn xkeyevent_to_keycode(&self, key_event: &mut xlib::XKeyEvent) -> KeyCode {
         let mut keysym = 0;
         unsafe {
             (self.xlib.XLookupString)(
@@ -385,60 +409,60 @@ impl XlibApp {
                 ptr::null_mut(),
             );
         }
-        match keysym as u32{
-            keysym::XK_a=>KeyCode::KeyA,
-            keysym::XK_A=>KeyCode::KeyA,
-            keysym::XK_b=>KeyCode::KeyB,
-            keysym::XK_B=>KeyCode::KeyB,
-            keysym::XK_c=>KeyCode::KeyC,
-            keysym::XK_C=>KeyCode::KeyC,
-            keysym::XK_d=>KeyCode::KeyD,
-            keysym::XK_D=>KeyCode::KeyD,
-            keysym::XK_e=>KeyCode::KeyE,
-            keysym::XK_E=>KeyCode::KeyE,
-            keysym::XK_f=>KeyCode::KeyF,
-            keysym::XK_F=>KeyCode::KeyF,
-            keysym::XK_g=>KeyCode::KeyG,
-            keysym::XK_G=>KeyCode::KeyG,
-            keysym::XK_h=>KeyCode::KeyH,
-            keysym::XK_H=>KeyCode::KeyH,
-            keysym::XK_i=>KeyCode::KeyI,
-            keysym::XK_I=>KeyCode::KeyI,
-            keysym::XK_j=>KeyCode::KeyJ,
-            keysym::XK_J=>KeyCode::KeyJ,
-            keysym::XK_k=>KeyCode::KeyK,
-            keysym::XK_K=>KeyCode::KeyK,
-            keysym::XK_l=>KeyCode::KeyL,
-            keysym::XK_L=>KeyCode::KeyL,
-            keysym::XK_m=>KeyCode::KeyM,
-            keysym::XK_M=>KeyCode::KeyM,
-            keysym::XK_n=>KeyCode::KeyN,
-            keysym::XK_N=>KeyCode::KeyN,
-            keysym::XK_o=>KeyCode::KeyO,
-            keysym::XK_O=>KeyCode::KeyO,
-            keysym::XK_p=>KeyCode::KeyP,
-            keysym::XK_P=>KeyCode::KeyP,
-            keysym::XK_q=>KeyCode::KeyQ,
-            keysym::XK_Q=>KeyCode::KeyQ,
-            keysym::XK_r=>KeyCode::KeyR,
-            keysym::XK_R=>KeyCode::KeyR,
-            keysym::XK_s=>KeyCode::KeyS,
-            keysym::XK_S=>KeyCode::KeyS,
-            keysym::XK_t=>KeyCode::KeyT,
-            keysym::XK_T=>KeyCode::KeyT,
-            keysym::XK_u=>KeyCode::KeyU,
-            keysym::XK_U=>KeyCode::KeyU,
-            keysym::XK_v=>KeyCode::KeyV,
-            keysym::XK_V=>KeyCode::KeyV,
-            keysym::XK_w=>KeyCode::KeyW,
-            keysym::XK_W=>KeyCode::KeyW,
-            keysym::XK_x=>KeyCode::KeyX,
-            keysym::XK_X=>KeyCode::KeyX,
-            keysym::XK_y=>KeyCode::KeyY,
-            keysym::XK_Y=>KeyCode::KeyY,
-            keysym::XK_z=>KeyCode::KeyZ,
-            keysym::XK_Z=>KeyCode::KeyZ,
-
+        match keysym as u32 {
+            keysym::XK_a => KeyCode::KeyA,
+            keysym::XK_A => KeyCode::KeyA,
+            keysym::XK_b => KeyCode::KeyB,
+            keysym::XK_B => KeyCode::KeyB,
+            keysym::XK_c => KeyCode::KeyC,
+            keysym::XK_C => KeyCode::KeyC,
+            keysym::XK_d => KeyCode::KeyD,
+            keysym::XK_D => KeyCode::KeyD,
+            keysym::XK_e => KeyCode::KeyE,
+            keysym::XK_E => KeyCode::KeyE,
+            keysym::XK_f => KeyCode::KeyF,
+            keysym::XK_F => KeyCode::KeyF,
+            keysym::XK_g => KeyCode::KeyG,
+            keysym::XK_G => KeyCode::KeyG,
+            keysym::XK_h => KeyCode::KeyH,
+            keysym::XK_H => KeyCode::KeyH,
+            keysym::XK_i => KeyCode::KeyI,
+            keysym::XK_I => KeyCode::KeyI,
+            keysym::XK_j => KeyCode::KeyJ,
+            keysym::XK_J => KeyCode::KeyJ,
+            keysym::XK_k => KeyCode::KeyK,
+            keysym::XK_K => KeyCode::KeyK,
+            keysym::XK_l => KeyCode::KeyL,
+            keysym::XK_L => KeyCode::KeyL,
+            keysym::XK_m => KeyCode::KeyM,
+            keysym::XK_M => KeyCode::KeyM,
+            keysym::XK_n => KeyCode::KeyN,
+            keysym::XK_N => KeyCode::KeyN,
+            keysym::XK_o => KeyCode::KeyO,
+            keysym::XK_O => KeyCode::KeyO,
+            keysym::XK_p => KeyCode::KeyP,
+            keysym::XK_P => KeyCode::KeyP,
+            keysym::XK_q => KeyCode::KeyQ,
+            keysym::XK_Q => KeyCode::KeyQ,
+            keysym::XK_r => KeyCode::KeyR,
+            keysym::XK_R => KeyCode::KeyR,
+            keysym::XK_s => KeyCode::KeyS,
+            keysym::XK_S => KeyCode::KeyS,
+            keysym::XK_t => KeyCode::KeyT,
+            keysym::XK_T => KeyCode::KeyT,
+            keysym::XK_u => KeyCode::KeyU,
+            keysym::XK_U => KeyCode::KeyU,
+            keysym::XK_v => KeyCode::KeyV,
+            keysym::XK_V => KeyCode::KeyV,
+            keysym::XK_w => KeyCode::KeyW,
+            keysym::XK_W => KeyCode::KeyW,
+            keysym::XK_x => KeyCode::KeyX,
+            keysym::XK_X => KeyCode::KeyX,
+            keysym::XK_y => KeyCode::KeyY,
+            keysym::XK_Y => KeyCode::KeyY,
+            keysym::XK_z => KeyCode::KeyZ,
+            keysym::XK_Z => KeyCode::KeyZ,
+            
             keysym::XK_0 => KeyCode::Key0,
             keysym::XK_1 => KeyCode::Key1,
             keysym::XK_2 => KeyCode::Key2,
@@ -493,7 +517,7 @@ impl XlibApp {
             keysym::XK_KP_7 => KeyCode::Numpad7,
             keysym::XK_KP_8 => KeyCode::Numpad8,
             keysym::XK_KP_9 => KeyCode::Numpad9,
-
+            
             keysym::XK_F1 => KeyCode::F1,
             keysym::XK_F2 => KeyCode::F2,
             keysym::XK_F3 => KeyCode::F3,
@@ -506,7 +530,7 @@ impl XlibApp {
             keysym::XK_F10 => KeyCode::F10,
             keysym::XK_F11 => KeyCode::F11,
             keysym::XK_F12 => KeyCode::F12,
-
+            
             keysym::XK_Print => KeyCode::PrintScreen,
             keysym::XK_Home => KeyCode::Home,
             keysym::XK_Page_Up => KeyCode::PageUp,
@@ -586,7 +610,7 @@ impl XlibWindow {
                 (*visual_info).depth,
                 xlib::InputOutput as u32,
                 (*visual_info).visual,
-                xlib::CWBorderPixel | xlib::CWColormap | xlib::CWEventMask,// | xlib::CWOverrideRedirect,
+                xlib::CWBorderPixel | xlib::CWColormap | xlib::CWEventMask, // | xlib::CWOverrideRedirect,
                 &mut attributes,
             );
             
@@ -599,12 +623,12 @@ impl XlibWindow {
             (xlib.XSetWMProtocols)(display, window, &mut wm_delete_message, 1);
             
             let hints_prop = (xlib.XInternAtom)(display, CString::new("_MOTIF_WM_HINTS").unwrap().as_ptr(), 0);
-            let hints = MwmHints{
-                  flags: MWM_HINTS_DECORATIONS,
-                  functions: 0,
-                  decorations: 0,
-                  input_mode: 0,
-                  status: 0,
+            let hints = MwmHints {
+                flags: MWM_HINTS_DECORATIONS,
+                functions: 0,
+                decorations: 0,
+                input_mode: 0,
+                status: 0,
             };
             (xlib.XChangeProperty)(display, window, hints_prop, hints_prop, 32, xlib::PropModeReplace, &hints as *const _ as *const u8, 5);
             // Map the window to the screen
@@ -992,19 +1016,19 @@ impl XlibWindow {
 #[derive(Debug, Clone, Copy, PartialEq)]
 #[repr(C)]
 struct MwmHints {
-  pub flags: c_ulong,
-  pub functions: c_ulong,
-  pub decorations: c_ulong,
-  pub input_mode: c_long,
-  pub status: c_ulong,
+    pub flags: c_ulong,
+    pub functions: c_ulong,
+    pub decorations: c_ulong,
+    pub input_mode: c_long,
+    pub status: c_ulong,
 }
 
-const MWM_HINTS_FUNCTIONS:c_ulong = (1 << 0);
-const MWM_HINTS_DECORATIONS:c_ulong =  (1 << 1);
+const MWM_HINTS_FUNCTIONS: c_ulong = (1 << 0);
+const MWM_HINTS_DECORATIONS: c_ulong = (1 << 1);
 
-const MWM_FUNC_ALL:c_ulong = (1 << 0);
-const MWM_FUNC_RESIZE:c_ulong = (1 << 1);
-const MWM_FUNC_MOVE:c_ulong = (1 << 2);
-const MWM_FUNC_MINIMIZE:c_ulong = (1 << 3);
-const MWM_FUNC_MAXIMIZE:c_ulong = (1 << 4);
-const MWM_FUNC_CLOSE:c_ulong = (1 << 5);
+const MWM_FUNC_ALL: c_ulong = (1 << 0);
+const MWM_FUNC_RESIZE: c_ulong = (1 << 1);
+const MWM_FUNC_MOVE: c_ulong = (1 << 2);
+const MWM_FUNC_MINIMIZE: c_ulong = (1 << 3);
+const MWM_FUNC_MAXIMIZE: c_ulong = (1 << 4);
+const MWM_FUNC_CLOSE: c_ulong = (1 << 5);
