@@ -175,7 +175,8 @@ pub enum MouseCursor {
     //     |
     ZoomOut,
     */
-    /*
+    
+    
     //     ^
     //     |
     NResize,
@@ -205,7 +206,7 @@ pub enum MouseCursor {
     //   ^
     //    \
     NwResize,
-    */
+    
     //     ^
     //     |
     //     v 	

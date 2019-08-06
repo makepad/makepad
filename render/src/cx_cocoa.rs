@@ -1679,10 +1679,16 @@ fn load_mouse_cursor(cursor: MouseCursor) -> id {
         MouseCursor::Copy => load_native_cursor("dragCopyCursor"),
         MouseCursor::Alias => load_native_cursor("dragLinkCursor"),
         MouseCursor::ContextMenu => load_native_cursor("contextualMenuCursor"),
+        */
         MouseCursor::EResize => load_native_cursor("resizeRightCursor"),
         MouseCursor::NResize => load_native_cursor("resizeUpCursor"),
         MouseCursor::WResize => load_native_cursor("resizeLeftCursor"),
-        MouseCursor::SResize => load_native_cursor("resizeDownCursor"),*/
+        MouseCursor::SResize => load_native_cursor("resizeDownCursor"),
+        MouseCursor::NeResize => load_undocumented_cursor("_windowResizeNorthEastCursor"),
+        MouseCursor::NwResize => load_undocumented_cursor("_windowResizeNorthWestCursor"),
+        MouseCursor::SeResize => load_undocumented_cursor("_windowResizeSouthEastCursor"),
+        MouseCursor::SwResize => load_undocumented_cursor("_windowResizeSouthWestCursor"),
+        
         MouseCursor::EwResize | MouseCursor::ColResize => load_native_cursor("resizeLeftRightCursor"),
         MouseCursor::NsResize | MouseCursor::RowResize => load_native_cursor("resizeUpDownCursor"),
         
@@ -1690,11 +1696,7 @@ fn load_mouse_cursor(cursor: MouseCursor) -> id {
         MouseCursor::Help => load_undocumented_cursor("_helpCursor"),
         //MouseCursor::ZoomIn => load_undocumented_cursor("_zoomInCursor"),
         //MouseCursor::ZoomOut => load_undocumented_cursor("_zoomOutCursor"),
-        /*
-        MouseCursor::NeResize => load_undocumented_cursor("_windowResizeNorthEastCursor"),
-        MouseCursor::NwResize => load_undocumented_cursor("_windowResizeNorthWestCursor"),
-        MouseCursor::SeResize => load_undocumented_cursor("_windowResizeSouthEastCursor"),
-        MouseCursor::SwResize => load_undocumented_cursor("_windowResizeSouthWestCursor"),*/
+        
         MouseCursor::NeswResize => load_undocumented_cursor("_windowResizeNorthEastSouthWestCursor"),
         MouseCursor::NwseResize => load_undocumented_cursor("_windowResizeNorthWestSouthEastCursor"),
         
