@@ -675,7 +675,6 @@ impl Win32Window {
                 })]);
             },
             winuser::WM_SIZE | winuser::WM_DPICHANGED => {
-                println!("GOT WM_SIZE");
                 //if window.ignore_wmsize > 1{
                 window.send_change_event();
                 // }
