@@ -285,8 +285,10 @@ impl Cx {
                             opengl_window.window_geom = re.new_geom.clone();
                             self.windows[re.window_id].window_geom = re.new_geom.clone();
                             // redraw just this windows root draw list
-                            if let Some(main_pass_id) = self.windows[re.window_id].main_pass_id {
-                                self.redraw_pass_and_sub_passes(main_pass_id);
+                            if re.old_geom.inner_size != re.new_geom.inner_size{
+                                if let Some(main_pass_id) = self.windows[re.window_id].main_pass_id {
+                                    self.redraw_pass_and_sub_passes(main_pass_id);
+                                }
                             }
                             break;
                         }}
@@ -369,7 +371,6 @@ impl Cx {
                                 }}
                             }
                         }
-                        
                         // set a cursor
                         if !self.down_mouse_cursor.is_none() {
                             xlib_app.set_mouse_cursor(self.down_mouse_cursor.as_ref().unwrap().clone())
@@ -410,7 +411,9 @@ impl Cx {
                                         // its a render window
                                         windows_need_repaint -= 1;
                                         for opengl_window in &mut opengl_windows {if opengl_window.window_id == window_id {
-                                            
+                                            if opengl_window.xlib_window.window.is_none(){
+                                                break;
+                                            }
                                             let dpi_factor = opengl_window.window_geom.dpi_factor;
                                             
                                             self.passes[*pass_id].set_dpi_factor(dpi_factor);

@@ -46,7 +46,7 @@ pub struct XlibWindow {
     pub visual_info: Option<XVisualInfo>,
     pub child_windows: Vec<XlibChildWindow>,
     
-    pub last_nc_mode: XlibNcMode,
+    pub last_nc_mode: Option<c_long>,
     pub window_id: usize,
     pub xlib_app: *mut XlibApp,
     pub last_window_geom: WindowGeom,
@@ -56,20 +56,6 @@ pub struct XlibWindow {
     pub current_cursor: MouseCursor,
     pub last_mouse_pos: Vec2,
     pub fingers_down: Vec<bool>,
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub enum XlibNcMode {
-    Client,
-    Caption,
-    TopLeft,
-    Top,
-    TopRight,
-    Right,
-    BottomRight,
-    Bottom,
-    BottomLeft,
-    Left,
 }
 
 #[derive(Clone)]
@@ -208,10 +194,20 @@ impl XlibApp {
                     ]);
                 }
                 
-                while (self.xlib.XPending)(self.display) != 0 {
+                while self.display != ptr::null_mut() && (self.xlib.XPending)(self.display) != 0 {
                     let mut event = mem::uninitialized();
                     (self.xlib.XNextEvent)(self.display, &mut event);
                     match event.type_ {
+                        xlib::DestroyNotify => { // our window got destroyed
+                            
+                            let destroy_window = event.destroy_window;
+                            if let Some(window_ptr) = self.window_map.get(&destroy_window.window) {
+                                let window = &mut (**window_ptr);
+                                window.do_callback(&mut vec![Event::WindowClosed(WindowClosedEvent {
+                                    window_id: window.window_id,
+                                })]);
+                            }
+                        },
                         xlib::ConfigureNotify => {
                             let cfg = event.configure;
                             if let Some(window_ptr) = self.window_map.get(&cfg.window) {
@@ -221,9 +217,7 @@ impl XlibApp {
                                 }
                             }
                         },
-                        xlib::EnterNotify => {
-                            
-                        },
+                        xlib::EnterNotify => {},
                         xlib::LeaveNotify => {
                             let crossing = event.crossing;
                             if crossing.detail == 4 {
@@ -276,45 +270,45 @@ impl XlibApp {
                                 window.send_finger_hover_and_move(pos, KeyModifiers::default());
                                 let window_size = window.last_window_geom.inner_size;
                                 if pos.x >= 0.0 && pos.x < 10.0 && pos.y >= 0.0 && pos.y < 10.0 {
-                                    window.last_nc_mode = XlibNcMode::TopLeft;
+                                    window.last_nc_mode = Some(_NET_WM_MOVERESIZE_SIZE_TOPLEFT);
                                     window.do_callback(&mut vec![Event::WindowSetHoverCursor(MouseCursor::NwResize)]);
                                 }
                                 else if pos.x >= 0.0 && pos.x < 10.0 && pos.y >= window_size.y - 10.0 {
-                                    window.last_nc_mode = XlibNcMode::BottomLeft;
+                                    window.last_nc_mode = Some(_NET_WM_MOVERESIZE_SIZE_BOTTOMLEFT);
                                     window.do_callback(&mut vec![Event::WindowSetHoverCursor(MouseCursor::SwResize)]);
                                 }
                                 else if pos.x >= 0.0 && pos.x < 5.0 {
-                                    window.last_nc_mode = XlibNcMode::Left;
+                                    window.last_nc_mode = Some(_NET_WM_MOVERESIZE_SIZE_LEFT);
                                     window.do_callback(&mut vec![Event::WindowSetHoverCursor(MouseCursor::WResize)]);
                                 }
                                 else if pos.x >= window_size.x - 10.0 && pos.y >= 0.0 && pos.y < 10.0 {
-                                    window.last_nc_mode = XlibNcMode::TopRight;
+                                    window.last_nc_mode = Some(_NET_WM_MOVERESIZE_SIZE_TOPRIGHT);
                                     window.do_callback(&mut vec![Event::WindowSetHoverCursor(MouseCursor::NeResize)]);
                                 }
                                 else if pos.x >= window_size.x - 10.0 && pos.y >= window_size.y - 10.0 {
-                                    window.last_nc_mode = XlibNcMode::BottomRight;
+                                    window.last_nc_mode = Some(_NET_WM_MOVERESIZE_SIZE_BOTTOMRIGHT);
                                     window.do_callback(&mut vec![Event::WindowSetHoverCursor(MouseCursor::SeResize)]);
                                 }
                                 else if pos.x >= window_size.x - 5.0 {
-                                    window.last_nc_mode = XlibNcMode::Right;
+                                    window.last_nc_mode = Some(_NET_WM_MOVERESIZE_SIZE_RIGHT);
                                     window.do_callback(&mut vec![Event::WindowSetHoverCursor(MouseCursor::EResize)]);
                                 }
                                 else if pos.y <= 5.0 {
-                                    window.last_nc_mode = XlibNcMode::Top;
+                                    window.last_nc_mode = Some(_NET_WM_MOVERESIZE_SIZE_TOP);
                                     window.do_callback(&mut vec![Event::WindowSetHoverCursor(MouseCursor::NResize)]);
                                 }
                                 else if pos.y > window_size.y - 5.0 {
-                                    window.last_nc_mode = XlibNcMode::Bottom;
+                                    window.last_nc_mode = Some(_NET_WM_MOVERESIZE_SIZE_BOTTOM);
                                     window.do_callback(&mut vec![Event::WindowSetHoverCursor(MouseCursor::SResize)]);
                                 }
                                 else {
                                     match &drag_query_events[0] {
                                         Event::WindowDragQuery(wd) => match &wd.response {
                                             WindowDragQueryResponse::Caption => {
-                                                window.last_nc_mode = XlibNcMode::Caption;
+                                                window.last_nc_mode = Some(_NET_WM_MOVERESIZE_MOVE);
                                             },
                                             _ => {
-                                                window.last_nc_mode = XlibNcMode::Client;
+                                                window.last_nc_mode = None;
                                             }
                                         },
                                         _ => ()
@@ -349,16 +343,9 @@ impl XlibApp {
                                     })])
                                 }
                                 else {
-                                    println!("HERE!{:?}", window.last_nc_mode);
                                     // lets check if last_nc_mouse_pos is something we need to do
-                                    if window.last_nc_mode == XlibNcMode::Client {
-                                        window.send_finger_down(button.button as usize, self.xkeystate_to_modifiers(button.state))
-                                    }
-                                    else { // start some kind of drag
-                                        // tell the window manager to start dragging
+                                    if let Some(last_nc_mode) = window.last_nc_mode {
                                         let default_screen = (self.xlib.XDefaultScreen)(self.display);
-                                        
-                                        // The root window of the default screen
                                         let root_window = (self.xlib.XRootWindow)(self.display, default_screen);
                                         (self.xlib.XUngrabPointer)(self.display, 0);
                                         (self.xlib.XFlush)(self.display);
@@ -374,21 +361,14 @@ impl XlibApp {
                                                 let mut msg = xlib::ClientMessageData::new();
                                                 msg.set_long(0, button.x_root as c_long);
                                                 msg.set_long(1, button.y_root as c_long);
-                                                msg.set_long(2, match window.last_nc_mode {
-                                                    XlibNcMode::TopLeft => _NET_WM_MOVERESIZE_SIZE_TOPLEFT,
-                                                    XlibNcMode::Top => _NET_WM_MOVERESIZE_SIZE_TOP,
-                                                    XlibNcMode::TopRight => _NET_WM_MOVERESIZE_SIZE_TOPRIGHT,
-                                                    XlibNcMode::Right => _NET_WM_MOVERESIZE_SIZE_RIGHT,
-                                                    XlibNcMode::BottomRight => _NET_WM_MOVERESIZE_SIZE_BOTTOMRIGHT,
-                                                    XlibNcMode::Bottom => _NET_WM_MOVERESIZE_SIZE_BOTTOM,
-                                                    XlibNcMode::BottomLeft => _NET_WM_MOVERESIZE_SIZE_BOTTOMLEFT,
-                                                    XlibNcMode::Left => _NET_WM_MOVERESIZE_SIZE_LEFT,
-                                                    _ => _NET_WM_MOVERESIZE_MOVE,
-                                                });
+                                                msg.set_long(2, last_nc_mode);
                                                 msg
                                             }
                                         };
                                         (self.xlib.XSendEvent)(self.display, root_window, 0, xlib::SubstructureRedirectMask | xlib::SubstructureNotifyMask, &mut xclient as *mut _ as *mut xlib::XEvent);
+                                    }
+                                    else {
+                                        window.send_finger_down(button.button as usize, self.xkeystate_to_modifiers(button.state))
                                     }
                                 }
                             }
@@ -551,8 +531,8 @@ impl XlibApp {
     pub fn terminate_event_loop(&mut self) {
         // maybe need to do more here
         self.event_loop_running = false;
-        
         unsafe {(self.xlib.XCloseDisplay)(self.display)};
+        self.display = ptr::null_mut();
     }
     
     pub fn time_now(&self) -> f64 {
@@ -609,8 +589,10 @@ impl XlibApp {
             };
             if let Some(x11_cursor) = x11_cursor {
                 unsafe {
-                    for (k, _v) in &self.window_map {
-                        (self.xlib.XDefineCursor)(self.display, *k, x11_cursor);
+                    for (k, v) in &self.window_map {
+                        if !(**v).window.is_none(){ 
+                            (self.xlib.XDefineCursor)(self.display, *k, x11_cursor);
+                        }
                     }
                     (self.xlib.XFreeCursor)(self.display, x11_cursor);
                 }
@@ -791,7 +773,7 @@ impl XlibWindow {
             xlib_app: xlib_app,
             last_window_geom: WindowGeom::default(),
             time_start: xlib_app.time_start,
-            last_nc_mode: XlibNcMode::Client,
+            last_nc_mode: None,
             ime_spot: Vec2::zero(),
             current_cursor: MouseCursor::Default,
             last_mouse_pos: Vec2::zero(),
@@ -991,20 +973,59 @@ impl XlibWindow {
     pub fn on_mouse_move(&self) {
     }
     
-    
     pub fn set_mouse_cursor(&mut self, _cursor: MouseCursor) {
     }
     
+    fn restore_or_maximize(&self, add_remove: c_long) {
+        unsafe {
+            let xlib_app = &(*self.xlib_app);
+            let default_screen = (xlib_app.xlib.XDefaultScreen)(xlib_app.display);
+            let root_window = (xlib_app.xlib.XRootWindow)(xlib_app.display, default_screen);
+            let mut xclient = xlib::XClientMessageEvent {
+                type_: xlib::ClientMessage,
+                serial: 0,
+                send_event: 0,
+                display: xlib_app.display,
+                window: self.window.unwrap(),
+                message_type: (xlib_app.xlib.XInternAtom)(xlib_app.display, CString::new("_NET_WM_STATE").unwrap().as_ptr(), 0),
+                format: 32,
+                data: {
+                    let mut msg = xlib::ClientMessageData::new();
+                    msg.set_long(0, add_remove);
+                    msg.set_long(1, (xlib_app.xlib.XInternAtom)(xlib_app.display, CString::new("_NET_WM_STATE_MAXIMIZED_HORZ").unwrap().as_ptr(), 0) as c_long);
+                    msg.set_long(2, (xlib_app.xlib.XInternAtom)(xlib_app.display, CString::new("_NET_WM_STATE_MAXIMIZED_VERT").unwrap().as_ptr(), 0) as c_long);
+                    msg
+                }
+            };
+            (xlib_app.xlib.XSendEvent)(xlib_app.display, root_window, 0, xlib::SubstructureNotifyMask, &mut xclient as *mut _ as *mut xlib::XEvent);
+        }
+    }
+    
     pub fn restore(&self) {
+        self.restore_or_maximize(_NET_WM_STATE_REMOVE);
     }
     
     pub fn maximize(&self) {
+        self.restore_or_maximize(_NET_WM_STATE_ADD);
     }
     
-    pub fn close_window(&self) {
+    pub fn close_window(&mut self) {
+        unsafe {
+            let xlib_app = &(*self.xlib_app);
+            (xlib_app.xlib.XDestroyWindow)(xlib_app.display, self.window.unwrap());
+            self.window = None;
+            // lets remove us from the mapping
+            
+        }
     }
     
     pub fn minimize(&self) {
+        unsafe {
+            let xlib_app = &(*self.xlib_app);
+            let default_screen = (xlib_app.xlib.XDefaultScreen)(xlib_app.display);
+            (xlib_app.xlib.XIconifyWindow)(xlib_app.display, self.window.unwrap(), default_screen);
+            (xlib_app.xlib.XFlush)(xlib_app.display);
+        }
     }
     
     pub fn set_topmost(&self, _topmost: bool) {
@@ -1026,7 +1047,45 @@ impl XlibWindow {
     }
     
     pub fn get_is_maximized(&self) -> bool {
-        false
+        let mut maximized = false;
+        unsafe {
+            let xlib_app = &(*self.xlib_app);
+            let default_screen = (xlib_app.xlib.XDefaultScreen)(xlib_app.display);
+            let xlib = &(*self.xlib_app).xlib;
+            let display = (*self.xlib_app).display;
+            let mut prop_type = mem::uninitialized();
+            let mut format = mem::uninitialized();
+            let mut n_item = mem::uninitialized();
+            let mut bytes_after = mem::uninitialized();
+            let mut properties = mem::uninitialized();
+            let horiz_atom = (xlib_app.xlib.XInternAtom)(xlib_app.display, CString::new("_NET_WM_STATE_MAXIMIZED_HORZ").unwrap().as_ptr(), 0) as c_long;
+            let vert_atom = (xlib_app.xlib.XInternAtom)(xlib_app.display, CString::new("_NET_WM_STATE_MAXIMIZED_VERT").unwrap().as_ptr(), 0) as c_long;
+            let result = (xlib_app.xlib.XGetWindowProperty)(
+                xlib_app.display,
+                self.window.unwrap(),
+                (xlib_app.xlib.XInternAtom)(xlib_app.display, CString::new("_NET_WM_STATE").unwrap().as_ptr(), 0) as c_ulong,
+                0,
+                !0,
+                0,
+                xlib::AnyPropertyType as c_ulong,
+                &mut prop_type,
+                &mut format,
+                &mut n_item,
+                &mut bytes_after,
+                &mut properties
+            );
+            if result == 0 && properties != ptr::null_mut() {
+                let items = std::slice::from_raw_parts::<c_long>(properties as *mut _, n_item as usize);
+                for item in items {
+                    if *item == horiz_atom || *item == vert_atom {
+                        maximized = true;
+                        break;
+                    }
+                }
+                (xlib_app.xlib.XFree)(properties as *mut _);
+            }
+        }
+        maximized
     }
     
     pub fn time_now(&self) -> f64 {
@@ -1120,7 +1179,11 @@ impl XlibWindow {
     
     pub fn send_change_event(&mut self) {
         
-        let new_geom = self.get_window_geom();
+        let mut new_geom = self.get_window_geom();
+        if new_geom.inner_size.x < self.last_window_geom.inner_size.x ||
+        new_geom.inner_size.y < self.last_window_geom.inner_size.y {
+            new_geom.is_fullscreen = false;
+        }
         let old_geom = self.last_window_geom.clone();
         self.last_window_geom = new_geom.clone();
         
@@ -1276,4 +1339,11 @@ const _NET_WM_MOVERESIZE_SIZE_LEFT: c_long = 7;
 const _NET_WM_MOVERESIZE_MOVE: c_long = 8;/* movement only */
 const _NET_WM_MOVERESIZE_SIZE_KEYBOARD: c_long = 9;/* size via keyboard */
 const _NET_WM_MOVERESIZE_MOVE_KEYBOARD: c_long = 10;
+
+const _NET_WM_STATE_REMOVE: c_long = 0;/* remove/unset property */
+const _NET_WM_STATE_ADD: c_long = 1;/* add/set property */
+const _NET_WM_STATE_TOGGLE: c_long = 2;/* toggle property  */
+
+
+
 /* move via keyboard */
