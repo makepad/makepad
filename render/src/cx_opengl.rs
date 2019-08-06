@@ -111,8 +111,11 @@ impl Cx {
         self.calc_dirty_bounds(pass_id, view_id, &mut view_bounds);
         
         let full_repaint = view_bounds.max_x - view_bounds.min_x > opengl_window.window_geom.inner_size.x - 100.
-            && view_bounds.max_y - view_bounds.min_y > opengl_window.window_geom.inner_size.y - 100.;
-        
+            && view_bounds.max_y - view_bounds.min_y > opengl_window.window_geom.inner_size.y - 100. ||
+            opengl_window.opening_repaint_count < 2;
+        if opengl_window.opening_repaint_count < 2{ // for some reason the first repaint doesn't arrive on the window
+             opengl_window.opening_repaint_count +=1;
+        } 
         let window;
         let view_rect;
         if full_repaint { 
@@ -881,6 +884,7 @@ pub struct CxPlatformShader {
 struct OpenglWindow {
     pub window_id: usize,
     pub window_geom: WindowGeom,
+    pub opening_repaint_count: u32,
     pub cal_size: Vec2,
     pub xlib_window: XlibWindow,
 }
@@ -894,6 +898,7 @@ impl OpenglWindow {
         
         OpenglWindow {
             window_id,
+            opening_repaint_count:0,
             cal_size: Vec2::zero(),
             window_geom: xlib_window.get_window_geom(),
             xlib_window

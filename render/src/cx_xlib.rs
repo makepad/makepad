@@ -164,10 +164,10 @@ impl XlibApp {
                        // println!("Select wait {}",(timer.delta_timeout.fract() * 1000000.0) as i64);
                         Some(timeval {
                             // `tv_sec` is in seconds, so take the integer part of `delta_timeout`
-                            tv_sec: timer.delta_timeout.trunc() as i64,
+                            tv_sec: timer.delta_timeout.trunc() as c_int,
                             // `tv_usec` is in microseconds, so take the fractional part of
                             // `delta_timeout` 1000000.0.
-                            tv_usec: (timer.delta_timeout.fract() * 1000000.0) as i64,
+                            tv_usec: (timer.delta_timeout.fract() * 1000000.0) as c_int,
                         })
                     }
                     else{  
@@ -223,6 +223,12 @@ impl XlibApp {
                                 }
                             }
                         },
+                        xlib::EnterNotify=>{
+                            
+                        },
+                        xlib::LeaveNotify=>{
+                            
+                        },
                         xlib::MotionNotify => { // mousemove
                             let motion = event.motion;
                             if let Some(window_ptr) = self.window_map.get(&motion.window) {
@@ -241,32 +247,64 @@ impl XlibApp {
                                 }
                                 let pos = Vec2 {x: x as f32 / window.last_window_geom.dpi_factor, y: y as f32 / window.last_window_geom.dpi_factor};
                                 // query window for chrome 
-                                let mut events = vec![
+                                let mut drag_query_events = vec![
                                     Event::WindowDragQuery(WindowDragQueryEvent {
                                         window_id: window.window_id,
                                         abs: window.last_mouse_pos,
                                         response: WindowDragQueryResponse::NoAnswer
                                     })
                                 ];
-                                window.do_callback(&mut events);
-                                match &events[0] {
-                                    Event::WindowDragQuery(wd) => match &wd.response {
-                                        WindowDragQueryResponse::Client => {
-                                            window.last_nc_mouse_pos = XlibNcMousePos::Client;
-                                        }
-                                        WindowDragQueryResponse::Caption => {
-                                            window.last_nc_mouse_pos = XlibNcMousePos::Client;
-                                        },
-                                        _ => ()
-                                    },
-                                    _ => ()
-                                }
+                                window.do_callback(&mut drag_query_events);
                                 // otherwise lets check if we are hover the window edge to resize the window
                                 //println!("{} {}", window.last_window_geom.inner_size.x, pos.x);
-                                
-                                
                                 window.send_finger_hover_and_move(pos, KeyModifiers::default());
-
+                                let window_size = window.last_window_geom.inner_size;
+                                if pos.x >= 0.0 && pos.x < 10.0 && pos.y >= 0.0 && pos.y < 10.0{
+                                    window.last_nc_mouse_pos = XlibNcMousePos::TopLeft;
+                                    window.do_callback(&mut vec![Event::WindowSetHoverCursor(MouseCursor::NwseResize)]);
+                                }
+                                else if pos.x >= 0.0 && pos.x < 10.0 && pos.y >= window_size.y - 10.0{
+                                    window.last_nc_mouse_pos = XlibNcMousePos::BottomLeft;
+                                    window.do_callback(&mut vec![Event::WindowSetHoverCursor(MouseCursor::NeswResize)]);
+                                }
+                                else if pos.x >= 0.0 && pos.x < 5.0{
+                                    window.last_nc_mouse_pos = XlibNcMousePos::Left;
+                                    window.do_callback(&mut vec![Event::WindowSetHoverCursor(MouseCursor::EwResize)]);
+                                }
+                                if pos.x >= window_size.x - 10.0 && pos.y >= 0.0 && pos.y < 10.0{
+                                    window.last_nc_mouse_pos = XlibNcMousePos::TopRight;
+                                    window.do_callback(&mut vec![Event::WindowSetHoverCursor(MouseCursor::NeswResize)]);
+                                }
+                                else if pos.x >= window_size.x - 10.0 && pos.y >= window_size.y - 10.0{
+                                    window.last_nc_mouse_pos = XlibNcMousePos::BottomRight;
+                                    window.do_callback(&mut vec![Event::WindowSetHoverCursor(MouseCursor::NwseResize)]);
+                                }
+                                else if pos.x >= window_size.x - 5.0{
+                                    window.last_nc_mouse_pos = XlibNcMousePos::Right;
+                                    window.do_callback(&mut vec![Event::WindowSetHoverCursor(MouseCursor::EwResize)]);
+                                }
+                                else if pos.y <= 5.0{
+                                    window.last_nc_mouse_pos = XlibNcMousePos::Top;
+                                    window.do_callback(&mut vec![Event::WindowSetHoverCursor(MouseCursor::NsResize)]);
+                                }
+                                else if pos.y > window_size.y - 5.0{
+                                    window.last_nc_mouse_pos = XlibNcMousePos::Bottom;
+                                    window.do_callback(&mut vec![Event::WindowSetHoverCursor(MouseCursor::NsResize)]);
+                                }
+                                else{
+                                    match &drag_query_events[0] {
+                                        Event::WindowDragQuery(wd) => match &wd.response {
+                                            WindowDragQueryResponse::Client => {
+                                                window.last_nc_mouse_pos = XlibNcMousePos::Client;
+                                            }
+                                            WindowDragQueryResponse::Caption => {
+                                                window.last_nc_mouse_pos = XlibNcMousePos::Caption;
+                                            },
+                                            _ => ()
+                                        },
+                                        _ => ()
+                                    }
+                                }
                             }
                         },
                         xlib::ButtonPress => { // mouse down
@@ -724,7 +762,10 @@ impl XlibWindow {
                 | xlib::KeyPressMask
                 | xlib::KeyReleaseMask
                 | xlib::VisibilityChangeMask
-                | xlib::FocusChangeMask;
+                | xlib::FocusChangeMask
+                | xlib::EnterWindowMask
+                | xlib::LeaveWindowMask;
+                
 
             let dpi_factor = self.get_dpi_factor();
             // Create a window
