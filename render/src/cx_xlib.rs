@@ -997,7 +997,7 @@ impl XlibWindow {
                     msg
                 }
             };
-            (xlib_app.xlib.XSendEvent)(xlib_app.display, root_window, 0, xlib::SubstructureNotifyMask, &mut xclient as *mut _ as *mut xlib::XEvent);
+            (xlib_app.xlib.XSendEvent)(xlib_app.display, root_window, 0, xlib::SubstructureNotifyMask|xlib::SubstructureRedirectMask, &mut xclient as *mut _ as *mut xlib::XEvent);
         }
     }
     
