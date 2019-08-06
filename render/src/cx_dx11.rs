@@ -109,7 +109,7 @@ impl Cx {
         let draw_calls_len = {
             let cxview = &mut self.views[view_id];
             cxview.set_clipping_uniforms();
-            cxview.platform.uni_dl.update_with_f32_constant_data(d3d11_cx, &mut cxview.uniforms)
+            cxview.platform.uni_dl.update_with_f32_constant_data(d3d11_cx, &mut cxview.uniforms);
             cxview.draw_calls_len
         };
         for draw_call_id in 0..draw_calls_len {
