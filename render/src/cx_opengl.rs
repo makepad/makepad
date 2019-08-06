@@ -88,7 +88,7 @@ impl Cx {
                 //let sh = &self.shaders[draw_call.shader_id];
                 //let shp = sh.platform.as_ref().unwrap();
                 
-                if draw_call.instance_dirty {
+                if draw_call.instance_dirty || draw_call.uniforms_dirty{
                     view_bounds.add_rect(&cxview.rect);
                 }
             }
@@ -111,8 +111,11 @@ impl Cx {
         self.calc_dirty_bounds(pass_id, view_id, &mut view_bounds);
         
         let full_repaint = view_bounds.max_x - view_bounds.min_x > opengl_window.window_geom.inner_size.x - 100.
-            && view_bounds.max_y - view_bounds.min_y > opengl_window.window_geom.inner_size.y - 100.;
-        
+            && view_bounds.max_y - view_bounds.min_y > opengl_window.window_geom.inner_size.y - 100. ||
+            opengl_window.opening_repaint_count < 3;
+        if opengl_window.opening_repaint_count < 3{ // for some reason the first repaint doesn't arrive on the window
+             opengl_window.opening_repaint_count +=1;
+        } 
         let window;
         let view_rect;
         if full_repaint { 
@@ -282,8 +285,10 @@ impl Cx {
                             opengl_window.window_geom = re.new_geom.clone();
                             self.windows[re.window_id].window_geom = re.new_geom.clone();
                             // redraw just this windows root draw list
-                            if let Some(main_pass_id) = self.windows[re.window_id].main_pass_id {
-                                self.redraw_pass_and_sub_passes(main_pass_id);
+                            if re.old_geom.inner_size != re.new_geom.inner_size{
+                                if let Some(main_pass_id) = self.windows[re.window_id].main_pass_id {
+                                    self.redraw_pass_and_sub_passes(main_pass_id);
+                                }
                             }
                             break;
                         }}
@@ -366,7 +371,6 @@ impl Cx {
                                 }}
                             }
                         }
-                        
                         // set a cursor
                         if !self.down_mouse_cursor.is_none() {
                             xlib_app.set_mouse_cursor(self.down_mouse_cursor.as_ref().unwrap().clone())
@@ -407,7 +411,9 @@ impl Cx {
                                         // its a render window
                                         windows_need_repaint -= 1;
                                         for opengl_window in &mut opengl_windows {if opengl_window.window_id == window_id {
-                                            
+                                            if opengl_window.xlib_window.window.is_none(){
+                                                break;
+                                            }
                                             let dpi_factor = opengl_window.window_geom.dpi_factor;
                                             
                                             self.passes[*pass_id].set_dpi_factor(dpi_factor);
@@ -881,6 +887,7 @@ pub struct CxPlatformShader {
 struct OpenglWindow {
     pub window_id: usize,
     pub window_geom: WindowGeom,
+    pub opening_repaint_count: u32,
     pub cal_size: Vec2,
     pub xlib_window: XlibWindow,
 }
@@ -894,6 +901,7 @@ impl OpenglWindow {
         
         OpenglWindow {
             window_id,
+            opening_repaint_count:0,
             cal_size: Vec2::zero(),
             window_geom: xlib_window.get_window_geom(),
             xlib_window

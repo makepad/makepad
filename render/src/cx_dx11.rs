@@ -109,7 +109,7 @@ impl Cx {
         let draw_calls_len = {
             let cxview = &mut self.views[view_id];
             cxview.set_clipping_uniforms();
-            cxview.platform.uni_dl.update_with_f32_constant_data(d3d11_cx, &mut cxview.uniforms)
+            cxview.platform.uni_dl.update_with_f32_constant_data(d3d11_cx, &mut cxview.uniforms);
             cxview.draw_calls_len
         };
         for draw_call_id in 0..draw_calls_len {
@@ -334,9 +334,11 @@ impl Cx {
                                 d3d11_window.window_geom = re.new_geom.clone();
                                 self.windows[re.window_id].window_geom = re.new_geom.clone();
                                 // redraw just this windows root draw list
-                                if let Some(main_pass_id) = self.windows[re.window_id].main_pass_id {
-                                    self.redraw_pass_and_sub_passes(main_pass_id);
-                                }
+                                //if re.old_geom.inner_size != re.new_geom.inner_size{
+                                    if let Some(main_pass_id) = self.windows[re.window_id].main_pass_id {
+                                        self.redraw_pass_and_sub_passes(main_pass_id);
+                                    }
+                                //}
                                 break;
                             }
                         }

@@ -288,12 +288,24 @@ impl Win32App {
                 MouseCursor::Wait => winuser::IDC_ARROW,
                 MouseCursor::Help => winuser::IDC_HELP,
                 MouseCursor::NotAllowed => winuser::IDC_NO,
+
+                MouseCursor::EResize =>  winuser::IDC_SIZEWE,
+                MouseCursor::NResize => winuser::IDC_SIZENS,
+                MouseCursor::NeResize => winuser::IDC_SIZENESW,
+                MouseCursor::NwResize => winuser::IDC_SIZENWSE,
+                MouseCursor::SResize => winuser::IDC_SIZENS,
+                MouseCursor::SeResize => winuser::IDC_SIZENWSE,
+                MouseCursor::SwResize => winuser::IDC_SIZENESW,
+                MouseCursor::WResize =>  winuser::IDC_SIZEWE,
+                
+                
                 MouseCursor::NsResize => winuser::IDC_SIZENS,
                 MouseCursor::NeswResize => winuser::IDC_SIZENESW,
                 MouseCursor::EwResize => winuser::IDC_SIZEWE,
                 MouseCursor::NwseResize => winuser::IDC_SIZENWSE,
+                
                 MouseCursor::ColResize => winuser::IDC_SIZEWE,
-                MouseCursor::RowResize => winuser::IDC_SIZEWE,
+                MouseCursor::RowResize => winuser::IDC_SIZENS,
             };
             self.current_cursor = cursor;
             unsafe {

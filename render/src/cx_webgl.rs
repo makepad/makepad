@@ -489,7 +489,7 @@ impl Cx {
         //let _=io::stdout().flush();
     }
     
-    pub fn send_signal(_signal: Signal, _value: usize) {
+    pub fn post_signal(_signal: Signal, _value: usize) {
         // todo
     }
     
@@ -1091,25 +1091,22 @@ impl FromWasm {
             MouseCursor::Text => 6,
             MouseCursor::Wait => 7,
             MouseCursor::Help => 8,
-            MouseCursor::Progress => 9,
-            MouseCursor::NotAllowed => 10,
-            MouseCursor::ContextMenu => 11,
-            MouseCursor::Cell => 12,
-            MouseCursor::VerticalText => 13,
-            MouseCursor::Alias => 14,
-            MouseCursor::Copy => 15,
-            MouseCursor::NoDrop => 16,
-            MouseCursor::Grab => 17,
-            MouseCursor::Grabbing => 18,
-            MouseCursor::AllScroll => 19,
-            MouseCursor::ZoomIn => 20,
-            MouseCursor::ZoomOut => 21,
-            MouseCursor::NsResize => 22,
-            MouseCursor::NeswResize => 23,
-            MouseCursor::EwResize => 24,
-            MouseCursor::NwseResize => 25,
-            MouseCursor::ColResize => 26,
-            MouseCursor::RowResize => 27,
+            MouseCursor::NotAllowed => 9,
+            MouseCursor::NResize=>10,
+            MouseCursor::NeResize=>11,
+            MouseCursor::EResize=>12,
+            MouseCursor::SeResize=>13,
+            MouseCursor::SResize=>14,
+            MouseCursor::SwResize=>15,
+            MouseCursor::WResize=>16,
+            MouseCursor::NwResize=>17,
+            
+            MouseCursor::NsResize => 18,
+            MouseCursor::NeswResize => 19,
+            MouseCursor::EwResize => 20,
+            MouseCursor::NwseResize => 21,
+            MouseCursor::ColResize => 22,
+            MouseCursor::RowResize => 23,
             
         };
         self.mu32(cursor_id);

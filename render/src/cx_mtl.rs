@@ -229,8 +229,10 @@ impl Cx {
                                 metal_window.window_geom = re.new_geom.clone();
                                 self.windows[re.window_id].window_geom = re.new_geom.clone();
                                 // redraw just this windows root draw list
-                                if let Some(main_pass_id) = self.windows[re.window_id].main_pass_id {
-                                    self.redraw_pass_and_sub_passes(main_pass_id);
+                                if re.old_geom.inner_size != re.new_geom.inner_size{
+                                    if let Some(main_pass_id) = self.windows[re.window_id].main_pass_id {
+                                        self.redraw_pass_and_sub_passes(main_pass_id);
+                                    }
                                 }
                                 break;
                             }
