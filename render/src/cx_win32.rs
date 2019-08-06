@@ -304,8 +304,8 @@ impl Win32App {
                 MouseCursor::EwResize => winuser::IDC_SIZEWE,
                 MouseCursor::NwseResize => winuser::IDC_SIZENWSE,
                 
-                MouseCursor::ColResize => winuser::IDC_SIZENS,
-                MouseCursor::RowResize => winuser::IDC_SIZEWE,
+                MouseCursor::ColResize => winuser::IDC_SIZEWE,
+                MouseCursor::RowResize => winuser::IDC_SIZENS,
             };
             self.current_cursor = cursor;
             unsafe {
