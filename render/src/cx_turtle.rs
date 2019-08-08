@@ -211,6 +211,23 @@ impl Cx {
         }
     }
     
+    pub fn turtle_line_is_visible(&mut self, min_height: f32, scroll: Vec2)->bool{
+        if let Some(turtle) = self.turtles.last_mut() {
+            let y = turtle.walk.y;
+            let h = turtle.biggest.max(min_height);
+            let vy = turtle.origin.y + scroll.y;
+            let vh = turtle.height;
+            
+            if y > vy + vh || y + h < vy {
+                return false
+            }
+            else {
+                return true
+            }
+        }
+        false
+    }
+    
     pub fn turtle_new_line_min_height(&mut self, min_height: f32) {
         if let Some(turtle) = self.turtles.last_mut() {
             turtle.walk.x = turtle.origin.x + turtle.layout.padding.l;

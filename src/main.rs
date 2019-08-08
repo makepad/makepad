@@ -226,6 +226,9 @@ impl AppWindow {
             FileTreeEvent::DragMove {fe, ..} => {
                 self.dock.dock_drag_move(cx, fe);
             },
+            FileTreeEvent::DragCancel=>{
+                self.dock.dock_drag_cancel(cx);
+            },
             FileTreeEvent::DragOut => {
                 self.dock.dock_drag_out(cx);
             },

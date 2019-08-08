@@ -18,6 +18,8 @@ pub struct Text{
     pub color: Color,
     pub font_size:f32,
     pub do_dpi_dilate:bool,
+    pub do_h_scroll: bool,
+    pub do_v_scroll: bool,
     pub brightness:f32,
     pub line_spacing:f32,
     pub wrapping:Wrapping,
@@ -28,6 +30,8 @@ impl Style for Text{
         Self{
             shader:cx.add_shader(Self::def_text_shader(), "Text"),
             font:cx.load_font_style("normal_font"),
+            do_h_scroll:true,
+            do_v_scroll:true,
             text:"".to_string(),
             font_size:cx.size("font_size") as f32,
             line_spacing:1.15,
@@ -76,6 +80,7 @@ impl Text{
             let clipped:vec2<Varying>;
             let rect:vec4<Varying>;
             let brightness:float<Uniform>;
+            let view_do_scroll: vec2<Uniform>;
 
             fn pixel()->vec4{
                 if marker>0.5{
@@ -95,7 +100,7 @@ impl Text{
             }
             
             fn vertex()->vec4{
-                let shift:vec2 = -view_scroll;
+                let shift:vec2 = -view_scroll * view_do_scroll;
 
                 let min_pos = vec2(
                     x + font_size * font_geom.x,
@@ -132,6 +137,7 @@ impl Text{
         if !cx.fonts[font_id].loaded{
             panic!("Font not loaded {}", font_id);
         }
+        
         let inst = cx.new_instance(&self.shader, 0); 
         let aligned = cx.align_instance(inst);
         
@@ -141,6 +147,11 @@ impl Text{
             //tex_size
             aligned.inst.push_uniform_vec2f(cx, cx.fonts[font_id].width as f32, cx.fonts[font_id].height as f32);
             aligned.inst.push_uniform_float(cx, self.brightness);
+            aligned.inst.push_uniform_vec2f(
+                cx,
+                if self.do_h_scroll {1.0}else {0.0},
+                if self.do_v_scroll {1.0}else {0.0}
+            );
 
             //list_clip
             //area.push_uniform_vec4f(cx, -50000.0,-50000.0,50000.0,50000.0);

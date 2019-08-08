@@ -26,6 +26,7 @@ pub struct FileTree {
 pub enum FileTreeEvent {
     None,
     DragMove {fe: FingerMoveEvent, paths: Vec<String>},
+    DragCancel,
     DragEnd {fe: FingerUpEvent, paths: Vec<String>},
     DragOut,
     SelectFile {path: String}
@@ -417,21 +418,30 @@ impl FileTree {
                 }
             }
         }
-        if let Some(drag_end) = drag_end {
+        if let Some(fe) = drag_end {
             self._drag_move = None;
             let paths = Self::get_marked_paths(&mut self.root_node);
-            return FileTreeEvent::DragEnd {
-                fe: drag_end.clone(),
-                paths: paths
-            };
-        }
-        if drag_nodes {
-            if let Some(mv) = &self._drag_move {
-                let paths = Self::get_marked_paths(&mut self.root_node);
-                return FileTreeEvent::DragMove {
-                    fe: mv.clone(),
+            if !self.view.get_view_area(cx).get_rect(cx, true).contains(fe.abs.x, fe.abs.y){
+                return FileTreeEvent::DragEnd {
+                    fe: fe.clone(),
                     paths: paths
                 };
+            }
+        }
+        if drag_nodes {
+            if let Some(fe) = &self._drag_move {
+                // lets check if we are over our own filetree
+                // ifso, we need to support moving files with directories
+                let paths = Self::get_marked_paths(&mut self.root_node);
+                if !self.view.get_view_area(cx).get_rect(cx, true).contains(fe.abs.x, fe.abs.y){
+                    return FileTreeEvent::DragMove {
+                        fe: fe.clone(),
+                        paths: paths
+                    };
+                }
+                else{
+                    return FileTreeEvent::DragCancel;
+                }
             }
         };
         if select_node {
@@ -450,6 +460,7 @@ impl FileTree {
     
     pub fn draw_file_tree(&mut self, cx: &mut Cx) {
         if let Err(()) = self.view.begin_view(cx, Layout::default()) {
+            println!("SKIPPING FILETREE");
             return
         }
         
