@@ -226,22 +226,14 @@ where TScrollBar: ScrollBarLike<TScrollBar> + Clone
         match ret_h {
             ScrollBarEvent::None => (),
             ScrollBarEvent::Scroll {scroll_pos, ..} => {
-                let fac = cx.get_delegated_dpi_factor(cx.views[self.view_id.unwrap()].pass_id);
-                let cxview = &mut cx.views[self.view_id.unwrap()];
-                let snapped_scroll_pos = scroll_pos - scroll_pos % (1.0 / fac);
-                cxview.set_scroll_x(snapped_scroll_pos);
-                cx.passes[cxview.pass_id].paint_dirty = true;
+                cx.set_view_scroll_x(self.view_id.unwrap(), scroll_pos);
             },
             _ => ()
         };
         match ret_v {
             ScrollBarEvent::None => (),
             ScrollBarEvent::Scroll {scroll_pos, ..} => {
-                let fac = cx.get_delegated_dpi_factor(cx.views[self.view_id.unwrap()].pass_id);
-                let cxview = &mut cx.views[self.view_id.unwrap()];
-                let snapped_scroll_pos = scroll_pos - scroll_pos % (1.0 / fac);
-                cxview.set_scroll_y(snapped_scroll_pos);
-                cx.passes[cxview.pass_id].paint_dirty = true;
+                cx.set_view_scroll_y(self.view_id.unwrap(), scroll_pos);
             },
             _ => ()
         };
@@ -251,7 +243,7 @@ where TScrollBar: ScrollBarLike<TScrollBar> + Clone
     pub fn get_scroll_pos(&self, cx: &Cx) -> Vec2 {
         if let Some(view_id) = self.view_id {
             let cxview = &cx.views[view_id];
-            cxview.get_scroll_pos()
+            cxview.unsnapped_scroll
         }
         else {
             Vec2::zero()
@@ -265,14 +257,14 @@ where TScrollBar: ScrollBarLike<TScrollBar> + Clone
         if let Some(scroll_h) = &mut self.scroll_h {
             if scroll_h.set_scroll_pos(cx, pos.x) {
                 let scroll_pos = scroll_h.get_scroll_pos();
-                cx.views[view_id].set_scroll_x(scroll_pos);
+                cx.set_view_scroll_x(view_id, scroll_pos);
                 changed = true;
             }
         }
         if let Some(scroll_v) = &mut self.scroll_v {
             if scroll_v.set_scroll_pos(cx, pos.y) {
                 let scroll_pos = scroll_v.get_scroll_pos();
-                cx.views[view_id].set_scroll_y(scroll_pos);
+                cx.set_view_scroll_y(view_id, scroll_pos);
                 changed = true;
             }
         }
@@ -333,17 +325,12 @@ where TScrollBar: ScrollBarLike<TScrollBar> + Clone
         
         if let Some(scroll_h) = &mut self.scroll_h {
             let scroll_pos = scroll_h.draw_scroll_bar(cx, Axis::Horizontal, view_area, rect_now, view_total);
-            // so, in a virtual viewport widget this isn't actually allowed
-            let fac = cx.get_delegated_dpi_factor(cx.views[view_id].pass_id);
-            let snapped_scroll_pos = scroll_pos - scroll_pos % (1.0 / fac);
-            cx.views[view_id].set_scroll_x(snapped_scroll_pos);
+            cx.set_view_scroll_x(view_id, scroll_pos);
         }
         if let Some(scroll_v) = &mut self.scroll_v {
             //println!("SET SCROLLBAR {} {}", rect_now.h, view_total.y);
             let scroll_pos = scroll_v.draw_scroll_bar(cx, Axis::Vertical, view_area, rect_now, view_total);
-            let fac = cx.get_delegated_dpi_factor(cx.views[view_id].pass_id);
-            let snapped_scroll_pos = scroll_pos - scroll_pos % (1.0 / fac);
-            cx.views[view_id].set_scroll_y(snapped_scroll_pos);
+            cx.set_view_scroll_y(view_id, scroll_pos);
         }
         
         let rect = cx.end_turtle(view_area);
@@ -479,6 +466,30 @@ impl Cx {
             instance.instance_count = aligned_instance.inst.instance_count;
         }
     }
+    
+    pub fn set_view_scroll_x(&mut self, view_id:usize, scroll_pos:f32){
+        let fac = self.get_delegated_dpi_factor(self.views[view_id].pass_id);
+        let cxview = &mut self.views[view_id];
+        cxview.unsnapped_scroll.x = scroll_pos;
+        let snapped = scroll_pos - scroll_pos % (1.0 / fac);
+        if cxview.uniforms[VW_UNI_SCROLL + 0] != snapped{
+            cxview.uniforms[VW_UNI_SCROLL + 0] = snapped;
+            self.passes[cxview.pass_id].paint_dirty = true;
+        }
+    }
+
+
+    pub fn set_view_scroll_y(&mut self, view_id:usize, scroll_pos: f32) {
+        let fac = self.get_delegated_dpi_factor(self.views[view_id].pass_id);
+        let cxview = &mut self.views[view_id];
+        cxview.unsnapped_scroll.y = scroll_pos;
+        let snapped = scroll_pos - scroll_pos % (1.0 / fac);
+        if cxview.uniforms[VW_UNI_SCROLL + 1] != snapped{
+            cxview.uniforms[VW_UNI_SCROLL + 1] = snapped;
+            self.passes[cxview.pass_id].paint_dirty = true;
+        }
+    }
+        
 }
 
 
@@ -533,6 +544,7 @@ pub struct CxView {
     pub draw_calls: Vec<DrawCall>,
     pub draw_calls_len: usize,
     pub uniforms: Vec<f32>, // cmdlist uniforms
+    pub unsnapped_scroll: Vec2,
     pub platform: CxPlatformView,
     pub rect: Rect,
     pub clipped: bool
@@ -562,17 +574,10 @@ impl CxView {
         }))
     }
     
-    pub fn set_scroll_x(&mut self, x: f32) {
-        self.uniforms[VW_UNI_SCROLL + 0] = x;
-    }
-    
-    pub fn set_scroll_y(&mut self, y: f32) {
-        self.uniforms[VW_UNI_SCROLL + 1] = y;
-    }
-    
-    pub fn get_scroll_pos(&self) -> Vec2 {
-        return Vec2 {x: self.uniforms[VW_UNI_SCROLL + 0], y: self.uniforms[VW_UNI_SCROLL + 1]}
-    }
+    //pub fn get_scroll_pos(&self) -> Vec2 {
+    //    return self.unsnapped_scroll
+        //return Vec2 {x: self.uniforms[VW_UNI_SCROLL + 0], y: self.uniforms[VW_UNI_SCROLL + 1]}
+    //}
     
     pub fn clip_and_scroll_rect(&self, x: f32, y: f32, w: f32, h: f32) -> Rect {
         let mut x1 = x - self.uniforms[VW_UNI_SCROLL + 0];
