@@ -9,11 +9,11 @@ use std::sync::Mutex;
 //use std::io::Write;
 //use std::os::unix::io::FromRawFd;
 use std::mem;
-use std::os::raw::{c_char, c_int, c_uint, c_ulong, c_long};
+use std::os::raw::{c_char, c_int, c_uint, c_ulong, c_long, c_void};
 use std::ptr;
 use time::precise_time_ns;
 use x11_dl::xlib;
-use x11_dl::xlib::{Display, XVisualInfo, Xlib};
+use x11_dl::xlib::{Display, XVisualInfo, Xlib, XIM, XIC};
 use x11_dl::keysym;
 use x11_dl::xcursor::Xcursor;
 
@@ -23,6 +23,7 @@ pub struct XlibApp {
     pub xlib: Xlib,
     pub xcursor: Xcursor,
     pub display: *mut Display,
+    pub xim: XIM,
     
     pub display_fd: c_int,
     pub signal_fd: c_int,
@@ -42,6 +43,7 @@ pub struct XlibApp {
 #[derive(Clone)]
 pub struct XlibWindow {
     pub window: Option<c_ulong>,
+    pub xic: Option<XIC>,
     pub attributes: Option<xlib::XSetWindowAttributes>,
     pub visual_info: Option<XVisualInfo>,
     pub child_windows: Vec<XlibChildWindow>,
@@ -89,9 +91,11 @@ impl XlibApp {
             let xcursor = Xcursor::open().unwrap();
             let display = (xlib.XOpenDisplay)(ptr::null());
             let display_fd = (xlib.XConnectionNumber)(display);
+            let xim = (xlib.XOpenIM)(display, ptr::null_mut(), ptr::null_mut(), ptr::null_mut());
             let signal_fd = 0i32; //libc::pipe();
             XlibApp {
                 xlib,
+                xim,
                 xcursor,
                 display,
                 display_fd,
@@ -343,7 +347,7 @@ impl XlibApp {
                                     })])
                                 }
                                 else {
-                                    // lets check if last_nc_mouse_pos is something we need to do
+                                    // do all the 'nonclient' area messaging to the window manager
                                     if let Some(last_nc_mode) = window.last_nc_mode {
                                         let default_screen = (self.xlib.XDefaultScreen)(self.display);
                                         let root_window = (self.xlib.XRootWindow)(self.display, default_screen);
@@ -381,12 +385,41 @@ impl XlibApp {
                             }
                         },
                         xlib::KeyPress => {
-                            self.do_callback(&mut vec![Event::KeyDown(KeyEvent {
-                                key_code: self.xkeyevent_to_keycode(&mut event.key),
-                                is_repeat: false,
-                                modifiers: self.xkeystate_to_modifiers(event.key.state),
-                                time: self.time_now()
-                            })]);
+                            if event.key.keycode != 0 {
+                                self.do_callback(&mut vec![Event::KeyDown(KeyEvent {
+                                    key_code: self.xkeyevent_to_keycode(&mut event.key),
+                                    is_repeat: false,
+                                    modifiers: self.xkeystate_to_modifiers(event.key.state),
+                                    time: self.time_now()
+                                })]);
+                            }
+                            if let Some(window_ptr) = self.window_map.get(&event.key.window) {
+                                let window = &mut (**window_ptr);
+                                let mut buffer: [u8; 128] = mem::uninitialized();
+                                let mut keysym = mem::uninitialized();
+                                let mut status = mem::uninitialized();
+                                let count = (self.xlib.Xutf8LookupString)(
+                                    window.xic.unwrap(),
+                                    &mut event.key,
+                                    buffer.as_mut_ptr() as *mut c_char,
+                                    buffer.len() as c_int,
+                                    &mut keysym,
+                                    &mut status,
+                                );
+                                if status != xlib::XBufferOverflow {
+                                    let utf8 = std::str::from_utf8(&buffer[..count as usize]).unwrap_or("").to_string();
+                                    let char_code = utf8.chars().next().unwrap_or('\0');
+                                    if char_code >= ' ' {
+                                        window.do_callback(&mut vec![
+                                            Event::TextInput(TextInputEvent {
+                                                input: utf8,
+                                                was_paste: false,
+                                                replace_last: false
+                                            })
+                                        ]);
+                                    }
+                                }
+                            }
                         },
                         xlib::KeyRelease => {
                             self.do_callback(&mut vec![Event::KeyUp(KeyEvent {
@@ -531,6 +564,7 @@ impl XlibApp {
     pub fn terminate_event_loop(&mut self) {
         // maybe need to do more here
         self.event_loop_running = false;
+        unsafe {(self.xlib.XCloseIM)(self.xim)};
         unsafe {(self.xlib.XCloseDisplay)(self.display)};
         self.display = ptr::null_mut();
     }
@@ -590,7 +624,7 @@ impl XlibApp {
             if let Some(x11_cursor) = x11_cursor {
                 unsafe {
                     for (k, v) in &self.window_map {
-                        if !(**v).window.is_none(){ 
+                        if !(**v).window.is_none() {
                             (self.xlib.XDefineCursor)(self.display, *k, x11_cursor);
                         }
                     }
@@ -766,6 +800,7 @@ impl XlibWindow {
         
         XlibWindow {
             window: None,
+            xic: None,
             attributes: None,
             visual_info: None,
             child_windows: Vec::new(),
@@ -850,12 +885,15 @@ impl XlibWindow {
             (xlib.XMapWindow)(display, window);
             (xlib.XFlush)(display);
             
+            let xic = (xlib.XCreateIC)((*self.xlib_app).xim, CString::new(xlib::XNInputStyle).unwrap().as_ptr(), xlib::XIMPreeditNothing | xlib::XIMStatusNothing, CString::new(xlib::XNClientWindow).unwrap().as_ptr(), window, CString::new(xlib::XNFocusWindow).unwrap().as_ptr(), window, ptr::null_mut() as *mut c_void);
+            
             // Create a window
             (*self.xlib_app).window_map.insert(window, self);
             
             self.attributes = Some(attributes);
             self.visual_info = Some(*visual_info);
             self.window = Some(window);
+            self.xic = Some(xic);
             self.last_window_geom = self.get_window_geom();
             
             (*self.xlib_app).event_recur_block = false;
@@ -997,7 +1035,7 @@ impl XlibWindow {
                     msg
                 }
             };
-            (xlib_app.xlib.XSendEvent)(xlib_app.display, root_window, 0, xlib::SubstructureNotifyMask|xlib::SubstructureRedirectMask, &mut xclient as *mut _ as *mut xlib::XEvent);
+            (xlib_app.xlib.XSendEvent)(xlib_app.display, root_window, 0, xlib::SubstructureNotifyMask | xlib::SubstructureRedirectMask, &mut xclient as *mut _ as *mut xlib::XEvent);
         }
     }
     
@@ -1050,9 +1088,6 @@ impl XlibWindow {
         let mut maximized = false;
         unsafe {
             let xlib_app = &(*self.xlib_app);
-            let default_screen = (xlib_app.xlib.XDefaultScreen)(xlib_app.display);
-            let xlib = &(*self.xlib_app).xlib;
-            let display = (*self.xlib_app).display;
             let mut prop_type = mem::uninitialized();
             let mut format = mem::uninitialized();
             let mut n_item = mem::uninitialized();
