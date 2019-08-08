@@ -9,7 +9,7 @@ use std::sync::Mutex;
 //use std::io::Write;
 //use std::os::unix::io::FromRawFd;
 use std::mem;
-use std::os::raw::{c_char, c_int, c_uint, c_ulong, c_long, c_void};
+use std::os::raw::{c_char, c_uchar, c_int, c_uint, c_ulong, c_long, c_void};
 use std::ptr;
 use time::precise_time_ns;
 use x11_dl::xlib;
@@ -24,7 +24,7 @@ pub struct XlibApp {
     pub xcursor: Xcursor,
     pub display: *mut Display,
     pub xim: XIM,
-    
+    pub clipboard: String,
     pub display_fd: c_int,
     pub signal_fd: c_int,
     pub window_map: HashMap<c_ulong, *mut XlibWindow>,
@@ -38,6 +38,20 @@ pub struct XlibApp {
     pub signals: Mutex<Vec<Event>>,
     pub loop_block: bool,
     pub current_cursor: MouseCursor,
+    
+    pub atom_clipboard: xlib::Atom,
+    pub atom_net_wm_moveresize: xlib::Atom,
+    pub atom_wm_delete_window: xlib::Atom,
+    pub atom_motif_wm_hints: xlib::Atom,
+    pub atom_net_wm_state: xlib::Atom,
+    pub atom_new_wm_state_maximized_horz: xlib::Atom,
+    pub atom_new_wm_state_maximized_vert: xlib::Atom,
+    pub atom_targets: xlib::Atom,
+    pub atom_utf8_string: xlib::Atom,
+    pub atom_text: xlib::Atom,
+    pub atom_multiple: xlib::Atom,
+    pub atom_text_plain: xlib::Atom,
+    pub atom_atom: xlib::Atom,
 }
 
 #[derive(Clone)]
@@ -94,12 +108,26 @@ impl XlibApp {
             let xim = (xlib.XOpenIM)(display, ptr::null_mut(), ptr::null_mut(), ptr::null_mut());
             let signal_fd = 0i32; //libc::pipe();
             XlibApp {
+                atom_clipboard: (xlib.XInternAtom)(display, CString::new("CLIPBOARD").unwrap().as_ptr(), 0),
+                atom_net_wm_moveresize: (xlib.XInternAtom)(display, CString::new("_NET_WM_MOVERESIZE").unwrap().as_ptr(), 0),
+                atom_wm_delete_window: (xlib.XInternAtom)(display, CString::new("WM_DELETE_WINDOW").unwrap().as_ptr(), 0),
+                atom_motif_wm_hints: (xlib.XInternAtom)(display, CString::new("_MOTIF_WM_HINTS").unwrap().as_ptr(), 0),
+                atom_net_wm_state: (xlib.XInternAtom)(display, CString::new("_NET_WM_STATE").unwrap().as_ptr(), 0),
+                atom_new_wm_state_maximized_horz: (xlib.XInternAtom)(display, CString::new("_NET_WM_STATE_MAXIMIZED_HORZ").unwrap().as_ptr(), 0),
+                atom_new_wm_state_maximized_vert: (xlib.XInternAtom)(display, CString::new("_NET_WM_STATE_MAXIMIZED_VERT").unwrap().as_ptr(), 0),
+                atom_targets: (xlib.XInternAtom)(display, CString::new("TARGETS").unwrap().as_ptr(), 0),
+                atom_utf8_string: (xlib.XInternAtom)(display, CString::new("UTF8_STRING").unwrap().as_ptr(), 1),
+                atom_atom: (xlib.XInternAtom)(display, CString::new("ATOM").unwrap().as_ptr(), 0),
+                atom_text: (xlib.XInternAtom)(display, CString::new("TEXT").unwrap().as_ptr(), 0),
+                atom_text_plain: (xlib.XInternAtom)(display, CString::new("text/plain").unwrap().as_ptr(), 0),
+                atom_multiple: (xlib.XInternAtom)(display, CString::new("MULTIPLE").unwrap().as_ptr(), 0),
                 xlib,
                 xim,
                 xcursor,
                 display,
                 display_fd,
                 signal_fd,
+                clipboard: String::new(),
                 last_scroll_time: 0.0,
                 window_map: HashMap::new(),
                 signals: Mutex::new(Vec::new()),
@@ -110,7 +138,7 @@ impl XlibApp {
                 loop_block: false,
                 timers: VecDeque::new(),
                 free_timers: Vec::new(),
-                current_cursor: MouseCursor::Default
+                current_cursor: MouseCursor::Default,
             }
         }
     }
@@ -202,6 +230,101 @@ impl XlibApp {
                     let mut event = mem::uninitialized();
                     (self.xlib.XNextEvent)(self.display, &mut event);
                     match event.type_ {
+                        xlib::SelectionNotify => {
+                            let selection = event.selection; 
+                            // first get the size of the thing
+                            let mut actual_type = mem::uninitialized();
+                            let mut actual_format = mem::uninitialized();
+                            let mut n_items = mem::uninitialized();
+                            let mut bytes_to_read = mem::uninitialized();
+                            let mut ret = mem::uninitialized(); 
+                            (self.xlib.XGetWindowProperty)(
+                                self.display,
+                                selection.requestor, 
+                                selection.property, 
+                                0,
+                                0,
+                                0,
+                                xlib::AnyPropertyType as c_ulong,  
+                                &mut actual_type,
+                                &mut actual_format,
+                                &mut n_items,
+                                &mut bytes_to_read,
+                                &mut ret
+                            );
+                            //read all of it
+                            let mut bytes_after = mem::uninitialized();
+                            (self.xlib.XGetWindowProperty)(
+                                self.display,
+                                selection.requestor, 
+                                selection.property, 
+                                0,
+                                bytes_to_read as c_long,
+                                0,
+                                xlib::AnyPropertyType as c_ulong,  
+                                &mut actual_type,
+                                &mut actual_format,
+                                &mut n_items,
+                                &mut bytes_after,
+                                &mut ret
+                            );
+                            if ret != ptr::null_mut() && bytes_to_read > 0{
+                                let utf8_slice = std::slice::from_raw_parts::<u8>(ret as *const _ as *const u8, bytes_to_read as usize);
+                                if let Ok(utf8_string) = String::from_utf8(utf8_slice.to_vec()){
+                                   self.do_callback(&mut vec![
+                                        Event::TextInput(TextInputEvent {
+                                            input: utf8_string,
+                                            was_paste: true,
+                                            replace_last: false
+                                        })
+                                    ]);
+                                }
+                                (self.xlib.XFree)(ret as *mut _ as *mut c_void);
+                            }
+                        },
+                        xlib::SelectionRequest => {
+                            let request = event.selection_request;
+                            let mut response = xlib::XSelectionEvent {
+                                type_: xlib::SelectionNotify,
+                                serial: 0,
+                                send_event: 0,
+                                display: self.display,
+                                requestor: request.requestor,
+                                selection: request.selection,
+                                target: request.target,
+                                time: request.time,
+                                property: request.property,
+                            };
+                            if request.target == self.atom_targets {
+                                let mut targets = [self.atom_utf8_string];
+                                (self.xlib.XChangeProperty)(
+                                    self.display,
+                                    request.requestor,
+                                    request.property,
+                                    4,
+                                    32,
+                                    xlib::PropModeReplace,
+                                    targets.as_mut() as *mut _ as *mut c_uchar,
+                                    targets.len() as i32
+                                );
+                            }
+                            else if request.target == self.atom_utf8_string {
+                                (self.xlib.XChangeProperty)(
+                                    self.display,
+                                    request.requestor,
+                                    request.property,
+                                    self.atom_utf8_string,
+                                    8,
+                                    xlib::PropModeReplace,
+                                    self.clipboard.as_ptr() as *const _ as *const c_uchar,
+                                    self.clipboard.len() as i32
+                                );
+                            }
+                            else {
+                                response.property = 0;
+                            }
+                            (self.xlib.XSendEvent)(self.display, request.requestor, 1, 0, &mut response as *mut _ as *mut xlib::XEvent);
+                        },
                         xlib::DestroyNotify => { // our window got destroyed
                             
                             let destroy_window = event.destroy_window;
@@ -359,7 +482,7 @@ impl XlibApp {
                                             send_event: 0,
                                             display: self.display,
                                             window: window.window.unwrap(),
-                                            message_type: (self.xlib.XInternAtom)(self.display, CString::new("_NET_WM_MOVERESIZE").unwrap().as_ptr(), 0),
+                                            message_type: self.atom_net_wm_moveresize,
                                             format: 32,
                                             data: {
                                                 let mut msg = xlib::ClientMessageData::new();
@@ -385,17 +508,72 @@ impl XlibApp {
                             }
                         },
                         xlib::KeyPress => {
-                            if event.key.keycode != 0 {
-                                self.do_callback(&mut vec![Event::KeyDown(KeyEvent {
-                                    key_code: self.xkeyevent_to_keycode(&mut event.key),
-                                    is_repeat: false,
-                                    modifiers: self.xkeystate_to_modifiers(event.key.state),
-                                    time: self.time_now()
-                                })]);
-                            }
                             if let Some(window_ptr) = self.window_map.get(&event.key.window) {
                                 let window = &mut (**window_ptr);
-                                let mut buffer: [u8; 128] = mem::uninitialized();
+                                if event.key.keycode != 0 {
+                                    let key_code = self.xkeyevent_to_keycode(&mut event.key);
+                                    let modifiers = self.xkeystate_to_modifiers(event.key.state);
+                                    
+                                    if modifiers.control || modifiers.logo {
+                                        match key_code {
+                                            KeyCode::KeyV => { // paste
+                                                // request the pasteable text from the other side
+                                                (self.xlib.XConvertSelection)(
+                                                    self.display,
+                                                    self.atom_clipboard,
+                                                    self.atom_utf8_string,
+                                                    self.atom_clipboard,
+                                                    window.window.unwrap(),
+                                                    event.key.time
+                                                );
+                                                /*
+                                                self.do_callback(&mut vec![
+                                                    Event::TextInput(TextInputEvent {
+                                                        input: String::new(),
+                                                        was_paste: true,
+                                                        replace_last: false
+                                                    })
+                                                ]);
+                                                */
+                                            }
+                                            KeyCode::KeyX | KeyCode::KeyC => {
+                                                let mut events = vec![
+                                                    Event::TextCopy(TextCopyEvent {
+                                                        response: None
+                                                    })
+                                                ];
+                                                self.do_callback(&mut events);
+                                                match &events[0] {
+                                                    Event::TextCopy(req) => if let Some(response) = &req.response {
+                                                        // store the text on the clipboard
+                                                        self.clipboard = response.clone();
+                                                        // lets set the owner
+                                                        println!("Set selection owner");
+                                                        (self.xlib.XSetSelectionOwner)(
+                                                            self.display,
+                                                            self.atom_clipboard,
+                                                            window.window.unwrap(),
+                                                            event.key.time
+                                                        );
+                                                        (self.xlib.XFlush)(self.display);
+                                                    },
+                                                    _ => ()
+                                                };
+                                            }
+                                            _ => ()
+                                        }
+                                    }
+                                    
+                                    self.do_callback(&mut vec![Event::KeyDown(KeyEvent {
+                                        key_code: key_code,
+                                        is_repeat: false,
+                                        modifiers: modifiers,
+                                        time: self.time_now()
+                                    })]);
+                                }
+                                
+                                // decode the character
+                                let mut buffer: [u8; 32] = mem::uninitialized();
                                 let mut keysym = mem::uninitialized();
                                 let mut status = mem::uninitialized();
                                 let count = (self.xlib.Xutf8LookupString)(
@@ -409,8 +587,9 @@ impl XlibApp {
                                 if status != xlib::XBufferOverflow {
                                     let utf8 = std::str::from_utf8(&buffer[..count as usize]).unwrap_or("").to_string();
                                     let char_code = utf8.chars().next().unwrap_or('\0');
-                                    if char_code >= ' ' {
-                                        window.do_callback(&mut vec![
+                                    println!("GOT {} {} {}", utf8, utf8.len(), char_code as u64);
+                                    if char_code >= ' ' && char_code != 127 as char{
+                                        self.do_callback(&mut vec![
                                             Event::TextInput(TextInputEvent {
                                                 input: utf8,
                                                 was_paste: false,
@@ -865,14 +1044,8 @@ impl XlibWindow {
             );
             
             // Tell the window manager that we want to be notified when the window is closed
-            let mut wm_delete_message = (xlib.XInternAtom)(
-                display,
-                CString::new("WM_DELETE_WINDOW").unwrap().as_ptr(),
-                xlib::False,
-            );
-            (xlib.XSetWMProtocols)(display, window, &mut wm_delete_message, 1);
+            (xlib.XSetWMProtocols)(display, window, &mut (*self.xlib_app).atom_wm_delete_window, 1);
             
-            let hints_prop = (xlib.XInternAtom)(display, CString::new("_MOTIF_WM_HINTS").unwrap().as_ptr(), 0);
             let hints = MwmHints {
                 flags: MWM_HINTS_DECORATIONS,
                 functions: 0,
@@ -880,7 +1053,11 @@ impl XlibWindow {
                 input_mode: 0,
                 status: 0,
             };
-            (xlib.XChangeProperty)(display, window, hints_prop, hints_prop, 32, xlib::PropModeReplace, &hints as *const _ as *const u8, 5);
+            
+            let atom_motif_wm_hints = (*self.xlib_app).atom_motif_wm_hints;
+            
+            (xlib.XChangeProperty)(display, window, atom_motif_wm_hints, atom_motif_wm_hints, 32, xlib::PropModeReplace, &hints as *const _ as *const u8, 5);
+            
             // Map the window to the screen
             (xlib.XMapWindow)(display, window);
             (xlib.XFlush)(display);
@@ -1025,13 +1202,13 @@ impl XlibWindow {
                 send_event: 0,
                 display: xlib_app.display,
                 window: self.window.unwrap(),
-                message_type: (xlib_app.xlib.XInternAtom)(xlib_app.display, CString::new("_NET_WM_STATE").unwrap().as_ptr(), 0),
+                message_type: xlib_app.atom_net_wm_state,
                 format: 32,
                 data: {
                     let mut msg = xlib::ClientMessageData::new();
                     msg.set_long(0, add_remove);
-                    msg.set_long(1, (xlib_app.xlib.XInternAtom)(xlib_app.display, CString::new("_NET_WM_STATE_MAXIMIZED_HORZ").unwrap().as_ptr(), 0) as c_long);
-                    msg.set_long(2, (xlib_app.xlib.XInternAtom)(xlib_app.display, CString::new("_NET_WM_STATE_MAXIMIZED_VERT").unwrap().as_ptr(), 0) as c_long);
+                    msg.set_long(1, xlib_app.atom_new_wm_state_maximized_horz as c_long);
+                    msg.set_long(2, xlib_app.atom_new_wm_state_maximized_vert as c_long);
                     msg
                 }
             };
@@ -1093,12 +1270,10 @@ impl XlibWindow {
             let mut n_item = mem::uninitialized();
             let mut bytes_after = mem::uninitialized();
             let mut properties = mem::uninitialized();
-            let horiz_atom = (xlib_app.xlib.XInternAtom)(xlib_app.display, CString::new("_NET_WM_STATE_MAXIMIZED_HORZ").unwrap().as_ptr(), 0) as c_long;
-            let vert_atom = (xlib_app.xlib.XInternAtom)(xlib_app.display, CString::new("_NET_WM_STATE_MAXIMIZED_VERT").unwrap().as_ptr(), 0) as c_long;
             let result = (xlib_app.xlib.XGetWindowProperty)(
                 xlib_app.display,
                 self.window.unwrap(),
-                (xlib_app.xlib.XInternAtom)(xlib_app.display, CString::new("_NET_WM_STATE").unwrap().as_ptr(), 0) as c_ulong,
+                xlib_app.atom_net_wm_state,
                 0,
                 !0,
                 0,
@@ -1110,9 +1285,9 @@ impl XlibWindow {
                 &mut properties
             );
             if result == 0 && properties != ptr::null_mut() {
-                let items = std::slice::from_raw_parts::<c_long>(properties as *mut _, n_item as usize);
+                let items = std::slice::from_raw_parts::<c_ulong>(properties as *mut _, n_item as usize);
                 for item in items {
-                    if *item == horiz_atom || *item == vert_atom {
+                    if *item == xlib_app.atom_new_wm_state_maximized_horz || *item == xlib_app.atom_new_wm_state_maximized_vert {
                         maximized = true;
                         break;
                     }
