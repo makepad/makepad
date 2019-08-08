@@ -587,7 +587,6 @@ impl XlibApp {
                                 if status != xlib::XBufferOverflow {
                                     let utf8 = std::str::from_utf8(&buffer[..count as usize]).unwrap_or("").to_string();
                                     let char_code = utf8.chars().next().unwrap_or('\0');
-                                    println!("GOT {} {} {}", utf8, utf8.len(), char_code as u64);
                                     if char_code >= ' ' && char_code != 127 as char{
                                         self.do_callback(&mut vec![
                                             Event::TextInput(TextInputEvent {
