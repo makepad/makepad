@@ -244,7 +244,7 @@ impl TextBuffer {
     pub fn get_nearest_line_range(&self, offset: usize) -> (usize, usize) {
         let pos = self.offset_to_text_pos(offset);
         let line = &self.lines[pos.row];
-        return (offset - pos.col, line.len() + if pos.row < line.len() - 1 {1}else {0})
+        return (offset - pos.col, line.len() + if pos.row < (line.len().max(1) - 1) {1}else {0})
     }
     
     pub fn calc_next_line_indent_depth(&self, offset: usize, tabsize: usize) -> (usize, usize) {
