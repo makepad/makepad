@@ -228,15 +228,13 @@ where TItem: Clone
                                 TabControlEvent::TabClose {tab_id} => {
                                     *self._close_tab = Some(DockTabIdent {
                                         tab_control_id: stack_top.uid,
-                                        
                                         tab_id: tab_id
                                     });
                                     // if tab_id < current, subtract current if >0
                                     if tab_id < *current && *current > 0 {
                                         *current -= 1;
-                                        
                                     }
-                                    self.drop_quad_view.redraw_view_area(cx);
+                                    cx.redraw_child_area(Area::All);
                                 },
                                 _ => ()
                             }
@@ -600,6 +598,11 @@ where TItem: Clone
         self._drag_move = Some(fe);
         self.drop_quad_view.redraw_view_area(cx);
     }
+
+    pub fn dock_drag_cancel(&mut self, cx: &mut Cx) {
+        self._drag_move = None;
+        self.drop_quad_view.redraw_view_area(cx);
+    }
     
     pub fn dock_drag_end(&mut self, _cx: &mut Cx, fe: FingerUpEvent, new_items: Vec<DockTab<TItem>>) {
         self._drag_move = None;
@@ -612,6 +615,8 @@ where TItem: Clone
     pub fn handle_dock(&mut self, cx: &mut Cx, _event: &mut Event, dock_items: &mut DockItem<TItem>) -> DockEvent {
         if let Some(close_tab) = &self._close_tab {
             Self::recur_remove_tab(dock_items, close_tab.tab_control_id, close_tab.tab_id, &mut 0);
+            Self::recur_collapse_empty(dock_items);
+            cx.redraw_child_area(Area::All);
             self._close_tab = None;
             return DockEvent::DockChanged
         }

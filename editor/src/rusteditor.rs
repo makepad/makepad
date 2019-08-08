@@ -534,11 +534,11 @@ impl RustTokenizer {
                 }
             },
             'c' => {
-                if state.keyword(chunk, "o") {
-                    if state.keyword(chunk, "nst") {
+                if state.keyword(chunk, "on") {
+                    if state.keyword(chunk, "st") {
                         return TokenType::Keyword
                     }
-                    if state.keyword(chunk, "ntinue") {
+                    if state.keyword(chunk, "tinue") {
                         return TokenType::Flow
                     }
                 }
@@ -594,6 +594,9 @@ impl RustTokenizer {
                 }
                 if state.keyword(chunk, "mpl") {
                     return TokenType::TypeDef
+                }
+                if state.keyword(chunk, "size") {
+                    return TokenType::BuiltinType
                 }
                 if state.keyword(chunk, "n") {
                     return TokenType::Keyword

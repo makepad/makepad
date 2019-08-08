@@ -82,12 +82,12 @@ impl Area{
                     Vec2::zero()
                 }
                 else{
-                    cxview.get_scroll_pos()
+                    cxview.unsnapped_scroll
                 }
             },
             Area::View(view_area)=>{
                 let cxview = &cx.views[view_area.view_id];
-                cxview.get_scroll_pos()
+                cxview.unsnapped_scroll
             },
             _=>Vec2::zero(),
         }
@@ -161,7 +161,7 @@ impl Area{
                             }
                         }
                         else{
-                            let scroll = cxview.get_scroll_pos();
+                            let scroll = cxview.unsnapped_scroll;
                             return Vec2{
                                 x:abs.x - x + scroll.x,
                                 y:abs.y - y + scroll.y

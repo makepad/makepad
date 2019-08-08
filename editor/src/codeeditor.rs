@@ -8,7 +8,7 @@ use crate::codeicon::*;
 pub struct CodeEditor {
     pub view: View<ScrollBar>,
     pub bg_layout: Layout,
-    //pub bg: Quad,
+    pub gutter_bg: Quad,
     pub cursor: Quad,
     pub selection: Quad,
     pub token_highlight: Quad,
@@ -19,6 +19,7 @@ pub struct CodeEditor {
     pub code_icon: CodeIcon,
     pub message_marker: Quad,
     pub text: Text,
+    pub line_number_text: Text,
     pub cursors: TextCursorSet,
     
     pub open_font_size: f32,
@@ -86,7 +87,7 @@ pub struct CodeEditor {
 #[derive(Clone)]
 pub struct CodeEditorColors {
     // UI
-    //pub bg: Color,
+    pub gutter_bg: Color,
     pub indent_line_unknown: Color,
     pub indent_line_fn: Color,
     pub indent_line_typedef: Color,
@@ -128,7 +129,7 @@ impl Style for CodeEditor {
         Self {
             cursors: TextCursorSet::new(),
             colors: CodeEditorColors {
-                //bg: color256(30, 30, 30),
+                gutter_bg: color256(30, 30, 30),
                 indent_line_unknown: color("#5"),
                 indent_line_fn: color256(220, 220, 174),
                 indent_line_typedef: color256(91, 155, 211),
@@ -183,10 +184,11 @@ impl Style for CodeEditor {
                 }),
                 ..Style::style(cx)
             },
-            //bg: Quad {
-            //    do_scroll: false,
-            //    ..Style::style(cx)
-            //},
+            gutter_bg: Quad {
+                do_h_scroll: false,
+                do_v_scroll: false,
+                ..Style::style(cx)
+            },
             selection: Quad {
                 shader: cx.add_shader(Self::def_selection_shader(), "Editor.selection"),
                 ..Style::style(cx)
@@ -231,6 +233,16 @@ impl Style for CodeEditor {
                 brightness: 1.0,
                 line_spacing: 1.4,
                 do_dpi_dilate: true,
+                wrapping: Wrapping::Line,
+                ..Style::style(cx)
+            },
+            line_number_text: Text {
+                font: cx.load_font_style("mono_font"),
+                font_size: 12.0,
+                brightness: 1.0,
+                line_spacing: 1.4,
+                do_dpi_dilate: true,
+                do_h_scroll: false,
                 wrapping: Wrapping::Line,
                 ..Style::style(cx)
             },
@@ -895,7 +907,7 @@ impl CodeEditor {
         
         // copy over colors
         self._last_indent_color = self.colors.indent_line_unknown;
-        //self.bg.color = self.colors.bg;
+        self.gutter_bg.color = self.colors.gutter_bg;
         self.selection.color = if self.has_key_focus(cx) {self.colors.selection}else {self.colors.selection_defocus};
         //self.select_highlight.color = self.colors.highlight;
         self.token_highlight.color = self.colors.highlight;
@@ -928,13 +940,16 @@ impl CodeEditor {
             cx.new_instance_draw_call(&self.selection.shader, 0);
             cx.new_instance_draw_call(&self.message_marker.shader, 0);
             cx.new_instance_draw_call(&self.paren_pair.shader, 0);
-            self._line_number_inst = Some(self.text.begin_text(cx));
-            cx.new_instance_draw_call(&self.text.shader, 0);
+            
             // force next begin_text in another drawcall
             self._text_inst = Some(self.text.begin_text(cx));
             self._indent_line_inst = Some(cx.new_instance_draw_call(&self.indent_lines.shader, 0));
             
             self._cursor_area = cx.new_instance_draw_call(&self.cursor.shader, 0).into_area();
+            
+            self.gutter_bg.draw_quad(cx, Rect {x: 0., y: 0., w: self.line_number_width, h: cx.get_height_total()});
+            cx.new_instance_draw_call(&self.text.shader, 0);
+            self._line_number_inst = Some(self.line_number_text.begin_text(cx));
             
             if let Some(select_scroll) = &mut self._select_scroll {
                 let scroll_pos = self.view.get_scroll_pos(cx);
@@ -1049,7 +1064,8 @@ impl CodeEditor {
         };
         
         // draw a linenumber if we are visible
-        if self._line_was_visible {
+        let origin = cx.get_turtle_origin();
+        if cx.turtle_line_is_visible(self._monospace_size.y, self._scroll_pos) {
             // lets format a number, we go to 4 numbers
             // yes this is dumb as rocks. but we need to be cheapnfast
             let chunk = &mut self._line_number_chunk;
@@ -1074,18 +1090,18 @@ impl CodeEditor {
                 scale /= 10;
             }
             if line_num == self._last_cursor_pos.row + 1 {
-                self.text.color = self.colors.line_number_highlight;
+                self.line_number_text.color = self.colors.line_number_highlight;
             }
             else {
-                self.text.color = self.colors.line_number_normal;
+                self.line_number_text.color = self.colors.line_number_normal;
             }
-            let origin = cx.get_turtle_origin();
             let chunk_width = self._monospace_size.x * 5.0;
-            self.text.add_text(cx, origin.x + (self.line_number_width - chunk_width - 10.), origin.y + line_geom.walk.y, 0, self._line_number_inst.as_mut().unwrap(), chunk, | _, _, _, _ | {0.});
+            self.line_number_text.add_text(cx, origin.x + (self.line_number_width - chunk_width - 10.), origin.y + line_geom.walk.y, 0, self._line_number_inst.as_mut().unwrap(), chunk, | _, _, _, _ | {0.});
         }
-        
-        // newline with minheight
+
         cx.turtle_new_line_min_height(self._monospace_size.y);
+
+        // newline with minheight
         // skip the linenumber
         cx.move_turtle(self.line_number_width, 0.);
         
@@ -1463,7 +1479,7 @@ impl CodeEditor {
         
         self.text.end_text(cx, self._text_inst.as_ref().unwrap());
         self._text_area = self._text_inst.take().unwrap().inst.into_area();
-        self.text.end_text(cx, self._line_number_inst.as_ref().unwrap());
+        self.line_number_text.end_text(cx, self._line_number_inst.as_ref().unwrap());
         
         // unmatched highlighting
         self.draw_paren_unmatched(cx);
@@ -1665,6 +1681,7 @@ impl CodeEditor {
     // set it once per line otherwise the LineGeom stuff isn't really working out.
     fn set_font_size(&mut self, _cx: &Cx, font_size: f32) {
         self.text.font_size = font_size;
+        self.line_number_text.font_size = font_size;
         if font_size > self._line_largest_font {
             self._line_largest_font = font_size;
         }

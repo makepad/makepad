@@ -3,7 +3,8 @@ use crate::cx::*;
 #[derive(Clone)]
 pub struct Quad {
     pub shader: Shader,
-    pub do_scroll: bool,
+    pub do_h_scroll: bool,
+    pub do_v_scroll: bool,
     pub color: Color
 }
 
@@ -11,7 +12,8 @@ impl Style for Quad {
     fn style(cx: &mut Cx) -> Self {
         Self {
             shader: cx.add_shader(Self::def_quad_shader(), "Quad"),
-            do_scroll: true,
+            do_h_scroll:true,
+            do_v_scroll:true,
             color: color("green")
         }
     }
@@ -33,7 +35,7 @@ impl Quad {
             let h: float<Instance>;
             let color: vec4<Instance>;
             let pos: vec2<Varying>;
-            let view_do_scroll: float<Uniform>;
+            let view_do_scroll: vec2<Uniform>;
             //let dpi_dilate: float<Uniform>;
             
             fn vertex() -> vec4 {
@@ -88,7 +90,11 @@ impl Quad {
     pub fn draw_quad_abs(&mut self, cx: &mut Cx, rect: Rect) -> InstanceArea {
         let inst = cx.new_instance(&self.shader, 1);
         if inst.need_uniforms_now(cx) {
-            inst.push_uniform_float(cx, if self.do_scroll {1.0}else {0.0});
+            inst.push_uniform_vec2f(
+                cx,
+                if self.do_h_scroll {1.0}else {0.0},
+                if self.do_v_scroll {1.0}else {0.0}
+            );
         }
         //println!("{:?} {}", area, cx.current_draw_list_id);
         let data = [
