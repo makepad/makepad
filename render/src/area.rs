@@ -173,9 +173,18 @@ impl Area{
             },
             Area::View(view_area)=>{
                 let cxview = &cx.views[view_area.view_id];
-                Vec2{
-                    x:abs.x - cxview.rect.x,
-                    y:abs.y - cxview.rect.y
+                if no_scrolling{
+                    return Vec2{
+                        x:abs.x - cxview.rect.x,
+                        y:abs.y - cxview.rect.y
+                    }
+                }
+                else{
+                    let scroll = cxview.unsnapped_scroll;
+                    return Vec2{
+                        x:abs.x - cxview.rect.x + scroll.x,
+                        y:abs.y - cxview.rect.y + scroll.y
+                    }
                 }
             },
             _=>abs,
