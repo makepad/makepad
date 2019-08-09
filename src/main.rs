@@ -2,8 +2,7 @@
 use render::*;
 use widget::*; 
 use editor::*;
-mod rustcompiler;
-pub use crate::rustcompiler::*;
+use compiler::*;
 use std::collections::HashMap;
 //use std::borrow::Cow;
 use serde::*;
@@ -14,7 +13,8 @@ enum Panel {
     Keyboard,
     FileTree,
     FileEditorTarget,
-    FileEditor {path: String, editor_id: u64}
+    FileEditor {path: String, editor_id: u64},
+    LocalTerminal {start_path: String, terminal_id:u64}
 }
 
 #[derive(Clone)] 
@@ -23,6 +23,7 @@ struct AppWindow {
     file_tree: FileTree,
     keyboard: Keyboard,
     file_editors: Elements<u64, FileEditor, FileEditorTemplates>,
+    local_terminals: Elements<u64, LocalTerminal, LocalTerminal>,
     dock: Dock<Panel>,
 }
 
@@ -72,6 +73,7 @@ impl Style for AppWindow {
                 rust_editor: RustEditor::style(cx),
                 js_editor: JSEditor::style(cx)
             }),
+            local_terminals:Elements::new(LocalTerminal::style(cx)),
             keyboard: Keyboard::style(cx),
             file_tree: FileTree::style(cx),
             dock: Dock ::style(cx),
@@ -122,6 +124,11 @@ impl Style for App {
                         last: Box::new(DockItem::TabControl {
                             current: 0,
                             tabs: vec![
+                                DockTab {
+                                    closeable: false,
+                                    title: "Local Terminal".to_string(),
+                                    item: Panel::LocalTerminal{start_path:"./".to_string(), terminal_id:1}
+                                },
                                 DockTab {
                                     closeable: false,
                                     title: "Rust Compiler".to_string(),
@@ -203,6 +210,11 @@ impl AppWindow {
                 Panel::FileEditorTarget => {
                     
                 },
+                Panel::LocalTerminal{terminal_id,..}=>{
+                    if let Some(local_terminal) = &mut self.local_terminals.get(*terminal_id) {
+                        local_terminal.handle_local_terminal(cx, event);
+                    }
+                },
                 Panel::FileTree => {
                     file_tree_event = self.file_tree.handle_file_tree(cx, event);
                 },
@@ -277,6 +289,12 @@ impl AppWindow {
                 Panel::FileEditorTarget => {},
                 Panel::FileTree => {
                     self.file_tree.draw_file_tree(cx);
+                },
+                Panel::LocalTerminal {start_path, terminal_id}=>{
+                    let local_terminal = self.local_terminals.get_draw(cx, *terminal_id, | _cx, tmpl | {
+                        tmpl.clone()
+                    });
+                    local_terminal.draw_local_terminal(cx);
                 },
                 Panel::FileEditor {path, editor_id} => {
                     let text_buffer = app_global.text_buffers.from_path(cx, path);

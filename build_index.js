@@ -2,12 +2,16 @@ var fs = require('fs');
 
 function readRecur(path, name){
     var files = fs.readdirSync(path);
+    console.log("reading "+path);
     var ret = {name:name,open:true,folders:[], files:[]};
     if(name == "shader_ast" || name == "webgl") ret.open = false;
     for(file of files){
         let new_file = path + '/' + file
         if (fs.statSync(new_file).isDirectory()) {
-            if( file == 'target') continue;
+            if( file == "bin" || file == 'target' || file== "edit_repo" || file == ".git"){
+                continue
+            }
+
             let sub = readRecur(new_file, file);
             if(sub.folders.length > 0 || sub.files.length > 0){ // prune empty dirs
                 ret.folders.push(sub)
@@ -22,8 +26,6 @@ function readRecur(path, name){
 }
 let tree = readRecur(".","");
 tree.open = true;
-tree.folders.splice(0,1);
-tree.folders[0].open = true;
 //tree.folders[0].folders[0].open = true;
 //tree.folders[2].open = true;
 //tree.folders[3].open = true;

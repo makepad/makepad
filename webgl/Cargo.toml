@@ -27,3 +27,6 @@ path="../render"
 
 [dependencies.editor]
 path="../editor"
+
+[dependencies.compiler]
+path="../compiler"

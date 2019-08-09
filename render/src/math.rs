@@ -18,10 +18,10 @@ impl Rect{
     }
     pub fn intersects(&self, r:Rect)->bool{
         !(
-            r.x >= self.x + self.w || 
-            r.x + r.w <= self.x || 
-            r.y >= self.y + self.h ||
-            r.y + r.h <= self.y
+            r.x > self.x + self.w || 
+            r.x + r.w < self.x || 
+            r.y > self.y + self.h ||
+            r.y + r.h < self.y
         )
     }
 }

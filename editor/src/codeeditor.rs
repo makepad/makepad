@@ -65,7 +65,7 @@ pub struct CodeEditor {
     
     pub _tokens_on_line: usize,
     pub _line_was_folded: bool,
-    pub _line_was_visible: bool,
+    //pub _line_was_visible: bool,
     pub _final_fill_height: f32,
     pub _draw_cursors: DrawCursors,
     pub _draw_search: DrawCursors,
@@ -256,7 +256,7 @@ impl Style for CodeEditor {
             _last_finger_move: None,
             _tokens_on_line: 0,
             _line_was_folded: false,
-            _line_was_visible: false,
+            //_line_was_visible: false,
             _scroll_pos: Vec2::zero(),
             _visible_lines: 0,
             
@@ -1106,7 +1106,7 @@ impl CodeEditor {
         cx.move_turtle(self.line_number_width, 0.);
         
         self._tokens_on_line = 0;
-        self._line_was_visible = false;
+        //self._line_was_visible = false;
         
         self._draw_cursors.process_newline();
         self._draw_messages.process_newline();
@@ -1346,7 +1346,7 @@ impl CodeEditor {
             
             if self._tokens_on_line == 0 {
                 self._visible_lines += 1;
-                self._line_was_visible = true;
+                //self._line_was_visible = true;
             }
             
             let cursors = &self.cursors.set;
