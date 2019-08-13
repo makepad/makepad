@@ -13,5 +13,5 @@ proc-macro-hack = "*"
 proc-macro2 = "*"
 
 [dependencies.syn]
-version = "*"
+version = "0.15"
 features = ["full"]
