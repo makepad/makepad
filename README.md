@@ -1,4 +1,5 @@
-# makepad THIS REPO WILL BE SPLIT UP INTO PARTS SOON
+# makepad 
+THIS REPO WILL BE HISTORY RESET SOON (has zillions of mb's of wasm builds) and restructured to prepare for final productisation/release of makepad.
 Code your design
 
 Live demo: https://makepad.github.io/makepad/
