@@ -2,7 +2,9 @@
 use render::*;
 use widget::*; 
 use editor::*;
-use compiler::*;
+use terminal::*;
+mod rustcompiler;
+pub use crate::rustcompiler::*;
 use std::collections::HashMap;
 //use std::borrow::Cow;
 use serde::*;
@@ -290,9 +292,11 @@ impl AppWindow {
                 Panel::FileTree => {
                     self.file_tree.draw_file_tree(cx);
                 },
-                Panel::LocalTerminal {start_path, terminal_id}=>{
-                    let local_terminal = self.local_terminals.get_draw(cx, *terminal_id, | _cx, tmpl | {
-                        tmpl.clone()
+                Panel::LocalTerminal {terminal_id, ..}=>{
+                    let local_terminal = self.local_terminals.get_draw(cx, *terminal_id, | cx, tmpl | {
+                        let mut new_terminal = tmpl.clone();
+                        new_terminal.start_terminal(cx);
+                        new_terminal
                     });
                     local_terminal.draw_local_terminal(cx);
                 },

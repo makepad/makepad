@@ -1,5 +1,5 @@
 [package]
-name = "compiler"
+name = "terminal"
 version = "0.1.0"
 authors = ["makepaddev"]
 edition = "2018"
@@ -14,6 +14,5 @@ path="../render"
 [dependencies.widget]
 path="../widget"
 
-[dependencies.editor]
-path="../editor"
-
+[dependencies.process]
+path="../process"

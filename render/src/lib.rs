@@ -1,35 +1,34 @@
 #![allow(dead_code)]
 
-// renderer specific modules
-/*
-#[cfg(target_os = "macos")]
-mod cx_glsl; 
-#[cfg(target_os = "macos")]
-mod cx_opengl; 
-#[cfg(target_os = "macos")]
-mod cx_xlib; 
-*/
 #[cfg(target_os = "linux")]
 mod cx_opengl; 
 #[cfg(target_os = "linux")]
 mod cx_xlib; 
+#[cfg(any(target_os = "linux"))]
+mod cx_linux;
 
 #[cfg(target_os = "macos")]
-mod cx_mtl; 
+mod cx_metal; 
 #[cfg(target_os = "macos")]
-mod cx_mtlsl; 
+mod cx_metalsl; 
 #[cfg(target_os = "macos")]
 mod cx_cocoa; 
+#[cfg(any(target_os = "macos"))]
+mod cx_macos;
 
 #[cfg(target_os = "windows")]
-mod cx_dx11; 
+mod cx_dx12; 
 #[cfg(target_os = "windows")]
 mod cx_hlsl;  
 #[cfg(target_os = "windows")]
 mod cx_win32; 
+#[cfg(any(target_os = "windows"))]
+mod cx_win10;
 
 #[cfg(target_arch = "wasm32")]
 mod cx_webgl; 
+#[cfg(target_arch = "wasm32")]
+mod cx_wasm32; 
 
 #[cfg(any(target_arch = "wasm32", target_os = "linux"))]
 mod cx_glsl; 

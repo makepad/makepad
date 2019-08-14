@@ -1,0 +1,9 @@
+[package]
+name = "process"
+version = "0.1.0"
+authors = ["makepaddev"]
+edition = "2018"
+
+[dependencies.render]
+path="../render"
+

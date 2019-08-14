@@ -1,16 +1,15 @@
 use render::*;
 use widget::*;
-use editor::*;
 
 #[derive(Clone)]
 pub struct Terminal {
     pub view: View<ScrollBar>,
     pub bg_layout: Layout,
+
     pub cursor: Quad,
     pub cursor_row: Quad,
     pub selection: Quad,
     pub text: Text,
-    pub cursors: TextCursorSet,
     
     pub top_padding: f32,
     pub colors: TerminalColors,
@@ -27,15 +26,12 @@ pub struct Terminal {
     pub _visible_lines: usize,
     
     pub _select_scroll: Option<SelectScroll>,
-    pub _grid_select_corner: Option<TextPos>,
     pub _is_row_select: bool,
     
-    pub _last_cursor_pos: TextPos,
+    pub _last_cursor_pos: TermPos,
     
     pub _monospace_size: Vec2,
     pub _monospace_base: Vec2,
-    
-    pub _draw_cursors: DrawCursors,
     
     pub _cursor_blink_timer: Timer,
     pub _cursor_blink_flipflop: f32,
@@ -55,7 +51,6 @@ pub struct TerminalColors {
 impl Style for Terminal {
     fn style(cx: &mut Cx) -> Self {
         Self {
-            cursors: TextCursorSet::new(),
             colors: TerminalColors {
                 selection: color256(42, 78, 117),
                 selection_defocus: color256(75, 75, 75),
@@ -108,16 +103,14 @@ impl Style for Terminal {
             _scroll_pos: Vec2::zero(),
             _visible_lines: 0,
             
-            _grid_select_corner: None,
             _is_row_select: false,
             
             _text_inst: None,
             _text_area: Area::Empty,
             
             _select_scroll: None,
-            _draw_cursors: DrawCursors::new(),
             
-            _last_cursor_pos: TextPos::zero(),
+            _last_cursor_pos: TermPos{row:0,col:0},
             
             _cursor_blink_timer: Timer::empty(),
             _cursor_blink_flipflop: 0.,
@@ -215,63 +208,28 @@ impl Terminal {
         self._cursor_area.write_uniform_float(cx, "blink", self._cursor_blink_flipflop);
     }
     
-    fn handle_finger_down(&mut self, cx: &mut Cx, fe: &FingerDownEvent, text_buffer: &mut TextBuffer) {
+    fn handle_finger_down(&mut self, cx: &mut Cx, fe: &FingerDownEvent, _term_buffer: &mut TermBuffer) {
         cx.set_down_mouse_cursor(MouseCursor::Text);
         // give us the focus
         self.set_key_focus(cx);
         
-        let offset = self.text.find_closest_offset(cx, &self._text_area, fe.abs);
+        let _offset = self.text.find_closest_offset(cx, &self._text_area, fe.abs);
         match fe.tap_count {
             1 => {
             },
             2 => {
-                if let Some((coffset, len)) = TextCursorSet::get_nearest_token_chunk(offset, &text_buffer) {
-                    self.cursors.set_last_clamp_range((coffset, len));
-                }
             },
             3 => {
-                if let Some((coffset, len)) = TextCursorSet::get_nearest_token_chunk(offset, &text_buffer) {
-                    //self.cursors.set_last_clamp_range((coffset, len));
-                    let (start, line_len) = text_buffer.get_nearest_line_range(offset);
-                    let mut chunk_offset = coffset;
-                    let mut chunk_len = len;
-                    if start < chunk_offset {
-                        chunk_len += chunk_offset - start;
-                        chunk_offset = start;
-                        if line_len > chunk_len {
-                            chunk_len = line_len;
-                        }
-                    }
-                    self.cursors.set_last_clamp_range((chunk_offset, chunk_len));
-                }
-                else {
-                    let range = text_buffer.get_nearest_line_range(offset);
-                    self.cursors.set_last_clamp_range(range);
-                }
             },
             _ => {
-                //let range = (0, text_buffer.calc_char_count());
-                //self.cursors.set_last_clamp_range(range);
             }
         }
         
         if fe.modifiers.shift {
-            if fe.modifiers.logo || fe.modifiers.control { // grid select
-                let pos = self.compute_grid_text_pos_from_abs(cx, fe.abs);
-                self._grid_select_corner = Some(self.cursors.grid_select_corner(pos, text_buffer));
-                self.cursors.grid_select(self._grid_select_corner.unwrap(), pos, text_buffer);
-            }
-            else { // simply place selection
-                self.cursors.clear_and_set_last_cursor_head(offset, text_buffer);
-            }
+            //self.cursors.clear_and_set_last_cursor_head(offset, text_buffer);
         }
         else { // cursor drag with possible add
-            if fe.modifiers.logo || fe.modifiers.control {
-                self.cursors.add_last_cursor_head_and_tail(offset, text_buffer);
-            }
-            else {
-                self.cursors.clear_and_set_last_cursor_head_and_tail(offset, text_buffer);
-            }
+           //self.cursors.clear_and_set_last_cursor_head_and_tail(offset, text_buffer);
         }
         
         self.view.redraw_view_area(cx);
@@ -279,23 +237,15 @@ impl Terminal {
         self.reset_cursor_blinker(cx);
     }
     
-    fn handle_finger_move(&mut self, cx: &mut Cx, fe: &FingerMoveEvent, text_buffer: &mut TextBuffer) {
-        let cursor_moved = if let Some(grid_select_corner) = self._grid_select_corner {
-            let pos = self.compute_grid_text_pos_from_abs(cx, fe.abs);
-            self.cursors.grid_select(grid_select_corner, pos, text_buffer)
-        }
-        else if self._is_row_select {
-            let offset = self.compute_offset_from_ypos(cx, fe.abs.y, text_buffer, true);
-            self.cursors.set_last_cursor_head(offset, text_buffer)
-        }
-        else {
-            let offset = self.text.find_closest_offset(cx, &self._text_area, fe.abs);
-            self.cursors.set_last_cursor_head(offset, text_buffer)
-        };
+    fn handle_finger_move(&mut self, cx: &mut Cx, fe: &FingerMoveEvent, _text_buffer: &mut TermBuffer) {
+        
+        //let offset = self.text.find_closest_offset(cx, &self._text_area, fe.abs);
+        //self.cursors.set_last_cursor_head(offset, text_buffer)
+        let cursor_moved = false;
         self._last_finger_move = Some(fe.abs);
         // determine selection drag scroll dynamics
         let repaint_scroll = self.check_select_scroll_dynamics(&fe);
-        if repaint_scroll || cursor_moved {
+        if repaint_scroll  {
             self.view.redraw_view_area(cx);
         }
         if cursor_moved {
@@ -303,16 +253,14 @@ impl Terminal {
         }
     }
     
-    fn handle_finger_up(&mut self, cx: &mut Cx, _fe: &FingerUpEvent, _text_buffer: &mut TextBuffer) {
-        self.cursors.clear_last_clamp_range();
+    fn handle_finger_up(&mut self, cx: &mut Cx, _fe: &FingerUpEvent, _term_buffer: &mut TermBuffer) {
         self._select_scroll = None;
         self._last_finger_move = None;
-        self._grid_select_corner = None;
         self._is_row_select = false;
         self.reset_cursor_blinker(cx);
     }
     
-    fn handle_key_down(&mut self, cx: &mut Cx, ke: &KeyEvent, text_buffer: &mut TextBuffer) {
+    fn handle_key_down(&mut self, cx: &mut Cx, ke: &KeyEvent, term_buffer: &mut TermBuffer) {
         let cursor_moved = match ke.key_code {
             KeyCode::ArrowUp => {
                 true
@@ -359,32 +307,28 @@ impl Terminal {
             _ => false
         };
         if cursor_moved {
-            self.scroll_last_cursor_visible(cx, text_buffer, 0.);
+            self.scroll_last_cursor_visible(cx, term_buffer, 0.);
             self.view.redraw_view_area(cx);
             self.reset_cursor_blinker(cx);
         }
     }
     
-    fn handle_text_input(&mut self, cx: &mut Cx, _te: &TextInputEvent, text_buffer: &mut TextBuffer) {
+    fn handle_text_input(&mut self, cx: &mut Cx, _te: &TextInputEvent, _term_buffer: &mut TermBuffer) {
         // send to terminal
         self.view.redraw_view_area(cx);
         self.reset_cursor_blinker(cx);
         
-        cx.send_signal(text_buffer.signal, SIGNAL_TEXTBUFFER_DATA_UPDATE);
+        //cx.send_signal(term_buffer.signal, SIGNAL_TEXTBUFFER_DATA_UPDATE);
     }
     
-    pub fn handle_terminal(&mut self, cx: &mut Cx, event: &mut Event, text_buffer: &mut TextBuffer) -> TerminalEvent {
+    pub fn handle_terminal(&mut self, cx: &mut Cx, event: &mut Event, term_buffer: &mut TermBuffer) -> TerminalEvent {
         
         if self.view.handle_scroll_bars(cx, event) {
-            if let Some(last_finger_move) = self._last_finger_move {
-                if let Some(grid_select_corner) = self._grid_select_corner {
-                    let pos = self.compute_grid_text_pos_from_abs(cx, last_finger_move);
-                    self.cursors.grid_select(grid_select_corner, pos, text_buffer);
-                }
-                else {
-                    let offset = self.text.find_closest_offset(cx, &self._text_area, last_finger_move);
-                    self.cursors.set_last_cursor_head(offset, text_buffer);
-                }
+            if let Some(_last_finger_move) = self._last_finger_move {
+                /*
+                let offset = self.text.find_closest_offset(cx, &self._text_area, last_finger_move);
+                self.cursors.set_last_cursor_head(offset, text_buffer);
+                */
             }
             // the editor actually redraws on scroll, its because we don't actually
             // generate the entire file as GPU text-buffer just the visible area
@@ -401,14 +345,14 @@ impl Terminal {
                 self._cursor_blink_flipflop = 1.0 - self._cursor_blink_flipflop;
                 self._cursor_area.write_uniform_float(cx, "blink", self._cursor_blink_flipflop);
             },
-            Event::Signal(se) => if text_buffer.signal.is_signal(se) {
-                match se.value {
-                    SIGNAL_TEXTBUFFER_MESSAGE_UPDATE | SIGNAL_TEXTBUFFER_LOADED | SIGNAL_TEXTBUFFER_DATA_UPDATE => {
-                        self.view.redraw_view_area(cx);
-                    },
-                    _ => ()
-                }
-            },
+            //Event::Signal(se) => if text_buffer.signal.is_signal(se) {
+            //    match se.value {
+            //        SIGNAL_TEXTBUFFER_MESSAGE_UPDATE | SIGNAL_TEXTBUFFER_LOADED | SIGNAL_TEXTBUFFER_DATA_UPDATE => {
+            //            self.view.redraw_view_area(cx);
+            //        },
+            //        _ => ()
+            //    }
+            //},
             _ => ()
         }
         // editor local
@@ -417,29 +361,29 @@ impl Terminal {
                 self.view.redraw_view_area(cx)
             },
             Event::FingerDown(fe) => {
-                self.handle_finger_down(cx, &fe, text_buffer);
+                self.handle_finger_down(cx, &fe, term_buffer);
             },
             Event::FingerHover(_fe) => {
                 cx.set_hover_mouse_cursor(MouseCursor::Text);
             },
             Event::FingerUp(fe) => {
-                self.handle_finger_up(cx, &fe, text_buffer);
+                self.handle_finger_up(cx, &fe, term_buffer);
             },
             Event::FingerMove(fe) => {
-                self.handle_finger_move(cx, &fe, text_buffer);
+                self.handle_finger_move(cx, &fe, term_buffer);
             },
             Event::KeyDown(ke) => {
-                self.handle_key_down(cx, &ke, text_buffer);
+                self.handle_key_down(cx, &ke, term_buffer);
             },
             Event::KeyUp(_ke) => {
                 self.reset_cursor_blinker(cx);
             },
             Event::TextInput(te) => {
-                self.handle_text_input(cx, &te, text_buffer);
+                self.handle_text_input(cx, &te, term_buffer);
             },
             Event::TextCopy(_) => match event { // access the original event
-                Event::TextCopy(req) => {
-                    req.response = Some(self.cursors.get_all_as_string(text_buffer));
+                Event::TextCopy(_req) => {
+                    //req.response = Some(self.cursors.get_all_as_string(text_buffer));
                 },
                 _ => ()
             },
@@ -457,7 +401,7 @@ impl Terminal {
         self.reset_cursor_blinker(cx);
     }
     
-    pub fn begin_terminal(&mut self, cx: &mut Cx, text_buffer: &TextBuffer) -> Result<(), ()> {
+    pub fn begin_terminal(&mut self, cx: &mut Cx, _term_buffer: &TermBuffer) -> Result<(), ()> {
         // adjust dilation based on DPI factor
         self.view.begin_view(cx, Layout {..Default::default()}) ?;
         
@@ -469,7 +413,7 @@ impl Terminal {
         self.cursor.color = self.colors.cursor;
         self.cursor_row.color = self.colors.cursor_row;
         
-        if text_buffer.load_file_read.is_pending() {
+        /*if term_buffer.load_file_read.is_pending() {
             //et bg_inst = self.bg.begin_quad(cx, &Layout {
             //    align: Align::left_top(),
             //    ..self.bg_layout.clone()
@@ -481,53 +425,50 @@ impl Terminal {
             self.view.end_view(cx);
             return Err(())
         }
-        else {
-            //let bg_inst = self.bg.draw_quad(cx, Rect {x: 0., y: 0., w: cx.get_width_total(), h: cx.get_height_total()});
-            //let bg_area = bg_inst.into_area();
-            let view_area = self.view.get_view_area(cx);
-            cx.update_area_refs(self._view_area, view_area);
-            //self._bg_area = bg_area;
-            self._view_area = view_area;
-            // layering, this sets the draw call order
-            cx.new_instance_draw_call(&self.cursor_row.shader, 0);
-            cx.new_instance_draw_call(&self.selection.shader, 0);
-            
-            // force next begin_text in another drawcall
-            self._text_inst = Some(self.text.begin_text(cx));
-            self._cursor_area = cx.new_instance_draw_call(&self.cursor.shader, 0).into_area();
-            
-            if let Some(select_scroll) = &mut self._select_scroll {
-                let scroll_pos = self.view.get_scroll_pos(cx);
-                if self.view.set_scroll_pos(cx, Vec2 {
-                    x: scroll_pos.x + select_scroll.delta.x,
-                    y: scroll_pos.y + select_scroll.delta.y
-                }) {
-                    self.view.redraw_view_area(cx);
-                }
-                else {
-                    select_scroll.at_end = true;
-                }
+        else {*/
+        //let bg_inst = self.bg.draw_quad(cx, Rect {x: 0., y: 0., w: cx.get_width_total(), h: cx.get_height_total()});
+        //let bg_area = bg_inst.into_area();
+        let view_area = self.view.get_view_area(cx);
+        cx.update_area_refs(self._view_area, view_area);
+        //self._bg_area = bg_area;
+        self._view_area = view_area;
+        // layering, this sets the draw call order
+        cx.new_instance_draw_call(&self.cursor_row.shader, 0);
+        cx.new_instance_draw_call(&self.selection.shader, 0);
+        
+        // force next begin_text in another drawcall
+        self._text_inst = Some(self.text.begin_text(cx));
+        self._cursor_area = cx.new_instance_draw_call(&self.cursor.shader, 0).into_area();
+        
+        if let Some(select_scroll) = &mut self._select_scroll {
+            let scroll_pos = self.view.get_scroll_pos(cx);
+            if self.view.set_scroll_pos(cx, Vec2 {
+                x: scroll_pos.x + select_scroll.delta.x,
+                y: scroll_pos.y + select_scroll.delta.y
+            }) {
+                self.view.redraw_view_area(cx);
             }
-            
-            // initialize all drawing counters/stacks
-            self._monospace_base = self.text.get_monospace_base(cx);
-            self._draw_cursors = DrawCursors::new();
-            self._visible_lines = 0;
-            self._draw_cursors.set_next(&self.cursors.set);
-            self._last_cursor_pos = self.cursors.get_last_cursor_text_pos(text_buffer);
-            
-            // indent
-            cx.move_turtle(0., self.top_padding);
-            
-            self._scroll_pos = self.view.get_scroll_pos(cx);
-            
-            return Ok(())
+            else {
+                select_scroll.at_end = true;
+            }
         }
+        
+        // initialize all drawing counters/stacks
+        self._monospace_base = self.text.get_monospace_base(cx);
+        self._visible_lines = 0;
+        //self._last_cursor_pos = self.cursors.get_last_cursor_text_pos(text_buffer);
+        
+        // indent
+        cx.move_turtle(0., self.top_padding);
+        
+        self._scroll_pos = self.view.get_scroll_pos(cx);
+        
+        return Ok(())
+        //}
     }
     
     fn draw_new_line(&mut self, cx: &mut Cx) {
         cx.turtle_new_line_min_height(self._monospace_size.y);
-        self._draw_cursors.process_newline();
     }
     /*
     pub fn draw_chunk(&mut self, _cx: &mut Cx, _token_chunks_index: usize, _flat_text: &Vec<char>, _token_chunk: &TokenChunk, _message_cursors: &Vec<TextCursor>) {
@@ -538,7 +479,7 @@ impl Terminal {
     }
 */
     
-    pub fn end_terminal(&mut self, cx: &mut Cx, text_buffer: &TextBuffer) {
+    pub fn end_terminal(&mut self, cx: &mut Cx, term_buffer: &TermBuffer) {
         
         // lets insert an empty newline at the bottom so its nicer to scroll
         self.draw_new_line(cx);
@@ -547,33 +488,22 @@ impl Terminal {
         self.text.end_text(cx, self._text_inst.as_ref().unwrap());
         self._text_area = self._text_inst.take().unwrap().inst.into_area();
         
-        self.draw_cursors(cx);
+        //self.draw_cursors(cx);
         //self.do_selection_animations(cx);
         self.draw_selections(cx);
         
         // last bits
-        self.do_selection_scrolling(cx, text_buffer);
+        self.do_selection_scrolling(cx, term_buffer);
         self.place_ime_and_draw_cursor_row(cx);
         
         self.view.end_view(cx);
     }
     
-    fn draw_cursors(&mut self, cx: &mut Cx) {
-        if self.has_key_focus(cx) {
-            let origin = cx.get_turtle_origin();
-            for rc in &self._draw_cursors.cursors {
-                let inst = self.cursor.draw_quad(cx, Rect {x: rc.x - origin.x, y: rc.y - origin.y, w: rc.w, h: rc.h});
-                if inst.need_uniforms_now(cx) {
-                    inst.push_uniform_float(cx, self._cursor_blink_flipflop);
-                    //blink
-                }
-            }
-        }
-    }
     
     fn draw_selections(&mut self, cx: &mut Cx) {
-        let origin = cx.get_turtle_origin();
-        let sel = &mut self._draw_cursors.selections;
+        let _origin = cx.get_turtle_origin();
+        /*
+        //let sel = &mut self._draw_cursors.selections;
         // draw selections
         for i in 0..sel.len() {
             let cur = &sel[i];
@@ -601,10 +531,12 @@ impl Terminal {
                 // prev_x, prev_w
             }
         }
+        */
     }
     
-    fn place_ime_and_draw_cursor_row(&mut self, cx: &mut Cx) {
+    fn place_ime_and_draw_cursor_row(&mut self, _cx: &mut Cx) {
         // place the IME
+        /*
         if let Some(last_cursor) = self._draw_cursors.last_cursor {
             let rc = self._draw_cursors.cursors[last_cursor];
             if let Some(_) = self.cursors.get_last_cursor_singular() {
@@ -623,21 +555,16 @@ impl Terminal {
             else {
                 cx.hide_text_ime();
             }
-        }
+        }*/
     }
     
-    fn do_selection_scrolling(&mut self, cx: &mut Cx, text_buffer: &TextBuffer) {
+    fn do_selection_scrolling(&mut self, cx: &mut Cx, _term_buffer: &TermBuffer) {
         // do select scrolling
         if let Some(select_scroll) = self._select_scroll.clone() {
-            if let Some(grid_select_corner) = self._grid_select_corner {
-                // self.cursors.grid_select(offset, text_buffer);
-                let pos = self.compute_grid_text_pos_from_abs(cx, select_scroll.abs);
-                self.cursors.grid_select(grid_select_corner, pos, text_buffer);
-            }
-            else {
-                let offset = self.text.find_closest_offset(cx, &self._text_area, select_scroll.abs);
-                self.cursors.set_last_cursor_head(offset, text_buffer);
-            }
+            
+            //let offset = self.text.find_closest_offset(cx, &self._text_area, select_scroll.abs);
+            //self.cursors.set_last_cursor_head(offset, text_buffer);
+            
             if select_scroll.at_end {
                 self._select_scroll = None;
             }
@@ -653,11 +580,11 @@ impl Terminal {
         self._monospace_size.y = self._monospace_base.y * font_size;
     }*/
     
-    fn scroll_last_cursor_visible(&mut self, _cx: &mut Cx, _text_buffer: &TextBuffer, _height_pad: f32) {
+    fn scroll_last_cursor_visible(&mut self, _cx: &mut Cx, _term_buffer: &TermBuffer, _height_pad: f32) {
         // so we have to compute (approximately) the rect of our cursor
-        if self.cursors.last_cursor >= self.cursors.set.len() {
+        //if self.cursors.last_cursor >= self.cursors.set.len() {
             panic !("LAST CURSOR INVALID");
-        }
+        //}
         
         //let pos = self.cursors.get_last_cursor_text_pos(text_buffer);
         
@@ -679,9 +606,9 @@ impl Terminal {
         }
         */
     }
-    
-    fn compute_grid_text_pos_from_abs(&mut self, _cx: &Cx, _abs: Vec2) -> TextPos {
-        /*
+    /*
+    fn compute_grid_text_pos_from_abs(&mut self, _cx: &Cx, _abs: Vec2) -> TermPos {
+        
         //
         let rel = self.view.get_view_area(cx).abs_to_rel(cx, abs, false);
         let mut mono_size = Vec2::zero();
@@ -696,15 +623,15 @@ impl Terminal {
         }
         // otherwise the file is too short, lets use the last line
         TextPos {row: self._line_geometry.len() - 1, col: (rel.x.max(0.) / mono_size.x) as usize}
-        */
-        TextPos {row: 0, col: 0}
+        
+        TermPos {row: 0, col: 0}
     }
     
-    fn compute_offset_from_ypos(&mut self, _cx: &Cx, _ypos_abs: f32, _text_buffer: &TextBuffer, _end: bool) -> usize {
+    fn compute_offset_from_ypos(&mut self, _cx: &Cx, _ypos_abs: f32, _term_buffer: &TermBuffer, _end: bool) -> usize {
         //let rel = self.view.get_view_area(cx).abs_to_rel(cx, Vec2 {x: 0.0, y: ypos_abs}, false);
         // = Vec2::zero();
         //let end_col = if end {1 << 31}else {0};
-        /*
+        
         for (row, geom) in self._line_geometry.iter().enumerate() {
             //let geom = &self._line_geometry[pos.row];
             mono_size = Vec2 {x: self._monospace_base.x * geom.font_size, y: self._monospace_base.y * geom.font_size};
@@ -713,10 +640,10 @@ impl Terminal {
             }
         }
         return text_buffer.text_pos_to_offset(TextPos {row: self._line_geometry.len() - 1, col: end_col})
-        */
+        
         return 0
     }
-    
+    */
     fn check_select_scroll_dynamics(&mut self, fe: &FingerMoveEvent) -> bool {
         let pow_scale = 0.1;
         let pow_fac = 3.;
@@ -764,17 +691,26 @@ impl Terminal {
     
 }
 
-#[derive(Clone)]
-pub struct AnimSelect {
-    pub ypos: f32,
-    pub invert: bool,
-    pub time: f64
-}
-
 #[derive(Clone, Default)]
 pub struct SelectScroll {
     // pub margin:Margin,
     pub delta: Vec2,
     pub abs: Vec2,
     pub at_end: bool
+}
+
+#[derive(Clone, Default)]
+pub struct TermChunk{
+    pub text: String,
+}
+
+#[derive(Clone, Default)]
+pub struct TermBuffer{
+    pub buffer: Vec<Vec<TermChunk>>
+}
+
+#[derive(Clone, Copy)]
+pub struct TermPos {
+    pub row: usize,
+    pub col: usize
 }
