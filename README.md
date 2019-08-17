@@ -4,10 +4,10 @@ Code your design
 
 Live demo: https://makepad.github.io/makepad/
 
-This repo is for developing Makepad, a live Rust authoring tool for 2D vector design, shaders and animation. The goal of the containing code is to be a Code Editor / UI kit for the Makepad application and will change without notice to suit that goal. The makepad application itself may be closed-sourced and sold, since we also have to feed our families.
+This repo is for developing Makepad, a live Rust authoring tool for webVR. The goal of the containing code is to be a Code Editor / UI kit for the Makepad application and will change without notice to suit that goal. The makepad application itself may be closed-sourced and sold, since we also have to feed our families.
 
 The vision is to build a livecoding / design hybrid program, where procedural design and code are fused in one environment. If you have missed 'learnable programming' please check this out: http://worrydream.com/LearnableProgramming/
-Makepad aims to fulfill (some) of these ideas using a completely from-scratch renderstack built on the GPU and Rust. The first goal of makepad will be to be an IDE for webVR that runs on your laptop, whilst generating/debugging wasm/webVR code that runs on standalone VR devices like the Oculus Quest.
+Makepad aims to fulfill (some) of these ideas using a completely from-scratch renderstack built on the GPU and Rust. The first goal of makepad will be to be an IDE for webVR that runs natively on your laptop, whilst generating/debugging wasm/webVR code that runs on standalone VR devices like the Oculus Quest.
 
 However before we can make this awesome application, we need to build a UI stack. Making a live-code editor with all sorts of visual manipulation components just doesn't work in HTML. We tried. It also doesn't work in JS+WebGL. We tried. But now with Rust we are getting right performance figures (up to 200x HTML). And even with Wasm, its plenty fast.
 This new UI stack has a new way of building UI called 'dual immediate mode' and uses multi-platform shaders for styling that are compiled from Rust source via a proc macro.
