@@ -1,4 +1,5 @@
 # makepad 
+ALL NATIVE BUILDS ARE BROKEN IN THE LAST UPDATE, WILL BE FIXED TOMORROW
 THIS REPO WILL BE HISTORY RESET SOON (has zillions of mb's of wasm builds) and restructured to prepare for final productisation/release of makepad.
 Code your design
 
