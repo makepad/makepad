@@ -87,7 +87,7 @@ impl ScrollBar {
                     view_clip.zw
                 );
                 pos = (clipped - vec2(x, y)) / vec2(w, h);
-                return camera_projection*(camera_view*(view_transform*vec4(clipped, z, 1.)));
+                return camera_projection*(camera_view*(view_transform*vec4(clipped, 0., 1.)));
             }
             
             fn pixel() -> vec4 {
