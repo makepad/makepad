@@ -42,7 +42,7 @@ impl Style for Tab{
                 margin:Margin{l:-4.,t:3.,r:4.,b:0.},
                 ..Style::style(cx)
             },
-            text:Text{..Style::style(cx)},
+            text:Text{z:1.0,..Style::style(cx)},
             animator:Animator::new(Anim::empty()),
             _is_selected:false,
             _is_focussed:false,

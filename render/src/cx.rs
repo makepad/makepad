@@ -17,32 +17,22 @@ pub use crate::elements::*;
 pub use crate::animator::*;
 pub use crate::area::*;
 
-/*
-#[cfg(target_os = "macos")]
-pub use crate::cx_glsl::*;
-
-#[cfg(target_os = "macos")]
-pub use crate::cx_opengl::*;
-
-#[cfg(target_os = "macos")]
-pub use crate::cx_xlib::*;
-*/
-
+#[cfg(any(target_os = "linux"))]
+pub use crate::cx_linux::*;
 #[cfg(target_os = "linux")]
 pub use crate::cx_opengl::*;
 
-#[cfg(target_os = "linux")]
-pub use crate::cx_xlib::*;
-
+#[cfg(any(target_os = "macos"))]
+pub use crate::cx_macos::*;
 #[cfg(target_os = "macos")]
-pub use crate::cx_mtl::*;
-
+pub use crate::cx_metal::*;
 #[cfg(target_os = "macos")]
-pub use crate::cx_mtlsl::*;
+pub use crate::cx_metalsl::*;
 
+#[cfg(any(target_os = "windows"))]
+pub use crate::cx_win10::*;
 #[cfg(target_os = "windows")]
-pub use crate::cx_dx11::*;
-
+pub use crate::cx_dx12::*;
 #[cfg(target_os = "windows")]
 pub use crate::cx_hlsl::*;
 
@@ -54,6 +44,9 @@ pub use crate::cx_glsl::*;
 
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 pub use crate::cx_desktop::*;
+
+#[cfg(any(target_arch = "wasm32"))]
+pub use crate::cx_wasm32::*;
 
 pub enum PlatformType {
     Windows,
@@ -91,6 +84,7 @@ pub struct Cx {
     pub shader_map: HashMap<ShaderGen, usize>,
     
     pub is_in_redraw_cycle: bool,
+    pub vr_can_present: bool,
     pub window_stack: Vec<usize>,
     pub pass_stack: Vec<usize>,
     pub view_stack: Vec<usize>,
@@ -184,6 +178,7 @@ impl Default for Cx {
             shader_map: HashMap::new(),
             
             is_in_redraw_cycle: false,
+            vr_can_present: false,
             window_stack: Vec::new(),
             pass_stack: Vec::new(),
             view_stack: Vec::new(),

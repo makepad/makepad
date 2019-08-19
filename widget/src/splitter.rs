@@ -273,6 +273,7 @@ impl Splitter {
         self.split.color = self.animator.last_color("split.color");
         match self.axis {
             Axis::Horizontal => {
+                
                 cx.set_turtle_walk(Vec2 {x: origin.x, y: origin.y + self._calc_pos});
                 if let Ok(_) = self.split_view.begin_view(cx, Layout {
                     width: Bounds::Fix(rect.w),

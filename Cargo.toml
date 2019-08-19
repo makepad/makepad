@@ -23,3 +23,6 @@ path="./editor"
 
 [dependencies.render]
 path="./render"
+
+[dependencies.terminal]
+path="./terminal"

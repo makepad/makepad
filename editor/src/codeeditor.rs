@@ -65,7 +65,7 @@ pub struct CodeEditor {
     
     pub _tokens_on_line: usize,
     pub _line_was_folded: bool,
-    pub _line_was_visible: bool,
+    //pub _line_was_visible: bool,
     pub _final_fill_height: f32,
     pub _draw_cursors: DrawCursors,
     pub _draw_search: DrawCursors,
@@ -173,6 +173,7 @@ impl Style for CodeEditor {
                 unexpected: color256(255, 0, 0),
             },
             indent_lines: Quad {
+                z:1.0,
                 shader: cx.add_shader(Self::def_indent_lines_shader(), "Editor.indent_lines"),
                 ..Style::style(cx)
             },
@@ -231,6 +232,7 @@ impl Style for CodeEditor {
                 font: cx.load_font_style("mono_font"),
                 font_size: 12.0,
                 brightness: 1.0,
+                z:1.0,
                 line_spacing: 1.4,
                 do_dpi_dilate: true,
                 wrapping: Wrapping::Line,
@@ -240,6 +242,7 @@ impl Style for CodeEditor {
                 font: cx.load_font_style("mono_font"),
                 font_size: 12.0,
                 brightness: 1.0,
+                z:1.0,
                 line_spacing: 1.4,
                 do_dpi_dilate: true,
                 do_h_scroll: false,
@@ -256,7 +259,7 @@ impl Style for CodeEditor {
             _last_finger_move: None,
             _tokens_on_line: 0,
             _line_was_folded: false,
-            _line_was_visible: false,
+            //_line_was_visible: false,
             _scroll_pos: Vec2::zero(),
             _visible_lines: 0,
             
@@ -376,7 +379,7 @@ impl CodeEditor {
                     view_clip.zw
                 );
                 pos = (clipped - shift - vec2(x, y)) / vec2(w, h);
-                return vec4(clipped.x, clipped.y, 0., 1.) * camera_projection;
+                return  camera_projection*(camera_view*(view_transform*vec4(clipped.x, clipped.y, 0., 1.)));
             }
             
             fn pixel() -> vec4 {
@@ -1106,7 +1109,7 @@ impl CodeEditor {
         cx.move_turtle(self.line_number_width, 0.);
         
         self._tokens_on_line = 0;
-        self._line_was_visible = false;
+        //self._line_was_visible = false;
         
         self._draw_cursors.process_newline();
         self._draw_messages.process_newline();
@@ -1346,7 +1349,7 @@ impl CodeEditor {
             
             if self._tokens_on_line == 0 {
                 self._visible_lines += 1;
-                self._line_was_visible = true;
+                //self._line_was_visible = true;
             }
             
             let cursors = &self.cursors.set;

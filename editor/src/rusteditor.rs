@@ -664,8 +664,11 @@ impl RustTokenizer {
                     if state.keyword(chunk, "atic") {
                         return TokenType::Keyword
                     }
-                    if state.keyword(chunk, "ruct") {
-                        return TokenType::TypeDef
+                    if state.keyword(chunk, "r") {
+                        if state.keyword(chunk, "uct"){
+                            return TokenType::TypeDef
+                        }
+                        return TokenType::BuiltinType
                     }
                 }
             },

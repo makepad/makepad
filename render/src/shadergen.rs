@@ -761,6 +761,24 @@ impl ShBinary {
                     ty: left.ty
                 })
             }
+            else if left.ty == "mat4" && right.ty == "vec4" {
+                Ok(Sl {
+                    sl: slcx.mat_mul(&left.sl, &right.sl),
+                    ty: right.ty
+                })
+            }
+            else if left.ty == "mat3" && right.ty == "vec3" {
+                Ok(Sl {
+                    sl: slcx.mat_mul(&left.sl, &right.sl),
+                    ty: right.ty
+                })
+            }
+            else if left.ty == "mat2" && right.ty == "vec2" {
+                Ok(Sl {
+                    sl: slcx.mat_mul(&left.sl, &right.sl),
+                    ty: right.ty
+                })
+            }
             else {
                 Err(SlErr {
                     msg: format!("Left type {} not the same as right {} in binary op {}{}{}", left.ty, right.ty, left.sl, self.op.to_string(), right.sl)

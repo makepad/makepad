@@ -134,14 +134,16 @@ pub enum CxPassDepOf {
 }
 
 const CX_UNI_CAMERA_PROJECTION: usize = 0;
-const CX_UNI_DPI_FACTOR: usize = 16;
-const CX_UNI_DPI_DILATE: usize = 17;
-const CX_UNI_SIZE: usize = 20;
+const CX_UNI_CAMERA_VIEW: usize = 16;
+const CX_UNI_DPI_FACTOR: usize = 32;
+const CX_UNI_DPI_DILATE: usize = 33;
+const CX_UNI_SIZE: usize = 36;
 
 impl CxPass {
     pub fn def_uniforms(sg: ShaderGen)->ShaderGen{
         sg.compose(shader_ast!({
             let camera_projection: mat4<UniformCx>;
+            let camera_view: mat4<UniformCx>;
             let dpi_factor: float<UniformCx>;
             let dpi_dilate: float<UniformCx>;
         }))
@@ -151,6 +153,13 @@ impl CxPass {
         //dump in uniforms
         for i in 0..16 {
             self.uniforms[CX_UNI_CAMERA_PROJECTION + i] = v.v[i];
+        }
+    }
+    
+    pub fn uniform_camera_view(&mut self, v: &Mat4) {
+        //dump in uniforms
+        for i in 0..16 {
+            self.uniforms[CX_UNI_CAMERA_VIEW + i] = v.v[i];
         }
     }
     

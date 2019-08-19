@@ -818,6 +818,7 @@ impl Win32Window {
     
     pub fn get_window_geom(&self) -> WindowGeom {
         WindowGeom {
+            vr_is_presenting: false,
             is_topmost: self.get_is_topmost(),
             is_fullscreen: self.get_is_maximized(),
             inner_size: self.get_inner_size(),

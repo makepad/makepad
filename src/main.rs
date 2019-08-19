@@ -1,10 +1,11 @@
-//use syn::Type;
+//use syn::Type; 
 use render::*;
-use widget::*; 
-use editor::*;
-mod rustcompiler;
+use widget::*;
+use editor::*; 
+use terminal::*;
+mod rustcompiler; 
 pub use crate::rustcompiler::*;
-use std::collections::HashMap;
+use std::collections::HashMap; 
 //use std::borrow::Cow;
 use serde::*;
 
@@ -14,19 +15,21 @@ enum Panel {
     Keyboard,
     FileTree,
     FileEditorTarget,
-    FileEditor {path: String, editor_id: u64}
+    FileEditor {path: String, editor_id: u64},
+    LocalTerminal {start_path: String, terminal_id: u64}
 }
 
-#[derive(Clone)] 
+#[derive(Clone)]
 struct AppWindow {
     desktop_window: DesktopWindow,
     file_tree: FileTree,
     keyboard: Keyboard,
     file_editors: Elements<u64, FileEditor, FileEditorTemplates>,
+    local_terminals: Elements<u64, LocalTerminal, LocalTerminal>,
     dock: Dock<Panel>,
 }
 
-struct AppGlobal { 
+struct AppGlobal {
     file_tree_data: String,
     file_tree_reload_signal: Signal,
     text_buffers: TextBuffers,
@@ -47,7 +50,7 @@ struct App {
 struct AppWindowState {
     window_position: Vec2,
     window_inner_size: Vec2,
-    dock_items: DockItem<Panel>,
+    dock_items: DockItem<Panel>, 
 }
 
 #[derive(Default, Clone, Serialize, Deserialize)]
@@ -60,10 +63,10 @@ main_app!(App);
 impl Style for AppWindow {
     fn style(cx: &mut Cx) -> Self {
         Self {
-            desktop_window: DesktopWindow{
-                caption:"Makepad".to_string(),
-                window:Window{
-                    create_inner_size:Some(Vec2{x:1400.0,y:1000.0}),
+            desktop_window: DesktopWindow {
+                caption: "Makepad".to_string(),
+                window: Window {
+                    create_inner_size: None,
                     ..Window::style(cx)
                 },
                 ..DesktopWindow::style(cx)
@@ -72,11 +75,12 @@ impl Style for AppWindow {
                 rust_editor: RustEditor::style(cx),
                 js_editor: JSEditor::style(cx)
             }),
+            local_terminals: Elements::new(LocalTerminal::style(cx)),
             keyboard: Keyboard::style(cx),
             file_tree: FileTree::style(cx),
             dock: Dock ::style(cx),
         }
-    }
+    }  
 }
 
 impl Style for App {
@@ -122,6 +126,11 @@ impl Style for App {
                         last: Box::new(DockItem::TabControl {
                             current: 0,
                             tabs: vec![
+                                DockTab {
+                                    closeable: false,
+                                    title: "Local Terminal".to_string(),
+                                    item: Panel::LocalTerminal {start_path: "./".to_string(), terminal_id: 1}
+                                },
                                 DockTab {
                                     closeable: false,
                                     title: "Rust Compiler".to_string(),
@@ -203,6 +212,11 @@ impl AppWindow {
                 Panel::FileEditorTarget => {
                     
                 },
+                Panel::LocalTerminal {terminal_id, ..} => {
+                    if let Some(local_terminal) = &mut self.local_terminals.get(*terminal_id) {
+                        local_terminal.handle_local_terminal(cx, event);
+                    }
+                },
                 Panel::FileTree => {
                     file_tree_event = self.file_tree.handle_file_tree(cx, event);
                 },
@@ -226,7 +240,7 @@ impl AppWindow {
             FileTreeEvent::DragMove {fe, ..} => {
                 self.dock.dock_drag_move(cx, fe);
             },
-            FileTreeEvent::DragCancel=>{
+            FileTreeEvent::DragCancel => {
                 self.dock.dock_drag_cancel(cx);
             },
             FileTreeEvent::DragOut => {
@@ -277,6 +291,14 @@ impl AppWindow {
                 Panel::FileEditorTarget => {},
                 Panel::FileTree => {
                     self.file_tree.draw_file_tree(cx);
+                },
+                Panel::LocalTerminal {terminal_id, ..} => {
+                    let local_terminal = self.local_terminals.get_draw(cx, *terminal_id, | cx, tmpl | {
+                        let mut new_terminal = tmpl.clone();
+                        new_terminal.start_terminal(cx);
+                        new_terminal
+                    });
+                    local_terminal.draw_local_terminal(cx);
                 },
                 Panel::FileEditor {path, editor_id} => {
                     let text_buffer = app_global.text_buffers.from_path(cx, path);
@@ -395,12 +417,25 @@ impl AppGlobal {
 }
 
 impl App {
+    fn default_layout(&mut self, cx: &mut Cx){
+        println!("DOING DEFAULT");
+        self.app_global.state.windows = vec![self.app_window_state_template.clone()];
+        self.windows = vec![self.app_window_template.clone()];
+        cx.send_signal(self.app_global.file_tree_reload_signal, 0);
+        cx.redraw_child_area(Area::All);
+    }
+    
     fn handle_app(&mut self, cx: &mut Cx, event: &mut Event) {
         match event {
             Event::Construct => {
                 self.app_global.handle_construct(cx);
                 self.app_global.index_file_read = cx.file_read(&format!("{}index.json", self.app_global.text_buffers.root_path));
-                self.app_global.app_state_file_read = cx.file_read(&format!("{}makepad_state.json", self.app_global.text_buffers.root_path));
+                if cx.platform_type.is_desktop() {
+                    self.app_global.app_state_file_read = cx.file_read(&format!("{}makepad_state.json", self.app_global.text_buffers.root_path));
+                }
+                else{
+                    self.default_layout(cx);
+                }
             },
             Event::FileRead(fr) => {
                 // lets see which file we loaded
@@ -438,7 +473,7 @@ impl App {
                                         create_inner_size: Some(size),
                                         create_position: create_pos,
                                         ..Style::style(cx)
-                                    },  ..self.app_window_template.desktop_window.clone()},
+                                    }, ..self.app_window_template.desktop_window.clone()},
                                     ..self.app_window_template.clone()
                                 })
                             }
@@ -447,11 +482,7 @@ impl App {
                         }
                     }
                     else { // load default window
-                        println!("DOING DEFAULT");
-                        self.app_global.state.windows = vec![self.app_window_state_template.clone()];
-                        self.windows = vec![self.app_window_template.clone()];
-                        cx.send_signal(self.app_global.file_tree_reload_signal, 0);
-                        cx.redraw_child_area(Area::All);
+                        self.default_layout(cx);
                     }
                 }
                 else if self.app_global.text_buffers.handle_file_read(cx, &fr) {

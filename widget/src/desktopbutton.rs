@@ -42,9 +42,7 @@ pub enum DesktopButtonType {
     WindowsMax,
     WindowsMaxToggled,
     WindowsClose,
-    OSXMin,
-    OSXMax,
-    OSXClose
+    VRMode,
 }
 
 impl DesktopButtonType {
@@ -54,9 +52,7 @@ impl DesktopButtonType {
             DesktopButtonType::WindowsMax => 2.,
             DesktopButtonType::WindowsMaxToggled => 3.,
             DesktopButtonType::WindowsClose => 4.,
-            DesktopButtonType::OSXMin => 5.,
-            DesktopButtonType::OSXMax => 6.,
-            DesktopButtonType::OSXClose => 7.,
+            DesktopButtonType::VRMode => 5.,
         }
     }
 }
@@ -112,7 +108,23 @@ impl DesktopButton {
                     df_stroke(color("white"), 0.5 + 0.5 * dpi_dilate);
                     return df_result;
                 }
-                
+                // VRMode
+                if abs(button_type - 5.) < 0.1 {
+                    df_clear(mix(color("#3"), mix(color("#0aa"), color("#077"), down), hover));
+                    let w = 12.;
+                    let h = 8.;
+                    df_box(c.x - w, c.y - h, 2. * w, 2. * h, 2.);
+                    // subtract 2 eyes
+                    df_circle(c.x - 5.5,c.y,3.5);
+                    df_subtract();
+                    df_circle(c.x + 5.5,c.y,3.5);
+                    df_subtract();
+                    df_circle(c.x, c.y + h-0.75,2.5);
+                    df_subtract();
+                    df_fill(color("#8"));
+                    
+                    return df_result;
+                }
                 return color("red")/*
                 df_viewport(pos * vec2(w, h));
                 df_box(0., 0., w, h, border_radius);
@@ -162,12 +174,22 @@ impl DesktopButton {
         ButtonEvent::None
     }
     
-    pub fn draw_desktop_button(&mut self, cx: &mut Cx, _ty: DesktopButtonType) {
+    pub fn draw_desktop_button(&mut self, cx: &mut Cx, ty: DesktopButtonType) {
         self.bg.color = self.animator.last_color("bg.color");
-        let bg_inst = self.bg.draw_quad_walk(cx, Bounds::Fix(46.), Bounds::Fix(29.), Margin::zero());
+        
+        let (w,h) = match ty {
+            DesktopButtonType::WindowsMin 
+            | DesktopButtonType::WindowsMax 
+            | DesktopButtonType::WindowsMaxToggled 
+            | DesktopButtonType::WindowsClose => (46.,29.),
+            DesktopButtonType::VRMode => (50.,36.),
+        };
+
+        let bg_inst = self.bg.draw_quad_walk(cx, Bounds::Fix(w), Bounds::Fix(h), Margin::zero());
+        
         bg_inst.push_float(cx, self.animator.last_float("bg.hover"));
         bg_inst.push_float(cx, self.animator.last_float("bg.down"));
-        bg_inst.push_float(cx, _ty.shader_float());
+        bg_inst.push_float(cx, ty.shader_float());
         self._bg_area = bg_inst.into_area();
         self.animator.update_area_refs(cx, self._bg_area); // if our area changed, update animation
     }
