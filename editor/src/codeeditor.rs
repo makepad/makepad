@@ -28,6 +28,8 @@ pub struct CodeEditor {
     pub top_padding: f32,
     pub colors: CodeEditorColors,
     pub cursor_blink_speed: f64,
+
+    pub folding_depth: usize,
     //pub _bg_area: Area,
     pub _view_area: Area,
     pub _highlight_area: Area,
@@ -282,10 +284,10 @@ impl Style for CodeEditor {
             _anim_font_size: 11.0,
             _line_largest_font: 0.,
             _final_fill_height: 0.,
+            folding_depth: 2,
             _anim_folding: AnimFolding {
                 state: AnimFoldingState::Open,
                 focussed_line: 0,
-                depth: 2,
                 zoom_scale: 1.0,
                 did_animate: false,
             },
@@ -1152,7 +1154,7 @@ impl CodeEditor {
         let mut off = self.line_number_width;
         for i in 0..tabs {
             let (indent_color, indent_id) = if i < self._indent_stack.len() {self._indent_stack[i]}else {(self.colors.indent_line_unknown, 0.)};
-            let tab_width = if i < self._anim_folding.depth {tab_fixed_width}else {tab_variable_width};
+            let tab_width = if i < self.folding_depth {tab_fixed_width}else {tab_variable_width};
             self.indent_lines.color = indent_color;
             let inst = self.indent_lines.draw_quad(cx, Rect {
                 x: off,
@@ -1198,9 +1200,9 @@ impl CodeEditor {
                     }
                     // lets do the code folding here. if we are tabs > fold line
                     // lets change the fontsize
-                    if tabs >= self._anim_folding.depth || next_char == '\n' {
+                    if tabs >= self.folding_depth || next_char == '\n' {
                         // ok lets think. we need to move it over by the delta of 8 spaces * _anim_font_size
-                        let dx = (self._monospace_base.x * self.open_font_size * 4. * (self._anim_folding.depth as f32)) - (self._monospace_base.x * self._anim_font_size * 4. * (self._anim_folding.depth as f32));
+                        let dx = (self._monospace_base.x * self.open_font_size * 4. * (self.folding_depth as f32)) - (self._monospace_base.x * self._anim_font_size * 4. * (self.folding_depth as f32));
                         cx.move_turtle(dx, 0.0);
                         self._line_was_folded = true;
                         self._anim_font_size
@@ -1360,6 +1362,7 @@ impl CodeEditor {
             let height = self._monospace_size.y;
             
             // actually generate the GPU data for the text
+            //self.text.z = (self._paren_stack.len() as f32)*5.0 + 1.0;
             if self._highlight_selection.len() > 0 { // slow loop
                 //let draw_search = &mut self._draw_search;
                 let line_chunk = &mut self._line_chunk;
@@ -1752,7 +1755,7 @@ impl CodeEditor {
     fn start_code_folding(&mut self, cx: &mut Cx, text_buffer: &TextBuffer, halfway: bool) {
         // start code folding anim
         let speed = 0.98;
-        self._anim_folding.depth = if halfway {1}else {2};
+        //self._anim_folding.depth = if halfway {1}else {2};
         self._anim_folding.zoom_scale = if halfway {0.5}else {1.};
         //if halfway{9.0} else{1.0};
         self._anim_folding.state.do_folding(speed, 0.95);
@@ -1899,7 +1902,6 @@ pub struct AnimFolding {
     pub state: AnimFoldingState,
     pub focussed_line: usize,
     pub zoom_scale: f32,
-    pub depth: usize,
     pub did_animate: bool
 }
 

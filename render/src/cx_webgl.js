@@ -228,6 +228,11 @@
             this.send_f64(time);
         }
         
+        paint_dirty(time, frame_data) {
+            let pos = this.fit(1);
+            this.mu32[pos ++] = 21;
+        }
+        
         end() {
             let pos = this.fit(1);
             this.mu32[pos] = 0;
@@ -521,13 +526,18 @@
                 // ensure we always know when we begin/end presenting we need to
                 // listen for vrdisplaypresentchange events.
                 let on_vr_display_present_change = _ => {
-                    console.log("present change!")
                     this.vr_is_presenting = this.vr_display.isPresenting;
                     if (this.vr_is_presenting) { // we need to start the continuous repaintloop
                         let vr_on_request_animation_frame = time => {
+                            if(!this.vr_is_presenting){
+                                console.log("TERMINATING RENDER");
+                                return
+                            }
                             this.vr_display.requestAnimationFrame(vr_on_request_animation_frame);
                             this.vr_display.getFrameData(this.vr_frame_data);
                             
+                            // compute the view matrices taking into account the persons movement
+                            this.to_wasm.paint_dirty();
                             this.to_wasm.vr_frame(time / 1000.0, this.vr_frame_data);
                             this.in_animation_frame = true;
                             this.do_wasm_io();
@@ -537,7 +547,9 @@
                         this.vr_display.requestAnimationFrame(vr_on_request_animation_frame);
                     }
                     else { // lets return to normal
-                        
+                        console.log("RETURNING TO NORMAL");
+                        this.to_wasm.paint_dirty();
+                        this.request_animation_frame();
                     }
                     this.on_screen_resize();
                 }
