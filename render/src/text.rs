@@ -22,6 +22,7 @@ pub struct Text{
     pub do_v_scroll: bool,
     pub brightness:f32,
     pub line_spacing:f32,
+    pub z:f32,
     pub wrapping:Wrapping,
 }
 
@@ -37,6 +38,7 @@ impl Style for Text{
             line_spacing:1.15,
             do_dpi_dilate:false,
             brightness:1.0,
+            z:0.0,
             wrapping:Wrapping::Word,
             color:color("white")
         }
@@ -69,6 +71,7 @@ impl Text{
             let color:vec4<Instance>;
             let x:float<Instance>;
             let y:float<Instance>;
+            let z:float<Instance>;
 
             //let w:float<Instance>;
             //let h:float<Instance>;
@@ -127,7 +130,7 @@ impl Text{
                     normalized.xy
                 );
 
-                return vec4(clipped,0.,1.) * camera_projection;
+                return camera_projection*(camera_view*(view_transform*vec4(clipped,z,1.))); 
             }
         }))
     }
@@ -185,6 +188,7 @@ impl Text{
                 /*color*/ self.color.r, self.color.g, self.color.b, self.color.a,
                 /*x*/ geom_x,
                 /*y*/ geom_y,
+                /*z*/ self.z,
                 // /*w*/ w,
                 // /*h*/ height,
                 /*font_size*/ self.font_size,

@@ -99,7 +99,6 @@ impl Cx{
                             };
                             
                             window.window_command = match &window.window_command {
-                                CxWindowCmd::None => CxWindowCmd::None,
                                 CxWindowCmd::Restore => {
                                     for opengl_window in &mut opengl_windows {if opengl_window.window_id == index {
                                         opengl_window.xlib_window.restore();
@@ -118,6 +117,7 @@ impl Cx{
                                     }}
                                     CxWindowCmd::None
                                 },
+                                _ => CxWindowCmd::None,
                             };
                             
                             if let Some(topmost) = window.window_topmost {

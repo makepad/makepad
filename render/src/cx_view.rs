@@ -534,7 +534,8 @@ impl DrawCall {
 
 const VW_UNI_SCROLL: usize = 0;
 const VW_UNI_CLIP: usize = 4;
-const VW_UNI_SIZE: usize = 8;
+const VW_VIEW_TRANSFORM: usize = 8;
+const VW_UNI_SIZE: usize = 24;
 
 #[derive(Default, Clone)]
 pub struct CxView {
@@ -560,7 +561,7 @@ impl CxView {
     
     pub fn set_clipping_uniforms(&mut self) {
         if self.clipped {
-            self.uniform_view_clip(self.rect.x, self.rect.y, self.rect.x + self.rect.w, self.rect.y + self.rect.h);
+           self.uniform_view_clip(self.rect.x, self.rect.y, self.rect.x + self.rect.w, self.rect.y + self.rect.h);
         }
         else {
             self.uniform_view_clip(-50000.0, -50000.0, 50000.0, 50000.0);
@@ -571,6 +572,7 @@ impl CxView {
         sg.compose(shader_ast!({
             let view_scroll: vec2<UniformVw>;
             let view_clip: vec4<UniformVw>;
+            let view_transform: mat4<UniformVw>;
         }))
     }
     
@@ -579,6 +581,13 @@ impl CxView {
         //return Vec2 {x: self.uniforms[VW_UNI_SCROLL + 0], y: self.uniforms[VW_UNI_SCROLL + 1]}
     //}
     
+    pub fn uniform_view_transform(&mut self, v: &Mat4) {
+        //dump in uniforms
+        for i in 0..16 {
+            self.uniforms[VW_VIEW_TRANSFORM + i] = v.v[i];
+        }
+    }
+        
     pub fn clip_and_scroll_rect(&self, x: f32, y: f32, w: f32, h: f32) -> Rect {
         let mut x1 = x - self.uniforms[VW_UNI_SCROLL + 0];
         let mut y1 = y - self.uniforms[VW_UNI_SCROLL + 1];

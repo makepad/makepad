@@ -45,6 +45,7 @@ impl Style for ScrollBar {
                 Track::color("sb.color", Ease::Lin, vec![(1.0, color("#9"))])
             ]),
             sb: Quad {
+                z: 1.0,
                 shader: cx.add_shader(Self::def_shader(), "ScrollBar.sb"),
                 ..Style::style(cx)
             },
@@ -86,7 +87,7 @@ impl ScrollBar {
                     view_clip.zw
                 );
                 pos = (clipped - vec2(x, y)) / vec2(w, h);
-                return vec4(clipped, 0., 1.) * camera_projection;
+                return camera_projection*(camera_view*(view_transform*vec4(clipped, z, 1.)));
             }
             
             fn pixel() -> vec4 {

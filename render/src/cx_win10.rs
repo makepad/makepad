@@ -126,7 +126,6 @@ impl Cx {
                             }
                             
                             window.window_command = match &window.window_command {
-                                CxWindowCmd::None => CxWindowCmd::None,
                                 CxWindowCmd::Restore => {
                                     for d3d11_window in &mut d3d11_windows {if d3d11_window.window_id == index {
                                         d3d11_window.win32_window.restore();
@@ -145,6 +144,7 @@ impl Cx {
                                     }}
                                     CxWindowCmd::None
                                 },
+                                _ => CxWindowCmd::None,
                             };
                             
                             

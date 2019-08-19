@@ -7,3 +7,8 @@ pub use crate::process_forkpty::*;
 mod process_conpty;
 #[cfg(target_os = "windows")]
 pub use crate::process_conpty::*;
+
+#[cfg(target_arch = "wasm32")]
+mod process_dummy;
+#[cfg(target_arch = "wasm32")]
+pub use crate::process_dummy::*; 

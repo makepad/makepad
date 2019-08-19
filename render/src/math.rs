@@ -109,14 +109,12 @@ pub fn vec4(x:f32, y:f32, z:f32, w:f32)->Vec4{
 
 impl Mat4{
     pub fn identity() -> Mat4{
-        return Mat4{
-            v:[
-                1.0,0.0,0.0,0.0,
-                0.0,1.0,0.0,0.0,
-                0.0,0.0,1.0,0.0,
-                0.0,0.0,0.0,1.0
-            ]
-        }
+        return Mat4{v:[
+            1.0,0.0,0.0,0.0,
+            0.0,1.0,0.0,0.0,
+            0.0,0.0,1.0,0.0,
+            0.0,0.0,0.0,1.0
+        ]}
     }
 
     pub fn rotate_tsrt(t1: Vec3, s: Vec3, r: Vec3, t2: Vec3) -> Mat4{
@@ -157,15 +155,32 @@ impl Mat4{
         ]}
     }
 
+    pub fn translate(x:f32, y:f32, z:f32)->Mat4{
+        return Mat4{v:[
+            0.05,0.0,0.0,0.0,
+            0.0,-0.05,0.0,0.0,
+            0.0,0.0,0.1,0.0,
+            x,y,z,1.0
+        ]}
+
+    }
+
     pub fn ortho(left:f32, right:f32, top:f32, bottom:f32, near:f32, far:f32, scalex:f32, scaley:f32) -> Mat4{
         let lr = 1.0 / (left - right);
         let bt = 1.0 / (bottom - top);
-        let nf = 1.0 / (near - far);
+        let nf = 1.0 / (near - far);/*
         return Mat4{v:[
             -2.0 * lr * scalex, 0.0, 0.0, (left+right) * lr,
             0.0, -2.0 * bt * scaley, 0.0, (top+bottom) * bt,
             0.0, 0.0, 2.0 * nf, (far + near) * nf,
             0.0, 0.0, 0.0, 1.0
+        ]}*/
+        return Mat4{v:[
+            -2.0 * lr * scalex, 0.0, 0.0, 0.0,
+            0.0, -2.0 * bt * scaley, 0.0, 0.0,
+            0.0, 0.0, 2.0 * nf, 0.0,
+            (left+right) * lr, (top+bottom) * bt,  (far + near) * nf, 1.0
         ]}
+
     }
 } 

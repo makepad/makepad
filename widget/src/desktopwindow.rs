@@ -16,6 +16,7 @@ pub struct DesktopWindow {
     pub min_btn: DesktopButton,
     pub max_btn: DesktopButton,
     pub close_btn: DesktopButton,
+    pub vr_btn: DesktopButton,
     pub caption_text: Text,
     pub caption_bg: Quad,
     pub caption_size: Vec2,
@@ -52,6 +53,7 @@ impl Style for DesktopWindow {
             min_btn: DesktopButton::style(cx),
             max_btn: DesktopButton::style(cx),
             close_btn: DesktopButton::style(cx),
+            vr_btn: DesktopButton::style(cx),
             caption_text: Text::style(cx),
             caption_bg: Quad {
                 color: cx.color("bg_selected"),
@@ -73,6 +75,14 @@ impl DesktopWindow {
     pub fn handle_desktop_window(&mut self, cx: &mut Cx, event: &mut Event) -> DesktopWindowEvent {
         //self.main_view.handle_scroll_bars(cx, event);
         //self.inner_view.handle_scroll_bars(cx, event);
+        if let ButtonEvent::Clicked = self.vr_btn.handle_button(cx, event) {
+            if self.window.vr_is_presenting(cx) {
+                self.window.vr_stop_presenting(cx);
+            }
+            else{
+                self.window.vr_start_presenting(cx);
+            }
+        }
         if let ButtonEvent::Clicked = self.min_btn.handle_button(cx, event) {
             self.window.minimize_window(cx);
         }
@@ -112,7 +122,6 @@ impl DesktopWindow {
                                 dq.response = WindowDragQueryResponse::Caption;
                             }
                         }
-                        
                     }
                     true
                 }
@@ -217,8 +226,13 @@ impl DesktopWindow {
     }
     
     pub fn end_desktop_window(&mut self, cx: &mut Cx) {
-        
         self.inner_view.end_view(cx);
+        // lets draw a VR button top right over the UI.
+        if cx.vr_can_present{ // show a switch-to-VRMode button
+            cx.reset_turtle_walk();
+            cx.move_turtle( cx.get_width_total() - 50.0, 0.);
+            self.vr_btn.draw_desktop_button(cx, DesktopButtonType::VRMode);
+        }
         self.main_view.end_view(cx);
         if self.test_rtt {
             self.sub_pass.end_pass(cx);

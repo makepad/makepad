@@ -33,6 +33,7 @@ impl Cx {
                 if draw_call.instance_dirty {
                     draw_call.instance_dirty = false;
                     // update the instance buffer data
+                    self.platform.bytes_written += draw_call.instance.len() * 4;
                     draw_call.platform.inst_vbuf.update_with_f32_data(metal_cx, &draw_call.instance);
                 }
                 if draw_call.uniforms_dirty {
@@ -96,8 +97,9 @@ impl Cx {
         pass_id: usize,
         _dpi_factor: f32,
         layer: &CoreAnimationLayer,
-        metal_cx: &MetalCx,
+        metal_cx: &mut MetalCx,
     ) {
+        self.platform.bytes_written = 0;
         let view_id = self.passes[pass_id].main_view_id.unwrap();
         let pass_size = self.passes[pass_id].pass_size;
         self.passes[pass_id].set_ortho_matrix(Vec2::zero(), pass_size);
@@ -141,6 +143,7 @@ impl Cx {
         unsafe {
             msg_send![pool, release];
         }
+        println!("Bytes written {}", self.platform.bytes_written);
     }
     
     pub fn draw_pass_to_texture(
@@ -152,7 +155,7 @@ impl Cx {
         let view_id = self.passes[pass_id].main_view_id.unwrap();
         let pass_size = self.passes[pass_id].pass_size;
         self.passes[pass_id].set_ortho_matrix(Vec2::zero(), pass_size);
-        
+
         let pool = unsafe {NSAutoreleasePool::new(cocoa::base::nil)};
         
         let render_pass_descriptor = RenderPassDescriptor::new();

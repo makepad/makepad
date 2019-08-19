@@ -1,10 +1,21 @@
-use render::*; 
+use render::*;
 use crate::terminal::*;
+use process::*;
 
-#[derive(Clone)]
 pub struct LocalTerminal {
     pub terminal: Terminal,
-    pub term_buffer: TermBuffer
+    pub term_buffer: TermBuffer,
+    pub process: Option<Process>
+}
+
+impl Clone for LocalTerminal {
+    fn clone(&self) -> Self {
+        LocalTerminal {
+            terminal: self.terminal.clone(),
+            term_buffer: self.term_buffer.clone(),
+            process:None
+        }
+    }
 }
 
 impl Style for LocalTerminal {
@@ -12,6 +23,7 @@ impl Style for LocalTerminal {
         let local_terminal = Self {
             terminal: Terminal::style(cx),
             term_buffer: TermBuffer::default(),
+            process: None
         };
         //tab.animator.default = tab.anim_default(cx);
         local_terminal
@@ -25,7 +37,9 @@ pub enum LocalTerminalEvent {
 }
 
 impl LocalTerminal {
-    pub fn start_terminal(&mut self, _cx: &mut Cx){
+    pub fn start_terminal(&mut self, _cx: &mut Cx) {
+        self.process = Some(Process::start())
+        
     }
     
     pub fn handle_local_terminal(&mut self, cx: &mut Cx, event: &mut Event) -> TerminalEvent {

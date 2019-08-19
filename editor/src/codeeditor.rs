@@ -173,6 +173,7 @@ impl Style for CodeEditor {
                 unexpected: color256(255, 0, 0),
             },
             indent_lines: Quad {
+                z:1.0,
                 shader: cx.add_shader(Self::def_indent_lines_shader(), "Editor.indent_lines"),
                 ..Style::style(cx)
             },
@@ -231,6 +232,7 @@ impl Style for CodeEditor {
                 font: cx.load_font_style("mono_font"),
                 font_size: 12.0,
                 brightness: 1.0,
+                z:1.0,
                 line_spacing: 1.4,
                 do_dpi_dilate: true,
                 wrapping: Wrapping::Line,
@@ -240,6 +242,7 @@ impl Style for CodeEditor {
                 font: cx.load_font_style("mono_font"),
                 font_size: 12.0,
                 brightness: 1.0,
+                z:1.0,
                 line_spacing: 1.4,
                 do_dpi_dilate: true,
                 do_h_scroll: false,
@@ -376,7 +379,7 @@ impl CodeEditor {
                     view_clip.zw
                 );
                 pos = (clipped - shift - vec2(x, y)) / vec2(w, h);
-                return vec4(clipped.x, clipped.y, 0., 1.) * camera_projection;
+                return  camera_projection*(camera_view*(view_transform*vec4(clipped.x, clipped.y, 0., 1.)));
             }
             
             fn pixel() -> vec4 {

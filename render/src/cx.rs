@@ -17,17 +17,6 @@ pub use crate::elements::*;
 pub use crate::animator::*;
 pub use crate::area::*;
 
-/*
-#[cfg(target_os = "macos")]
-pub use crate::cx_glsl::*;
-
-#[cfg(target_os = "macos")]
-pub use crate::cx_opengl::*;
-
-#[cfg(target_os = "macos")]
-pub use crate::cx_xlib::*;
-*/
-
 #[cfg(any(target_os = "linux"))]
 pub use crate::cx_linux::*;
 #[cfg(target_os = "linux")]
@@ -95,6 +84,7 @@ pub struct Cx {
     pub shader_map: HashMap<ShaderGen, usize>,
     
     pub is_in_redraw_cycle: bool,
+    pub vr_can_present: bool,
     pub window_stack: Vec<usize>,
     pub pass_stack: Vec<usize>,
     pub view_stack: Vec<usize>,
@@ -188,6 +178,7 @@ impl Default for Cx {
             shader_map: HashMap::new(),
             
             is_in_redraw_cycle: false,
+            vr_can_present: false,
             window_stack: Vec::new(),
             pass_stack: Vec::new(),
             view_stack: Vec::new(),

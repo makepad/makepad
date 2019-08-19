@@ -13,7 +13,7 @@ impl Cx {
         
         cocoa_app.init();
         
-        let metal_cx = MetalCx::new();
+        let mut metal_cx = MetalCx::new();
         
         let mut metal_windows: Vec<MetalWindow> = Vec::new();
         
@@ -100,7 +100,6 @@ impl Cx {
                             };
                             
                             window.window_command = match &window.window_command {
-                                CxWindowCmd::None => CxWindowCmd::None,
                                 CxWindowCmd::Restore => {
                                     for metal_window in &mut metal_windows {if metal_window.window_id == index {
                                         metal_window.cocoa_window.restore();
@@ -119,6 +118,7 @@ impl Cx {
                                     }}
                                     CxWindowCmd::None
                                 },
+                                _ => CxWindowCmd::None,
                             };
                             
                             if let Some(topmost) = window.window_topmost {
@@ -184,7 +184,7 @@ impl Cx {
                                                 *pass_id,
                                                 dpi_factor,
                                                 &metal_window.core_animation_layer,
-                                                &metal_cx,
+                                                &mut metal_cx,
                                             );
                                         }}
                                     }
@@ -194,7 +194,7 @@ impl Cx {
                                         self.draw_pass_to_texture(
                                             *pass_id,
                                             dpi_factor,
-                                            &metal_cx,
+                                            &mut metal_cx,
                                         );
                                     },
                                     CxPassDepOf::None => ()
@@ -255,6 +255,7 @@ impl Cx {
 
 #[derive(Clone, Default)]
 pub struct CxPlatform {
+    pub bytes_written: usize,
     pub set_window_position: Option<Vec2>,
     pub set_window_outer_size: Option<Vec2>,
     pub set_ime_position: Option<Vec2>,

@@ -5,6 +5,7 @@ pub struct Quad {
     pub shader: Shader,
     pub do_h_scroll: bool,
     pub do_v_scroll: bool,
+    pub z:f32,
     pub color: Color
 }
 
@@ -13,12 +14,13 @@ impl Style for Quad {
         Self {
             shader: cx.add_shader(Self::def_quad_shader(), "Quad"),
             do_h_scroll:true,
+            z:0.0,
             do_v_scroll:true,
             color: color("green")
         }
     }
 }
-
+ 
 impl Quad {
     pub fn def_quad_shader() -> ShaderGen {
         // lets add the draw shader lib
@@ -33,6 +35,7 @@ impl Quad {
             let y: float<Instance>;
             let w: float<Instance>;
             let h: float<Instance>;
+            let z: float<Instance>;
             let color: vec4<Instance>;
             let pos: vec2<Varying>;
             let view_do_scroll: vec2<Uniform>;
@@ -48,7 +51,7 @@ impl Quad {
                 );
                 pos = (clipped - shift - vec2(x, y)) / vec2(w, h);
                 // only pass the clipped position forward
-                return vec4(clipped.x, clipped.y, 0., 1.) * camera_projection;
+                return camera_projection*(camera_view*(view_transform*vec4(clipped.x, clipped.y, z, 1.)));
             }
             
             fn pixel() -> vec4 {
@@ -102,6 +105,7 @@ impl Quad {
             rect.y,
             rect.w,
             rect.h,
+            self.z,
             /*color*/self.color.r,
             self.color.g,
             self.color.b,

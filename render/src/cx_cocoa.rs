@@ -690,6 +690,7 @@ impl CocoaWindow {
     
     pub fn get_window_geom(&self) -> WindowGeom {
         WindowGeom {
+            vr_is_presenting:false,
             is_topmost: false,
             is_fullscreen: self.is_fullscreen,
             inner_size: self.get_inner_size(),

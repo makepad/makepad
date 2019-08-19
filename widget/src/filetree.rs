@@ -179,12 +179,13 @@ impl Style for FileTree {
             },
             filler: Quad {
                 color: cx.color("icon_color"),
+                z:1.0,
                 shader: cx.add_shader(Self::def_filler_shader(), "FileTree.filler"),
                 ..Style::style(cx)
             },
             tree_folder_color: cx.color("text_selected_focus"),
             tree_file_color: cx.color("text_deselected_focus"),
-            tree_text: Text::style(cx),
+            tree_text: Text{z:1.0,..Text::style(cx)},
             view: View {
                 //scroll_h:Some(ScrollBar{
                 //    ..Style::style(cx)

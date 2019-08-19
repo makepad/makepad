@@ -1,5 +1,5 @@
 use crate::cx::*;
-use crate::cx_lib::*;
+use crate::cx_xlib::*;
 use std::ffi::CString;
 use std::ptr;
 use std::slice;
@@ -76,7 +76,7 @@ impl Cx {
         }
     }
     
-    fn calc_dirty_bounds(&mut self, pass_id: usize, view_id: usize, view_bounds: &mut ViewBounds) {
+    pub fn calc_dirty_bounds(&mut self, pass_id: usize, view_id: usize, view_bounds: &mut ViewBounds) {
         let draw_calls_len = self.views[view_id].draw_calls_len;
         for draw_call_id in 0..draw_calls_len {
             let sub_view_id = self.views[view_id].draw_calls[draw_call_id].sub_view_id;
@@ -97,7 +97,7 @@ impl Cx {
     }
     
     
-    fn draw_pass_to_window(
+    pub fn draw_pass_to_window(
         &mut self,
         pass_id: usize,
         _dpi_factor: f32,
@@ -212,7 +212,7 @@ impl Cx {
         }
     }
     
-    fn draw_pass_to_texture(
+    pub fn draw_pass_to_texture(
         &mut self,
         pass_id: usize,
         _dpi_factor: f32,
@@ -436,11 +436,11 @@ impl Cx {
 }
 
 #[derive(Clone, PartialEq)]
-struct ViewBounds {
-    min_x: f32,
-    min_y: f32,
-    max_x: f32,
-    max_y: f32
+pub struct ViewBounds {
+    pub min_x: f32,
+    pub min_y: f32,
+    pub max_x: f32,
+    pub max_y: f32
 }
 
 impl ViewBounds {
@@ -624,7 +624,7 @@ pub struct CxPlatformShader {
 
 
 #[derive(Clone)]
-struct OpenglWindow {
+pub struct OpenglWindow {
     pub window_id: usize,
     pub window_geom: WindowGeom,
     pub opening_repaint_count: u32,
@@ -633,7 +633,7 @@ struct OpenglWindow {
 }
 
 impl OpenglWindow {
-    fn new(window_id: usize, opengl_cx: &OpenglCx, xlib_app: &mut XlibApp, inner_size: Vec2, position: Option<Vec2>, title: &str) -> OpenglWindow {
+    pub fn new(window_id: usize, opengl_cx: &OpenglCx, xlib_app: &mut XlibApp, inner_size: Vec2, position: Option<Vec2>, title: &str) -> OpenglWindow {
         
         let mut xlib_window = XlibWindow::new(xlib_app, window_id);
         
@@ -648,7 +648,7 @@ impl OpenglWindow {
         }
     }
     
-    fn resize_framebuffer(&mut self, _opengl_cx: &OpenglCx) -> bool {
+    pub fn resize_framebuffer(&mut self, _opengl_cx: &OpenglCx) -> bool {
         let cal_size = Vec2 {
             x: self.window_geom.inner_size.x * self.window_geom.dpi_factor,
             y: self.window_geom.inner_size.y * self.window_geom.dpi_factor

@@ -1,6 +1,6 @@
 use crate::cx::*;
 
-#[derive(Default, Clone)]
+#[derive(Clone)]
 pub struct Window {
     pub window_id: Option<usize>,
     pub create_inner_size: Option<Vec2>,
@@ -113,6 +113,27 @@ impl Window {
         }
     }
     
+    pub fn vr_is_presenting(&mut self, cx: &mut Cx) -> bool {
+        if let Some(window_id) = self.window_id {
+            cx.windows[window_id].window_geom.vr_is_presenting
+        }
+        else {
+            false
+        }
+    }
+    
+    pub fn vr_start_presenting(&mut self, cx: &mut Cx){
+        if let Some(window_id) = self.window_id {
+            cx.windows[window_id].window_command = CxWindowCmd::VrStartPresenting;
+        }
+    }
+    
+    pub fn vr_stop_presenting(&mut self, cx: &mut Cx){
+        if let Some(window_id) = self.window_id {
+            cx.windows[window_id].window_command = CxWindowCmd::VrStopPresenting;
+        }
+    }
+    
     pub fn is_topmost(&mut self, cx: &mut Cx) -> bool {
         if let Some(window_id) = self.window_id {
             cx.windows[window_id].window_geom.is_topmost
@@ -144,6 +165,7 @@ impl Window {
 #[derive(Clone, Default, Debug, PartialEq)]
 pub struct WindowGeom {
     pub dpi_factor: f32,
+    pub vr_is_presenting: bool,
     pub is_fullscreen: bool,
     pub is_topmost: bool,
     pub position: Vec2,
@@ -165,6 +187,8 @@ pub enum CxWindowCmd {
     Restore,
     Maximize,
     Minimize,
+    VrStartPresenting,
+    VrStopPresenting
 }
 
 impl Default for CxWindowCmd {
