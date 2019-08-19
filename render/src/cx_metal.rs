@@ -18,6 +18,7 @@ impl Cx {
         // tad ugly otherwise the borrow checker locks 'self' and we can't recur
         let draw_calls_len = self.views[view_id].draw_calls_len;
         self.views[view_id].set_clipping_uniforms();
+        self.views[view_id].uniform_view_transform(&Mat4::identity());
         for draw_call_id in 0..draw_calls_len {
             let sub_view_id = self.views[view_id].draw_calls[draw_call_id].sub_view_id;
             if sub_view_id != 0 {
@@ -103,6 +104,7 @@ impl Cx {
         let view_id = self.passes[pass_id].main_view_id.unwrap();
         let pass_size = self.passes[pass_id].pass_size;
         self.passes[pass_id].set_ortho_matrix(Vec2::zero(), pass_size);
+        self.passes[pass_id].uniform_camera_view(&Mat4::identity());
         let pool = unsafe {NSAutoreleasePool::new(cocoa::base::nil)};
         //let command_buffer = command_queue.new_command_buffer();
         if let Some(drawable) = layer.next_drawable() {
@@ -143,7 +145,6 @@ impl Cx {
         unsafe {
             msg_send![pool, release];
         }
-        println!("Bytes written {}", self.platform.bytes_written);
     }
     
     pub fn draw_pass_to_texture(
@@ -155,6 +156,7 @@ impl Cx {
         let view_id = self.passes[pass_id].main_view_id.unwrap();
         let pass_size = self.passes[pass_id].pass_size;
         self.passes[pass_id].set_ortho_matrix(Vec2::zero(), pass_size);
+        self.passes[pass_id].uniform_camera_view(&Mat4::identity());
 
         let pool = unsafe {NSAutoreleasePool::new(cocoa::base::nil)};
         
