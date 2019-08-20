@@ -175,7 +175,7 @@ impl Style for CodeEditor {
                 unexpected: color256(255, 0, 0),
             },
             indent_lines: Quad {
-                z:1.0,
+                z:0.001,
                 shader: cx.add_shader(Self::def_indent_lines_shader(), "Editor.indent_lines"),
                 ..Style::style(cx)
             },
@@ -234,7 +234,7 @@ impl Style for CodeEditor {
                 font: cx.load_font_style("mono_font"),
                 font_size: 12.0,
                 brightness: 1.0,
-                z:1.0,
+                z:0.01,
                 line_spacing: 1.4,
                 do_dpi_dilate: true,
                 wrapping: Wrapping::Line,
@@ -244,7 +244,7 @@ impl Style for CodeEditor {
                 font: cx.load_font_style("mono_font"),
                 font_size: 12.0,
                 brightness: 1.0,
-                z:1.0,
+                z:0.001,
                 line_spacing: 1.4,
                 do_dpi_dilate: true,
                 do_h_scroll: false,
@@ -1362,7 +1362,7 @@ impl CodeEditor {
             let height = self._monospace_size.y;
             
             // actually generate the GPU data for the text
-            //self.text.z = (self._paren_stack.len() as f32)*5.0 + 1.0;
+            self.text.z = (self._paren_stack.len() as f32)*0.02+0.03;
             if self._highlight_selection.len() > 0 { // slow loop
                 //let draw_search = &mut self._draw_search;
                 let line_chunk = &mut self._line_chunk;

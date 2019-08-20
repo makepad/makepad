@@ -130,7 +130,7 @@ impl Text{
                     normalized.xy
                 );
 
-                return camera_projection*(camera_view*(view_transform*vec4(clipped,0.,1.))); 
+                return camera_projection*(camera_view*(view_transform*vec4(clipped,z,1.))); 
             }
         }))
     }

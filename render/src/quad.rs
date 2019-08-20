@@ -51,7 +51,7 @@ impl Quad {
                 );
                 pos = (clipped - shift - vec2(x, y)) / vec2(w, h);
                 // only pass the clipped position forward
-                return camera_projection*(camera_view*(view_transform*vec4(clipped.x, clipped.y, 0., 1.)));
+                return camera_projection*(camera_view*(view_transform*vec4(clipped.x, clipped.y, z, 1.)));
             }
             
             fn pixel() -> vec4 {
