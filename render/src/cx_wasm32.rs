@@ -327,9 +327,6 @@ impl Cx {
                 },
                 20 => { // vr_frame, TODO add all the matrices / tracked hands / position IO'ed here
                     is_animation_frame = true;
-                    for (_pass_id, cxpass) in self.passes.iter_mut().enumerate() {
-                        cxpass.paint_dirty = true;
-                    }
                     let time = to_wasm.mf64();
                     //log!(self, "{} o clock",time);
                     if self.playing_anim_areas.len() != 0 {
@@ -339,6 +336,11 @@ impl Cx {
                         self.call_frame_event(&mut event_handler, time);
                     }
                 },
+                21 => { /// paint_dirty
+                    for (_pass_id, cxpass) in self.passes.iter_mut().enumerate() {
+                        cxpass.paint_dirty = true;
+                    }
+                }
                 _ => {
                     panic!("Message unknown")
                 }

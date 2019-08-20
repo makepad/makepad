@@ -228,6 +228,11 @@
             this.send_f64(time);
         }
         
+        paint_dirty(time, frame_data) {
+            let pos = this.fit(1);
+            this.mu32[pos ++] = 21;
+        }
+        
         end() {
             let pos = this.fit(1);
             this.mu32[pos] = 0;
@@ -342,17 +347,17 @@
             // destroy from_wasm_ptr object
             this.exports.dealloc_wasm_message(from_wasm_ptr);
         }
-
+        
         
         request_animation_frame() {
             if (this.vr_is_presenting || this.req_anim_frame_id) {
                 return;
             }
             this.req_anim_frame_id = window.requestAnimationFrame(time => {
+                this.req_anim_frame_id = 0;
                 if (this.vr_is_presenting) {
                     return
                 }
-                this.req_anim_frame_id = 0;
                 this.to_wasm.animation_frame(time / 1000.0);
                 this.in_animation_frame = true;
                 this.do_wasm_io();
@@ -521,13 +526,31 @@
                 // ensure we always know when we begin/end presenting we need to
                 // listen for vrdisplaypresentchange events.
                 let on_vr_display_present_change = _ => {
-                    console.log("present change!")
                     this.vr_is_presenting = this.vr_display.isPresenting;
                     if (this.vr_is_presenting) { // we need to start the continuous repaintloop
                         let vr_on_request_animation_frame = time => {
+                            if (!this.vr_is_presenting) {
+                                console.log("TERMINATING RENDER");
+                                return
+                            }
                             this.vr_display.requestAnimationFrame(vr_on_request_animation_frame);
                             this.vr_display.getFrameData(this.vr_frame_data);
                             
+                            if(this.vr_display.stageParameters){
+                                let inv = new Float32Array(16);
+                                this.vr_left_view_matrix = new Float32Array(16);
+                                this.vr_right_view_matrix = new Float32Array(16);
+                                mat4_invert(inv, this.vr_display.stageParameters.sittingToStandingTransform);
+                                mat4_multiply(this.vr_left_view_matrix, this.vr_frame_data.leftViewMatrix, inv);
+                                mat4_multiply(this.vr_right_view_matrix, this.vr_frame_data.rightViewMatrix, inv);
+                            }
+                            else{
+                                this.vr_left_view_matrix = this.vr_frame_data.leftViewMatrix;
+                                this.vr_right_view_matrix = this.vr_frame_data.rightViewMatrix;
+                            }
+                            
+                            // compute the view matrices taking into account the persons movement
+                            this.to_wasm.paint_dirty();
                             this.to_wasm.vr_frame(time / 1000.0, this.vr_frame_data);
                             this.in_animation_frame = true;
                             this.do_wasm_io();
@@ -537,7 +560,9 @@
                         this.vr_display.requestAnimationFrame(vr_on_request_animation_frame);
                     }
                     else { // lets return to normal
-                        
+                        console.log("RETURNING TO NORMAL");
+                        this.to_wasm.paint_dirty();
+                        this.request_animation_frame();
                     }
                     this.on_screen_resize();
                 }
@@ -613,9 +638,9 @@
                 preferLowPowerToHighPerformance: true
             }
             
-            var gl = this.gl = canvas.getContext('webgl', options) ||
-            canvas.getContext('webgl-experimental', options) ||
-            canvas.getContext('experimental-webgl', options)
+            var gl = this.gl = canvas.getContext('webgl', options)
+                || canvas.getContext('webgl-experimental', options)
+                || canvas.getContext('experimental-webgl', options)
             
             if (!gl) {
                 var span = document.createElement('span')
@@ -633,7 +658,7 @@
             //gl.OES_texture_float_linear = gl.getExtension('OES_texture_float_linear')
             //gl.OES_texture_half_float = gl.getExtension('OES_texture_half_float')
             //gl.OES_texture_float = gl.getExtension('OES_texture_float')
-            //gl.WEBGL_depth_texture = gl.getExtension("WEBGL_depth_texture") || gl.getExtension("WEBKIT_WEBGL_depth_texture")       
+            //gl.WEBGL_depth_texture = gl.getExtension("WEBGL_depth_texture") || gl.getExtension("WEBKIT_WEBGL_depth_texture")  
             this.on_screen_resize()
         }
         
@@ -979,9 +1004,35 @@
             ta.setAttribute('autocapitalize', 'off')
             ta.setAttribute('spellcheck', 'false')
             var style = document.createElement('style')
-            style.innerHTML = "\n\
-            textarea.makepad { \ n \ z - index: 100000; \ n \ position: absolute; \ n \ opacity: 0; \ n \ border - radius: 4px; \ n \ color: white; \ n \ font - size: 6; \ n \ background: gray; \ n \ -moz - appearance: none; \ n \ appearance: none; \ n \ border: none; \ n \ resize: none; \ n \ outline: none; \ n \ overflow: hidden; \ n \ text - indent: 0px; \ n \ padding: 0 0px; \ n \ margin: 0 - 1px; \ n \ text - indent: 0px; \ n \ -ms - user - select: text; \ n \ -moz - user - select: text; \ n \ -webkit - user - select: text; \ n \ user - select: text; \ n \ white - space: pre!important; \ n \ \ n \} \ n \
-            textarea: focus.makepad { \ n \ outline: 0px !important; \ n \ -webkit - appearance: none; \ n \}"
+            style.innerHTML = "\n"
+                + "textarea.makepad {\n"
+                + "z-index: 100000;\n"
+                + "position: absolute;\n"
+                + "opacity: 0;\n"
+                + "border-radius: 4px;\n"
+                + "color:white;\n"
+                + "font-size: 6;\n"
+                + "background: gray;\n"
+                + "-moz-appearance: none;\n"
+                + "appearance:none;\n"
+                + "border:none;\n"
+                + "resize: none;\n"
+                + "outline: none;\n"
+                + "overflow: hidden;\n"
+                + "text-indent: 0px;\n"
+                + "padding: 0 0px;\n"
+                + "margin: 0 -1px;\n"
+                + "text-indent: 0px;\n"
+                + "-ms-user-select: text;\n"
+                + "-moz-user-select: text;\n"
+                + "-webkit-user-select: text;\n"
+                + "user-select: text;\n"
+                + "white-space: pre!important;\n"
+                + "}\n"
+                + "textarea: focus.makepad {\n"
+                + "outline: 0px !important;\n"
+                + "-webkit-appearance: none;\n"
+                + "}"
             document.body.appendChild(style)
             ta.style.left = -100
             ta.style.top = -100
@@ -1075,8 +1126,8 @@
                     ta.selectionEnd = ta.value.length;
                 }
                 //    this.keyboardCut = true // x cut
-                //if(code === 65 && (e.metaKey || e.ctrlKey)) this.keyboardSelectAll = true     // all (select all)   
-                if (code === 89 && (e.metaKey || e.ctrlKey)) e.preventDefault() // all (select all)   
+                //if(code === 65 && (e.metaKey || e.ctrlKey)) this.keyboardSelectAll = true     // all (select all)
+                if (code === 89 && (e.metaKey || e.ctrlKey)) e.preventDefault() // all (select all)
                 if (code === 83 && (e.metaKey || e.ctrlKey)) e.preventDefault() // ctrl s
                 if (code === 90 && (e.metaKey || e.ctrlKey)) {
                     this.update_text_area_pos();
@@ -1150,7 +1201,7 @@
         }
         
         alloc_array_buffer(array_buffer_id, array) {
-            if(this.multipass_updated_buffers){
+            if (this.multipass_updated_buffers) {
                 return
             }
             var gl = this.gl;
@@ -1162,7 +1213,7 @@
         }
         
         alloc_index_buffer(index_buffer_id, array) {
-            if(this.multipass_updated_buffers){
+            if (this.multipass_updated_buffers) {
                 return
             }
             var gl = this.gl;
@@ -1174,7 +1225,7 @@
         }
         
         alloc_texture(texture_id, width, height, data_ptr) {
-            if(this.multipass_updated_buffers){
+            if (this.multipass_updated_buffers) {
                 return
             }
             var gl = this.gl;
@@ -1193,7 +1244,7 @@
         }
         
         alloc_vao(shader_id, vao_id, geom_ib_id, geom_vb_id, inst_vb_id) {
-            if(this.multipass_updated_buffers){
+            if (this.multipass_updated_buffers) {
                 return
             }
             let gl = this.gl;
@@ -1250,22 +1301,22 @@
             // also possibly use webGL2 uniform buffers. For now this will suffice for webGL 1 compat
             let uniforms_cx = shader.uniforms_cx;
             // if vr_presenting
-            if(this.vr_is_presenting){
+            if (this.vr_is_presenting) {
                 // the first 2 matrices are project and view
-                if(this.multipass_updated_buffers){
+                if (this.multipass_updated_buffers) {
                     gl.uniformMatrix4fv(uniforms_cx[0].loc, false, this.vr_frame_data.rightProjectionMatrix)
-                    gl.uniformMatrix4fv(uniforms_cx[1].loc, false, this.vr_frame_data.rightViewMatrix)
+                    gl.uniformMatrix4fv(uniforms_cx[1].loc, false, this.vr_right_view_matrix)
                 }
-                else{
+                else {
                     gl.uniformMatrix4fv(uniforms_cx[0].loc, false, this.vr_frame_data.leftProjectionMatrix)
-                    gl.uniformMatrix4fv(uniforms_cx[1].loc, false, this.vr_frame_data.leftViewMatrix)
+                    gl.uniformMatrix4fv(uniforms_cx[1].loc, false, this.vr_left_view_matrix)
                 }
                 for (let i = 2; i < uniforms_cx.length; i ++) {
                     let uni = uniforms_cx[i];
                     uni.fn(this, uni.loc, uni.offset + uniforms_cx_ptr);
                 }
             }
-            else{
+            else {
                 for (let i = 0; i < uniforms_cx.length; i ++) {
                     let uni = uniforms_cx[i];
                     uni.fn(this, uni.loc, uni.offset + uniforms_cx_ptr);
@@ -1303,10 +1354,10 @@
         
         end_frame() {
             // mark parse end position
-            if(this.vr_is_presenting && !this.multipass_updated_buffers){
+            if (this.vr_is_presenting && !this.multipass_updated_buffers) {
                 this.multipass_updated_buffers = true;
                 // set up the right eye
-                this.gl.viewport(this.canvas.width*0.5,0,this.canvas.width*0.5,this.canvas.height);
+                this.gl.viewport(this.canvas.width * 0.5, 0, this.canvas.width * 0.5, this.canvas.height);
                 // jump the parser back to begin_frame
                 this.parse = this.vr_begin_parse;
             }
@@ -1315,7 +1366,7 @@
         clear(r, g, b, a) {
             var gl = this.gl;
             this.multipass_updated_buffers = false;
-            gl.viewport(0,0,this.canvas.width, this.canvas.height);
+            gl.viewport(0, 0, this.canvas.width, this.canvas.height);
             gl.enable(gl.DEPTH_TEST);
             gl.depthFunc(gl.LEQUAL);
             gl.blendEquationSeparate(gl.FUNC_ADD, gl.FUNC_ADD);
@@ -1323,12 +1374,12 @@
             gl.enable(gl.BLEND);
             gl.clearColor(r, g, b, a);
             gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
-            if(this.vr_is_presenting){ // set up the left eye
+            if (this.vr_is_presenting) { // set up the left eye
                 // set the viewport to the whole thing
-                gl.viewport(0,0,this.canvas.width*0.5,this.canvas.height);
+                gl.viewport(0, 0, this.canvas.width * 0.5, this.canvas.height);
             }
-            else{
-                // set the viewport 
+            else {
+                // set the viewport
             }
         }
         
@@ -1585,6 +1636,122 @@
     var firefox_logo_key = false;
     function pack_key_modifier(e) {
         return (e.shiftKey? 1: 0) | (e.ctrlKey? 2: 0) | (e.altKey? 4: 0) | ((e.metaKey || firefox_logo_key)? 8: 0)
+    }
+    
+    function mat4_invert(out, a) {
+        let a00 = a[0]
+        let a01 = a[1]
+        let a02 = a[2]
+        let a03 = a[3]
+        let a10 = a[4]
+        let a11 = a[5]
+        let a12 = a[6]
+        let a13 = a[7]
+        let a20 = a[8]
+        let a21 = a[9]
+        let a22 = a[10]
+        let a23 = a[11]
+        let a30 = a[12]
+        let a31 = a[13]
+        let a32 = a[14]
+        let a33 = a[15]
+        
+        let b00 = a00 * a11 - a01 * a10;
+        let b01 = a00 * a12 - a02 * a10;
+        let b02 = a00 * a13 - a03 * a10;
+        let b03 = a01 * a12 - a02 * a11;
+        let b04 = a01 * a13 - a03 * a11;
+        let b05 = a02 * a13 - a03 * a12;
+        let b06 = a20 * a31 - a21 * a30;
+        let b07 = a20 * a32 - a22 * a30;
+        let b08 = a20 * a33 - a23 * a30;
+        let b09 = a21 * a32 - a22 * a31;
+        let b10 = a21 * a33 - a23 * a31;
+        let b11 = a22 * a33 - a23 * a32;
+        
+        // Calculate the determinant
+        let det = b00 * b11 - b01 * b10 + b02 * b09 + b03 * b08 - b04 * b07 + b05 * b06;
+        
+        if (!det) {
+            return null;
+        }
+        det = 1.0 / det;
+        
+        out[0] = (a11 * b11 - a12 * b10 + a13 * b09) * det;
+        out[1] = (a02 * b10 - a01 * b11 - a03 * b09) * det;
+        out[2] = (a31 * b05 - a32 * b04 + a33 * b03) * det;
+        out[3] = (a22 * b04 - a21 * b05 - a23 * b03) * det;
+        out[4] = (a12 * b08 - a10 * b11 - a13 * b07) * det;
+        out[5] = (a00 * b11 - a02 * b08 + a03 * b07) * det;
+        out[6] = (a32 * b02 - a30 * b05 - a33 * b01) * det;
+        out[7] = (a20 * b05 - a22 * b02 + a23 * b01) * det;
+        out[8] = (a10 * b10 - a11 * b08 + a13 * b06) * det;
+        out[9] = (a01 * b08 - a00 * b10 - a03 * b06) * det;
+        out[10] = (a30 * b04 - a31 * b02 + a33 * b00) * det;
+        out[11] = (a21 * b02 - a20 * b04 - a23 * b00) * det;
+        out[12] = (a11 * b07 - a10 * b09 - a12 * b06) * det;
+        out[13] = (a00 * b09 - a01 * b07 + a02 * b06) * det;
+        out[14] = (a31 * b01 - a30 * b03 - a32 * b00) * det;
+        out[15] = (a20 * b03 - a21 * b01 + a22 * b00) * det;
+        
+        return out;
+    }
+    
+    function mat4_multiply(out, a, b) {
+        let a00 = a[0]
+        let a01 = a[1]
+        let a02 = a[2]
+        let a03 = a[3]
+        let a10 = a[4]
+        let a11 = a[5]
+        let a12 = a[6]
+        let a13 = a[7]
+        let a20 = a[8]
+        let a21 = a[9]
+        let a22 = a[10]
+        let a23 = a[11]
+        let a30 = a[12]
+        let a31 = a[13]
+        let a32 = a[14]
+        let a33 = a[15]
+        
+        // Cache only the current line of the second matrix
+        let b0 = b[0]
+        let b1 = b[1]
+        let b2 = b[2]
+        let b3 = b[3]
+        out[0] = b0 * a00 + b1 * a10 + b2 * a20 + b3 * a30;
+        out[1] = b0 * a01 + b1 * a11 + b2 * a21 + b3 * a31;
+        out[2] = b0 * a02 + b1 * a12 + b2 * a22 + b3 * a32;
+        out[3] = b0 * a03 + b1 * a13 + b2 * a23 + b3 * a33;
+        
+        b0 = b[4];
+        b1 = b[5];
+        b2 = b[6];
+        b3 = b[7];
+        out[4] = b0 * a00 + b1 * a10 + b2 * a20 + b3 * a30;
+        out[5] = b0 * a01 + b1 * a11 + b2 * a21 + b3 * a31;
+        out[6] = b0 * a02 + b1 * a12 + b2 * a22 + b3 * a32;
+        out[7] = b0 * a03 + b1 * a13 + b2 * a23 + b3 * a33;
+        
+        b0 = b[8];
+        b1 = b[9];
+        b2 = b[10];
+        b3 = b[11];
+        out[8] = b0 * a00 + b1 * a10 + b2 * a20 + b3 * a30;
+        out[9] = b0 * a01 + b1 * a11 + b2 * a21 + b3 * a31;
+        out[10] = b0 * a02 + b1 * a12 + b2 * a22 + b3 * a32;
+        out[11] = b0 * a03 + b1 * a13 + b2 * a23 + b3 * a33;
+        
+        b0 = b[12];
+        b1 = b[13];
+        b2 = b[14];
+        b3 = b[15];
+        out[12] = b0 * a00 + b1 * a10 + b2 * a20 + b3 * a30;
+        out[13] = b0 * a01 + b1 * a11 + b2 * a21 + b3 * a31;
+        out[14] = b0 * a02 + b1 * a12 + b2 * a22 + b3 * a32;
+        out[15] = b0 * a03 + b1 * a13 + b2 * a23 + b3 * a33;
+        return out;
     }
     
     var wasm_instances = [];

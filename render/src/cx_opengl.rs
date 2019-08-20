@@ -18,6 +18,7 @@ impl Cx {
             return
         }
         self.views[view_id].set_clipping_uniforms();
+        self.views[view_id].uniform_view_transform(&Mat4::identity());
         for draw_call_id in 0..draw_calls_len {
             let sub_view_id = self.views[view_id].draw_calls[draw_call_id].sub_view_id;
             if sub_view_id != 0 {
@@ -126,6 +127,7 @@ impl Cx {
             
             let pass_size = self.passes[pass_id].pass_size;
             self.passes[pass_id].set_ortho_matrix(Vec2::zero(), pass_size);
+            self.passes[pass_id].uniform_camera_view(&Mat4::identity());
             let pix_width = opengl_window.window_geom.inner_size.x * opengl_window.window_geom.dpi_factor;
             let pix_height = opengl_window.window_geom.inner_size.y * opengl_window.window_geom.dpi_factor;
             
@@ -173,7 +175,8 @@ impl Cx {
                 Vec2 {x: view_bounds.min_x, y: view_bounds.min_y},
                 Vec2 {x: pix_width / opengl_window.window_geom.dpi_factor, y: pix_height / opengl_window.window_geom.dpi_factor}
             );
-            
+            self.passes[pass_id].uniform_camera_view(&Mat4::identity());
+
             unsafe {
                 (opengl_cx.glx.glXMakeCurrent)(xlib_app.display, window, opengl_cx.context);
                 gl::Viewport(0, 0, pix_width as i32, pix_height as i32);

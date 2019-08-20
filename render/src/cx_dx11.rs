@@ -104,6 +104,7 @@ impl Cx {
         let draw_calls_len = {
             let cxview = &mut self.views[view_id];
             cxview.set_clipping_uniforms();
+            cxview.uniform_view_transform(&Mat4::identity());
             cxview.platform.uni_dl.update_with_f32_constant_data(d3d11_cx, &mut cxview.uniforms);
             cxview.draw_calls_len
         };
@@ -223,6 +224,7 @@ impl Cx {
         let view_id = self.passes[pass_id].main_view_id.unwrap();
         let pass_size = self.passes[pass_id].pass_size;
         self.passes[pass_id].set_ortho_matrix(Vec2::zero(), pass_size);
+        self.passes[pass_id].uniform_camera_view(&Mat4::identity());
         
         self.platform.uni_cx.update_with_f32_constant_data(&d3d11_cx, &mut self.passes[pass_id].uniforms);
         
@@ -253,6 +255,7 @@ impl Cx {
         let view_id = self.passes[pass_id].main_view_id.unwrap();
         let pass_size = self.passes[pass_id].pass_size;
         self.passes[pass_id].set_ortho_matrix(Vec2::zero(), pass_size);
+        self.passes[pass_id].uniform_camera_view(&Mat4::identity());
         
         self.platform.uni_cx.update_with_f32_constant_data(&d3d11_cx, &mut self.passes[pass_id].uniforms);
         
