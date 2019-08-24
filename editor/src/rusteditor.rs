@@ -225,7 +225,7 @@ impl RustTokenizer {
                     };
                     return TokenType::String;
                 },
-                '0'...'9' => { // try to parse numbers
+                '0'..='9' => { // try to parse numbers
                     chunk.push(state.cur);
                     Self::parse_rust_number_tail(state, chunk);
                     return TokenType::Number;
@@ -359,7 +359,7 @@ impl RustTokenizer {
                     }
                     return TokenType::Identifier;
                 },
-                'a'...'z' => { // try to parse keywords or identifiers
+                'a'..='z' => { // try to parse keywords or identifiers
                     chunk.push(state.cur);
                     
                     let keyword_type = Self::parse_rust_lc_keyword(state, chunk, token_chunks);
@@ -374,7 +374,7 @@ impl RustTokenizer {
                         return keyword_type
                     }
                 },
-                'A'...'Z' => {
+                'A'..='Z' => {
                     chunk.push(state.cur);
                     let mut is_keyword = false;
                     if state.cur == 'S' {

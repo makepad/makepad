@@ -8,6 +8,7 @@ use crate::codeicon::*;
 pub struct CodeEditor {
     pub view: View<ScrollBar>,
     pub bg_layout: Layout,
+    pub bg: Quad,
     pub gutter_bg: Quad,
     pub cursor: Quad,
     pub selection: Quad,
@@ -89,6 +90,7 @@ pub struct CodeEditor {
 #[derive(Clone)]
 pub struct CodeEditorColors {
     // UI
+    pub bg: Color,
     pub gutter_bg: Color,
     pub indent_line_unknown: Color,
     pub indent_line_fn: Color,
@@ -131,6 +133,7 @@ impl Style for CodeEditor {
         Self {
             cursors: TextCursorSet::new(),
             colors: CodeEditorColors {
+                bg: color256(30, 30, 30),
                 gutter_bg: color256(30, 30, 30),
                 indent_line_unknown: color("#5"),
                 indent_line_fn: color256(220, 220, 174),
@@ -187,13 +190,20 @@ impl Style for CodeEditor {
                 }),
                 ..Style::style(cx)
             },
+            bg: Quad {
+                do_h_scroll: false,
+                do_v_scroll: false,
+                ..Style::style(cx)
+            },
             gutter_bg: Quad {
+                z:9.0,
                 do_h_scroll: false,
                 do_v_scroll: false,
                 ..Style::style(cx)
             },
             selection: Quad {
                 shader: cx.add_shader(Self::def_selection_shader(), "Editor.selection"),
+                z:1.0,
                 ..Style::style(cx)
             },
             token_highlight: Quad {
@@ -234,7 +244,7 @@ impl Style for CodeEditor {
                 font: cx.load_font_style("mono_font"),
                 font_size: 12.0,
                 brightness: 1.0,
-                z:0.01,
+                z:2.00,
                 line_spacing: 1.4,
                 do_dpi_dilate: true,
                 wrapping: Wrapping::Line,
@@ -244,7 +254,7 @@ impl Style for CodeEditor {
                 font: cx.load_font_style("mono_font"),
                 font_size: 12.0,
                 brightness: 1.0,
-                z:0.001,
+                z:9.1,
                 line_spacing: 1.4,
                 do_dpi_dilate: true,
                 do_h_scroll: false,
@@ -381,7 +391,7 @@ impl CodeEditor {
                     view_clip.zw
                 );
                 pos = (clipped - shift - vec2(x, y)) / vec2(w, h);
-                return  camera_projection*(camera_view*(view_transform*vec4(clipped.x, clipped.y, 0., 1.)));
+                return  camera_projection*(camera_view*(view_transform*vec4(clipped.x, clipped.y, z, 1.)));
             }
             
             fn pixel() -> vec4 {
@@ -912,6 +922,7 @@ impl CodeEditor {
         
         // copy over colors
         self._last_indent_color = self.colors.indent_line_unknown;
+        self.bg.color = self.colors.bg;
         self.gutter_bg.color = self.colors.gutter_bg;
         self.selection.color = if self.has_key_focus(cx) {self.colors.selection}else {self.colors.selection_defocus};
         //self.select_highlight.color = self.colors.highlight;
@@ -932,7 +943,7 @@ impl CodeEditor {
             return Err(())
         }
         else {
-            //let bg_inst = self.bg.draw_quad(cx, Rect {x: 0., y: 0., w: cx.get_width_total(), h: cx.get_height_total()});
+            self.bg.draw_quad(cx, Rect {x: 0., y: 0., w: cx.get_width_total(), h: cx.get_height_total()});
             //let bg_area = bg_inst.into_area();
             let view_area = self.view.get_view_area(cx);
             cx.update_area_refs(self._view_area, view_area);
@@ -1362,7 +1373,8 @@ impl CodeEditor {
             let height = self._monospace_size.y;
             
             // actually generate the GPU data for the text
-            self.text.z = (self._paren_stack.len() as f32)*0.02+0.03;
+            let z = 2.0 + self._paren_stack.len() as f32;
+            self.text.z = z;
             if self._highlight_selection.len() > 0 { // slow loop
                 //let draw_search = &mut self._draw_search;
                 let line_chunk = &mut self._line_chunk;
@@ -1370,13 +1382,13 @@ impl CodeEditor {
                     line_chunk.push((x, ch));
                     //draw_search.mark_text_select_only(cursors, offset, x, geom.y, w, height);
                     draw_messages.mark_text_select_only(message_cursors, offset, x, geom.y, w, height);
-                    draw_cursors.mark_text_with_cursor(cursors, ch, offset, x, geom.y, w, height, last_cursor, mark_spaces)
+                    draw_cursors.mark_text_with_cursor(cursors, ch, offset, x, geom.y, w, height, z, last_cursor, mark_spaces)
                 });
             }
             else { // fast loop
                 self.text.add_text(cx, geom.x, geom.y, offset, self._text_inst.as_mut().unwrap(), &chunk, | ch, offset, x, w | {
                     draw_messages.mark_text_select_only(message_cursors, offset, x, geom.y, w, height);
-                    draw_cursors.mark_text_with_cursor(cursors, ch, offset, x, geom.y, w, height, last_cursor, mark_spaces)
+                    draw_cursors.mark_text_with_cursor(cursors, ch, offset, x, geom.y, w, height, z, last_cursor, mark_spaces)
                 });
             }
         }
@@ -1518,6 +1530,8 @@ impl CodeEditor {
         if self.has_key_focus(cx) {
             let origin = cx.get_turtle_origin();
             for rc in &self._draw_cursors.cursors {
+                self.cursor.z = rc.z + 0.1;
+
                 let inst = self.cursor.draw_quad(cx, Rect {x: rc.x - origin.x, y: rc.y - origin.y, w: rc.w, h: rc.h});
                 if inst.need_uniforms_now(cx) {
                     inst.push_uniform_float(cx, self._cursor_blink_flipflop);

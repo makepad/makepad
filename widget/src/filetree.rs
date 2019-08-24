@@ -547,8 +547,8 @@ impl FileTree {
                     }
                 }
             };
-            self.filler.z = 0.03*depth as f32 + 0.01;
-            self.tree_text.z = 0.03*depth as f32 + 0.01;
+            self.filler.z = depth as f32 + 1.0;
+            self.tree_text.z = depth as f32 + 1.0;
             self.tree_text.font_size = 11. * scale as f32;
             match node {
                 FileNode::Folder {name, state, ..} => {

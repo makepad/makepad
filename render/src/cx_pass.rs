@@ -71,11 +71,12 @@ impl Pass {
         })
     }
     
-    pub fn set_depth_texture(&mut self, cx: &mut Cx, texture: &mut Texture) {
+    pub fn set_depth_texture(&mut self, cx: &mut Cx, texture: &mut Texture, depth_clear: Option<f64>) {
         texture.set_desc(cx, None);
         let pass_id = self.pass_id.expect("Please call set_depth_texture after begin_pass");
         let cxpass = &mut cx.passes[pass_id];
         cxpass.depth_texture = texture.texture_id;
+        cxpass.depth_clear = depth_clear;
     }
     
     
@@ -101,6 +102,7 @@ pub struct CxPassColorTexture {
 pub struct CxPass {
     pub color_textures: Vec<CxPassColorTexture>,
     pub depth_texture: Option<usize>,
+    pub depth_clear: Option<f64>,
     pub main_view_id: Option<usize>,
     pub dep_of: CxPassDepOf,
     pub paint_dirty: bool,
@@ -117,6 +119,7 @@ impl Default for CxPass {
             uniforms: uniforms,
             color_textures: Vec::new(),
             depth_texture: None,
+            depth_clear: Some(std::f64::INFINITY),
             main_view_id: None,
             dep_of: CxPassDepOf::None,
             paint_dirty: true,
@@ -175,11 +178,14 @@ impl CxPass {
             offset.x + size.x,
             offset.y,
             offset.y + size.y,
-            -100.0,
-            100.0,
+            100.,
+            -100.,
             1.0,
             1.0
         );
+        
+        //println!("{} {}", ortho_matrix.v[10], ortho_matrix.v[14]);
+        //println!("CHECK {} {} {:?}", size.x, size.y,ortho_matrix.transform_vec4(Vec4{x:200.,y:300.,z:100.,w:1.0}));
         self.uniform_camera_projection(&ortho_matrix);
         //self.set_matrix(cx, &ortho_matrix);
     }

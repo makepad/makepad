@@ -45,7 +45,7 @@ impl Style for ScrollBar {
                 Track::color("sb.color", Ease::Lin, vec![(1.0, color("#9"))])
             ]),
             sb: Quad {
-                z: 0.03,
+                z: 10.,
                 shader: cx.add_shader(Self::def_shader(), "ScrollBar.sb"),
                 ..Style::style(cx)
             },

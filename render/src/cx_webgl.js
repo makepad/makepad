@@ -396,7 +396,6 @@
                 let vr_display = this.vr_display;
                 var left_eye = vr_display.getEyeParameters("left");
                 var right_eye = vr_display.getEyeParameters("right");
-                console.log(left_eye.renderWidth, left_eye.renderHeight);
                 canvas.width = Math.max(left_eye.renderWidth, right_eye.renderWidth) * 2;
                 canvas.height = Math.max(left_eye.renderHeight, right_eye.renderHeight);
                 this.dpi_factor = 2.0;
@@ -486,6 +485,54 @@
         }
         
         
+                    // The UA may kick us out of VR present mode for any reason, so to
+        // ensure we always know when we begin/end presenting we need to
+        // listen for vrdisplaypresentchange events.
+        on_vr_display_present_change(){
+            this.vr_is_presenting = this.vr_display.isPresenting;
+            if (this.vr_is_presenting) { // we need to start the continuous repaintloop
+                let vr_on_request_animation_frame = time => {
+                    if (!this.vr_is_presenting) {
+                        return
+                    }
+                    this.vr_display.requestAnimationFrame(vr_on_request_animation_frame);
+                    
+                    
+                    // compute the view matrices taking into account the persons movement
+                    this.to_wasm.paint_dirty();
+                    this.to_wasm.vr_frame(time / 1000.0, this.vr_frame_data);
+                    this.in_animation_frame = true;
+                    this.do_wasm_io();
+                    this.in_animation_frame = false;
+                    this.vr_display.submitFrame();
+                };
+                this.vr_display.requestAnimationFrame(vr_on_request_animation_frame);
+            }
+            else { // lets return to normal
+                this.to_wasm.paint_dirty();
+                this.request_animation_frame();
+            }
+            this.on_screen_resize();
+        }
+        
+        on_vr_display_activate(){
+            var attributes = {depth: true, antialias: true, multiview: false};
+            this.vr_display.requestPresent([{source: this.canvas, attributes: attributes}]).then(_ => {
+            }, error => {
+                console.log("requestPresent failed", error)
+            });
+        }
+        
+        on_vr_display_deactivate(){
+            if (!this.vr_display.isPresenting){
+                return;
+            }
+            this.vr_display.exitPresent().then(_ => {
+            }, error => {
+                console.log("exitPresent failed", error)
+            });
+        }
+        
         init_webvr_bindings() {
             this.vr_can_present = false;
             this.vr_is_presenting = false;
@@ -508,6 +555,9 @@
                         if (this.vr_display.capabilities.canPresent) {
                             this.vr_can_present = true;
                             console.log("webVR available");
+                            window.addEventListener("vrdisplaypresentchange", this.on_vr_display_present_change.bind(this), false);
+                            window.addEventListener("vrdisplayactivate", this.on_vr_display_activate.bind(this), false);
+                            window.addEventListener("vrdisplaydeactivate", this.on_vr_display_deactivate.bind(this), false);
                         }
                     }
                     else {
@@ -522,80 +572,8 @@
         
         vr_start_presenting() {
             if (this.vr_can_present) {
-                // The UA may kick us out of VR present mode for any reason, so to
-                // ensure we always know when we begin/end presenting we need to
-                // listen for vrdisplaypresentchange events.
-                let on_vr_display_present_change = _ => {
-                    this.vr_is_presenting = this.vr_display.isPresenting;
-                    if (this.vr_is_presenting) { // we need to start the continuous repaintloop
-                        let vr_on_request_animation_frame = time => {
-                            if (!this.vr_is_presenting) {
-                                console.log("TERMINATING RENDER");
-                                return
-                            }
-                            this.vr_display.requestAnimationFrame(vr_on_request_animation_frame);
-                            this.vr_display.getFrameData(this.vr_frame_data);
-                            
-                            if(this.vr_display.stageParameters){
-                                let inv = new Float32Array(16);
-                                this.vr_left_view_matrix = new Float32Array(16);
-                                this.vr_right_view_matrix = new Float32Array(16);
-                                mat4_invert(inv, this.vr_display.stageParameters.sittingToStandingTransform);
-                                mat4_multiply(this.vr_left_view_matrix, this.vr_frame_data.leftViewMatrix, inv);
-                                mat4_multiply(this.vr_right_view_matrix, this.vr_frame_data.rightViewMatrix, inv);
-                            }
-                            else{
-                                this.vr_left_view_matrix = this.vr_frame_data.leftViewMatrix;
-                                this.vr_right_view_matrix = this.vr_frame_data.rightViewMatrix;
-                            }
-                            
-                            // compute the view matrices taking into account the persons movement
-                            this.to_wasm.paint_dirty();
-                            this.to_wasm.vr_frame(time / 1000.0, this.vr_frame_data);
-                            this.in_animation_frame = true;
-                            this.do_wasm_io();
-                            this.in_animation_frame = false;
-                            this.vr_display.submitFrame();
-                        };
-                        this.vr_display.requestAnimationFrame(vr_on_request_animation_frame);
-                    }
-                    else { // lets return to normal
-                        console.log("RETURNING TO NORMAL");
-                        this.to_wasm.paint_dirty();
-                        this.request_animation_frame();
-                    }
-                    this.on_screen_resize();
-                }
-                
-                let on_vr_display_activate = _ => {
-                    var attributes = {depth: true, antialias: true, multiview: false};
-                    this.vr_display.requestPresent([{source: this.canvas, attributes: attributes}]).then(_ => {
-                        console.log("requestPresent complete")
-                    }, error => {
-                        console.log("requestPresent failed", error)
-                    });
-                }
-                
-                let on_vr_display_deactivate = _ => {
-                    if (!self.vr_display.isPresenting)
-                    return;
-                    self.vr_display.exitPresent().then(_ => {
-                        console.log("exitPresent complete")
-                    }, error => {
-                        console.log("exitPresent failed", error)
-                    });
-                }
-                
-                this.test_start_vr = _ => {
-                    on_vr_display_activate();
-                }
-                window.addEventListener("vrdisplaypresentchange", on_vr_display_present_change, false);
-                window.addEventListener("vrdisplayactivate", on_vr_display_activate, false);
-                window.addEventListener("vrdisplaydeactivate", on_vr_display_deactivate, false);
-                
-                on_vr_display_activate();
-                
                 console.log("Starting webVR")
+                this.on_vr_display_activate();
             }
         }
         
@@ -1377,6 +1355,21 @@
             if (this.vr_is_presenting) { // set up the left eye
                 // set the viewport to the whole thing
                 gl.viewport(0, 0, this.canvas.width * 0.5, this.canvas.height);
+                
+                this.vr_display.getFrameData(this.vr_frame_data);
+                
+                let inv = new Float32Array(16);
+                this.vr_left_view_matrix = new Float32Array(16);
+                this.vr_right_view_matrix = new Float32Array(16);
+                if(this.vr_display.stageParameters){
+                    mat4_invert(inv, this.vr_display.stageParameters.sittingToStandingTransform);
+                }
+                else{
+                    mat4_translation(inv, [0,1.65,0]);
+                    mat4_invert(inv, inv);
+                }
+                mat4_multiply(this.vr_left_view_matrix, this.vr_frame_data.leftViewMatrix, inv);
+                mat4_multiply(this.vr_right_view_matrix, this.vr_frame_data.rightViewMatrix, inv);
             }
             else {
                 // set the viewport
@@ -1751,6 +1744,26 @@
         out[13] = b0 * a01 + b1 * a11 + b2 * a21 + b3 * a31;
         out[14] = b0 * a02 + b1 * a12 + b2 * a22 + b3 * a32;
         out[15] = b0 * a03 + b1 * a13 + b2 * a23 + b3 * a33;
+        return out;
+    }
+    
+    function mat4_translation(out, v){
+        out[0] = 1;
+        out[1] = 0;
+        out[2] = 0;
+        out[3] = 0;
+        out[4] = 0;
+        out[5] = 1;
+        out[6] = 0;
+        out[7] = 0;
+        out[8] = 0;
+        out[9] = 0;
+        out[10] = 1;
+        out[11] = 0;
+        out[12] = v[0];
+        out[13] = v[1];
+        out[14] = v[2];
+        out[15] = 1;
         return out;
     }
     

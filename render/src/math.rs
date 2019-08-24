@@ -155,11 +155,11 @@ impl Mat4{
         ]}
     }
 
-    pub fn translate(x:f32, y:f32, z:f32)->Mat4{
+    pub fn scale_translate(sx:f32, sy:f32, sz:f32, x:f32, y:f32, z:f32)->Mat4{
         return Mat4{v:[
-            0.0005,0.0,0.0,0.0,
-            0.0,-0.0005,0.0,0.0,
-            0.0,0.0,0.1,0.0,
+            sx,0.0,0.0,0.0,
+            0.0,sy,0.0,0.0,
+            0.0,0.0,sz,0.0,
             x,y,z,1.0
         ]}
 
@@ -168,8 +168,8 @@ impl Mat4{
     pub fn ortho(left:f32, right:f32, top:f32, bottom:f32, near:f32, far:f32, scalex:f32, scaley:f32) -> Mat4{
         let lr = 1.0 / (left - right);
         let bt = 1.0 / (bottom - top);
-        let nf = 1.0 / (near - far);/*
-        return Mat4{v:[
+        let nf = 1.0 / (near - far);
+        /*return Mat4{v:[
             -2.0 * lr * scalex, 0.0, 0.0, (left+right) * lr,
             0.0, -2.0 * bt * scaley, 0.0, (top+bottom) * bt,
             0.0, 0.0, 2.0 * nf, (far + near) * nf,
@@ -178,9 +178,18 @@ impl Mat4{
         return Mat4{v:[
             -2.0 * lr * scalex, 0.0, 0.0, 0.0,
             0.0, -2.0 * bt * scaley, 0.0, 0.0,
-            0.0, 0.0, 2.0 * nf, 0.0,
-            (left+right) * lr, (top+bottom) * bt,  (far + near) * nf, 1.0
+            0.0, 0.0, -1.0 * nf, 0.0,
+            (left+right) * lr, (top+bottom) * bt,  0.5+(far+near)*nf, 1.0
         ]}
-
+    }
+    
+    pub fn transform_vec4(&self, v:Vec4)->Vec4{
+        let m = &self.v;
+        Vec4{
+            x:m[0] * v.x + m[4] * v.y + m[8] * v.z + m[12] * v.w,
+            y:m[1] * v.x + m[5] * v.y + m[9] * v.z + m[13] * v.w,
+            z:m[2] * v.x + m[6] * v.y + m[10] * v.z + m[14] * v.w,
+            w:m[3] * v.x + m[7] * v.y + m[11] * v.z + m[15] * v.w
+        }
     }
 } 

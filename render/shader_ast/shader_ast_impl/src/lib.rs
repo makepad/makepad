@@ -44,45 +44,45 @@ fn error(span:Span, msg: &str)->TokenStream{
 // generate the ShVar definitions from a let statement
 fn generate_shvar_defs(stmt:Local)->TokenStream{
     // lets define a local with storage specified
-    if let Pat::Ident(pat) = &stmt.pats[0]{
-        let name =  pat.ident.to_string();
+    if let Pat::Type(pat) = &stmt.pat{
+        let name =  if let Pat::Ident(ident) = &*pat.pat{
+            ident.ident.to_string()
+        }
+        else{
+            return error(stmt.span(), "Please only use simple identifiers such as x or var_iable");
+        };
         let found_type;
         let store;
-        if let Some((_tok, ty)) = stmt.ty.clone(){
-            if let Type::Path(typath) = *ty{
-                if typath.path.segments.len() != 1{
-                    return error(typath.span(), "Only simple typenames such as float or vec4 are supported");
+        if let Type::Path(typath) = &*pat.ty{
+            if typath.path.segments.len() != 1{
+                return error(typath.span(), "Only simple typenames such as float or vec4 are supported");
+            }
+            let seg = &typath.path.segments[0];
+            found_type = seg.ident.to_string();
+            // lets read the path args
+            if let PathArguments::AngleBracketed(angle) = &seg.arguments{
+                if angle.args.len() != 1{
+                    return error(angle.span(), "Please pass one storage arg like float<Uniform> or float<Local>");
                 }
-                let seg = &typath.path.segments[0];
-                found_type = seg.ident.to_string();
-                // lets read the path args
-                if let PathArguments::AngleBracketed(angle) = &seg.arguments{
-                    if angle.args.len() != 1{
-                        return error(angle.span(), "Please pass one storage arg like float<Uniform> or float<Local>");
-                    }
-                    let arg = &angle.args[0];
-                    if let GenericArgument::Type(ty) = arg{
-                        if let Type::Path(typath) = ty{
-                            if typath.path.segments.len() != 1{
-                                return error(typath.span(), "Only simple typenames such as float or vec4 are supported");
-                            }
-                            let seg = &typath.path.segments[0];
-                            store = seg.ident.clone();
+                let arg = &angle.args[0];
+                if let GenericArgument::Type(ty) = arg{
+                    if let Type::Path(typath) = ty{
+                        if typath.path.segments.len() != 1{
+                            return error(typath.span(), "Only simple typenames such as float or vec4 are supported");
                         }
-                        else{
-                            return error(arg.span(), "Only simple typenames such as float or vec4 are supported");
-                        }
+                        let seg = &typath.path.segments[0];
+                        store = seg.ident.clone();
                     }
                     else{
-                        return error(arg.span(), "Please pass one storage arg like float<Uniform> or float<Local>");
+                        return error(arg.span(), "Only simple typenames such as float or vec4 are supported");
                     }
                 }
                 else{
-                    return error(seg.ident.span(), "type should have storage specifier like float<Uniform> or float<Local>");
+                    return error(arg.span(), "Please pass one storage arg like float<Uniform> or float<Local>");
                 }
             }
             else{
-                return error(stmt.span(), "Please give the variable a type of the form float<Local> or vec4<Uniform>");
+                return error(seg.ident.span(), "type should have storage specifier like float<Uniform> or float<Local>");
             }
         }
         else{
@@ -97,7 +97,7 @@ fn generate_shvar_defs(stmt:Local)->TokenStream{
         }
     }
     else{
-        return error(stmt.span(), "Please only use simple identifiers such as x or var_iable")
+        return error(stmt.span(), "Please only use simple identifiers such as x or var_iable {:?}")
     }
 }
 
@@ -105,16 +105,16 @@ fn generate_shvar_defs(stmt:Local)->TokenStream{
 fn generate_fn_def(item:ItemFn)->TokenStream{
     // alright lets do a function
     // and then incrementally add all supported ast nodes
-    let name = item.ident.to_string();
+    let name = item.sig.ident.to_string();
        let mut args = Vec::new();
     // lets process the fnargs
-    for arg in &item.decl.inputs{
-        if let FnArg::Captured(arg) = arg{
+    for arg in &item.sig.inputs{
+        if let FnArg::Typed(arg) = arg{
             // lets look at pat and ty
-            if let Pat::Ident(pat) = &arg.pat{
+            if let Pat::Ident(pat) = &*arg.pat{
                 let name =  pat.ident.to_string();
                 let found_type;
-                if let Type::Path(typath) = &arg.ty{
+                if let Type::Path(typath) = &*arg.ty{
                     if typath.path.segments.len() != 1{
                         return error(typath.span(), "arg type not simple");
                     }
@@ -137,7 +137,7 @@ fn generate_fn_def(item:ItemFn)->TokenStream{
         }
     }
     let return_type;
-    if let ReturnType::Type(_, ty) = item.decl.output{
+    if let ReturnType::Type(_, ty) = item.sig.output{
         if let Type::Path(typath) = *ty{
             if typath.path.segments.len() != 1{
                 return error(typath.span(), "return type not simple");
@@ -167,11 +167,66 @@ fn generate_fn_def(item:ItemFn)->TokenStream{
 // generate a let statement inside a function
 fn generate_let(local:Local)->TokenStream{
     // lets define a local with storage specified
-    if let Pat::Ident(pat) = &local.pats[0]{
+    if let Pat::Ident(ident) = &local.pat{
+        let name = ident.ident.to_string();
+        let init = if let Some((_,local_init)) = local.init{
+            generate_expr(*local_init)
+        }
+        else{
+            return error(local.span(), "let pattern misses initializer");
+        };
+
+        return quote!{
+            ShLet{
+                name:#name.to_string(),
+                ty:String::new(),
+                init:Box::new(#init)
+            }
+        }
+    }
+    else if let Pat::Type(pat) = &local.pat{
+        let name =  if let Pat::Ident(ident) = &*pat.pat{
+            ident.ident.to_string()
+        }
+        else{
+            return error(local.span(), "Please only use simple identifiers such as x or var_iable");
+        };
+        
+        let ty = if let Type::Path(typath) = &*pat.ty{
+            if typath.path.segments.len() != 1{
+                return error(typath.span(), "Only simple typenames such as float or vec4 are supported");
+            }
+            let seg = &typath.path.segments[0];
+            seg.ident.to_string()
+        }
+        else{
+           return error(local.span(), "Only simple typenames such as float or vec4 are supported");
+        };
+
+        let init = if let Some((_,local_init)) = local.init{
+            generate_expr(*local_init)
+        }
+        else{
+            return error(local.span(), "let pattern misses initializer");
+        };
+        
+        return quote!{
+            ShLet{
+                name:#name.to_string(),
+                ty:#ty.to_string(),
+                init:Box::new(#init)
+            }
+        }
+    }
+    else{
+        return error(local.span(), "let pattern doesn't need type");
+    }
+/*
+    if let Pat::Ident(pat) = &local.pat{
         let name =  pat.ident.to_string();
         let found_type;
-        if let Some((_tok, ty)) = local.ty.clone(){
-            if let Type::Path(typath) = *ty{
+        //if let Some((_tok, ty)) = local.ty.clone(){
+            if let Pat::Path(typath) = &local.pat{
                 if typath.path.segments.len() != 1{
                     return error(typath.span(), "type not simple");
                 }
@@ -181,11 +236,11 @@ fn generate_let(local:Local)->TokenStream{
             else{
                 return error(local.span(), "type missing or malformed");
             }
-        }
-        else{
-            found_type = "".to_string();
+        //}
+        //else{
+        //    found_type = "".to_string();
             //return error(local.span(), "let pattern misses type info");
-        }
+        //}
         let init;
         if let Some((_,local_init)) = local.init{
             init = generate_expr(*local_init);
@@ -203,7 +258,7 @@ fn generate_let(local:Local)->TokenStream{
     }
     else{
         return error(local.span(), "let pattern not simple identifier")
-    }
+    }*/
 }
 
 // generate a { } block AST 
@@ -323,11 +378,11 @@ fn generate_expr(expr:Expr)->TokenStream{
                     return quote!{ShExpr::ShLit(ShLit::Str(#value.to_string()))}
                 }
                 Lit::Int(lit)=>{
-                    let value = lit.value() as i64;
+                    let value = lit.base10_parse::<i64>().unwrap();
                     return quote!{ShExpr::ShLit(ShLit::Int(#value))}
                 }
                 Lit::Float(lit)=>{
-                    let value = lit.value() as f64;
+                    let value = lit.base10_parse::<f64>().unwrap();
                     return quote!{ShExpr::ShLit(ShLit::Float(#value))}
                 }
                 Lit::Bool(lit)=>{
@@ -377,7 +432,7 @@ fn generate_expr(expr:Expr)->TokenStream{
         Expr::ForLoop(expr)=>{
               // lets define a local with storage specified
             let span = expr.span();
-            if let Pat::Ident(pat) = *expr.pat{
+            if let Pat::Ident(pat) = expr.pat{
                 let name =  pat.ident.to_string();
                 let body = generate_block(expr.body);
                 let from_ts;
