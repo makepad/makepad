@@ -336,7 +336,7 @@ impl Cx {
                         self.call_frame_event(&mut event_handler, time);
                     }
                 },
-                21 => { /// paint_dirty
+                21 => { // paint_dirty
                     for (_pass_id, cxpass) in self.passes.iter_mut().enumerate() {
                         cxpass.paint_dirty = true;
                     }

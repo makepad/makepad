@@ -67,9 +67,9 @@ impl Cx {
                     if cxtexture.update_image {
                         metal_cx.update_platform_texture_image2d(cxtexture);
                     }
-                    if let Some(mtltex) = &cxtexture.platform.mtltexture {
-                        encoder.set_fragment_texture(i as NSUInteger, Some(&mtltex));
-                        encoder.set_vertex_texture(i as NSUInteger, Some(&mtltex));
+                    if let Some(mtl_texture) = &cxtexture.platform.mtl_texture {
+                        encoder.set_fragment_texture(i as NSUInteger, Some(&mtl_texture));
+                        encoder.set_vertex_texture(i as NSUInteger, Some(&mtl_texture));
                     }
                 }
                 
@@ -93,50 +93,96 @@ impl Cx {
         }
     }
     
+    pub fn setup_render_pass_descriptor(&mut self, render_pass_descriptor:&RenderPassDescriptorRef, pass_id: usize, dpi_factor:f32, first_texture:Option<&metal::TextureRef>, metal_cx: &MetalCx){
+        let pass_size = self.passes[pass_id].pass_size;
+
+        self.passes[pass_id].set_ortho_matrix(Vec2::zero(), pass_size);
+        
+        
+        
+        self.passes[pass_id].uniform_camera_view(&Mat4::identity());
+        
+        for (index, color_texture) in self.passes[pass_id].color_textures.iter().enumerate() {
+
+            let color_attachment = render_pass_descriptor.color_attachments().object_at(0).unwrap();
+            
+            if index == 0 && first_texture.is_some(){
+                color_attachment.set_texture(Some(&first_texture.unwrap()));
+            }
+            else{
+                let cxtexture = &mut self.textures[color_texture.texture_id];
+                metal_cx.update_platform_render_target(cxtexture, dpi_factor, pass_size, false);
+                
+                if let Some(mtl_texture) = &cxtexture.platform.mtl_texture {
+                    color_attachment.set_texture(Some(&mtl_texture));
+                }
+                else {
+                    println!("draw_pass_to_texture invalid render target");
+                }
+                
+            }
+
+            color_attachment.set_store_action(MTLStoreAction::Store);
+            if let Some(color) = color_texture.clear_color {
+                color_attachment.set_load_action(MTLLoadAction::Clear);
+                color_attachment.set_clear_color(MTLClearColor::new(color.r as f64, color.g as f64, color.b as f64, color.a as f64));
+            }
+            else {
+                color_attachment.set_load_action(MTLLoadAction::Load);
+            }
+        }
+        // attach depth texture
+        if let Some(depth_texture_id) = self.passes[pass_id].depth_texture {
+            let cxtexture = &mut self.textures[depth_texture_id];
+            metal_cx.update_platform_render_target(cxtexture, dpi_factor, pass_size, true);
+             let depth_attachment = render_pass_descriptor.depth_attachment().unwrap();
+            if let Some(mtl_texture) = &cxtexture.platform.mtl_texture {
+                depth_attachment.set_texture(Some(&mtl_texture));
+            }
+            else {
+                println!("draw_pass_to_texture invalid render target");
+            }
+            depth_attachment.set_store_action(MTLStoreAction::Store);
+            if let Some(depth_clear) = self.passes[pass_id].depth_clear {
+                depth_attachment.set_load_action(MTLLoadAction::Clear);
+                //depth_attachment.set_clear_depth(1.0);
+            }
+            else {
+                depth_attachment.set_load_action(MTLLoadAction::Load);
+            }
+            // create depth state
+            if self.passes[pass_id].platform.mtl_depth_state.is_none(){
+                let desc = DepthStencilDescriptor::new();
+                desc.set_depth_compare_function(MTLCompareFunction::LessEqual);
+                desc.set_depth_write_enabled(true);
+                self.passes[pass_id].platform.mtl_depth_state = Some(metal_cx.device.new_depth_stencil_state(&desc));
+            }
+        }
+    }
+    
     pub fn draw_pass_to_layer(
         &mut self,
         pass_id: usize,
-        _dpi_factor: f32,
+        dpi_factor: f32,
         layer: &CoreAnimationLayer,
         metal_cx: &mut MetalCx,
     ) {
         self.platform.bytes_written = 0;
         let view_id = self.passes[pass_id].main_view_id.unwrap();
-        let pass_size = self.passes[pass_id].pass_size;
-        self.passes[pass_id].set_ortho_matrix(Vec2::zero(), pass_size);
-        self.passes[pass_id].uniform_camera_view(&Mat4::identity());
         let pool = unsafe {NSAutoreleasePool::new(cocoa::base::nil)};
         //let command_buffer = command_queue.new_command_buffer();
         if let Some(drawable) = layer.next_drawable() {
-            
             let render_pass_descriptor = RenderPassDescriptor::new();
-            
-            if self.passes[pass_id].color_textures.len()>0 {
-                // TODO add z-buffer attachments and multisample attachments
-                let color_texture = &self.passes[pass_id].color_textures[0];
-                let color_attachment = render_pass_descriptor.color_attachments().object_at(0).unwrap();
-                color_attachment.set_texture(Some(drawable.texture()));
-                color_attachment.set_store_action(MTLStoreAction::Store);
-                if let Some(color) = color_texture.clear_color {
-                    color_attachment.set_load_action(MTLLoadAction::Clear);
-                    color_attachment.set_clear_color(MTLClearColor::new(color.r as f64, color.g as f64, color.b as f64, color.a as f64));
-                }
-                else {
-                    color_attachment.set_load_action(MTLLoadAction::Load);
-                }
-            }
-            else {
-                let color_attachment = render_pass_descriptor.color_attachments().object_at(0).unwrap();
-                color_attachment.set_texture(Some(drawable.texture()));
-                color_attachment.set_store_action(MTLStoreAction::Store);
-                color_attachment.set_load_action(MTLLoadAction::Clear);
-                color_attachment.set_clear_color(MTLClearColor::new(0.0, 0.0, 0.0, 0.0))
-            }
+
+            self.setup_render_pass_descriptor(&render_pass_descriptor, pass_id, dpi_factor, Some(drawable.texture()), metal_cx);
             
             let command_buffer = metal_cx.command_queue.new_command_buffer();
             let encoder = command_buffer.new_render_command_encoder(&render_pass_descriptor);
-            
+            if let Some(depth_state) = &self.passes[pass_id].platform.mtl_depth_state{
+                encoder.set_depth_stencil_state(depth_state);
+            }
             self.render_view(pass_id, view_id, &metal_cx, encoder);
+
             encoder.end_encoding();
             command_buffer.present_drawable(&drawable);
             command_buffer.commit();
@@ -154,43 +200,21 @@ impl Cx {
         metal_cx: &MetalCx,
     ) {
         let view_id = self.passes[pass_id].main_view_id.unwrap();
-        let pass_size = self.passes[pass_id].pass_size;
-        self.passes[pass_id].set_ortho_matrix(Vec2::zero(), pass_size);
-        self.passes[pass_id].uniform_camera_view(&Mat4::identity());
-
-        let pool = unsafe {NSAutoreleasePool::new(cocoa::base::nil)};
         
+        let pool = unsafe {NSAutoreleasePool::new(cocoa::base::nil)};
         let render_pass_descriptor = RenderPassDescriptor::new();
         
-        for (index, color_texture) in self.passes[pass_id].color_textures.iter().enumerate() {
-            
-            let cxtexture = &mut self.textures[color_texture.texture_id];
-            
-            metal_cx.update_platform_render_target(cxtexture, dpi_factor, pass_size, false);
-            let color_attachment = render_pass_descriptor.color_attachments().object_at(index).unwrap();
-            if let Some(mtltex) = &cxtexture.platform.mtltexture {
-                color_attachment.set_texture(Some(&mtltex));
-            }
-            else {
-                println!("draw_pass_to_texture invalid render target");
-            }
-            color_attachment.set_store_action(MTLStoreAction::Store);
-            if let Some(color) = color_texture.clear_color {
-                color_attachment.set_load_action(MTLLoadAction::Clear);
-                color_attachment.set_clear_color(MTLClearColor::new(color.r as f64, color.g as f64, color.b as f64, color.a as f64));
-            }
-            else {
-                color_attachment.set_load_action(MTLLoadAction::Load);
-            }
-        }
-        // lets loop and connect all color_textures to our render pass descriptors
-        // initializing/allocating/reallocating them to the right size if need be.
-        
+        self.setup_render_pass_descriptor(&render_pass_descriptor, pass_id, dpi_factor, None, metal_cx);
+
         let command_buffer = metal_cx.command_queue.new_command_buffer();
         let encoder = command_buffer.new_render_command_encoder(&render_pass_descriptor);
+        if let Some(depth_state) = &self.passes[pass_id].platform.mtl_depth_state{
+            encoder.set_depth_stencil_state(depth_state);
+        }
+
         self.render_view(pass_id, view_id, &metal_cx, encoder);
+
         encoder.end_encoding();
-        
         command_buffer.commit();
         
         unsafe {msg_send![pool, release];}
@@ -220,7 +244,7 @@ impl MetalCx {
         if cxtexture.platform.width == width && cxtexture.platform.height == height && cxtexture.platform.alloc_desc == cxtexture.desc {
             return
         }
-        cxtexture.platform.mtltexture = None;
+        cxtexture.platform.mtl_texture = None;
         
         let mdesc = TextureDescriptor::new();
         if !is_depth {
@@ -258,7 +282,7 @@ impl MetalCx {
         cxtexture.platform.width = width;
         cxtexture.platform.height = height;
         cxtexture.platform.alloc_desc = cxtexture.desc.clone();
-        cxtexture.platform.mtltexture = Some(tex);
+        cxtexture.platform.mtl_texture = Some(tex);
     }
     
     pub fn update_platform_texture_image2d(&self, cxtexture: &mut CxTexture) {
@@ -273,7 +297,7 @@ impl MetalCx {
         
         // allocate new texture if descriptor change
         if cxtexture.platform.alloc_desc != cxtexture.desc {
-            cxtexture.platform.mtltexture = None;
+            cxtexture.platform.mtl_texture = None;
             let mdesc = TextureDescriptor::new();
             mdesc.set_texture_type(MTLTextureType::D2);
             mdesc.set_width(width as u64);
@@ -284,19 +308,19 @@ impl MetalCx {
                 TextureFormat::Default | TextureFormat::ImageBGRA => {
                     mdesc.set_pixel_format(MTLPixelFormat::BGRA8Unorm);
                     let tex = self.device.new_texture(&mdesc);
-                    cxtexture.platform.mtltexture = Some(tex);
+                    cxtexture.platform.mtl_texture = Some(tex);
                     
                     if cxtexture.image_u32.len() != width * height {
                         println!("update_platform_texture_image2d with wrong buffer_u32 size!");
-                        cxtexture.platform.mtltexture = None;
+                        cxtexture.platform.mtl_texture = None;
                         return;
                     }
                     let region = MTLRegion {
                         origin: MTLOrigin {x: 0, y: 0, z: 0},
                         size: MTLSize {width: width as u64, height: height as u64, depth: 1}
                     };
-                    if let Some(mtltexture) = &cxtexture.platform.mtltexture {
-                        mtltexture.replace_region(
+                    if let Some(mtl_texture) = &cxtexture.platform.mtl_texture {
+                        mtl_texture.replace_region(
                             region,
                             0,
                             (width * std::mem::size_of::<u32>()) as u64,
@@ -415,13 +439,13 @@ pub struct CxPlatformTexture {
     pub alloc_desc: TextureDesc,
     pub width: u64,
     pub height: u64,
-    pub mtltexture: Option<metal::Texture>
+    pub mtl_texture: Option<metal::Texture>
 }
 
 #[derive(Default, Clone, Debug)]
 pub struct CxPlatformPass {
+    pub mtl_depth_state: Option<metal::DepthStencilState>
 }
-
 
 #[derive(Default, Clone, Debug)]
 pub struct MultiMetalBuffer {

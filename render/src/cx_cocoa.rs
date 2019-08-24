@@ -62,7 +62,7 @@ pub struct CocoaApp {
     pub cocoa_windows: Vec<(id, id)>,
     pub last_key_mod: KeyModifiers,
     pub pasteboard: id,
-    pub event_callback: Option<*mut FnMut(&mut CocoaApp, &mut Vec<Event>) -> bool>,
+    pub event_callback: Option<*mut dyn FnMut(&mut CocoaApp, &mut Vec<Event>) -> bool>,
     pub event_recur_block: bool,
     pub event_loop_running: bool,
     pub loop_block: bool,
@@ -357,7 +357,7 @@ impl CocoaApp {
     where F: FnMut(&mut CocoaApp, &mut Vec<Event>) -> bool,
     {
         unsafe {
-            self.event_callback = Some(&mut event_handler as *const FnMut(&mut CocoaApp, &mut Vec<Event>) -> bool as *mut FnMut(&mut CocoaApp, &mut Vec<Event>) -> bool);
+            self.event_callback = Some(&mut event_handler as *const dyn FnMut(&mut CocoaApp, &mut Vec<Event>) -> bool as *mut dyn FnMut(&mut CocoaApp, &mut Vec<Event>) -> bool);
             
             while self.event_loop_running {
                 let pool = foundation::NSAutoreleasePool::new(cocoa::base::nil);

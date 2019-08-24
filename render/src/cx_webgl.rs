@@ -7,7 +7,7 @@ impl Cx {
         let draw_calls_len = self.views[view_id].draw_calls_len;
         self.views[view_id].set_clipping_uniforms();
         if vr_is_presenting{
-            self.views[view_id].uniform_view_transform(&Mat4::translate(-0.4,1.4,-0.2));
+            self.views[view_id].uniform_view_transform(&Mat4::scale_translate(0.0005,-0.0005,0.001,-0.3,1.8,-0.4));
         }
         else{
             self.views[view_id].uniform_view_transform(&Mat4::identity());

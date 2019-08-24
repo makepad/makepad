@@ -32,7 +32,7 @@ pub use crate::cx_metalsl::*;
 #[cfg(any(target_os = "windows"))]
 pub use crate::cx_win10::*;
 #[cfg(target_os = "windows")]
-pub use crate::cx_dx12::*;
+pub use crate::cx_dx11::*;
 #[cfg(target_os = "windows")]
 pub use crate::cx_hlsl::*;
 

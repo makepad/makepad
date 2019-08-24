@@ -220,7 +220,7 @@ impl JSTokenizer {
                     };
                     return TokenType::String;
                 },
-                '0'...'9' => { // try to parse numbers
+                '0'..='9' => { // try to parse numbers
                     chunk.push(state.cur);
                     Self::parse_js_number_tail(state, chunk);
                     return TokenType::Number;
@@ -361,7 +361,7 @@ impl JSTokenizer {
                         return TokenType::Identifier;
                     }
                 },
-                'a'...'z' | 'A'...'Z' => { // try to parse keywords or identifiers
+                'a'..='z' | 'A'..='Z' => { // try to parse keywords or identifiers
                     chunk.push(state.cur);
                     
                     let keyword_type = Self::parse_js_keyword(state, chunk, token_chunks);

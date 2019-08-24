@@ -1118,9 +1118,18 @@ pub struct DrawCursors {
     pub last_w: f32,
     pub first: bool,
     pub empty: bool,
-    pub cursors: Vec<Rect>,
+    pub cursors: Vec<CursorRect>,
     pub last_cursor: Option<usize>,
     pub selections: Vec<DrawSel>
+}
+
+#[derive(Clone, Copy)]
+pub struct CursorRect {
+    pub x:f32,
+    pub y:f32,
+    pub w:f32,
+    pub h:f32,
+    pub z:f32
 }
 
 impl DrawCursors {
@@ -1165,12 +1174,13 @@ impl DrawCursors {
         }
     }
     
-    pub fn emit_cursor(&mut self, x: f32, y: f32, h: f32) {
-        self.cursors.push(Rect {
+    pub fn emit_cursor(&mut self, x: f32, y: f32, h: f32, z:f32) {
+        self.cursors.push(CursorRect {
             x: x,
             y: y,
             w: 1.5,
-            h: h
+            h: h,
+            z: z
         })
     }
     
@@ -1208,12 +1218,12 @@ impl DrawCursors {
         }
     }
     
-    pub fn process_cursor(&mut self, last_cursor: usize, offset: usize, x: f32, y: f32, h: f32) {
+    pub fn process_cursor(&mut self, last_cursor: usize, offset: usize, x: f32, y: f32, h: f32, z:f32) {
         if offset == self.head { // emit a cursor
             if self.next_index > 0 && self.next_index - 1 == last_cursor {
                 self.last_cursor = Some(self.cursors.len());
             }
-            self.emit_cursor(x, y, h);
+            self.emit_cursor(x, y, h, z);
         }
     }
     
@@ -1262,11 +1272,11 @@ impl DrawCursors {
         }
     }
     
-    pub fn mark_text_with_cursor(&mut self, cursors: &Vec<TextCursor>, ch: char, offset: usize, x: f32, y: f32, w: f32, h: f32, last_cursor: usize, mark_spaces: f32) -> f32 {
+    pub fn mark_text_with_cursor(&mut self, cursors: &Vec<TextCursor>, ch: char, offset: usize, x: f32, y: f32, w: f32, h: f32, z:f32, last_cursor: usize, mark_spaces: f32) -> f32 {
         // check if we need to skip cursors
         while offset >= self.end { // jump to next cursor
             if offset == self.end { // process the last bit here
-                self.process_cursor(last_cursor, offset, x, y, h);
+                self.process_cursor(last_cursor, offset, x, y, h, z);
                 self.process_geom(x, y, w, h);
                 self.emit_selection();
             }
@@ -1276,7 +1286,7 @@ impl DrawCursors {
         }
         // in current cursor range, update values
         if offset >= self.start && offset <= self.end {
-            self.process_cursor(last_cursor, offset, x, y, h);
+            self.process_cursor(last_cursor, offset, x, y, h, z);
             self.process_geom(x, y, w, h);
             if offset == self.end {
                 self.emit_selection();

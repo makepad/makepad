@@ -153,6 +153,7 @@ impl DesktopWindow {
         self.window.begin_window(cx);
         self.pass.begin_pass(cx);
         self.pass.add_color_texture(cx, &mut self.color_texture, Some(color256(30,30,30)));
+        self.pass.set_depth_texture(cx, &mut self.depth_texture, Some(1.0));
         
         // for z-buffering add a depth texture here
         

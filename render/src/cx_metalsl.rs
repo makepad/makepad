@@ -275,6 +275,9 @@ impl Cx {
                         color.set_destination_alpha_blend_factor(MTLBlendFactor::OneMinusSourceAlpha);
                         color.set_rgb_blend_operation(MTLBlendOperation::Add);
                         color.set_alpha_blend_operation(MTLBlendOperation::Add);
+                        
+                        rpd.set_depth_attachment_pixel_format(MTLPixelFormat::Depth24Unorm_Stencil8);
+                        
                         metal_cx.device.new_render_pipeline_state(&rpd).unwrap()
                     },
                     library: library,
