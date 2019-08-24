@@ -1,5 +1,4 @@
 # makepad 
-ALL NATIVE BUILDS ARE BROKEN IN THE LAST UPDATE, WILL BE FIXED TOMORROW
 THIS REPO WILL BE HISTORY RESET SOON (has zillions of mb's of wasm builds) and restructured to prepare for final productisation/release of makepad.
 Code your design
 
@@ -31,11 +30,11 @@ Platforms:
 
 OSX + Metal - WORKING
 
-Win32 + DirectX11 - WORKING
+Win32 + DirectX11 - WORKING (needs zbuffer, text may be invisible, fixing)
 
 WASM + WebGL - WORKING
 
-Linux + OpenGL - WORKING
+Linux + OpenGL - WORKING (needs zbuffer, text may be invisible, fixing)
 
 The project is split out over a few nested crates
 
