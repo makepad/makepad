@@ -11,7 +11,7 @@ impl Process {
 	Process{}
     }
     
-    pub fn write(&mut self, values: &str) {
+    pub fn write(&mut self, _values: &str) {
         
     }
 }

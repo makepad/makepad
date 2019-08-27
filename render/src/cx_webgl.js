@@ -994,32 +994,32 @@
             var style = document.createElement('style')
             style.innerHTML = "\n"
                 + "textarea.makepad {\n"
-                + "z-index: 100000;\n"
-                + "position: absolute;\n"
-                + "opacity: 0;\n"
-                + "border-radius: 4px;\n"
-                + "color:white;\n"
-                + "font-size: 6;\n"
-                + "background: gray;\n"
-                + "-moz-appearance: none;\n"
-                + "appearance:none;\n"
-                + "border:none;\n"
-                + "resize: none;\n"
-                + "outline: none;\n"
-                + "overflow: hidden;\n"
-                + "text-indent: 0px;\n"
-                + "padding: 0 0px;\n"
-                + "margin: 0 -1px;\n"
-                + "text-indent: 0px;\n"
-                + "-ms-user-select: text;\n"
-                + "-moz-user-select: text;\n"
-                + "-webkit-user-select: text;\n"
-                + "user-select: text;\n"
-                + "white-space: pre!important;\n"
-                + "}\n"
-                + "textarea: focus.makepad {\n"
-                + "outline: 0px !important;\n"
-                + "-webkit-appearance: none;\n"
+                    + "z-index: 100000;\n"
+                    + "position: absolute;\n"
+                    + "opacity: 0;\n"
+                    + "border-radius: 4px;\n"
+                    + "color:white;\n"
+                    + "font-size: 6;\n"
+                    + "background: gray;\n"
+                    + "-moz-appearance: none;\n"
+                    + "appearance:none;\n"
+                    + "border:none;\n"
+                    + "resize: none;\n"
+                    + "outline: none;\n"
+                    + "overflow: hidden;\n"
+                    + "text-indent: 0px;\n"
+                    + "padding: 0 0px;\n"
+                    + "margin: 0 -1px;\n"
+                    + "text-indent: 0px;\n"
+                    + "-ms-user-select: text;\n"
+                    + "-moz-user-select: text;\n"
+                    + "-webkit-user-select: text;\n"
+                    + "user-select: text;\n"
+                    + "white-space: pre!important;\n"
+                    + "}\n"
+                    + "textarea: focus.makepad {\n"
+                    + "outline: 0px !important;\n"
+                    + "-webkit-appearance: none;\n"
                 + "}"
             document.body.appendChild(style)
             ta.style.left = -100
@@ -1074,7 +1074,6 @@
                         }
                         else if (ta.value.length == 1 && last_len == ta.value.length) { // its an IME replace
                             replace_last = true;
-                            
                         }
                         // we should send a replace last
                         if (replace_last || text_value != '\n') {
@@ -1146,7 +1145,7 @@
                 let code = e.keyCode;
                 
                 if (code == 18 || code == 17 || code == 16) e.preventDefault(); // alt
-                if (code == 91) {firefox_logo_key = false; e.preventDefault();}
+                if (code == 91) {e.preventDefault();}
                 var ta = this.text_area;
                 if (ugly_ime_hack) {
                     ugly_ime_hack = false;

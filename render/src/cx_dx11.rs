@@ -242,6 +242,8 @@ impl Cx {
         else {
             d3d11_cx.clear_render_target_view(&d3d11_window.render_target, Color::zero()); //self.clear_color);
         }
+        // attach depth buffer
+        
         //d3d11_cx.clear_depth_stencil_view(d3d11_window);
         
         self.render_view(pass_id, view_id, self.repaint_id, &d3d11_cx);
