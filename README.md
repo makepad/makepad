@@ -30,7 +30,7 @@ Platforms:
 
 OSX + Metal - WORKING
 
-Win32 + DirectX11 - WORKING (needs zbuffer, text may be invisible, fixing)
+Win32 + DirectX11 - WORKING
 
 WASM + WebGL - WORKING
 
