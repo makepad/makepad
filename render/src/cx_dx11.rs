@@ -16,7 +16,7 @@ use std::ffi;
 
 impl Cx {
     
-    pub fn render_view(&mut self, pass_id: usize, view_id: usize, repaint_id: u64, d3d11_cx: &D3d11Cx) {
+    pub fn render_view(&mut self, pass_id: usize, view_id: usize, repaint_id: u64, d3d11_cx: &D3d11Cx, zbias: &mut f32, zbias_step: f32) {
         
         // tad ugly otherwise the borrow checker locks 'self' and we can't recur
         let draw_calls_len = {
@@ -29,7 +29,7 @@ impl Cx {
         for draw_call_id in 0..draw_calls_len {
             let sub_view_id = self.views[view_id].draw_calls[draw_call_id].sub_view_id;
             if sub_view_id != 0 {
-                self.render_view(pass_id, sub_view_id, repaint_id, d3d11_cx);
+                self.render_view(pass_id, sub_view_id, repaint_id, d3d11_cx, zbias, zbias_step);
             }
             else {
                 let cxview = &mut self.views[view_id];
@@ -46,6 +46,18 @@ impl Cx {
                     // update the instance buffer data
                     draw_call.platform.inst_vbuf.update_with_f32_vertex_data(d3d11_cx, &draw_call.instance);
                 }
+                
+                // update the zbias uniform if we have it.
+                if draw_call.uniforms.len() > 0 {
+                    if let Some(zbias_offset) = sh.mapping.zbias_uniform_prop {
+                        if draw_call.uniforms[zbias_offset] != *zbias {
+                            draw_call.uniforms[zbias_offset] = *zbias;
+                            draw_call.uniforms_dirty = true;
+                        }
+                        *zbias += zbias_step;
+                    }
+                }
+                
                 if draw_call.uniforms_dirty {
                     draw_call.uniforms_dirty = false;
                     if draw_call.uniforms.len() != 0 {
@@ -174,7 +186,9 @@ impl Cx {
         let view_id = self.passes[pass_id].main_view_id.unwrap();
         
         self.setup_pass_render_targets(pass_id, dpi_factor, d3d11_window.render_target_view.as_ref(), d3d11_cx);
-        self.render_view(pass_id, view_id, self.repaint_id, &d3d11_cx);
+        let mut zbias = 0.0;
+        let zbias_step = self.passes[pass_id].zbias_step;
+        self.render_view(pass_id, view_id, self.repaint_id, &d3d11_cx, &mut zbias, zbias_step);
         d3d11_window.present(vsync);
         //println!("{}", (Cx::profile_time_ns() - time1)as f64 / 1000.0);
     }
@@ -183,7 +197,9 @@ impl Cx {
         // let time1 = Cx::profile_time_ns();
         let view_id = self.passes[pass_id].main_view_id.unwrap();
         self.setup_pass_render_targets(pass_id, dpi_factor, None, d3d11_cx);
-        self.render_view(pass_id, view_id, self.repaint_id, &d3d11_cx);
+        let mut zbias = 0.0;
+        let zbias_step = self.passes[pass_id].zbias_step;
+        self.render_view(pass_id, view_id, self.repaint_id, &d3d11_cx, &mut zbias, zbias_step);
     }
 }
 
@@ -885,7 +901,7 @@ impl D3d11Cx {
             Format: format,
             SampleDesc: dxgitype::DXGI_SAMPLE_DESC {Count: 1, Quality: 0},
             Usage: d3d11::D3D11_USAGE_DEFAULT,
-            BindFlags: d3d11::D3D11_BIND_DEPTH_STENCIL,// | d3d11::D3D11_BIND_SHADER_RESOURCE,
+            BindFlags: d3d11::D3D11_BIND_DEPTH_STENCIL, // | d3d11::D3D11_BIND_SHADER_RESOURCE,
             CPUAccessFlags: 0,
             MiscFlags: 0,
         };

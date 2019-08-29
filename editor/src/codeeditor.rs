@@ -391,7 +391,7 @@ impl CodeEditor {
                     view_clip.zw
                 );
                 pos = (clipped - shift - vec2(x, y)) / vec2(w, h);
-                return  camera_projection*(camera_view*(view_transform*vec4(clipped.x, clipped.y, z, 1.)));
+                return  camera_projection*(camera_view*(view_transform*vec4(clipped.x, clipped.y, z + zbias, 1.)));
             }
             
             fn pixel() -> vec4 {

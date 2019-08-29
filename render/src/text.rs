@@ -63,6 +63,7 @@ impl Text{
         sg.compose(shader_ast!({
             let geom:vec2<Geometry>;
             let texturez:texture2d<Texture>;
+            let zbias:float<Uniform>;
             let tex_size:vec2<Uniform>;
             //let list_clip:vec4<Uniform>;
             //let instance_clip:vec4<Instance>;
@@ -130,7 +131,7 @@ impl Text{
                     normalized.xy
                 );
 
-                return camera_projection*(camera_view*(view_transform*vec4(clipped,z,1.))); 
+                return camera_projection*(camera_view*(view_transform*vec4(clipped,z+zbias,1.))); 
             }
         }))
     }
@@ -145,6 +146,7 @@ impl Text{
         let aligned = cx.align_instance(inst);
         
         if aligned.inst.need_uniforms_now(cx){
+            aligned.inst.push_uniform_float(cx, 0.); 
             //texture,
             aligned.inst.push_uniform_texture_2d(cx, &self.font.texture);
             //tex_size

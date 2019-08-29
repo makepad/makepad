@@ -13,7 +13,7 @@ use crate::cx::*;
 
 impl Cx {
     
-    pub fn render_view(&mut self, pass_id: usize, view_id: usize, metal_cx: &MetalCx, encoder: &RenderCommandEncoderRef) {
+    pub fn render_view(&mut self, pass_id: usize, view_id: usize, metal_cx: &MetalCx, zbias:&mut f32, zbias_step:f32, encoder: &RenderCommandEncoderRef) {
         
         // tad ugly otherwise the borrow checker locks 'self' and we can't recur
         let draw_calls_len = self.views[view_id].draw_calls_len;
@@ -22,7 +22,7 @@ impl Cx {
         for draw_call_id in 0..draw_calls_len {
             let sub_view_id = self.views[view_id].draw_calls[draw_call_id].sub_view_id;
             if sub_view_id != 0 {
-                self.render_view(pass_id, sub_view_id, metal_cx, encoder);
+                self.render_view(pass_id, sub_view_id, metal_cx, zbias, zbias_step, encoder);
             }
             else {
                 let cxview = &mut self.views[view_id];
@@ -37,6 +37,15 @@ impl Cx {
                     self.platform.bytes_written += draw_call.instance.len() * 4;
                     draw_call.platform.inst_vbuf.update_with_f32_data(metal_cx, &draw_call.instance);
                 }
+
+                // update the zbias uniform if we have it.
+                if  draw_call.uniforms.len() > 0{
+                    if let Some(zbias_offset) = sh.mapping.zbias_uniform_prop{
+                        draw_call.uniforms[zbias_offset] = *zbias;
+                        *zbias += zbias_step;
+                    }
+                }
+    
                 if draw_call.uniforms_dirty {
                     draw_call.uniforms_dirty = false;
                     //draw_call.platform.uni_dr.update_with_f32_data(device, &draw_call.uniforms);
@@ -142,7 +151,7 @@ impl Cx {
             depth_attachment.set_store_action(MTLStoreAction::Store);
             if let Some(depth_clear) = self.passes[pass_id].depth_clear {
                 depth_attachment.set_load_action(MTLLoadAction::Clear);
-                //depth_attachment.set_clear_depth(1.0);
+                depth_attachment.set_clear_depth(depth_clear);
             }
             else {
                 depth_attachment.set_load_action(MTLLoadAction::Load);
@@ -178,7 +187,9 @@ impl Cx {
             if let Some(depth_state) = &self.passes[pass_id].platform.mtl_depth_state {
                 encoder.set_depth_stencil_state(depth_state);
             }
-            self.render_view(pass_id, view_id, &metal_cx, encoder);
+            let mut zbias = 0.0;
+            let zbias_step = self.passes[pass_id].zbias_step;
+            self.render_view(pass_id, view_id, &metal_cx, &mut zbias, zbias_step, encoder);
             
             encoder.end_encoding();
             command_buffer.present_drawable(&drawable);
@@ -208,8 +219,9 @@ impl Cx {
         if let Some(depth_state) = &self.passes[pass_id].platform.mtl_depth_state {
             encoder.set_depth_stencil_state(depth_state);
         }
-        
-        self.render_view(pass_id, view_id, &metal_cx, encoder);
+        let mut zbias = 0.0;
+        let zbias_step = self.passes[pass_id].zbias_step;
+        self.render_view(pass_id, view_id, &metal_cx, &mut zbias, zbias_step, encoder);
         
         encoder.end_encoding();
         command_buffer.commit();
@@ -269,7 +281,7 @@ impl MetalCx {
         }
         else {
             match cxtexture.desc.format {
-                TextureFormat::Default | TextureFormat::Depth24Stencil8 => {
+                TextureFormat::Default | TextureFormat::Depth32Stencil8 => {
                     mdesc.set_pixel_format(MTLPixelFormat::Depth32Float_Stencil8);
                     mdesc.set_texture_type(MTLTextureType::D2);
                     mdesc.set_storage_mode(MTLStorageMode::Private);

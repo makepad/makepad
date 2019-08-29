@@ -231,11 +231,13 @@ impl Cx {
         if sg.log != 0 {
             println!("---- Metal shader -----\n{}", mtl_out);
         }
-        
+
+        let  named_uniform_props =  NamedProps::construct(sg, &uniforms_dr, true);
         Ok((mtl_out, CxShaderMapping {
+            zbias_uniform_prop: named_uniform_props.find_zbias_uniform_prop(),
             rect_instance_props: RectInstanceProps::construct(sg, &instances),
             named_instance_props: NamedProps::construct(sg, &instances, false),
-            named_uniform_props: NamedProps::construct(sg, &uniforms_dr, true),
+            named_uniform_props: named_uniform_props,
             instances: instances,
             geometries: geometries,
             instance_slots: instance_slots,

@@ -108,6 +108,7 @@ pub struct CxPass {
     pub paint_dirty: bool,
     pub pass_size: Vec2,
     pub uniforms: Vec<f32>,
+    pub zbias_step: f32,
     pub platform: CxPlatformPass,
 }
 
@@ -116,6 +117,7 @@ impl Default for CxPass {
         let mut uniforms: Vec<f32> = Vec::new();
         uniforms.resize(CX_UNI_SIZE, 0.0);
         CxPass {
+            zbias_step: 0.001,
             uniforms: uniforms,
             color_textures: Vec::new(),
             depth_texture: None,

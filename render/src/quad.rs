@@ -38,6 +38,7 @@ impl Quad {
             let z: float<Instance>;
             let color: vec4<Instance>;
             let pos: vec2<Varying>;
+            let zbias: float<Uniform>;
             let view_do_scroll: vec2<Uniform>;
             //let dpi_dilate: float<Uniform>;
             
@@ -51,7 +52,7 @@ impl Quad {
                 );
                 pos = (clipped - shift - vec2(x, y)) / vec2(w, h);
                 // only pass the clipped position forward
-                return camera_projection*(camera_view*(view_transform*vec4(clipped.x, clipped.y, z, 1.)));
+                return camera_projection*(camera_view*(view_transform*vec4(clipped.x, clipped.y, z+zbias, 1.)));
             }
             
             fn pixel() -> vec4 {
@@ -92,6 +93,7 @@ impl Quad {
     pub fn draw_quad_abs(&mut self, cx: &mut Cx, rect: Rect) -> InstanceArea {
         let inst = cx.new_instance(&self.shader, 1);
         if inst.need_uniforms_now(cx) {
+            inst.push_uniform_float(cx, 0.); 
             inst.push_uniform_vec2f(
                 cx,
                 if self.do_h_scroll {1.0}else {0.0},
