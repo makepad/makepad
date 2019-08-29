@@ -85,7 +85,7 @@ impl Cx {
                     };
                     self.vr_can_present = to_wasm.mu32() > 0;
                     
-                    if self.windows.len()>0 {
+                    if self.windows.len() > 0 {
                         self.windows[0].window_geom = self.platform.window_geom.clone();
                     }
                     
@@ -127,7 +127,7 @@ impl Cx {
                     let abs = Vec2 {x: to_wasm.mf32(), y: to_wasm.mf32()};
                     let digit = to_wasm.mu32() as usize;
                     self.platform.fingers_down[digit] = true;
-                    let is_touch = to_wasm.mu32()>0;
+                    let is_touch = to_wasm.mu32() > 0;
                     let modifiers = unpack_key_modifier(to_wasm.mu32());
                     let time = to_wasm.mf64();
                     let tap_count = self.process_tap_count(digit, abs, time);

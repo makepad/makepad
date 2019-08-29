@@ -45,14 +45,14 @@ impl RectInstanceProps {
     }
 }
 
-#[derive(Default, Clone)]
+#[derive(Default, Clone, Debug)]
 pub struct NamedProp {
     pub name: String,
     pub offset: usize,
     pub slots: usize
 }
 
-#[derive(Default, Clone)]
+#[derive(Default, Clone, Debug)]
 pub struct NamedProps {
     pub props: Vec<NamedProp>,
     pub total_slots: usize,
@@ -67,6 +67,9 @@ impl NamedProps {
             
             if aligned && (offset & 3) + slots > 4 { // goes over the boundary
                 offset += 4 - (offset & 3); // make jump to new slot
+            }
+            if aligned && slots == 2 && (offset&1) != 0{
+                panic!("Please re-order uniform {} to be size-2 aligned", prop.name);
             }
             
             out_props.push(NamedProp {
@@ -84,6 +87,15 @@ impl NamedProps {
             total_slots: offset
         }
     }
+    
+    pub fn find_zbias_uniform_prop(&self)->Option<usize>{
+        for prop in &self.props {
+            if prop.name == "zbias"{
+                return Some(prop.offset)
+            }
+        }
+        return None
+    }
 }
 
 #[derive(Default, Clone)]
@@ -99,6 +111,7 @@ pub struct CxShaderMapping {
     pub rect_instance_props: RectInstanceProps,
     pub named_uniform_props: NamedProps,
     pub named_instance_props: NamedProps,
+    pub zbias_uniform_prop: Option<usize> 
 }
 
 #[derive(Default, Clone)]

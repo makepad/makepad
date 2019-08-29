@@ -1,5 +1,5 @@
 // forkpty version of Process
-use render::*;
+//use render::*;
 use libc::{winsize,termios};
 use std::ptr;
 use std::mem;
@@ -114,7 +114,7 @@ impl Process {
         Process {}
     }
     
-    pub fn write(&mut self, values: &str) {
+    pub fn write(&mut self, _values: &str) {
         
     }
 }

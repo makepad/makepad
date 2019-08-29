@@ -22,7 +22,7 @@ static mut GLOBAL_WIN32_APP: *mut Win32App = 0 as *mut _;
 
 pub struct Win32App {
     pub time_start: u64,
-    pub event_callback: Option<*mut FnMut(&mut Win32App, &mut Vec<Event>) -> bool>,
+    pub event_callback: Option<*mut dyn FnMut(&mut Win32App, &mut Vec<Event>) -> bool>,
     pub event_recur_block: bool,
     pub event_loop_running: bool,
     pub class_name_wstr: Vec<u16>,
@@ -116,8 +116,8 @@ impl Win32App {
     {
         unsafe {
             self.event_callback = Some(
-                &mut event_handler as *const FnMut(&mut Win32App, &mut Vec<Event>) -> bool
-                as *mut FnMut(&mut Win32App, &mut Vec<Event>) -> bool
+                &mut event_handler as *const dyn FnMut(&mut Win32App, &mut Vec<Event>) -> bool
+                as *mut dyn FnMut(&mut Win32App, &mut Vec<Event>) -> bool
             );
             
             while self.event_loop_running {

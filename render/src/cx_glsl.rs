@@ -275,7 +275,7 @@ impl Cx {
         out
     }
     
-    pub fn gl_assemble_shader(sg: &ShaderGen, shtype: GLShaderType) -> Result<(String,String,CxShaderMapping), SlErr> {
+    pub fn gl_assemble_shader(sg: &ShaderGen, shtype: GLShaderType) -> Result<(String, String, CxShaderMapping), SlErr> {
         
         let mut vtx_out = String::new();
         let mut pix_out = String::new();
@@ -470,12 +470,14 @@ impl Cx {
         // we can also flatten our uniform variable set
         
         // lets composite our ShAst structure into a set of methods
+        let named_uniform_props = NamedProps::construct(sg, &uniforms_dr, true);
         Ok((vtx_out, pix_out, CxShaderMapping {
+            zbias_uniform_prop: named_uniform_props.find_zbias_uniform_prop(),
             named_instance_props: NamedProps::construct(sg, &instances, false),
-            named_uniform_props: NamedProps::construct(sg, &uniforms_dr, true),
             rect_instance_props: RectInstanceProps::construct(sg, &instances),
-            instances:instances,
-            geometries:geometries,
+            named_uniform_props,
+            instances: instances,
+            geometries: geometries,
             geometry_slots: geometry_slots,
             instance_slots: instance_slots,
             uniforms_dr: uniforms_dr,
@@ -519,8 +521,8 @@ impl<'a> SlCx<'a> {
         }
     }
     
-    pub fn mat_mul(&self, left:&str, right:&str)->String{
-        format!("{}*{}",left, right)
+    pub fn mat_mul(&self, left: &str, right: &str) -> String {
+        format!("{}*{}", left, right)
     }
     
     pub fn map_type(&self, ty: &str) -> String {

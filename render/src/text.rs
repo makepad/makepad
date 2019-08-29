@@ -59,7 +59,6 @@ impl Text{
             0,1,2,
             0,3,2
         ];
-
         sg.compose(shader_ast!({
             let geom:vec2<Geometry>;
             let texturez:texture2d<Texture>;
@@ -82,6 +81,7 @@ impl Text{
             let tex_coord:vec2<Varying>;
             let clipped:vec2<Varying>;
             let rect:vec4<Varying>;
+            let zbias:float<Uniform>;
             let brightness:float<Uniform>;
             let view_do_scroll: vec2<Uniform>;
 
@@ -130,7 +130,7 @@ impl Text{
                     normalized.xy
                 );
 
-                return camera_projection*(camera_view*(view_transform*vec4(clipped,z,1.))); 
+                return camera_projection*(camera_view*(view_transform*vec4(clipped,z+zbias,1.))); 
             }
         }))
     }
@@ -149,6 +149,7 @@ impl Text{
             aligned.inst.push_uniform_texture_2d(cx, &self.font.texture);
             //tex_size
             aligned.inst.push_uniform_vec2f(cx, cx.fonts[font_id].width as f32, cx.fonts[font_id].height as f32);
+            aligned.inst.push_uniform_float(cx, 0.); 
             aligned.inst.push_uniform_float(cx, self.brightness);
             aligned.inst.push_uniform_vec2f(
                 cx,

@@ -1,5 +1,5 @@
 use crate::cx::*;
-use crate::cx_dx12::*;
+use crate::cx_dx11::*;
 use std::ffi;
 use winapi::shared:: {dxgiformat};
 use winapi::um:: {d3d11, d3dcommon};
@@ -235,11 +235,13 @@ impl Cx {
                 println!("{} {}", index + 1, line);
             }
         }
-        
+
+        let named_uniform_props = NamedProps::construct(sg, &uniforms_dr, true);
         Ok((hlsl_out, CxShaderMapping {
+            zbias_uniform_prop: named_uniform_props.find_zbias_uniform_prop(),
             rect_instance_props: RectInstanceProps::construct(sg, &instances),
             named_instance_props: NamedProps::construct(sg, &instances, false),
-            named_uniform_props: NamedProps::construct(sg, &uniforms_dr, true),
+            named_uniform_props,
             geometries: geometries,
             instances: instances,
             geometry_slots: geometry_slots,

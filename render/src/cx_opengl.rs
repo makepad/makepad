@@ -10,7 +10,7 @@ use x11_dl::xlib;
 
 impl Cx {
     
-    pub fn render_view(&mut self, pass_id: usize, view_id: usize, full_repaint: bool, view_rect: &Rect, opengl_cx: &OpenglCx) {
+    pub fn render_view(&mut self, pass_id: usize, view_id: usize, full_repaint: bool, view_rect: &Rect, opengl_cx: &OpenglCx, zbias: &mut f32, zbias_step: f32) {
         
         // tad ugly otherwise the borrow checker locks 'self' and we can't recur
         let draw_calls_len = self.views[view_id].draw_calls_len;
@@ -22,7 +22,7 @@ impl Cx {
         for draw_call_id in 0..draw_calls_len {
             let sub_view_id = self.views[view_id].draw_calls[draw_call_id].sub_view_id;
             if sub_view_id != 0 {
-                self.render_view(pass_id, sub_view_id, full_repaint, view_rect, opengl_cx);
+                self.render_view(pass_id, sub_view_id, full_repaint, view_rect, opengl_cx, zbias, zbias_step);
             }
             else {
                 let cxview = &mut self.views[view_id];
@@ -37,6 +37,13 @@ impl Cx {
                 }
                 
                 draw_call.platform.check_vao(draw_call.shader_id, &shp);
+                
+                if draw_call.uniforms.len() > 0 {
+                    if let Some(zbias_offset) = sh.mapping.zbias_uniform_prop {
+                        draw_call.uniforms[zbias_offset] = *zbias;
+                        *zbias += zbias_step;
+                    }
+                }
                 
                 if draw_call.uniforms_dirty {
                     draw_call.uniforms_dirty = false;
@@ -120,7 +127,7 @@ impl Cx {
         } 
         let window;
         let view_rect;
-        if full_repaint { 
+        if full_repaint {
             opengl_window.xlib_window.hide_child_windows();
              
             window = opengl_window.xlib_window.window.unwrap();
@@ -208,7 +215,11 @@ impl Cx {
                 gl::Clear(gl::COLOR_BUFFER_BIT | gl::DEPTH_BUFFER_BIT);
             }
         }
-        self.render_view(pass_id, view_id, full_repaint, &view_rect, &opengl_cx);
+
+        let mut zbias = 0.0;
+        let zbias_step = self.passes[pass_id].zbias_step;
+
+        self.render_view(pass_id, view_id, full_repaint, &view_rect, &opengl_cx, &mut zbias, zbias_step);
         
         unsafe {
             (opengl_cx.glx.glXSwapBuffers)(xlib_app.display, window);

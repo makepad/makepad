@@ -13,7 +13,7 @@ use crate::cx::*;
 
 impl Cx {
     
-    pub fn render_view(&mut self, pass_id: usize, view_id: usize, metal_cx: &MetalCx, encoder: &RenderCommandEncoderRef) {
+    pub fn render_view(&mut self, pass_id: usize, view_id: usize, metal_cx: &MetalCx, zbias:&mut f32, zbias_step:f32, encoder: &RenderCommandEncoderRef) {
         
         // tad ugly otherwise the borrow checker locks 'self' and we can't recur
         let draw_calls_len = self.views[view_id].draw_calls_len;
@@ -22,7 +22,7 @@ impl Cx {
         for draw_call_id in 0..draw_calls_len {
             let sub_view_id = self.views[view_id].draw_calls[draw_call_id].sub_view_id;
             if sub_view_id != 0 {
-                self.render_view(pass_id, sub_view_id, metal_cx, encoder);
+                self.render_view(pass_id, sub_view_id, metal_cx, zbias, zbias_step, encoder);
             }
             else {
                 let cxview = &mut self.views[view_id];
@@ -37,6 +37,15 @@ impl Cx {
                     self.platform.bytes_written += draw_call.instance.len() * 4;
                     draw_call.platform.inst_vbuf.update_with_f32_data(metal_cx, &draw_call.instance);
                 }
+
+                // update the zbias uniform if we have it.
+                if  draw_call.uniforms.len() > 0{
+                    if let Some(zbias_offset) = sh.mapping.zbias_uniform_prop{
+                        draw_call.uniforms[zbias_offset] = *zbias;
+                        *zbias += zbias_step;
+                    }
+                }
+    
                 if draw_call.uniforms_dirty {
                     draw_call.uniforms_dirty = false;
                     //draw_call.platform.uni_dr.update_with_f32_data(device, &draw_call.uniforms);
@@ -93,23 +102,20 @@ impl Cx {
         }
     }
     
-    pub fn setup_render_pass_descriptor(&mut self, render_pass_descriptor:&RenderPassDescriptorRef, pass_id: usize, dpi_factor:f32, first_texture:Option<&metal::TextureRef>, metal_cx: &MetalCx){
+    pub fn setup_render_pass_descriptor(&mut self, render_pass_descriptor: &RenderPassDescriptorRef, pass_id: usize, dpi_factor: f32, first_texture: Option<&metal::TextureRef>, metal_cx: &MetalCx) {
         let pass_size = self.passes[pass_id].pass_size;
-
+        
         self.passes[pass_id].set_ortho_matrix(Vec2::zero(), pass_size);
-        
-        
-        
         self.passes[pass_id].uniform_camera_view(&Mat4::identity());
         
         for (index, color_texture) in self.passes[pass_id].color_textures.iter().enumerate() {
-
+            
             let color_attachment = render_pass_descriptor.color_attachments().object_at(0).unwrap();
             
-            if index == 0 && first_texture.is_some(){
+            if index == 0 && first_texture.is_some() {
                 color_attachment.set_texture(Some(&first_texture.unwrap()));
             }
-            else{
+            else {
                 let cxtexture = &mut self.textures[color_texture.texture_id];
                 metal_cx.update_platform_render_target(cxtexture, dpi_factor, pass_size, false);
                 
@@ -121,7 +127,7 @@ impl Cx {
                 }
                 
             }
-
+            
             color_attachment.set_store_action(MTLStoreAction::Store);
             if let Some(color) = color_texture.clear_color {
                 color_attachment.set_load_action(MTLLoadAction::Clear);
@@ -135,7 +141,7 @@ impl Cx {
         if let Some(depth_texture_id) = self.passes[pass_id].depth_texture {
             let cxtexture = &mut self.textures[depth_texture_id];
             metal_cx.update_platform_render_target(cxtexture, dpi_factor, pass_size, true);
-             let depth_attachment = render_pass_descriptor.depth_attachment().unwrap();
+            let depth_attachment = render_pass_descriptor.depth_attachment().unwrap();
             if let Some(mtl_texture) = &cxtexture.platform.mtl_texture {
                 depth_attachment.set_texture(Some(&mtl_texture));
             }
@@ -145,13 +151,13 @@ impl Cx {
             depth_attachment.set_store_action(MTLStoreAction::Store);
             if let Some(depth_clear) = self.passes[pass_id].depth_clear {
                 depth_attachment.set_load_action(MTLLoadAction::Clear);
-                //depth_attachment.set_clear_depth(1.0);
+                depth_attachment.set_clear_depth(depth_clear);
             }
             else {
                 depth_attachment.set_load_action(MTLLoadAction::Load);
             }
             // create depth state
-            if self.passes[pass_id].platform.mtl_depth_state.is_none(){
+            if self.passes[pass_id].platform.mtl_depth_state.is_none() {
                 let desc = DepthStencilDescriptor::new();
                 desc.set_depth_compare_function(MTLCompareFunction::LessEqual);
                 desc.set_depth_write_enabled(true);
@@ -173,16 +179,18 @@ impl Cx {
         //let command_buffer = command_queue.new_command_buffer();
         if let Some(drawable) = layer.next_drawable() {
             let render_pass_descriptor = RenderPassDescriptor::new();
-
+            
             self.setup_render_pass_descriptor(&render_pass_descriptor, pass_id, dpi_factor, Some(drawable.texture()), metal_cx);
             
             let command_buffer = metal_cx.command_queue.new_command_buffer();
             let encoder = command_buffer.new_render_command_encoder(&render_pass_descriptor);
-            if let Some(depth_state) = &self.passes[pass_id].platform.mtl_depth_state{
+            if let Some(depth_state) = &self.passes[pass_id].platform.mtl_depth_state {
                 encoder.set_depth_stencil_state(depth_state);
             }
-            self.render_view(pass_id, view_id, &metal_cx, encoder);
-
+            let mut zbias = 0.0;
+            let zbias_step = self.passes[pass_id].zbias_step;
+            self.render_view(pass_id, view_id, &metal_cx, &mut zbias, zbias_step, encoder);
+            
             encoder.end_encoding();
             command_buffer.present_drawable(&drawable);
             command_buffer.commit();
@@ -205,15 +213,16 @@ impl Cx {
         let render_pass_descriptor = RenderPassDescriptor::new();
         
         self.setup_render_pass_descriptor(&render_pass_descriptor, pass_id, dpi_factor, None, metal_cx);
-
+        
         let command_buffer = metal_cx.command_queue.new_command_buffer();
         let encoder = command_buffer.new_render_command_encoder(&render_pass_descriptor);
-        if let Some(depth_state) = &self.passes[pass_id].platform.mtl_depth_state{
+        if let Some(depth_state) = &self.passes[pass_id].platform.mtl_depth_state {
             encoder.set_depth_stencil_state(depth_state);
         }
-
-        self.render_view(pass_id, view_id, &metal_cx, encoder);
-
+        let mut zbias = 0.0;
+        let zbias_step = self.passes[pass_id].zbias_step;
+        self.render_view(pass_id, view_id, &metal_cx, &mut zbias, zbias_step, encoder);
+        
         encoder.end_encoding();
         command_buffer.commit();
         
@@ -229,6 +238,15 @@ pub struct MetalCx {
 impl MetalCx {
     
     pub fn new() -> MetalCx {
+        let devices = Device::all();
+        for device in devices {
+            if device.is_low_power() {
+                return MetalCx {
+                    command_queue: device.new_command_queue(),
+                    device: device
+                }
+            }
+        }
         let device = Device::system_default();
         MetalCx {
             command_queue: device.new_command_queue(),
@@ -263,8 +281,8 @@ impl MetalCx {
         }
         else {
             match cxtexture.desc.format {
-                TextureFormat::Default | TextureFormat::Depth24Stencil8 => {
-                    mdesc.set_pixel_format(MTLPixelFormat::Depth24Unorm_Stencil8);
+                TextureFormat::Default | TextureFormat::Depth32Stencil8 => {
+                    mdesc.set_pixel_format(MTLPixelFormat::Depth32Float_Stencil8);
                     mdesc.set_texture_type(MTLTextureType::D2);
                     mdesc.set_storage_mode(MTLStorageMode::Private);
                     mdesc.set_usage(MTLTextureUsage::RenderTarget);

@@ -10,8 +10,8 @@ use std::collections::HashMap;
 use serde::*;
 
 #[derive(Clone, Serialize, Deserialize)]
-enum Panel {
-    RustCompiler,
+enum Panel { 
+    RustCompiler,     
     Keyboard,
     FileTree,
     FileEditorTarget,

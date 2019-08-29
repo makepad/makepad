@@ -30,7 +30,7 @@ pub struct XlibApp {
     pub window_map: HashMap<c_ulong, *mut XlibWindow>,
     pub time_start: u64,
     pub last_scroll_time: f64,
-    pub event_callback: Option<*mut FnMut(&mut XlibApp, &mut Vec<Event>) -> bool>,
+    pub event_callback: Option<*mut dyn FnMut(&mut XlibApp, &mut Vec<Event>) -> bool>,
     pub event_recur_block: bool,
     pub event_loop_running: bool,
     pub timers: VecDeque<XlibTimer>,
@@ -157,8 +157,8 @@ impl XlibApp {
     {
         unsafe {
             self.event_callback = Some(
-                &mut event_handler as *const FnMut(&mut XlibApp, &mut Vec<Event>) -> bool
-                as *mut FnMut(&mut XlibApp, &mut Vec<Event>) -> bool
+                &mut event_handler as *const dyn FnMut(&mut XlibApp, &mut Vec<Event>) -> bool
+                as *mut dyn FnMut(&mut XlibApp, &mut Vec<Event>) -> bool
             );
             
             self.do_callback(&mut vec![

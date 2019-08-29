@@ -254,7 +254,7 @@ impl Style for CodeEditor {
                 font: cx.load_font_style("mono_font"),
                 font_size: 12.0,
                 brightness: 1.0,
-                z:9.1,
+                z:9.,
                 line_spacing: 1.4,
                 do_dpi_dilate: true,
                 do_h_scroll: false,
@@ -391,7 +391,7 @@ impl CodeEditor {
                     view_clip.zw
                 );
                 pos = (clipped - shift - vec2(x, y)) / vec2(w, h);
-                return  camera_projection*(camera_view*(view_transform*vec4(clipped.x, clipped.y, z, 1.)));
+                return  camera_projection*(camera_view*(view_transform*vec4(clipped.x, clipped.y, z + zbias, 1.)));
             }
             
             fn pixel() -> vec4 {

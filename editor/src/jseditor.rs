@@ -576,8 +576,13 @@ impl JSTokenizer {
                 }
             },
             't' => {
-                if state.keyword(chunk, "ry") {
-                    return TokenType::Keyword
+                if state.keyword(chunk, "r") {
+                    if state.keyword(chunk, "y") {
+                        return TokenType::Keyword
+                    }
+                    if state.keyword(chunk, "ue") {
+                        return TokenType::Bool
+                    }
                 }
                 if state.keyword(chunk, "ypeof") {
                     return TokenType::Keyword

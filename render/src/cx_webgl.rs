@@ -2,7 +2,7 @@
 use crate::cx::*;
 
 impl Cx {
-    pub fn render_view(&mut self, pass_id: usize, view_id: usize, vr_is_presenting:bool) {
+    pub fn render_view(&mut self, pass_id: usize, view_id: usize, vr_is_presenting:bool, zbias: &mut f32, zbias_step: f32) {
         // tad ugly otherwise the borrow checker locks 'self' and we can't recur
         let draw_calls_len = self.views[view_id].draw_calls_len;
         self.views[view_id].set_clipping_uniforms();
@@ -16,7 +16,7 @@ impl Cx {
             
             let sub_view_id = self.views[view_id].draw_calls[draw_call_id].sub_view_id;
             if sub_view_id != 0 {
-                self.render_view(pass_id, sub_view_id, vr_is_presenting);
+                self.render_view(pass_id, sub_view_id, vr_is_presenting, zbias, zbias_step);
             }
             else {
                 let cxview = &mut self.views[view_id];
@@ -35,6 +35,13 @@ impl Cx {
                     );
                 }
                 
+                if draw_call.uniforms.len() > 0 {
+                    if let Some(zbias_offset) = sh.mapping.zbias_uniform_prop {
+                        draw_call.uniforms[zbias_offset] = *zbias;
+                        *zbias += zbias_step;
+                    }
+                }
+                                
                 // update/alloc textures?
                 for texture_id in &draw_call.textures_2d {
                     let cxtexture = &mut self.textures[*texture_id as usize];
@@ -80,8 +87,10 @@ impl Cx {
         }
         
         self.platform.from_wasm.begin_frame();
+        let mut zbias = 0.0;
+        let zbias_step = self.passes[pass_id].zbias_step;
         
-        self.render_view(pass_id, view_id, vr_is_presenting);
+        self.render_view(pass_id, view_id, vr_is_presenting, &mut zbias, zbias_step);
 
         self.platform.from_wasm.end_frame();
     }
