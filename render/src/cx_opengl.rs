@@ -228,12 +228,12 @@ impl Cx {
     
     pub fn draw_pass_to_texture(
         &mut self,
-        pass_id: usize,
+        _pass_id: usize,
         _dpi_factor: f32,
-        opengl_cx: &OpenglCx,
+        _opengl_cx: &OpenglCx,
     ) {
-        let view_id = self.passes[pass_id].main_view_id.unwrap();
-        let _pass_size = self.passes[pass_id].pass_size;
+        //let view_id = self.passes[pass_id].main_view_id.unwrap();
+        //let _pass_size = self.passes[pass_id].pass_size;
         
         /*
         for (index, color_texture) in self.passes[pass_id].color_textures.iter().enumerate() {
@@ -258,7 +258,7 @@ impl Cx {
             }
         }
         */
-        self.render_view(pass_id, view_id, true, &Rect::zero(), &opengl_cx);
+        //self.render_view(pass_id, view_id, true, &Rect::zero(), &opengl_cx);
         // commit
     }
     
