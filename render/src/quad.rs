@@ -38,8 +38,8 @@ impl Quad {
             let z: float<Instance>;
             let color: vec4<Instance>;
             let pos: vec2<Varying>;
-            let zbias: float<Uniform>;
             let view_do_scroll: vec2<Uniform>;
+            let zbias: float<Uniform>;
             //let dpi_dilate: float<Uniform>;
             
             fn vertex() -> vec4 {
@@ -93,12 +93,12 @@ impl Quad {
     pub fn draw_quad_abs(&mut self, cx: &mut Cx, rect: Rect) -> InstanceArea {
         let inst = cx.new_instance(&self.shader, 1);
         if inst.need_uniforms_now(cx) {
-            inst.push_uniform_float(cx, 0.); 
             inst.push_uniform_vec2f(
                 cx,
                 if self.do_h_scroll {1.0}else {0.0},
                 if self.do_v_scroll {1.0}else {0.0}
             );
+            inst.push_uniform_float(cx, 0.); 
         }
         //println!("{:?} {}", area, cx.current_draw_list_id);
         let data = [

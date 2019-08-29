@@ -42,7 +42,10 @@ impl Style for TabControl {
             },
             page_view: View::style(cx),
             tabs: Elements::new(Tab::style(cx)),
-            drag_tab: Tab::style(cx),
+            drag_tab: Tab {
+                z: 10.,
+                ..Tab::style(cx)
+            },
             drag_tab_view: View {
                 is_overlay: true,
                 ..Style::style(cx)
@@ -127,7 +130,7 @@ impl TabControl {
                 }
             },
             TabControlEvent::TabClose {..} => { // needed to clear animation state
-                self.tabs.clear(cx, |_,_|());
+                self.tabs.clear(cx, | _, _ | ());
             },
             _ => ()
         };
@@ -196,7 +199,7 @@ impl TabControl {
     
     pub fn end_tabs(&mut self, cx: &mut Cx) {
         self.tab_fill.draw_quad_walk(cx, Bounds::Fill, Bounds::Fill, Margin::zero());
-        self.tabs.sweep(cx, |_,_|());
+        self.tabs.sweep(cx, | _, _ | ());
         if let Some((fe, id)) = &self._dragging_tab {
             if let Ok(()) = self.drag_tab_view.begin_view(cx, Layout {
                 abs_origin: Some(Vec2::zero()),

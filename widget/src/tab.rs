@@ -11,7 +11,7 @@ pub struct Tab{
     pub label:String,
     pub is_closeable:bool,
     pub animator:Animator,
-
+    pub z:f32,
     pub _is_selected:bool,
     pub _is_focussed:bool,
     pub _bg_area:Area,
@@ -26,6 +26,7 @@ impl Style for Tab{
         let mut tab = Self{
             label:"Tab".to_string(),
             is_closeable:true,
+            z:0.,
             bg:Quad{
                 shader:cx.add_shader(Self::def_bg_shader(), "Tab.bg"),
                 ..Style::style(cx)
@@ -42,7 +43,7 @@ impl Style for Tab{
                 margin:Margin{l:-4.,t:3.,r:4.,b:0.},
                 ..Style::style(cx)
             },
-            text:Text{z:0.01,..Style::style(cx)},
+            text:Text::style(cx),
             animator:Animator::new(Anim::empty()),
             _is_selected:false,
             _is_focussed:false,
@@ -270,7 +271,7 @@ impl Tab{
 
     pub fn draw_tab(&mut self, cx:&mut Cx){
         // pull the bg color from our animation system, uses 'default' value otherwise
-
+        self.bg.z = self.z;
         self.bg.color = self.animator.last_color("bg.color");
 
         // check if we are closing
@@ -295,6 +296,7 @@ impl Tab{
                 cx.walk_turtle(Bounds::Fix(0.0),Bounds::Fix(10.0),self.tab_close.margin,None);
             }
             // push the 2 vars we added to bg shader
+            self.text.z = self.z;
             self.text.color = self.animator.last_color("text.color");
             self._text_area = self.text.draw_text(cx, &self.label);
 

@@ -45,14 +45,14 @@ impl RectInstanceProps {
     }
 }
 
-#[derive(Default, Clone)]
+#[derive(Default, Clone, Debug)]
 pub struct NamedProp {
     pub name: String,
     pub offset: usize,
     pub slots: usize
 }
 
-#[derive(Default, Clone)]
+#[derive(Default, Clone, Debug)]
 pub struct NamedProps {
     pub props: Vec<NamedProp>,
     pub total_slots: usize,
@@ -67,6 +67,9 @@ impl NamedProps {
             
             if aligned && (offset & 3) + slots > 4 { // goes over the boundary
                 offset += 4 - (offset & 3); // make jump to new slot
+            }
+            if aligned && slots == 2 && (offset&1) != 0{
+                panic!("Please re-order uniform {} to be size-2 aligned", prop.name);
             }
             
             out_props.push(NamedProp {

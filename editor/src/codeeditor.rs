@@ -254,7 +254,7 @@ impl Style for CodeEditor {
                 font: cx.load_font_style("mono_font"),
                 font_size: 12.0,
                 brightness: 1.0,
-                z:9.1,
+                z:9.,
                 line_spacing: 1.4,
                 do_dpi_dilate: true,
                 do_h_scroll: false,

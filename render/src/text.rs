@@ -59,11 +59,9 @@ impl Text{
             0,1,2,
             0,3,2
         ];
-
         sg.compose(shader_ast!({
             let geom:vec2<Geometry>;
             let texturez:texture2d<Texture>;
-            let zbias:float<Uniform>;
             let tex_size:vec2<Uniform>;
             //let list_clip:vec4<Uniform>;
             //let instance_clip:vec4<Instance>;
@@ -83,6 +81,7 @@ impl Text{
             let tex_coord:vec2<Varying>;
             let clipped:vec2<Varying>;
             let rect:vec4<Varying>;
+            let zbias:float<Uniform>;
             let brightness:float<Uniform>;
             let view_do_scroll: vec2<Uniform>;
 
@@ -146,11 +145,11 @@ impl Text{
         let aligned = cx.align_instance(inst);
         
         if aligned.inst.need_uniforms_now(cx){
-            aligned.inst.push_uniform_float(cx, 0.); 
             //texture,
             aligned.inst.push_uniform_texture_2d(cx, &self.font.texture);
             //tex_size
             aligned.inst.push_uniform_vec2f(cx, cx.fonts[font_id].width as f32, cx.fonts[font_id].height as f32);
+            aligned.inst.push_uniform_float(cx, 0.); 
             aligned.inst.push_uniform_float(cx, self.brightness);
             aligned.inst.push_uniform_vec2f(
                 cx,

@@ -39,7 +39,10 @@ where TItem: Clone
             // dock_items:None,
             drop_size: Vec2 {x: 100., y: 70.},
             drop_quad_color: color("#a"),
-            drop_quad: Quad ::style(cx),
+            drop_quad: Quad{
+                z:10.,
+                ..Quad ::style(cx)
+            },
             splitters: Elements::new(Splitter::style(cx)),
             tab_controls: Elements::new(TabControl::style(cx)),
             drop_quad_view: View {
