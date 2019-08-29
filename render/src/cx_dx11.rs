@@ -13,7 +13,6 @@ use std::ffi;
 //use std::ffi::c_void;
 //use std::sync::Mutex;
 
-
 impl Cx {
     
     pub fn render_view(&mut self, pass_id: usize, view_id: usize, repaint_id: u64, d3d11_cx: &D3d11Cx, zbias: &mut f32, zbias_step: f32) {
