@@ -106,7 +106,7 @@ impl Cx {
         self.passes[pass_id].uniform_camera_view(&Mat4::identity());
         
         //let wg = &d3d11_window.window_geom;
-        d3d11_cx.set_viewport(pass_size.x, pass_size.y);
+        d3d11_cx.set_viewport(pass_size.x * dpi_factor, pass_size.y * dpi_factor);
         
         // set up the color texture array
         let mut color_textures = Vec::<*mut d3d11::ID3D11RenderTargetView>::new();
@@ -885,7 +885,7 @@ impl D3d11Cx {
             Format: format,
             SampleDesc: dxgitype::DXGI_SAMPLE_DESC {Count: 1, Quality: 0},
             Usage: d3d11::D3D11_USAGE_DEFAULT,
-            BindFlags: d3d11::D3D11_BIND_DEPTH_STENCIL | d3d11::D3D11_BIND_SHADER_RESOURCE,
+            BindFlags: d3d11::D3D11_BIND_DEPTH_STENCIL,// | d3d11::D3D11_BIND_SHADER_RESOURCE,
             CPUAccessFlags: 0,
             MiscFlags: 0,
         };
@@ -900,9 +900,9 @@ impl D3d11Cx {
             cxtexture.platform.height = height;
             cxtexture.platform.texture = Some(unsafe {ComPtr::from_raw(texture as *mut _)});
             
-            let mut shader_resource = ptr::null_mut();
-            unsafe {self.device.CreateShaderResourceView(texture as *mut _, ptr::null(), &mut shader_resource as *mut *mut _)};
-            cxtexture.platform.shader_resource = Some(unsafe {ComPtr::from_raw(shader_resource as *mut _)});
+            //let mut shader_resource = ptr::null_mut();
+            //unsafe {self.device.CreateShaderResourceView(texture as *mut _, ptr::null(), &mut shader_resource as *mut *mut _)};
+            //cxtexture.platform.shader_resource = Some(unsafe {ComPtr::from_raw(shader_resource as *mut _)});
             
             // lets create the render target too
             if let Ok(dsview) = self.create_depth_stencil_view(cxtexture.platform.texture.as_ref().unwrap()) {
