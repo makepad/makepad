@@ -4,17 +4,17 @@ use crate::cx::*;
 pub enum TextureFormat {
     Default,
     ImageBGRA,
-    ImageBGRAf32,
-    ImageRf32,
-    ImageRGf32,
-    MappedBGRA,
-    MappedBGRAf32,
-    MappedRf32,
-    MappedRGf32,
-    Depth24Stencil8,
+    Depth32Stencil8,
     RenderBGRA,
     RenderBGRAf16,
     RenderBGRAf32,
+//    ImageBGRAf32,
+//    ImageRf32,
+//    ImageRGf32,
+//    MappedBGRA,
+//    MappedBGRAf32,
+//    MappedRf32,
+//    MappedRGf32,
 }
 
 #[derive(Clone, PartialEq, Debug)]

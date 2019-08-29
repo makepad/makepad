@@ -549,6 +549,11 @@ impl RustTokenizer {
                     return TokenType::BuiltinType
                 }
             },
+            'd' =>{
+                if state.keyword(chunk, "yn") {
+                    return TokenType::Keyword
+                }
+            },
             'e' => {
                 if state.keyword(chunk, "lse") {
                     return TokenType::Flow
