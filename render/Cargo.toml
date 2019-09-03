@@ -8,6 +8,7 @@ edition = "2018"
 ipc=[]
 
 [dependencies]
+internal_iter = { path = "./internal_iter" }
 shader_ast = {path="./shader_ast"}
 serde = { version = "1.0", features = ["derive"] }
 
