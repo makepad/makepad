@@ -13,4 +13,4 @@ cargo check --release --target=x86_64-unknown-linux-gnu
 echo "Checking Apple"
 cargo check --release --target=x86_64-apple-darwin
 echo "Checking Wasm"
-cargo check --release --target=wasm32-unknown-unknown --manifest-path="./makepad/webgl/Cargo.toml"
+cargo check --release --target=wasm32-unknown-unknown --manifest-path="./webgl/Cargo.toml"

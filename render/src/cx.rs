@@ -17,48 +17,36 @@ pub use crate::elements::*;
 pub use crate::animator::*;
 pub use crate::area::*;
 
-#[cfg(all(not(feature="ipc"),target_os = "linux"))]
+#[cfg(any(target_os = "linux"))]
 pub use crate::cx_linux::*;
-#[cfg(all(not(feature="ipc"),target_os = "linux"))]
+#[cfg(target_os = "linux")]
 pub use crate::cx_opengl::*;
 
-#[cfg(all(not(feature="ipc"),target_os = "macos"))]
+#[cfg(any(target_os = "macos"))]
 pub use crate::cx_macos::*;
-#[cfg(all(not(feature="ipc"),target_os = "macos"))]
+#[cfg(target_os = "macos")]
 pub use crate::cx_metal::*;
-#[cfg(all(not(feature="ipc"),target_os = "macos"))]
+#[cfg(target_os = "macos")]
 pub use crate::cx_metalsl::*;
 
-#[cfg(all(not(feature="ipc"),target_os = "windows"))]
+#[cfg(any(target_os = "windows"))]
 pub use crate::cx_win10::*;
-#[cfg(all(not(feature="ipc"),target_os = "windows"))]
+#[cfg(target_os = "windows")]
 pub use crate::cx_dx11::*;
-#[cfg(all(not(feature="ipc"),target_os = "windows"))]
+#[cfg(target_os = "windows")]
 pub use crate::cx_hlsl::*;
 
-#[cfg(all(not(feature="ipc"),target_arch = "wasm32"))]
+#[cfg(target_arch = "wasm32")]
 pub use crate::cx_webgl::*;
 
-#[cfg(all(not(feature="ipc"),any(target_arch = "wasm32", target_os = "linux")))]
+#[cfg(any(target_arch = "wasm32", target_os = "linux"))]
 pub use crate::cx_glsl::*;
 
-#[cfg(all(not(feature="ipc"),any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 pub use crate::cx_desktop::*;
 
-#[cfg(all(not(feature="ipc"),target_arch = "wasm32"))]
+#[cfg(any(target_arch = "wasm32"))]
 pub use crate::cx_wasm32::*;
-
-#[cfg(feature="ipc")]
-pub use crate::cx_ipc_child::*;
-
-#[cfg(all(feature="ipc",target_arch = "wasm32"))]
-pub use crate::cx_ipc_wasm32::*;
-
-#[cfg(all(feature="ipc",any(target_os = "linux", target_os = "macos")))]
-pub use crate::cx_ipc_posix::*;
-
-#[cfg(all(feature="ipc",target_os = "windows"))]
-pub use crate::cx_ipc_win32::*;
 
 pub enum PlatformType {
     Windows,

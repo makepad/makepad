@@ -705,13 +705,13 @@ pub struct CxPlatformView {
 }
 
 #[derive(Default, Clone, Debug)]
-pub struct CxPlatformDrawCall {
+pub struct PlatformDrawCall {
     pub inst_vbuf: OpenglBuffer,
     pub vao_shader_id: Option<usize>,
     pub vao: Option<u32>
 }
 
-impl CxPlatformDrawCall {
+impl PlatformDrawCall {
     
     pub fn check_vao(&mut self, shader_id: usize, shp: &CxPlatformShader) {
         if self.vao_shader_id.is_none() || self.vao_shader_id.unwrap() != shader_id {

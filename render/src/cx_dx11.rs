@@ -1246,7 +1246,7 @@ pub struct CxPlatformView {
 }
 
 #[derive(Default, Clone, Debug)]
-pub struct CxPlatformDrawCall {
+pub struct PlatformDrawCall {
     pub uni_dr: D3d11Buffer,
     pub inst_vbuf: D3d11Buffer
 }
