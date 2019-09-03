@@ -1,6 +1,6 @@
 //use syn::Type; 
 use render::*;
-use widget::*; 
+use widget::*;
 use editor::*; 
 use terminal::*;
 mod rustcompiler; 

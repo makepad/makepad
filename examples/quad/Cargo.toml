@@ -1,5 +1,5 @@
 [package]
-name = "quad_example"
+name = "quad"
 version = "0.1.0"
 authors = ["makepaddev"]
 edition = "2018"
