@@ -4,6 +4,9 @@ version = "0.1.0"
 authors = ["makepaddev"]
 edition = "2018"
 
+[features]
+ipc=[]
+
 [dependencies]
 shader_ast = {path="./shader_ast"}
 serde = { version = "1.0", features = ["derive"] }

@@ -447,7 +447,7 @@ pub struct CxPlatformView {
 }
 
 #[derive(Default, Clone, Debug)]
-pub struct PlatformDrawCall {
+pub struct CxPlatformDrawCall {
     //pub uni_dr: MetalBuffer,
     pub inst_vbuf: MetalBuffer
 }

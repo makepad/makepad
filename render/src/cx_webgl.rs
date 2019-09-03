@@ -146,7 +146,7 @@ pub struct CxPlatformView {
 }
 
 #[derive(Default, Clone)]
-pub struct PlatformDrawCall {
+pub struct CxPlatformDrawCall {
     pub resource_shader_id: Option<usize>,
     pub vao_id: usize,
     pub inst_vb_id: usize
@@ -164,7 +164,7 @@ pub struct CxPlatformShader {
 pub struct CxPlatformTexture {
 }
 
-impl PlatformDrawCall {
+impl CxPlatformDrawCall {
     
     pub fn check_attached_vao(&mut self, shader_id: usize, sh: &CxShader, platform: &mut CxPlatform) {
         if self.resource_shader_id.is_none() || self.resource_shader_id.unwrap() != shader_id {
