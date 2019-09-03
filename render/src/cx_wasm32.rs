@@ -16,10 +16,8 @@ impl Cx {
     where F: FnMut(&mut Cx, &mut Event)
     {
         // store our view root somewhere
-        if self.platform.root_view_ptr == 0 {
-            self.platform.root_view_ptr = Box::into_raw(
-                Box::new(View::<NoScrollBar> {..Style::style(self)})
-            ) as u32;
+        if self.platform.is_initialized == false {
+            self.platform.is_initialized = true;
             for _i in 0..10 {
                 self.platform.fingers_down.push(false);
             }
@@ -639,6 +637,7 @@ fn web_to_key_code(key_code: u32) -> KeyCode {
 // storage buffers for graphics API related platform
 #[derive(Clone)]
 pub struct CxPlatform {
+    pub is_initialized: bool,
     pub window_geom: WindowGeom,
     pub from_wasm: FromWasm,
     pub vertex_buffers: usize,
@@ -647,7 +646,6 @@ pub struct CxPlatform {
     pub index_buffers_free: Vec<usize>,
     pub vaos: usize,
     pub vaos_free: Vec<usize>,
-    pub root_view_ptr: u32,
     pub fingers_down: Vec<bool>,
     pub file_read_id: u64,
 }
@@ -655,6 +653,7 @@ pub struct CxPlatform {
 impl Default for CxPlatform {
     fn default() -> CxPlatform {
         CxPlatform {
+            is_initialized: false,
             window_geom: WindowGeom::default(),
             from_wasm: FromWasm::zero(),
             vertex_buffers: 1,
@@ -663,7 +662,6 @@ impl Default for CxPlatform {
             index_buffers_free: Vec::new(),
             vaos: 1,
             vaos_free: Vec::new(),
-            root_view_ptr: 0,
             file_read_id: 1,
             fingers_down: Vec::new()
         }

@@ -1,15 +1,22 @@
 // forkpty version of Process
 //use render::*;
-use libc::{winsize,termios};
-use std::ptr;
-use std::mem;
+//use libc::{winsize,termios};
+//use std::ptr;
+//use std::mem;
 
 pub struct Process {
 }
 
 impl Process {
+    // starts a process with a read/write pipe
+    // since rusts Process is broken.
+    
+    pub fn write(&mut self, _values: &str) {
+    }
+
     // start a process with terminal read output
     // to Cx
+    /*
     #[cfg(target_os = "linux")]
     pub fn get_platform_termios()->termios{
         termios {
@@ -110,11 +117,9 @@ impl Process {
             }
             println!("WE GOT A PID {}", pid);
         }
-        
         Process {}
-    }
-    
-    pub fn write(&mut self, _values: &str) {
-        
+    }*/
+    pub fn start() -> Process {
+        Process {}
     }
 }

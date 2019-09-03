@@ -30,7 +30,7 @@
 // press alt or escape for animated codefolding outline view!
 
 use render::*;
-
+  
 struct App {
     window: Window,
     pass: Pass,
@@ -60,7 +60,7 @@ impl App {
     pub fn def_quad_shader() -> ShaderGen {
         Quad::def_quad_shader().compose(shader_ast !({
             
-            fn pixel() -> vec4 { 
+            fn pixel() -> vec4 {
                 return vec4(1.0,0.0,0.0,1.0);
             }
         }))
