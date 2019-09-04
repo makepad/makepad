@@ -16,7 +16,7 @@ pub struct Vector {
 impl Vector {
     /// Creates a new vector with the given coordinates.
     pub fn new(x: f32, y: f32) -> Vector {
-        Vector {x, y}
+        Vector { x, y }
     }
 
     /// Returns the length of `self`.
