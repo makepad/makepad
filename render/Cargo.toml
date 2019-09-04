@@ -8,6 +8,7 @@ edition = "2018"
 ipc=[]
 
 [dependencies]
+font = { path = "./font" }
 geometry = { path = "./geometry" }
 internal_iter = { path = "./internal_iter" }
 shader_ast = {path="./shader_ast"}
