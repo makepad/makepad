@@ -495,7 +495,7 @@ impl RustCompiler {
         // start a release build
         self._rustc_build_stages = BuildStage::Building;
         
-        let mut _child = spawn_process_command("cargo", &["build", "--release", "--target=wasm32-unknown-unknown", "--message-format=json","--manifest-path=./webgl/Cargo.toml"], "./edit_repo");
+        let mut _child = spawn_process_command("cargo", &["build", /*"--release", "--target=wasm32-unknown-unknown",*/ "--message-format=json","--manifest-path=./webgl/Cargo.toml"], "./edit_repo");
         
         if let Err(_) = _child {
             return;
@@ -575,7 +575,7 @@ impl RustCompiler {
             let _ = child.kill();
         }
         
-        let mut _child = spawn_process_command("cargo", &["check", "--target=wasm32-unknown-unknown", "--message-format=json", "--manifest-path=./webgl/Cargo.toml"], "./edit_repo");
+        let mut _child = spawn_process_command("cargo", &["check", /*"--target=wasm32-unknown-unknown",*/ "--message-format=json", "--manifest-path=./webgl/Cargo.toml"], "./edit_repo");
         
         if let Err(_) = _child {
             return;
