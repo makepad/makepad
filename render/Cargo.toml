@@ -4,9 +4,17 @@ version = "0.1.0"
 authors = ["makepaddev"]
 edition = "2018"
 
+[features]
+ipc=[]
+
 [dependencies]
+font = { path = "./font" }
+geometry = { path = "./geometry" }
+internal_iter = { path = "./internal_iter" }
 shader_ast = {path="./shader_ast"}
 serde = { version = "1.0", features = ["derive"] }
+trapezoidator = { path = "./trapezoidator" }
+ttf_parser = { path = "./ttf_parser" }
 
 [target.x86_64-apple-darwin.dependencies]
 closefds = "*"

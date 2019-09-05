@@ -17,7 +17,7 @@ pub enum ScrollBarEvent {
     None,
     Scroll {scroll_pos: f32, view_total: f32, view_visible: f32},
     ScrollDone
-} 
+}
 
 #[derive(Clone)]
 pub struct ViewTexture{
@@ -403,7 +403,7 @@ impl Cx {
                 current_instance_offset: 0,
                 instance_dirty: true,
                 uniforms_dirty: true,
-                platform: PlatformDrawCall {..Default::default()}
+                platform: CxPlatformDrawCall::default()
             });
             let dc = &mut draw_list.draw_calls[draw_call_id];
             return dc.get_current_instance_area(instance_count);
@@ -513,7 +513,7 @@ pub struct DrawCall {
     pub textures_2d: Vec<u32>,
     pub instance_dirty: bool,
     pub uniforms_dirty: bool,
-    pub platform: PlatformDrawCall
+    pub platform: CxPlatformDrawCall
 }
 
 impl DrawCall {
