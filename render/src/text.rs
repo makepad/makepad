@@ -26,15 +26,15 @@ pub struct Text{
     pub wrapping:Wrapping,
 }
 
-impl Style for Text{
-    fn style(cx:&mut Cx)->Self{
+impl Text{
+    pub fn style(cx:&mut Cx)->Self{
         Self{
-            shader:cx.add_shader(Self::def_text_shader(), "Text"),
-            font:cx.load_font_style("normal_font"),
+            shader: cx.add_shader(Self::def_text_shader(), "TextAtlas"),
+            font:cx.load_font_path("resources/Ubuntu-R.ttf"),
             do_h_scroll:true,
             do_v_scroll:true,
             text:"".to_string(),
-            font_size:cx.size("font_size") as f32,
+            font_size:11.0,
             line_spacing:1.15,
             do_dpi_dilate:false,
             brightness:1.0,
@@ -43,9 +43,7 @@ impl Style for Text{
             color:color("white")
         }
     }
-}
-
-impl Text{
+    
     pub fn def_text_shader()->ShaderGen{
         // lets add the draw shader lib
         let mut sg = ShaderGen::new();
@@ -62,16 +60,16 @@ impl Text{
         sg.compose(shader_ast!({
             let geom:vec2<Geometry>;
             let texturez:texture2d<Texture>;
-            let tex_size:vec2<Uniform>;
+            //let tex_size:vec2<Uniform>;
             //let list_clip:vec4<Uniform>;
             //let instance_clip:vec4<Instance>;
-            let font_geom:vec4<Instance>;
+            let font_rect:vec4<Instance>;
             let font_tc:vec4<Instance>;
             let color:vec4<Instance>;
             let x:float<Instance>;
             let y:float<Instance>;
             let z:float<Instance>;
-
+            
             //let w:float<Instance>;
             //let h:float<Instance>;
             let font_size:float<Instance>;
@@ -86,6 +84,8 @@ impl Text{
             let view_do_scroll: vec2<Uniform>;
 
             fn pixel()->vec4{
+                return color("red");
+                /*
                 if marker>0.5{
                     df_viewport(clipped);
                     let center = (rect.xy+rect.zw)*0.5;
@@ -99,20 +99,20 @@ impl Text{
                     df_viewport(tex_coord * tex_size * (0.1 - dpi_dilate*0.03));
                     df_shape = (-sig_dist - (0.5 / df_aa)) - dpi_dilate*0.1;
                     return df_fill(color*brightness); 
-                }
+                }*/
             }
             
             fn vertex()->vec4{
                 let shift:vec2 = -view_scroll * view_do_scroll;
 
                 let min_pos = vec2(
-                    x + font_size * font_geom.x,
-                    y - font_size * font_geom.y + font_size// * font_base
+                    x + font_size * font_rect.x,
+                    y - font_size * font_rect.y + font_size// * font_base
                 );
 
                 let max_pos = vec2(
-                    x + font_size * font_geom.z,
-                    y - font_size * font_geom.w + font_size// * font_base
+                    x + font_size * font_rect.z,
+                    y - font_size * font_rect.w + font_size// * font_base
                 );
                 
                 clipped = clamp(
@@ -136,19 +136,19 @@ impl Text{
     }
 
     pub fn begin_text(&mut self, cx:&mut Cx)->AlignedInstance{
-        let font_id = self.font.font_id.unwrap();
-        if !cx.fonts[font_id].loaded{
-            panic!("Font not loaded {}", font_id);
-        }
         
+        //let font_id = self.font.font_id.unwrap();
         let inst = cx.new_instance(&self.shader, 0); 
         let aligned = cx.align_instance(inst);
         
         if aligned.inst.need_uniforms_now(cx){
             //texture,
-            aligned.inst.push_uniform_texture_2d(cx, &self.font.texture);
+            
+            // cx.fonts[font_id].width as f32 , cx.fonts[font_id].height as f32
+            aligned.inst.push_uniform_texture_2d_id(cx, self.font.get_atlas_texture_id(cx));
             //tex_size
-            aligned.inst.push_uniform_vec2f(cx, cx.fonts[font_id].width as f32, cx.fonts[font_id].height as f32);
+            //aligned.inst.push_uniform_vec2(cx, self.font.texture_size);
+            
             aligned.inst.push_uniform_float(cx, 0.); 
             aligned.inst.push_uniform_float(cx, self.brightness);
             aligned.inst.push_uniform_vec2f(
@@ -156,7 +156,6 @@ impl Text{
                 if self.do_h_scroll {1.0}else {0.0},
                 if self.do_v_scroll {1.0}else {0.0}
             );
-
             //list_clip
             //area.push_uniform_vec4f(cx, -50000.0,-50000.0,50000.0,50000.0);
         }
@@ -169,8 +168,18 @@ impl Text{
         let mut geom_x = geom_x;
         let mut char_offset = char_offset;
         let font_id = self.font.font_id.unwrap();
-        let unicodes = &cx.fonts[font_id].unicodes;
-        let glyphs = &cx.fonts[font_id].glyphs;
+
+        let cxfont = &mut cx.fonts[font_id];
+
+        let atlas_id = cxfont.fetch_atlas_index(2.0, self.font_size);
+
+        let font = &mut cxfont.font_loaded.as_ref().unwrap();
+
+        let font_scale_logical = self.font_size * 96.0 / (72.0 * font.units_per_em);
+        let font_scale_pixels = font_scale_logical * 2.0;
+
+        let atlas = &mut cxfont.sized_atlas[atlas_id];
+        
         let instance = {
             let cxview = &mut cx.views[aligned.inst.view_id];
             let draw_call = &mut cxview.draw_calls[ aligned.inst.draw_call_id];
@@ -179,20 +188,55 @@ impl Text{
 
         for wc in chunk{
             let unicode = *wc as usize;
-            let slot = unicodes[unicode as usize];
-            let glyph = &glyphs[slot];
-            let w = glyph.advance * self.font_size;
+            let slot = font.char_code_to_glyph_index_map[unicode];
+            let glyph = &font.glyphs[slot];
+            
+            let w = glyph.horizontal_metrics.advance_width * font_scale_logical;
+            
+            // lets allocate 
             let marker = char_callback(*wc, char_offset, geom_x, w);
+            
+            let tc = if let Some(tc) = &atlas.atlas_glyphs[slot]{
+                tc
+            }
+            else{
+                // allocate slot
+                cxfont.glyphs_to_atlas.push((atlas_id, slot));
+                // see if we can fit it 
+                let w = (glyph.bounds.p_max.x - glyph.bounds.p_min.x) * font_scale_pixels;
+                let h = (glyph.bounds.p_max.y - glyph.bounds.p_min.y) * font_scale_pixels;
+                if w + cxfont.alloc_xpos >= cxfont.texture_size.x{
+                    cxfont.alloc_xpos = 0.0;
+                    cxfont.alloc_ypos += cxfont.alloc_hmax;
+                    cxfont.alloc_hmax = 0.0;
+                }
+                if h + cxfont.alloc_ypos >= cxfont.texture_size.y{
+                    println!("FONT ATLAS FULL {}, TODO FIX THIS", cxfont.path);
+                }
+                let tx1 = cxfont.alloc_xpos / cxfont.texture_size.x;
+                let ty1 = cxfont.alloc_ypos / cxfont.texture_size.y;
+                if h > cxfont.alloc_hmax{
+                    cxfont.alloc_hmax = h;
+                }
+                atlas.atlas_glyphs[slot] = Some(AtlasGlyph{
+                    tx1: tx1,
+                    ty1: ty1,
+                    tx2: tx1 + w / cxfont.texture_size.x,
+                    ty2: ty1 + h / cxfont.texture_size.y
+                });
+                atlas.atlas_glyphs[slot].as_ref().unwrap()
+            };
+            
             let data = [
-                /*font_geom*/ glyph.x1 ,glyph.y1 ,glyph.x2 ,glyph.y2,
-                /*font_tc*/ glyph.tx1 ,glyph.ty1 ,glyph.tx2 ,glyph.ty2,
+                /*font_geom*/ glyph.bounds.p_min.x ,glyph.bounds.p_min.y ,glyph.bounds.p_max.x ,glyph.bounds.p_max.y,
+                /*font_tc*/ tc.tx1, tc.ty1, tc.tx2, tc.ty2,//glyph.tx1 ,glyph.ty1 ,glyph.tx2 ,glyph.ty2,
                 /*color*/ self.color.r, self.color.g, self.color.b, self.color.a,
                 /*x*/ geom_x,
                 /*y*/ geom_y,
                 /*z*/ self.z,
                 // /*w*/ w,
                 // /*h*/ height,
-                /*font_size*/ self.font_size,
+                /*font_size*/font_scale_logical,
                 /*char_offset*/ char_offset as f32,
                 /*marker*/ marker,
                 // /*font_base*/ 1.0
@@ -202,7 +246,6 @@ impl Text{
             for i in 0..15{
                 instance.push(0.)
             }*/
-            
             geom_x += w;
             char_offset += 1;
             aligned.inst.instance_count += 1;
@@ -221,20 +264,24 @@ impl Text{
         let mut elipct = 0;
         let font_size = self.font_size;
         let mut iter = text.chars().peekable();
+
         let font_id = self.font.font_id.unwrap();
+        let font_scale_logical = self.font_size * 96.0 / (72.0 * cx.fonts[font_id].font_loaded.as_ref().unwrap().units_per_em);
+        
         while let Some(c) = iter.next(){
             let last = iter.peek().is_none();
 
             let mut emit = last;
+            
             let slot = if c < '\u{10000}'{
-                cx.fonts[font_id].unicodes[c as usize]
-            } else{
+                cx.fonts[font_id].font_loaded.as_ref().unwrap().char_code_to_glyph_index_map[c as usize]
+            } else {
                 0
             };
 
             if slot != 0 {
-                let glyph = &cx.fonts[font_id].glyphs[slot];
-                width += glyph.advance * self.font_size;
+                let glyph = &cx.fonts[font_id].font_loaded.as_ref().unwrap().glyphs[slot];
+                width += glyph.horizontal_metrics.advance_width * font_scale_logical;
                 match self.wrapping{
                     Wrapping::Char=>{
                         chunk.push(c);
@@ -340,14 +387,17 @@ impl Text{
         return 0
     }
 
-    pub fn get_monospace_base(&self, cx:&Cx)->Vec2{
-        let font_id = self.font.font_id.unwrap();
+    pub fn get_monospace_base(&self, _cx:&Cx)->Vec2{
+        let _font_id = self.font.font_id.unwrap();
+        /*
         let slot = cx.fonts[font_id].unicodes[33 as usize];
         let glyph = &cx.fonts[font_id].glyphs[slot];
+        
         //let font_size = if let Some(font_size) = font_size{font_size}else{self.font_size};
         Vec2{
             x: glyph.advance,
             y: self.line_spacing
-        }
+        }*/
+        Vec2::zero()
     }
 }

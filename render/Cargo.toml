@@ -15,6 +15,7 @@ shader_ast = {path="./shader_ast"}
 serde = { version = "1.0", features = ["derive"] }
 trapezoidator = { path = "./trapezoidator" }
 ttf_parser = { path = "./ttf_parser" }
+path = { path = "./path" }
 
 [target.x86_64-apple-darwin.dependencies]
 closefds = "*"

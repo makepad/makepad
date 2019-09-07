@@ -7,17 +7,15 @@ pub struct Blit {
     pub do_scroll: bool
 }
 
-impl Style for Blit {
-    fn style(cx: &mut Cx) -> Self {
+impl Blit {
+    pub fn style(cx: &mut Cx) -> Self {
         Self {
             alpha: 1.0,
             shader: cx.add_shader(Self::def_blit_shader(), "Blit"),
             do_scroll:false,
         }
     }
-}
-
-impl Blit {
+    
     pub fn def_blit_shader() -> ShaderGen {
         // lets add the draw shader lib
         let mut sb = ShaderGen::new();

@@ -5,24 +5,23 @@ pub struct Pass {
     pub pass_id: Option<usize>
 }
 
+
 impl Pass {
     pub fn begin_pass(&mut self, cx: &mut Cx) {
+        
+        if self.pass_id.is_none() { // we need to allocate a CxPass
+            self.pass_id = Some(if cx.passes_free.len() != 0 {
+                cx.passes_free.pop().unwrap()
+            } else {
+                cx.passes.push(CxPass::default());
+                cx.passes.len() - 1
+            });
+        }
+        let pass_id = self.pass_id.unwrap();
         
         let window_id = *cx.window_stack.last().expect("No window found when begin_pass");
         
         let cxwindow = &mut cx.windows[window_id];
-        
-        if self.pass_id.is_none() { // we need to allocate a CxPass
-            if cx.passes_free.len() != 0 {
-                self.pass_id = Some(cx.passes_free.pop().unwrap());
-            }
-            else {
-                self.pass_id = Some(cx.passes.len());
-                cx.passes.push(CxPass {..Default::default()});
-            }
-        }
-        let pass_id = self.pass_id.unwrap();
-        
         if cxwindow.main_pass_id.is_none() { // we are the main pass of a window
             let cxpass = &mut cx.passes[pass_id];
             cxwindow.main_pass_id = Some(pass_id);
@@ -124,7 +123,7 @@ impl Default for CxPass {
             depth_clear: Some(std::f64::INFINITY),
             main_view_id: None,
             dep_of: CxPassDepOf::None,
-            paint_dirty: true,
+            paint_dirty: false,
             pass_size: Vec2::zero(),
             platform: CxPlatformPass::default()
         }
@@ -145,7 +144,7 @@ const CX_UNI_DPI_DILATE: usize = 33;
 const CX_UNI_SIZE: usize = 36;
 
 impl CxPass {
-    pub fn def_uniforms(sg: ShaderGen)->ShaderGen{
+    pub fn def_uniforms(sg: ShaderGen) -> ShaderGen {
         sg.compose(shader_ast!({
             let camera_projection: mat4<UniformCx>;
             let camera_view: mat4<UniformCx>;
@@ -193,7 +192,7 @@ impl CxPass {
     }
     
     //pub fn set_matrix(&mut self, cx: &mut Cx, matrix: &Mat4) {
-        //let pass_id = self.pass_id.expect("Please call set_ortho_matrix after begin_pass");
-        //let cxpass = &mut cx.passes[pass_id];
-   // }
+    //let pass_id = self.pass_id.expect("Please call set_ortho_matrix after begin_pass");
+    //let cxpass = &mut cx.passes[pass_id];
+    // }
 }

@@ -791,10 +791,6 @@ pub enum StyleValue {
     Size(f64)
 }
 
-pub trait Style {
-    fn style(cx: &mut Cx) -> Self;
-}
-
 #[macro_export]
 macro_rules!log {
     ( $ ( $ arg: tt) *) => ({
@@ -807,40 +803,36 @@ macro_rules!main_app {
     ( $ app: ident) => {
         //TODO do this with a macro to generate both entrypoints for App and Cx
         pub fn main() {
-            let mut cx = Cx {
-                ..Default::default()
-            };
-            
-            let mut app = $ app {
-                ..Style::style(&mut cx)
-            };
-            
+            let mut cx = Cx::default();
+            let mut app = $ app::style(&mut cx);
+            let mut cxafterdraw = CxAfterDraw::style(&mut cx);
             cx.event_loop( | cx, mut event | {
-                if let Event::Draw = event {return app.draw_app(cx);}
+                if let Event::Draw = event {
+                    app.draw_app(cx);
+                    cxafterdraw.after_draw(cx);
+                    return
+                }
                 app.handle_app(cx, &mut event);
             });
         }
         
         #[export_name = "create_wasm_app"]
         pub extern "C" fn create_wasm_app() -> u32 {
-            let mut cx = Box::new(
-                Cx {
-                    ..Default::default()
-                }
-            );
-            let app = Box::new(
-                $ app {
-                    ..Style::style(&mut cx)
-                }
-            );
-            Box::into_raw(Box::new((Box::into_raw(app), Box::into_raw(cx)))) as u32
+            let mut cx = Box::new(Cx::default());
+            let app = Box::new($ app::style(&mut cx));
+            let cxafterdraw = Box::new(CxAfterDraw::style(&mut cx));
+            Box::into_raw(Box::new((Box::into_raw(app), Box::into_raw(cx), Box::into_raw(cxafterdraw)))) as u32
         }
         
         #[export_name = "process_to_wasm"]
         pub unsafe extern "C" fn process_to_wasm(appcx: u32, msg_bytes: u32) -> u32 {
-            let appcx = &*(appcx as *mut (*mut $ app, *mut Cx));
+            let appcx = &*(appcx as *mut (*mut $ app, *mut Cx, *mut CxAfterDraw));
             (*appcx.1).process_to_wasm(msg_bytes, | cx, mut event | {
-                if let Event::Draw = event {return (*appcx.0).draw_app(cx);}
+                if let Event::Draw = event {
+                    (*appcx.0).draw_app(cx);
+                    (*appcx.2).after_draw(cx);
+                    return;
+                };
                 (*appcx.0).handle_app(cx, &mut event);
             })
         }

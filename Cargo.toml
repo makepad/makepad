@@ -3,5 +3,6 @@
 members = [
     "makepad",
     "makepad/webgl",
+    "examples/text_example",
     "examples/quad_example"
 ]

@@ -49,6 +49,18 @@ impl Default for Texture {
     }
 }
 
+impl Cx{
+    pub fn alloc_texture_id(&mut self)->usize{
+        if self.textures_free.len() > 0{
+            self.textures_free.pop().unwrap()
+        }
+        else{
+            self.textures.push(CxTexture::default());
+            self.textures.len() - 1
+        }
+    }
+}
+
 impl Texture{
     pub fn get_desc(&mut self, cx:&Cx)->Option<TextureDesc>{
         if let Some(texture_id) = self.texture_id{
@@ -61,13 +73,7 @@ impl Texture{
     
     pub fn set_desc(&mut self, cx:&mut Cx, desc:Option<TextureDesc>){
         if self.texture_id.is_none(){
-            if cx.textures_free.len() > 0{
-                self.texture_id = Some(cx.textures_free.pop().unwrap())
-            }
-            else{
-                self.texture_id = Some(cx.textures.len());
-                cx.textures.push(CxTexture{..Default::default()});
-            };
+            self.texture_id = Some(cx.alloc_texture_id());
         }
         let cxtexture = &mut cx.textures[self.texture_id.unwrap()];
         if let Some(desc) = desc{

@@ -8,7 +8,7 @@ pub struct Button {
     pub animator: Animator,
     pub anim_over: Anim,
     pub anim_down: Anim,
-    pub _bg_area: Area,
+    pub _bg_area: Area, 
 }
 
 impl Style for Button {

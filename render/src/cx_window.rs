@@ -8,8 +8,8 @@ pub struct Window {
     pub create_title: String,
 }
 
-impl Style for Window {
-    fn style(_cx: &mut Cx) -> Self {
+impl Window {
+    pub fn style(_cx: &mut Cx) -> Self {
         Self {
             window_id: None,
             create_inner_size: None,
@@ -17,9 +17,6 @@ impl Style for Window {
             create_title: "Makepad".to_string()
         }
     }
-}
-
-impl Window {
     
     pub fn begin_window(&mut self, cx: &mut Cx) {
         // if we are not at ground level for viewports,

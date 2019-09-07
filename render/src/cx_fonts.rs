@@ -1,329 +1,288 @@
 use crate::cx::*;
+use trapezoidator::Trapezoidator;
+use geometry::{AffineTransformation, Transform, Vector};
+use internal_iter::*;
+use path::PathIterator;
 
 #[derive(Default, Clone)]
-pub struct Font{
+pub struct Font {
     pub font_id: Option<usize>,
-    pub texture: Texture
 }
 
-impl Cx{
+impl Font {
+    pub fn get_atlas_texture_id(&self, cx: &Cx) -> usize {
+        cx.fonts[self.font_id.unwrap()].atlas_texture_id
+    }
+}
+
+impl Cx {
     
-    pub fn load_font_style(&mut self, style: &str)->Font{
+    pub fn load_font_style(&mut self, style: &str) -> Font {
         self.load_font_path(&self.font(style))
     }
     
-    pub fn load_font_path(&mut self, path: &str)->Font{
-        let found = self.fonts.iter().position(|v| v.path == path);
-        if let Some(font_id) = found{
-            return Font{
+    pub fn load_font_path(&mut self, path: &str) -> Font {
+        let texture_size = Vec2 {x: 4096.0, y: 4096.0};
+        let found = self.fonts.iter().position( | v | v.path == path);
+        if let Some(font_id) = found {
+            return Font {
                 font_id: Some(font_id),
-                texture: Texture{texture_id:Some(self.fonts[font_id].texture_id)}
             }
         }
-
-        let mut texture = Texture{..Default::default()};
-        texture.set_desc(self, None);
-        let font_id = self.fonts.len();
-        self.fonts.push(CxFont{
-            path:path.to_string(),
-            loaded:false,
-            texture_id: texture.texture_id.unwrap(),
-            ..Default::default()
-        });
-        return Font{
-            font_id: Some(font_id),
-            texture: texture
-        }
-    }
-}
-
-#[derive(Default, Clone)]
-pub struct Glyph{
-    pub unicode:u32,
-    pub x1:f32,
-    pub y1:f32,
-    pub x2:f32,
-    pub y2:f32,
-    pub advance:f32,
-    pub tsingle:usize,
-    pub toffset:usize,
-    pub tw:usize,
-    pub th:usize,
-    pub tx1:f32,
-    pub ty1:f32,
-    pub tx2:f32,
-    pub ty2:f32
-}
-
-#[derive(Default, Clone)]
-pub struct Kern{
-    pub i:u32,
-    pub j:u32,
-    pub kern:f32
-}
-
-#[derive(Default, Clone)]
-pub struct CxFont{
-    pub path:String,
-    pub loaded:bool,
-    pub font_id:usize,
-    pub width:usize,
-    pub height:usize,
-    pub slots:usize,
-    pub rgbsize:usize,
-    pub onesize:usize,
-    pub kernsize:usize, 
-    pub scale:f32,
-    pub glyphs:Vec<Glyph>,
-    pub unicodes:Vec<usize>,
-    pub kerntable:Vec<Kern>,
-    pub texture_id:usize
-}
-
-impl CxFont{
-    pub fn from_binary_reader(cx:&mut Cx, path:String, texture_id:usize, inp: &mut BinaryReader) -> Result<CxFont, String> {
-        let _type_id = inp.u32()?;
-
-        let mut ff = CxFont{
-            font_id: 0,
-            width: inp.u16()? as usize,
-            height: inp.u16()? as usize,
-            slots: inp.u32()? as usize,
-            rgbsize: inp.u32()? as usize,
-            onesize: inp.u32()? as usize,
-            kernsize:inp.u32()? as usize,
-            scale:inp.f32()?,
-            path:path,
-            texture_id:texture_id,
-            loaded:true,
-            ..Default::default()
-        };
-        ff.unicodes.resize(65535, 0);
-
-        ff.glyphs.reserve(ff.slots as usize);
-        for _i in 0..(ff.slots as usize){
-            ff.glyphs.push(Glyph{
-                unicode: inp.u32()?,
-                x1: inp.f32()?,
-                y1: inp.f32()?,
-                x2: inp.f32()?,
-                y2: inp.f32()?,
-                advance: inp.f32()?,
-                tsingle: inp.u32()? as usize,
-                toffset: inp.u32()? as usize,
-                tw: inp.u32()? as usize,
-                th: inp.u32()? as usize,
-                tx1:0.0,
-                ty1:0.0,
-                tx2:0.0,
-                ty2:0.0
-            })
-        }
-        // read the kerning table
-        ff.kerntable.reserve(ff.kernsize as usize);
-        for _i in 0..(ff.kernsize){
-            ff.kerntable.push(Kern{
-                i: inp.u32()?,
-                j: inp.u32()?,
-                kern: inp.f32()?
-            })
-        }
-
-        // now lets read the texture
-        let mut r_buf: Vec<u8> = Vec::with_capacity(ff.rgbsize as usize);//[u8; usize ff.texpage];
-        let mut g_buf: Vec<u8> = Vec::with_capacity(ff.rgbsize as usize);
-        let mut b_buf: Vec<u8> = Vec::with_capacity(ff.rgbsize as usize);
-        let mut s_buf: Vec<u8> = Vec::with_capacity(ff.onesize as usize);
-
-        r_buf.resize(r_buf.capacity(), 0);
-        g_buf.resize(g_buf.capacity(), 0);
-        b_buf.resize(b_buf.capacity(), 0);
-        s_buf.resize(s_buf.capacity(), 0);
-
-        // just directly access cxtexture
-        let cxtex = &mut cx.textures[texture_id];
-        cxtex.desc = TextureDesc{
-            format: TextureFormat::ImageBGRA,
-            width: Some(ff.width),
-            height:Some(ff.height),
+        
+        let atlas_texture_id = self.alloc_texture_id();
+        self.textures[atlas_texture_id].desc = TextureDesc {
+            format: TextureFormat::RenderBGRA,
+            width: Some(texture_size.x as usize),
+            height: Some(texture_size.y as usize),
             multisample: None
         };
-        cxtex.image_u32.resize(ff.width*ff.height, 0);
-        cxtex.update_image = true;
         
-        // ok lets read the different buffers
-        inp.read(r_buf.as_mut_slice())?;
-        inp.read(g_buf.as_mut_slice())?;
-        inp.read(b_buf.as_mut_slice())?;
-        inp.read(s_buf.as_mut_slice())?;
-
-        let mut ox = 0;
-        let mut oy = 0;
-        let mut mh = 0;
-        for i in 0..(ff.slots as usize){
-            let b = &mut ff.glyphs[i];
-
-            if ox + b.tw >= ff.width{
-                ox = 0;
-                oy = mh +1;
-                mh = 0;
-            }
-
-            if b.th > mh{
-                mh = b.th
-            }
-
-            if b.tsingle != 0{
-                let mut ow = b.toffset;
-                for y in 0..b.th{
-                    for x in 0..b.tw{
-                        let v = s_buf[ow as usize] as u32;
-                        cxtex.image_u32[ (x + ox + ((y + oy) * ff.width))] = (v<<16) | (v<<8) | v;
-                        ow = ow + 1;
-                    }
-                }
-            }
-            else{
-                let mut ow = b.toffset;
-                for y in 0..b.th{
-                    for x in 0..b.tw{
-                        let r = r_buf[ow as usize] as u32;
-                        let g = g_buf[ow as usize] as u32;
-                        let b = b_buf[ow as usize] as u32;
-                        cxtex.image_u32[ (x + ox + ((y + oy) * ff.width))] = (r<<16) | (g<<8) | b;
-                        ow = ow + 1;
-                    }
-                }
-            }
-            b.tx1 = (ox as f32) / (ff.width as f32);
-            b.ty1 = ((oy+b.th) as f32) / (ff.height as f32);
-            b.tx2 = ((ox+b.tw) as f32) / (ff.width as f32);
-            b.ty2 = (oy as f32) / (ff.height as f32);
-            ff.unicodes[b.unicode as usize] = i as usize;
-            //ff.unicodes.insert(b.unicode, i as  u32);
-            ox += b.tw+1;
+        let font_id = self.fonts.len();
+        self.fonts.push(CxFont {
+            path: path.to_string(),
+            atlas_texture_id: atlas_texture_id,
+            texture_size: texture_size,
+            ..Default::default()
+        });
+        
+        return Font {
+            font_id: Some(font_id)
         }
-        /*
-        ff.unicodes[32] = ff.glyphs.len();
-        ff.glyphs.push(Glyph{
-            unicode:32,
-            x1:0.0,
-            y1:-0.3,
-            x2:0.5,
-            y2:1.0,
-            advance:0.5,
-            tsingle:0,
-            toffset:0,
-            tw:0,
-            th:0,
-            tx1:0.0,
-            ty1:0.0,
-            tx2:0.0,
-            ty2:0.0,
-        });*/
+    }
+    
+}
 
-        let mut excl_slot = ff.glyphs[ff.unicodes[33]].clone();
+pub struct CxAppFontPass {
+    pub pass: Pass,
+    pub view: View<NoScroll>
+}
 
-        // set texture coord to 0
-        excl_slot.tx1 = 0.0;
-        excl_slot.ty1 = 0.0;
-        excl_slot.tx2 = 0.0;
-        excl_slot.ty2 = 0.0;
+pub struct CxAfterDraw {
+    pub trapezoid_text: TrapezoidText,
+    pub font_passes: Vec<CxAppFontPass>
+}
 
-        ff.unicodes[32] = ff.glyphs.len();
-        ff.glyphs.push(Glyph{
-            unicode:32,
-            ..excl_slot.clone()
-        });
+pub struct TrapezoidText {
+    shader: Shader,
+    trapezoidator: Trapezoidator
+}
 
-        ff.unicodes[10] = ff.glyphs.len();
-        ff.glyphs.push(Glyph{
-            unicode:10,
-            ..excl_slot.clone()
-        });
-
-        ff.unicodes[9] = ff.glyphs.len();
-        ff.glyphs.push(Glyph{
-            unicode:9,
-            ..excl_slot.clone()
-        });
-
-        Ok(ff)
+impl TrapezoidText {
+    fn style(cx: &mut Cx) -> Self {
+        Self {
+            shader: cx.add_shader(Self::def_trapezoid_shader(), "TrapezoidShader"),
+            trapezoidator: Trapezoidator::default()
+        }
+    }
+    
+    pub fn def_trapezoid_shader() -> ShaderGen {
+        let mut sg = ShaderGen::new();
+        sg.geometry_vertices = vec![0.0, 0.0, 1.0, 0.0, 1.0, 1.0, 0.0, 1.0];
+        sg.geometry_indices = vec![0, 1, 2, 2, 3, 0];
+        
+        sg.compose(shader_ast!({
+            
+            let geom: vec2<Geometry>;
+            
+            let a_xs: vec2<Instance>;
+            let a_ys: vec4<Instance>;
+            
+            let v_p0: vec2<Varying>;
+            let v_p1: vec2<Varying>;
+            let v_p2: vec2<Varying>;
+            let v_p3: vec2<Varying>;
+            let v_pixel: vec2<Varying>;
+            
+            fn intersect_line_segment_with_vertical_line(p0: vec2, p1: vec2, x: float) -> vec2 {
+                return vec2(
+                    x,
+                    mix(p0.y, p1.y, (x - p0.x) / (p1.x - p0.x))
+                );
+            }
+            
+            fn intersect_line_segment_with_horizontal_line(p0: vec2, p1: vec2, y: float) -> vec2 {
+                return vec2(
+                    mix(p0.x, p1.x, (y - p0.y) / (p1.y - p0.y)),
+                    y
+                );
+            }
+            
+            fn compute_clamped_right_trapezoid_area(p0: vec2, p1: vec2, p_min: vec2, p_max: vec2) -> float {
+                let x0 = clamp(p0.x, p_min.x, p_max.x);
+                let x1 = clamp(p1.x, p_min.x, p_max.x);
+                if (p0.x < p_min.x && p_min.x < p1.x) {
+                    p0 = intersect_line_segment_with_vertical_line(p0, p1, p_min.x);
+                }
+                if (p0.x < p_max.x && p_max.x < p1.x) {
+                    p1 = intersect_line_segment_with_vertical_line(p0, p1, p_max.x);
+                }
+                if (p0.y < p_min.y && p_min.y < p1.y) {
+                    p0 = intersect_line_segment_with_horizontal_line(p0, p1, p_min.y);
+                }
+                if (p1.y < p_min.y && p_min.y < p0.y) {
+                    p1 = intersect_line_segment_with_horizontal_line(p1, p0, p_min.y);
+                }
+                if (p0.y < p_max.y && p_max.y < p1.y) {
+                    p1 = intersect_line_segment_with_horizontal_line(p0, p1, p_max.y);
+                }
+                if (p1.y < p_max.y && p_max.y < p0.y) {
+                    p0 = intersect_line_segment_with_horizontal_line(p1, p0, p_max.y);
+                }
+                p0 = clamp(p0, p_min, p_max);
+                p1 = clamp(p1, p_min, p_max);
+                let h0 = p_max.y - p0.y;
+                let h1 = p_max.y - p1.y;
+                let a0 = (p0.x - x0) * h0;
+                let a1 = (p1.x - p0.x) * (h0 + h1) * 0.5;
+                let a2 = (x1 - p1.x) * h1;
+                return a0 + a1 + a2;
+            }
+            
+            fn compute_clamped_trapezoid_area(p_min: vec2, p_max: vec2) -> float {
+                let a0 = compute_clamped_right_trapezoid_area(v_p0, v_p1, p_min, p_max);
+                let a1 = compute_clamped_right_trapezoid_area(v_p2, v_p3, p_min, p_max);
+                return a0 - a1;
+            }
+            
+            fn pixel() -> vec4 {
+                let p_min = v_pixel.xy - 0.5;
+                let p_max = v_pixel.xy + 0.5;
+                let b_minx = p_min.x + 1.0 / 3.0;
+                let r_minx = p_min.x - 1.0 / 3.0;
+                let b_maxx = p_max.x + 1.0 / 3.0;
+                let r_maxx = p_max.x - 1.0 / 3.0;
+                return vec4(
+                    compute_clamped_trapezoid_area(vec2(r_minx, p_min.y), vec2(r_maxx, p_max.y)),
+                    compute_clamped_trapezoid_area(p_min, p_max),
+                    compute_clamped_trapezoid_area(vec2(b_minx, p_min.y), vec2(b_maxx, p_max.y)),
+                    1.0
+                );
+            }
+            
+            fn vertex() -> vec4 {
+                let pos_min = vec2(a_xs.x, min(a_ys.x, a_ys.y));
+                let pos_max = vec2(a_xs.y, max(a_ys.z, a_ys.w));
+                let pos = mix(pos_min - 1.0, pos_max + 1.0, geom);
+                
+                // set the varyings
+                v_p0 = vec2(a_xs.x, a_ys.x);
+                v_p1 = vec2(a_xs.y, a_ys.y);
+                v_p2 = vec2(a_xs.x, a_ys.z);
+                v_p3 = vec2(a_xs.y, a_ys.w);
+                v_pixel = pos;
+                
+                return camera_projection * vec4(pos, 0.0, 1.0);
+            }
+        }))
+    }
+    
+    pub fn draw_character(&mut self, cx: &mut Cx, x:f32, y:f32, unicode: char, scale: f32, font_id: usize) {
+        // now lets make a draw_character function
+        let inst = cx.new_instance(&self.shader, 1);
+        if inst.need_uniforms_now(cx) {
+        }
+        
+        let trapezoids = {
+            let font = cx.fonts[font_id].font_loaded.as_ref().unwrap();
+            
+            let trapezoids = Vec::new();
+            
+            let slot = font.char_code_to_glyph_index_map[unicode as usize];
+            let glyph = &font.glyphs[slot];
+            
+            trapezoids.extend_from_internal_iter(
+                self.trapezoidator.trapezoidate(
+                    glyph
+                        .outline
+                        .commands()
+                        .map({
+                            move |command| {
+                                command.transform(
+                                    &AffineTransformation::identity()
+                                        .translate(Vector::new(glyph.horizontal_metrics.left_side_bearing - glyph.bounds.p_min.x, 0.0))
+                                        .uniform_scale(scale)
+                                        .translate(Vector::new(x,y))
+                                )
+                            }
+                        })
+                        .linearize(1.0),
+                ),
+            );
+            trapezoids;
+        };
+        // push trapezoids instance data
+        inst.push_slice(cx, &trapezoids);
     }
 }
 
+impl CxAfterDraw {
+    pub fn style(cx: &mut Cx) -> Self {
+        Self {
+            trapezoid_text: TrapezoidText::style(cx),
+            font_passes: Vec::new()
+        }
+    }
+    
+    pub fn after_draw(&mut self, cx: &mut Cx) {
+    }
+}
+
+#[derive(Default)]
+pub struct CxFont {
+    pub path: String,
+    pub atlas_texture_id: usize,
+    pub font_loaded: Option<font::Font>,
+    pub texture_size: Vec2,
+    pub alloc_xpos: f32,
+    pub alloc_ypos: f32,
+    pub alloc_hmax: f32,
+    pub sized_atlas: Vec<SizedAtlasGlyph>,
+    pub glyphs_to_atlas: Vec<(usize, usize)>,
+}
+
+impl CxFont {
+    pub fn load_from_ttf_bytes(&mut self, path: &str, bytes: &[u8]) -> ttf_parser::Result<()> {
+        let font = ttf_parser::parse_ttf(bytes) ?;
+        self.font_loaded = Some(font);
+        Ok(())
+    }
+    
+    pub fn fetch_atlas_index(&mut self, dpi_factor: f32, font_size: f32) -> usize {
+        for (index, sg) in self.sized_atlas.iter().enumerate() {
+            if sg.dpi_factor == dpi_factor && sg.font_size == font_size {
+                return index
+            }
+        }
+        if let Some(font) = &self.font_loaded {
+            self.sized_atlas.push(SizedAtlasGlyph {
+                dpi_factor: dpi_factor,
+                font_size: font_size,
+                atlas_glyphs: {
+                    let mut v = Vec::new();
+                    v.resize(font.glyphs.len(), None);
+                    v
+                }
+            });
+            self.sized_atlas.len() - 1
+            
+        }
+        else {
+            panic!("Font not loaded {}", self.path);
+        }
+    }
+}
+
+pub struct SizedAtlasGlyph {
+    pub dpi_factor: f32,
+    pub font_size: f32,
+    pub atlas_glyphs: Vec<Option<AtlasGlyph>>
+}
 
 #[derive(Clone)]
-pub struct BinaryReader{
-    pub name:String,
-    pub vec_obj:Vec<u8>,
-    pub parse:isize
-}
-
-impl BinaryReader{
-    pub fn new_from_vec(name:String, vec_obj:Vec<u8>)->BinaryReader{
-        BinaryReader{
-            name:name, 
-            vec_obj:vec_obj,
-            parse:0
-        }
-    }
-
-    pub fn u8(&mut self)->Result<u8, String>{
-        if self.parse + 1 > self.vec_obj.len() as isize{
-            return Err(format!("Eof on u8 file {} offset {}", self.name, self.parse))
-        }
-        unsafe{
-            let ret = (self.vec_obj.as_ptr().offset(self.parse) as *const u8).read();
-            self.parse += 1;
-            Ok(ret)
-        }
-    }
-
-    pub fn u16(&mut self)->Result<u16, String>{
-        if self.parse+2 > self.vec_obj.len() as isize{
-            return Err(format!("Eof on u16 file {} offset {}", self.name, self.parse))
-        }
-        unsafe{
-            let ret = (self.vec_obj.as_ptr().offset(self.parse) as *const u16).read();
-            self.parse += 2;
-            Ok(ret)
-        }
-    }
-
-    pub fn u32(&mut self)->Result<u32, String>{
-        if self.parse+4 > self.vec_obj.len() as isize{
-            return Err(format!("Eof on u32 file {} offset {}", self.name, self.parse))
-        }
-        unsafe{
-            let ret = (self.vec_obj.as_ptr().offset(self.parse) as *const u32).read();
-            self.parse += 4;
-            Ok(ret)
-        }
-    }
-
-    pub fn f32(&mut self)->Result<f32, String>{
-        if self.parse+4 > self.vec_obj.len() as isize{
-            return Err(format!("Eof on f32 file {} offset {}", self.name, self.parse))
-        }
-        unsafe{
-            let ret = (self.vec_obj.as_ptr().offset(self.parse) as *const f32).read();
-            self.parse += 4;
-            Ok(ret)
-        }
-    }
-
-    pub fn read(&mut self, out:&mut [u8])->Result<usize, String>{
-        let len = out.len();
-        if self.parse + len as isize > self.vec_obj.len() as isize{
-             return Err(format!("Eof on read file {} len {} offset {}", self.name, out.len(), self.parse));
-        };
-        //unsafe{
-            for i in 0..len{
-                out[i] = self.vec_obj[self.parse as usize + i];
-            };
-            self.parse += len as isize;
-        //}
-        Ok(len)
-    }
+pub struct AtlasGlyph {
+    pub tx1: f32,
+    pub ty1: f32,
+    pub tx2: f32,
+    pub ty2: f32,
 }

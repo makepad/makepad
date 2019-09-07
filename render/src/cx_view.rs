@@ -37,31 +37,17 @@ where TScrollBar: ScrollBarLike<TScrollBar> + Clone
     pub scroll_v: Option<TScrollBar>,
 }
 
-impl<TScrollBar> Style for View<TScrollBar>
-where TScrollBar: ScrollBarLike<TScrollBar> + Clone
-{
-    fn style(_cx: &mut Cx) -> Self {
-        Self {
-            is_clipped: true,
-            is_overlay: false,
-            view_id: None,
-            scroll_h: None,
-            scroll_v: None
-        }
-    }
-}
-
 #[derive(Clone)]
-pub struct NoScrollBar {
+pub struct NoScroll {
 }
 
-impl NoScrollBar {
+impl NoScroll {
     fn handle_no_scroll_bar(&mut self, _cx: &mut Cx, _event: &mut Event) -> ScrollBarEvent {
         ScrollBarEvent::None
     }
 }
 
-impl ScrollBarLike<NoScrollBar> for NoScrollBar {
+impl ScrollBarLike<NoScroll> for NoScroll {
     fn draw_scroll_bar(&mut self, _cx: &mut Cx, _axis: Axis, _view_area: Area, _view_rect: Rect, _total_size: Vec2) -> f32 {0.}
     fn handle_scroll_bar(&mut self, _cx: &mut Cx, _event: &mut Event) -> ScrollBarEvent {
         ScrollBarEvent::None
@@ -80,6 +66,15 @@ pub type ViewRedraw = Result<(), ()>;
 impl<TScrollBar> View<TScrollBar>
 where TScrollBar: ScrollBarLike<TScrollBar> + Clone
 {
+    pub fn style(_cx: &mut Cx) -> Self {
+        Self {
+            is_clipped: true,
+            is_overlay: false,
+            view_id: None,
+            scroll_h: None,
+            scroll_v: None
+        }
+    }
     
     pub fn begin_view(&mut self, cx: &mut Cx, layout: Layout) -> ViewRedraw {
         

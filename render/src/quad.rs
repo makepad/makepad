@@ -9,8 +9,8 @@ pub struct Quad {
     pub color: Color
 }
 
-impl Style for Quad {
-    fn style(cx: &mut Cx) -> Self {
+impl Quad {
+    pub fn style(cx: &mut Cx) -> Self {
         Self {
             shader: cx.add_shader(Self::def_quad_shader(), "Quad"),
             do_h_scroll:true,
@@ -19,9 +19,7 @@ impl Style for Quad {
             color: color("green")
         }
     }
-}
- 
-impl Quad {
+
     pub fn def_quad_shader() -> ShaderGen {
         // lets add the draw shader lib
         let mut sg = ShaderGen::new();

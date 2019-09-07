@@ -1079,7 +1079,7 @@ impl TextCursorSet {
             let (start, end) = cursor.order();
             let start_pos = text_buffer.offset_to_text_pos(start);
             let end_pos = text_buffer.offset_to_text_pos_next(end, start_pos, start);
-            if start_pos.row != end_pos.row {
+            if start_pos.row != end_pos.row || end_pos.col <= start_pos.col {
                 return vec![]
             };
             let buf = text_buffer.copy_line(start_pos.row, start_pos.col, end_pos.col - start_pos.col);

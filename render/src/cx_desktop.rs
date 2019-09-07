@@ -186,7 +186,9 @@ impl Cx {
         }
     }
     
-    pub fn process_to_wasm<F>(&mut self, _msg: u32, mut _event_handler: F) -> u32 {
+    pub fn process_to_wasm<F>(&mut self, _msg: u32, mut _event_handler: F) -> u32 
+    where F: FnMut(&mut Cx, &mut Event)
+    {
         0
     }
     
@@ -200,15 +202,12 @@ impl Cx {
                 let mut buffer = Vec::<u8>::new();
                 // read the whole file
                 if file.read_to_end(&mut buffer).is_ok() {
-                    let mut read = BinaryReader::new_from_vec(path.clone(), buffer);
-                    let result = CxFont::from_binary_reader(self, path.clone(), self.fonts[i].texture_id, &mut read);
-                    if let Ok(cxfont) = result {
-                        self.fonts[i] = cxfont;
-                        continue;
-                    }
+                    self.fonts[i].load_from_ttf_bytes(&path, &buffer);
                 }
             }
-            println!("Error loading font {} ", path);
+            else{
+                println!("Error loading font {} ", path);
+            }
         }
     }
     

@@ -35,14 +35,14 @@ struct App {
     window: Window,
     pass: Pass,
     color_texture: Texture,
-    main_view: View<NoScrollBar>,
+    main_view: View<NoScroll>,
     quad: Quad
 }
 
 main_app!(App);
 
-impl Style for App {
-    fn style(cx: &mut Cx) -> Self {
+impl App {
+    pub fn style(cx: &mut Cx) -> Self {
         Self {
             window: Window::style(cx),
             pass: Pass::default(),
@@ -54,9 +54,7 @@ impl Style for App {
             },
         }
     }
-}
 
-impl App {
     pub fn def_quad_shader() -> ShaderGen {
         Quad::def_quad_shader().compose(shader_ast !({
             
@@ -65,6 +63,7 @@ impl App {
             }
         }))
     }
+    
     fn handle_app(&mut self, cx: &mut Cx, event: &mut Event) {
         
         match event {

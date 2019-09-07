@@ -613,7 +613,7 @@ impl InstanceArea{
         return draw_call.need_uniforms_now()
     }
 
-   pub fn push_uniform_texture_2d(&self, cx:&mut Cx,texture:&Texture){
+    pub fn push_uniform_texture_2d(&self, cx:&mut Cx,texture:&Texture){
         let cxview = &mut cx.views[self.view_id];
         if cxview.redraw_id != self.redraw_id {
             println!("uniform_texture_2d called on invalid area pointer, use mark/sweep correctly!");
@@ -628,6 +628,16 @@ impl InstanceArea{
         }
     }
 
+    pub fn push_uniform_texture_2d_id(&self, cx:&mut Cx, texture_id: usize){
+        let cxview = &mut cx.views[self.view_id];
+        if cxview.redraw_id != self.redraw_id {
+            println!("uniform_texture_2d called on invalid area pointer, use mark/sweep correctly!");
+            return
+        }
+        let draw_call = &mut cxview.draw_calls[self.draw_call_id]; 
+        draw_call.textures_2d.push(texture_id as u32);
+    }
+
     pub fn push_uniform_float(&self, cx:&mut Cx, v:f32){
         let cxview = &mut cx.views[self.view_id];
         if cxview.redraw_id != self.redraw_id {
@@ -636,6 +646,23 @@ impl InstanceArea{
         }
         let draw_call = &mut cxview.draw_calls[self.draw_call_id]; 
         draw_call.uniforms.push(v);
+    }
+
+    pub fn push_uniform_vec2(&self, cx:&mut Cx, v:Vec2){
+        let cxview = &mut cx.views[self.view_id];
+        if cxview.redraw_id != self.redraw_id {
+            println!("uniform_vec2f called on invalid area pointer, use mark/sweep correctly!");
+            return
+        }
+        let draw_call = &mut cxview.draw_calls[self.draw_call_id]; 
+        let left = draw_call.uniforms.len()&3;
+        if left > 2{ // align buffer
+            for _ in 0..(4-left){
+                draw_call.uniforms.push(0.0);
+            }
+        }
+        draw_call.uniforms.push(v.x);
+        draw_call.uniforms.push(v.y);
     }
 
     pub fn push_uniform_vec2f(&self, cx:&mut Cx,  x:f32, y:f32){
