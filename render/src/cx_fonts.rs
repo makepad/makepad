@@ -69,7 +69,7 @@ pub struct TrapezoidText {
 }
 
 impl TrapezoidText {
-    fn style(cx: &mut Cx) -> Self {
+    pub fn style(cx: &mut Cx) -> Self {
         Self {
             shader: cx.add_shader(Self::def_trapezoid_shader(), "TrapezoidShader"),
             trapezoidator: Trapezoidator::default()
@@ -177,16 +177,16 @@ impl TrapezoidText {
         }))
     }
     
-    pub fn draw_character(&mut self, cx: &mut Cx, x:f32, y:f32, unicode: char, scale: f32, font_id: usize) {
+    pub fn draw_character(&mut self, cx: &mut Cx, x:f32, y:f32, scale: f32, unicode: char, font: &Font) {
         // now lets make a draw_character function
         let inst = cx.new_instance(&self.shader, 1);
         if inst.need_uniforms_now(cx) {
         }
         
         let trapezoids = {
-            let font = cx.fonts[font_id].font_loaded.as_ref().unwrap();
+            let font = cx.fonts[font.font_id.unwrap()].font_loaded.as_ref().unwrap();
             
-            let trapezoids = Vec::new();
+            let mut trapezoids = Vec::new();
             
             let slot = font.char_code_to_glyph_index_map[unicode as usize];
             let glyph = &font.glyphs[slot];
@@ -209,10 +209,15 @@ impl TrapezoidText {
                         .linearize(1.0),
                 ),
             );
-            trapezoids;
+            trapezoids
         };
-        // push trapezoids instance data
-        inst.push_slice(cx, &trapezoids);
+        for trapezoid in trapezoids{
+            let data = [
+                trapezoid.xs[0], trapezoid.xs[1],
+                trapezoid.ys[0], trapezoid.ys[1], trapezoid.ys[2], trapezoid.ys[3],
+            ];
+            inst.push_slice(cx, &data);
+        }
     }
 }
 
