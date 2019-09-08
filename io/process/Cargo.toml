@@ -8,4 +8,4 @@ edition = "2018"
 libc = "0.2"
 
 [dependencies.render]
-path="../render"
+path="../../render"

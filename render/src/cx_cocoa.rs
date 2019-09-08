@@ -113,22 +113,22 @@ impl CocoaApp {
                 panic!("App is nil");
             }
             
-            /*let menu: id = msg_send![class!(NSMenu), init: NSString::alloc(nil).init_str("MainMenu")];
-            let makepad_menu: id = msg_send![class!(NSMenu), init: NSString::alloc(nil).init_str("Apple")];
-            let makepad_item: id = msg_send![class!(NSMenuItem), title: NSString::alloc(nil).init_str("MakePad")];
-            let makepad_quit: id = msg_send![
-                class!(NSMenuItem),
-                title: NSString::alloc(nil).init_str("MakePad")
-                action: NSString::alloc(nil).init_str("terminate:")
-                keyEquivalent: NSString::alloc(nil).init_str("q")
-            ];
+            //let menu: id = msg_send![class!(NSMenu), init: NSString::alloc(nil).init_str("MainMenu")];
+            //let makepad_menu: id = msg_send![class!(NSMenu), init: NSString::alloc(nil).init_str("Apple")];
+            //let makepad_item: id = msg_send![class!(NSMenuItem), title: NSString::alloc(nil).init_str("MakePad")];
+            //let makepad_quit: id = msg_send![
+            //    class!(NSMenuItem),
+            //    title: NSString::alloc(nil).init_str("MakePad")
+            //    action: NSString::alloc(nil).init_str("terminate:")
+            //    keyEquivalent: NSString::alloc(nil).init_str("q")
+            //];
             
             // add our menu
-            msg_send![
-                ns_app,
-                setMainMenu: menu
-            ];
-            */
+            //msg_send![
+            //    ns_app,
+            //    setMainMenu: menu
+            //];
+            
             ns_app.setActivationPolicy_(appkit::NSApplicationActivationPolicy::NSApplicationActivationPolicyRegular);
             ns_app.finishLaunching();
             let current_app = appkit::NSRunningApplication::currentApplication(nil);

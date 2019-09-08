@@ -8,14 +8,14 @@ edition = "2018"
 ipc=[]
 
 [dependencies]
-font = { path = "./font" }
-geometry = { path = "./geometry" }
-internal_iter = { path = "./internal_iter" }
+font = { path = "./vector/font" }
+geometry = { path = "./vector/geometry" }
+internal_iter = { path = "./vector/internal_iter" }
 shader_ast = {path="./shader_ast"}
 serde = { version = "1.0", features = ["derive"] }
-trapezoidator = { path = "./trapezoidator" }
-ttf_parser = { path = "./ttf_parser" }
-path = { path = "./path" }
+trapezoidator = { path = "./vector/trapezoidator" }
+ttf_parser = { path = "./vector/ttf_parser" }
+path = { path = "./vector/path" }
 
 [target.x86_64-apple-darwin.dependencies]
 closefds = "*"

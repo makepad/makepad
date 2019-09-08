@@ -15,4 +15,4 @@ path="../render"
 path="../widget"
 
 [dependencies.process]
-path="../process"
+path="../io/process"
