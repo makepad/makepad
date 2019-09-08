@@ -171,7 +171,7 @@ impl TrapezoidText {
                 v_p2 = vec2(a_xs.x, a_ys.z);
                 v_p3 = vec2(a_xs.y, a_ys.w);
                 v_pixel = pos;
-                
+                //return vec4(pos * 2.0 / vec2(1600.,1200.) - 10.0, 0.0, 1.0);
                 return camera_projection * vec4(pos, 0.0, 1.0);
             }
         }))
