@@ -75,7 +75,7 @@ impl App {
         cx.move_turtle(50.,50.);
         self.text.draw_text(cx, "Hello world");
         
-        self.trapezoid_text.draw_character(cx, 100.,100., 0.02, 'X', &self.text.font);
+        self.trapezoid_text.draw_character(cx, 100.,100., 0.5, 'X', &self.text.font);
         //self.trapezoid_text.draw_character(cx, 100.,300., 0.2, 'O', &self.text.font);
         
         self.main_view.end_view(cx);
