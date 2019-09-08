@@ -117,11 +117,11 @@ impl Cx {
         xlib_app: &XlibApp,
         opengl_window: &mut OpenglWindow,
         opengl_cx: &OpenglCx,
-    ) {
+    )->bool {
         let view_id = self.passes[pass_id].main_view_id.unwrap();
         
         let mut view_bounds = ViewBounds::new();
-        
+        let mut init_repaint = false;
         self.calc_dirty_bounds(pass_id, view_id, &mut view_bounds);
         
         let full_repaint = view_bounds.max_x - view_bounds.min_x > opengl_window.window_geom.inner_size.x - 100.
@@ -129,6 +129,7 @@ impl Cx {
             opengl_window.opening_repaint_count < 3;
         if opengl_window.opening_repaint_count < 3{ // for some reason the first repaint doesn't arrive on the window
              opengl_window.opening_repaint_count +=1;
+             init_repaint = true;
         } 
         let window;
         let view_rect;
@@ -229,6 +230,7 @@ impl Cx {
         unsafe {
             (opengl_cx.glx.glXSwapBuffers)(xlib_app.display, window);
         }
+        return init_repaint;
     }
     
     pub fn draw_pass_to_texture(

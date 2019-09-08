@@ -26,7 +26,7 @@ impl Cx{
         let mut passes_todo = Vec::new();
         
         xlib_app.event_loop( | xlib_app, events | {
-            //let mut paint_dirty = false;
+            let mut paint_dirty = false;
             for mut event in events {
                 
                 self.process_desktop_pre_event(&mut event, &mut event_handler);
@@ -177,13 +177,15 @@ impl Cx{
                                             
                                             self.passes[*pass_id].paint_dirty = false;
                                             
-                                            self.draw_pass_to_window(
+                                            if self.draw_pass_to_window(
                                                 *pass_id,
                                                 dpi_factor,
                                                 xlib_app,
                                                 opengl_window,
                                                 &opengl_cx,
-                                            );
+                                            ){
+                                                paint_dirty = true;
+                                            }
                                         }}
                                     }
                                     CxPassDepOf::Pass(parent_pass_id) => {
