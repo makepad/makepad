@@ -11,12 +11,20 @@ pub struct Button {
     pub _bg_area: Area, 
 }
 
-impl Style for Button {
-    fn style(cx: &mut Cx) -> Self {
+#[derive(Clone, PartialEq)]
+pub enum ButtonEvent {
+    None,
+    Clicked,
+    Down,
+    Up
+}
+
+impl Button {
+    pub fn style(cx: &mut Cx) -> Self {
         Self {
             bg: Quad {
                 shader: cx.add_shader(Self::def_bg_shader(), "Button.bg"),
-                ..Style::style(cx)
+                ..Quad::style(cx)
             },
             bg_layout: Layout {
                 align: Align::center(),
@@ -48,17 +56,7 @@ impl Style for Button {
             _bg_area: Area::Empty,
         }
     }
-}
 
-#[derive(Clone, PartialEq)]
-pub enum ButtonEvent {
-    None,
-    Clicked,
-    Down,
-    Up
-}
-
-impl Button {
     pub fn def_bg_shader() -> ShaderGen {
         Quad::def_quad_shader().compose(shader_ast!({
             

@@ -18,8 +18,14 @@ impl Clone for LocalTerminal {
     }
 }
 
-impl Style for LocalTerminal {
-    fn style(cx: &mut Cx) -> Self {
+#[derive(Clone, PartialEq)]
+pub enum LocalTerminalEvent {
+    None,
+    Change
+}
+
+impl LocalTerminal {
+    pub fn style(cx: &mut Cx) -> Self {
         let local_terminal = Self {
             terminal: Terminal::style(cx),
             term_buffer: TermBuffer::default(),
@@ -28,15 +34,7 @@ impl Style for LocalTerminal {
         //tab.animator.default = tab.anim_default(cx);
         local_terminal
     }
-}
 
-#[derive(Clone, PartialEq)]
-pub enum LocalTerminalEvent {
-    None,
-    Change
-}
-
-impl LocalTerminal {
     pub fn start_terminal(&mut self, _cx: &mut Cx) {
         self.process = Some(Process::start())
         

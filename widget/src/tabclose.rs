@@ -12,12 +12,12 @@ pub struct TabClose {
     pub _bg_area: Area,
 }
 
-impl Style for TabClose {
-    fn style(cx: &mut Cx) -> Self {
+impl TabClose {
+    pub fn style(cx: &mut Cx) -> Self {
         Self {
             bg: Quad {
                 shader: cx.add_shader(Self::def_bg_shader(), "TabClose.bg"),
-                ..Style::style(cx)
+                ..Quad::style(cx)
             },
             text: Text::style(cx),
             animator: Animator::new(Anim::new(Play::Cut {duration: 0.2}, vec![
@@ -39,9 +39,7 @@ impl Style for TabClose {
             _bg_area: Area::Empty,
         }
     }
-}
 
-impl TabClose {
     pub fn def_bg_shader() -> ShaderGen {
         Quad::def_quad_shader().compose(shader_ast!({
             let hover: float<Instance>;

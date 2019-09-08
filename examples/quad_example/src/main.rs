@@ -50,7 +50,7 @@ impl App {
             main_view: View::style(cx),
             quad: Quad {
                 shader: cx.add_shader(Self::def_quad_shader(), "quad"),
-                ..Style::style(cx)
+                ..Quad::style(cx)
             },
         }
     }
@@ -64,7 +64,7 @@ impl App {
         }))
     }
     
-    fn handle_app(&mut self, cx: &mut Cx, event: &mut Event) {
+    fn handle_app(&mut self, _cx: &mut Cx, event: &mut Event) {
         
         match event {
             Event::Construct => {

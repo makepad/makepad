@@ -7,9 +7,9 @@ use crate::tab::*;
 pub struct TabControl {
     pub tabs_view: View<ScrollBar>,
     pub tabs: Elements<usize, Tab, Tab>,
-    pub drag_tab_view: View<NoScrollBar>,
+    pub drag_tab_view: View<NoScroll>,
     pub drag_tab: Tab,
-    pub page_view: View<NoScrollBar>,
+    pub page_view: View<NoScroll>,
     pub hover: Quad,
     pub tab_fill: Quad,
     pub animator: Animator,
@@ -28,17 +28,17 @@ pub enum TabControlEvent {
     TabClose {tab_id: usize}
 }
 
-impl Style for TabControl {
-    fn style(cx: &mut Cx) -> Self {
+impl TabControl {
+    pub fn style(cx: &mut Cx) -> Self {
         Self {
             tabs_view: View {
                 scroll_h: Some(ScrollBar {
                     bar_size: 8.0,
                     smoothing: Some(0.15),
                     use_vertical_finger_scroll: true,
-                    ..Style::style(cx)
+                    ..ScrollBar::style(cx)
                 }),
-                ..Style::style(cx)
+                ..View::style(cx)
             },
             page_view: View::style(cx),
             tabs: Elements::new(Tab::style(cx)),
@@ -48,15 +48,15 @@ impl Style for TabControl {
             },
             drag_tab_view: View {
                 is_overlay: true,
-                ..Style::style(cx)
+                ..View::style(cx)
             },
             hover: Quad {
                 color: color("purple"),
-                ..Style::style(cx)
+                ..Quad::style(cx)
             },
             tab_fill: Quad {
                 color: cx.color("bg_normal"),
-                ..Style::style(cx)
+                ..Quad::style(cx)
             },
             animator: Animator::new(Anim::new(Play::Cut {duration: 0.5}, vec![])),
             _dragging_tab: None,
@@ -64,9 +64,7 @@ impl Style for TabControl {
             _tab_id_alloc: 0
         }
     }
-}
-
-impl TabControl {
+    
     pub fn handle_tab_control(&mut self, cx: &mut Cx, event: &mut Event) -> TabControlEvent {
         let mut tab_control_event = TabControlEvent::None;
         

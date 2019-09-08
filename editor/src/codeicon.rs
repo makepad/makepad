@@ -8,20 +8,6 @@ pub struct CodeIcon {
     pub height: f32,
 }
 
-impl Style for CodeIcon {
-    fn style(cx: &mut Cx) -> Self {
-        Self {
-            width: 14.0,
-            height: 14.0,
-            margin: Margin {l: 0., t: 0.5, r: 4., b: 0.},
-            quad: Quad {
-                shader: cx.add_shader(Self::def_code_icon_shader(), "CodeIcon"),
-                ..Style::style(cx)
-            }
-        }
-    }
-}
-
 pub enum CodeIconType {
     Warning,
     Error,
@@ -41,6 +27,18 @@ impl CodeIconType {
 }
 
 impl CodeIcon {
+    pub fn style(cx: &mut Cx) -> Self {
+        Self {
+            width: 14.0,
+            height: 14.0,
+            margin: Margin {l: 0., t: 0.5, r: 4., b: 0.},
+            quad: Quad {
+                shader: cx.add_shader(Self::def_code_icon_shader(), "CodeIcon"),
+                ..Quad::style(cx)
+            }
+        }
+    }
+
     pub fn def_code_icon_shader() -> ShaderGen {
         Quad::def_quad_shader().compose(shader_ast!({
             let icon_id: float<Instance>;

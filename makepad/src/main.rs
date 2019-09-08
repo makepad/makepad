@@ -60,8 +60,8 @@ struct AppState {
 
 main_app!(App);
 
-impl Style for AppWindow {
-    fn style(cx: &mut Cx) -> Self {
+impl AppWindow {
+    pub fn style(cx: &mut Cx) -> Self {
         Self {
             desktop_window: DesktopWindow {
                 caption: "Makepad".to_string(),
@@ -81,89 +81,8 @@ impl Style for AppWindow {
             dock: Dock ::style(cx),
         }
     }  
-}
 
-impl Style for App {
     
-    fn style(cx: &mut Cx) -> Self {
-        set_dark_style(cx);
-        Self {
-            app_window_template: AppWindow::style(cx),
-            app_window_state_template: AppWindowState {
-                window_inner_size: Vec2::zero(),
-                window_position: Vec2::zero(),
-                dock_items: DockItem::Splitter {
-                    axis: Axis::Vertical,
-                    align: SplitterAlign::First,
-                    pos: 150.0,
-                    first: Box::new(DockItem::TabControl {
-                        current: 0,
-                        tabs: vec![DockTab {
-                            closeable: false,
-                            title: "Files".to_string(),
-                            item: Panel::FileTree
-                        }]
-                    }),
-                    last: Box::new(DockItem::Splitter {
-                        axis: Axis::Horizontal,
-                        align: SplitterAlign::Last,
-                        pos: 150.0,
-                        first: Box::new(DockItem::TabControl {
-                            current: 1,
-                            tabs: vec![
-                                DockTab {
-                                    closeable: false,
-                                    title: "Edit".to_string(),
-                                    item: Panel::FileEditorTarget
-                                },
-                                DockTab {
-                                    closeable: true,
-                                    title: "main.rs".to_string(),
-                                    item: Panel::FileEditor {path: "examples/quad/src/main.rs".to_string(), editor_id: 1}
-                                }
-                            ],
-                        }),
-                        last: Box::new(DockItem::TabControl {
-                            current: 0,
-                            tabs: vec![
-                                DockTab {
-                                    closeable: false,
-                                    title: "Local Terminal".to_string(),
-                                    item: Panel::LocalTerminal {start_path: "./".to_string(), terminal_id: 1}
-                                },
-                                DockTab {
-                                    closeable: false,
-                                    title: "Rust Compiler".to_string(),
-                                    item: Panel::RustCompiler
-                                },
-                                DockTab {
-                                    closeable: false,
-                                    title: "Keyboard".to_string(),
-                                    item: Panel::Keyboard
-                                }
-                            ]
-                        })
-                    })
-                },
-            },
-            windows: vec![],
-            app_global: AppGlobal {
-                rust_compiler: RustCompiler::style(cx),
-                text_buffers: TextBuffers {
-                    root_path: "./".to_string(),
-                    storage: HashMap::new()
-                },
-                index_file_read: FileRead::default(),
-                app_state_file_read: FileRead::default(),
-                file_tree_data: String::new(),
-                file_tree_reload_signal: cx.new_signal(),
-                state: AppState::default()
-            }
-        }
-    }
-}
-
-impl AppWindow {
     fn handle_app_window(&mut self, cx: &mut Cx, event: &mut Event, window_index: usize, app_global: &mut AppGlobal) {
         
         match self.desktop_window.handle_desktop_window(cx, event) {
@@ -417,6 +336,84 @@ impl AppGlobal {
 }
 
 impl App {
+    
+    pub fn style(cx: &mut Cx) -> Self {
+        set_dark_style(cx);
+        Self {
+            app_window_template: AppWindow::style(cx),
+            app_window_state_template: AppWindowState {
+                window_inner_size: Vec2::zero(),
+                window_position: Vec2::zero(),
+                dock_items: DockItem::Splitter {
+                    axis: Axis::Vertical,
+                    align: SplitterAlign::First,
+                    pos: 150.0,
+                    first: Box::new(DockItem::TabControl {
+                        current: 0,
+                        tabs: vec![DockTab {
+                            closeable: false,
+                            title: "Files".to_string(),
+                            item: Panel::FileTree
+                        }]
+                    }),
+                    last: Box::new(DockItem::Splitter {
+                        axis: Axis::Horizontal,
+                        align: SplitterAlign::Last,
+                        pos: 150.0,
+                        first: Box::new(DockItem::TabControl {
+                            current: 1,
+                            tabs: vec![
+                                DockTab {
+                                    closeable: false,
+                                    title: "Edit".to_string(),
+                                    item: Panel::FileEditorTarget
+                                },
+                                DockTab {
+                                    closeable: true,
+                                    title: "main.rs".to_string(),
+                                    item: Panel::FileEditor {path: "examples/quad/src/main.rs".to_string(), editor_id: 1}
+                                }
+                            ],
+                        }),
+                        last: Box::new(DockItem::TabControl {
+                            current: 0,
+                            tabs: vec![
+                                DockTab {
+                                    closeable: false,
+                                    title: "Local Terminal".to_string(),
+                                    item: Panel::LocalTerminal {start_path: "./".to_string(), terminal_id: 1}
+                                },
+                                DockTab {
+                                    closeable: false,
+                                    title: "Rust Compiler".to_string(),
+                                    item: Panel::RustCompiler
+                                },
+                                DockTab {
+                                    closeable: false,
+                                    title: "Keyboard".to_string(),
+                                    item: Panel::Keyboard
+                                }
+                            ]
+                        })
+                    })
+                },
+            },
+            windows: vec![],
+            app_global: AppGlobal {
+                rust_compiler: RustCompiler::style(cx),
+                text_buffers: TextBuffers {
+                    root_path: "./".to_string(),
+                    storage: HashMap::new()
+                },
+                index_file_read: FileRead::default(),
+                app_state_file_read: FileRead::default(),
+                file_tree_data: String::new(),
+                file_tree_reload_signal: cx.new_signal(),
+                state: AppState::default()
+            }
+        }
+    }
+    
     fn default_layout(&mut self, cx: &mut Cx){
         println!("DOING DEFAULT");
         self.app_global.state.windows = vec![self.app_window_state_template.clone()];
@@ -472,7 +469,7 @@ impl App {
                                     desktop_window: DesktopWindow {window: Window {
                                         create_inner_size: Some(size),
                                         create_position: create_pos,
-                                        ..Style::style(cx)
+                                        ..Window::style(cx)
                                     }, ..self.app_window_template.desktop_window.clone()},
                                     ..self.app_window_template.clone()
                                 })

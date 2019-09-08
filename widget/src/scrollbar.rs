@@ -27,8 +27,8 @@ pub struct ScrollBar {
     pub _drag_point: Option<f32>, // the point in pixels where we are dragging
 }
 
-impl Style for ScrollBar {
-    fn style(cx: &mut Cx) -> Self {
+impl ScrollBar {
+    pub fn style(cx: &mut Cx) -> Self {
         Self {
             bar_size: 12.0,
             min_handle_size: 30.0,
@@ -47,7 +47,7 @@ impl Style for ScrollBar {
             sb: Quad {
                 z: 10.,
                 shader: cx.add_shader(Self::def_shader(), "ScrollBar.sb"),
-                ..Style::style(cx)
+                ..Quad::style(cx)
             },
             use_vertical_finger_scroll: false,
             _visible: false,
@@ -66,10 +66,7 @@ impl Style for ScrollBar {
             _sb_area: Area::Empty,
         }
     }
-}
 
-
-impl ScrollBar {
     pub fn def_shader() -> ShaderGen {
         Quad::def_quad_shader().compose(shader_ast!({
             

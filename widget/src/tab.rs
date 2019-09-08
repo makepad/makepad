@@ -21,15 +21,25 @@ pub struct Tab{
     pub _is_drag:bool
 }
 
-impl Style for Tab{
-    fn style(cx:&mut Cx)->Self{
+#[derive(Clone, PartialEq)]
+pub enum TabEvent{
+    None,
+    DragMove(FingerMoveEvent),
+    DragEnd(FingerUpEvent),
+    Closing,
+    Close,
+    Select,
+}
+
+impl Tab{
+    pub fn style(cx:&mut Cx)->Self{
         let mut tab = Self{
             label:"Tab".to_string(),
             is_closeable:true,
             z:0.,
             bg:Quad{
                 shader:cx.add_shader(Self::def_bg_shader(), "Tab.bg"),
-                ..Style::style(cx)
+                ..Quad::style(cx)
             },
             bg_layout:Layout{
                 align:Align::center(),
@@ -41,7 +51,7 @@ impl Style for Tab{
             },
             tab_close:TabClose{
                 margin:Margin{l:-4.,t:3.,r:4.,b:0.},
-                ..Style::style(cx)
+                ..TabClose::style(cx)
             },
             text:Text::style(cx),
             animator:Animator::new(Anim::empty()),
@@ -56,20 +66,7 @@ impl Style for Tab{
         tab.animator.default = tab.anim_default(cx);
         tab
     }
-}
-
-#[derive(Clone, PartialEq)]
-pub enum TabEvent{
-    None,
-    DragMove(FingerMoveEvent),
-    DragEnd(FingerUpEvent),
-    Closing,
-    Close,
-    Select,
-}
-
-impl Tab{
-
+    
     pub fn get_bg_color(&self, cx:&Cx)->Color{
         if self._is_selected{
             cx.color("bg_selected")

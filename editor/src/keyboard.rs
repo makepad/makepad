@@ -35,14 +35,14 @@ impl KeyType {
     }
 }
 
-impl Style for Keyboard {
-    fn style(cx: &mut Cx) -> Self {
+impl Keyboard {
+    pub fn style(cx: &mut Cx) -> Self {
         Self {
             view: View {
-                ..Style::style(cx)
+                ..View::style(cx)
             },
             buttons: Elements::new(Button {
-                ..Style::style(cx)
+                ..Button::style(cx)
             }),
             modifiers: KeyModifiers {..Default::default()},
             key_down: None,
@@ -50,9 +50,6 @@ impl Style for Keyboard {
             
         }
     }
-}
-
-impl Keyboard {
     
     fn send_textbuffers_update(&mut self, cx: &mut Cx, text_buffers: &mut TextBuffers) {
         // clear all files we missed

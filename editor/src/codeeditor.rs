@@ -128,8 +128,16 @@ pub struct CodeEditorColors {
     pub unexpected: Color
 }
 
-impl Style for CodeEditor {
-    fn style(cx: &mut Cx) -> Self {
+#[derive(Clone, PartialEq)]
+pub enum CodeEditorEvent {
+    None,
+    AutoFormat,
+    LagChange,
+    Change
+}
+
+impl CodeEditor {
+    pub     fn style(cx: &mut Cx) -> Self {
         Self {
             cursors: TextCursorSet::new(),
             colors: CodeEditorColors {
@@ -180,35 +188,35 @@ impl Style for CodeEditor {
             indent_lines: Quad {
                 z:0.001,
                 shader: cx.add_shader(Self::def_indent_lines_shader(), "Editor.indent_lines"),
-                ..Style::style(cx)
+                ..Quad::style(cx)
             },
             view: View {
                 scroll_h: Some(ScrollBar::style(cx)),
                 scroll_v: Some(ScrollBar {
                     smoothing: Some(0.15),
-                    ..Style::style(cx)
+                    ..ScrollBar::style(cx)
                 }),
-                ..Style::style(cx)
+                ..View::style(cx)
             },
             bg: Quad {
                 do_h_scroll: false,
                 do_v_scroll: false,
-                ..Style::style(cx)
+                ..Quad::style(cx)
             },
             gutter_bg: Quad {
                 z:9.0,
                 do_h_scroll: false,
                 do_v_scroll: false,
-                ..Style::style(cx)
+                ..Quad::style(cx)
             },
             selection: Quad {
                 shader: cx.add_shader(Self::def_selection_shader(), "Editor.selection"),
                 z:1.0,
-                ..Style::style(cx)
+                ..Quad::style(cx)
             },
             token_highlight: Quad {
                 shader: cx.add_shader(Self::def_token_highlight_shader(), "Editor.token_highlight"),
-                ..Style::style(cx)
+                ..Quad::style(cx)
             },
             //select_highlight:Quad{
             // shader_id:cx.add_shader(select_highlight_sh, "Editor.select_highlight"),
@@ -216,22 +224,22 @@ impl Style for CodeEditor {
             //},
             cursor: Quad {
                 shader: cx.add_shader(Self::def_cursor_shader(), "Editor.cursor"),
-                ..Style::style(cx)
+                ..Quad::style(cx)
             },
             cursor_row: Quad {
                 shader: cx.add_shader(Self::def_cursor_row_shader(), "Editor.cursor_row"),
-                ..Style::style(cx)
+                ..Quad::style(cx)
             },
             paren_pair: Quad {
                 shader: cx.add_shader(Self::def_paren_pair_shader(), "Editor.paren_pair"),
-                ..Style::style(cx)
+                ..Quad::style(cx)
             },
             message_marker: Quad {
                 shader: cx.add_shader(Self::def_message_marker_shader(), "Editor.message_marker"),
-                ..Style::style(cx)
+                ..Quad::style(cx)
             },
             code_icon: CodeIcon {
-                ..Style::style(cx)
+                ..CodeIcon::style(cx)
             },
             bg_layout: Layout {
                 width: Bounds::Fill,
@@ -248,7 +256,7 @@ impl Style for CodeEditor {
                 line_spacing: 1.4,
                 do_dpi_dilate: true,
                 wrapping: Wrapping::Line,
-                ..Style::style(cx)
+                ..Text::style(cx)
             },
             line_number_text: Text {
                 font: cx.load_font_style("mono_font"),
@@ -259,7 +267,7 @@ impl Style for CodeEditor {
                 do_dpi_dilate: true,
                 do_h_scroll: false,
                 wrapping: Wrapping::Line,
-                ..Style::style(cx)
+                ..Text::style(cx)
             },
             open_font_size: 11.0,
             folded_font_size: 0.5,
@@ -326,17 +334,6 @@ impl Style for CodeEditor {
             _jump_to_offset_id: 0
         }
     }
-}
-
-#[derive(Clone, PartialEq)]
-pub enum CodeEditorEvent {
-    None,
-    AutoFormat,
-    LagChange,
-    Change
-}
-
-impl CodeEditor {
     
     pub fn def_indent_lines_shader() -> ShaderGen {
         Quad::def_quad_shader().compose(shader_ast !({

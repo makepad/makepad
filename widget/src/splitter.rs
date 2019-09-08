@@ -14,7 +14,7 @@ pub struct Splitter {
     pub anim_over: Anim,
     pub anim_moving: Anim,
     pub realign_dist: f32,
-    pub split_view: View<NoScrollBar>,
+    pub split_view: View<NoScroll>,
     pub _split_area: Area,
     pub _calc_pos: f32,
     pub _is_moving: bool,
@@ -38,8 +38,8 @@ pub enum SplitterEvent {
     MovingEnd {new_align: SplitterAlign, new_pos: f32}
 }
 
-impl Style for Splitter {
-    fn style(cx: &mut Cx) -> Self {
+impl Splitter {
+    pub fn style(cx: &mut Cx) -> Self {
         Self {
             
             axis: Axis::Vertical,
@@ -59,7 +59,7 @@ impl Style for Splitter {
             split_view: View::style(cx),
             split: Quad {
                 shader: cx.add_shader(Self::def_split_shader(), "Splitter.split"),
-                ..Style::style(cx)
+                ..Quad::style(cx)
             },
             animator: Animator::new(Anim::new(Play::Cut {duration: 0.5}, vec![
                 Track::color("split.color", Ease::Lin, vec![(1.0, cx.color("bg_split"))]),
@@ -74,11 +74,7 @@ impl Style for Splitter {
                 ]),
             ]),
         }
-    }
-}
-
-impl Splitter {
-    
+    }    
     pub fn def_split_shader() -> ShaderGen {
         Quad::def_quad_shader().compose(shader_ast!({
             

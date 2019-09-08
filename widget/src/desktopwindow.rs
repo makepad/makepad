@@ -9,8 +9,8 @@ pub struct DesktopWindow {
     pub pass: Pass,
     pub color_texture: Texture,
     pub depth_texture: Texture,
-    pub caption_view: View<NoScrollBar>, // we have a root view otherwise is_overlay subviews can't attach topmost
-    pub main_view: View<NoScrollBar>, // we have a root view otherwise is_overlay subviews can't attach topmost
+    pub caption_view: View<NoScroll>, // we have a root view otherwise is_overlay subviews can't attach topmost
+    pub main_view: View<NoScroll>, // we have a root view otherwise is_overlay subviews can't attach topmost
     pub inner_view: View<ScrollBar>,
     
     pub min_btn: DesktopButton,
@@ -39,8 +39,8 @@ pub enum DesktopWindowEvent {
     None
 }
 
-impl Style for DesktopWindow {
-    fn style(cx: &mut Cx) -> Self {
+impl DesktopWindow {
+    pub fn style(cx: &mut Cx) -> Self {
         Self {
             window: Window::style(cx),
             pass: Pass::default(),
@@ -57,7 +57,7 @@ impl Style for DesktopWindow {
             caption_text: Text::style(cx),
             caption_bg: Quad {
                 color: cx.color("bg_selected"),
-                ..Style::style(cx)
+                ..Quad::style(cx)
             },
             caption_size: Vec2::zero(),
             caption: "Makepad".to_string(),
@@ -69,9 +69,7 @@ impl Style for DesktopWindow {
             blitbuffer: Texture::default()
         }
     }
-}
 
-impl DesktopWindow {
     pub fn handle_desktop_window(&mut self, cx: &mut Cx, event: &mut Event) -> DesktopWindowEvent {
         //self.main_view.handle_scroll_bars(cx, event);
         //self.inner_view.handle_scroll_bars(cx, event);

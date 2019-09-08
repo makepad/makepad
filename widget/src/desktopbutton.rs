@@ -10,33 +10,6 @@ pub struct DesktopButton {
     pub _bg_area: Area,
 }
 
-impl Style for DesktopButton {
-    fn style(cx: &mut Cx) -> Self {
-        Self {
-            bg: Quad {
-                shader: cx.add_shader(Self::def_bg_shader(), "Button.bg"),
-                ..Style::style(cx)
-            },
-            animator: Animator::new(Anim::new(Play::Cut {duration: 0.2}, vec![
-                Track::color("bg.color", Ease::Lin, vec![(1.0, color("#a"))]),
-                Track::float("bg.hover", Ease::Lin, vec![(1.0, 0.)]),
-                Track::float("bg.down", Ease::Lin, vec![(1.0, 0.)]),
-            ])),
-            anim_over: Anim::new(Play::Cut {duration: 0.2}, vec![
-                Track::color("bg.color", Ease::Lin, vec![(0.0, color("#f")), (1.0, color("#f"))]),
-                Track::float("bg.down", Ease::Lin, vec![(1.0, 0.)]),
-                Track::float("bg.hover", Ease::Lin, vec![(0.0, 1.0), (1.0, 1.0)]),
-            ]),
-            anim_down: Anim::new(Play::Cut {duration: 0.2}, vec![
-                Track::color("bg.color", Ease::Lin, vec![(0.0, color("#f55")), (1.0, color("#f55"))]),
-                Track::float("bg.hover", Ease::Lin, vec![(1.0, 1.0)]),
-                Track::float("bg.down", Ease::OutExp, vec![(0.0, 0.0), (1.0, 3.1415 * 0.5)]),
-            ]),
-            _bg_area: Area::Empty,
-        }
-    }
-}
-
 pub enum DesktopButtonType {
     WindowsMin,
     WindowsMax,
@@ -58,6 +31,31 @@ impl DesktopButtonType {
 }
 
 impl DesktopButton {
+    pub fn style(cx: &mut Cx) -> Self {
+        Self {
+            bg: Quad {
+                shader: cx.add_shader(Self::def_bg_shader(), "Button.bg"),
+                ..Quad::style(cx)
+            },
+            animator: Animator::new(Anim::new(Play::Cut {duration: 0.2}, vec![
+                Track::color("bg.color", Ease::Lin, vec![(1.0, color("#a"))]),
+                Track::float("bg.hover", Ease::Lin, vec![(1.0, 0.)]),
+                Track::float("bg.down", Ease::Lin, vec![(1.0, 0.)]),
+            ])),
+            anim_over: Anim::new(Play::Cut {duration: 0.2}, vec![
+                Track::color("bg.color", Ease::Lin, vec![(0.0, color("#f")), (1.0, color("#f"))]),
+                Track::float("bg.down", Ease::Lin, vec![(1.0, 0.)]),
+                Track::float("bg.hover", Ease::Lin, vec![(0.0, 1.0), (1.0, 1.0)]),
+            ]),
+            anim_down: Anim::new(Play::Cut {duration: 0.2}, vec![
+                Track::color("bg.color", Ease::Lin, vec![(0.0, color("#f55")), (1.0, color("#f55"))]),
+                Track::float("bg.hover", Ease::Lin, vec![(1.0, 1.0)]),
+                Track::float("bg.down", Ease::OutExp, vec![(0.0, 0.0), (1.0, 3.1415 * 0.5)]),
+            ]),
+            _bg_area: Area::Empty,
+        }
+    }
+
     pub fn def_bg_shader() -> ShaderGen {
         Quad::def_quad_shader().compose(shader_ast!({
             

@@ -16,7 +16,7 @@ where TItem: Clone
     
     pub drop_size: Vec2,
     pub drop_quad: Quad,
-    pub drop_quad_view: View<NoScrollBar>,
+    pub drop_quad_view: View<NoScroll>,
     pub drop_quad_color: Color,
     pub _drag_move: Option<FingerMoveEvent>,
     pub _drag_end: Option<DockDragEnd<TItem>>,
@@ -29,33 +29,6 @@ where TItem: Clone
 pub struct DockTabIdent {
     tab_control_id: usize,
     tab_id: usize
-}
-
-impl<TItem> Style for Dock<TItem>
-where TItem: Clone
-{
-    fn style(cx: &mut Cx) -> Dock<TItem> {
-        Dock {
-            // dock_items:None,
-            drop_size: Vec2 {x: 100., y: 70.},
-            drop_quad_color: color("#a"),
-            drop_quad: Quad{
-                z:10.,
-                ..Quad ::style(cx)
-            },
-            splitters: Elements::new(Splitter::style(cx)),
-            tab_controls: Elements::new(TabControl::style(cx)),
-            drop_quad_view: View {
-                is_overlay: true,
-                ..Style::style(cx)
-            },
-            _close_tab: None,
-            _drag_move: None,
-            _drag_end: None,
-            _tab_select: None,
-            _tweening_quad: None
-        }
-    }
 }
 
 #[derive(Clone)]
@@ -114,7 +87,7 @@ where TItem: Clone
     // forwards for Dock
     splitters: &'a mut Elements<usize, Splitter, Splitter>,
     tab_controls: &'a mut Elements<usize, TabControl, TabControl>,
-    drop_quad_view: &'a mut View<NoScrollBar>,
+    drop_quad_view: &'a mut View<NoScroll>,
     _drag_move: &'a mut Option<FingerMoveEvent>,
     _drag_end: &'a mut Option<DockDragEnd<TItem>>,
     _close_tab: &'a mut Option<DockTabIdent>,
@@ -403,6 +376,29 @@ enum DockDropKind {
 impl<TItem> Dock<TItem>
 where TItem: Clone
 {
+    pub fn style(cx: &mut Cx) -> Dock<TItem> {
+        Dock {
+            // dock_items:None,
+            drop_size: Vec2 {x: 100., y: 70.},
+            drop_quad_color: color("#a"),
+            drop_quad: Quad{
+                z:10.,
+                ..Quad::style(cx)
+            },
+            splitters: Elements::new(Splitter::style(cx)),
+            tab_controls: Elements::new(TabControl::style(cx)),
+            drop_quad_view: View {
+                is_overlay: true,
+                ..View::style(cx)
+            },
+            _close_tab: None,
+            _drag_move: None,
+            _drag_end: None,
+            _tab_select: None,
+            _tweening_quad: None
+        }
+    }
+
     fn recur_remove_tab(dock_walk: &mut DockItem<TItem>, control_id: usize, tab_id: usize, counter: &mut usize) -> Option<DockTab<TItem>>
     where TItem: Clone
     {

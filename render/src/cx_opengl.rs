@@ -69,7 +69,12 @@ impl Cx {
                         }
                         // get the loc
                         gl::ActiveTexture(gl::TEXTURE0 + i as u32);
-                        gl::BindTexture(gl::TEXTURE_2D, cxtexture.platform.gl_texture.unwrap());
+                        if let Some(texture) = cxtexture.platform.gl_texture{
+                            gl::BindTexture(gl::TEXTURE_2D, texture);
+                        }
+                        else{
+                            gl::BindTexture(gl::TEXTURE_2D, 0);
+                        }
                     }
                     
                     gl::DrawElementsInstanced(

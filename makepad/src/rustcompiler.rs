@@ -73,31 +73,25 @@ pub enum RustCompilerEvent {
     None,
 }
 
-impl Style for RustCompiler {
-    fn style(cx: &mut Cx) -> Self {
+impl RustCompiler {
+    pub fn style(cx: &mut Cx) -> Self {
         Self {
-            bg: Quad {
-                ..Style::style(cx)
-            },
-            item_bg: Quad {
-                ..Style::style(cx)
-            },
+            bg: Quad ::style(cx),
+            item_bg: Quad::style(cx),
             text: Text {
                 wrapping: Wrapping::Word,
-                ..Style::style(cx)
+                ..Text::style(cx)
             },
             view: View {
-                scroll_h: Some(ScrollBar {
-                    ..Style::style(cx)
-                }),
+                scroll_h: Some(ScrollBar::style(cx)),
                 scroll_v: Some(ScrollBar {
                     smoothing: Some(0.15),
-                    ..Style::style(cx)
+                    ..ScrollBar::style(cx)
                 }),
-                ..Style::style(cx)
+                ..View::style(cx)
             },
             code_icon: CodeIcon {
-                ..Style::style(cx)
+                ..CodeIcon::style(cx)
             },
             path_color: color("#999"),
             message_color: color("#bbb"),
@@ -122,9 +116,6 @@ impl Style for RustCompiler {
             _data: Vec::new()
         }
     }
-}
-
-impl RustCompiler {
     pub fn init(&mut self, cx: &mut Cx, text_buffers: &mut TextBuffers) {
         self._check_signal = cx.new_signal();
         self.restart_rust_checker(cx, text_buffers);

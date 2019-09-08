@@ -48,8 +48,14 @@ pub struct TerminalColors {
     pub cursor_row: Color
 }
 
-impl Style for Terminal {
-    fn style(cx: &mut Cx) -> Self {
+#[derive(Clone, PartialEq)]
+pub enum TerminalEvent {
+    None,
+    Change
+}
+
+impl Terminal {
+    pub fn style(cx: &mut Cx) -> Self {
         Self {
             colors: TerminalColors {
                 selection: color256(42, 78, 117),
@@ -62,21 +68,21 @@ impl Style for Terminal {
                 scroll_h: Some(ScrollBar::style(cx)),
                 scroll_v: Some(ScrollBar {
                     smoothing: Some(0.15),
-                    ..Style::style(cx)
+                    ..ScrollBar::style(cx)
                 }),
-                ..Style::style(cx)
+                ..View::style(cx)
             },
             selection: Quad {
                 shader: cx.add_shader(Self::def_selection_shader(), "Editor.selection"),
-                ..Style::style(cx)
+                ..Quad::style(cx)
             },
             cursor: Quad {
                 shader: cx.add_shader(Self::def_cursor_shader(), "Editor.cursor"),
-                ..Style::style(cx)
+                ..Quad::style(cx)
             },
             cursor_row: Quad {
                 shader: cx.add_shader(Self::def_cursor_row_shader(), "Editor.cursor_row"),
-                ..Style::style(cx)
+                ..Quad::style(cx)
             },
             bg_layout: Layout {
                 width: Bounds::Fill,
@@ -92,7 +98,7 @@ impl Style for Terminal {
                 line_spacing: 1.4,
                 do_dpi_dilate: true,
                 wrapping: Wrapping::Line,
-                ..Style::style(cx)
+                ..Text::style(cx)
             },
             cursor_blink_speed: 0.5,
             top_padding: 27.,
@@ -116,16 +122,7 @@ impl Style for Terminal {
             _cursor_blink_flipflop: 0.,
             _cursor_area: Area::Empty,
         }
-    }
-}
-
-#[derive(Clone, PartialEq)]
-pub enum TerminalEvent {
-    None,
-    Change
-}
-
-impl Terminal {
+    }    
     
     pub fn def_cursor_shader() -> ShaderGen {
         Quad::def_quad_shader().compose(shader_ast !({

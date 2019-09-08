@@ -7,7 +7,7 @@ use serde::*;
 #[derive(Clone)]
 pub struct FileTree {
     pub view: View<ScrollBar>,
-    pub drag_view: View<NoScrollBar>,
+    pub drag_view: View<NoScroll>,
     pub _drag_move: Option<FingerMoveEvent>,
     pub drag_bg: Quad,
     pub drag_bg_layout: Layout,
@@ -157,55 +157,6 @@ impl<'a> FileWalker<'a> {
     }
 }
 
-impl Style for FileTree {
-    fn style(cx: &mut Cx) -> Self {
-        Self {
-            row_height: 20.,
-            row_padding: Padding {l: 5., t: 0., r: 0., b: 1.},
-            root_node: FileNode::Folder {name: "".to_string(), state: NodeState::Open, draw: None, folder: vec![
-                FileNode::File {name: "loading...".to_string(), draw: None},
-            ]},
-            node_bg: Quad::style(cx),
-            drag_bg: Quad {
-                color: cx.color("bg_marked"),
-                shader: cx.add_shader(Self::def_drag_bg_shader(), "FileTree.drag_bg"),
-                ..Style::style(cx)
-            },
-            drag_bg_layout: Layout {
-                padding: Padding {l: 5., t: 5., r: 5., b: 5.},
-                width: Bounds::Compute,
-                height: Bounds::Compute,
-                ..Default::default()
-            },
-            filler: Quad {
-                color: cx.color("icon_color"),
-                z:0.001,
-                shader: cx.add_shader(Self::def_filler_shader(), "FileTree.filler"),
-                ..Style::style(cx)
-            },
-            tree_folder_color: cx.color("text_selected_focus"),
-            tree_file_color: cx.color("text_deselected_focus"),
-            tree_text: Text{z:0.001,..Text::style(cx)},
-            view: View {
-                //scroll_h:Some(ScrollBar{
-                //    ..Style::style(cx)
-                //}),
-                scroll_v: Some(ScrollBar {
-                    smoothing: Some(0.25),
-                    ..Style::style(cx)
-                }),
-                ..Style::style(cx)
-            },
-            drag_view: View {
-                is_overlay: true,
-                ..Style::style(cx)
-            },
-            animator: Animator::new(Anim::empty()),
-            _drag_move: None,
-        }
-    }
-}
-
 #[derive(Deserialize, Debug)]
 struct JsonFolder {
     name: String,
@@ -220,6 +171,52 @@ struct JsonFile {
 }
 
 impl FileTree {
+    pub fn style(cx: &mut Cx) -> Self {
+        Self {
+            row_height: 20.,
+            row_padding: Padding {l: 5., t: 0., r: 0., b: 1.},
+            root_node: FileNode::Folder {name: "".to_string(), state: NodeState::Open, draw: None, folder: vec![
+                FileNode::File {name: "loading...".to_string(), draw: None},
+            ]},
+            node_bg: Quad::style(cx),
+            drag_bg: Quad {
+                color: cx.color("bg_marked"),
+                shader: cx.add_shader(Self::def_drag_bg_shader(), "FileTree.drag_bg"),
+                ..Quad::style(cx)
+            },
+            drag_bg_layout: Layout {
+                padding: Padding {l: 5., t: 5., r: 5., b: 5.},
+                width: Bounds::Compute,
+                height: Bounds::Compute,
+                ..Default::default()
+            },
+            filler: Quad {
+                color: cx.color("icon_color"),
+                z:0.001,
+                shader: cx.add_shader(Self::def_filler_shader(), "FileTree.filler"),
+                ..Quad::style(cx)
+            },
+            tree_folder_color: cx.color("text_selected_focus"),
+            tree_file_color: cx.color("text_deselected_focus"),
+            tree_text: Text{z:0.001,..Text::style(cx)},
+            view: View {
+                //scroll_h:Some(ScrollBar{
+                //    ..Style::style(cx)
+                //}),
+                scroll_v: Some(ScrollBar {
+                    smoothing: Some(0.25),
+                    ..ScrollBar::style(cx)
+                }),
+                ..View::style(cx)
+            },
+            drag_view: View {
+                is_overlay: true,
+                ..View::style(cx)
+            },
+            animator: Animator::new(Anim::empty()),
+            _drag_move: None,
+        }
+    }
     
     pub fn def_drag_bg_shader() -> ShaderGen {
         Quad::def_quad_shader().compose(shader_ast!({

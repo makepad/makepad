@@ -8,8 +8,14 @@ pub struct JSEditor {
     pub code_editor: CodeEditor,
 }
 
-impl Style for JSEditor {
-    fn style(cx: &mut Cx) -> Self {
+#[derive(Clone, PartialEq)]
+pub enum JSEditorEvent {
+    None,
+    Change
+}
+
+impl JSEditor {
+    pub fn style(cx: &mut Cx) -> Self {
         let rust_editor = Self {
             code_editor: CodeEditor{
                 folding_depth: 3,
@@ -19,15 +25,7 @@ impl Style for JSEditor {
         //tab.animator.default = tab.anim_default(cx);
         rust_editor
     }
-}
-
-#[derive(Clone, PartialEq)]
-pub enum JSEditorEvent {
-    None,
-    Change
-}
-
-impl JSEditor {
+    
     pub fn handle_js_editor(&mut self, cx: &mut Cx, event: &mut Event,  text_buffer: &mut TextBuffer) -> CodeEditorEvent {
         let ce = self.code_editor.handle_code_editor(cx, event, text_buffer);
         match ce {
