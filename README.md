@@ -1,4 +1,4 @@
-# makepad 
+# Makepad - Live coding 2D/VR IDE for Rust 
 This repo will be restructured soon! To set the expectations: The current business model idea is to have all library crates be MIT open-source (editor, UI, vectors, renderstack, etc), but to have 'pro features' of the IDE like the VR compile connectivity, or visual design tools be paid as a subscription model. This means all software you develop with the makepad library stack will always have all dependencies be MIT, but we'll try to convince you that the pro features of the IDE are useful to pay for. This means that this repo will have an open part (what you find here today+lots more) and a closed part (currently starting the work).
 
 Makepad: Code your design
