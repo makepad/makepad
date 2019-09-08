@@ -2,6 +2,7 @@
 // press alt or escape for animated codefolding outline view!
 // Find the repo and more explanation at github.com/makepad/makepad.
 // All makepad does today is we use it ourselves to develop itself.
+// If you have webVR on a Quest or otherwise you can walk around the IDE in 3D
 
 // This application is nearly 100% Wasm running on webGL. NO HTML AT ALL.
 // The vision is to build a livecoding / design hybrid program,
