@@ -184,6 +184,7 @@ impl Cx{
                                                 opengl_window,
                                                 &opengl_cx,
                                             ){
+                                                self.passes[*pass_id].paint_dirty = true;
                                                 paint_dirty = true;
                                             }
                                         }}
