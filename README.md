@@ -4,7 +4,7 @@ This repo will be restructured soon! To set the expectations: The current busine
 Makepad: Code your design
 Live demo: https://makepad.github.io/makepad/
 
-The vision of makepad is to build a livecoding / design hybrid IDE. You can live modify values in code that update the running program (in 2D and VR), and it tries to recompile real code changes code as 'live' as it can. The language its written in, and targets is Rust and only Rust. The IDE will run both in 2D and in VR. Right now all makepad can do is 'dogfood' its own development in 2D, which means we use it ourselves every day to write its own code.
+The vision of makepad is to build a livecoding / design hybrid IDE. The entire library stack you use to write programs is opinionated and integrated with IDE tools as much as possible. You can live modify values in code that update the running program (in 2D and VR), and it tries to recompile real code changes code as 'live' as it can. The language its written in, and targets is Rust and only Rust. The IDE will run both in 2D and in VR. Right now all makepad can do is 'dogfood' its own development in 2D, which means we use it ourselves every day to write its own code.
 
 If you have missed 'learnable programming' please check this out: http://worrydream.com/LearnableProgramming/
 Makepad aims to fulfill (some) of these ideas using a completely from-scratch renderstack built on the GPU and Rust. The first goal of makepad will be to be an IDE for VR that runs natively on your desktop OS, whilst generating/debugging native VR code that runs on standalone VR devices like the Oculus Quest. It will possibly also generate wasm+webXR but that depends on the stability of these API's. Sofar testing showed that its not ready.
@@ -25,7 +25,7 @@ UI Library - Mostly there, needs textinput control/dropwdown/menu<br/>
 3D/VR rendering - Work just started<br/>
 Code editor - Mostly there<br/>
 Shader compiler - Mostly there<br/>
-Buildsystem - Work just starter<br/>
+Buildsystem - Work just started<br/>
 Platforms:<br/>
 OSX + Metal - WORKING<br/>
 Win32 + DirectX11 - WORKING<br/>
