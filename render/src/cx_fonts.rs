@@ -229,7 +229,7 @@ impl CxAfterDraw {
         }
     }
     
-    pub fn after_draw(&mut self, cx: &mut Cx) {
+    pub fn after_draw(&mut self, _cx: &mut Cx) {
     }
 }
 
@@ -247,7 +247,7 @@ pub struct CxFont {
 }
 
 impl CxFont {
-    pub fn load_from_ttf_bytes(&mut self, path: &str, bytes: &[u8]) -> ttf_parser::Result<()> {
+    pub fn load_from_ttf_bytes(&mut self, bytes: &[u8]) -> ttf_parser::Result<()> {
         let font = ttf_parser::parse_ttf(bytes) ?;
         self.font_loaded = Some(font);
         Ok(())

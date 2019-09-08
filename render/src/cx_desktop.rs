@@ -202,7 +202,9 @@ impl Cx {
                 let mut buffer = Vec::<u8>::new();
                 // read the whole file
                 if file.read_to_end(&mut buffer).is_ok() {
-                    self.fonts[i].load_from_ttf_bytes(&path, &buffer);
+                    if let Err(_) = self.fonts[i].load_from_ttf_bytes(&buffer){
+                        println!("Error loading font {} ", path);
+                    }
                 }
             }
             else{

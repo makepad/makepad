@@ -157,7 +157,7 @@ impl Cx {
                 || view_bounds.min_x == std::f32::INFINITY
                 || view_bounds.min_x == view_bounds.max_x
                 || view_bounds.min_y == view_bounds.max_y {
-                return
+                return false
             }
             /*
             unsafe {

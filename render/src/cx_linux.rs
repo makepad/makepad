@@ -212,7 +212,7 @@ impl Cx{
                     xlib_app.terminate_event_loop();
                 }
             }
-            if self.playing_anim_areas.len() == 0 && self.redraw_parent_areas.len() == 0 && self.redraw_child_areas.len() == 0 && self.frame_callbacks.len() == 0 {
+            if !paint_dirty && self.playing_anim_areas.len() == 0 && self.redraw_parent_areas.len() == 0 && self.redraw_child_areas.len() == 0 && self.frame_callbacks.len() == 0 {
                 true
             } else {
                 false
