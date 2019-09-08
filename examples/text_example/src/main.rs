@@ -58,7 +58,6 @@ impl App {
     }
 
     fn handle_app(&mut self, _cx: &mut Cx, event: &mut Event) {
-        
         match event {
             Event::Construct => {
             },

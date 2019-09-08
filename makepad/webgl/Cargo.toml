@@ -26,7 +26,7 @@ path="../../widget"
 path="../../render"
 
 [dependencies.editor]
-path="../../editor"
+path="../editor"
 
 [dependencies.terminal]
-path="../../terminal"
+path="../terminal"

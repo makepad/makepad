@@ -156,7 +156,7 @@ impl TrapezoidText {
                     compute_clamped_trapezoid_area(vec2(r_minx, p_min.y), vec2(r_maxx, p_max.y)),
                     compute_clamped_trapezoid_area(p_min, p_max),
                     compute_clamped_trapezoid_area(vec2(b_minx, p_min.y), vec2(b_maxx, p_max.y)),
-                    1.0
+                    0.0
                 );
             }
             
