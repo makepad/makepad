@@ -19,10 +19,10 @@ serde = { version = "1.0", features = ["derive"] }
 path="../widget"
 
 [dependencies.editor]
-path="../editor"
+path="./editor"
 
 [dependencies.render]
 path="../render"
 
 [dependencies.terminal]
-path="../terminal"
+path="./terminal"

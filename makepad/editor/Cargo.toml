@@ -1,5 +1,5 @@
 [package]
-name = "terminal"
+name = "editor"
 version = "0.1.0"
 authors = ["makepaddev"]
 edition = "2018"
@@ -9,10 +9,7 @@ serde_json = "*"
 serde = { version = "1.0", features = ["derive"] }
 
 [dependencies.render]
-path="../render"
+path="../../render"
 
 [dependencies.widget]
-path="../widget"
-
-[dependencies.process]
-path="../io/process"
+path="../../widget"
