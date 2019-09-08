@@ -451,22 +451,39 @@ impl D3d11Cx {
     pub fn set_constant_buffers(&self, cx_buf: &D3d11Buffer, dl_buf: &D3d11Buffer, dr_buf: &D3d11Buffer) {
         let cx_buf = cx_buf.buffer.as_ref().unwrap();
         let dl_buf = dl_buf.buffer.as_ref().unwrap();
-        let dr_buf = dr_buf.buffer.as_ref().unwrap();
-        let buffers = [
-            cx_buf.as_raw() as *const std::ffi::c_void,
-            dl_buf.as_raw() as *const std::ffi::c_void,
-            dr_buf.as_raw() as *const std::ffi::c_void
-        ];
-        unsafe {self.context.VSSetConstantBuffers(
-            0,
-            3,
-            buffers.as_ptr() as *const *mut _,
-        )};
-        unsafe {self.context.PSSetConstantBuffers(
-            0,
-            3,
-            buffers.as_ptr() as *const *mut _,
-        )};
+        if let Some(dr_buf) = dr_buf.buffer.as_ref(){
+            let buffers = [
+                cx_buf.as_raw() as *const std::ffi::c_void,
+                dl_buf.as_raw() as *const std::ffi::c_void,
+                dr_buf.as_raw() as *const std::ffi::c_void
+            ];
+            unsafe {self.context.VSSetConstantBuffers(
+                0,
+                3,
+                buffers.as_ptr() as *const *mut _,
+            )};
+            unsafe {self.context.PSSetConstantBuffers(
+                0,
+                3,
+                buffers.as_ptr() as *const *mut _,
+            )};
+        }
+        else{
+            let buffers = [
+                cx_buf.as_raw() as *const std::ffi::c_void,
+                dl_buf.as_raw() as *const std::ffi::c_void,
+            ];
+            unsafe {self.context.VSSetConstantBuffers(
+                0,
+                2,
+                buffers.as_ptr() as *const *mut _,
+            )};
+            unsafe {self.context.PSSetConstantBuffers(
+                0,
+                2,
+                buffers.as_ptr() as *const *mut _,
+            )};
+        }
     }
     
     pub fn draw_indexed_instanced(&self, num_vertices: usize, num_instances: usize) {
