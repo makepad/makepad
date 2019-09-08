@@ -1,67 +1,46 @@
 # makepad 
-THIS REPO WILL BE HISTORY RESET SOON (has zillions of mb's of wasm builds) and restructured to prepare for final productisation/release of makepad.
-Code your design
+This repo will be restructured soon! To set the expectations: The current business model idea is to have all library crates be MIT open-source (editor, UI, vectors, renderstack, etc), but to have 'pro features' of the IDE like the VR compile connectivity, or visual design tools be paid as a subscription model. This means all software you develop with the makepad library stack will always have all dependencies be MIT, but we'll try to convince you that the pro features of the IDE are useful to pay for. This means that this repo will have an open part (what you find here today+lots more) and a closed part (currently starting the work).
 
+Makepad: Code your design
 Live demo: https://makepad.github.io/makepad/
 
-This repo is for developing Makepad, a live Rust authoring tool for VR. The goal of the containing code is to be a Code Editor / UI kit for the Makepad application and will change without notice to suit that goal. The makepad application itself may be closed-sourced and sold, since we also have to feed our families.
+The vision of makepad is to build a livecoding / design hybrid IDE. You can live modify values in code that update the running program (in 2D and VR), and it tries to recompile real code changes code as 'live' as it can. The language its written in, and targets is Rust and only Rust. The IDE will run both in 2D and in VR. Right now all makepad can do is 'dogfood' its own development in 2D, which means we use it ourselves every day to write its own code.
 
-The vision is to build a livecoding / design hybrid program, where procedural design and code are fused in one environment. If you have missed 'learnable programming' please check this out: http://worrydream.com/LearnableProgramming/
+If you have missed 'learnable programming' please check this out: http://worrydream.com/LearnableProgramming/
 Makepad aims to fulfill (some) of these ideas using a completely from-scratch renderstack built on the GPU and Rust. The first goal of makepad will be to be an IDE for VR that runs natively on your desktop OS, whilst generating/debugging native VR code that runs on standalone VR devices like the Oculus Quest. It will possibly also generate wasm+webXR but that depends on the stability of these API's. Sofar testing showed that its not ready.
 
-However before we can make this awesome application, we need to build a UI stack. Making a live-code editor with all sorts of visual manipulation components just doesn't work in HTML. We tried. It also doesn't work in JS+WebGL. We tried. But now with Rust we are getting right performance figures (up to 200x HTML). And even with Wasm, its plenty fast.
-This new UI stack has a new way of building UI called 'dual immediate mode' and uses multi-platform shaders for styling that are compiled from Rust source via a proc macro.
-Dual immediate mode has the code simplicity of an immediate mode API with the scalability/componentisation of a retained mode API.
-
-The aim of this toolkit is to be our stepping stone into building a livecoding IDE and designtools that don't suck or fall to pieces along the way. We do not aim to maintain this library as everyones new web-UI lib, since we don't have the time and resources to do so. We are just a tiny company.
-
-However since openness is fine and this may be useful to someone, the foundational technologies (UI/rendering/vector engine) will be MIT opensource, but provided AS IS.
-
-We are not accepting pull requests or feature requests or documenting the code for now. However bugreports of obviously overlooked things are welcome.
-You may use, reuse, fork, do whatever you feel like. But our focus is code/designtools and these libraries are just a tool for us to get there. As the technology looks like its working this time we will contemplate our open-source strategy and update this readme along the way.
+We are not accepting pull requests or feature requests or documenting the code for now. However bugreports of obviously overlooked things are welcome. As the stack gets closer to beta we'd love to get more feedback. 
 
 IMPORTANT INFO RUNNING THE LOCAL VERSION:
-The native version is being dogfooded on itself, so when you clone it run this first:
-./run_first_init.sh
-then run
-./build_native.sh
+We are dogfooding the local version ourselves, but it needs a 'current project' which is hardcoded for now. Check out makepad repo 'again' under ./edit_repo in the root with:
 
-Platforms:
+./run_first_init.sh<br/>
+Start makepad:<br/>
+cargo run --release<br/>
 
-OSX + Metal - WORKING
+Features:
 
-Win32 + DirectX11 - WORKING
+Renderstack 2D - Currently working on new Font stack for VR/LowDPI fonts<br/>
+UI Library - Mostly there, needs textinput control/dropwdown/menu<br/>
+3D/VR rendering - Work just started<br/>
+Code editor - Mostly there<br/>
+Shader compiler - Mostly there<br/>
+Buildsystem - Work just starter<br/>
+Platforms:<br/>
+OSX + Metal - WORKING<br/>
+Win32 + DirectX11 - WORKING<br/>
+WASM + WebGL - WORKING<br/>
+Linux + OpenGL - WORKING<br/>
+Quest Android + OpenGL - TODO<br/>
 
-WASM + WebGL - WORKING
 
-Linux + OpenGL - WORKING
-
-The project is split out over a few nested crates
-
-src/main.rs - application 'main'
-
-webgl/ - webGL build crate info (actual source is src/main.rs)
-
-widget/src/*.rs - nested crate for the widgets
-
-render/src/*.rs - nested crate for the render engine
-
-The only 'web' JS code sits here, its a typed-array RPC driven simplification of the webGL API
-widgets/render/src/cx_webgl.js
-
-IMPORTANT, on windows may need to do manually with git:
-
-./run_first_init.sh - just downloads the repository again in ./edit_repo for the editor to have something to do
-
-./serve_webgl.sh (uses node to start a tiny server on 127.0.0.1:2001)
-
-./build_webgl.sh - compiles the webGL version
-
-./build_release.sh - compiles the native ap
+Wasm:
 
 Since webassembly can't really use a void main(){} because of the message loop,
 makepad uses a macro, in main.rs you see: main_app!(App, "My App!");
 This macro generates a main function for 'desktop' and a bunch of extern "C" exports for wasm that serve as the App event entrypoint. If you want to see how that works look in widget/render/src/cx.rs 
+
+Application Structure:
 
 Applications are nested structs. Widgets are simply structs you embed on the parent struct. Some widgets are 'generic' as in they have type args: Dock<Panel>.
 
