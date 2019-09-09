@@ -52,22 +52,13 @@ impl Text {
         sg.compose(shader_ast!({
             let geom: vec2<Geometry>;
             let texturez: texture2d<Texture>;
-            //let tex_size:vec2<Uniform>;
-            //let list_clip:vec4<Uniform>;
-            //let instance_clip:vec4<Instance>;
-            let font_rect: vec4<Instance>;
+            let min_pos: vec2<Instance>;
+            let max_pos: vec2<Instance>;
             let font_tc: vec4<Instance>;
             let color: vec4<Instance>;
-            let x: float<Instance>;
-            let y: float<Instance>;
             let z: float<Instance>;
-            
-            //let w:float<Instance>;
-            //let h:float<Instance>;
-            let font_size: float<Instance>;
             let char_offset: float<Instance>;
             let marker: float<Instance>;
-            //let font_base:float<Instance>;
             let tex_coord: vec2<Varying>;
             let clipped: vec2<Varying>;
             let rect: vec4<Varying>;
@@ -77,7 +68,7 @@ impl Text {
             
             fn pixel() -> vec4 {
                 let s = sample2d(texturez, tex_coord.xy);
-                return s// + vec4(0.,0.1,0.,0.);
+                return s;// + vec4(0.,0.1,0.,0.);
                 /*
                 if marker>0.5{
                     df_viewport(clipped);
@@ -98,7 +89,7 @@ impl Text {
             fn vertex() -> vec4 {
                 let shift: vec2 = -view_scroll * view_do_scroll;
                 
-                let min_pos = vec2(
+                /*et min_pos = vec2(
                     x + font_size * font_rect.x,
                     y - font_size * font_rect.y + font_size // * font_base
                 );
@@ -106,7 +97,7 @@ impl Text {
                 let max_pos = vec2(
                     x + font_size * font_rect.z,
                     y - font_size * font_rect.w + font_size // * font_base
-                );
+                );*/
                 
                 clipped = clamp(
                     mix(min_pos, max_pos, geom) + shift,
@@ -186,16 +177,39 @@ impl Text {
             let glyph_id = font.char_code_to_glyph_index_map[unicode];
             let glyph = &font.glyphs[glyph_id];
             
-            let w = glyph.horizontal_metrics.advance_width * font_scale_logical;
+            let advance = glyph.horizontal_metrics.advance_width * font_scale_logical;
             
-            // lets allocate
-            let marker = char_callback(*wc, char_offset, geom_x, w);
+            //let w_logical = (glyph.bounds.p_max.x - glyph.bounds.p_min.x) * font_scale_logical;
+            //let h_logical = (glyph.bounds.p_max.x - glyph.bounds.p_min.x) * font_scale_logical;
             
-            // map the fraction to 0..15
-            let subpixel_id = (geom_x.fract()*(ATLAS_SUBPIXEL_SLOTS as f32 - 1.0)) as usize;
+            //println!("{} {}", wc, subpixel_fract);
+
+            // now we snap geom_x to the 'floor'
+            //let geom_x_snapped = (geom_x * dpi_factor).floor() / dpi_factor;
+
+            // this one needs pixel snapping
+            let min_pos_x = geom_x + font_scale_logical * glyph.bounds.p_min.x;
+            let min_pos_y = geom_y - font_scale_logical * glyph.bounds.p_min.y;
             
-            // now we have to snap the geom_x to a pixel
+            // this is the x_subpixel shift
+            let subpixel_x_fract = min_pos_x - (min_pos_x * dpi_factor).floor() / dpi_factor;
+
+            // this is the x_subpixel shift
+            let subpixel_y_fract = min_pos_y - (min_pos_y * dpi_factor).floor() / dpi_factor;
             
+            // the subpixel id
+            let subpixel_id = (subpixel_x_fract*(ATLAS_SUBPIXEL_SLOTS as f32 - 1.0)) as usize;
+            
+            // but the error needs to be shifted into the atlas
+            let max_pos_x = geom_x + font_scale_logical * glyph.bounds.p_max.x + 1.0/dpi_factor;
+            let max_pos_y = geom_y - font_scale_logical * glyph.bounds.p_max.y;
+            
+            // our atlas index will contain the proper subpixel shifting.
+            // ok so this thing is written into the atlas somewhere.
+            // however they are shifted by p_min.x and p_min.y
+            // what needs to happen is these pixels need to be copied properly aligned
+            // so what needs to happen is that pmin/max thing needs to be pixelsnapped with floor/ceil
+            // and exactly textured from the atlas
             let tc = if let Some(tc) = &atlas_page.atlas_glyphs[glyph_id][subpixel_id] {
                 tc
             }
@@ -203,9 +217,10 @@ impl Text {
                 // see if we can fit it
                 let w = (glyph.bounds.p_max.x - glyph.bounds.p_min.x) * font_scale_pixels;
                 let h = (glyph.bounds.p_max.y - glyph.bounds.p_min.y) * font_scale_pixels;
-
                 // allocate slot
                 cx.fonts_atlas.atlas_todo.push(CxFontsAtlasTodo {
+                    subpixel_x_fract,
+                    subpixel_y_fract,
                     font_id,
                     atlas_page_id,
                     glyph_id,
@@ -218,12 +233,26 @@ impl Text {
                 
                 atlas_page.atlas_glyphs[glyph_id][subpixel_id].as_ref().unwrap()
             };
+            // lets allocate
+            let marker = char_callback(*wc, char_offset, geom_x, advance);
+            
+            // what happens if we snap these things.
+            
+             /*et min_pos = vec2(
+                    x + font_size * font_rect.x,
+                    y - font_size * font_rect.y + font_size // * font_base
+                );
+                
+                let max_pos = vec2(
+                    x + font_size * font_rect.z,
+                    y - font_size * font_rect.w + font_size // * font_base
+                );*/
             
             let data = [
-                glyph.bounds.p_min.x, // font_geom
-                glyph.bounds.p_min.y,
-                glyph.bounds.p_max.x,
-                glyph.bounds.p_max.y,
+                min_pos_x - subpixel_x_fract,
+                min_pos_y - subpixel_y_fract,
+                max_pos_x - subpixel_x_fract,
+                max_pos_y - subpixel_y_fract,
                 tc.tx1,
                 tc.ty1,
                 tc.tx2,
@@ -232,10 +261,7 @@ impl Text {
                 self.color.g,
                 self.color.b,
                 self.color.a,
-                geom_x, //x
-                geom_y, //y
                 self.z, //z
-                font_scale_logical, // font_size
                 char_offset as f32, // char_offset
                 marker, // marker
             ];
@@ -244,7 +270,7 @@ impl Text {
             for i in 0..15{
                 instance.push(0.)
             }*/
-            geom_x += w;
+            geom_x += advance;
             char_offset += 1;
             aligned.inst.instance_count += 1;
         }

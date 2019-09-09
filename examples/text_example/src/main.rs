@@ -36,6 +36,7 @@ struct App {
     pass: Pass,
     color_texture: Texture,
     text: Text,
+    blit: Blit,
     trapezoid_text: TrapezoidText,
     main_view: View<NoScroll>,
 }
@@ -50,14 +51,20 @@ impl App {
             color_texture: Texture::default(),
             text: Text {
                 font_size: 8.0,
-                font:cx.load_font_path("resources/Ubuntu-R.ttf"),
+                font: cx.load_font_path("resources/Ubuntu-R.ttf"),
                 ..Text::style(cx)
+            },
+            blit: Blit {
+                tx1: 0.05,
+                tx2: 0.05+0.01,
+                ty2: 0.01,
+                ..Blit::style(cx)
             },
             trapezoid_text: TrapezoidText::style(cx),
             main_view: View::style(cx),
         }
     }
-
+    
     fn handle_app(&mut self, _cx: &mut Cx, event: &mut Event) {
         match event {
             Event::Construct => {
@@ -72,9 +79,10 @@ impl App {
         self.pass.add_color_texture(cx, &mut self.color_texture, ClearColor::ClearWith(color256(0, 0, 0)));
         
         let _ = self.main_view.begin_view(cx, Layout::default());
-        cx.move_turtle(50.,50.);
+        cx.move_turtle(50., 50.);
         self.text.draw_text(cx, "hello world");
         
+        //self.blit.draw_blit_abs(cx, &Texture {texture_id: Some(cx.fonts_atlas.texture_id)}, Rect {x: 100., y: 100., w: 400., h: 400.});
         //self.trapezoid_text.draw_character(cx, 100.,100., 0.5, 'X', &self.text.font);
         //self.trapezoid_text.draw_character(cx, 100.,300., 0.2, 'O', &self.text.font);
         

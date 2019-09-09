@@ -118,6 +118,10 @@ impl TrapezoidText {
             }
             
             fn pixel() -> vec4 {
+                //if fmod(v_pixel.x,2.0) > 1.0 && fmod(v_pixel.y,2.0) > 1.0{
+                //    return color("white")
+                //}
+                //return color("black");
                 let p_min = v_pixel.xy - 0.5;
                 let p_max = v_pixel.xy + 0.5;
                 let b_minx = p_min.x + 1.0 / 3.0;
@@ -165,8 +169,9 @@ impl TrapezoidText {
             let glyph = &font.glyphs[todo.glyph_id];
 
             let glyphtc = atlas_page.atlas_glyphs[todo.glyph_id][todo.subpixel_id].unwrap();
-            let tx = glyphtc.tx1 * (cx.fonts_atlas.texture_size.x - 1.0);
-            let ty = glyphtc.ty1 * (cx.fonts_atlas.texture_size.y - 1.0);
+            let tx = glyphtc.tx1 * (cx.fonts_atlas.texture_size.x - 1.0) + todo.subpixel_x_fract;
+            let ty = glyphtc.ty1 * (cx.fonts_atlas.texture_size.y - 1.0) - todo.subpixel_y_fract;
+            
             let font_scale_logical = atlas_page.font_size * 96.0 / (72.0 * font.units_per_em);
             let font_scale_pixels = font_scale_logical * atlas_page.dpi_factor;
             
@@ -281,6 +286,8 @@ pub struct CxFontAtlasGlyph {
 
 #[derive(Default)]
 pub struct CxFontsAtlasTodo {
+    pub subpixel_x_fract:f32,
+    pub subpixel_y_fract:f32,
     pub font_id:usize,
     pub atlas_page_id:usize,
     pub glyph_id:usize,
@@ -323,7 +330,7 @@ impl CxFontsAtlas{
         CxFontAtlasGlyph {
             tx1: tx1,
             ty1: ty1,
-            tx2: tx1 + (w / (self.texture_size.x-1.0)),
+            tx2: tx1 + ((w+1.0) / (self.texture_size.x-1.0)),
             ty2: ty1 + (h / (self.texture_size.y-1.0))
         }
     }
