@@ -179,22 +179,12 @@ impl Text {
             
             let advance = glyph.horizontal_metrics.advance_width * font_scale_logical;
             
-            //let w_logical = (glyph.bounds.p_max.x - glyph.bounds.p_min.x) * font_scale_logical;
-            //let h_logical = (glyph.bounds.p_max.x - glyph.bounds.p_min.x) * font_scale_logical;
-            
-            //println!("{} {}", wc, subpixel_fract);
-
-            // now we snap geom_x to the 'floor'
-            //let geom_x_snapped = (geom_x * dpi_factor).floor() / dpi_factor;
-
             // this one needs pixel snapping
             let min_pos_x = geom_x + font_scale_logical * glyph.bounds.p_min.x;
             let min_pos_y = geom_y - font_scale_logical * glyph.bounds.p_min.y;
             
             // this is the x_subpixel shift
             let subpixel_x_fract = min_pos_x - (min_pos_x * dpi_factor).floor() / dpi_factor;
-
-            // this is the x_subpixel shift
             let subpixel_y_fract = min_pos_y - (min_pos_y * dpi_factor).floor() / dpi_factor;
             
             // the subpixel id
@@ -204,12 +194,6 @@ impl Text {
             let max_pos_x = geom_x + font_scale_logical * glyph.bounds.p_max.x + 1.0/dpi_factor;
             let max_pos_y = geom_y - font_scale_logical * glyph.bounds.p_max.y;
             
-            // our atlas index will contain the proper subpixel shifting.
-            // ok so this thing is written into the atlas somewhere.
-            // however they are shifted by p_min.x and p_min.y
-            // what needs to happen is these pixels need to be copied properly aligned
-            // so what needs to happen is that pmin/max thing needs to be pixelsnapped with floor/ceil
-            // and exactly textured from the atlas
             let tc = if let Some(tc) = &atlas_page.atlas_glyphs[glyph_id][subpixel_id] {
                 tc
             }
@@ -237,16 +221,6 @@ impl Text {
             let marker = char_callback(*wc, char_offset, geom_x, advance);
             
             // what happens if we snap these things.
-            
-             /*et min_pos = vec2(
-                    x + font_size * font_rect.x,
-                    y - font_size * font_rect.y + font_size // * font_base
-                );
-                
-                let max_pos = vec2(
-                    x + font_size * font_rect.z,
-                    y - font_size * font_rect.w + font_size // * font_base
-                );*/
             
             let data = [
                 min_pos_x - subpixel_x_fract,
