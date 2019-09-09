@@ -55,9 +55,6 @@ impl App {
                 ..Text::style(cx)
             },
             blit: Blit {
-                tx1: 0.05,
-                tx2: 0.05+0.01,
-                ty2: 0.01,
                 ..Blit::style(cx)
             },
             trapezoid_text: TrapezoidText::style(cx),
@@ -80,9 +77,12 @@ impl App {
         
         let _ = self.main_view.begin_view(cx, Layout::default());
         cx.move_turtle(50., 50.);
-        self.text.draw_text(cx, "hello world");
-        
-        //self.blit.draw_blit_abs(cx, &Texture {texture_id: Some(cx.fonts_atlas.texture_id)}, Rect {x: 100., y: 100., w: 400., h: 400.});
+        self.text.font_size = 2.0;
+        for i in 0..7{
+            self.text.font_size += 2.0;
+            self.text.draw_text(cx, "hello12345789");
+        }
+        self.blit.draw_blit_abs(cx, &Texture {texture_id: Some(cx.fonts_atlas.texture_id)}, Rect {x: 100., y: 100., w: 700., h: 400.});
         //self.trapezoid_text.draw_character(cx, 100.,100., 0.5, 'X', &self.text.font);
         //self.trapezoid_text.draw_character(cx, 100.,300., 0.2, 'O', &self.text.font);
         

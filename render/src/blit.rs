@@ -46,6 +46,7 @@ impl Blit {
             let view_do_scroll: float<Uniform>;
             let alpha: float<Uniform>;
             let texturez:texture2d<Texture>;
+            let v_pixel: vec2<Varying>;
             //let dpi_dilate: float<Uniform>;
             
             fn vertex() -> vec4 {
@@ -58,6 +59,7 @@ impl Blit {
                 ); 
                 let pos = (clipped - shift - vec2(x, y)) / vec2(w, h);
                 tc = mix(vec2(tx1,ty1), vec2(tx2,ty2), pos);
+                v_pixel = clipped;
                 // only pass the clipped position forward
                 return camera_projection * vec4(clipped.x, clipped.y, 0., 1.);
             }

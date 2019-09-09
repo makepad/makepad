@@ -117,11 +117,11 @@ impl TrapezoidText {
                 return a0 - a1;
             }
             
-            fn pixel() -> vec4 {
-                //if fmod(v_pixel.x,2.0) > 1.0 && fmod(v_pixel.y,2.0) > 1.0{
-                //    return color("white")
-                //}
-                //return color("black");
+            fn pixel() -> vec4 {/*
+                if fmod(v_pixel.x,2.0) > 1.0 && fmod(v_pixel.y,2.0) > 1.0{
+                    return color("white")
+                }
+                return color("black");*/
                 let p_min = v_pixel.xy - 0.5;
                 let p_max = v_pixel.xy + 0.5;
                 let b_minx = p_min.x + 1.0 / 3.0;
@@ -169,8 +169,8 @@ impl TrapezoidText {
             let glyph = &font.glyphs[todo.glyph_id];
 
             let glyphtc = atlas_page.atlas_glyphs[todo.glyph_id][todo.subpixel_id].unwrap();
-            let tx = glyphtc.tx1 * (cx.fonts_atlas.texture_size.x - 1.0) + todo.subpixel_x_fract;
-            let ty = glyphtc.ty1 * (cx.fonts_atlas.texture_size.y - 1.0) - todo.subpixel_y_fract;
+            let tx = glyphtc.tx1 * cx.fonts_atlas.texture_size.x + todo.subpixel_x_fract;
+            let ty = glyphtc.ty1 * cx.fonts_atlas.texture_size.y - todo.subpixel_y_fract;
             
             let font_scale_logical = atlas_page.font_size * 96.0 / (72.0 * font.units_per_em);
             let font_scale_pixels = font_scale_logical * atlas_page.dpi_factor;
@@ -308,7 +308,7 @@ impl CxFontsAtlas{
     pub fn alloc_atlas_glyph(&mut self, path:&str, w:f32, h:f32)->CxFontAtlasGlyph{
         if w + self.alloc_xpos >= self.texture_size.x {
             self.alloc_xpos = 0.0;
-            self.alloc_ypos += self.alloc_hmax.ceil() + 1.0;
+            self.alloc_ypos += self.alloc_hmax.ceil() + 2.0;
             self.alloc_hmax = 0.0;
         }
         if h + self.alloc_ypos >= self.texture_size.y {
@@ -318,10 +318,10 @@ impl CxFontsAtlas{
             self.alloc_hmax = h;
         }
         
-        let tx1 = self.alloc_xpos / (self.texture_size.x-1.0);
-        let ty1 = self.alloc_ypos / (self.texture_size.y-1.0);
+        let tx1 = self.alloc_xpos / self.texture_size.x;
+        let ty1 = self.alloc_ypos / self.texture_size.y;
         
-        self.alloc_xpos += w.ceil() + 1.0;
+        self.alloc_xpos += w.ceil() + 2.0;
 
         if h > self.alloc_hmax {
             self.alloc_hmax = h;
@@ -330,8 +330,8 @@ impl CxFontsAtlas{
         CxFontAtlasGlyph {
             tx1: tx1,
             ty1: ty1,
-            tx2: tx1 + ((w+1.0) / (self.texture_size.x-1.0)),
-            ty2: ty1 + (h / (self.texture_size.y-1.0))
+            tx2: tx1 + (w / self.texture_size.x),
+            ty2: ty1 + (h / self.texture_size.y)
         }
     }
 }

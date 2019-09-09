@@ -68,7 +68,7 @@ impl Text {
             
             fn pixel() -> vec4 {
                 let s = sample2d(texturez, tex_coord.xy);
-                return s;// + vec4(0.,0.1,0.,0.);
+                return s; // + vec4(0.,0.1,0.,0.);
                 /*
                 if marker>0.5{
                     df_viewport(clipped);
@@ -154,13 +154,13 @@ impl Text {
         let font_id = self.font.font_id.unwrap();
         
         let cxfont = &mut cx.fonts[font_id];
-
+        
         let dpi_factor = 2.0;
         
         let atlas_page_id = cxfont.get_atlas_page_id(dpi_factor, self.font_size);
         
         let font = &mut cxfont.font_loaded.as_ref().unwrap();
-
+        
         let font_scale_logical = self.font_size * 96.0 / (72.0 * font.units_per_em);
         let font_scale_pixels = font_scale_logical * dpi_factor;
         
@@ -179,28 +179,33 @@ impl Text {
             
             let advance = glyph.horizontal_metrics.advance_width * font_scale_logical;
             
+            // snap width/height to pixel granularity
+            let w = ((glyph.bounds.p_max.x - glyph.bounds.p_min.x) * font_scale_pixels).ceil();
+            let h = ((glyph.bounds.p_max.y - glyph.bounds.p_min.y) * font_scale_pixels).ceil();
+            
             // this one needs pixel snapping
-            let min_pos_x = geom_x + font_scale_logical * glyph.bounds.p_min.x;
-            let min_pos_y = geom_y - font_scale_logical * glyph.bounds.p_min.y;
+            let mut min_pos_x = geom_x + font_scale_logical * glyph.bounds.p_min.x;
+            let mut min_pos_y = geom_y - font_scale_logical * glyph.bounds.p_min.y;
             
             // this is the x_subpixel shift
             let subpixel_x_fract = min_pos_x - (min_pos_x * dpi_factor).floor() / dpi_factor;
             let subpixel_y_fract = min_pos_y - (min_pos_y * dpi_factor).floor() / dpi_factor;
             
+            min_pos_x -= subpixel_x_fract;
+            min_pos_y -= subpixel_y_fract;
+            
             // the subpixel id
-            let subpixel_id = (subpixel_x_fract*(ATLAS_SUBPIXEL_SLOTS as f32 - 1.0)) as usize;
+            let subpixel_id = (subpixel_x_fract * (ATLAS_SUBPIXEL_SLOTS as f32 - 1.0)) as usize;
             
             // but the error needs to be shifted into the atlas
-            let max_pos_x = geom_x + font_scale_logical * glyph.bounds.p_max.x + 1.0/dpi_factor;
-            let max_pos_y = geom_y - font_scale_logical * glyph.bounds.p_max.y;
+            let max_pos_x = min_pos_x + w / dpi_factor;
+            let max_pos_y = min_pos_y - h / dpi_factor;
             
             let tc = if let Some(tc) = &atlas_page.atlas_glyphs[glyph_id][subpixel_id] {
                 tc
             }
             else {
                 // see if we can fit it
-                let w = (glyph.bounds.p_max.x - glyph.bounds.p_min.x) * font_scale_pixels;
-                let h = (glyph.bounds.p_max.y - glyph.bounds.p_min.y) * font_scale_pixels;
                 // allocate slot
                 cx.fonts_atlas.atlas_todo.push(CxFontsAtlasTodo {
                     subpixel_x_fract,
@@ -217,16 +222,17 @@ impl Text {
                 
                 atlas_page.atlas_glyphs[glyph_id][subpixel_id].as_ref().unwrap()
             };
+            
             // lets allocate
             let marker = char_callback(*wc, char_offset, geom_x, advance);
             
             // what happens if we snap these things.
             
             let data = [
-                min_pos_x - subpixel_x_fract,
-                min_pos_y - subpixel_y_fract,
-                max_pos_x - subpixel_x_fract,
-                max_pos_y - subpixel_y_fract,
+                min_pos_x, // - subpixel_x_fract,
+                min_pos_y, // - subpixel_y_fract,
+                max_pos_x, // - subpixel_x_fract,
+                max_pos_y, // - subpixel_y_fract,
                 tc.tx1,
                 tc.ty1,
                 tc.tx2,
