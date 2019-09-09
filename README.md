@@ -9,7 +9,9 @@ Right now all makepad can do is 'dogfood' its own development in 2D, which means
 The vision of makepad is to build a livecoding / design hybrid IDE. The entire library stack you use to write programs is opinionated and integrated with IDE tools as much as possible. You can live modify values in code that update the running program (in 2D and VR), and it tries to recompile real code changes code as 'live' as it can. The language its written in, and targets is Rust and only Rust. The IDE will run both in 2D and in VR.  Makepad only depends on a few Rust only platform bindings and Serde, everything else compiles trivially on all supported platforms (gnu-windows as well). Makepad includes its own Rust based shader abstraction that can target GLSL, HLSL, MetalSL directly.
 
 If you have missed 'learnable programming' please check this out: http://worrydream.com/LearnableProgramming/
-Makepad aims to fulfill (some) of these ideas using a completely from-scratch renderstack built on the GPU and Rust. The first goal of makepad will be to be an IDE for VR that runs natively on your desktop OS, whilst generating/debugging native VR code that runs on standalone VR devices like the Oculus Quest. It will possibly also generate wasm+webXR but that depends on the stability of these API's. Sofar testing showed that its not ready.
+Makepad aims to fulfill (some) of these ideas. 
+
+The first goal of makepad will be to be an IDE for VR that runs natively on your desktop OS, whilst generating/debugging native VR code that runs on standalone VR devices like the Oculus Quest. It will possibly also generate wasm+webXR but that depends on the stability of these API's. Sofar testing showed that its not ready.
 
 We are not accepting pull requests or feature requests or documenting the code for now. However bugreports of obviously overlooked things are welcome. As the stack gets closer to beta we'd love to get more feedback. 
 
@@ -46,7 +48,7 @@ Application Structure:
 
 Applications are nested structs. Widgets are simply structs you embed on the parent struct. Some widgets are 'generic' as in they have type args: Dock<Panel>.
 
-Rust has this Trait called 'Default', its a way of using a splat for a struct initialisation. MyStruct{prop:10, ..Default::default()}. In makepad we have a Trait called Style. Style is exactly like default except it gets an extra argument called cx. This cx is needed because in Style things like shaders and fonts are gathered. We use implementations of Style per widget to set default values. 
+Rust has this Trait called 'Default', its a way of using a splat for a struct initialisation. MyStruct{prop:10, ..Default::default()}. In makepad widgets generally implement a function called style. Style is exactly like default except it gets an extra argument called cx. This cx is needed because in Style things like shaders and fonts are gathered. 
 
 What is Cx? Cx is a large struct (widget/render/src/cx.rs) that contains all of the render state. This means fonts, textures, shaders, rendertree. Its one of the 2 main values you will deal with. The other one is the 'self' of the struct your widget represents.
 
