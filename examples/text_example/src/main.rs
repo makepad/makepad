@@ -49,6 +49,7 @@ impl App {
             pass: Pass::default(),
             color_texture: Texture::default(),
             text: Text {
+                font_size: 8.0,
                 font:cx.load_font_path("resources/Ubuntu-R.ttf"),
                 ..Text::style(cx)
             },
@@ -72,7 +73,7 @@ impl App {
         
         let _ = self.main_view.begin_view(cx, Layout::default());
         cx.move_turtle(50.,50.);
-        self.text.draw_text(cx, "Hello world");
+        self.text.draw_text(cx, "hello world");
         
         //self.trapezoid_text.draw_character(cx, 100.,100., 0.5, 'X', &self.text.font);
         //self.trapezoid_text.draw_character(cx, 100.,300., 0.2, 'O', &self.text.font);

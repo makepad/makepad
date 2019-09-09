@@ -28,7 +28,7 @@ impl Trapezoidator {
         path.for_each(&mut |command| {
             match command {
                 LinePathCommand::MoveTo(p) => {
-                    assert!(initial_point == current_point);
+                    //assert!(initial_point == current_point);
                     initial_point = Some(p);
                     current_point = Some(p);
                 }

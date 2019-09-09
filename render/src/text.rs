@@ -77,7 +77,7 @@ impl Text {
             
             fn pixel() -> vec4 {
                 let s = sample2d(texturez, tex_coord.xy);
-                return s;
+                return s// + vec4(0.,0.1,0.,0.);
                 /*
                 if marker>0.5{
                     df_viewport(clipped);
@@ -169,6 +169,7 @@ impl Text {
         let atlas_page_id = cxfont.get_atlas_page_id(dpi_factor, self.font_size);
         
         let font = &mut cxfont.font_loaded.as_ref().unwrap();
+
         let font_scale_logical = self.font_size * 96.0 / (72.0 * font.units_per_em);
         let font_scale_pixels = font_scale_logical * dpi_factor;
         
@@ -189,7 +190,11 @@ impl Text {
             
             // lets allocate
             let marker = char_callback(*wc, char_offset, geom_x, w);
-            let subpixel_id = 0;
+            
+            // map the fraction to 0..15
+            let subpixel_id = (geom_x.fract()*(ATLAS_SUBPIXEL_SLOTS as f32 - 1.0)) as usize;
+            
+            // now we have to snap the geom_x to a pixel
             
             let tc = if let Some(tc) = &atlas_page.atlas_glyphs[glyph_id][subpixel_id] {
                 tc
@@ -219,7 +224,7 @@ impl Text {
                 glyph.bounds.p_min.y,
                 glyph.bounds.p_max.x,
                 glyph.bounds.p_max.y,
-                tc.tx1, // font_tc
+                tc.tx1,
                 tc.ty1,
                 tc.tx2,
                 tc.ty2,

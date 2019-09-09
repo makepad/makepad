@@ -143,7 +143,7 @@ impl TrapezoidText {
                 v_p2 = vec2(a_xs.x, a_ys.z);
                 v_p3 = vec2(a_xs.y, a_ys.w);
                 v_pixel = pos;
-                //return vec4(pos * 2.0 / vec2(1600.,1200.) - 1.0, 0.0, 1.0);
+                //return vec4(vec2(pos.x, 1.0-pos.y) * 2.0 / vec2(4096.,4096.) - 1.0, 0.0, 1.0);
                 return camera_projection * vec4(pos, 0.0, 1.0);
             }
         }))
@@ -165,9 +165,8 @@ impl TrapezoidText {
             let glyph = &font.glyphs[todo.glyph_id];
 
             let glyphtc = atlas_page.atlas_glyphs[todo.glyph_id][todo.subpixel_id].unwrap();
-            let tx = glyphtc.tx1 * cx.fonts_atlas.texture_size.x;
-            let ty = glyphtc.ty1 * cx.fonts_atlas.texture_size.y;
-            
+            let tx = glyphtc.tx1 * (cx.fonts_atlas.texture_size.x - 1.0);
+            let ty = glyphtc.ty1 * (cx.fonts_atlas.texture_size.y - 1.0);
             let font_scale_logical = atlas_page.font_size * 96.0 / (72.0 * font.units_per_em);
             let font_scale_pixels = font_scale_logical * atlas_page.dpi_factor;
             
@@ -181,7 +180,7 @@ impl TrapezoidText {
                         move | command | {
                             command.transform(
                                 &AffineTransformation::identity()
-                                    .translate(Vector::new(glyph.horizontal_metrics.left_side_bearing - glyph.bounds.p_min.x, 0.0))
+                                    .translate(Vector::new(-glyph.bounds.p_min.x, -glyph.bounds.p_min.y))
                                     .uniform_scale(font_scale_pixels)
                                     .translate(Vector::new(tx, ty))
                             )
@@ -249,7 +248,7 @@ impl CxAfterDraw {
             for todo in atlas_todo{
                 self.trapezoid_text.draw_todo(cx, todo);
                 // ok we have to draw a font_id
-                break;
+                //break;
             }
             self.atlas_view.end_view(cx);
             self.atlas_pass.end_pass(cx);
@@ -300,19 +299,22 @@ pub struct CxFontsAtlas {
 
 impl CxFontsAtlas{
     pub fn alloc_atlas_glyph(&mut self, path:&str, w:f32, h:f32)->CxFontAtlasGlyph{
-        
         if w + self.alloc_xpos >= self.texture_size.x {
             self.alloc_xpos = 0.0;
-            self.alloc_ypos += self.alloc_hmax;
+            self.alloc_ypos += self.alloc_hmax.ceil() + 1.0;
             self.alloc_hmax = 0.0;
         }
         if h + self.alloc_ypos >= self.texture_size.y {
             println!("FONT ATLAS FULL {}, TODO FIX THIS", path);
         }
-        let tx1 = self.alloc_xpos / self.texture_size.x;
-        let ty1 = self.alloc_ypos / self.texture_size.y;
+        if h > self.alloc_hmax{
+            self.alloc_hmax = h;
+        }
         
-        self.alloc_xpos += w;
+        let tx1 = self.alloc_xpos / (self.texture_size.x-1.0);
+        let ty1 = self.alloc_ypos / (self.texture_size.y-1.0);
+        
+        self.alloc_xpos += w.ceil() + 1.0;
 
         if h > self.alloc_hmax {
             self.alloc_hmax = h;
@@ -321,8 +323,8 @@ impl CxFontsAtlas{
         CxFontAtlasGlyph {
             tx1: tx1,
             ty1: ty1,
-            tx2: tx1 + w / self.texture_size.x,
-            ty2: ty1 + h / self.texture_size.y
+            tx2: tx1 + (w / (self.texture_size.x-1.0)),
+            ty2: ty1 + (h / (self.texture_size.y-1.0))
         }
     }
 }
