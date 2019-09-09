@@ -9,12 +9,6 @@ pub struct Font {
     pub font_id: Option<usize>,
 }
 
-impl Font {
-    pub fn get_atlas_texture_id(&self, cx: &Cx) -> usize {
-        cx.fonts[self.font_id.unwrap()].atlas_texture_id
-    }
-}
-
 impl Cx {
     
     pub fn load_font_style(&mut self, style: &str) -> Font {
@@ -22,7 +16,6 @@ impl Cx {
     }
     
     pub fn load_font_path(&mut self, path: &str) -> Font {
-        let texture_size = Vec2 {x: 4096.0, y: 4096.0};
         let found = self.fonts.iter().position( | v | v.path == path);
         if let Some(font_id) = found {
             return Font {
@@ -30,19 +23,9 @@ impl Cx {
             }
         }
         
-        let atlas_texture_id = self.alloc_texture_id();
-        self.textures[atlas_texture_id].desc = TextureDesc {
-            format: TextureFormat::RenderBGRA,
-            width: Some(texture_size.x as usize),
-            height: Some(texture_size.y as usize),
-            multisample: None
-        };
-        
         let font_id = self.fonts.len();
         self.fonts.push(CxFont {
             path: path.to_string(),
-            atlas_texture_id: atlas_texture_id,
-            texture_size: texture_size,
             ..Default::default()
         });
         
@@ -50,17 +33,6 @@ impl Cx {
             font_id: Some(font_id)
         }
     }
-    
-}
-
-pub struct CxAppFontPass {
-    pub pass: Pass,
-    pub view: View<NoScroll>
-}
-
-pub struct CxAfterDraw {
-    pub trapezoid_text: TrapezoidText,
-    pub font_passes: Vec<CxAppFontPass>
 }
 
 pub struct TrapezoidText {
@@ -72,7 +44,7 @@ impl TrapezoidText {
     pub fn style(cx: &mut Cx) -> Self {
         Self {
             shader: cx.add_shader(Self::def_trapezoid_shader(), "TrapezoidShader"),
-            trapezoidator: Trapezoidator::default()
+            trapezoidator: Trapezoidator::default(),
         }
     }
     
@@ -177,73 +149,182 @@ impl TrapezoidText {
         }))
     }
     
-    pub fn draw_character(&mut self, cx: &mut Cx, x:f32, y:f32, scale: f32, unicode: char, font: &Font) {
+    pub fn draw_todo(&mut self, cx: &mut Cx, todo:CxFontsAtlasTodo) {
+        // lets fetch font
+        
+        
         // now lets make a draw_character function
         let inst = cx.new_instance(&self.shader, 1);
         if inst.need_uniforms_now(cx) {
         }
         
         let trapezoids = {
-            let font = cx.fonts[font.font_id.unwrap()].font_loaded.as_ref().unwrap();
+            let cxfont = &cx.fonts[todo.font_id];
+            let font = cxfont.font_loaded.as_ref().unwrap();
+            let atlas_page = &cxfont.atlas_pages[todo.atlas_page_id];
+            let glyph = &font.glyphs[todo.glyph_id];
+
+            let glyphtc = atlas_page.atlas_glyphs[todo.glyph_id][todo.subpixel_id].unwrap();
+            let tx = glyphtc.tx1 * cx.fonts_atlas.texture_size.x;
+            let ty = glyphtc.ty1 * cx.fonts_atlas.texture_size.y;
+            
+            let font_scale_logical = atlas_page.font_size * 96.0 / (72.0 * font.units_per_em);
+            let font_scale_pixels = font_scale_logical * atlas_page.dpi_factor;
             
             let mut trapezoids = Vec::new();
-            
-            let slot = font.char_code_to_glyph_index_map[unicode as usize];
-            let glyph = &font.glyphs[slot];
-            
             trapezoids.extend_from_internal_iter(
                 self.trapezoidator.trapezoidate(
                     glyph
                         .outline
                         .commands()
                         .map({
-                            move |command| {
-                                command.transform(
-                                    &AffineTransformation::identity()
-                                        .translate(Vector::new(glyph.horizontal_metrics.left_side_bearing - glyph.bounds.p_min.x, 0.0))
-                                        .uniform_scale(scale)
-                                        .translate(Vector::new(x,y))
-                                )
-                            }
-                        })
+                        move | command | {
+                            command.transform(
+                                &AffineTransformation::identity()
+                                    .translate(Vector::new(glyph.horizontal_metrics.left_side_bearing - glyph.bounds.p_min.x, 0.0))
+                                    .uniform_scale(font_scale_pixels)
+                                    .translate(Vector::new(tx, ty))
+                            )
+                        }
+                    })
                         .linearize(1.0),
                 ),
             );
             trapezoids
         };
-        for trapezoid in trapezoids{
+        for trapezoid in trapezoids {
             let data = [
-                trapezoid.xs[0], trapezoid.xs[1],
-                trapezoid.ys[0], trapezoid.ys[1], trapezoid.ys[2], trapezoid.ys[3],
+                trapezoid.xs[0],
+                trapezoid.xs[1],
+                trapezoid.ys[0],
+                trapezoid.ys[1],
+                trapezoid.ys[2],
+                trapezoid.ys[3],
             ];
             inst.push_slice(cx, &data);
         }
     }
 }
 
+pub struct CxAfterDraw {
+    pub trapezoid_text: TrapezoidText,
+    pub atlas_pass: Pass,
+    pub atlas_view: View<NoScroll>,
+    pub atlas_texture: Texture
+}
+
 impl CxAfterDraw {
     pub fn style(cx: &mut Cx) -> Self {
+        cx.fonts_atlas.texture_size = Vec2{x:4096.0,y:4096.0};
+        let mut atlas_texture = Texture::default();
+        atlas_texture.set_desc(cx, Some(TextureDesc {
+            format: TextureFormat::RenderBGRA,
+            width: None,
+            height: None,
+            multisample: None
+        }));
+
+        cx.fonts_atlas.texture_id = atlas_texture.texture_id.unwrap();
+        
         Self {
             trapezoid_text: TrapezoidText::style(cx),
-            font_passes: Vec::new()
+            atlas_pass:Pass::default(),
+            atlas_view:View{
+                always_redraw:true,
+                ..View::style(cx)
+            },
+            atlas_texture: atlas_texture
         }
     }
     
-    pub fn after_draw(&mut self, _cx: &mut Cx) {
+    pub fn after_draw(&mut self, cx: &mut Cx) {
+        // we need to start a pass that just uses the texture
+        if cx.fonts_atlas.atlas_todo.len()>0{
+            self.atlas_pass.begin_pass(cx);
+            self.atlas_pass.set_size(cx, cx.fonts_atlas.texture_size);
+            self.atlas_pass.add_color_texture(cx, &mut self.atlas_texture, ClearColor::InitWith(Color::zero()));
+            let _ = self.atlas_view.begin_view(cx, Layout::default());
+            let mut atlas_todo = Vec::new();
+            std::mem::swap(&mut cx.fonts_atlas.atlas_todo, &mut atlas_todo);
+            for todo in atlas_todo{
+                self.trapezoid_text.draw_todo(cx, todo);
+                // ok we have to draw a font_id
+                break;
+            }
+            self.atlas_view.end_view(cx);
+            self.atlas_pass.end_pass(cx);
+        }
     }
 }
 
 #[derive(Default)]
 pub struct CxFont {
     pub path: String,
-    pub atlas_texture_id: usize,
     pub font_loaded: Option<font::Font>,
+    pub atlas_pages: Vec<CxFontAtlasPage>,
+}
+
+pub const ATLAS_SUBPIXEL_SLOTS:usize = 16;
+
+pub struct CxFontAtlasPage {
+    pub dpi_factor: f32,
+    pub font_size: f32,
+    pub atlas_glyphs: Vec<[Option<CxFontAtlasGlyph>;ATLAS_SUBPIXEL_SLOTS]>
+}
+
+#[derive(Clone, Copy)]
+pub struct CxFontAtlasGlyph {
+    pub tx1: f32,
+    pub ty1: f32,
+    pub tx2: f32,
+    pub ty2: f32,
+}
+
+#[derive(Default)]
+pub struct CxFontsAtlasTodo {
+    pub font_id:usize,
+    pub atlas_page_id:usize,
+    pub glyph_id:usize,
+    pub subpixel_id:usize
+}
+
+#[derive(Default)]
+pub struct CxFontsAtlas {
+    pub texture_id: usize,
     pub texture_size: Vec2,
     pub alloc_xpos: f32,
     pub alloc_ypos: f32,
     pub alloc_hmax: f32,
-    pub sized_atlas: Vec<SizedAtlasGlyph>,
-    pub glyphs_to_atlas: Vec<(usize, usize)>,
+    pub atlas_todo: Vec<CxFontsAtlasTodo>,
+}
+
+impl CxFontsAtlas{
+    pub fn alloc_atlas_glyph(&mut self, path:&str, w:f32, h:f32)->CxFontAtlasGlyph{
+        
+        if w + self.alloc_xpos >= self.texture_size.x {
+            self.alloc_xpos = 0.0;
+            self.alloc_ypos += self.alloc_hmax;
+            self.alloc_hmax = 0.0;
+        }
+        if h + self.alloc_ypos >= self.texture_size.y {
+            println!("FONT ATLAS FULL {}, TODO FIX THIS", path);
+        }
+        let tx1 = self.alloc_xpos / self.texture_size.x;
+        let ty1 = self.alloc_ypos / self.texture_size.y;
+        
+        self.alloc_xpos += w;
+
+        if h > self.alloc_hmax {
+            self.alloc_hmax = h;
+        }
+
+        CxFontAtlasGlyph {
+            tx1: tx1,
+            ty1: ty1,
+            tx2: tx1 + w / self.texture_size.x,
+            ty2: ty1 + h / self.texture_size.y
+        }
+    }
 }
 
 impl CxFont {
@@ -253,41 +334,27 @@ impl CxFont {
         Ok(())
     }
     
-    pub fn fetch_atlas_index(&mut self, dpi_factor: f32, font_size: f32) -> usize {
-        for (index, sg) in self.sized_atlas.iter().enumerate() {
-            if sg.dpi_factor == dpi_factor && sg.font_size == font_size {
+    pub fn get_atlas_page_id(&mut self, dpi_factor: f32, font_size: f32) -> usize {
+        for (index, sg) in self.atlas_pages.iter().enumerate() {
+            if sg.dpi_factor == dpi_factor
+                && sg.font_size == font_size {
                 return index
             }
         }
         if let Some(font) = &self.font_loaded {
-            self.sized_atlas.push(SizedAtlasGlyph {
+            self.atlas_pages.push(CxFontAtlasPage {
                 dpi_factor: dpi_factor,
                 font_size: font_size,
                 atlas_glyphs: {
                     let mut v = Vec::new();
-                    v.resize(font.glyphs.len(), None);
+                    v.resize(font.glyphs.len(), [None; ATLAS_SUBPIXEL_SLOTS]);
                     v
                 }
             });
-            self.sized_atlas.len() - 1
-            
+            self.atlas_pages.len() - 1
         }
         else {
             panic!("Font not loaded {}", self.path);
         }
     }
-}
-
-pub struct SizedAtlasGlyph {
-    pub dpi_factor: f32,
-    pub font_size: f32,
-    pub atlas_glyphs: Vec<Option<AtlasGlyph>>
-}
-
-#[derive(Clone)]
-pub struct AtlasGlyph {
-    pub tx1: f32,
-    pub ty1: f32,
-    pub tx2: f32,
-    pub ty2: f32,
 }

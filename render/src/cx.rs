@@ -90,6 +90,7 @@ pub struct Cx {
     pub views_free: Vec<usize>,
     
     pub fonts: Vec<CxFont>,
+    pub fonts_atlas: CxFontsAtlas,
     pub textures: Vec<CxTexture>,
     pub textures_free: Vec<usize>,
     pub shaders: Vec<CxShader>,
@@ -184,6 +185,7 @@ impl Default for Cx {
             views_free: Vec::new(),
             
             fonts: Vec::new(),
+            fonts_atlas: CxFontsAtlas::default(),
             textures: textures,
             textures_free: Vec::new(),
             shaders: Vec::new(),
@@ -330,7 +332,10 @@ impl Cx {
                             }
                         }
                     },
-                    _ => ()
+                    CxPassDepOf::None=>{ // we need to be first
+                        passes_todo.insert(0, pass_id);
+                        inserted = true;
+                    },
                 }
                 if !inserted {
                     passes_todo.push(pass_id);
@@ -630,8 +635,8 @@ impl Cx {
     pub fn call_all_keys_up<F>(&mut self, mut event_handler: F)
     where F: FnMut(&mut Cx, &mut Event)
     {
-        let keys_down = self.keys_down.clone();
-        self.keys_down.truncate(0);
+        let mut keys_down = Vec::new();
+        std::mem::swap(&mut keys_down, &mut self.keys_down);
         for key_event in keys_down {
             self.call_event_handler(&mut event_handler, &mut Event::KeyUp(key_event))
         }
@@ -660,8 +665,8 @@ impl Cx {
     {
         self.is_in_redraw_cycle = true;
         self.redraw_id += 1;
-        self._redraw_child_areas = self.redraw_child_areas.clone();
-        self._redraw_parent_areas = self.redraw_parent_areas.clone();
+        std::mem::swap(&mut self._redraw_child_areas, &mut self.redraw_child_areas);
+        std::mem::swap(&mut self._redraw_parent_areas, &mut self.redraw_parent_areas);
         self.align_list.truncate(0);
         self.redraw_child_areas.truncate(0);
         self.redraw_parent_areas.truncate(0);
@@ -682,7 +687,7 @@ impl Cx {
     pub fn call_frame_event<F>(&mut self, mut event_handler: F, time: f64)
     where F: FnMut(&mut Cx, &mut Event)
     {
-        self._frame_callbacks = self.frame_callbacks.clone();
+        std::mem::swap(&mut self._frame_callbacks, &mut self.frame_callbacks);
         self.frame_callbacks.truncate(0);
         self.call_event_handler(&mut event_handler, &mut Event::Frame(FrameEvent {time: time, frame: self.repaint_id}));
     }
@@ -710,8 +715,9 @@ impl Cx {
             return
         }
         
-        let signals = self.signals.clone();
-        self.signals.truncate(0);
+        let mut signals = Vec::new();
+        std::mem::swap(&mut self.signals, &mut signals);
+        
         for (signal, value) in signals {
             self.call_event_handler(&mut event_handler, &mut Event::Signal(SignalEvent {
                 signal_id: signal.signal_id,

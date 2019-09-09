@@ -102,22 +102,32 @@ impl Cx {
         }
     }
     
-    pub fn setup_render_pass_descriptor(&mut self, render_pass_descriptor: &RenderPassDescriptorRef, pass_id: usize, dpi_factor: f32, first_texture: Option<&metal::TextureRef>, metal_cx: &MetalCx) {
+    pub fn setup_render_pass_descriptor(&mut self, render_pass_descriptor: &RenderPassDescriptorRef, pass_id: usize, inherit_dpi_factor: f32, first_texture: Option<&metal::TextureRef>, metal_cx: &MetalCx) {
         let pass_size = self.passes[pass_id].pass_size;
         
         self.passes[pass_id].set_ortho_matrix(Vec2::zero(), pass_size);
         self.passes[pass_id].uniform_camera_view(&Mat4::identity());
+        self.passes[pass_id].paint_dirty = false;
+        let dpi_factor = if let Some(override_dpi_factor) = self.passes[pass_id].override_dpi_factor{
+            override_dpi_factor
+        }
+        else{
+            inherit_dpi_factor
+        };
+        self.passes[pass_id].set_dpi_factor(dpi_factor);
         
         for (index, color_texture) in self.passes[pass_id].color_textures.iter().enumerate() {
             
             let color_attachment = render_pass_descriptor.color_attachments().object_at(0).unwrap();
             
+            let is_initial;
             if index == 0 && first_texture.is_some() {
                 color_attachment.set_texture(Some(&first_texture.unwrap()));
+                is_initial = true;
             }
             else {
                 let cxtexture = &mut self.textures[color_texture.texture_id];
-                metal_cx.update_platform_render_target(cxtexture, dpi_factor, pass_size, false);
+                is_initial = metal_cx.update_platform_render_target(cxtexture, dpi_factor, pass_size, false);
                 
                 if let Some(mtl_texture) = &cxtexture.platform.mtl_texture {
                     color_attachment.set_texture(Some(&mtl_texture));
@@ -129,18 +139,27 @@ impl Cx {
             }
             
             color_attachment.set_store_action(MTLStoreAction::Store);
-            if let Some(color) = color_texture.clear_color {
-                color_attachment.set_load_action(MTLLoadAction::Clear);
-                color_attachment.set_clear_color(MTLClearColor::new(color.r as f64, color.g as f64, color.b as f64, color.a as f64));
-            }
-            else {
-                color_attachment.set_load_action(MTLLoadAction::Load);
+
+            match color_texture.clear_color{
+                ClearColor::InitWith(color)=>{
+                    if is_initial{
+                        color_attachment.set_load_action(MTLLoadAction::Clear);
+                        color_attachment.set_clear_color(MTLClearColor::new(color.r as f64, color.g as f64, color.b as f64, color.a as f64));
+                    }
+                    else{
+                        color_attachment.set_load_action(MTLLoadAction::Load);
+                    }
+                },
+                ClearColor::ClearWith(color)=>{
+                    color_attachment.set_load_action(MTLLoadAction::Clear);
+                    color_attachment.set_clear_color(MTLClearColor::new(color.r as f64, color.g as f64, color.b as f64, color.a as f64));
+                }
             }
         }
         // attach depth texture
         if let Some(depth_texture_id) = self.passes[pass_id].depth_texture {
             let cxtexture = &mut self.textures[depth_texture_id];
-            metal_cx.update_platform_render_target(cxtexture, dpi_factor, pass_size, true);
+            let is_initial = metal_cx.update_platform_render_target(cxtexture, dpi_factor, pass_size, true);
             let depth_attachment = render_pass_descriptor.depth_attachment().unwrap();
             if let Some(mtl_texture) = &cxtexture.platform.mtl_texture {
                 depth_attachment.set_texture(Some(&mtl_texture));
@@ -149,12 +168,21 @@ impl Cx {
                 println!("draw_pass_to_texture invalid render target");
             }
             depth_attachment.set_store_action(MTLStoreAction::Store);
-            if let Some(depth_clear) = self.passes[pass_id].depth_clear {
-                depth_attachment.set_load_action(MTLLoadAction::Clear);
-                depth_attachment.set_clear_depth(depth_clear);
-            }
-            else {
-                depth_attachment.set_load_action(MTLLoadAction::Load);
+            
+            match self.passes[pass_id].clear_depth{
+                ClearDepth::InitWith(depth)=>{
+                    if is_initial{
+                        depth_attachment.set_load_action(MTLLoadAction::Clear);
+                        depth_attachment.set_clear_depth(depth);
+                    }
+                    else {
+                        depth_attachment.set_load_action(MTLLoadAction::Load);
+                    }
+                },
+                ClearDepth::ClearWith(depth)=>{
+                    depth_attachment.set_load_action(MTLLoadAction::Clear);
+                    depth_attachment.set_clear_depth(depth);
+                }
             }
             // create depth state
             if self.passes[pass_id].platform.mtl_depth_state.is_none() {
@@ -254,13 +282,13 @@ impl MetalCx {
         }
     }
     
-    pub fn update_platform_render_target(&self, cxtexture: &mut CxTexture, dpi_factor: f32, size: Vec2, is_depth: bool) {
+    pub fn update_platform_render_target(&self, cxtexture: &mut CxTexture, dpi_factor: f32, size: Vec2, is_depth: bool)->bool {
         
         let width = if let Some(width) = cxtexture.desc.width {width as u64} else {(size.x * dpi_factor) as u64};
         let height = if let Some(height) = cxtexture.desc.height {height as u64} else {(size.y * dpi_factor) as u64};
         
         if cxtexture.platform.width == width && cxtexture.platform.height == height && cxtexture.platform.alloc_desc == cxtexture.desc {
-            return
+            return false
         }
         cxtexture.platform.mtl_texture = None;
         
@@ -275,7 +303,7 @@ impl MetalCx {
                 },
                 _ => {
                     println!("update_platform_render_target unsupported texture format");
-                    return;
+                    return false;
                 }
             }
         }
@@ -289,7 +317,7 @@ impl MetalCx {
                 },
                 _ => {
                     println!("update_platform_render_targete unsupported texture format");
-                    return;
+                    return false;
                 }
             }
         }
@@ -301,6 +329,7 @@ impl MetalCx {
         cxtexture.platform.height = height;
         cxtexture.platform.alloc_desc = cxtexture.desc.clone();
         cxtexture.platform.mtl_texture = Some(tex);
+        return true
     }
     
     pub fn update_platform_texture_image2d(&self, cxtexture: &mut CxTexture) {

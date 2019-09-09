@@ -68,13 +68,13 @@ impl App {
     fn draw_app(&mut self, cx: &mut Cx) {
         self.window.begin_window(cx);
         self.pass.begin_pass(cx);
-        self.pass.add_color_texture(cx, &mut self.color_texture, Some(color256(0, 0, 0)));
+        self.pass.add_color_texture(cx, &mut self.color_texture, ClearColor::ClearWith(color256(0, 0, 0)));
         
         let _ = self.main_view.begin_view(cx, Layout::default());
         cx.move_turtle(50.,50.);
         self.text.draw_text(cx, "Hello world");
         
-        self.trapezoid_text.draw_character(cx, 100.,100., 0.5, 'X', &self.text.font);
+        //self.trapezoid_text.draw_character(cx, 100.,100., 0.5, 'X', &self.text.font);
         //self.trapezoid_text.draw_character(cx, 100.,300., 0.2, 'O', &self.text.font);
         
         self.main_view.end_view(cx);

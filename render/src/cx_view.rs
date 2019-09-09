@@ -33,6 +33,7 @@ where TScrollBar: ScrollBarLike<TScrollBar> + Clone
     pub view_id: Option<usize>,
     pub is_clipped: bool,
     pub is_overlay: bool, // this view is an overlay, rendered last
+    pub always_redraw: bool,
     pub scroll_h: Option<TScrollBar>,
     pub scroll_v: Option<TScrollBar>,
 }
@@ -70,6 +71,7 @@ where TScrollBar: ScrollBarLike<TScrollBar> + Clone
         Self {
             is_clipped: true,
             is_overlay: false,
+            always_redraw: false,
             view_id: None,
             scroll_h: None,
             scroll_v: None
@@ -169,7 +171,7 @@ where TScrollBar: ScrollBarLike<TScrollBar> + Clone
         // set nesting draw list id for incremental repaint scanning
         cx.views[view_id].nesting_view_id = nesting_view_id;
         
-        if cx.views[view_id].draw_calls_len != 0 && !cx.view_will_redraw(view_id) {
+        if !self.always_redraw && cx.views[view_id].draw_calls_len != 0 && !cx.view_will_redraw(view_id) {
             
             // walk the turtle because we aren't drawing
             let w = Bounds::Fix(cx.views[view_id].rect.w);

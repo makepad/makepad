@@ -19,21 +19,26 @@ impl Pass {
         }
         let pass_id = self.pass_id.unwrap();
         
-        let window_id = *cx.window_stack.last().expect("No window found when begin_pass");
-        
-        let cxwindow = &mut cx.windows[window_id];
-        if cxwindow.main_pass_id.is_none() { // we are the main pass of a window
-            let cxpass = &mut cx.passes[pass_id];
-            cxwindow.main_pass_id = Some(pass_id);
-            cxpass.dep_of = CxPassDepOf::Window(window_id);
-            cxpass.pass_size = cxwindow.get_inner_size();
-        }
-        else if let Some(dep_of_pass_id) = cx.pass_stack.last() {
-            cx.passes[pass_id].dep_of = CxPassDepOf::Pass(*dep_of_pass_id);
-            cx.passes[pass_id].pass_size = cx.passes[*dep_of_pass_id].pass_size
+        if let Some(window_id) = cx.window_stack.last() {
+            let cxwindow = &mut cx.windows[*window_id];
+            if cxwindow.main_pass_id.is_none() { // we are the main pass of a window
+                let cxpass = &mut cx.passes[pass_id];
+                cxwindow.main_pass_id = Some(pass_id);
+                cxpass.dep_of = CxPassDepOf::Window(*window_id);
+                cxpass.pass_size = cxwindow.get_inner_size();
+            }
+            else if let Some(dep_of_pass_id) = cx.pass_stack.last() {
+                cx.passes[pass_id].dep_of = CxPassDepOf::Pass(*dep_of_pass_id);
+                cx.passes[pass_id].pass_size = cx.passes[*dep_of_pass_id].pass_size
+            }
+            else {
+                cx.passes[pass_id].dep_of = CxPassDepOf::None;
+                cx.passes[pass_id].override_dpi_factor = Some(1.0);
+            }
         }
         else {
             cx.passes[pass_id].dep_of = CxPassDepOf::None;
+            cx.passes[pass_id].override_dpi_factor = Some(1.0);
         }
         
         let cxpass = &mut cx.passes[pass_id];
@@ -43,6 +48,12 @@ impl Pass {
         
         //let pass_size = cxpass.pass_size;
         //self.set_ortho_matrix(cx, Vec2::zero(), pass_size);
+    }
+    
+    pub fn override_dpi_factor(&mut self, cx: &mut Cx, dpi_factor:f32){
+        if let Some(pass_id) = self.pass_id {
+            cx.passes[pass_id].override_dpi_factor = Some(dpi_factor);
+        }
     }
     
     pub fn make_dep_of_pass(&mut self, cx: &mut Cx, pass: &Pass) {
@@ -60,7 +71,7 @@ impl Pass {
         cxpass.pass_size = pass_size;
     }
     
-    pub fn add_color_texture(&mut self, cx: &mut Cx, texture: &mut Texture, clear_color: Option<Color>) {
+    pub fn add_color_texture(&mut self, cx: &mut Cx, texture: &mut Texture, clear_color: ClearColor) {
         texture.set_desc(cx, None);
         let pass_id = self.pass_id.expect("Please call add_color_texture after begin_pass");
         let cxpass = &mut cx.passes[pass_id];
@@ -70,12 +81,12 @@ impl Pass {
         })
     }
     
-    pub fn set_depth_texture(&mut self, cx: &mut Cx, texture: &mut Texture, depth_clear: Option<f64>) {
+    pub fn set_depth_texture(&mut self, cx: &mut Cx, texture: &mut Texture, clear_depth: ClearDepth) {
         texture.set_desc(cx, None);
         let pass_id = self.pass_id.expect("Please call set_depth_texture after begin_pass");
         let cxpass = &mut cx.passes[pass_id];
         cxpass.depth_texture = texture.texture_id;
-        cxpass.depth_clear = depth_clear;
+        cxpass.clear_depth = clear_depth;
     }
     
     
@@ -91,9 +102,27 @@ impl Pass {
     
 }
 
+#[derive(Clone, Debug)]
+pub enum ClearColor {
+    InitWith(Color),
+    ClearWith(Color)
+}
+
+impl Default for ClearColor {
+    fn default() -> Self {
+        ClearColor::ClearWith(Color::zero())
+    }
+}
+
+#[derive(Clone, Debug)]
+pub enum ClearDepth {
+    InitWith(f64),
+    ClearWith(f64)
+}
+
 #[derive(Default, Clone, Debug)]
 pub struct CxPassColorTexture {
-    pub clear_color: Option<Color>,
+    pub clear_color: ClearColor,
     pub texture_id: usize
 }
 
@@ -101,7 +130,9 @@ pub struct CxPassColorTexture {
 pub struct CxPass {
     pub color_textures: Vec<CxPassColorTexture>,
     pub depth_texture: Option<usize>,
-    pub depth_clear: Option<f64>,
+    pub clear_depth: ClearDepth,
+    pub depth_init: f64,
+    pub override_dpi_factor: Option<f32>,
     pub main_view_id: Option<usize>,
     pub dep_of: CxPassDepOf,
     pub paint_dirty: bool,
@@ -120,7 +151,9 @@ impl Default for CxPass {
             uniforms: uniforms,
             color_textures: Vec::new(),
             depth_texture: None,
-            depth_clear: Some(std::f64::INFINITY),
+            override_dpi_factor: None,
+            clear_depth: ClearDepth::ClearWith(1.0),
+            depth_init: 1.0,
             main_view_id: None,
             dep_of: CxPassDepOf::None,
             paint_dirty: false,

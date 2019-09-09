@@ -174,11 +174,8 @@ impl Cx {
                                             );
                                             
                                             let dpi_factor = metal_window.window_geom.dpi_factor;
-                                            self.passes[*pass_id].set_dpi_factor(dpi_factor);
                                             
                                             metal_window.resize_core_animation_layer(&metal_cx);
-                                            
-                                            self.passes[*pass_id].paint_dirty = false;
                                             
                                             self.draw_pass_to_layer(
                                                 *pass_id,
@@ -190,14 +187,19 @@ impl Cx {
                                     }
                                     CxPassDepOf::Pass(parent_pass_id) => {
                                         let dpi_factor = self.get_delegated_dpi_factor(parent_pass_id);
-                                        self.passes[*pass_id].set_dpi_factor(dpi_factor);
                                         self.draw_pass_to_texture(
                                             *pass_id,
                                             dpi_factor,
                                             &mut metal_cx,
                                         );
                                     },
-                                    CxPassDepOf::None => ()
+                                    CxPassDepOf::None => {
+                                        self.draw_pass_to_texture(
+                                            *pass_id,
+                                            1.0,
+                                            &mut metal_cx,
+                                        );
+                                    }
                                 }
                             }
                         }
