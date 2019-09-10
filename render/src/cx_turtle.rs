@@ -227,7 +227,7 @@ impl Cx {
         }
         false
     }
-    
+
     pub fn turtle_new_line_min_height(&mut self, min_height: f32) {
         if let Some(turtle) = self.turtles.last_mut() {
             turtle.walk.x = turtle.origin.x + turtle.layout.padding.l;

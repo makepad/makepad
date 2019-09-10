@@ -117,11 +117,11 @@ impl TrapezoidText {
                 return a0 - a1;
             }
             
-            fn pixel() -> vec4 {/*
-                if fmod(v_pixel.x,2.0) > 1.0 && fmod(v_pixel.y,2.0) > 1.0{
-                    return color("white")
-                }
-                return color("black");*/
+            fn pixel() -> vec4 {
+                //if fmod(v_pixel.x,2.0) > 1.0 && fmod(v_pixel.y,2.0) > 1.0{
+                //    return color("white")
+                // }
+                //return color("black");
                 let p_min = v_pixel.xy - 0.5;
                 let p_max = v_pixel.xy + 0.5;
                 let b_minx = p_min.x + 1.0 / 3.0;
@@ -153,7 +153,7 @@ impl TrapezoidText {
         }))
     }
     
-    pub fn draw_todo(&mut self, cx: &mut Cx, todo:CxFontsAtlasTodo) {
+    pub fn draw_todo(&mut self, cx: &mut Cx, todo: CxFontsAtlasTodo) {
         // lets fetch font
         
         
@@ -167,10 +167,16 @@ impl TrapezoidText {
             let font = cxfont.font_loaded.as_ref().unwrap();
             let atlas_page = &cxfont.atlas_pages[todo.atlas_page_id];
             let glyph = &font.glyphs[todo.glyph_id];
-
+            
+            if todo.glyph_id == font.char_code_to_glyph_index_map[10] ||
+            todo.glyph_id == font.char_code_to_glyph_index_map[9] ||
+            todo.glyph_id == font.char_code_to_glyph_index_map[13] {
+                return
+            }
+            
             let glyphtc = atlas_page.atlas_glyphs[todo.glyph_id][todo.subpixel_id].unwrap();
             let tx = glyphtc.tx1 * cx.fonts_atlas.texture_size.x + todo.subpixel_x_fract;
-            let ty = glyphtc.ty1 * cx.fonts_atlas.texture_size.y - todo.subpixel_y_fract;
+            let ty = 1.0 + glyphtc.ty1 * cx.fonts_atlas.texture_size.y - todo.subpixel_y_fract;
             
             let font_scale_logical = atlas_page.font_size * 96.0 / (72.0 * font.units_per_em);
             let font_scale_pixels = font_scale_logical * atlas_page.dpi_factor;
@@ -218,7 +224,7 @@ pub struct CxAfterDraw {
 
 impl CxAfterDraw {
     pub fn style(cx: &mut Cx) -> Self {
-        cx.fonts_atlas.texture_size = Vec2{x:4096.0,y:4096.0};
+        cx.fonts_atlas.texture_size = Vec2 {x: 4096.0, y: 4096.0};
         let mut atlas_texture = Texture::default();
         atlas_texture.set_desc(cx, Some(TextureDesc {
             format: TextureFormat::RenderBGRA,
@@ -226,14 +232,14 @@ impl CxAfterDraw {
             height: None,
             multisample: None
         }));
-
+        
         cx.fonts_atlas.texture_id = atlas_texture.texture_id.unwrap();
         
         Self {
             trapezoid_text: TrapezoidText::style(cx),
-            atlas_pass:Pass::default(),
-            atlas_view:View{
-                always_redraw:true,
+            atlas_pass: Pass::default(),
+            atlas_view: View {
+                always_redraw: true,
                 ..View::style(cx)
             },
             atlas_texture: atlas_texture
@@ -241,15 +247,17 @@ impl CxAfterDraw {
     }
     
     pub fn after_draw(&mut self, cx: &mut Cx) {
+        //let start = Cx::profile_time_ns();
+        
         // we need to start a pass that just uses the texture
-        if cx.fonts_atlas.atlas_todo.len()>0{
+        if cx.fonts_atlas.atlas_todo.len()>0 {
             self.atlas_pass.begin_pass(cx);
             self.atlas_pass.set_size(cx, cx.fonts_atlas.texture_size);
             self.atlas_pass.add_color_texture(cx, &mut self.atlas_texture, ClearColor::InitWith(Color::zero()));
             let _ = self.atlas_view.begin_view(cx, Layout::default());
             let mut atlas_todo = Vec::new();
             std::mem::swap(&mut cx.fonts_atlas.atlas_todo, &mut atlas_todo);
-            for todo in atlas_todo{
+            for todo in atlas_todo {
                 self.trapezoid_text.draw_todo(cx, todo);
                 // ok we have to draw a font_id
                 //break;
@@ -257,6 +265,7 @@ impl CxAfterDraw {
             self.atlas_view.end_view(cx);
             self.atlas_pass.end_pass(cx);
         }
+        //println!("TOTALT TIME {}", Cx::profile_time_ns() - start);
     }
 }
 
@@ -267,12 +276,12 @@ pub struct CxFont {
     pub atlas_pages: Vec<CxFontAtlasPage>,
 }
 
-pub const ATLAS_SUBPIXEL_SLOTS:usize = 16;
+pub const ATLAS_SUBPIXEL_SLOTS: usize = 16;
 
 pub struct CxFontAtlasPage {
     pub dpi_factor: f32,
     pub font_size: f32,
-    pub atlas_glyphs: Vec<[Option<CxFontAtlasGlyph>;ATLAS_SUBPIXEL_SLOTS]>
+    pub atlas_glyphs: Vec<[Option<CxFontAtlasGlyph>; ATLAS_SUBPIXEL_SLOTS]>
 }
 
 #[derive(Clone, Copy)]
@@ -285,12 +294,12 @@ pub struct CxFontAtlasGlyph {
 
 #[derive(Default)]
 pub struct CxFontsAtlasTodo {
-    pub subpixel_x_fract:f32,
-    pub subpixel_y_fract:f32,
-    pub font_id:usize,
-    pub atlas_page_id:usize,
-    pub glyph_id:usize,
-    pub subpixel_id:usize
+    pub subpixel_x_fract: f32,
+    pub subpixel_y_fract: f32,
+    pub font_id: usize,
+    pub atlas_page_id: usize,
+    pub glyph_id: usize,
+    pub subpixel_id: usize
 }
 
 #[derive(Default)]
@@ -303,8 +312,8 @@ pub struct CxFontsAtlas {
     pub atlas_todo: Vec<CxFontsAtlasTodo>,
 }
 
-impl CxFontsAtlas{
-    pub fn alloc_atlas_glyph(&mut self, path:&str, w:f32, h:f32)->CxFontAtlasGlyph{
+impl CxFontsAtlas {
+    pub fn alloc_atlas_glyph(&mut self, path: &str, w: f32, h: f32) -> CxFontAtlasGlyph {
         if w + self.alloc_xpos >= self.texture_size.x {
             self.alloc_xpos = 0.0;
             self.alloc_ypos += self.alloc_hmax + 1.0;
@@ -313,7 +322,7 @@ impl CxFontsAtlas{
         if h + self.alloc_ypos >= self.texture_size.y {
             println!("FONT ATLAS FULL {}, TODO FIX THIS", path);
         }
-        if h > self.alloc_hmax{
+        if h > self.alloc_hmax {
             self.alloc_hmax = h;
         }
         
@@ -321,11 +330,11 @@ impl CxFontsAtlas{
         let ty1 = self.alloc_ypos / self.texture_size.y;
         
         self.alloc_xpos += w + 1.0;
-
+        
         if h > self.alloc_hmax {
             self.alloc_hmax = h;
         }
-
+        
         CxFontAtlasGlyph {
             tx1: tx1,
             ty1: ty1,

@@ -280,7 +280,7 @@ impl Cx {
         }
     }
 
-    pub fn get_dpi_factor_of(&mut self, area:Area) -> f32 {
+    pub fn get_dpi_factor_of(&mut self, area:&Area) -> f32 {
         match area{
             Area::Instance(ia)=>{
                 let pass_id = self.views[ia.view_id].pass_id;

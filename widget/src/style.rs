@@ -4,7 +4,7 @@ pub fn set_dark_style(cx:&mut Cx){
     
     cx.set_font("normal_font", "resources/Ubunutu-R.ttf");
 
-    cx.set_font("mono_font", "resources/Inconsolata-Regular.ttf");
+    cx.set_font("mono_font", "resources/LiberationMono-Regular.ttf");
 
     cx.set_size("font_size", 8.0);
 

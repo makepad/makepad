@@ -51,7 +51,7 @@ impl App {
             color_texture: Texture::default(),
             text: Text {
                 font_size: 8.0,
-                font: cx.load_font_path("resources/Ubuntu-R.ttf"),
+                font: cx.load_font_path("resources/Inconsolata-Regular.ttf"),
                 ..Text::style(cx)
             },
             blit: Blit {
@@ -77,10 +77,9 @@ impl App {
         
         let _ = self.main_view.begin_view(cx, Layout::default());
         cx.move_turtle(50., 50.);
-        self.text.font_size = 2.0;
+        self.text.font_size = 9.0;
         for i in 0..7{
-            self.text.font_size += 2.0;
-            self.text.draw_text(cx, "hello12345789");
+            self.text.draw_text(cx, "- num -");
         }
         self.blit.draw_blit_abs(cx, &Texture {texture_id: Some(cx.fonts_atlas.texture_id)}, Rect {x: 100., y: 100., w: 700., h: 400.});
         //self.trapezoid_text.draw_character(cx, 100.,100., 0.5, 'X', &self.text.font);

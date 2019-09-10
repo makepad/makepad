@@ -251,9 +251,10 @@ impl CodeEditor {
             text: Text {
                 font: cx.load_font_style("mono_font"),
                 font_size: 12.0,
-                brightness: 1.0,
+                brightness: 1.1,
                 z:2.00,
-                line_spacing: 1.4,
+                line_spacing: 1.8,
+                //do_subpixel_aa: true,
                 do_dpi_dilate: true,
                 wrapping: Wrapping::Line,
                 ..Text::style(cx)
@@ -269,7 +270,7 @@ impl CodeEditor {
                 wrapping: Wrapping::Line,
                 ..Text::style(cx)
             },
-            open_font_size: 11.0,
+            open_font_size: 8.0,
             folded_font_size: 0.5,
             line_number_width: 45.,
             cursor_blink_speed: 0.5,
@@ -1111,11 +1112,9 @@ impl CodeEditor {
             let chunk_width = self._monospace_size.x * 5.0;
             self.line_number_text.add_text(cx, origin.x + (self.line_number_width - chunk_width - 10.), origin.y + line_geom.walk.y, 0, self._line_number_inst.as_mut().unwrap(), chunk, | _, _, _, _ | {0.});
         }
-
+        
         cx.turtle_new_line_min_height(self._monospace_size.y);
 
-        // newline with minheight
-        // skip the linenumber
         cx.move_turtle(self.line_number_width, 0.);
         
         self._tokens_on_line = 0;
@@ -1699,7 +1698,7 @@ impl CodeEditor {
     fn set_font_size(&mut self, _cx: &Cx, font_size: f32) {
         self.text.font_size = font_size;
         self.line_number_text.font_size = font_size;
-        if font_size > self._line_largest_font {
+        if font_size > self._line_largest_font { 
             self._line_largest_font = font_size;
         }
         self._monospace_size.x = self._monospace_base.x * font_size;
@@ -1954,6 +1953,13 @@ impl AnimFoldingState {
             AnimFoldingState::Open => false,
             AnimFoldingState::Folded => false,
             _ => true
+        }
+    }
+    
+    fn is_open(&self) -> bool {
+        match self {
+            AnimFoldingState::Open => true,
+            _ => false
         }
     }
     

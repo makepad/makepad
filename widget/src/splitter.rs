@@ -242,7 +242,7 @@ impl Splitter {
                 Axis::Vertical => rect.w
             }
         };
-        let dpi_factor = cx.get_dpi_factor_of(self._split_area);
+        let dpi_factor = cx.get_dpi_factor_of(&self._split_area);
         self._calc_pos -= self._calc_pos % (1.0 / dpi_factor);
         match self.axis {
             Axis::Horizontal => {
