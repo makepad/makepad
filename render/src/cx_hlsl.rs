@@ -303,7 +303,13 @@ impl Cx {
             })
         }
         
-        let input_layout = d3d11_cx.create_input_layout(&vs_blob, &layout_desc) ?;
+        let input_layout;
+        if let Ok(inp) = d3d11_cx.create_input_layout(&vs_blob, &layout_desc){
+            input_layout = inp;
+        }
+        else{
+            return Err(SlErr{msg:format!("create_input_layout failed for {}", hlsl)});
+        }
 
         sh.mapping = mapping;
         sh.platform = Some(CxPlatformShader{
