@@ -306,21 +306,7 @@ impl Cx {
             })
         }
         
-        let input_layout;
-        if let Ok(inp) = d3d11_cx.create_input_layout(&vs_blob, &layout_desc){
-            input_layout = inp;
-        }
-        else{
-            let mut s = String::new();
-            for geom in &geom_named.props {
-                s.push_str(&format!("GEOM_{} {} {}", geom.name.to_uppercase(), geom.slots, geom.offset));
-            }
-            
-            for inst in &inst_named.props {
-                s.push_str(&format!("GEOM_{} {} {}", inst.name.to_uppercase(), inst.slots, inst.offset));
-            }
-            return Err(SlErr{msg:format!("create_input_layout failed for {} {}", sh.name, s)});
-        }
+        let input_layout = d3d11_cx.create_input_layout(&vs_blob, &layout_desc)?;
 
         sh.mapping = mapping;
         sh.platform = Some(CxPlatformShader{
