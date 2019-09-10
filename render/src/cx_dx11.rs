@@ -109,12 +109,20 @@ impl Cx {
         }
     }
     
-    pub fn setup_pass_render_targets(&mut self, pass_id: usize, dpi_factor: f32, first_target: Option<&ComPtr<d3d11::ID3D11RenderTargetView>>, d3d11_cx: &D3d11Cx) {
+    pub fn setup_pass_render_targets(&mut self, pass_id: usize, inherit_dpi_factor: f32, first_target: Option<&ComPtr<d3d11::ID3D11RenderTargetView>>, d3d11_cx: &D3d11Cx) {
         
         let pass_size = self.passes[pass_id].pass_size;
         
         self.passes[pass_id].set_ortho_matrix(Vec2::zero(), pass_size);
         self.passes[pass_id].uniform_camera_view(&Mat4::identity());
+        self.passes[pass_id].paint_dirty = false;
+        let dpi_factor = if let Some(override_dpi_factor) = self.passes[pass_id].override_dpi_factor{
+            override_dpi_factor
+        }
+        else{
+            inherit_dpi_factor
+        };
+        self.passes[pass_id].set_dpi_factor(dpi_factor);
         
         //let wg = &d3d11_window.window_geom;
         d3d11_cx.set_viewport(pass_size.x * dpi_factor, pass_size.y * dpi_factor);

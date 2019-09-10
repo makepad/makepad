@@ -210,19 +210,22 @@ impl Cx {
                                                 &d3d11_cx,
                                             );
                                         }
-                                        self.passes[*pass_id].paint_dirty = false;
                                     }
                                     CxPassDepOf::Pass(parent_pass_id) => {
                                         let dpi_factor = self.get_delegated_dpi_factor(parent_pass_id);
-                                        self.passes[*pass_id].set_dpi_factor(dpi_factor);
                                         self.draw_pass_to_texture(
                                             *pass_id,
                                             dpi_factor,
                                             &d3d11_cx,
                                         );
-                                        self.passes[*pass_id].paint_dirty = false;
                                     },
-                                    CxPassDepOf::None => ()
+                                    CxPassDepOf::None => {
+                                        self.draw_pass_to_texture(
+                                            *pass_id,
+                                            1.0,
+                                            &d3d11_cx,
+                                        );
+                                    }
                                 }
                             }
                         }
