@@ -48,15 +48,18 @@ impl Cx {
         out.push_str(post);
         out.push_str("{\n");
         out.push_str(field);
-        for var in vars {
+        for (index,var) in vars.iter().enumerate() {
             out.push_str("  ");
             out.push_str(&Self::hlsl_type(&var.ty));
             out.push_str(" ");
             out.push_str(&var.name);
             if semantic.len()>0 {
                 out.push_str(": ");
-                out.push_str(&format!("{}{}", semantic, var.name.to_uppercase()));
+                out.push_str(&format!("{}{}", semantic, std::char::from_u32(index as u32 +65).unwrap()));
                 //out.push_str(&format!("{}", index));
+                if index > 26{
+                    panic!("HLSL struct semantic name out of range");
+                }
             }
             out.push_str(";\n")
         };
@@ -277,8 +280,8 @@ impl Cx {
         let inst_named = NamedProps::construct(&sh.shader_gen, &mapping.instances, false);
         let mut strings = Vec::new();
         
-        for geom in &geom_named.props {
-            strings.push(ffi::CString::new(format!("GEOM_{}", geom.name.to_uppercase())).unwrap());
+        for (index,geom) in geom_named.props.iter().enumerate() {
+            strings.push(ffi::CString::new(format!("GEOM_{}", std::char::from_u32(index as u32 +65).unwrap())).unwrap());
             layout_desc.push(d3d11::D3D11_INPUT_ELEMENT_DESC {
                 SemanticName: strings.last().unwrap().as_ptr() as *const _,
                 SemanticIndex: 0,
@@ -290,8 +293,8 @@ impl Cx {
             })
         }
         
-        for inst in &inst_named.props {
-            strings.push(ffi::CString::new(format!("INST_{}", inst.name.to_uppercase())).unwrap());
+        for (index,inst) in inst_named.props.iter().enumerate() {
+            strings.push(ffi::CString::new(format!("INST_{}", std::char::from_u32(index as u32 +65).unwrap())).unwrap());
             layout_desc.push(d3d11::D3D11_INPUT_ELEMENT_DESC {
                 SemanticName: strings.last().unwrap().as_ptr() as *const _,
                 SemanticIndex: 0,
