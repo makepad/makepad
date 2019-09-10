@@ -642,10 +642,11 @@ fn parse_char_code_to_glyph_index_map_format_4(bytes: &[u8]) -> Result<Vec<usize
             let mut id = if id_range_offset == 0 {
                 code
             } else {
-                let id_range_bytes = &id_range_offset_bytes[(seg_index * 2 + id_range_offset)..];
+                let id_range_bytes = &id_range_offset_bytes[(seg_index * 2)..];
                 let mut reader = Reader::new(id_range_bytes);
-                reader.skip((code - start_code) as usize)?;
-                reader.read_u16()?
+                reader.skip(id_range_offset + (code - start_code) as usize * 2)?;
+                let id = reader.read_u16()?;
+                id
             } as usize;
             if id != 0 {
                 id = (id + id_delta) % 65536;
