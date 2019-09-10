@@ -19,6 +19,7 @@ pub struct FileTree {
     pub root_node: FileNode,
     pub animator: Animator,
     pub row_height: f32,
+    pub font_size: f32,
     pub row_padding: Padding
 }
 
@@ -174,6 +175,7 @@ impl FileTree {
     pub fn style(cx: &mut Cx) -> Self {
         Self {
             row_height: 20.,
+            font_size: 8.0,
             row_padding: Padding {l: 5., t: 0., r: 0., b: 1.},
             root_node: FileNode::Folder {name: "".to_string(), state: NodeState::Open, draw: None, folder: vec![
                 FileNode::File {name: "loading...".to_string(), draw: None},
@@ -546,7 +548,7 @@ impl FileTree {
             };
             self.filler.z = depth as f32 + 1.0;
             self.tree_text.z = depth as f32 + 1.0;
-            self.tree_text.font_size = 11. * scale as f32;
+            self.tree_text.font_size = self.font_size * scale as f32;
             match node {
                 FileNode::Folder {name, state, ..} => {
                     // draw the folder icon

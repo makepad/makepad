@@ -24,11 +24,6 @@ pub struct DesktopWindow {
     
     // testing
     pub inner_over_chrome: bool,
-    pub test_rtt: bool,
-    pub blit: Blit,
-    pub sub_pass: Pass,
-    pub sub_view: View<ScrollBar>, // we have a root view otherwise is_overlay subviews can't attach topmost
-    pub blitbuffer: Texture,
 }
 
 #[derive(Clone, PartialEq)]
@@ -62,11 +57,6 @@ impl DesktopWindow {
             caption_size: Vec2::zero(),
             caption: "Makepad".to_string(),
             inner_over_chrome:false,
-            test_rtt: false,
-            sub_pass: Pass::default(),
-            sub_view: View::style(cx),
-            blit: Blit::style(cx),
-            blitbuffer: Texture::default()
         }
     }
 
@@ -150,16 +140,8 @@ impl DesktopWindow {
         
         self.window.begin_window(cx);
         self.pass.begin_pass(cx);
-        self.pass.add_color_texture(cx, &mut self.color_texture, Some(color256(30,30,30)));
-        self.pass.set_depth_texture(cx, &mut self.depth_texture, Some(1.0));
-        
-        // for z-buffering add a depth texture here
-        
-        if self.test_rtt {
-            // ok so how does subpass know its size.
-            self.sub_pass.begin_pass(cx);
-            self.sub_pass.add_color_texture(cx, &mut self.blitbuffer, Some(Color::zero()));
-        }
+        self.pass.add_color_texture(cx, &mut self.color_texture, ClearColor::ClearWith(color256(30,30,30)));
+        self.pass.set_depth_texture(cx, &mut self.depth_texture, ClearDepth::ClearWith(1.0));
         
         let _ = self.main_view.begin_view(cx, Layout::default());
         
@@ -233,13 +215,7 @@ impl DesktopWindow {
             self.vr_btn.draw_desktop_button(cx, DesktopButtonType::VRMode);
         }
         self.main_view.end_view(cx);
-        if self.test_rtt {
-            self.sub_pass.end_pass(cx);
-            // alright so sub_pass rendered a texture, now we blit it inside the outer pass
-            let _ = self.sub_view.begin_view(cx, Layout::default());
-            self.blit.draw_blit_walk(cx, &self.blitbuffer, Bounds::Fill, Bounds::Fill, Margin::zero());
-            self.sub_view.end_view(cx);
-        }
+
         self.pass.end_pass(cx);
         
         self.window.end_window(cx);

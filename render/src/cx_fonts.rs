@@ -190,8 +190,7 @@ impl TrapezoidText {
                                     .translate(Vector::new(tx, ty))
                             )
                         }
-                    })
-                        .linearize(1.0),
+                    }).linearize(1.0),
                 ),
             );
             trapezoids
@@ -308,7 +307,7 @@ impl CxFontsAtlas{
     pub fn alloc_atlas_glyph(&mut self, path:&str, w:f32, h:f32)->CxFontAtlasGlyph{
         if w + self.alloc_xpos >= self.texture_size.x {
             self.alloc_xpos = 0.0;
-            self.alloc_ypos += self.alloc_hmax.ceil() + 2.0;
+            self.alloc_ypos += self.alloc_hmax + 1.0;
             self.alloc_hmax = 0.0;
         }
         if h + self.alloc_ypos >= self.texture_size.y {
@@ -321,7 +320,7 @@ impl CxFontsAtlas{
         let tx1 = self.alloc_xpos / self.texture_size.x;
         let ty1 = self.alloc_ypos / self.texture_size.y;
         
-        self.alloc_xpos += w.ceil() + 2.0;
+        self.alloc_xpos += w + 1.0;
 
         if h > self.alloc_hmax {
             self.alloc_hmax = h;

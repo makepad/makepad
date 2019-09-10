@@ -20,8 +20,10 @@ pub struct Text {
     pub do_dpi_dilate: bool,
     pub do_h_scroll: bool,
     pub do_v_scroll: bool,
+    pub do_subpixel_aa: bool,
     pub brightness: f32,
     pub line_spacing: f32,
+    pub top_drop: f32,
     pub z: f32,
     pub wrapping: Wrapping,
 }
@@ -33,9 +35,11 @@ impl Text {
             font: cx.load_font_path("resources/Ubuntu-R.ttf"),
             do_h_scroll: true,
             do_v_scroll: true,
+            do_subpixel_aa: false,
             text: "".to_string(),
-            font_size: 11.0,
+            font_size: 8.0,
             line_spacing: 1.15,
+            top_drop: 1.35,
             do_dpi_dilate: false,
             brightness: 1.0,
             z: 0.0,
@@ -52,10 +56,14 @@ impl Text {
         sg.compose(shader_ast!({
             let geom: vec2<Geometry>;
             let texturez: texture2d<Texture>;
-            let min_pos: vec2<Instance>;
-            let max_pos: vec2<Instance>;
+            //let min_pos: vec2<Instance>;
+            //let max_pos: vec2<Instance>;
             let font_tc: vec4<Instance>;
             let color: vec4<Instance>;
+            let x: float<Instance>;
+            let y: float<Instance>;
+            let w: float<Instance>;
+            let h: float<Instance>;
             let z: float<Instance>;
             let char_offset: float<Instance>;
             let marker: float<Instance>;
@@ -65,10 +73,15 @@ impl Text {
             let zbias: float<Uniform>;
             let brightness: float<Uniform>;
             let view_do_scroll: vec2<Uniform>;
-            
+            let do_subpixel_aa: float<Uniform>;
             fn pixel() -> vec4 {
                 let s = sample2d(texturez, tex_coord.xy);
-                return s; // + vec4(0.,0.1,0.,0.);
+                if do_subpixel_aa>0.5{
+                    return s
+                }
+                else{
+                    return vec4(s.yyy*color.rgb*color.a, s.y*color.a)
+                }
                 /*
                 if marker>0.5{
                     df_viewport(clipped);
@@ -87,17 +100,10 @@ impl Text {
             }
             
             fn vertex() -> vec4 {
-                let shift: vec2 = -view_scroll * view_do_scroll;
+                let shift: vec2 = -view_scroll * view_do_scroll;// + vec2(x, y);
                 
-                /*et min_pos = vec2(
-                    x + font_size * font_rect.x,
-                    y - font_size * font_rect.y + font_size // * font_base
-                );
-                
-                let max_pos = vec2(
-                    x + font_size * font_rect.z,
-                    y - font_size * font_rect.w + font_size // * font_base
-                );*/
+                let min_pos = vec2(x,y);
+                let max_pos = vec2(x+w,y-h);
                 
                 clipped = clamp(
                     mix(min_pos, max_pos, geom) + shift,
@@ -140,6 +146,7 @@ impl Text {
                 if self.do_h_scroll {1.0}else {0.0},
                 if self.do_v_scroll {1.0}else {0.0}
             );
+            aligned.inst.push_uniform_float(cx, if self.do_subpixel_aa{1.0}else{0.0});
             //list_clip
             //area.push_uniform_vec4f(cx, -50000.0,-50000.0,50000.0,50000.0);
         }
@@ -175,6 +182,10 @@ impl Text {
         for wc in chunk {
             let unicode = *wc as usize;
             let glyph_id = font.char_code_to_glyph_index_map[unicode];
+            if glyph_id >= font.glyphs.len(){
+                println!("GLYPHID OUT OF BOUNDS {} len is {}", glyph_id, font.glyphs.len());
+                continue;
+            }
             let glyph = &font.glyphs[glyph_id];
             
             let advance = glyph.horizontal_metrics.advance_width * font_scale_logical;
@@ -185,22 +196,27 @@ impl Text {
             
             // this one needs pixel snapping
             let mut min_pos_x = geom_x + font_scale_logical * glyph.bounds.p_min.x;
-            let mut min_pos_y = geom_y - font_scale_logical * glyph.bounds.p_min.y;
+            let mut min_pos_y = geom_y - font_scale_logical * glyph.bounds.p_min.y + self.font_size * self.top_drop;
             
-            // this is the x_subpixel shift
+            // compute subpixel shift
             let subpixel_x_fract = min_pos_x - (min_pos_x * dpi_factor).floor() / dpi_factor;
             let subpixel_y_fract = min_pos_y - (min_pos_y * dpi_factor).floor() / dpi_factor;
             
+            // snap it
             min_pos_x -= subpixel_x_fract;
             min_pos_y -= subpixel_y_fract;
+
+            //let max_pos_x = min_pos_x + w / dpi_factor;
+            //let max_pos_y = min_pos_y - h / dpi_factor;
             
-            // the subpixel id
-            let subpixel_id = (subpixel_x_fract * (ATLAS_SUBPIXEL_SLOTS as f32 - 1.0)) as usize;
-            
-            // but the error needs to be shifted into the atlas
-            let max_pos_x = min_pos_x + w / dpi_factor;
-            let max_pos_y = min_pos_y - h / dpi_factor;
-            
+            // only use a subpixel id for really small fonts
+            let subpixel_id = if self.font_size>12.0{
+                0
+            } 
+            else{
+                 (subpixel_x_fract * (ATLAS_SUBPIXEL_SLOTS as f32 - 1.0)) as usize
+            };
+
             let tc = if let Some(tc) = &atlas_page.atlas_glyphs[glyph_id][subpixel_id] {
                 tc
             }
@@ -226,13 +242,7 @@ impl Text {
             // lets allocate
             let marker = char_callback(*wc, char_offset, geom_x, advance);
             
-            // what happens if we snap these things.
-            
             let data = [
-                min_pos_x, // - subpixel_x_fract,
-                min_pos_y, // - subpixel_y_fract,
-                max_pos_x, // - subpixel_x_fract,
-                max_pos_y, // - subpixel_y_fract,
                 tc.tx1,
                 tc.ty1,
                 tc.tx2,
@@ -241,15 +251,16 @@ impl Text {
                 self.color.g,
                 self.color.b,
                 self.color.a,
+                min_pos_x,
+                min_pos_y,
+                w / dpi_factor,
+                h / dpi_factor,
                 self.z, //z
                 char_offset as f32, // char_offset
                 marker, // marker
             ];
             instance.extend_from_slice(&data);
-            /*
-            for i in 0..15{
-                instance.push(0.)
-            }*/
+
             geom_x += advance;
             char_offset += 1;
             aligned.inst.instance_count += 1;
@@ -344,6 +355,7 @@ impl Text {
         aligned.inst.into_area()
     }
     
+    // this function has to be rewritten now
     pub fn find_closest_offset(&self, cx: &Cx, area: &Area, pos: Vec2) -> usize {
         // ok so, we have a bunch of text geom,
         // now we need to find the closest offset
