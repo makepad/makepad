@@ -308,7 +308,15 @@ impl Cx {
             input_layout = inp;
         }
         else{
-            return Err(SlErr{msg:format!("create_input_layout failed for {}", hlsl)});
+            let mut s = String::new();
+            for geom in &geom_named.props {
+                s.push_str(&format!("GEOM_{} {} {}", geom.name.to_uppercase(), geom.slots, geom.offset));
+            }
+            
+            for inst in &inst_named.props {
+                s.push_str(&format!("GEOM_{} {} {}", inst.name.to_uppercase(), inst.slots, inst.offset));
+            }
+            return Err(SlErr{msg:format!("create_input_layout failed for {} {}", sh.name, s)});
         }
 
         sh.mapping = mapping;
