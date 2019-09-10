@@ -37,7 +37,7 @@ struct App {
     color_texture: Texture,
     text: Text,
     blit: Blit,
-    trapezoid_text: TrapezoidText,
+    //trapezoid_text: TrapezoidText,
     main_view: View<NoScroll>,
 }
 
@@ -57,7 +57,7 @@ impl App {
             blit: Blit {
                 ..Blit::style(cx)
             },
-            trapezoid_text: TrapezoidText::style(cx),
+            //trapezoid_text: TrapezoidText::style(cx),
             main_view: View::style(cx),
         }
     }
@@ -78,7 +78,7 @@ impl App {
         let _ = self.main_view.begin_view(cx, Layout::default());
         cx.move_turtle(50., 50.);
         self.text.font_size = 9.0;
-        for i in 0..7{
+        for _ in 0..7{
             self.text.draw_text(cx, "- num -");
         }
         self.blit.draw_blit_abs(cx, &Texture {texture_id: Some(cx.fonts_atlas.texture_id)}, Rect {x: 100., y: 100., w: 700., h: 400.});

@@ -1956,13 +1956,6 @@ impl AnimFoldingState {
         }
     }
     
-    fn is_open(&self) -> bool {
-        match self {
-            AnimFoldingState::Open => true,
-            _ => false
-        }
-    }
-    
     fn is_folded(&self) -> bool {
         match self {
             AnimFoldingState::Folded => true,

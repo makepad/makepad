@@ -76,7 +76,7 @@ impl App {
     fn draw_app(&mut self, cx: &mut Cx) {
         self.window.begin_window(cx);
         self.pass.begin_pass(cx);
-        self.pass.add_color_texture(cx, &mut self.color_texture, Some(color256(30,30,30)));
+        self.pass.add_color_texture(cx, &mut self.color_texture, ClearColor::ClearWith(color256(0, 0, 0)));
 
         let _ = self.main_view.begin_view(cx, Layout::default());
         

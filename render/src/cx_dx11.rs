@@ -123,30 +123,44 @@ impl Cx {
         let mut color_textures = Vec::<*mut d3d11::ID3D11RenderTargetView>::new();
         for (index, color_texture) in self.passes[pass_id].color_textures.iter().enumerate() {
             let render_target;
+            let is_initial;
             if index == 0 && first_target.is_some() {
                 render_target = first_target.unwrap();
+                is_initial = true;
             }
             else {
                 let cxtexture = &mut self.textures[color_texture.texture_id];
-                d3d11_cx.update_render_target(cxtexture, dpi_factor, pass_size);
+                is_initial = d3d11_cx.update_render_target(cxtexture, dpi_factor, pass_size);
                 render_target = cxtexture.platform.render_target_view.as_ref().unwrap();
             }
             color_textures.push(render_target.as_raw() as *mut _);
             // possibly clear it
-            if let Some(color) = color_texture.clear_color {
-                d3d11_cx.clear_render_target_view(&render_target, color); //self.clear_color);
+            match color_texture.clear_color{
+                ClearColor::InitWith(color)=>{
+                    if is_initial{
+                        d3d11_cx.clear_render_target_view(&render_target, color); //self.clear_color);
+                    }
+                },
+                ClearColor::ClearWith(color)=>{
+                    d3d11_cx.clear_render_target_view(&render_target, color); //self.clear_color);
+                }
             }
         }
         
         // attach/clear depth buffers, if any
         if let Some(depth_texture_id) = self.passes[pass_id].depth_texture {
             let cxtexture = &mut self.textures[depth_texture_id];
-            d3d11_cx.update_depth_stencil(cxtexture, dpi_factor, pass_size);
-            if let Some(depth_clear) = self.passes[pass_id].depth_clear {
-                d3d11_cx.clear_depth_stencil_view(cxtexture.platform.depth_stencil_view.as_ref().unwrap(), depth_clear as f32);
-                //depth_attachment.set_clear_depth(1.0);
+            let is_initial = d3d11_cx.update_depth_stencil(cxtexture, dpi_factor, pass_size);
+            match self.passes[pass_id].clear_depth{
+                ClearDepth::InitWith(depth_clear)=>{
+                    if is_initial{
+                        d3d11_cx.clear_depth_stencil_view(cxtexture.platform.depth_stencil_view.as_ref().unwrap(), depth_clear as f32);
+                    }
+                },
+                ClearDepth::ClearWith(depth_clear)=>{
+                    d3d11_cx.clear_depth_stencil_view(cxtexture.platform.depth_stencil_view.as_ref().unwrap(), depth_clear as f32);
+                }
             }
-            
             unsafe {d3d11_cx.context.OMSetRenderTargets(
                 color_textures.len() as u32,
                 color_textures.as_ptr(),
@@ -830,13 +844,13 @@ impl D3d11Cx {
         }
     }
     
-    pub fn update_render_target(&self, cxtexture: &mut CxTexture, dpi_factor: f32, size: Vec2) {
+    pub fn update_render_target(&self, cxtexture: &mut CxTexture, dpi_factor: f32, size: Vec2) ->bool {
         
         let width = if let Some(width) = cxtexture.desc.width {width as usize} else {(size.x * dpi_factor) as usize};
         let height = if let Some(height) = cxtexture.desc.height {height as usize} else {(size.y * dpi_factor) as usize};
         
         if cxtexture.platform.width == width && cxtexture.platform.height == height {
-            return
+            return false
         }
         
         let format;
@@ -889,15 +903,16 @@ impl D3d11Cx {
         else {
             panic!("update_render_target failed");
         }
+        return true
     }
     
-    pub fn update_depth_stencil(&self, cxtexture: &mut CxTexture, dpi_factor: f32, size: Vec2) {
+    pub fn update_depth_stencil(&self, cxtexture: &mut CxTexture, dpi_factor: f32, size: Vec2)->bool{
         
         let width = if let Some(width) = cxtexture.desc.width {width as usize} else {(size.x * dpi_factor) as usize};
         let height = if let Some(height) = cxtexture.desc.height {height as usize} else {(size.y * dpi_factor) as usize};
         
         if cxtexture.platform.width == width && cxtexture.platform.height == height {
-            return
+            return false
         }
         
         let format;
@@ -947,6 +962,7 @@ impl D3d11Cx {
         else {
             panic!("update_render_target failed");
         }
+        return true
     }
     
     pub fn update_platform_texture_image_bgra(&self, res: &mut CxPlatformTexture, width: usize, height: usize, image_u32: &Vec<u32>) {
