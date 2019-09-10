@@ -3,10 +3,10 @@ use crate::cx::*;
 #[derive(Clone)]
 pub struct Blit {
     pub shader: Shader,
-    pub tx1: f32,
-    pub ty1: f32,
-    pub tx2: f32,
-    pub ty2: f32,
+    pub min_x: f32,
+    pub min_y: f32,
+    pub max_x: f32,
+    pub max_y: f32,
     pub alpha: f32,
     pub do_scroll: bool
 }
@@ -15,10 +15,10 @@ impl Blit {
     pub fn style(cx: &mut Cx) -> Self {
         Self {
             alpha: 1.0,
-            tx1:0.0,
-            ty1:0.0,
-            tx2:1.0,
-            ty2:1.0,
+            min_x:0.0,
+            min_y:0.0,
+            max_x:1.0,
+            max_y:1.0,
             shader: cx.add_shader(Self::def_blit_shader(), "Blit"),
             do_scroll:false,
         }
@@ -38,10 +38,10 @@ impl Blit {
             let y: float<Instance>;
             let w: float<Instance>;
             let h: float<Instance>;
-            let tx1: float<Instance>;
-            let ty1: float<Instance>;
-            let tx2: float<Instance>;
-            let ty2: float<Instance>;
+            let min_x: float<Instance>;
+            let min_y: float<Instance>;
+            let max_x: float<Instance>;
+            let max_y: float<Instance>;
             let tc: vec2<Varying>;
             let view_do_scroll: float<Uniform>;
             let alpha: float<Uniform>;
@@ -58,7 +58,7 @@ impl Blit {
                     view_clip.zw
                 ); 
                 let pos = (clipped - shift - vec2(x, y)) / vec2(w, h);
-                tc = mix(vec2(tx1,ty1), vec2(tx2,ty2), pos);
+                tc = mix(vec2(min_x,min_y), vec2(max_x,max_y), pos);
                 v_pixel = clipped;
                 // only pass the clipped position forward
                 return camera_projection * vec4(clipped.x, clipped.y, 0., 1.);
@@ -113,10 +113,10 @@ impl Blit {
             rect.y,
             rect.w,
             rect.h,
-            self.tx1,
-            self.ty1,
-            self.tx2,
-            self.ty2
+            self.min_x,
+            self.min_y,
+            self.max_x,
+            self.max_y
         ];
         inst.push_slice(cx, &data);
         inst
