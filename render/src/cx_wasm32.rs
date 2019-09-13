@@ -23,7 +23,7 @@ impl Cx {
             }
             self.platform_type = PlatformType::WASM;
         }
-        
+         
         //let root_view = unsafe {&mut *(self.platform.root_view_ptr as *mut View<NoScrollBar>)};
         let mut to_wasm = ToWasm::from(msg);
         self.platform.from_wasm = FromWasm::new();

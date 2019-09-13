@@ -399,7 +399,7 @@
         
         on_screen_resize() {
             var dpi_factor = window.devicePixelRatio;
-            var w,
+            var w;
             var h;
             var canvas = this.canvas;
             
