@@ -392,6 +392,7 @@ impl MetalCx {
 #[derive(Clone)]
 pub struct MetalWindow {
     pub window_id: usize,
+    pub first_draw: bool,
     pub window_geom: WindowGeom,
     pub cal_size: Vec2,
     pub core_animation_layer: CoreAnimationLayer,
@@ -432,6 +433,7 @@ impl MetalWindow {
         }
         
         MetalWindow {
+            first_draw:true,
             window_id,
             cal_size: Vec2::zero(),
             core_animation_layer,

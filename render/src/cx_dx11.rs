@@ -266,6 +266,7 @@ pub struct D3d11Window {
     // pub d2d1_hwnd_target: Option<ComPtr<d2d1::ID2D1HwndRenderTarget>>,
     // pub d2d1_bitmap: Option<ComPtr<d2d1::ID2D1Bitmap>>,
     pub alloc_size: Vec2,
+    pub first_draw: bool,
     pub swap_chain: ComPtr<dxgi1_2::IDXGISwapChain1>,
 }
 
@@ -292,6 +293,7 @@ impl D3d11Window {
         //unsafe {d3d11_cx.context.OMSetDepthStencilState(depth_stencil_state.as_raw() as *mut _, 1)}
         
         D3d11Window {
+            first_draw: true,
             is_in_resize: false,
             window_id: window_id,
             alloc_size: window_geom.inner_size,

@@ -209,6 +209,11 @@ impl Cx {
                                                 d3d11_window,
                                                 &d3d11_cx,
                                             );
+                                            // call redraw since our DPI could have been wrong
+                                            if d3d11_window.first_draw{
+                                                d3d11_window.first_draw = false;
+                                                self.redraw_pass_and_sub_passes(*pass_id);
+                                            }
                                         }
                                     }
                                     CxPassDepOf::Pass(parent_pass_id) => {

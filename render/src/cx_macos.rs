@@ -183,6 +183,10 @@ impl Cx {
                                                 &metal_window.core_animation_layer,
                                                 &mut metal_cx,
                                             );
+                                            if metal_window.first_draw{
+                                                metal_window.first_draw = false;
+                                                self.redraw_pass_and_sub_passes(*pass_id);
+                                            }
                                         }}
                                     }
                                     CxPassDepOf::Pass(parent_pass_id) => {
