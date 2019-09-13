@@ -400,7 +400,7 @@
         on_screen_resize() {
             var dpi_factor = window.devicePixelRatio;
             var w,
-            h;
+            var h;
             var canvas = this.canvas;
             
             if (this.vr_is_presenting) {
