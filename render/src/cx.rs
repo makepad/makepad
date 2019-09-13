@@ -98,6 +98,8 @@ pub struct Cx {
     
     pub is_in_redraw_cycle: bool,
     pub vr_can_present: bool,
+    pub default_dpi_factor: f32,
+    pub current_dpi_factor: f32,
     pub window_stack: Vec<usize>,
     pub pass_stack: Vec<usize>,
     pub view_stack: Vec<usize>,
@@ -190,7 +192,9 @@ impl Default for Cx {
             textures_free: Vec::new(),
             shaders: Vec::new(),
             shader_map: HashMap::new(),
-            
+
+            default_dpi_factor: 1.0,
+            current_dpi_factor: 1.0,
             is_in_redraw_cycle: false,
             vr_can_present: false,
             window_stack: Vec::new(),
@@ -301,7 +305,15 @@ impl Cx {
         for _ in 0..25 {
             match self.passes[pass_id_walk].dep_of {
                 CxPassDepOf::Window(window_id) => {
-                    dpi_factor = self.windows[window_id].window_geom.dpi_factor;
+                    dpi_factor = match self.windows[window_id].window_state{
+                        CxWindowState::Create{..}=>{
+                            self.default_dpi_factor
+                        },
+                        CxWindowState::Created=>{
+                            self.windows[window_id].window_geom.dpi_factor
+                        },
+                        _=>1.0
+                    };
                     break;
                 },
                 CxPassDepOf::Pass(next_pass_id) => {

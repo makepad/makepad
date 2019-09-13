@@ -60,10 +60,8 @@ impl Cx {
                             // lets find path in deps
                             if dep_path == path {
                                 let vec_rec = unsafe {Vec::<u8>::from_raw_parts(vec_ptr, vec_len, vec_len)};
-                                let mut read = BinaryReader::new_from_vec(path.clone(), vec_rec);
-                                let result = CxFont::from_binary_reader(self, path.clone(), self.fonts[i].texture_id, &mut read);
-                                if let Ok(cxfont) = result {
-                                    self.fonts[i] = cxfont;
+                                if let Err(_) = self.fonts[i].load_from_ttf_bytes(&vec_rec) {
+                                    println!("Error loading font {} ", path);
                                 }
                                 continue;
                             }
@@ -81,6 +79,7 @@ impl Cx {
                         position: Vec2 {x: 0., y: 0.},
                         vr_is_presenting: false
                     };
+                    self.default_dpi_factor = self.platform.window_geom.dpi_factor;
                     self.vr_can_present = to_wasm.mu32() > 0;
                     
                     if self.windows.len() > 0 {
@@ -406,16 +405,15 @@ impl Cx {
                             // its a render window
                             windows_need_repaint -= 1;
                             let dpi_factor = self.platform.window_geom.dpi_factor;
-                            self.passes[*pass_id].set_dpi_factor(dpi_factor);
-                            self.passes[*pass_id].paint_dirty = false;
-                            self.draw_pass_to_canvas(*pass_id, self.platform.window_geom.vr_is_presenting);
+                            self.draw_pass_to_canvas(*pass_id, self.platform.window_geom.vr_is_presenting, dpi_factor);
                         }
                         CxPassDepOf::Pass(parent_pass_id) => {
                             let dpi_factor = self.get_delegated_dpi_factor(parent_pass_id);
-                            self.passes[*pass_id].set_dpi_factor(dpi_factor);
-                            // TODO
+                            self.draw_pass_to_texture(*pass_id, dpi_factor);
                         },
-                        CxPassDepOf::None => ()
+                        CxPassDepOf::None => {
+                            self.draw_pass_to_texture(*pass_id, 1.0);
+                        }
                     }
                 }
             }
@@ -1011,16 +1009,53 @@ impl FromWasm {
         self.mu32(20);
     }
     
-    pub fn begin_frame(&mut self) {
+    pub fn begin_draw_commands(&mut self) {
         self.fit(1);
         self.mu32(21);
     }
     
-    pub fn end_frame(&mut self) {
+    pub fn end_draw_commands(&mut self) {
         self.fit(1);
         self.mu32(22);
     }
     
+    pub fn begin_render_targets(&mut self, is_main_canvas: bool, width: usize, height: usize) {
+        self.fit(4);
+        self.mu32(23);
+        self.mu32(if is_main_canvas {1} else {0});
+        self.mu32(width as u32);
+        self.mu32(height as u32);
+    }
+    
+    pub fn add_color_target(&mut self, texture_id: usize, init_only: bool, color: Color) {
+        self.fit(7);
+        self.mu32(24);
+        self.mu32(texture_id as u32);
+        self.mu32(if init_only {1} else {0});
+        self.mf32(color.r);
+        self.mf32(color.g);
+        self.mf32(color.b);
+        self.mf32(color.a);
+    }
+    
+    pub fn set_depth_target(&mut self, texture_id: usize, init_only: bool, depth: f32) {
+        self.fit(4);
+        self.mu32(25);
+        self.mu32(texture_id as u32);
+        self.mu32(if init_only {1} else {0});
+        self.mf32(depth);
+    }
+    
+    pub fn end_render_targets(&mut self) {
+        self.fit(1);
+        self.mu32(26);
+    }
+    
+    pub fn set_default_depth_and_blend_mode(&mut self){
+        self.fit(1);
+        self.mu32(27);
+    }
+
     fn add_string(&mut self, msg: &str) {
         let len = msg.chars().count();
         self.fit(len + 1);

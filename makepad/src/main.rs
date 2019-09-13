@@ -371,7 +371,7 @@ impl App {
                                 DockTab {
                                     closeable: true,
                                     title: "main.rs".to_string(),
-                                    item: Panel::FileEditor {path: "examples/quad/src/main.rs".to_string(), editor_id: 1}
+                                    item: Panel::FileEditor {path: "examples/quad_example/src/main.rs".to_string(), editor_id: 1}
                                 }
                             ],
                         }),

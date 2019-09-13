@@ -165,7 +165,7 @@ impl Text {
         
         let cxfont = &mut cx.fonts[font_id];
         
-        let dpi_factor = 2.0;
+        let dpi_factor = cx.current_dpi_factor;
 
         let geom_y =  (geom_y * dpi_factor).floor() / dpi_factor;
         let font_size = (self.font_size * 10.).ceil()/10.;

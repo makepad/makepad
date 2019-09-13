@@ -308,6 +308,10 @@ impl Cx {
                 pix_out.push_str("precision highp int;\n");
             }
         }
+
+        vtx_out.push_str("vec4 texture2Dflip(sampler2D sampler, vec2 pos){return texture2D(sampler, vec2(pos.x, 1.0-pos.y));}\n");
+        pix_out.push_str("vec4 texture2Dflip(sampler2D sampler, vec2 pos){return texture2D(sampler, vec2(pos.x, 1.0-pos.y));}\n");
+
         // ok now define samplers from our sh.
         let texture_slots = sg.flat_vars(ShVarStore::Texture);
         let geometries = sg.flat_vars(ShVarStore::Geometry);
@@ -499,7 +503,7 @@ impl<'a> SlCx<'a> {
             "greater_than_equal" => return MapCallResult::Rename("greaterThanEqual".to_string()),
             "not_equal" => return MapCallResult::Rename("notEqual".to_string()),
             "sample2d" => {
-                return MapCallResult::Rename("texture2D".to_string())
+                return MapCallResult::Rename("texture2Dflip".to_string())
             },
             "fmod" => {
                 return MapCallResult::Rename("mod".to_string())

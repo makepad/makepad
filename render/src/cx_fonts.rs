@@ -226,13 +226,7 @@ impl CxAfterDraw {
     pub fn style(cx: &mut Cx) -> Self {
         cx.fonts_atlas.texture_size = Vec2 {x: 4096.0, y: 4096.0};
         let mut atlas_texture = Texture::default();
-        atlas_texture.set_desc(cx, Some(TextureDesc {
-            format: TextureFormat::RenderBGRA,
-            width: None,
-            height: None,
-            multisample: None
-        }));
-        
+        atlas_texture.set_desc(cx, None);
         cx.fonts_atlas.texture_id = atlas_texture.texture_id.unwrap();
         
         Self {

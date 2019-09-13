@@ -6,3 +6,11 @@ members = [
     "examples/text_example",
     "examples/quad_example"
 ]
+
+
+[profile.release]
+lto = true
+opt-level = 'z'
+panic = "abort"
+debug = true
+codegen-units = 1

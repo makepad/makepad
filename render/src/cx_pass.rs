@@ -20,25 +20,29 @@ impl Pass {
         let pass_id = self.pass_id.unwrap();
         
         if let Some(window_id) = cx.window_stack.last() {
-            let cxwindow = &mut cx.windows[*window_id];
-            if cxwindow.main_pass_id.is_none() { // we are the main pass of a window
+            if cx.windows[*window_id].main_pass_id.is_none() { // we are the main pass of a window
                 let cxpass = &mut cx.passes[pass_id];
-                cxwindow.main_pass_id = Some(pass_id);
+                cx.windows[*window_id].main_pass_id = Some(pass_id);
                 cxpass.dep_of = CxPassDepOf::Window(*window_id);
-                cxpass.pass_size = cxwindow.get_inner_size();
+                cxpass.pass_size = cx.windows[*window_id].get_inner_size();
+                cx.current_dpi_factor = cx.get_delegated_dpi_factor(pass_id);
             }
-            else if let Some(dep_of_pass_id) = cx.pass_stack.last() {
-                cx.passes[pass_id].dep_of = CxPassDepOf::Pass(*dep_of_pass_id);
-                cx.passes[pass_id].pass_size = cx.passes[*dep_of_pass_id].pass_size
+            else if let Some(dep_of_pass_id) = cx.pass_stack.last() { 
+                let dep_of_pass_id = *dep_of_pass_id;
+                cx.passes[pass_id].dep_of = CxPassDepOf::Pass(dep_of_pass_id);
+                cx.passes[pass_id].pass_size = cx.passes[dep_of_pass_id].pass_size;
+                cx.current_dpi_factor = cx.get_delegated_dpi_factor(dep_of_pass_id);
             }
             else {
                 cx.passes[pass_id].dep_of = CxPassDepOf::None;
                 cx.passes[pass_id].override_dpi_factor = Some(1.0);
+                cx.current_dpi_factor = 1.0;
             }
         }
         else {
             cx.passes[pass_id].dep_of = CxPassDepOf::None;
             cx.passes[pass_id].override_dpi_factor = Some(1.0);
+            cx.current_dpi_factor = 1.0;
         }
         
         let cxpass = &mut cx.passes[pass_id];
@@ -53,6 +57,7 @@ impl Pass {
     pub fn override_dpi_factor(&mut self, cx: &mut Cx, dpi_factor:f32){
         if let Some(pass_id) = self.pass_id {
             cx.passes[pass_id].override_dpi_factor = Some(dpi_factor);
+            cx.current_dpi_factor = dpi_factor;
         }
     }
     
@@ -92,6 +97,9 @@ impl Pass {
     
     pub fn end_pass(&mut self, cx: &mut Cx) {
         cx.pass_stack.pop();
+        if cx.pass_stack.len()>0{
+            cx.current_dpi_factor = cx.get_delegated_dpi_factor(*cx.pass_stack.last().unwrap());
+        }
     }
     
     pub fn redraw_pass_area(&mut self, cx: &mut Cx) {

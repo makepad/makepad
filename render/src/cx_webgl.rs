@@ -70,30 +70,78 @@ impl Cx {
             }
         }
     }
-    
-    pub fn draw_pass_to_canvas(&mut self, pass_id: usize, vr_is_presenting:bool) {
-        let view_id = self.passes[pass_id].main_view_id.unwrap();
+
+    pub fn setup_pass_render_targets(&mut self, pass_id: usize, inherit_dpi_factor: f32, is_main_canvas:bool) {
         let pass_size = self.passes[pass_id].pass_size;
-        
-        // this ortho matrix needs to be a 3D one now
         self.passes[pass_id].set_ortho_matrix(Vec2::zero(), pass_size);
         self.passes[pass_id].uniform_camera_view(&Mat4::identity());
-
-        if self.passes[pass_id].color_textures.len()>0 {
-            let color_texture = &self.passes[pass_id].color_textures[0];
-            if let Some(color) = color_texture.clear_color {
-                self.platform.from_wasm.clear(color.r, color.g, color.b, color.a);
+        self.passes[pass_id].paint_dirty = false;
+        
+        let dpi_factor = if let Some(override_dpi_factor) = self.passes[pass_id].override_dpi_factor{
+            override_dpi_factor
+        }
+        else{
+            inherit_dpi_factor
+        };
+        self.passes[pass_id].set_dpi_factor(dpi_factor);
+        
+        self.platform.from_wasm.begin_render_targets(is_main_canvas, (pass_size.x * dpi_factor) as usize, (pass_size.y * dpi_factor) as usize);
+        
+        
+        for color_texture in &self.passes[pass_id].color_textures{
+            match color_texture.clear_color{
+                ClearColor::InitWith(color)=>{
+                    self.platform.from_wasm.add_color_target(color_texture.texture_id, true, color);
+                },
+                ClearColor::ClearWith(color)=>{
+                    self.platform.from_wasm.add_color_target(color_texture.texture_id, false, color);
+                }
             }
         }
         
-        self.platform.from_wasm.begin_frame();
+        // attach/clear depth buffers, if any
+        if let Some(depth_texture_id) = self.passes[pass_id].depth_texture {
+            match self.passes[pass_id].clear_depth{
+                ClearDepth::InitWith(depth_clear)=>{
+                    self.platform.from_wasm.set_depth_target(depth_texture_id, true, depth_clear as f32);
+                },
+                ClearDepth::ClearWith(depth_clear)=>{
+                    self.platform.from_wasm.set_depth_target(depth_texture_id, false, depth_clear as f32);
+                }
+            }
+        }
+                // set the default depth and blendmode
+        self.platform.from_wasm.set_default_depth_and_blend_mode();
+        
+        self.platform.from_wasm.end_render_targets();
+    }
+    
+    pub fn draw_pass_to_canvas(&mut self, pass_id: usize, vr_is_presenting:bool, dpi_factor:f32) {
+        let view_id = self.passes[pass_id].main_view_id.unwrap();
+        
+        self.setup_pass_render_targets(pass_id,  dpi_factor, true);
+        
         let mut zbias = 0.0;
         let zbias_step = self.passes[pass_id].zbias_step;
         
+        self.platform.from_wasm.begin_draw_commands();
         self.render_view(pass_id, view_id, vr_is_presenting, &mut zbias, zbias_step);
-
-        self.platform.from_wasm.end_frame();
+        self.platform.from_wasm.end_draw_commands();
     }
+
+    pub fn draw_pass_to_texture(&mut self, pass_id: usize, dpi_factor:f32) {
+        let view_id = self.passes[pass_id].main_view_id.unwrap();
+        
+        self.setup_pass_render_targets(pass_id, dpi_factor, false);
+        
+        let mut zbias = 0.0;
+        let zbias_step = self.passes[pass_id].zbias_step;
+        
+        self.platform.from_wasm.begin_draw_commands();
+        self.render_view(pass_id, view_id, false, &mut zbias, zbias_step);
+        self.platform.from_wasm.end_draw_commands();
+    }
+
     
     pub fn webgl_compile_all_shaders(&mut self) {
         for (shader_id, sh) in self.shaders.iter_mut().enumerate() {

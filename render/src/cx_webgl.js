@@ -1,10 +1,11 @@
 (function(root) {
     var user_agent = window.navigator.userAgent;
-    var is_mobile_safari = user_agent.match(/Mobile\/\w+ Safari/i);
+    var is_mobile_safari = window.navigator.platform.match(/iPhone|iPad/i);
     var is_android = user_agent.match(/Android/i);
     var is_add_to_homescreen_safari = is_mobile_safari && navigator.standalone;
     var is_touch_device = ('ontouchstart' in window || navigator.maxTouchPoints);
     var is_firefox = navigator.userAgent.toLowerCase().indexOf('firefox') > -1;
+
     // message we can send to wasm
     class ToWasm {
         constructor(wasm_app) {
@@ -435,11 +436,9 @@
                 }
                 var sw = canvas.width = w * dpi_factor;
                 var sh = canvas.height = h * dpi_factor;
-                canvas.style.width = w + 'px';
-                canvas.style.height = h + 'px';
+
                 this.gl.viewport(0, 0, sw, sh);
-                document.body.scrollTop = 0;
-                document.body.scrollLeft = 0;
+
                 this.dpi_factor = dpi_factor;
                 this.width = canvas.offsetWidth;
                 this.height = canvas.offsetHeight;
@@ -592,6 +591,7 @@
         }
         
         init_webgl_context() {
+            
             window.addEventListener('resize', _ => {
                 this.on_screen_resize()
             })
@@ -872,14 +872,14 @@
             
             var mouse_buttons_down = [];
             canvas.addEventListener('mousedown', e => {
-                e.preventDefault();
+                //e.preventDefault();
                 this.focus_keyboard_input();
                 mouse_buttons_down[e.button] = true;
                 this.to_wasm.finger_down(mouse_to_finger(e))
                 this.do_wasm_io();
             })
             window.addEventListener('mouseup', e => {
-                e.preventDefault();
+                //e.preventDefault();
                 mouse_buttons_down[e.button] = false;
                 this.to_wasm.finger_up(mouse_to_finger(e))
                 this.do_wasm_io();
@@ -915,8 +915,8 @@
                 e.preventDefault()
                 return false
             })
-            window.addEventListener('touchstart', e => {
-                //e.preventDefault()
+            canvas.addEventListener('touchstart', e => {
+                e.preventDefault()
                 let fingers = touch_to_finger_alloc(e);
                 for (let i = 0; i < fingers.length; i ++) {
                     this.to_wasm.finger_down(fingers[i])
@@ -924,7 +924,7 @@
                 this.do_wasm_io();
                 return false
             })
-            window.addEventListener('touchmove', e => {
+            canvas.addEventListener('touchmove', e => {
                 //e.preventDefault();
                 var fingers = touch_to_finger_lookup(e);
                 for (let i = 0; i < fingers.length; i ++) {
@@ -942,7 +942,7 @@
                 this.do_wasm_io();
                 return false
             }
-            window.addEventListener('touchend', end_cancel_leave);
+            canvas.addEventListener('touchend', end_cancel_leave);
             canvas.addEventListener('touchcancel', end_cancel_leave);
             canvas.addEventListener('touchleave', end_cancel_leave);
             
@@ -1022,8 +1022,8 @@
                     + "-webkit-appearance: none;\n"
                 + "}"
             document.body.appendChild(style)
-            ta.style.left = -100
-            ta.style.top = -100
+            ta.style.left = -100+'px'
+            ta.style.top = -100+'px'
             ta.style.height = 1
             ta.style.width = 1
             
@@ -1174,8 +1174,8 @@
             var pos = this.text_area_pos;
             var ta = this.text_area;
             if (ta) {
-                ta.style.left = Math.round(pos.x) + 4; // + "px";
-                ta.style.top = Math.round(pos.y); // + "px"
+                ta.style.left = (Math.round(pos.x)-4) + "px";
+                ta.style.top = Math.round(pos.y) + "px"
             }
         }
         
@@ -1334,34 +1334,98 @@
             gl.ANGLE_instanced_arrays.drawElementsInstancedANGLE(gl.TRIANGLES, indices, gl.UNSIGNED_INT, 0, instances);
         }
         
-        begin_frame() {
-            // mark parse position for VR multiple eyes
-            this.vr_begin_parse = this.parse;
-        }
         
-        end_frame() {
-            // mark parse end position
-            if (this.vr_is_presenting && !this.multipass_updated_buffers) {
-                this.multipass_updated_buffers = true;
-                // set up the right eye
-                this.gl.viewport(this.canvas.width * 0.5, 0, this.canvas.width * 0.5, this.canvas.height);
-                // jump the parser back to begin_frame
-                this.parse = this.vr_begin_parse;
-            }
-        }
-        
-        clear(r, g, b, a) {
-            var gl = this.gl;
-            this.multipass_updated_buffers = false;
-            gl.viewport(0, 0, this.canvas.width, this.canvas.height);
+        set_default_depth_and_blend_mode(){
+            let gl = this.gl
             gl.enable(gl.DEPTH_TEST);
             gl.depthFunc(gl.LEQUAL);
             gl.blendEquationSeparate(gl.FUNC_ADD, gl.FUNC_ADD);
             gl.blendFuncSeparate(gl.ONE, gl.ONE_MINUS_SRC_ALPHA, gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
             gl.enable(gl.BLEND);
-            gl.clearColor(r, g, b, a);
-            gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
-            if (this.vr_is_presenting) { // set up the left eye
+        }
+        
+        begin_render_targets(is_main_canvas, width, height){
+            this.is_main_canvas = is_main_canvas;
+            if(is_main_canvas){
+                this.target_width = this.canvas.width;
+                this.target_height = this.canvas.height;
+            }
+            else{
+                this.target_width = width;
+                this.target_height = height;
+            }
+            this.color_targets = 0;
+            this.clear_flags = 0;
+        }
+        
+        add_color_target(texture_id, init_only, r, g, b, a){
+            // if use_default
+            this.clear_r = r;
+            this.clear_g = g;
+            this.clear_b = b;
+            this.clear_a = a;
+            var gl = this.gl;
+            if(this.is_main_canvas && this.color_targets == 0){ 
+                this.clear_flags = gl.COLOR_BUFFER_BIT;
+                gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+            }
+            else{ // we have to possibly alloc or resize texture_id
+                var gl_tex = this.textures[texture_id] || (this.textures[texture_id] = gl.createTexture());
+
+                // resize or create texture
+                if(gl_tex.mp_width != this.target_width || gl_tex.mp_height != this.target_height){
+                    gl.bindTexture(gl.TEXTURE_2D, gl_tex)
+                    this.clear_flags = gl.COLOR_BUFFER_BIT;
+
+                    gl_tex.mp_width = this.target_width
+                    gl_tex.mp_height = this.target_height
+                    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR)
+                    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR)
+                    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE)
+                    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE)
+                    
+                    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl_tex.mp_width, gl_tex.mp_height, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+                }
+                else if(!init_only){
+                    this.clear_flags = gl.COLOR_BUFFER_BIT;
+                }
+
+                if(!gl_tex.fb){
+                    gl_tex.fb = gl.createFramebuffer();
+                }
+                
+                gl.bindFramebuffer(gl.FRAMEBUFFER, gl_tex.fb);
+                gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, gl_tex, 0)
+            }
+            this.color_targets += 1;
+        }
+        
+        set_depth_target(texture_id, init_only, depth){
+            this.clear_depth = depth;
+            if(this.is_main_canvas){ 
+                this.clear_flags = this.gl.DEPTH_BUFFER_BIT;
+            }
+            else{
+                console.log("IMPLEMENT DEPTH TEXTURE TARGETS ON WEBGL")
+            }
+        }
+        
+        end_render_targets(){
+            var gl = this.gl;
+            
+            // process the actual 'clear'
+            gl.viewport(0, 0, this.target_width, this.target_height);
+
+            // check if we need to clear color, and depth
+            // clear it
+            if(this.clear_flags){
+                gl.clearColor(this.clear_r, this.clear_g, this.clear_b, this.clear_a);
+                gl.clearDepth(this.clear_depth);
+                gl.clear(this.clear_flags);
+            }
+            this.multipass_updated_buffers = false;
+
+            if (this.is_main_canvas && this.vr_is_presenting) { // set up the left eye
                 // set the viewport to the whole thing
                 gl.viewport(0, 0, this.canvas.width * 0.5, this.canvas.height);
                 
@@ -1380,8 +1444,21 @@
                 mat4_multiply(this.vr_left_view_matrix, this.vr_frame_data.leftViewMatrix, inv);
                 mat4_multiply(this.vr_right_view_matrix, this.vr_frame_data.rightViewMatrix, inv);
             }
-            else {
-                // set the viewport
+        }
+        
+        begin_draw_commands() {
+            // mark parse position for VR multiple eyes
+            this.vr_begin_parse = this.parse;
+        }
+        
+        end_draw_commands() {
+            // mark parse end position
+            if (this.is_main_canvas && this.vr_is_presenting && !this.multipass_updated_buffers) {
+                this.multipass_updated_buffers = true;
+                // set up the right eye
+                this.gl.viewport(this.canvas.width * 0.5, 0, this.canvas.width * 0.5, this.canvas.height);
+                // jump the parser back to begin_frame
+                this.parse = this.vr_begin_parse;
             }
         }
         
@@ -1576,11 +1653,38 @@
         function vr_stop_presenting_20(self) {
             self.vr_stop_presenting();
         },
-        function begin_frame_21(self) {
-            self.begin_frame();
+        function begin_draw_commands_21(self) {
+            self.begin_draw_commands();
         },
-        function end_frame_22(self) {
-            self.end_frame();
+        function end_draw_commands_22(self) {
+            self.end_draw_commands();
+        },
+        function begin_render_targets_23(self) {
+            let is_main_canvas = self.mu32[self.parse++];
+            let width = self.mu32[self.parse++];
+            let height = self.mu32[self.parse++];
+            self.begin_render_targets(is_main_canvas, width, height);
+        },
+        function add_color_target_24(self){
+            let texture_id = self.mu32[self.parse++];
+            let init_only = self.mu32[self.parse++];
+            let r = self.mf32[self.parse++];
+            let g = self.mf32[self.parse++];
+            let b = self.mf32[self.parse++];
+            let a = self.mf32[self.parse++];
+            self.add_color_target(texture_id, init_only, r, g, b, a)
+        },
+        function set_depth_target_25(self){
+            let texture_id = self.mu32[self.parse++];
+            let init_only = self.mu32[self.parse++];
+            let depth = self.mf32[self.parse++];
+            self.set_depth_target(texture_id, init_only, depth);
+        },
+        function end_render_targets_26(self) {
+            self.end_render_targets();
+        },
+        function set_default_depth_and_blend_mode_27(self) {
+            self.set_default_depth_and_blend_mode();
         }
     ]
     
