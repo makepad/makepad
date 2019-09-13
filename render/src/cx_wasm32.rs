@@ -333,10 +333,8 @@ impl Cx {
                         self.call_frame_event(&mut event_handler, time);
                     }
                 },
-                21 => { // paint_dirty
-                    for (_pass_id, cxpass) in self.passes.iter_mut().enumerate() {
-                        cxpass.paint_dirty = true;
-                    }
+                21 => { // paint_dirty, only set the passes of the main window to dirty
+                    self.passes[self.windows[0].main_pass_id.unwrap()].paint_dirty = true;
                 }
                 _ => {
                     panic!("Message unknown")

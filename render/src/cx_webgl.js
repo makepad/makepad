@@ -1288,7 +1288,7 @@
             // also possibly use webGL2 uniform buffers. For now this will suffice for webGL 1 compat
             let uniforms_cx = shader.uniforms_cx;
             // if vr_presenting
-            if (this.vr_is_presenting) {
+            if (this.is_main_canvas && this.vr_is_presenting) {
                 // the first 2 matrices are project and view
                 if (this.multipass_updated_buffers) {
                     gl.uniformMatrix4fv(uniforms_cx[0].loc, false, this.vr_frame_data.rightProjectionMatrix)
@@ -1403,7 +1403,7 @@
         set_depth_target(texture_id, init_only, depth){
             this.clear_depth = depth;
             if(this.is_main_canvas){ 
-                this.clear_flags = this.gl.DEPTH_BUFFER_BIT;
+                this.clear_flags |= this.gl.DEPTH_BUFFER_BIT;
             }
             else{
                 console.log("IMPLEMENT DEPTH TEXTURE TARGETS ON WEBGL")
