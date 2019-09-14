@@ -174,8 +174,8 @@ struct JsonFile {
 impl FileTree {
     pub fn style(cx: &mut Cx) -> Self {
         Self {
-            row_height: 20.,
-            font_size: 8.0,
+            row_height: 24.,
+            font_size: 10.0,
             row_padding: Padding {l: 5., t: 0., r: 0., b: 1.},
             root_node: FileNode::Folder {name: "".to_string(), state: NodeState::Open, draw: None, folder: vec![
                 FileNode::File {name: "loading...".to_string(), draw: None},
@@ -244,8 +244,8 @@ impl FileTree {
                     return df_stroke(color, 1.);
                 }
                 else { // its a folder
-                    df_box(0. * w, 0.39 * h, 0.87 * w, 0.39 * h, 0.75);
-                    df_box(0. * w, 0.32 * h, 0.5 * w, 0.3 * h, 1.);
+                    df_box(0. * w, 0.35 * h, 0.87 * w, 0.39 * h, 0.75);
+                    df_box(0. * w, 0.28 * h, 0.5 * w, 0.3 * h, 1.);
                     df_union();
                     // ok so.
                     return df_fill(color);
