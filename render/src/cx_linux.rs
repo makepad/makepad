@@ -184,6 +184,7 @@ impl Cx{
                                                 opengl_window,
                                                 &opengl_cx,
                                             ){
+                                                // paint it again a few times, apparently this is necessary
                                                 self.passes[*pass_id].paint_dirty = true;
                                                 paint_dirty = true;
                                             }
@@ -191,14 +192,19 @@ impl Cx{
                                     }
                                     CxPassDepOf::Pass(parent_pass_id) => {
                                         let dpi_factor = self.get_delegated_dpi_factor(parent_pass_id);
-                                        self.passes[*pass_id].set_dpi_factor(dpi_factor);
                                         self.draw_pass_to_texture(
                                             *pass_id,
                                             dpi_factor,
                                             &opengl_cx,
                                         );
                                     },
-                                    CxPassDepOf::None => ()
+                                    CxPassDepOf::None => {
+                                        self.draw_pass_to_texture(
+                                            *pass_id,
+                                            1.0,
+                                            &opengl_cx,
+                                        );
+                                    }
                                 }
                             }
                         }

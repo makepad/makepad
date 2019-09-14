@@ -183,9 +183,13 @@ impl Cx {
                                                 &metal_window.core_animation_layer,
                                                 &mut metal_cx,
                                             );
+                                            // call redraw if we guessed the dpi wrong on startup
                                             if metal_window.first_draw{
                                                 metal_window.first_draw = false;
-                                                self.redraw_pass_and_sub_passes(*pass_id);
+                                                if dpi_factor != self.default_dpi_factor{
+                                                    self.redraw_pass_and_sub_passes(*pass_id);
+                                                }
+
                                             }
                                         }}
                                     }

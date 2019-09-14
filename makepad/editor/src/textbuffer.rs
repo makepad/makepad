@@ -108,7 +108,6 @@ impl TextBuffers {
                     // TODO HANDLE ERROR CASE
                     text_buffer.is_crlf = !utf8_data.find("\r\n").is_none();
                     text_buffer.lines = TextBuffer::split_string_to_lines(&utf8_data.to_string());
-                    println!("SENDING SIGNAL");
                     cx.send_signal(text_buffer.signal, SIGNAL_TEXTBUFFER_LOADED);
                 }
                 return true

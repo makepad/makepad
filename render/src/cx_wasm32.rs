@@ -1007,20 +1007,20 @@ impl FromWasm {
         self.mu32(20);
     }
     
-    pub fn begin_draw_commands(&mut self) {
+    pub fn mark_vr_draw_eye(&mut self) {
         self.fit(1);
         self.mu32(21);
     }
     
-    pub fn end_draw_commands(&mut self) {
+    pub fn loop_vr_draw_eye(&mut self) {
         self.fit(1);
         self.mu32(22);
     }
     
-    pub fn begin_render_targets(&mut self, is_main_canvas: bool, width: usize, height: usize) {
+    pub fn begin_render_targets(&mut self, pass_id: usize, width: usize, height: usize) {
         self.fit(4);
         self.mu32(23);
-        self.mu32(if is_main_canvas {1} else {0});
+        self.mu32(pass_id as u32);
         self.mu32(width as u32);
         self.mu32(height as u32);
     }
@@ -1053,6 +1053,17 @@ impl FromWasm {
         self.fit(1);
         self.mu32(27);
     }
+
+    pub fn begin_main_canvas(&mut self,color: Color, depth:f32) {
+        self.fit(6);
+        self.mu32(28);
+        self.mf32(color.r);
+        self.mf32(color.g);
+        self.mf32(color.b);
+        self.mf32(color.a);
+        self.mf32(depth);
+    }
+
 
     fn add_string(&mut self, msg: &str) {
         let len = msg.chars().count();

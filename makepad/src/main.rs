@@ -10,8 +10,8 @@ use std::collections::HashMap;
 use serde::*;
 
 #[derive(Clone, Serialize, Deserialize)]
-enum Panel { 
-    RustCompiler,     
+enum Panel {
+    RustCompiler,
     Keyboard,
     FileTree,
     FileEditorTarget,
@@ -80,8 +80,7 @@ impl AppWindow {
             file_tree: FileTree::style(cx),
             dock: Dock ::style(cx),
         }
-    }  
-
+    }
     
     fn handle_app_window(&mut self, cx: &mut Cx, event: &mut Event, window_index: usize, app_global: &mut AppGlobal) {
         
@@ -120,7 +119,6 @@ impl AppWindow {
                         RustCompilerEvent::SelectMessage {path} => {
                             // just make it open an editor
                             file_tree_event = FileTreeEvent::SelectFile {path: path};
-                            
                         },
                         _ => ()
                     }
@@ -129,7 +127,6 @@ impl AppWindow {
                     self.keyboard.handle_keyboard(cx, event, &mut app_global.text_buffers);
                 },
                 Panel::FileEditorTarget => {
-                    
                 },
                 Panel::LocalTerminal {terminal_id, ..} => {
                     if let Some(local_terminal) = &mut self.local_terminals.get(*terminal_id) {
@@ -207,7 +204,8 @@ impl AppWindow {
                 Panel::Keyboard => {
                     self.keyboard.draw_keyboard(cx);
                 },
-                Panel::FileEditorTarget => {},
+                Panel::FileEditorTarget => {
+                },
                 Panel::FileTree => {
                     self.file_tree.draw_file_tree(cx);
                 },

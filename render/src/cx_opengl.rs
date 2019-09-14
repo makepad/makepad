@@ -49,7 +49,7 @@ impl Cx {
                     draw_call.uniforms_dirty = false;
                 }
                 
-                unsafe { 
+                unsafe {
                     gl::UseProgram(shp.program);
                     gl::BindVertexArray(draw_call.platform.vao.unwrap());
                     let instances = draw_call.instance.len() / sh.mapping.instance_slots;
@@ -69,10 +69,10 @@ impl Cx {
                         }
                         // get the loc
                         gl::ActiveTexture(gl::TEXTURE0 + i as u32);
-                        if let Some(texture) = cxtexture.platform.gl_texture{
+                        if let Some(texture) = cxtexture.platform.gl_texture {
                             gl::BindTexture(gl::TEXTURE_2D, texture);
                         }
-                        else{
+                        else {
                             gl::BindTexture(gl::TEXTURE_2D, 0);
                         }
                     }
@@ -102,22 +102,21 @@ impl Cx {
                 //let sh = &self.shaders[draw_call.shader_id];
                 //let shp = sh.platform.as_ref().unwrap();
                 
-                if draw_call.instance_dirty || draw_call.uniforms_dirty{
+                if draw_call.instance_dirty || draw_call.uniforms_dirty {
                     view_bounds.add_rect(&cxview.rect);
                 }
             }
         }
     }
     
-    
     pub fn draw_pass_to_window(
         &mut self,
         pass_id: usize,
-        _dpi_factor: f32,
+        dpi_factor: f32,
         xlib_app: &XlibApp,
         opengl_window: &mut OpenglWindow,
         opengl_cx: &OpenglCx,
-    )->bool {
+    ) -> bool {
         let view_id = self.passes[pass_id].main_view_id.unwrap();
         
         let mut view_bounds = ViewBounds::new();
@@ -126,21 +125,21 @@ impl Cx {
         
         let full_repaint = view_bounds.max_x - view_bounds.min_x > opengl_window.window_geom.inner_size.x - 100.
             && view_bounds.max_y - view_bounds.min_y > opengl_window.window_geom.inner_size.y - 100. ||
-            opengl_window.opening_repaint_count < 3;
-        if opengl_window.opening_repaint_count < 3{ // for some reason the first repaint doesn't arrive on the window
-             opengl_window.opening_repaint_count +=1;
-             init_repaint = true;
-        } 
+        opengl_window.opening_repaint_count < 3;
+        if opengl_window.opening_repaint_count < 3 { // for some reason the first repaint doesn't arrive on the window
+            opengl_window.opening_repaint_count += 1;
+            init_repaint = true;
+        }
         let window;
         let view_rect;
         if full_repaint {
             opengl_window.xlib_window.hide_child_windows();
-             
+            
             window = opengl_window.xlib_window.window.unwrap();
             
             let pass_size = self.passes[pass_id].pass_size;
             self.passes[pass_id].set_ortho_matrix(Vec2::zero(), pass_size);
-            self.passes[pass_id].uniform_camera_view(&Mat4::identity());
+            
             let pix_width = opengl_window.window_geom.inner_size.x * opengl_window.window_geom.dpi_factor;
             let pix_height = opengl_window.window_geom.inner_size.y * opengl_window.window_geom.dpi_factor;
             
@@ -188,8 +187,7 @@ impl Cx {
                 Vec2 {x: view_bounds.min_x, y: view_bounds.min_y},
                 Vec2 {x: pix_width / opengl_window.window_geom.dpi_factor, y: pix_height / opengl_window.window_geom.dpi_factor}
             );
-            self.passes[pass_id].uniform_camera_view(&Mat4::identity());
-
+            
             unsafe {
                 (opengl_cx.glx.glXMakeCurrent)(xlib_app.display, window, opengl_cx.context);
                 gl::Viewport(0, 0, pix_width as i32, pix_height as i32);
@@ -197,34 +195,33 @@ impl Cx {
             view_rect = Rect {x: view_bounds.min_x, y: view_bounds.min_y, w: view_bounds.max_x - view_bounds.min_x, h: view_bounds.max_y - view_bounds.min_y}
         }
         
-        unsafe {
-            gl::Disable(gl::DEPTH_TEST);
-            gl::BlendEquationSeparate(gl::FUNC_ADD, gl::FUNC_ADD);
-            gl::BlendFuncSeparate(gl::ONE, gl::ONE_MINUS_SRC_ALPHA, gl::ONE, gl::ONE_MINUS_SRC_ALPHA);
-            gl::Enable(gl::BLEND);
-        }
-        
-        if self.passes[pass_id].color_textures.len()>0 {
-            let color_texture = &self.passes[pass_id].color_textures[0];
-            if let Some(color) = color_texture.clear_color {
-                unsafe {
-                    gl::ClearColor(color.r, color.g, color.b, color.a);
-                    gl::Clear(gl::COLOR_BUFFER_BIT | gl::DEPTH_BUFFER_BIT);
-                }
-            }
-            else { // dont clear
-            }
+        self.passes[pass_id].uniform_camera_view(&Mat4::identity());
+        self.passes[pass_id].set_dpi_factor(dpi_factor);
+        // set up the
+        let clear_color = if self.passes[pass_id].color_textures.len() == 0 {
+            Color::zero()
         }
         else {
-            unsafe {
-                gl::ClearColor(0.0, 0.0, 0.0, 0.0);
-                gl::Clear(gl::COLOR_BUFFER_BIT | gl::DEPTH_BUFFER_BIT);
+            match self.passes[pass_id].color_textures[0].clear_color {
+                ClearColor::InitWith(color) => color,
+                ClearColor::ClearWith(color) => color
             }
+        };
+        let clear_depth = match self.passes[pass_id].clear_depth {
+            ClearDepth::InitWith(depth) => depth,
+            ClearDepth::ClearWith(depth) => depth
+        };
+        
+        unsafe {
+            gl::BindFramebuffer(gl::FRAMEBUFFER, 0);
+            gl::ClearDepth(clear_depth);
+            gl::ClearColor(clear_color.r, clear_color.g, clear_color.b, clear_color.a);
+            gl::Clear(gl::COLOR_BUFFER_BIT | gl::DEPTH_BUFFER_BIT);
         }
-
+        
         let mut zbias = 0.0;
         let zbias_step = self.passes[pass_id].zbias_step;
-
+        
         self.render_view(pass_id, view_id, full_repaint, &view_rect, &opengl_cx, &mut zbias, zbias_step);
         
         unsafe {
@@ -235,14 +232,112 @@ impl Cx {
     
     pub fn draw_pass_to_texture(
         &mut self,
-        _pass_id: usize,
-        _dpi_factor: f32,
-        _opengl_cx: &OpenglCx,
+        pass_id: usize,
+        inherit_dpi_factor: f32,
+        opengl_cx: &OpenglCx,
     ) {
-        //let view_id = self.passes[pass_id].main_view_id.unwrap();
-        //let _pass_size = self.passes[pass_id].pass_size;
         
-        /*
+        let pass_size = self.passes[pass_id].pass_size;
+        self.passes[pass_id].set_ortho_matrix(Vec2::zero(), pass_size);
+        self.passes[pass_id].uniform_camera_view(&Mat4::identity());
+        self.passes[pass_id].paint_dirty = false;
+        
+        let dpi_factor = if let Some(override_dpi_factor) = self.passes[pass_id].override_dpi_factor {
+            override_dpi_factor
+        }
+        else {
+            inherit_dpi_factor
+        };
+        self.passes[pass_id].set_dpi_factor(dpi_factor);
+        
+        let mut clear_color = Color::zero();
+        let mut clear_depth = 1.0;
+        let mut clear_flags = 0;
+        
+        // make a framebuffer
+        if self.passes[pass_id].platform.gl_framebuffer.is_none() {
+            unsafe {
+                let mut gl_framebuffer = mem::uninitialized();
+                gl::GenFramebuffers(1, &mut gl_framebuffer);
+                self.passes[pass_id].platform.gl_framebuffer = Some(gl_framebuffer);
+            }
+        }
+        
+        // bind the framebuffer
+        unsafe {
+            gl::BindFramebuffer(gl::FRAMEBUFFER, self.passes[pass_id].platform.gl_framebuffer.unwrap());
+        }
+        
+        for (index, color_texture) in self.passes[pass_id].color_textures.iter().enumerate() {
+            match color_texture.clear_color {
+                ClearColor::InitWith(color) => {
+                    if opengl_cx.update_platform_render_target(&mut self.textures[color_texture.texture_id], dpi_factor, pass_size, false) {
+                        clear_color = color;
+                        clear_flags = gl::COLOR_BUFFER_BIT;
+                    }
+                },
+                ClearColor::ClearWith(color) => {
+                    opengl_cx.update_platform_render_target(&mut self.textures[color_texture.texture_id], dpi_factor, pass_size, false);
+                    clear_color = color;
+                    clear_flags = gl::COLOR_BUFFER_BIT;
+                }
+            }
+            if let Some(gl_texture) = self.textures[color_texture.texture_id].platform.gl_texture {
+                unsafe {
+                    gl::FramebufferTexture2D(gl::FRAMEBUFFER, gl::COLOR_ATTACHMENT0 + index as u32, gl::TEXTURE_2D, gl_texture, 0);
+                }
+            }
+        }
+        
+        // attach/clear depth buffers, if any
+        if let Some(depth_texture_id) = self.passes[pass_id].depth_texture {
+            match self.passes[pass_id].clear_depth {
+                ClearDepth::InitWith(depth_clear) => {
+                    if opengl_cx.update_platform_render_target(&mut self.textures[depth_texture_id], dpi_factor, pass_size, true) {
+                        clear_depth = depth_clear;
+                        clear_flags = gl::DEPTH_BUFFER_BIT;
+                    }
+                },
+                ClearDepth::ClearWith(depth_clear) => {
+                    opengl_cx.update_platform_render_target(&mut self.textures[depth_texture_id], dpi_factor, pass_size, true);
+                    clear_depth = depth_clear;
+                    clear_flags = gl::COLOR_BUFFER_BIT;
+                }
+            }
+            if let Some(gl_texture) = self.textures[depth_texture_id].platform.gl_texture {
+                unsafe {
+                    gl::FramebufferTexture2D(gl::FRAMEBUFFER, gl::DEPTH_STENCIL_ATTACHMENT, gl::TEXTURE_2D, gl_texture, 0);
+                }
+            }
+        }
+        
+        if clear_flags != 0 {
+            unsafe {
+                gl::ClearDepth(clear_depth);
+                gl::ClearColor(clear_color.r, clear_color.g, clear_color.b, clear_color.a);
+                gl::Clear(clear_flags);
+            }
+        }
+        
+        unsafe {
+            gl::Enable(gl::DEPTH_TEST);
+            gl::BlendEquationSeparate(gl::FUNC_ADD, gl::FUNC_ADD);
+            gl::BlendFuncSeparate(gl::ONE, gl::ONE_MINUS_SRC_ALPHA, gl::ONE, gl::ONE_MINUS_SRC_ALPHA);
+            gl::Enable(gl::BLEND);
+        }
+        
+        let mut zbias = 0.0;
+        let zbias_step = self.passes[pass_id].zbias_step;
+        let view_id = self.passes[pass_id].main_view_id.unwrap();
+        
+        self.render_view(pass_id, view_id, true, &Rect::zero(), &opengl_cx, &mut zbias, zbias_step);
+        
+    }
+    
+    //let view_id = self.passes[pass_id].main_view_id.unwrap();
+    //let _pass_size = self.passes[pass_id].pass_size;
+    
+    /*
         for (index, color_texture) in self.passes[pass_id].color_textures.iter().enumerate() {
 
             let cxtexture = &mut self.textures[color_texture.texture_id];
@@ -265,9 +360,9 @@ impl Cx {
             }
         }
         */
-        //self.render_view(pass_id, view_id, true, &Rect::zero(), &opengl_cx);
-        // commit
-    }
+    //self.render_view(pass_id, view_id, true, &Rect::zero(), &opengl_cx);
+    // commit
+    //}
     
     pub fn opengl_compile_all_shaders(&mut self, xlib_app: &XlibApp, opengl_cx: &OpenglCx) {
         let xlib = &xlib_app.xlib;
@@ -526,12 +621,16 @@ impl OpenglCx {
                         glx::GLX_RENDER_TYPE,
                         glx::GLX_RGBA_BIT,
                         glx::GLX_RED_SIZE,
-                        1,
+                        8,
                         glx::GLX_GREEN_SIZE,
-                        1,
+                        8,
                         glx::GLX_BLUE_SIZE,
-                        1,
-                        0,
+                        8,
+                        glx::GLX_DEPTH_SIZE,
+                        32,
+                        glx::GLX_STENCIL_SIZE,
+                        8,
+                        0
                     ]
                         .as_mut_ptr(),
                     &mut len,
@@ -587,7 +686,6 @@ impl OpenglCx {
         
     }
     
-    
     pub fn update_platform_texture_image2d(&self, cxtexture: &mut CxTexture) {
         
         if cxtexture.desc.width.is_none() || cxtexture.desc.height.is_none() {
@@ -605,21 +703,21 @@ impl OpenglCx {
             cxtexture.platform.width = width as u64;
             cxtexture.platform.height = height as u64;
             
-            let mut tex_handle;
+            let mut gl_texture;
             match cxtexture.platform.gl_texture {
                 None => {
                     unsafe {
-                        tex_handle = mem::uninitialized();
-                        gl::GenTextures(1, &mut tex_handle);
-                        cxtexture.platform.gl_texture = Some(tex_handle);
+                        gl_texture = mem::uninitialized();
+                        gl::GenTextures(1, &mut gl_texture);
+                        cxtexture.platform.gl_texture = Some(gl_texture);
                     }
                 }
-                Some(gl_texture) => {
-                    tex_handle = gl_texture
+                Some(gl_texture_old) => {
+                    gl_texture = gl_texture_old
                 }
             }
             unsafe {
-                gl::BindTexture(gl::TEXTURE_2D, tex_handle);
+                gl::BindTexture(gl::TEXTURE_2D, gl_texture);
                 gl::TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_MIN_FILTER, gl::LINEAR as i32);
                 gl::TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_MAG_FILTER, gl::LINEAR as i32);
                 gl::TexImage2D(gl::TEXTURE_2D, 0, gl::RGBA as i32, width as i32, height as i32, 0, gl::RGBA, gl::UNSIGNED_BYTE, cxtexture.image_u32.as_ptr() as *const _);
@@ -628,6 +726,57 @@ impl OpenglCx {
         }
         
         cxtexture.update_image = false;
+    }
+    
+    pub fn update_platform_render_target(&self, cxtexture: &mut CxTexture, dpi_factor: f32, size: Vec2, is_depth: bool) -> bool {
+        let width = if let Some(width) = cxtexture.desc.width {width as u64} else {(size.x * dpi_factor) as u64};
+        let height = if let Some(height) = cxtexture.desc.height {height as u64} else {(size.y * dpi_factor) as u64};
+        
+        if cxtexture.platform.width == width && cxtexture.platform.height == height && cxtexture.platform.alloc_desc == cxtexture.desc {
+            return false
+        }
+        
+        unsafe {
+            if let Some(gl_texture) = cxtexture.platform.gl_texture {
+                gl::DeleteTextures(1, &gl_texture);
+            }
+            
+            let mut gl_texture = mem::uninitialized();
+            gl::GenTextures(1, &mut gl_texture);
+            gl::BindTexture(gl::TEXTURE_2D, gl_texture);
+            gl::TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_MIN_FILTER, gl::LINEAR as i32);
+            gl::TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_MAG_FILTER, gl::LINEAR as i32);
+            
+            cxtexture.platform.alloc_desc = cxtexture.desc.clone();
+            cxtexture.platform.width = width;
+            cxtexture.platform.height = height;
+            cxtexture.platform.gl_texture = Some(gl_texture);
+            
+            if !is_depth {
+                match cxtexture.desc.format {
+                    TextureFormat::Default | TextureFormat::RenderBGRA => {
+                        gl::TexImage2D(gl::TEXTURE_2D, 0, gl::RGBA as i32, width as i32, height as i32, 0, gl::RGBA, gl::UNSIGNED_BYTE, ptr::null());
+                    },
+                    _ => {
+                        println!("update_platform_render_target unsupported texture format");
+                        return false;
+                    }
+                }
+            }
+            else {
+                match cxtexture.desc.format {
+                    TextureFormat::Default | TextureFormat::Depth32Stencil8 => {
+                        println!("Depth stencil texture!");
+                    },
+                    _ => {
+                        println!("update_platform_render_targete unsupported texture format");
+                        return false;
+                    }
+                }
+            }
+            
+        }
+        return true;
     }
 }
 
@@ -662,7 +811,7 @@ impl OpenglWindow {
         
         OpenglWindow {
             window_id,
-            opening_repaint_count:0,
+            opening_repaint_count: 0,
             cal_size: Vec2::zero(),
             window_geom: xlib_window.get_window_geom(),
             xlib_window
@@ -769,11 +918,12 @@ pub struct CxPlatformTexture {
     pub alloc_desc: TextureDesc,
     pub width: u64,
     pub height: u64,
-    pub gl_texture: Option<u32>
+    pub gl_texture: Option<u32>,
 }
 
 #[derive(Default, Clone, Debug)]
 pub struct CxPlatformPass {
+    pub gl_framebuffer: Option<u32>
 }
 
 #[derive(Default, Clone, Debug)]
