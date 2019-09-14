@@ -70,4 +70,5 @@ All gpu data is generated absolutely positioned as draw runs. This is because ot
 
 Clipping is done using vertex-shader clipping. So there is no stencil-state. Makepad is really just a bunch of instanced-array drawcalls on indexed triangles. And one texture for the font. Thats it.
 
-Font rendering in makepad is via an MSDF font format on master. We are in the final stages of integrating our own font stack (Rust ttf reader all the way to GPU trapezoid rendering and atlassing). This will significantly improve lowDPI/VR font clarity.
+Font rendering works with a gpu-accelerated trapezoid font engine that reads ttf files directly.
+Its still being tweaked for low DPI quality, it has some ways to go still.
