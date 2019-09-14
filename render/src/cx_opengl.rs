@@ -310,7 +310,9 @@ impl Cx {
                 }
             }
         }
-        
+        unsafe {
+            gl::Viewport(0, 0, (pass_size.x * dpi_factor) as i32, (pass_size.y * dpi_factor) as i32);
+        }
         if clear_flags != 0 {
             unsafe {
                 gl::ClearDepth(clear_depth);
@@ -627,12 +629,11 @@ impl OpenglCx {
                         glx::GLX_BLUE_SIZE,
                         8,
                         glx::GLX_DEPTH_SIZE,
-                        32,
+                        24,
                         glx::GLX_STENCIL_SIZE,
                         8,
                         0
-                    ]
-                        .as_mut_ptr(),
+                    ].as_mut_ptr(),
                     &mut len,
                 );
                 slice::from_raw_parts(ptr, len as usize)
