@@ -188,6 +188,13 @@ impl Cx{
                                                 self.passes[*pass_id].paint_dirty = true;
                                                 paint_dirty = true;
                                             }
+                                            if opengl_window.first_draw{
+                                                opengl_window.first_draw = false;
+                                                if dpi_factor != self.default_dpi_factor{
+                                                    self.redraw_pass_and_sub_passes(*pass_id);
+                                                }
+
+                                            }
                                         }}
                                     }
                                     CxPassDepOf::Pass(parent_pass_id) => {

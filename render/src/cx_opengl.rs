@@ -796,6 +796,7 @@ pub struct CxPlatformShader {
 
 #[derive(Clone)]
 pub struct OpenglWindow {
+    pub first_draw:bool,
     pub window_id: usize,
     pub window_geom: WindowGeom,
     pub opening_repaint_count: u32,
@@ -811,6 +812,7 @@ impl OpenglWindow {
         xlib_window.init(title, inner_size, position, opengl_cx.visual_info);
         
         OpenglWindow {
+            first_draw: true,
             window_id,
             opening_repaint_count: 0,
             cal_size: Vec2::zero(),
