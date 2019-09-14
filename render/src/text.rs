@@ -16,8 +16,9 @@ pub struct Text {
     pub shader: Shader,
     pub text: String,
     pub color: Color,
+    pub bg: Color,
     pub font_size: f32,
-    pub font_atlas_size: Option<f32>,
+    pub font_scale: f32,
     pub do_dpi_dilate: bool,
     pub do_h_scroll: bool,
     pub do_v_scroll: bool,
@@ -39,14 +40,15 @@ impl Text {
             do_subpixel_aa: false,
             text: "".to_string(),
             font_size: 8.0,
-            font_atlas_size: None,
+            font_scale: 1.0,
             line_spacing: 1.3,
             top_drop: 1.4,
             do_dpi_dilate: false,
             brightness: 1.0,
             z: 0.0,
             wrapping: Wrapping::Word,
-            color: color("white")
+            color: color("white"),
+            bg: color("black")
         }
     }
     
@@ -62,6 +64,7 @@ impl Text {
             //let max_pos: vec2<Instance>;
             let font_tc: vec4<Instance>;
             let color: vec4<Instance>;
+            let bg: vec4<Instance>;
             let x: float<Instance>;
             let y: float<Instance>;
             let w: float<Instance>;
@@ -80,10 +83,15 @@ impl Text {
             fn pixel() -> vec4 {
                 let s = sample2d(texturez, tex_coord.xy);
                 if do_subpixel_aa>0.5{
-                    return vec4(s.xyz*color.rgb*brightness*color.a, s.y*color.a);
+                     
+                    let color_linear = pow(color.xyz*brightness, vec3(1.0/1.43));
+                    let bg_linear = pow(bg.xyz, vec3(1.0/1.43));
+                    let blend = mix(bg_linear.xyz,color_linear.xyz, s.xyz);
+                    return vec4(pow(blend.xyz,  vec3(1.43))*color.w, color.w);
+                    //return vec4(s.xyz*color.rgb*color.a, s.y*color.a);
                 }
                 else{
-                    return vec4(s.yyy*color.rgb*brightness*color.a, s.y*color.a);// + vec4(1.0,0.0,0.0,0.0);
+                    return vec4(s.yyy*color.rgb*brightness*color.a, s.y * color.a);// + vec4(1.0,0.0,0.0,0.0);
                 }
                 /*
                 if marker>0.5{
@@ -196,7 +204,7 @@ impl Text {
             let advance = glyph.horizontal_metrics.advance_width * font_scale_logical;
             
             // snap width/height to pixel granularity
-            let w = ((glyph.bounds.p_max.x - glyph.bounds.p_min.x) * font_scale_pixels).ceil();
+            let w = ((glyph.bounds.p_max.x - glyph.bounds.p_min.x) * font_scale_pixels).ceil() + 1.0;
             let h = ((glyph.bounds.p_max.y - glyph.bounds.p_min.y) * font_scale_pixels).ceil() + 1.0;
             
             // this one needs pixel snapping
@@ -258,6 +266,10 @@ impl Text {
                 self.color.g,
                 self.color.b,
                 self.color.a,
+                self.bg.r, // color
+                self.bg.g,
+                self.bg.b,
+                self.bg.a,
                 min_pos_x,
                 min_pos_y,
                 w / dpi_factor,
