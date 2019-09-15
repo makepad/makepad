@@ -46,7 +46,7 @@ impl Tab{
                 width:Bounds::Compute,
                 height:Bounds::Compute,
                 margin:Margin::all(0.),
-                padding:Padding{l:16.0,t:7.0,r:16.0,b:12.0},
+                padding:Padding{l:16.0,t:8.0,r:16.0,b:12.0},
                 ..Default::default()
             },
             tab_close:TabClose{
