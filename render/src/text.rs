@@ -22,7 +22,6 @@ pub struct Text {
     pub do_dpi_dilate: bool,
     pub do_h_scroll: bool,
     pub do_v_scroll: bool,
-    pub do_subpixel_aa: bool,
     pub brightness: f32,
     pub line_spacing: f32,
     pub top_drop: f32,
@@ -37,7 +36,7 @@ impl Text {
             font: cx.load_font_path("resources/Ubuntu-R.ttf"),
             do_h_scroll: true,
             do_v_scroll: true,
-            do_subpixel_aa: false,
+            // do_subpixel_aa: false,
             text: "".to_string(),
             font_size: 8.0,
             font_scale: 1.0,
@@ -73,48 +72,50 @@ impl Text {
             let font_size: float<Instance>;
             let char_offset: float<Instance>;
             let marker: float<Instance>;
-            let tex_coord: vec2<Varying>;
+            let tex_coord1: vec2<Varying>;
+            let tex_coord2: vec2<Varying>;
+            let tex_coord3: vec2<Varying>;
             let clipped: vec2<Varying>;
             let rect: vec4<Varying>;
             let zbias: float<Uniform>;
             let brightness: float<Uniform>;
             let view_do_scroll: vec2<Uniform>;
-            let do_subpixel_aa: float<Uniform>;
+            // let do_subpixel_aa: float<Uniform>;
             fn pixel() -> vec4 {
-                let s = sample2d(texturez, tex_coord.xy);
-                if do_subpixel_aa>0.5{
-                     
-                    let color_linear = pow(color.xyz*brightness, vec3(1.0/1.43));
-                    let bg_linear = pow(bg.xyz, vec3(1.0/1.43));
-                    let blend = mix(bg_linear.xyz,color_linear.xyz, s.xyz);
-                    return vec4(pow(blend.xyz,  vec3(1.43))*color.w, color.w);
-                    //return vec4(s.xyz*color.rgb*color.a, s.y*color.a);
+                let dx = dfdx(tex_coord1.x * 4096.0);
+                
+                let s = vec4(0.);
+                
+                let dp = 1.0 / 4096.0;
+
+                if dx > 2.75 { // combine 3x3
+                    let s = (
+                        sample2d(texturez, tex_coord3.xy + vec2(0.,0.)).z
+                        + sample2d(texturez, tex_coord3.xy + vec2(dp,0.)).z
+                        + sample2d(texturez, tex_coord3.xy + vec2(0.,dp)).z
+                        + sample2d(texturez, tex_coord3.xy + vec2(dp,dp)).z)*0.25;
+                    return vec4(vec3(s) * color.rgb * brightness * color.a, s * color.a);
                 }
-                else{
-                    return vec4(s.yyy*color.rgb*brightness*color.a, s.y * color.a);// + vec4(1.0,0.0,0.0,0.0);
+                else if dx > 1.75 { // combine 3x3
+                    let s = sample2d(texturez, tex_coord3.xy).z;
+                    return vec4(vec3(s) * color.rgb * brightness * color.a, s * color.a);
                 }
-                /*
-                if marker>0.5{
-                    df_viewport(clipped);
-                    let center = (rect.xy+rect.zw)*0.5;
-                    df_circle(center.x, center.y, 1.);
-                    return df_fill(color); 
+                else if dx > 1.3 { // combine 2x2
+                    let s = sample2d(texturez, tex_coord2.xy).y;
+                    return vec4(vec3(s) * color.rgb * brightness * color.a, s * color.a);
                 }
-                else{
-                    let s = sample2d(texturez, tex_coord.xy);
-                    let sig_dist =  max(min(s.r, s.g), min(max(s.r, s.g), s.b)) - 0.5;
-                    //let scale = pow(df_antialias(clipped) * 0.002,0.5);
-                    df_viewport(tex_coord * tex_size * (0.1 - dpi_dilate*0.03));
-                    df_shape = (-sig_dist - (0.5 / df_aa)) - dpi_dilate*0.1;
-                    return df_fill(color*brightness); 
-                }*/
+                else {
+                    let s = sample2d(texturez, tex_coord1.xy).x;
+                    return vec4(vec3(s) * color.rgb * brightness * color.a, s * color.a);
+                }
+                
             }
             
             fn vertex() -> vec4 {
-                let shift: vec2 = -view_scroll * view_do_scroll;// + vec2(x, y);
+                let shift: vec2 = -view_scroll * view_do_scroll; // + vec2(x, y);
                 
-                let min_pos = vec2(x,y);
-                let max_pos = vec2(x+w,y-h);
+                let min_pos = vec2(x, y);
+                let max_pos = vec2(x + w, y - h);
                 
                 clipped = clamp(
                     mix(min_pos, max_pos, geom) + shift,
@@ -125,9 +126,21 @@ impl Text {
                 let normalized: vec2 = (clipped - min_pos - shift) / (max_pos - min_pos);
                 rect = vec4(min_pos.x, min_pos.y, max_pos.x, max_pos.y) + shift.xyxy;
                 
-                tex_coord = mix(
+                tex_coord1 = mix(
                     font_tc.xy,
                     font_tc.zw,
+                    normalized.xy
+                );
+
+                tex_coord2 = mix(
+                    font_tc.xy,
+                    font_tc.xy+(font_tc.zw - font_tc.xy)*0.75,
+                    normalized.xy
+                );
+
+                tex_coord3 = mix(
+                    font_tc.xy,
+                    font_tc.xy+(font_tc.zw - font_tc.xy)*0.6,
                     normalized.xy
                 );
                 
@@ -143,7 +156,6 @@ impl Text {
         let aligned = cx.align_instance(inst);
         
         if aligned.inst.need_uniforms_now(cx) {
-            //texture,
             
             // cx.fonts[font_id].width as f32 , cx.fonts[font_id].height as f32
             aligned.inst.push_uniform_texture_2d_id(cx, cx.fonts_atlas.texture_id);
@@ -157,7 +169,7 @@ impl Text {
                 if self.do_h_scroll {1.0}else {0.0},
                 if self.do_v_scroll {1.0}else {0.0}
             );
-            aligned.inst.push_uniform_float(cx, if self.do_subpixel_aa{1.0}else{0.0});
+            //aligned.inst.push_uniform_float(cx, if self.do_subpixel_aa{1.0}else{0.0});
             //list_clip
             //area.push_uniform_vec4f(cx, -50000.0,-50000.0,50000.0,50000.0);
         }
@@ -174,9 +186,9 @@ impl Text {
         let cxfont = &mut cx.fonts[font_id];
         
         let dpi_factor = cx.current_dpi_factor;
-
-        let geom_y =  (geom_y * dpi_factor).floor() / dpi_factor;
-        let font_size = (self.font_size * 10.).ceil()/10.;
+        
+        let geom_y = (geom_y * dpi_factor).floor() / dpi_factor;
+        let font_size = (self.font_size * 10.).ceil() / 10.;
         let atlas_page_id = cxfont.get_atlas_page_id(dpi_factor, font_size);
         
         let font = &mut cxfont.font_loaded.as_ref().unwrap();
@@ -195,7 +207,7 @@ impl Text {
         for wc in chunk {
             let unicode = *wc as usize;
             let glyph_id = font.char_code_to_glyph_index_map[unicode];
-            if glyph_id >= font.glyphs.len(){
+            if glyph_id >= font.glyphs.len() {
                 println!("GLYPHID OUT OF BOUNDS {} {} len is {}", unicode, glyph_id, font.glyphs.len());
                 continue;
             }
@@ -218,20 +230,20 @@ impl Text {
             // snap it
             min_pos_x -= subpixel_x_fract;
             min_pos_y -= subpixel_y_fract;
-
+            
             //println!("{}", subpixel_y_fract);
-
+            
             // only use a subpixel id for really small fonts
-            let subpixel_id = if font_size>12.0{
+            let subpixel_id = if font_size>12.0 {
                 0
-            } 
-            else{
-                 //let x_sub = (subpixel_x_fract * 3.0) as usize;
-                 //let y_sub = (subpixel_y_fract * 3.0) as usize;
-                 //y_sub * 4 + x_sub;
-                 (subpixel_x_fract * (ATLAS_SUBPIXEL_SLOTS as f32 - 1.0)) as usize
+            }
+            else {
+                //let x_sub = (subpixel_x_fract * 3.0) as usize;
+                //let y_sub = (subpixel_y_fract * 3.0) as usize;
+                //y_sub * 4 + x_sub;
+                (subpixel_x_fract * (ATLAS_SUBPIXEL_SLOTS as f32 - 1.0)) as usize
             };
-
+            
             let tc = if let Some(tc) = &atlas_page.atlas_glyphs[glyph_id][subpixel_id] {
                 tc
             }
@@ -280,7 +292,7 @@ impl Text {
                 marker, // marker
             ];
             instance.extend_from_slice(&data);
-
+            
             geom_x += advance;
             char_offset += 1;
             aligned.inst.instance_count += 1;
@@ -404,7 +416,7 @@ impl Text {
                         let y = read.buffer[read.offset + y_o + index * read.slots];
                         //let h = read.buffer[read.offset + h_o + index * read.slots];
                         //let font_size = read.buffer[read.offset + font_size_o + index * read.slots];
-                        let w = read.buffer[read.offset + w_o + index * read.slots];//read.buffer[read.offset + font_geom_o + index * read.slots] * font_size;
+                        let w = read.buffer[read.offset + w_o + index * read.slots]; //read.buffer[read.offset + font_geom_o + index * read.slots] * font_size;
                         if x > spos.x + w * 0.5 || y - font_size * line_spacing> spos.y {
                             let prev_index = if index == 0 {0}else {index - 1};
                             let prev_x = read.buffer[read.offset + x_o + prev_index * read.slots];
@@ -434,7 +446,7 @@ impl Text {
         let glyph = &font.glyphs[slot];
         
         //let font_size = if let Some(font_size) = font_size{font_size}else{self.font_size};
-        Vec2{ 
+        Vec2 {
             x: glyph.horizontal_metrics.advance_width * (96.0 / (72.0 * font.units_per_em)),
             y: self.line_spacing
         }

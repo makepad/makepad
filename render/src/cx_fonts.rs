@@ -59,6 +59,7 @@ impl TrapezoidText {
             
             let a_xs: vec2<Instance>;
             let a_ys: vec4<Instance>;
+            let chan: float<Instance>;
             
             let v_p0: vec2<Varying>;
             let v_p1: vec2<Varying>;
@@ -124,16 +125,24 @@ impl TrapezoidText {
                 //return color("black");
                 let p_min = v_pixel.xy - 0.5;
                 let p_max = v_pixel.xy + 0.5;
-                let b_minx = p_min.x + 1.0 / 3.0;
-                let r_minx = p_min.x - 1.0 / 3.0;
-                let b_maxx = p_max.x + 1.0 / 3.0;
-                let r_maxx = p_max.x - 1.0 / 3.0;
-                return vec4(
-                    compute_clamped_trapezoid_area(vec2(r_minx, p_min.y), vec2(r_maxx, p_max.y)),
-                    compute_clamped_trapezoid_area(p_min, p_max),
-                    compute_clamped_trapezoid_area(vec2(b_minx, p_min.y), vec2(b_maxx, p_max.y)),
-                    0.0
-                );
+                let t_area = compute_clamped_trapezoid_area(p_min, p_max);
+                if chan < 0.5{
+                    return vec4(t_area,0.,0.,0.);
+                }
+                if chan < 1.5{
+                    return vec4(0., t_area, 0.,0.);
+                }
+                return vec4(0., 0., t_area,0.);
+                //let b_minx = p_min.x + 1.0 / 3.0;
+                //let r_minx = p_min.x - 1.0 / 3.0;
+                //let b_maxx = p_max.x + 1.0 / 3.0;
+                //let r_maxx = p_max.x - 1.0 / 3.0;
+                //return vec4(
+                //    compute_clamped_trapezoid_area(vec2(r_minx, p_min.y), vec2(r_maxx, p_max.y)),
+                //    compute_clamped_trapezoid_area(p_min, p_max),
+                //    compute_clamped_trapezoid_area(vec2(b_minx, p_min.y), vec2(b_maxx, p_max.y)),
+                //    0.0
+                //);
             }
             
             fn vertex() -> vec4 {
@@ -162,55 +171,65 @@ impl TrapezoidText {
         if inst.need_uniforms_now(cx) {
         }
         
-        let trapezoids = {
-            let cxfont = &cx.fonts[todo.font_id];
-            let font = cxfont.font_loaded.as_ref().unwrap();
-            let atlas_page = &cxfont.atlas_pages[todo.atlas_page_id];
-            let glyph = &font.glyphs[todo.glyph_id];
-            
-            if todo.glyph_id == font.char_code_to_glyph_index_map[10] ||
-            todo.glyph_id == font.char_code_to_glyph_index_map[9] ||
-            todo.glyph_id == font.char_code_to_glyph_index_map[13] {
-                return
+        let mut size = 1.0;
+        for i in 0..3{
+            if i == 1{
+                size = 0.75;
             }
-            
-            let glyphtc = atlas_page.atlas_glyphs[todo.glyph_id][todo.subpixel_id].unwrap();
-            let tx = glyphtc.tx1 * cx.fonts_atlas.texture_size.x + todo.subpixel_x_fract;
-            let ty = 1.0 + glyphtc.ty1 * cx.fonts_atlas.texture_size.y - todo.subpixel_y_fract;
-            
-            let font_scale_logical = atlas_page.font_size * 96.0 / (72.0 * font.units_per_em);
-            let font_scale_pixels = font_scale_logical * atlas_page.dpi_factor;
-            
-            let mut trapezoids = Vec::new();
-            trapezoids.extend_from_internal_iter(
-                self.trapezoidator.trapezoidate(
-                    glyph
-                        .outline
-                        .commands()
-                        .map({
-                        move | command | {
-                            command.transform(
-                                &AffineTransformation::identity()
-                                    .translate(Vector::new(-glyph.bounds.p_min.x, -glyph.bounds.p_min.y))
-                                    .uniform_scale(font_scale_pixels)
-                                    .translate(Vector::new(tx, ty))
-                            )
-                        }
-                    }).linearize(1.0),
-                ),
-            );
-            trapezoids
-        };
-        for trapezoid in trapezoids {
-            let data = [
-                trapezoid.xs[0],
-                trapezoid.xs[1],
-                trapezoid.ys[0],
-                trapezoid.ys[1],
-                trapezoid.ys[2],
-                trapezoid.ys[3],
-            ];
-            inst.push_slice(cx, &data);
+            if i == 2{
+                size = 0.6;
+            }
+            let trapezoids = {
+                let cxfont = &cx.fonts[todo.font_id];
+                let font = cxfont.font_loaded.as_ref().unwrap();
+                let atlas_page = &cxfont.atlas_pages[todo.atlas_page_id];
+                let glyph = &font.glyphs[todo.glyph_id];
+                
+                if todo.glyph_id == font.char_code_to_glyph_index_map[10] ||
+                todo.glyph_id == font.char_code_to_glyph_index_map[9] ||
+                todo.glyph_id == font.char_code_to_glyph_index_map[13] {
+                    return
+                }
+                
+                let glyphtc = atlas_page.atlas_glyphs[todo.glyph_id][todo.subpixel_id].unwrap();
+                let tx = glyphtc.tx1 * cx.fonts_atlas.texture_size.x + todo.subpixel_x_fract;
+                let ty = 1.0 + glyphtc.ty1 * cx.fonts_atlas.texture_size.y - todo.subpixel_y_fract;
+                
+                let font_scale_logical = atlas_page.font_size * 96.0 / (72.0 * font.units_per_em);
+                let font_scale_pixels = font_scale_logical * atlas_page.dpi_factor;
+                
+                let mut trapezoids = Vec::new();
+                trapezoids.extend_from_internal_iter(
+                    self.trapezoidator.trapezoidate(
+                        glyph
+                            .outline
+                            .commands()
+                            .map({
+                            move | command | {
+                                command.transform(
+                                    &AffineTransformation::identity()
+                                        .translate(Vector::new(-glyph.bounds.p_min.x, -glyph.bounds.p_min.y))
+                                        .uniform_scale(font_scale_pixels * size)
+                                        .translate(Vector::new(tx, ty))
+                                )
+                            }
+                        }).linearize(0.5),
+                    ),
+                );
+                trapezoids
+            };
+            for trapezoid in trapezoids {
+                let data = [
+                    trapezoid.xs[0],
+                    trapezoid.xs[1],
+                    trapezoid.ys[0],
+                    trapezoid.ys[1],
+                    trapezoid.ys[2],
+                    trapezoid.ys[3],
+                    i as f32
+                ];
+                inst.push_slice(cx, &data);
+            }
         }
     }
 }

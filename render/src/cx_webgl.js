@@ -410,7 +410,7 @@
                 var right_eye = vr_display.getEyeParameters("right");
                 canvas.width = Math.max(left_eye.renderWidth, right_eye.renderWidth) * 2;
                 canvas.height = Math.max(left_eye.renderHeight, right_eye.renderHeight);
-                this.dpi_factor = 2.0;
+                this.dpi_factor = 1.0;
                 this.width = canvas.width >> 1;
                 this.height = canvas.height;
             }

@@ -255,7 +255,7 @@ impl CodeEditor {
                 z:2.00,
                 line_spacing: 1.8,
                 bg: color256(30, 30, 30),
-                do_subpixel_aa: false,
+                //do_subpixel_aa: false,
                 do_dpi_dilate: true,
                 wrapping: Wrapping::Line,
                 ..Text::style(cx)
@@ -267,7 +267,7 @@ impl CodeEditor {
                 bg: color256(30, 30, 30),
                 z:9.,
                 line_spacing: 1.4,
-                do_subpixel_aa: true,
+                //do_subpixel_aa: true,
                 do_dpi_dilate: true,
                 do_h_scroll: false,
                 wrapping: Wrapping::Line,

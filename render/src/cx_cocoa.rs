@@ -747,7 +747,8 @@ impl CocoaWindow {
     }
     
     pub fn get_dpi_factor(&self) -> f32 {
-        unsafe {NSWindow::backingScaleFactor(self.window) as f32}
+        let scale = unsafe {NSWindow::backingScaleFactor(self.window) as f32};
+        scale
     }
     
     pub fn send_change_event(&mut self) {

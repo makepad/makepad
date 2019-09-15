@@ -1,11 +1,11 @@
-//use syn::Type; 
+//use syn::Type;
 use render::*;
-use widget::*; 
-use editor::*; 
+use widget::*;
+use editor::*;
 use terminal::*;
-mod rustcompiler; 
+mod rustcompiler;
 pub use crate::rustcompiler::*;
-use std::collections::HashMap; 
+use std::collections::HashMap;
 //use std::borrow::Cow;
 use serde::*;
 
@@ -50,7 +50,7 @@ struct App {
 struct AppWindowState {
     window_position: Vec2,
     window_inner_size: Vec2,
-    dock_items: DockItem<Panel>, 
+    dock_items: DockItem<Panel>,
 }
 
 #[derive(Default, Clone, Serialize, Deserialize)]
@@ -72,7 +72,68 @@ impl AppWindow {
                 ..DesktopWindow::style(cx)
             },
             file_editors: Elements::new(FileEditorTemplates {
-                rust_editor: RustEditor::style(cx),
+                rust_editor: RustEditor {
+                    code_editor: CodeEditor {
+                        text: Text {
+                            /*
+                            shader: cx.add_shader(Text::def_text_shader().compose(shader_ast !({
+                                fn pixel() -> vec4 {
+                                    let dx = dfdx(tex_coord.x * 4096.0);
+                                    
+                                    let s = vec4(0.);
+                                    
+                                    let dp = 1.0 / 4096.0;
+                                    
+                                    if dx > 3.0 { // combine 4x4
+                                        s += sample2d(texturez, tex_coord.xy + vec2(0., 0.));
+                                        s += sample2d(texturez, tex_coord.xy + vec2(dp, 0.));
+                                        s += sample2d(texturez, tex_coord.xy + vec2(dp*2., 0.));
+                                        s += sample2d(texturez, tex_coord.xy + vec2(dp*3., 0.));
+                                        s += sample2d(texturez, tex_coord.xy + vec2(0., dp));
+                                        s += sample2d(texturez, tex_coord.xy + vec2(dp, dp));
+                                        s += sample2d(texturez, tex_coord.xy + vec2(dp*2., dp));
+                                        s += sample2d(texturez, tex_coord.xy + vec2(dp*3., dp));
+                                        s += sample2d(texturez, tex_coord.xy + vec2(0., dp*2.));
+                                        s += sample2d(texturez, tex_coord.xy + vec2(dp, dp*2.));
+                                        s += sample2d(texturez, tex_coord.xy + vec2(dp*2., dp*2.));
+                                        s += sample2d(texturez, tex_coord.xy + vec2(dp*3., dp*2.));
+                                        s += sample2d(texturez, tex_coord.xy + vec2(0., dp*3.));
+                                        s += sample2d(texturez, tex_coord.xy + vec2(dp, dp*3.));
+                                        s += sample2d(texturez, tex_coord.xy + vec2(dp*2., dp*3.));
+                                        s += sample2d(texturez, tex_coord.xy + vec2(dp*3., dp*3.));
+                                        s /= vec4(16.0);
+                                    }
+                                    else if dx > 2.0 { // combine 3x3
+                                        s += sample2d(texturez, tex_coord.xy + vec2(0., 0.));
+                                        s += sample2d(texturez, tex_coord.xy + vec2(dp, 0.));
+                                        s += sample2d(texturez, tex_coord.xy + vec2(dp*2., 0.));
+                                        s += sample2d(texturez, tex_coord.xy + vec2(0., dp));
+                                        s += sample2d(texturez, tex_coord.xy + vec2(dp, dp));
+                                        s += sample2d(texturez, tex_coord.xy + vec2(dp*2., dp));
+                                        s += sample2d(texturez, tex_coord.xy + vec2(0., dp*2.));
+                                        s += sample2d(texturez, tex_coord.xy + vec2(dp, dp*2.));
+                                        s += sample2d(texturez, tex_coord.xy + vec2(dp*2., dp*2.));
+                                        s /= vec4(9.0);
+                                    }
+                                    else if dx > 1.0 { // combine 2x2
+                                        s += sample2d(texturez, tex_coord.xy + vec2(0.));
+                                        s += sample2d(texturez, tex_coord.xy + vec2(dp, 0.));
+                                        s += sample2d(texturez, tex_coord.xy + vec2(0., dp));
+                                        s += sample2d(texturez, tex_coord.xy + vec2(dp, dp));
+                                        s /= vec4(4.0);
+                                    }
+                                    else {
+                                        s = sample2d(texturez, tex_coord.xy);
+                                    }
+                                    return vec4(s.yyy * color.rgb * brightness * color.a, s.y * color.a);
+                                }
+                            })), "Editor.cursor_row"),*/
+                            ..CodeEditor::style(cx).text
+                        },
+                        ..CodeEditor::style(cx)
+                    },
+                    ..RustEditor::style(cx)
+                },
                 js_editor: JSEditor::style(cx)
             }),
             local_terminals: Elements::new(LocalTerminal::style(cx)),
@@ -412,7 +473,7 @@ impl App {
         }
     }
     
-    fn default_layout(&mut self, cx: &mut Cx){
+    fn default_layout(&mut self, cx: &mut Cx) {
         println!("DOING DEFAULT");
         self.app_global.state.windows = vec![self.app_window_state_template.clone()];
         self.windows = vec![self.app_window_template.clone()];
@@ -428,7 +489,7 @@ impl App {
                 if cx.platform_type.is_desktop() {
                     self.app_global.app_state_file_read = cx.file_read(&format!("{}makepad_state.json", self.app_global.text_buffers.root_path));
                 }
-                else{
+                else {
                     self.default_layout(cx);
                 }
             },
