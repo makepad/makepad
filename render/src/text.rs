@@ -16,10 +16,8 @@ pub struct Text {
     pub shader: Shader,
     pub text: String,
     pub color: Color,
-    pub bg: Color,
     pub font_size: f32,
     pub font_scale: f32,
-    pub do_dpi_dilate: bool,
     pub do_h_scroll: bool,
     pub do_v_scroll: bool,
     pub brightness: f32,
@@ -36,18 +34,15 @@ impl Text {
             font: cx.load_font_path("resources/Ubuntu-R.ttf"),
             do_h_scroll: true,
             do_v_scroll: true,
-            // do_subpixel_aa: false,
             text: "".to_string(),
             font_size: 8.0,
             font_scale: 1.0,
             line_spacing: 1.3,
             top_drop: 1.4,
-            do_dpi_dilate: false,
             brightness: 1.0,
             z: 0.0,
             wrapping: Wrapping::Word,
-            color: color("white"),
-            bg: color("black")
+            color: color("white")
         }
     }
     
@@ -59,11 +54,8 @@ impl Text {
         sg.compose(shader_ast!({
             let geom: vec2<Geometry>;
             let texturez: texture2d<Texture>;
-            //let min_pos: vec2<Instance>;
-            //let max_pos: vec2<Instance>;
             let font_tc: vec4<Instance>;
             let color: vec4<Instance>;
-            let bg: vec4<Instance>;
             let x: float<Instance>;
             let y: float<Instance>;
             let w: float<Instance>;
@@ -80,7 +72,7 @@ impl Text {
             let zbias: float<Uniform>;
             let brightness: float<Uniform>;
             let view_do_scroll: vec2<Uniform>;
-            // let do_subpixel_aa: float<Uniform>;
+
             fn pixel() -> vec4 {
                 let dx = dfdx(tex_coord1.x * 4096.0);
                 
@@ -88,6 +80,7 @@ impl Text {
                 
                 let dp = 1.0 / 4096.0;
 
+                // basic hardcoded mipmapping so it stops 'swimming' in VR
                 if dx > 2.75 { // combine 3x3
                     let s = (
                         sample2d(texturez, tex_coord3.xy + vec2(0.,0.)).z
@@ -108,7 +101,6 @@ impl Text {
                     let s = sample2d(texturez, tex_coord1.xy).x;
                     return vec4(vec3(s) * color.rgb * brightness * color.a, s * color.a);
                 }
-                
             }
             
             fn vertex() -> vec4 {
@@ -238,9 +230,6 @@ impl Text {
                 0
             }
             else {
-                //let x_sub = (subpixel_x_fract * 3.0) as usize;
-                //let y_sub = (subpixel_y_fract * 3.0) as usize;
-                //y_sub * 4 + x_sub;
                 (subpixel_x_fract * (ATLAS_SUBPIXEL_SLOTS as f32 - 1.0)) as usize
             };
             
@@ -278,15 +267,11 @@ impl Text {
                 self.color.g,
                 self.color.b,
                 self.color.a,
-                self.bg.r, // color
-                self.bg.g,
-                self.bg.b,
-                self.bg.a,
                 min_pos_x,
                 min_pos_y,
                 w / dpi_factor,
                 h / dpi_factor,
-                self.z, //z
+                self.z+0.00001*min_pos_x, //slight z-bias so we don't get z-fighting with neighbouring charsa
                 font_size,
                 char_offset as f32, // char_offset
                 marker, // marker

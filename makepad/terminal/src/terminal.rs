@@ -96,7 +96,6 @@ impl Terminal {
                 font_size: 12.0,
                 brightness: 1.0,
                 line_spacing: 1.4,
-                do_dpi_dilate: true,
                 wrapping: Wrapping::Line,
                 ..Text::style(cx)
             },
