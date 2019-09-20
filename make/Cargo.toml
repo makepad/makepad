@@ -1,0 +1,8 @@
+[package]
+name = "make"
+version = "0.1.0"
+edition = "2018"
+[workspace]
+
+[dependencies.makelib]
+path="../makepad/makelib"

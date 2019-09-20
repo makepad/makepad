@@ -45,7 +45,7 @@ impl Cx {
                         *zbias += zbias_step;
                     }
                 }
-    
+                
                 if draw_call.uniforms_dirty {
                     draw_call.uniforms_dirty = false;
                     //draw_call.platform.uni_dr.update_with_f32_data(device, &draw_call.uniforms);
@@ -139,7 +139,7 @@ impl Cx {
             }
             
             color_attachment.set_store_action(MTLStoreAction::Store);
-
+            
             match color_texture.clear_color{
                 ClearColor::InitWith(color)=>{
                     if is_initial{

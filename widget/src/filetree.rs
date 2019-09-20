@@ -194,13 +194,13 @@ impl FileTree {
             },
             filler: Quad {
                 color: cx.color("icon_color"),
-                z:0.001,
+                z: 0.001,
                 shader: cx.add_shader(Self::def_filler_shader(), "FileTree.filler"),
                 ..Quad::style(cx)
             },
             tree_folder_color: cx.color("text_selected_focus"),
             tree_file_color: cx.color("text_deselected_focus"),
-            tree_text: Text{z:0.001,..Text::style(cx)},
+            tree_text: Text {z: 0.001, ..Text::style(cx)},
             view: View {
                 //scroll_h:Some(ScrollBar{
                 //    ..Style::style(cx)
@@ -421,7 +421,7 @@ impl FileTree {
         if let Some(fe) = drag_end {
             self._drag_move = None;
             let paths = Self::get_marked_paths(&mut self.root_node);
-            if !self.view.get_view_area(cx).get_rect(cx, true).contains(fe.abs.x, fe.abs.y){
+            if !self.view.get_view_area(cx).get_rect(cx, true).contains(fe.abs.x, fe.abs.y) {
                 return FileTreeEvent::DragEnd {
                     fe: fe.clone(),
                     paths: paths
@@ -433,13 +433,13 @@ impl FileTree {
                 // lets check if we are over our own filetree
                 // ifso, we need to support moving files with directories
                 let paths = Self::get_marked_paths(&mut self.root_node);
-                if !self.view.get_view_area(cx).get_rect(cx, true).contains(fe.abs.x, fe.abs.y){
+                if !self.view.get_view_area(cx).get_rect(cx, true).contains(fe.abs.x, fe.abs.y) {
                     return FileTreeEvent::DragMove {
                         fe: fe.clone(),
                         paths: paths
                     };
                 }
-                else{
+                else {
                     return FileTreeEvent::DragCancel;
                 }
             }
@@ -510,7 +510,12 @@ impl FileTree {
             for i in 0..(depth - 1) {
                 let quad_margin = Margin {l: 1., t: 0., r: 4., b: 0.};
                 if i == depth - 2 { // our own thread.
-                    let area = self.filler.draw_quad_walk(cx, Bounds::Fix(10.), Bounds::Fill, quad_margin);
+                    let area = self.filler.draw_quad_walk(
+                        cx,
+                        Bounds::Fix(10.),
+                        Bounds::Fill,
+                        quad_margin
+                    );
                     if is_last {
                         if is_first {
                             //line_vec
@@ -556,7 +561,7 @@ impl FileTree {
                     inst.push_vec2(cx, Vec2::zero());
                     inst.push_float(cx, 1.);
                     // move the turtle down a bit
-                    cx.move_turtle(0.,3.5);
+                    cx.move_turtle(0., 3.5);
                     //cx.realign_turtle(Align::left_center(), false);
                     self.tree_text.color = self.tree_folder_color;
                     let wleft = cx.get_width_left() - 10.;
@@ -594,7 +599,7 @@ impl FileTree {
                     scale_stack.push(scale * new_scale);
                 },
                 FileNode::File {name, ..} => {
-                    cx.move_turtle(0.,3.5);
+                    cx.move_turtle(0., 3.5);
                     //cx.realign_turtle(Align::left_center(), false);
                     self.tree_text.color = if is_marked {
                         self.tree_folder_color
@@ -623,7 +628,12 @@ impl FileTree {
         let mut y = view_total.y;
         while y < rect_now.h {
             self.node_bg.color = if counter & 1 == 0 {bg_even}else {bg_odd};
-            self.node_bg.draw_quad_walk(cx, Bounds::Fill, Bounds::Fix((rect_now.h - y).min(self.row_height)), Margin::zero());
+            self.node_bg.draw_quad_walk(
+                cx,
+                Bounds::Fill,
+                Bounds::Fix((rect_now.h - y).min(self.row_height)),
+                Margin::zero()
+            );
             cx.turtle_new_line();
             y += self.row_height;
             counter += 1;

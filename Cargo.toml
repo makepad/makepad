@@ -1,6 +1,7 @@
 [workspace]
 
 members = [
+    "make",
     "makepad",
     "makepad/webgl",
     "examples/text_example",
