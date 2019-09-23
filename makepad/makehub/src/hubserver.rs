@@ -8,7 +8,6 @@ pub struct HubServerConnection {
     peer_addr: HubAddr,
     _read_thread: std::thread::JoinHandle<()>,
     _write_thread: std::thread::JoinHandle<()>,
-    //write_thread: Option<std::thread::JoinHandle<()>>,
     tx_write: mpsc::Sender<HubToClientMsg>
 }
 
@@ -22,9 +21,8 @@ pub struct HubServer {
 impl HubServer {
     pub fn start_hub_server(listen_address: SocketAddr) -> HubServer {
         
-        // bind to all interfaces
-        let listen_port = listen_address.port();
         let listener = TcpListener::bind(listen_address).expect("Cannot bind server address");
+        let listen_port = listener.local_addr().expect("Cannot get server local address").port();
         
         //let (_tx_listen, _rx_listen) = mpsc::channel::<HubMessage>();
         let (tx_pump, rx_pump) = mpsc::channel::<(HubAddr, ClientToHubMsg)>();
@@ -60,9 +58,9 @@ impl HubServer {
                 if let Ok(mut connections) = listen_connections.lock() {
                     connections.push(HubServerConnection {
                         peer_addr: peer_addr.clone(),
+                        tx_write: tx_write,
                         _read_thread: read_thread,
-                        _write_thread: write_thread,
-                        tx_write: tx_write
+                        _write_thread: write_thread
                     })
                 };
             }
@@ -72,7 +70,7 @@ impl HubServer {
         let router_thread = std::thread::spawn(move || {
             // ok we get inbound messages from the threads
             while let Ok((from_addr, cth_msg)) = rx_pump.recv() {
-                println!("Pump thread got message {:?} {:?}", from_addr, cth_msg);
+                println!("Router thread got message {:?} {:?}", from_addr, cth_msg);
                 
                 let target = cth_msg.target;
                 let htc_msg = HubToClientMsg {
@@ -92,6 +90,10 @@ impl HubServer {
                                 connection.tx_write.send(htc_msg).expect("Could not tx_write.send");
                                 break;
                             }
+                        },
+                        HubTarget::HubOnly => { // process queries on the hub
+                            // return current connections
+                            
                         }
                     }
                 }
@@ -112,11 +114,17 @@ impl HubServer {
         let announce_thread = std::thread::spawn(move || {
             let socket = UdpSocket::bind(announce_bind).expect("Server: Cannot bind announce port");
             socket.set_broadcast(true).expect("Server: cannot set broadcast on announce ip");
-            let port_buf = unsafe {std::mem::transmute::<u16, [u8; 2]>(listen_port)};
-            let thread_sleep = time::Duration::from_millis(100);
+            
+            let port_buf = unsafe {std::mem::transmute::<(u32, u32, u32), [u8; 12]>((
+                HUB_MARKER_MAGIC_1,
+                HUB_MARKER_MAGIC_2,
+                listen_port as u32
+            ))};
+            
+            let thread_sleep_time = time::Duration::from_millis(100);
             loop {
                 socket.send_to(&port_buf, announce_send).expect("Cannot write to announce port");
-                thread::sleep(thread_sleep.clone());
+                thread::sleep(thread_sleep_time.clone());
             }
         });
         self.announce_thread = Some(announce_thread);
@@ -125,7 +133,7 @@ impl HubServer {
     pub fn join_threads(&mut self) {
         self.listen_thread.take().expect("cant take listen thread").join().expect("cant join listen thread");
         self.router_thread.take().expect("cant take router thread").join().expect("cant join router thread");
-        if self.announce_thread.is_some(){
+        if self.announce_thread.is_some() {
             self.announce_thread.take().expect("cant take announce thread").join().expect("cant join announce_thread thread");
         }
     }

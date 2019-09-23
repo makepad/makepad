@@ -19,6 +19,7 @@ pub enum HubAddr{
 pub enum HubTarget{
     Client(HubAddr),
     AllClients,
+    HubOnly
 }
 
 impl HubAddr{

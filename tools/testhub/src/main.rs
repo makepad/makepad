@@ -11,10 +11,11 @@ fn main() {
         SocketAddr::from(([255, 255, 255, 255], 51235)),
     );
     
-    // lets wait for an announcement
-    let address = HubClient::wait_for_announce(SocketAddr::from(([0, 0, 0, 0], 51235))).expect("cannout wait for announce");
-    //let address = SocketAddr::from(([127, 0, 0, 1], 51234));
-    // we get an announcement
+    // lets wait for a server announce
+    let address = HubClient::wait_for_announce(
+        SocketAddr::from(([0, 0, 0, 0], 51235))
+    ).expect("cannot wait for announce");
+
     let client_a = HubClient::connect_to_hub(address).expect("Cannot connect client_a");
     let client_b = HubClient::connect_to_hub(address).expect("Cannot connect client_a");
     
@@ -29,5 +30,4 @@ fn main() {
     }
     
     server.join_threads();
-    
 }
