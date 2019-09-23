@@ -5,13 +5,16 @@ fn main() {
     let mut server = HubServer::start_hub_server();
     // lets wait for server to terminate
     
-    let mut client = HubClient::connect_to_hub("127.0.0.1:51234");
+    let client_a = HubClient::connect_to_hub("127.0.0.1:51234");
+    let client_b = HubClient::connect_to_hub("127.0.0.1:51234");
     
     // lets connect a client
-    client.tx_write.send(ClientToHubMsg{
-        to:None,
-        msg:HubMsg::LoginBuildServer
-    });
+    client_a.tx_write.send(ClientToHubMsg{
+        target:HubTarget::AllClients,
+        msg:HubMsg::Ping
+    }).expect("Cannot send messsage");
+    
+    
     
     server.join_threads();
 }

@@ -1,4 +1,4 @@
-use crate::hubmessage::*;
+use crate::hubmsg::*;
 use std::net::{TcpStream};
 use std::io::prelude::*;
 use std::sync::{mpsc};

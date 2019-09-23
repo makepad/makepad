@@ -1,14 +1,14 @@
 use std::net::{TcpListener};
 use std::sync::{mpsc, Arc, Mutex};
-use crate::hubmessage::*;
+use crate::hubmsg::*;
 use crate::hubclient::*;
 
 pub struct HubServerConnection {
-    _peer_addr: HubAddr,
+    peer_addr: HubAddr,
     _read_thread: std::thread::JoinHandle<()>,
     _write_thread: std::thread::JoinHandle<()>,
     //write_thread: Option<std::thread::JoinHandle<()>>,
-    _tx_write: mpsc::Sender<HubToClientMsg>
+    tx_write: mpsc::Sender<HubToClientMsg>
 }
 
 pub struct HubServer {
@@ -54,21 +54,41 @@ impl HubServer {
                 
                 if let Ok(mut connections) = listen_connections.lock() {
                     connections.push(HubServerConnection {
-                        _peer_addr: peer_addr.clone(),
+                        peer_addr: peer_addr.clone(),
                         _read_thread: read_thread,
                         _write_thread: write_thread,
-                        _tx_write: tx_write
+                        tx_write: tx_write
                     })
                 };
             }
         });
-        let _pump_connections = Arc::clone(&connections);
+        let pump_connections = Arc::clone(&connections);
         let pump_thread = std::thread::spawn(move || {
             // ok we get inbound messages from the threads
             while let Ok((from_addr, cth_msg)) = rx_pump.recv() {
                 println!("Pump thread got message {:?} {:?}", from_addr, cth_msg);
+                
+                let target = cth_msg.target;
+                let htc_msg = HubToClientMsg{
+                    from:from_addr,
+                    msg:cth_msg.msg
+                };
                 // we got a message.. now lets route it elsewhere
-                // call our log closure with a message.
+                if let Ok(connections) = pump_connections.lock() {
+                    match target{
+                        HubTarget::AllClients=>{ // send it to all
+                            for connection in connections.iter(){
+                                connection.tx_write.send(htc_msg.clone()).expect("Could not tx_write.send");
+                            }
+                        },
+                        HubTarget::Client(hub_addr)=>{ // find our specific addr and send
+                            if let Some(connection) = connections.iter().find(|c| c.peer_addr == hub_addr){
+                                connection.tx_write.send(htc_msg).expect("Could not tx_write.send");
+                                break;
+                            }
+                        }
+                    }
+                }
                 
             }
         });
@@ -77,8 +97,8 @@ impl HubServer {
     }
 
     pub fn join_threads(&mut self) {
-        self.listen_thread.take().expect("cant take listen thread").join().expect("cant join listen");
-        self.pump_thread.take().expect("cant take pump thread").join().expect("cant join pump");
+        self.listen_thread.take().expect("cant take listen thread").join().expect("cant join listen thread");
+        self.pump_thread.take().expect("cant take pump thread").join().expect("cant join pump thread");
     }
 
 }
