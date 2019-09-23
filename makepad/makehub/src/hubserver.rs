@@ -1,5 +1,6 @@
-use std::net::{TcpListener};
+use std::net::{TcpListener, UdpSocket, SocketAddr};
 use std::sync::{mpsc, Arc, Mutex};
+use std::{time, thread};
 use crate::hubmsg::*;
 use crate::hubclient::*;
 
@@ -12,14 +13,18 @@ pub struct HubServerConnection {
 }
 
 pub struct HubServer {
+    pub listen_port: u16,
     pub listen_thread: Option<std::thread::JoinHandle<()>>,
-    pub pump_thread: Option<std::thread::JoinHandle<()>>,
+    pub router_thread: Option<std::thread::JoinHandle<()>>,
+    pub announce_thread: Option<std::thread::JoinHandle<()>>,
 }
 
 impl HubServer {
-    pub fn start_hub_server() -> HubServer {
+    pub fn start_hub_server(listen_address: SocketAddr) -> HubServer {
+        
         // bind to all interfaces
-        let listener = TcpListener::bind("0.0.0.0:51234").expect("Cannot bind server to 51243");
+        let listen_port = listen_address.port();
+        let listener = TcpListener::bind(listen_address).expect("Cannot bind server address");
         
         //let (_tx_listen, _rx_listen) = mpsc::channel::<HubMessage>();
         let (tx_pump, rx_pump) = mpsc::channel::<(HubAddr, ClientToHubMsg)>();
@@ -62,27 +67,28 @@ impl HubServer {
                 };
             }
         });
-        let pump_connections = Arc::clone(&connections);
-        let pump_thread = std::thread::spawn(move || {
+        
+        let router_connections = Arc::clone(&connections);
+        let router_thread = std::thread::spawn(move || {
             // ok we get inbound messages from the threads
             while let Ok((from_addr, cth_msg)) = rx_pump.recv() {
                 println!("Pump thread got message {:?} {:?}", from_addr, cth_msg);
                 
                 let target = cth_msg.target;
-                let htc_msg = HubToClientMsg{
-                    from:from_addr,
-                    msg:cth_msg.msg
+                let htc_msg = HubToClientMsg {
+                    from: from_addr,
+                    msg: cth_msg.msg
                 };
                 // we got a message.. now lets route it elsewhere
-                if let Ok(connections) = pump_connections.lock() {
-                    match target{
-                        HubTarget::AllClients=>{ // send it to all
-                            for connection in connections.iter(){
+                if let Ok(connections) = router_connections.lock() {
+                    match target {
+                        HubTarget::AllClients => { // send it to all
+                            for connection in connections.iter() {
                                 connection.tx_write.send(htc_msg.clone()).expect("Could not tx_write.send");
                             }
                         },
-                        HubTarget::Client(hub_addr)=>{ // find our specific addr and send
-                            if let Some(connection) = connections.iter().find(|c| c.peer_addr == hub_addr){
+                        HubTarget::Client(hub_addr) => { // find our specific addr and send
+                            if let Some(connection) = connections.iter().find( | c | c.peer_addr == hub_addr) {
                                 connection.tx_write.send(htc_msg).expect("Could not tx_write.send");
                                 break;
                             }
@@ -93,12 +99,35 @@ impl HubServer {
             }
         });
         
-        return HubServer {listen_thread: Some(listen_thread), pump_thread: Some(pump_thread)};
+        return HubServer {
+            listen_port: listen_port,
+            listen_thread: Some(listen_thread),
+            router_thread: Some(router_thread),
+            announce_thread: None
+        };
     }
-
+    
+    pub fn start_announce_thread(&mut self, announce_bind: SocketAddr, announce_send: SocketAddr) {
+        let listen_port = self.listen_port;
+        let announce_thread = std::thread::spawn(move || {
+            let mut socket = UdpSocket::bind(announce_bind).expect("Server: Cannot bind announce port");
+            socket.set_broadcast(true);
+            let mut port_buf = unsafe {std::mem::transmute::<u16, [u8; 2]>(listen_port)};
+            let thread_sleep = time::Duration::from_millis(100);
+            loop {
+                socket.send_to(&port_buf, announce_send).expect("Cannot write to announce port");
+                thread::sleep(thread_sleep.clone());
+            }
+        });
+        self.announce_thread = Some(announce_thread);
+    }
+    
     pub fn join_threads(&mut self) {
         self.listen_thread.take().expect("cant take listen thread").join().expect("cant join listen thread");
-        self.pump_thread.take().expect("cant take pump thread").join().expect("cant join pump thread");
+        self.router_thread.take().expect("cant take router thread").join().expect("cant join router thread");
+        if self.announce_thread.is_some(){
+            self.announce_thread.take().expect("cant take announce thread").join().expect("cant join announce_thread thread");
+        }
     }
-
+    
 }
