@@ -3,8 +3,8 @@ use std::net::{TcpStream, UdpSocket, SocketAddr, SocketAddrV4, SocketAddrV6};
 use std::io::prelude::*;
 use std::sync::{mpsc};
 
-const magic_1:u32 = 0x89575214;
-const magic_2:u32 = 0x54027861;
+const MAGIC_1:u32 = 0x89575214;
+const MAGIC_2:u32 = 0x54027861;
 
 pub fn read_block_from_tcp_stream(tcp_stream:&mut TcpStream)->Vec<u8>{
     // we read 4 bytes for the buffer len
@@ -12,7 +12,7 @@ pub fn read_block_from_tcp_stream(tcp_stream:&mut TcpStream)->Vec<u8>{
     let head_bytecount = tcp_stream.read(&mut head_buf).expect("head read failure");
     let (bytes_total_u32, magic_r1, magic_r2) = unsafe {std::mem::transmute::<[u8; 12], (u32,u32,u32)>(head_buf)};
     let bytes_total = bytes_total_u32 as usize;
-    if magic_r1 != magic_1 || magic_r2 != magic_2 {
+    if magic_r1 != MAGIC_1 || magic_r2 != MAGIC_2 {
         panic!("magic identifier invalid");
     }
     if head_bytecount !=  12 {
@@ -37,7 +37,7 @@ pub fn write_block_to_tcp_stream(tcp_stream:&mut TcpStream, msg_buf:Vec<u8>){
     // we read 4 bytes for the buffer len
     let bytes_total =  msg_buf.len();
     
-    let mut head_buf =unsafe {std::mem::transmute::<(u32,u32,u32),[u8; 12]>((bytes_total as u32, magic_1, magic_2))};
+    let mut head_buf =unsafe {std::mem::transmute::<(u32,u32,u32),[u8; 12]>((bytes_total as u32, MAGIC_1, MAGIC_2))};
     let head_bytecount = tcp_stream.write(&mut head_buf).expect("head write failure");
     
     if head_bytecount != 12 {
@@ -90,18 +90,18 @@ impl HubClient{
         })
     }
     
-    pub fn wait_for_announce(announce_address:SocketAddr)->SocketAddr{
-        let mut socket = UdpSocket::bind(announce_address).expect("Client: Cannot bind announce port");
+    pub fn wait_for_announce(announce_address:SocketAddr)->Result<SocketAddr, std::io::Error>{
+        let socket = UdpSocket::bind(announce_address)?;
         let mut port_buf = [0u8;2];
-        let (bytes, from) = socket.recv_from(&mut port_buf).expect("Cannot recv from announce port");
+        let (bytes, from) = socket.recv_from(&mut port_buf)?;
         if bytes != 2{
             panic!("Announce port wrong bytecount");
         }
-        let mut listen_port = unsafe {std::mem::transmute::<[u8; 2], u16>(port_buf)};
-        return match from{
+        let listen_port = unsafe {std::mem::transmute::<[u8; 2], u16>(port_buf)};
+        return Ok(match from{
             SocketAddr::V4(v4)=>SocketAddr::V4(SocketAddrV4::new(*v4.ip(), listen_port)),
             SocketAddr::V6(v6)=>SocketAddr::V6(SocketAddrV6::new(*v6.ip(), listen_port, v6.flowinfo(), v6.scope_id())),
-        }
+        })
     }
 
     pub fn join_threads(&mut self) {

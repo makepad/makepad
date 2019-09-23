@@ -6,13 +6,13 @@ fn main() {
         SocketAddr::from(([0, 0, 0, 0], 51234))
     );
     
-    server.start_announce_thread(
+    server.start_announce_server(
         SocketAddr::from(([0, 0, 0, 0], 0)),
         SocketAddr::from(([255, 255, 255, 255], 51235)),
     );
     
     // lets wait for an announcement
-    let address = HubClient::wait_for_announce(SocketAddr::from(([0, 0, 0, 0], 51235)));
+    let address = HubClient::wait_for_announce(SocketAddr::from(([0, 0, 0, 0], 51235))).expect("cannout wait for announce");
     //let address = SocketAddr::from(([127, 0, 0, 1], 51234));
     // we get an announcement
     let client_a = HubClient::connect_to_hub(address).expect("Cannot connect client_a");

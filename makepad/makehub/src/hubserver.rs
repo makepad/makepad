@@ -107,12 +107,12 @@ impl HubServer {
         };
     }
     
-    pub fn start_announce_thread(&mut self, announce_bind: SocketAddr, announce_send: SocketAddr) {
+    pub fn start_announce_server(&mut self, announce_bind: SocketAddr, announce_send: SocketAddr) {
         let listen_port = self.listen_port;
         let announce_thread = std::thread::spawn(move || {
-            let mut socket = UdpSocket::bind(announce_bind).expect("Server: Cannot bind announce port");
-            socket.set_broadcast(true);
-            let mut port_buf = unsafe {std::mem::transmute::<u16, [u8; 2]>(listen_port)};
+            let socket = UdpSocket::bind(announce_bind).expect("Server: Cannot bind announce port");
+            socket.set_broadcast(true).expect("Server: cannot set broadcast on announce ip");
+            let port_buf = unsafe {std::mem::transmute::<u16, [u8; 2]>(listen_port)};
             let thread_sleep = time::Duration::from_millis(100);
             loop {
                 socket.send_to(&port_buf, announce_send).expect("Cannot write to announce port");
