@@ -1,8 +1,7 @@
 [package]
-name = "makelib"
+name = "testhub"
 version = "0.1.0"
-authors = ["makepaddev"]
 edition = "2018"
 
 [dependencies.makehub]
-path = "../makehub/"
+path="../../makepad/makehub"

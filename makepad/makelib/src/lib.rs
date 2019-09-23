@@ -12,13 +12,13 @@ impl Make{
     pub fn proc<F>(_event_handler:F)
     where F: FnMut(&mut Make, &mut MakeCmd){
         // check commandline args
-        let mut messagebus = MessageBus::new_lan_broadcast(35162);
+        //let mut messagebus = MessageBus::new_lan_broadcast(35162);
         
-        messagebus.send(IPCMessage::QueryOnline); 
+        //messagebus.send(IPCMessage::QueryOnline); 
         
-        messagebus.recv(|_messagebus, _message|{
+        //messagebus.recv(|_messagebus, _message|{
             
-        })
+        //})
     }
     
     
