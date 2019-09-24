@@ -19,7 +19,7 @@ pub struct HubServer {
 }
 
 impl HubServer {
-    pub fn start_hub_server(listen_address: SocketAddr) -> HubServer {
+    pub fn start_hub_server(key: &[u8], listen_address: SocketAddr) -> HubServer {
         
         let listener = TcpListener::bind(listen_address).expect("Cannot bind server address");
         let listen_port = listener.local_addr().expect("Cannot get server local address").port();
@@ -28,6 +28,9 @@ impl HubServer {
         let (tx_pump, rx_pump) = mpsc::channel::<(HubAddr, ClientToHubMsg)>();
         
         let connections = Arc::new(Mutex::new(Vec::<HubServerConnection>::new()));
+
+        let mut digest = [0u64; 26];
+        digest_buffer(&mut digest, key);
         
         let listen_connections = Arc::clone(&connections);
         let listen_thread = std::thread::spawn(move || {
@@ -39,19 +42,20 @@ impl HubServer {
                 // clone our transmit-to-pump
                 let tx_pump = tx_pump.clone();
                 let read_peer_addr = peer_addr.clone();
+                let read_digest = digest.clone();
                 let read_thread = std::thread::spawn(move || {
                     loop {
-                        let msg_buf = read_block_from_tcp_stream(&mut read_tcp_stream);
+                        let msg_buf = read_block_from_tcp_stream(&mut read_tcp_stream, &mut read_digest.clone());
                         let cth_msg: ClientToHubMsg = bincode::deserialize(&msg_buf).expect("read_thread hub message deserialize fail");
                         tx_pump.send((read_peer_addr.clone(), cth_msg)).expect("tx_pump.send fails");
                     }
                 });
-                
+                let write_digest = digest.clone();
                 let (tx_write, rx_write) = mpsc::channel::<HubToClientMsg>();
                 let write_thread = std::thread::spawn(move || {
                     while let Ok(htc_msg) = rx_write.recv() {
                         let msg_buf = bincode::serialize(&htc_msg).expect("write_thread hub message serialize fail");
-                        write_block_to_tcp_stream(&mut write_tcp_stream, msg_buf);
+                        write_block_to_tcp_stream(&mut write_tcp_stream, &msg_buf, &mut write_digest.clone());
                     }
                 });
                 
@@ -93,7 +97,6 @@ impl HubServer {
                         },
                         HubTarget::HubOnly => { // process queries on the hub
                             // return current connections
-                            
                         }
                     }
                 }
@@ -109,21 +112,23 @@ impl HubServer {
         };
     }
     
-    pub fn start_announce_server(&mut self, announce_bind: SocketAddr, announce_send: SocketAddr) {
+    pub fn start_announce_server(&mut self, key: &[u8], announce_bind: SocketAddr, announce_send: SocketAddr) {
         let listen_port = self.listen_port;
+        
+        let mut digest = [0u64; 26];
+        digest[25] = listen_port as u64;
+        digest[0] = listen_port as u64;
+        digest_buffer(&mut digest, key);
+        
+        let digest_u8 = unsafe {std::mem::transmute::<[u64;26], [u8; 26*8]>(digest)};
+        
         let announce_thread = std::thread::spawn(move || {
             let socket = UdpSocket::bind(announce_bind).expect("Server: Cannot bind announce port");
             socket.set_broadcast(true).expect("Server: cannot set broadcast on announce ip");
             
-            let port_buf = unsafe {std::mem::transmute::<(u32, u32, u32), [u8; 12]>((
-                HUB_MARKER_MAGIC_1,
-                HUB_MARKER_MAGIC_2,
-                listen_port as u32
-            ))};
-            
             let thread_sleep_time = time::Duration::from_millis(100);
             loop {
-                socket.send_to(&port_buf, announce_send).expect("Cannot write to announce port");
+                socket.send_to(&digest_u8, announce_send).expect("Cannot write to announce port");
                 thread::sleep(thread_sleep_time.clone());
             }
         });
