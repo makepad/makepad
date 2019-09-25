@@ -1,5 +1,4 @@
-mod messagebus;
-pub use crate::messagebus::*;
+use makehub::*;
 
 pub enum MakeCmd{
     Check
@@ -11,14 +10,16 @@ pub struct Make{
 impl Make{
     pub fn proc<F>(_event_handler:F)
     where F: FnMut(&mut Make, &mut MakeCmd){
-        // check commandline args
-        //let mut messagebus = MessageBus::new_lan_broadcast(35162);
+        //let key = [1u8,2u8,3u8,4u8];
+        // connect to the local build server.
         
-        //messagebus.send(IPCMessage::QueryOnline); 
+         // lets wait for a server announce
+        //let address = HubClient::wait_for_announce(&key).expect("cannot wait for announce");
         
-        //messagebus.recv(|_messagebus, _message|{
-            
-        //})
+        // ok now connect to that address
+        //let hub_client = HubClient::connect_to_hub(&key, address).expect("cannot connect to hub"){
+        
+        
     }
     
     

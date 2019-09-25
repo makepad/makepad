@@ -45,9 +45,11 @@ impl HubServer {
                 let read_digest = digest.clone();
                 let read_thread = std::thread::spawn(move || {
                     loop {
-                        let msg_buf = read_block_from_tcp_stream(&mut read_tcp_stream, &mut read_digest.clone());
-                        let cth_msg: ClientToHubMsg = bincode::deserialize(&msg_buf).expect("read_thread hub message deserialize fail");
-                        tx_pump.send((read_peer_addr.clone(), cth_msg)).expect("tx_pump.send fails");
+                        let msg_buf_result = read_block_from_tcp_stream(&mut read_tcp_stream, &mut read_digest.clone());
+                        if let Ok(msg_buf) = msg_buf_result{
+                            let cth_msg: ClientToHubMsg = bincode::deserialize(&msg_buf).expect("read_thread hub message deserialize fail");
+                            tx_pump.send((read_peer_addr.clone(), cth_msg)).expect("tx_pump.send fails");
+                        }
                     }
                 });
                 let write_digest = digest.clone();
@@ -100,7 +102,6 @@ impl HubServer {
                         }
                     }
                 }
-                
             }
         });
         

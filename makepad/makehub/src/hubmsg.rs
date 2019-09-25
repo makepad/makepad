@@ -3,6 +3,7 @@ use std::net::SocketAddr;
 
 #[derive(Clone, Debug, Serialize,Deserialize)]
 pub enum HubMsg{
+    ConnectionError(HubError),
     Ping,
     LoginBuildServer,
     LoginMakepad, 
@@ -41,4 +42,13 @@ pub struct ClientToHubMsg{
 pub struct HubToClientMsg{
     pub from:HubAddr,
     pub msg:HubMsg
+}
+
+#[derive(Clone, Debug, Serialize,Deserialize)]
+pub struct HubError{
+    pub msg:String
+}
+
+impl HubError{
+    pub fn new(msg:&str)->HubError{HubError{msg:msg.to_string()}}
 }

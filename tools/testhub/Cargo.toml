@@ -3,5 +3,12 @@ name = "testhub"
 version = "0.1.0"
 edition = "2018"
 
+[dependencies]
+#time = "0.1.4"
+#snap = "0.1"
+
 [dependencies.makehub]
 path="../../makepad/makehub"
+
+[dependencies.makelib]
+path="../../makepad/makelib"
