@@ -21,8 +21,6 @@ fn main() {
     let client_a = HubClient::connect_to_hub(&key, address).expect("Cannot connect client_a");
     let client_b = HubClient::connect_to_hub(&key, address).expect("Cannot connect client_b");
     
-    // ok so before the hub knows what we are, we need to identify ourselves.
-    
     // lets connect a client
     client_a.tx_write.send(ClientToHubMsg {
         target: HubTarget::AllClients,
@@ -32,6 +30,32 @@ fn main() {
     if let Ok(msg) = client_b.rx_read.recv() {
         println!("Got client_b {:?}", msg);
     }
+    
+    // start a buildserver
+    std::thread::spawn(move || {
+        // lets start a Make proc
+        Make::proc( | make, htc | match htc.msg {
+            HubMsg::GetCargoTargets => {
+                make.cargo_has_target("makepad");
+            },
+            HubMsg::CargoCheck(ck) => {
+                match ck.target.as_ref(){
+                    "makepad" => make.cargo_check("-p makepad"),
+                    _=>()
+                }
+            },
+            _=>()
+        });
+    });
+    
+    // send the build server a build command
+    client_a.tx_write.send(ClientToHubMsg {
+        target: HubTarget::AllClients,
+        msg: HubMsg::GetCargoTargets
+    }).expect("Cannot send messsage");
+    
+    // OK so how does this work. we have a message pipe
+    // we still need to do server disconnecting
     /*
     let time1 = time::precise_time_ns();
     let mut contents = Vec::new();

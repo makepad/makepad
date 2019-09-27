@@ -15,6 +15,7 @@ impl<T> ResultMsg<T> for Result<T, std::io::Error> {
         }
     }
 }
+
 impl<T> ResultMsg<T> for Result<T, snap::Error> {
     fn expect_msg(self, msg:&str)->Result<T, HubError>{
         match self{
@@ -100,6 +101,7 @@ pub fn write_block_to_tcp_stream(tcp_stream: &mut TcpStream, msg_buf: &[u8], dig
 pub struct HubClient {
     read_thread: Option<std::thread::JoinHandle<()>>,
     write_thread: Option<std::thread::JoinHandle<()>>,
+    pub tx_read: mpsc::Sender<HubToClientMsg>,
     pub rx_read: mpsc::Receiver<HubToClientMsg>,
     pub tx_write: mpsc::Sender<ClientToHubMsg>
 }
@@ -133,8 +135,7 @@ impl HubClient {
             let server_hubaddr = server_hubaddr.clone();
             std::thread::spawn(move || {
                 loop {
-                    let mut digest_fresh = digest.clone();
-                    match read_block_from_tcp_stream(&mut tcp_stream, &mut digest_fresh){
+                    match read_block_from_tcp_stream(&mut tcp_stream, &mut digest.clone()){
                         Ok(msg_buf)=>{
                             let htc_msg: HubToClientMsg = bincode::deserialize(&msg_buf).expect("read_thread hub message deserialize fail - version conflict!");
                             tx_read.send(htc_msg).expect("tx_read.send fails - should never happen");
@@ -152,17 +153,18 @@ impl HubClient {
                 }
             })
         };
+
         let write_thread = {
             let digest = digest.clone();
+            let tx_read = tx_read_copy.clone();
             let server_hubaddr = server_hubaddr.clone();
             std::thread::spawn(move || {// this one cannot send to the read channel.
                 while let Ok(cth_msg) = rx_write.recv() {
-                    let mut digest_fresh = digest.clone();
                     let msg_buf = bincode::serialize(&cth_msg).expect("write_thread hub message serialize fail - should never happen");
-                    if let Err(e) = write_block_to_tcp_stream(&mut tcp_stream, &msg_buf, &mut digest_fresh){
+                    if let Err(e) = write_block_to_tcp_stream(&mut tcp_stream, &msg_buf, &mut digest.clone()){
                         // disconnect the socket and send shutdown
                         if tcp_stream.shutdown(Shutdown::Both).is_ok(){;
-                            tx_read_copy.send(HubToClientMsg{
+                            tx_read.send(HubToClientMsg{
                                 from:server_hubaddr.clone(),
                                 msg:HubMsg::ConnectionError(e)
                             }).expect("tx_read.send fails - should never happen");
@@ -176,6 +178,7 @@ impl HubClient {
         Ok(HubClient {
             read_thread: Some(read_thread),
             write_thread: Some(write_thread),
+            tx_read: tx_read_copy,
             rx_read: rx_read,
             tx_write: tx_write
         })

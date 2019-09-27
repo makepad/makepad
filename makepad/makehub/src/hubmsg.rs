@@ -3,10 +3,21 @@ use std::net::SocketAddr;
 
 #[derive(Clone, Debug, Serialize,Deserialize)]
 pub enum HubMsg{
-    ConnectionError(HubError),
     Ping,
     LoginBuildServer,
     LoginMakepad, 
+
+    ConnectionError(HubError),
+
+    CargoCheck(HubCargoCheck),
+    GetCargoTargets,
+    CargoHasTarget(String),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HubCargoCheck{
+    pub target:String,
+    pub args:String,
 }
 
 #[derive(PartialEq, Debug, Clone, Serialize, Deserialize)]
@@ -14,7 +25,6 @@ pub enum HubAddr{
     V4{octets:[u8;4],port:u16},
     V6{octets:[u8;16],port:u16},
 }
-
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum HubTarget{
@@ -32,19 +42,19 @@ impl HubAddr{
     }
 }
 
-#[derive(Debug, Serialize,Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct ClientToHubMsg{
     pub target:HubTarget,
     pub msg:HubMsg
 }
 
-#[derive(Clone, Debug, Serialize,Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct HubToClientMsg{
     pub from:HubAddr,
     pub msg:HubMsg
 }
 
-#[derive(Clone, Debug, Serialize,Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct HubError{
     pub msg:String
 }
