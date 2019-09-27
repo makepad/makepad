@@ -23,7 +23,7 @@ fn main() {
     
     // lets connect a client
     client_a.tx_write.send(ClientToHubMsg {
-        target: HubTarget::AllClients,
+        to: HubMsgTo::AllClients,
         msg: HubMsg::Ping
     }).expect("Cannot send messsage");
     
@@ -50,7 +50,7 @@ fn main() {
     
     // send the build server a build command
     client_a.tx_write.send(ClientToHubMsg {
-        target: HubTarget::AllClients,
+        to: HubMsgTo::AllClients,
         msg: HubMsg::GetCargoTargets
     }).expect("Cannot send messsage");
     

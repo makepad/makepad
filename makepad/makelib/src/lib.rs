@@ -37,6 +37,11 @@ impl Make{
     }
     
     pub fn cargo_has_target(&mut self, tgt:&str){
-        
+        self.hub_client.tx_write(ClientToHubMsg{
+            to:
+            msg:HubMsg{
+                
+            }
+        })
     }
 }

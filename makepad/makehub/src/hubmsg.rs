@@ -26,13 +26,6 @@ pub enum HubAddr{
     V6{octets:[u8;16],port:u16},
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum HubTarget{
-    Client(HubAddr),
-    AllClients,
-    HubOnly
-}
-
 impl HubAddr{
     pub fn from_socket_addr(addr:SocketAddr)->HubAddr{
         match addr{
@@ -42,9 +35,16 @@ impl HubAddr{
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum HubMsgTo{
+    Client(HubAddr),
+    AllClients,
+    HubOnly
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ClientToHubMsg{
-    pub target:HubTarget,
+    pub to:HubMsgTo,
     pub msg:HubMsg
 }
 

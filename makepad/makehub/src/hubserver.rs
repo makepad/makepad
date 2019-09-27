@@ -55,7 +55,7 @@ impl HubServer {
                                     Err(e) => {
                                         if tcp_stream.shutdown(Shutdown::Both).is_ok() {
                                             tx_pump.send((peer_addr.clone(), ClientToHubMsg {
-                                                target: HubTarget::HubOnly,
+                                                to: HubMsgTo::HubOnly,
                                                 msg: HubMsg::ConnectionError(e)
                                             })).expect("tx_pump.send fails - should never happen");
                                         }
@@ -77,7 +77,7 @@ impl HubServer {
                                     // disconnect the socket and send shutdown
                                     if tcp_stream.shutdown(Shutdown::Both).is_ok() {
                                         tx_pump.send((peer_addr.clone(), ClientToHubMsg {
-                                            target: HubTarget::HubOnly,
+                                            to: HubMsgTo::HubOnly,
                                             msg: HubMsg::ConnectionError(e)
                                         })).expect("tx_pump.send fails - should never happen");
                                     }
