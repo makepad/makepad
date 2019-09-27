@@ -4,14 +4,34 @@ use std::net::SocketAddr;
 #[derive(Clone, Debug, Serialize,Deserialize)]
 pub enum HubMsg{
     Ping,
-    LoginBuildServer,
-    LoginMakepad, 
-
+    
+    ConnectBuild,
+    ConnectUI,
     ConnectionError(HubError),
 
-    CargoCheck(HubCargoCheck),
-    GetCargoTargets,
-    CargoHasTarget(String),
+    // make client stuff
+    CargoCheck{
+        uid:HubUid,
+        target:String
+    },
+
+    CargoMsg{
+        uid:HubUid,
+        msg:CargoMsg
+    },
+    
+    CargoDone{
+        uid:HubUid
+    },
+
+    CargoHasTargets{uid:HubUid, targets:Vec<String>},
+    GetCargoTargets{uid:HubUid},
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum CargoMsg{
+    Warning{msg:String},
+    Error{msg:String}
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -20,7 +40,7 @@ pub struct HubCargoCheck{
     pub args:String,
 }
 
-#[derive(PartialEq, Debug, Clone, Serialize, Deserialize)]
+#[derive(PartialEq, Copy, Debug, Clone, Serialize, Deserialize)]
 pub enum HubAddr{
     V4{octets:[u8;4],port:u16},
     V6{octets:[u8;16],port:u16},
@@ -38,8 +58,16 @@ impl HubAddr{
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum HubMsgTo{
     Client(HubAddr),
-    AllClients,
-    HubOnly
+    Build,
+    UI,
+    All,
+    Hub
+}
+
+#[derive(PartialEq, Copy, Debug, Clone, Serialize, Deserialize)]
+pub struct HubUid{
+    pub addr:HubAddr,
+    pub id:u64
 }
 
 #[derive(Debug, Serialize, Deserialize)]

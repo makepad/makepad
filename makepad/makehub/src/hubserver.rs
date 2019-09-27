@@ -1,14 +1,21 @@
-use std::net::{TcpListener, UdpSocket, SocketAddr, Shutdown};
+use std::net::{TcpStream, TcpListener, UdpSocket, SocketAddr, Shutdown};
 use std::sync::{mpsc, Arc, Mutex};
 use std::{time, thread};
 use crate::hubmsg::*;
 use crate::hubclient::*;
 
+#[derive(PartialEq)]
+pub enum HubClientType{
+    Unknown,
+    Build,
+    UI
+}
+
 pub struct HubServerConnection {
     peer_addr: HubAddr,
-    _read_thread: std::thread::JoinHandle<()>,
-    _write_thread: std::thread::JoinHandle<()>,
-    tx_write: mpsc::Sender<HubToClientMsg>
+    tx_write: mpsc::Sender<HubToClientMsg>,
+    tcp_stream: TcpStream,
+    client_type: HubClientType
 }
 
 pub struct HubServer {
@@ -36,10 +43,10 @@ impl HubServer {
             std::thread::spawn(move || {
                 
                 for tcp_stream in listener.incoming() {
-                    let mut tcp_stream = tcp_stream.expect("Incoming stream failure");
+                    let tcp_stream = tcp_stream.expect("Incoming stream failure");
                     let peer_addr = HubAddr::from_socket_addr(tcp_stream.peer_addr().expect("No peer address"));
                     // clone our transmit-to-pump
-                    let read_thread = {
+                    let _read_thread = {
                         let tx_pump = tx_pump.clone();
                         let peer_addr = peer_addr.clone();
                         let digest = digest.clone();
@@ -55,7 +62,7 @@ impl HubServer {
                                     Err(e) => {
                                         if tcp_stream.shutdown(Shutdown::Both).is_ok() {
                                             tx_pump.send((peer_addr.clone(), ClientToHubMsg {
-                                                to: HubMsgTo::HubOnly,
+                                                to: HubMsgTo::Hub,
                                                 msg: HubMsg::ConnectionError(e)
                                             })).expect("tx_pump.send fails - should never happen");
                                         }
@@ -66,10 +73,11 @@ impl HubServer {
                         })
                     };
                     let (tx_write, rx_write) = mpsc::channel::<HubToClientMsg>();
-                    let write_thread = {
+                    let _write_thread = {
                         let digest = digest.clone();
                         let peer_addr = peer_addr.clone();
                         let tx_pump = tx_pump.clone();
+                        let mut tcp_stream = tcp_stream.try_clone().expect("Cannot clone tcp stream");
                         std::thread::spawn(move || {
                             while let Ok(htc_msg) = rx_write.recv() {
                                 let msg_buf = bincode::serialize(&htc_msg).expect("write_thread hub message serialize fail");
@@ -77,7 +85,7 @@ impl HubServer {
                                     // disconnect the socket and send shutdown
                                     if tcp_stream.shutdown(Shutdown::Both).is_ok() {
                                         tx_pump.send((peer_addr.clone(), ClientToHubMsg {
-                                            to: HubMsgTo::HubOnly,
+                                            to: HubMsgTo::Hub,
                                             msg: HubMsg::ConnectionError(e)
                                         })).expect("tx_pump.send fails - should never happen");
                                     }
@@ -88,10 +96,10 @@ impl HubServer {
                     
                     if let Ok(mut connections) = connections.lock() {
                         connections.push(HubServerConnection {
+                            client_type: HubClientType::Unknown,
                             peer_addr: peer_addr.clone(),
-                            tx_write: tx_write,
-                            _read_thread: read_thread,
-                            _write_thread: write_thread
+                            tcp_stream: tcp_stream,
+                            tx_write: tx_write
                         })
                     };
                 }
@@ -102,28 +110,69 @@ impl HubServer {
             let connections = Arc::clone(&connections);
             std::thread::spawn(move || {
                 // ok we get inbound messages from the threads
-                while let Ok((from_addr, cth_msg)) = rx_pump.recv() {
-                    let target = cth_msg.target;
+                while let Ok((from, cth_msg)) = rx_pump.recv() {
+                    let to = cth_msg.to;
                     let htc_msg = HubToClientMsg {
-                        from: from_addr,
+                        from: from,
                         msg: cth_msg.msg
                     };
-                    println!("Router thread got message {:?}", htc_msg);
                     // we got a message.. now lets route it elsewhere
                     if let Ok(mut connections) = connections.lock() {
-                        match target {
-                            HubTarget::AllClients => { // send it to all
+
+                        println!("Router thread got message {:?}", htc_msg);
+                        
+                        if let Some(cid) = connections.iter().position( | c | c.peer_addr == htc_msg.from) {
+                            if connections[cid].client_type == HubClientType::Unknown {
+                                match &htc_msg.msg {
+                                    HubMsg::ConnectBuild => { // send it to all clients
+                                        connections[cid].client_type = HubClientType::Build;
+                                    },
+                                    HubMsg::ConnectUI => { // send it to all clients
+                                        connections[cid].client_type = HubClientType::UI;
+                                    },
+                                    _ => {
+                                        println!("Router got message from unknown client {:?}, disconnecting", htc_msg.from);
+                                        let _ = connections[cid].tcp_stream.shutdown(Shutdown::Both);
+                                        connections.remove(cid);
+                                        continue;
+                                    }
+                                }
+                            }
+                        }
+                        
+                        match to {
+                            HubMsgTo::All => { // send it to all
                                 for connection in connections.iter() {
-                                    connection.tx_write.send(htc_msg.clone()).expect("Could not tx_write.send");
+                                    if connection.client_type != HubClientType::Unknown {
+                                        connection.tx_write.send(htc_msg.clone()).expect("Could not tx_write.send");
+                                    }
                                 }
                             },
-                            HubTarget::Client(hub_addr) => { // find our specific addr and send
-                                if let Some(connection) = connections.iter().find( | c | c.peer_addr == hub_addr) {
-                                    connection.tx_write.send(htc_msg).expect("Could not tx_write.send");
-                                    break;
+                            HubMsgTo::Client(addr) => { // find our specific addr and send
+                                if let Some(connection) = connections.iter().find( | c | c.peer_addr == addr) {
+                                    if connection.client_type != HubClientType::Unknown {
+                                        connection.tx_write.send(htc_msg).expect("Could not tx_write.send");
+                                        break;
+                                    }
                                 }
                             },
-                            HubTarget::HubOnly => { // process queries on the hub
+                            HubMsgTo::Build=>{
+                                for connection in connections.iter() {
+                                    if connection.client_type == HubClientType::Build{
+                                        connection.tx_write.send(htc_msg).expect("Could not tx_write.send");
+                                        break;
+                                    }
+                                }
+                            },
+                            HubMsgTo::UI=>{
+                                for connection in connections.iter() {
+                                    if connection.client_type == HubClientType::UI{
+                                        connection.tx_write.send(htc_msg).expect("Could not tx_write.send");
+                                        break;
+                                    }
+                                }
+                            },
+                            HubMsgTo::Hub => { // process queries on the hub
                                 match &htc_msg.msg {
                                     HubMsg::ConnectionError(e) => {
                                         // connection error, lets remove connection

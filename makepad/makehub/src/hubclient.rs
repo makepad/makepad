@@ -2,6 +2,7 @@ use crate::hubmsg::*;
 use std::net::{TcpStream, UdpSocket, SocketAddr, SocketAddrV4, SocketAddrV6, Shutdown};
 use std::io::prelude::*;
 use std::sync::{mpsc};
+use std::thread;
 
 trait ResultMsg<T>{
     fn expect_msg(self, msg:&str)->Result<T, HubError>;
@@ -99,8 +100,10 @@ pub fn write_block_to_tcp_stream(tcp_stream: &mut TcpStream, msg_buf: &[u8], dig
 }
 
 pub struct HubClient {
-    read_thread: Option<std::thread::JoinHandle<()>>,
-    write_thread: Option<std::thread::JoinHandle<()>>,
+    pub own_addr: HubAddr,
+    pub uid_alloc: u64,
+    read_thread: Option<thread::JoinHandle<()>>,
+    write_thread: Option<thread::JoinHandle<()>>,
     pub tx_read: mpsc::Sender<HubToClientMsg>,
     pub rx_read: mpsc::Receiver<HubToClientMsg>,
     pub tx_write: mpsc::Sender<ClientToHubMsg>
@@ -121,6 +124,7 @@ impl HubClient {
             TcpStream::connect(server_address).expect_msg("connect_to_hub: cannot connect")?
         };
         
+        let own_addr = HubAddr::from_socket_addr(tcp_stream.local_addr().expect("Cannot get client local address"));
 
         let (tx_read, rx_read) = mpsc::channel::<HubToClientMsg>();
         let (tx_write, rx_write) = mpsc::channel::<ClientToHubMsg>();
@@ -176,6 +180,8 @@ impl HubClient {
         };
         
         Ok(HubClient {
+            uid_alloc:0,
+            own_addr: own_addr,
             read_thread: Some(read_thread),
             write_thread: Some(write_thread),
             tx_read: tx_read_copy,
@@ -219,6 +225,14 @@ impl HubClient {
     pub fn join_threads(&mut self) {
         self.read_thread.take().expect("cant take read thread").join().expect("cant join read thread");
         self.write_thread.take().expect("cant take write thread").join().expect("cant join write thread");
+    }
+    
+    pub fn alloc_uid(&mut self)->HubUid{
+        self.uid_alloc += 1;
+        return HubUid{
+            addr:self.own_addr,
+            id: self.uid_alloc
+        }
     }
     
 }

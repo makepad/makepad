@@ -4,5 +4,10 @@ version = "0.1.0"
 authors = ["makepaddev"]
 edition = "2018"
 
+[dependencies]
+closefds = "*"
+serde_json = "*"
+serde = { version = "1.0", features = ["derive"] }
+
 [dependencies.makehub]
 path = "../makehub/"

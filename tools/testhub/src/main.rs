@@ -18,41 +18,59 @@ fn main() {
     // lets wait for a server announce
     let address = HubClient::wait_for_announce(&key).expect("cannot wait for announce");
 
-    let client_a = HubClient::connect_to_hub(&key, address).expect("Cannot connect client_a");
-    let client_b = HubClient::connect_to_hub(&key, address).expect("Cannot connect client_b");
+    let mut ui_client = HubClient::connect_to_hub(&key, address).expect("Cannot connect client_a");
     
-    // lets connect a client
-    client_a.tx_write.send(ClientToHubMsg {
-        to: HubMsgTo::AllClients,
-        msg: HubMsg::Ping
+    // lets connect a UI client
+    ui_client.tx_write.send(ClientToHubMsg {
+        to: HubMsgTo::All,
+        msg: HubMsg::ConnectUI
     }).expect("Cannot send messsage");
+
+    // start a client message pump
+    std::thread::spawn(move || {
+        // wait for the answer
+        while let Ok(htc) = ui_client.rx_read.recv() {
+            match htc.msg{
+                HubMsg::ConnectBuild => {
+                    println!("Got build client, querying");
+                    let new_uid = ui_client.alloc_uid();
+                    ui_client.tx_write.send(ClientToHubMsg{
+                        to: HubMsgTo::Build,
+                        msg: HubMsg::GetCargoTargets{uid:new_uid}
+                    }).expect("Cannot send messsage");
+                },
+                HubMsg::CargoHasTargets{uid, targets}=>{
+                    println!("Got Has Targets answer! {:?} {:?}",uid, targets);
+                    let new_uid = ui_client.alloc_uid();
+                    // now lets fire up a build.
+                    ui_client.tx_write.send(ClientToHubMsg{
+                        to: HubMsgTo::Build,
+                        msg: HubMsg::CargoCheck{uid:new_uid, target:"makepad".to_string()}
+                    }).expect("Cannot send messsage");
+
+                },
+                _=>()
+            }
+        }
+    });
     
-    if let Ok(msg) = client_b.rx_read.recv() {
-        println!("Got client_b {:?}", msg);
-    }
-    
-    // start a buildserver
+    // start a buildserver test
     std::thread::spawn(move || {
         // lets start a Make proc
         Make::proc( | make, htc | match htc.msg {
-            HubMsg::GetCargoTargets => {
-                make.cargo_has_target("makepad");
+            HubMsg::GetCargoTargets{uid} => {
+                println!("Get cargo targets");
+                make.cargo_has_targets(uid, &["makepad"]);
             },
-            HubMsg::CargoCheck(ck) => {
-                match ck.target.as_ref(){
-                    "makepad" => make.cargo_check("-p makepad"),
+            HubMsg::CargoCheck{uid, target, ..} => {
+                match target.as_ref(){
+                    "makepad" => make.cargo(uid, &["check", "-p", "makepad"]),
                     _=>()
                 }
             },
             _=>()
         });
     });
-    
-    // send the build server a build command
-    client_a.tx_write.send(ClientToHubMsg {
-        to: HubMsgTo::AllClients,
-        msg: HubMsg::GetCargoTargets
-    }).expect("Cannot send messsage");
     
     // OK so how does this work. we have a message pipe
     // we still need to do server disconnecting
