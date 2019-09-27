@@ -199,7 +199,7 @@ impl HubServer {
         };
     }
     
-    pub fn start_announce_server(&mut self, key: &[u8], announce_bind: SocketAddr, announce_send: SocketAddr) {
+    pub fn start_announce_server(&mut self, key: &[u8], announce_bind: SocketAddr, announce_send: SocketAddr, announce_backup: SocketAddr) {
         let listen_port = self.listen_port;
         
         let mut digest = [0u64; 26];
@@ -215,7 +215,12 @@ impl HubServer {
             
             let thread_sleep_time = time::Duration::from_millis(100);
             loop {
-                socket.send_to(&digest_u8, announce_send).expect("Cannot write to announce port");
+                if let Err(_) = socket.send_to(&digest_u8, announce_send){
+                    if let Err(_) = socket.send_to(&digest_u8, announce_backup){
+                        println!("Cannot send to announce port");
+                        return
+                    }
+                }
                 thread::sleep(thread_sleep_time.clone());
             }
         });

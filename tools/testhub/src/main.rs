@@ -13,10 +13,13 @@ fn main() {
         &key,
         SocketAddr::from(([0, 0, 0, 0], 0)),
         SocketAddr::from(([255, 255, 255, 255], HUB_ANNOUNCE_PORT)),
+        SocketAddr::from(([127, 0, 0, 1], HUB_ANNOUNCE_PORT)),
     );
     
     // lets wait for a server announce
-    let address = HubClient::wait_for_announce(&key).expect("cannot wait for announce");
+    let address = HubClient::wait_for_announce(&key, 47263).expect("cannot wait for announce");
+
+    println!("GOT ADDRESS {:?}", address);
 
     let mut ui_client = HubClient::connect_to_hub(&key, address).expect("Cannot connect client_a");
     
@@ -32,7 +35,6 @@ fn main() {
         while let Ok(htc) = ui_client.rx_read.recv() {
             match htc.msg{
                 HubMsg::ConnectBuild => {
-                    println!("Got build client, querying");
                     let new_uid = ui_client.alloc_uid();
                     ui_client.tx_write.send(ClientToHubMsg{
                         to: HubMsgTo::Build,
@@ -40,7 +42,6 @@ fn main() {
                     }).expect("Cannot send messsage");
                 },
                 HubMsg::CargoHasTargets{uid, targets}=>{
-                    println!("Got Has Targets answer! {:?} {:?}",uid, targets);
                     let new_uid = ui_client.alloc_uid();
                     // now lets fire up a build.
                     ui_client.tx_write.send(ClientToHubMsg{
@@ -59,7 +60,6 @@ fn main() {
         // lets start a Make proc
         Make::proc( | make, htc | match htc.msg {
             HubMsg::GetCargoTargets{uid} => {
-                println!("Get cargo targets");
                 make.cargo_has_targets(uid, &["makepad"]);
             },
             HubMsg::CargoCheck{uid, target, ..} => {

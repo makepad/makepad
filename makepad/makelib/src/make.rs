@@ -14,7 +14,7 @@ impl Make {
         let key = [1u8, 2u8, 3u8, 4u8];
         
         // lets wait for a server announce
-        let address = HubClient::wait_for_announce(&key).expect("cannot wait for announce");
+        let address = HubClient::wait_for_announce(&key, HUB_DEFAULT_PORT).expect("cannot wait for announce");
         
         // ok now connect to that address
         let hub_client = HubClient::connect_to_hub(&key, address).expect("cannot connect to hub");

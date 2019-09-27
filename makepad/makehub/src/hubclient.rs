@@ -29,7 +29,7 @@ impl<T> ResultMsg<T> for Result<T, snap::Error> {
 type HubResult<T> = Result<T, HubError>;
 
 pub const HUB_ANNOUNCE_PORT:u16 = 46243;
-
+pub const HUB_DEFAULT_PORT:u16 = 56234;
 pub fn read_exact_bytes_from_tcp_stream(tcp_stream: &mut TcpStream, bytes: &mut [u8])->HubResult<()>{
     let bytes_total = bytes.len();
     let mut bytes_left = bytes_total;
@@ -190,35 +190,39 @@ impl HubClient {
         })
     }
 
-    pub fn wait_for_announce(key: &[u8]) -> Result<SocketAddr, std::io::Error> {
-        Self::wait_for_announce_on(key, SocketAddr::from(([0, 0, 0, 0], HUB_ANNOUNCE_PORT)))
+    pub fn wait_for_announce(key: &[u8], def_port:u16) -> Result<SocketAddr, std::io::Error> {
+        Self::wait_for_announce_on(key, SocketAddr::from(([0, 0, 0, 0], HUB_ANNOUNCE_PORT)), def_port)
     }
     
-    pub fn wait_for_announce_on(key: &[u8], announce_address: SocketAddr) -> Result<SocketAddr, std::io::Error> {
-        let socket = UdpSocket::bind(announce_address) ?;
-        loop {
-            let mut digest = [0u64; 26];
-            let digest_u8 = unsafe {std::mem::transmute::<&mut [u64; 26], &mut [u8; 26 * 8]>(&mut digest)};
-            
-            let (bytes, from) = socket.recv_from(digest_u8) ?;
-            if bytes != 26 * 8 {
-                panic!("Announce port wrong bytecount");
+    pub fn wait_for_announce_on(key: &[u8], announce_address: SocketAddr, def_port:u16) -> Result<SocketAddr, std::io::Error> {
+        if let Ok(socket) = UdpSocket::bind(announce_address){
+            loop {
+                let mut digest = [0u64; 26];
+                let digest_u8 = unsafe {std::mem::transmute::<&mut [u64; 26], &mut [u8; 26 * 8]>(&mut digest)};
+                
+                let (bytes, from) = socket.recv_from(digest_u8) ?;
+                if bytes != 26 * 8 {
+                    println!("Announce port wrong bytecount");
+                }
+                
+                let mut check_digest = [0u64; 26];
+                check_digest[25] = digest[25];
+                check_digest[0] = digest[25];
+                digest_buffer(&mut check_digest, key);
+                
+                if check_digest == digest { // use this to support multiple hubs on one network
+                    let listen_port = digest[25];
+                    return Ok(match from {
+                        SocketAddr::V4(v4) => SocketAddr::V4(SocketAddrV4::new(*v4.ip(), listen_port as u16)),
+                        SocketAddr::V6(v6) => SocketAddr::V6(SocketAddrV6::new(*v6.ip(), listen_port as u16, v6.flowinfo(), v6.scope_id())),
+                    })
+                }
+                
+                println!("wait for announce found wrong digest");
             }
-            
-            let mut check_digest = [0u64; 26];
-            check_digest[25] = digest[25];
-            check_digest[0] = digest[25];
-            digest_buffer(&mut check_digest, key);
-            
-            if check_digest == digest { // use this to support multiple hubs on one network
-                let listen_port = digest[25];
-                return Ok(match from {
-                    SocketAddr::V4(v4) => SocketAddr::V4(SocketAddrV4::new(*v4.ip(), listen_port as u16)),
-                    SocketAddr::V6(v6) => SocketAddr::V6(SocketAddrV6::new(*v6.ip(), listen_port as u16, v6.flowinfo(), v6.scope_id())),
-                })
-            }
-            
-            println!("wait for announce found wrong digest");
+        }
+        else{
+            return Ok(SocketAddr::from(([127,0,0,1], def_port as u16)))
         }
     }
     
