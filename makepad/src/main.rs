@@ -9,6 +9,8 @@ use std::collections::HashMap;
 //use std::borrow::Cow;
 use serde::*;
 
+use makehub::*;
+
 #[derive(Clone, Serialize, Deserialize)]
 enum Panel {
     RustCompiler,
@@ -40,6 +42,8 @@ struct AppGlobal {
 }
 
 struct App {
+    hub_server: Option<HubServer>,
+    hub_client: Option<HubClient>,
     app_window_state_template: AppWindowState,
     app_window_template: AppWindow,
     app_global: AppGlobal,
@@ -399,6 +403,8 @@ impl App {
     pub fn style(cx: &mut Cx) -> Self {
         set_dark_style(cx);
         Self {
+            hub_server: None,
+            hub_client: None,
             app_window_template: AppWindow::style(cx),
             app_window_state_template: AppWindowState {
                 window_inner_size: Vec2::zero(),
@@ -474,7 +480,6 @@ impl App {
     }
     
     fn default_layout(&mut self, cx: &mut Cx) {
-        println!("DOING DEFAULT");
         self.app_global.state.windows = vec![self.app_window_state_template.clone()];
         self.windows = vec![self.app_window_template.clone()];
         cx.send_signal(self.app_global.file_tree_reload_signal, 0);
@@ -491,6 +496,20 @@ impl App {
                 }
                 else {
                     self.default_layout(cx);
+                }
+                
+                let key = [7u8, 4u8, 5u8, 1u8];
+                let mut hub_server = HubServer::start_hub_server_default(&key);
+                hub_server.start_announce_server_default(&key);
+                
+                self.hub_server = Some(hub_server);
+                
+                if let Ok(address) = HubClient::wait_for_announce(&key){
+                    if let Ok(hub_client) = HubClient::connect_to_hub(&key, address){
+                        self.hub_client = Some(hub_client);
+                        // now we need to route the hub client
+                        
+                    }
                 }
             },
             Event::FileRead(fr) => {

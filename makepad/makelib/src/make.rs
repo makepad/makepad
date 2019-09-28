@@ -2,10 +2,17 @@ use makehub::*;
 use crate::process::*;
 use serde::{Deserialize};
 use std::sync::{Arc, Mutex};
+use serde_json::{Result};
 
 pub struct Make {
     pub hub_client: HubClient,
     pub processes: Arc<Mutex<Vec<MakeProcess>>>
+}
+
+pub struct MakeProcess{
+    uid:HubUid,
+    _process:Process,
+    _thread: Option<std::thread::JoinHandle<()>>
 }
 
 impl Make {
@@ -14,7 +21,7 @@ impl Make {
         let key = [1u8, 2u8, 3u8, 4u8];
         
         // lets wait for a server announce
-        let address = HubClient::wait_for_announce(&key, HUB_DEFAULT_PORT).expect("cannot wait for announce");
+        let address = HubClient::wait_for_announce(&key).expect("cannot wait for announce");
         
         // ok now connect to that address
         let hub_client = HubClient::connect_to_hub(&key, address).expect("cannot connect to hub");
@@ -37,9 +44,23 @@ impl Make {
         }
     }
     
-    pub fn cargo(&mut self, uid:HubUid, args: &[&str]) {
+    pub fn default(&mut self, htc:HubToClientMsg){
+        match htc.msg{
+            HubMsg::CargoCheck{uid, target, ..} => {
+                self.cargo(uid,&["check", "-p", &target]);
+            },
+            HubMsg::ListWorkspace{uid}=>{
+                self.list_workspace(uid, "./");
+            },
+            _=>()
+        }
+    }
+    
+    pub fn cargo(&mut self, uid:HubUid, args: &[&str]){
         // lets start a thread
-        let mut process = Process::start("cargo", args, "./").expect("Cannot start process");
+        let mut extargs = args.to_vec();
+        extargs.push("--message-format=json");
+        let mut process = Process::start("cargo", &extargs, "./").expect("Cannot start process");
         
         // we now need to start a subprocess and parse the cargo output.
         let tx_write = self.hub_client.tx_write.clone();
@@ -50,13 +71,29 @@ impl Make {
         
         let thread = std::thread::spawn(move || {
             while let Ok(line) = rx_line.recv(){
-                tx_write.send(ClientToHubMsg{
-                    to: HubMsgTo::UI,
-                    msg: HubMsg::CargoMsg{
-                        uid:uid,
-                        msg:CargoMsg::Warning{msg:"hi".to_string()}
+                if let Some(line) = line{
+                    
+                    // lets parse the line
+                    let parsed: Result<RustcCompilerMessage> = serde_json::from_str(&line);
+                    match parsed {
+                        Err(err) => println!("Json Parse Error {:?} {}", err, line),
+                        Ok(rcm) => {
+                            // here we convert the parsed message
+                            
+                        }
                     }
-                }).expect("tx_write fail");
+                    
+                    tx_write.send(ClientToHubMsg{
+                        to: HubMsgTo::UI,
+                        msg: HubMsg::CargoMsg{
+                            uid:uid,
+                            msg:CargoMsg::Warning{msg:"hi".to_string()}
+                        }
+                    }).expect("tx_write fail");
+                }
+                else{ // process terminated
+                    break;
+                }
             }
 
             // process ends as well
@@ -66,6 +103,7 @@ impl Make {
                     uid:uid,
                 }
             }).expect("tx_write fail");
+            
             // remove process from process list
             if let Ok(mut processes) = processes.lock() {
                 if let Some(index) = processes.iter().position(|p| p.uid == uid){
@@ -76,16 +114,16 @@ impl Make {
         
         if let Ok(mut processes) = self.processes.lock() {
             processes.push(MakeProcess {
-                process:process,
+                _process:process,
                 uid:uid,
-                thread: Some(thread)
+                _thread: Some(thread)
             });
             // wait for the thread to terminate?
             
         };
     }
     
-    pub fn cargo_has_targets(&mut self, uid: HubUid, tgt: &[&'static str]) {
+    pub fn cargo_has_targets(&mut self, uid: HubUid, tgt: &[&'static str]){
         self.hub_client.tx_write.send(ClientToHubMsg {
             to: HubMsgTo::UI,
             msg: HubMsg::CargoHasTargets {
@@ -94,12 +132,10 @@ impl Make {
             }
         }).expect("cannot send message");
     }
-}
+    
+    pub fn list_workspace(&mut self, uid:HubUid, path:&str){
 
-pub struct MakeProcess{
-    uid:HubUid,
-    process:Process,
-    thread: Option<std::thread::JoinHandle<()>>
+    }
 }
 
 // rust compiler output json structs
@@ -173,11 +209,16 @@ pub struct RustcProfile {
 pub struct RustcCompilerMessage {
     reason: String,
     package_id: String,
-    target: RustcTarget,
-    message: RustcMessage
+    target: Option<RustcTarget>,
+    message: Option<RustcMessage>,
+    profile: Option<RustcProfile>,
+    features: Option<Vec<String>>,
+    filenames: Option<Vec<String>>,
+    executable: Option<String>,
+    fresh: Option<bool>
 }
 
-#[derive(Clone, Deserialize, Default)]
+/*#[derive(Clone, Deserialize, Default)]
 pub struct RustcCompilerArtifact {
     reason: String,
     package_id: String,
@@ -187,4 +228,4 @@ pub struct RustcCompilerArtifact {
     filenames: Vec<String>,
     executable: Option<String>,
     fresh: bool
-}
+}*/

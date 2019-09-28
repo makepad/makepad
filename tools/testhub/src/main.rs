@@ -3,7 +3,7 @@ use makelib::*;
 use std::net::SocketAddr;
 
 fn main() {
-    let key = [1u8,2u8,3u8,4u8];
+    let key = [1u8, 2u8, 3u8, 4u8];
     let mut server = HubServer::start_hub_server(
         &key,
         SocketAddr::from(([0, 0, 0, 0], 0))
@@ -17,10 +17,10 @@ fn main() {
     );
     
     // lets wait for a server announce
-    let address = HubClient::wait_for_announce(&key, 47263).expect("cannot wait for announce");
-
+    let address = HubClient::wait_for_announce(&key).expect("cannot wait for announce");
+    
     println!("GOT ADDRESS {:?}", address);
-
+    
     let mut ui_client = HubClient::connect_to_hub(&key, address).expect("Cannot connect client_a");
     
     // lets connect a UI client
@@ -28,29 +28,29 @@ fn main() {
         to: HubMsgTo::All,
         msg: HubMsg::ConnectUI
     }).expect("Cannot send messsage");
-
+    
     // start a client message pump
     std::thread::spawn(move || {
         // wait for the answer
         while let Ok(htc) = ui_client.rx_read.recv() {
-            match htc.msg{
+            match htc.msg {
                 HubMsg::ConnectBuild => {
                     let new_uid = ui_client.alloc_uid();
-                    ui_client.tx_write.send(ClientToHubMsg{
+                    ui_client.tx_write.send(ClientToHubMsg {
                         to: HubMsgTo::Build,
-                        msg: HubMsg::GetCargoTargets{uid:new_uid}
+                        msg: HubMsg::GetCargoTargets {uid: new_uid}
                     }).expect("Cannot send messsage");
                 },
-                HubMsg::CargoHasTargets{uid, targets}=>{
+                HubMsg::CargoHasTargets {uid: _, targets: _} => {
                     let new_uid = ui_client.alloc_uid();
                     // now lets fire up a build.
-                    ui_client.tx_write.send(ClientToHubMsg{
+                    ui_client.tx_write.send(ClientToHubMsg {
                         to: HubMsgTo::Build,
-                        msg: HubMsg::CargoCheck{uid:new_uid, target:"makepad".to_string()}
+                        msg: HubMsg::CargoCheck {uid: new_uid, target: "makepad".to_string()}
                     }).expect("Cannot send messsage");
-
+                    
                 },
-                _=>()
+                _ => ()
             }
         }
     });
@@ -59,16 +59,16 @@ fn main() {
     std::thread::spawn(move || {
         // lets start a Make proc
         Make::proc( | make, htc | match htc.msg {
-            HubMsg::GetCargoTargets{uid} => {
-                make.cargo_has_targets(uid, &["makepad"]);
+            HubMsg::GetCargoTargets {uid} => {
+                make.cargo_has_targets(uid, &["makepad"])
             },
-            HubMsg::CargoCheck{uid, target, ..} => {
-                match target.as_ref(){
-                    "makepad" => make.cargo(uid, &["check", "-p", "makepad"]),
-                    _=>()
-                }
+            HubMsg::CargoCheck {uid, target, ..} => {
+                make.cargo(uid, &["check", "-p", &target])
             },
-            _=>()
+            HubMsg::ListWorkspace {uid} => {
+                make.list_workspace(uid, "./")
+            }
+            _ => make.default(htc)
         });
     });
     

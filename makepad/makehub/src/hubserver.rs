@@ -26,6 +26,13 @@ pub struct HubServer {
 }
 
 impl HubServer {
+    pub fn start_hub_server_default(key: &[u8])->HubServer{
+         HubServer::start_hub_server(
+            &key,
+            SocketAddr::from(([0, 0, 0, 0], 0))
+        )
+    }
+    
     pub fn start_hub_server(key: &[u8], listen_address: SocketAddr) -> HubServer {
         
         let listener = TcpListener::bind(listen_address).expect("Cannot bind server address");
@@ -198,6 +205,15 @@ impl HubServer {
             announce_thread: None
         };
     }
+
+    pub fn start_announce_server_default(&mut self, key: &[u8]) {
+        self.start_announce_server(
+            &key,
+            SocketAddr::from(([0, 0, 0, 0], 0)),
+            SocketAddr::from(([255, 255, 255, 255], HUB_ANNOUNCE_PORT)),
+            SocketAddr::from(([127, 0, 0, 1], HUB_ANNOUNCE_PORT)),
+        )
+}
     
     pub fn start_announce_server(&mut self, key: &[u8], announce_bind: SocketAddr, announce_send: SocketAddr, announce_backup: SocketAddr) {
         let listen_port = self.listen_port;

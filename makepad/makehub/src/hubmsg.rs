@@ -23,6 +23,10 @@ pub enum HubMsg{
     CargoDone{
         uid:HubUid
     },
+    
+    ListWorkspace{
+        uid:HubUid
+    },
 
     CargoHasTargets{uid:HubUid, targets:Vec<String>},
     GetCargoTargets{uid:HubUid},

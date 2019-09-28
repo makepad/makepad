@@ -26,3 +26,6 @@ path="../render"
 
 [dependencies.terminal]
 path="./terminal"
+
+[dependencies.makehub]
+path="./makehub"
