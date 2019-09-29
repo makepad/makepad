@@ -1,5 +1,4 @@
-use makehub::*;
-use makelib::*;
+use buildlib::*;
 use std::net::SocketAddr;
 
 fn main() {
@@ -58,7 +57,7 @@ fn main() {
     // start a buildserver test
     std::thread::spawn(move || {
         // lets start a Make proc
-        Make::proc( | make, htc | match htc.msg {
+        Build::proc( | make, htc | match htc.msg {
             HubMsg::GetCargoTargets {uid} => {
                 make.cargo_has_targets(uid, &["makepad"])
             },

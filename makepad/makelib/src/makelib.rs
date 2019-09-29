@@ -1,5 +1,7 @@
-use makehub::*;
 use crate::process::*;
+use crate::hubmsg::*;
+use crate::hubclient::*;
+
 use serde::{Deserialize};
 use std::sync::{Arc, Mutex};
 use serde_json::{Result};
@@ -18,13 +20,19 @@ pub struct MakeProcess{
 impl Make {
     pub fn proc<F>(mut event_handler: F)
     where F: FnMut(&mut Make, HubToClientMsg) {
-        let key = [1u8, 2u8, 3u8, 4u8];
+        let key = [7u8, 4u8, 5u8, 1u8];
         
+        println!("Waiting for hub announcement..");
+
         // lets wait for a server announce
         let address = HubClient::wait_for_announce(&key).expect("cannot wait for announce");
+
+        println!("Got announce, connecting to {:?}", address);
         
         // ok now connect to that address
         let hub_client = HubClient::connect_to_hub(&key, address).expect("cannot connect to hub");
+        
+        println!("Connected to {:?}", hub_client.server_addr);
         
         let mut make = Make {
             hub_client: hub_client,
@@ -77,7 +85,7 @@ impl Make {
                     let parsed: Result<RustcCompilerMessage> = serde_json::from_str(&line);
                     match parsed {
                         Err(err) => println!("Json Parse Error {:?} {}", err, line),
-                        Ok(rcm) => {
+                        Ok(_rcm) => {
                             // here we convert the parsed message
                             
                         }
@@ -133,8 +141,8 @@ impl Make {
         }).expect("cannot send message");
     }
     
-    pub fn list_workspace(&mut self, uid:HubUid, path:&str){
-
+    pub fn list_workspace(&mut self, _uid:HubUid, _path:&str){
+        
     }
 }
 

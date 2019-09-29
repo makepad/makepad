@@ -101,6 +101,7 @@ pub fn write_block_to_tcp_stream(tcp_stream: &mut TcpStream, msg_buf: &[u8], dig
 
 pub struct HubClient {
     pub own_addr: HubAddr,
+    pub server_addr: HubAddr,
     pub uid_alloc: u64,
     read_thread: Option<thread::JoinHandle<()>>,
     write_thread: Option<thread::JoinHandle<()>>,
@@ -116,7 +117,7 @@ impl HubClient {
         let local_address =   SocketAddr::from(([127, 0, 0, 1], server_address.port()));
         let server_hubaddr;
         let mut tcp_stream = if let Ok(stream) = TcpStream::connect(local_address){
-            server_hubaddr = HubAddr::from_socket_addr(server_address);
+            server_hubaddr = HubAddr::from_socket_addr(local_address);
             stream
         }
         else{
@@ -182,6 +183,7 @@ impl HubClient {
         Ok(HubClient {
             uid_alloc:0,
             own_addr: own_addr,
+            server_addr: server_hubaddr,
             read_thread: Some(read_thread),
             write_thread: Some(write_thread),
             tx_read: tx_read_copy,
