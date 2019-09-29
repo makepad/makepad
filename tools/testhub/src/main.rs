@@ -1,4 +1,4 @@
-use buildlib::*;
+use workspacelib::*;
 use std::net::SocketAddr;
 
 fn main() {
@@ -57,7 +57,7 @@ fn main() {
     // start a buildserver test
     std::thread::spawn(move || {
         // lets start a Make proc
-        Build::proc( | make, htc | match htc.msg {
+        Workspace::run("test", | make, htc | match htc.msg {
             HubMsg::GetCargoTargets {uid} => {
                 make.cargo_has_targets(uid, &["makepad"])
             },

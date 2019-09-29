@@ -1,12 +1,12 @@
 [workspace]
 
 members = [
-    "make",
     "makepad",
     "makepad/webgl",
     "tools/testhub",
     "examples/text_example",
-    "examples/quad_example"
+    "examples/quad_example",
+    "workspace"
 ]
 
 

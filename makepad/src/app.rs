@@ -6,7 +6,7 @@ use crate::rustcompiler::*;
 use crate::appwindow::*;
 use std::collections::HashMap;
 use serde::*;
-use makelib::*;
+use workspacelib::*;
 
 pub struct AppGlobal {
     pub file_tree_data: String,
@@ -140,13 +140,6 @@ impl App {
         match event {
             Event::Construct => {
                 self.app_global.handle_construct(cx);
-                self.app_global.index_file_read = cx.file_read(&format!("{}index.json", self.app_global.text_buffers.root_path));
-                if cx.platform_type.is_desktop() {
-                    self.app_global.app_state_file_read = cx.file_read(&format!("{}makepad_state.json", self.app_global.text_buffers.root_path));
-                }
-                else {
-                    self.default_layout(cx);
-                }
                 
                 let key = [7u8, 4u8, 5u8, 1u8];
                 let mut hub_server = HubServer::start_hub_server_default(&key);
@@ -160,6 +153,15 @@ impl App {
                         // now we need to route the hub client
                     }
                 }
+
+                self.app_global.index_file_read = cx.file_read(&format!("{}index.json", self.app_global.text_buffers.root_path));
+                if cx.platform_type.is_desktop() {
+                    self.app_global.app_state_file_read = cx.file_read(&format!("{}makepad_state.json", self.app_global.text_buffers.root_path));
+                }
+                else {
+                    self.default_layout(cx);
+                }
+
             },
             Event::FileRead(fr) => {
                 // lets see which file we loaded

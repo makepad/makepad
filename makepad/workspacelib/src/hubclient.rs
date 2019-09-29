@@ -36,6 +36,9 @@ pub fn read_exact_bytes_from_tcp_stream(tcp_stream: &mut TcpStream, bytes: &mut 
     while bytes_left > 0 {
         let buf = &mut bytes[(bytes_total - bytes_left)..bytes_total];
         let bytes_read = tcp_stream.read(buf).expect_msg("read_exact_bytes_from_tcp_stream: read failed")?;
+        if bytes_read == 0{
+            return Err(HubError::new("read_exact_bytes_from_tcp_stream - cannot read bytes"));
+        }
         bytes_left -= bytes_read;
     }
     Ok(())
@@ -75,6 +78,9 @@ pub fn write_exact_bytes_to_tcp_stream(tcp_stream: &mut TcpStream, bytes: &[u8])
     while bytes_left > 0 {
         let buf = &bytes[(bytes_total - bytes_left)..bytes_total];
         let bytes_written = tcp_stream.write(buf).expect_msg("write_exact_bytes_to_tcp_stream: block write fail")?;
+        if bytes_written == 0{
+            return Err(HubError::new("write_exact_bytes_to_tcp_stream - cannot write bytes"));
+        }
         bytes_left -= bytes_written;
     }
     Ok(())
@@ -130,7 +136,8 @@ impl HubClient {
         let (tx_read, rx_read) = mpsc::channel::<HubToClientMsg>();
         let (tx_write, rx_write) = mpsc::channel::<ClientToHubMsg>();
         let tx_read_copy = tx_read.clone();
-
+        let tx_write_copy = tx_write.clone();
+        
         let mut digest = [0u64; 26];
         digest_buffer(&mut digest, key);
         
@@ -146,12 +153,16 @@ impl HubClient {
                             tx_read.send(htc_msg).expect("tx_read.send fails - should never happen");
                         },
                         Err(e)=>{
-                            if tcp_stream.shutdown(Shutdown::Both).is_ok(){
-                                tx_read.send(HubToClientMsg{
-                                    from:server_hubaddr.clone(),
-                                    msg:HubMsg::ConnectionError(e)
-                                }).expect("tx_read.send fails - should never happen");
-                            }
+                            let _ = tcp_stream.shutdown(Shutdown::Both);
+                            tx_read.send(HubToClientMsg{
+                                from:server_hubaddr.clone(),
+                                msg:HubMsg::ConnectionError(e.clone())
+                            }).expect("tx_read.send fails - should never happen");
+                            // lets break rx write
+                            let _ = tx_write_copy.send(ClientToHubMsg{
+                                to:HubMsgTo::Hub,
+                                msg:HubMsg::ConnectionError(e)
+                            });
                             return
                         }
                     }
@@ -165,15 +176,21 @@ impl HubClient {
             let server_hubaddr = server_hubaddr.clone();
             std::thread::spawn(move || {// this one cannot send to the read channel.
                 while let Ok(cth_msg) = rx_write.recv() {
+                    match &cth_msg.msg{
+                        HubMsg::ConnectionError(_)=>{ // we are closed by the read loop
+                            return
+                        },
+                        _=>()
+                    }
+                        
                     let msg_buf = bincode::serialize(&cth_msg).expect("write_thread hub message serialize fail - should never happen");
                     if let Err(e) = write_block_to_tcp_stream(&mut tcp_stream, &msg_buf, &mut digest.clone()){
                         // disconnect the socket and send shutdown
-                        if tcp_stream.shutdown(Shutdown::Both).is_ok(){;
-                            tx_read.send(HubToClientMsg{
-                                from:server_hubaddr.clone(),
-                                msg:HubMsg::ConnectionError(e)
-                            }).expect("tx_read.send fails - should never happen");
-                        }
+                        let _ = tcp_stream.shutdown(Shutdown::Both);
+                        let _ = tx_read.send(HubToClientMsg{
+                            from:server_hubaddr.clone(),
+                            msg:HubMsg::ConnectionError(e)
+                        });
                         return
                     }
                 }

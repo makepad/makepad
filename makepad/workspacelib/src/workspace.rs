@@ -6,49 +6,58 @@ use serde::{Deserialize};
 use std::sync::{Arc, Mutex};
 use serde_json::{Result};
 
-pub struct Make {
+pub struct Workspace {
     pub hub_client: HubClient,
-    pub processes: Arc<Mutex<Vec<MakeProcess>>>
+    pub processes: Arc<Mutex<Vec<WorkspaceProcess>>>,
+    pub restart_connection: bool
 }
 
-pub struct MakeProcess{
+pub struct WorkspaceProcess{
     uid:HubUid,
     _process:Process,
     _thread: Option<std::thread::JoinHandle<()>>
 }
 
-impl Make {
-    pub fn proc<F>(mut event_handler: F)
-    where F: FnMut(&mut Make, HubToClientMsg) {
+impl Workspace {
+    pub fn run<F>(ws_name:&str, mut event_handler: F)
+    where F: FnMut(&mut Workspace, HubToClientMsg) {
         let key = [7u8, 4u8, 5u8, 1u8];
         
-        println!("Waiting for hub announcement..");
-
-        // lets wait for a server announce
-        let address = HubClient::wait_for_announce(&key).expect("cannot wait for announce");
-
-        println!("Got announce, connecting to {:?}", address);
-        
-        // ok now connect to that address
-        let hub_client = HubClient::connect_to_hub(&key, address).expect("cannot connect to hub");
-        
-        println!("Connected to {:?}", hub_client.server_addr);
-        
-        let mut make = Make {
-            hub_client: hub_client,
-            processes: Arc::new(Mutex::new(Vec::<MakeProcess>::new()))
-        };
-        
-        // lets transmit a BuildServer ack
-        make.hub_client.tx_write.send(ClientToHubMsg {
-            to: HubMsgTo::All,
-            msg: HubMsg::ConnectBuild
-        }).expect("Cannot send login");
-        
-        // this is the main messageloop, on rx
-        while let Ok(htc) = make.hub_client.rx_read.recv() {
-            // we just call the thing.
-            event_handler(&mut make, htc);
+        loop{
+            
+            println!("Workspace {} waiting for hub announcement..", ws_name);
+    
+            // lets wait for a server announce
+            let address = HubClient::wait_for_announce(&key).expect("cannot wait for announce");
+    
+            println!("Workspace {} got announce, connecting to {:?}",  ws_name, address);
+            
+            // ok now connect to that address
+            let hub_client = HubClient::connect_to_hub(&key, address).expect("cannot connect to hub");
+            
+            println!("Workspace {} connected to {:?}", ws_name, hub_client.server_addr);
+            
+            let mut workspace = Workspace {
+                hub_client: hub_client,
+                processes: Arc::new(Mutex::new(Vec::<WorkspaceProcess>::new())),
+                restart_connection: false
+            };
+            
+            // lets transmit a BuildServer ack
+            workspace.hub_client.tx_write.send(ClientToHubMsg {
+                to: HubMsgTo::All,
+                msg: HubMsg::ConnectWorkspace(ws_name.to_string())
+            }).expect("Cannot send login");
+            
+            // this is the main messageloop, on rx
+            while let Ok(htc) = workspace.hub_client.rx_read.recv() {
+                println!("Got {:?}", htc);
+                // we just call the thing.
+                event_handler(&mut workspace, htc);
+                if workspace.restart_connection{
+                    break
+                }
+            }
         }
     }
     
@@ -57,8 +66,12 @@ impl Make {
             HubMsg::CargoCheck{uid, target, ..} => {
                 self.cargo(uid,&["check", "-p", &target]);
             },
-            HubMsg::ListWorkspace{uid}=>{
+            HubMsg::ListWorkspaceRequest{uid}=>{
                 self.list_workspace(uid, "./");
+            },
+            HubMsg::ConnectionError(_e)=>{
+                self.restart_connection = true;
+                println!("Got connection error, need to restart loop TODO kill all processes!");
             },
             _=>()
         }
@@ -121,20 +134,18 @@ impl Make {
         });
         
         if let Ok(mut processes) = self.processes.lock() {
-            processes.push(MakeProcess {
+            processes.push(WorkspaceProcess {
                 _process:process,
                 uid:uid,
                 _thread: Some(thread)
             });
-            // wait for the thread to terminate?
-            
         };
     }
     
-    pub fn cargo_has_targets(&mut self, uid: HubUid, tgt: &[&'static str]){
+    pub fn cargo_targets(&mut self, uid: HubUid, tgt: &[&'static str]){
         self.hub_client.tx_write.send(ClientToHubMsg {
             to: HubMsgTo::UI,
-            msg: HubMsg::CargoHasTargets {
+            msg: HubMsg::CargoTargetsResponse {
                 uid: uid,
                 targets: tgt.iter().map( | v | v.to_string()).collect()
             }

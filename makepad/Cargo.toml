@@ -27,5 +27,5 @@ path="../render"
 [dependencies.terminal]
 path="./terminal"
 
-[dependencies.makelib]
-path="./makelib"
+[dependencies.workspacelib]
+path="./workspacelib"
