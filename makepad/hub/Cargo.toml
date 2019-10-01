@@ -1,5 +1,5 @@
 [package]
-name = "workspacelib"
+name = "hub"
 version = "0.1.0"
 authors = ["makepaddev"]
 edition = "2018"
@@ -9,4 +9,5 @@ closefds = "*"
 serde_json = "*"
 bincode = "1.2"
 snap = "0.1"
+libc = "0.2"
 serde = { version = "1.0", features = ["derive"] }

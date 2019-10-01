@@ -1,9 +1,11 @@
-use workspacelib::*;
+use hub::*;
 
 fn main() {
-    Workspace::run("makepad", | workspace, htc | match htc.msg {
-        HubMsg::CargoTargetsRequest {uid} => {
-            workspace.cargo_targets(uid, &["makepad"])
+    HubWorkspace::run("makepad", | workspace, htc | match htc.msg {
+        HubMsg::CargoPackagesRequest {uid} => {
+            workspace.cargo_packages(uid, vec![
+                CargoPackage::new("makepad",vec![CargoTarget::Check, CargoTarget::Release, CargoTarget::IPC])
+            ])
         },
         _ => workspace.default(htc)
     });

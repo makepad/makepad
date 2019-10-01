@@ -1,6 +1,6 @@
 
-mod workspace;
-pub use crate::workspace::*;
+mod hubworkspace;
+pub use crate::hubworkspace::*;
 
 mod process;
 pub use crate::process::*;

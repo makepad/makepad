@@ -3,5 +3,5 @@ name = "workspace"
 version = "0.1.0"
 edition = "2018"
 
-[dependencies.workspacelib]
-path="../makepad/workspacelib"
+[dependencies.hub]
+path="../makepad/hub"

@@ -7,5 +7,5 @@ edition = "2018"
 #time = "0.1.4"
 #snap = "0.1"
 
-[dependencies.workspacelib]
-path="../../makepad/workspacelib"
+[dependencies.hub]
+path="../../makepad/hub"

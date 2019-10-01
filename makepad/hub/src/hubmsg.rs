@@ -7,12 +7,18 @@ pub enum HubMsg {
     ConnectClone(String),
     ConnectUI,
     
+    DisconnectWorkspace(String),
+    DisconnectClone(String),
+    DisconnectUI,
+    DisconnectUnknown,
+    
     ConnectionError(HubError),
     
     // make client stuff
-    CargoCheck {
+    CargoExec {
         uid: HubUid,
-        target: String
+        package: String,
+        target: CargoTarget
     },
     
     CargoMsg {
@@ -24,12 +30,21 @@ pub enum HubMsg {
         uid: HubUid
     },
     
-    ListWorkspaceRequest {
+    WorkspaceFileTreeRequest {
         uid: HubUid
     },
     
-    ListWorkspaceResponse {
+    WorkspaceFileTreeResponse {
         uid: HubUid,
+    },
+    
+    ListWorkspacesRequest{
+        uid: HubUid,
+    },
+    
+    ListWorkspacesResponse{
+        uid: HubUid,
+        workspaces: Vec<String>
     },
     
     ReadFileRequest {
@@ -55,15 +70,41 @@ pub enum HubMsg {
         done: bool
     },
     
-    CargoTargetsRequest {
+    CargoPackagesRequest {
         uid: HubUid
     },
     
-    CargoTargetsResponse {
+    CargoPackagesResponse {
         uid: HubUid,
-        targets: Vec<String>
+        packages: Vec<CargoPackage>
     },
+
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct  CargoPackage {
+    pub package_name: String,
+    pub targets: Vec<CargoTarget>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum CargoTarget {
+    Check,
+    Release,
+    IPC,
+    VR,
+    Custom(String)
+}
+
+impl CargoPackage{
+    pub fn new(package_name:&str, targets:Vec<CargoTarget>)->CargoPackage{
+        CargoPackage{
+            package_name: package_name.to_string(),
+            targets: targets
+        }
+    }
+}
+
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum CargoMsg {
@@ -83,7 +124,20 @@ pub enum HubAddr {
     V6 {octets: [u8; 16], port: u16},
 }
 
+impl HubAddr{
+    pub fn port(&self)->u16{
+        match self{
+            HubAddr::V4{port,..}=>*port,
+            HubAddr::V6{port,..}=>*port
+        }
+    }
+}
+
 impl HubAddr {
+    pub fn zero()->HubAddr{
+        HubAddr::V4{octets:[0,0,0,0], port:0}
+    }
+    
     pub fn from_socket_addr(addr: SocketAddr) -> HubAddr {
         match addr {
             SocketAddr::V4(v4) => HubAddr::V4 {octets: v4.ip().octets(), port: v4.port()},
@@ -126,4 +180,10 @@ pub struct HubError {
 
 impl HubError {
     pub fn new(msg: &str) -> HubError {HubError {msg: msg.to_string()}}
+}
+
+#[derive(Clone)]
+pub enum HubLog{
+    All,
+    None
 }

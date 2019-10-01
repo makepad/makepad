@@ -410,7 +410,6 @@ impl CocoaApp {
             (*post_delegate_instance).set_ivar("cocoa_app_ptr", GLOBAL_COCOA_APP as *mut _ as *mut c_void);
             (*post_delegate_instance).set_ivar("signal_id", signal_id);
             (*post_delegate_instance).set_ivar("value", value);
-            
             let nstimer: id = msg_send![
                 class!(NSTimer),
                 timerWithTimeInterval: 0.

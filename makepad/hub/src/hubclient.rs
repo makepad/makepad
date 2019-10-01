@@ -4,6 +4,10 @@ use std::io::prelude::*;
 use std::sync::{mpsc};
 use std::thread;
 
+use std::os::unix::io::AsRawFd;
+use std::mem;
+use libc;
+
 trait ResultMsg<T>{
     fn expect_msg(self, msg:&str)->Result<T, HubError>;
 }
@@ -105,6 +109,8 @@ pub fn write_block_to_tcp_stream(tcp_stream: &mut TcpStream, msg_buf: &[u8], dig
     Ok(())
 }
 
+
+
 pub struct HubClient {
     pub own_addr: HubAddr,
     pub server_addr: HubAddr,
@@ -117,7 +123,7 @@ pub struct HubClient {
 }
 
 impl HubClient {
-    pub fn connect_to_hub(key: &[u8], server_address: SocketAddr) -> HubResult<HubClient> {
+    pub fn connect_to_hub(key: &[u8], server_address: SocketAddr, hub_log:HubLog) -> HubResult<HubClient> {
         
         // first try local address
         let local_address =   SocketAddr::from(([127, 0, 0, 1], server_address.port()));
@@ -145,11 +151,18 @@ impl HubClient {
             let mut tcp_stream = tcp_stream.try_clone().expect_msg("connect_to_hub: cannot clone socket")?;
             let digest = digest.clone();
             let server_hubaddr = server_hubaddr.clone();
+            let hub_log = hub_log.clone();
             std::thread::spawn(move || {
                 loop {
                     match read_block_from_tcp_stream(&mut tcp_stream, &mut digest.clone()){
                         Ok(msg_buf)=>{
                             let htc_msg: HubToClientMsg = bincode::deserialize(&msg_buf).expect("read_thread hub message deserialize fail - version conflict!");
+                            match hub_log{
+                                HubLog::All=>{
+                                    println!("HubClient received {:?}", htc_msg);
+                                },
+                                _=>()
+                            }
                             tx_read.send(htc_msg).expect("tx_read.send fails - should never happen");
                         },
                         Err(e)=>{
@@ -174,8 +187,15 @@ impl HubClient {
             let digest = digest.clone();
             let tx_read = tx_read_copy.clone();
             let server_hubaddr = server_hubaddr.clone();
+            let hub_log = hub_log.clone();
             std::thread::spawn(move || {// this one cannot send to the read channel.
                 while let Ok(cth_msg) = rx_write.recv() {
+                    match hub_log{
+                        HubLog::All=>{
+                            println!("HubClient sending {:?}", cth_msg);
+                        },
+                        _=>()
+                    }
                     match &cth_msg.msg{
                         HubMsg::ConnectionError(_)=>{ // we are closed by the read loop
                             return
@@ -214,30 +234,45 @@ impl HubClient {
     }
     
     pub fn wait_for_announce_on(key: &[u8], announce_address: SocketAddr) -> Result<SocketAddr, std::io::Error> {
-        let socket = UdpSocket::bind(announce_address)?;
+            
         loop {
-            let mut digest = [0u64; 26];
-            let digest_u8 = unsafe {std::mem::transmute::<&mut [u64; 26], &mut [u8; 26 * 8]>(&mut digest)};
-            
-            let (bytes, from) = socket.recv_from(digest_u8) ?;
-            if bytes != 26 * 8 {
-                println!("Announce port wrong bytecount");
+            if let Ok(socket) = UdpSocket::bind(announce_address){
+                // TODO. FIX FOR WINDOWS
+                unsafe{
+                    let optval: libc::c_int = 1;
+                    let _ = libc::setsockopt(
+                        socket.as_raw_fd(),
+                        libc::SOL_SOCKET,
+                        libc::SO_REUSEADDR,
+                        &optval as *const _ as *const libc::c_void,
+                        mem::size_of_val(&optval) as libc::socklen_t,
+                    );
+                }
+                let mut digest = [0u64; 26];
+                let digest_u8 = unsafe {std::mem::transmute::<&mut [u64; 26], &mut [u8; 26 * 8]>(&mut digest)};
+                
+                let (bytes, from) = socket.recv_from(digest_u8) ?;
+                if bytes != 26 * 8 {
+                    println!("Announce port wrong bytecount");
+                }
+                
+                let mut check_digest = [0u64; 26];
+                check_digest[25] = digest[25];
+                check_digest[0] = digest[25];
+                digest_buffer(&mut check_digest, key);
+                
+                if check_digest == digest { // use this to support multiple hubs on one network
+                    let listen_port = digest[25];
+                    return Ok(match from {
+                        SocketAddr::V4(v4) => SocketAddr::V4(SocketAddrV4::new(*v4.ip(), listen_port as u16)),
+                        SocketAddr::V6(v6) => SocketAddr::V6(SocketAddrV6::new(*v6.ip(), listen_port as u16, v6.flowinfo(), v6.scope_id())),
+                    })
+                }
+                println!("wait for announce found wrong digest");
             }
-            
-            let mut check_digest = [0u64; 26];
-            check_digest[25] = digest[25];
-            check_digest[0] = digest[25];
-            digest_buffer(&mut check_digest, key);
-            
-            if check_digest == digest { // use this to support multiple hubs on one network
-                let listen_port = digest[25];
-                return Ok(match from {
-                    SocketAddr::V4(v4) => SocketAddr::V4(SocketAddrV4::new(*v4.ip(), listen_port as u16)),
-                    SocketAddr::V6(v6) => SocketAddr::V6(SocketAddrV6::new(*v6.ip(), listen_port as u16, v6.flowinfo(), v6.scope_id())),
-                })
+            else{
+                println!("wait for announce bind failed");
             }
-            
-            println!("wait for announce found wrong digest");
         }
     }
     

@@ -6,40 +6,40 @@ use serde::{Deserialize};
 use std::sync::{Arc, Mutex};
 use serde_json::{Result};
 
-pub struct Workspace {
+pub struct HubWorkspace {
     pub hub_client: HubClient,
-    pub processes: Arc<Mutex<Vec<WorkspaceProcess>>>,
+    pub processes: Arc<Mutex<Vec<HubWsProcess>>>,
     pub restart_connection: bool
 }
 
-pub struct WorkspaceProcess{
-    uid:HubUid,
-    _process:Process,
+pub struct HubWsProcess {
+    uid: HubUid,
+    _process: Process,
     _thread: Option<std::thread::JoinHandle<()>>
 }
 
-impl Workspace {
-    pub fn run<F>(ws_name:&str, mut event_handler: F)
-    where F: FnMut(&mut Workspace, HubToClientMsg) {
+impl HubWorkspace {
+    pub fn run<F>(ws_name: &str, mut event_handler: F)
+    where F: FnMut(&mut HubWorkspace, HubToClientMsg) {
         let key = [7u8, 4u8, 5u8, 1u8];
         
-        loop{
+        loop {
             
             println!("Workspace {} waiting for hub announcement..", ws_name);
-    
+            
             // lets wait for a server announce
             let address = HubClient::wait_for_announce(&key).expect("cannot wait for announce");
-    
-            println!("Workspace {} got announce, connecting to {:?}",  ws_name, address);
+            
+            println!("Workspace {} got announce, connecting to {:?}", ws_name, address);
             
             // ok now connect to that address
-            let hub_client = HubClient::connect_to_hub(&key, address).expect("cannot connect to hub");
+            let hub_client = HubClient::connect_to_hub(&key, address, HubLog::All).expect("cannot connect to hub");
             
             println!("Workspace {} connected to {:?}", ws_name, hub_client.server_addr);
             
-            let mut workspace = Workspace {
+            let mut workspace = HubWorkspace {
                 hub_client: hub_client,
-                processes: Arc::new(Mutex::new(Vec::<WorkspaceProcess>::new())),
+                processes: Arc::new(Mutex::new(Vec::<HubWsProcess>::new())),
                 restart_connection: false
             };
             
@@ -51,33 +51,49 @@ impl Workspace {
             
             // this is the main messageloop, on rx
             while let Ok(htc) = workspace.hub_client.rx_read.recv() {
-                println!("Got {:?}", htc);
+                //println!("Workspace got message {:?}", htc);
                 // we just call the thing.
                 event_handler(&mut workspace, htc);
-                if workspace.restart_connection{
+                if workspace.restart_connection {
                     break
                 }
             }
         }
     }
     
-    pub fn default(&mut self, htc:HubToClientMsg){
-        match htc.msg{
-            HubMsg::CargoCheck{uid, target, ..} => {
-                self.cargo(uid,&["check", "-p", &target]);
+    pub fn default(&mut self, htc: HubToClientMsg) {
+        match htc.msg {
+            HubMsg::CargoExec {uid, package, target} => {
+                match target{
+                    CargoTarget::Check=>{
+                        self.cargo(uid, &["check", "-p", &package]);
+                    },
+                    CargoTarget::Release=>{
+                        self.cargo(uid, &["build", "-p", &package, "--release"]);
+                    },
+                    CargoTarget::IPC=>{
+                        self.cargo(uid, &["build", "-p", &package, "--release"]);
+                    },
+                    CargoTarget::VR=>{
+                        self.cargo(uid, &["build", "-p", &package, "--release"]);
+                    },
+                    CargoTarget::Custom(_s)=>{
+                        
+                    }
+                }
             },
-            HubMsg::ListWorkspaceRequest{uid}=>{
-                self.list_workspace(uid, "./");
+            HubMsg::WorkspaceFileTreeRequest {uid} => {
+                self.workspace_file_tree(uid, "./");
             },
-            HubMsg::ConnectionError(_e)=>{
+            HubMsg::ConnectionError(_e) => {
                 self.restart_connection = true;
                 println!("Got connection error, need to restart loop TODO kill all processes!");
             },
-            _=>()
+            _ => ()
         }
     }
     
-    pub fn cargo(&mut self, uid:HubUid, args: &[&str]){
+    pub fn cargo(&mut self, uid: HubUid, args: &[&str]) {
         // lets start a thread
         let mut extargs = args.to_vec();
         extargs.push("--message-format=json");
@@ -85,14 +101,14 @@ impl Workspace {
         
         // we now need to start a subprocess and parse the cargo output.
         let tx_write = self.hub_client.tx_write.clone();
-
+        
         let rx_line = process.rx_line.take().unwrap();
-
+        
         let processes = Arc::clone(&self.processes);
         
         let thread = std::thread::spawn(move || {
-            while let Ok(line) = rx_line.recv(){
-                if let Some(line) = line{
+            while let Ok(line) = rx_line.recv() {
+                if let Some(line) = line {
                     
                     // lets parse the line
                     let parsed: Result<RustcCompilerMessage> = serde_json::from_str(&line);
@@ -104,55 +120,55 @@ impl Workspace {
                         }
                     }
                     
-                    tx_write.send(ClientToHubMsg{
+                    tx_write.send(ClientToHubMsg {
                         to: HubMsgTo::UI,
-                        msg: HubMsg::CargoMsg{
-                            uid:uid,
-                            msg:CargoMsg::Warning{msg:"hi".to_string()}
+                        msg: HubMsg::CargoMsg {
+                            uid: uid,
+                            msg: CargoMsg::Warning {msg: "hi".to_string()}
                         }
                     }).expect("tx_write fail");
                 }
-                else{ // process terminated
+                else { // process terminated
                     break;
                 }
             }
-
+            
             // process ends as well
-            tx_write.send(ClientToHubMsg{
+            tx_write.send(ClientToHubMsg {
                 to: HubMsgTo::UI,
-                msg: HubMsg::CargoDone{
-                    uid:uid,
+                msg: HubMsg::CargoDone {
+                    uid: uid,
                 }
             }).expect("tx_write fail");
             
             // remove process from process list
             if let Ok(mut processes) = processes.lock() {
-                if let Some(index) = processes.iter().position(|p| p.uid == uid){
+                if let Some(index) = processes.iter().position( | p | p.uid == uid) {
                     processes.remove(index);
                 }
             };
         });
         
         if let Ok(mut processes) = self.processes.lock() {
-            processes.push(WorkspaceProcess {
-                _process:process,
-                uid:uid,
+            processes.push(HubWsProcess {
+                uid: uid,
+                _process: process,
                 _thread: Some(thread)
             });
         };
     }
     
-    pub fn cargo_targets(&mut self, uid: HubUid, tgt: &[&'static str]){
+    pub fn cargo_packages(&mut self, uid: HubUid, packages:Vec<CargoPackage>) {
         self.hub_client.tx_write.send(ClientToHubMsg {
             to: HubMsgTo::UI,
-            msg: HubMsg::CargoTargetsResponse {
+            msg: HubMsg::CargoPackagesResponse {
                 uid: uid,
-                targets: tgt.iter().map( | v | v.to_string()).collect()
+                packages: packages
             }
         }).expect("cannot send message");
     }
     
-    pub fn list_workspace(&mut self, _uid:HubUid, _path:&str){
+    pub fn workspace_file_tree(&mut self, _uid: HubUid, _path: &str) {
         
     }
 }

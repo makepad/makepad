@@ -4,11 +4,14 @@ use widget::*;
 use editor::*;
 use crate::rustcompiler::*;
 use crate::appwindow::*;
+use crate::hubui::*;
 use std::collections::HashMap;
 use serde::*;
-use workspacelib::*;
+use hub::*;
 
 pub struct AppGlobal {
+    pub hub_server: Option<HubServer>,
+    pub hub_ui: Option<HubUI>,
     pub file_tree_data: String,
     pub file_tree_reload_signal: Signal,
     pub text_buffers: TextBuffers,
@@ -19,8 +22,6 @@ pub struct AppGlobal {
 }
 
 pub struct App {
-    pub hub_server: Option<HubServer>,
-    pub hub_client: Option<HubClient>,
     pub app_window_state_template: AppWindowState,
     pub app_window_template: AppWindow,
     pub app_global: AppGlobal,
@@ -46,15 +47,26 @@ impl AppGlobal {
         let json = serde_json::to_string(&self.state).unwrap();
         cx.file_write(&format!("{}makepad_state.json", self.text_buffers.root_path), json.as_bytes());
     }
+    
+    pub fn send_hub_msg(&mut self,  msg:ClientToHubMsg){
+        self.hub_ui.as_mut().unwrap().send(msg)
+    }
+
+    pub fn alloc_hub_uid(&mut self)->HubUid{
+        self.hub_ui.as_mut().unwrap().alloc_uid()
+    }
+
+    pub fn is_own_hub_addr(&mut self, addr:&HubAddr)->bool{
+        self.hub_ui.as_mut().unwrap().is_own_addr(addr)
+    }
 }
 
 impl App {
     
     pub fn style(cx: &mut Cx) -> Self {
         set_dark_style(cx);
+        
         Self {
-            hub_server: None,
-            hub_client: None,
             app_window_template: AppWindow::style(cx),
             app_window_state_template: AppWindowState {
                 window_inner_size: Vec2::zero(),
@@ -115,6 +127,8 @@ impl App {
             },
             windows: vec![],
             app_global: AppGlobal {
+                hub_server: None,
+                hub_ui: None,
                 rust_compiler: RustCompiler::style(cx),
                 text_buffers: TextBuffers {
                     root_path: "./".to_string(),
@@ -136,24 +150,26 @@ impl App {
         cx.redraw_child_area(Area::All);
     }
     
+    pub fn handle_hub_msg(&mut self, _cx:&mut Cx, htc: HubToClientMsg){
+        // only in ConnectUI of ourselves do we list the workspaces
+        match &htc.msg{
+            HubMsg::ConnectUI=>if self.app_global.is_own_hub_addr(&htc.from){
+                // now start talking
+                let workspaces_uid = self.app_global.alloc_hub_uid();
+                self.app_global.send_hub_msg(ClientToHubMsg{
+                    to:HubMsgTo::Hub,
+                    msg:HubMsg::ListWorkspacesRequest{uid:workspaces_uid}
+                });
+            },
+            _=>()
+        }
+    }
+    
     pub fn handle_app(&mut self, cx: &mut Cx, event: &mut Event) {
         match event {
             Event::Construct => {
                 self.app_global.handle_construct(cx);
                 
-                let key = [7u8, 4u8, 5u8, 1u8];
-                let mut hub_server = HubServer::start_hub_server_default(&key);
-                hub_server.start_announce_server_default(&key);
-                
-                self.hub_server = Some(hub_server);
-                
-                if let Ok(address) = HubClient::wait_for_announce(&key){
-                    if let Ok(hub_client) = HubClient::connect_to_hub(&key, address){
-                        self.hub_client = Some(hub_client);
-                        // now we need to route the hub client
-                    }
-                }
-
                 self.app_global.index_file_read = cx.file_read(&format!("{}index.json", self.app_global.text_buffers.root_path));
                 if cx.platform_type.is_desktop() {
                     self.app_global.app_state_file_read = cx.file_read(&format!("{}makepad_state.json", self.app_global.text_buffers.root_path));
@@ -161,7 +177,29 @@ impl App {
                 else {
                     self.default_layout(cx);
                 }
+                
+                let key = [7u8, 4u8, 5u8, 1u8];
+                let mut hub_server = HubServer::start_hub_server_default(&key, HubLog::All);
+                hub_server.start_announce_server_default(&key);
+                let hub_ui = HubUI::new(cx, &key, HubLog::All);
 
+                self.app_global.hub_server = Some(hub_server);
+                
+                self.app_global.hub_ui = Some(hub_ui);
+                
+            },
+            Event::Signal(se) => {
+                let mut hub_htc_msgs = Vec::new();
+                if let Some(hub_ui) = &mut self.app_global.hub_ui{
+                    if hub_ui.signal.is_signal(se){
+                        if let Ok(mut htc_msgs) = hub_ui.htc_msgs_arc.lock(){
+                            std::mem::swap(&mut hub_htc_msgs, &mut htc_msgs);
+                        }
+                    }
+                }
+                for htc in hub_htc_msgs.drain(..){
+                    self.handle_hub_msg(cx, htc);
+                }
             },
             Event::FileRead(fr) => {
                 // lets see which file we loaded
