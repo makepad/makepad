@@ -1,5 +1,6 @@
 use serde::{Serialize, Deserialize};
 use std::net::SocketAddr;
+use std::cmp::Ordering;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum HubMsg {
@@ -36,6 +37,7 @@ pub enum HubMsg {
     
     WorkspaceFileTreeResponse {
         uid: HubUid,
+        tree:WorkspaceFileTreeNode
     },
     
     ListWorkspacesRequest{
@@ -79,6 +81,45 @@ pub enum HubMsg {
         packages: Vec<CargoPackage>
     },
 
+}
+
+#[derive(Eq, PartialEq, Debug, Clone, Serialize, Deserialize)]
+pub enum WorkspaceFileTreeNode {
+    File {name: String},
+    Folder {name: String, folder: Vec<WorkspaceFileTreeNode>}
+}
+
+impl Ord for WorkspaceFileTreeNode {
+    fn cmp(&self, other:&WorkspaceFileTreeNode)->Ordering{
+        match self{
+            WorkspaceFileTreeNode::File{name:lhs, ..} =>{
+                match other{
+                    WorkspaceFileTreeNode::File{name:rhs, ..} =>{
+                        lhs.cmp(rhs)
+                    },
+                    WorkspaceFileTreeNode::Folder{name:_rhs, ..} =>{
+                        Ordering::Greater
+                    },
+                }
+            },
+            WorkspaceFileTreeNode::Folder{name:lhs, ..} =>{
+                match other{
+                    WorkspaceFileTreeNode::File{name:_rhs, ..} =>{
+                        Ordering::Less
+                    },
+                    WorkspaceFileTreeNode::Folder{name:rhs, ..} =>{
+                        lhs.cmp(rhs)
+                    },
+                }
+            },
+        }
+    }
+}
+
+impl PartialOrd for WorkspaceFileTreeNode {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -161,6 +202,12 @@ pub struct HubUid {
     pub id: u64
 }
 
+impl HubUid {
+    pub fn zero()->HubUid{
+        HubUid{addr:HubAddr::zero(), id:0}
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ClientToHubMsg {
     pub to: HubMsgTo,
@@ -186,4 +233,22 @@ impl HubError {
 pub enum HubLog{
     All,
     None
+}
+
+impl HubLog{
+    pub fn log<T>(&self, prefix:&str, htc_msg:&T)
+    where T:std::fmt::Debug
+    {
+        match self{
+            HubLog::All=>{
+                let mut msg = format!("{:?}", htc_msg);
+                if msg.len()>200{
+                    msg.truncate(200);
+                    msg.push_str("...")
+                }
+                println!("{}{}", prefix, msg);
+            },
+            _=>()
+        }
+    }
 }

@@ -6,7 +6,7 @@ use editor::*;
 use terminal::*;
 use crate::app::*;
 use crate::fileeditor::*;
-use crate::rustcompiler::*;
+use crate::keyboard::*;
 
 #[derive(Clone, Serialize, Deserialize)]
 pub enum Panel {
@@ -32,6 +32,7 @@ pub struct AppWindow {
 pub struct AppWindowState {
     pub window_position: Vec2,
     pub window_inner_size: Vec2,
+    pub open_folders: Vec<String>,
     pub dock_items: DockItem<Panel>,
 }
 
@@ -69,7 +70,7 @@ impl AppWindow {
                 return
             },
             DesktopWindowEvent::WindowGeomChange(wc) => {
-                if !app_global.app_state_file_read.is_pending() {
+                if !app_global.storage.app_state_file_read.is_pending() {
                     // store our new window geom
                     app_global.state.windows[window_index].window_position = wc.new_geom.position;
                     app_global.state.windows[window_index].window_inner_size = wc.new_geom.inner_size;
@@ -80,8 +81,9 @@ impl AppWindow {
         }
         
         match event {
-            Event::Signal(se) => if app_global.file_tree_reload_signal.is_signal(se) {
-                self.file_tree.load_from_json(cx, &app_global.file_tree_data);
+            // this loads the filetree
+            Event::Signal(se) => if app_global.storage.file_tree_reload_signal.is_signal(se) {
+                self.file_tree.load_from_json(cx, &app_global.storage.file_tree_data);
             },
             _ => ()
         }
@@ -92,16 +94,16 @@ impl AppWindow {
         while let Some(item) = dock_walker.walk_handle_dock(cx, event) {
             match item {
                 Panel::RustCompiler => {
-                    match app_global.rust_compiler.handle_rust_compiler(cx, event, &mut app_global.text_buffers) {
-                        RustCompilerEvent::SelectMessage {path} => {
-                            // just make it open an editor
-                            file_tree_event = FileTreeEvent::SelectFile {path: path};
-                        },
-                        _ => ()
-                    }
+                    //match app_global.rust_compiler.handle_rust_compiler(cx, event, &mut app_global.text_buffers) {
+                    //    RustCompilerEvent::SelectMessage {path} => {
+                    //        // just make it open an editor
+                    //        file_tree_event = FileTreeEvent::SelectFile {path: path};
+                    //    },
+                    //    _ => ()
+                    // }
                 },
                 Panel::Keyboard => {
-                    self.keyboard.handle_keyboard(cx, event, &mut app_global.text_buffers);
+                    self.keyboard.handle_keyboard(cx, event, &mut app_global.storage);
                 },
                 Panel::FileEditorTarget => {
                 },
@@ -115,13 +117,20 @@ impl AppWindow {
                 },
                 Panel::FileEditor {path, editor_id} => {
                     if let Some(file_editor) = &mut self.file_editors.get(*editor_id) {
-                        let text_buffer = app_global.text_buffers.from_path(cx, path);
+
+                        let text_buffer = app_global.storage.text_buffer_from_path(cx, path);
+
                         match file_editor.handle_file_editor(cx, event, text_buffer) {
                             FileEditorEvent::LagChange => {
-                                app_global.text_buffers.save_file(cx, path);
+                                
+                                // HERE WE SAVE
+                                app_global.storage.text_buffer_file_write(cx, path);
+                                
+                                
+                                
                                 // lets save the textbuffer to disk
                                 // lets re-trigger the rust compiler
-                                app_global.rust_compiler.restart_rust_checker(cx, &mut app_global.text_buffers);
+                                //app_global.rust_compiler.restart_rust_checker(cx, &mut app_global.text_buffers);
                             },
                             _ => ()
                         }
@@ -153,6 +162,10 @@ impl AppWindow {
                     app_global.save_state(cx);
                 }
             },
+            FileTreeEvent::SelectFolder {..} => {
+                app_global.state.windows[window_index].open_folders = self.file_tree.save_open_folders();
+                app_global.save_state(cx);
+            },
             _ => {}
         }
         
@@ -176,7 +189,7 @@ impl AppWindow {
         while let Some(item) = dock_walker.walk_draw_dock(cx) {
             match item {
                 Panel::RustCompiler => {
-                    app_global.rust_compiler.draw_rust_compiler(cx);
+                    //app_global.rust_compiler.draw_rust_compiler(cx);
                 },
                 Panel::Keyboard => {
                     self.keyboard.draw_keyboard(cx);
@@ -195,7 +208,7 @@ impl AppWindow {
                     local_terminal.draw_local_terminal(cx);
                 },
                 Panel::FileEditor {path, editor_id} => {
-                    let text_buffer = app_global.text_buffers.from_path(cx, path);
+                    let text_buffer = app_global.storage.text_buffer_from_path(cx, path);
                     let mut set_key_focus = false;
                     let file_editor = self.file_editors.get_draw(cx, *editor_id, | _cx, tmpl | {
                         set_key_focus = true;

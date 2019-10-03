@@ -157,12 +157,7 @@ impl HubClient {
                     match read_block_from_tcp_stream(&mut tcp_stream, &mut digest.clone()){
                         Ok(msg_buf)=>{
                             let htc_msg: HubToClientMsg = bincode::deserialize(&msg_buf).expect("read_thread hub message deserialize fail - version conflict!");
-                            match hub_log{
-                                HubLog::All=>{
-                                    println!("HubClient received {:?}", htc_msg);
-                                },
-                                _=>()
-                            }
+                            hub_log.log("HubClient received", &htc_msg);
                             tx_read.send(htc_msg).expect("tx_read.send fails - should never happen");
                         },
                         Err(e)=>{
@@ -190,12 +185,7 @@ impl HubClient {
             let hub_log = hub_log.clone();
             std::thread::spawn(move || {// this one cannot send to the read channel.
                 while let Ok(cth_msg) = rx_write.recv() {
-                    match hub_log{
-                        HubLog::All=>{
-                            println!("HubClient sending {:?}", cth_msg);
-                        },
-                        _=>()
-                    }
+                    hub_log.log("HubClient sending", &cth_msg);
                     match &cth_msg.msg{
                         HubMsg::ConnectionError(_)=>{ // we are closed by the read loop
                             return

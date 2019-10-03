@@ -4,10 +4,12 @@ use crate::hubclient::*;
 
 use serde::{Deserialize};
 use std::sync::{Arc, Mutex};
+use std::fs;
 use serde_json::{Result};
 
 pub struct HubWorkspace {
     pub hub_client: HubClient,
+    pub workspace: String,
     pub processes: Arc<Mutex<Vec<HubWsProcess>>>,
     pub restart_connection: bool
 }
@@ -19,42 +21,43 @@ pub struct HubWsProcess {
 }
 
 impl HubWorkspace {
-    pub fn run<F>(ws_name: &str, mut event_handler: F)
+    pub fn run<F>(workspace: &str, mut event_handler: F)
     where F: FnMut(&mut HubWorkspace, HubToClientMsg) {
         let key = [7u8, 4u8, 5u8, 1u8];
         
         loop {
             
-            println!("Workspace {} waiting for hub announcement..", ws_name);
+            println!("Workspace {} waiting for hub announcement..", workspace);
             
             // lets wait for a server announce
             let address = HubClient::wait_for_announce(&key).expect("cannot wait for announce");
             
-            println!("Workspace {} got announce, connecting to {:?}", ws_name, address);
+            println!("Workspace {} got announce, connecting to {:?}", workspace, address);
             
             // ok now connect to that address
             let hub_client = HubClient::connect_to_hub(&key, address, HubLog::All).expect("cannot connect to hub");
             
-            println!("Workspace {} connected to {:?}", ws_name, hub_client.server_addr);
+            println!("Workspace {} connected to {:?}", workspace, hub_client.server_addr);
             
-            let mut workspace = HubWorkspace {
+            let mut hub_workspace = HubWorkspace {
                 hub_client: hub_client,
+                workspace: workspace.to_string(),
                 processes: Arc::new(Mutex::new(Vec::<HubWsProcess>::new())),
                 restart_connection: false
             };
             
             // lets transmit a BuildServer ack
-            workspace.hub_client.tx_write.send(ClientToHubMsg {
+            hub_workspace.hub_client.tx_write.send(ClientToHubMsg {
                 to: HubMsgTo::All,
-                msg: HubMsg::ConnectWorkspace(ws_name.to_string())
+                msg: HubMsg::ConnectWorkspace(workspace.to_string())
             }).expect("Cannot send login");
             
             // this is the main messageloop, on rx
-            while let Ok(htc) = workspace.hub_client.rx_read.recv() {
+            while let Ok(htc) = hub_workspace.hub_client.rx_read.recv() {
                 //println!("Workspace got message {:?}", htc);
                 // we just call the thing.
-                event_handler(&mut workspace, htc);
-                if workspace.restart_connection {
+                event_handler(&mut hub_workspace, htc);
+                if hub_workspace.restart_connection {
                     break
                 }
             }
@@ -78,12 +81,11 @@ impl HubWorkspace {
                         self.cargo(uid, &["build", "-p", &package, "--release"]);
                     },
                     CargoTarget::Custom(_s)=>{
-                        
                     }
                 }
             },
             HubMsg::WorkspaceFileTreeRequest {uid} => {
-                self.workspace_file_tree(uid, "./");
+                self.workspace_file_tree(htc.from, uid, "./", &[".json",".toml",".js",".rs"]);
             },
             HubMsg::ConnectionError(_e) => {
                 self.restart_connection = true;
@@ -158,9 +160,9 @@ impl HubWorkspace {
         };
     }
     
-    pub fn cargo_packages(&mut self, uid: HubUid, packages:Vec<CargoPackage>) {
+    pub fn cargo_packages(&mut self, from:HubAddr, uid: HubUid, packages:Vec<CargoPackage>) {
         self.hub_client.tx_write.send(ClientToHubMsg {
-            to: HubMsgTo::UI,
+            to: HubMsgTo::Client(from),
             msg: HubMsg::CargoPackagesResponse {
                 uid: uid,
                 packages: packages
@@ -168,8 +170,60 @@ impl HubWorkspace {
         }).expect("cannot send message");
     }
     
-    pub fn workspace_file_tree(&mut self, _uid: HubUid, _path: &str) {
-        
+    pub fn workspace_file_tree(&mut self, from:HubAddr, uid: HubUid, path: &str, ext_inc:&[&str]) {
+        let tx_write = self.hub_client.tx_write.clone();
+        let path = path.to_string();
+        let workspace = self.workspace.to_string();
+        let ext_inc:Vec<String> = ext_inc.to_vec().iter().map(|v|v.to_string()).collect();
+        let _thread = std::thread::spawn(move || {
+            
+            fn read_recur(path:&str, ext_inc:&Vec<String>)->Vec<WorkspaceFileTreeNode>{
+                let mut ret = Vec::new();
+                if let Ok(read_dir) = fs::read_dir(path){
+                    for entry in read_dir{
+                        if let Ok(entry) = entry{
+                            if let Ok(ty) = entry.file_type(){
+                                if let Ok(name) = entry.file_name().into_string(){
+                                    if ty.is_dir(){
+                                        if name == ".git" || name == "target"{
+                                            continue;
+                                        }
+                                        ret.push(WorkspaceFileTreeNode::Folder{
+                                            name: name.clone(),
+                                            folder: read_recur(&format!("{}/{}", path, name), ext_inc)
+                                        });
+                                    }
+                                    else{
+                                        for ext in ext_inc{
+                                            if name.ends_with(ext){
+                                                ret.push(WorkspaceFileTreeNode::File{
+                                                    name: name
+                                                });
+                                                break;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                ret.sort();
+                ret
+            }
+            
+            tx_write.send(ClientToHubMsg {
+                to: HubMsgTo::Client(from),
+                msg: HubMsg::WorkspaceFileTreeResponse {
+                    uid: uid,
+                    tree: WorkspaceFileTreeNode::Folder{
+                        name:workspace.clone(),
+                        folder:read_recur(&path, &ext_inc)
+                    }
+                }
+            }).expect("cannot send message");
+            
+        });
     }
 }
 

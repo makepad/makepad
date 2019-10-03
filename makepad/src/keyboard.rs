@@ -1,7 +1,8 @@
 use render::*; 
 use widget::*; 
+use crate::app::*;
+use editor::*;
 
-use crate::textbuffer::*;
 
 #[derive(Clone)]
 pub struct Keyboard {
@@ -51,9 +52,9 @@ impl Keyboard {
         }
     }
     
-    fn send_textbuffers_update(&mut self, cx: &mut Cx, text_buffers: &mut TextBuffers) {
+    fn send_textbuffers_update(&mut self, cx: &mut Cx, app_storage: &mut AppStorage) {
         // clear all files we missed
-        for (_, text_buffer) in &mut text_buffers.storage {
+        for (_, text_buffer) in &mut app_storage.text_buffers {
             text_buffer.keyboard.modifiers = self.modifiers.clone();
             text_buffer.keyboard.key_down = self.key_down.clone();
             text_buffer.keyboard.key_up = self.key_up.clone();
@@ -61,7 +62,7 @@ impl Keyboard {
         }
     }
     
-    pub fn handle_keyboard(&mut self, cx: &mut Cx, event: &mut Event, text_buffers: &mut TextBuffers) -> KeyboardEvent {
+    pub fn handle_keyboard(&mut self, cx: &mut Cx, event: &mut Event, app_storage: &mut AppStorage) -> KeyboardEvent {
         // do shit here
         if self.view.handle_scroll_bars(cx, event) {
         }
@@ -112,7 +113,7 @@ impl Keyboard {
             }
         }
         if update_textbuffers {
-            self.send_textbuffers_update(cx, text_buffers);
+            self.send_textbuffers_update(cx, app_storage);
         }
         
         KeyboardEvent::None

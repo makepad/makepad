@@ -1,7 +1,6 @@
  use render::*;
 
 use crate::textcursor::*;
-use std::collections::HashMap;
 
 #[derive(Clone, Default)]
 pub struct TextBuffer {
@@ -73,11 +72,7 @@ pub struct TextBufferMessage {
     pub body: String
 }
 
-pub struct TextBuffers {
-    pub root_path: String,
-    pub storage: HashMap<String, TextBuffer>
-}
-
+/*
 impl TextBuffers {
     pub fn from_path(&mut self, cx: &mut Cx, path: &str) -> &mut TextBuffer {
         let root_path = &self.root_path;
@@ -97,7 +92,6 @@ impl TextBuffers {
             let string = text_buffer.get_as_string();
             cx.file_write(&format!("{}{}", self.root_path, path), string.as_bytes());
             //cx.http_send("POST", path, "192.168.0.20", "2001", &string);
-            
         }
     }
     
@@ -115,9 +109,8 @@ impl TextBuffers {
         }
         return false;
     }
-    
 }
-
+*/
 #[derive(Clone, Copy)]
 pub struct TextPos {
     pub row: usize,

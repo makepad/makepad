@@ -76,7 +76,7 @@ impl HubServer {
                                     }
                                     Err(e) => {
                                         let _ = tcp_stream.shutdown(Shutdown::Both);
-                                        tx_pump.send((peer_addr.clone(), ClientToHubMsg {
+                                        let _ = tx_pump.send((peer_addr.clone(), ClientToHubMsg {
                                             to: HubMsgTo::Hub,
                                             msg: HubMsg::ConnectionError(e.clone())
                                         })).expect("tx_pump.send fails - should never happen");
@@ -143,12 +143,7 @@ impl HubServer {
                     };
                     // we got a message.. now lets route it elsewhere
                     if let Ok(mut connections) = connections.lock() {
-                        match hub_log{
-                            HubLog::All=>{
-                                println!("HubServer sending {:?} to {:?}", htc_msg, to);
-                            },
-                            _=>()
-                        }
+                        hub_log.log("HubServer sending", &htc_msg);
                         
                         if let Some(cid) = connections.iter().position( | c | c.peer_addr == htc_msg.from) {
                             if connections[cid].client_type == HubClientType::Unknown {
@@ -199,7 +194,6 @@ impl HubServer {
                                 if let Some(connection) = connections.iter().find( | c | c.peer_addr == addr) {
                                     if connection.client_type != HubClientType::Unknown {
                                         connection.tx_write.send(htc_msg).expect("Could not tx_write.send");
-                                        break;
                                     }
                                 }
                             },
@@ -207,12 +201,10 @@ impl HubServer {
                                 for connection in connections.iter() {
                                     match &connection.client_type{
                                         HubClientType::Workspace(ws_name)=>if to_ws_name == *ws_name{
-                                            connection.tx_write.send(htc_msg).expect("Could not tx_write.send");
-                                            break;
+                                            connection.tx_write.send(htc_msg.clone()).expect("Could not tx_write.send");
                                         },
                                         HubClientType::Clone(ws_name)=>if to_ws_name == *ws_name{
-                                            connection.tx_write.send(htc_msg).expect("Could not tx_write.send");
-                                            break;
+                                            connection.tx_write.send(htc_msg.clone()).expect("Could not tx_write.send");
                                         },
                                         _=>()
                                     }
@@ -221,8 +213,7 @@ impl HubServer {
                             HubMsgTo::UI=>{
                                 for connection in connections.iter() {
                                     if connection.client_type == HubClientType::UI{
-                                        connection.tx_write.send(htc_msg).expect("Could not tx_write.send");
-                                        break;
+                                        connection.tx_write.send(htc_msg.clone()).expect("Could not tx_write.send");
                                     }
                                 }
                             },
@@ -248,6 +239,25 @@ impl HubServer {
                                             for connection in connections.iter() {
                                                 connection.tx_write.send(msg.clone()).expect("Could not tx_write.send");
                                             }
+                                        }
+                                    },
+                                    HubMsg::ListWorkspacesRequest{uid}=>{
+                                        let mut workspaces = Vec::new();
+                                        for connection in connections.iter() {
+                                            match &connection.client_type{
+                                                HubClientType::Workspace(ws_name)=>workspaces.push(ws_name.to_string()),
+                                                _=>()
+                                            }
+                                        }
+                                        // send it back to the caller
+                                        if let Some(connection) = connections.iter().find( | c | c.peer_addr == htc_msg.from) {
+                                            connection.tx_write.send(HubToClientMsg{
+                                                from:htc_msg.from,
+                                                msg:HubMsg::ListWorkspacesResponse{
+                                                    uid:*uid,
+                                                    workspaces:workspaces
+                                                }
+                                            }).expect("Could not tx_write.send");
                                         }
                                     },
                                     _ => ()

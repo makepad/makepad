@@ -30,7 +30,8 @@ pub enum FileTreeEvent {
     DragCancel,
     DragEnd {fe: FingerUpEvent, paths: Vec<String>},
     DragOut,
-    SelectFile {path: String}
+    SelectFile {path: String},
+    SelectFolder {path: String}
 }
 
 #[derive(Clone)]
@@ -58,6 +59,17 @@ impl FileNode {
         match self {
             FileNode::File {draw, ..} => draw,
             FileNode::Folder {draw, ..} => draw
+        }
+    }
+    
+    fn is_open(&self) -> bool {
+        match self {
+            FileNode::File {..} => false,
+            FileNode::Folder {state, ..} => match state {
+                NodeState::Opening(..) => true,
+                NodeState::Open => true,
+                _ => false
+            }
         }
     }
     
@@ -158,19 +170,6 @@ impl<'a> FileWalker<'a> {
     }
 }
 
-#[derive(Deserialize, Debug)]
-struct JsonFolder {
-    name: String,
-    open: bool,
-    files: Vec<JsonFile>,
-    folders: Vec<JsonFolder>
-}
-
-#[derive(Deserialize, Debug)]
-struct JsonFile {
-    name: String
-}
-
 impl FileTree {
     pub fn style(cx: &mut Cx) -> Self {
         Self {
@@ -254,33 +253,102 @@ impl FileTree {
         }))
     }
     
-    fn json_to_file_node(node: JsonFolder) -> FileNode {
-        let mut out = Vec::new();
-        for folder in node.folders {
-            out.push(Self::json_to_file_node(folder));
-        }
-        for file in node.files {
-            out.push(FileNode::File {
-                name: file.name,
-                draw: None
-            })
-        };
-        FileNode::Folder {
-            name: node.name,
-            state: if node.open {NodeState::Open} else {NodeState::Closed},
-            draw: None,
-            folder: out
-        }
-    }
-    
     pub fn load_from_json(&mut self, cx: &mut Cx, json_data: &str) {
+                
+        #[derive(Deserialize, Debug)]
+        struct JsonFolder {
+            name: String,
+            open: bool,
+            files: Vec<JsonFile>,
+            folders: Vec<JsonFolder>
+        }
+        
+        #[derive(Deserialize, Debug)]
+        struct JsonFile {
+            name: String
+        }
+
+        fn recur_walk(node: JsonFolder) -> FileNode {
+            let mut out = Vec::new();
+            for folder in node.folders {
+                out.push(recur_walk(folder));
+            }
+            for file in node.files {
+                out.push(FileNode::File {
+                    name: file.name,
+                    draw: None
+                })
+            };
+            FileNode::Folder {
+                name: node.name,
+                state: if node.open {NodeState::Open} else {NodeState::Closed},
+                draw: None,
+                folder: out
+            }
+        }
+        
         let value: Result<JsonFolder> = serde_json::from_str(json_data);
         if let Ok(value) = value {
-            self.root_node = Self::json_to_file_node(value);
+            self.root_node = recur_walk(value);
         }
         self.view.redraw_view_area(cx);
     }
     
+    pub fn clear_roots(&mut self, cx:&mut Cx, names: &Vec<String>) {
+        self.root_node = FileNode::Folder {
+            name: "".to_string(),
+            draw: None,
+            state: NodeState::Open,
+            folder: names.iter().map( | v | FileNode::Folder {
+                name: v.clone(),
+                draw: None,
+                state: NodeState::Open,
+                folder: Vec::new()
+            }).collect()
+        };
+        self.view.redraw_view_area(cx);
+    }
+    
+    pub fn save_open_folders(&mut self) -> Vec<String> {
+        let mut paths = Vec::new();
+        fn recur_walk(node:&mut FileNode, base:&str, paths:&mut Vec<String>){
+            if node.is_open(){
+                if let FileNode::Folder{folder,name,..} = node{
+                    let new_base = if name.len()>0{format!("{}/{}", base, name)}else{base.to_string()};
+                    paths.push(new_base.clone());
+                    for node in folder{
+                        recur_walk(node, &new_base, paths)
+                    }
+                }
+            }
+        }
+        recur_walk(&mut self.root_node, "", &mut paths);
+        println!(" SAVING {:?}", paths);
+        paths
+    }
+    
+    pub fn load_open_folders(&mut self, cx:&mut Cx, paths:&Vec<String>){
+        
+        fn recur_walk(node:&mut FileNode, base:&str, depth:usize, paths:&Vec<String>){
+            match node{
+                FileNode::File{..}=>(),
+                FileNode::Folder{name, folder, state, ..}=>{
+                    let new_base = if name.len()>0{format!("{}/{}", base, name)}else{base.to_string()};
+                    if depth == 0 || paths.iter().position(|v| *v == new_base).is_some(){
+                        *state = NodeState::Open;
+                        for node in folder{
+                            recur_walk(node, &new_base, depth + 1, paths);
+                        }
+                    }
+                    else{
+                        *state = NodeState::Closed;
+                    }
+                }
+            }
+        }
+        recur_walk(&mut self.root_node, "", 0, paths);
+        self.view.redraw_view_area(cx);
+    }
     
     pub fn get_default_anim(cx: &Cx, counter: usize, marked: bool) -> Anim {
         Anim::new(Play::Chain {duration: 0.01}, vec![
@@ -321,7 +389,7 @@ impl FileTree {
         let mut unmark_nodes = false;
         let mut drag_nodes = false;
         let mut drag_end: Option<FingerUpEvent> = None;
-        let mut select_node = false;
+        let mut select_node = 0;
         while let Some((_depth, _index, _len, node)) = file_walker.walk() {
             // alright we haz a node. so now what.
             let is_filenode = if let FileNode::File {..} = node {true} else {false};
@@ -335,7 +403,10 @@ impl FileTree {
                 Event::FingerDown(_fe) => {
                     // mark ourselves, unmark others
                     if is_filenode {
-                        select_node = true;
+                        select_node = 1;
+                    }
+                    else {
+                        select_node = 2;
                     }
                     node_draw.marked = cx.event_id;
                     
@@ -444,14 +515,21 @@ impl FileTree {
                 }
             }
         };
-        if select_node {
+        if select_node != 0 {
             let mut file_walker = FileWalker::new(&mut self.root_node);
             while let Some((_depth, _index, _len, node)) = file_walker.walk() {
                 let node_draw = if let Some(node_draw) = node.get_draw() {node_draw}else {continue};
                 if node_draw.marked != 0 {
-                    return FileTreeEvent::SelectFile {
-                        path: file_walker.current_path()
-                    };
+                    if select_node == 1 {
+                        return FileTreeEvent::SelectFile {
+                            path: file_walker.current_path()
+                        };
+                    }
+                    else {
+                        return FileTreeEvent::SelectFolder {
+                            path: file_walker.current_path()
+                        };
+                    }
                 }
             }
         }
