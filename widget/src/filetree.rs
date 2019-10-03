@@ -254,7 +254,7 @@ impl FileTree {
     }
     
     pub fn load_from_json(&mut self, cx: &mut Cx, json_data: &str) {
-                
+        
         #[derive(Deserialize, Debug)]
         struct JsonFolder {
             name: String,
@@ -267,7 +267,7 @@ impl FileTree {
         struct JsonFile {
             name: String
         }
-
+        
         fn recur_walk(node: JsonFolder) -> FileNode {
             let mut out = Vec::new();
             for folder in node.folders {
@@ -294,7 +294,7 @@ impl FileTree {
         self.view.redraw_view_area(cx);
     }
     
-    pub fn clear_roots(&mut self, cx:&mut Cx, names: &Vec<String>) {
+    pub fn clear_roots(&mut self, cx: &mut Cx, names: &Vec<String>) {
         self.root_node = FileNode::Folder {
             name: "".to_string(),
             draw: None,
@@ -311,12 +311,14 @@ impl FileTree {
     
     pub fn save_open_folders(&mut self) -> Vec<String> {
         let mut paths = Vec::new();
-        fn recur_walk(node:&mut FileNode, base:&str, paths:&mut Vec<String>){
-            if node.is_open(){
-                if let FileNode::Folder{folder,name,..} = node{
-                    let new_base = if name.len()>0{format!("{}/{}", base, name)}else{base.to_string()};
+        fn recur_walk(node: &mut FileNode, base: &str, paths: &mut Vec<String>) {
+            if node.is_open() {
+                if let FileNode::Folder {folder, name, ..} = node {
+                    let new_base = if name.len()>0 {
+                        if base.len()>0 {format!("{}/{}", base, name)}else {name.to_string()}
+                    }else {base.to_string()};
                     paths.push(new_base.clone());
-                    for node in folder{
+                    for node in folder {
                         recur_walk(node, &new_base, paths)
                     }
                 }
@@ -327,20 +329,22 @@ impl FileTree {
         paths
     }
     
-    pub fn load_open_folders(&mut self, cx:&mut Cx, paths:&Vec<String>){
+    pub fn load_open_folders(&mut self, cx: &mut Cx, paths: &Vec<String>) {
         
-        fn recur_walk(node:&mut FileNode, base:&str, depth:usize, paths:&Vec<String>){
-            match node{
-                FileNode::File{..}=>(),
-                FileNode::Folder{name, folder, state, ..}=>{
-                    let new_base = if name.len()>0{format!("{}/{}", base, name)}else{base.to_string()};
-                    if depth == 0 || paths.iter().position(|v| *v == new_base).is_some(){
+        fn recur_walk(node: &mut FileNode, base: &str, depth: usize, paths: &Vec<String>) {
+            match node {
+                FileNode::File {..} => (),
+                FileNode::Folder {name, folder, state, ..} => {
+                    let new_base = if name.len()>0 {
+                        if base.len()>0 {format!("{}/{}", base, name)}else {name.to_string()}
+                    }else {base.to_string()};
+                    if depth == 0 || paths.iter().position( | v | *v == new_base).is_some() {
                         *state = NodeState::Open;
-                        for node in folder{
+                        for node in folder {
                             recur_walk(node, &new_base, depth + 1, paths);
                         }
                     }
-                    else{
+                    else {
                         *state = NodeState::Closed;
                     }
                 }

@@ -16,7 +16,7 @@ pub struct AppStorage{
     pub index_file_read: FileRead,
     pub app_state_file_read: FileRead,
     pub root_path: String,
-    pub text_buffers: HashMap<String, TextBuffer>
+    pub text_buffers: HashMap<String, AppTextBuffer>
 }
 
 pub struct App {
@@ -28,20 +28,19 @@ pub struct App {
     pub windows: Vec<AppWindow>,
 }
 
+pub struct AppTextBuffer{
+    pub read_msg:Option<ClientToHubMsg>, 
+    pub write_msg:Option<ClientToHubMsg>,
+    pub text_buffer:TextBuffer,
+}
+
 #[derive(Default, Clone, Serialize, Deserialize)]
 pub struct AppState {
     pub windows: Vec<AppWindowState>
 }
 
-impl AppState{
-    pub fn save_state(&mut self, cx: &mut Cx, storage:&AppStorage) {
-        let json = serde_json::to_string(&self).unwrap();
-        cx.file_write(&format!("{}makepad_state.json", storage.root_path), json.as_bytes());
-    }
-}
-
 impl AppStorage {
-    
+    /*
     pub fn send_hub_msg(&mut self, msg: ClientToHubMsg) {
         self.hub_ui.as_mut().unwrap().send(msg)
     }
@@ -52,46 +51,70 @@ impl AppStorage {
     
     pub fn is_own_hub_addr(&mut self, addr: &HubAddr) -> bool {
         self.hub_ui.as_mut().unwrap().is_own_addr(addr)
+    }*/
+
+    pub fn save_state(&mut self, cx: &mut Cx, state:&AppState) {
+        let json = serde_json::to_string(state).unwrap();
+        cx.file_write(&format!("{}makepad_state.json", self.root_path), json.as_bytes());
     }
     
     pub fn text_buffer_from_path(&mut self, cx: &mut Cx, path: &str) -> &mut TextBuffer {
         let root_path = &self.root_path;
-        let hub_ui = &mut self.hub_ui;
-        self.text_buffers.entry(path.to_string()).or_insert_with( || {
-            // lets send our hub_ui a request
-            
-            TextBuffer {
-                signal: cx.new_signal(),
-                mutation_id: 1,
-                load_file_read: cx.file_read(&format!("{}{}", root_path, path)),
-                ..Default::default()
+        let hub_ui = self.hub_ui.as_mut().unwrap();
+        let atb = self.text_buffers.entry(path.to_string()).or_insert_with( || {
+            // lets find the right workspace
+            let msg = if let Some(workspace_pos) = path.find('/'){
+                let uid = hub_ui.alloc_uid();
+                let (workspace, rest) = path.split_at(workspace_pos);
+                let msg = ClientToHubMsg{
+                    to:HubMsgTo::Workspace(workspace.to_string()),
+                    msg:HubMsg::FileReadRequest{
+                        uid:uid.clone(),
+                        path:rest.to_string()
+                    }
+                };
+                hub_ui.send(msg.clone());
+                Some(msg)
             }
-        })
+            else{
+                None
+            };
+            AppTextBuffer{
+                read_msg:msg,
+                write_msg:None,
+                text_buffer:TextBuffer {
+                    is_loading:true,
+                    signal: cx.new_signal(),
+                    mutation_id: 1,
+                    ..Default::default()
+                }
+            }
+        });
+        &mut atb.text_buffer
     }
     
     pub fn text_buffer_file_write(&mut self, cx: &mut Cx, path: &str) {
-        let text_buffer = self.text_buffers.get(path);
-        if let Some(text_buffer) = text_buffer {
-            let string = text_buffer.get_as_string();
+        if let Some(atb) = self.text_buffers.get(path) {
+            let string = atb.text_buffer.get_as_string();
             cx.file_write(&format!("{}{}", self.root_path, path), string.as_bytes());
-            //cx.http_send("POST", path, "192.168.0.20", "2001", &string);
         }
     }
-    
+    /*
     pub fn text_buffer_handle_file_read(&mut self, cx: &mut Cx, fr: &FileReadEvent) -> bool {
-        for (_path, text_buffer) in &mut self.text_buffers {
-            if let Some(utf8_data) = text_buffer.load_file_read.resolve_utf8(fr) {
+        for (_path, atb) in &mut self.text_buffers {
+            /*
+            if let Some(utf8_data) = atb.text_buffer.load_file_read.resolve_utf8(fr) {
                 if let Ok(utf8_data) = utf8_data {
                     // TODO HANDLE ERROR CASE
-                    text_buffer.is_crlf = !utf8_data.find("\r\n").is_none();
-                    text_buffer.lines = TextBuffer::split_string_to_lines(&utf8_data.to_string());
-                    cx.send_signal(text_buffer.signal, SIGNAL_TEXTBUFFER_LOADED);
+                    atb.text_buffer.is_crlf = !utf8_data.find("\r\n").is_none();
+                    atb.text_buffer.lines = TextBuffer::split_string_to_lines(&utf8_data.to_string());
+                    cx.send_signal(atb.text_buffer.signal, SIGNAL_TEXTBUFFER_LOADED);
                 }
                 return true
-            }
+            }*/
         }
         return false;
-    }
+    }*/
 }
 
 impl App {
@@ -184,31 +207,32 @@ impl App {
     }
     
     pub fn handle_hub_msg(&mut self, cx: &mut Cx, htc: HubToClientMsg) {
+        let hub_ui = self.storage.hub_ui.as_mut().unwrap();
         // only in ConnectUI of ourselves do we list the workspaces
-        match &htc.msg {
+        match htc.msg {
             // our own connectUI message, means we are ready to talk to the hub
-            HubMsg::ConnectUI => if self.storage.is_own_hub_addr(&htc.from) {
+            HubMsg::ConnectUI => if hub_ui.is_own_addr(&htc.from) {
                 // now start talking
-                let uid = self.storage.alloc_hub_uid();
-                self.storage.send_hub_msg(ClientToHubMsg {
+                let uid = hub_ui.alloc_uid();
+                hub_ui.send(ClientToHubMsg {
                     to: HubMsgTo::Hub,
                     msg: HubMsg::ListWorkspacesRequest {uid: uid}
                 });
                 self.workspaces_request_uid = uid;
             },
             HubMsg::DisconnectWorkspace(_) | HubMsg::ConnectWorkspace(_) => {
-                let uid = self.storage.alloc_hub_uid();
-                self.storage.send_hub_msg(ClientToHubMsg {
+                let uid = hub_ui.alloc_uid();
+                hub_ui.send(ClientToHubMsg {
                     to: HubMsgTo::Hub,
                     msg: HubMsg::ListWorkspacesRequest {uid: uid}
                 });
                 self.workspaces_request_uid = uid;
             },
-            HubMsg::ListWorkspacesResponse {uid, workspaces} => if *uid == self.workspaces_request_uid {
-                let uid = self.storage.alloc_hub_uid();
+            HubMsg::ListWorkspacesResponse {uid, workspaces} => if uid == self.workspaces_request_uid {
+                let uid = hub_ui.alloc_uid();
                 // from these workspaces query filetrees
-                for workspace in workspaces {
-                    self.storage.send_hub_msg(ClientToHubMsg {
+                for workspace in &workspaces {
+                    hub_ui.send(ClientToHubMsg {
                         to: HubMsgTo::Workspace(workspace.clone()),
                         msg: HubMsg::WorkspaceFileTreeRequest {uid: uid}
                     });
@@ -229,8 +253,15 @@ impl App {
                     };
                     window.file_tree.view.redraw_view_area(cx);
                 }
+                // lets resend the file load we haven't gotten
+                for (_path, atb) in &mut self.storage.text_buffers {
+                    if let Some(cth_msg) =  &atb.read_msg{
+                        hub_ui.send(cth_msg.clone())
+                    }
+                }
+
             },
-            HubMsg::WorkspaceFileTreeResponse {uid, tree} => if *uid == self.workspaces_request_uid {
+            HubMsg::WorkspaceFileTreeResponse {uid, tree} => if uid == self.workspaces_request_uid {
                 // replace a workspace node
                 fn hub_to_tree(node: &WorkspaceFileTreeNode) -> FileNode {
                     match node {
@@ -248,7 +279,7 @@ impl App {
                         }
                     }
                 }
-                if let WorkspaceFileTreeNode::Folder {name, ..} = tree {
+                if let WorkspaceFileTreeNode::Folder {name, ..} = &tree {
                     let workspace = name.clone();
                     // insert each filetree at the right childnode
                     for (window_index, window) in self.windows.iter_mut().enumerate() {
@@ -256,7 +287,7 @@ impl App {
                             for node in folder.iter_mut() {
                                 if let FileNode::Folder {name, ..} = node {
                                     if *name == workspace {
-                                        *node = hub_to_tree(tree);
+                                        *node = hub_to_tree(&tree);
                                         break
                                     }
                                 }
@@ -266,10 +297,28 @@ impl App {
                     }
                 }
             },
+            HubMsg::FileReadResponse{uid, path, data}=>{
+                for (_path, atb) in &mut self.storage.text_buffers {
+                    if let Some(cth_msg) =  &atb.read_msg{
+                        if let HubMsg::FileReadRequest{uid:read_uid, ..} = &cth_msg.msg{
+                            if *read_uid == uid{
+                                atb.read_msg = None;
+                                if let Some(data) = data{
+                                    if let Ok(utf8_data) = String::from_utf8(data){
+                                        atb.text_buffer.load_from_utf8(cx, &utf8_data);
+                                    }
+                                }
+                                else{
+                                    // DO SOMETHING HERE
+                                }
+                                break
+                            }
+                        }
+                    }
+                }
+            },
             _ => ()
         }
-        
-        
     }
     
     pub fn handle_app(&mut self, cx: &mut Cx, event: &mut Event) {
@@ -360,10 +409,10 @@ impl App {
                         self.default_layout(cx);
                     }
                 }
-                else if self.storage.text_buffer_handle_file_read(cx, &fr) {
+                // else if self.storage.text_buffer_handle_file_read(cx, &fr) {
                     // this should work already
                     //cx.redraw_child_area(Area::All);
-                }
+                 //}
             },
             
             _ => ()

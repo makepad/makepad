@@ -49,24 +49,24 @@ pub enum HubMsg {
         workspaces: Vec<String>
     },
     
-    ReadFileRequest {
+    FileReadRequest {
         uid: HubUid,
         path: String
     },
     
-    ReadFileResponse {
+    FileReadResponse {
         uid: HubUid,
         path: String,
         data: Option<Vec<u8>>
     },
     
-    WriteFileRequest {
+    FileWriteRequest {
         uid: HubUid,
         path: String,
         data: Vec<u8>
     },
     
-    WriteFileResponse {
+    FileWriteResponse {
         uid: HubUid,
         path: String,
         done: bool
@@ -208,7 +208,7 @@ impl HubUid {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ClientToHubMsg {
     pub to: HubMsgTo,
     pub msg: HubMsg

@@ -12,8 +12,11 @@ pub struct TextBuffer {
     pub lines: Vec<Vec<char>>,
     pub undo_stack: Vec<TextUndo>,
     pub redo_stack: Vec<TextUndo>,
-    pub load_file_read: FileRead,
+
+    //pub load_file_read: FileRead,
+    pub is_loading:bool,
     pub signal: Signal,
+
     pub mutation_id: u64,
     pub is_crlf: bool,
     pub messages: TextBufferMessages,
@@ -25,7 +28,7 @@ pub struct TextBuffer {
 
 impl TextBuffer {
     pub fn needs_token_chunks(&mut self) -> bool {
-        if self.token_chunks_id != self.mutation_id && !self.load_file_read.is_pending() {
+        if self.token_chunks_id != self.mutation_id && !self.is_loading {
             self.token_chunks_id = self.mutation_id;
             self.token_chunks.truncate(0);
             self.flat_text.truncate(0);
@@ -404,6 +407,13 @@ impl TextBuffer {
             }
         }
         return ret
+    }
+    
+    pub fn load_from_utf8(&mut self, cx:&mut Cx, utf8:&str){
+        self.is_loading = false;
+        self.is_crlf =  !utf8.find("\r\n").is_none();
+        self.lines = TextBuffer::split_string_to_lines(utf8);
+        cx.send_signal(self.signal, SIGNAL_TEXTBUFFER_LOADED);
     }
     
     pub fn replace_line(&mut self, row: usize, start_col: usize, len: usize, rep_line: Vec<char>) -> Vec<char> {

@@ -10,6 +10,7 @@ use serde_json::{Result};
 pub struct HubWorkspace {
     pub hub_client: HubClient,
     pub workspace: String,
+    pub root_path: String,
     pub processes: Arc<Mutex<Vec<HubWsProcess>>>,
     pub restart_connection: bool
 }
@@ -21,7 +22,7 @@ pub struct HubWsProcess {
 }
 
 impl HubWorkspace {
-    pub fn run<F>(workspace: &str, mut event_handler: F)
+    pub fn run<F>(workspace: &str, root_path:&str, mut event_handler: F)
     where F: FnMut(&mut HubWorkspace, HubToClientMsg) {
         let key = [7u8, 4u8, 5u8, 1u8];
         
@@ -42,6 +43,7 @@ impl HubWorkspace {
             let mut hub_workspace = HubWorkspace {
                 hub_client: hub_client,
                 workspace: workspace.to_string(),
+                root_path: root_path.to_string(),
                 processes: Arc::new(Mutex::new(Vec::<HubWsProcess>::new())),
                 restart_connection: false
             };
@@ -85,7 +87,10 @@ impl HubWorkspace {
                 }
             },
             HubMsg::WorkspaceFileTreeRequest {uid} => {
-                self.workspace_file_tree(htc.from, uid, "./", &[".json",".toml",".js",".rs"]);
+                self.workspace_file_tree(htc.from, uid, &[".json",".toml",".js",".rs"]);
+            },
+            HubMsg::FileReadRequest{uid, path}=>{
+                self.file_read(htc.from, uid, &path);
             },
             HubMsg::ConnectionError(_e) => {
                 self.restart_connection = true;
@@ -170,9 +175,31 @@ impl HubWorkspace {
         }).expect("cannot send message");
     }
     
-    pub fn workspace_file_tree(&mut self, from:HubAddr, uid: HubUid, path: &str, ext_inc:&[&str]) {
+    pub fn file_read(&mut self, from:HubAddr, uid: HubUid, path: &str){
+        // lets read a file and send it.
+        if let Some(_) = path.find(".."){
+            println!("file_read got relative path, ignoring {}", path);
+            return
+        }
+        let data = if let Ok(data) = std::fs::read(format!("{}{}", self.root_path, path)){
+            Some(data)
+        }
+        else{
+            None
+        };
+        self.hub_client.tx_write.send(ClientToHubMsg {
+            to: HubMsgTo::Client(from),
+            msg: HubMsg::FileReadResponse {
+                uid: uid,
+                path: path.to_string(),
+                data: data
+            }
+        }).expect("cannot send message");
+    }
+    
+    pub fn workspace_file_tree(&mut self, from:HubAddr, uid: HubUid, ext_inc:&[&str]) {
         let tx_write = self.hub_client.tx_write.clone();
-        let path = path.to_string();
+        let path = self.root_path.to_string();
         let workspace = self.workspace.to_string();
         let ext_inc:Vec<String> = ext_inc.to_vec().iter().map(|v|v.to_string()).collect();
         let _thread = std::thread::spawn(move || {

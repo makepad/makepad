@@ -74,7 +74,7 @@ impl AppWindow {
                     // store our new window geom
                     state.windows[window_index].window_position = wc.new_geom.position;
                     state.windows[window_index].window_inner_size = wc.new_geom.inner_size;
-                    state.save_state(cx, storage);
+                    storage.save_state(cx, state);
                 }
             },
             _ => ()
@@ -159,12 +159,12 @@ impl AppWindow {
             FileTreeEvent::SelectFile {path} => {
                 // search for the tabcontrol with the maximum amount of editors
                 if self.focus_or_new_editor(cx, window_index, state, &path) {
-                    state.save_state(cx, storage);
+                    storage.save_state(cx, state);
                 }
             },
             FileTreeEvent::SelectFolder {..} => {
                 state.windows[window_index].open_folders = self.file_tree.save_open_folders();
-                state.save_state(cx, storage);
+                storage.save_state(cx, state);
             },
             _ => {}
         }
@@ -172,7 +172,7 @@ impl AppWindow {
         let dock_items = &mut state.windows[window_index].dock_items;
         match self.dock.handle_dock(cx, event, dock_items) {
             DockEvent::DockChanged => { // thats a bit bland event. lets let the thing know which file closed
-                state.save_state(cx, storage);
+                storage.save_state(cx, state);
             },
             _ => ()
         }
