@@ -60,7 +60,7 @@ impl AppWindow {
         }
     }
     
-    pub fn handle_app_window(&mut self, cx: &mut Cx, event: &mut Event, window_index: usize, app_global: &mut AppGlobal) {
+    pub fn handle_app_window(&mut self, cx: &mut Cx, event: &mut Event, window_index: usize, state: &mut AppState, storage:&mut AppStorage) {
         
         match self.desktop_window.handle_desktop_window(cx, event) {
             DesktopWindowEvent::EventForOtherWindow => {
@@ -70,11 +70,11 @@ impl AppWindow {
                 return
             },
             DesktopWindowEvent::WindowGeomChange(wc) => {
-                if !app_global.storage.app_state_file_read.is_pending() {
+                if !storage.app_state_file_read.is_pending() {
                     // store our new window geom
-                    app_global.state.windows[window_index].window_position = wc.new_geom.position;
-                    app_global.state.windows[window_index].window_inner_size = wc.new_geom.inner_size;
-                    app_global.save_state(cx);
+                    state.windows[window_index].window_position = wc.new_geom.position;
+                    state.windows[window_index].window_inner_size = wc.new_geom.inner_size;
+                    state.save_state(cx, storage);
                 }
             },
             _ => ()
@@ -82,13 +82,13 @@ impl AppWindow {
         
         match event {
             // this loads the filetree
-            Event::Signal(se) => if app_global.storage.file_tree_reload_signal.is_signal(se) {
-                self.file_tree.load_from_json(cx, &app_global.storage.file_tree_data);
+            Event::Signal(se) => if storage.file_tree_reload_signal.is_signal(se) {
+                self.file_tree.load_from_json(cx, &storage.file_tree_data);
             },
             _ => ()
         }
         
-        let dock_items = &mut app_global.state.windows[window_index].dock_items;
+        let dock_items = &mut state.windows[window_index].dock_items;
         let mut dock_walker = self.dock.walker(dock_items);
         let mut file_tree_event = FileTreeEvent::None;
         while let Some(item) = dock_walker.walk_handle_dock(cx, event) {
@@ -103,7 +103,7 @@ impl AppWindow {
                     // }
                 },
                 Panel::Keyboard => {
-                    self.keyboard.handle_keyboard(cx, event, &mut app_global.storage);
+                    self.keyboard.handle_keyboard(cx, event, storage);
                 },
                 Panel::FileEditorTarget => {
                 },
@@ -118,13 +118,13 @@ impl AppWindow {
                 Panel::FileEditor {path, editor_id} => {
                     if let Some(file_editor) = &mut self.file_editors.get(*editor_id) {
 
-                        let text_buffer = app_global.storage.text_buffer_from_path(cx, path);
+                        let text_buffer = storage.text_buffer_from_path(cx, path);
 
                         match file_editor.handle_file_editor(cx, event, text_buffer) {
                             FileEditorEvent::LagChange => {
                                 
                                 // HERE WE SAVE
-                                app_global.storage.text_buffer_file_write(cx, path);
+                                storage.text_buffer_file_write(cx, path);
                                 
                                 
                                 
@@ -152,39 +152,39 @@ impl AppWindow {
                 let mut tabs = Vec::new();
                 for path in paths {
                     // find a free editor id
-                    tabs.push(self.new_file_editor_tab(window_index, app_global, &path));
+                    tabs.push(self.new_file_editor_tab(window_index, state, &path));
                 }
                 self.dock.dock_drag_end(cx, fe, tabs);
             },
             FileTreeEvent::SelectFile {path} => {
                 // search for the tabcontrol with the maximum amount of editors
-                if self.focus_or_new_editor(cx, window_index, app_global, &path) {
-                    app_global.save_state(cx);
+                if self.focus_or_new_editor(cx, window_index, state, &path) {
+                    state.save_state(cx, storage);
                 }
             },
             FileTreeEvent::SelectFolder {..} => {
-                app_global.state.windows[window_index].open_folders = self.file_tree.save_open_folders();
-                app_global.save_state(cx);
+                state.windows[window_index].open_folders = self.file_tree.save_open_folders();
+                state.save_state(cx, storage);
             },
             _ => {}
         }
         
-        let dock_items = &mut app_global.state.windows[window_index].dock_items;
+        let dock_items = &mut state.windows[window_index].dock_items;
         match self.dock.handle_dock(cx, event, dock_items) {
             DockEvent::DockChanged => { // thats a bit bland event. lets let the thing know which file closed
-                app_global.save_state(cx);
+                state.save_state(cx, storage);
             },
             _ => ()
         }
     }
     
-    pub fn draw_app_window(&mut self, cx: &mut Cx, window_index: usize, app_global: &mut AppGlobal) {
+    pub fn draw_app_window(&mut self, cx: &mut Cx, window_index: usize, state: &mut AppState, storage:&mut AppStorage) {
         if let Err(()) = self.desktop_window.begin_desktop_window(cx) {
             return
         }
         self.dock.draw_dock(cx);
         
-        let dock_items = &mut app_global.state.windows[window_index].dock_items;
+        let dock_items = &mut state.windows[window_index].dock_items;
         let mut dock_walker = self.dock.walker(dock_items);
         while let Some(item) = dock_walker.walk_draw_dock(cx) {
             match item {
@@ -208,7 +208,7 @@ impl AppWindow {
                     local_terminal.draw_local_terminal(cx);
                 },
                 Panel::FileEditor {path, editor_id} => {
-                    let text_buffer = app_global.storage.text_buffer_from_path(cx, path);
+                    let text_buffer = storage.text_buffer_from_path(cx, path);
                     let mut set_key_focus = false;
                     let file_editor = self.file_editors.get_draw(cx, *editor_id, | _cx, tmpl | {
                         set_key_focus = true;
@@ -224,9 +224,9 @@ impl AppWindow {
         self.desktop_window.end_desktop_window(cx);
     }
     
-    pub fn new_file_editor_tab(&mut self, window_index: usize, app_global: &mut AppGlobal, path: &str) -> DockTab<Panel> {
+    pub fn new_file_editor_tab(&mut self, window_index: usize, state: &mut AppState, path: &str) -> DockTab<Panel> {
         let mut max_id = 0;
-        let dock_items = &mut app_global.state.windows[window_index].dock_items;
+        let dock_items = &mut state.windows[window_index].dock_items;
         let mut dock_walker = self.dock.walker(dock_items);
         while let Some(dock_item) = dock_walker.walk_dock_item() {
             match dock_item {
@@ -253,10 +253,10 @@ impl AppWindow {
         }
     }
     
-    pub fn focus_or_new_editor(&mut self, cx: &mut Cx, window_index: usize, app_global: &mut AppGlobal, file_path: &str) -> bool {
+    pub fn focus_or_new_editor(&mut self, cx: &mut Cx, window_index: usize, state: &mut AppState, file_path: &str) -> bool {
         let mut target_ctrl_id = 0;
         let mut only_focus_editor = false;
-        let dock_items = &mut app_global.state.windows[window_index].dock_items;
+        let dock_items = &mut state.windows[window_index].dock_items;
         let mut dock_walker = self.dock.walker(dock_items);
         let mut ctrl_id = 1;
         while let Some(dock_item) = dock_walker.walk_dock_item() {
@@ -288,8 +288,8 @@ impl AppWindow {
             ctrl_id += 1;
         }
         if target_ctrl_id != 0 && !only_focus_editor { // open a new one
-            let new_tab = self.new_file_editor_tab(window_index, app_global, file_path);
-            let dock_items = &mut app_global.state.windows[window_index].dock_items;
+            let new_tab = self.new_file_editor_tab(window_index, state, file_path);
+            let dock_items = &mut state.windows[window_index].dock_items;
             let mut dock_walker = self.dock.walker(dock_items);
             let mut ctrl_id = 1;
             while let Some(dock_item) = dock_walker.walk_dock_item() {

@@ -8,11 +8,6 @@ use std::collections::HashMap;
 use serde::*;
 use hub::*;
 
-pub struct AppGlobal {
-    pub state: AppState,
-    pub storage: AppStorage,
-}
-
 pub struct AppStorage{
     pub hub_server: Option<HubServer>,
     pub hub_ui: Option<HubUI>,
@@ -28,7 +23,8 @@ pub struct App {
     pub workspaces_request_uid: HubUid,
     pub app_window_state_template: AppWindowState,
     pub app_window_template: AppWindow,
-    pub app_global: AppGlobal,
+    pub state: AppState,
+    pub storage: AppStorage,
     pub windows: Vec<AppWindow>,
 }
 
@@ -37,10 +33,10 @@ pub struct AppState {
     pub windows: Vec<AppWindowState>
 }
 
-impl AppGlobal{
-    pub fn save_state(&mut self, cx: &mut Cx) {
-        let json = serde_json::to_string(&self.state).unwrap();
-        cx.file_write(&format!("{}makepad_state.json", self.storage.root_path), json.as_bytes());
+impl AppState{
+    pub fn save_state(&mut self, cx: &mut Cx, storage:&AppStorage) {
+        let json = serde_json::to_string(&self).unwrap();
+        cx.file_write(&format!("{}makepad_state.json", storage.root_path), json.as_bytes());
     }
 }
 
@@ -60,7 +56,10 @@ impl AppStorage {
     
     pub fn text_buffer_from_path(&mut self, cx: &mut Cx, path: &str) -> &mut TextBuffer {
         let root_path = &self.root_path;
+        let hub_ui = &mut self.hub_ui;
         self.text_buffers.entry(path.to_string()).or_insert_with( || {
+            // lets send our hub_ui a request
+            
             TextBuffer {
                 signal: cx.new_signal(),
                 mutation_id: 1,
@@ -162,27 +161,25 @@ impl App {
                 },
             },
             windows: vec![],
-            app_global: AppGlobal {
-                state: AppState::default(),
-                storage: AppStorage{
-                    hub_server: None,
-                    hub_ui: None,
-                    //rust_compiler: RustCompiler::style(cx),
-                    root_path: "./".to_string(),
-                    text_buffers: HashMap::new(),
-                    index_file_read: FileRead::default(),
-                    app_state_file_read: FileRead::default(),
-                    file_tree_data: String::new(),
-                    file_tree_reload_signal: cx.new_signal(),
-                }
+            state: AppState::default(),
+            storage: AppStorage{
+                hub_server: None,
+                hub_ui: None,
+                //rust_compiler: RustCompiler::style(cx),
+                root_path: "./".to_string(),
+                text_buffers: HashMap::new(),
+                index_file_read: FileRead::default(),
+                app_state_file_read: FileRead::default(),
+                file_tree_data: String::new(),
+                file_tree_reload_signal: cx.new_signal(),
             }
         }
     }
     
     pub fn default_layout(&mut self, cx: &mut Cx) {
-        self.app_global.state.windows = vec![self.app_window_state_template.clone()];
+        self.state.windows = vec![self.app_window_state_template.clone()];
         self.windows = vec![self.app_window_template.clone()];
-        cx.send_signal(self.app_global.storage.file_tree_reload_signal, 0);
+        cx.send_signal(self.storage.file_tree_reload_signal, 0);
         cx.redraw_child_area(Area::All);
     }
     
@@ -190,28 +187,28 @@ impl App {
         // only in ConnectUI of ourselves do we list the workspaces
         match &htc.msg {
             // our own connectUI message, means we are ready to talk to the hub
-            HubMsg::ConnectUI => if self.app_global.storage.is_own_hub_addr(&htc.from) {
+            HubMsg::ConnectUI => if self.storage.is_own_hub_addr(&htc.from) {
                 // now start talking
-                let uid = self.app_global.storage.alloc_hub_uid();
-                self.app_global.storage.send_hub_msg(ClientToHubMsg {
+                let uid = self.storage.alloc_hub_uid();
+                self.storage.send_hub_msg(ClientToHubMsg {
                     to: HubMsgTo::Hub,
                     msg: HubMsg::ListWorkspacesRequest {uid: uid}
                 });
                 self.workspaces_request_uid = uid;
             },
             HubMsg::DisconnectWorkspace(_) | HubMsg::ConnectWorkspace(_) => {
-                let uid = self.app_global.storage.alloc_hub_uid();
-                self.app_global.storage.send_hub_msg(ClientToHubMsg {
+                let uid = self.storage.alloc_hub_uid();
+                self.storage.send_hub_msg(ClientToHubMsg {
                     to: HubMsgTo::Hub,
                     msg: HubMsg::ListWorkspacesRequest {uid: uid}
                 });
                 self.workspaces_request_uid = uid;
             },
             HubMsg::ListWorkspacesResponse {uid, workspaces} => if *uid == self.workspaces_request_uid {
-                let uid = self.app_global.storage.alloc_hub_uid();
+                let uid = self.storage.alloc_hub_uid();
                 // from these workspaces query filetrees
                 for workspace in workspaces {
-                    self.app_global.storage.send_hub_msg(ClientToHubMsg {
+                    self.storage.send_hub_msg(ClientToHubMsg {
                         to: HubMsgTo::Workspace(workspace.clone()),
                         msg: HubMsg::WorkspaceFileTreeRequest {uid: uid}
                     });
@@ -265,7 +262,7 @@ impl App {
                                 }
                             }
                         }
-                        window.file_tree.load_open_folders(cx, &self.app_global.state.windows[window_index].open_folders);
+                        window.file_tree.load_open_folders(cx, &self.state.windows[window_index].open_folders);
                     }
                 }
             },
@@ -279,12 +276,12 @@ impl App {
         match event {
             Event::Construct => {
                 if cx.platform_type.is_desktop() {
-                    self.app_global.storage.root_path = "./edit_repo/".to_string();
+                    self.storage.root_path = "./edit_repo/".to_string();
                 }
                 
-                self.app_global.storage.index_file_read = cx.file_read(&format!("{}index.json", self.app_global.storage.root_path));
+                self.storage.index_file_read = cx.file_read(&format!("{}index.json", self.storage.root_path));
                 if cx.platform_type.is_desktop() {
-                    self.app_global.storage.app_state_file_read = cx.file_read(&format!("{}makepad_state.json", self.app_global.storage.root_path));
+                    self.storage.app_state_file_read = cx.file_read(&format!("{}makepad_state.json", self.storage.root_path));
                 }
                 else {
                     self.default_layout(cx);
@@ -295,15 +292,15 @@ impl App {
                 hub_server.start_announce_server_default(&key);
                 let hub_ui = HubUI::new(cx, &key, HubLog::All);
                 
-                self.app_global.storage.hub_server = Some(hub_server);
+                self.storage.hub_server = Some(hub_server);
                 
-                self.app_global.storage.hub_ui = Some(hub_ui);
+                self.storage.hub_ui = Some(hub_ui);
                 
             },
             Event::Signal(se) => {
                 // process incoming hub messages
                 let mut hub_htc_msgs = Vec::new();
-                if let Some(hub_ui) = &mut self.app_global.storage.hub_ui {
+                if let Some(hub_ui) = &mut self.storage.hub_ui {
                     if hub_ui.signal.is_signal(se) {
                         if let Ok(mut htc_msgs) = hub_ui.htc_msgs_arc.lock() {
                             std::mem::swap(&mut hub_htc_msgs, &mut htc_msgs);
@@ -316,20 +313,20 @@ impl App {
             },
             Event::FileRead(fr) => {
                 // lets see which file we loaded
-                if let Some(utf8_data) = self.app_global.storage.index_file_read.resolve_utf8(fr) {
+                if let Some(utf8_data) = self.storage.index_file_read.resolve_utf8(fr) {
                     if let Ok(utf8_data) = utf8_data {
-                        self.app_global.storage.file_tree_data = utf8_data.to_string();
-                        cx.send_signal(self.app_global.storage.file_tree_reload_signal, 0);
+                        self.storage.file_tree_data = utf8_data.to_string();
+                        cx.send_signal(self.storage.file_tree_reload_signal, 0);
                     }
                 }
                 else
-                if let Some(utf8_data) = self.app_global.storage.app_state_file_read.resolve_utf8(fr) {
+                if let Some(utf8_data) = self.storage.app_state_file_read.resolve_utf8(fr) {
                     if let Ok(utf8_data) = utf8_data {
                         if let Ok(state) = serde_json::from_str(&utf8_data) {
-                            self.app_global.state = state;
+                            self.state = state;
                             
                             // create our windows with the serialized positions/size
-                            for window_state in &self.app_global.state.windows {
+                            for window_state in &self.state.windows {
                                 let mut size = window_state.window_inner_size;
                                 
                                 if size.x <= 10. {
@@ -355,7 +352,7 @@ impl App {
                                     ..self.app_window_template.clone()
                                 })
                             }
-                            cx.send_signal(self.app_global.storage.file_tree_reload_signal, 0);
+                            cx.send_signal(self.storage.file_tree_reload_signal, 0);
                             cx.redraw_child_area(Area::All);
                         }
                     }
@@ -363,7 +360,7 @@ impl App {
                         self.default_layout(cx);
                     }
                 }
-                else if self.app_global.storage.text_buffer_handle_file_read(cx, &fr) {
+                else if self.storage.text_buffer_handle_file_read(cx, &fr) {
                     // this should work already
                     //cx.redraw_child_area(Area::All);
                 }
@@ -372,7 +369,7 @@ impl App {
             _ => ()
         }
         for (window_index, window) in self.windows.iter_mut().enumerate() {
-            window.handle_app_window(cx, event, window_index, &mut self.app_global);
+            window.handle_app_window(cx, event, window_index, &mut self.state, &mut self.storage);
             // break;
         }
     }
@@ -380,7 +377,7 @@ impl App {
     pub fn draw_app(&mut self, cx: &mut Cx) {
         //return;
         for (window_index, window) in self.windows.iter_mut().enumerate() {
-            window.draw_app_window(cx, window_index, &mut self.app_global);
+            window.draw_app_window(cx, window_index, &mut self.state, &mut self.storage);
             // break;
         }
     }
