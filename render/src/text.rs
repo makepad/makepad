@@ -84,7 +84,7 @@ impl Text {
             fn pixel() -> vec4 {
                 let dx = dfdx(tex_coord1.x * 4096.0);
                 
-                let s = vec4(0.);
+                let s = vec4(0.,0.,0.,0.);
                 
                 let dp = 1.0 / 4096.0;
 
@@ -94,19 +94,19 @@ impl Text {
                         + sample2d(texturez, tex_coord3.xy + vec2(dp,0.)).z
                         + sample2d(texturez, tex_coord3.xy + vec2(0.,dp)).z
                         + sample2d(texturez, tex_coord3.xy + vec2(dp,dp)).z)*0.25;
-                    return vec4(vec3(s) * color.rgb * brightness * color.a, s * color.a);
+                    return vec4(vec3(s,s,s) * color.rgb * brightness * color.a, s * color.a);
                 }
                 else if dx > 1.75 { // combine 3x3
                     let s = sample2d(texturez, tex_coord3.xy).z;
-                    return vec4(vec3(s) * color.rgb * brightness * color.a, s * color.a);
+                    return vec4(vec3(s,s,s) * color.rgb * brightness * color.a, s * color.a);
                 }
                 else if dx > 1.3 { // combine 2x2
                     let s = sample2d(texturez, tex_coord2.xy).y;
-                    return vec4(vec3(s) * color.rgb * brightness * color.a, s * color.a);
+                    return vec4(vec3(s,s,s) * color.rgb * brightness * color.a, s * color.a);
                 }
                 else {
                     let s = sample2d(texturez, tex_coord1.xy).x;
-                    return vec4(vec3(s) * color.rgb * brightness * color.a, s * color.a);
+                    return vec4(vec3(s,s,s) * color.rgb * brightness * color.a, s * color.a);
                 }
                 
             }
@@ -144,7 +144,7 @@ impl Text {
                     normalized.xy
                 );
                 
-                return camera_projection * (camera_view * (view_transform * vec4(clipped, z + zbias, 1.)));
+                return camera_projection * (camera_view * (view_transform * vec4(clipped.x,clipped.y, z + zbias, 1.)));
             }
         }))
     }
