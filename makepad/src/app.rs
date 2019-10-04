@@ -108,7 +108,6 @@ impl AppStorage {
                 let msg = if let Some(workspace_pos) = path.find('/'){
                     let hub_ui = self.hub_ui.as_mut().unwrap();
                     let utf8_data = atb.text_buffer.get_as_string();
-                    let uid = hub_ui.alloc_uid();
                     let (workspace, rest) = path.split_at(workspace_pos);
                     // lets write it as a message
                     let uid = hub_ui.alloc_uid();
@@ -217,6 +216,16 @@ impl App {
         cx.redraw_child_area(Area::All);
     }
     
+    pub fn reload_workspaces(&mut self){
+        let hub_ui = self.storage.hub_ui.as_mut().unwrap();
+        let uid = hub_ui.alloc_uid();
+        hub_ui.send(ClientToHubMsg {
+            to: HubMsgTo::Hub,
+            msg: HubMsg::ListWorkspacesRequest {uid: uid}
+        });
+        self.workspaces_request_uid = uid;        
+    }
+    
     pub fn handle_hub_msg(&mut self, cx: &mut Cx, htc: HubToClientMsg) {
         let hub_ui = self.storage.hub_ui.as_mut().unwrap();
         // only in ConnectUI of ourselves do we list the workspaces
@@ -224,20 +233,10 @@ impl App {
             // our own connectUI message, means we are ready to talk to the hub
             HubMsg::ConnectUI => if hub_ui.is_own_addr(&htc.from) {
                 // now start talking
-                let uid = hub_ui.alloc_uid();
-                hub_ui.send(ClientToHubMsg {
-                    to: HubMsgTo::Hub,
-                    msg: HubMsg::ListWorkspacesRequest {uid: uid}
-                });
-                self.workspaces_request_uid = uid;
+                self.reload_workspaces();
             },
             HubMsg::DisconnectWorkspace(_) | HubMsg::ConnectWorkspace(_) => {
-                let uid = hub_ui.alloc_uid();
-                hub_ui.send(ClientToHubMsg {
-                    to: HubMsgTo::Hub,
-                    msg: HubMsg::ListWorkspacesRequest {uid: uid}
-                });
-                self.workspaces_request_uid = uid;
+                self.reload_workspaces();
             },
             HubMsg::ListWorkspacesResponse {uid, workspaces} => if uid == self.workspaces_request_uid {
                 let uid = hub_ui.alloc_uid();
@@ -353,6 +352,12 @@ impl App {
                     self.storage.file_tree_file_read = cx.file_read("index.json");
                     self.default_layout(cx);
                 }
+            },
+            Event::KeyDown(ke) => match ke.key_code {
+                KeyCode::F5 => {
+                    self.reload_workspaces();
+                },
+                _=>()
             },
             Event::Signal(se) => {
                 // process incoming hub messages
