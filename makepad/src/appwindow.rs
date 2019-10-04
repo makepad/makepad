@@ -80,14 +80,7 @@ impl AppWindow {
             _ => ()
         }
         
-        match event {
-            // this loads the filetree
-            Event::Signal(se) => if storage.file_tree_reload_signal.is_signal(se) {
-                self.file_tree.load_from_json(cx, &storage.file_tree_data);
-            },
-            _ => ()
-        }
-        
+       
         let dock_items = &mut state.windows[window_index].dock_items;
         let mut dock_walker = self.dock.walker(dock_items);
         let mut file_tree_event = FileTreeEvent::None;

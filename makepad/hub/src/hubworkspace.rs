@@ -92,6 +92,9 @@ impl HubWorkspace {
             HubMsg::FileReadRequest{uid, path}=>{
                 self.file_read(htc.from, uid, &path);
             },
+            HubMsg::FileWriteRequest{uid, path, data}=>{
+                self.file_write(htc.from, uid, &path, data);
+            },
             HubMsg::ConnectionError(_e) => {
                 self.restart_connection = true;
                 println!("Got connection error, need to restart loop TODO kill all processes!");
@@ -193,6 +196,24 @@ impl HubWorkspace {
                 uid: uid,
                 path: path.to_string(),
                 data: data
+            }
+        }).expect("cannot send message");
+    }
+    
+    pub fn file_write(&mut self, from:HubAddr, uid:HubUid, path:&str, data:Vec<u8>){
+        if let Some(_) = path.find(".."){
+            println!("file_read got relative path, ignoring {}", path);
+            return
+        }
+
+        let done = std::fs::write(format!("{}{}", self.root_path, path), &data).is_ok();
+
+        self.hub_client.tx_write.send(ClientToHubMsg {
+            to: HubMsgTo::Client(from),
+            msg: HubMsg::FileWriteResponse {
+                uid: uid,
+                path: path.to_string(),
+                done: done
             }
         }).expect("cannot send message");
     }
