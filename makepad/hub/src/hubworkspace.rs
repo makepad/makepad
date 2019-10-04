@@ -22,7 +22,7 @@ pub struct HubWsProcess {
 }
 
 impl HubWorkspace {
-    pub fn run<F>(key: &[u8], &workspace: &str, root_path:&str, mut event_handler: F)
+    pub fn run<F>(key: &[u8], workspace: &str, root_path:&str, mut event_handler: F)
     where F: FnMut(&mut HubWorkspace, HubToClientMsg) {
         
         loop {
