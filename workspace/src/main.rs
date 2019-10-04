@@ -1,7 +1,7 @@
 use hub::*;
 
 fn main() {
-    let key = [7u8, 4u8, 5u8, 1u8];
+    let key = std::fs::read("./key.bin").unwrap();
     HubWorkspace::run(&key, "makepad", "./edit_repo", | workspace, htc | match htc.msg {
         HubMsg::CargoPackagesRequest {uid} => {
             workspace.cargo_packages(htc.from, uid, vec![

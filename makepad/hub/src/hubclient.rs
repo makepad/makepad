@@ -258,7 +258,7 @@ impl HubClient {
                         SocketAddr::V6(v6) => SocketAddr::V6(SocketAddrV6::new(*v6.ip(), listen_port as u16, v6.flowinfo(), v6.scope_id())),
                     })
                 }
-                println!("wait for announce found wrong digest");
+                //println!("wait for announce found wrong digest");
             }
             else{
                 println!("wait for announce bind failed");

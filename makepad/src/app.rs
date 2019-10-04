@@ -339,21 +339,20 @@ impl App {
                 
                 if cx.platform_type.is_desktop() {
                     self.storage.app_state_file_read = cx.file_read("makepad_state.json");
+                    
+                    let key = std::fs::read("./key.bin").unwrap();
+                    let mut hub_server = HubServer::start_hub_server_default(&key, HubLog::All);
+                    hub_server.start_announce_server_default(&key);
+                    let hub_ui = HubUI::new(cx, &key, HubLog::All);
+                    
+                    self.storage.hub_server = Some(hub_server);
+                    
+                    self.storage.hub_ui = Some(hub_ui);
                 }
                 else {
                     self.storage.file_tree_file_read = cx.file_read("index.json");
                     self.default_layout(cx);
                 }
-                
-                let key = [7u8, 4u8, 5u8, 1u8];
-                let mut hub_server = HubServer::start_hub_server_default(&key, HubLog::All);
-                hub_server.start_announce_server_default(&key);
-                let hub_ui = HubUI::new(cx, &key, HubLog::All);
-                
-                self.storage.hub_server = Some(hub_server);
-                
-                self.storage.hub_ui = Some(hub_ui);
-                
             },
             Event::Signal(se) => {
                 // process incoming hub messages
