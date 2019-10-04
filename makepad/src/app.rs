@@ -338,7 +338,7 @@ impl App {
             Event::Construct => {
                 
                 if cx.platform_type.is_desktop() {
-                    self.storage.app_state_file_read = cx.file_read("./edit_repo/makepad_state.json");
+                    self.storage.app_state_file_read = cx.file_read("makepad_state.json");
                 }
                 else {
                     self.storage.file_tree_file_read = cx.file_read("index.json");

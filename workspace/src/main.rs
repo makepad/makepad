@@ -1,7 +1,8 @@
 use hub::*;
 
 fn main() {
-    HubWorkspace::run("makepad", ".", | workspace, htc | match htc.msg {
+    let key = [7u8, 4u8, 5u8, 1u8];
+    HubWorkspace::run(&key, "makepad", "./edit_repo", | workspace, htc | match htc.msg {
         HubMsg::CargoPackagesRequest {uid} => {
             workspace.cargo_packages(htc.from, uid, vec![
                 CargoPackage::new("makepad", vec![

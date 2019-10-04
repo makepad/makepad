@@ -22,9 +22,8 @@ pub struct HubWsProcess {
 }
 
 impl HubWorkspace {
-    pub fn run<F>(workspace: &str, root_path:&str, mut event_handler: F)
+    pub fn run<F>(key: &[u8], &workspace: &str, root_path:&str, mut event_handler: F)
     where F: FnMut(&mut HubWorkspace, HubToClientMsg) {
-        let key = [7u8, 4u8, 5u8, 1u8];
         
         loop {
             
