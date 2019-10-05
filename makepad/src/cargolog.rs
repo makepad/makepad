@@ -311,10 +311,10 @@ impl CargoLog {
                 KeyCode::F9 => { // start run
                     self.restart_cargo(storage);
                 },
-                KeyCode::ArrowRight => if ke.modifiers.logo {
+                KeyCode::ArrowDown => if ke.modifiers.logo {
                     dm_to_select = self.next_error(false);
                 },
-                KeyCode::ArrowLeft => if ke.modifiers.logo {
+                KeyCode::ArrowUp => if ke.modifiers.logo {
                     dm_to_select = self.next_error(true);
                 },
                 KeyCode::F8 => { // next error
