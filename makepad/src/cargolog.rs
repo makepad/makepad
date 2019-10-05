@@ -167,17 +167,17 @@ impl CargoLog {
     }
     
     pub fn is_running_cargo_uid(&self, uid: &HubUid) -> bool {
-        for active_target in &self._active_targets{
-            if active_target.cargo_uid == *uid{
+        for active_target in &self._active_targets {
+            if active_target.cargo_uid == *uid {
                 return true
             }
         }
         return false
     }
-
+    
     pub fn is_any_cargo_running(&self) -> bool {
-        for active_target in &self._active_targets{
-            if active_target.cargo_uid != HubUid::zero(){
+        for active_target in &self._active_targets {
+            if active_target.cargo_uid != HubUid::zero() {
                 return true
             }
         }
@@ -192,8 +192,8 @@ impl CargoLog {
             HubMsg::CargoExecBegin {uid} => if self.is_running_cargo_uid(uid) {
             },
             HubMsg::CargoMsg {uid, msg} => if self.is_running_cargo_uid(uid) {
-                for check_msg in &self._draw_messages{
-                    if check_msg.msg == *msg{
+                for check_msg in &self._draw_messages {
+                    if check_msg.msg == *msg {
                         return
                     }
                 }
@@ -210,8 +210,8 @@ impl CargoLog {
             },
             HubMsg::CargoExecEnd {uid, artifact_path} => if self.is_running_cargo_uid(uid) {
                 // if we didnt have any errors, check if we need to run
-                for active_target in &mut self._active_targets{
-                    if active_target.cargo_uid == *uid{ 
+                for active_target in &mut self._active_targets {
+                    if active_target.cargo_uid == *uid {
                         active_target.cargo_uid = HubUid::zero();
                         active_target.artifact_path = artifact_path.clone();
                     }
@@ -225,8 +225,8 @@ impl CargoLog {
     pub fn restart_cargo(&mut self, storage: &mut AppStorage) {
         let hub_ui = storage.hub_ui.as_mut().unwrap();
         
-        for active_target in &mut self._active_targets{
-            if active_target.cargo_uid != HubUid::zero(){
+        for active_target in &mut self._active_targets {
+            if active_target.cargo_uid != HubUid::zero() {
                 hub_ui.send(ClientToHubMsg {
                     to: HubMsgTo::Workspace(self._active_workspace.clone()),
                     msg: HubMsg::CargoKill {
@@ -254,6 +254,50 @@ impl CargoLog {
         }
     }
     
+    pub fn next_error(&mut self, reverse: bool) -> Option<usize> {
+        if self._draw_messages.len() == 0 {
+            return None
+        }
+        if reverse {
+            let mut selected_index = None;
+            for (counter, item) in self._draw_messages.iter_mut().enumerate() {
+                if item.is_selected {
+                    selected_index = Some(counter);
+                }
+            }
+            if let Some(selected_index) = selected_index {
+                if selected_index > 0 {
+                    return Some(selected_index - 1);
+                }
+                else {
+                    return Some(self._draw_messages.len() - 1);
+                }
+            }
+            else {
+                return Some(self._draw_messages.len() - 1);
+            }
+        }
+        else {
+            let mut selected_index = None;
+            for (counter, dm) in self._draw_messages.iter_mut().enumerate() {
+                if dm.is_selected {
+                    selected_index = Some(counter);
+                }
+            }
+            if let Some(selected_index) = selected_index {
+                if selected_index + 1 < self._draw_messages.len() {
+                    return Some(selected_index + 1);
+                }
+                else {
+                    return Some(0);
+                }
+            }
+            else {
+                return Some(0);
+            }
+        }
+    }
+    
     pub fn handle_cargo_log(&mut self, cx: &mut Cx, event: &mut Event, storage: &mut AppStorage) -> CargoLogEvent {
         // do shit here
         if self.view.handle_scroll_bars(cx, event) {
@@ -267,47 +311,14 @@ impl CargoLog {
                 KeyCode::F9 => { // start run
                     self.restart_cargo(storage);
                 },
+                KeyCode::ArrowRight => if ke.modifiers.logo {
+                    dm_to_select = self.next_error(false);
+                },
+                KeyCode::ArrowLeft => if ke.modifiers.logo {
+                    dm_to_select = self.next_error(true);
+                },
                 KeyCode::F8 => { // next error
-                    if self._draw_messages.len() > 0 {
-                        if ke.modifiers.shift {
-                            let mut selected_index = None;
-                            for (counter, item) in self._draw_messages.iter_mut().enumerate() {
-                                if item.is_selected {
-                                    selected_index = Some(counter);
-                                }
-                            }
-                            if let Some(selected_index) = selected_index {
-                                if selected_index > 0 {
-                                    dm_to_select = Some(selected_index - 1);
-                                }
-                                else {
-                                    dm_to_select = Some(self._draw_messages.len() - 1);
-                                }
-                            }
-                            else {
-                                dm_to_select = Some(self._draw_messages.len() - 1);
-                            }
-                        }
-                        else {
-                            let mut selected_index = None;
-                            for (counter, dm) in self._draw_messages.iter_mut().enumerate() {
-                                if dm.is_selected {
-                                    selected_index = Some(counter);
-                                }
-                            }
-                            if let Some(selected_index) = selected_index {
-                                if selected_index + 1 < self._draw_messages.len() {
-                                    dm_to_select = Some(selected_index + 1);
-                                }
-                                else {
-                                    dm_to_select = Some(0);
-                                }
-                            }
-                            else {
-                                dm_to_select = Some(0);
-                            }
-                        }
-                    }
+                    dm_to_select = self.next_error(ke.modifiers.shift);
                 },
                 _ => ()
             },

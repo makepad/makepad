@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex};
 use std::fs;
 use serde_json::{Result};
 
-pub struct HubWorkspace {
+pub struct HubWorkspace { 
     pub hub_client: HubClient,
     pub workspace: String,
     pub root_path: String,
