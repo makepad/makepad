@@ -22,22 +22,22 @@ pub struct HubWsProcess {
 }
 
 impl HubWorkspace {
-    pub fn run<F>(key: &[u8], workspace: &str, root_path: &str, mut event_handler: F)
+    pub fn run<F>(key: &[u8], workspace: &str, root_path: &str, hub_log:HubLog, mut event_handler: F)
     where F: FnMut(&mut HubWorkspace, HubToClientMsg) {
         
         loop {
             
-            println!("Workspace {} waiting for hub announcement..", workspace);
+            hub_log.msg("Workspace waiting for hub announcement..", &workspace);
             
             // lets wait for a server announce
             let address = HubClient::wait_for_announce(&key).expect("cannot wait for announce");
             
-            println!("Workspace {} got announce, connecting to {:?}", workspace, address);
+            hub_log.msg("Workspace got announce, connecting to {:?}", &address);
             
             // ok now connect to that address
-            let hub_client = HubClient::connect_to_hub(&key, address, HubLog::All).expect("cannot connect to hub");
+            let hub_client = HubClient::connect_to_hub(&key, address, hub_log.clone()).expect("cannot connect to hub");
             
-            println!("Workspace {} connected to {:?}", workspace, hub_client.server_addr);
+            hub_log.msg("Workspace connected to {:?}", &hub_client.server_addr);
             
             let mut hub_workspace = HubWorkspace {
                 hub_client: hub_client,
@@ -67,24 +67,6 @@ impl HubWorkspace {
     
     pub fn default(&mut self, htc: HubToClientMsg) {
         match htc.msg {
-            HubMsg::CargoExec {uid, package, target} => {
-                match target {
-                    HubCargoTarget::Check => {
-                        self.cargo(uid, &["check", "-p", &package]);
-                    },
-                    HubCargoTarget::Release => {
-                        self.cargo(uid, &["build", "-p", &package, "--release"]);
-                    },
-                    HubCargoTarget::IPC => {
-                        self.cargo(uid, &["build", "-p", &package, "--release"]);
-                    },
-                    HubCargoTarget::VR => {
-                        self.cargo(uid, &["build", "-p", &package, "--release"]);
-                    },
-                    HubCargoTarget::Custom(_s) => {
-                    }
-                }
-            },
             HubMsg::WorkspaceFileTreeRequest {uid} => {
                 self.workspace_file_tree(htc.from, uid, &[".json", ".toml", ".js", ".rs"]);
             },
@@ -98,11 +80,79 @@ impl HubWorkspace {
                 self.restart_connection = true;
                 println!("Got connection error, need to restart loop TODO kill all processes!");
             },
+            HubMsg::ArtifactExec{uid, artifact, args}=>{
+                let v: Vec<&str> = args.iter().map(|v| v.as_ref()).collect();
+                self.exec_artifact(uid, &artifact, &v);
+            },
             _ => ()
         }
     }
     
+    pub fn exec_artifact(&mut self, uid: HubUid, artifact:&str, args: &[&str]) {
+
+        // lets start a thread
+        let mut process = Process::start(artifact, args, &self.root_path).expect("Cannot start process");
+        
+        // we now need to start a subprocess and parse the cargo output.
+        let tx_write = self.hub_client.tx_write.clone();
+        
+        let rx_line = process.rx_line.take().unwrap();
+        
+        let processes = Arc::clone(&self.processes);
+
+        tx_write.send(ClientToHubMsg {
+            to: HubMsgTo::UI,
+            msg: HubMsg::ArtifactExecBegin{uid:uid}
+        }).expect("tx_write fail");
+        
+        let thread = std::thread::spawn(move || {
+            //let mut any_errors = false;
+            while let Ok(line) = rx_line.recv() {
+                if let Some(line) = line {
+                    tx_write.send(ClientToHubMsg {
+                        to: HubMsgTo::UI,
+                        msg: HubMsg::ArtifactMsg {
+                            uid: uid,
+                            msg: line
+                        }
+                    }).expect("tx_write fail");
+                }
+                else { // process terminated
+                    // do we have any errors?
+                    break;
+                }
+            }
+            
+            // now tryread all stderr output
+            
+            
+            // process ends as well
+            tx_write.send(ClientToHubMsg {
+                to: HubMsgTo::UI,
+                msg: HubMsg::ArtifactExecEnd {
+                    uid: uid,
+                }
+            }).expect("tx_write fail");
+            
+            // remove process from process list
+            if let Ok(mut processes) = processes.lock() {
+                if let Some(index) = processes.iter().position( | p | p.uid == uid) {
+                    processes.remove(index);
+                }
+            };
+        });
+        
+        if let Ok(mut processes) = self.processes.lock() {
+            processes.push(HubWsProcess {
+                uid: uid,
+                _process: process,
+                _thread: Some(thread)
+            });
+        };
+    }
+    
     pub fn cargo(&mut self, uid: HubUid, args: &[&str]) {
+
         // lets start a thread
         let mut extargs = args.to_vec();
         extargs.push("--message-format=json");
@@ -117,10 +167,14 @@ impl HubWorkspace {
 
         tx_write.send(ClientToHubMsg {
             to: HubMsgTo::UI,
-            msg: HubMsg::CargoClear{uid:uid}
+            msg: HubMsg::CargoExecBegin{uid:uid}
         }).expect("tx_write fail");
         
+        let workspace = self.workspace.clone();
+        
         let thread = std::thread::spawn(move || {
+            let mut any_errors = false;
+            let mut artifact_path = None;
             while let Ok(line) = rx_line.recv() {
                 if let Some(line) = line {
                     
@@ -146,24 +200,28 @@ impl HubWorkspace {
                                     for child in &message.children {
                                         more_lines.push(child.message.clone());
                                     }
+                                    let level = match message.level.as_ref() {
+                                        "warning" => HubCargoMsgLevel::Warning,
+                                        "error" => HubCargoMsgLevel::Error,
+                                        _ => HubCargoMsgLevel::Warning
+                                    };
+                                    if level == HubCargoMsgLevel::Error{
+                                        any_errors = true;
+                                    }
                                     tx_write.send(ClientToHubMsg {
                                         to: HubMsgTo::UI,
                                         msg: HubMsg::CargoMsg {
                                             uid: uid,
                                             msg: HubCargoMsg{
                                                 package_id: parsed.package_id.clone(),
-                                                path: span.file_name,
+                                                path: format!("{}/{}", workspace, span.file_name),
                                                 row: span.line_start as usize,
                                                 col: span.column_start as usize,
                                                 tail: span.byte_start as usize,
                                                 head: span.byte_end as usize,
                                                 body: message.message.clone(),
                                                 more_lines: more_lines,
-                                                level: match message.level.as_ref() {
-                                                    "warning" => HubCargoMsgLevel::Warning,
-                                                    "error" => HubCargoMsgLevel::Error,
-                                                    _ => HubCargoMsgLevel::Warning
-                                                }
+                                                level: level
                                             }
                                         }
                                     }).expect("tx_write fail");
@@ -175,9 +233,12 @@ impl HubWorkspace {
                                     msg: HubMsg::CargoArtifact {
                                         uid: uid,
                                         package_id: parsed.package_id.clone(),
-                                        fresh: parsed.fresh.unwrap()
+                                        fresh: if let Some(fresh) = parsed.fresh{fresh}else{false}
                                     }
                                 }).expect("tx_write fail");
+                                if !any_errors{
+                                    artifact_path = parsed.executable;
+                                }
                             }
                         }
                     }
@@ -185,6 +246,7 @@ impl HubWorkspace {
                     
                 }
                 else { // process terminated
+                    // do we have any errors?
                     break;
                 }
             }
@@ -192,8 +254,9 @@ impl HubWorkspace {
             // process ends as well
             tx_write.send(ClientToHubMsg {
                 to: HubMsgTo::UI,
-                msg: HubMsg::CargoDone {
+                msg: HubMsg::CargoExecEnd {
                     uid: uid,
+                    artifact_path:artifact_path
                 }
             }).expect("tx_write fail");
             

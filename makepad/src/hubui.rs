@@ -8,6 +8,7 @@ pub struct HubUI {
     pub tx_write_arc: Arc<Mutex<Option<mpsc::Sender<ClientToHubMsg>>>>,
     pub own_addr_arc: Arc<Mutex<Option<HubAddr>>>,
     pub htc_msgs_arc: Arc<Mutex<Vec<HubToClientMsg>>>,
+    pub hub_log: HubLog,
     pub thread: Option<std::thread::JoinHandle<()>>
 }
 
@@ -25,22 +26,23 @@ impl HubUI {
             let tx_write_arc = Arc::clone(&tx_write_arc);
             let htc_msgs_arc = Arc::clone(&htc_msgs_arc);
             let own_addr_arc = Arc::clone(&own_addr_arc);
+            let hub_log = hub_log.clone();
             let signal = signal.clone();
             
             std::thread::spawn(move || {
                 loop {
                     
-                    println!("HubUI waiting for hub announcement..");
+                    hub_log.log("HubUI waiting for hub announcement..");
                     
                     // lets wait for a server announce
                     let address = HubClient::wait_for_announce(&key).expect("cannot wait for announce");
                     
-                    println!("HubUI got announce, connecting to {:?}", address);
+                    hub_log.msg("HubUI got announce, connecting to ", &address);
                     
                     // ok now connect to that address
                     let hub_client = HubClient::connect_to_hub(&key, address, hub_log.clone()).expect("cannot connect to hub");
                     
-                    println!("HubUI connected to {:?}", hub_client.server_addr);
+                    hub_log.msg("HubUI connected to ", &hub_client.server_addr);
                     
                     // lets clone the tx_write
                     let tx_write_clone = hub_client.tx_write.clone();
@@ -94,6 +96,7 @@ impl HubUI {
             own_addr_arc: own_addr_arc,
             tx_write_arc: tx_write_arc,
             htc_msgs_arc: htc_msgs_arc,
+            hub_log:hub_log.clone(),
             // cth_msgs_arc: cth_msgs_arc,
             thread: Some(thread)
         }
@@ -105,7 +108,7 @@ impl HubUI {
                 return own_addr == *addr
             }
         }
-        println!("HubUI - Warning, is_own_addr whilst disconnected from hub");
+        self.hub_log.log("HubUI - Warning, is_own_addr whilst disconnected from hub");
         return false
     }
 
@@ -119,7 +122,7 @@ impl HubUI {
                 }
             }
         }
-        println!("HubUI - Warning, trying to alloc_uid whilst disconnected from hub");
+        self.hub_log.log("HubUI - Warning, trying to alloc_uid whilst disconnected from hub");
         return HubUid{
             addr:HubAddr::zero(),
             id: self.uid_alloc
@@ -131,7 +134,7 @@ impl HubUI {
             if let Some(tx_write) = &*tx_write{
                 tx_write.send(msg).expect("Cannot tx_write.send - unexpected");;
             }else{ // lets queue up
-                println!("HubUI - Warning, trying to send messages whilst disconnected from hub");
+                self.hub_log.log("HubUI - Warning, trying to send messages whilst disconnected from hub");
             }
         }
     }

@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use serde::*;
 use hub::*;
 
-pub struct AppStorage{
+pub struct AppStorage {
     pub hub_server: Option<HubServer>,
     pub hub_ui: Option<HubUI>,
     pub file_tree_file_read: FileRead,
@@ -25,11 +25,11 @@ pub struct App {
     pub windows: Vec<AppWindow>,
 }
 
-pub struct AppTextBuffer{
-    pub file_read:FileRead,
-    pub read_msg:Option<ClientToHubMsg>, 
-    pub write_msg:Option<ClientToHubMsg>,
-    pub text_buffer:TextBuffer,
+pub struct AppTextBuffer {
+    pub file_read: FileRead,
+    pub read_msg: Option<ClientToHubMsg>,
+    pub write_msg: Option<ClientToHubMsg>,
+    pub text_buffer: TextBuffer,
 }
 
 #[derive(Default, Clone, Serialize, Deserialize)]
@@ -38,22 +38,22 @@ pub struct AppState {
 }
 
 impl AppStorage {
-
-    pub fn save_state(&mut self, cx: &mut Cx, state:&AppState) {
+    
+    pub fn save_state(&mut self, cx: &mut Cx, state: &AppState) {
         let json = serde_json::to_string(state).unwrap();
         cx.file_write("makepad_state.json", json.as_bytes());
     }
     
     pub fn text_buffer_from_path(&mut self, cx: &mut Cx, path: &str) -> &mut TextBuffer {
         // if online, fallback to readfile
-        let atb = if !cx.platform_type.is_desktop(){
+        let atb = if !cx.platform_type.is_desktop() {
             let atb = self.text_buffers.entry(path.to_string()).or_insert_with( || {
-                AppTextBuffer{
-                    file_read:cx.file_read(path),
-                    read_msg:None,
-                    write_msg:None,
-                    text_buffer:TextBuffer {
-                        is_loading:true,
+                AppTextBuffer {
+                    file_read: cx.file_read(path),
+                    read_msg: None,
+                    write_msg: None,
+                    text_buffer: TextBuffer {
+                        is_loading: true,
                         signal: cx.new_signal(),
                         mutation_id: 1,
                         ..Default::default()
@@ -62,32 +62,32 @@ impl AppStorage {
             });
             atb
         }
-        else{
+        else {
             let hub_ui = self.hub_ui.as_mut().unwrap();
             let atb = self.text_buffers.entry(path.to_string()).or_insert_with( || {
                 // lets find the right workspace
-                let msg = if let Some(workspace_pos) = path.find('/'){
+                let msg = if let Some(workspace_pos) = path.find('/') {
                     let uid = hub_ui.alloc_uid();
                     let (workspace, rest) = path.split_at(workspace_pos);
-                    let msg = ClientToHubMsg{
-                        to:HubMsgTo::Workspace(workspace.to_string()),
-                        msg:HubMsg::FileReadRequest{
-                            uid:uid.clone(),
-                            path:rest.to_string()
+                    let msg = ClientToHubMsg {
+                        to: HubMsgTo::Workspace(workspace.to_string()),
+                        msg: HubMsg::FileReadRequest {
+                            uid: uid.clone(),
+                            path: rest.to_string()
                         }
                     };
                     hub_ui.send(msg.clone());
                     Some(msg)
                 }
-                else{
+                else {
                     None
                 };
-                AppTextBuffer{
-                    file_read:FileRead::default(),
-                    read_msg:msg,
-                    write_msg:None,
-                    text_buffer:TextBuffer {
-                        is_loading:true,
+                AppTextBuffer {
+                    file_read: FileRead::default(),
+                    read_msg: msg,
+                    write_msg: None,
+                    text_buffer: TextBuffer {
+                        is_loading: true,
                         signal: cx.new_signal(),
                         mutation_id: 1,
                         ..Default::default()
@@ -100,29 +100,29 @@ impl AppStorage {
     }
     
     pub fn text_buffer_file_write(&mut self, cx: &mut Cx, path: &str) {
-        if !cx.platform_type.is_desktop(){
+        if !cx.platform_type.is_desktop() {
             // do nothing
         }
-        else{
+        else {
             if let Some(atb) = self.text_buffers.get_mut(path) {
-                let msg = if let Some(workspace_pos) = path.find('/'){
+                let msg = if let Some(workspace_pos) = path.find('/') {
                     let hub_ui = self.hub_ui.as_mut().unwrap();
                     let utf8_data = atb.text_buffer.get_as_string();
                     let (workspace, rest) = path.split_at(workspace_pos);
                     // lets write it as a message
                     let uid = hub_ui.alloc_uid();
-                    let msg = ClientToHubMsg{
-                        to:HubMsgTo::Workspace(workspace.to_string()),
-                        msg:HubMsg::FileWriteRequest{
-                            uid:uid.clone(),
-                            path:rest.to_string(),
-                            data:utf8_data.into_bytes()
+                    let msg = ClientToHubMsg {
+                        to: HubMsgTo::Workspace(workspace.to_string()),
+                        msg: HubMsg::FileWriteRequest {
+                            uid: uid.clone(),
+                            path: rest.to_string(),
+                            data: utf8_data.into_bytes()
                         }
                     };
                     hub_ui.send(msg.clone());
                     Some(msg)
                 }
-                else{
+                else {
                     None
                 };
                 atb.write_msg = msg;
@@ -199,7 +199,7 @@ impl App {
             },
             windows: vec![],
             state: AppState::default(),
-            storage: AppStorage{
+            storage: AppStorage {
                 hub_server: None,
                 hub_ui: None,
                 //rust_compiler: RustCompiler::style(cx),
@@ -216,14 +216,14 @@ impl App {
         cx.redraw_child_area(Area::All);
     }
     
-    pub fn reload_workspaces(&mut self){
+    pub fn reload_workspaces(&mut self) {
         let hub_ui = self.storage.hub_ui.as_mut().unwrap();
         let uid = hub_ui.alloc_uid();
         hub_ui.send(ClientToHubMsg {
             to: HubMsgTo::Hub,
             msg: HubMsg::ListWorkspacesRequest {uid: uid}
         });
-        self.workspaces_request_uid = uid;        
+        self.workspaces_request_uid = uid;
     }
     
     pub fn handle_hub_msg(&mut self, cx: &mut Cx, htc: HubToClientMsg) {
@@ -269,11 +269,11 @@ impl App {
                 }
                 // lets resend the file load we haven't gotten
                 for (_path, atb) in &mut self.storage.text_buffers {
-                    if let Some(cth_msg) =  &atb.read_msg{
+                    if let Some(cth_msg) = &atb.read_msg {
                         hub_ui.send(cth_msg.clone())
                     }
                 }
-
+                
             },
             HubMsg::WorkspaceFileTreeResponse {uid, tree} => if uid == self.workspaces_request_uid {
                 // replace a workspace node
@@ -311,18 +311,18 @@ impl App {
                     }
                 }
             },
-            HubMsg::FileReadResponse{uid, data, ..}=>{
+            HubMsg::FileReadResponse {uid, data, ..} => {
                 for (_path, atb) in &mut self.storage.text_buffers {
-                    if let Some(cth_msg) =  &atb.read_msg{
-                        if let HubMsg::FileReadRequest{uid:read_uid, ..} = &cth_msg.msg{
-                            if *read_uid == uid{
+                    if let Some(cth_msg) = &atb.read_msg {
+                        if let HubMsg::FileReadRequest {uid: read_uid, ..} = &cth_msg.msg {
+                            if *read_uid == uid {
                                 atb.read_msg = None;
-                                if let Some(data) = data{
-                                    if let Ok(utf8_data) = String::from_utf8(data){
+                                if let Some(data) = data {
+                                    if let Ok(utf8_data) = String::from_utf8(data) {
                                         atb.text_buffer.load_from_utf8(cx, &utf8_data);
                                     }
                                 }
-                                else{
+                                else {
                                     // DO SOMETHING HERE
                                     println!("FILE READ FAILED!")
                                 }
@@ -332,12 +332,11 @@ impl App {
                     }
                 }
             },
-            HubMsg::CargoPackagesResponse{..}=>{
+            _ => { // send the rest to cargo_log
                 for window in &mut self.windows {
                     window.cargo_log.handle_hub_msg(cx, &mut self.storage, &htc)
                 }
             }
-            _ => ()
         }
     }
     
@@ -349,9 +348,9 @@ impl App {
                     self.storage.app_state_file_read = cx.file_read("makepad_state.json");
                     
                     let key = std::fs::read("./key.bin").unwrap();
-                    let mut hub_server = HubServer::start_hub_server_default(&key, HubLog::All);
+                    let mut hub_server = HubServer::start_hub_server_default(&key, HubLog::None);
                     hub_server.start_announce_server_default(&key);
-                    let hub_ui = HubUI::new(cx, &key, HubLog::All);
+                    let hub_ui = HubUI::new(cx, &key, HubLog::None);
                     
                     self.storage.hub_server = Some(hub_server);
                     
@@ -366,7 +365,7 @@ impl App {
                 KeyCode::F5 => {
                     self.reload_workspaces();
                 },
-                _=>()
+                _ => ()
             },
             Event::Signal(se) => {
                 // process incoming hub messages
@@ -431,7 +430,7 @@ impl App {
                         self.default_layout(cx);
                     }
                 }
-                else{
+                else {
                     for (_path, atb) in &mut self.storage.text_buffers {
                         if let Some(utf8_data) = atb.file_read.resolve_utf8(fr) {
                             if let Ok(utf8_data) = utf8_data {

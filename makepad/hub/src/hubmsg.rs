@@ -19,9 +19,17 @@ pub enum HubMsg {
     CargoExec {
         uid: HubUid,
         package: String,
-        target: HubCargoTarget
+        target: String
     },
     
+    CargoKill {
+        uid: HubUid
+    },
+    
+    CargoExecBegin {
+        uid:HubUid,
+    },
+
     CargoMsg {
         uid: HubUid,
         msg: HubCargoMsg
@@ -33,12 +41,9 @@ pub enum HubMsg {
         fresh:bool
     },
 
-    CargoDone {
-        uid: HubUid
-    },
-    
-    CargoClear{
-        uid:HubUid,
+    CargoExecEnd {
+        uid: HubUid,
+        artifact_path:Option<String>
     },
 
     CargoPackagesRequest {
@@ -50,6 +55,25 @@ pub enum HubMsg {
         packages: Vec<HubCargoPackage>
     },
     
+    ArtifactExec{
+        uid:HubUid,
+        artifact:String,
+        args:Vec<String>
+    },
+
+    ArtifactExecBegin{
+        uid:HubUid
+    },
+
+    ArtifactMsg{
+        uid:HubUid,
+        msg:String
+    },
+
+    ArtifactExecEnd{
+        uid:HubUid
+    },
+
     WorkspaceFileTreeRequest {
         uid: HubUid
     },
@@ -134,12 +158,13 @@ impl PartialOrd for WorkspaceFileTreeNode {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct  HubCargoPackage {
     pub package_name: String,
-    pub targets: Vec<HubCargoTarget>,
+    pub targets: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum HubCargoTarget {
     Check,
+    Run,
     Release,
     IPC,
     VR,
@@ -147,10 +172,10 @@ pub enum HubCargoTarget {
 }
 
 impl HubCargoPackage{
-    pub fn new(package_name:&str, targets:Vec<HubCargoTarget>)->HubCargoPackage{
+    pub fn new(package_name:&str, targets:&[&str])->HubCargoPackage{
         HubCargoPackage{
             package_name: package_name.to_string(),
-            targets: targets
+            targets: targets.iter().map(|v| v.to_string()).collect()
         }
     }
 }
@@ -162,7 +187,7 @@ pub enum HubCargoMsgLevel {
     Log
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct HubCargoMsg {
     pub package_id: String,
     pub path: String,
@@ -264,7 +289,7 @@ pub enum HubLog{
 }
 
 impl HubLog{
-    pub fn log<T>(&self, prefix:&str, htc_msg:&T)
+    pub fn msg<T>(&self, prefix:&str, htc_msg:&T)
     where T:std::fmt::Debug
     {
         match self{
@@ -274,9 +299,17 @@ impl HubLog{
                     msg.truncate(200);
                     msg.push_str("...")
                 }
-                println!("{}{}", prefix, msg);
+                println!("{} {}", prefix, msg);
             },
             _=>()
         }
     }
-}
+    pub fn log(&self, msg:&str)
+    {
+        match self{
+            HubLog::All=>{
+                println!("{}", msg);
+            },
+            _=>()
+        }
+    }}

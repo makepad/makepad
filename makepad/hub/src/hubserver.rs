@@ -143,7 +143,7 @@ impl HubServer {
                     };
                     // we got a message.. now lets route it elsewhere
                     if let Ok(mut connections) = connections.lock() {
-                        hub_log.log("HubServer sending", &htc_msg);
+                        hub_log.msg("HubServer sending", &htc_msg);
                         
                         if let Some(cid) = connections.iter().position( | c | c.peer_addr == htc_msg.from) {
                             if connections[cid].client_type == HubClientType::Unknown {
@@ -222,7 +222,7 @@ impl HubServer {
                                     HubMsg::ConnectionError(e) => {
                                         // connection error, lets remove connection
                                         if let Some(pos) = connections.iter().position( | c | c.peer_addr == htc_msg.from) {
-                                            println!("Server closing connection {:?} from error {:?}", htc_msg.from, e);
+                                            hub_log.log(&format!("Server closing connection {:?} from error {:?}", htc_msg.from, e));
                                             // let everyone know we lost something
                                             let msg = HubToClientMsg{
                                                 from:htc_msg.from,

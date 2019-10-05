@@ -325,7 +325,6 @@ impl FileTree {
             }
         }
         recur_walk(&mut self.root_node, "", &mut paths);
-        println!(" SAVING {:?}", paths);
         paths
     }
     

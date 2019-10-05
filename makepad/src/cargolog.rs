@@ -14,8 +14,30 @@ pub struct CargoLog {
     pub row_height: f32,
     pub path_color: Color,
     pub message_color: Color,
+    pub _active_workspace: String,
+    pub _active_package: String,
+    pub _active_targets: Vec<CargoActiveTarget>,
     pub _draw_messages: Vec<CargoMsg>,
-    pub _artifacts: Vec<String>
+    pub _artifacts: Vec<String>,
+}
+
+#[derive(Clone)]
+pub struct CargoActiveTarget {
+    target: String,
+    artifact_path: Option<String>,
+    cargo_uid: HubUid,
+    artifact_uid: HubUid,
+}
+
+impl CargoActiveTarget {
+    fn new(target: &str) -> CargoActiveTarget {
+        CargoActiveTarget {
+            target: target.to_string(),
+            cargo_uid: HubUid::zero(),
+            artifact_path: None,
+            artifact_uid: HubUid::zero()
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -55,7 +77,14 @@ impl CargoLog {
             message_color: color("#bbb"),
             row_height: 20.0,
             _draw_messages: Vec::new(),
-            _artifacts: Vec::new()
+            _artifacts: Vec::new(),
+            _active_workspace: "makepad".to_string(),
+            _active_package: "makepad".to_string(),
+            _active_targets: vec![
+                CargoActiveTarget::new("check"),
+                CargoActiveTarget::new("makepad"),
+                CargoActiveTarget::new("workspace")
+            ]
         }
     }
     pub fn init(&mut self, _cx: &mut Cx, _storage: &mut AppStorage) {
@@ -137,27 +166,91 @@ impl CargoLog {
         self.clear_textbuffer_messages(cx, storage);
     }
     
-    pub fn handle_hub_msg(&mut self, cx: &mut Cx, storage: &mut AppStorage, htc: &HubToClientMsg) {
+    pub fn is_running_cargo_uid(&self, uid: &HubUid) -> bool {
+        for active_target in &self._active_targets{
+            if active_target.cargo_uid == *uid{
+                return true
+            }
+        }
+        return false
+    }
+
+    pub fn is_any_cargo_running(&self) -> bool {
+        for active_target in &self._active_targets{
+            if active_target.cargo_uid != HubUid::zero(){
+                return true
+            }
+        }
+        return false
+    }
+    
+    
+    pub fn handle_hub_msg(&mut self, cx: &mut Cx, _storage: &mut AppStorage, htc: &HubToClientMsg) {
         match &htc.msg {
-            HubMsg::CargoPackagesResponse {uid, packages} => {
+            HubMsg::CargoPackagesResponse {uid: _, packages: _} => {
             },
-            HubMsg::CargoClear{uid} => {
-                self._draw_messages.truncate(0);
-                self.view.redraw_view_area(cx);
+            HubMsg::CargoExecBegin {uid} => if self.is_running_cargo_uid(uid) {
             },
-            HubMsg::CargoMsg {uid, msg} => {
+            HubMsg::CargoMsg {uid, msg} => if self.is_running_cargo_uid(uid) {
+                for check_msg in &self._draw_messages{
+                    if check_msg.msg == *msg{
+                        return
+                    }
+                }
                 self._draw_messages.push(CargoMsg {
-                    animator:  Animator::new(Self::get_default_anim(cx, self._draw_messages.len(), false)),
+                    animator: Animator::new(Self::get_default_anim(cx, self._draw_messages.len(), false)),
                     msg: msg.clone(),
                     is_selected: false
                 });
                 self.view.redraw_view_area(cx);
             },
-            HubMsg::CargoArtifact{uid, package_id, fresh}=>{
+            HubMsg::CargoArtifact {uid, package_id, fresh: _} => if self.is_running_cargo_uid(uid) {
                 self._artifacts.push(package_id.clone());
                 self.view.redraw_view_area(cx);
             },
+            HubMsg::CargoExecEnd {uid, artifact_path} => if self.is_running_cargo_uid(uid) {
+                // if we didnt have any errors, check if we need to run
+                for active_target in &mut self._active_targets{
+                    if active_target.cargo_uid == *uid{ 
+                        active_target.cargo_uid = HubUid::zero();
+                        active_target.artifact_path = artifact_path.clone();
+                    }
+                }
+                self.view.redraw_view_area(cx);
+            },
             _ => ()
+        }
+    }
+    
+    pub fn restart_cargo(&mut self, storage: &mut AppStorage) {
+        let hub_ui = storage.hub_ui.as_mut().unwrap();
+        
+        for active_target in &mut self._active_targets{
+            if active_target.cargo_uid != HubUid::zero(){
+                hub_ui.send(ClientToHubMsg {
+                    to: HubMsgTo::Workspace(self._active_workspace.clone()),
+                    msg: HubMsg::CargoKill {
+                        uid: active_target.cargo_uid,
+                    }
+                });
+                active_target.cargo_uid = HubUid::zero();
+            }
+        }
+        
+        self._artifacts.truncate(0);
+        self._draw_messages.truncate(0);
+        
+        for active_target in &mut self._active_targets {
+            let uid = hub_ui.alloc_uid();
+            hub_ui.send(ClientToHubMsg {
+                to: HubMsgTo::Workspace(self._active_workspace.clone()),
+                msg: HubMsg::CargoExec {
+                    uid: uid.clone(),
+                    package: self._active_package.clone(),
+                    target: active_target.target.clone()
+                }
+            });
+            active_target.cargo_uid = uid;
         }
     }
     
@@ -171,17 +264,8 @@ impl CargoLog {
         
         match event {
             Event::KeyDown(ke) => match ke.key_code {
-                KeyCode::F9 => { // start compile
-                    let hub_ui = storage.hub_ui.as_mut().unwrap();
-                    let uid = hub_ui.alloc_uid();
-                    hub_ui.send(ClientToHubMsg {
-                        to: HubMsgTo::Workspace("makepad".to_string()),
-                        msg: HubMsg::CargoExec {
-                            uid: uid.clone(),
-                            package: "makepad".to_string(),
-                            target: HubCargoTarget::Check
-                        }
-                    });
+                KeyCode::F9 => { // start run
+                    self.restart_cargo(storage);
                 },
                 KeyCode::F8 => { // next error
                     if self._draw_messages.len() > 0 {
@@ -291,7 +375,7 @@ impl CargoLog {
         CargoLogEvent::None
     }
     
-    pub fn draw_cargo_output(&mut self, cx: &mut Cx) {
+    pub fn draw_cargo_log(&mut self, cx: &mut Cx) {
         if let Err(_) = self.view.begin_view(cx, Layout::default()) {
             return
         }
@@ -353,14 +437,12 @@ impl CargoLog {
             ..Default::default()
         });
         
-        /*
-        if self._rustc_done == true {
+        
+        if !self.is_any_cargo_running() {
             self.text.color = self.path_color;
-            match self._rustc_build_stages {
-                BuildStage::NotRunning => {
-                    self.code_icon.draw_icon_walk(cx, CodeIconType::Ok);
-                    self.text.draw_text(cx, "Done");
-                }
+            self.code_icon.draw_icon_walk(cx, CodeIconType::Ok);
+            self.text.draw_text(cx, "Done");
+            /*
                 BuildStage::Building => {
                     if self._run_when_done {
                         self.code_icon.draw_icon_walk(cx, CodeIconType::Ok);
@@ -380,18 +462,14 @@ impl CargoLog {
                         self.code_icon.draw_icon_walk(cx, CodeIconType::Ok);
                         self.text.draw_text(cx, "Application running");
                     }
-                }
-            };
+                }*/
         }
         else {
             self.code_icon.draw_icon_walk(cx, CodeIconType::Wait);
             self.text.color = self.path_color;
-            self.text.draw_text(cx, &format!("Checking({})", self._rustc_artifacts.len()));
-        }*/
-        self.code_icon.draw_icon_walk(cx, CodeIconType::Wait);
-        self.text.color = self.path_color;
-        self.text.draw_text(cx, &format!("Checking({})", self._artifacts.len()));
-
+            self.text.draw_text(cx, &format!("Checking({})", self._artifacts.len()));
+        }
+        
         
         self.item_bg.end_quad(cx, &bg_inst);
         cx.turtle_new_line();

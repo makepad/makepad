@@ -122,10 +122,8 @@ impl AppWindow {
                                 // HERE WE SAVE
                                 storage.text_buffer_file_write(cx, path);
                                 
-                                
-                                
-                                // lets save the textbuffer to disk
                                 // lets re-trigger the rust compiler
+                                self.cargo_log.restart_cargo(storage);
                                 //app_global.rust_compiler.restart_rust_checker(cx, &mut app_global.text_buffers);
                             },
                             _ => ()
@@ -185,7 +183,7 @@ impl AppWindow {
         while let Some(item) = dock_walker.walk_draw_dock(cx) {
             match item {
                 Panel::CargoLog => {
-                    //app_global.rust_compiler.draw_rust_compiler(cx);
+                    self.cargo_log.draw_cargo_log(cx);
                 },
                 Panel::Keyboard => {
                     self.keyboard.draw_keyboard(cx);
