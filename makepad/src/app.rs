@@ -179,13 +179,13 @@ impl App {
                             tabs: vec![
                                 DockTab {
                                     closeable: false,
-                                    title: "Local Terminal".to_string(),
-                                    item: Panel::LocalTerminal {start_path: "./".to_string(), terminal_id: 1}
+                                    title: "Cargo Log".to_string(),
+                                    item: Panel::CargoLog
                                 },
                                 DockTab {
                                     closeable: false,
-                                    title: "Rust Compiler".to_string(),
-                                    item: Panel::RustCompiler
+                                    title: "Local Terminal".to_string(),
+                                    item: Panel::LocalTerminal {start_path: "./".to_string(), terminal_id: 1}
                                 },
                                 DockTab {
                                     closeable: false,
@@ -245,6 +245,10 @@ impl App {
                     hub_ui.send(ClientToHubMsg {
                         to: HubMsgTo::Workspace(workspace.clone()),
                         msg: HubMsg::WorkspaceFileTreeRequest {uid: uid}
+                    });
+                    hub_ui.send(ClientToHubMsg {
+                        to: HubMsgTo::Workspace(workspace.clone()),
+                        msg: HubMsg::CargoPackagesRequest {uid: uid}
                     });
                 }
                 self.workspaces_request_uid = uid;
@@ -328,6 +332,11 @@ impl App {
                     }
                 }
             },
+            HubMsg::CargoPackagesResponse{..}=>{
+                for window in &mut self.windows {
+                    window.cargo_log.handle_hub_msg(cx, &mut self.storage, &htc)
+                }
+            }
             _ => ()
         }
     }

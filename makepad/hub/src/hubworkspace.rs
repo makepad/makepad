@@ -22,7 +22,7 @@ pub struct HubWsProcess {
 }
 
 impl HubWorkspace {
-    pub fn run<F>(key: &[u8], workspace: &str, root_path:&str, mut event_handler: F)
+    pub fn run<F>(key: &[u8], workspace: &str, root_path: &str, mut event_handler: F)
     where F: FnMut(&mut HubWorkspace, HubToClientMsg) {
         
         loop {
@@ -68,30 +68,30 @@ impl HubWorkspace {
     pub fn default(&mut self, htc: HubToClientMsg) {
         match htc.msg {
             HubMsg::CargoExec {uid, package, target} => {
-                match target{
-                    CargoTarget::Check=>{
+                match target {
+                    HubCargoTarget::Check => {
                         self.cargo(uid, &["check", "-p", &package]);
                     },
-                    CargoTarget::Release=>{
+                    HubCargoTarget::Release => {
                         self.cargo(uid, &["build", "-p", &package, "--release"]);
                     },
-                    CargoTarget::IPC=>{
+                    HubCargoTarget::IPC => {
                         self.cargo(uid, &["build", "-p", &package, "--release"]);
                     },
-                    CargoTarget::VR=>{
+                    HubCargoTarget::VR => {
                         self.cargo(uid, &["build", "-p", &package, "--release"]);
                     },
-                    CargoTarget::Custom(_s)=>{
+                    HubCargoTarget::Custom(_s) => {
                     }
                 }
             },
             HubMsg::WorkspaceFileTreeRequest {uid} => {
-                self.workspace_file_tree(htc.from, uid, &[".json",".toml",".js",".rs"]);
+                self.workspace_file_tree(htc.from, uid, &[".json", ".toml", ".js", ".rs"]);
             },
-            HubMsg::FileReadRequest{uid, path}=>{
+            HubMsg::FileReadRequest {uid, path} => {
                 self.file_read(htc.from, uid, &path);
             },
-            HubMsg::FileWriteRequest{uid, path, data}=>{
+            HubMsg::FileWriteRequest {uid, path, data} => {
                 self.file_write(htc.from, uid, &path, data);
             },
             HubMsg::ConnectionError(_e) => {
@@ -106,7 +106,7 @@ impl HubWorkspace {
         // lets start a thread
         let mut extargs = args.to_vec();
         extargs.push("--message-format=json");
-        let mut process = Process::start("cargo", &extargs, "./").expect("Cannot start process");
+        let mut process = Process::start("cargo", &extargs, &self.root_path).expect("Cannot start process");
         
         // we now need to start a subprocess and parse the cargo output.
         let tx_write = self.hub_client.tx_write.clone();
@@ -114,6 +114,11 @@ impl HubWorkspace {
         let rx_line = process.rx_line.take().unwrap();
         
         let processes = Arc::clone(&self.processes);
+
+        tx_write.send(ClientToHubMsg {
+            to: HubMsgTo::UI,
+            msg: HubMsg::CargoClear{uid:uid}
+        }).expect("tx_write fail");
         
         let thread = std::thread::spawn(move || {
             while let Ok(line) = rx_line.recv() {
@@ -123,19 +128,61 @@ impl HubWorkspace {
                     let parsed: Result<RustcCompilerMessage> = serde_json::from_str(&line);
                     match parsed {
                         Err(err) => println!("Json Parse Error {:?} {}", err, line),
-                        Ok(_rcm) => {
+                        Ok(parsed) => {
                             // here we convert the parsed message
-                            
+                            //println!("PARSED {:?}!", parsed);
+                            if let Some(message) = &parsed.message { //.spans;
+                                let spans = &message.spans;
+                                for i in 0..spans.len() {
+                                    let span = spans[i].clone();
+                                    if !span.is_primary {
+                                        continue
+                                    }
+                                    let mut more_lines = vec![];
+                                    if let Some(label) = span.label {
+                                        more_lines.push(label);
+                                    }
+                                    // if we have children fo process
+                                    for child in &message.children {
+                                        more_lines.push(child.message.clone());
+                                    }
+                                    tx_write.send(ClientToHubMsg {
+                                        to: HubMsgTo::UI,
+                                        msg: HubMsg::CargoMsg {
+                                            uid: uid,
+                                            msg: HubCargoMsg{
+                                                package_id: parsed.package_id.clone(),
+                                                path: span.file_name,
+                                                row: span.line_start as usize,
+                                                col: span.column_start as usize,
+                                                tail: span.byte_start as usize,
+                                                head: span.byte_end as usize,
+                                                body: message.message.clone(),
+                                                more_lines: more_lines,
+                                                level: match message.level.as_ref() {
+                                                    "warning" => HubCargoMsgLevel::Warning,
+                                                    "error" => HubCargoMsgLevel::Error,
+                                                    _ => HubCargoMsgLevel::Warning
+                                                }
+                                            }
+                                        }
+                                    }).expect("tx_write fail");
+                                }
+                            }
+                            else{ // other type of message
+                                tx_write.send(ClientToHubMsg {
+                                    to: HubMsgTo::UI,
+                                    msg: HubMsg::CargoArtifact {
+                                        uid: uid,
+                                        package_id: parsed.package_id.clone(),
+                                        fresh: parsed.fresh.unwrap()
+                                    }
+                                }).expect("tx_write fail");
+                            }
                         }
                     }
                     
-                    tx_write.send(ClientToHubMsg {
-                        to: HubMsgTo::UI,
-                        msg: HubMsg::CargoMsg {
-                            uid: uid,
-                            msg: CargoMsg::Warning {msg: "hi".to_string()}
-                        }
-                    }).expect("tx_write fail");
+                    
                 }
                 else { // process terminated
                     break;
@@ -167,7 +214,7 @@ impl HubWorkspace {
         };
     }
     
-    pub fn cargo_packages(&mut self, from:HubAddr, uid: HubUid, packages:Vec<CargoPackage>) {
+    pub fn cargo_packages(&mut self, from: HubAddr, uid: HubUid, packages: Vec<HubCargoPackage>) {
         self.hub_client.tx_write.send(ClientToHubMsg {
             to: HubMsgTo::Client(from),
             msg: HubMsg::CargoPackagesResponse {
@@ -177,16 +224,16 @@ impl HubWorkspace {
         }).expect("cannot send message");
     }
     
-    pub fn file_read(&mut self, from:HubAddr, uid: HubUid, path: &str){
+    pub fn file_read(&mut self, from: HubAddr, uid: HubUid, path: &str) {
         // lets read a file and send it.
-        if let Some(_) = path.find(".."){
+        if let Some(_) = path.find("..") {
             println!("file_read got relative path, ignoring {}", path);
             return
         }
-        let data = if let Ok(data) = std::fs::read(format!("{}{}", self.root_path, path)){
+        let data = if let Ok(data) = std::fs::read(format!("{}{}", self.root_path, path)) {
             Some(data)
         }
-        else{
+        else {
             None
         };
         self.hub_client.tx_write.send(ClientToHubMsg {
@@ -199,14 +246,14 @@ impl HubWorkspace {
         }).expect("cannot send message");
     }
     
-    pub fn file_write(&mut self, from:HubAddr, uid:HubUid, path:&str, data:Vec<u8>){
-        if let Some(_) = path.find(".."){
+    pub fn file_write(&mut self, from: HubAddr, uid: HubUid, path: &str, data: Vec<u8>) {
+        if let Some(_) = path.find("..") {
             println!("file_read got relative path, ignoring {}", path);
             return
         }
-
+        
         let done = std::fs::write(format!("{}{}", self.root_path, path), &data).is_ok();
-
+        
         self.hub_client.tx_write.send(ClientToHubMsg {
             to: HubMsgTo::Client(from),
             msg: HubMsg::FileWriteResponse {
@@ -217,33 +264,33 @@ impl HubWorkspace {
         }).expect("cannot send message");
     }
     
-    pub fn workspace_file_tree(&mut self, from:HubAddr, uid: HubUid, ext_inc:&[&str]) {
+    pub fn workspace_file_tree(&mut self, from: HubAddr, uid: HubUid, ext_inc: &[&str]) {
         let tx_write = self.hub_client.tx_write.clone();
         let path = self.root_path.to_string();
         let workspace = self.workspace.to_string();
-        let ext_inc:Vec<String> = ext_inc.to_vec().iter().map(|v|v.to_string()).collect();
+        let ext_inc: Vec<String> = ext_inc.to_vec().iter().map( | v | v.to_string()).collect();
         let _thread = std::thread::spawn(move || {
             
-            fn read_recur(path:&str, ext_inc:&Vec<String>)->Vec<WorkspaceFileTreeNode>{
+            fn read_recur(path: &str, ext_inc: &Vec<String>) -> Vec<WorkspaceFileTreeNode> {
                 let mut ret = Vec::new();
-                if let Ok(read_dir) = fs::read_dir(path){
-                    for entry in read_dir{
-                        if let Ok(entry) = entry{
-                            if let Ok(ty) = entry.file_type(){
-                                if let Ok(name) = entry.file_name().into_string(){
-                                    if ty.is_dir(){
-                                        if name == ".git" || name == "target"{
+                if let Ok(read_dir) = fs::read_dir(path) {
+                    for entry in read_dir {
+                        if let Ok(entry) = entry {
+                            if let Ok(ty) = entry.file_type() {
+                                if let Ok(name) = entry.file_name().into_string() {
+                                    if ty.is_dir() {
+                                        if name == ".git" || name == "target" {
                                             continue;
                                         }
-                                        ret.push(WorkspaceFileTreeNode::Folder{
+                                        ret.push(WorkspaceFileTreeNode::Folder {
                                             name: name.clone(),
                                             folder: read_recur(&format!("{}/{}", path, name), ext_inc)
                                         });
                                     }
-                                    else{
-                                        for ext in ext_inc{
-                                            if name.ends_with(ext){
-                                                ret.push(WorkspaceFileTreeNode::File{
+                                    else {
+                                        for ext in ext_inc {
+                                            if name.ends_with(ext) {
+                                                ret.push(WorkspaceFileTreeNode::File {
                                                     name: name
                                                 });
                                                 break;
@@ -263,9 +310,9 @@ impl HubWorkspace {
                 to: HubMsgTo::Client(from),
                 msg: HubMsg::WorkspaceFileTreeResponse {
                     uid: uid,
-                    tree: WorkspaceFileTreeNode::Folder{
-                        name:workspace.clone(),
-                        folder:read_recur(&path, &ext_inc)
+                    tree: WorkspaceFileTreeNode::Folder {
+                        name: workspace.clone(),
+                        folder: read_recur(&path, &ext_inc)
                     }
                 }
             }).expect("cannot send message");

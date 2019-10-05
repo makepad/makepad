@@ -260,9 +260,9 @@ impl HubClient {
                 }
                 //println!("wait for announce found wrong digest");
             }
-            else{
-                println!("wait for announce bind failed");
-            }
+            //else{
+            //    println!("wait for announce bind failed");
+            //}
         }
     }
     

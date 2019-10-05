@@ -19,16 +19,35 @@ pub enum HubMsg {
     CargoExec {
         uid: HubUid,
         package: String,
-        target: CargoTarget
+        target: HubCargoTarget
     },
     
     CargoMsg {
         uid: HubUid,
-        msg: CargoMsg
+        msg: HubCargoMsg
     },
     
+    CargoArtifact {
+        uid: HubUid,
+        package_id: String,
+        fresh:bool
+    },
+
     CargoDone {
         uid: HubUid
+    },
+    
+    CargoClear{
+        uid:HubUid,
+    },
+
+    CargoPackagesRequest {
+        uid: HubUid
+    },
+    
+    CargoPackagesResponse {
+        uid: HubUid,
+        packages: Vec<HubCargoPackage>
     },
     
     WorkspaceFileTreeRequest {
@@ -71,16 +90,6 @@ pub enum HubMsg {
         path: String,
         done: bool
     },
-    
-    CargoPackagesRequest {
-        uid: HubUid
-    },
-    
-    CargoPackagesResponse {
-        uid: HubUid,
-        packages: Vec<CargoPackage>
-    },
-
 }
 
 #[derive(Eq, PartialEq, Debug, Clone, Serialize, Deserialize)]
@@ -123,13 +132,13 @@ impl PartialOrd for WorkspaceFileTreeNode {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct  CargoPackage {
+pub struct  HubCargoPackage {
     pub package_name: String,
-    pub targets: Vec<CargoTarget>,
+    pub targets: Vec<HubCargoTarget>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum CargoTarget {
+pub enum HubCargoTarget {
     Check,
     Release,
     IPC,
@@ -137,20 +146,39 @@ pub enum CargoTarget {
     Custom(String)
 }
 
-impl CargoPackage{
-    pub fn new(package_name:&str, targets:Vec<CargoTarget>)->CargoPackage{
-        CargoPackage{
+impl HubCargoPackage{
+    pub fn new(package_name:&str, targets:Vec<HubCargoTarget>)->HubCargoPackage{
+        HubCargoPackage{
             package_name: package_name.to_string(),
             targets: targets
         }
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum HubCargoMsgLevel {
+    Warning,
+    Error,
+    Log
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum CargoMsg {
-    Warning {msg: String},
-    Error {msg: String}
+pub struct HubCargoMsg {
+    pub package_id: String,
+    pub path: String,
+    pub row: usize,
+    pub col: usize,
+    pub tail: usize,
+    pub head: usize,
+    pub body: String,
+    pub more_lines: Vec<String>,
+    pub level: HubCargoMsgLevel
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HubCargoArtifact {
+    pub package_id: String,
+    pub fresh: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

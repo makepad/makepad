@@ -6,11 +6,12 @@ use editor::*;
 use terminal::*;
 use crate::app::*;
 use crate::fileeditor::*;
+use crate::cargolog::*;
 use crate::keyboard::*;
 
 #[derive(Clone, Serialize, Deserialize)]
 pub enum Panel {
-    RustCompiler,
+    CargoLog,
     Keyboard,
     FileTree,
     FileEditorTarget,
@@ -22,6 +23,7 @@ pub enum Panel {
 pub struct AppWindow {
     pub desktop_window: DesktopWindow,
     pub file_tree: FileTree,
+    pub cargo_log: CargoLog,
     pub keyboard: Keyboard,
     pub file_editors: Elements<u64, FileEditor, FileEditorTemplates>,
     pub local_terminals: Elements<u64, LocalTerminal, LocalTerminal>,
@@ -56,6 +58,7 @@ impl AppWindow {
             local_terminals: Elements::new(LocalTerminal::style(cx)),
             keyboard: Keyboard::style(cx),
             file_tree: FileTree::style(cx),
+            cargo_log: CargoLog::style(cx),
             dock: Dock ::style(cx),
         }
     }
@@ -86,14 +89,14 @@ impl AppWindow {
         let mut file_tree_event = FileTreeEvent::None;
         while let Some(item) = dock_walker.walk_handle_dock(cx, event) {
             match item {
-                Panel::RustCompiler => {
-                    //match app_global.rust_compiler.handle_rust_compiler(cx, event, &mut app_global.text_buffers) {
-                    //    RustCompilerEvent::SelectMessage {path} => {
-                    //        // just make it open an editor
-                    //        file_tree_event = FileTreeEvent::SelectFile {path: path};
-                    //    },
-                    //    _ => ()
-                    // }
+                Panel::CargoLog => {
+                    match self.cargo_log.handle_cargo_log(cx, event, storage){
+                        CargoLogEvent::SelectMessage {path} => {
+                            // just make it open an editor
+                            file_tree_event = FileTreeEvent::SelectFile {path: path};
+                        },
+                        _ => ()
+                    }
                 },
                 Panel::Keyboard => {
                     self.keyboard.handle_keyboard(cx, event, storage);
@@ -181,7 +184,7 @@ impl AppWindow {
         let mut dock_walker = self.dock.walker(dock_items);
         while let Some(item) = dock_walker.walk_draw_dock(cx) {
             match item {
-                Panel::RustCompiler => {
+                Panel::CargoLog => {
                     //app_global.rust_compiler.draw_rust_compiler(cx);
                 },
                 Panel::Keyboard => {
