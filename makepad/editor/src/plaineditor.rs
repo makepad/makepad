@@ -64,7 +64,11 @@ impl PlainTokenizer {
         let start = chunk.len();
         loop {
             if state.next == '\0' {
-                return TokenType::Identifier
+		if (chunk.len()-start)>0 {
+                    return TokenType::Identifier
+                }
+		state.advance();
+                return TokenType::Eof
             }
             else if state.next == '\n' {
                 // output current line
