@@ -308,17 +308,14 @@ impl CargoLog {
         
         match event {
             Event::KeyDown(ke) => match ke.key_code {
-                KeyCode::F9 => { // start run
-                    self.restart_cargo(storage);
-                },
-                KeyCode::ArrowDown => if ke.modifiers.logo {
+                KeyCode::ArrowDown => if ke.modifiers.logo || ke.modifiers.control {
                     dm_to_select = self.next_error(false);
                 },
-                KeyCode::ArrowUp => if ke.modifiers.logo {
+                KeyCode::ArrowUp => if ke.modifiers.logo || ke.modifiers.control{
                     dm_to_select = self.next_error(true);
                 },
-                KeyCode::F8 => { // next error
-                    dm_to_select = self.next_error(ke.modifiers.shift);
+                KeyCode::Return => if ke.modifiers.logo || ke.modifiers.control{
+                    
                 },
                 _ => ()
             },

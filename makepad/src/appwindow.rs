@@ -50,10 +50,9 @@ impl AppWindow {
                 ..DesktopWindow::style(cx)
             },
             file_editors: Elements::new(FileEditorTemplates {
-                rust_editor: RustEditor {
-                    ..RustEditor::style(cx)
-                },
-                js_editor: JSEditor::style(cx)
+                rust_editor: RustEditor::style(cx),
+                js_editor: JSEditor::style(cx),
+                plain_editor: PlainEditor::style(cx)
             }),
             local_terminals: Elements::new(LocalTerminal::style(cx)),
             keyboard: Keyboard::style(cx),

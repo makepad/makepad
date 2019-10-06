@@ -6,6 +6,7 @@ use editor::*;
 pub struct FileEditorTemplates {
     pub rust_editor: RustEditor,
     pub js_editor: JSEditor,
+    pub plain_editor: PlainEditor
     //text_editor: TextEditor
 }
 
@@ -13,6 +14,7 @@ pub struct FileEditorTemplates {
 pub enum FileEditor {
     Rust(RustEditor),
     JS(JSEditor),
+    Plain(PlainEditor)
     //Text(TextEditor)
 }
 
@@ -23,23 +25,20 @@ pub enum FileEditorEvent {
     Change
 }
 
+fn code_editor_to_file_editor(event: CodeEditorEvent)->FileEditorEvent {
+    match event {
+        CodeEditorEvent::Change => FileEditorEvent::Change,
+        CodeEditorEvent::LagChange => FileEditorEvent::LagChange,
+        _ => FileEditorEvent::None
+    }
+}
+
 impl FileEditor {
     pub fn handle_file_editor(&mut self, cx: &mut Cx, event: &mut Event, text_buffer: &mut TextBuffer) -> FileEditorEvent {
         match self {
-            FileEditor::Rust(re) => {
-                match re.handle_rust_editor(cx, event, text_buffer) {
-                    CodeEditorEvent::Change => FileEditorEvent::Change,
-                    CodeEditorEvent::LagChange => FileEditorEvent::LagChange,
-                    _ => FileEditorEvent::None
-                }
-            },
-            FileEditor::JS(re) => {
-                match re.handle_js_editor(cx, event, text_buffer) {
-                    CodeEditorEvent::Change => FileEditorEvent::Change,
-                    CodeEditorEvent::LagChange => FileEditorEvent::LagChange,
-                    _ => FileEditorEvent::None
-                }
-            },
+            FileEditor::Rust(re) => code_editor_to_file_editor(re.handle_rust_editor(cx, event, text_buffer)),
+            FileEditor::JS(re) => code_editor_to_file_editor(re.handle_js_editor(cx, event, text_buffer)),
+            FileEditor::Plain(re) => code_editor_to_file_editor(re.handle_plain_editor(cx, event, text_buffer)),
         }
     }
     
@@ -47,6 +46,7 @@ impl FileEditor {
         match self {
             FileEditor::Rust(re) => re.code_editor.set_key_focus(cx),
             FileEditor::JS(re) => re.code_editor.set_key_focus(cx),
+            FileEditor::Plain(re) => re.code_editor.set_key_focus(cx),
         }
     }
     
@@ -54,12 +54,13 @@ impl FileEditor {
         match self {
             FileEditor::Rust(re) => re.draw_rust_editor(cx, text_buffer),
             FileEditor::JS(re) => re.draw_js_editor(cx, text_buffer),
+            FileEditor::Plain(re) => re.draw_plain_editor(cx, text_buffer),
         }
     }
     
     pub fn create_file_editor_for_path(path: &str, template: &FileEditorTemplates) -> FileEditor {
         // check which file extension we have to spawn a new editor
-        if path.ends_with(".rs") {
+        if path.ends_with(".rs") || path.ends_with(".toml") {
             FileEditor::Rust(RustEditor {
                 ..template.rust_editor.clone()
             })
@@ -70,8 +71,8 @@ impl FileEditor {
             })
         }
         else {
-            FileEditor::Rust(RustEditor {
-                ..template.rust_editor.clone()
+            FileEditor::Plain(PlainEditor {
+                ..template.plain_editor.clone()
             })
         }
     }

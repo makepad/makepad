@@ -8,12 +8,6 @@ pub struct JSEditor {
     pub code_editor: CodeEditor,
 }
 
-#[derive(Clone, PartialEq)]
-pub enum JSEditorEvent {
-    None,
-    Change
-}
-
 impl JSEditor {
     pub fn style(cx: &mut Cx) -> Self {
         let rust_editor = Self {
