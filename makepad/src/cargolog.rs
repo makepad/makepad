@@ -17,6 +17,7 @@ pub struct CargoLog {
     pub _active_workspace: String,
     pub _active_package: String,
     pub _active_targets: Vec<CargoActiveTarget>,
+    pub _exec_when_done: bool,
     pub _draw_messages: Vec<CargoMsg>,
     pub _artifacts: Vec<String>,
 }
@@ -35,7 +36,7 @@ impl CargoActiveTarget {
             target: target.to_string(),
             cargo_uid: HubUid::zero(),
             artifact_path: None,
-            artifact_uid: HubUid::zero()
+            artifact_uid: HubUid::zero(),
         }
     }
 }
@@ -76,6 +77,7 @@ impl CargoLog {
             path_color: color("#999"),
             message_color: color("#bbb"),
             row_height: 20.0,
+            _exec_when_done: false,
             _draw_messages: Vec::new(),
             _artifacts: Vec::new(),
             _active_workspace: "makepad".to_string(),
@@ -185,6 +187,7 @@ impl CargoLog {
     
     
     pub fn handle_hub_msg(&mut self, cx: &mut Cx, storage: &mut AppStorage, htc: &HubToClientMsg) {
+        let hub_ui = storage.hub_ui.as_mut().unwrap();
         match &htc.msg {
             HubMsg::CargoPackagesResponse {uid: _, packages: _} => {
             },
@@ -214,6 +217,20 @@ impl CargoLog {
                     if active_target.cargo_uid == *uid {
                         active_target.cargo_uid = HubUid::zero();
                         active_target.artifact_path = artifact_path.clone();
+                        if self._exec_when_done {
+                            if let Some(artifact_path) = &active_target.artifact_path {
+                                let uid = hub_ui.alloc_uid();
+                                active_target.artifact_uid = uid;
+                                hub_ui.send(ClientToHubMsg {
+                                    to: HubMsgTo::Workspace(self._active_workspace.clone()),
+                                    msg: HubMsg::ArtifactExec {
+                                        uid: active_target.artifact_uid,
+                                        path: artifact_path.clone(),
+                                        args: Vec::new()
+                                    }
+                                });
+                            }
+                        }
                     }
                 }
                 self.view.redraw_view_area(cx);
@@ -222,10 +239,49 @@ impl CargoLog {
         }
     }
     
+    
+    pub fn artifact_exec(&mut self, storage: &mut AppStorage, recur: bool) {
+        let hub_ui = storage.hub_ui.as_mut().unwrap();
+        let mut some_exec = false;
+        // all the artifacts that are building
+        for active_target in &mut self._active_targets {
+            if active_target.cargo_uid != HubUid::zero() {
+                some_exec = true;
+                self._exec_when_done = true;
+            }
+            else if let Some(artifact_path) = &active_target.artifact_path {
+                some_exec = true;
+                let uid = hub_ui.alloc_uid();
+                if active_target.artifact_uid != HubUid::zero(){
+                    hub_ui.send(ClientToHubMsg {
+                        to: HubMsgTo::Workspace(self._active_workspace.clone()),
+                        msg: HubMsg::ArtifactKill {
+                            uid: active_target.artifact_uid,
+                        }
+                    });
+                }
+                active_target.artifact_uid = uid;
+                hub_ui.send(ClientToHubMsg {
+                    to: HubMsgTo::Workspace(self._active_workspace.clone()),
+                    msg: HubMsg::ArtifactExec {
+                        uid: active_target.artifact_uid,
+                        path: artifact_path.clone(),
+                        args: Vec::new()
+                    }
+                });
+            }
+        }
+        if !some_exec && !recur {
+            self.restart_cargo(storage);
+            self.artifact_exec(storage, true);
+        }
+    }
+    
     pub fn restart_cargo(&mut self, storage: &mut AppStorage) {
         let hub_ui = storage.hub_ui.as_mut().unwrap();
-        
+        self._exec_when_done = false;
         for active_target in &mut self._active_targets {
+            active_target.artifact_path = None;
             if active_target.cargo_uid != HubUid::zero() {
                 hub_ui.send(ClientToHubMsg {
                     to: HubMsgTo::Workspace(self._active_workspace.clone()),
@@ -235,15 +291,16 @@ impl CargoLog {
                 });
                 active_target.cargo_uid = HubUid::zero();
             }
-            if active_target.cargo_uid != HubUid::zero() {
+            if active_target.artifact_uid != HubUid::zero() {
                 hub_ui.send(ClientToHubMsg {
                     to: HubMsgTo::Workspace(self._active_workspace.clone()),
                     msg: HubMsg::ArtifactKill {
-                        uid: active_target.cargo_uid,
+                        uid: active_target.artifact_uid,
                     }
                 });
-                active_target.cargo_uid = HubUid::zero();
-            }        }
+                active_target.artifact_uid = HubUid::zero();
+            }
+        }
         
         self._artifacts.truncate(0);
         self._draw_messages.truncate(0);
@@ -322,8 +379,9 @@ impl CargoLog {
                 KeyCode::ArrowUp => if ke.modifiers.logo || ke.modifiers.control {
                     dm_to_select = self.next_error(true);
                 },
-                KeyCode::Return => if ke.modifiers.logo || ke.modifiers.control {
-                    
+                KeyCode::Backtick => if ke.modifiers.logo || ke.modifiers.control {
+                    self.artifact_exec(storage, false);
+                    self.view.redraw_view_area(cx);
                 },
                 _ => ()
             },
@@ -383,7 +441,6 @@ impl CargoLog {
                 else {
                     dm.msg.head
                 };
-                
                 cx.send_signal(text_buffer.signal, SIGNAL_TEXTBUFFER_JUMP_TO_OFFSET);
                 return CargoLogEvent::SelectMessage {path: dm.msg.path.clone()}
             }
@@ -453,7 +510,6 @@ impl CargoLog {
             ..Default::default()
         });
         
-        
         if !self.is_any_cargo_running() {
             self.text.color = self.path_color;
             self.code_icon.draw_icon_walk(cx, CodeIconType::Ok);
@@ -483,9 +539,11 @@ impl CargoLog {
         else {
             self.code_icon.draw_icon_walk(cx, CodeIconType::Wait);
             self.text.color = self.path_color;
-            self.text.draw_text(cx, &format!("Checking({})", self._artifacts.len()));
+            self.text.draw_text(cx, &format!("Building ({})", self._artifacts.len()));
+            if self._exec_when_done {
+                self.text.draw_text(cx, " - starting when done");
+            }
         }
-        
         
         self.item_bg.end_quad(cx, &bg_inst);
         cx.turtle_new_line();

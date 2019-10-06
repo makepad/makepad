@@ -11,6 +11,7 @@ pub struct HubWorkspace {
     pub hub_client: HubClient,
     pub workspace: String,
     pub root_path: String,
+    pub abs_root_path: String,
     pub processes: Arc<Mutex<Vec<HubWsProcess>>>,
     pub restart_connection: bool
 }
@@ -26,6 +27,9 @@ impl HubWorkspace {
     where F: FnMut(&mut HubWorkspace, HubToClientMsg) {
         
         loop {
+            if root_path.contains("..") || root_path.contains("./") || root_path.contains("\\") || root_path.starts_with("/"){
+                panic!("Root path for workspace cant be relative and must be unix style");
+            }
             
             hub_log.msg("Workspace waiting for hub announcement..", &workspace);
             
@@ -43,6 +47,7 @@ impl HubWorkspace {
                 hub_client: hub_client,
                 workspace: workspace.to_string(),
                 root_path: root_path.to_string(),
+                abs_root_path: format!("{}/{}", std::env::current_dir().unwrap().display(), root_path),
                 processes: Arc::new(Mutex::new(Vec::<HubWsProcess>::new())),
                 restart_connection: false
             };
@@ -86,22 +91,29 @@ impl HubWorkspace {
             HubMsg::ArtifactKill {uid} => {
                 self.artifact_kill(uid);
             },
-            HubMsg::ArtifactExec {uid, artifact, args} => {
+            HubMsg::ArtifactExec {uid, path, args} => {
                 let v: Vec<&str> = args.iter().map( | v | v.as_ref()).collect();
-                self.artifact_exec(uid, &artifact, &v);
+                self.artifact_exec(uid, &path, &v);
             },
             _ => ()
         }
     }
     
-    pub fn artifact_kill(&mut self, _uid: HubUid) {
-        
+    pub fn artifact_kill(&mut self, uid: HubUid) {
+        if let Ok(mut procs) = self.processes.lock() {
+            for proc in procs.iter_mut(){
+                if proc.uid == uid{
+                    proc.process.kill();
+                    break;
+                }
+            }
+        };
     }
     
-    pub fn artifact_exec(&mut self, uid: HubUid, artifact: &str, args: &[&str]) {
+    pub fn artifact_exec(&mut self, uid: HubUid, path: &str, args: &[&str]) {
         
         // lets start a thread
-        let mut process = Process::start(artifact, args, &self.root_path).expect("Cannot start process");
+        let mut process = Process::start(path, args, &self.root_path).expect("Cannot start process");
         
         // we now need to start a subprocess and parse the cargo output.
         let tx_write = self.hub_client.tx_write.clone();
@@ -157,7 +169,8 @@ impl HubWorkspace {
             });
         };
     }
-    
+
+        
     pub fn cargo_kill(&mut self, uid: HubUid) {
         if let Ok(mut procs) = self.processes.lock() {
             for proc in procs.iter_mut(){
@@ -175,8 +188,8 @@ impl HubWorkspace {
         let mut extargs = args.to_vec();
         extargs.push("--message-format=json");
         let mut process = Process::start("cargo", &extargs, &self.root_path).expect("Cannot start process");
-        let print_args: Vec<String> = extargs.to_vec().iter().map( | v | v.to_string()).collect();
-
+        //let print_args: Vec<String> = extargs.to_vec().iter().map( | v | v.to_string()).collect();
+        
         // we now need to start a subprocess and parse the cargo output.
         let tx_write = self.hub_client.tx_write.clone();
         
@@ -190,6 +203,7 @@ impl HubWorkspace {
         }).expect("tx_write fail");
         
         let workspace = self.workspace.clone();
+        let abs_root_path = self.abs_root_path.clone();
         
         let thread = std::thread::spawn(move || {
             
@@ -258,8 +272,9 @@ impl HubWorkspace {
                                 if !any_errors {
                                     artifact_path = None;
                                     if let Some(executable) = parsed.executable{
-                                        if !executable.ends_with(".rmeta"){ // othwerise i can't recognise binaries
-                                            artifact_path = Some(executable)
+                                        if !executable.ends_with(".rmeta") &&  abs_root_path.len() + 1< executable.len(){
+                                            let last = executable.clone().split_off(abs_root_path.len() + 1);
+                                            artifact_path = Some(last);
                                         }
                                     }
                                 }
@@ -315,7 +330,7 @@ impl HubWorkspace {
             println!("file_read got relative path, ignoring {}", path);
             return
         }
-        let data = if let Ok(data) = std::fs::read(format!("{}{}", self.root_path, path)) {
+        let data = if let Ok(data) = std::fs::read(format!("{}/{}", self.root_path, path)) {
             Some(data)
         }
         else {
@@ -332,12 +347,12 @@ impl HubWorkspace {
     }
     
     pub fn file_write(&mut self, from: HubAddr, uid: HubUid, path: &str, data: Vec<u8>) {
-        if let Some(_) = path.find("..") {
+        if path.contains("..") {
             println!("file_read got relative path, ignoring {}", path);
             return
         }
         
-        let done = std::fs::write(format!("{}{}", self.root_path, path), &data).is_ok();
+        let done = std::fs::write(format!("{}/{}", self.root_path, path), &data).is_ok();
         
         self.hub_client.tx_write.send(ClientToHubMsg {
             to: HubMsgTo::Client(from),

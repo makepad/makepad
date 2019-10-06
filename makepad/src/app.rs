@@ -69,6 +69,7 @@ impl AppStorage {
                 let msg = if let Some(workspace_pos) = path.find('/') {
                     let uid = hub_ui.alloc_uid();
                     let (workspace, rest) = path.split_at(workspace_pos);
+                    let (_, rest) = rest.split_at(1);
                     let msg = ClientToHubMsg {
                         to: HubMsgTo::Workspace(workspace.to_string()),
                         msg: HubMsg::FileReadRequest {
@@ -109,6 +110,7 @@ impl AppStorage {
                     let hub_ui = self.hub_ui.as_mut().unwrap();
                     let utf8_data = atb.text_buffer.get_as_string();
                     let (workspace, rest) = path.split_at(workspace_pos);
+                    let (_, rest) = rest.split_at(1);
                     // lets write it as a message
                     let uid = hub_ui.alloc_uid();
                     let msg = ClientToHubMsg {
@@ -370,8 +372,10 @@ impl App {
             Event::Signal(se) => {
                 // process incoming hub messages
                 let mut hub_htc_msgs = Vec::new();
+                let mut was_signal = false;
                 if let Some(hub_ui) = &mut self.storage.hub_ui {
                     if hub_ui.signal.is_signal(se) {
+                        was_signal = true;
                         if let Ok(mut htc_msgs) = hub_ui.htc_msgs_arc.lock() {
                             std::mem::swap(&mut hub_htc_msgs, &mut htc_msgs);
                         }
@@ -379,6 +383,9 @@ impl App {
                 }
                 for htc in hub_htc_msgs.drain(..) {
                     self.handle_hub_msg(cx, htc);
+                }
+                if was_signal{
+                    return
                 }
             },
             Event::FileRead(fr) => {

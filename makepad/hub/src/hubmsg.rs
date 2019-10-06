@@ -61,7 +61,7 @@ pub enum HubMsg {
     
     ArtifactExec {
         uid: HubUid,
-        artifact: String,
+        path: String,
         args: Vec<String>
     },
     

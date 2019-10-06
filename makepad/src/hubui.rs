@@ -73,7 +73,6 @@ impl HubUI {
                         if let Ok(mut htc_msgs) = htc_msgs_arc.lock(){
                             htc_msgs.push(htc);
                         }
-
                         Cx::post_signal(signal, 0);
                         if restart_connection {
                             break

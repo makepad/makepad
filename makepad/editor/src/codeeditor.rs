@@ -728,7 +728,6 @@ impl CodeEditor {
             self.scroll_last_cursor_visible(cx, text_buffer, 0.);
             self.view.redraw_view_area(cx);
             self.reset_cursor_blinker(cx);
-            
         }
     }
     
@@ -779,7 +778,6 @@ impl CodeEditor {
     }
     
     pub fn handle_code_editor(&mut self, cx: &mut Cx, event: &mut Event, text_buffer: &mut TextBuffer) -> CodeEditorEvent {
-        
         if self.view.handle_scroll_bars(cx, event) {
             if let Some(last_finger_move) = self._last_finger_move {
                 if let Some(grid_select_corner) = self._grid_select_corner {
