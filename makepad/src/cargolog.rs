@@ -23,7 +23,7 @@ pub struct CargoLog {
 }
 
 #[derive(Clone)]
-pub struct CargoActiveTarget {
+pub struct CargoActiveTarget {  
     target: String,
     artifact_path: Option<String>,
     cargo_uid: HubUid,
@@ -514,27 +514,6 @@ impl CargoLog {
             self.text.color = self.path_color;
             self.code_icon.draw_icon_walk(cx, CodeIconType::Ok);
             self.text.draw_text(cx, "Done");
-            /*
-                BuildStage::Building => {
-                    if self._run_when_done {
-                        self.code_icon.draw_icon_walk(cx, CodeIconType::Ok);
-                        self.text.draw_text(cx, "Running when ready");
-                    }
-                    else {
-                        self.code_icon.draw_icon_walk(cx, CodeIconType::Ok);
-                        self.text.draw_text(cx, "Building");
-                    }
-                },
-                BuildStage::Complete => {
-                    if !self._program_running {
-                        self.code_icon.draw_icon_walk(cx, CodeIconType::Ok);
-                        self.text.draw_text(cx, "Press F9 to run");
-                    }
-                    else if self._draw_messages.len() == 0 {
-                        self.code_icon.draw_icon_walk(cx, CodeIconType::Ok);
-                        self.text.draw_text(cx, "Application running");
-                    }
-                }*/
         }
         else {
             self.code_icon.draw_icon_walk(cx, CodeIconType::Wait);

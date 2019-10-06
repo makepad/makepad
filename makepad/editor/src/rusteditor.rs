@@ -246,6 +246,14 @@ impl RustTokenizer {
                     }
                     return TokenType::Operator;
                 },
+                '^' => {
+                    chunk.push(state.cur);
+                    if state.next == '=' {
+                        chunk.push(state.next);
+                        state.advance();
+                    }
+                    return TokenType::Operator;
+                },
                 '+' => {
                     chunk.push(state.cur);
                     if state.next == '=' {

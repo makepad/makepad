@@ -600,26 +600,36 @@ impl CodeEditor {
     fn handle_key_down(&mut self, cx: &mut Cx, ke: &KeyEvent, text_buffer: &mut TextBuffer) {
         let cursor_moved = match ke.key_code {
             KeyCode::ArrowUp => {
-                if self._anim_folding.state.is_folded() && self.cursors.set.len() == 1 {
-                    // compute the nearest nonfolded line up
-                    let delta = self.compute_next_unfolded_line_up(text_buffer);
-                    self.cursors.move_up(delta, ke.modifiers.shift, text_buffer);
+                if ke.modifiers.logo || ke.modifiers.control {
+                    false
                 }
                 else {
-                    self.cursors.move_up(1, ke.modifiers.shift, text_buffer);
+                    if self._anim_folding.state.is_folded() && self.cursors.set.len() == 1 {
+                        // compute the nearest nonfolded line up
+                        let delta = self.compute_next_unfolded_line_up(text_buffer);
+                        self.cursors.move_up(delta, ke.modifiers.shift, text_buffer);
+                    }
+                    else {
+                        self.cursors.move_up(1, ke.modifiers.shift, text_buffer);
+                    }
+                    true
                 }
-                true
             },
             KeyCode::ArrowDown => {
-                if self._anim_folding.state.is_folded() && self.cursors.set.len() == 1 {
-                    // compute the nearest nonfolded line down
-                    let delta = self.compute_next_unfolded_line_down(text_buffer);
-                    self.cursors.move_down(delta, ke.modifiers.shift, text_buffer);
+                if ke.modifiers.logo || ke.modifiers.control {
+                    false
                 }
                 else {
-                    self.cursors.move_down(1, ke.modifiers.shift, text_buffer);
+                    if self._anim_folding.state.is_folded() && self.cursors.set.len() == 1 {
+                        // compute the nearest nonfolded line down
+                        let delta = self.compute_next_unfolded_line_down(text_buffer);
+                        self.cursors.move_down(delta, ke.modifiers.shift, text_buffer);
+                    }
+                    else {
+                        self.cursors.move_down(1, ke.modifiers.shift, text_buffer);
+                    }
+                    true
                 }
-                true
             },
             KeyCode::ArrowLeft => {
                 if ke.modifiers.logo || ke.modifiers.control { // token skipping
