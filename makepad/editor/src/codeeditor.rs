@@ -29,7 +29,7 @@ pub struct CodeEditor {
     pub top_padding: f32,
     pub colors: CodeEditorColors,
     pub cursor_blink_speed: f64,
-
+    
     pub folding_depth: usize,
     //pub _bg_area: Area,
     pub _view_area: Area,
@@ -137,7 +137,7 @@ pub enum CodeEditorEvent {
 }
 
 impl CodeEditor {
-    pub     fn style(cx: &mut Cx) -> Self {
+    pub fn style(cx: &mut Cx) -> Self {
         Self {
             cursors: TextCursorSet::new(),
             colors: CodeEditorColors {
@@ -186,7 +186,7 @@ impl CodeEditor {
                 unexpected: color256(255, 0, 0),
             },
             indent_lines: Quad {
-                z:0.001,
+                z: 0.001,
                 shader: cx.add_shader(Self::def_indent_lines_shader(), "Editor.indent_lines"),
                 ..Quad::style(cx)
             },
@@ -204,14 +204,14 @@ impl CodeEditor {
                 ..Quad::style(cx)
             },
             gutter_bg: Quad {
-                z:9.0,
+                z: 9.0,
                 do_h_scroll: false,
                 do_v_scroll: false,
                 ..Quad::style(cx)
             },
             selection: Quad {
                 shader: cx.add_shader(Self::def_selection_shader(), "Editor.selection"),
-                z:1.0,
+                z: 1.0,
                 ..Quad::style(cx)
             },
             token_highlight: Quad {
@@ -251,7 +251,7 @@ impl CodeEditor {
             text: Text {
                 font: cx.load_font_style("mono_font"),
                 brightness: 1.1,
-                z:2.00,
+                z: 2.00,
                 line_spacing: 1.8,
                 wrapping: Wrapping::Line,
                 ..Text::style(cx)
@@ -259,7 +259,7 @@ impl CodeEditor {
             line_number_text: Text {
                 font: cx.load_font_style("mono_font"),
                 brightness: 1.0,
-                z:9.,
+                z: 9.,
                 line_spacing: 1.4,
                 do_h_scroll: false,
                 wrapping: Wrapping::Line,
@@ -384,7 +384,7 @@ impl CodeEditor {
                     view_clip.zw
                 );
                 pos = (clipped - shift - vec2(x, y)) / vec2(w, h);
-                return  camera_projection*(camera_view*(view_transform*vec4(clipped.x, clipped.y, z + zbias, 1.)));
+                return camera_projection * (camera_view * (view_transform * vec4(clipped.x, clipped.y, z + zbias, 1.)));
             }
             
             fn pixel() -> vec4 {
@@ -699,10 +699,6 @@ impl CodeEditor {
                     false
                 }
             },
-            KeyCode::Escape => {
-                self.start_code_folding(cx, text_buffer, ke.modifiers.shift);
-                false
-            },
             KeyCode::Alt => {
                 // how do we find the center line of the view
                 // its simply the top line
@@ -879,9 +875,6 @@ impl CodeEditor {
                     KeyCode::Alt => {
                         self.start_code_unfolding(cx, text_buffer);
                     },
-                    KeyCode::Escape => {
-                        self.start_code_unfolding(cx, text_buffer);
-                    }
                     _ => (),
                 }
                 self.reset_cursor_blinker(cx);
@@ -1109,7 +1102,7 @@ impl CodeEditor {
         }
         
         cx.turtle_new_line_min_height(self._monospace_size.y);
-
+        
         cx.move_turtle(self.line_number_width, 0.);
         
         self._tokens_on_line = 0;
@@ -1522,7 +1515,7 @@ impl CodeEditor {
             let origin = cx.get_turtle_origin();
             for rc in &self._draw_cursors.cursors {
                 self.cursor.z = rc.z + 0.1;
-
+                
                 let inst = self.cursor.draw_quad(cx, Rect {x: rc.x - origin.x, y: rc.y - origin.y, w: rc.w, h: rc.h});
                 if inst.need_uniforms_now(cx) {
                     inst.push_uniform_float(cx, self._cursor_blink_flipflop);
@@ -1693,7 +1686,7 @@ impl CodeEditor {
     fn set_font_size(&mut self, _cx: &Cx, font_size: f32) {
         self.text.font_size = font_size;
         self.line_number_text.font_size = font_size;
-        if font_size > self._line_largest_font { 
+        if font_size > self._line_largest_font {
             self._line_largest_font = font_size;
         }
         self._monospace_size.x = self._monospace_base.x * font_size;

@@ -11,9 +11,9 @@ fn main() {
         HubMsg::CargoExec {uid, package, target} => {
             match package.as_ref() {
                 "makepad" => match target.as_ref() {
-                    "check" => ws.cargo(uid, &["check", "-p", &package]),
-                    "makepad" => ws.cargo(uid, &["build", "-p", "makepad"]),
-                    "workspace" => ws.cargo(uid, &["build", "-p", "workspace"]),
+                    "check" => ws.cargo_exec(uid, &["check", "-p", &package]),
+                    "makepad" => ws.cargo_exec(uid, &["build", "-p", "makepad"]),
+                    "workspace" => ws.cargo_exec(uid, &["build", "-p", "workspace"]),
                     _ => ()
                 },
                 _ => ()

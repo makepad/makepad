@@ -105,7 +105,10 @@ impl Process {
         })
     }
     
-    fn _kill(&mut self) {
-        
+    pub fn kill(&mut self) {
+        if let Some(child) = &mut self.child{
+            let _ = child.kill();
+            self.child = None;
+        }
     }
 }

@@ -17,7 +17,7 @@ pub struct HubWorkspace {
 
 pub struct HubWsProcess {
     uid: HubUid,
-    _process: Process,
+    process: Process,
     _thread: Option<std::thread::JoinHandle<()>>
 }
 
@@ -80,15 +80,25 @@ impl HubWorkspace {
                 self.restart_connection = true;
                 println!("Got connection error, need to restart loop TODO kill all processes!");
             },
+            HubMsg::CargoKill {uid} => {
+                self.cargo_kill(uid);
+            },
+            HubMsg::ArtifactKill {uid} => {
+                self.artifact_kill(uid);
+            },
             HubMsg::ArtifactExec {uid, artifact, args} => {
                 let v: Vec<&str> = args.iter().map( | v | v.as_ref()).collect();
-                self.exec_artifact(uid, &artifact, &v);
+                self.artifact_exec(uid, &artifact, &v);
             },
             _ => ()
         }
     }
     
-    pub fn exec_artifact(&mut self, uid: HubUid, artifact: &str, args: &[&str]) {
+    pub fn artifact_kill(&mut self, _uid: HubUid) {
+        
+    }
+    
+    pub fn artifact_exec(&mut self, uid: HubUid, artifact: &str, args: &[&str]) {
         
         // lets start a thread
         let mut process = Process::start(artifact, args, &self.root_path).expect("Cannot start process");
@@ -142,19 +152,31 @@ impl HubWorkspace {
         if let Ok(mut processes) = self.processes.lock() {
             processes.push(HubWsProcess {
                 uid: uid,
-                _process: process,
+                process: process,
                 _thread: Some(thread)
             });
         };
     }
     
-    pub fn cargo(&mut self, uid: HubUid, args: &[&str]) {
+    pub fn cargo_kill(&mut self, uid: HubUid) {
+        if let Ok(mut procs) = self.processes.lock() {
+            for proc in procs.iter_mut(){
+                if proc.uid == uid{
+                    proc.process.kill();
+                    break;
+                }
+            }
+        };
+    }
+    
+    pub fn cargo_exec(&mut self, uid: HubUid, args: &[&str]) {
         
         // lets start a thread
         let mut extargs = args.to_vec();
         extargs.push("--message-format=json");
         let mut process = Process::start("cargo", &extargs, &self.root_path).expect("Cannot start process");
-        
+        let print_args: Vec<String> = extargs.to_vec().iter().map( | v | v.to_string()).collect();
+
         // we now need to start a subprocess and parse the cargo output.
         let tx_write = self.hub_client.tx_write.clone();
         
@@ -170,6 +192,7 @@ impl HubWorkspace {
         let workspace = self.workspace.clone();
         
         let thread = std::thread::spawn(move || {
+            
             let mut any_errors = false;
             let mut artifact_path = None;
             while let Ok(line) = rx_line.recv() {
@@ -233,13 +256,16 @@ impl HubWorkspace {
                                     }
                                 }).expect("tx_write fail");
                                 if !any_errors {
-                                    artifact_path = parsed.executable;
+                                    artifact_path = None;
+                                    if let Some(executable) = parsed.executable{
+                                        if !executable.ends_with(".rmeta"){ // othwerise i can't recognise binaries
+                                            artifact_path = Some(executable)
+                                        }
+                                    }
                                 }
                             }
                         }
                     }
-                    
-                    
                 }
                 else { // process terminated
                     // do we have any errors?
@@ -267,7 +293,7 @@ impl HubWorkspace {
         if let Ok(mut processes) = self.processes.lock() {
             processes.push(HubWsProcess {
                 uid: uid,
-                _process: process,
+                process: process,
                 _thread: Some(thread)
             });
         };

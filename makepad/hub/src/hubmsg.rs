@@ -27,9 +27,9 @@ pub enum HubMsg {
     },
     
     CargoExecBegin {
-        uid:HubUid,
+        uid: HubUid,
     },
-
+    
     CargoMsg {
         uid: HubUid,
         msg: HubCargoMsg
@@ -38,14 +38,14 @@ pub enum HubMsg {
     CargoArtifact {
         uid: HubUid,
         package_id: String,
-        fresh:bool
+        fresh: bool
     },
-
+    
     CargoExecEnd {
         uid: HubUid,
-        artifact_path:Option<String>
+        artifact_path: Option<String>
     },
-
+    
     CargoPackagesRequest {
         uid: HubUid
     },
@@ -54,40 +54,44 @@ pub enum HubMsg {
         uid: HubUid,
         packages: Vec<HubCargoPackage>
     },
+
+    ArtifactKill {
+        uid: HubUid
+    },
     
-    ArtifactExec{
-        uid:HubUid,
-        artifact:String,
-        args:Vec<String>
+    ArtifactExec {
+        uid: HubUid,
+        artifact: String,
+        args: Vec<String>
     },
-
-    ArtifactExecBegin{
-        uid:HubUid
+    
+    ArtifactExecBegin {
+        uid: HubUid
     },
-
-    ArtifactMsg{
-        uid:HubUid,
-        msg:String
+    
+    ArtifactMsg {
+        uid: HubUid,
+        msg: String
     },
-
-    ArtifactExecEnd{
-        uid:HubUid
+    
+    ArtifactExecEnd {
+        uid: HubUid
     },
-
+    
     WorkspaceFileTreeRequest {
         uid: HubUid
     },
     
     WorkspaceFileTreeResponse {
         uid: HubUid,
-        tree:WorkspaceFileTreeNode
+        tree: WorkspaceFileTreeNode
     },
     
-    ListWorkspacesRequest{
+    ListWorkspacesRequest {
         uid: HubUid,
     },
     
-    ListWorkspacesResponse{
+    ListWorkspacesResponse {
         uid: HubUid,
         workspaces: Vec<String>
     },
@@ -123,24 +127,24 @@ pub enum WorkspaceFileTreeNode {
 }
 
 impl Ord for WorkspaceFileTreeNode {
-    fn cmp(&self, other:&WorkspaceFileTreeNode)->Ordering{
-        match self{
-            WorkspaceFileTreeNode::File{name:lhs, ..} =>{
-                match other{
-                    WorkspaceFileTreeNode::File{name:rhs, ..} =>{
+    fn cmp(&self, other: &WorkspaceFileTreeNode) -> Ordering {
+        match self {
+            WorkspaceFileTreeNode::File {name: lhs, ..} => {
+                match other {
+                    WorkspaceFileTreeNode::File {name: rhs, ..} => {
                         lhs.cmp(rhs)
                     },
-                    WorkspaceFileTreeNode::Folder{name:_rhs, ..} =>{
+                    WorkspaceFileTreeNode::Folder {name: _rhs, ..} => {
                         Ordering::Greater
                     },
                 }
             },
-            WorkspaceFileTreeNode::Folder{name:lhs, ..} =>{
-                match other{
-                    WorkspaceFileTreeNode::File{name:_rhs, ..} =>{
+            WorkspaceFileTreeNode::Folder {name: lhs, ..} => {
+                match other {
+                    WorkspaceFileTreeNode::File {name: _rhs, ..} => {
                         Ordering::Less
                     },
-                    WorkspaceFileTreeNode::Folder{name:rhs, ..} =>{
+                    WorkspaceFileTreeNode::Folder {name: rhs, ..} => {
                         lhs.cmp(rhs)
                     },
                 }
@@ -156,7 +160,7 @@ impl PartialOrd for WorkspaceFileTreeNode {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct  HubCargoPackage {
+pub struct HubCargoPackage {
     pub package_name: String,
     pub targets: Vec<String>,
 }
@@ -171,11 +175,11 @@ pub enum HubCargoTarget {
     Custom(String)
 }
 
-impl HubCargoPackage{
-    pub fn new(package_name:&str, targets:&[&str])->HubCargoPackage{
-        HubCargoPackage{
+impl HubCargoPackage {
+    pub fn new(package_name: &str, targets: &[&str]) -> HubCargoPackage {
+        HubCargoPackage {
             package_name: package_name.to_string(),
-            targets: targets.iter().map(|v| v.to_string()).collect()
+            targets: targets.iter().map( | v | v.to_string()).collect()
         }
     }
 }
@@ -218,18 +222,18 @@ pub enum HubAddr {
     V6 {octets: [u8; 16], port: u16},
 }
 
-impl HubAddr{
-    pub fn port(&self)->u16{
-        match self{
-            HubAddr::V4{port,..}=>*port,
-            HubAddr::V6{port,..}=>*port
+impl HubAddr {
+    pub fn port(&self) -> u16 {
+        match self {
+            HubAddr::V4 {port, ..} => *port,
+            HubAddr::V6 {port, ..} => *port
         }
     }
 }
 
 impl HubAddr {
-    pub fn zero()->HubAddr{
-        HubAddr::V4{octets:[0,0,0,0], port:0}
+    pub fn zero() -> HubAddr {
+        HubAddr::V4 {octets: [0, 0, 0, 0], port: 0}
     }
     
     pub fn from_socket_addr(addr: SocketAddr) -> HubAddr {
@@ -256,8 +260,8 @@ pub struct HubUid {
 }
 
 impl HubUid {
-    pub fn zero()->HubUid{
-        HubUid{addr:HubAddr::zero(), id:0}
+    pub fn zero() -> HubUid {
+        HubUid {addr: HubAddr::zero(), id: 0}
     }
 }
 
@@ -283,33 +287,34 @@ impl HubError {
 }
 
 #[derive(Clone)]
-pub enum HubLog{
+pub enum HubLog {
     All,
     None
 }
 
-impl HubLog{
-    pub fn msg<T>(&self, prefix:&str, htc_msg:&T)
-    where T:std::fmt::Debug
+impl HubLog {
+    pub fn msg<T>(&self, prefix: &str, htc_msg: &T)
+    where T: std::fmt::Debug
     {
-        match self{
-            HubLog::All=>{
+        match self {
+            HubLog::All => {
                 let mut msg = format!("{:?}", htc_msg);
-                if msg.len()>200{
+                if msg.len()>200 {
                     msg.truncate(200);
                     msg.push_str("...")
                 }
                 println!("{} {}", prefix, msg);
             },
-            _=>()
+            _ => ()
         }
     }
-    pub fn log(&self, msg:&str)
+    pub fn log(&self, msg: &str)
     {
-        match self{
-            HubLog::All=>{
+        match self {
+            HubLog::All => {
                 println!("{}", msg);
             },
-            _=>()
+            _ => ()
         }
-    }}
+    }
+}

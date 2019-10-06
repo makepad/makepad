@@ -106,7 +106,7 @@ impl CargoLog {
         ])
     }
     
-    fn clear_textbuffer_messages(&self, cx: &mut Cx, storage: &mut AppStorage) {
+    fn gc_textbuffer_messages(&self, cx: &mut Cx, storage: &mut AppStorage) {
         // clear all files we missed
         for (_, atb) in &mut storage.text_buffers {
             if atb.text_buffer.messages.gc_id != cx.event_id {
@@ -152,7 +152,6 @@ impl CargoLog {
                 })
             }
             
-            //println!("PROCESING MESSAGES FOR {} {} {}", span.byte_start, span.byte_end+1, path);
             text_buffer.messages.bodies.push(TextBufferMessage {
                 body: dm.msg.body.clone(),
                 level: match dm.msg.level {
@@ -163,7 +162,7 @@ impl CargoLog {
             });
             //}
         }
-        self.clear_textbuffer_messages(cx, storage);
+        self.gc_textbuffer_messages(cx, storage);
     }
     
     pub fn is_running_cargo_uid(&self, uid: &HubUid) -> bool {
@@ -185,7 +184,7 @@ impl CargoLog {
     }
     
     
-    pub fn handle_hub_msg(&mut self, cx: &mut Cx, _storage: &mut AppStorage, htc: &HubToClientMsg) {
+    pub fn handle_hub_msg(&mut self, cx: &mut Cx, storage: &mut AppStorage, htc: &HubToClientMsg) {
         match &htc.msg {
             HubMsg::CargoPackagesResponse {uid: _, packages: _} => {
             },
@@ -203,6 +202,7 @@ impl CargoLog {
                     is_selected: false
                 });
                 self.view.redraw_view_area(cx);
+                self.export_messages(cx, storage);
             },
             HubMsg::CargoArtifact {uid, package_id, fresh: _} => if self.is_running_cargo_uid(uid) {
                 self._artifacts.push(package_id.clone());
@@ -235,7 +235,15 @@ impl CargoLog {
                 });
                 active_target.cargo_uid = HubUid::zero();
             }
-        }
+            if active_target.cargo_uid != HubUid::zero() {
+                hub_ui.send(ClientToHubMsg {
+                    to: HubMsgTo::Workspace(self._active_workspace.clone()),
+                    msg: HubMsg::ArtifactKill {
+                        uid: active_target.cargo_uid,
+                    }
+                });
+                active_target.cargo_uid = HubUid::zero();
+            }        }
         
         self._artifacts.truncate(0);
         self._draw_messages.truncate(0);
@@ -311,10 +319,10 @@ impl CargoLog {
                 KeyCode::ArrowDown => if ke.modifiers.logo || ke.modifiers.control {
                     dm_to_select = self.next_error(false);
                 },
-                KeyCode::ArrowUp => if ke.modifiers.logo || ke.modifiers.control{
+                KeyCode::ArrowUp => if ke.modifiers.logo || ke.modifiers.control {
                     dm_to_select = self.next_error(true);
                 },
-                KeyCode::Return => if ke.modifiers.logo || ke.modifiers.control{
+                KeyCode::Return => if ke.modifiers.logo || ke.modifiers.control {
                     
                 },
                 _ => ()
