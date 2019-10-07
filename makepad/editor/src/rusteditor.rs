@@ -553,7 +553,7 @@ impl RustTokenizer {
             'd' =>{
                 if state.keyword(chunk, "yn") {
                     return TokenType::Keyword
-                }
+                } 
             },
             'e' => {
                 if state.keyword(chunk, "lse") {

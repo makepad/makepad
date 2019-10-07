@@ -355,14 +355,14 @@ impl FileTree {
     
     pub fn get_default_anim(cx: &Cx, counter: usize, marked: bool) -> Anim {
         Anim::new(Play::Chain {duration: 0.01}, vec![
-            Track::color("bg.color", Ease::Lin, vec![(1.0, if marked {cx.color("bg_marked")} else if counter & 1 == 0 {cx.color("bg_selected")}else {cx.color("bg_odd")})])
+            Track::color(cx.id("bg.color"), Ease::Lin, vec![(1.0, if marked {cx.color("bg_marked")} else if counter & 1 == 0 {cx.color("bg_selected")}else {cx.color("bg_odd")})])
         ])
     }
     
     pub fn get_over_anim(cx: &Cx, counter: usize, marked: bool) -> Anim {
         let over_color = if marked {cx.color("bg_marked_over")} else if counter & 1 == 0 {cx.color("bg_selected_over")}else {cx.color("bg_odd_over")};
         Anim::new(Play::Cut {duration: 0.02}, vec![
-            Track::color("bg.color", Ease::Lin, vec![
+            Track::color(cx.id("bg.color"), Ease::Lin, vec![
                 (0., over_color),
                 (1., over_color)
             ])
@@ -402,6 +402,9 @@ impl FileTree {
             match event.hits(cx, node_draw.animator.area, HitOpt::default()) {
                 Event::Animate(ae) => {
                     node_draw.animator.write_area(cx, node_draw.animator.area, "bg.", ae.time);
+                },
+                Event::AnimateEnded(_)=>{
+                    node_draw.animator.end();
                 },
                 Event::FingerDown(_fe) => {
                     // mark ourselves, unmark others
@@ -576,7 +579,7 @@ impl FileTree {
             
             // if we are NOT animating, we need to get change a default color.
             
-            self.node_bg.color = node_draw.animator.last_color("bg.color");
+            self.node_bg.color = node_draw.animator.last_color(cx.id("bg.color"));
             
             let inst = self.node_bg.begin_quad(cx, &Layout {
                 width: Bounds::Fill,

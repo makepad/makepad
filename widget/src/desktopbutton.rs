@@ -38,19 +38,19 @@ impl DesktopButton {
                 ..Quad::style(cx)
             },
             animator: Animator::new(Anim::new(Play::Cut {duration: 0.2}, vec![
-                Track::color("bg.color", Ease::Lin, vec![(1.0, color("#a"))]),
-                Track::float("bg.hover", Ease::Lin, vec![(1.0, 0.)]),
-                Track::float("bg.down", Ease::Lin, vec![(1.0, 0.)]),
+                Track::color(cx.id("bg.color"), Ease::Lin, vec![(1.0, color("#a"))]),
+                Track::float(cx.id("bg.hover"), Ease::Lin, vec![(1.0, 0.)]),
+                Track::float(cx.id("bg.down"), Ease::Lin, vec![(1.0, 0.)]),
             ])),
             anim_over: Anim::new(Play::Cut {duration: 0.2}, vec![
-                Track::color("bg.color", Ease::Lin, vec![(0.0, color("#f")), (1.0, color("#f"))]),
-                Track::float("bg.down", Ease::Lin, vec![(1.0, 0.)]),
-                Track::float("bg.hover", Ease::Lin, vec![(0.0, 1.0), (1.0, 1.0)]),
+                Track::color(cx.id("bg.color"), Ease::Lin, vec![(0.0, color("#f")), (1.0, color("#f"))]),
+                Track::float(cx.id("bg.down"), Ease::Lin, vec![(1.0, 0.)]),
+                Track::float(cx.id("bg.hover"), Ease::Lin, vec![(0.0, 1.0), (1.0, 1.0)]),
             ]),
             anim_down: Anim::new(Play::Cut {duration: 0.2}, vec![
-                Track::color("bg.color", Ease::Lin, vec![(0.0, color("#f55")), (1.0, color("#f55"))]),
-                Track::float("bg.hover", Ease::Lin, vec![(1.0, 1.0)]),
-                Track::float("bg.down", Ease::OutExp, vec![(0.0, 0.0), (1.0, 3.1415 * 0.5)]),
+                Track::color(cx.id("bg.color"), Ease::Lin, vec![(0.0, color("#f55")), (1.0, color("#f55"))]),
+                Track::float(cx.id("bg.hover)"), Ease::Lin, vec![(1.0, 1.0)]),
+                Track::float(cx.id("bg.down"), Ease::OutExp, vec![(0.0, 0.0), (1.0, 3.1415 * 0.5)]),
             ]),
             _bg_area: Area::Empty,
         }
@@ -173,7 +173,7 @@ impl DesktopButton {
     }
     
     pub fn draw_desktop_button(&mut self, cx: &mut Cx, ty: DesktopButtonType) {
-        self.bg.color = self.animator.last_color("bg.color");
+        self.bg.color = self.animator.last_color(cx.id("bg.color"));
         
         let (w,h) = match ty {
             DesktopButtonType::WindowsMin 
@@ -185,8 +185,8 @@ impl DesktopButton {
 
         let bg_inst = self.bg.draw_quad_walk(cx, Bounds::Fix(w), Bounds::Fix(h), Margin::zero());
         
-        bg_inst.push_float(cx, self.animator.last_float("bg.hover"));
-        bg_inst.push_float(cx, self.animator.last_float("bg.down"));
+        bg_inst.push_float(cx, self.animator.last_float(cx.id("bg.hover")));
+        bg_inst.push_float(cx, self.animator.last_float(cx.id("bg.down")));
         bg_inst.push_float(cx, ty.shader_float());
         self._bg_area = bg_inst.into_area();
         self.animator.update_area_refs(cx, self._bg_area); // if our area changed, update animation

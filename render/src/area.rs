@@ -529,7 +529,7 @@ impl InstanceArea{
     pub fn into_area(self)->Area{
         Area::Instance(self)
     }
-
+    
     pub fn push_slice(&self, cx:&mut Cx, data:&[f32]){
         let cxview = &mut cx.views[self.view_id];
         if cxview.redraw_id != self.redraw_id {
@@ -541,6 +541,10 @@ impl InstanceArea{
         draw_call.instance.extend_from_slice(data);
     }
 
+    pub fn push_last_float(&self, cx:&mut Cx, animator:&Animator, ident_str:&str){
+        self.push_float(cx, animator.last_float(cx.id(ident_str)))
+    }
+
     pub fn push_float(&self, cx:&mut Cx, value:f32){
         let cxview = &mut cx.views[self.view_id];
         if cxview.redraw_id != self.redraw_id {
@@ -550,6 +554,10 @@ impl InstanceArea{
         let draw_call = &mut cxview.draw_calls[self.draw_call_id];
         //let csh = &cx.shaders.compiled_shaders[draw_call.shader_id];
         draw_call.instance.push(value);
+    }
+
+    pub fn push_last_vec2(&self, cx:&mut Cx, animator:&Animator, ident_str:&str){
+        self.push_vec2(cx, animator.last_vec2(cx.id(ident_str)))
     }
 
     pub fn push_vec2(&self, cx:&mut Cx, value:Vec2){
@@ -564,6 +572,10 @@ impl InstanceArea{
         draw_call.instance.push(value.y);
     }
 
+    pub fn push_last_vec3(&self, cx:&mut Cx, animator:&Animator, ident_str:&str){
+        self.push_vec3(cx, animator.last_vec3(cx.id(ident_str)))
+    }
+
     pub fn push_vec3(&self, cx:&mut Cx, value:Vec3){
         let cxview = &mut cx.views[self.view_id];
         if cxview.redraw_id != self.redraw_id {
@@ -574,6 +586,10 @@ impl InstanceArea{
         draw_call.instance.push(value.x);
         draw_call.instance.push(value.y);
         draw_call.instance.push(value.z);
+    }
+
+    pub fn push_last_vec4(&self, cx:&mut Cx, animator:&Animator, ident_str:&str){
+        self.push_vec4(cx, animator.last_vec4(cx.id(ident_str)))
     }
 
     pub fn push_vec4(&self, cx:&mut Cx, value:Vec4){
@@ -587,6 +603,10 @@ impl InstanceArea{
         draw_call.instance.push(value.y);
         draw_call.instance.push(value.z);
         draw_call.instance.push(value.w);
+    }
+
+    pub fn push_last_color(&self, cx:&mut Cx, animator:&Animator, ident_str:&str){
+        self.push_color(cx, animator.last_color(cx.id(ident_str)))
     }
 
     pub fn push_color(&self, cx:&mut Cx, value:Color){

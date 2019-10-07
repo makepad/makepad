@@ -62,13 +62,13 @@ impl Splitter {
                 ..Quad::style(cx)
             },
             animator: Animator::new(Anim::new(Play::Cut {duration: 0.5}, vec![
-                Track::color("split.color", Ease::Lin, vec![(1.0, cx.color("bg_split"))]),
+                Track::color(cx.id("split.color"), Ease::Lin, vec![(1.0, cx.color("bg_split"))]),
             ])),
             anim_over: Anim::new(Play::Cut {duration: 0.05}, vec![
-                Track::color("split.color", Ease::Lin, vec![(1.0, color("#5"))]),
+                Track::color(cx.id("split.color"), Ease::Lin, vec![(1.0, color("#5"))]),
             ]),
             anim_moving: Anim::new(Play::Cut {duration: 0.2}, vec![
-                Track::color("split.color", Ease::Lin, vec![
+                Track::color(cx.id("split.color"), Ease::Lin, vec![
                     (0.0, color("#f")),
                     (1.0, color("#6"))
                 ]),
@@ -266,7 +266,7 @@ impl Splitter {
         cx.end_turtle(Area::Empty);
         let rect = cx.get_turtle_rect();
         let origin = cx.get_turtle_origin();
-        self.split.color = self.animator.last_color("split.color");
+        self.split.color = self.animator.last_color(cx.id("split.color"));
         match self.axis {
             Axis::Horizontal => {
                 

@@ -94,14 +94,14 @@ impl CargoLog {
     
     pub fn get_default_anim(cx: &Cx, counter: usize, marked: bool) -> Anim {
         Anim::new(Play::Chain {duration: 0.01}, vec![
-            Track::color("bg.color", Ease::Lin, vec![(1.0, if marked {cx.color("bg_marked")} else if counter & 1 == 0 {cx.color("bg_selected")}else {cx.color("bg_odd")})])
+            Track::color(cx.id("bg.color"), Ease::Lin, vec![(1.0, if marked {cx.color("bg_marked")} else if counter & 1 == 0 {cx.color("bg_selected")}else {cx.color("bg_odd")})])
         ])
     }
     
     pub fn get_over_anim(cx: &Cx, counter: usize, marked: bool) -> Anim {
         let over_color = if marked {cx.color("bg_marked_over")} else if counter & 1 == 0 {cx.color("bg_selected_over")}else {cx.color("bg_odd_over")};
         Anim::new(Play::Cut {duration: 0.02}, vec![
-            Track::color("bg.color", Ease::Lin, vec![
+            Track::color(cx.id("bg.color"), Ease::Lin, vec![
                 (0., over_color),
                 (1., over_color)
             ])
@@ -184,7 +184,6 @@ impl CargoLog {
         }
         return false
     }
-    
     
     pub fn handle_hub_msg(&mut self, cx: &mut Cx, storage: &mut AppStorage, htc: &HubToClientMsg) {
         let hub_ui = storage.hub_ui.as_mut().unwrap();
@@ -360,8 +359,8 @@ impl CargoLog {
             else {
                 return Some(0);
             }
-        }
-    }
+        }   
+    }                
     
     pub fn handle_cargo_log(&mut self, cx: &mut Cx, event: &mut Event, storage: &mut AppStorage) -> CargoLogEvent {
         // do shit here
@@ -455,7 +454,7 @@ impl CargoLog {
         
         let mut counter = 0;
         for dm in &mut self._draw_messages {
-            self.item_bg.color = dm.animator.last_color("bg.color");
+            self.item_bg.color = dm.animator.last_color(cx.id("bg.color"));
             
             let bg_inst = self.item_bg.begin_quad(cx, &Layout {
                 width: Bounds::Fill,

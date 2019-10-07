@@ -21,6 +21,7 @@ impl Process {
                     println!("\0");
                     Ok(())
                 })
+                    .stdin(Stdio::null())
                     .stdout(Stdio::piped())
                     .stderr(Stdio::piped())
                     .current_dir(current_dir)

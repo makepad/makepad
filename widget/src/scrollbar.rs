@@ -36,13 +36,13 @@ impl ScrollBar {
             
             axis: Axis::Horizontal,
             animator: Animator::new(Anim::new(Play::Cut {duration: 0.5}, vec![
-                Track::color("sb.color", Ease::Lin, vec![(1.0, color("#5"))])
+                Track::color(cx.id("sb.color"), Ease::Lin, vec![(1.0, color("#5"))])
             ])),
             anim_over: Anim::new(Play::Cut {duration: 0.05}, vec![
-                Track::color("sb.color", Ease::Lin, vec![(1.0, color("#7"))])
+                Track::color(cx.id("sb.color"), Ease::Lin, vec![(1.0, color("#7"))])
             ]),
             anim_scrolling: Anim::new(Play::Cut {duration: 0.05}, vec![
-                Track::color("sb.color", Ease::Lin, vec![(1.0, color("#9"))])
+                Track::color(cx.id("sb.color"), Ease::Lin, vec![(1.0, color("#9"))])
             ]),
             sb: Quad {
                 z: 10.,
@@ -360,7 +360,7 @@ impl ScrollBarLike<ScrollBar> for ScrollBar {
     
     fn draw_scroll_bar(&mut self, cx: &mut Cx, axis: Axis, view_area: Area, view_rect: Rect, view_total: Vec2) -> f32 {
         // pull the bg color from our animation system, uses 'default' value otherwise
-        self.sb.color = self.animator.last_color("sb.color");
+        self.sb.color = self.animator.last_color(cx.id("sb.color"));
         self._sb_area = Area::Empty;
         self._view_area = view_area;
         self.axis = axis;

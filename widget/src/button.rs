@@ -36,22 +36,22 @@ impl Button {
             },
             text: Text::style(cx),
             animator: Animator::new(Anim::new(Play::Cut {duration: 0.5}, vec![
-                Track::color("bg.color", Ease::Lin, vec![(1., cx.color("bg_normal"))]),
-                Track::float("bg.glow_size", Ease::Lin, vec![(1., 0.0)]),
-                Track::color("bg.border_color", Ease::Lin, vec![(1., color("#6"))]),
-                Track::color("text.color", Ease::Lin, vec![(1., color("white"))]),
-                Track::color("icon.color", Ease::Lin, vec![(1., color("white"))])
+                Track::color(cx.id("bg.color"), Ease::Lin, vec![(1., cx.color("bg_normal"))]),
+                Track::float(cx.id("bg.glow_size"), Ease::Lin, vec![(1., 0.0)]),
+                Track::color(cx.id("bg.border_color"), Ease::Lin, vec![(1., color("#6"))]),
+                Track::color(cx.id("text.color"), Ease::Lin, vec![(1., color("white"))]),
+                Track::color(cx.id("icon.color"), Ease::Lin, vec![(1., color("white"))])
             ])),
-            anim_over: Anim::new(Play::Cut {duration: 0.05}, vec![
-                Track::color("bg.color", Ease::Lin, vec![(1., color("#999"))]),
-                Track::color("bg.border_color", Ease::Lin, vec![(1., color("white"))]),
-                Track::float("bg.glow_size", Ease::Lin, vec![(1., 1.0)])
+            anim_over: Anim::new(Play::Cut {duration: 0.05}, vec![ 
+                Track::color(cx.id("bg.color"), Ease::Lin, vec![(1., color("#999"))]),
+                Track::color(cx.id("bg.border_color"), Ease::Lin, vec![(1., color("white"))]),
+                Track::float(cx.id("bg.glow_size"), Ease::Lin, vec![(1., 1.0)])
             ]),
             anim_down: Anim::new(Play::Cut {duration: 0.2}, vec![
-                Track::color("bg.border_color", Ease::Lin, vec![(0.0, color("white")), (1.0, color("white"))]),
-                Track::color("bg.color", Ease::Lin, vec![(0.0, color("#f")), (1.0, color("#6"))]),
-                Track::float("bg.glow_size", Ease::Lin, vec![(0.0, 1.0), (1.0, 1.0)]),
-                Track::color("icon.color", Ease::Lin, vec![(0.0, color("#0")), (1.0, color("#f")),]),
+                Track::color(cx.id("bg.border_color"), Ease::Lin, vec![(0.0, color("white")), (1.0, color("white"))]),
+                Track::color(cx.id("bg.color"), Ease::Lin, vec![(0.0, color("#f")), (1.0, color("#6"))]),
+                Track::float(cx.id("bg.glow_size"), Ease::Lin, vec![(0.0, 1.0), (1.0, 1.0)]),
+                Track::color(cx.id("icon.color"), Ease::Lin, vec![(0.0, color("#0")), (1.0, color("#f")),]),
             ]),
             _bg_area: Area::Empty,
         }
@@ -83,6 +83,7 @@ impl Button {
         //let mut ret_event = ButtonEvent::None;
         match event.hits(cx, self._bg_area, HitOpt::default()) {
             Event::Animate(ae) => self.animator.write_area(cx, self._bg_area, "bg.", ae.time),
+            Event::AnimateEnded(_) => self.animator.end(),
             Event::FingerDown(_fe) => {
                 self.animator.play_anim(cx, self.anim_down.clone());
                 return ButtonEvent::Down;
@@ -115,11 +116,12 @@ impl Button {
     }
     
     pub fn draw_button_with_label(&mut self, cx: &mut Cx, label: &str) {
-        self.bg.color = self.animator.last_color("bg.color");
+        self.bg.color = self.animator.last_color(cx.id("bg.color"));
 
         let bg_inst = self.bg.begin_quad(cx, &self.bg_layout);
-        bg_inst.push_color(cx, self.animator.last_color("bg.border_color"));
-        bg_inst.push_float(cx, self.animator.last_float("bg.glow_size"));
+
+        bg_inst.push_last_color(cx, &self.animator, "bg.border_color");
+        bg_inst.push_last_float(cx, &self.animator, "bg.glow_size");
 
         self.text.draw_text(cx, label);
         self._bg_area = self.bg.end_quad(cx, &bg_inst);
