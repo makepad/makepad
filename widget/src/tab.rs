@@ -196,7 +196,7 @@ impl Tab{
                 }
             },
             Event::AnimateEnded(_ae)=>{
-                self.animator.end(),
+                self.animator.end();
                 if self.animator.term_anim_playing(){
                     return TabEvent::Close;
                 }
