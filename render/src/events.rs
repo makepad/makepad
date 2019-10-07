@@ -219,7 +219,7 @@ pub enum Event {
     Paint,
     AppFocus,
     AppFocusLost,
-    AnimateEnded(AnimateEvent),
+    AnimEnded(AnimateEvent),
     Animate(AnimateEvent),
     Frame(FrameEvent),
     WindowSetHoverCursor(MouseCursor),
@@ -311,7 +311,7 @@ impl Event {
                     }
                 }
             },
-            Event::AnimateEnded(_) => {
+            Event::AnimEnded(_) => {
                 for anim in &cx.ended_anim_areas {
                     if anim.area == area {
                         return self.clone()

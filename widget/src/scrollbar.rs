@@ -289,7 +289,7 @@ impl ScrollBarLike<ScrollBar> for ScrollBar {
                 Event::Animate(ae) => {
                     self.animator.write_area(cx, self._sb_area, "sb.", ae.time);
                 },
-                Event::AnimateEnded(_) => self.animator.end(),
+                Event::AnimEnded(_) => self.animator.end(),
                 Event::Frame(_ae) => {
                     if self.move_towards_scroll_target(cx) {
                         cx.next_frame(self._sb_area);

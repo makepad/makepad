@@ -724,7 +724,7 @@ impl Cx {
         self.call_event_handler(&mut event_handler, &mut Event::Animate(AnimateEvent {time: time, frame: self.repaint_id}));
         self.check_ended_anim_areas(time);
         if self.ended_anim_areas.len() > 0 {
-            self.call_event_handler(&mut event_handler, &mut Event::AnimateEnded(AnimateEvent {time: time, frame: self.repaint_id}));
+            self.call_event_handler(&mut event_handler, &mut Event::AnimEnded(AnimateEvent {time: time, frame: self.repaint_id}));
         }
     }
     

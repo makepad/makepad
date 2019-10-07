@@ -91,7 +91,7 @@ impl Button {
         //let mut ret_event = ButtonEvent::None;
         match event.hits(cx, self._bg_area, HitOpt::default()) {
             Event::Animate(ae) => self.animator.write_area(cx, self._bg_area, "bg.", ae.time),
-            Event::AnimateEnded(_) => self.animator.end(),
+            Event::AnimEnded(_) => self.animator.end(),
             Event::FingerDown(_fe) => {
                 self.animator.play_anim(cx, Self::get_down_anim(cx));
                 return ButtonEvent::Down;

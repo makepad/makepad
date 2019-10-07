@@ -403,7 +403,7 @@ impl FileTree {
                 Event::Animate(ae) => {
                     node_draw.animator.write_area(cx, node_draw.animator.area, "bg.", ae.time);
                 },
-                Event::AnimateEnded(_)=>{
+                Event::AnimEnded(_)=>{
                     node_draw.animator.end();
                 },
                 Event::FingerDown(_fe) => {

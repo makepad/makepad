@@ -102,7 +102,7 @@ impl Splitter {
             Event::Animate(ae) => {
                 self.animator.write_area(cx, self._split_area, "split.", ae.time);
             },
-            Event::AnimateEnded(_) => self.animator.end(),
+            Event::AnimEnded(_) => self.animator.end(),
             Event::FingerDown(fe) => {
                 self._is_moving = true;
                 self.animator.play_anim(cx, Self::get_moving_anim(cx));
