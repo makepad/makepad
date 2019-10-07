@@ -8,8 +8,6 @@ pub struct ScrollBar {
     pub min_handle_size: f32, //minimum size of the handle in pixels
     pub axis: Axis,
     pub animator: Animator,
-    pub anim_over: Anim,
-    pub anim_scrolling: Anim,
     pub use_vertical_finger_scroll: bool,
     pub _visible: bool,
     pub smoothing: Option<f32>,
@@ -35,15 +33,7 @@ impl ScrollBar {
             smoothing: None,
             
             axis: Axis::Horizontal,
-            animator: Animator::new(Anim::new(Play::Cut {duration: 0.5}, vec![
-                Track::color(cx.id("sb.color"), Ease::Lin, vec![(1.0, color("#5"))])
-            ])),
-            anim_over: Anim::new(Play::Cut {duration: 0.05}, vec![
-                Track::color(cx.id("sb.color"), Ease::Lin, vec![(1.0, color("#7"))])
-            ]),
-            anim_scrolling: Anim::new(Play::Cut {duration: 0.05}, vec![
-                Track::color(cx.id("sb.color"), Ease::Lin, vec![(1.0, color("#9"))])
-            ]),
+            animator: Animator::new(Self::get_default_anim(cx)),
             sb: Quad {
                 z: 10.,
                 shader: cx.add_shader(Self::def_shader(), "ScrollBar.sb"),
@@ -65,6 +55,24 @@ impl ScrollBar {
             _drag_point: None,
             _sb_area: Area::Empty,
         }
+    }
+    
+    pub fn get_over_anim(cx:&Cx)->Anim{
+        Anim::new(Play::Cut {duration: 0.05}, vec![
+            Track::color(cx.id("sb.color"), Ease::Lin, vec![(1.0, color("#7"))])
+        ])
+    }
+    
+    pub fn get_scrolling_anim(cx:&Cx)->Anim{
+        Anim::new(Play::Cut {duration: 0.05}, vec![
+            Track::color(cx.id("sb.color"), Ease::Lin, vec![(1.0, color("#9"))])
+        ])
+    }
+    
+    pub fn get_default_anim(cx:&Cx)->Anim{
+        Anim::new(Play::Cut {duration: 0.5}, vec![
+            Track::color(cx.id("sb.color"), Ease::Lin, vec![(1.0, color("#5"))])
+        ])
     }
 
     pub fn def_shader() -> ShaderGen {
@@ -281,6 +289,7 @@ impl ScrollBarLike<ScrollBar> for ScrollBar {
                 Event::Animate(ae) => {
                     self.animator.write_area(cx, self._sb_area, "sb.", ae.time);
                 },
+                Event::AnimateEnded(_) => self.animator.end(),
                 Event::Frame(_ae) => {
                     if self.move_towards_scroll_target(cx) {
                         cx.next_frame(self._sb_area);
@@ -288,7 +297,7 @@ impl ScrollBarLike<ScrollBar> for ScrollBar {
                     return self.make_scroll_event()
                 },
                 Event::FingerDown(fe) => {
-                    self.animator.play_anim(cx, self.anim_scrolling.clone());
+                    self.animator.play_anim(cx, Self::get_scrolling_anim(cx));
                     let rel = match self.axis {
                         Axis::Horizontal => fe.rel.x,
                         Axis::Vertical => fe.rel.y
@@ -310,10 +319,10 @@ impl ScrollBarLike<ScrollBar> for ScrollBar {
                         cx.set_hover_mouse_cursor(MouseCursor::Default);
                         match fe.hover_state {
                             HoverState::In => {
-                                self.animator.play_anim(cx, self.anim_over.clone());
+                                self.animator.play_anim(cx, Self::get_over_anim(cx));
                             },
                             HoverState::Out => {
-                                self.animator.play_anim(cx, self.animator.default.clone());
+                                self.animator.play_anim(cx, Self::get_default_anim(cx));
                             },
                             _ => ()
                         }
@@ -323,14 +332,14 @@ impl ScrollBarLike<ScrollBar> for ScrollBar {
                     self._drag_point = None;
                     if fe.is_over {
                         if !fe.is_touch {
-                            self.animator.play_anim(cx, self.anim_over.clone());
+                            self.animator.play_anim(cx, Self::get_over_anim(cx));
                         }
                         else {
-                            self.animator.play_anim(cx, self.animator.default.clone());
+                            self.animator.play_anim(cx, Self::get_default_anim(cx));
                         }
                     }
                     else {
-                        self.animator.play_anim(cx, self.animator.default.clone());
+                        self.animator.play_anim(cx, Self::get_default_anim(cx));
                     }
                     return ScrollBarEvent::ScrollDone;
                 },

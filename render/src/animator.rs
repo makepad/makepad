@@ -16,7 +16,6 @@ pub struct Anim {
 
 #[derive(Clone)]
 pub struct Animator {
-    pub default: Anim,
     current: Option<Anim>,
     next: Option<Anim>,
     pub area: Area,
@@ -26,8 +25,18 @@ pub struct Animator {
 impl Animator {
     
     pub fn new(default: Anim) -> Animator {
+        let mut anim = Animator {
+            current: None,
+            next: None,
+            area: Area::Empty,
+            last_values: Vec::new(),
+        };
+        anim.set_anim_as_last_values(&default);
+        return anim
+    }
+    
+    pub fn new_no_default()->Animator{
         Animator {
-            default: default,
             current: None,
             next: None,
             area: Area::Empty,
@@ -110,10 +119,10 @@ impl Animator {
         }
         return false
     }
-    
+    /*
     pub fn play_default(&mut self, cx: &mut Cx) {
         self.play_anim(cx, self.default.clone());
-    }
+    }*/
     
     pub fn play_anim(&mut self, cx: &mut Cx, anim: Anim) {
         // if our area is invalid, we should just set our default value
@@ -227,20 +236,12 @@ impl Animator {
     }
     
     pub fn last_float(&self, ident: CxId) -> f32 {
-        Self::_last_float(ident, &self.last_values, &self.default.tracks)
+        Self::_last_float(ident, &self.last_values)
     }
     
-    pub fn _last_float(ident: CxId, last_float: &Vec<(CxId, f32, f32, f32, f32)>, tracks: &Vec<Track>) -> f32 {
+    pub fn _last_float(ident: CxId, last_float: &Vec<(CxId, f32, f32, f32, f32)>) -> f32 {
         if let Some(values) = last_float.iter().find( | v | v.0 == ident) {
             return values.1;
-        }
-        // we dont have a last float, find it in the tracks
-        if let Some(track) = tracks.iter().find( | tr | tr.ident() == ident) {
-            if let Track::Float(ft) = track {
-                if ft.track.len()>0 { // grab the last key in the track
-                    return ft.track.last().unwrap().1
-                }
-            }
         }
         return 0.0
     }
@@ -274,20 +275,12 @@ impl Animator {
     }
     
     pub fn last_vec2(&self, ident: CxId) -> Vec2 {
-        Self::_last_vec2(ident, &self.last_values, &self.default.tracks)
+        Self::_last_vec2(ident, &self.last_values)
     }
     
-    pub fn _last_vec2(ident: CxId, last_values: &Vec<(CxId, f32, f32, f32, f32)>, tracks: &Vec<Track>) -> Vec2 {
+    pub fn _last_vec2(ident: CxId, last_values: &Vec<(CxId, f32, f32, f32, f32)>) -> Vec2 {
         if let Some(value) = last_values.iter().find( | v | v.0 == ident) {
             return Vec2{x:value.1, y:value.2};
-        }
-        // we dont have a last float, find it in the tracks
-        if let Some(track) = tracks.iter().find( | tr | tr.ident() == ident) {
-            if let Track::Vec2(ft) = track {
-                if ft.track.len()>0 { // grab the last key in the track
-                    return ft.track.last().unwrap().1
-                }
-            }
         }
         return Vec2::zero()
     }
@@ -322,20 +315,12 @@ impl Animator {
     }
     
     pub fn last_vec3(&self, ident: CxId) -> Vec3 {
-        Self::_last_vec3(ident, &self.last_values, &self.default.tracks)
+        Self::_last_vec3(ident, &self.last_values)
     }
     
-    pub fn _last_vec3(ident: CxId, last_values: &Vec<(CxId, f32, f32, f32, f32)>, tracks: &Vec<Track>) -> Vec3 {
+    pub fn _last_vec3(ident: CxId, last_values: &Vec<(CxId, f32, f32, f32, f32)>) -> Vec3 {
         if let Some(value) = last_values.iter().find( | v | v.0 == ident) {
             return Vec3{x:value.1, y:value.2, z:value.3};
-        }
-        // we dont have a last float, find it in the tracks
-        if let Some(track) = tracks.iter().find( | tr | tr.ident() == ident) {
-            if let Track::Vec3(ft) = track {
-                if ft.track.len()>0 { // grab the last key in the track
-                    return ft.track.last().unwrap().1
-                }
-            }
         }
         return Vec3::zero()
     }
@@ -371,20 +356,12 @@ impl Animator {
     }
     
     pub fn last_vec4(&self, ident: CxId) -> Vec4 {
-        Self::_last_vec4(ident, &self.last_values, &self.default.tracks)
+        Self::_last_vec4(ident, &self.last_values)
     }
     
-    pub fn _last_vec4(ident: CxId, last_values: &Vec<(CxId, f32, f32, f32, f32)>, tracks: &Vec<Track>) -> Vec4 {
+    pub fn _last_vec4(ident: CxId, last_values: &Vec<(CxId, f32, f32, f32, f32)>) -> Vec4 {
         if let Some(value) = last_values.iter().find( | v | v.0 == ident) {
             return Vec4{x:value.1, y:value.2, z:value.3, w:value.4};
-        }
-        // we dont have a last float, find it in the tracks
-        if let Some(track) = tracks.iter().find( | tr | tr.ident() == ident) {
-            if let Track::Vec4(ft) = track {
-                if ft.track.len()>0 { // grab the last key in the track
-                    return ft.track.last().unwrap().1
-                }
-            }
         }
         return Vec4::zero()
     }
@@ -421,21 +398,14 @@ impl Animator {
     }
         
     pub fn last_color(&self, ident: CxId) -> Color {
-        Self::_last_color(ident, &self.last_values, &self.default.tracks)
+        Self::_last_color(ident, &self.last_values)
     }
     
-    pub fn _last_color(ident: CxId, last_values: &Vec<(CxId, f32, f32, f32, f32)>, tracks: &Vec<Track>) -> Color {
+    pub fn _last_color(ident: CxId, last_values: &Vec<(CxId, f32, f32, f32, f32)>) -> Color {
         if let Some(value) = last_values.iter().find( | v | v.0 == ident) {
             return Color{r:value.1, g:value.2, b:value.3, a:value.4}
         }
-        // we dont have a last float, find it in the tracks
-        if let Some(track) = tracks.iter().find( | tr | tr.ident() == ident) {
-            if let Track::Color(ft) = track {
-                if ft.track.len()>0 { // grab the last key in the track
-                    return ft.track.last().unwrap().1
-                }
-            }
-        }
+      
         return Color::zero()
     }
     
@@ -464,7 +434,7 @@ impl Animator {
                 match &mut self.current.as_mut().unwrap().tracks[track_index] {
                     Track::Color(ft) => {
                         if let Some(begin) = cx.id_starts_with(ft.ident, prefix){
-                            let init = Self::_last_color(ft.ident, &self.last_values, &self.default.tracks);
+                            let init = Self::_last_color(ft.ident, &self.last_values);
                             let ret = Track::compute_track_value::<Color>(time, &ft.track, &mut ft.cut_init, init, &ft.ease);
                             Self::_set_last_color(ft.ident, ret, &mut self.last_values);
                             area.write_color(cx, &begin, ret);
@@ -472,7 +442,7 @@ impl Animator {
                     },
                     Track::Vec4(ft) => {
                         if let Some(begin) = cx.id_starts_with(ft.ident, prefix){
-                            let init = Self::_last_vec4(ft.ident, &self.last_values, &self.default.tracks);
+                            let init = Self::_last_vec4(ft.ident, &self.last_values);
                             let ret = Track::compute_track_value::<Vec4>(time, &ft.track, &mut ft.cut_init, init, &ft.ease);
                             Self::_set_last_vec4(ft.ident, ret, &mut self.last_values);
                             area.write_vec4(cx, &begin, ret);
@@ -480,7 +450,7 @@ impl Animator {
                     },
                     Track::Vec3(ft) => {
                         if let Some(begin) = cx.id_starts_with(ft.ident, prefix){
-                            let init = Self::_last_vec3(ft.ident, &self.last_values, &self.default.tracks);
+                            let init = Self::_last_vec3(ft.ident, &self.last_values);
                             let ret = Track::compute_track_value::<Vec3>(time, &ft.track, &mut ft.cut_init, init, &ft.ease);
                             Self::_set_last_vec3(ft.ident, ret, &mut self.last_values);
                             area.write_vec3(cx, &begin, ret);
@@ -488,7 +458,7 @@ impl Animator {
                     },
                     Track::Vec2(ft) => {
                         if let Some(begin) = cx.id_starts_with(ft.ident, prefix){
-                            let init = Self::_last_vec2(ft.ident, &self.last_values, &self.default.tracks);
+                            let init = Self::_last_vec2(ft.ident, &self.last_values);
                             let ret = Track::compute_track_value::<Vec2>(time, &ft.track, &mut ft.cut_init, init, &ft.ease);
                             Self::_set_last_vec2(ft.ident, ret, &mut self.last_values);
                             area.write_vec2(cx, &begin, ret);
@@ -496,7 +466,7 @@ impl Animator {
                     },
                     Track::Float(ft) => {
                         if let Some(begin) = cx.id_starts_with(ft.ident, prefix){
-                            let init = Self::_last_float(ft.ident, &self.last_values, &self.default.tracks);
+                            let init = Self::_last_float(ft.ident, &self.last_values);
                             let ret = Track::compute_track_value::<f32>(time, &ft.track, &mut ft.cut_init, init, &ft.ease);
                             Self::_set_last_float(ft.ident, ret, &mut self.last_values);
                             area.write_float(cx, &begin, ret);

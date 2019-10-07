@@ -5,8 +5,6 @@ use crate::button::*;
 pub struct DesktopButton {
     pub bg: Quad,
     pub animator: Animator,
-    pub anim_over: Anim,
-    pub anim_down: Anim,
     pub _bg_area: Area,
 }
 
@@ -37,23 +35,33 @@ impl DesktopButton {
                 shader: cx.add_shader(Self::def_bg_shader(), "Button.bg"),
                 ..Quad::style(cx)
             },
-            animator: Animator::new(Anim::new(Play::Cut {duration: 0.2}, vec![
-                Track::color(cx.id("bg.color"), Ease::Lin, vec![(1.0, color("#a"))]),
-                Track::float(cx.id("bg.hover"), Ease::Lin, vec![(1.0, 0.)]),
-                Track::float(cx.id("bg.down"), Ease::Lin, vec![(1.0, 0.)]),
-            ])),
-            anim_over: Anim::new(Play::Cut {duration: 0.2}, vec![
-                Track::color(cx.id("bg.color"), Ease::Lin, vec![(0.0, color("#f")), (1.0, color("#f"))]),
-                Track::float(cx.id("bg.down"), Ease::Lin, vec![(1.0, 0.)]),
-                Track::float(cx.id("bg.hover"), Ease::Lin, vec![(0.0, 1.0), (1.0, 1.0)]),
-            ]),
-            anim_down: Anim::new(Play::Cut {duration: 0.2}, vec![
-                Track::color(cx.id("bg.color"), Ease::Lin, vec![(0.0, color("#f55")), (1.0, color("#f55"))]),
-                Track::float(cx.id("bg.hover)"), Ease::Lin, vec![(1.0, 1.0)]),
-                Track::float(cx.id("bg.down"), Ease::OutExp, vec![(0.0, 0.0), (1.0, 3.1415 * 0.5)]),
-            ]),
+            animator: Animator::new(Self::get_default_anim(cx)),
             _bg_area: Area::Empty,
         }
+    }
+    
+    pub fn get_default_anim(cx:&Cx)->Anim{
+        Anim::new(Play::Cut {duration: 0.2}, vec![
+            Track::color(cx.id("bg.color"), Ease::Lin, vec![(1.0, color("#a"))]),
+            Track::float(cx.id("bg.hover"), Ease::Lin, vec![(1.0, 0.)]),
+            Track::float(cx.id("bg.down"), Ease::Lin, vec![(1.0, 0.)]),
+        ])
+    }
+    
+    pub fn get_over_anim(cx:&Cx)->Anim{
+        Anim::new(Play::Cut {duration: 0.2}, vec![
+            Track::color(cx.id("bg.color"), Ease::Lin, vec![(0.0, color("#f")), (1.0, color("#f"))]),
+            Track::float(cx.id("bg.down"), Ease::Lin, vec![(1.0, 0.)]),
+            Track::float(cx.id("bg.hover"), Ease::Lin, vec![(0.0, 1.0), (1.0, 1.0)]),
+        ])
+    }
+    
+    pub fn get_down_anim(cx:&Cx)->Anim{
+        Anim::new(Play::Cut {duration: 0.2}, vec![
+            Track::color(cx.id("bg.color"), Ease::Lin, vec![(0.0, color("#f55")), (1.0, color("#f55"))]),
+            Track::float(cx.id("bg.hover)"), Ease::Lin, vec![(1.0, 1.0)]),
+            Track::float(cx.id("bg.down"), Ease::OutExp, vec![(0.0, 0.0), (1.0, 3.1415 * 0.5)]),
+        ])
     }
 
     pub fn def_bg_shader() -> ShaderGen {
@@ -139,32 +147,33 @@ impl DesktopButton {
         //let mut ret_event = ButtonEvent::None;
         match event.hits(cx, self._bg_area, HitOpt::default()) {
             Event::Animate(ae) => self.animator.write_area(cx, self._bg_area, "bg.", ae.time),
+            Event::AnimateEnded(_) => self.animator.end(),
             Event::FingerDown(_fe) => {
-                self.animator.play_anim(cx, self.anim_down.clone());
+                self.animator.play_anim(cx, Self::get_down_anim(cx));
                 return ButtonEvent::Down;
             },
             Event::FingerHover(fe) => {
                 cx.set_hover_mouse_cursor(MouseCursor::Default);
                 match fe.hover_state {
                     HoverState::In => if fe.any_down {
-                        self.animator.play_anim(cx, self.anim_down.clone())
+                        self.animator.play_anim(cx, Self::get_down_anim(cx))
                     }
                     else {
-                        self.animator.play_anim(cx, self.anim_over.clone())
+                        self.animator.play_anim(cx, Self::get_over_anim(cx))
                     },
                     HoverState::Out => {
-                        self.animator.play_default(cx)
+                        self.animator.play_anim(cx, Self::get_default_anim(cx))
                     }
                     _ => ()
                 }
             },
             Event::FingerUp(fe) => if fe.is_over {
-                if !fe.is_touch {self.animator.play_anim(cx, self.anim_over.clone())}
-                else {self.animator.play_default(cx)}
+                if !fe.is_touch {self.animator.play_anim(cx, Self::get_over_anim(cx))}
+                else {self.animator.play_anim(cx, Self::get_default_anim(cx))}
                 return ButtonEvent::Clicked;
             }
             else {
-                self.animator.play_default(cx);
+                self.animator.play_anim(cx, Self::get_default_anim(cx));
                 return ButtonEvent::Up;
             }
             _ => ()

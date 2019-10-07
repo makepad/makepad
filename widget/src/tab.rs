@@ -57,7 +57,7 @@ impl Tab{
                 font_size:8.0,
                 ..Text::style(cx)
             },
-            animator:Animator::new(Anim::empty()),
+            animator:Animator::new_no_default(),
             _is_selected:false,
             _is_focussed:false,
             _is_down:false,
@@ -66,7 +66,7 @@ impl Tab{
             _text_area:Area::Empty,
             _bg_area:Area::Empty,
         };
-        tab.animator.default = tab.anim_default(cx);
+        tab.animator.set_anim_as_last_values(&tab.anim_default(cx));
         tab
     }
     
@@ -195,6 +195,7 @@ impl Tab{
                     self.animator.write_area(cx, self._text_area, "text.", ae.time);
                 }
             },
+            Event::AnimateEnded(_) => self.animator.end(),
             Event::AnimateEnded(_ae)=>{
                 if self.animator.term_anim_playing(){
                     return TabEvent::Close;
