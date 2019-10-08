@@ -413,6 +413,7 @@ impl TextBuffer {
         self.is_loading = false;
         self.is_crlf =  !utf8.find("\r\n").is_none();
         self.lines = TextBuffer::split_string_to_lines(utf8);
+        self.mutation_id += 1;
         cx.send_signal(self.signal, SIGNAL_TEXTBUFFER_LOADED);
     }
     
@@ -841,6 +842,10 @@ pub enum TokenType {
     Splat,
     Delimiter,
     Colon,
+    
+    Warning,
+    Error,
+    Defocus,
     
     Unexpected,
     Eof

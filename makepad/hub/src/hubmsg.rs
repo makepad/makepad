@@ -200,7 +200,8 @@ pub struct HubCargoMsg {
     pub tail: usize,
     pub head: usize,
     pub body: String,
-    pub more_lines: Vec<String>,
+    pub rendered: Option<String>,
+    pub explanation: Option<String>,
     pub level: HubCargoMsgLevel
 }
 

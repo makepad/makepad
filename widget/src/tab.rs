@@ -196,9 +196,11 @@ impl Tab {
                 }
             },
             Event::AnimEnded(_ae) => {
-                self.animator.end();
                 if self.animator.term_anim_playing() {
                     return TabEvent::Close;
+                }
+                else{
+                    self.animator.end();
                 }
             },
             Event::FingerDown(_fe) => {

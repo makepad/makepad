@@ -26,9 +26,12 @@ pub struct CodeEditor {
     pub open_font_size: f32,
     pub folded_font_size: f32,
     pub line_number_width: f32,
+    pub draw_line_numbers: bool, 
     pub top_padding: f32,
     pub colors: CodeEditorColors,
     pub cursor_blink_speed: f64,
+    
+    pub mark_unmatched_parens: bool,
     
     pub folding_depth: usize,
     //pub _bg_area: Area,
@@ -125,7 +128,12 @@ pub struct CodeEditorColors {
     pub paren_d2: Color,
     pub operator: Color,
     pub delimiter: Color,
-    pub unexpected: Color
+    pub unexpected: Color,
+
+    pub warning: Color,
+    pub error: Color,
+    pub defocus: Color
+
 }
 
 #[derive(Clone, PartialEq)]
@@ -184,6 +192,10 @@ impl CodeEditor {
                 operator: color256(212, 212, 212),
                 delimiter: color256(212, 212, 212),
                 unexpected: color256(255, 0, 0),
+                
+                warning: color256(225, 229, 112),
+                error: color256(254, 0, 0),
+                defocus: color256(128,128,128),
             },
             indent_lines: Quad {
                 z: 0.001,
@@ -268,8 +280,10 @@ impl CodeEditor {
             open_font_size: 8.0,
             folded_font_size: 0.5,
             line_number_width: 45.,
+            draw_line_numbers: true,
             cursor_blink_speed: 0.5,
             top_padding: 27.,
+            mark_unmatched_parens: true,
             _monospace_size: Vec2::zero(),
             _monospace_base: Vec2::zero(),
             _last_finger_move: None,
@@ -957,9 +971,11 @@ impl CodeEditor {
             
             self._cursor_area = cx.new_instance_draw_call(&self.cursor.shader, 0).into_area();
             
-            self.gutter_bg.draw_quad(cx, Rect {x: 0., y: 0., w: self.line_number_width, h: cx.get_height_total()});
-            cx.new_instance_draw_call(&self.text.shader, 0);
-            self._line_number_inst = Some(self.line_number_text.begin_text(cx));
+            if self.draw_line_numbers{
+                self.gutter_bg.draw_quad(cx, Rect {x: 0., y: 0., w: self.line_number_width, h: cx.get_height_total()});
+                cx.new_instance_draw_call(&self.text.shader, 0);
+                self._line_number_inst = Some(self.line_number_text.begin_text(cx));
+            }
             
             if let Some(select_scroll) = &mut self._select_scroll {
                 let scroll_pos = self.view.get_scroll_pos(cx);
@@ -1075,7 +1091,7 @@ impl CodeEditor {
         
         // draw a linenumber if we are visible
         let origin = cx.get_turtle_origin();
-        if cx.turtle_line_is_visible(self._monospace_size.y, self._scroll_pos) {
+        if self.draw_line_numbers && cx.turtle_line_is_visible(self._monospace_size.y, self._scroll_pos) {
             // lets format a number, we go to 4 numbers
             // yes this is dumb as rocks. but we need to be cheapnfast
             let chunk = &mut self._line_number_chunk;
@@ -1281,6 +1297,9 @@ impl CodeEditor {
                 TokenType::BuiltinType => self.colors.keyword,
                 TokenType::Keyword => self.colors.keyword,
                 TokenType::Bool => self.colors.keyword,
+                TokenType::Error => self.colors.error,
+                TokenType::Warning => self.colors.warning,
+                TokenType::Defocus => self.colors.defocus,
                 TokenType::Flow => {
                     self.colors.flow
                 }
@@ -1470,6 +1489,9 @@ impl CodeEditor {
     }
     
     fn draw_paren_unmatched(&mut self, cx: &mut Cx) {
+        if !self.mark_unmatched_parens{
+            return
+        }
         while self._paren_stack.len()>0 {
             let last = self._paren_stack.pop().unwrap();
             if self.has_key_focus(cx) && !last.geom_open.is_none() {
@@ -1489,7 +1511,9 @@ impl CodeEditor {
         
         self.text.end_text(cx, self._text_inst.as_ref().unwrap());
         self._text_area = self._text_inst.take().unwrap().inst.into_area();
-        self.line_number_text.end_text(cx, self._line_number_inst.as_ref().unwrap());
+        if self.draw_line_numbers{
+            self.line_number_text.end_text(cx, self._line_number_inst.as_ref().unwrap());
+        }
         
         // unmatched highlighting
         self.draw_paren_unmatched(cx);

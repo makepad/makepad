@@ -213,26 +213,32 @@ impl HubWorkspace {
                 if let Some(line) = line {
                     
                     // lets parse the line
-                    let parsed: Result<RustcCompilerMessage> = serde_json::from_str(&line);
-                    match parsed {
+                    let mut parsed: Result<RustcCompilerMessage> = serde_json::from_str(&line);
+                    match &mut parsed {
                         Err(err) => println!("Json Parse Error {:?} {}", err, line),
                         Ok(parsed) => {
                             // here we convert the parsed message
-                            if let Some(message) = &parsed.message { //.spans;
+                            if let Some(message) = &mut parsed.message { //.spans;
                                 let spans = &message.spans;
                                 for i in 0..spans.len() {
                                     let span = spans[i].clone();
                                     if !span.is_primary {
                                         continue
                                     }
+                                    
                                     let mut more_lines = vec![];
+                                    more_lines.push(line.clone());
+                                    /*
                                     if let Some(label) = span.label {
                                         more_lines.push(label);
-                                    }
+                                    }*/
                                     // if we have children fo process
                                     for child in &message.children {
                                         more_lines.push(child.message.clone());
                                     }
+                                    //if let Some(rendered) = &mut message.rendered{
+                                    //    *rendered = format!("{}\n{}", rendered, line.clone());
+                                    //}
                                     let level = match message.level.as_ref() {
                                         "warning" => HubCargoMsgLevel::Warning,
                                         "error" => HubCargoMsgLevel::Error,
@@ -253,7 +259,8 @@ impl HubWorkspace {
                                                 tail: span.byte_start as usize,
                                                 head: span.byte_end as usize,
                                                 body: message.message.clone(),
-                                                more_lines: more_lines,
+                                                rendered: message.rendered.clone(),
+                                                explanation: if let Some(code) = &message.code{code.explanation.clone()}else{None},
                                                 level: level
                                             }
                                         }
@@ -271,7 +278,7 @@ impl HubWorkspace {
                                 }).expect("tx_write fail");
                                 if !any_errors {
                                     artifact_path = None;
-                                    if let Some(executable) = parsed.executable{
+                                    if let Some(executable) = &parsed.executable{
                                         if !executable.ends_with(".rmeta") &&  abs_root_path.len() + 1< executable.len(){
                                             let last = executable.clone().split_off(abs_root_path.len() + 1);
                                             artifact_path = Some(last);

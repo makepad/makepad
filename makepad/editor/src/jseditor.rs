@@ -879,7 +879,7 @@ impl JSTokenizer {
                 // these are followeable by non unary operators
                 TokenType::Identifier | TokenType::BuiltinType | TokenType::TypeName |
                 TokenType::Call | TokenType::String | TokenType::Regex | TokenType::Number |
-                TokenType::Bool | TokenType::Unexpected => {
+                TokenType::Bool | TokenType::Unexpected | TokenType::Error | TokenType::Warning | TokenType::Defocus=> {
                     is_unary_operator = false;
                     
                     first_after_open = false;

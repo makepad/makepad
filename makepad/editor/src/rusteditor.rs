@@ -1023,7 +1023,7 @@ impl RustTokenizer {
                 },
                 // these are followeable by non unary operators
                 TokenType::Call | TokenType::String | TokenType::Regex | TokenType::Number |
-                TokenType::Bool | TokenType::Unexpected => {
+                TokenType::Bool | TokenType::Unexpected | TokenType::Error | TokenType::Warning | TokenType::Defocus=> {
                     is_unary_operator = false;
                     paren_stack.last_mut().unwrap().angle_counter = 0;
                     

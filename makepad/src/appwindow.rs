@@ -94,9 +94,11 @@ impl AppWindow {
             match item {
                 Panel::CargoLog => {
                     match self.cargo_log.handle_cargo_log(cx, event, storage){
-                        CargoLogEvent::SelectMessage {path} => {
+                        CargoLogEvent::SelectMessage {msg} => {
                             // just make it open an editor
-                            file_tree_event = FileTreeEvent::SelectFile {path: path};
+                            let path = msg.path.clone();
+                            file_tree_event = FileTreeEvent::SelectFile {path:path};
+                            self.cargo_log_item.load_msg(cx, msg);
                         },
                         _ => ()
                     }
@@ -129,7 +131,7 @@ impl AppWindow {
                                 storage.text_buffer_file_write(cx, path);
                                 
                                 // lets re-trigger the rust compiler
-                                self.cargo_log.restart_cargo(storage);
+                                self.cargo_log.restart_cargo(cx, storage);
                                 //app_global.rust_compiler.restart_rust_checker(cx, &mut app_global.text_buffers);
                             },
                             _ => ()

@@ -50,7 +50,7 @@ pub struct CargoMsg {
 
 #[derive(Clone)]
 pub enum CargoLogEvent {
-    SelectMessage {path: String},
+    SelectMessage {msg: HubCargoMsg},
     None,
 }
 
@@ -238,7 +238,7 @@ impl CargoLog {
     }
     
     
-    pub fn artifact_exec(&mut self, storage: &mut AppStorage, recur: bool) {
+    pub fn artifact_exec(&mut self, cx:&mut Cx, storage: &mut AppStorage, recur: bool) {
         let hub_ui = storage.hub_ui.as_mut().unwrap();
         let mut some_exec = false;
         // all the artifacts that are building
@@ -270,12 +270,16 @@ impl CargoLog {
             }
         }
         if !some_exec && !recur {
-            self.restart_cargo(storage);
-            self.artifact_exec(storage, true);
+            self.restart_cargo(cx, storage);
+            self.artifact_exec(cx, storage, true);
         }
     }
     
-    pub fn restart_cargo(&mut self, storage: &mut AppStorage) {
+    pub fn restart_cargo(&mut self, cx: &mut Cx, storage: &mut AppStorage) {
+        self._artifacts.truncate(0);
+        self._draw_messages.truncate(0);
+        self.gc_textbuffer_messages(cx, storage);
+
         let hub_ui = storage.hub_ui.as_mut().unwrap();
         self._exec_when_done = false;
         for active_target in &mut self._active_targets {
@@ -299,9 +303,6 @@ impl CargoLog {
                 active_target.artifact_uid = HubUid::zero();
             }
         }
-        
-        self._artifacts.truncate(0);
-        self._draw_messages.truncate(0);
         
         for active_target in &mut self._active_targets {
             let uid = hub_ui.alloc_uid();
@@ -371,14 +372,14 @@ impl CargoLog {
         
         match event {
             Event::KeyDown(ke) => match ke.key_code {
-                KeyCode::ArrowDown => if ke.modifiers.logo || ke.modifiers.control {
+                KeyCode::Period => if ke.modifiers.logo || ke.modifiers.control {
                     dm_to_select = self.next_error(false);
                 },
-                KeyCode::ArrowUp => if ke.modifiers.logo || ke.modifiers.control {
+                KeyCode::Comma => if ke.modifiers.logo || ke.modifiers.control {
                     dm_to_select = self.next_error(true);
                 },
                 KeyCode::Backtick => if ke.modifiers.logo || ke.modifiers.control {
-                    self.artifact_exec(storage, false);
+                    self.artifact_exec(cx, storage, false);
                     self.view.redraw_view_area(cx);
                 },
                 _ => ()
@@ -443,7 +444,10 @@ impl CargoLog {
                     dm.msg.head
                 };
                 cx.send_signal(text_buffer.signal, SIGNAL_TEXTBUFFER_JUMP_TO_OFFSET);
-                return CargoLogEvent::SelectMessage {path: dm.msg.path.clone()}
+                return CargoLogEvent::SelectMessage {
+                    msg: dm.msg.clone()
+                    //path: dm.msg.path.clone()
+                }
             }
         }
         CargoLogEvent::None
@@ -496,13 +500,13 @@ impl CargoLog {
             cx.set_turtle_padding(Padding {l: walk.x, t: 3., b: 2., r: 0.});
             self.text.color = self.message_color;
             self.text.draw_text(cx, &format!("{}", dm.msg.body));
-            
+            /*
             for line in &dm.msg.more_lines {
                 self.text.color = self.path_color;
                 self.text.draw_text(cx, ".  ");
                 self.text.color = self.message_color;
                 self.text.draw_text(cx, line);
-            }
+            }*/
             
             let bg_area = self.item_bg.end_quad(cx, &bg_inst);
             dm.animator.update_area_refs(cx, bg_area);
