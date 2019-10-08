@@ -4,6 +4,7 @@ use widget::*;
 use serde::*;
 use editor::*;
 use terminal::*;
+use hub::*;
 use crate::app::*;
 use crate::fileeditor::*;
 use crate::filetree::*;
@@ -65,6 +66,10 @@ impl AppWindow {
             cargo_log: CargoLog::style(cx),
             dock: Dock ::style(cx),
         }
+    }
+    
+    pub fn handle_hub_msg(&mut self, cx: &mut Cx, storage: &mut AppStorage, htc: &HubToClientMsg) {
+        self.cargo_log.handle_hub_msg(cx, storage, htc);
     }
     
     pub fn handle_app_window(&mut self, cx: &mut Cx, event: &mut Event, window_index: usize, state: &mut AppState, storage:&mut AppStorage) {
@@ -132,6 +137,8 @@ impl AppWindow {
                                 
                                 // lets re-trigger the rust compiler
                                 self.cargo_log.restart_cargo(cx, storage);
+                                self.cargo_log_item.clear_msg(cx);
+                                
                                 //app_global.rust_compiler.restart_rust_checker(cx, &mut app_global.text_buffers);
                             },
                             _ => ()

@@ -13,6 +13,7 @@ impl CargoLogItem {
         let editor = Self {
             code_editor: CodeEditor {
                 draw_line_numbers: false,
+                draw_cursor_row: false,
                 line_number_width: 10.,
                 top_padding: 10.,
                 mark_unmatched_parens: false,
@@ -43,7 +44,7 @@ impl CargoLogItem {
     }
     
     pub fn clear_msg(&mut self, cx: &mut Cx) {
-        
+         self.text_buffer.load_from_utf8(cx, "");
     }
     
     pub fn handle_cargo_log_item(&mut self, cx: &mut Cx, event: &mut Event) -> CodeEditorEvent {

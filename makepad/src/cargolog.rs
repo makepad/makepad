@@ -184,7 +184,7 @@ impl CargoLog {
         return false
     }
     
-    pub fn handle_hub_msg(&mut self, cx: &mut Cx, storage: &mut AppStorage, htc: &HubToClientMsg) {
+    pub fn handle_hub_msg(&mut self, cx: &mut Cx, storage: &mut AppStorage, htc: &HubToClientMsg) -> CargoLogEvent{
         let hub_ui = storage.hub_ui.as_mut().unwrap();
         match &htc.msg {
             HubMsg::CargoPackagesResponse {uid: _, packages: _} => {
@@ -194,7 +194,7 @@ impl CargoLog {
             HubMsg::CargoMsg {uid, msg} => if self.is_running_cargo_uid(uid) {
                 for check_msg in &self._draw_messages {
                     if check_msg.msg == *msg {
-                        return
+                        return CargoLogEvent::None
                     }
                 }
                 self._draw_messages.push(CargoMsg {
@@ -235,6 +235,7 @@ impl CargoLog {
             },
             _ => ()
         }
+        CargoLogEvent::None
     }
     
     

@@ -32,7 +32,7 @@ pub struct CodeEditor {
     pub cursor_blink_speed: f64,
     
     pub mark_unmatched_parens: bool,
-    
+    pub draw_cursor_row: bool,
     pub folding_depth: usize,
     //pub _bg_area: Area,
     pub _view_area: Area,
@@ -284,6 +284,7 @@ impl CodeEditor {
             cursor_blink_speed: 0.5,
             top_padding: 27.,
             mark_unmatched_parens: true,
+            draw_cursor_row: true, 
             _monospace_size: Vec2::zero(),
             _monospace_base: Vec2::zero(),
             _last_finger_move: None,
@@ -1611,12 +1612,14 @@ impl CodeEditor {
             let rc = self._draw_cursors.cursors[last_cursor];
             if let Some(_) = self.cursors.get_last_cursor_singular() {
                 // lets draw the cursor line
-                self.cursor_row.draw_quad_abs(cx, Rect {
-                    x: self.line_number_width + cx.get_turtle_origin().x,
-                    y: rc.y,
-                    w: cx.get_width_total().max(cx.get_turtle_bounds().x) - self.line_number_width,
-                    h: rc.h
-                });
+                if self.draw_cursor_row{
+                    self.cursor_row.draw_quad_abs(cx, Rect {
+                        x: self.line_number_width + cx.get_turtle_origin().x,
+                        y: rc.y,
+                        w: cx.get_width_total().max(cx.get_turtle_bounds().x) - self.line_number_width,
+                        h: rc.h
+                    });
+                }
             }
             if cx.has_key_focus(self.view.get_view_area(cx)) {
                 let scroll_pos = self.view.get_scroll_pos(cx);

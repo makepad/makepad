@@ -342,7 +342,7 @@ impl App {
             },
             _ => { // send the rest to cargo_log
                 for window in &mut self.windows {
-                    window.cargo_log.handle_hub_msg(cx, &mut self.storage, &htc)
+                    window.handle_hub_msg(cx, &mut self.storage, &htc)
                 }
             }
         }
