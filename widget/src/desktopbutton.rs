@@ -194,8 +194,8 @@ impl DesktopButton {
 
         let bg_inst = self.bg.draw_quad_walk(cx, Bounds::Fix(w), Bounds::Fix(h), Margin::zero());
         
-        bg_inst.push_float(cx, self.animator.last_float(cx.id("bg.hover")));
-        bg_inst.push_float(cx, self.animator.last_float(cx.id("bg.down")));
+        bg_inst.push_last_float(cx, &self.animator, "bg.hover");
+        bg_inst.push_last_float(cx, &self.animator, "bg.down");
         bg_inst.push_float(cx, ty.shader_float());
         self._bg_area = bg_inst.into_area();
         self.animator.update_area_refs(cx, self._bg_area); // if our area changed, update animation

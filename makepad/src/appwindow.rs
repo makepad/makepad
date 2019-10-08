@@ -6,12 +6,15 @@ use editor::*;
 use terminal::*;
 use crate::app::*;
 use crate::fileeditor::*;
+use crate::filetree::*;
 use crate::cargolog::*;
+use crate::cargologitem::*;
 use crate::keyboard::*;
 
 #[derive(Clone, Serialize, Deserialize)]
 pub enum Panel {
     CargoLog,
+    CargoLogItem,
     Keyboard,
     FileTree,
     FileEditorTarget,
@@ -23,6 +26,7 @@ pub enum Panel {
 pub struct AppWindow {
     pub desktop_window: DesktopWindow,
     pub file_tree: FileTree,
+    pub cargo_log_item: CargoLogItem,
     pub cargo_log: CargoLog,
     pub keyboard: Keyboard,
     pub file_editors: Elements<u64, FileEditor, FileEditorTemplates>,
@@ -56,6 +60,7 @@ impl AppWindow {
             }),
             local_terminals: Elements::new(LocalTerminal::style(cx)),
             keyboard: Keyboard::style(cx),
+            cargo_log_item: CargoLogItem::style(cx),
             file_tree: FileTree::style(cx),
             cargo_log: CargoLog::style(cx),
             dock: Dock ::style(cx),
@@ -64,7 +69,7 @@ impl AppWindow {
     
     pub fn handle_app_window(&mut self, cx: &mut Cx, event: &mut Event, window_index: usize, state: &mut AppState, storage:&mut AppStorage) {
         
-        match self.desktop_window.handle_desktop_window(cx, event) {
+        match self.desktop_window.handle_desktop_window(cx, event) {      
             DesktopWindowEvent::EventForOtherWindow => {
                 return
             },
@@ -81,7 +86,6 @@ impl AppWindow {
             },
             _ => ()
         }
-        
        
         let dock_items = &mut state.windows[window_index].dock_items;
         let mut dock_walker = self.dock.walker(dock_items);
@@ -96,6 +100,9 @@ impl AppWindow {
                         },
                         _ => ()
                     }
+                },
+                Panel::CargoLogItem=>{
+                    self.cargo_log_item.handle_cargo_log_item(cx, event);
                 },
                 Panel::Keyboard => {
                     self.keyboard.handle_keyboard(cx, event, storage);
@@ -183,6 +190,9 @@ impl AppWindow {
             match item {
                 Panel::CargoLog => {
                     self.cargo_log.draw_cargo_log(cx);
+                },
+                Panel::CargoLogItem=>{
+                    self.cargo_log_item.draw_cargo_log_item(cx);
                 },
                 Panel::Keyboard => {
                     self.keyboard.draw_keyboard(cx);

@@ -4,11 +4,14 @@ mod fileeditor;
 pub use crate::fileeditor::*;
 mod cargolog;
 pub use crate::cargolog::*;
-
+mod cargologitem; 
+pub use crate::cargologitem::*;
 mod app;
 pub use crate::app::*;
 mod appwindow;
 pub use crate::appwindow::*;
+mod filetree;
+pub use crate::filetree::*;
 //mod rustcompiler;
 //pub use crate::rustcompiler::*;
 mod hubui;

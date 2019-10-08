@@ -1,26 +1,17 @@
-use workspacelib::*;
-use std::net::SocketAddr;
+use hub::*;
 
 fn main() {
     let key = [1u8, 2u8, 3u8, 4u8];
-    let mut server = HubServer::start_hub_server(
-        &key,
-        SocketAddr::from(([0, 0, 0, 0], 0))
-    );
+    let mut server = HubServer::start_hub_server_default(&key, HubLog::None);
     
-    server.start_announce_server(
-        &key,
-        SocketAddr::from(([0, 0, 0, 0], 0)),
-        SocketAddr::from(([255, 255, 255, 255], HUB_ANNOUNCE_PORT)),
-        SocketAddr::from(([127, 0, 0, 1], HUB_ANNOUNCE_PORT)),
-    );
+    server.start_announce_server_default(&key);
     
     // lets wait for a server announce
     let address = HubClient::wait_for_announce(&key).expect("cannot wait for announce");
     
     println!("GOT ADDRESS {:?}", address);
     
-    let mut ui_client = HubClient::connect_to_hub(&key, address).expect("Cannot connect client_a");
+    let mut ui_client = HubClient::connect_to_hub(&key, address, HubLog::None).expect("Cannot connect client_a");
     
     // lets connect a UI client
     ui_client.tx_write.send(ClientToHubMsg {
@@ -33,21 +24,31 @@ fn main() {
         // wait for the answer
         while let Ok(htc) = ui_client.rx_read.recv() {
             match htc.msg {
-                HubMsg::ConnectBuild => {
+                HubMsg::ConnectWorkspace(_) => {
                     let new_uid = ui_client.alloc_uid();
                     ui_client.tx_write.send(ClientToHubMsg {
-                        to: HubMsgTo::Build,
-                        msg: HubMsg::GetCargoTargets {uid: new_uid}
+                        to: HubMsgTo::Client(htc.from),
+                        msg: HubMsg::CargoPackagesRequest {uid: new_uid}
                     }).expect("Cannot send messsage");
                 },
-                HubMsg::CargoHasTargets {uid: _, targets: _} => {
+                HubMsg::CargoPackagesResponse {uid:_, packages: _} => {
                     let new_uid = ui_client.alloc_uid();
                     // now lets fire up a build.
                     ui_client.tx_write.send(ClientToHubMsg {
-                        to: HubMsgTo::Build,
-                        msg: HubMsg::CargoCheck {uid: new_uid, target: "makepad".to_string()}
+                        to: HubMsgTo::Client(htc.from),
+                        msg: HubMsg::CargoExec {
+                            uid: new_uid,
+                            package: "makepad".to_string(),
+                            target: "check".to_string()
+                        }
                     }).expect("Cannot send messsage");
                     
+                    ui_client.tx_write.send(ClientToHubMsg {
+                        to: HubMsgTo::Client(htc.from),
+                        msg: HubMsg::CargoKill {
+                            uid: new_uid,
+                        }
+                    }).expect("Cannot send messsage");
                 },
                 _ => ()
             }
@@ -57,17 +58,25 @@ fn main() {
     // start a buildserver test
     std::thread::spawn(move || {
         // lets start a Make proc
-        Workspace::run("test", | make, htc | match htc.msg {
-            HubMsg::GetCargoTargets {uid} => {
-                make.cargo_has_targets(uid, &["makepad"])
+        let key = [1u8, 2u8, 3u8, 4u8];
+        HubWorkspace::run(&key, "makepad", "edit_repo", HubLog::None, | ws, htc | match htc.msg {
+            HubMsg::CargoPackagesRequest {uid} => {
+                ws.cargo_packages(htc.from, uid, vec![
+                    HubCargoPackage::new("makepad", &["check", "makepad", "workspace"])
+                ])
             },
-            HubMsg::CargoCheck {uid, target, ..} => {
-                make.cargo(uid, &["check", "-p", &target])
+            HubMsg::CargoExec {uid, package, target} => {
+                match package.as_ref() {
+                    "makepad" => match target.as_ref() {
+                        "check" => ws.cargo_exec(uid, &["check", "-p", &package]),
+                        "makepad" => ws.cargo_exec(uid, &["build", "-p", "makepad"]),
+                        "workspace" => ws.cargo_exec(uid, &["build", "-p", "workspace"]),
+                        _ => ()
+                    },
+                    _ => ()
+                }
             },
-            HubMsg::ListWorkspace {uid} => {
-                make.list_workspace(uid, "./")
-            }
-            _ => make.default(htc)
+            _ => ws.default(htc)
         });
     });
     

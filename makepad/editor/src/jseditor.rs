@@ -10,14 +10,14 @@ pub struct JSEditor {
 
 impl JSEditor {
     pub fn style(cx: &mut Cx) -> Self {
-        let rust_editor = Self {
+        let editor = Self {
             code_editor: CodeEditor{
                 folding_depth: 3,
                 ..CodeEditor::style(cx)
             }
         };
         //tab.animator.default = tab.anim_default(cx);
-        rust_editor
+        editor
     }
     
     pub fn handle_js_editor(&mut self, cx: &mut Cx, event: &mut Event,  text_buffer: &mut TextBuffer) -> CodeEditorEvent {

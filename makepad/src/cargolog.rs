@@ -57,7 +57,7 @@ pub enum CargoLogEvent {
 impl CargoLog {
     pub fn style(cx: &mut Cx) -> Self {
         Self {
-            bg: Quad ::style(cx),
+            bg: Quad::style(cx),
             item_bg: Quad::style(cx),
             text: Text {
                 wrapping: Wrapping::Word,
@@ -71,9 +71,7 @@ impl CargoLog {
                 }),
                 ..View::style(cx)
             },
-            code_icon: CodeIcon {
-                ..CodeIcon::style(cx)
-            },
+            code_icon: CodeIcon::style(cx),
             path_color: color("#999"),
             message_color: color("#bbb"),
             row_height: 20.0,
@@ -89,6 +87,7 @@ impl CargoLog {
             ]
         }
     }
+    
     pub fn init(&mut self, _cx: &mut Cx, _storage: &mut AppStorage) {
     }
     
@@ -393,6 +392,9 @@ impl CargoLog {
                 Event::Animate(ae) => {
                     dm.animator.write_area(cx, dm.animator.area, "bg.", ae.time);
                 },
+                Event::AnimEnded(_)=>{
+                    dm.animator.end();
+                },
                 Event::FingerDown(_fe) => {
                     cx.set_down_mouse_cursor(MouseCursor::Hand);
                     // mark ourselves, unmark others
@@ -452,17 +454,28 @@ impl CargoLog {
             return
         }
         
+        // lets get the scroll position.
+        let scroll_pos = self.view.get_scroll_pos(cx);
+        
+        // we need to find the first item to draw
+        let _start_item = (scroll_pos.y / self.row_height).floor(); 
+        // lets jump the turtle forward by scrollpos.y 
+        
+        //cx.move_turtle(0., scroll_pos.y);
+        
+        let item_layout = Layout {
+            width: Bounds::Fill,
+            height: Bounds::Fix(self.row_height),
+            padding: Padding {l: 2., t: 3., b: 2., r: 0.},
+            line_wrap: LineWrap::None,
+            ..Default::default()
+        };
+        
         let mut counter = 0;
         for dm in &mut self._draw_messages {
             self.item_bg.color = dm.animator.last_color(cx.id("bg.color"));
             
-            let bg_inst = self.item_bg.begin_quad(cx, &Layout {
-                width: Bounds::Fill,
-                height: Bounds::Compute, //::Fix(self.row_height),
-                padding: Padding {l: 2., t: 3., b: 2., r: 0.},
-                line_wrap: LineWrap::NewLine,
-                ..Default::default()
-            });
+            let bg_inst = self.item_bg.begin_quad(cx, &item_layout);
             
             match dm.msg.level {
                 HubCargoMsgLevel::Error => {
@@ -479,6 +492,7 @@ impl CargoLog {
             self.text.color = self.path_color;
             self.text.draw_text(cx, &format!("{}:{} - ", dm.msg.path, dm.msg.row));
             let walk = cx.get_rel_turtle_walk();
+            // this keeps the wraparound to the right of where we are
             cx.set_turtle_padding(Padding {l: walk.x, t: 3., b: 2., r: 0.});
             self.text.color = self.message_color;
             self.text.draw_text(cx, &format!("{}", dm.msg.body));
@@ -492,22 +506,18 @@ impl CargoLog {
             
             let bg_area = self.item_bg.end_quad(cx, &bg_inst);
             dm.animator.update_area_refs(cx, bg_area);
-            
             cx.turtle_new_line();
             
             counter += 1;
         }
         
+        // draw status line
+        
         let bg_even = cx.color("bg_selected");
         let bg_odd = cx.color("bg_odd");
         
         self.item_bg.color = if counter & 1 == 0 {bg_even}else {bg_odd};
-        let bg_inst = self.item_bg.begin_quad(cx, &Layout {
-            width: Bounds::Fill,
-            height: Bounds::Compute, //Bounds::Fix(self.row_height),
-            padding: Padding {l: 2., t: 3., b: 2., r: 0.},
-            ..Default::default()
-        });
+        let bg_inst = self.item_bg.begin_quad(cx, &item_layout);
         
         if !self.is_any_cargo_running() {
             self.text.color = self.path_color;
@@ -533,7 +543,7 @@ impl CargoLog {
         let rect_now = cx.get_turtle_rect();
         let mut y = view_total.y;
         while y < rect_now.h {
-            self.item_bg.color = if counter & 1 == 0 {bg_even}else {bg_odd};
+            self.item_bg.color = if counter & 1 == 0 {bg_even} else {bg_odd};
             self.item_bg.draw_quad_walk(cx, Bounds::Fill, Bounds::Fix((rect_now.h - y).min(self.row_height)), Margin::zero());
             cx.turtle_new_line();
             y += self.row_height;

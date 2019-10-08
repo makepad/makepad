@@ -1,6 +1,6 @@
-use closefds::*;
+//use closefds::*;
 use std::process::{Command, Child, Stdio};
-use std::os::unix::process::{CommandExt};
+//use std::os::unix::process::{CommandExt};
 use std::sync::{mpsc};
 use std::io::{Read};
 use std::str;
@@ -15,33 +15,22 @@ impl Process {
     
     pub fn start(cmd: &str, args: &[&str], current_dir: &str) -> Result<Process, std::io::Error> {
         fn create_process(cmd: &str, args: &[&str], current_dir: &str) -> Result<Child, std::io::Error> {
-            unsafe {
-                Command::new(cmd) .args(args) .pre_exec( || {
-                    let _ = close_fds_on_exec(vec![0, 1, 2]).unwrap()();
-                    println!("\0");
-                    Ok(())
-                })
-                    .stdin(Stdio::null())
-                    .stdout(Stdio::piped())
-                    .stderr(Stdio::piped())
-                    .current_dir(current_dir)
-                    .spawn()
-            }
+            Command::new(cmd) .args(args)
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .current_dir(current_dir)
+                .spawn()
         }
 
         let mut child = create_process(cmd, args, current_dir) ?;
+ 
+        let (tx_line, rx_line) = mpsc::channel();
+        let (tx_err, rx_err) = mpsc::channel();
 
         let mut stdout = child.stdout.take().expect("stdout cannot be taken!");
         let mut stderr = child.stderr.take().expect("stderr cannot be taken!");
-        let mut zero = [0u8; 2];
 
-        let bytes = stdout.read(&mut zero) ?;
-        
-        if bytes == 0 || zero[0] != 0 {
-            panic!("Process start incorrect startup state {} {}", bytes, zero[0]);
-        }
-
-        let (tx_line, rx_line) = mpsc::channel();
         let _stdout_thread = {
             std::thread::spawn(move || {
                 let mut storage = Vec::new();
@@ -70,7 +59,6 @@ impl Process {
             })
         };
 
-        let (tx_err, rx_err) = mpsc::channel();
         let _stderr_thread = {
             std::thread::spawn(move || {
                 let mut storage = Vec::new();
@@ -109,6 +97,7 @@ impl Process {
     pub fn kill(&mut self) {
         if let Some(child) = &mut self.child{
             let _ = child.kill();
+            let _ = child.wait();
             self.child = None;
         }
     }

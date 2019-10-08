@@ -14,8 +14,6 @@ mod dock;
 pub use crate::dock::*;
 mod style;
 pub use crate::style::*;
-mod filetree;
-pub use crate::filetree::*;
 mod desktopwindow;
 pub use crate::desktopwindow::*;
 mod desktopbutton;

@@ -119,10 +119,6 @@ impl Animator {
         }
         return false
     }
-    /*
-    pub fn play_default(&mut self, cx: &mut Cx) {
-        self.play_anim(cx, self.default.clone());
-    }*/
     
     pub fn play_anim(&mut self, cx: &mut Cx, anim: Anim) {
         // if our area is invalid, we should just set our default value
@@ -477,45 +473,6 @@ impl Animator {
             //}
         }
     }
-    
-    /*
-    pub fn last_push(&self, cx: &mut Cx, area_name:&str, area:Area){
-        if let Some(dot) = area_name.find('.'){
-            let field = area_name.get((dot+1)..area_name.len()).unwrap();
-
-            let anim = if self.current.is_none(){
-                &self.default
-            }
-            else{
-                self.current.as_ref().unwrap()
-            };
-            for track in &anim.tracks{
-                if track.ident() == area_name{
-                    match track{
-                        Track::Vec4(_)=>{
-                            let v4 = self.last_vec4(area_name);
-                            area.push_vec4(cx, field, v4);
-                        },
-                        Track::Vec3(_)=>{
-                            let v3 = self.last_vec3(area_name);
-                            area.push_vec3(cx, field, v3);
-                        },
-                        Track::Vec2(_)=>{
-                            let v2 = self.last_vec2(area_name);
-                            area.push_vec2(cx, field, v2);
-                        },
-                        Track::Float(_)=>{
-                            let fl =  self.last_float(area_name);
-                            area.push_float(cx, field, fl);
-                        }
-                    }
-                    return
-                }
-            }
-
-        }
-    }*/
-    
 }
 
 #[derive(Clone, Debug)]

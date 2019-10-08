@@ -4,6 +4,7 @@ use widget::*;
 use editor::*;
 use crate::appwindow::*;
 use crate::hubui::*;
+use crate::filetree::*;
 use std::collections::HashMap;
 use serde::*;
 use hub::*;
@@ -183,6 +184,11 @@ impl App {
                                     closeable: false,
                                     title: "Cargo Log".to_string(),
                                     item: Panel::CargoLog
+                                },
+                                DockTab {
+                                    closeable: false,
+                                    title: "Log Item".to_string(),
+                                    item: Panel::CargoLogItem
                                 },
                                 DockTab {
                                     closeable: false,
