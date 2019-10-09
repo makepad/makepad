@@ -544,7 +544,7 @@ impl LogList {
         for i in start_item..self._log_items.len() {
             
             let walk = cx.get_rel_turtle_walk();
-            if walk.y - start_scroll > view_rect.h {
+            if walk.y - start_scroll > view_rect.h + self.row_height {
                 // this is a virtual viewport, so bail if we are below the view
                 let left = (self._log_items.len() - i) as f32 * self.row_height;
                 cx.walk_turtle(Bounds::Fill, Bounds::Fix(left), Margin::zero(), None);
