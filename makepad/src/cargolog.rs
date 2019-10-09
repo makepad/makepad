@@ -141,14 +141,22 @@ impl CargoLog {
                 if dm.msg.level == HubCargoMsgLevel::Log {
                     break
                 }
-                if dm.msg.head == dm.msg.tail {
-                    messages.cursors.push(TextCursor {
-                        head: dm.msg.head as usize,
-                        tail: dm.msg.tail as usize,
-                        max: 0
-                    })
+                // search for insert point
+                let mut inserted = false;
+                if messages.cursors.len()>0{
+                    for i in (0..messages.cursors.len()).rev(){
+                        if dm.msg.head < messages.cursors[i].head && (i == 0 || dm.msg.head >= messages.cursors[i-1].head){
+                            messages.cursors.insert(i, TextCursor {
+                                head: dm.msg.head,
+                                tail: dm.msg.tail,
+                                max: 0
+                            });
+                            inserted = true;
+                            break;
+                        }
+                    }
                 }
-                else {
+                if !inserted{
                     messages.cursors.push(TextCursor {
                         head: dm.msg.head,
                         tail: dm.msg.tail,
@@ -207,6 +215,9 @@ impl CargoLog {
                 });
                 self.view.redraw_view_area(cx);
                 self.export_messages(cx, storage);
+            },
+            HubMsg::ArtifactMsg{uid, msg}=>{ 
+                
             },
             HubMsg::CargoArtifact {uid, package_id, fresh: _} => if self.is_running_cargo_uid(uid) {
                 self._artifacts.push(package_id.clone());
@@ -442,10 +453,10 @@ impl CargoLog {
             if let Some(path) = &dm.msg.path {
                 let text_buffer = storage.text_buffer_from_path(cx, &path);
                 text_buffer.messages.jump_to_offset = if dm.msg.level == HubCargoMsgLevel::Log {
-                    text_buffer.text_pos_to_offset(TextPos {row: dm.msg.row - 1, col: dm.msg.col - 1 - (dm.msg.tail - dm.msg.head)})
+                    text_buffer.text_pos_to_offset(TextPos {row: dm.msg.row - 1, col: dm.msg.col - 1})
                 }
                 else {
-                    dm.msg.head
+                    dm.msg.tail 
                 };
                 cx.send_signal(text_buffer.signal, SIGNAL_TEXTBUFFER_JUMP_TO_OFFSET);
                 

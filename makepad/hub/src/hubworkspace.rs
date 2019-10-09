@@ -250,7 +250,7 @@ impl HubWorkspace {
                                     if level == HubCargoMsgLevel::Error {
                                         any_errors = true;
                                     }
-                                    // lets try to pull path out of rendered
+                                    // lets try to pull path out of rendered, this fixes some rust bugs
                                     let mut path = span.file_name;
                                     if let Some(rendered) = &message.rendered{
                                         let lines:Vec<&str> = rendered.split('\n').collect();
