@@ -30,9 +30,9 @@ pub enum HubMsg {
         uid: HubUid,
     },
     
-    CargoMsg {
+    LogItem {
         uid: HubUid,
-        msg: HubCargoMsg
+        item: HubLogItem
     },
     
     CargoArtifact {
@@ -67,11 +67,6 @@ pub enum HubMsg {
     
     ArtifactExecBegin {
         uid: HubUid
-    },
-    
-    ArtifactMsg {
-        uid: HubUid,
-        msg: String
     },
     
     ArtifactExecEnd {
@@ -185,14 +180,14 @@ impl HubCargoPackage {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub enum HubCargoMsgLevel {
+pub enum HubLogItemLevel {
     Warning,
     Error,
     Log
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct HubCargoMsg {
+pub struct HubLogItem {
     pub package_id: String,
     pub path: Option<String>,
     pub row: usize,
@@ -202,7 +197,7 @@ pub struct HubCargoMsg {
     pub body: String,
     pub rendered: Option<String>,
     pub explanation: Option<String>,
-    pub level: HubCargoMsgLevel
+    pub level: HubLogItemLevel
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -8,14 +8,14 @@ use hub::*;
 use crate::app::*;
 use crate::fileeditor::*;
 use crate::filetree::*;
-use crate::cargolog::*;
-use crate::cargologitem::*;
+use crate::loglist::*;
+use crate::logitem::*;
 use crate::keyboard::*;
 
 #[derive(Clone, Serialize, Deserialize)]
 pub enum Panel {
-    CargoLog,
-    CargoLogItem,
+    LogList,
+    LogItem,
     Keyboard,
     FileTree,
     FileEditorTarget,
@@ -27,8 +27,8 @@ pub enum Panel {
 pub struct AppWindow {
     pub desktop_window: DesktopWindow,
     pub file_tree: FileTree,
-    pub cargo_log_item: CargoLogItem,
-    pub cargo_log: CargoLog,
+    pub log_item: LogItem,
+    pub log_list: LogList,
     pub keyboard: Keyboard,
     pub file_editors: Elements<u64, FileEditor, FileEditorTemplates>,
     pub local_terminals: Elements<u64, LocalTerminal, LocalTerminal>,
@@ -61,15 +61,15 @@ impl AppWindow {
             }),
             local_terminals: Elements::new(LocalTerminal::style(cx)),
             keyboard: Keyboard::style(cx),
-            cargo_log_item: CargoLogItem::style(cx),
+            log_item: LogItem::style(cx),
+            log_list: LogList::style(cx),
             file_tree: FileTree::style(cx),
-            cargo_log: CargoLog::style(cx),
             dock: Dock ::style(cx),
         }
     }
     
     pub fn handle_hub_msg(&mut self, cx: &mut Cx, storage: &mut AppStorage, htc: &HubToClientMsg) {
-        self.cargo_log.handle_hub_msg(cx, storage, htc);
+        self.log_list.handle_hub_msg(cx, storage, htc);
     }
     
     pub fn handle_app_window(&mut self, cx: &mut Cx, event: &mut Event, window_index: usize, state: &mut AppState, storage:&mut AppStorage) {
@@ -97,22 +97,22 @@ impl AppWindow {
         let mut file_tree_event = FileTreeEvent::None;
         while let Some(item) = dock_walker.walk_handle_dock(cx, event) {
             match item {
-                Panel::CargoLog => {
-                    match self.cargo_log.handle_cargo_log(cx, event, storage){
-                        CargoLogEvent::SelectMessage {path, msg} => {
+                Panel::LogList => {
+                    match self.log_list.handle_log_list(cx, event, storage){
+                        LogListEvent::SelectLogItem {path, item} => {
                             // just make it open an editor
                             if let Some(path) = path{
                                 file_tree_event = FileTreeEvent::SelectFile {path:path};
                             }
-                            if let Some(msg) = msg{
-                                self.cargo_log_item.load_msg(cx, &msg);
+                            if let Some(item) = item{
+                                self.log_item.load_item(cx, &item);
                             }
                         },
                         _ => ()
                     }
                 },
-                Panel::CargoLogItem=>{
-                    self.cargo_log_item.handle_cargo_log_item(cx, event);
+                Panel::LogItem=>{
+                    self.log_item.handle_log_item(cx, event);
                 },
                 Panel::Keyboard => {
                     self.keyboard.handle_keyboard(cx, event, storage);
@@ -139,8 +139,8 @@ impl AppWindow {
                                 storage.text_buffer_file_write(cx, path);
                                 
                                 // lets re-trigger the rust compiler
-                                self.cargo_log.restart_cargo(cx, storage);
-                                self.cargo_log_item.clear_msg(cx);
+                                self.log_list.restart_cargo(cx, storage);
+                                self.log_item.clear_msg(cx);
                                 
                                 //app_global.rust_compiler.restart_rust_checker(cx, &mut app_global.text_buffers);
                             },
@@ -200,11 +200,11 @@ impl AppWindow {
         let mut dock_walker = self.dock.walker(dock_items);
         while let Some(item) = dock_walker.walk_draw_dock(cx) {
             match item {
-                Panel::CargoLog => {
-                    self.cargo_log.draw_cargo_log(cx);
+                Panel::LogList => {
+                    self.log_list.draw_log_list(cx);
                 },
-                Panel::CargoLogItem=>{
-                    self.cargo_log_item.draw_cargo_log_item(cx);
+                Panel::LogItem=>{
+                    self.log_item.draw_log_item(cx);
                 },
                 Panel::Keyboard => {
                     self.keyboard.draw_keyboard(cx);

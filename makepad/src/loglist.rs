@@ -5,7 +5,7 @@ use hub::*;
 use crate::app::*;
 
 #[derive(Clone)]
-pub struct CargoLog {
+pub struct LogList {
     pub view: View<ScrollBar>,
     pub bg: Quad,
     pub text: Text,
@@ -18,7 +18,7 @@ pub struct CargoLog {
     pub _active_package: String,
     pub _active_targets: Vec<CargoActiveTarget>,
     pub _exec_when_done: bool,
-    pub _draw_messages: Vec<CargoMsg>,
+    pub _log_items: Vec<LogItemDraw>,
     pub _artifacts: Vec<String>,
 }
 
@@ -42,22 +42,22 @@ impl CargoActiveTarget {
 }
 
 #[derive(Clone)]
-pub struct CargoMsg {
+pub struct LogItemDraw {
     animator: Animator,
-    msg: HubCargoMsg,
+    item: HubLogItem,
     is_selected: bool
 }
 
 #[derive(Clone)]
-pub enum CargoLogEvent {
-    SelectMessage {
+pub enum LogListEvent {
+    SelectLogItem {
         path: Option<String>,
-        msg: Option<String>
+        item: Option<String>
     },
     None,
 }
 
-impl CargoLog {
+impl LogList {
     pub fn style(cx: &mut Cx) -> Self {
         Self {
             bg: Quad::style(cx),
@@ -79,7 +79,7 @@ impl CargoLog {
             message_color: color("#bbb"),
             row_height: 20.0,
             _exec_when_done: false,
-            _draw_messages: Vec::new(),
+            _log_items: Vec::new(),
             _artifacts: Vec::new(),
             _active_workspace: "makepad".to_string(),
             _active_package: "makepad".to_string(),
@@ -126,8 +126,8 @@ impl CargoLog {
     
     pub fn export_messages(&self, cx: &mut Cx, storage: &mut AppStorage) {
         
-        for dm in &self._draw_messages {
-            if let Some(path) = &dm.msg.path{
+        for dm in &self._log_items {
+            if let Some(path) = &dm.item.path{
                 let text_buffer = storage.text_buffer_from_path(cx, &path);
                 
                 let messages = &mut text_buffer.messages;
@@ -138,17 +138,17 @@ impl CargoLog {
                     messages.bodies.truncate(0);
                 }
                 
-                if dm.msg.level == HubCargoMsgLevel::Log {
+                if dm.item.level == HubLogItemLevel::Log {
                     break
                 }
                 // search for insert point
                 let mut inserted = false;
                 if messages.cursors.len()>0{
                     for i in (0..messages.cursors.len()).rev(){
-                        if dm.msg.head < messages.cursors[i].head && (i == 0 || dm.msg.head >= messages.cursors[i-1].head){
+                        if dm.item.head < messages.cursors[i].head && (i == 0 || dm.item.head >= messages.cursors[i-1].head){
                             messages.cursors.insert(i, TextCursor {
-                                head: dm.msg.head,
-                                tail: dm.msg.tail,
+                                head: dm.item.head,
+                                tail: dm.item.tail,
                                 max: 0
                             });
                             inserted = true;
@@ -158,20 +158,23 @@ impl CargoLog {
                 }
                 if !inserted{
                     messages.cursors.push(TextCursor {
-                        head: dm.msg.head,
-                        tail: dm.msg.tail,
+                        head: dm.item.head,
+                        tail: dm.item.tail,
                         max: 0
                     })
                 }
                 
                 text_buffer.messages.bodies.push(TextBufferMessage {
-                    body: dm.msg.body.clone(),
-                    level: match dm.msg.level {
-                        HubCargoMsgLevel::Warning => TextBufferMessageLevel::Warning,
-                        HubCargoMsgLevel::Error => TextBufferMessageLevel::Error,
-                        HubCargoMsgLevel::Log => TextBufferMessageLevel::Log,
+                    body: dm.item.body.clone(),
+                    level: match dm.item.level {
+                        HubLogItemLevel::Warning => TextBufferMessageLevel::Warning,
+                        HubLogItemLevel::Error => TextBufferMessageLevel::Error,
+                        HubLogItemLevel::Log => TextBufferMessageLevel::Log,
                     }
                 });
+            }
+            if dm.item.level == HubLogItemLevel::Log {
+                break
             }
         }
         self.gc_textbuffer_messages(cx, storage);
@@ -195,30 +198,28 @@ impl CargoLog {
         return false
     }
     
-    pub fn handle_hub_msg(&mut self, cx: &mut Cx, storage: &mut AppStorage, htc: &HubToClientMsg) -> CargoLogEvent {
+    pub fn handle_hub_msg(&mut self, cx: &mut Cx, storage: &mut AppStorage, htc: &HubToClientMsg) -> LogListEvent {
         let hub_ui = storage.hub_ui.as_mut().unwrap();
         match &htc.msg {
             HubMsg::CargoPackagesResponse {uid: _, packages: _} => {
             },
             HubMsg::CargoExecBegin {uid} => if self.is_running_cargo_uid(uid) {
             },
-            HubMsg::CargoMsg {uid, msg} => if self.is_running_cargo_uid(uid) {
-                for check_msg in &self._draw_messages {
-                    if check_msg.msg == *msg {
-                        return CargoLogEvent::None
+            HubMsg::LogItem {uid, item} => if self.is_running_cargo_uid(uid) {
+                for check_msg in &self._log_items {
+                    if check_msg.item == *item { // ignore duplicates
+                        return LogListEvent::None
                     }
                 }
-                self._draw_messages.push(CargoMsg {
-                    animator: Animator::new(Self::get_default_anim(cx, self._draw_messages.len(), false)),
-                    msg: msg.clone(),
+                self._log_items.push(LogItemDraw {
+                    animator: Animator::new(Self::get_default_anim(cx, self._log_items.len(), false)),
+                    item: item.clone(),
                     is_selected: false
                 });
                 self.view.redraw_view_area(cx);
                 self.export_messages(cx, storage);
             },
-            HubMsg::ArtifactMsg{uid, msg}=>{ 
-                
-            },
+            
             HubMsg::CargoArtifact {uid, package_id, fresh: _} => if self.is_running_cargo_uid(uid) {
                 self._artifacts.push(package_id.clone());
                 self.view.redraw_view_area(cx);
@@ -249,7 +250,7 @@ impl CargoLog {
             },
             _ => ()
         }
-        CargoLogEvent::None
+        LogListEvent::None
     }
     
     
@@ -292,7 +293,7 @@ impl CargoLog {
     
     pub fn restart_cargo(&mut self, cx: &mut Cx, storage: &mut AppStorage) {
         self._artifacts.truncate(0);
-        self._draw_messages.truncate(0);
+        self._log_items.truncate(0);
         self.gc_textbuffer_messages(cx, storage);
         
         let hub_ui = storage.hub_ui.as_mut().unwrap();
@@ -334,12 +335,12 @@ impl CargoLog {
     }
     
     pub fn next_error(&mut self, reverse: bool) -> Option<usize> {
-        if self._draw_messages.len() == 0 {
+        if self._log_items.len() == 0 {
             return None
         }
         if reverse {
             let mut selected_index = None;
-            for (counter, item) in self._draw_messages.iter_mut().enumerate() {
+            for (counter, item) in self._log_items.iter_mut().enumerate() {
                 if item.is_selected {
                     selected_index = Some(counter);
                 }
@@ -349,22 +350,22 @@ impl CargoLog {
                     return Some(selected_index - 1);
                 }
                 else {
-                    return Some(self._draw_messages.len() - 1);
+                    return Some(self._log_items.len() - 1);
                 }
             }
             else {
-                return Some(self._draw_messages.len() - 1);
+                return Some(self._log_items.len() - 1);
             }
         }
         else {
             let mut selected_index = None;
-            for (counter, dm) in self._draw_messages.iter_mut().enumerate() {
+            for (counter, dm) in self._log_items.iter_mut().enumerate() {
                 if dm.is_selected {
                     selected_index = Some(counter);
                 }
             }
             if let Some(selected_index) = selected_index {
-                if selected_index + 1 < self._draw_messages.len() {
+                if selected_index + 1 < self._log_items.len() {
                     return Some(selected_index + 1);
                 }
                 else {
@@ -377,7 +378,7 @@ impl CargoLog {
         }
     }
     
-    pub fn handle_cargo_log(&mut self, cx: &mut Cx, event: &mut Event, storage: &mut AppStorage) -> CargoLogEvent {
+    pub fn handle_log_list(&mut self, cx: &mut Cx, event: &mut Event, storage: &mut AppStorage) -> LogListEvent {
         // do shit here
         if self.view.handle_scroll_bars(cx, event) {
             // do zshit.
@@ -403,7 +404,7 @@ impl CargoLog {
         }
         
         //let mut unmark_nodes = false;
-        for (counter, dm) in self._draw_messages.iter_mut().enumerate() {
+        for (counter, dm) in self._log_items.iter_mut().enumerate() {
             match event.hits(cx, dm.animator.area, HitOpt::default()) {
                 Event::Animate(ae) => {
                     dm.animator.write_area(cx, dm.animator.area, "bg.", ae.time);
@@ -438,30 +439,30 @@ impl CargoLog {
         
         if let Some(dm_to_select) = dm_to_select {
             
-            for (counter, dm) in self._draw_messages.iter_mut().enumerate() {
+            for (counter, dm) in self._log_items.iter_mut().enumerate() {
                 if counter != dm_to_select {
                     dm.is_selected = false;
                     dm.animator.play_anim(cx, Self::get_default_anim(cx, counter, false));
                 }
             };
             
-            let dm = &mut self._draw_messages[dm_to_select];
+            let dm = &mut self._log_items[dm_to_select];
             dm.is_selected = true;
             dm.animator.play_anim(cx, Self::get_over_anim(cx, dm_to_select, true));
             
             // alright we clicked an item. now what. well
-            if let Some(path) = &dm.msg.path {
+            if let Some(path) = &dm.item.path {
                 let text_buffer = storage.text_buffer_from_path(cx, &path);
-                text_buffer.messages.jump_to_offset = if dm.msg.level == HubCargoMsgLevel::Log {
-                    text_buffer.text_pos_to_offset(TextPos {row: dm.msg.row - 1, col: dm.msg.col - 1})
+                text_buffer.messages.jump_to_offset = if dm.item.level == HubLogItemLevel::Log {
+                    text_buffer.text_pos_to_offset(TextPos {row: dm.item.row - 1, col: dm.item.col - 1})
                 }
                 else {
-                    dm.msg.tail 
+                    dm.item.tail 
                 };
                 cx.send_signal(text_buffer.signal, SIGNAL_TEXTBUFFER_JUMP_TO_OFFSET);
                 
-                let msg = if let Some(rendered) = &dm.msg.rendered {
-                    if let Some(explanation) = &dm.msg.explanation {
+                let item = if let Some(rendered) = &dm.item.rendered {
+                    if let Some(explanation) = &dm.item.explanation {
                         Some(format!("{}{}", rendered, explanation))
                     }
                     else {
@@ -471,16 +472,16 @@ impl CargoLog {
                 else{
                     None
                 };
-                return CargoLogEvent::SelectMessage {
-                    msg: msg,
-                    path: dm.msg.path.clone()
+                return LogListEvent::SelectLogItem {
+                    item: item,
+                    path: dm.item.path.clone()
                 }
             }
         }
-        CargoLogEvent::None
+        LogListEvent::None
     }
     
-    pub fn draw_cargo_log(&mut self, cx: &mut Cx) {
+    pub fn draw_log_list(&mut self, cx: &mut Cx) {
         if let Err(_) = self.view.begin_view(cx, Layout {
             direction: Direction::Down,
             ..Layout::default()
@@ -508,29 +509,29 @@ impl CargoLog {
         };
         
         let mut counter = 0;
-        for dm in &mut self._draw_messages {
+        for dm in &mut self._log_items {
             self.item_bg.color = dm.animator.last_color(cx.id("bg.color"));
             
             let bg_inst = self.item_bg.begin_quad(cx, &item_layout);
             
-            match dm.msg.level {
-                HubCargoMsgLevel::Error => {
+            match dm.item.level {
+                HubLogItemLevel::Error => {
                     self.code_icon.draw_icon_walk(cx, CodeIconType::Error);
                 },
-                HubCargoMsgLevel::Warning => {
+                HubLogItemLevel::Warning => {
                     self.code_icon.draw_icon_walk(cx, CodeIconType::Warning);
                 },
-                HubCargoMsgLevel::Log => {
+                HubLogItemLevel::Log => {
                     self.code_icon.draw_icon_walk(cx, CodeIconType::Ok);
                 }
             }
             
-            if let Some(path) = &dm.msg.path{
+            if let Some(path) = &dm.item.path{
                 self.text.color = self.path_color;
-                self.text.draw_text(cx, &format!("{}:{} - ", path, dm.msg.row));
+                self.text.draw_text(cx, &format!("{}:{} - ", path, dm.item.row));
             }
             self.text.color = self.message_color;
-            self.text.draw_text(cx, &format!("{}", dm.msg.body));
+            self.text.draw_text(cx, &format!("{}", dm.item.body));
             
             let bg_area = self.item_bg.end_quad(cx, &bg_inst);
             dm.animator.update_area_refs(cx, bg_area);

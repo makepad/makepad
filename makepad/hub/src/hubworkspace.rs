@@ -131,13 +131,15 @@ impl HubWorkspace {
             //let mut any_errors = false;
             while let Ok(line) = rx_line.recv() {
                 if let Some(line) = line {
+                    // lets parse/process our log line 
+                    /*
                     tx_write.send(ClientToHubMsg {
                         to: HubMsgTo::UI,
                         msg: HubMsg::ArtifactMsg {
                             uid: uid,
                             msg: line
                         }
-                    }).expect("tx_write fail");
+                    }).expect("tx_write fail");*/
                 }
                 else { // process terminated
                     // do we have any errors?
@@ -243,11 +245,11 @@ impl HubWorkspace {
                                     //    *rendered = format!("{}\n{}", rendered, line.clone());
                                     //}
                                     let level = match message.level.as_ref() {
-                                        "warning" => HubCargoMsgLevel::Warning,
-                                        "error" => HubCargoMsgLevel::Error,
-                                        _ => HubCargoMsgLevel::Warning 
+                                        "warning" => HubLogItemLevel::Warning,
+                                        "error" => HubLogItemLevel::Error,
+                                        _ => HubLogItemLevel::Warning 
                                     };
-                                    if level == HubCargoMsgLevel::Error {
+                                    if level == HubLogItemLevel::Error {
                                         any_errors = true;
                                     }
                                     // lets try to pull path out of rendered, this fixes some rust bugs
@@ -264,9 +266,9 @@ impl HubWorkspace {
                                     }
                                     tx_write.send(ClientToHubMsg {
                                         to: HubMsgTo::UI,
-                                        msg: HubMsg::CargoMsg {
+                                        msg: HubMsg::LogItem{
                                             uid: uid,
-                                            msg: HubCargoMsg {
+                                            item: HubLogItem {
                                                 package_id: parsed.package_id.clone(),
                                                 path: Some(format!("{}/{}", workspace, path)),
                                                 row: span.line_start as usize,

@@ -2,12 +2,12 @@ use render::*;
 use editor::*;
 
 #[derive(Clone)]
-pub struct CargoLogItem {
+pub struct LogItem {
     pub code_editor: CodeEditor,
     pub text_buffer: TextBuffer
 }
 
-impl CargoLogItem {
+impl LogItem {
     pub fn style(cx: &mut Cx) -> Self {
         let editor = Self {
             code_editor: CodeEditor {
@@ -30,7 +30,7 @@ impl CargoLogItem {
         editor
     }
     
-    pub fn load_msg(&mut self, cx: &mut Cx, val: &str) {
+    pub fn load_item(&mut self, cx: &mut Cx, val: &str) {
         self.text_buffer.load_from_utf8(cx, val);
         self.code_editor.view.redraw_view_area(cx);
     }
@@ -39,12 +39,12 @@ impl CargoLogItem {
          self.text_buffer.load_from_utf8(cx, "");
     }
     
-    pub fn handle_cargo_log_item(&mut self, cx: &mut Cx, event: &mut Event) -> CodeEditorEvent {
+    pub fn handle_log_item(&mut self, cx: &mut Cx, event: &mut Event) -> CodeEditorEvent {
         let ce = self.code_editor.handle_code_editor(cx, event, &mut self.text_buffer);
         ce
     }
     
-    pub fn draw_cargo_log_item(&mut self, cx: &mut Cx) {
+    pub fn draw_log_item(&mut self, cx: &mut Cx) {
         let text_buffer = &mut self.text_buffer;
         if text_buffer.needs_token_chunks() && text_buffer.lines.len() >0 {
             let mut state = TokenizerState::new(&text_buffer.lines);

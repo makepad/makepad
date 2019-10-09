@@ -182,13 +182,13 @@ impl App {
                             tabs: vec![
                                 DockTab {
                                     closeable: false,
-                                    title: "Cargo Log".to_string(),
-                                    item: Panel::CargoLog
+                                    title: "Log List".to_string(),
+                                    item: Panel::LogList
                                 },
                                 DockTab {
                                     closeable: false,
                                     title: "Log Item".to_string(),
-                                    item: Panel::CargoLogItem
+                                    item: Panel::LogItem
                                 },
                                 DockTab {
                                     closeable: false,
