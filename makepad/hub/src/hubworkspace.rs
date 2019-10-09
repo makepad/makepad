@@ -226,15 +226,18 @@ impl HubWorkspace {
                                         continue
                                     }
                                     
-                                    let mut more_lines = vec![];
-                                    more_lines.push(line.clone());
-                                    /*
-                                    if let Some(label) = span.label {
-                                        more_lines.push(label);
-                                    }*/
+                                    let mut msg = message.message.clone();
+                                    
+                                    //let mut more_lines = vec![];
+                                    //more_lines.push(line.clone());
+                                    
+                                    //if let Some(label) = span.label {
+                                    //    msg.push_str(&label);
+                                    //}
                                     // if we have children fo process
                                     for child in &message.children {
-                                        more_lines.push(child.message.clone());
+                                        msg.push_str(" - ");
+                                        msg.push_str(&child.message);
                                     }
                                     //if let Some(rendered) = &mut message.rendered{
                                     //    *rendered = format!("{}\n{}", rendered, line.clone());
@@ -242,7 +245,7 @@ impl HubWorkspace {
                                     let level = match message.level.as_ref() {
                                         "warning" => HubCargoMsgLevel::Warning,
                                         "error" => HubCargoMsgLevel::Error,
-                                        _ => HubCargoMsgLevel::Warning
+                                        _ => HubCargoMsgLevel::Warning 
                                     };
                                     if level == HubCargoMsgLevel::Error {
                                         any_errors = true;
@@ -258,7 +261,7 @@ impl HubWorkspace {
                                                 col: span.column_start as usize,
                                                 tail: span.byte_start as usize,
                                                 head: span.byte_end as usize,
-                                                body: message.message.clone(),
+                                                body: msg,
                                                 rendered: message.rendered.clone(),
                                                 explanation: if let Some(code) = &message.code{code.explanation.clone()}else{None},
                                                 level: level
@@ -307,6 +310,7 @@ impl HubWorkspace {
             // remove process from process list
             if let Ok(mut processes) = processes.lock() {
                 if let Some(index) = processes.iter().position( | p | p.uid == uid) {
+                    processes[index].process.wait();
                     processes.remove(index);
                 }
             };

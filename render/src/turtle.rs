@@ -105,15 +105,36 @@ impl Cx {
                     if biggest > turtle.biggest {
                         turtle.biggest = biggest;
                     }
-                    // update x2 bounds (margin right is only added if its negative)
-                    let bound_x2 = x + w + if margin.r < 0. {margin.r} else {0.};
-                    if bound_x2 > turtle.bound_right_bottom.x {
-                        turtle.bound_right_bottom.x = bound_x2;
+                    (x, y)
+                },
+                Direction::Down => {
+                    match turtle.layout.line_wrap {
+                        LineWrap::NewLine => {
+                            if (turtle.walk.y + margin.t + h) >
+                            (turtle.origin.y + turtle.height - turtle.layout.padding.b) {
+                                // what is the move delta.
+                                let old_x = turtle.walk.x;
+                                let old_y = turtle.walk.y;
+                                turtle.walk.y = turtle.origin.y + turtle.layout.padding.t;
+                                turtle.walk.x += turtle.biggest;
+                                turtle.biggest = 0.0;
+                                align_dx = turtle.walk.x - old_x;
+                                align_dy = turtle.walk.y - old_y;
+                            }
+                        },
+                        LineWrap::None => {
+                        }
                     }
-                    // update y2 bounds (margin bottom is only added if its negative)
-                    let bound_y2 = turtle.walk.y + h + margin.t + if margin.b < 0. {margin.b} else {0.};
-                    if bound_y2 > turtle.bound_right_bottom.y {
-                        turtle.bound_right_bottom.y = bound_y2;
+                    
+                    let x = turtle.walk.x + margin.l;
+                    let y = turtle.walk.y + margin.t;
+                    // walk it normally
+                    turtle.walk.y += h + margin.t + margin.b;
+                    
+                    // keep track of biggest item in the line (include item margin bottom)
+                    let biggest = w + margin.r + margin.l;
+                    if biggest > turtle.biggest {
+                        turtle.biggest = biggest;
                     }
                     (x, y)
                 },
@@ -121,6 +142,17 @@ impl Cx {
                     (turtle.walk.x + margin.l, turtle.walk.y + margin.t)
                 }
             };
+            
+            let bound_x2 = x + w + if margin.r < 0. {margin.r} else {0.};
+            if bound_x2 > turtle.bound_right_bottom.x {
+                turtle.bound_right_bottom.x = bound_x2;
+            }
+            // update y2 bounds (margin bottom is only added if its negative)
+            let bound_y2 = y + h + margin.t + if margin.b < 0. {margin.b} else {0.};
+            if bound_y2 > turtle.bound_right_bottom.y {
+                turtle.bound_right_bottom.y = bound_y2;
+            }
+            
             if x < turtle.bound_left_top.x {
                 turtle.bound_left_top.x = x;
             }
@@ -204,6 +236,11 @@ impl Cx {
                 Direction::Right => {
                     turtle.walk.x = turtle.origin.x + turtle.layout.padding.l;
                     turtle.walk.y += turtle.biggest;
+                    turtle.biggest = 0.0;
+                },
+                Direction::Down => {
+                    turtle.walk.y = turtle.origin.y + turtle.layout.padding.t;
+                    turtle.walk.x += turtle.biggest;
                     turtle.biggest = 0.0;
                 },
                 _ => ()

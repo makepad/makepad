@@ -99,11 +99,14 @@ impl AppWindow {
             match item {
                 Panel::CargoLog => {
                     match self.cargo_log.handle_cargo_log(cx, event, storage){
-                        CargoLogEvent::SelectMessage {msg} => {
+                        CargoLogEvent::SelectMessage {path, msg} => {
                             // just make it open an editor
-                            let path = msg.path.clone();
-                            file_tree_event = FileTreeEvent::SelectFile {path:path};
-                            self.cargo_log_item.load_msg(cx, msg);
+                            if let Some(path) = path{
+                                file_tree_event = FileTreeEvent::SelectFile {path:path};
+                            }
+                            if let Some(msg) = msg{
+                                self.cargo_log_item.load_msg(cx, &msg);
+                            }
                         },
                         _ => ()
                     }

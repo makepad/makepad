@@ -1453,40 +1453,42 @@ impl CodeEditor {
             return
         }
         if let Some(pos) = self.cursors.get_last_cursor_singular() {
-            // cursor is near the last one or its marked
-            let fail = if last.exp_paren == '(' && chunk[0] != ')' ||
-            last.exp_paren == '[' && chunk[0] != ']' ||
-            last.exp_paren == '{' && chunk[0] != '}' {
-                self.paren_pair.color = self.colors.paren_pair_fail;
-                true
-            }
-            else {
-                self.paren_pair.color = self.colors.paren_pair_match;
-                false
-            };
-            if fail || pos == offset || pos == offset + 1 && next_char != ')' && next_char != '}' && next_char != ']' || last.marked {
-                // fuse the tokens
-                if last.pair_start + 1 == token_chunks_index && !last.geom_open.is_none() && !last.geom_close.is_none() {
-                    let geom_open = last.geom_open.unwrap();
-                    let geom_close = last.geom_open.unwrap();
-                    let geom = Rect {
-                        x: geom_open.x,
-                        y: geom_open.y,
-                        w: geom_open.w + geom_close.w,
-                        h: geom_close.h
-                    };
-                    self.paren_pair.draw_quad_abs(cx, geom);
+            if self.mark_unmatched_parens{
+                // cursor is near the last one or its marked
+                let fail = if last.exp_paren == '(' && chunk[0] != ')' ||
+                last.exp_paren == '[' && chunk[0] != ']' ||
+                last.exp_paren == '{' && chunk[0] != '}' {
+                    self.paren_pair.color = self.colors.paren_pair_fail;
+                    true
                 }
                 else {
-                    if let Some(rc) = last.geom_open {
-                        self.paren_pair.draw_quad_abs(cx, rc);
+                    self.paren_pair.color = self.colors.paren_pair_match;
+                    false
+                };
+                if fail || pos == offset || pos == offset + 1 && next_char != ')' && next_char != '}' && next_char != ']' || last.marked {
+                    // fuse the tokens
+                    if last.pair_start + 1 == token_chunks_index && !last.geom_open.is_none() && !last.geom_close.is_none() {
+                        let geom_open = last.geom_open.unwrap();
+                        let geom_close = last.geom_open.unwrap();
+                        let geom = Rect {
+                            x: geom_open.x,
+                            y: geom_open.y,
+                            w: geom_open.w + geom_close.w,
+                            h: geom_close.h
+                        };
+                        self.paren_pair.draw_quad_abs(cx, geom);
                     }
-                    if let Some(rc) = last.geom_close {
-                        self.paren_pair.draw_quad_abs(cx, rc);
+                    else {
+                        if let Some(rc) = last.geom_open {
+                            self.paren_pair.draw_quad_abs(cx, rc);
+                        }
+                        if let Some(rc) = last.geom_close {
+                            self.paren_pair.draw_quad_abs(cx, rc);
+                        }
                     }
                 }
-            }
-        };
+            };
+        }
     }
     
     fn draw_paren_unmatched(&mut self, cx: &mut Cx) {

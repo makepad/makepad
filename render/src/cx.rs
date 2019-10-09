@@ -2,14 +2,15 @@ use std::collections::HashMap;
 use std::cell::RefCell;
 
 pub use crate::shadergen::*;
-pub use crate::cx_fonts::*;
-pub use crate::cx_turtle::*;
-pub use crate::cx_cursor::*;
-pub use crate::cx_window::*;
-pub use crate::cx_view::*;
-pub use crate::cx_pass::*;
-pub use crate::cx_texture::*;
-pub use crate::cx_shader::*;
+pub use crate::fonts::*;
+pub use crate::turtle::*;
+pub use crate::cursor::*;
+pub use crate::window::*;
+pub use crate::view::*;
+pub use crate::pass::*;
+pub use crate::texture::*;
+pub use crate::shader::*;
+
 pub use crate::math::*;
 pub use crate::events::*;
 pub use crate::colors::*;

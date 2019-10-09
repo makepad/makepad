@@ -23,7 +23,7 @@ pub struct CargoLog {
 }
 
 #[derive(Clone)]
-pub struct CargoActiveTarget {  
+pub struct CargoActiveTarget {
     target: String,
     artifact_path: Option<String>,
     cargo_uid: HubUid,
@@ -50,7 +50,10 @@ pub struct CargoMsg {
 
 #[derive(Clone)]
 pub enum CargoLogEvent {
-    SelectMessage {msg: HubCargoMsg},
+    SelectMessage {
+        path: Option<String>,
+        msg: Option<String>
+    },
     None,
 }
 
@@ -82,7 +85,7 @@ impl CargoLog {
             _active_package: "makepad".to_string(),
             _active_targets: vec![
                 CargoActiveTarget::new("check"),
-                CargoActiveTarget::new("makepad"),
+                CargoActiveTarget::new("build"),
                 CargoActiveTarget::new("workspace")
             ]
         }
@@ -184,7 +187,7 @@ impl CargoLog {
         return false
     }
     
-    pub fn handle_hub_msg(&mut self, cx: &mut Cx, storage: &mut AppStorage, htc: &HubToClientMsg) -> CargoLogEvent{
+    pub fn handle_hub_msg(&mut self, cx: &mut Cx, storage: &mut AppStorage, htc: &HubToClientMsg) -> CargoLogEvent {
         let hub_ui = storage.hub_ui.as_mut().unwrap();
         match &htc.msg {
             HubMsg::CargoPackagesResponse {uid: _, packages: _} => {
@@ -239,7 +242,7 @@ impl CargoLog {
     }
     
     
-    pub fn artifact_exec(&mut self, cx:&mut Cx, storage: &mut AppStorage, recur: bool) {
+    pub fn artifact_exec(&mut self, cx: &mut Cx, storage: &mut AppStorage, recur: bool) {
         let hub_ui = storage.hub_ui.as_mut().unwrap();
         let mut some_exec = false;
         // all the artifacts that are building
@@ -251,7 +254,7 @@ impl CargoLog {
             else if let Some(artifact_path) = &active_target.artifact_path {
                 some_exec = true;
                 let uid = hub_ui.alloc_uid();
-                if active_target.artifact_uid != HubUid::zero(){
+                if active_target.artifact_uid != HubUid::zero() {
                     hub_ui.send(ClientToHubMsg {
                         to: HubMsgTo::Workspace(self._active_workspace.clone()),
                         msg: HubMsg::ArtifactKill {
@@ -280,7 +283,7 @@ impl CargoLog {
         self._artifacts.truncate(0);
         self._draw_messages.truncate(0);
         self.gc_textbuffer_messages(cx, storage);
-
+        
         let hub_ui = storage.hub_ui.as_mut().unwrap();
         self._exec_when_done = false;
         for active_target in &mut self._active_targets {
@@ -360,8 +363,8 @@ impl CargoLog {
             else {
                 return Some(0);
             }
-        }   
-    }                
+        }
+    }
     
     pub fn handle_cargo_log(&mut self, cx: &mut Cx, event: &mut Event, storage: &mut AppStorage) -> CargoLogEvent {
         // do shit here
@@ -394,7 +397,7 @@ impl CargoLog {
                 Event::Animate(ae) => {
                     dm.animator.write_area(cx, dm.animator.area, "bg.", ae.time);
                 },
-                Event::AnimEnded(_)=>{
+                Event::AnimEnded(_) => {
                     dm.animator.end();
                 },
                 Event::FingerDown(_fe) => {
@@ -445,9 +448,21 @@ impl CargoLog {
                     dm.msg.head
                 };
                 cx.send_signal(text_buffer.signal, SIGNAL_TEXTBUFFER_JUMP_TO_OFFSET);
+                
+                let msg = if let Some(rendered) = &dm.msg.rendered {
+                    if let Some(explanation) = &dm.msg.explanation {
+                        Some(format!("{}{}", rendered, explanation))
+                    }
+                    else {
+                        Some(rendered.clone())
+                    }
+                }
+                else{
+                    None
+                };
                 return CargoLogEvent::SelectMessage {
-                    msg: dm.msg.clone()
-                    //path: dm.msg.path.clone()
+                    msg: msg,
+                    path: Some(dm.msg.path.clone())
                 }
             }
         }
@@ -455,17 +470,22 @@ impl CargoLog {
     }
     
     pub fn draw_cargo_log(&mut self, cx: &mut Cx) {
-        if let Err(_) = self.view.begin_view(cx, Layout::default()) {
+        if let Err(_) = self.view.begin_view(cx, Layout {
+            direction: Direction::Down,
+            ..Layout::default()
+        }) {
             return
         }
+        
+        let bg_even = cx.color("bg_selected");
+        let bg_odd = cx.color("bg_odd");
         
         // lets get the scroll position.
         let scroll_pos = self.view.get_scroll_pos(cx);
         
         // we need to find the first item to draw
-        let _start_item = (scroll_pos.y / self.row_height).floor(); 
-        // lets jump the turtle forward by scrollpos.y 
-        
+        let _start_item = (scroll_pos.y / self.row_height).floor();
+        // lets jump the turtle forward by scrollpos.y
         //cx.move_turtle(0., scroll_pos.y);
         
         let item_layout = Layout {
@@ -496,38 +516,23 @@ impl CargoLog {
             
             self.text.color = self.path_color;
             self.text.draw_text(cx, &format!("{}:{} - ", dm.msg.path, dm.msg.row));
-            let walk = cx.get_rel_turtle_walk();
-            // this keeps the wraparound to the right of where we are
-            cx.set_turtle_padding(Padding {l: walk.x, t: 3., b: 2., r: 0.});
             self.text.color = self.message_color;
             self.text.draw_text(cx, &format!("{}", dm.msg.body));
-            /*
-            for line in &dm.msg.more_lines {
-                self.text.color = self.path_color;
-                self.text.draw_text(cx, ".  ");
-                self.text.color = self.message_color;
-                self.text.draw_text(cx, line);
-            }*/
             
             let bg_area = self.item_bg.end_quad(cx, &bg_inst);
             dm.animator.update_area_refs(cx, bg_area);
-            cx.turtle_new_line();
             
             counter += 1;
         }
         
         // draw status line
-        
-        let bg_even = cx.color("bg_selected");
-        let bg_odd = cx.color("bg_odd");
-        
         self.item_bg.color = if counter & 1 == 0 {bg_even}else {bg_odd};
         let bg_inst = self.item_bg.begin_quad(cx, &item_layout);
         
         if !self.is_any_cargo_running() {
             self.text.color = self.path_color;
             self.code_icon.draw_icon_walk(cx, CodeIconType::Ok);
-            self.text.draw_text(cx, "Done");
+            self.text.draw_text(cx, "Done"); 
         }
         else {
             self.code_icon.draw_icon_walk(cx, CodeIconType::Wait);
@@ -539,18 +544,16 @@ impl CargoLog {
         }
         
         self.item_bg.end_quad(cx, &bg_inst);
-        cx.turtle_new_line();
         counter += 1;
         
         // draw filler nodes
-        
         let view_total = cx.get_turtle_bounds();
         let rect_now = cx.get_turtle_rect();
         let mut y = view_total.y;
         while y < rect_now.h {
             self.item_bg.color = if counter & 1 == 0 {bg_even} else {bg_odd};
-            self.item_bg.draw_quad_walk(cx, Bounds::Fill, Bounds::Fix((rect_now.h - y).min(self.row_height)), Margin::zero());
-            cx.turtle_new_line();
+            self.item_bg.draw_quad_walk(cx, Bounds::Fill, Bounds::Fix(self.row_height), Margin::zero());
+            cx.set_turtle_bounds(view_total);
             y += self.row_height;
             counter += 1;
         }

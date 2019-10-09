@@ -2,7 +2,7 @@
 
 use std::hash::{Hash, Hasher};
 
-use crate::cx_shader::*;
+use crate::shader::*;
 
 #[derive(Default, Clone, PartialEq)]
 pub struct ShaderGen {

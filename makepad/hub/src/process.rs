@@ -93,6 +93,13 @@ impl Process {
             rx_err: Some(rx_err)
         })
     }
+
+    pub fn wait(&mut self) {
+        if let Some(child) = &mut self.child{
+            let _ = child.wait();
+            self.child = None;
+        }
+    }
     
     pub fn kill(&mut self) {
         if let Some(child) = &mut self.child{

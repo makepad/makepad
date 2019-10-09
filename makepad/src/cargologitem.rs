@@ -1,6 +1,5 @@
 use render::*;
 use editor::*;
-use hub::*;
 
 #[derive(Clone)]
 pub struct CargoLogItem {
@@ -31,16 +30,9 @@ impl CargoLogItem {
         editor
     }
     
-    pub fn load_msg(&mut self, cx: &mut Cx, msg: HubCargoMsg) {
-        if let Some(rendered) = msg.rendered {
-            if let Some(explanation) = msg.explanation {
-                self.text_buffer.load_from_utf8(cx, &format!("{}{}", rendered, explanation));
-            }
-            else {
-                self.text_buffer.load_from_utf8(cx, &rendered);
-            }
-            self.code_editor.view.redraw_view_area(cx);
-        }
+    pub fn load_msg(&mut self, cx: &mut Cx, val: &str) {
+        self.text_buffer.load_from_utf8(cx, val);
+        self.code_editor.view.redraw_view_area(cx);
     }
     
     pub fn clear_msg(&mut self, cx: &mut Cx) {
