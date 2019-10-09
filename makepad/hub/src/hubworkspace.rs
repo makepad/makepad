@@ -132,6 +132,25 @@ impl HubWorkspace {
             while let Ok(line) = rx_line.recv() {
                 if let Some(line) = line {
                     // lets parse/process our log line 
+                    tx_write.send(ClientToHubMsg {
+                        to: HubMsgTo::UI,
+                        msg: HubMsg::LogItem{
+                            uid: uid,
+                            item: HubLogItem {
+                                //package_id: parsed.package_id.clone(),
+                                path: None,
+                                row: 0,
+                                col: 0,
+                                tail: 0,
+                                head: 0,
+                                body: line.clone(),
+                                rendered: Some(line),
+                                explanation: None,
+                                level: HubLogItemLevel::Log
+                            }
+                        }
+                    }).expect("tx_write fail");
+
                     /*
                     tx_write.send(ClientToHubMsg {
                         to: HubMsgTo::UI,
@@ -269,7 +288,7 @@ impl HubWorkspace {
                                         msg: HubMsg::LogItem{
                                             uid: uid,
                                             item: HubLogItem {
-                                                package_id: parsed.package_id.clone(),
+                                                //package_id: parsed.package_id.clone(),
                                                 path: Some(format!("{}/{}", workspace, path)),
                                                 row: span.line_start as usize,
                                                 col: span.column_start as usize,

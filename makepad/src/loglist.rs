@@ -82,16 +82,34 @@ impl LogList {
             _log_items: Vec::new(),
             _artifacts: Vec::new(),
             _active_workspace: "makepad".to_string(),
-            _active_package: "makepad".to_string(),
+            _active_package: "csvproc".to_string(),
             _active_targets: vec![
                 CargoActiveTarget::new("check"),
                 CargoActiveTarget::new("build"),
-                CargoActiveTarget::new("workspace")
+                //CargoActiveTarget::new("workspace")
             ]
         }
     }
     
-    pub fn init(&mut self, _cx: &mut Cx, _storage: &mut AppStorage) {
+    pub fn init(&mut self, _cx: &mut Cx) {
+        /*
+        for i in 0..100 {
+            self._log_items.push(LogItemDraw {
+                animator: Animator::new(Self::get_default_anim(cx, self._log_items.len(), false)),
+                item: HubLogItem {
+                    path: None, //Some("makepad/makepad/test".to_string()),
+                    row: 0,
+                    col: 0,
+                    tail: 0,
+                    head: 0,
+                    body: format!("Hello world {}", i),
+                    rendered: None,
+                    explanation: None,
+                    level: HubLogItemLevel::Log
+                },
+                is_selected: false
+            });
+        }*/
     }
     
     pub fn get_default_anim(cx: &Cx, counter: usize, marked: bool) -> Anim {
@@ -127,7 +145,7 @@ impl LogList {
     pub fn export_messages(&self, cx: &mut Cx, storage: &mut AppStorage) {
         
         for dm in &self._log_items {
-            if let Some(path) = &dm.item.path{
+            if let Some(path) = &dm.item.path {
                 let text_buffer = storage.text_buffer_from_path(cx, &path);
                 
                 let messages = &mut text_buffer.messages;
@@ -137,15 +155,15 @@ impl LogList {
                     messages.cursors.truncate(0);
                     messages.bodies.truncate(0);
                 }
-                
+                //println!("{:?}", dm.item.level);
                 if dm.item.level == HubLogItemLevel::Log {
                     break
                 }
                 // search for insert point
                 let mut inserted = false;
-                if messages.cursors.len()>0{
-                    for i in (0..messages.cursors.len()).rev(){
-                        if dm.item.head < messages.cursors[i].head && (i == 0 || dm.item.head >= messages.cursors[i-1].head){
+                if messages.cursors.len()>0 {
+                    for i in (0..messages.cursors.len()).rev() {
+                        if dm.item.head < messages.cursors[i].head && (i == 0 || dm.item.head >= messages.cursors[i - 1].head) {
                             messages.cursors.insert(i, TextCursor {
                                 head: dm.item.head,
                                 tail: dm.item.tail,
@@ -156,7 +174,7 @@ impl LogList {
                         }
                     }
                 }
-                if !inserted{
+                if !inserted {
                     messages.cursors.push(TextCursor {
                         head: dm.item.head,
                         tail: dm.item.tail,
@@ -180,9 +198,12 @@ impl LogList {
         self.gc_textbuffer_messages(cx, storage);
     }
     
-    pub fn is_running_cargo_uid(&self, uid: &HubUid) -> bool {
+    pub fn is_running_uid(&self, uid: &HubUid) -> bool {
         for active_target in &self._active_targets {
             if active_target.cargo_uid == *uid {
+                return true
+            }
+            if active_target.artifact_uid == *uid {
                 return true
             }
         }
@@ -198,14 +219,23 @@ impl LogList {
         return false
     }
     
+    pub fn is_any_artifact_running(&self) -> bool {
+        for active_target in &self._active_targets {
+            if active_target.artifact_uid != HubUid::zero() {
+                return true
+            }
+        }
+        return false
+    }
+        
     pub fn handle_hub_msg(&mut self, cx: &mut Cx, storage: &mut AppStorage, htc: &HubToClientMsg) -> LogListEvent {
-        let hub_ui = storage.hub_ui.as_mut().unwrap();
+        //let hub_ui = storage.hub_ui.as_mut().unwrap();
         match &htc.msg {
             HubMsg::CargoPackagesResponse {uid: _, packages: _} => {
             },
-            HubMsg::CargoExecBegin {uid} => if self.is_running_cargo_uid(uid) {
-            },
-            HubMsg::LogItem {uid, item} => if self.is_running_cargo_uid(uid) {
+            HubMsg::CargoExecBegin {uid} => if self.is_running_uid(uid) {
+            }, 
+            HubMsg::LogItem {uid, item} => if self.is_running_uid(uid) {
                 for check_msg in &self._log_items {
                     if check_msg.item == *item { // ignore duplicates
                         return LogListEvent::None
@@ -220,51 +250,41 @@ impl LogList {
                 self.export_messages(cx, storage);
             },
             
-            HubMsg::CargoArtifact {uid, package_id, fresh: _} => if self.is_running_cargo_uid(uid) {
+            HubMsg::CargoArtifact {uid, package_id, fresh: _} => if self.is_running_uid(uid) {
                 self._artifacts.push(package_id.clone());
                 self.view.redraw_view_area(cx);
             },
-            HubMsg::CargoExecEnd {uid, artifact_path} => if self.is_running_cargo_uid(uid) {
+            HubMsg::CargoExecEnd {uid, artifact_path} => if self.is_running_uid(uid) {
                 // if we didnt have any errors, check if we need to run
                 for active_target in &mut self._active_targets {
                     if active_target.cargo_uid == *uid {
                         active_target.cargo_uid = HubUid::zero();
                         active_target.artifact_path = artifact_path.clone();
-                        if self._exec_when_done {
-                            if let Some(artifact_path) = &active_target.artifact_path {
-                                let uid = hub_ui.alloc_uid();
-                                active_target.artifact_uid = uid;
-                                hub_ui.send(ClientToHubMsg {
-                                    to: HubMsgTo::Workspace(self._active_workspace.clone()),
-                                    msg: HubMsg::ArtifactExec {
-                                        uid: active_target.artifact_uid,
-                                        path: artifact_path.clone(),
-                                        args: Vec::new()
-                                    }
-                                });
-                            }
-                        }
                     }
+                }
+                if !self.is_any_cargo_running() && self._exec_when_done {
+                    self.exec_all_artifacts(storage)
                 }
                 self.view.redraw_view_area(cx);
             },
-            _ => ()
+            HubMsg::ArtifactExecEnd {uid} => if self.is_running_uid(uid) {
+                // if we didnt have any errors, check if we need to run
+                for active_target in &mut self._active_targets {
+                    if active_target.artifact_uid == *uid {
+                        active_target.artifact_uid = HubUid::zero();
+                    }
+                }
+                self.view.redraw_view_area(cx);
+            },            _ => ()
         }
         LogListEvent::None
     }
     
-    
-    pub fn artifact_exec(&mut self, cx: &mut Cx, storage: &mut AppStorage, recur: bool) {
+    pub fn exec_all_artifacts(&mut self, storage: &mut AppStorage) {
         let hub_ui = storage.hub_ui.as_mut().unwrap();
-        let mut some_exec = false;
-        // all the artifacts that are building
+        // otherwise execute all we have artifacts for
         for active_target in &mut self._active_targets {
-            if active_target.cargo_uid != HubUid::zero() {
-                some_exec = true;
-                self._exec_when_done = true;
-            }
-            else if let Some(artifact_path) = &active_target.artifact_path {
-                some_exec = true;
+            if let Some(artifact_path) = &active_target.artifact_path {
                 let uid = hub_ui.alloc_uid();
                 if active_target.artifact_uid != HubUid::zero() {
                     hub_ui.send(ClientToHubMsg {
@@ -285,9 +305,14 @@ impl LogList {
                 });
             }
         }
-        if !some_exec && !recur {
-            self.restart_cargo(cx, storage);
-            self.artifact_exec(cx, storage, true);
+    }
+    
+    pub fn artifact_exec(&mut self, storage: &mut AppStorage) {
+        if self.is_any_cargo_running() {
+            self._exec_when_done = true;
+        }
+        else {
+            self.exec_all_artifacts(storage)
         }
     }
     
@@ -382,6 +407,7 @@ impl LogList {
         // do shit here
         if self.view.handle_scroll_bars(cx, event) {
             // do zshit.
+            self.view.redraw_view_area(cx);
         }
         
         let mut dm_to_select = None;
@@ -395,7 +421,7 @@ impl LogList {
                     dm_to_select = self.next_error(true);
                 },
                 KeyCode::Backtick => if ke.modifiers.logo || ke.modifiers.control {
-                    self.artifact_exec(cx, storage, false);
+                    self.artifact_exec(storage);
                     self.view.redraw_view_area(cx);
                 },
                 _ => ()
@@ -457,25 +483,24 @@ impl LogList {
                     text_buffer.text_pos_to_offset(TextPos {row: dm.item.row - 1, col: dm.item.col - 1})
                 }
                 else {
-                    dm.item.tail 
+                    dm.item.tail
                 };
                 cx.send_signal(text_buffer.signal, SIGNAL_TEXTBUFFER_JUMP_TO_OFFSET);
-                
-                let item = if let Some(rendered) = &dm.item.rendered {
-                    if let Some(explanation) = &dm.item.explanation {
-                        Some(format!("{}{}", rendered, explanation))
-                    }
-                    else {
-                        Some(rendered.clone())
-                    }
+            }
+            let item = if let Some(rendered) = &dm.item.rendered {
+                if let Some(explanation) = &dm.item.explanation {
+                    Some(format!("{}{}", rendered, explanation))
                 }
-                else{
-                    None
-                };
-                return LogListEvent::SelectLogItem {
-                    item: item,
-                    path: dm.item.path.clone()
+                else {
+                    Some(rendered.clone())
                 }
+            }
+            else {
+                None
+            };
+            return LogListEvent::SelectLogItem {
+                item: item,
+                path: dm.item.path.clone()
             }
         }
         LogListEvent::None
@@ -496,9 +521,10 @@ impl LogList {
         let scroll_pos = self.view.get_scroll_pos(cx);
         
         // we need to find the first item to draw
-        let _start_item = (scroll_pos.y / self.row_height).floor();
+        let start_item = (scroll_pos.y / self.row_height).floor() as usize;
+        let start_scroll = (start_item as f32) * self.row_height;
         // lets jump the turtle forward by scrollpos.y
-        //cx.move_turtle(0., scroll_pos.y);
+        cx.move_turtle(0., start_scroll);
         
         let item_layout = Layout {
             width: Bounds::Fill,
@@ -508,8 +534,21 @@ impl LogList {
             ..Default::default()
         };
         
+        let view_rect = cx.get_turtle_rect();
+        
         let mut counter = 0;
-        for dm in &mut self._log_items {
+        for i in start_item..self._log_items.len() {
+            
+            let walk = cx.get_rel_turtle_walk();
+            if walk.y - start_scroll > view_rect.h {
+                // this is a virtual viewport, so bail if we are below the view
+                let left = (self._log_items.len() - i) as f32 * self.row_height;
+                cx.walk_turtle(Bounds::Fill, Bounds::Fix(left), Margin::zero(), None);
+                break
+            }
+            
+            let dm = &mut self._log_items[i];
+            
             self.item_bg.color = dm.animator.last_color(cx.id("bg.color"));
             
             let bg_inst = self.item_bg.begin_quad(cx, &item_layout);
@@ -526,7 +565,7 @@ impl LogList {
                 }
             }
             
-            if let Some(path) = &dm.item.path{
+            if let Some(path) = &dm.item.path {
                 self.text.color = self.path_color;
                 self.text.draw_text(cx, &format!("{}:{} - ", path, dm.item.row));
             }
@@ -546,7 +585,12 @@ impl LogList {
         if !self.is_any_cargo_running() {
             self.text.color = self.path_color;
             self.code_icon.draw_icon_walk(cx, CodeIconType::Ok);
-            self.text.draw_text(cx, "Done"); 
+            if self.is_any_artifact_running(){
+                self.text.draw_text(cx, "Running");
+            }
+            else{
+                self.text.draw_text(cx, "Done");
+            }
         }
         else {
             self.code_icon.draw_icon_walk(cx, CodeIconType::Wait);
@@ -562,12 +606,11 @@ impl LogList {
         
         // draw filler nodes
         let view_total = cx.get_turtle_bounds();
-        let rect_now = cx.get_turtle_rect();
         let mut y = view_total.y;
-        while y < rect_now.h {
+        while y < view_rect.h {
             self.item_bg.color = if counter & 1 == 0 {bg_even} else {bg_odd};
             self.item_bg.draw_quad_walk(cx, Bounds::Fill, Bounds::Fix(self.row_height), Margin::zero());
-            cx.set_turtle_bounds(view_total);
+            cx.set_turtle_bounds(view_total); // do this so the scrollbar doesnt show up
             y += self.row_height;
             counter += 1;
         }

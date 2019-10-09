@@ -40,8 +40,18 @@ impl LogItem {
     }
     
     pub fn handle_log_item(&mut self, cx: &mut Cx, event: &mut Event) -> CodeEditorEvent {
-        let ce = self.code_editor.handle_code_editor(cx, event, &mut self.text_buffer);
+        let text_buffer = &mut self.text_buffer;
+        let ce = self.code_editor.handle_code_editor(cx, event, text_buffer);
+        match ce {
+            CodeEditorEvent::AutoFormat => {
+                let formatted = RustTokenizer::auto_format(text_buffer, true).out_lines;
+                self.code_editor.cursors.replace_lines_formatted(formatted, text_buffer);
+                self.code_editor.view.redraw_view_area(cx);
+            },
+            _ => ()
+        }
         ce
+
     }
     
     pub fn draw_log_item(&mut self, cx: &mut Cx) {

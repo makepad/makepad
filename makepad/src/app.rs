@@ -437,6 +437,9 @@ impl App {
                                 })
                             }
                             cx.redraw_child_area(Area::All);
+                            for window in &mut self.windows {
+                                window.log_list.init(cx);
+                            }
                         }
                     }
                     else { // load default window

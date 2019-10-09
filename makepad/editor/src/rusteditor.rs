@@ -22,7 +22,7 @@ impl RustEditor {
         let ce = self.code_editor.handle_code_editor(cx, event, text_buffer);
         match ce {
             CodeEditorEvent::AutoFormat => {
-                let formatted = RustTokenizer::auto_format(text_buffer).out_lines;
+                let formatted = RustTokenizer::auto_format(text_buffer, false).out_lines;
                 self.code_editor.cursors.replace_lines_formatted(formatted, text_buffer);
                 self.code_editor.view.redraw_view_area(cx);
             },
@@ -739,7 +739,7 @@ impl RustTokenizer {
     }
     
     // because rustfmt is such an insane shitpile to compile or use as a library, here is a stupid version.
-    pub fn auto_format(text_buffer: &mut TextBuffer) -> FormatOutput {
+    pub fn auto_format(text_buffer: &mut TextBuffer, force_newlines:bool) -> FormatOutput {
         
         // extra spacey setting that rustfmt seems to do, but i don't like
         let extra_spacey = false;
@@ -817,7 +817,7 @@ impl RustTokenizer {
                     }
                     
                     paren_stack.push(ParenStack {
-                        expecting_newlines: false,
+                        expecting_newlines: force_newlines,
                         expected_indent: expected_indent,
                         angle_counter: 0
                     });

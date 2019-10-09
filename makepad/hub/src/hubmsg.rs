@@ -188,7 +188,7 @@ pub enum HubLogItemLevel {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct HubLogItem {
-    pub package_id: String,
+//    pub package_id: Option<String>,
     pub path: Option<String>,
     pub row: usize,
     pub col: usize,

@@ -830,11 +830,6 @@ pub struct Turtle {
     pub layout: Layout,
     pub guard_area: Area
 }
-//#[derive(Clone, Default)]
-//pub struct CxTurtle{
-//   pub debug_pts:RefCell<Vec<(f32,f32,i32)>>
-//}
-
 
 pub fn max_zero_keep_nan(v: f32) -> f32 {
     if v.is_nan() {
