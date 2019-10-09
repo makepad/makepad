@@ -565,7 +565,7 @@ impl LogList {
                     self.code_icon.draw_icon_walk(cx, CodeIconType::Warning);
                 },
                 HubLogItemLevel::Log => {
-                    self.code_icon.draw_icon_walk(cx, CodeIconType::Ok);
+                    //self.code_icon.draw_icon_walk(cx, CodeIconType::Ok);
                 }
             }
             
