@@ -18,6 +18,7 @@ pub struct LogList {
     pub _active_package: String,
     pub _active_targets: Vec<CargoActiveTarget>,
     pub _exec_when_done: bool,
+    pub _always_exec_when_done:bool,
     pub _log_items: Vec<LogItemDraw>,
     pub _artifacts: Vec<String>,
 }
@@ -52,7 +53,8 @@ pub struct LogItemDraw {
 pub enum LogListEvent {
     SelectLogItem {
         path: Option<String>,
-        item: Option<String>
+        item: Option<String>,
+        level: HubLogItemLevel
     },
     None,
 }
@@ -78,6 +80,7 @@ impl LogList {
             path_color: color("#999"),
             message_color: color("#bbb"),
             row_height: 20.0,
+            _always_exec_when_done:true,
             _exec_when_done: false,
             _log_items: Vec::new(),
             _artifacts: Vec::new(),
@@ -322,7 +325,7 @@ impl LogList {
         self.gc_textbuffer_messages(cx, storage);
         
         let hub_ui = storage.hub_ui.as_mut().unwrap();
-        self._exec_when_done = false;
+        self._exec_when_done = self._always_exec_when_done;
         for active_target in &mut self._active_targets {
             active_target.artifact_path = None;
             if active_target.cargo_uid != HubUid::zero() {
@@ -500,7 +503,8 @@ impl LogList {
             };
             return LogListEvent::SelectLogItem {
                 item: item,
-                path: dm.item.path.clone()
+                path: dm.item.path.clone(),
+                level: dm.item.level.clone()
             }
         }
         LogListEvent::None

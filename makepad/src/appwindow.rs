@@ -99,13 +99,13 @@ impl AppWindow {
             match item {
                 Panel::LogList => {
                     match self.log_list.handle_log_list(cx, event, storage){
-                        LogListEvent::SelectLogItem {path, item} => {
+                        LogListEvent::SelectLogItem {path, item, level} => {
                             // just make it open an editor
                             if let Some(path) = path{
                                 file_tree_event = FileTreeEvent::SelectFile {path:path};
                             }
                             if let Some(item) = item{
-                                self.log_item.load_item(cx, &item);
+                                self.log_item.load_item(cx, &item, level);
                             }
                         },
                         _ => ()

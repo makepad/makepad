@@ -1,10 +1,12 @@
 use render::*;
 use editor::*;
+use hub::*;
 
 #[derive(Clone)]
 pub struct LogItem {
     pub code_editor: CodeEditor,
-    pub text_buffer: TextBuffer
+    pub text_buffer: TextBuffer,
+    pub level:HubLogItemLevel
 }
 
 impl LogItem {
@@ -24,13 +26,14 @@ impl LogItem {
                 signal: cx.new_signal(),
                 mutation_id: 1,
                 ..TextBuffer::default()
-            }
-            
+            },
+            level: HubLogItemLevel::Log
         };
         editor
     }
     
-    pub fn load_item(&mut self, cx: &mut Cx, val: &str) {
+    pub fn load_item(&mut self, cx: &mut Cx, val: &str, level:HubLogItemLevel) {
+        self.level = level;
         self.text_buffer.load_from_utf8(cx, val);
         self.code_editor.view.redraw_view_area(cx);
     }
@@ -69,51 +72,53 @@ impl LogItem {
             loop {
                 let offset = text_buffer.flat_text.len();
                 let mut token_type = tokenizer.next_token(&mut state, &mut text_buffer.flat_text, &text_buffer.token_chunks);
-                let mut val = String::new();
-                for i in offset..text_buffer.flat_text.len() {
-                    val.push(text_buffer.flat_text[i]);
-                }
-                if token_type == TokenType::Operator && val == "`" {
-                    backtick_toggle = !backtick_toggle;
-                }
-
-                let inside_backtick = !backtick_toggle || token_type == TokenType::Operator && val == "`";
-                if line_count == 2{
-                    first_block = true;
-                }
-                if first_block && token_count == 0 && token_type == TokenType::Number{
-                     first_block_code_line = true;   
-                }
-                
-                // Gray out everything thats not in backticks or code
-                if (line_count == 0 && inside_backtick 
-                    || line_count == 1
-                    || first_block && token_count <= 2 && (val == "|" || token_type == TokenType::Number)
-                    || first_block && !first_block_code_line && inside_backtick
-                    || !first_block && inside_backtick
-                    )
-                    && token_type != TokenType::Whitespace
-                    && token_type != TokenType::Newline 
-                    && token_type != TokenType::Eof{
-                    token_type = TokenType::Defocus;
-                } 
-
-                // color the ^^
-                if first_block && !first_block_code_line && val == "^"{
-                    token_type = message_type;
-                }
-
-                if first_block && token_count == 1 && val != "|" && token_type != TokenType::Whitespace{
-                    first_block = false;
-                }
-                
-                if line_count == 0 && token_count == 0 {
-                    if val == "warning" {
-                        token_type = TokenType::Warning
+                if self.level != HubLogItemLevel::Log{
+                    let mut val = String::new();
+                    for i in offset..text_buffer.flat_text.len() {
+                        val.push(text_buffer.flat_text[i]);
                     }
-                    else if val == "error" {
-                        message_type = TokenType::Error;
-                        token_type = TokenType::Error
+                    if token_type == TokenType::Operator && val == "`" {
+                        backtick_toggle = !backtick_toggle;
+                    }
+    
+                    let inside_backtick = !backtick_toggle || token_type == TokenType::Operator && val == "`";
+                    if line_count == 2{
+                        first_block = true;
+                    }
+                    if first_block && token_count == 0 && token_type == TokenType::Number{
+                         first_block_code_line = true;   
+                    }
+                    
+                    // Gray out everything thats not in backticks or code
+                    if (line_count == 0 && inside_backtick 
+                        || line_count == 1
+                        || first_block && token_count <= 2 && (val == "|" || token_type == TokenType::Number)
+                        || first_block && !first_block_code_line && inside_backtick
+                        || !first_block && inside_backtick
+                        )
+                        && token_type != TokenType::Whitespace
+                        && token_type != TokenType::Newline 
+                        && token_type != TokenType::Eof{
+                        token_type = TokenType::Defocus;
+                    } 
+    
+                    // color the ^^
+                    if first_block && !first_block_code_line && val == "^"{
+                        token_type = message_type;
+                    }
+    
+                    if first_block && token_count == 1 && val != "|" && token_type != TokenType::Whitespace{
+                        first_block = false;
+                    }
+                    
+                    if line_count == 0 && token_count == 0 {
+                        if val == "warning" {
+                            token_type = TokenType::Warning
+                        }
+                        else if val == "error" {
+                            message_type = TokenType::Error;
+                            token_type = TokenType::Error
+                        }
                     }
                 }
                 //println!("{:?} {}", token_type, val);
