@@ -41,7 +41,7 @@ impl Process {
                     storage.resize(offset + 1024, 0u8);
                     let new_len = storage.len();
                     let n_bytes_read = stdout.read(&mut storage[offset..new_len]).expect("cannot read");
-                    if n_bytes_read == 0{
+                    if n_bytes_read == 0{ 
                         tx_line.send(None).expect("tx_line cannot send - unexpected");
                         return;
                     }
@@ -61,8 +61,8 @@ impl Process {
             })
         };
 
-        let _stderr_thread = {
-            std::thread::spawn(move || {
+        let _stderr_thread = { 
+            std::thread::spawn(move || { 
                 let mut storage = Vec::new();
                 loop {
                     let offset = storage.len();
@@ -70,8 +70,7 @@ impl Process {
                     let new_len = storage.len();
                     let n_bytes_read = stderr.read(&mut storage[offset..new_len]).expect("cannot read");
                     if n_bytes_read == 0{
-                        tx_err.send(None).expect("tx_line cannot send - unexpected");
-                        return;
+                        return; 
                     }
                     storage.resize(offset + n_bytes_read, 0u8);
                     let mut start = 0;
@@ -79,7 +78,7 @@ impl Process {
                         if *ch == '\n' as u8 {
                             // emit a line
                             if let Ok(line) = str::from_utf8(&storage[start..(index+1)]) {
-                                tx_err.send(Some(line.to_string())).expect("tx_line cannot send - unexpected");;
+                                tx_err.send(Some(line.to_string())).expect("tx_err cannot send - unexpected");;
                             }
                             start = index + 1;
                         }
