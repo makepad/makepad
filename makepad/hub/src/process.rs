@@ -8,7 +8,6 @@ use std::str;
 pub struct Process {
     pub child: Option<Child>,
     pub rx_line: Option<mpsc::Receiver<Option<String>>>,
-    pub rx_err: Option<mpsc::Receiver<Option<String>>>,
 }
 
 impl Process {
@@ -26,8 +25,7 @@ impl Process {
         let mut child = create_process(cmd, args, current_dir) ?;
  
         let (tx_line, rx_line) = mpsc::channel();
-        let (tx_err, rx_err) = mpsc::channel();
-
+        let tx_err = tx_line.clone();
         let mut stdout = child.stdout.take().expect("stdout cannot be taken!");
         let mut stderr = child.stderr.take().expect("stderr cannot be taken!");
 
@@ -90,7 +88,6 @@ impl Process {
         Ok(Process {
             child: Some(child),
             rx_line: Some(rx_line),
-            rx_err: Some(rx_err)
         })
     }
 

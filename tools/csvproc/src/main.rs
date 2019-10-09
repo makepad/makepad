@@ -1,11 +1,6 @@
-#[derive(Debug)]
-struct Test{
-    x:u32
-}
+use std::fs;
 
 fn main(){
-   for i in 0..10000{
-       let t=Test{x:i};
-       println!("Testing logging log {:?}", t);
-   }
+    let st = fs::read_to_string("~/Downloads/data.csv").unwrap();
+    println!("{}", st);
 }
