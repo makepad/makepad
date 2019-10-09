@@ -250,13 +250,25 @@ impl HubWorkspace {
                                     if level == HubCargoMsgLevel::Error {
                                         any_errors = true;
                                     }
+                                    // lets try to pull path out of rendered
+                                    let mut path = span.file_name;
+                                    if let Some(rendered) = &message.rendered{
+                                        let lines:Vec<&str> = rendered.split('\n').collect();
+                                        if lines.len()>=1{
+                                            if let Some(start) = lines[1].find("--> "){
+                                                if let Some(end) = lines[1].find(":"){
+                                                    path = lines[1].get(start..end).unwrap().to_string();
+                                                }
+                                            }
+                                        }
+                                    }
                                     tx_write.send(ClientToHubMsg {
                                         to: HubMsgTo::UI,
                                         msg: HubMsg::CargoMsg {
                                             uid: uid,
                                             msg: HubCargoMsg {
                                                 package_id: parsed.package_id.clone(),
-                                                path: format!("{}/{}", workspace, span.file_name),
+                                                path: Some(format!("{}/{}", workspace, path)),
                                                 row: span.line_start as usize,
                                                 col: span.column_start as usize,
                                                 tail: span.byte_start as usize,

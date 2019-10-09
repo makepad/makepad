@@ -127,44 +127,44 @@ impl CargoLog {
     pub fn export_messages(&self, cx: &mut Cx, storage: &mut AppStorage) {
         
         for dm in &self._draw_messages {
-            
-            let text_buffer = storage.text_buffer_from_path(cx, &dm.msg.path);
-            
-            let messages = &mut text_buffer.messages;
-            messages.mutation_id = text_buffer.mutation_id;
-            if messages.gc_id != cx.event_id {
-                messages.gc_id = cx.event_id;
-                messages.cursors.truncate(0);
-                messages.bodies.truncate(0);
-            }
-            
-            if dm.msg.level == HubCargoMsgLevel::Log {
-                break
-            }
-            if dm.msg.head == dm.msg.tail {
-                messages.cursors.push(TextCursor {
-                    head: dm.msg.head as usize,
-                    tail: dm.msg.tail as usize,
-                    max: 0
-                })
-            }
-            else {
-                messages.cursors.push(TextCursor {
-                    head: dm.msg.head,
-                    tail: dm.msg.tail,
-                    max: 0
-                })
-            }
-            
-            text_buffer.messages.bodies.push(TextBufferMessage {
-                body: dm.msg.body.clone(),
-                level: match dm.msg.level {
-                    HubCargoMsgLevel::Warning => TextBufferMessageLevel::Warning,
-                    HubCargoMsgLevel::Error => TextBufferMessageLevel::Error,
-                    HubCargoMsgLevel::Log => TextBufferMessageLevel::Log,
+            if let Some(path) = &dm.msg.path{
+                let text_buffer = storage.text_buffer_from_path(cx, &path);
+                
+                let messages = &mut text_buffer.messages;
+                messages.mutation_id = text_buffer.mutation_id;
+                if messages.gc_id != cx.event_id {
+                    messages.gc_id = cx.event_id;
+                    messages.cursors.truncate(0);
+                    messages.bodies.truncate(0);
                 }
-            });
-            //}
+                
+                if dm.msg.level == HubCargoMsgLevel::Log {
+                    break
+                }
+                if dm.msg.head == dm.msg.tail {
+                    messages.cursors.push(TextCursor {
+                        head: dm.msg.head as usize,
+                        tail: dm.msg.tail as usize,
+                        max: 0
+                    })
+                }
+                else {
+                    messages.cursors.push(TextCursor {
+                        head: dm.msg.head,
+                        tail: dm.msg.tail,
+                        max: 0
+                    })
+                }
+                
+                text_buffer.messages.bodies.push(TextBufferMessage {
+                    body: dm.msg.body.clone(),
+                    level: match dm.msg.level {
+                        HubCargoMsgLevel::Warning => TextBufferMessageLevel::Warning,
+                        HubCargoMsgLevel::Error => TextBufferMessageLevel::Error,
+                        HubCargoMsgLevel::Log => TextBufferMessageLevel::Log,
+                    }
+                });
+            }
         }
         self.gc_textbuffer_messages(cx, storage);
     }
@@ -439,10 +439,10 @@ impl CargoLog {
             dm.animator.play_anim(cx, Self::get_over_anim(cx, dm_to_select, true));
             
             // alright we clicked an item. now what. well
-            if dm.msg.path != "" {
-                let text_buffer = storage.text_buffer_from_path(cx, &dm.msg.path);
+            if let Some(path) = &dm.msg.path {
+                let text_buffer = storage.text_buffer_from_path(cx, &path);
                 text_buffer.messages.jump_to_offset = if dm.msg.level == HubCargoMsgLevel::Log {
-                    text_buffer.text_pos_to_offset(TextPos {row: dm.msg.row - 1, col: dm.msg.col - 1})
+                    text_buffer.text_pos_to_offset(TextPos {row: dm.msg.row - 1, col: dm.msg.col - 1 - (dm.msg.tail - dm.msg.head)})
                 }
                 else {
                     dm.msg.head
@@ -462,7 +462,7 @@ impl CargoLog {
                 };
                 return CargoLogEvent::SelectMessage {
                     msg: msg,
-                    path: Some(dm.msg.path.clone())
+                    path: dm.msg.path.clone()
                 }
             }
         }
@@ -514,8 +514,10 @@ impl CargoLog {
                 }
             }
             
-            self.text.color = self.path_color;
-            self.text.draw_text(cx, &format!("{}:{} - ", dm.msg.path, dm.msg.row));
+            if let Some(path) = &dm.msg.path{
+                self.text.color = self.path_color;
+                self.text.draw_text(cx, &format!("{}:{} - ", path, dm.msg.row));
+            }
             self.text.color = self.message_color;
             self.text.draw_text(cx, &format!("{}", dm.msg.body));
             

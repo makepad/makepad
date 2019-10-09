@@ -194,7 +194,7 @@ pub enum HubCargoMsgLevel {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct HubCargoMsg {
     pub package_id: String,
-    pub path: String,
+    pub path: Option<String>,
     pub row: usize,
     pub col: usize,
     pub tail: usize,
