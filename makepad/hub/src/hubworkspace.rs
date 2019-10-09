@@ -257,7 +257,7 @@ impl HubWorkspace {
                                         if lines.len()>=1{
                                             if let Some(start) = lines[1].find("--> "){
                                                 if let Some(end) = lines[1].find(":"){
-                                                    path = lines[1].get(start..end).unwrap().to_string();
+                                                    path = lines[1].get((start+4)..end).unwrap().to_string();
                                                 }
                                             }
                                         }
