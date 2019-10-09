@@ -12,17 +12,21 @@ pub struct Process {
 
 impl Process {
     
-    pub fn start(cmd: &str, args: &[&str], current_dir: &str) -> Result<Process, std::io::Error> {
-        fn create_process(cmd: &str, args: &[&str], current_dir: &str) -> Result<Child, std::io::Error> {
-            Command::new(cmd) .args(args)
+    pub fn start(cmd: &str, args: &[&str], current_dir: &str, env:&[(&str,&str)]) -> Result<Process, std::io::Error> {
+        fn create_process(cmd: &str, args: &[&str], current_dir: &str, env:&[(&str,&str)]) -> Result<Child, std::io::Error> {
+            let mut cbuild = Command::new(cmd);
+            cbuild.args(args)
                 .stdin(Stdio::null())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
-                .current_dir(current_dir)
-                .spawn()
+                .current_dir(current_dir);
+            for (key,value) in env{
+                cbuild.env(key,value); 
+            }
+            cbuild.spawn()
         }
 
-        let mut child = create_process(cmd, args, current_dir) ?;
+        let mut child = create_process(cmd, args, current_dir, env) ?;
  
         let (tx_line, rx_line) = mpsc::channel();
         let tx_err = tx_line.clone();
