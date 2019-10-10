@@ -10,7 +10,7 @@ fn main() {
         if index == 0 {
             //for chunk in &chunks{
             //println!("{}", chunk);
-            //} 
+            //}  
         }
         else if chunks[0].len()>0 {
             let date = &chunks[0][1..];
@@ -21,7 +21,7 @@ fn main() {
             let misc = &chunks[8];
             let mut lcname = name.to_string(); 
             lcname.make_ascii_lowercase();        
-            if let Some(_) = lcname.find(""){
+            if let Some(_) = lcname.find(""){  
                 println!("{} {}{} {}", date, addsub, value, name); 
             }
              

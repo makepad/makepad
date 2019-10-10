@@ -435,7 +435,7 @@ impl LogList {
                         dm_to_select = Some(0);
                     }
                     self._scroll_item_in_view = dm_to_select;
-                    
+                    self._top_log = false;
                     select_type = SelectType::Single;
                 },
                 KeyCode::Comma => if ke.modifiers.logo || ke.modifiers.control {
@@ -452,6 +452,7 @@ impl LogList {
                         dm_to_select = Some(0);
                     }
                     self._scroll_item_in_view = dm_to_select;
+                    self._top_log = false;
                     select_type = SelectType::Single;
                 },
                 KeyCode::KeyM => if ke.modifiers.logo || ke.modifiers.control {
