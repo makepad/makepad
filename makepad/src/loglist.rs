@@ -241,7 +241,7 @@ impl LogList {
             }, 
             HubMsg::LogItem {uid, item} => if self.is_running_uid(uid) {
                 for check_msg in &self._log_items {
-                    if check_msg.item == *item { // ignore duplicates
+                    if check_msg.item == *item && (item.level == HubLogItemLevel::Warning || item.level == HubLogItemLevel::Error) { // ignore duplicates
                         return LogListEvent::None
                     }
                 }
@@ -496,6 +496,7 @@ impl LogList {
                     Some(format!("{}{}", rendered, explanation))
                 }
                 else {
+                    println!("DOING {}", rendered);
                     Some(rendered.clone())
                 }
             }

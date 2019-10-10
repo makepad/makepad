@@ -20,7 +20,7 @@ pub struct HubWorkspace {
 pub struct HubWsProcess {
     uid: HubUid,
     process: Process,
-    _thread: Option<std::thread::JoinHandle<()>>
+    _thread: Option<std::thread::JoinHandle<()>> 
 }
 
 impl HubWorkspace {
@@ -215,6 +215,31 @@ impl HubWorkspace {
                             }
                             else {
                                 panic_stack.push(trimmed);
+                            }
+                        }
+                        else{
+                            if line.starts_with("["){
+                                if let Some(row_pos) = line.find(":"){
+                                    if let Some(end_pos) = line.find("]"){
+                                         tx_write.send(ClientToHubMsg {
+                                            to: HubMsgTo::UI,
+                                            msg: HubMsg::LogItem {
+                                                uid: uid,
+                                                item: HubLogItem { 
+                                                    path: Some(format!("{}/{}",workspace,line.get(1..row_pos).unwrap().to_string())),
+                                                    row: line.get((row_pos + 1)..end_pos).unwrap().parse::<usize>().unwrap(),
+                                                    col: 1, 
+                                                    tail: 0,
+                                                    head: 0,
+                                                    body: line.get((end_pos+1)..).unwrap().to_string(),
+                                                    rendered: Some(line.clone()),
+                                                    explanation: None,
+                                                    level: HubLogItemLevel::Log
+                                                }
+                                            }
+                                        }).expect("tx_write fail");     
+                                    }
+                                }
                             }
                         }
                     }
