@@ -136,6 +136,12 @@ impl LogList {
         ])
     }
     
+    pub fn get_default_anim_cut(cx: &Cx, counter: usize, marked: bool) -> Anim {
+        Anim::new(Play::Cut {duration: 0.01}, vec![
+            Track::color(cx.id("bg.color"), Ease::Lin, vec![(1.0, if marked {cx.color("bg_marked")} else if counter & 1 == 0 {cx.color("bg_selected")}else {cx.color("bg_odd")})])
+        ])
+    }
+    
     pub fn get_over_anim(cx: &Cx, counter: usize, marked: bool) -> Anim {
         let over_color = if marked {cx.color("bg_marked_over")} else if counter & 1 == 0 {cx.color("bg_selected_over")}else {cx.color("bg_odd_over")};
         Anim::new(Play::Cut {duration: 0.02}, vec![
@@ -558,7 +564,7 @@ impl LogList {
                                 let dm = &mut self._log_items[*counter];
                                 if *counter != dm_to_select {
                                     dm.is_selected = false;
-                                    dm.animator.play_anim(cx, Self::get_default_anim(cx, *counter, false));
+                                    dm.animator.play_anim(cx, Self::get_default_anim_cut(cx, *counter, false));
                                 }
                             }
                             self._selection.truncate(0);
@@ -604,7 +610,7 @@ impl LogList {
                         let dm = &mut self._log_items[*counter];
                         if *counter != dm_to_select {
                             dm.is_selected = false;
-                            dm.animator.play_anim(cx, Self::get_default_anim(cx, *counter, false));
+                            dm.animator.play_anim(cx, Self::get_default_anim_cut(cx, *counter, false));
                         }
                     }
                     self._selection.truncate(0);
