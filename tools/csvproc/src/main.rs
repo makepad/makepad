@@ -14,7 +14,7 @@ fn main() {
         } 
         else if chunks[0].len()>0 {
             let date = &chunks[0][1..];
-            let name = &chunks[1];
+            let name = &chunks[1]; 
             //println!("{}", name);
             let addsub = if chunks[5].len() == 2 {"-"}else {""};
             let value = &chunks[6];
