@@ -692,7 +692,7 @@ impl LogList {
             if let Some(scroll_item_in_view) = self._scroll_item_in_view{
                 self._scroll_item_in_view = None;
                 let item_y = scroll_item_in_view as f32 * self.row_height;
-                println("{}", item_y);
+                println!("{}", item_y);
                 let dy = (item_y + self.row_height) - (sp.y + view_rect.h);
                 if item_y < sp.y{
                      (Vec2 {x: 0., y: item_y}, true)
