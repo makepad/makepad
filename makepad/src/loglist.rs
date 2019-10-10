@@ -191,6 +191,7 @@ impl LogList {
                         HubLogItemLevel::Warning => TextBufferMessageLevel::Warning,
                         HubLogItemLevel::Error => TextBufferMessageLevel::Error,
                         HubLogItemLevel::Log => TextBufferMessageLevel::Log,
+                        HubLogItemLevel::Panic => TextBufferMessageLevel::Log,
                     }
                 });
             }
@@ -482,7 +483,7 @@ impl LogList {
             // alright we clicked an item. now what. well
             if let Some(path) = &dm.item.path {
                 let text_buffer = storage.text_buffer_from_path(cx, &path);
-                text_buffer.messages.jump_to_offset = if dm.item.level == HubLogItemLevel::Log {
+                text_buffer.messages.jump_to_offset = if dm.item.level == HubLogItemLevel::Log || dm.item.level == HubLogItemLevel::Panic {
                     text_buffer.text_pos_to_offset(TextPos {row: dm.item.row - 1, col: dm.item.col - 1})
                 }
                 else {
@@ -563,6 +564,9 @@ impl LogList {
                 },
                 HubLogItemLevel::Warning => {
                     self.code_icon.draw_icon_walk(cx, CodeIconType::Warning);
+                },
+                HubLogItemLevel::Panic=>{
+                    self.code_icon.draw_icon_walk(cx, CodeIconType::Panic);
                 },
                 HubLogItemLevel::Log => {
                     //self.code_icon.draw_icon_walk(cx, CodeIconType::Ok);

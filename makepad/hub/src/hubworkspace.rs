@@ -183,13 +183,13 @@ impl HubWorkspace {
                         item: HubLogItem {
                             path: path,
                             row: row,
-                            col: 0,
+                            col: 1,
                             tail: 0,
                             head: 0,
                             body: rendered[0].clone(),
                             rendered: Some(rendered.join("")),
                             explanation: Some(panic_stack[2..].join("")),
-                            level: HubLogItemLevel::Error
+                            level: HubLogItemLevel::Panic
                         }
                     }
                 }).expect("tx_write fail");                

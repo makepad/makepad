@@ -183,7 +183,8 @@ impl HubCargoPackage {
 pub enum HubLogItemLevel {
     Warning,
     Error,
-    Log
+    Panic,
+    Log,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
