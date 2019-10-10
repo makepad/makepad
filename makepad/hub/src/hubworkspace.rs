@@ -113,7 +113,7 @@ impl HubWorkspace {
     pub fn artifact_exec(&mut self, uid: HubUid, path: &str, args: &[&str]) {
         
         // lets start a thread
-        let mut process = Process::start(path, args, &self.root_path, &[("RUST_BACKTRACE","1")]).expect("Cannot start process");
+        let mut process = Process::start(path, args, &self.root_path, &[("RUST_BACKTRACE","full")]).expect("Cannot start process");
         
         // we now need to start a subprocess and parse the cargo output.
         let tx_write = self.hub_client.tx_write.clone();

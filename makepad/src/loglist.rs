@@ -85,11 +85,11 @@ impl LogList {
             _log_items: Vec::new(),
             _artifacts: Vec::new(),
             _active_workspace: "makepad".to_string(),
-            _active_package: "csvproc".to_string(),
+            _active_package: "makepad".to_string(),
             _active_targets: vec![
                 CargoActiveTarget::new("check"),
                 CargoActiveTarget::new("build"),
-                //CargoActiveTarget::new("workspace")
+                CargoActiveTarget::new("workspace")
             ]
         }
     }

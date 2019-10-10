@@ -1,7 +1,33 @@
 use std::fs;
 
 fn main(){
-    println!("Hi");   
-    let st = fs::read_to_string("/Users/Admin/Downloads/data.csv").unwrap();
-    println!("{}", st);
+    let data = fs::read_to_string("data.csv").unwrap();
+
+     let thread = std::thread::spawn(move || {
+         panic!("Thread panic")
+     });
+    
+    let lines:Vec<&str> = data.split("\n").collect();
+    for (index,line) in lines.iter().enumerate(){
+        let chunks:Vec<&str> = line.split("\",\"").collect();
+        if index == 0{
+            //for chunk in &chunks{
+                //println!("{}", chunk);
+            //}
+        }
+        else if chunks[0].len()>0{
+            let _date = &chunks[0][1..];
+            let _name = &chunks[1];
+            let addsub = &chunks[5];
+            let _value = &chunks[6];
+            let _misc = &chunks[8];
+            if addsub.len() == 2{
+               // println!("{} -{} {} {}", date, value name, misc);
+            }
+            else{
+               // println!("{} {} {}", date, value name);
+            }
+        }
+    }
+    let _ = thread.join();
 }
