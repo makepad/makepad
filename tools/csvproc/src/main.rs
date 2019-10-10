@@ -1,35 +1,38 @@
 use std::fs;
 
-fn main(){
+fn main() {
     let data = fs::read_to_string("data.csv").unwrap();
-
-     let thread = std::thread::spawn(move || {
-         panic!("Thread panic!")
-     });
     
-    let lines:Vec<&str> = data.split("\n").collect();
-    for i in 0..1{ 
-    for (index,line) in lines.iter().enumerate(){
-        let chunks:Vec<&str> = line.split("\",\"").collect();
-        if index == 0{ 
+    let lines: Vec<&str> = data.split("\n").collect();
+    //for i in 0..1{
+    for (index, line) in lines.iter().enumerate() {
+        let chunks: Vec<&str> = line.split("\",\"").collect();
+        if index == 0 {
             //for chunk in &chunks{
-                //println!("{}", chunk);
+            //println!("{}", chunk);
             //}
-        } 
-        else if chunks[0].len()>0{ 
+        }
+        else if chunks[0].len()>0 {
             let date = &chunks[0][1..];
             let name = &chunks[1];
-            let addsub = &chunks[5];
+            //println!("{}", name);
+            let addsub = if chunks[5].len() == 2 {"-"}else {""};
             let value = &chunks[6];
-            let misc = &chunks[8]; 
-            if addsub.len() == 2{ 
-                println!("{} -{} {} {}", date, value, name, misc);
-            }
-            else{
-                println!("{} {} {}", date, value, name);
-            }
+            let misc = &chunks[8];
+            let mut lcname = name.to_string(); 
+            lcname.make_ascii_lowercase();  
+            //if let Some(_) = lcname.find(""){
+                println!("{} {}{} {}", date, addsub, value, name, misc);
+            //}
+            
+            //println!("{}", misc);
+            //println!("{}",date);
+            //   println!("-{}", value);
+            //}
+            // else{
+            //    println!("{}", value);
+            //println!("{} {} {}", date, value, name);
+            // }
         }
     }
-}
-    let _ = thread.join();
 }

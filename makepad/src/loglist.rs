@@ -253,7 +253,7 @@ impl LogList {
             HubMsg::CargoExecBegin {uid} => if self.is_running_uid(uid) {
             }, 
             HubMsg::LogItem {uid, item} => if self.is_running_uid(uid) {
-                
+                let mut export = false;
                 if item.level == HubLogItemLevel::Warning || item.level == HubLogItemLevel::Error{
                     for check_msg in &self._log_items {
                         if check_msg.item == *item { // ignore duplicates
@@ -263,12 +263,16 @@ impl LogList {
                             break;
                         }
                     }
+                    export = true;
                 }
                 self._log_items.push(LogItemDraw {
                     animator: Animator::new(Self::get_default_anim(cx, self._log_items.len(), false)),
                     item: item.clone(),
                     is_selected: false
                 });
+                if export{
+                    self.export_messages(cx, storage);
+                }
                 self.view.redraw_view_area(cx);
             },
             
@@ -287,7 +291,6 @@ impl LogList {
                 if !self.is_any_cargo_running() && self._exec_when_done {
                     self.exec_all_artifacts(storage)
                 }
-                self.export_messages(cx, storage);
                 self.view.redraw_view_area(cx);
             },
             HubMsg::ArtifactExecEnd {uid} => if self.is_running_uid(uid) {
