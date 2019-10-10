@@ -716,7 +716,7 @@ impl LogList {
         
         let scroll_pos = if self._top_log{ // ok. this thing determines everything. scroll the log down to 
             // compute the scroll pos.
-            Vec2{x:0.,y:(self._log_items.len() as f32 * self.row_height - view_rect.h).max(0.) }
+            Vec2{x:0.,y:((self._log_items.len()+1) as f32 * self.row_height - view_rect.h).max(0.) }
         }
         else{
             // lets get the scroll position.

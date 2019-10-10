@@ -16,13 +16,13 @@ fn main(){
                 //println!("{}", chunk);
             //}
         } 
-        else if chunks[0].len()>0{
+        else if chunks[0].len()>0{ 
             let date = &chunks[0][1..];
             let name = &chunks[1];
             let addsub = &chunks[5];
             let value = &chunks[6];
             let misc = &chunks[8]; 
-            if addsub.len() == 2{
+            if addsub.len() == 2{ 
                 println!("{} -{} {} {}", date, value, name, misc);
             }
             else{
