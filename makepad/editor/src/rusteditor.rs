@@ -284,6 +284,11 @@ impl RustTokenizer {
                     if state.next == '.' {
                         chunk.push(state.next);
                         state.advance();
+                        if state.next == '=' {
+                            chunk.push(state.next);
+                            state.advance();
+                            return TokenType::Splat;
+                        }
                         return TokenType::Splat;
                     }
                     return TokenType::Operator;
