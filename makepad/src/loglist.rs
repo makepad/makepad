@@ -442,7 +442,7 @@ impl LogList {
                     // lets find the
                     if let Some(first) = self._selection.last() {
                         if *first == 0 { // wrap around
-                            dm_to_select = Some(self._log_items.len().min(1) - 1)
+                            dm_to_select = Some(self._log_items.len().max(1) - 1)
                         }
                         else {
                             dm_to_select = Some(first - 1);
