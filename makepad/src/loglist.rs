@@ -212,7 +212,7 @@ impl LogList {
                 break
             }
         }
-        //self.gc_textbuffer_messages(cx, storage);
+        self.gc_textbuffer_messages(cx, storage);
     }
     
     pub fn is_running_uid(&self, uid: &HubUid) -> bool {
