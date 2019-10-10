@@ -14,6 +14,11 @@ pub struct LogList {
     pub row_height: f32,
     pub path_color: Color,
     pub message_color: Color,
+    pub _start_item: usize,
+    pub _top_log: bool,
+    pub _end_item: usize,
+    pub _selection:Vec<usize>,
+    pub _last_range: Option<(usize,usize)>,
     pub _active_workspace: String, 
     pub _active_package: String,
     pub _active_targets: Vec<CargoActiveTarget>,
@@ -22,7 +27,7 @@ pub struct LogList {
     pub _log_items: Vec<LogItemDraw>,
     pub _artifacts: Vec<String>,
 }
-
+ 
 #[derive(Clone)]
 pub struct CargoActiveTarget {
     target: String,
@@ -56,6 +61,9 @@ pub enum LogListEvent {
         item: Option<String>,
         level: HubLogItemLevel
     },
+    SelectLogRange{
+        items: String
+    },
     None,
 }
 
@@ -80,6 +88,11 @@ impl LogList {
             path_color: color("#999"),
             message_color: color("#bbb"),
             row_height: 20.0,
+            _selection:Vec::new(),
+            _start_item:0,
+            _top_log:true,
+            _end_item:0,
+            _last_range:None,
             _always_exec_when_done:true,
             _exec_when_done: false,
             _log_items: Vec::new(),
@@ -199,7 +212,7 @@ impl LogList {
                 break
             }
         }
-        self.gc_textbuffer_messages(cx, storage);
+        //self.gc_textbuffer_messages(cx, storage);
     }
     
     pub fn is_running_uid(&self, uid: &HubUid) -> bool {
@@ -240,9 +253,15 @@ impl LogList {
             HubMsg::CargoExecBegin {uid} => if self.is_running_uid(uid) {
             }, 
             HubMsg::LogItem {uid, item} => if self.is_running_uid(uid) {
-                for check_msg in &self._log_items {
-                    if check_msg.item == *item && (item.level == HubLogItemLevel::Warning || item.level == HubLogItemLevel::Error) { // ignore duplicates
-                        return LogListEvent::None
+                
+                if item.level == HubLogItemLevel::Warning || item.level == HubLogItemLevel::Error{
+                    for check_msg in &self._log_items {
+                        if check_msg.item == *item { // ignore duplicates
+                            return LogListEvent::None
+                        }
+                        if check_msg.item.level != HubLogItemLevel::Warning && check_msg.item.level != HubLogItemLevel::Error{
+                            break;
+                        }
                     }
                 }
                 self._log_items.push(LogItemDraw {
@@ -251,7 +270,6 @@ impl LogList {
                     is_selected: false
                 });
                 self.view.redraw_view_area(cx);
-                self.export_messages(cx, storage);
             },
             
             HubMsg::CargoArtifact {uid, package_id, fresh: _} => if self.is_running_uid(uid) {
@@ -269,6 +287,7 @@ impl LogList {
                 if !self.is_any_cargo_running() && self._exec_when_done {
                     self.exec_all_artifacts(storage)
                 }
+                self.export_messages(cx, storage);
                 self.view.redraw_view_area(cx);
             },
             HubMsg::ArtifactExecEnd {uid} => if self.is_running_uid(uid) {
@@ -412,17 +431,48 @@ impl LogList {
         if self.view.handle_scroll_bars(cx, event) {
             // do zshit.
             self.view.redraw_view_area(cx);
+            match &event{
+                Event::FingerScroll{..}=>{
+                    self._top_log = false;
+                },
+                Event::FingerMove{..}=>{
+                    self._top_log = false;
+                },
+                _=>()
+            }
         }
         
-        let mut dm_to_select = None;
+        #[derive(PartialEq)]
+        enum SelectType{
+            None,
+            Single,
+            Range,
+            Toggle,
+            All
+        };
         
+        
+        let mut dm_to_select = None;
+
+        let mut select_type = SelectType::None;
+
         match event {
             Event::KeyDown(ke) => match ke.key_code {
                 KeyCode::Period => if ke.modifiers.logo || ke.modifiers.control {
                     dm_to_select = self.next_error(false);
+                    select_type = SelectType::Single;
                 },
                 KeyCode::Comma => if ke.modifiers.logo || ke.modifiers.control {
                     dm_to_select = self.next_error(true);
+                    select_type = SelectType::Single;
+                },
+                KeyCode::KeyM => if ke.modifiers.logo || ke.modifiers.control {
+                    dm_to_select = Some(0);
+                    select_type = SelectType::All;
+                },
+                KeyCode::KeyT => if ke.modifiers.logo || ke.modifiers.control {
+                    // lock scroll
+                    self._top_log = true; 
                 },
                 KeyCode::Backtick => if ke.modifiers.logo || ke.modifiers.control {
                     self.artifact_exec(storage);
@@ -434,7 +484,11 @@ impl LogList {
         }
         
         //let mut unmark_nodes = false;
-        for (counter, dm) in self._log_items.iter_mut().enumerate() {
+        for counter in self._start_item..=self._end_item{
+            if counter>=self._log_items.len(){
+                break;
+            }
+            let dm = &mut self._log_items[counter];
             match event.hits(cx, dm.animator.area, HitOpt::default()) {
                 Event::Animate(ae) => {
                     dm.animator.write_area(cx, dm.animator.area, "bg.", ae.time);
@@ -442,8 +496,17 @@ impl LogList {
                 Event::AnimEnded(_) => {
                     dm.animator.end();
                 },
-                Event::FingerDown(_fe) => {
+                Event::FingerDown(fe) => {
                     cx.set_down_mouse_cursor(MouseCursor::Hand);
+                    if fe.modifiers.logo || fe.modifiers.control{
+                        select_type = SelectType::Toggle
+                    }
+                    else if fe.modifiers.shift{
+                        select_type = SelectType::Range
+                    }
+                    else{
+                        select_type = SelectType::Single
+                    }
                     // mark ourselves, unmark others
                     dm_to_select = Some(counter);
                 },
@@ -466,21 +529,146 @@ impl LogList {
                 _ => ()
             }
         };
+        // clean up outside of window
+        if let Some(last_range) = self._last_range{
+            for counter in last_range.0..last_range.1{
+                if counter>=self._log_items.len(){
+                    break;
+                }                
+                if counter < self._start_item || counter >=  self._end_item{
+                    let dm = &mut self._log_items[counter]; 
+                    dm.animator.end_and_set(Self::get_default_anim(cx, counter, dm.is_selected));
+                }
+            }
+        }
+        self._last_range = Some((self._start_item, self._end_item));
         
         if let Some(dm_to_select) = dm_to_select {
             
-            for (counter, dm) in self._log_items.iter_mut().enumerate() {
-                if counter != dm_to_select {
-                    dm.is_selected = false;
-                    dm.animator.play_anim(cx, Self::get_default_anim(cx, counter, false));
+            match select_type{
+                SelectType::Range=>{
+                    if let Some(first) = self._selection.first(){
+                        if let Some(last) = self._selection.last(){
+
+                            let (start,end) = if dm_to_select < *first{
+                                (dm_to_select,*last)
+                            }
+                            else if dm_to_select > *last{
+                                (*first, dm_to_select)
+                            }
+                            else{
+                                (dm_to_select, dm_to_select)
+                            };
+
+                            for counter in &self._selection{
+                                if *counter>=self._log_items.len() || *counter >=start && *counter <= end{
+                                    continue;
+                                }
+                                let dm = &mut self._log_items[*counter];
+                                if *counter != dm_to_select {
+                                    dm.is_selected = false;
+                                    dm.animator.play_anim(cx, Self::get_default_anim(cx, *counter, false));
+                                }
+                            }         
+                            self._selection.truncate(0);
+                            for i in start..=end{
+                                let dm = &mut self._log_items[i];
+                                dm.is_selected = true;
+                                dm.animator.play_anim(cx, Self::get_over_anim(cx, i, true));
+                                self._selection.push(i);
+                            }
+
+                        }
+                    }
+                },
+                SelectType::Toggle=>{
+                    let dm = &mut self._log_items[dm_to_select];
+                    if dm.is_selected{
+                        dm.is_selected = false;
+                        dm.animator.play_anim(cx, Self::get_default_anim(cx, dm_to_select, false));
+                        if let Some(pos) = self._selection.iter().position(|v| *v == dm_to_select){
+                            self._selection.remove(pos);
+                        }
+                    }
+                    else{
+                        self._selection.push(dm_to_select);
+                        dm.is_selected = true;
+                        dm.animator.play_anim(cx, Self::get_over_anim(cx, dm_to_select, true));
+                    }
+                },
+                SelectType::All=>{
+                    self._selection.truncate(0);
+                    for counter in 0..self._log_items.len(){
+                        self._selection.push(counter);
+                        let dm = &mut self._log_items[counter];
+                        dm.is_selected = true;
+                        dm.animator.play_anim(cx, Self::get_over_anim(cx, dm_to_select, true));
+                    }
+                },
+                SelectType::Single=>{
+                    for counter in &self._selection{
+                        if *counter>=self._log_items.len(){
+                            continue;
+                        }
+                        let dm = &mut self._log_items[*counter];
+                        if *counter != dm_to_select {
+                            dm.is_selected = false;
+                            dm.animator.play_anim(cx, Self::get_default_anim(cx, *counter, false));
+                        }
+                    }
+                    self._selection.truncate(0);
+                    self._selection.push(dm_to_select);    
+                    let dm = &mut self._log_items[dm_to_select];
+                    dm.is_selected = true;
+                    dm.animator.play_anim(cx, Self::get_over_anim(cx, dm_to_select, true));
+                    
+                    if let Some(path) = &dm.item.path {
+                        let text_buffer = storage.text_buffer_from_path(cx, &path);
+                        text_buffer.messages.jump_to_offset = if dm.item.level == HubLogItemLevel::Log || dm.item.level == HubLogItemLevel::Panic {
+                            text_buffer.text_pos_to_offset(TextPos {row: dm.item.row - 1, col: dm.item.col - 1})
+                        }
+                        else {
+                            dm.item.tail
+                        };
+                        cx.send_signal(text_buffer.signal, SIGNAL_TEXTBUFFER_JUMP_TO_OFFSET);
+                    }
+                    let item = if let Some(rendered) = &dm.item.rendered {
+                        if let Some(explanation) = &dm.item.explanation {
+                            Some(format!("{}{}", rendered, explanation))
+                        }
+                        else {
+                            Some(rendered.clone())
+                        }
+                    }
+                    else {
+                        None
+                    };
+                    return LogListEvent::SelectLogItem {
+                        item: item,
+                        path: dm.item.path.clone(),
+                        level: dm.item.level.clone()
+                    }
+                },
+                _=>()
+            }
+            if select_type == SelectType::Range || select_type == SelectType::Toggle  || select_type == SelectType::All{
+                let mut items = String::new();
+                for select in &self._selection{
+                    if let Some(rendered) = &self._log_items[*select].item.rendered{
+                        items.push_str(rendered);
+                        if items.len()>1000000{ // safety break
+                            break;
+                        }
+                    }
                 }
-            };
-            
-            let dm = &mut self._log_items[dm_to_select];
-            dm.is_selected = true;
-            dm.animator.play_anim(cx, Self::get_over_anim(cx, dm_to_select, true));
-            
+                return LogListEvent::SelectLogRange {
+                    items: items,
+                }                
+            }
+           
+            // lets loop over our selection
             // alright we clicked an item. now what. well
+            /*
             if let Some(path) = &dm.item.path {
                 let text_buffer = storage.text_buffer_from_path(cx, &path);
                 text_buffer.messages.jump_to_offset = if dm.item.level == HubLogItemLevel::Log || dm.item.level == HubLogItemLevel::Panic {
@@ -496,7 +684,6 @@ impl LogList {
                     Some(format!("{}{}", rendered, explanation))
                 }
                 else {
-                    println!("DOING {}", rendered);
                     Some(rendered.clone())
                 }
             }
@@ -508,6 +695,7 @@ impl LogList {
                 path: dm.item.path.clone(),
                 level: dm.item.level.clone()
             }
+            */
         }
         LogListEvent::None
     }
@@ -520,15 +708,23 @@ impl LogList {
             return
         }
         
+        let view_rect = cx.get_turtle_rect();
+
         let bg_even = cx.color("bg_selected");
         let bg_odd = cx.color("bg_odd");
         
-        // lets get the scroll position.
-        let scroll_pos = self.view.get_scroll_pos(cx);
+        let scroll_pos = if self._top_log{ // ok. this thing determines everything. scroll the log down to 
+            // compute the scroll pos.
+            Vec2{x:0.,y:(self._log_items.len() as f32 * self.row_height - view_rect.h).max(0.) }
+        }
+        else{
+            // lets get the scroll position.
+             self.view.get_scroll_pos(cx)
+        };
         
         // we need to find the first item to draw
-        let start_item = (scroll_pos.y / self.row_height).floor() as usize;
-        let start_scroll = (start_item as f32) * self.row_height;
+        self._start_item = (scroll_pos.y / self.row_height).floor() as usize;
+        let start_scroll = (self._start_item as f32) * self.row_height;
         // lets jump the turtle forward by scrollpos.y
         cx.move_turtle(0., start_scroll);
         
@@ -540,10 +736,8 @@ impl LogList {
             ..Default::default()
         };
         
-        let view_rect = cx.get_turtle_rect();
-        
         let mut counter = 0;
-        for i in start_item..self._log_items.len() {
+        for i in self._start_item..self._log_items.len() {
             
             let walk = cx.get_rel_turtle_walk();
             if walk.y - start_scroll > view_rect.h + self.row_height {
@@ -585,8 +779,8 @@ impl LogList {
             dm.animator.update_area_refs(cx, bg_area);
             
             counter += 1;
+            self._end_item = i;
         }
-        
         // draw status line
         self.item_bg.color = if counter & 1 == 0 {bg_even}else {bg_odd};
         let bg_inst = self.item_bg.begin_quad(cx, &item_layout);
@@ -623,7 +817,10 @@ impl LogList {
             y += self.row_height;
             counter += 1;
         }
-        
         self.view.end_view(cx);
+        if self._top_log{
+            println!("SET SCROLLPOS {}", scroll_pos.y);
+            self.view.set_scroll_pos(cx, scroll_pos);
+        }
     }
 }

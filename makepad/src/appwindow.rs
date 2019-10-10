@@ -108,6 +108,9 @@ impl AppWindow {
                                 self.log_item.load_item(cx, &item, level);
                             }
                         },
+                        LogListEvent::SelectLogRange{items}=>{
+                            self.log_item.load_item(cx, &items, HubLogItemLevel::Log);
+                        }
                         _ => ()
                     }
                 },

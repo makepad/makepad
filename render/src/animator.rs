@@ -112,6 +112,11 @@ impl Animator {
             self.set_anim_as_last_values(&current);
         }
     }
+
+    pub fn end_and_set(&mut self, anim:Anim){
+        self.current = None;
+        self.set_anim_as_last_values(&anim);
+    }
     
     pub fn term_anim_playing(&mut self) -> bool {
         if let Some(current) = &self.current {

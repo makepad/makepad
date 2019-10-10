@@ -11,9 +11,9 @@ members = [
 ]
 
 
-[profile.release]
-lto = true
-opt-level = 'z'
-panic = "abort"
-debug = true
-codegen-units = 1
+#[profile.release]
+#lto = true
+#opt-level = 'z'
+#panic = "abort"
+#debug = true
+#codegen-units = 1

@@ -218,7 +218,7 @@ impl HubWorkspace {
                             }
                         }
                         else{
-                            if line.starts_with("["){
+                            if line.starts_with("["){ // a dbg! style output with line information
                                 if let Some(row_pos) = line.find(":"){
                                     if let Some(end_pos) = line.find("]"){
                                          tx_write.send(ClientToHubMsg {
@@ -351,7 +351,7 @@ impl HubWorkspace {
                     // lets parse the line
                     let mut parsed: Result<RustcCompilerMessage> = serde_json::from_str(&line);
                     match &mut parsed {
-                        Err(err) => (), //self.hub_log.log(&format!("Json Parse Error {:?} {}", err, line)),
+                        Err(_) => (), //self.hub_log.log(&format!("Json Parse Error {:?} {}", err, line)),
                         Ok(parsed) => {
                             // here we convert the parsed message
                             if let Some(message) = &mut parsed.message { //.spans;

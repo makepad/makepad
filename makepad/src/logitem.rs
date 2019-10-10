@@ -37,7 +37,7 @@ impl LogItem {
         self.text_buffer.load_from_utf8(cx, val);
         self.code_editor.view.redraw_view_area(cx);
     }
-    
+
     pub fn clear_msg(&mut self, cx: &mut Cx) {
         self.text_buffer.load_from_utf8(cx, "");
     }
@@ -128,6 +128,19 @@ impl LogItem {
                         token_count = 0;
                         first_block_code_line = false;
                     }
+                    if token_type == TokenType::Eof {
+                        break
+                    }
+                }
+            }
+            else{
+                 let mut state = TokenizerState::new(&text_buffer.lines);
+                let mut tokenizer = PlainTokenizer::new();
+                let mut pair_stack = Vec::new();
+                loop {
+                    let offset = text_buffer.flat_text.len();
+                    let token_type = tokenizer.next_token(&mut state, &mut text_buffer.flat_text, &text_buffer.token_chunks);
+                    TokenChunk::push_with_pairing(&mut text_buffer.token_chunks, &mut pair_stack, state.next, offset, text_buffer.flat_text.len(), token_type);
                     if token_type == TokenType::Eof {
                         break
                     }

@@ -75,7 +75,7 @@ impl HubUI {
                                 do_signal = true;
                             }
                             htc_msgs.push(htc);
-                        }
+                        } 
                         if do_signal{
                             Cx::post_signal(signal, 0);
                         }

@@ -5,7 +5,8 @@ fn main() {
     HubWorkspace::run(&key, "makepad", "edit_repo", HubLog::None, | ws, htc | match htc.msg {
         HubMsg::CargoPackagesRequest {uid} => {
             ws.cargo_packages(htc.from, uid, vec![
-                HubCargoPackage::new("makepad", &["check", "makepad", "workspace"])
+                HubCargoPackage::new("makepad", &["check", "build", "workspace"]),
+                HubCargoPackage::new("csvproc", &["check", "build"])
             ])
         },
         HubMsg::CargoExec {uid, package, target} => {
