@@ -17,7 +17,7 @@ impl RustEditor {
         editor
     }
 
-    
+      
     pub fn handle_rust_editor(&mut self, cx: &mut Cx, event: &mut Event, text_buffer: &mut TextBuffer) -> CodeEditorEvent {
         let ce = self.code_editor.handle_code_editor(cx, event, text_buffer);
         match ce {

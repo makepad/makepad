@@ -11,7 +11,7 @@ fn main() {
             //for chunk in &chunks{
             //println!("{}", chunk);
             //} 
-        }
+        }   
         else if chunks[0].len()>0 {
             //let date = &chunks[0][1..];
             let name = &chunks[1];

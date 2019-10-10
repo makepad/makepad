@@ -141,7 +141,7 @@ impl Animator {
         // alright first we find area, it already exists
         if let Some(anim_area) = cx.playing_anim_areas.iter_mut().find( | v | v.area == self.area) {
             //do we cut the animation in right now?
-            if anim.mode.cut() {
+            if anim.mode.cut() || self.current.is_none() {
                 self.current = Some(anim);
                 anim_area.start_time = std::f64::NAN;
                 self.next = None;

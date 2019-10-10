@@ -354,6 +354,7 @@ impl LogList {
     pub fn restart_cargo(&mut self, cx: &mut Cx, storage: &mut AppStorage) {
         self._artifacts.truncate(0);
         self._log_items.truncate(0);
+        self._selection.truncate(0);
         self.gc_textbuffer_messages(cx, storage);
         
         let hub_ui = storage.hub_ui.as_mut().unwrap();
