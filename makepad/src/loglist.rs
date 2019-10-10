@@ -473,6 +473,7 @@ impl LogList {
                 KeyCode::KeyT => if ke.modifiers.logo || ke.modifiers.control {
                     // lock scroll
                     self._top_log = true; 
+                    self.view.redraw_view_area(cx);
                 },
                 KeyCode::Backtick => if ke.modifiers.logo || ke.modifiers.control {
                     self.artifact_exec(storage);
@@ -819,7 +820,6 @@ impl LogList {
         }
         self.view.end_view(cx);
         if self._top_log{
-            println!("SET SCROLLPOS {}", scroll_pos.y);
             self.view.set_scroll_pos(cx, scroll_pos);
         }
     }
