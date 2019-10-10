@@ -712,8 +712,9 @@ impl LogList {
             // lets get the scroll position.
             let sp = self.view.get_scroll_pos(cx);
             if let Some(scroll_item_in_view) = self._scroll_item_in_view{
+                self._scroll_item_in_view = None;
                 let item_y = scroll_item_in_view as f32 * self.row_height;
-                let dy = (sp.y + view_rect.h) - (item_y + self.row_height);
+                let dy = (item_y + self.row_height) - (sp.y + view_rect.h);
                 if item_y < sp.y{
                      (Vec2 {x: 0., y: item_y}, true)
                 }

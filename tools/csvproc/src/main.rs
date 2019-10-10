@@ -10,7 +10,7 @@ fn main() {
         if index == 0 {
             //for chunk in &chunks{
             //println!("{}", chunk);
-            //}
+            //} 
         }
         else if chunks[0].len()>0 {
             let date = &chunks[0][1..];
