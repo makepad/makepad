@@ -723,13 +723,13 @@ impl LogList {
         }
         else{
             // lets get the scroll position.
-             let sp = self.view.get_scroll_pos(cx)
+             let sp = self.view.get_scroll_pos(cx);
              // see if our list is < the max scrollpos
              if sp.y > max_scroll_y{
                  (Vec2{x:0., y:max_scroll_y}, false)
              }
              else{
-                 (sp.y, false)
+                 (sp, false)
              }
         };
         
