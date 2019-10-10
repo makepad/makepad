@@ -487,7 +487,6 @@ impl LogList {
             _ => ()
         }
         
-        //let mut unmark_nodes = false;
         for counter in self._start_item..=self._end_item{
             if counter>=self._log_items.len(){
                 break;
@@ -717,13 +716,21 @@ impl LogList {
         let bg_even = cx.color("bg_selected");
         let bg_odd = cx.color("bg_odd");
         
-        let scroll_pos = if self._top_log{ // ok. this thing determines everything. scroll the log down to 
+        let max_scroll_y = ((self._log_items.len()+1) as f32 * self.row_height - view_rect.h).max(0.);
+        let (scroll_pos, move_scroll_pos) = if self._top_log{ // ok. this thing determines everything. scroll the log down to 
             // compute the scroll pos.
-            Vec2{x:0.,y:((self._log_items.len()+1) as f32 * self.row_height - view_rect.h).max(0.) }
+            (Vec2{x:0.,y:max_scroll_y },true)
         }
         else{
             // lets get the scroll position.
-             self.view.get_scroll_pos(cx)
+             let sp = self.view.get_scroll_pos(cx)
+             // see if our list is < the max scrollpos
+             if sp.y > max_scroll_y{
+                 (Vec2{x:0., y:max_scroll_y}, false)
+             }
+             else{
+                 (sp.y, false)
+             }
         };
         
         // we need to find the first item to draw
@@ -822,7 +829,7 @@ impl LogList {
             counter += 1;
         }
         self.view.end_view(cx);
-        if self._top_log{
+        if move_scroll_pos{
             self.view.set_scroll_pos(cx, scroll_pos);
         }
     }

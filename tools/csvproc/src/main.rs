@@ -20,9 +20,9 @@ fn main() {
             let value = &chunks[6];
             let misc = &chunks[8];
             let mut lcname = name.to_string(); 
-            lcname.make_ascii_lowercase();   
-            //if let Some(_) = lcname.find(""){
-                println!("{} {}{} {}", date, addsub, value, name, misc);
+            lcname.make_ascii_lowercase();      
+            //if let Some(_) = lcname.find(""){ 
+                println!("{} {}{} {} {}", date, addsub, value, name, misc);
             //}
             
             //println!("{}", misc);
