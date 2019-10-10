@@ -166,7 +166,7 @@ impl LogList {
         }
     }
     
-    pub fn export_messages(&self, cx: &mut Cx, storage: &mut AppStorage) {
+    pub fn export_messages_to_textbuffers(&self, cx: &mut Cx, storage: &mut AppStorage) {
         
         for dm in &self._log_items {
             if let Some(path) = &dm.item.path {
@@ -279,7 +279,7 @@ impl LogList {
                     is_selected: false
                 });
                 if export {
-                    self.export_messages(cx, storage);
+                    self.export_messages_to_textbuffers(cx, storage);
                 }
                 self.view.redraw_view_area(cx);
             },
@@ -421,7 +421,6 @@ impl LogList {
         
         
         let mut dm_to_select = None;
-        
         let mut select_type = SelectType::None;
         
         match event {
@@ -662,37 +661,6 @@ impl LogList {
                     items: items,
                 }
             }
-            
-            // lets loop over our selection
-            // alright we clicked an item. now what. well
-            /*
-            if let Some(path) = &dm.item.path {
-                let text_buffer = storage.text_buffer_from_path(cx, &path);
-                text_buffer.messages.jump_to_offset = if dm.item.level == HubLogItemLevel::Log || dm.item.level == HubLogItemLevel::Panic {
-                    text_buffer.text_pos_to_offset(TextPos {row: dm.item.row - 1, col: dm.item.col - 1})
-                }
-                else {
-                    dm.item.tail
-                };
-                cx.send_signal(text_buffer.signal, SIGNAL_TEXTBUFFER_JUMP_TO_OFFSET);
-            }
-            let item = if let Some(rendered) = &dm.item.rendered {
-                if let Some(explanation) = &dm.item.explanation {
-                    Some(format!("{}{}", rendered, explanation))
-                }
-                else {
-                    Some(rendered.clone())
-                }
-            }
-            else {
-                None
-            };
-            return LogListEvent::SelectLogItem {
-                item: item,
-                path: dm.item.path.clone(),
-                level: dm.item.level.clone()
-            }
-            */
         }
         LogListEvent::None
     }
@@ -710,17 +678,20 @@ impl LogList {
         let bg_even = cx.color("bg_selected");
         let bg_odd = cx.color("bg_odd");
         
+        // compute if we need to clamp or scroll the view
         let max_scroll_y = ((self._log_items.len() + 1) as f32 * self.row_height - view_rect.h).max(0.);
-        let (scroll_pos, move_scroll_pos) = if self._top_log { // ok. this thing determines everything. scroll the log down to
+        let (scroll_pos, move_scroll_pos) = if self._top_log { 
             // compute the scroll pos.
             (Vec2 {x: 0., y: max_scroll_y}, true)
         }
         else {
-            // lets get the scroll position.
             let sp = self.view.get_scroll_pos(cx);
+
+            // scroll item into view
             if let Some(scroll_item_in_view) = self._scroll_item_in_view{
                 self._scroll_item_in_view = None;
                 let item_y = scroll_item_in_view as f32 * self.row_height;
+                println("{}", item_y);
                 let dy = (item_y + self.row_height) - (sp.y + view_rect.h);
                 if item_y < sp.y{
                      (Vec2 {x: 0., y: item_y}, true)
@@ -733,7 +704,7 @@ impl LogList {
                 }
             }
             else{
-                // see if our list is < the max scrollpos
+                // clamp the scrollbar to our max list size
                 if sp.y > max_scroll_y {
                     (Vec2 {x: 0., y: max_scroll_y}, false)
                 }
