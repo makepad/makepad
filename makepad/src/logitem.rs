@@ -6,7 +6,7 @@ use hub::*;
 pub struct LogItem {
     pub code_editor: CodeEditor,
     pub text_buffer: TextBuffer,
-    pub level:HubLogItemLevel
+    pub level: HubLogItemLevel
 }
 
 impl LogItem {
@@ -32,14 +32,14 @@ impl LogItem {
         editor
     }
     
-    pub fn load_item(&mut self, cx: &mut Cx, val: &str, level:HubLogItemLevel) {
+    pub fn load_item(&mut self, cx: &mut Cx, val: &str, level: HubLogItemLevel) {
         self.level = level;
         self.text_buffer.load_from_utf8(cx, val);
         self.code_editor.view.redraw_view_area(cx);
     }
     
     pub fn clear_msg(&mut self, cx: &mut Cx) {
-         self.text_buffer.load_from_utf8(cx, "");
+        self.text_buffer.load_from_utf8(cx, "");
     }
     
     pub fn handle_log_item(&mut self, cx: &mut Cx, event: &mut Event) -> CodeEditorEvent {
@@ -54,25 +54,26 @@ impl LogItem {
             _ => ()
         }
         ce
-
+        
     }
     
     pub fn draw_log_item(&mut self, cx: &mut Cx) {
         let text_buffer = &mut self.text_buffer;
         if text_buffer.needs_token_chunks() && text_buffer.lines.len() >0 {
-            let mut state = TokenizerState::new(&text_buffer.lines);
-            let mut tokenizer = RustTokenizer::new();
-            let mut pair_stack = Vec::new();
-            let mut line_count = 0;
-            let mut token_count = 0;
-            let mut backtick_toggle = false;
-            let mut first_block = false;
-            let mut first_block_code_line = false;
-            let mut message_type = TokenType::Warning;
-            loop {
-                let offset = text_buffer.flat_text.len();
-                let mut token_type = tokenizer.next_token(&mut state, &mut text_buffer.flat_text, &text_buffer.token_chunks);
-                if self.level != HubLogItemLevel::Log{
+            
+            if self.level != HubLogItemLevel::Log {
+                let mut state = TokenizerState::new(&text_buffer.lines);
+                let mut tokenizer = RustTokenizer::new();
+                let mut pair_stack = Vec::new();
+                let mut line_count = 0;
+                let mut token_count = 0;
+                let mut backtick_toggle = false;
+                let mut first_block = false;
+                let mut first_block_code_line = false;
+                let mut message_type = TokenType::Warning;
+                loop {
+                    let offset = text_buffer.flat_text.len();
+                    let mut token_type = tokenizer.next_token(&mut state, &mut text_buffer.flat_text, &text_buffer.token_chunks);
                     let mut val = String::new();
                     for i in offset..text_buffer.flat_text.len() {
                         val.push(text_buffer.flat_text[i]);
@@ -80,34 +81,29 @@ impl LogItem {
                     if token_type == TokenType::Operator && val == "`" {
                         backtick_toggle = !backtick_toggle;
                     }
-    
+                    
                     let inside_backtick = !backtick_toggle || token_type == TokenType::Operator && val == "`";
-                    if line_count == 2{
+                    if line_count == 2 {
                         first_block = true;
                     }
-                    if first_block && token_count == 0 && token_type == TokenType::Number{
-                         first_block_code_line = true;   
+                    if first_block && token_count == 0 && token_type == TokenType::Number {
+                        first_block_code_line = true;
                     }
                     
                     // Gray out everything thats not in backticks or code
-                    if (line_count == 0 && inside_backtick 
-                        || line_count == 1
-                        || first_block && token_count <= 2 && (val == "|" || token_type == TokenType::Number)
-                        || first_block && !first_block_code_line && inside_backtick
-                        || !first_block && inside_backtick
-                        )
+                    if (line_count == 0 && inside_backtick || line_count == 1 || first_block && token_count <= 2 && (val == "|" || token_type == TokenType::Number) || first_block && !first_block_code_line && inside_backtick || !first_block && inside_backtick)
                         && token_type != TokenType::Whitespace
-                        && token_type != TokenType::Newline 
-                        && token_type != TokenType::Eof{
+                        && token_type != TokenType::Newline
+                        && token_type != TokenType::Eof {
                         token_type = TokenType::Defocus;
-                    } 
-    
+                    }
+                    
                     // color the ^^
-                    if first_block && !first_block_code_line && val == "^"{
+                    if first_block && !first_block_code_line && val == "^" {
                         token_type = message_type;
                     }
-    
-                    if first_block && token_count == 1 && val != "|" && token_type != TokenType::Whitespace{
+                    
+                    if first_block && token_count == 1 && val != "|" && token_type != TokenType::Whitespace {
                         first_block = false;
                     }
                     
@@ -120,19 +116,21 @@ impl LogItem {
                             token_type = TokenType::Error
                         }
                     }
-                }
-                //println!("{:?} {}", token_type, val);
-                
-                TokenChunk::push_with_pairing(&mut text_buffer.token_chunks, &mut pair_stack, state.next, offset, text_buffer.flat_text.len(), token_type);
-                
-                token_count += 1;
-                if token_type == TokenType::Newline {
-                    line_count += 1;
-                    token_count = 0;
-                    first_block_code_line = false;
-                }
-                if token_type == TokenType::Eof {
-                    break
+                    
+                    
+                    //println!("{:?} {}", token_type, val);
+                    
+                    TokenChunk::push_with_pairing(&mut text_buffer.token_chunks, &mut pair_stack, state.next, offset, text_buffer.flat_text.len(), token_type);
+                    
+                    token_count += 1;
+                    if token_type == TokenType::Newline {
+                        line_count += 1;
+                        token_count = 0;
+                        first_block_code_line = false;
+                    }
+                    if token_type == TokenType::Eof {
+                        break
+                    }
                 }
             }
         }

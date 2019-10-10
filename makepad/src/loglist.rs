@@ -14,7 +14,7 @@ pub struct LogList {
     pub row_height: f32,
     pub path_color: Color,
     pub message_color: Color,
-    pub _active_workspace: String,
+    pub _active_workspace: String, 
     pub _active_package: String,
     pub _active_targets: Vec<CargoActiveTarget>,
     pub _exec_when_done: bool,
@@ -85,11 +85,11 @@ impl LogList {
             _log_items: Vec::new(),
             _artifacts: Vec::new(),
             _active_workspace: "makepad".to_string(),
-            _active_package: "makepad".to_string(),
+            _active_package: "csvproc".to_string(),
             _active_targets: vec![
                 CargoActiveTarget::new("check"),
                 CargoActiveTarget::new("build"),
-                CargoActiveTarget::new("workspace")
+                //CargoActiveTarget::new("workspace")
             ]
         }
     }

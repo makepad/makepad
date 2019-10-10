@@ -7,7 +7,7 @@ use std::str;
 
 pub struct Process {
     pub child: Option<Child>,
-    pub rx_line: Option<mpsc::Receiver<Option<String>>>,
+    pub rx_line: Option<mpsc::Receiver<Option<(bool,String)>>>,
 }
 
 impl Process {
@@ -51,7 +51,7 @@ impl Process {
                         if *ch == '\n' as u8 {
                             // emit a line
                             if let Ok(line) = str::from_utf8(&storage[start..(index+1)]) {
-                                tx_line.send(Some(line.to_string())).expect("tx_line cannot send - unexpected");;
+                                tx_line.send(Some((false,line.to_string()))).expect("tx_line cannot send - unexpected");;
                             }
                             start = index + 1;
                         }
@@ -78,7 +78,7 @@ impl Process {
                         if *ch == '\n' as u8 {
                             // emit a line
                             if let Ok(line) = str::from_utf8(&storage[start..(index+1)]) {
-                                tx_err.send(Some(line.to_string())).expect("tx_err cannot send - unexpected");;
+                                tx_err.send(Some((true,line.to_string()))).expect("tx_err cannot send - unexpected");;
                             }
                             start = index + 1;
                         }

@@ -6,6 +6,7 @@ use serde::{Deserialize};
 use std::sync::{Arc, Mutex};
 use std::fs;
 use serde_json::{Result};
+use std::sync::{mpsc};
 
 pub struct HubWorkspace {
     pub hub_client: HubClient,
@@ -27,7 +28,7 @@ impl HubWorkspace {
     where F: FnMut(&mut HubWorkspace, HubToClientMsg) {
         
         loop {
-            if root_path.contains("..") || root_path.contains("./") || root_path.contains("\\") || root_path.starts_with("/"){
+            if root_path.contains("..") || root_path.contains("./") || root_path.contains("\\") || root_path.starts_with("/") {
                 panic!("Root path for workspace cant be relative and must be unix style");
             }
             
@@ -101,8 +102,8 @@ impl HubWorkspace {
     
     pub fn artifact_kill(&mut self, uid: HubUid) {
         if let Ok(mut procs) = self.processes.lock() {
-            for proc in procs.iter_mut(){
-                if proc.uid == uid{
+            for proc in procs.iter_mut() {
+                if proc.uid == uid {
                     proc.process.kill();
                     break;
                 }
@@ -113,7 +114,7 @@ impl HubWorkspace {
     pub fn artifact_exec(&mut self, uid: HubUid, path: &str, args: &[&str]) {
         
         // lets start a thread
-        let mut process = Process::start(path, args, &self.root_path, &[("RUST_BACKTRACE","full")]).expect("Cannot start process");
+        let mut process = Process::start(path, args, &self.root_path, &[("RUST_BACKTRACE", "full")]).expect("Cannot start process");
         
         // we now need to start a subprocess and parse the cargo output.
         let tx_write = self.hub_client.tx_write.clone();
@@ -121,36 +122,123 @@ impl HubWorkspace {
         let rx_line = process.rx_line.take().unwrap();
         
         let processes = Arc::clone(&self.processes);
-        
+        let workspace = self.workspace.clone();
         tx_write.send(ClientToHubMsg {
             to: HubMsgTo::UI,
             msg: HubMsg::ArtifactExecBegin {uid: uid}
         }).expect("tx_write fail");
         
+        fn starts_with_digit(val: &str) -> bool {
+            if val.len() <= 1 {
+                return false;
+            }
+            let c1 = val.chars().next().unwrap();
+            c1 >= '0' && c1 <= '9'
+        }
+        
         let thread = std::thread::spawn(move || {
-            //let mut any_errors = false;
-            while let Ok(line) = rx_line.recv() {
-                if let Some(line) = line {
-                    // lets parse/process our log line 
-                    tx_write.send(ClientToHubMsg {
-                        to: HubMsgTo::UI,
-                        msg: HubMsg::LogItem{
-                            uid: uid,
-                            item: HubLogItem {
-                                //package_id: parsed.package_id.clone(),
-                                path: None,
-                                row: 0,
-                                col: 0,
-                                tail: 0,
-                                head: 0,
-                                body: line.clone(),
-                                rendered: Some(line),
-                                explanation: None,
-                                level: HubLogItemLevel::Log
+            let mut tracing_panic = false;
+            let mut panic_stack: Vec<String> = Vec::new();
+            
+            fn send_panic(uid:HubUid, workspace:&str, panic_stack:&Vec<String>, tx_write:&mpsc::Sender<ClientToHubMsg>){
+                // this has to be the uglies code in the whole project. If only stacktraces were more cleanly machine readable.
+                let mut path = None;
+                let mut row = 0;
+                let mut rendered = Vec::new();
+                rendered.push(panic_stack[0].clone());
+                let mut last_fn_name = String::new();
+                for panic_line in panic_stack {
+                    
+                    if panic_line.starts_with("at ")
+                        && !panic_line.starts_with("at /")
+                        && !panic_line.starts_with("at src/libstd")
+                        && !panic_line.starts_with("at src/libpanic_unwind") {
+                        if let Some(end) = panic_line.find(":") {
+                            let proc_path = format!("{}/{}", workspace, panic_line.get(3..end).unwrap().to_string());
+                            let proc_row = panic_line.get((end + 1)..(panic_line.len() - 1)).unwrap().parse::<usize>().unwrap();
+                            
+                            rendered.push(format!("{}:{} - {}", proc_path, proc_row, last_fn_name));
+                            if path.is_none() {
+                                path = Some(proc_path);
+                                row = proc_row
                             }
                         }
-                    }).expect("tx_write fail");
+                    }
+                    else if starts_with_digit(panic_line){
+                        if let Some(pos) = panic_line.find(" 0x") {
+                            last_fn_name = panic_line.get((pos+15)..).unwrap().to_string();
+                        }
+                    }
+                }
+                rendered.push("\n".to_string());
 
+                if panic_stack.len()<3{
+                    return;
+                }
+
+                tx_write.send(ClientToHubMsg {
+                    to: HubMsgTo::UI,
+                    msg: HubMsg::LogItem {
+                        uid: uid,
+                        item: HubLogItem {
+                            path: path,
+                            row: row,
+                            col: 0,
+                            tail: 0,
+                            head: 0,
+                            body: rendered[0].clone(),
+                            rendered: Some(rendered.join("")),
+                            explanation: Some(panic_stack[2..].join("")),
+                            level: HubLogItemLevel::Error
+                        }
+                    }
+                }).expect("tx_write fail");                
+            }
+            
+            while let Ok(line) = rx_line.recv() {
+                if let Some((is_stderr, line)) = line {
+                    if is_stderr { // start collecting stderr
+                        if line.starts_with("thread '") {// this is how we recognise a stacktrace start..Very sturdy.
+                            tracing_panic = true;
+                            panic_stack.truncate(0);
+                        }
+                        if tracing_panic {
+                            let trimmed = line.trim_start().to_string();
+                            // we terminate the stacktrace on a double 'no-source' line
+                            // this usually is around the beginning. If only someone thought of marking the 'end'
+                            // of the stacktrace in a recognisable form
+                            if panic_stack.len()>2
+                                && starts_with_digit(panic_stack.last().unwrap())
+                                && starts_with_digit(&trimmed) {
+                                tracing_panic = false;
+                                send_panic(uid, &workspace, &panic_stack, &tx_write);
+                            }
+                            else {
+                                panic_stack.push(trimmed);
+                            }
+                        }
+                    }
+                    else {
+                        // lets parse/process our log line
+                        tx_write.send(ClientToHubMsg {
+                            to: HubMsgTo::UI,
+                            msg: HubMsg::LogItem {
+                                uid: uid,
+                                item: HubLogItem {
+                                    //package_id: parsed.package_id.clone(),
+                                    path: None,
+                                    row: 0,
+                                    col: 0,
+                                    tail: 0,
+                                    head: 0,
+                                    body: line.clone(),
+                                    rendered: Some(line),
+                                    explanation: None,
+                                    level: HubLogItemLevel::Log
+                                }
+                            }
+                        }).expect("tx_write fail");
+                    }
                     /*
                     tx_write.send(ClientToHubMsg {
                         to: HubMsgTo::UI,
@@ -161,6 +249,9 @@ impl HubWorkspace {
                     }).expect("tx_write fail");*/
                 }
                 else { // process terminated
+                    if tracing_panic{
+                        send_panic(uid, &workspace, &panic_stack, &tx_write);
+                    }
                     // do we have any errors?
                     break;
                 }
@@ -181,7 +272,6 @@ impl HubWorkspace {
                 }
             };
         });
-        
         if let Ok(mut processes) = self.processes.lock() {
             processes.push(HubWsProcess {
                 uid: uid,
@@ -190,12 +280,12 @@ impl HubWorkspace {
             });
         };
     }
-
-        
+    
+    
     pub fn cargo_kill(&mut self, uid: HubUid) {
         if let Ok(mut procs) = self.processes.lock() {
-            for proc in procs.iter_mut(){
-                if proc.uid == uid{
+            for proc in procs.iter_mut() {
+                if proc.uid == uid {
                     proc.process.kill();
                     break;
                 }
@@ -207,7 +297,7 @@ impl HubWorkspace {
         
         // lets start a thread
         let mut extargs = args.to_vec();
-        extargs.push("--message-format=json"); 
+        extargs.push("--message-format=json");
         let mut process = Process::start("cargo", &extargs, &self.root_path, &[]).expect("Cannot start process");
         //let print_args: Vec<String> = extargs.to_vec().iter().map( | v | v.to_string()).collect();
         
@@ -231,12 +321,12 @@ impl HubWorkspace {
             let mut any_errors = false;
             let mut artifact_path = None;
             while let Ok(line) = rx_line.recv() {
-                if let Some(line) = line {
+                if let Some((_is_stderr, line)) = line {
                     
                     // lets parse the line
                     let mut parsed: Result<RustcCompilerMessage> = serde_json::from_str(&line);
                     match &mut parsed {
-                        Err(err) => println!("Json Parse Error {:?} {}", err, line),
+                        Err(err) => (), //self.hub_log.log(&format!("Json Parse Error {:?} {}", err, line)),
                         Ok(parsed) => {
                             // here we convert the parsed message
                             if let Some(message) = &mut parsed.message { //.spans;
@@ -266,26 +356,26 @@ impl HubWorkspace {
                                     let level = match message.level.as_ref() {
                                         "warning" => HubLogItemLevel::Warning,
                                         "error" => HubLogItemLevel::Error,
-                                        _ => HubLogItemLevel::Warning 
+                                        _ => HubLogItemLevel::Warning
                                     };
                                     if level == HubLogItemLevel::Error {
                                         any_errors = true;
                                     }
                                     // lets try to pull path out of rendered, this fixes some rust bugs
                                     let mut path = span.file_name;
-                                    if let Some(rendered) = &message.rendered{
-                                        let lines:Vec<&str> = rendered.split('\n').collect();
-                                        if lines.len()>=1{
-                                            if let Some(start) = lines[1].find("--> "){
-                                                if let Some(end) = lines[1].find(":"){
-                                                    path = lines[1].get((start+4)..end).unwrap().to_string();
+                                    if let Some(rendered) = &message.rendered {
+                                        let lines: Vec<&str> = rendered.split('\n').collect();
+                                        if lines.len() >= 1 {
+                                            if let Some(start) = lines[1].find("--> ") {
+                                                if let Some(end) = lines[1].find(":") {
+                                                    path = lines[1].get((start + 4)..end).unwrap().to_string();
                                                 }
                                             }
                                         }
                                     }
                                     tx_write.send(ClientToHubMsg {
                                         to: HubMsgTo::UI,
-                                        msg: HubMsg::LogItem{
+                                        msg: HubMsg::LogItem {
                                             uid: uid,
                                             item: HubLogItem {
                                                 //package_id: parsed.package_id.clone(),
@@ -296,7 +386,7 @@ impl HubWorkspace {
                                                 head: span.byte_end as usize,
                                                 body: msg,
                                                 rendered: message.rendered.clone(),
-                                                explanation: if let Some(code) = &message.code{code.explanation.clone()}else{None},
+                                                explanation: if let Some(code) = &message.code {code.explanation.clone()}else {None},
                                                 level: level
                                             }
                                         }
@@ -314,8 +404,8 @@ impl HubWorkspace {
                                 }).expect("tx_write fail");
                                 if !any_errors {
                                     artifact_path = None;
-                                    if let Some(executable) = &parsed.executable{
-                                        if !executable.ends_with(".rmeta") &&  abs_root_path.len() + 1< executable.len(){
+                                    if let Some(executable) = &parsed.executable {
+                                        if !executable.ends_with(".rmeta") && abs_root_path.len() + 1< executable.len() {
                                             let last = executable.clone().split_off(abs_root_path.len() + 1);
                                             artifact_path = Some(last);
                                         }
