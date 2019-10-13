@@ -24,11 +24,11 @@ impl BuildManager{
             log_items: Vec::new(),
             artifacts: Vec::new(),
             active_workspace: "makepad".to_string(),
-            active_package: "csvproc".to_string(),
+            active_package: "makepad".to_string(),
             active_targets: vec![
                 BuildActiveTarget::new("check"),
                 BuildActiveTarget::new("build"),
-                //CargoActiveTarget::new("workspace")
+                BuildActiveTarget::new("workspace")
             ]
         }
     }
@@ -186,6 +186,7 @@ impl BuildManager{
                     self.export_messages_to_textbuffers(cx, storage);
                 }
                 cx.send_signal(self.signal, SIGNAL_BUILD_MANAGER_NEW_LOG_ITEM);
+                println!("LOG ITEM RECEIVED");
             },
             
             HubMsg::CargoArtifact {uid, package_id, fresh: _} => if self.is_running_uid(uid) {

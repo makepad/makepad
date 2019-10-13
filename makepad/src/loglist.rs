@@ -217,6 +217,7 @@ impl LogList {
             Event::Signal(se)=>if bm.signal.is_signal(se){
                 // we have new things
                 self.view.redraw_view_area(cx);
+                println!("SIGNAL!");
             },
             _ => ()
         }
@@ -303,6 +304,7 @@ impl LogList {
     } 
     
     pub fn draw_log_list(&mut self, cx: &mut Cx, bm: &BuildManager) {
+                println!("REDRAW!");
         let item_draw = &self.item_draw;
         self.list.set_list_len(cx, bm.log_items.len(), |cx, index|{
             item_draw.get_default_anim(cx, index, false)
