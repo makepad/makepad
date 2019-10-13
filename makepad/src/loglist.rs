@@ -16,7 +16,7 @@ pub struct LogList {
 pub struct LogItemDraw {
     pub bg: Quad,
     pub text: Text,
-    pub item_bg: Quad,
+    pub item_bg: Quad, 
     pub code_icon: CodeIcon,
     pub row_height: f32,
     pub path_color: Color,
@@ -217,7 +217,7 @@ impl LogList {
             Event::Signal(se)=>if bm.signal.is_signal(se){
                 // we have new things
                 self.view.redraw_view_area(cx);
-                println!("SIGNAL!");
+                //println!("SIGNAL!");
             },
             _ => ()
         }
@@ -304,7 +304,7 @@ impl LogList {
     } 
     
     pub fn draw_log_list(&mut self, cx: &mut Cx, bm: &BuildManager) {
-                println!("REDRAW!");
+        //        println!("REDRAW!");
         let item_draw = &self.item_draw;
         self.list.set_list_len(cx, bm.log_items.len(), |cx, index|{
             item_draw.get_default_anim(cx, index, false)
