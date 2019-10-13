@@ -237,7 +237,7 @@ impl TrapezoidText {
 pub struct CxAfterDraw {
     pub trapezoid_text: TrapezoidText,
     pub atlas_pass: Pass,
-    pub atlas_view: View<NoScroll>,
+    pub atlas_view: View,
     pub atlas_texture: Texture
 }
 

@@ -12,7 +12,7 @@ pub struct Splitter {
     pub split: Quad,
     pub animator: Animator,
     pub realign_dist: f32,
-    pub split_view: View<NoScroll>,
+    pub split_view: View,
     pub _split_area: Area,
     pub _calc_pos: f32,
     pub _is_moving: bool,

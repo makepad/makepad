@@ -16,7 +16,7 @@ where TItem: Clone
     
     pub drop_size: Vec2,
     pub drop_quad: Quad,
-    pub drop_quad_view: View<NoScroll>,
+    pub drop_quad_view: View,
     pub drop_quad_color: Color,
     pub _drag_move: Option<FingerMoveEvent>,
     pub _drag_end: Option<DockDragEnd<TItem>>,
@@ -87,7 +87,7 @@ where TItem: Clone
     // forwards for Dock
     splitters: &'a mut Elements<usize, Splitter, Splitter>,
     tab_controls: &'a mut Elements<usize, TabControl, TabControl>,
-    drop_quad_view: &'a mut View<NoScroll>,
+    drop_quad_view: &'a mut View,
     _drag_move: &'a mut Option<FingerMoveEvent>,
     _drag_end: &'a mut Option<DockDragEnd<TItem>>,
     _close_tab: &'a mut Option<DockTabIdent>,

@@ -1,15 +1,16 @@
 use render::*;
 
 use crate::scrollbar::*;
+use crate::scrollview::*;
 use crate::tab::*;
 
 #[derive(Clone)]
 pub struct TabControl {
-    pub tabs_view: View<ScrollBar>,
+    pub tabs_view: ScrollView,
     pub tabs: Elements<usize, Tab, Tab>,
-    pub drag_tab_view: View<NoScroll>,
+    pub drag_tab_view: View,
     pub drag_tab: Tab,
-    pub page_view: View<NoScroll>,
+    pub page_view: View,
     pub hover: Quad,
     pub tab_fill: Quad,
     pub animator: Animator,
@@ -31,14 +32,14 @@ pub enum TabControlEvent {
 impl TabControl {
     pub fn style(cx: &mut Cx) -> Self {
         Self {
-            tabs_view: View {
+            tabs_view: ScrollView {
                 scroll_h: Some(ScrollBar {
                     bar_size: 8.0,
                     smoothing: Some(0.15),
                     use_vertical_finger_scroll: true,
                     ..ScrollBar::style(cx)
                 }),
-                ..View::style(cx)
+                ..ScrollView::style(cx)
             },
             page_view: View::style(cx),
             tabs: Elements::new(Tab::style(cx)),

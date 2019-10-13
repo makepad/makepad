@@ -6,7 +6,7 @@ use crate::codeicon::*;
 
 #[derive(Clone)]
 pub struct CodeEditor {
-    pub view: View<ScrollBar>,
+    pub view: ScrollView,
     pub bg_layout: Layout,
     pub bg: Quad,
     pub gutter_bg: Quad,
@@ -202,14 +202,7 @@ impl CodeEditor {
                 shader: cx.add_shader(Self::def_indent_lines_shader(), "Editor.indent_lines"),
                 ..Quad::style(cx)
             },
-            view: View {
-                scroll_h: Some(ScrollBar::style(cx)),
-                scroll_v: Some(ScrollBar {
-                    smoothing: Some(0.15),
-                    ..ScrollBar::style(cx)
-                }),
-                ..View::style(cx)
-            },
+            view: ScrollView::style_hor_and_vert(cx),
             bg: Quad {
                 do_h_scroll: false,
                 do_v_scroll: false,

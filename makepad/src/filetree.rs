@@ -6,8 +6,8 @@ use serde::*;
 
 #[derive(Clone)]
 pub struct FileTree {
-    pub view: View<ScrollBar>,
-    pub drag_view: View<NoScroll>,
+    pub view: ScrollView,
+    pub drag_view: View,
     pub _drag_move: Option<FingerMoveEvent>,
     pub drag_bg: Quad,
     pub drag_bg_layout: Layout,
@@ -200,15 +200,12 @@ impl FileTree {
             tree_folder_color: cx.color("text_selected_focus"),
             tree_file_color: cx.color("text_deselected_focus"),
             tree_text: Text {z: 0.001, ..Text::style(cx)},
-            view: View {
-                //scroll_h:Some(ScrollBar{
-                //    ..Style::style(cx)
-                //}),
+            view: ScrollView {
                 scroll_v: Some(ScrollBar {
                     smoothing: Some(0.25),
                     ..ScrollBar::style(cx)
                 }),
-                ..View::style(cx)
+                ..ScrollView::style(cx)
             },
             drag_view: View {
                 is_overlay: true,

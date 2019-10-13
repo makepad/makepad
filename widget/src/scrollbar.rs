@@ -25,6 +25,13 @@ pub struct ScrollBar {
     pub _drag_point: Option<f32>, // the point in pixels where we are dragging
 }
 
+#[derive(Clone, PartialEq, Debug)]
+pub enum ScrollBarEvent {
+    None,
+    Scroll {scroll_pos: f32, view_total: f32, view_visible: f32},
+    ScrollDone
+}
+
 impl ScrollBar {
     pub fn style(cx: &mut Cx) -> Self {
         Self {
@@ -109,7 +116,7 @@ impl ScrollBar {
     }
     
     // reads back normalized scroll position info
-    fn get_normalized_scroll_pos(&self) -> (f32, f32) {
+    pub fn get_normalized_scroll_pos(&self) -> (f32, f32) {
         // computed handle size normalized
         let vy = self._view_visible / self._view_total;
         if !self._visible {
@@ -121,7 +128,7 @@ impl ScrollBar {
     }
     
     // sets the scroll pos from finger position
-    fn set_scroll_pos_from_finger(&mut self, cx: &mut Cx, finger: f32) -> ScrollBarEvent {
+    pub fn set_scroll_pos_from_finger(&mut self, cx: &mut Cx, finger: f32) -> ScrollBarEvent {
         let vy = self._view_visible / self._view_total;
         let norm_handle = vy.max(self.min_handle_size / self._scroll_size);
         
@@ -141,13 +148,13 @@ impl ScrollBar {
     }
     
     // writes the norm_scroll value into the shader
-    fn update_shader_scroll_pos(&mut self, cx: &mut Cx) {
+    pub fn update_shader_scroll_pos(&mut self, cx: &mut Cx) {
         let (norm_scroll, _) = self.get_normalized_scroll_pos();
         self._sb_area.write_float(cx, "norm_scroll", norm_scroll);
     }
     
     // turns scroll_pos into an event on this.event
-    fn make_scroll_event(&mut self) -> ScrollBarEvent {
+    pub fn make_scroll_event(&mut self) -> ScrollBarEvent {
         ScrollBarEvent::Scroll {
             scroll_pos: self._scroll_pos,
             view_total: self._view_total,
@@ -155,7 +162,7 @@ impl ScrollBar {
         }
     }
     
-    fn move_towards_scroll_target(&mut self, cx: &mut Cx) -> bool {
+    pub fn move_towards_scroll_target(&mut self, cx: &mut Cx) -> bool {
         if self.smoothing.is_none() {
             return false;
         }
@@ -181,19 +188,12 @@ impl ScrollBar {
         self.update_shader_scroll_pos(cx);
         true
     }
-    
-}
-
-
-impl ScrollBarLike<ScrollBar> for ScrollBar {
-    
-    // public facing API
-    
-    fn get_scroll_pos(&self) -> f32 {
+        
+    pub fn get_scroll_pos(&self) -> f32 {
         return self._scroll_pos;
     }
     
-    fn set_scroll_pos(&mut self, cx: &mut Cx, scroll_pos: f32) -> bool {
+    pub fn set_scroll_pos(&mut self, cx: &mut Cx, scroll_pos: f32) -> bool {
         // clamp scroll_pos to
         let scroll_pos = scroll_pos.min(self._view_total - self._view_visible).max(0.);
         
@@ -207,19 +207,19 @@ impl ScrollBarLike<ScrollBar> for ScrollBar {
         return false
     }
     
-    fn get_scroll_target(&mut self) -> f32 {
+    pub fn get_scroll_target(&mut self) -> f32 {
         return self._scroll_target
     }
     
-    fn set_scroll_view_total(&mut self, _cx: &mut Cx, view_total: f32) {
+    pub fn set_scroll_view_total(&mut self, _cx: &mut Cx, view_total: f32) {
         self._view_total = view_total;
     }
     
-    fn get_scroll_view_total(&self) -> f32 {
+    pub fn get_scroll_view_total(&self) -> f32 {
         return self._view_total;
     }
     
-    fn set_scroll_target(&mut self, cx: &mut Cx, scroll_pos_target: f32) -> bool {
+    pub fn set_scroll_target(&mut self, cx: &mut Cx, scroll_pos_target: f32) -> bool {
         // clamp scroll_pos to
         
         let new_target = scroll_pos_target.min(self._view_total - self._view_visible).max(0.);
@@ -232,7 +232,7 @@ impl ScrollBarLike<ScrollBar> for ScrollBar {
         return false
     }
     
-    fn scroll_into_view(&mut self, cx: &mut Cx, pos: f32, size: f32) {
+    pub fn scroll_into_view(&mut self, cx: &mut Cx, pos: f32, size: f32) {
         if pos < self._scroll_pos { // scroll up
             let scroll_to = pos;
             if self.smoothing.is_none() {
@@ -256,7 +256,7 @@ impl ScrollBarLike<ScrollBar> for ScrollBar {
         }
     }
     
-    fn handle_scroll_bar(&mut self, cx: &mut Cx, event: &mut Event) -> ScrollBarEvent {
+    pub fn handle_scroll_bar(&mut self, cx: &mut Cx, event: &mut Event) -> ScrollBarEvent {
         // lets check if our view-area gets a mouse-scroll.
         match event {
             Event::FingerScroll(fe) => {
@@ -367,7 +367,7 @@ impl ScrollBarLike<ScrollBar> for ScrollBar {
         ScrollBarEvent::None
     }
     
-    fn draw_scroll_bar(&mut self, cx: &mut Cx, axis: Axis, view_area: Area, view_rect: Rect, view_total: Vec2) -> f32 {
+    pub fn draw_scroll_bar(&mut self, cx: &mut Cx, axis: Axis, view_area: Area, view_rect: Rect, view_total: Vec2) -> f32 {
         // pull the bg color from our animation system, uses 'default' value otherwise
         self.sb.color = self.animator.last_color(cx.id("sb.color"));
         self._sb_area = Area::Empty;

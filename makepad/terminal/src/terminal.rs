@@ -3,7 +3,7 @@ use widget::*;
 
 #[derive(Clone)]
 pub struct Terminal {
-    pub view: View<ScrollBar>,
+    pub view: ScrollView,
     pub bg_layout: Layout,
 
     pub cursor: Quad,
@@ -13,7 +13,7 @@ pub struct Terminal {
     
     pub top_padding: f32,
     pub colors: TerminalColors,
-    
+     
     pub cursor_blink_speed: f64,
     
     //pub _bg_area: Area,
@@ -64,14 +64,7 @@ impl Terminal {
                 cursor: color256(212, 212, 212),
                 cursor_row: color256(212, 212, 212),
             },
-            view: View {
-                scroll_h: Some(ScrollBar::style(cx)),
-                scroll_v: Some(ScrollBar {
-                    smoothing: Some(0.15),
-                    ..ScrollBar::style(cx)
-                }),
-                ..View::style(cx)
-            },
+            view: ScrollView::style_hor_and_vert(cx),
             selection: Quad {
                 shader: cx.add_shader(Self::def_selection_shader(), "Editor.selection"),
                 ..Quad::style(cx)

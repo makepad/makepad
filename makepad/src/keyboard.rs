@@ -6,7 +6,7 @@ use editor::*;
 
 #[derive(Clone)]
 pub struct Keyboard {
-    pub view: View<ScrollBar>,
+    pub view: ScrollView,
     pub modifiers: KeyModifiers,
     pub key_down: Option<KeyCode>,
     pub key_up: Option<KeyCode>,
@@ -39,9 +39,7 @@ impl KeyType {
 impl Keyboard {
     pub fn style(cx: &mut Cx) -> Self {
         Self {
-            view: View {
-                ..View::style(cx)
-            },
+            view: ScrollView::style_hor_and_vert(cx),
             buttons: Elements::new(Button {
                 ..Button::style(cx)
             }),

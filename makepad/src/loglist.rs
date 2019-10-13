@@ -7,13 +7,13 @@ use crate::buildmanager::*;
 
 #[derive(Clone)]
 pub struct LogList {
-    pub view: View<ScrollBar>,
-    pub style: LogListStyle,
+    pub view: ScrollView,
+    pub item_draw: LogItemDraw,
     pub list: List
 }
 
 #[derive(Clone)]
-pub struct LogListStyle {
+pub struct LogItemDraw {
     pub bg: Quad,
     pub text: Text,
     pub item_bg: Quad,
@@ -30,7 +30,7 @@ pub struct LogListStyle {
     pub bg_selected_over: Color
 }
 
-impl LogListStyle {
+impl LogItemDraw {
     pub fn style(cx: &mut Cx) -> Self {
         Self {
             bg: Quad::style(cx),
@@ -168,23 +168,16 @@ pub enum LogListEvent {
 impl LogList {
     pub fn style(cx: &mut Cx) -> Self {
         Self {
-            style: LogListStyle::style(cx),
+            item_draw: LogItemDraw::style(cx),
             list: List::default(),
-            view: View {
-                scroll_h: Some(ScrollBar::style(cx)),
-                scroll_v: Some(ScrollBar {
-                    smoothing: Some(0.15),
-                    ..ScrollBar::style(cx)
-                }),
-                ..View::style(cx)
-            },
+            view: ScrollView::style_hor_and_vert(cx),
         }
     }
     
     pub fn handle_log_list(&mut self, cx: &mut Cx, event: &mut Event, storage: &mut AppStorage, bm:&mut BuildManager) -> LogListEvent {
-        let style = &self.style;
+        let item_draw = &self.item_draw;
         self.list.set_list_len(cx, bm.log_items.len(), |cx, index|{
-            style.get_default_anim(cx, index, false)
+            item_draw.get_default_anim(cx, index, false)
         });
         
         self.list.handle_list_scroll_bars(cx, event, &mut self.view);
@@ -228,7 +221,7 @@ impl LogList {
             _ => ()
         }
         
-        let style = &self.style;
+        let item_draw = &self.item_draw;
         let le = self.list.handle_selection(cx, event, select, | cx, item_event, item, item_index | {
             match item_event {
                 ListItemEvent::ItemAnimate(ae) => {
@@ -238,19 +231,19 @@ impl LogList {
                     item.animator.end();
                 },
                 ListItemEvent::ItemSelect => {
-                    item.animator.play_anim(cx, style.get_over_anim(cx, item_index, true));
+                    item.animator.play_anim(cx, item_draw.get_over_anim(cx, item_index, true));
                 },
                 ListItemEvent::ItemDeselect => {
-                    item.animator.play_anim(cx, style.get_default_anim(cx, item_index, false));
+                    item.animator.play_anim(cx, item_draw.get_default_anim(cx, item_index, false));
                 },
                 ListItemEvent::ItemCleanup => {
-                    item.animator.play_anim(cx, style.get_default_anim_cut(cx, item_index, false));
+                    item.animator.play_anim(cx, item_draw.get_default_anim_cut(cx, item_index, false));
                 },
                 ListItemEvent::ItemOver => {
-                    item.animator.play_anim(cx, style.get_over_anim(cx, item_index, item.is_selected));
+                    item.animator.play_anim(cx, item_draw.get_over_anim(cx, item_index, item.is_selected));
                 },
                 ListItemEvent::ItemOut => {
-                    item.animator.play_anim(cx, style.get_default_anim(cx, item_index, item.is_selected));
+                    item.animator.play_anim(cx, item_draw.get_default_anim(cx, item_index, item.is_selected));
                 }
             }
         });
@@ -310,29 +303,29 @@ impl LogList {
     }
     
     pub fn draw_log_list(&mut self, cx: &mut Cx, bm: &BuildManager) {
-        let style = &self.style;
+        let item_draw = &self.item_draw;
         self.list.set_list_len(cx, bm.log_items.len(), |cx, index|{
-            style.get_default_anim(cx, index, false)
+            item_draw.get_default_anim(cx, index, false)
         });
         
-        if let Err(_) = self.list.begin_list(cx, &mut self.view, self.style.row_height){
+        if let Err(_) = self.list.begin_list(cx, &mut self.view, self.item_draw.row_height){
             return
         }
         
         let mut counter = 0;
         for i in self.list.start_item..self.list.end_item{
-            self.style.draw_log_item(cx, &mut self.list.list_items[i], &bm.log_items[i]);
+            self.item_draw.draw_log_item(cx, &mut self.list.list_items[i], &bm.log_items[i]);
             counter += 1;
         }
         
-        self.list.walk_turtle_to_end(cx, self.style.row_height);
+        self.list.walk_turtle_to_end(cx, self.item_draw.row_height);
         
-        self.style.draw_status_line(cx, counter, &bm);
+        self.item_draw.draw_status_line(cx, counter, &bm);
         counter += 1;
         
         // draw filler nodes
         for _ in (self.list.end_item + 1)..self.list.end_fill{
-            self.style.draw_filler(cx, counter);
+            self.item_draw.draw_filler(cx, counter);
             counter += 1;
         }
 

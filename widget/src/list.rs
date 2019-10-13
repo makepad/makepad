@@ -1,4 +1,5 @@
 use render::*;
+use crate::scrollview::*;
 
 #[derive(Clone, Default)]
 pub struct List {
@@ -70,8 +71,7 @@ impl List {
         }
     }
     
-    pub fn handle_list_scroll_bars<S>(&mut self, cx:&mut Cx, event:&mut Event, view:&mut View<S>)
-    where S:ScrollBarLike<S> + Clone
+    pub fn handle_list_scroll_bars(&mut self, cx:&mut Cx, event:&mut Event, view:&mut ScrollView)
     {
         if view.handle_scroll_bars(cx, event) {
             view.redraw_view_area(cx);
@@ -87,8 +87,7 @@ impl List {
         }
     }
     
-    pub fn begin_list<S>(&mut self, cx: &mut Cx, view:&mut View<S>, row_height:f32)->Result<(),()>
-    where S:ScrollBarLike<S> + Clone
+    pub fn begin_list(&mut self, cx: &mut Cx, view:&mut ScrollView, row_height:f32)->Result<(),()>
     {
         view.begin_view(cx, Layout {
             direction: Direction::Down,
@@ -107,17 +106,14 @@ impl List {
     }
     
     
-    pub fn end_list<S>(&mut self, cx: &mut Cx, view:&mut View<S>)
-    where S:ScrollBarLike<S> + Clone{
+    pub fn end_list(&mut self, cx: &mut Cx, view:&mut ScrollView){
         view.end_view(cx);
         if let Some(set_scroll_pos) = self.set_scroll_pos{
             view.set_scroll_pos(cx, set_scroll_pos);
         }
     }
     
-    pub fn set_visible_range_and_scroll<S>(&mut self, cx: &mut Cx, view:&mut View<S>, row_height:f32)
-    where S:ScrollBarLike<S> + Clone
-    {
+    pub fn set_visible_range_and_scroll(&mut self, cx: &mut Cx, view:&mut ScrollView, row_height:f32){
         let view_rect = cx.get_turtle_rect(); 
 
         // the maximum scroll position given the amount of log items
