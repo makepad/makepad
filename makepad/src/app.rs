@@ -377,22 +377,13 @@ impl App {
                 _ => ()
             },
             Event::Signal(se) => {
-                // process incoming hub messages
-                let mut hub_htc_msgs = Vec::new();
-                let mut was_signal = false;
                 if let Some(hub_ui) = &mut self.storage.hub_ui {
-                    if hub_ui.signal.is_signal(se) {
-                        was_signal = true;
-                        if let Ok(mut htc_msgs) = hub_ui.htc_msgs_arc.lock() {
-                            std::mem::swap(&mut hub_htc_msgs, &mut htc_msgs);
+                    if let Some(mut msgs) = hub_ui.process_signal(se){
+                        for htc in msgs.drain(..) {
+                            self.handle_hub_msg(cx, htc);
                         }
+                        return
                     }
-                }
-                for htc in hub_htc_msgs.drain(..) {
-                    self.handle_hub_msg(cx, htc);
-                }
-                if was_signal{
-                    return
                 }
             },
             Event::FileRead(fr) => {

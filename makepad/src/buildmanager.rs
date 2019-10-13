@@ -182,11 +182,6 @@ impl BuildManager{
                     export = true;
                 }
                 self.log_items.push(item.clone());
-                /*LogItemDraw {
-                    animator: Animator::new(self.style.get_default_anim(cx, self.log_items.len(), false)),
-                    item: item.clone(),
-                    is_selected: false
-                });*/
                 if export {
                     self.export_messages_to_textbuffers(cx, storage);
                 }

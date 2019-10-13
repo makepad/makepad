@@ -142,4 +142,15 @@ impl HubUI {
             }
         }
     }
+    
+    pub fn process_signal(&mut self, se:&SignalEvent)->Option<Vec<HubToClientMsg>>{
+         if self.signal.is_signal(se) {
+            if let Ok(mut htc_msgs) = self.htc_msgs_arc.lock() {
+                let mut msgs = Vec::new();
+                std::mem::swap(&mut msgs, &mut htc_msgs);
+                return Some(msgs);
+            }
+        }
+        None
+    }
 }
