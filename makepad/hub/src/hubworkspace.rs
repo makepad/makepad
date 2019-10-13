@@ -16,9 +16,9 @@ pub struct HubWorkspace {
     pub processes: Arc<Mutex<Vec<HubWsProcess>>>,
     pub restart_connection: bool
 }
-
-pub struct HubWsProcess {
-    uid: HubUid,
+ 
+pub struct HubWsProcess {  
+    uid: HubUid, 
     process: Process,
     _thread: Option<std::thread::JoinHandle<()>> 
 }
@@ -27,7 +27,7 @@ impl HubWorkspace {
     pub fn run<F>(key: &[u8], workspace: &str, root_path: &str, hub_log: HubLog, mut event_handler: F)
     where F: FnMut(&mut HubWorkspace, HubToClientMsg) {
         
-        loop {
+        loop {  
             if root_path.contains("..") || root_path.contains("./") || root_path.contains("\\") || root_path.starts_with("/") {
                 panic!("Root path for workspace cant be relative and must be unix style");
             }

@@ -300,7 +300,7 @@ impl LogList {
                 LogListEvent::None
             }
         }
-    }
+    } 
     
     pub fn draw_log_list(&mut self, cx: &mut Cx, bm: &BuildManager) {
         let item_draw = &self.item_draw;

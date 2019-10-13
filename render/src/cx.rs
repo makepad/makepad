@@ -756,18 +756,22 @@ impl Cx {
     pub fn call_signals<F>(&mut self, mut event_handler: F)
     where F: FnMut(&mut Cx, &mut Event)
     {
-         if self.signals.len() == 0 {
-            return
-        }
-        
-        let mut signals = Vec::new();
-        std::mem::swap(&mut self.signals, &mut signals);
-        
-        for (signal, value) in signals {
-            self.call_event_handler(&mut event_handler, &mut Event::Signal(SignalEvent {
-                signal_id: signal.signal_id,
-                value: value
-            }));
+        let mut counter = 0;
+        while self.signals.len() != 0 {
+            counter += 1;
+            let mut signals = Vec::new();
+            std::mem::swap(&mut self.signals, &mut signals);
+            
+            for (signal, value) in signals {
+                self.call_event_handler(&mut event_handler, &mut Event::Signal(SignalEvent {
+                    signal_id: signal.signal_id,
+                    value: value
+                }));
+            }
+            if counter > 100{
+                println!("Signal feedback loop detected");
+                break
+            }
         }
     }
     
