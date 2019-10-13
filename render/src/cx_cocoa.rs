@@ -19,7 +19,7 @@ static mut GLOBAL_COCOA_APP: *mut CocoaApp = 0 as *mut _;
 #[link(name = "Foundation", kind = "framework")]
 extern {
     pub static NSRunLoopCommonModes: id;
-}
+}  
 
 use crate::cx::*;
 
