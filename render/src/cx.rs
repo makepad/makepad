@@ -11,7 +11,7 @@ pub use crate::pass::*;
 pub use crate::texture::*;
 pub use crate::shader::*;
 
-pub use crate::math::*;
+pub use crate::math::*; 
 pub use crate::events::*;
 pub use crate::colors::*;
 pub use crate::elements::*;

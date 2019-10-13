@@ -514,6 +514,7 @@ impl CocoaApp {
                 value: value
             })
         ]);
+        self.do_callback(&mut vec![Event::Paint]);
     }
     
     pub fn send_paint_event(&mut self) {

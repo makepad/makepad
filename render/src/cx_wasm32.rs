@@ -21,7 +21,7 @@ impl Cx {
             for _i in 0..10 {
                 self.platform.fingers_down.push(false);
             }
-            self.platform_type = PlatformType::WASM;
+            self.platform_type = PlatformType::WASM; 
         }
          
         //let root_view = unsafe {&mut *(self.platform.root_view_ptr as *mut View<NoScrollBar>)};
