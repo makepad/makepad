@@ -17,12 +17,12 @@ pub struct BuildManager {
 
 impl BuildManager{
     pub fn new(cx:&mut Cx)->BuildManager{
-        BuildManager{
+        BuildManager{ 
             signal:cx.new_signal(),
             always_exec_when_done: true,
             exec_when_done: false,
             log_items: Vec::new(),
-            artifacts: Vec::new(),
+            artifacts: Vec::new(), 
             active_workspace: "makepad".to_string(),
             active_package: "csvproc".to_string(),
             active_targets: vec![

@@ -21,13 +21,13 @@ pub struct LogItemDraw {
     pub row_height: f32,
     pub path_color: Color,
     pub message_color: Color,
-    pub bg_even: Color,
-    pub bg_odd: Color,
-    pub bg_marked: Color,
+    pub bg_even: Color, 
+    pub bg_odd: Color, 
+    pub bg_marked: Color,  
     pub bg_odd_over: Color,
     pub bg_marked_over: Color,
     pub bg_selected: Color,
-    pub bg_selected_over: Color
+    pub bg_selected_over: Color 
 }
 
 impl LogItemDraw {
@@ -208,10 +208,10 @@ impl LogList {
                     self.list.tail_list = true;
                     self.view.redraw_view_area(cx);
                 },
-                //KeyCode::Backtick => if ke.modifiers.logo || ke.modifiers.control {
-                //    self.artifact_exec(storage);
-                //    self.style.view.redraw_view_area(cx);
-                //},
+                KeyCode::Backtick => if ke.modifiers.logo || ke.modifiers.control {
+                    bm.artifact_exec(storage);
+                    self.view.redraw_view_area(cx);
+                },
                 _ => ()
             },
             Event::Signal(se)=>if bm.signal.is_signal(se){
