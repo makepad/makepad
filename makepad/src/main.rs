@@ -12,6 +12,8 @@ mod appwindow;
 pub use crate::appwindow::*;
 mod filetree;
 pub use crate::filetree::*;
+mod buildmanager;
+pub use crate::buildmanager::*;
 //mod rustcompiler;
 //pub use crate::rustcompiler::*;
 mod hubui;

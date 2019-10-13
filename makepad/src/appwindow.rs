@@ -11,6 +11,7 @@ use crate::filetree::*;
 use crate::loglist::*;
 use crate::logitem::*;
 use crate::keyboard::*;
+use crate::buildmanager::*;
 
 #[derive(Clone, Serialize, Deserialize)]
 pub enum Panel {
@@ -68,11 +69,7 @@ impl AppWindow {
         }
     }
     
-    pub fn handle_hub_msg(&mut self, cx: &mut Cx, storage: &mut AppStorage, htc: &HubToClientMsg) {
-        self.log_list.handle_hub_msg(cx, storage, htc);
-    }
-    
-    pub fn handle_app_window(&mut self, cx: &mut Cx, event: &mut Event, window_index: usize, state: &mut AppState, storage:&mut AppStorage) {
+    pub fn handle_app_window(&mut self, cx: &mut Cx, event: &mut Event, window_index: usize, state: &mut AppState, storage:&mut AppStorage, build_manager:&mut BuildManager) {
         
         match self.desktop_window.handle_desktop_window(cx, event) {      
             DesktopWindowEvent::EventForOtherWindow => {
@@ -98,7 +95,7 @@ impl AppWindow {
         while let Some(item) = dock_walker.walk_handle_dock(cx, event) {
             match item {
                 Panel::LogList => {
-                    match self.log_list.handle_log_list(cx, event, storage){
+                    match self.log_list.handle_log_list(cx, event, storage, build_manager){
                         LogListEvent::SelectLogItem {path, item, level} => {
                             // just make it open an editor
                             if let Some(path) = path{
@@ -142,7 +139,7 @@ impl AppWindow {
                                 storage.text_buffer_file_write(cx, path);
                                 
                                 // lets re-trigger the rust compiler
-                                self.log_list.restart_cargo(cx, storage);
+                                build_manager.restart_cargo(cx, storage);
                                 self.log_item.clear_msg(cx);
                                 
                                 //app_global.rust_compiler.restart_rust_checker(cx, &mut app_global.text_buffers);
@@ -193,7 +190,7 @@ impl AppWindow {
         }
     }
     
-    pub fn draw_app_window(&mut self, cx: &mut Cx, window_index: usize, state: &mut AppState, storage:&mut AppStorage) {
+    pub fn draw_app_window(&mut self, cx: &mut Cx, window_index: usize, state: &mut AppState, storage:&mut AppStorage, build_manager:&mut BuildManager) {
         if let Err(()) = self.desktop_window.begin_desktop_window(cx) {
             return
         }
@@ -204,7 +201,7 @@ impl AppWindow {
         while let Some(item) = dock_walker.walk_draw_dock(cx) {
             match item {
                 Panel::LogList => {
-                    self.log_list.draw_log_list(cx);
+                    self.log_list.draw_log_list(cx, build_manager);
                 },
                 Panel::LogItem=>{
                     self.log_item.draw_log_item(cx);

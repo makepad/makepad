@@ -5,6 +5,7 @@ use editor::*;
 use crate::appwindow::*;
 use crate::hubui::*;
 use crate::filetree::*;
+use crate::buildmanager::*;
 use std::collections::HashMap;
 use serde::*;
 use hub::*;
@@ -23,6 +24,7 @@ pub struct App {
     pub app_window_template: AppWindow,
     pub state: AppState,
     pub storage: AppStorage,
+    pub build_manager: BuildManager,
     pub windows: Vec<AppWindow>,
 }
 
@@ -206,6 +208,7 @@ impl App {
                 },
             },
             windows: vec![],
+            build_manager:BuildManager::new(cx),
             state: AppState::default(),
             storage: AppStorage {
                 hub_server: None,
@@ -341,9 +344,7 @@ impl App {
                 }
             },
             _ => { // send the rest to cargo_log
-                for window in &mut self.windows {
-                    window.handle_hub_msg(cx, &mut self.storage, &htc)
-                }
+                self.build_manager.handle_hub_msg(cx, &mut self.storage, &htc)
             }
         }
     }
@@ -437,9 +438,7 @@ impl App {
                                 })
                             }
                             cx.redraw_child_area(Area::All);
-                            for window in &mut self.windows {
-                                window.log_list.init(cx);
-                            }
+                           
                         }
                     }
                     else { // load default window
@@ -461,7 +460,7 @@ impl App {
             _ => ()
         }
         for (window_index, window) in self.windows.iter_mut().enumerate() {
-            window.handle_app_window(cx, event, window_index, &mut self.state, &mut self.storage);
+            window.handle_app_window(cx, event, window_index, &mut self.state, &mut self.storage, &mut self.build_manager);
             // break;
         }
     }
@@ -469,7 +468,7 @@ impl App {
     pub fn draw_app(&mut self, cx: &mut Cx) {
         //return;
         for (window_index, window) in self.windows.iter_mut().enumerate() {
-            window.draw_app_window(cx, window_index, &mut self.state, &mut self.storage);
+            window.draw_app_window(cx, window_index, &mut self.state, &mut self.storage, &mut self.build_manager);
             // break;
         }
     }
