@@ -151,8 +151,9 @@ impl HubWorkspace {
                     
                     if panic_line.starts_with("at ")
                         && !panic_line.starts_with("at /")
-                        && !panic_line.starts_with("at src/libstd")
-                        && !panic_line.starts_with("at src/libpanic_unwind") {
+                        && !panic_line.starts_with("at src/libstd/")
+                        && !panic_line.starts_with("at src/libcore/")
+                        && !panic_line.starts_with("at src/libpanic_unwind/") {
                         if let Some(end) = panic_line.find(":") {
                             let proc_path = format!("{}/{}", workspace, panic_line.get(3..end).unwrap().to_string());
                             let proc_row = panic_line.get((end + 1)..(panic_line.len() - 1)).unwrap().parse::<usize>().unwrap();
@@ -249,11 +250,11 @@ impl HubWorkspace {
                             to: HubMsgTo::UI,
                             msg: HubMsg::LogItem {
                                 uid: uid,
-                                item: HubLogItem {
+                                item: HubLogItem { 
                                     //package_id: parsed.package_id.clone(),
                                     path: None,
                                     row: 0,
-                                    col: 0,
+                                    col: 0, 
                                     tail: 0,
                                     head: 0,
                                     body: line.clone(),
