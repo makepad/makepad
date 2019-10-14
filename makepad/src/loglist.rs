@@ -238,7 +238,7 @@ impl LogList {
                     item.animator.play_anim(cx, item_draw.get_default_anim(cx, item_index, false));
                 },
                 ListItemEvent::ItemCleanup => {
-                    item.animator.play_anim(cx, item_draw.get_default_anim_cut(cx, item_index, false));
+                    item.animator.play_anim(cx, item_draw.get_default_anim_cut(cx, item_index, item.is_selected));
                 },
                 ListItemEvent::ItemOver => {
                     item.animator.play_anim(cx, item_draw.get_over_anim(cx, item_index, item.is_selected));

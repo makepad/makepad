@@ -239,33 +239,14 @@ impl AppWindow {
         self.desktop_window.end_desktop_window(cx);
     }
     
-    pub fn new_file_editor_tab(&mut self, /*window_index: usize, state: &mut AppState,*/ path: &str) -> DockTab<Panel> {
+    pub fn new_file_editor_tab(&mut self, path: &str) -> DockTab<Panel> {
         let mut max_id = 0;
         for id in &self.file_editors.element_list{
             if *id > max_id{
                 max_id = *id;
             }
         }
-        /*
-        let dock_items = &mut state.windows[window_index].dock_items;
-        let mut dock_walker = self.dock.walker(dock_items);
-        while let Some(dock_item) = dock_walker.walk_dock_item() {
-            match dock_item {
-                DockItem::TabControl {tabs, ..} => {
-                    for (_, tab) in tabs.iter().enumerate() {
-                        match &tab.item {
-                            Panel::FileEditor {editor_id, ..} => {
-                                if *editor_id > max_id {
-                                    max_id = *editor_id;
-                                }
-                            },
-                            _ => ()
-                        }
-                    }
-                },
-                _ => ()
-            }
-        }*/
+        
         let editor_id = max_id + 1;
         DockTab {
             closeable: true,
@@ -309,7 +290,7 @@ impl AppWindow {
             ctrl_id += 1;
         }
         if target_ctrl_id != 0 && !only_focus_editor { // open a new one
-            let new_tab = self.new_file_editor_tab(/*window_index, state,*/ file_path);
+            let new_tab = self.new_file_editor_tab(file_path);
             let dock_items = &mut state.windows[window_index].dock_items;
             let mut dock_walker = self.dock.walker(dock_items);
             let mut ctrl_id = 1;

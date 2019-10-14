@@ -1,6 +1,6 @@
 use std::fs;
 
-fn main() {
+fn main() { 
     let data = fs::read_to_string("data.csv").unwrap();
     let lines: Vec<&str> = data.split("\n").collect();
 
