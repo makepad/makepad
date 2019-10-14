@@ -32,7 +32,7 @@ impl Cx {
             let msg_type = to_wasm.mu32();
             match msg_type {
                 0 => { // end
-                    break;
+                    break;  
                 },
                 1 => { // fetch_deps
                     

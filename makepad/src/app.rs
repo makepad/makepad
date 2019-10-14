@@ -6,6 +6,7 @@ use crate::appwindow::*;
 use crate::hubui::*;
 use crate::filetree::*;
 use crate::buildmanager::*;
+use crate::workspace_main;
 use std::collections::HashMap;
 use serde::*;
 use hub::*;
@@ -208,7 +209,7 @@ impl App {
                 },
             },
             windows: vec![],
-            build_manager:BuildManager::new(cx),
+            build_manager: BuildManager::new(cx),
             state: AppState::default(),
             storage: AppStorage {
                 hub_server: None,
@@ -352,6 +353,10 @@ impl App {
     pub fn handle_app(&mut self, cx: &mut Cx, event: &mut Event) {
         match event {
             Event::Construct => {
+                // start the workspace
+                std::thread::spawn(move || {
+                    workspace_main::main();
+                });
                 
                 if cx.platform_type.is_desktop() {
                     self.storage.app_state_file_read = cx.file_read("makepad_state.json");
@@ -369,16 +374,17 @@ impl App {
                     self.storage.file_tree_file_read = cx.file_read("index.json");
                     self.default_layout(cx);
                 }
+                
             },
             Event::KeyDown(ke) => match ke.key_code {
-                KeyCode::KeyR => if ke.modifiers.logo || ke.modifiers.control{
+                KeyCode::KeyR => if ke.modifiers.logo || ke.modifiers.control {
                     self.reload_workspaces();
                 },
                 _ => ()
             },
             Event::Signal(se) => {
                 if let Some(hub_ui) = &mut self.storage.hub_ui {
-                    if let Some(mut msgs) = hub_ui.process_signal(se){
+                    if let Some(mut msgs) = hub_ui.process_signal(se) {
                         for htc in msgs.drain(..) {
                             self.handle_hub_msg(cx, htc);
                         }
@@ -429,7 +435,7 @@ impl App {
                                 })
                             }
                             cx.redraw_child_area(Area::All);
-                           
+                            
                         }
                     }
                     else { // load default window

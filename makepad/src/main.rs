@@ -19,5 +19,7 @@ pub use crate::buildmanager::*;
 mod hubui;
 pub use crate::hubui::*;
 use render::*;
+#[path = "../../workspace/src/main.rs"]
+mod workspace_main;
 
 main_app!(App);
