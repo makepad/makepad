@@ -285,7 +285,7 @@ impl HubServer {
             SocketAddr::from(([255, 255, 255, 255], HUB_ANNOUNCE_PORT)),
             SocketAddr::from(([127, 0, 0, 1], HUB_ANNOUNCE_PORT)),
         )
-}
+    }
     
     pub fn start_announce_server(&mut self, key: &[u8], announce_bind: SocketAddr, announce_send: SocketAddr, announce_backup: SocketAddr) {
         let listen_port = self.listen_addr.port();

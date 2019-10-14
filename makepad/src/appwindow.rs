@@ -164,7 +164,7 @@ impl AppWindow {
                 let mut tabs = Vec::new();
                 for path in paths {
                     // find a free editor id
-                    tabs.push(self.new_file_editor_tab(window_index, state, &path));
+                    tabs.push(self.new_file_editor_tab(/*window_index, state,*/ &path));
                 }
                 self.dock.dock_drag_end(cx, fe, tabs);
             },
@@ -239,8 +239,14 @@ impl AppWindow {
         self.desktop_window.end_desktop_window(cx);
     }
     
-    pub fn new_file_editor_tab(&mut self, window_index: usize, state: &mut AppState, path: &str) -> DockTab<Panel> {
+    pub fn new_file_editor_tab(&mut self, /*window_index: usize, state: &mut AppState,*/ path: &str) -> DockTab<Panel> {
         let mut max_id = 0;
+        for id in &self.file_editors.element_list{
+            if *id > max_id{
+                max_id = *id;
+            }
+        }
+        /*
         let dock_items = &mut state.windows[window_index].dock_items;
         let mut dock_walker = self.dock.walker(dock_items);
         while let Some(dock_item) = dock_walker.walk_dock_item() {
@@ -259,7 +265,7 @@ impl AppWindow {
                 },
                 _ => ()
             }
-        }
+        }*/
         let editor_id = max_id + 1;
         DockTab {
             closeable: true,
@@ -303,7 +309,7 @@ impl AppWindow {
             ctrl_id += 1;
         }
         if target_ctrl_id != 0 && !only_focus_editor { // open a new one
-            let new_tab = self.new_file_editor_tab(window_index, state, file_path);
+            let new_tab = self.new_file_editor_tab(/*window_index, state,*/ file_path);
             let dock_items = &mut state.windows[window_index].dock_items;
             let mut dock_walker = self.dock.walker(dock_items);
             let mut ctrl_id = 1;

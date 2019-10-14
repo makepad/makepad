@@ -2,7 +2,6 @@ use std::fs;
 
 fn main() {
     let data = fs::read_to_string("data.csv").unwrap();
-     
     let lines: Vec<&str> = data.split("\n").collect();
 
     for (index, line) in lines.iter().enumerate() {
@@ -10,11 +9,11 @@ fn main() {
         if index == 0 {
             //for chunk in &chunks{
             //println!("{}", chunk);
-            //}  
+            //}
         }
         else if chunks[0].len()>0 {
             let _date = &chunks[0][1..]; 
-            let name = &chunks[1]; 
+            let name = &chunks[1];
             //println!("{}", name);
             let addsub = if chunks[5].len() == 2 {"-"}else {""};
             let value = &chunks[6];
@@ -23,21 +22,10 @@ fn main() {
             lcname.make_ascii_lowercase(); 
             if lcname.find("albert").is_some(){
                 //println!("{} {}{} {} {}", date, addsub, value, name, _misc);
-                println!("hello{}{}", addsub, value);
+                println!("{}{}", addsub, value);
             }
-            else { 
-                //println!("");
-                //println!("Hi")
+            else {
             }
-            
-            //println!("{}", misc);
-            //println!("{}",date);
-            //   println!("-{}", value);
-            //}
-            // else{
-            //    println!("{}", value);
-            //println!("{} {} {}", date, value, name);
-            // }
         }
     }
 }
