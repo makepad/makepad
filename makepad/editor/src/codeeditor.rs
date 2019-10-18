@@ -26,7 +26,7 @@ pub struct CodeEditor {
     pub open_font_size: f32,
     pub folded_font_size: f32,
     pub line_number_width: f32,
-    pub draw_line_numbers: bool, 
+    pub draw_line_numbers: bool,
     pub top_padding: f32,
     pub colors: CodeEditorColors,
     pub cursor_blink_speed: f64,
@@ -35,6 +35,7 @@ pub struct CodeEditor {
     pub draw_cursor_row: bool,
     pub folding_depth: usize,
     //pub _bg_area: Area,
+    pub _jump_to_offset: bool,
     pub _view_area: Area,
     pub _highlight_area: Area,
     pub _text_inst: Option<AlignedInstance>,
@@ -129,11 +130,11 @@ pub struct CodeEditorColors {
     pub operator: Color,
     pub delimiter: Color,
     pub unexpected: Color,
-
+    
     pub warning: Color,
     pub error: Color,
     pub defocus: Color
-
+    
 }
 
 #[derive(Clone, PartialEq)]
@@ -195,7 +196,7 @@ impl CodeEditor {
                 
                 warning: color256(225, 229, 112),
                 error: color256(254, 0, 0),
-                defocus: color256(128,128,128),
+                defocus: color256(128, 128, 128),
             },
             indent_lines: Quad {
                 z: 0.001,
@@ -277,7 +278,8 @@ impl CodeEditor {
             cursor_blink_speed: 0.5,
             top_padding: 27.,
             mark_unmatched_parens: true,
-            draw_cursor_row: true, 
+            draw_cursor_row: true,
+            _jump_to_offset: true,
             _monospace_size: Vec2::zero(),
             _monospace_base: Vec2::zero(),
             _last_finger_move: None,
@@ -834,11 +836,19 @@ impl CodeEditor {
             },
             Event::Signal(se) => if text_buffer.signal.is_signal(se) {
                 match se.value {
-                    SIGNAL_TEXTBUFFER_MESSAGE_UPDATE | SIGNAL_TEXTBUFFER_LOADED | SIGNAL_TEXTBUFFER_DATA_UPDATE => {
+                    SIGNAL_TEXTBUFFER_LOADED => {
+                        self.view.redraw_view_area(cx);
+                    },
+                    SIGNAL_TEXTBUFFER_MESSAGE_UPDATE | SIGNAL_TEXTBUFFER_DATA_UPDATE => {
                         self.view.redraw_view_area(cx);
                     },
                     SIGNAL_TEXTBUFFER_JUMP_TO_OFFSET => {
-                        self.do_jump_to_offset(cx, text_buffer);
+                        if text_buffer.is_loading {
+                            self._jump_to_offset = true;
+                        }
+                        else {
+                            self.do_jump_to_offset(cx, text_buffer);
+                        }
                     },
                     SIGNAL_TEXTBUFFER_KEYBOARD_UPDATE => {
                         if let Some(key_down) = &text_buffer.keyboard.key_down {
@@ -965,7 +975,7 @@ impl CodeEditor {
             
             self._cursor_area = cx.new_instance_draw_call(&self.cursor.shader, 0).into_area();
             
-            if self.draw_line_numbers{
+            if self.draw_line_numbers {
                 self.gutter_bg.draw_quad(cx, Rect {x: 0., y: 0., w: self.line_number_width, h: cx.get_height_total()});
                 cx.new_instance_draw_call(&self.text.shader, 0);
                 self._line_number_inst = Some(self.line_number_text.begin_text(cx));
@@ -1446,7 +1456,7 @@ impl CodeEditor {
             return
         }
         if let Some(pos) = self.cursors.get_last_cursor_singular() {
-            if self.mark_unmatched_parens{
+            if self.mark_unmatched_parens {
                 // cursor is near the last one or its marked
                 let fail = if last.exp_paren == '(' && chunk[0] != ')' ||
                 last.exp_paren == '[' && chunk[0] != ']' ||
@@ -1485,7 +1495,7 @@ impl CodeEditor {
     }
     
     fn draw_paren_unmatched(&mut self, cx: &mut Cx) {
-        if !self.mark_unmatched_parens{
+        if !self.mark_unmatched_parens {
             return
         }
         while self._paren_stack.len()>0 {
@@ -1507,7 +1517,7 @@ impl CodeEditor {
         
         self.text.end_text(cx, self._text_inst.as_ref().unwrap());
         self._text_area = self._text_inst.take().unwrap().inst.into_area();
-        if self.draw_line_numbers{
+        if self.draw_line_numbers {
             self.line_number_text.end_text(cx, self._line_number_inst.as_ref().unwrap());
         }
         
@@ -1528,6 +1538,11 @@ impl CodeEditor {
         self.set_indent_line_highlight_id(cx);
         
         self.view.end_view(cx);
+        
+        if self._jump_to_offset{
+            self._jump_to_offset = false;
+            self.do_jump_to_offset(cx, text_buffer);            
+        }
     }
     
     fn do_jump_to_offset(&mut self, cx: &mut Cx, text_buffer: &TextBuffer) {
@@ -1607,7 +1622,7 @@ impl CodeEditor {
             let rc = self._draw_cursors.cursors[last_cursor];
             if let Some(_) = self.cursors.get_last_cursor_singular() {
                 // lets draw the cursor line
-                if self.draw_cursor_row{
+                if self.draw_cursor_row {
                     self.cursor_row.draw_quad_abs(cx, Rect {
                         x: self.line_number_width + cx.get_turtle_origin().x,
                         y: rc.y,
@@ -1738,11 +1753,11 @@ impl CodeEditor {
             let mono_size = Vec2 {x: self._monospace_base.x * geom.font_size, y: self._monospace_base.y * geom.font_size};
             //self.text.get_monospace_size(cx, geom.font_size);
             let rect = Rect {
-                x: (pos.col as f32) * mono_size.x,// - self.line_number_width,
+                x: (pos.col as f32) * mono_size.x, // - self.line_number_width,
                 y: geom.walk.y - mono_size.y * 1. - 0.5 * height_pad,
-                w: mono_size.x * 4.,// + self.line_number_width,
+                w: mono_size.x * 4., // + self.line_number_width,
                 h: mono_size.y * 4. + height_pad
-            }; 
+            };
             // scroll this cursor into view
             self.view.scroll_into_view(cx, rect);
         }
