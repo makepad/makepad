@@ -18,7 +18,7 @@ pub struct AppSettings {
     pub builds: Vec<BuildTarget>,
 }
 
-impl Default for AppSettings {
+impl Default for AppSettings { 
     fn default() -> Self {
         Self {
             exec_when_done:false,

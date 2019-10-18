@@ -228,6 +228,9 @@ impl LogList {
                     self.view.redraw_view_area(cx);
                 },
                 KeyCode::Backtick => if ke.modifiers.logo || ke.modifiers.control {
+                    if bm.active_targets.len() == 0{
+                        bm.restart_cargo(cx, storage);
+                    }
                     bm.artifact_exec(storage);
                     self.view.redraw_view_area(cx);
                 },
