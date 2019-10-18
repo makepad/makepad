@@ -79,7 +79,7 @@ impl AppStorage {
             Ok(settings) => {
                 self.settings = settings;
                 cx.send_signal(self.settings_changed, 0);
-                println!("Succesfully loaded makepad_settings.ron");
+                //println!("Succesfully loaded makepad_settings.ron");
             },
             Err(e) => {
                 println!("Cannot deserialize settings {:?}", e);
@@ -405,13 +405,9 @@ impl App {
         }
     }
     
-    pub fn load_settings(&mut self, cx: &mut Cx) {
-        
-    }
-    
     pub fn handle_app(&mut self, cx: &mut Cx, event: &mut Event) {
         match event {
-            Event::Construct => {
+            Event::Construct => { 
                 // start the workspace
                 std::thread::spawn(move || {
                     workspace_main::main();
