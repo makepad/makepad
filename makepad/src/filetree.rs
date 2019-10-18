@@ -679,6 +679,8 @@ impl FileTree {
                 },
                 FileNode::File {name, ..} => {
                     cx.move_turtle(0., 3.5);
+                    let wleft = cx.get_width_left() - 10.;
+                    self.tree_text.wrapping = Wrapping::Ellipsis(wleft);
                     //cx.realign_turtle(Align::left_center(), false);
                     self.tree_text.color = if is_marked {
                         self.tree_folder_color
