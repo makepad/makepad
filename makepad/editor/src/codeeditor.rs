@@ -23,8 +23,9 @@ pub struct CodeEditor {
     pub line_number_text: Text,
     pub cursors: TextCursorSet,
     
-    pub open_font_size: f32,
-    pub folded_font_size: f32,
+    pub base_font_size: f32,
+    pub open_font_scale: f32,
+    pub folded_font_scale: f32,
     pub line_number_width: f32,
     pub draw_line_numbers: bool,
     pub top_padding: f32,
@@ -63,7 +64,7 @@ pub struct CodeEditor {
     pub _highlight_token: Vec<char>,
     pub _last_cursor_pos: TextPos,
     
-    pub _anim_font_size: f32,
+    pub _anim_font_scale: f32,
     pub _line_largest_font: f32,
     pub _anim_folding: AnimFolding,
     
@@ -271,8 +272,9 @@ impl CodeEditor {
                 wrapping: Wrapping::Line,
                 ..Text::style(cx)
             },
-            open_font_size: 8.0,
-            folded_font_size: 0.5,
+            base_font_size: 8.0,
+            open_font_scale: 1.0,
+            folded_font_scale: 0.05,
             line_number_width: 45.,
             draw_line_numbers: true,
             cursor_blink_speed: 0.5,
@@ -305,14 +307,13 @@ impl CodeEditor {
             _line_number_inst: None,
             _line_number_chunk: Vec::new(),
             
-            _anim_font_size: 11.0,
+            _anim_font_scale: 1.0,
             _line_largest_font: 0.,
             _final_fill_height: 0.,
             folding_depth: 2,
             _anim_folding: AnimFolding {
                 state: AnimFoldingState::Open,
                 focussed_line: 0,
-                zoom_scale: 1.0,
                 did_animate: false,
             },
             _select_scroll: None,
@@ -722,7 +723,7 @@ impl CodeEditor {
             KeyCode::Alt => {
                 // how do we find the center line of the view
                 // its simply the top line
-                self.start_code_folding(cx, text_buffer, ke.modifiers.shift);
+                self.start_code_folding(cx, text_buffer);
                 false
                 //return CodeEditorEvent::FoldStart
             },
@@ -854,7 +855,7 @@ impl CodeEditor {
                         if let Some(key_down) = &text_buffer.keyboard.key_down {
                             match key_down {
                                 KeyCode::Alt => {
-                                    self.start_code_folding(cx, text_buffer, text_buffer.keyboard.modifiers.shift);
+                                    self.start_code_folding(cx, text_buffer);
                                 },
                                 _ => ()
                             }
@@ -996,7 +997,7 @@ impl CodeEditor {
             
             // initialize all drawing counters/stacks
             self._monospace_base = self.text.get_monospace_base(cx);
-            self.set_font_size(cx, self.open_font_size);
+            self.set_font_scale(cx, self.open_font_scale);
             self._draw_cursors = DrawCursors::new();
             self._draw_messages = DrawCursors::new();
             self._tokens_on_line = 0;
@@ -1043,7 +1044,7 @@ impl CodeEditor {
             anim_folding.did_animate = false;
         }
         //let new_anim_font_size =
-        self._anim_font_size = anim_folding.state.get_font_size(self.open_font_size, self.folded_font_size * anim_folding.zoom_scale);
+        self._anim_font_scale = anim_folding.state.get_font_size(self.open_font_scale, self.folded_font_scale);
         
         if self._anim_folding.did_animate {
             let mut ypos = self.top_padding;
@@ -1055,10 +1056,10 @@ impl CodeEditor {
                         ypos_at_line = ypos;
                     }
                     ypos += if geom.was_folded {
-                        self._monospace_base.y * self._anim_font_size
+                        self._monospace_base.y  * self.base_font_size * self._anim_font_scale
                     }
                     else {
-                        self._monospace_base.y * self.open_font_size
+                        self._monospace_base.y * self.base_font_size
                     }
                 }
                 ypos += self._final_fill_height;
@@ -1172,8 +1173,8 @@ impl CodeEditor {
     
     fn draw_indent_lines(&mut self, cx: &mut Cx, geom_y: f32, tabs: usize) {
         let y_pos = geom_y - cx.get_turtle_origin().y;
-        let tab_variable_width = self._monospace_base.x * 4. * self._anim_font_size;
-        let tab_fixed_width = self._monospace_base.x * 4. * self.open_font_size;
+        let tab_variable_width = self._monospace_base.x * 4. * self.base_font_size * self._anim_font_scale;
+        let tab_fixed_width = self._monospace_base.x * 4. * self.base_font_size;
         let mut off = self.line_number_width;
         for i in 0..tabs {
             let (indent_color, indent_id) = if i < self._indent_stack.len() {self._indent_stack[i]}else {(self.colors.indent_line_unknown, 0.)};
@@ -1207,7 +1208,7 @@ impl CodeEditor {
         
         // do indent depth walking
         if self._tokens_on_line == 0 {
-            let font_size = match token_type {
+            let font_scale = match token_type {
                 TokenType::Whitespace => {
                     let tabs = chunk.len()>>2;
                     while tabs > self._indent_stack.len() {
@@ -1225,27 +1226,27 @@ impl CodeEditor {
                     // lets change the fontsize
                     if tabs >= self.folding_depth || next_char == '\n' {
                         // ok lets think. we need to move it over by the delta of 8 spaces * _anim_font_size
-                        let dx = (self._monospace_base.x * self.open_font_size * 4. * (self.folding_depth as f32)) - (self._monospace_base.x * self._anim_font_size * 4. * (self.folding_depth as f32));
+                        let dx = (self._monospace_base.x * self.base_font_size * 4. * (self.folding_depth as f32)) - (self._monospace_base.x * self.base_font_size * self._anim_font_scale * 4. * (self.folding_depth as f32));
                         cx.move_turtle(dx, 0.0);
                         self._line_was_folded = true;
-                        self._anim_font_size
+                        self._anim_font_scale
                     }
                     else {
                         self._line_was_folded = false;
-                        self.open_font_size
+                        self.open_font_scale
                     }
                 }
                 TokenType::Newline | TokenType::CommentLine | TokenType::CommentChunk | TokenType::CommentMultiBegin | TokenType::CommentMultiEnd | TokenType::Hash => {
                     self._line_was_folded = true;
-                    self._anim_font_size
+                    self._anim_font_scale
                 }
                 _ => {
                     self._indent_stack.truncate(0);
                     self._line_was_folded = false;
-                    self.open_font_size
+                    self.open_font_scale
                 }
             };
-            self.set_font_size(cx, font_size);
+            self.set_font_scale(cx, font_scale);
         }
         // colorise indent lines properly
         if self._tokens_on_line < 4 {
@@ -1728,14 +1729,14 @@ impl CodeEditor {
     }
     
     // set it once per line otherwise the LineGeom stuff isn't really working out.
-    fn set_font_size(&mut self, _cx: &Cx, font_size: f32) {
-        self.text.font_size = font_size;
-        self.line_number_text.font_size = font_size;
-        if font_size > self._line_largest_font {
-            self._line_largest_font = font_size;
+    fn set_font_scale(&mut self, _cx: &Cx, font_scale: f32) {
+        self.text.font_scale = font_scale;
+        self.line_number_text.font_scale = font_scale;
+        if font_scale > self._line_largest_font {
+            self._line_largest_font = font_scale;
         }
-        self._monospace_size.x = self._monospace_base.x * font_size;
-        self._monospace_size.y = self._monospace_base.y * font_size;
+        self._monospace_size.x = self._monospace_base.x * self.base_font_size * font_scale;
+        self._monospace_size.y = self._monospace_base.y * self.base_font_size * font_scale;
     }
     
     fn scroll_last_cursor_visible(&mut self, cx: &mut Cx, text_buffer: &TextBuffer, height_pad: f32) {
@@ -1795,11 +1796,11 @@ impl CodeEditor {
         return text_buffer.text_pos_to_offset(TextPos {row: self._line_geometry.len() - 1, col: end_col})
     }
     
-    fn start_code_folding(&mut self, cx: &mut Cx, text_buffer: &TextBuffer, halfway: bool) {
+    fn start_code_folding(&mut self, cx: &mut Cx, text_buffer: &TextBuffer) {
         // start code folding anim
         let speed = 0.98;
         //self._anim_folding.depth = if halfway {1}else {2};
-        self._anim_folding.zoom_scale = if halfway {0.5}else {1.};
+        //self._anim_folding.zoom_scale = if halfway {0.5}else {1.};
         //if halfway{9.0} else{1.0};
         self._anim_folding.state.do_folding(speed, 0.95);
         self._anim_folding.focussed_line = self.compute_focussed_line_for_folding(cx, text_buffer);
@@ -1944,7 +1945,6 @@ pub enum AnimFoldingState {
 pub struct AnimFolding {
     pub state: AnimFoldingState,
     pub focussed_line: usize,
-    pub zoom_scale: f32,
     pub did_animate: bool
 }
 

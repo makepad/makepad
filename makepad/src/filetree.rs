@@ -632,7 +632,8 @@ impl FileTree {
             };
             self.filler.z = depth as f32 + 1.0;
             self.tree_text.z = depth as f32 + 1.0;
-            self.tree_text.font_size = self.font_size * scale as f32;
+            self.tree_text.font_size = self.font_size;
+            self.tree_text.font_scale = scale as f32;
             match node {
                 FileNode::Folder {name, state, ..} => {
                     // draw the folder icon
