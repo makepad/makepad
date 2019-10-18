@@ -897,7 +897,12 @@ impl TextCursorSet {
         self.insert_undo_group += 1;
         let mut old_max = (TextPos {row: 0, col: 0}, 0);
         for cursor in &mut self.set {
-            cursor.move_left(char_count, text_buffer);
+            if cursor.head != cursor.tail && !only_head{
+                cursor.head = cursor.head.min(cursor.tail)
+            }
+            else{
+                cursor.move_left(char_count, text_buffer);
+            }
             if !only_head {cursor.tail = cursor.head}
             old_max = cursor.calc_max(text_buffer, old_max);
         }
@@ -908,7 +913,12 @@ impl TextCursorSet {
         let mut old_max = (TextPos {row: 0, col: 0}, 0);
         let total_char_count = text_buffer.calc_char_count();
         for cursor in &mut self.set {
-            cursor.move_right(char_count, total_char_count, text_buffer);
+            if cursor.head != cursor.tail && !only_head{
+                cursor.head = cursor.head.max(cursor.tail)
+            }
+            else{
+                cursor.move_right(char_count, total_char_count, text_buffer);
+            }
             if !only_head {cursor.tail = cursor.head}
             old_max = cursor.calc_max(text_buffer, old_max);
         }
