@@ -6,30 +6,20 @@ use crate::app::*;
 #[derive(Clone)]
 pub struct BuildManager {
     pub signal: Signal,
-    pub active_workspace: String,
-    pub active_package: String,
     pub active_targets: Vec<BuildActiveTarget>,
     pub exec_when_done: bool,
-    pub always_exec_when_done: bool,
     pub log_items: Vec<HubLogItem>,
     pub artifacts: Vec<String>,
 }
 
 impl BuildManager{
     pub fn new(cx:&mut Cx)->BuildManager{
-        BuildManager{ 
+        BuildManager{
             signal:cx.new_signal(),
-            always_exec_when_done: true,
             exec_when_done: false,
             log_items: Vec::new(),
             artifacts: Vec::new(), 
-            active_workspace: "makepad".to_string(),
-            active_package: "csvproc".to_string(),
-            active_targets: vec![
-                BuildActiveTarget::new("check"),
-                BuildActiveTarget::new("build"),
-                //BuildActiveTarget::new("workspace")
-            ]
+            active_targets: Vec::new(),
         }
     }
 }
@@ -41,21 +31,12 @@ const SIGNAL_BUILD_MANAGER_ARTIFACT_EXEC_END:usize = 3;
 
 #[derive(Clone)]
 pub struct BuildActiveTarget {
-    target: String,
-    artifact_path: Option<String>,
-    cargo_uid: HubUid,
-    artifact_uid: HubUid,
-}
-
-impl BuildActiveTarget {
-    fn new(target: &str) -> BuildActiveTarget {
-        BuildActiveTarget {
-            target: target.to_string(),
-            cargo_uid: HubUid::zero(),
-            artifact_path: None,
-            artifact_uid: HubUid::zero(),
-        }
-    }
+    pub workspace: String,
+    pub package: String,
+    pub target: String,
+    pub artifact_path: Option<String>,
+    pub cargo_uid: HubUid,
+    pub artifact_uid: HubUid,
 }
 
 impl BuildManager{
@@ -193,6 +174,27 @@ impl BuildManager{
                 self.artifacts.push(package_id.clone());
                 cx.send_signal(self.signal, SIGNAL_BUILD_MANAGER_NEW_ARTIFACT);
             },
+            HubMsg::CargoExecFail {uid} => if self.is_running_uid(uid) {
+                // if we didnt have any errors, check if we need to run
+                for active_target in &mut self.active_targets {
+                    if active_target.cargo_uid == *uid {
+                        active_target.cargo_uid = HubUid::zero();
+                        self.log_items.push(HubLogItem{
+                            path:None,
+                            row:0,
+                            col:0,
+                            tail:0,
+                            head:0,
+                            body:format!("Workspace cannot find build {}:{}:{}", active_target.workspace,active_target.package,active_target.target),
+                            rendered:None,
+                            explanation:None,
+                            level:HubLogItemLevel::Error
+                        });
+                        cx.send_signal(self.signal, SIGNAL_BUILD_MANAGER_NEW_LOG_ITEM);
+                        return
+                    }
+                }
+            },
             HubMsg::CargoExecEnd {uid, artifact_path} => if self.is_running_uid(uid) {
                 // if we didnt have any errors, check if we need to run
                 for active_target in &mut self.active_targets {
@@ -227,7 +229,7 @@ impl BuildManager{
                 let uid = hub_ui.alloc_uid();
                 if active_target.artifact_uid != HubUid::zero() {
                     hub_ui.send(ClientToHubMsg {
-                        to: HubMsgTo::Workspace(self.active_workspace.clone()),
+                        to: HubMsgTo::Workspace(active_target.workspace.clone()),
                         msg: HubMsg::ArtifactKill {
                             uid: active_target.artifact_uid,
                         }
@@ -235,7 +237,7 @@ impl BuildManager{
                 }
                 active_target.artifact_uid = uid;
                 hub_ui.send(ClientToHubMsg {
-                    to: HubMsgTo::Workspace(self.active_workspace.clone()),
+                    to: HubMsgTo::Workspace(active_target.workspace.clone()),
                     msg: HubMsg::ArtifactExec {
                         uid: active_target.artifact_uid,
                         path: artifact_path.clone(),
@@ -256,18 +258,19 @@ impl BuildManager{
     }
     
     pub fn restart_cargo(&mut self, cx: &mut Cx, storage: &mut AppStorage) {
+        
         self.artifacts.truncate(0);
         self.log_items.truncate(0);
         //self.selection.truncate(0);
         self.gc_textbuffer_messages(cx, storage);
         
         let hub_ui = storage.hub_ui.as_mut().unwrap();
-        self.exec_when_done = self.always_exec_when_done;
+        self.exec_when_done = storage.settings.exec_when_done;
         for active_target in &mut self.active_targets {
             active_target.artifact_path = None;
             if active_target.cargo_uid != HubUid::zero() {
                 hub_ui.send(ClientToHubMsg {
-                    to: HubMsgTo::Workspace(self.active_workspace.clone()),
+                    to: HubMsgTo::Workspace(active_target.workspace.clone()),
                     msg: HubMsg::CargoKill {
                         uid: active_target.cargo_uid,
                     }
@@ -276,7 +279,7 @@ impl BuildManager{
             }
             if active_target.artifact_uid != HubUid::zero() {
                 hub_ui.send(ClientToHubMsg {
-                    to: HubMsgTo::Workspace(self.active_workspace.clone()),
+                    to: HubMsgTo::Workspace(active_target.workspace.clone()),
                     msg: HubMsg::ArtifactKill {
                         uid: active_target.artifact_uid,
                     }
@@ -285,17 +288,27 @@ impl BuildManager{
             }
         }
         
-        for active_target in &mut self.active_targets {
+        // lets reset active targets
+        self.active_targets.truncate(0);
+        
+        for build_target in &storage.settings.builds{
             let uid = hub_ui.alloc_uid();
             hub_ui.send(ClientToHubMsg {
-                to: HubMsgTo::Workspace(self.active_workspace.clone()),
+                to: HubMsgTo::Workspace(build_target.workspace.clone()),
                 msg: HubMsg::CargoExec {
                     uid: uid.clone(),
-                    package: self.active_package.clone(),
-                    target: active_target.target.clone()
+                    package: build_target.package.clone(),
+                    target: build_target.target.clone()
                 }
             });
-            active_target.cargo_uid = uid;
+            self.active_targets.push(BuildActiveTarget{
+                workspace: build_target.workspace.to_string(),
+                package: build_target.package.to_string(),
+                target: build_target.target.to_string(),
+                artifact_path: None,
+                cargo_uid: uid,
+                artifact_uid: HubUid::zero()
+            })
         }
     }    
 }

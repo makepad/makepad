@@ -22,6 +22,10 @@ pub enum HubMsg {
         target: String
     },
     
+    CargoExecFail{
+        uid:HubUid,
+    },
+    
     CargoKill {
         uid: HubUid
     },

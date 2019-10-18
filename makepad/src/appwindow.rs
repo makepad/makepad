@@ -38,9 +38,9 @@ pub struct AppWindow {
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct AppWindowState {
+    pub open_folders: Vec<String>,
     pub window_position: Vec2,
     pub window_inner_size: Vec2,
-    pub open_folders: Vec<String>,
     pub dock_items: DockItem<Panel>,
 }
 
@@ -139,8 +139,10 @@ impl AppWindow {
                                 storage.text_buffer_file_write(cx, path);
                                 
                                 // lets re-trigger the rust compiler
-                                build_manager.restart_cargo(cx, storage);
-                                self.log_item.clear_msg(cx);
+                                if storage.settings.build_on_save{
+                                    build_manager.restart_cargo(cx, storage);
+                                    self.log_item.clear_msg(cx);
+                                }
                                 
                                 //app_global.rust_compiler.restart_rust_checker(cx, &mut app_global.text_buffers);
                             },

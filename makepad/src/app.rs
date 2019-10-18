@@ -11,11 +11,42 @@ use std::collections::HashMap;
 use serde::*;
 use hub::*;
 
+#[derive(Debug, Serialize, Deserialize)]
+pub struct AppSettings {
+    pub build_on_save: bool,
+    pub exec_when_done: bool,
+    pub builds: Vec<BuildTarget>,
+}
+
+impl Default for AppSettings {
+    fn default() -> Self {
+        Self {
+            exec_when_done:false,
+            build_on_save:true,
+            builds: vec![BuildTarget {
+                workspace: "makepad".to_string(),
+                package: "makepad".to_string(),
+                target: "check".to_string()
+            }]
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct BuildTarget {
+    pub workspace: String,
+    pub package: String,
+    pub target: String
+}
+
 pub struct AppStorage {
     pub hub_server: Option<HubServer>,
     pub hub_ui: Option<HubUI>,
+    pub settings_changed: Signal,
+    pub settings: AppSettings,
     pub file_tree_file_read: FileRead,
     pub app_state_file_read: FileRead,
+    pub app_settings_file_read: FileRead,
     pub text_buffers: HashMap<String, AppTextBuffer>
 }
 
@@ -43,14 +74,28 @@ pub struct AppState {
 
 impl AppStorage {
     
+    pub fn load_settings(&mut self, cx: &mut Cx, utf8_data: &str) {
+        match ron::de::from_str(utf8_data) {
+            Ok(settings) => {
+                self.settings = settings;
+                cx.send_signal(self.settings_changed, 0);
+                println!("Succesfully loaded makepad_settings.ron");
+            },
+            Err(e) => {
+                println!("Cannot deserialize settings {:?}", e);
+            }
+        }
+    }
+    
     pub fn save_state(&mut self, cx: &mut Cx, state: &AppState) {
-        let json = serde_json::to_string(state).unwrap();
-        cx.file_write("makepad_state.json", json.as_bytes());
+        let ron = ron::ser::to_string_pretty(state, ron::ser::PrettyConfig::default()).unwrap();
+        cx.file_write("makepad_state.ron", ron.as_bytes());
     }
     
     pub fn text_buffer_from_path(&mut self, cx: &mut Cx, path: &str) -> &mut TextBuffer {
+        
         // if online, fallback to readfile
-        let atb = if !cx.platform_type.is_desktop() {
+        let atb = if !cx.platform_type.is_desktop() || path.find('/').is_none() {
             let atb = self.text_buffers.entry(path.to_string()).or_insert_with( || {
                 AppTextBuffer {
                     file_read: cx.file_read(path),
@@ -70,26 +115,21 @@ impl AppStorage {
             let hub_ui = self.hub_ui.as_mut().unwrap();
             let atb = self.text_buffers.entry(path.to_string()).or_insert_with( || {
                 // lets find the right workspace
-                let msg = if let Some(workspace_pos) = path.find('/') {
-                    let uid = hub_ui.alloc_uid();
-                    let (workspace, rest) = path.split_at(workspace_pos);
-                    let (_, rest) = rest.split_at(1);
-                    let msg = ClientToHubMsg {
-                        to: HubMsgTo::Workspace(workspace.to_string()),
-                        msg: HubMsg::FileReadRequest {
-                            uid: uid.clone(),
-                            path: rest.to_string()
-                        }
-                    };
-                    hub_ui.send(msg.clone());
-                    Some(msg)
-                }
-                else {
-                    None
+                let workspace_pos = path.find('/').unwrap();
+                let uid = hub_ui.alloc_uid();
+                let (workspace, rest) = path.split_at(workspace_pos);
+                let (_, rest) = rest.split_at(1);
+                let msg = ClientToHubMsg {
+                    to: HubMsgTo::Workspace(workspace.to_string()),
+                    msg: HubMsg::FileReadRequest {
+                        uid: uid.clone(),
+                        path: rest.to_string()
+                    }
                 };
+                hub_ui.send(msg.clone());
                 AppTextBuffer {
                     file_read: FileRead::default(),
-                    read_msg: msg,
+                    read_msg: Some(msg),
                     write_msg: None,
                     text_buffer: TextBuffer {
                         is_loading: true,
@@ -109,12 +149,13 @@ impl AppStorage {
             // do nothing
         }
         else {
-            if let Some(atb) = self.text_buffers.get_mut(path) {
-                let msg = if let Some(workspace_pos) = path.find('/') {
+            if let Some(workspace_pos) = path.find('/') {
+                if let Some(atb) = self.text_buffers.get_mut(path) {
                     let hub_ui = self.hub_ui.as_mut().unwrap();
                     let utf8_data = atb.text_buffer.get_as_string();
                     let (workspace, rest) = path.split_at(workspace_pos);
                     let (_, rest) = rest.split_at(1);
+                    
                     // lets write it as a message
                     let uid = hub_ui.alloc_uid();
                     let msg = ClientToHubMsg {
@@ -126,12 +167,18 @@ impl AppStorage {
                         }
                     };
                     hub_ui.send(msg.clone());
-                    Some(msg)
+                    atb.write_msg = Some(msg);
                 }
-                else {
-                    None
-                };
-                atb.write_msg = msg;
+            }
+            else { // its not a workspace, its a system (settings) file
+                if let Some(atb) = self.text_buffers.get_mut(path) {
+                    let utf8_data = atb.text_buffer.get_as_string();
+                    cx.file_write(path, utf8_data.as_bytes());
+                    // if its the settings, load it
+                    if path == "makepad_settings.ron" {
+                        self.load_settings(cx, &utf8_data);
+                    };
+                }
             }
         }
     }
@@ -214,10 +261,13 @@ impl App {
             storage: AppStorage {
                 hub_server: None,
                 hub_ui: None,
+                settings_changed: cx.new_signal(),
+                settings: AppSettings::default(),
                 //rust_compiler: RustCompiler::style(cx),
                 text_buffers: HashMap::new(),
                 file_tree_file_read: FileRead::default(),
-                app_state_file_read: FileRead::default()
+                app_state_file_read: FileRead::default(),
+                app_settings_file_read: FileRead::default()
             }
         }
     }
@@ -275,7 +325,12 @@ impl App {
                             draw: None,
                             state: NodeState::Open,
                             folder: Vec::new()
-                        }).collect()
+                        }).chain(std::iter::once(
+                            FileNode::File {
+                                name: "makepad_settings.ron".to_string(),
+                                draw: None
+                            }
+                        )).collect()
                     };
                     window.file_tree.view.redraw_view_area(cx);
                 }
@@ -350,6 +405,10 @@ impl App {
         }
     }
     
+    pub fn load_settings(&mut self, cx: &mut Cx) {
+        
+    }
+    
     pub fn handle_app(&mut self, cx: &mut Cx, event: &mut Event) {
         match event {
             Event::Construct => {
@@ -359,7 +418,8 @@ impl App {
                 });
                 
                 if cx.platform_type.is_desktop() {
-                    self.storage.app_state_file_read = cx.file_read("makepad_state.json");
+                    self.storage.app_state_file_read = cx.file_read("makepad_state.ron");
+                    self.storage.app_settings_file_read = cx.file_read("makepad_settings.ron");
                     
                     let key = std::fs::read("./key.bin").unwrap();
                     let mut hub_server = HubServer::start_hub_server_default(&key, HubLog::None);
@@ -371,7 +431,7 @@ impl App {
                     self.storage.hub_ui = Some(hub_ui);
                 }
                 else {
-                    self.storage.file_tree_file_read = cx.file_read("index.json");
+                    self.storage.file_tree_file_read = cx.file_read("index.ron");
                     self.default_layout(cx);
                 }
                 
@@ -397,14 +457,13 @@ impl App {
                 if let Some(utf8_data) = self.storage.file_tree_file_read.resolve_utf8(fr) {
                     if let Ok(utf8_data) = utf8_data {
                         for window in &mut self.windows {
-                            window.file_tree.load_from_json(cx, &utf8_data);
+                            window.file_tree.load_from_ron(cx, &utf8_data);
                         }
                     }
                 }
-                else
-                if let Some(utf8_data) = self.storage.app_state_file_read.resolve_utf8(fr) {
+                else if let Some(utf8_data) = self.storage.app_state_file_read.resolve_utf8(fr) {
                     if let Ok(utf8_data) = utf8_data {
-                        if let Ok(state) = serde_json::from_str(&utf8_data) {
+                        if let Ok(state) = ron::de::from_str(&utf8_data) {
                             self.state = state;
                             
                             // create our windows with the serialized positions/size
@@ -442,6 +501,15 @@ impl App {
                         self.default_layout(cx);
                     }
                 }
+                else if let Some(utf8_data) = self.storage.app_settings_file_read.resolve_utf8(fr) {
+                    if let Ok(utf8_data) = utf8_data {
+                        self.storage.load_settings(cx, utf8_data);
+                    }
+                    else { // create default settings file
+                        let ron = ron::ser::to_string_pretty(&self.storage.settings, ron::ser::PrettyConfig::default()).expect("cannot serialize settings");
+                        cx.file_write("makepad_settings.ron", ron.as_bytes());
+                    }
+                }
                 else {
                     for (_path, atb) in &mut self.storage.text_buffers {
                         if let Some(utf8_data) = atb.file_read.resolve_utf8(fr) {
@@ -461,6 +529,7 @@ impl App {
             // break;
         }
     }
+    
     
     pub fn draw_app(&mut self, cx: &mut Cx) {
         //return;

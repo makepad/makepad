@@ -2,27 +2,28 @@ use hub::*;
 
 pub fn main() {
     let key = std::fs::read("./key.bin").unwrap();
-    HubWorkspace::run(&key, "makepad", "edit_repo", HubLog::None, | ws, htc | match htc.msg {
+    HubWorkspace::run(&key, "makepad", "edit_repo", HubLog::All, | ws, htc | match htc.msg {
         HubMsg::CargoPackagesRequest {uid} => {
+            let targets = &["check","debug","release"];
             ws.cargo_packages(htc.from, uid, vec![
-                HubCargoPackage::new("makepad", &["check", "build", "workspace"]),
-                HubCargoPackage::new("csvproc", &["check", "build"])
-            ])
+                HubCargoPackage::new("workspace", targets),
+                HubCargoPackage::new("makepad", targets),
+                HubCargoPackage::new("csvproc", targets),
+                HubCargoPackage::new("ui_example", targets),
+            ]);
         },
         HubMsg::CargoExec {uid, package, target} => {
-            match package.as_ref() {
-                "makepad" => match target.as_ref() {
-                    "check" => ws.cargo_exec(uid, &["check", "-p", &package]),
-                    "build" => ws.cargo_exec(uid, &["build", "-p", "makepad"]),
-                    "workspace" => ws.cargo_exec(uid, &["build", "-p", "workspace"]),
-                    _ => ()
+            match target.as_ref(){
+                "release"=>{
+                    ws.cargo_exec(uid, &["build", "--release", "-p", &package], &[])
                 },
-                "csvproc" => match target.as_ref() {
-                    "check" => ws.cargo_exec(uid, &["check", "-p", &package]),
-                    "build" => ws.cargo_exec(uid, &["build", "-p", &package]),
-                    _=>()
+                "debug"=>{
+                    ws.cargo_exec(uid, &["build", "-p", &package], &[])
                 },
-                _ => ()
+                "check"=>{
+                    ws.cargo_exec(uid, &["check", "-p", &package], &[])
+                },
+                _=>ws.cargo_exec_fail(uid, &package, &target)
             }
         },
         _ => ws.default(htc)

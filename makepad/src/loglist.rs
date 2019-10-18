@@ -127,16 +127,29 @@ impl LogItemDraw {
             self.text.color = self.path_color;
             self.code_icon.draw_icon_walk(cx, CodeIconType::Ok);
             if bm.is_any_artifact_running() {
-                self.text.draw_text(cx, "Running");
+                self.text.draw_text(cx, "Running - ");
+                for active_target in &bm.active_targets {
+                    if active_target.artifact_uid != HubUid::zero(){
+                        self.text.draw_text(cx, &format!("{}/{}:{} ", active_target.workspace, active_target.package, active_target.target));
+                    }
+                }
             }
             else {
-                self.text.draw_text(cx, "Done");
+                self.text.draw_text(cx, "Done ");
+                for active_target in &bm.active_targets {
+                    self.text.draw_text(cx, &format!("{}/{}:{} ", active_target.workspace, active_target.package, active_target.target));
+                }
             }
         }
         else {
             self.code_icon.draw_icon_walk(cx, CodeIconType::Wait);
             self.text.color = self.path_color;
-            self.text.draw_text(cx, &format!("Building ({})", bm.artifacts.len()));
+            self.text.draw_text(cx, &format!("Building ({}) ", bm.artifacts.len()));
+            for active_target in &bm.active_targets {
+                if active_target.cargo_uid != HubUid::zero(){
+                    self.text.draw_text(cx, &format!("{}/{}:{} ", active_target.workspace, active_target.package, active_target.target));
+                }
+            }
             if bm.exec_when_done {
                 self.text.draw_text(cx, " - starting when done");
             }
@@ -206,6 +219,12 @@ impl LogList {
                 KeyCode::KeyT => if ke.modifiers.logo || ke.modifiers.control {
                     // lock scroll
                     self.list.tail_list = true;
+                    self.view.redraw_view_area(cx);
+                },
+                KeyCode::KeyK => if ke.modifiers.logo || ke.modifiers.control {
+                    // clear and tail log
+                    self.list.tail_list = true;
+                    bm.log_items.truncate(0);
                     self.view.redraw_view_area(cx);
                 },
                 KeyCode::Backtick => if ke.modifiers.logo || ke.modifiers.control {

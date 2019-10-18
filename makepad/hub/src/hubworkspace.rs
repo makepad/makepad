@@ -16,18 +16,18 @@ pub struct HubWorkspace {
     pub processes: Arc<Mutex<Vec<HubWsProcess>>>,
     pub restart_connection: bool
 }
- 
-pub struct HubWsProcess {  
-    uid: HubUid, 
+
+pub struct HubWsProcess {
+    uid: HubUid,
     process: Process,
-    _thread: Option<std::thread::JoinHandle<()>> 
+    _thread: Option<std::thread::JoinHandle<()>>
 }
 
 impl HubWorkspace {
     pub fn run<F>(key: &[u8], workspace: &str, root_path: &str, hub_log: HubLog, mut event_handler: F)
     where F: FnMut(&mut HubWorkspace, HubToClientMsg) {
         
-        loop {  
+        loop {
             if root_path.contains("..") || root_path.contains("./") || root_path.contains("\\") || root_path.starts_with("/") {
                 panic!("Root path for workspace cant be relative and must be unix style");
             }
@@ -74,7 +74,7 @@ impl HubWorkspace {
     pub fn default(&mut self, htc: HubToClientMsg) {
         match htc.msg {
             HubMsg::WorkspaceFileTreeRequest {uid} => {
-                self.workspace_file_tree(htc.from, uid, &[".json", ".toml", ".js", ".rs", ".txt", ".text"]);
+                self.workspace_file_tree(htc.from, uid, &[".json", ".toml", ".js", ".rs", ".txt", ".text", ".ron"]);
             },
             HubMsg::FileReadRequest {uid, path} => {
                 self.file_read(htc.from, uid, &path);
@@ -140,7 +140,7 @@ impl HubWorkspace {
             let mut tracing_panic = false;
             let mut panic_stack: Vec<String> = Vec::new();
             
-            fn send_panic(uid:HubUid, workspace:&str, panic_stack:&Vec<String>, tx_write:&mpsc::Sender<ClientToHubMsg>){
+            fn send_panic(uid: HubUid, workspace: &str, panic_stack: &Vec<String>, tx_write: &mpsc::Sender<ClientToHubMsg>) {
                 // this has to be the uglies code in the whole project. If only stacktraces were more cleanly machine readable.
                 let mut path = None;
                 let mut row = 0;
@@ -165,18 +165,18 @@ impl HubWorkspace {
                             }
                         }
                     }
-                    else if starts_with_digit(panic_line){
+                    else if starts_with_digit(panic_line) {
                         if let Some(pos) = panic_line.find(" 0x") {
-                            last_fn_name = panic_line.get((pos+15)..).unwrap().to_string();
+                            last_fn_name = panic_line.get((pos + 15)..).unwrap().to_string();
                         }
                     }
                 }
                 rendered.push("\n".to_string());
-
-                if panic_stack.len()<3{
+                
+                if panic_stack.len()<3 {
                     return;
                 }
-
+                
                 tx_write.send(ClientToHubMsg {
                     to: HubMsgTo::UI,
                     msg: HubMsg::LogItem {
@@ -193,13 +193,13 @@ impl HubWorkspace {
                             level: HubLogItemLevel::Panic
                         }
                     }
-                }).expect("tx_write fail");                
+                }).expect("tx_write fail");
             }
             
             while let Ok(line) = rx_line.recv() {
                 if let Some((is_stderr, line)) = line {
                     if is_stderr { // start collecting stderr
-                        if line.starts_with("thread '") {// this is how we recognise a stacktrace start..Very sturdy.
+                        if line.starts_with("thread '") { // this is how we recognise a stacktrace start..Very sturdy.
                             tracing_panic = true;
                             panic_stack.truncate(0);
                         }
@@ -218,27 +218,27 @@ impl HubWorkspace {
                                 panic_stack.push(trimmed);
                             }
                         }
-                        else{
-                            if line.starts_with("["){ // a dbg! style output with line information
-                                if let Some(row_pos) = line.find(":"){
-                                    if let Some(end_pos) = line.find("]"){
-                                         tx_write.send(ClientToHubMsg {
+                        else {
+                            if line.starts_with("[") { // a dbg! style output with line information
+                                if let Some(row_pos) = line.find(":") {
+                                    if let Some(end_pos) = line.find("]") {
+                                        tx_write.send(ClientToHubMsg {
                                             to: HubMsgTo::UI,
                                             msg: HubMsg::LogItem {
                                                 uid: uid,
-                                                item: HubLogItem { 
-                                                    path: Some(format!("{}/{}",workspace,line.get(1..row_pos).unwrap().to_string())),
+                                                item: HubLogItem {
+                                                    path: Some(format!("{}/{}", workspace, line.get(1..row_pos).unwrap().to_string())),
                                                     row: line.get((row_pos + 1)..end_pos).unwrap().parse::<usize>().unwrap(),
-                                                    col: 1, 
+                                                    col: 1,
                                                     tail: 0,
                                                     head: 0,
-                                                    body: line.get((end_pos+1)..).unwrap().to_string(),
+                                                    body: line.get((end_pos + 1)..).unwrap().to_string(),
                                                     rendered: Some(line.clone()),
                                                     explanation: None,
                                                     level: HubLogItemLevel::Log
                                                 }
                                             }
-                                        }).expect("tx_write fail");     
+                                        }).expect("tx_write fail");
                                     }
                                 }
                             }
@@ -250,11 +250,11 @@ impl HubWorkspace {
                             to: HubMsgTo::UI,
                             msg: HubMsg::LogItem {
                                 uid: uid,
-                                item: HubLogItem { 
+                                item: HubLogItem {
                                     //package_id: parsed.package_id.clone(),
                                     path: None,
                                     row: 0,
-                                    col: 0, 
+                                    col: 0,
                                     tail: 0,
                                     head: 0,
                                     body: line.clone(),
@@ -275,7 +275,7 @@ impl HubWorkspace {
                     }).expect("tx_write fail");*/
                 }
                 else { // process terminated
-                    if tracing_panic{
+                    if tracing_panic {
                         send_panic(uid, &workspace, &panic_stack, &tx_write);
                     }
                     // do we have any errors?
@@ -319,12 +319,20 @@ impl HubWorkspace {
         };
     }
     
-    pub fn cargo_exec(&mut self, uid: HubUid, args: &[&str]) {
+    pub fn cargo_exec_fail(&mut self, uid: HubUid, package: &str, target: &str) {
+        println!("Workspace {} Cannot find package {} and target {} for exec", self.workspace, package, target);
+        self.hub_client.tx_write.send(ClientToHubMsg {
+            to: HubMsgTo::UI,
+            msg: HubMsg::CargoExecFail {uid: uid}
+        }).expect("tx_write fail");
+    }
+    
+    pub fn cargo_exec(&mut self, uid: HubUid, args: &[&str], env: &[(&str, &str)]) {
         
         // lets start a thread
         let mut extargs = args.to_vec();
         extargs.push("--message-format=json");
-        let mut process = Process::start("cargo", &extargs, &self.root_path, &[]).expect("Cannot start process");
+        let mut process = Process::start("cargo", &extargs, &self.root_path, env).expect("Cannot start process");
         //let print_args: Vec<String> = extargs.to_vec().iter().map( | v | v.to_string()).collect();
         
         // we now need to start a subprocess and parse the cargo output.

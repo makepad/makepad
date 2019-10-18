@@ -1,7 +1,6 @@
 use render::*;
 use widget::*;
 //use miniserde::{json,  Deserialize};
-use serde_json::{Result};
 use serde::*;
 
 #[derive(Clone)]
@@ -250,22 +249,22 @@ impl FileTree {
         }))
     }
     
-    pub fn load_from_json(&mut self, cx: &mut Cx, json_data: &str) {
+    pub fn load_from_ron(&mut self, cx: &mut Cx, ron_data: &str) {
         
         #[derive(Deserialize, Debug)]
-        struct JsonFolder {
+        struct RonFolder {
             name: String,
             open: bool,
-            files: Vec<JsonFile>,
-            folders: Vec<JsonFolder>
+            files: Vec<RonFile>,
+            folders: Vec<RonFolder>
         }
         
         #[derive(Deserialize, Debug)]
-        struct JsonFile {
+        struct RonFile {
             name: String
         }
         
-        fn recur_walk(node: JsonFolder) -> FileNode {
+        fn recur_walk(node: RonFolder) -> FileNode {
             let mut out = Vec::new();
             for folder in node.folders {
                 out.push(recur_walk(folder));
@@ -284,8 +283,7 @@ impl FileTree {
             }
         }
         
-        let value: Result<JsonFolder> = serde_json::from_str(json_data);
-        if let Ok(value) = value {
+        if let Ok(value) =  ron::de::from_str(ron_data) {
             self.root_node = recur_walk(value);
         }
         self.view.redraw_view_area(cx);

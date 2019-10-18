@@ -60,7 +60,7 @@ impl FileEditor {
     
     pub fn create_file_editor_for_path(path: &str, template: &FileEditorTemplates) -> FileEditor {
         // check which file extension we have to spawn a new editor
-        if path.ends_with(".rs") || path.ends_with(".toml") {
+        if path.ends_with(".rs") || path.ends_with(".toml")  || path.ends_with(".ron"){
             FileEditor::Rust(RustEditor {
                 ..template.rust_editor.clone()
             })

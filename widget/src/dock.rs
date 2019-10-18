@@ -57,8 +57,8 @@ where TItem: Clone
         tabs: Vec<DockTab<TItem>>,
     },
     Splitter {
-        align: SplitterAlign,
         pos: f32,
+        align: SplitterAlign,
         axis: Axis,
         first: Box<DockItem<TItem>>,
         last: Box<DockItem<TItem>>
