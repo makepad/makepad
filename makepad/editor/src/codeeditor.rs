@@ -1391,8 +1391,8 @@ impl CodeEditor {
             let height = self._monospace_size.y;
             
             // actually generate the GPU data for the text
-            let z = 2.0 + self._paren_stack.len() as f32;
-            self.text.z = z;
+            let z = 2.0;// + self._paren_stack.len() as f32;
+            //self.text.z = z;
             if self._highlight_selection.len() > 0 { // slow loop
                 //let draw_search = &mut self._draw_search;
                 let line_chunk = &mut self._line_chunk;

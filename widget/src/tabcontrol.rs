@@ -215,6 +215,7 @@ impl TabControl {
             }
         }
         self.tabs_view.end_view(cx);
+        
     }
     
     pub fn begin_tab_page(&mut self, cx: &mut Cx) -> ViewRedraw {
