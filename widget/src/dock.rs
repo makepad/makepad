@@ -76,6 +76,8 @@ where TItem: Clone
 
 pub enum DockEvent {
     None,
+    DockTabClosed,
+    DockTabCloned{tab_control_id:usize, tab_id:usize},
     DockChanged
 }
 
@@ -399,7 +401,7 @@ where TItem: Clone
         }
     }
 
-    fn recur_remove_tab(dock_walk: &mut DockItem<TItem>, control_id: usize, tab_id: usize, counter: &mut usize) -> Option<DockTab<TItem>>
+    fn recur_remove_tab(dock_walk: &mut DockItem<TItem>, control_id: usize, tab_id: usize, counter: &mut usize, clone:bool) -> Option<DockTab<TItem>>
     where TItem: Clone
     {
         match dock_walk {
@@ -414,16 +416,21 @@ where TItem: Clone
                     if tab_id >= tabs.len() {
                         return None;
                     }
-                    return Some(tabs.remove(tab_id));
+                    if clone{
+                        return Some(tabs[tab_id].clone())
+                    }
+                    else{
+                        return Some(tabs.remove(tab_id));
+                    }
                 }
             },
             DockItem::Splitter {first, last, ..} => {
                 *counter += 1;
-                let left = Self::recur_remove_tab(first, control_id, tab_id, counter);
+                let left = Self::recur_remove_tab(first, control_id, tab_id, counter, clone);
                 if !left.is_none() {
                     return left
                 }
-                let right = Self::recur_remove_tab(last, control_id, tab_id, counter);
+                let right = Self::recur_remove_tab(last, control_id, tab_id, counter, clone);
                 if !right.is_none() {
                     return right
                 }
@@ -614,14 +621,15 @@ where TItem: Clone
     
     pub fn handle_dock(&mut self, cx: &mut Cx, _event: &mut Event, dock_items: &mut DockItem<TItem>) -> DockEvent {
         if let Some(close_tab) = &self._close_tab {
-            Self::recur_remove_tab(dock_items, close_tab.tab_control_id, close_tab.tab_id, &mut 0);
+            Self::recur_remove_tab(dock_items, close_tab.tab_control_id, close_tab.tab_id, &mut 0, false);
             Self::recur_collapse_empty(dock_items);
             cx.redraw_child_area(Area::All);
             self._close_tab = None;
-            return DockEvent::DockChanged
+            return DockEvent::DockTabClosed
         }
         if let Some(drag_end) = self._drag_end.clone() {
             self._drag_end = None;
+            let mut tab_clone_ident = None;
             let fe = match &drag_end {DockDragEnd::OldTab {fe, ..} => fe, DockDragEnd::NewItems {fe, ..} => fe};
             for (target_id, tab_control) in self.tab_controls.enumerate() {
                 
@@ -638,7 +646,10 @@ where TItem: Clone
                     // we have a kind!
                     let items = match &drag_end {
                         DockDragEnd::OldTab {ident, ..} => {
-                            let item = Self::recur_remove_tab(dock_items, ident.tab_control_id, ident.tab_id, &mut 0);
+                            if fe.modifiers.control || fe.modifiers.logo{
+                                tab_clone_ident = Some(ident.clone());
+                            }
+                            let item = Self::recur_remove_tab(dock_items, ident.tab_control_id, ident.tab_id, &mut 0, tab_clone_ident.is_some());
                             if let Some(item) = item {
                                 vec![item]
                             }
@@ -666,6 +677,9 @@ where TItem: Clone
             Self::recur_collapse_empty(dock_items);
             cx.redraw_child_area(Area::All);
             //Self::recur_debug_dock(self.dock_items.as_mut().unwrap(), &mut 0, 0);
+            if let Some(ident) = tab_clone_ident{
+                return DockEvent::DockTabCloned{tab_control_id:ident.tab_control_id,  tab_id:ident.tab_id}
+            }
             return DockEvent::DockChanged
         };
         // ok we need to pull out the TItem from our dockpanel

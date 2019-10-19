@@ -46,11 +46,11 @@ impl Tab {
                 width: Bounds::Compute,
                 height: Bounds::Compute,
                 margin: Margin::all(0.),
-                padding: Padding {l: 16.0, t: 12.0, r: 16.0, b: 12.0},
+                padding: Padding {l: 16.0, t: 14.0, r: 16.0, b: 12.0},
                 ..Default::default()
             },
             tab_close: TabClose {
-                margin: Margin {l: -4., t: 3., r: 4., b: 0.},
+                margin: Margin {l: -4., t: 2., r: 4., b: 0.},
                 ..TabClose::style(cx)
             },
             text: Text {
