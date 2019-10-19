@@ -25,7 +25,7 @@ where TItem: Clone
     pub _tweening_quad: Option<(usize, Rect, f32)>
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct DockTabIdent {
     tab_control_id: usize,
     tab_id: usize
@@ -54,6 +54,7 @@ where TItem: Clone
     Single(TItem),
     TabControl {
         current: usize,
+        previous: usize,
         tabs: Vec<DockTab<TItem>>,
     },
     Splitter {
@@ -77,7 +78,7 @@ where TItem: Clone
 pub enum DockEvent {
     None,
     DockTabClosed,
-    DockTabCloned{tab_control_id:usize, tab_id:usize},
+    DockTabCloned {tab_control_id: usize, tab_id: usize},
     DockChanged
 }
 
@@ -99,7 +100,8 @@ where TItem: Clone
 impl<'a, TItem> DockWalker<'a, TItem>
 where TItem: Clone
 {
-    pub fn walk_dock_item(&mut self) -> Option<&mut DockItem<TItem>> {
+    
+    pub fn walk_dock_item(&mut self) -> Option<(usize, &mut DockItem<TItem>)> {
         // lets get the current item on the stack
         let push_or_pop = if let Some(stack_top) = self.stack.last_mut() {
             // return item 'count'
@@ -107,7 +109,7 @@ where TItem: Clone
                 DockItem::Single(..) => {
                     if stack_top.counter == 0 {
                         stack_top.counter += 1;
-                        return Some(unsafe {mem::transmute(&mut *stack_top.item)});
+                        return Some((self.walk_uid,unsafe {mem::transmute(&mut *stack_top.item)}));
                     }
                     else {
                         None
@@ -115,8 +117,10 @@ where TItem: Clone
                 },
                 DockItem::TabControl {..} => {
                     if stack_top.counter == 0 {
+                        let uid = self.walk_uid;
+                        self.walk_uid += 1;
                         stack_top.counter += 1;
-                        return Some(unsafe {mem::transmute(&mut *stack_top.item)});
+                        return Some((uid, unsafe {mem::transmute(&mut *stack_top.item)}));
                     }
                     else {
                         None
@@ -124,8 +128,10 @@ where TItem: Clone
                 },
                 DockItem::Splitter {first, last, ..} => {
                     if stack_top.counter == 0 {
+                        let uid = self.walk_uid;
+                        self.walk_uid += 1;
                         stack_top.counter += 1;
-                        return Some(unsafe {mem::transmute(&mut *stack_top.item)});
+                        return Some((uid, unsafe {mem::transmute(&mut *stack_top.item)}));
                     }
                     else if stack_top.counter == 1 {
                         stack_top.counter += 1;
@@ -169,7 +175,7 @@ where TItem: Clone
                         None
                     }
                 },
-                DockItem::TabControl {current, tabs} => {
+                DockItem::TabControl {current, previous, tabs} => {
                     if stack_top.counter == 0 {
                         stack_top.counter += 1;
                         stack_top.uid = self.walk_uid;
@@ -179,6 +185,7 @@ where TItem: Clone
                         if !tab_control.is_none() {
                             match tab_control.unwrap().handle_tab_control(cx, event) {
                                 TabControlEvent::TabSelect {tab_id} => {
+                                    *previous = *current;
                                     *current = tab_id;
                                     // someday ill fix this. Luckily entire UI redraws are millisecond span
                                     cx.redraw_child_area(Area::All);
@@ -241,7 +248,7 @@ where TItem: Clone
                         stack_top.uid = self.walk_uid;
                         self.walk_uid += 1;
                         let split = self.splitters.get(stack_top.uid);
-                        if let Some(split) = split{
+                        if let Some(split) = split {
                             match split.handle_splitter(cx, event) {
                                 SplitterEvent::Moving {new_pos} => {
                                     *pos = new_pos;
@@ -296,13 +303,13 @@ where TItem: Clone
                         None
                     }
                 },
-                DockItem::TabControl {current, tabs} => {
+                DockItem::TabControl {current, previous:_, tabs} => {
                     if stack_top.counter == 0 {
                         stack_top.counter += 1;
                         stack_top.uid = self.walk_uid;
                         self.walk_uid += 1;
                         let tab_control = self.tab_controls.get_draw(cx, stack_top.uid, | _cx, tmpl | tmpl.clone());
-
+                        
                         if let Ok(_) = tab_control.begin_tabs(cx) {
                             for (id, tab) in tabs.iter().enumerate() {
                                 tab_control.draw_tab(cx, &tab.title, *current == id, tab.closeable);
@@ -383,8 +390,8 @@ where TItem: Clone
             // dock_items:None,
             drop_size: Vec2 {x: 100., y: 70.},
             drop_quad_color: color("#a"),
-            drop_quad: Quad{
-                z:10.,
+            drop_quad: Quad {
+                z: 10.,
                 ..Quad::style(cx)
             },
             splitters: Elements::new(Splitter::style(cx)),
@@ -400,26 +407,31 @@ where TItem: Clone
             _tweening_quad: None
         }
     }
-
-    fn recur_remove_tab(dock_walk: &mut DockItem<TItem>, control_id: usize, tab_id: usize, counter: &mut usize, clone:bool) -> Option<DockTab<TItem>>
+    
+    fn recur_remove_tab(dock_walk: &mut DockItem<TItem>, control_id: usize, tab_id: usize, counter: &mut usize, clone: bool) -> Option<DockTab<TItem>>
     where TItem: Clone
     {
         match dock_walk {
             DockItem::Single(_) => {},
-            DockItem::TabControl {tabs, current} => {
+            DockItem::TabControl {tabs, current, previous} => {
                 let id = *counter;
                 *counter += 1;
                 if id == control_id {
-                    if *current >= 1 && *current == tabs.len() - 1 {
-                        *current -= 1;
-                    }
                     if tab_id >= tabs.len() {
                         return None;
                     }
-                    if clone{
+                    if clone && tabs[tab_id].closeable {
                         return Some(tabs[tab_id].clone())
                     }
-                    else{
+                    else {
+                        // this select the previous tab.
+                        if *previous != *current && *previous < tabs.len() - 1{
+                            *current = *previous;
+                        }
+                        else 
+                        if *current >= 1 && *current == tabs.len() - 1 {
+                            *current -= 1;
+                        }
                         return Some(tabs.remove(tab_id));
                     }
                 }
@@ -464,12 +476,12 @@ where TItem: Clone
         false
     }
     
-    fn recur_split_dock(dock_walk: &mut DockItem<TItem>, items: &Vec<DockTab<TItem>>, control_id: usize, kind: &DockDropKind, counter: &mut usize)
+    fn recur_split_dock(dock_walk: &mut DockItem<TItem>, items: &Vec<DockTab<TItem>>, control_id: usize, kind: &DockDropKind, counter: &mut usize)->Option<DockTabIdent>
     where TItem: Clone
     {
         match dock_walk {
             DockItem::Single(_) => {},
-            DockItem::TabControl {tabs, current} => {
+            DockItem::TabControl {tabs, previous:_, current} => {
                 let id = *counter;
                 *counter += 1;
                 if id == control_id {
@@ -481,6 +493,7 @@ where TItem: Clone
                                 idc += 1;
                             }
                             *current = idc - 1;
+                            return Some(DockTabIdent{tab_control_id:control_id, tab_id:tabs.len()-1})
                         },
                         DockDropKind::Left => {
                             *dock_walk = DockItem::Splitter {
@@ -488,8 +501,9 @@ where TItem: Clone
                                 pos: 0.5,
                                 axis: Axis::Vertical,
                                 last: Box::new(dock_walk.clone()),
-                                first: Box::new(DockItem::TabControl {current: 0, tabs: items.clone()})
+                                first: Box::new(DockItem::TabControl {current: 0, previous:0, tabs: items.clone()})
                             };
+                            return Some(DockTabIdent{tab_control_id:control_id+1, tab_id:0})
                         },
                         DockDropKind::Right => {
                             *dock_walk = DockItem::Splitter {
@@ -497,18 +511,19 @@ where TItem: Clone
                                 pos: 0.5,
                                 axis: Axis::Vertical,
                                 first: Box::new(dock_walk.clone()),
-                                last: Box::new(DockItem::TabControl {current: 0, tabs: items.clone()})
+                                last: Box::new(DockItem::TabControl {current: 0, previous:0, tabs: items.clone()})
                             };
+                            return Some(DockTabIdent{tab_control_id:control_id+2, tab_id:0})
                         },
-                        
                         DockDropKind::Top => {
                             *dock_walk = DockItem::Splitter {
                                 align: SplitterAlign::Weighted,
                                 pos: 0.5,
                                 axis: Axis::Horizontal,
                                 last: Box::new(dock_walk.clone()),
-                                first: Box::new(DockItem::TabControl {current: 0, tabs: items.clone()})
+                                first: Box::new(DockItem::TabControl {current: 0, previous:0, tabs: items.clone()})
                             };
+                            return Some(DockTabIdent{tab_control_id:control_id+1, tab_id:0})
                         },
                         DockDropKind::Bottom => {
                             *dock_walk = DockItem::Splitter {
@@ -516,9 +531,9 @@ where TItem: Clone
                                 pos: 0.5,
                                 axis: Axis::Horizontal,
                                 first: Box::new(dock_walk.clone()),
-                                last: Box::new(DockItem::TabControl {current: 0, tabs: items.clone()})
+                                last: Box::new(DockItem::TabControl {current: 0, previous:0, tabs: items.clone()})
                             };
-                            
+                            return Some(DockTabIdent{tab_control_id:control_id+2, tab_id:0})
                         },
                         DockDropKind::TabsView |
                         DockDropKind::Center => {
@@ -526,16 +541,22 @@ where TItem: Clone
                             for item in items {
                                 tabs.push(item.clone());
                             }
+                            return Some(DockTabIdent{tab_control_id:control_id, tab_id:tabs.len()-1})
                         }
                     }
                 }
             },
             DockItem::Splitter {first, last, ..} => {
                 *counter += 1;
-                Self::recur_split_dock(first, items, control_id, kind, counter);
-                Self::recur_split_dock(last, items, control_id, kind, counter);
+                if let Some(ret) = Self::recur_split_dock(first, items, control_id, kind, counter){
+                    return Some(ret)
+                }
+                if let Some(ret) =  Self::recur_split_dock(last, items, control_id, kind, counter){
+                    return Some(ret)
+                }
             }
         }
+        None
     }
     
     fn get_drop_kind(pos: Vec2, drop_size: Vec2, tvr: Rect, cdr: Rect, tab_rects: Vec<Rect>) -> (DockDropKind, Rect) {
@@ -605,7 +626,7 @@ where TItem: Clone
         self._drag_move = Some(fe);
         self.drop_quad_view.redraw_view_area(cx);
     }
-
+    
     pub fn dock_drag_cancel(&mut self, cx: &mut Cx) {
         self._drag_move = None;
         self.drop_quad_view.redraw_view_area(cx);
@@ -644,13 +665,17 @@ where TItem: Clone
                     // its either a previous tabs index
                     // or its a new Item
                     // we have a kind!
+                    let mut do_tab_clone = false;
                     let items = match &drag_end {
                         DockDragEnd::OldTab {ident, ..} => {
-                            if fe.modifiers.control || fe.modifiers.logo{
-                                tab_clone_ident = Some(ident.clone());
+                            if fe.modifiers.control || fe.modifiers.logo {
+                                do_tab_clone = true;
                             }
-                            let item = Self::recur_remove_tab(dock_items, ident.tab_control_id, ident.tab_id, &mut 0, tab_clone_ident.is_some());
+                            let item = Self::recur_remove_tab(dock_items, ident.tab_control_id, ident.tab_id, &mut 0, do_tab_clone);
                             if let Some(item) = item {
+                                if !item.closeable {
+                                    do_tab_clone = false;
+                                }
                                 vec![item]
                             }
                             else {
@@ -663,22 +688,25 @@ where TItem: Clone
                     };
                     // alright we have a kind.
                     if items.len() > 0 {
-                        Self::recur_split_dock(
+                        let new_ident = Self::recur_split_dock(
                             dock_items,
-                            
                             &items,
                             *target_id,
                             &kind,
                             &mut 0
                         );
+                        if do_tab_clone{
+                            println!("CLONE! {:?}", new_ident);
+                            tab_clone_ident = new_ident;
+                        }
                     };
                 }
             }
             Self::recur_collapse_empty(dock_items);
             cx.redraw_child_area(Area::All);
             //Self::recur_debug_dock(self.dock_items.as_mut().unwrap(), &mut 0, 0);
-            if let Some(ident) = tab_clone_ident{
-                return DockEvent::DockTabCloned{tab_control_id:ident.tab_control_id,  tab_id:ident.tab_id}
+            if let Some(ident) = tab_clone_ident {
+                return DockEvent::DockTabCloned {tab_control_id: ident.tab_control_id, tab_id: ident.tab_id}
             }
             return DockEvent::DockChanged
         };
@@ -732,7 +760,7 @@ where TItem: Clone
                             .max((rc.h - rect.h).abs())
                             .max(100. - alpha * 100.);
                         if dist>0.5 { // keep redrawing until we are close
-                           // cx.redraw_previous_areas();
+                            // cx.redraw_previous_areas();
                             //self.drop_quad_view.redraw_view_area(cx);
                         }
                         self._tweening_quad = Some((id, rc, alpha));
@@ -769,7 +797,7 @@ where TItem: Clone
             drop_quad_view: &mut self.drop_quad_view
         }
     }
-    
+
 }
 
 /*

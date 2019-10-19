@@ -18,11 +18,11 @@ pub struct AppSettings {
     pub builds: Vec<BuildTarget>,
 }
 
-impl Default for AppSettings { 
+impl Default for AppSettings {
     fn default() -> Self {
         Self {
-            exec_when_done:false,
-            build_on_save:true,
+            exec_when_done: false,
+            build_on_save: true,
             builds: vec![BuildTarget {
                 workspace: "makepad".to_string(),
                 package: "makepad".to_string(),
@@ -202,6 +202,7 @@ impl App {
                     pos: 150.0,
                     first: Box::new(DockItem::TabControl {
                         current: 0,
+                        previous: 0,
                         tabs: vec![DockTab {
                             closeable: false,
                             title: "Files".to_string(),
@@ -214,6 +215,7 @@ impl App {
                         pos: 150.0,
                         first: Box::new(DockItem::TabControl {
                             current: 1,
+                            previous: 0,
                             tabs: vec![
                                 DockTab {
                                     closeable: false,
@@ -223,12 +225,17 @@ impl App {
                                 DockTab {
                                     closeable: true,
                                     title: "main.rs".to_string(),
-                                    item: Panel::FileEditor {path: "examples/quad_example/src/main.rs".to_string(), editor_id: 1}
+                                    item: Panel::FileEditor {
+                                        path: "examples/quad_example/src/main.rs".to_string(),
+                                        scroll_pos:Vec2::zero(),
+                                        editor_id: 1
+                                    }
                                 }
                             ],
                         }),
                         last: Box::new(DockItem::TabControl {
                             current: 0,
+                            previous: 0,
                             tabs: vec![
                                 DockTab {
                                     closeable: false,
@@ -407,7 +414,7 @@ impl App {
     
     pub fn handle_app(&mut self, cx: &mut Cx, event: &mut Event) {
         match event {
-            Event::Construct => { 
+            Event::Construct => {
                 // start the workspace
                 std::thread::spawn(move || {
                     workspace_main::main();

@@ -20,7 +20,7 @@ pub enum Panel {
     Keyboard,
     FileTree,
     FileEditorTarget,
-    FileEditor {path: String, editor_id: u64},
+    FileEditor {path: String, scroll_pos:Vec2, editor_id: u64},
     LocalTerminal {start_path: String, terminal_id: u64}
 }
 
@@ -69,9 +69,9 @@ impl AppWindow {
         }
     }
     
-    pub fn handle_app_window(&mut self, cx: &mut Cx, event: &mut Event, window_index: usize, state: &mut AppState, storage:&mut AppStorage, build_manager:&mut BuildManager) {
+    pub fn handle_app_window(&mut self, cx: &mut Cx, event: &mut Event, window_index: usize, state: &mut AppState, storage: &mut AppStorage, build_manager: &mut BuildManager) {
         
-        match self.desktop_window.handle_desktop_window(cx, event) {      
+        match self.desktop_window.handle_desktop_window(cx, event) {
             DesktopWindowEvent::EventForOtherWindow => {
                 return
             },
@@ -88,30 +88,30 @@ impl AppWindow {
             },
             _ => ()
         }
-       
+        
         let dock_items = &mut state.windows[window_index].dock_items;
         let mut dock_walker = self.dock.walker(dock_items);
         let mut file_tree_event = FileTreeEvent::None;
         while let Some(item) = dock_walker.walk_handle_dock(cx, event) {
             match item {
                 Panel::LogList => {
-                    match self.log_list.handle_log_list(cx, event, storage, build_manager){
+                    match self.log_list.handle_log_list(cx, event, storage, build_manager) {
                         LogListEvent::SelectLogItem {path, item, level} => {
                             // just make it open an editor
-                            if let Some(path) = path{
-                                file_tree_event = FileTreeEvent::SelectFile {path:path};
+                            if let Some(path) = path {
+                                file_tree_event = FileTreeEvent::SelectFile {path: path};
                             }
-                            if let Some(item) = item{
+                            if let Some(item) = item {
                                 self.log_item.load_item(cx, &item, level);
                             }
                         },
-                        LogListEvent::SelectLogRange{items}=>{
+                        LogListEvent::SelectLogRange {items} => {
                             self.log_item.load_item(cx, &items, HubLogItemLevel::Log);
                         }
                         _ => ()
                     }
                 },
-                Panel::LogItem=>{
+                Panel::LogItem => {
                     self.log_item.handle_log_item(cx, event);
                 },
                 Panel::Keyboard => {
@@ -127,11 +127,11 @@ impl AppWindow {
                 Panel::FileTree => {
                     file_tree_event = self.file_tree.handle_file_tree(cx, event);
                 },
-                Panel::FileEditor {path, editor_id} => {
+                Panel::FileEditor {path, scroll_pos, editor_id} => {
                     if let Some(file_editor) = &mut self.file_editors.get(*editor_id) {
-
+                        
                         let text_buffer = storage.text_buffer_from_path(cx, path);
-
+                        
                         match file_editor.handle_file_editor(cx, event, text_buffer) {
                             FileEditorEvent::LagChange => {
                                 
@@ -139,7 +139,7 @@ impl AppWindow {
                                 storage.text_buffer_file_write(cx, path);
                                 
                                 // lets re-trigger the rust compiler
-                                if storage.settings.build_on_save{
+                                if storage.settings.build_on_save {
                                     build_manager.restart_cargo(cx, storage);
                                     self.log_item.clear_msg(cx);
                                 }
@@ -148,6 +148,7 @@ impl AppWindow {
                             },
                             _ => ()
                         }
+                        *scroll_pos = file_editor.get_scroll_pos(cx);
                     }
                 }
             }
@@ -188,11 +189,38 @@ impl AppWindow {
             DockEvent::DockChanged => { // thats a bit bland event. lets let the thing know which file closed
                 storage.save_state(cx, state);
             },
+            DockEvent::DockTabClosed => {
+                storage.save_state(cx, state);
+            },
+            DockEvent::DockTabCloned {tab_control_id, tab_id} => {
+                // lets change up our editor_id
+                let max_id = self.highest_file_editor_id();
+                let mut dock_walker = self.dock.walker(dock_items);
+                while let Some((ctrl_id,dock_item)) = dock_walker.walk_dock_item() {
+                    match dock_item {
+                        DockItem::TabControl {tabs, ..} => if ctrl_id == tab_control_id {
+                            if let Some(tab) = tabs.get_mut(tab_id){
+                                match &mut tab.item {
+                                    Panel::FileEditor {editor_id,..} => {
+                                        // we need to make a new editor_id here.
+                                        *editor_id = max_id + 1;
+                                        break;
+                                        // and now it needs to scroll the new one....
+                                    },
+                                    _ => ()
+                                }
+                            }
+                        },
+                        _ => ()
+                    }
+                }
+                storage.save_state(cx, state);
+            },
             _ => ()
         }
     }
     
-    pub fn draw_app_window(&mut self, cx: &mut Cx, window_index: usize, state: &mut AppState, storage:&mut AppStorage, build_manager:&mut BuildManager) {
+    pub fn draw_app_window(&mut self, cx: &mut Cx, window_index: usize, state: &mut AppState, storage: &mut AppStorage, build_manager: &mut BuildManager) {
         if let Err(()) = self.desktop_window.begin_desktop_window(cx) {
             return
         }
@@ -205,7 +233,7 @@ impl AppWindow {
                 Panel::LogList => {
                     self.log_list.draw_log_list(cx, build_manager);
                 },
-                Panel::LogItem=>{
+                Panel::LogItem => {
                     self.log_item.draw_log_item(cx);
                 },
                 Panel::Keyboard => {
@@ -224,12 +252,14 @@ impl AppWindow {
                     });
                     local_terminal.draw_local_terminal(cx);
                 },
-                Panel::FileEditor {path, editor_id} => {
+                Panel::FileEditor {path, scroll_pos, editor_id} => {
                     let text_buffer = storage.text_buffer_from_path(cx, path);
                     let mut set_key_focus = false;
                     let file_editor = self.file_editors.get_draw(cx, *editor_id, | _cx, tmpl | {
                         set_key_focus = true;
-                        FileEditor::create_file_editor_for_path(path, tmpl)
+                        let mut editor = FileEditor::create_file_editor_for_path(path, tmpl);
+                        editor.set_scroll_pos_on_load(*scroll_pos);
+                        editor
                     });
                     file_editor.draw_file_editor(cx, text_buffer);
                     if set_key_focus {
@@ -241,47 +271,50 @@ impl AppWindow {
         self.desktop_window.end_desktop_window(cx);
     }
     
-    pub fn new_file_editor_tab(&mut self, path: &str) -> DockTab<Panel> {
+    pub fn highest_file_editor_id(&self) -> u64 {
         let mut max_id = 0;
-        for id in &self.file_editors.element_list{
-            if *id > max_id{
+        for id in &self.file_editors.element_list {
+            if *id > max_id {
                 max_id = *id;
             }
         }
-        
-        let editor_id = max_id + 1;
+        max_id
+    }
+    
+    pub fn new_file_editor_tab(&self, path: &str) -> DockTab<Panel> {
         DockTab {
             closeable: true,
             title: path_file_name(&path),
-            item: Panel::FileEditor {path: path.to_string(), editor_id: editor_id}
+            item: Panel::FileEditor {
+                path: path.to_string(),
+                scroll_pos:Vec2::zero(),
+                editor_id: self.highest_file_editor_id() + 1
+            }
         }
     }
     
     pub fn focus_or_new_editor(&mut self, cx: &mut Cx, window_index: usize, state: &mut AppState, file_path: &str) -> bool {
-        let mut target_ctrl_id = 0;
-        let mut only_focus_editor = false;
+        let mut target_ctrl_id = None;
         let dock_items = &mut state.windows[window_index].dock_items;
         let mut dock_walker = self.dock.walker(dock_items);
-        let mut ctrl_id = 1;
-        while let Some(dock_item) = dock_walker.walk_dock_item() {
+        // first find existing editor, or 
+        while let Some((ctrl_id, dock_item)) = dock_walker.walk_dock_item() {
             match dock_item {
-                DockItem::TabControl {current, tabs} => {
+                DockItem::TabControl {current, previous:_, tabs} => {
                     for (id, tab) in tabs.iter().enumerate() {
                         match &tab.item {
-                            Panel::FileEditor {path, editor_id} => {
+                            Panel::FileEditor {path, scroll_pos:_, editor_id} => {
                                 if *path == file_path {
                                     *current = id;
-                                    // focus this one
-                                    // set the keyboard focus
                                     if let Some(file_editor) = &mut self.file_editors.get(*editor_id) {
                                         file_editor.set_key_focus(cx);
                                     }
-                                    only_focus_editor = true;
                                     cx.redraw_child_area(Area::All);
+                                    return false
                                 }
                             },
                             Panel::FileEditorTarget => { // found the editor target
-                                target_ctrl_id = ctrl_id;
+                                target_ctrl_id = Some(ctrl_id);
                             },
                             _ => ()
                         }
@@ -289,23 +322,20 @@ impl AppWindow {
                 },
                 _ => ()
             }
-            ctrl_id += 1;
         }
-        if target_ctrl_id != 0 && !only_focus_editor { // open a new one
+        if let Some(target_ctrl_id) = target_ctrl_id{ // open a new one
             let new_tab = self.new_file_editor_tab(file_path);
             let dock_items = &mut state.windows[window_index].dock_items;
             let mut dock_walker = self.dock.walker(dock_items);
-            let mut ctrl_id = 1;
-            while let Some(dock_item) = dock_walker.walk_dock_item() {
-                if ctrl_id == target_ctrl_id {
-                    if let DockItem::TabControl {current, tabs} = dock_item {
+            while let Some((ctrl_id, dock_item)) = dock_walker.walk_dock_item() {
+                if ctrl_id == target_ctrl_id { 
+                    if let DockItem::TabControl {current, previous:_, tabs} = dock_item {
                         tabs.insert(*current + 1, new_tab);
                         *current = *current + 1;
                         cx.redraw_child_area(Area::All);
                         return true;
                     }
                 }
-                ctrl_id += 1;
             }
         }
         return false

@@ -36,6 +36,7 @@ pub struct CodeEditor {
     pub draw_cursor_row: bool,
     pub folding_depth: usize,
     //pub _bg_area: Area,
+    pub _scroll_pos_on_load: Option<Vec2>,
     pub _jump_to_offset: bool,
     pub _view_area: Area,
     pub _highlight_area: Area,
@@ -281,6 +282,7 @@ impl CodeEditor {
             top_padding: 27.,
             mark_unmatched_parens: true,
             draw_cursor_row: true,
+            _scroll_pos_on_load: None,
             _jump_to_offset: true,
             _monospace_size: Vec2::zero(),
             _monospace_base: Vec2::zero(),
@@ -1543,6 +1545,10 @@ impl CodeEditor {
         if self._jump_to_offset{
             self._jump_to_offset = false;
             self.do_jump_to_offset(cx, text_buffer);            
+        }
+        else if let Some(scroll_pos_on_load) = self._scroll_pos_on_load{
+            self.view.set_scroll_pos(cx, scroll_pos_on_load);
+            self._scroll_pos_on_load = None;
         }
     }
     

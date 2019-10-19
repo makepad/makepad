@@ -49,7 +49,23 @@ impl FileEditor {
             FileEditor::Plain(re) => re.code_editor.set_key_focus(cx),
         }
     }
+
+    pub fn get_scroll_pos(&mut self, cx: &mut Cx)->Vec2{
+        match self {
+            FileEditor::Rust(re) => re.code_editor.view.get_scroll_pos(cx),
+            FileEditor::JS(re) => re.code_editor.view.get_scroll_pos(cx),
+            FileEditor::Plain(re) => re.code_editor.view.get_scroll_pos(cx),
+        }
+    }
     
+    pub fn set_scroll_pos_on_load(&mut self, pos:Vec2){
+        match self {
+            FileEditor::Rust(re) => re.code_editor._scroll_pos_on_load = Some(pos),
+            FileEditor::JS(re) => re.code_editor._scroll_pos_on_load = Some(pos),
+            FileEditor::Plain(re) => re.code_editor._scroll_pos_on_load = Some(pos),
+        }
+    }
+
     pub fn draw_file_editor(&mut self, cx: &mut Cx, text_buffer: &mut TextBuffer) {
         match self {
             FileEditor::Rust(re) => re.draw_rust_editor(cx, text_buffer),
