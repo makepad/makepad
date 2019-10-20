@@ -258,9 +258,6 @@ impl Default for Cx {
 pub struct CxId(u32);
 
 impl Cx {
-    //pub fn get_shader2(&self, id: usize) -> &CompiledShader {
-    //    &self.compiled_shaders[id]
-    // }
     
     pub fn id(&self, name:&str)->CxId{
         let mut str_to_id = self.str_to_id.borrow_mut();

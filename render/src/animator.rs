@@ -426,6 +426,61 @@ impl Animator {
         }
     }
     
+    
+    pub fn write_area2(&mut self, cx: &mut Cx, area: Area, prefix: &str,  time: f64) {
+
+        if let Some(time) = self.update_anim_track(cx, time) {
+            
+            for track_index in 0..self.current.as_ref().unwrap().tracks.len() {
+                //if let Some((time, track_index)) = self.fetch_calc_track(cx, ident, time) {
+                match &mut self.current.as_mut().unwrap().tracks[track_index] {
+                    Track::Color(ft) => {
+                        if let Some(begin) = cx.id_starts_with(ft.ident, prefix){
+                            let init = Self::_last_color(ft.ident, &self.last_values);
+                            let ret = Track::compute_track_value::<Color>(time, &ft.track, &mut ft.cut_init, init, &ft.ease);
+                            Self::_set_last_color(ft.ident, ret, &mut self.last_values);
+                            area.write_color(cx, &begin, ret);
+                        }
+                    },
+                    Track::Vec4(ft) => {
+                        if let Some(begin) = cx.id_starts_with(ft.ident, prefix){
+                            let init = Self::_last_vec4(ft.ident, &self.last_values);
+                            let ret = Track::compute_track_value::<Vec4>(time, &ft.track, &mut ft.cut_init, init, &ft.ease);
+                            Self::_set_last_vec4(ft.ident, ret, &mut self.last_values);
+                            area.write_vec4(cx, &begin, ret);
+                        }
+                    },
+                    Track::Vec3(ft) => {
+                        if let Some(begin) = cx.id_starts_with(ft.ident, prefix){
+                            let init = Self::_last_vec3(ft.ident, &self.last_values);
+                            let ret = Track::compute_track_value::<Vec3>(time, &ft.track, &mut ft.cut_init, init, &ft.ease);
+                            Self::_set_last_vec3(ft.ident, ret, &mut self.last_values);
+                            area.write_vec3(cx, &begin, ret);
+                        }
+                    },
+                    Track::Vec2(ft) => {
+                        if let Some(begin) = cx.id_starts_with(ft.ident, prefix){
+                            let init = Self::_last_vec2(ft.ident, &self.last_values);
+                            let ret = Track::compute_track_value::<Vec2>(time, &ft.track, &mut ft.cut_init, init, &ft.ease);
+                            Self::_set_last_vec2(ft.ident, ret, &mut self.last_values);
+                            area.write_vec2(cx, &begin, ret);
+                        }
+                    },
+                    Track::Float(ft) => {
+                        if let Some(begin) = cx.id_starts_with(ft.ident, prefix){
+                            //println!(" HERE #{}#", begin);
+                            let init = Self::_last_float(ft.ident, &self.last_values);
+                            let ret = Track::compute_track_value::<f32>(time, &ft.track, &mut ft.cut_init, init, &ft.ease);
+                            Self::_set_last_float(ft.ident, ret, &mut self.last_values);
+                            area.write_float(cx, &begin, ret);
+                        }
+                    }
+                };
+            }
+            //}
+        }
+    }
+    
     pub fn write_area(&mut self, cx: &mut Cx, area: Area, prefix: &str,  time: f64) {
 
         if let Some(time) = self.update_anim_track(cx, time) {

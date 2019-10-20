@@ -152,7 +152,7 @@ impl DesktopWindow {
             
             // alright here we draw our platform buttons.
             match cx.platform_type {
-                PlatformType::Linux | PlatformType::Windows => {
+                PlatformType::Linux | PlatformType::Windows | PlatformType::OSX => {
                     let bg_inst = self.caption_bg.begin_quad(cx, &Layout {
                         align: Align::right_center(),
                         width: Bounds::Fill,
@@ -176,6 +176,7 @@ impl DesktopWindow {
                     self.caption_bg.end_quad(cx, &bg_inst);
                     cx.turtle_new_line();
                 },
+                /*
                 PlatformType::OSX => { // mac still uses the built in buttons, TODO, replace that.
                     let bg_inst = self.caption_bg.begin_quad(cx, &Layout {
                         align: Align::center(),
@@ -187,7 +188,7 @@ impl DesktopWindow {
                     self.caption_text.draw_text(cx, &self.caption);
                     self.caption_bg.end_quad(cx, &bg_inst);
                     cx.turtle_new_line();
-                },
+                },*/
                 _ => {
                     
                 }

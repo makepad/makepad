@@ -59,8 +59,8 @@ impl DesktopButton {
     pub fn get_down_anim(cx:&Cx)->Anim{
         Anim::new(Play::Cut {duration: 0.2}, vec![
             Track::color(cx.id("bg.color"), Ease::Lin, vec![(0.0, color("#f55")), (1.0, color("#f55"))]),
-            Track::float(cx.id("bg.hover)"), Ease::Lin, vec![(1.0, 1.0)]),
             Track::float(cx.id("bg.down"), Ease::OutExp, vec![(0.0, 0.0), (1.0, 3.1415 * 0.5)]),
+            Track::float(cx.id("bg.hover"), Ease::Lin, vec![(1.0, 1.0)]),
         ])
     }
 
@@ -146,7 +146,7 @@ impl DesktopButton {
     pub fn handle_button(&mut self, cx: &mut Cx, event: &mut Event) -> ButtonEvent {
         //let mut ret_event = ButtonEvent::None;
         match event.hits(cx, self._bg_area, HitOpt::default()) {
-            Event::Animate(ae) => self.animator.write_area(cx, self._bg_area, "bg.", ae.time),
+            Event::Animate(ae) => self.animator.write_area2(cx, self._bg_area, "bg.", ae.time),
             Event::AnimEnded(_) => self.animator.end(),
             Event::FingerDown(_fe) => {
                 self.animator.play_anim(cx, Self::get_down_anim(cx));
@@ -193,7 +193,6 @@ impl DesktopButton {
         };
 
         let bg_inst = self.bg.draw_quad_walk(cx, Bounds::Fix(w), Bounds::Fix(h), Margin::zero());
-        
         bg_inst.push_last_float(cx, &self.animator, "bg.hover");
         bg_inst.push_last_float(cx, &self.animator, "bg.down");
         bg_inst.push_float(cx, ty.shader_float());
