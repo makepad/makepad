@@ -102,17 +102,17 @@ impl Cx {
         hlsl_out.push_str("SamplerState DefaultTextureSampler{Filter = MIN_MAG_MIP_LINEAR;AddressU = Wrap;AddressV=Wrap;};\n");
         
         // float constructor mappings
-        hlsl_out.push_str("float2 float2_1(float x){return float2(x,x);}\n");
-        hlsl_out.push_str("float3 float3_1(float x){return float3(x,x,x);}\n");
-        hlsl_out.push_str("float3 float3_21(float2 xy, float z){return float3(xy.x, xy.y, z);}\n");
-        hlsl_out.push_str("float3 float3_12(float x, float2 yz){return float3(x, yz.x, yz.y);}\n");
-        hlsl_out.push_str("float4 float4_1(float x){return float4(x,x,x,x);}\n");
-        hlsl_out.push_str("float4 float4_31(float3 xyz, float w){return float4(xyz.x,xyz.y,xyz.z,w);}\n");
-        hlsl_out.push_str("float4 float4_13(float x, float3 yzw){return float4(x,yzw.x,yzw.y,yzw.z);}\n");
-        hlsl_out.push_str("float4 float4_112(float x, float y, float2 zw){return float4(x, y, zw.x, yzw.y);}\n");
-        hlsl_out.push_str("float4 float4_121(float x, float2 yz, float w){return float4(x, yz.x, yz.y, w);}\n");
-        hlsl_out.push_str("float4 float4_211(float2 xy, float z, float w){return float4(xy.x, xy.y, z, w);}\n");
-        hlsl_out.push_str("float4 float4_22(float2 xy, float2 zw){return float4(xy.x, xy.y, zw.x, zw.y);}\n");
+        hlsl_out.push_str("float2 float2_1(float x){return float2(x,x);};\n");
+        hlsl_out.push_str("float3 float3_1(float x){return float3(x,x,x);};\n");
+        hlsl_out.push_str("float3 float3_21(float2 xy, float z){return float3(xy.x, xy.y, z);};\n");
+        hlsl_out.push_str("float3 float3_12(float x, float2 yz){return float3(x, yz.x, yz.y);};\n");
+        hlsl_out.push_str("float4 float4_1(float x){return float4(x,x,x,x);};\n");
+        hlsl_out.push_str("float4 float4_31(float3 xyz, float w){return float4(xyz.x,xyz.y,xyz.z,w);};\n");
+        hlsl_out.push_str("float4 float4_13(float x, float3 yzw){return float4(x,yzw.x,yzw.y,yzw.z);};\n");
+        hlsl_out.push_str("float4 float4_112(float x, float y, float2 zw){return float4(x, y, zw.x, yzw.y);};\n");
+        hlsl_out.push_str("float4 float4_121(float x, float2 yz, float w){return float4(x, yz.x, yz.y, w);};\n");
+        hlsl_out.push_str("float4 float4_211(float2 xy, float z, float w){return float4(xy.x, xy.y, z, w);};\n");
+        hlsl_out.push_str("float4 float4_22(float2 xy, float2 zw){return float4(xy.x, xy.y, zw.x, zw.y);};\n");
         
         // ok now define samplers from our sh.
         let texture_slots = sg.flat_vars(ShVarStore::Texture);
@@ -438,7 +438,7 @@ impl<'a> SlCx<'a> {
                             return format!("float4_121({},{},{})", args[0].sl, args[1].sl, args[2].sl);
                         }
                         else {
-                            return format!("float4_211({},{},{})", args[0].sl, args[1].sl, args[3].sl);
+                            return format!("float4_211({},{},{})", args[0].sl, args[1].sl, args[2].sl);
                         }
                     },
                     _=>()
