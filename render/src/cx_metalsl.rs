@@ -330,6 +330,20 @@ impl<'a> SlCx<'a> {
         Cx::mtl_type_to_metal(ty)
     }
     
+    pub fn map_constructor(&self, name: &str, args: &Vec<Sl>)->String{
+        let mut out = String::new();
+        out.push_str(&self.map_type(name));
+        out.push_str("(");
+        for (i,arg) in args.iter().enumerate(){
+            if i != 0{
+                out.push_str(", ");
+            }
+            out.push_str(&arg.sl);
+        }
+        out.push_str(")");
+        return out;
+    }
+        
     pub fn map_var(&mut self, var: &ShVar) -> String {
         let mty = Cx::mtl_type_to_metal(&var.ty);
         match var.store {

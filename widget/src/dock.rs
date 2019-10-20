@@ -493,7 +493,7 @@ where TItem: Clone
                                 idc += 1;
                             }
                             *current = idc - 1;
-                            return Some(DockTabIdent{tab_control_id:control_id, tab_id:tabs.len()-1})
+                            return Some(DockTabIdent{tab_control_id:control_id, tab_id:*current})
                         },
                         DockDropKind::Left => {
                             *dock_walk = DockItem::Splitter {

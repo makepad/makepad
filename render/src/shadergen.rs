@@ -985,21 +985,49 @@ impl ShCall {
         }
         else {
             // its a constructor call
-            if let Some(glty) = slcx.shader_gen.find_type(&self.call) {
-                out.push_str(&slcx.map_type(&self.call));
-                out.push_str("(");
+            if let Some(slty) = slcx.shader_gen.find_type(&self.call) {
+                
+                // HLSL doesn't allow vec3(0.) so we have to polyfill it
+                // vec3(x), vec3(xy,z) vec3(x,yz), 
+                let mut args = Vec::new();
+                
                 // TODO check args
-                for (i, arg) in self.args.iter().enumerate() {
-                    let arg_gl = arg.sl(slcx) ?;
-                    if i != 0 {
-                        out.push_str(", ");
+                let mut arg_slots = 0;
+                for arg in &self.args {
+                    let arg_sl = arg.sl(slcx) ?;
+                    if let Some(arg_ty) = slcx.shader_gen.find_type(&arg_sl.ty) {
+                        arg_slots += arg_ty.slots;
                     }
-                    out.push_str(&arg_gl.sl);
+                    else{
+                        return Err(SlErr {
+                            msg: format!("Cannot find constructor arg type {}", arg_sl.ty)
+                        })
+                    }
+                    args.push(arg_sl);
                 }
-                out.push_str(")");
+                if arg_slots > slty.slots{
+                    let mut out = String::new();
+                    out.push_str(&self.call);
+                    out.push_str("(");
+                    for (i,arg) in args.iter().enumerate(){
+                        if i != 0{
+                            out.push_str(", ")
+                        }
+                        out.push_str(&arg.sl);
+                    }
+                    out.push_str(")");
+                    return Err(SlErr {
+                        msg: format!("Constructor slots don't match given {} need {} - {}", arg_slots, slty.slots, out)
+                    })
+                }
+                
+                // lets sum up the arg type slots and see if it fits in our constructor
+                // if it does lets pass it to map_constructor so each platform can polyfill it
+                
+                out.push_str(&slcx.map_constructor(&self.call, &args));
                 Ok(Sl {
                     sl: out,
-                    ty: glty.name.clone()
+                    ty: slty.name.clone()
                 })
             }
             else {
