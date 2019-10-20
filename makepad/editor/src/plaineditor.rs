@@ -63,10 +63,11 @@ impl PlainTokenizer {
         let start = chunk.len();
         loop {
             if state.next == '\0' {
-		if (chunk.len()-start)>0 {
+		if (chunk.len()-start)>0 { 
                     return TokenType::Identifier
                 }
 		state.advance();
+                chunk.push(' ');
                 return TokenType::Eof
             }
             else if state.next == '\n' {
