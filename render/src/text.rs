@@ -375,7 +375,7 @@ impl Text {
         aligned.inst.into_area()
     }
     
-    // this function has to be rewritten now
+    // looks up text with the behavior of a text selection mouse cursor
     pub fn find_closest_offset(&self, cx: &Cx, area: &Area, pos: Vec2) -> usize {
         let scroll_pos = area.get_scroll_pos(cx);
         let spos = Vec2{x:pos.x + scroll_pos.x, y:pos.y + scroll_pos.y};
@@ -401,9 +401,9 @@ impl Text {
                             let prev_index = if index == 0{0}else{index - 1};
                             let prev_x = read.buffer[read.offset + x_o +  prev_index * read.slots];
                             let prev_w = read.buffer[read.offset + w_o + index * read.slots];
-                            //if prev_x > spos.x + prev_w{
-                            //    return read.buffer[read.offset + char_offset_o + index * read.slots] as usize;
-                            //}
+                            if index < read.count - 1 && prev_x > spos.x + prev_w{ // fix newline jump-back
+                                return read.buffer[read.offset + char_offset_o + index * read.slots] as usize;
+                            }
                             return read.buffer[read.offset + char_offset_o +  prev_index * read.slots] as usize;
                         }
                         index += 1;
