@@ -3,10 +3,8 @@ use std::net::{TcpStream, UdpSocket, SocketAddr, SocketAddrV4, SocketAddrV6, Shu
 use std::io::prelude::*;
 use std::sync::{mpsc};
 use std::thread;
-
+#[cfg(any(target_os = "linux",target_os = "macos"))]
 use std::os::unix::io::AsRawFd;
-use std::mem;
-use libc;
 
 trait ResultMsg<T> {
     fn expect_msg(self, msg: &str) -> Result<T, HubError>;
@@ -234,7 +232,7 @@ impl HubClient {
                     libc::SOL_SOCKET,
                     libc::SO_REUSEADDR,
                     &optval as *const _ as *const libc::c_void,
-                    mem::size_of_val(&optval) as libc::socklen_t,
+                    std::mem::size_of_val(&optval) as libc::socklen_t,
                 );
             }
         }
