@@ -189,6 +189,11 @@ impl LogList {
     
     pub fn handle_log_list(&mut self, cx: &mut Cx, event: &mut Event, storage: &mut AppStorage, bm:&mut BuildManager) -> LogListEvent {
         let item_draw = &self.item_draw;
+        
+        if bm.log_items.len() < self.list.list_items.len(){
+            self.list.tail_list = true;
+        }
+        
         self.list.set_list_len(cx, bm.log_items.len(), |cx, index|{
             item_draw.get_default_anim(cx, index, false)
         });

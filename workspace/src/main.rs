@@ -12,7 +12,7 @@ pub fn main() {
                 HubCargoPackage::new("ui_example", targets),
             ]);
         },
-        HubMsg::CargoExec {uid, package, target} => {
+        HubMsg::CargoExec {uid, package, target}=>{
             match target.as_ref(){
                 "release"=>{
                     ws.cargo_exec(uid, &["build", "--release", "-p", &package], &[])

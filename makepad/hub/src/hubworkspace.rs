@@ -508,10 +508,12 @@ impl HubWorkspace {
     
     pub fn file_read(&mut self, from: HubAddr, uid: HubUid, path: &str) {
         // lets read a file and send it.
+        let path = path.to_lower_case();
         if let Some(_) = path.find("..") {
             println!("file_read got relative path, ignoring {}", path);
             return
         }
+
         let data = if let Ok(data) = std::fs::read(format!("{}/{}", self.root_path, path)) {
             Some(data)
         }
