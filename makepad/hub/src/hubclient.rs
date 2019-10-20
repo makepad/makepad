@@ -8,39 +8,39 @@ use std::os::unix::io::AsRawFd;
 use std::mem;
 use libc;
 
-trait ResultMsg<T>{
-    fn expect_msg(self, msg:&str)->Result<T, HubError>;
+trait ResultMsg<T> {
+    fn expect_msg(self, msg: &str) -> Result<T, HubError>;
 }
 
 impl<T> ResultMsg<T> for Result<T, std::io::Error> {
-    fn expect_msg(self, msg:&str)->Result<T, HubError>{
-        match self{
-            Err(v)=>Err(HubError{msg:format!("{}: {}",msg.to_string(), v.to_string())}),
-            Ok(v)=>Ok(v)
+    fn expect_msg(self, msg: &str) -> Result<T, HubError> {
+        match self {
+            Err(v) => Err(HubError {msg: format!("{}: {}", msg.to_string(), v.to_string())}),
+            Ok(v) => Ok(v)
         }
     }
 }
 
 impl<T> ResultMsg<T> for Result<T, snap::Error> {
-    fn expect_msg(self, msg:&str)->Result<T, HubError>{
-        match self{
-            Err(v)=>Err(HubError{msg:format!("{}: {}",msg.to_string(), v.to_string())}),
-            Ok(v)=>Ok(v)
+    fn expect_msg(self, msg: &str) -> Result<T, HubError> {
+        match self {
+            Err(v) => Err(HubError {msg: format!("{}: {}", msg.to_string(), v.to_string())}),
+            Ok(v) => Ok(v)
         }
     }
 }
 
 type HubResult<T> = Result<T, HubError>;
 
-pub const HUB_ANNOUNCE_PORT:u16 = 46243;
+pub const HUB_ANNOUNCE_PORT: u16 = 46243;
 
-pub fn read_exact_bytes_from_tcp_stream(tcp_stream: &mut TcpStream, bytes: &mut [u8])->HubResult<()>{
+pub fn read_exact_bytes_from_tcp_stream(tcp_stream: &mut TcpStream, bytes: &mut [u8]) -> HubResult<()> {
     let bytes_total = bytes.len();
     let mut bytes_left = bytes_total;
     while bytes_left > 0 {
         let buf = &mut bytes[(bytes_total - bytes_left)..bytes_total];
-        let bytes_read = tcp_stream.read(buf).expect_msg("read_exact_bytes_from_tcp_stream: read failed")?;
-        if bytes_read == 0{
+        let bytes_read = tcp_stream.read(buf).expect_msg("read_exact_bytes_from_tcp_stream: read failed") ?;
+        if bytes_read == 0 {
             return Err(HubError::new("read_exact_bytes_from_tcp_stream - cannot read bytes"));
         }
         bytes_left -= bytes_read;
@@ -52,7 +52,7 @@ pub fn read_block_from_tcp_stream(tcp_stream: &mut TcpStream, check_digest: &mut
     let mut digest = [0u64; 26];
     
     let digest_u8 = unsafe {std::mem::transmute::<&mut [u64; 26], &mut [u8; 26 * 8]>(&mut digest)};
-    read_exact_bytes_from_tcp_stream(tcp_stream, digest_u8)?;
+    read_exact_bytes_from_tcp_stream(tcp_stream, digest_u8) ?;
     
     let bytes_total = digest[25] as usize;
     if bytes_total > 250 * 1024 * 1024 {
@@ -61,7 +61,7 @@ pub fn read_block_from_tcp_stream(tcp_stream: &mut TcpStream, check_digest: &mut
     
     let mut msg_buf = Vec::new();
     msg_buf.resize(bytes_total, 0);
-    read_exact_bytes_from_tcp_stream(tcp_stream, &mut msg_buf)?;
+    read_exact_bytes_from_tcp_stream(tcp_stream, &mut msg_buf) ?;
     
     digest_buffer(check_digest, &msg_buf);
     check_digest[25] = bytes_total as u64;
@@ -76,13 +76,13 @@ pub fn read_block_from_tcp_stream(tcp_stream: &mut TcpStream, check_digest: &mut
     return decompressed;
 }
 
-pub fn write_exact_bytes_to_tcp_stream(tcp_stream: &mut TcpStream, bytes: &[u8])->HubResult<()>{
+pub fn write_exact_bytes_to_tcp_stream(tcp_stream: &mut TcpStream, bytes: &[u8]) -> HubResult<()> {
     let bytes_total = bytes.len();
     let mut bytes_left = bytes_total;
     while bytes_left > 0 {
         let buf = &bytes[(bytes_total - bytes_left)..bytes_total];
-        let bytes_written = tcp_stream.write(buf).expect_msg("write_exact_bytes_to_tcp_stream: block write fail")?;
-        if bytes_written == 0{
+        let bytes_written = tcp_stream.write(buf).expect_msg("write_exact_bytes_to_tcp_stream: block write fail") ?;
+        if bytes_written == 0 {
             return Err(HubError::new("write_exact_bytes_to_tcp_stream - cannot write bytes"));
         }
         bytes_left -= bytes_written;
@@ -90,7 +90,7 @@ pub fn write_exact_bytes_to_tcp_stream(tcp_stream: &mut TcpStream, bytes: &[u8])
     Ok(())
 }
 
-pub fn write_block_to_tcp_stream(tcp_stream: &mut TcpStream, msg_buf: &[u8], digest: &mut [u64; 26])->HubResult<()> {
+pub fn write_block_to_tcp_stream(tcp_stream: &mut TcpStream, msg_buf: &[u8], digest: &mut [u64; 26]) -> HubResult<()> {
     let bytes_total = msg_buf.len();
     
     if bytes_total > 250 * 1024 * 1024 {
@@ -98,14 +98,14 @@ pub fn write_block_to_tcp_stream(tcp_stream: &mut TcpStream, msg_buf: &[u8], dig
     }
     
     let mut enc = snap::Encoder::new();
-    let compressed = enc.compress_vec(msg_buf).expect_msg("read_block_from_tcp_stream: cannot compress msgbuf")?;
+    let compressed = enc.compress_vec(msg_buf).expect_msg("read_block_from_tcp_stream: cannot compress msgbuf") ?;
     
     digest_buffer(digest, &compressed);
     digest[25] = compressed.len() as u64;
     
     let digest_u8 = unsafe {std::mem::transmute::<&mut [u64; 26], &mut [u8; 26 * 8]>(digest)};
-    write_exact_bytes_to_tcp_stream(tcp_stream, digest_u8)?;
-    write_exact_bytes_to_tcp_stream(tcp_stream, &compressed)?;
+    write_exact_bytes_to_tcp_stream(tcp_stream, digest_u8) ?;
+    write_exact_bytes_to_tcp_stream(tcp_stream, &compressed) ?;
     Ok(())
 }
 
@@ -123,22 +123,22 @@ pub struct HubClient {
 }
 
 impl HubClient {
-    pub fn connect_to_hub(key: &[u8], server_address: SocketAddr, hub_log:HubLog) -> HubResult<HubClient> {
+    pub fn connect_to_hub(key: &[u8], server_address: SocketAddr, hub_log: HubLog) -> HubResult<HubClient> {
         
         // first try local address
-        let local_address =   SocketAddr::from(([127, 0, 0, 1], server_address.port()));
+        let local_address = SocketAddr::from(([127, 0, 0, 1], server_address.port()));
         let server_hubaddr;
-        let mut tcp_stream = if let Ok(stream) = TcpStream::connect(local_address){
+        let mut tcp_stream = if let Ok(stream) = TcpStream::connect(local_address) {
             server_hubaddr = HubAddr::from_socket_addr(local_address);
             stream
         }
-        else{
+        else {
             server_hubaddr = HubAddr::from_socket_addr(server_address);
-            TcpStream::connect(server_address).expect_msg("connect_to_hub: cannot connect")?
+            TcpStream::connect(server_address).expect_msg("connect_to_hub: cannot connect") ?
         };
         
         let own_addr = HubAddr::from_socket_addr(tcp_stream.local_addr().expect("Cannot get client local address"));
-
+        
         let (tx_read, rx_read) = mpsc::channel::<HubToClientMsg>();
         let (tx_write, rx_write) = mpsc::channel::<ClientToHubMsg>();
         let tx_read_copy = tx_read.clone();
@@ -148,28 +148,28 @@ impl HubClient {
         digest_buffer(&mut digest, key);
         
         let read_thread = {
-            let mut tcp_stream = tcp_stream.try_clone().expect_msg("connect_to_hub: cannot clone socket")?;
+            let mut tcp_stream = tcp_stream.try_clone().expect_msg("connect_to_hub: cannot clone socket") ?;
             let digest = digest.clone();
             let server_hubaddr = server_hubaddr.clone();
             let hub_log = hub_log.clone();
             std::thread::spawn(move || {
                 loop {
-                    match read_block_from_tcp_stream(&mut tcp_stream, &mut digest.clone()){
-                        Ok(msg_buf)=>{
+                    match read_block_from_tcp_stream(&mut tcp_stream, &mut digest.clone()) {
+                        Ok(msg_buf) => {
                             let htc_msg: HubToClientMsg = bincode::deserialize(&msg_buf).expect("read_thread hub message deserialize fail - version conflict!");
                             hub_log.msg("HubClient received", &htc_msg);
                             tx_read.send(htc_msg).expect("tx_read.send fails - should never happen");
                         },
-                        Err(e)=>{
+                        Err(e) => {
                             let _ = tcp_stream.shutdown(Shutdown::Both);
-                            tx_read.send(HubToClientMsg{
-                                from:server_hubaddr.clone(),
-                                msg:HubMsg::ConnectionError(e.clone())
+                            tx_read.send(HubToClientMsg {
+                                from: server_hubaddr.clone(),
+                                msg: HubMsg::ConnectionError(e.clone())
                             }).expect("tx_read.send fails - should never happen");
                             // lets break rx write
-                            let _ = tx_write_copy.send(ClientToHubMsg{
-                                to:HubMsgTo::Hub,
-                                msg:HubMsg::ConnectionError(e)
+                            let _ = tx_write_copy.send(ClientToHubMsg {
+                                to: HubMsgTo::Hub,
+                                msg: HubMsg::ConnectionError(e)
                             });
                             return
                         }
@@ -177,29 +177,29 @@ impl HubClient {
                 }
             })
         };
-
+        
         let write_thread = {
             let digest = digest.clone();
             let tx_read = tx_read_copy.clone();
             let server_hubaddr = server_hubaddr.clone();
             let hub_log = hub_log.clone();
-            std::thread::spawn(move || {// this one cannot send to the read channel.
+            std::thread::spawn(move || { // this one cannot send to the read channel.
                 while let Ok(cth_msg) = rx_write.recv() {
                     hub_log.msg("HubClient sending", &cth_msg);
-                    match &cth_msg.msg{
-                        HubMsg::ConnectionError(_)=>{ // we are closed by the read loop
+                    match &cth_msg.msg {
+                        HubMsg::ConnectionError(_) => { // we are closed by the read loop
                             return
                         },
-                        _=>()
+                        _ => ()
                     }
-                        
+                    
                     let msg_buf = bincode::serialize(&cth_msg).expect("write_thread hub message serialize fail - should never happen");
-                    if let Err(e) = write_block_to_tcp_stream(&mut tcp_stream, &msg_buf, &mut digest.clone()){
+                    if let Err(e) = write_block_to_tcp_stream(&mut tcp_stream, &msg_buf, &mut digest.clone()) {
                         // disconnect the socket and send shutdown
                         let _ = tcp_stream.shutdown(Shutdown::Both);
-                        let _ = tx_read.send(HubToClientMsg{
-                            from:server_hubaddr.clone(),
-                            msg:HubMsg::ConnectionError(e)
+                        let _ = tx_read.send(HubToClientMsg {
+                            from: server_hubaddr.clone(),
+                            msg: HubMsg::ConnectionError(e)
                         });
                         return
                     }
@@ -208,7 +208,7 @@ impl HubClient {
         };
         
         Ok(HubClient {
-            uid_alloc:0,
+            uid_alloc: 0,
             own_addr: own_addr,
             server_addr: server_hubaddr,
             read_thread: Some(read_thread),
@@ -218,26 +218,35 @@ impl HubClient {
             tx_write: tx_write
         })
     }
-
+    
     pub fn wait_for_announce(key: &[u8]) -> Result<SocketAddr, std::io::Error> {
         Self::wait_for_announce_on(key, SocketAddr::from(([0, 0, 0, 0], HUB_ANNOUNCE_PORT)))
     }
     
     pub fn wait_for_announce_on(key: &[u8], announce_address: SocketAddr) -> Result<SocketAddr, std::io::Error> {
-            
+        
+        #[cfg(any(target_os = "linux",target_os = "macos"))]
+        fn reuse_addr(socket: &mut UdpSocket) {
+            unsafe {
+                let optval: libc::c_int = 1;
+                let _ = libc::setsockopt(
+                    socket.as_raw_fd(),
+                    libc::SOL_SOCKET,
+                    libc::SO_REUSEADDR,
+                    &optval as *const _ as *const libc::c_void,
+                    mem::size_of_val(&optval) as libc::socklen_t,
+                );
+            }
+        }
+
+        #[cfg(any(target_os = "windows",target_arch = "wasm32"))]
+        fn reuse_addr(_socket: &mut UdpSocket) {
+        }
+        
         loop {
-            if let Ok(socket) = UdpSocket::bind(announce_address){
+            if let Ok(mut socket) = UdpSocket::bind(announce_address) {
                 // TODO. FIX FOR WINDOWS
-                unsafe{
-                    let optval: libc::c_int = 1;
-                    let _ = libc::setsockopt(
-                        socket.as_raw_fd(),
-                        libc::SOL_SOCKET,
-                        libc::SO_REUSEADDR,
-                        &optval as *const _ as *const libc::c_void,
-                        mem::size_of_val(&optval) as libc::socklen_t,
-                    );
-                }
+                reuse_addr(&mut socket);
                 let mut digest = [0u64; 26];
                 let digest_u8 = unsafe {std::mem::transmute::<&mut [u64; 26], &mut [u8; 26 * 8]>(&mut digest)};
                 
@@ -271,10 +280,10 @@ impl HubClient {
         self.write_thread.take().expect("cant take write thread").join().expect("cant join write thread");
     }
     
-    pub fn alloc_uid(&mut self)->HubUid{
+    pub fn alloc_uid(&mut self) -> HubUid {
         self.uid_alloc += 1;
-        return HubUid{
-            addr:self.own_addr,
+        return HubUid {
+            addr: self.own_addr,
             id: self.uid_alloc
         }
     }
