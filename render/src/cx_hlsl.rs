@@ -432,7 +432,7 @@ impl<'a> SlCx<'a> {
                 match name {
                     "vec4" => {
                         if args[0].ty == "float" && args[1].ty == "float" {
-                            return format!("float4_112({},{})", args[0].sl, args[1].sl, args[2].sl);
+                            return format!("float4_112({},{},{})", args[0].sl, args[1].sl, args[2].sl);
                         }
                         else if args[0].ty == "float" && args[1].ty == "vec2" {
                             return format!("float4_121({},{},{})", args[0].sl, args[1].sl, args[2].sl);
