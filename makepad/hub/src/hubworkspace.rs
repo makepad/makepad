@@ -350,6 +350,20 @@ impl HubWorkspace {
         let workspace = self.workspace.clone();
         let abs_root_path = self.abs_root_path.clone();
         
+        fn de_relativize_path(path:&str)->String{
+            let splits:Vec<&str> = path.split("/").collect();
+            let mut out = Vec::new();
+            for split in splits{
+                if split == ".." && out.len()>0{
+                    out.pop();
+                }
+                else{
+                    out.push(split);
+                }
+            }
+            out.join("/")
+        }
+        
         let thread = std::thread::spawn(move || {
             
             let mut any_errors = false;
@@ -413,7 +427,7 @@ impl HubWorkspace {
                                             uid: uid,
                                             item: HubLogItem {
                                                 //package_id: parsed.package_id.clone(),
-                                                path: Some(format!("{}/{}", workspace, path)),
+                                                path: Some(format!("{}/{}", workspace, de_relativize_path(&path))),
                                                 row: span.line_start as usize,
                                                 col: span.column_start as usize,
                                                 tail: span.byte_start as usize,
