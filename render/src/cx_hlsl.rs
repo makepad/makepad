@@ -451,9 +451,9 @@ impl<'a> SlCx<'a> {
         out.push_str("(");
         for (i, arg) in args.iter().enumerate() {
             if i != 0 {
-                out.push_str(", ")
+                out.push_str(", ");
             }
-            out.push_str(arg.sl);
+            out.push_str(&arg.sl);
         }
         out.push_str(")");
         return out;
