@@ -553,6 +553,9 @@ impl CodeEditor {
                 let pos = self.compute_grid_text_pos_from_abs(cx, fe.abs);
                 self._grid_select_corner = Some(self.cursors.grid_select_corner(pos, text_buffer));
                 self.cursors.grid_select(self._grid_select_corner.unwrap(), pos, text_buffer);
+                if self.cursors.set.len() == 0{
+                    self.cursors.clear_and_set_last_cursor_head_and_tail(offset, text_buffer);
+                }
             }
             else { // simply place selection
                 self.cursors.clear_and_set_last_cursor_head(offset, text_buffer);

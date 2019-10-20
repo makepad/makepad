@@ -17,6 +17,8 @@ pub struct TabControl {
     
     pub _dragging_tab: Option<(FingerMoveEvent, usize)>,
     pub _tab_id_alloc: usize,
+    pub _tab_now_selected: Option<usize>,
+    pub _tab_last_selected:Option<usize>,
     pub _focussed: bool
 }
 
@@ -61,6 +63,8 @@ impl TabControl {
             },
             animator: Animator::new(Anim::new(Play::Cut {duration: 0.5}, vec![])),
             _dragging_tab: None,
+            _tab_now_selected:None,
+            _tab_last_selected:None,
             _focussed: false,
             _tab_id_alloc: 0
         }
@@ -176,7 +180,7 @@ impl TabControl {
         }) {
             return Err(())
         }
-        
+        self._tab_now_selected = None;
         self._tab_id_alloc = 0;
         Ok(())
     }
@@ -184,6 +188,9 @@ impl TabControl {
     pub fn draw_tab(&mut self, cx: &mut Cx, label: &str, selected: bool, closeable: bool) {
         let new_tab = self.tabs.get(self._tab_id_alloc).is_none();
         let tab = self.tabs.get_draw(cx, self._tab_id_alloc, | _cx, tmpl | tmpl.clone());
+        if selected{
+            self._tab_now_selected = Some(self._tab_id_alloc);
+        }
         self._tab_id_alloc += 1;
         tab.label = label.to_string();
         tab.is_closeable = closeable;
@@ -215,7 +222,16 @@ impl TabControl {
             }
         }
         self.tabs_view.end_view(cx);
-        
+        if self._tab_now_selected != self._tab_last_selected{
+            // lets scroll the thing into view
+            if let Some(tab_id) = self._tab_now_selected{
+                if let Some(tab) = self.tabs.get(tab_id){
+                    let tab_rect = tab._bg_area.get_rect(cx, true);
+                    self.tabs_view.scroll_into_view_abs(cx, tab_rect);
+                }
+            }
+            self._tab_last_selected = self._tab_now_selected;
+        }
     }
     
     pub fn begin_tab_page(&mut self, cx: &mut Cx) -> ViewRedraw {

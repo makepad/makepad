@@ -442,6 +442,10 @@ impl TextBuffer {
         
         if start_pos.row == end_pos.row && rep_lines.len() == 1 { // replace in one line
             let rep_line_zero = rep_lines.drain(0..1).next().unwrap();
+            
+            if start_pos.col>end_pos.col{ 
+               return vec![];
+            }
             let line = self.lines[start_pos.row].splice(start_pos.col..end_pos.col, rep_line_zero).collect();
             return vec![line];
         }

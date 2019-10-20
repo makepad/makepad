@@ -408,7 +408,7 @@ where TItem: Clone
         }
     }
     
-    fn recur_remove_tab(dock_walk: &mut DockItem<TItem>, control_id: usize, tab_id: usize, counter: &mut usize, clone: bool) -> Option<DockTab<TItem>>
+    fn recur_remove_tab(dock_walk: &mut DockItem<TItem>, control_id: usize, tab_id: usize, counter: &mut usize, clone: bool, select_previous:bool) -> Option<DockTab<TItem>>
     where TItem: Clone
     {
         match dock_walk {
@@ -425,7 +425,7 @@ where TItem: Clone
                     }
                     else {
                         // this select the previous tab.
-                        if *previous != *current && *previous < tabs.len() - 1{
+                        if select_previous && *previous != *current && *previous < tabs.len() - 1{
                             *current = *previous;
                         }
                         else 
@@ -438,11 +438,11 @@ where TItem: Clone
             },
             DockItem::Splitter {first, last, ..} => {
                 *counter += 1;
-                let left = Self::recur_remove_tab(first, control_id, tab_id, counter, clone);
+                let left = Self::recur_remove_tab(first, control_id, tab_id, counter, clone, select_previous);
                 if !left.is_none() {
                     return left
                 }
-                let right = Self::recur_remove_tab(last, control_id, tab_id, counter, clone);
+                let right = Self::recur_remove_tab(last, control_id, tab_id, counter, clone, select_previous);
                 if !right.is_none() {
                     return right
                 }
@@ -642,7 +642,7 @@ where TItem: Clone
     
     pub fn handle_dock(&mut self, cx: &mut Cx, _event: &mut Event, dock_items: &mut DockItem<TItem>) -> DockEvent {
         if let Some(close_tab) = &self._close_tab {
-            Self::recur_remove_tab(dock_items, close_tab.tab_control_id, close_tab.tab_id, &mut 0, false);
+            Self::recur_remove_tab(dock_items, close_tab.tab_control_id, close_tab.tab_id, &mut 0, false, false);
             Self::recur_collapse_empty(dock_items);
             cx.redraw_child_area(Area::All);
             self._close_tab = None;
@@ -671,7 +671,7 @@ where TItem: Clone
                             if fe.modifiers.control || fe.modifiers.logo {
                                 do_tab_clone = true;
                             }
-                            let item = Self::recur_remove_tab(dock_items, ident.tab_control_id, ident.tab_id, &mut 0, do_tab_clone);
+                            let item = Self::recur_remove_tab(dock_items, ident.tab_control_id, ident.tab_id, &mut 0, do_tab_clone, true);
                             if let Some(item) = item {
                                 if !item.closeable {
                                     do_tab_clone = false;
@@ -696,7 +696,6 @@ where TItem: Clone
                             &mut 0
                         );
                         if do_tab_clone{
-                            println!("CLONE! {:?}", new_ident);
                             tab_clone_ident = new_ident;
                         }
                     };

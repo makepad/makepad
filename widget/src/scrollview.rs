@@ -124,6 +124,16 @@ impl ScrollView{
         }
     }
     
+    pub fn scroll_into_view_abs(&mut self, cx: &mut Cx, rect: Rect) {
+        let self_rect = self.get_rect(cx); 
+        if let Some(scroll_h) = &mut self.scroll_h {
+            scroll_h.scroll_into_view(cx, rect.x - self_rect.x, rect.w);
+        }
+        if let Some(scroll_v) = &mut self.scroll_v {
+            scroll_v.scroll_into_view(cx, rect.y  - self_rect.y, rect.h);
+        }
+    }
+    
     pub fn set_scroll_target(&mut self, cx: &mut Cx, pos: Vec2) {
         if let Some(scroll_h) = &mut self.scroll_h {
             scroll_h.set_scroll_target(cx, pos.x);

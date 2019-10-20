@@ -401,9 +401,9 @@ impl Text {
                             let prev_index = if index == 0{0}else{index - 1};
                             let prev_x = read.buffer[read.offset + x_o +  prev_index * read.slots];
                             let prev_w = read.buffer[read.offset + w_o + index * read.slots];
-                            if prev_x > spos.x + prev_w{
-                                return read.buffer[read.offset + char_offset_o + index * read.slots] as usize;
-                            }
+                            //if prev_x > spos.x + prev_w{
+                            //    return read.buffer[read.offset + char_offset_o + index * read.slots] as usize;
+                            //}
                             return read.buffer[read.offset + char_offset_o +  prev_index * read.slots] as usize;
                         }
                         index += 1;
