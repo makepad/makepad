@@ -109,7 +109,7 @@ impl Cx {
         hlsl_out.push_str("float4 float4_1(float x){return float4(x,x,x,x);};\n");
         hlsl_out.push_str("float4 float4_31(float3 xyz, float w){return float4(xyz.x,xyz.y,xyz.z,w);};\n");
         hlsl_out.push_str("float4 float4_13(float x, float3 yzw){return float4(x,yzw.x,yzw.y,yzw.z);};\n");
-        hlsl_out.push_str("float4 float4_112(float x, float y, float2 zw){return float4(x, y, zw.x, yzw.y);};\n");
+        hlsl_out.push_str("float4 float4_112(float x, float y, float2 zw){return float4(x, y, zw.x, zw.y);};\n");
         hlsl_out.push_str("float4 float4_121(float x, float2 yz, float w){return float4(x, yz.x, yz.y, w);};\n");
         hlsl_out.push_str("float4 float4_211(float2 xy, float z, float w){return float4(xy.x, xy.y, z, w);};\n");
         hlsl_out.push_str("float4 float4_22(float2 xy, float2 zw){return float4(xy.x, xy.y, zw.x, zw.y);};\n");
