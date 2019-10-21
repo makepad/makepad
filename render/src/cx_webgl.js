@@ -1941,10 +1941,20 @@
         })
         req.responseType = 'text'
         req.addEventListener("load", function() {
-            if (req.response === '{continue:true}') return watchFileChange()
+            if (req.status === 201) return watchFileChange();
             if (req.status === 200) {
-                // do something with data, or not
-                location.href = location.href
+                var msg = JSON.parse(req.response);
+                if(msg.type == "file_change"){
+                    location.href = location.href
+                }
+                if(msg.type == "build_start"){  
+                    let note = "Rebuilding application..."
+                    if(document.title != note){
+                        document.title = note;
+                        console.log(note);
+                    }
+                    watchFileChange();
+                }
             }
         })
         req.open("GET", "/$watch?" + ('' + Math.random()).slice(2))

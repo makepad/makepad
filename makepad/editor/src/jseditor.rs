@@ -8,22 +8,14 @@ pub struct JSEditor {
     pub code_editor: CodeEditor,
 }
 
-#[derive(Clone, PartialEq)]
-pub enum JSEditorEvent {
-    None,
-    Change
-}
-
 impl JSEditor {
     pub fn style(cx: &mut Cx) -> Self {
-        let rust_editor = Self {
+        Self {
             code_editor: CodeEditor{
                 folding_depth: 3,
                 ..CodeEditor::style(cx)
             }
-        };
-        //tab.animator.default = tab.anim_default(cx);
-        rust_editor
+        }
     }
     
     pub fn handle_js_editor(&mut self, cx: &mut Cx, event: &mut Event,  text_buffer: &mut TextBuffer) -> CodeEditorEvent {
@@ -885,7 +877,7 @@ impl JSTokenizer {
                 // these are followeable by non unary operators
                 TokenType::Identifier | TokenType::BuiltinType | TokenType::TypeName |
                 TokenType::Call | TokenType::String | TokenType::Regex | TokenType::Number |
-                TokenType::Bool | TokenType::Unexpected => {
+                TokenType::Bool | TokenType::Unexpected | TokenType::Error | TokenType::Warning | TokenType::Defocus=> {
                     is_unary_operator = false;
                     
                     first_after_open = false;

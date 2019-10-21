@@ -1,8 +1,8 @@
 use crate::cx::*;
 use crate::cx_dx11::*;
 use std::ffi;
-use winapi::shared:: {dxgiformat};
-use winapi::um:: {d3d11, d3dcommon};
+use winapi::shared::{dxgiformat};
+use winapi::um::{d3d11, d3dcommon};
 use wio::com::ComPtr;
 
 #[derive(Clone)]
@@ -48,16 +48,16 @@ impl Cx {
         out.push_str(post);
         out.push_str("{\n");
         out.push_str(field);
-        for (index,var) in vars.iter().enumerate() {
+        for (index, var) in vars.iter().enumerate() {
             out.push_str("  ");
             out.push_str(&Self::hlsl_type(&var.ty));
             out.push_str(" ");
             out.push_str(&var.name);
             if semantic.len()>0 {
                 out.push_str(": ");
-                out.push_str(&format!("{}{}", semantic, std::char::from_u32(index as u32 +65).unwrap()));
+                out.push_str(&format!("{}{}", semantic, std::char::from_u32(index as u32 + 65).unwrap()));
                 //out.push_str(&format!("{}", index));
-                if index > 26{
+                if index > 26 {
                     panic!("HLSL struct semantic name out of range");
                 }
             }
@@ -66,7 +66,7 @@ impl Cx {
         out.push_str("};\n\n");
         out
     }
-
+    
     pub fn hlsl_init_struct(vars: &Vec<ShVar>, field: &str) -> String {
         let mut out = String::new();
         out.push_str("{\n");
@@ -100,6 +100,19 @@ impl Cx {
         let mut hlsl_out = String::new();
         
         hlsl_out.push_str("SamplerState DefaultTextureSampler{Filter = MIN_MAG_MIP_LINEAR;AddressU = Wrap;AddressV=Wrap;};\n");
+        
+        // float constructor mappings
+        hlsl_out.push_str("float2 float2_1(float x){return float2(x,x);};\n");
+        hlsl_out.push_str("float3 float3_1(float x){return float3(x,x,x);};\n");
+        hlsl_out.push_str("float3 float3_21(float2 xy, float z){return float3(xy.x, xy.y, z);};\n");
+        hlsl_out.push_str("float3 float3_12(float x, float2 yz){return float3(x, yz.x, yz.y);};\n");
+        hlsl_out.push_str("float4 float4_1(float x){return float4(x,x,x,x);};\n");
+        hlsl_out.push_str("float4 float4_31(float3 xyz, float w){return float4(xyz.x,xyz.y,xyz.z,w);};\n");
+        hlsl_out.push_str("float4 float4_13(float x, float3 yzw){return float4(x,yzw.x,yzw.y,yzw.z);};\n");
+        hlsl_out.push_str("float4 float4_112(float x, float y, float2 zw){return float4(x, y, zw.x, zw.y);};\n");
+        hlsl_out.push_str("float4 float4_121(float x, float2 yz, float w){return float4(x, yz.x, yz.y, w);};\n");
+        hlsl_out.push_str("float4 float4_211(float2 xy, float z, float w){return float4(xy.x, xy.y, z, w);};\n");
+        hlsl_out.push_str("float4 float4_22(float2 xy, float2 zw){return float4(xy.x, xy.y, zw.x, zw.y);};\n");
         
         // ok now define samplers from our sh.
         let texture_slots = sg.flat_vars(ShVarStore::Texture);
@@ -238,7 +251,7 @@ impl Cx {
                 println!("{} {}", index + 1, line);
             }
         }
-
+        
         let named_uniform_props = NamedProps::construct(sg, &uniforms_dr, true);
         Ok((hlsl_out, CxShaderMapping {
             zbias_uniform_prop: named_uniform_props.find_zbias_uniform_prop(),
@@ -280,8 +293,8 @@ impl Cx {
         let inst_named = NamedProps::construct(&sh.shader_gen, &mapping.instances, false);
         let mut strings = Vec::new();
         
-        for (index,geom) in geom_named.props.iter().enumerate() {
-            strings.push(ffi::CString::new(format!("GEOM_{}", std::char::from_u32(index as u32 +65).unwrap())).unwrap());
+        for (index, geom) in geom_named.props.iter().enumerate() {
+            strings.push(ffi::CString::new(format!("GEOM_{}", std::char::from_u32(index as u32 + 65).unwrap())).unwrap());
             layout_desc.push(d3d11::D3D11_INPUT_ELEMENT_DESC {
                 SemanticName: strings.last().unwrap().as_ptr() as *const _,
                 SemanticIndex: 0,
@@ -293,8 +306,8 @@ impl Cx {
             })
         }
         
-        for (index,inst) in inst_named.props.iter().enumerate() {
-            strings.push(ffi::CString::new(format!("INST_{}", std::char::from_u32(index as u32 +65).unwrap())).unwrap());
+        for (index, inst) in inst_named.props.iter().enumerate() {
+            strings.push(ffi::CString::new(format!("INST_{}", std::char::from_u32(index as u32 + 65).unwrap())).unwrap());
             layout_desc.push(d3d11::D3D11_INPUT_ELEMENT_DESC {
                 SemanticName: strings.last().unwrap().as_ptr() as *const _,
                 SemanticIndex: 0,
@@ -306,10 +319,10 @@ impl Cx {
             })
         }
         
-        let input_layout = d3d11_cx.create_input_layout(&vs_blob, &layout_desc)?;
-
+        let input_layout = d3d11_cx.create_input_layout(&vs_blob, &layout_desc) ?;
+        
         sh.mapping = mapping;
-        sh.platform = Some(CxPlatformShader{
+        sh.platform = Some(CxPlatformShader {
             geom_ibuf: {
                 let mut geom_ibuf = D3d11Buffer {..Default::default()};
                 geom_ibuf.update_with_u32_index_data(d3d11_cx, &sh.shader_gen.geometry_indices);
@@ -372,6 +385,78 @@ impl<'a> SlCx<'a> {
     
     pub fn map_type(&self, ty: &str) -> String {
         Cx::hlsl_type(ty)
+    }
+    
+    pub fn map_constructor(&self, name: &str, args: &Vec<Sl>) -> String {
+        let mut out = String::new();
+        match args.len() {
+            1 => { // we got one arg, lets check return type
+                match name {
+                    "vec2" => {
+                        return format!("float2_1({})", args[0].sl);
+                    },
+                    "vec3" => {
+                        return format!("float3_1({})", args[0].sl);
+                    },
+                    "vec4" => {
+                        return format!("float4_1({})", args[0].sl);
+                    },
+                    _=>()
+                }
+            },
+            2 => {
+                match name {
+                    "vec3" => { // its either 13 or 31
+                        if args[0].ty == "float" {
+                            return format!("float3_12({},{})", args[0].sl, args[1].sl);
+                        }
+                        else {
+                            return format!("float3_21({},{})", args[0].sl, args[1].sl);
+                        }
+                    },
+                    "vec4" => {
+                        if args[0].ty == "float" {
+                            return format!("float4_13({},{})", args[0].sl, args[1].sl);
+                        }
+                        else if args[0].ty == "vec2" {
+                            return format!("float4_22({},{})", args[0].sl, args[1].sl);
+                        }
+                        else {
+                            return format!("float4_31({},{})", args[0].sl, args[1].sl);
+                        }
+                    },
+                    _=>()
+                }
+            },
+            3 => {
+                match name {
+                    "vec4" => {
+                        if args[0].ty == "float" && args[1].ty == "float" {
+                            return format!("float4_112({},{},{})", args[0].sl, args[1].sl, args[2].sl);
+                        }
+                        else if args[0].ty == "float" && args[1].ty == "vec2" {
+                            return format!("float4_121({},{},{})", args[0].sl, args[1].sl, args[2].sl);
+                        }
+                        else {
+                            return format!("float4_211({},{},{})", args[0].sl, args[1].sl, args[2].sl);
+                        }
+                    },
+                    _=>()
+                }
+            },
+            _ => {} // the rest
+        }
+        // default
+        out.push_str(&self.map_type(name));
+        out.push_str("(");
+        for (i, arg) in args.iter().enumerate() {
+            if i != 0 {
+                out.push_str(", ");
+            }
+            out.push_str(&arg.sl);
+        }
+        out.push_str(")");
+        return out;
     }
     
     pub fn map_var(&mut self, var: &ShVar) -> String {

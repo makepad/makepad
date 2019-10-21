@@ -1,11 +1,12 @@
 use render::*; 
 use widget::*; 
+use crate::app::*;
+use editor::*;
 
-use crate::textbuffer::*;
 
 #[derive(Clone)]
 pub struct Keyboard {
-    pub view: View<ScrollBar>,
+    pub view: ScrollView,
     pub modifiers: KeyModifiers,
     pub key_down: Option<KeyCode>,
     pub key_up: Option<KeyCode>,
@@ -38,9 +39,7 @@ impl KeyType {
 impl Keyboard {
     pub fn style(cx: &mut Cx) -> Self {
         Self {
-            view: View {
-                ..View::style(cx)
-            },
+            view: ScrollView::style_hor_and_vert(cx),
             buttons: Elements::new(Button {
                 ..Button::style(cx)
             }),
@@ -51,17 +50,17 @@ impl Keyboard {
         }
     }
     
-    fn send_textbuffers_update(&mut self, cx: &mut Cx, text_buffers: &mut TextBuffers) {
+    fn send_textbuffers_update(&mut self, cx: &mut Cx, app_storage: &mut AppStorage) {
         // clear all files we missed
-        for (_, text_buffer) in &mut text_buffers.storage {
-            text_buffer.keyboard.modifiers = self.modifiers.clone();
-            text_buffer.keyboard.key_down = self.key_down.clone();
-            text_buffer.keyboard.key_up = self.key_up.clone();
-            cx.send_signal(text_buffer.signal, SIGNAL_TEXTBUFFER_KEYBOARD_UPDATE);
+        for (_, atb) in &mut app_storage.text_buffers {
+            atb.text_buffer.keyboard.modifiers = self.modifiers.clone();
+            atb.text_buffer.keyboard.key_down = self.key_down.clone();
+            atb.text_buffer.keyboard.key_up = self.key_up.clone();
+            cx.send_signal(atb.text_buffer.signal, SIGNAL_TEXTBUFFER_KEYBOARD_UPDATE);
         }
     }
     
-    pub fn handle_keyboard(&mut self, cx: &mut Cx, event: &mut Event, text_buffers: &mut TextBuffers) -> KeyboardEvent {
+    pub fn handle_keyboard(&mut self, cx: &mut Cx, event: &mut Event, app_storage: &mut AppStorage) -> KeyboardEvent {
         // do shit here
         if self.view.handle_scroll_bars(cx, event) {
         }
@@ -112,7 +111,7 @@ impl Keyboard {
             }
         }
         if update_textbuffers {
-            self.send_textbuffers_update(cx, text_buffers);
+            self.send_textbuffers_update(cx, app_storage);
         }
         
         KeyboardEvent::None

@@ -18,7 +18,6 @@ ttf_parser = { path = "./vector/ttf_parser" }
 path = { path = "./vector/path" }
 
 [target.x86_64-apple-darwin.dependencies]
-closefds = "*"
 time = "0.1.4"
 libc = "0.2"
 metal = "0.14"

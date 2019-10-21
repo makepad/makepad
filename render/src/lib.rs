@@ -64,14 +64,14 @@ pub use crate::cx_ipc_win32::*;
 // shared modules
 #[macro_use]
 mod cx; 
-mod cx_turtle;
-mod cx_fonts;
-mod cx_cursor;
-mod cx_window; 
-mod cx_view; 
-mod cx_pass;
-mod cx_texture;
-mod cx_shader;
+mod turtle;
+mod fonts;
+mod cursor;
+mod window; 
+mod view; 
+mod pass;
+mod texture;
+mod shader;
 mod animator;
 mod elements;
 mod math;

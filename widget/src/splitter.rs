@@ -11,10 +11,8 @@ pub struct Splitter {
     pub split_size: f32,
     pub split: Quad,
     pub animator: Animator,
-    pub anim_over: Anim,
-    pub anim_moving: Anim,
     pub realign_dist: f32,
-    pub split_view: View<NoScroll>,
+    pub split_view: View,
     pub _split_area: Area,
     pub _calc_pos: f32,
     pub _is_moving: bool,
@@ -61,20 +59,31 @@ impl Splitter {
                 shader: cx.add_shader(Self::def_split_shader(), "Splitter.split"),
                 ..Quad::style(cx)
             },
-            animator: Animator::new(Anim::new(Play::Cut {duration: 0.5}, vec![
-                Track::color("split.color", Ease::Lin, vec![(1.0, cx.color("bg_split"))]),
-            ])),
-            anim_over: Anim::new(Play::Cut {duration: 0.05}, vec![
-                Track::color("split.color", Ease::Lin, vec![(1.0, color("#5"))]),
-            ]),
-            anim_moving: Anim::new(Play::Cut {duration: 0.2}, vec![
-                Track::color("split.color", Ease::Lin, vec![
-                    (0.0, color("#f")),
-                    (1.0, color("#6"))
-                ]),
-            ]),
+            animator: Animator::new(Self::get_default_anim(cx)),
         }
-    }    
+    }
+    
+    pub fn get_default_anim(cx: &Cx) -> Anim {
+        Anim::new(Play::Cut {duration: 0.5}, vec![
+            Track::color(cx.id("split.color"), Ease::Lin, vec![(1.0, cx.color("bg_split"))]),
+        ])
+    }
+    
+    pub fn get_over_anim(cx: &Cx) -> Anim {
+        Anim::new(Play::Cut {duration: 0.05}, vec![
+            Track::color(cx.id("split.color"), Ease::Lin, vec![(1.0, color("#5"))]),
+        ])
+    }
+    
+    pub fn get_moving_anim(cx: &Cx) -> Anim {
+        Anim::new(Play::Cut {duration: 0.2}, vec![
+            Track::color(cx.id("split.color"), Ease::Lin, vec![
+                (0.0, color("#f")),
+                (1.0, color("#6"))
+            ]),
+        ])
+    }
+    
     pub fn def_split_shader() -> ShaderGen {
         Quad::def_quad_shader().compose(shader_ast!({
             
@@ -93,9 +102,10 @@ impl Splitter {
             Event::Animate(ae) => {
                 self.animator.write_area(cx, self._split_area, "split.", ae.time);
             },
+            Event::AnimEnded(_) => self.animator.end(),
             Event::FingerDown(fe) => {
                 self._is_moving = true;
-                self.animator.play_anim(cx, self.anim_moving.clone());
+                self.animator.play_anim(cx, Self::get_moving_anim(cx));
                 match self.axis {
                     Axis::Horizontal => cx.set_down_mouse_cursor(MouseCursor::RowResize),
                     Axis::Vertical => cx.set_down_mouse_cursor(MouseCursor::ColResize)
@@ -114,10 +124,10 @@ impl Splitter {
                 if !self._is_moving {
                     match fe.hover_state {
                         HoverState::In => {
-                            self.animator.play_anim(cx, self.anim_over.clone());
+                            self.animator.play_anim(cx, Self::get_over_anim(cx));
                         },
                         HoverState::Out => {
-                            self.animator.play_anim(cx, self.animator.default.clone());
+                            self.animator.play_anim(cx, Self::get_default_anim(cx));
                         },
                         _ => ()
                     }
@@ -127,14 +137,14 @@ impl Splitter {
                 self._is_moving = false;
                 if fe.is_over {
                     if !fe.is_touch {
-                        self.animator.play_anim(cx, self.anim_over.clone());
+                        self.animator.play_anim(cx, Self::get_over_anim(cx));
                     }
                     else {
-                        self.animator.play_anim(cx, self.animator.default.clone());
+                        self.animator.play_anim(cx, Self::get_default_anim(cx));
                     }
                 }
                 else {
-                    self.animator.play_anim(cx, self.animator.default.clone());
+                    self.animator.play_anim(cx, Self::get_default_anim(cx));
                 }
                 // we should change our mode based on which edge we are closest to
                 // the rule is center - 30 + 30
@@ -266,7 +276,7 @@ impl Splitter {
         cx.end_turtle(Area::Empty);
         let rect = cx.get_turtle_rect();
         let origin = cx.get_turtle_origin();
-        self.split.color = self.animator.last_color("split.color");
+        self.split.color = self.animator.last_color(cx.id("split.color"));
         match self.axis {
             Axis::Horizontal => {
                 
@@ -279,7 +289,7 @@ impl Splitter {
                     self._split_area = self.split.draw_quad(cx, Rect {x: 0., y: 0., w: rect.w, h: self.split_size}).into_area();
                     self.split_view.end_view(cx);
                 }
-                cx.set_turtle_walk(Vec2 {x: origin.x, y: origin.y + self._calc_pos+self.split_size});
+                cx.set_turtle_walk(Vec2 {x: origin.x, y: origin.y + self._calc_pos + self.split_size});
             },
             Axis::Vertical => {
                 cx.set_turtle_walk(Vec2 {x: origin.x + self._calc_pos, y: origin.y});

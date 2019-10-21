@@ -1397,18 +1397,6 @@ pub struct CxPlatformPass {
     depth_stencil_state: Option<ComPtr<d3d11::ID3D11DepthStencilState>>
 }
 
-
-use std::process::{Command, Child, Stdio};
-
-pub fn spawn_process_command(cmd: &str, args: &[&str], current_dir: &str) -> Result<Child, std::io::Error> {
-    Command::new(cmd)
-        .args(args)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .current_dir(current_dir)
-        .spawn()
-}
-
 /*pub const MAPPED_TEXTURE_BUFFER_COUNT: usize = 4;
 
     /*

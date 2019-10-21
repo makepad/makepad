@@ -1,5 +1,4 @@
 use render::*;
-use crate::scrollbar::*;
 use crate::button::*;
 use crate::desktopbutton::*;
 
@@ -9,9 +8,9 @@ pub struct DesktopWindow {
     pub pass: Pass,
     pub color_texture: Texture,
     pub depth_texture: Texture,
-    pub caption_view: View<NoScroll>, // we have a root view otherwise is_overlay subviews can't attach topmost
-    pub main_view: View<NoScroll>, // we have a root view otherwise is_overlay subviews can't attach topmost
-    pub inner_view: View<ScrollBar>,
+    pub caption_view: View, // we have a root view otherwise is_overlay subviews can't attach topmost
+    pub main_view: View, // we have a root view otherwise is_overlay subviews can't attach topmost
+    pub inner_view: View,
     
     pub min_btn: DesktopButton,
     pub max_btn: DesktopButton,
@@ -177,6 +176,7 @@ impl DesktopWindow {
                     self.caption_bg.end_quad(cx, &bg_inst);
                     cx.turtle_new_line();
                 },
+                
                 PlatformType::OSX => { // mac still uses the built in buttons, TODO, replace that.
                     let bg_inst = self.caption_bg.begin_quad(cx, &Layout {
                         align: Align::center(),

@@ -1,16 +1,17 @@
 use std::collections::HashMap;
-use std::collections::BTreeMap;
+use std::cell::RefCell;
 
 pub use crate::shadergen::*;
-pub use crate::cx_fonts::*;
-pub use crate::cx_turtle::*;
-pub use crate::cx_cursor::*;
-pub use crate::cx_window::*;
-pub use crate::cx_view::*;
-pub use crate::cx_pass::*;
-pub use crate::cx_texture::*;
-pub use crate::cx_shader::*;
-pub use crate::math::*;
+pub use crate::fonts::*;
+pub use crate::turtle::*;
+pub use crate::cursor::*;
+pub use crate::window::*;
+pub use crate::view::*;
+pub use crate::pass::*;
+pub use crate::texture::*;
+pub use crate::shader::*;
+
+pub use crate::math::*; 
 pub use crate::events::*;
 pub use crate::colors::*;
 pub use crate::elements::*;
@@ -96,6 +97,9 @@ pub struct Cx {
     pub shaders: Vec<CxShader>,
     pub shader_map: HashMap<ShaderGen, usize>,
     
+    pub str_to_id: RefCell<HashMap<String, u32>>,
+    pub id_to_str: RefCell<HashMap<u32, String>>,
+    
     pub is_in_redraw_cycle: bool,
     pub vr_can_present: bool,
     pub default_dpi_factor: f32,
@@ -140,7 +144,7 @@ pub struct Cx {
     
     pub signals: Vec<(Signal, usize)>,
     
-    pub style_values: BTreeMap<String, StyleValue>,
+    pub style_values: HashMap<String, StyleValue>,
     
     pub panic_now: bool,
     pub panic_redraw: bool,
@@ -192,7 +196,9 @@ impl Default for Cx {
             textures_free: Vec::new(),
             shaders: Vec::new(),
             shader_map: HashMap::new(),
-
+            id_to_str: RefCell::new(HashMap::new()),
+            str_to_id: RefCell::new(HashMap::new()),
+            
             default_dpi_factor: 1.0,
             current_dpi_factor: 1.0,
             is_in_redraw_cycle: false,
@@ -229,7 +235,7 @@ impl Default for Cx {
             finger_over_last_area: Area::Empty,
             _finger_over_last_area: Area::Empty,
             
-            style_values: BTreeMap::new(),
+            style_values: HashMap::new(),
             
             playing_anim_areas: Vec::new(),
             ended_anim_areas: Vec::new(),
@@ -248,24 +254,48 @@ impl Default for Cx {
     }
 }
 
+#[derive(PartialEq, Copy, Clone, Debug)]
+pub struct CxId(u32);
 
 impl Cx {
-    //pub fn get_shader2(&self, id: usize) -> &CompiledShader {
-    //    &self.compiled_shaders[id]
-    // }
     
-    pub fn add_shader(&mut self, sg: ShaderGen, name: &str) -> Shader {
-        let next_id = self.shaders.len();
-        let store_id = self.shader_map.entry(sg.clone()).or_insert(next_id);
-        if *store_id == next_id {
-            self.shaders.push(CxShader {
-                name: name.to_string(),
-                shader_gen: sg,
-                platform: None,
-                mapping: CxShaderMapping::default()
-            });
+    pub fn id(&self, name:&str)->CxId{
+        let mut str_to_id = self.str_to_id.borrow_mut();
+        if let Some(stored_id) = str_to_id.get(name){
+            return CxId(*stored_id)
         }
-        Shader {shader_id: Some(*store_id)}
+        let new_id = str_to_id.len() as u32;
+        str_to_id.insert(name.to_string(), new_id);
+        let mut id_to_str = self.id_to_str.borrow_mut();
+        id_to_str.insert(new_id, name.to_string());
+        CxId(new_id)
+    }
+    
+    pub fn id_starts_with(&self, ident:CxId, begin:&str)->Option<String>{
+        let id_to_str = self.id_to_str.borrow();
+        if let Some(value) = id_to_str.get(&ident.0){
+            if value.starts_with(begin){
+                return Some(value.to_string().split_off(begin.len()))
+            }
+            return None
+        }
+        panic!("id not found");
+    }
+
+    pub fn add_shader(&mut self, sg: ShaderGen, name: &str) -> Shader {
+        if let Some(stored_id) = self.shader_map.get(&sg){
+            return Shader {shader_id: Some(*stored_id)}
+        }
+        
+        let new_id = self.shaders.len();
+        self.shader_map.insert(sg.clone(), new_id);
+        self.shaders.push(CxShader {
+            name: name.to_string(),
+            shader_gen: sg,
+            platform: None,
+            mapping: CxShaderMapping::default()
+        });
+        Shader {shader_id: Some(new_id)}
     }
     
     pub fn process_tap_count(&mut self, digit: usize, pos: Vec2, time: f64) -> u32 {
@@ -692,7 +722,7 @@ impl Cx {
         self.call_event_handler(&mut event_handler, &mut Event::Animate(AnimateEvent {time: time, frame: self.repaint_id}));
         self.check_ended_anim_areas(time);
         if self.ended_anim_areas.len() > 0 {
-            self.call_event_handler(&mut event_handler, &mut Event::AnimateEnded(AnimateEvent {time: time, frame: self.repaint_id}));
+            self.call_event_handler(&mut event_handler, &mut Event::AnimEnded(AnimateEvent {time: time, frame: self.repaint_id}));
         }
     }
     
@@ -723,18 +753,22 @@ impl Cx {
     pub fn call_signals<F>(&mut self, mut event_handler: F)
     where F: FnMut(&mut Cx, &mut Event)
     {
-         if self.signals.len() == 0 {
-            return
-        }
-        
-        let mut signals = Vec::new();
-        std::mem::swap(&mut self.signals, &mut signals);
-        
-        for (signal, value) in signals {
-            self.call_event_handler(&mut event_handler, &mut Event::Signal(SignalEvent {
-                signal_id: signal.signal_id,
-                value: value
-            }));
+        let mut counter = 0;
+        while self.signals.len() != 0 {
+            counter += 1;
+            let mut signals = Vec::new();
+            std::mem::swap(&mut self.signals, &mut signals);
+            
+            for (signal, value) in signals {
+                self.call_event_handler(&mut event_handler, &mut Event::Signal(SignalEvent {
+                    signal_id: signal.signal_id,
+                    value: value
+                }));
+            }
+            if counter > 100{
+                println!("Signal feedback loop detected");
+                break
+            }
         }
     }
     

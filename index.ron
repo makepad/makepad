@@ -1,0 +1,791 @@
+Folder(
+    name: "makepad",
+    folder: [
+        Folder(
+            name: "examples",
+            folder: [
+                Folder(
+                    name: "mandelbrot_example",
+                    folder: [
+                        Folder(
+                            name: "src",
+                            folder: [
+                                File(
+                                    name: "main.rs",
+                                ),
+                                File(
+                                    name: "mandelbrot.rs",
+                                ),
+                            ],
+                        ),
+                    ],
+                ),
+                Folder(
+                    name: "quad_example",
+                    folder: [
+                        Folder(
+                            name: "src",
+                            folder: [
+                                File(
+                                    name: "main.rs",
+                                ),
+                            ],
+                        ),
+                        Folder(
+                            name: "webgl",
+                            folder: [
+                                File(
+                                    name: "Cargo.toml",
+                                ),
+                            ],
+                        ),
+                        File(
+                            name: "Cargo.toml",
+                        ),
+                    ],
+                ),
+                Folder(
+                    name: "text_example",
+                    folder: [
+                        Folder(
+                            name: "src",
+                            folder: [
+                                File(
+                                    name: "main.rs",
+                                ),
+                            ],
+                        ),
+                        File(
+                            name: "Cargo.toml",
+                        ),
+                    ],
+                ),
+                Folder(
+                    name: "ui_example",
+                    folder: [
+                        Folder(
+                            name: "src",
+                            folder: [
+                                File(
+                                    name: "main.rs",
+                                ),
+                            ],
+                        ),
+                        File(
+                            name: "Cargo.toml",
+                        ),
+                    ],
+                ),
+            ],
+        ),
+        Folder(
+            name: "io",
+            folder: [
+                Folder(
+                    name: "capture",
+                    folder: [
+                        Folder(
+                            name: "src",
+                            folder: [
+                                File(
+                                    name: "capture_winmf.rs",
+                                ),
+                                File(
+                                    name: "lib.rs",
+                                ),
+                            ],
+                        ),
+                    ],
+                ),
+                Folder(
+                    name: "gamepad",
+                    folder: [
+                        Folder(
+                            name: "src",
+                            folder: [
+                                File(
+                                    name: "gamepad_winxinput.rs",
+                                ),
+                                File(
+                                    name: "lib.rs",
+                                ),
+                            ],
+                        ),
+                    ],
+                ),
+                Folder(
+                    name: "process",
+                    folder: [
+                        Folder(
+                            name: "src",
+                            folder: [
+                                File(
+                                    name: "lib.rs",
+                                ),
+                                File(
+                                    name: "process_conpty.rs",
+                                ),
+                                File(
+                                    name: "process_dummy.rs",
+                                ),
+                                File(
+                                    name: "process_forkpty.rs",
+                                ),
+                            ],
+                        ),
+                        File(
+                            name: "Cargo.toml",
+                        ),
+                    ],
+                ),
+            ],
+        ),
+        Folder(
+            name: "makepad",
+            folder: [
+                Folder(
+                    name: "editor",
+                    folder: [
+                        Folder(
+                            name: "src",
+                            folder: [
+                                File(
+                                    name: "codeeditor.rs",
+                                ),
+                                File(
+                                    name: "codeicon.rs",
+                                ),
+                                File(
+                                    name: "jseditor.rs",
+                                ),
+                                File(
+                                    name: "lib.rs",
+                                ),
+                                File(
+                                    name: "plaineditor.rs",
+                                ),
+                                File(
+                                    name: "rusteditor.rs",
+                                ),
+                                File(
+                                    name: "textbuffer.rs",
+                                ),
+                                File(
+                                    name: "textcursor.rs",
+                                ),
+                            ],
+                        ),
+                        File(
+                            name: "Cargo.toml",
+                        ),
+                    ],
+                ),
+                Folder(
+                    name: "hub",
+                    folder: [
+                        Folder(
+                            name: "src",
+                            folder: [
+                                File(
+                                    name: "httpserver.rs",
+                                ),
+                                File(
+                                    name: "hubclient.rs",
+                                ),
+                                File(
+                                    name: "hubmsg.rs",
+                                ),
+                                File(
+                                    name: "hubserver.rs",
+                                ),
+                                File(
+                                    name: "hubworkspace.rs",
+                                ),
+                                File(
+                                    name: "lib.rs",
+                                ),
+                                File(
+                                    name: "process.rs",
+                                ),
+                                File(
+                                    name: "wasmstrip.rs",
+                                ),
+                            ],
+                        ),
+                        File(
+                            name: "Cargo.toml",
+                        ),
+                    ],
+                ),
+                Folder(
+                    name: "src",
+                    folder: [
+                        File(
+                            name: "app.rs",
+                        ),
+                        File(
+                            name: "appwindow.rs",
+                        ),
+                        File(
+                            name: "buildconfig.rs",
+                        ),
+                        File(
+                            name: "buildmanager.rs",
+                        ),
+                        File(
+                            name: "fileeditor.rs",
+                        ),
+                        File(
+                            name: "filetree.rs",
+                        ),
+                        File(
+                            name: "hubui.rs",
+                        ),
+                        File(
+                            name: "keyboard.rs",
+                        ),
+                        File(
+                            name: "logitem.rs",
+                        ),
+                        File(
+                            name: "loglist.rs",
+                        ),
+                        File(
+                            name: "main.rs",
+                        ),
+                    ],
+                ),
+                Folder(
+                    name: "terminal",
+                    folder: [
+                        Folder(
+                            name: "src",
+                            folder: [
+                                File(
+                                    name: "lib.rs",
+                                ),
+                                File(
+                                    name: "localterminal.rs",
+                                ),
+                                File(
+                                    name: "terminal.rs",
+                                ),
+                            ],
+                        ),
+                        File(
+                            name: "Cargo.toml",
+                        ),
+                    ],
+                ),
+                Folder(
+                    name: "webgl",
+                    folder: [
+                        File(
+                            name: "Cargo.toml",
+                        ),
+                    ],
+                ),
+                File(
+                    name: "Cargo.toml",
+                ),
+            ],
+        ),
+        Folder(
+            name: "render",
+            folder: [
+                Folder(
+                    name: "shader_ast",
+                    folder: [
+                        Folder(
+                            name: "shader_ast_impl",
+                            folder: [
+                                Folder(
+                                    name: "src",
+                                    folder: [
+                                        File(
+                                            name: "lib.rs",
+                                        ),
+                                    ],
+                                ),
+                                File(
+                                    name: "Cargo.toml",
+                                ),
+                            ],
+                        ),
+                        Folder(
+                            name: "src",
+                            folder: [
+                                File(
+                                    name: "lib.rs",
+                                ),
+                            ],
+                        ),
+                        File(
+                            name: "Cargo.toml",
+                        ),
+                    ],
+                ),
+                Folder(
+                    name: "src",
+                    folder: [
+                        File(
+                            name: "animator.rs",
+                        ),
+                        File(
+                            name: "area.rs",
+                        ),
+                        File(
+                            name: "blit.rs",
+                        ),
+                        File(
+                            name: "colors.rs",
+                        ),
+                        File(
+                            name: "cursor.rs",
+                        ),
+                        File(
+                            name: "cx.rs",
+                        ),
+                        File(
+                            name: "cx_cocoa.rs",
+                        ),
+                        File(
+                            name: "cx_desktop.rs",
+                        ),
+                        File(
+                            name: "cx_dx11.rs",
+                        ),
+                        File(
+                            name: "cx_glsl.rs",
+                        ),
+                        File(
+                            name: "cx_hlsl.rs",
+                        ),
+                        File(
+                            name: "cx_ipc_child.rs",
+                        ),
+                        File(
+                            name: "cx_ipc_host.rs",
+                        ),
+                        File(
+                            name: "cx_ipc_posix.rs",
+                        ),
+                        File(
+                            name: "cx_ipc_wasm32.rs",
+                        ),
+                        File(
+                            name: "cx_ipc_win32.rs",
+                        ),
+                        File(
+                            name: "cx_linux.rs",
+                        ),
+                        File(
+                            name: "cx_macos.rs",
+                        ),
+                        File(
+                            name: "cx_metal.rs",
+                        ),
+                        File(
+                            name: "cx_metalsl.rs",
+                        ),
+                        File(
+                            name: "cx_opengl.rs",
+                        ),
+                        File(
+                            name: "cx_wasm32.rs",
+                        ),
+                        File(
+                            name: "cx_webgl.js",
+                        ),
+                        File(
+                            name: "cx_webgl.rs",
+                        ),
+                        File(
+                            name: "cx_win10.rs",
+                        ),
+                        File(
+                            name: "cx_win32.rs",
+                        ),
+                        File(
+                            name: "cx_xlib.rs",
+                        ),
+                        File(
+                            name: "elements.rs",
+                        ),
+                        File(
+                            name: "events.rs",
+                        ),
+                        File(
+                            name: "fonts.rs",
+                        ),
+                        File(
+                            name: "lib.rs",
+                        ),
+                        File(
+                            name: "math.rs",
+                        ),
+                        File(
+                            name: "pass.rs",
+                        ),
+                        File(
+                            name: "quad.rs",
+                        ),
+                        File(
+                            name: "shader.rs",
+                        ),
+                        File(
+                            name: "shadergen.rs",
+                        ),
+                        File(
+                            name: "text.rs",
+                        ),
+                        File(
+                            name: "texture.rs",
+                        ),
+                        File(
+                            name: "turtle.rs",
+                        ),
+                        File(
+                            name: "view.rs",
+                        ),
+                        File(
+                            name: "window.rs",
+                        ),
+                    ],
+                ),
+                Folder(
+                    name: "vector",
+                    folder: [
+                        Folder(
+                            name: "font",
+                            folder: [
+                                Folder(
+                                    name: "src",
+                                    folder: [
+                                        File(
+                                            name: "font.rs",
+                                        ),
+                                        File(
+                                            name: "glyph.rs",
+                                        ),
+                                        File(
+                                            name: "horizontal_metrics.rs",
+                                        ),
+                                        File(
+                                            name: "lib.rs",
+                                        ),
+                                        File(
+                                            name: "outline.rs",
+                                        ),
+                                        File(
+                                            name: "outline_point.rs",
+                                        ),
+                                    ],
+                                ),
+                                File(
+                                    name: "Cargo.toml",
+                                ),
+                            ],
+                        ),
+                        Folder(
+                            name: "geometry",
+                            folder: [
+                                Folder(
+                                    name: "src",
+                                    folder: [
+                                        File(
+                                            name: "affine_transformation.rs",
+                                        ),
+                                        File(
+                                            name: "f32_ext.rs",
+                                        ),
+                                        File(
+                                            name: "lib.rs",
+                                        ),
+                                        File(
+                                            name: "line_segment.rs",
+                                        ),
+                                        File(
+                                            name: "linear_transformation.rs",
+                                        ),
+                                        File(
+                                            name: "point.rs",
+                                        ),
+                                        File(
+                                            name: "quadratic_segment.rs",
+                                        ),
+                                        File(
+                                            name: "rectangle.rs",
+                                        ),
+                                        File(
+                                            name: "transform.rs",
+                                        ),
+                                        File(
+                                            name: "transformation.rs",
+                                        ),
+                                        File(
+                                            name: "trapezoid.rs",
+                                        ),
+                                        File(
+                                            name: "vector.rs",
+                                        ),
+                                    ],
+                                ),
+                                File(
+                                    name: "Cargo.toml",
+                                ),
+                            ],
+                        ),
+                        Folder(
+                            name: "internal_iter",
+                            folder: [
+                                Folder(
+                                    name: "src",
+                                    folder: [
+                                        File(
+                                            name: "extend_from_internal_iterator.rs",
+                                        ),
+                                        File(
+                                            name: "from_internal_iterator.rs",
+                                        ),
+                                        File(
+                                            name: "internal_iterator.rs",
+                                        ),
+                                        File(
+                                            name: "into_internal_iterator.rs",
+                                        ),
+                                        File(
+                                            name: "lib.rs",
+                                        ),
+                                    ],
+                                ),
+                                File(
+                                    name: "Cargo.toml",
+                                ),
+                            ],
+                        ),
+                        Folder(
+                            name: "path",
+                            folder: [
+                                Folder(
+                                    name: "src",
+                                    folder: [
+                                        File(
+                                            name: "lib.rs",
+                                        ),
+                                        File(
+                                            name: "line_path.rs",
+                                        ),
+                                        File(
+                                            name: "line_path_command.rs",
+                                        ),
+                                        File(
+                                            name: "line_path_iterator.rs",
+                                        ),
+                                        File(
+                                            name: "path.rs",
+                                        ),
+                                        File(
+                                            name: "path_command.rs",
+                                        ),
+                                        File(
+                                            name: "path_iterator.rs",
+                                        ),
+                                    ],
+                                ),
+                                File(
+                                    name: "Cargo.toml",
+                                ),
+                            ],
+                        ),
+                        Folder(
+                            name: "trapezoidator",
+                            folder: [
+                                Folder(
+                                    name: "src",
+                                    folder: [
+                                        File(
+                                            name: "lib.rs",
+                                        ),
+                                    ],
+                                ),
+                                File(
+                                    name: "Cargo.toml",
+                                ),
+                            ],
+                        ),
+                        Folder(
+                            name: "ttf_parser",
+                            folder: [
+                                Folder(
+                                    name: "src",
+                                    folder: [
+                                        File(
+                                            name: "lib.rs",
+                                        ),
+                                    ],
+                                ),
+                                Folder(
+                                    name: "tests",
+                                    folder: [
+                                        File(
+                                            name: "test.rs",
+                                        ),
+                                    ],
+                                ),
+                                File(
+                                    name: "Cargo.toml",
+                                ),
+                            ],
+                        ),
+                    ],
+                ),
+                File(
+                    name: "Cargo.toml",
+                ),
+            ],
+        ),
+        Folder(
+            name: "resources",
+            folder: [],
+        ),
+        Folder(
+            name: "tools",
+            folder: [
+                Folder(
+                    name: "csvproc",
+                    folder: [
+                        Folder(
+                            name: "src",
+                            folder: [
+                                File(
+                                    name: "main.rs",
+                                ),
+                            ],
+                        ),
+                        File(
+                            name: "Cargo.toml",
+                        ),
+                    ],
+                ),
+                Folder(
+                    name: "testhub",
+                    folder: [
+                        Folder(
+                            name: "src",
+                            folder: [
+                                File(
+                                    name: "main.rs",
+                                ),
+                            ],
+                        ),
+                        File(
+                            name: "Cargo.toml",
+                        ),
+                    ],
+                ),
+                File(
+                    name: "build_index.js",
+                ),
+                File(
+                    name: "devserver.js",
+                ),
+                File(
+                    name: "devwebsocket.js",
+                ),
+            ],
+        ),
+        Folder(
+            name: "widget",
+            folder: [
+                Folder(
+                    name: "src",
+                    folder: [
+                        File(
+                            name: "button.rs",
+                        ),
+                        File(
+                            name: "desktopbutton.rs",
+                        ),
+                        File(
+                            name: "desktopwindow.rs",
+                        ),
+                        File(
+                            name: "dock.rs",
+                        ),
+                        File(
+                            name: "icons.rs",
+                        ),
+                        File(
+                            name: "lib.rs",
+                        ),
+                        File(
+                            name: "list.rs",
+                        ),
+                        File(
+                            name: "scrollbar.rs",
+                        ),
+                        File(
+                            name: "scrollview.rs",
+                        ),
+                        File(
+                            name: "splitter.rs",
+                        ),
+                        File(
+                            name: "style.rs",
+                        ),
+                        File(
+                            name: "tab.rs",
+                        ),
+                        File(
+                            name: "tabclose.rs",
+                        ),
+                        File(
+                            name: "tabcontrol.rs",
+                        ),
+                    ],
+                ),
+                File(
+                    name: "Cargo.toml",
+                ),
+            ],
+        ),
+        Folder(
+            name: "workspace",
+            folder: [
+                Folder(
+                    name: "src",
+                    folder: [
+                        File(
+                            name: "main.rs",
+                        ),
+                    ],
+                ),
+                File(
+                    name: "Cargo.toml",
+                ),
+            ],
+        ),
+        File(
+            name: "Cargo.toml",
+        ),
+        File(
+            name: "example.html",
+        ),
+        File(
+            name: "index.html",
+        ),
+        File(
+            name: "index.ron",
+        ),
+        File(
+            name: "makepad_settings.ron",
+        ),
+        File(
+            name: "makepad_state.ron",
+        ),
+        File(
+            name: "todo.txt",
+        ),
+    ],
+)

@@ -8,9 +8,10 @@ mod rusteditor;
 pub use crate::rusteditor::*;
 pub mod codeicon;
 pub use crate::codeicon::*;
-pub mod keyboard;
-pub use crate::keyboard::*;
 mod jseditor;
 pub use crate::jseditor::*;
+mod plaineditor;
+pub use crate::plaineditor::*;
+
 //mod texteditor;
 //pub use crate::texteditor::*;

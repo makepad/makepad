@@ -8,27 +8,21 @@ pub struct RustEditor {
     pub code_editor: CodeEditor,
 }
 
-#[derive(Clone, PartialEq)]
-pub enum RustEditorEvent {
-    None,
-    Change
-}
-
 impl RustEditor {
     pub fn style(cx: &mut Cx) -> Self {
-        let rust_editor = Self {
+        let editor = Self {
             code_editor: CodeEditor::style(cx),
         };
         //tab.animator.default = tab.anim_default(cx);
-        rust_editor
+        editor
     }
 
-    
+      
     pub fn handle_rust_editor(&mut self, cx: &mut Cx, event: &mut Event, text_buffer: &mut TextBuffer) -> CodeEditorEvent {
         let ce = self.code_editor.handle_code_editor(cx, event, text_buffer);
         match ce {
             CodeEditorEvent::AutoFormat => {
-                let formatted = RustTokenizer::auto_format(text_buffer).out_lines;
+                let formatted = RustTokenizer::auto_format(text_buffer, false).out_lines;
                 self.code_editor.cursors.replace_lines_formatted(formatted, text_buffer);
                 self.code_editor.view.redraw_view_area(cx);
             },
@@ -252,6 +246,14 @@ impl RustTokenizer {
                     }
                     return TokenType::Operator;
                 },
+                '^' => {
+                    chunk.push(state.cur);
+                    if state.next == '=' {
+                        chunk.push(state.next);
+                        state.advance();
+                    }
+                    return TokenType::Operator;
+                },
                 '+' => {
                     chunk.push(state.cur);
                     if state.next == '=' {
@@ -282,6 +284,11 @@ impl RustTokenizer {
                     if state.next == '.' {
                         chunk.push(state.next);
                         state.advance();
+                        if state.next == '=' {
+                            chunk.push(state.next);
+                            state.advance();
+                            return TokenType::Splat;
+                        }
                         return TokenType::Splat;
                     }
                     return TokenType::Operator;
@@ -551,7 +558,7 @@ impl RustTokenizer {
             'd' =>{
                 if state.keyword(chunk, "yn") {
                     return TokenType::Keyword
-                }
+                } 
             },
             'e' => {
                 if state.keyword(chunk, "lse") {
@@ -737,7 +744,7 @@ impl RustTokenizer {
     }
     
     // because rustfmt is such an insane shitpile to compile or use as a library, here is a stupid version.
-    pub fn auto_format(text_buffer: &mut TextBuffer) -> FormatOutput {
+    pub fn auto_format(text_buffer: &mut TextBuffer, force_newlines:bool) -> FormatOutput {
         
         // extra spacey setting that rustfmt seems to do, but i don't like
         let extra_spacey = false;
@@ -815,7 +822,7 @@ impl RustTokenizer {
                     }
                     
                     paren_stack.push(ParenStack {
-                        expecting_newlines: false,
+                        expecting_newlines: force_newlines,
                         expected_indent: expected_indent,
                         angle_counter: 0
                     });
@@ -1021,7 +1028,7 @@ impl RustTokenizer {
                 },
                 // these are followeable by non unary operators
                 TokenType::Call | TokenType::String | TokenType::Regex | TokenType::Number |
-                TokenType::Bool | TokenType::Unexpected => {
+                TokenType::Bool | TokenType::Unexpected | TokenType::Error | TokenType::Warning | TokenType::Defocus=> {
                     is_unary_operator = false;
                     paren_stack.last_mut().unwrap().angle_counter = 0;
                     

@@ -12,8 +12,8 @@ edition = "2018"
 #bgcodegen-units = 1
 
 [dependencies]
-serde_json = "*"
 serde = { version = "1.0", features = ["derive"] }
+ron = "0.5"
 
 [dependencies.widget]
 path="../widget"
@@ -26,3 +26,6 @@ path="../render"
 
 [dependencies.terminal]
 path="./terminal"
+
+[dependencies.hub]
+path="./hub"

@@ -16,7 +16,7 @@ pub struct CxDesktop {
 impl Default for CxDesktop {
     fn default() -> CxDesktop {
         CxDesktop {
-            file_read_id: 1,
+            file_read_id: 1, 
             file_reads: Vec::new(),
             profiler_list: Vec::new(),
             profiler_totals: Vec::new()

@@ -6,8 +6,6 @@ pub struct TabClose {
     pub bg: Quad,
     pub text: Text,
     pub animator: Animator,
-    pub anim_over: Anim,
-    pub anim_down: Anim,
     pub margin: Margin,
     pub _bg_area: Area,
 }
@@ -20,24 +18,34 @@ impl TabClose {
                 ..Quad::style(cx)
             },
             text: Text::style(cx),
-            animator: Animator::new(Anim::new(Play::Cut {duration: 0.2}, vec![
-                Track::color("bg.color", Ease::Lin, vec![(1.0, color("#a"))]),
-                Track::float("bg.hover", Ease::Lin, vec![(1.0, 0.)]),
-                Track::float("bg.down", Ease::Lin, vec![(1.0, 0.)]),
-            ])),
-            anim_over: Anim::new(Play::Cut {duration: 0.2}, vec![
-                Track::color("bg.color", Ease::Lin, vec![(0.0, color("#f")), (1.0, color("#f"))]),
-                Track::float("bg.down", Ease::Lin, vec![(1.0, 0.)]),
-                Track::float("bg.hover", Ease::Lin, vec![(0.0, 1.0), (1.0, 1.0)]),
-            ]),
-            anim_down: Anim::new(Play::Cut {duration: 0.2}, vec![
-                Track::color("bg.color", Ease::Lin, vec![(0.0, color("#f55")), (1.0, color("#f55"))]),
-                Track::float("bg.hover", Ease::Lin, vec![(1.0, 1.0)]),
-                Track::float("bg.down", Ease::OutExp, vec![(0.0, 0.0), (1.0, 3.1415 * 0.5)]),
-            ]),
+            animator: Animator::new(Self::get_default_anim(cx)),
             margin: Margin::zero(),
             _bg_area: Area::Empty,
         }
+    }
+    
+    pub fn get_default_anim(cx:&Cx)->Anim{
+        Anim::new(Play::Cut {duration: 0.2}, vec![
+            Track::color(cx.id("bg.color"), Ease::Lin, vec![(1.0, color("#a"))]),
+            Track::float(cx.id("bg.hover"), Ease::Lin, vec![(1.0, 0.)]),
+            Track::float(cx.id("bg.down"), Ease::Lin, vec![(1.0, 0.)]),
+        ])
+    }
+    
+    pub fn get_over_anim(cx:&Cx)->Anim{
+        Anim::new(Play::Cut {duration: 0.2}, vec![
+            Track::color(cx.id("bg.color"), Ease::Lin, vec![(0.0, color("#f")), (1.0, color("#f"))]),
+            Track::float(cx.id("bg.down"), Ease::Lin, vec![(1.0, 0.)]),
+            Track::float(cx.id("bg.hover"), Ease::Lin, vec![(0.0, 1.0), (1.0, 1.0)]),
+        ])
+    }
+    
+    pub fn get_down_anim(cx:&Cx)->Anim{
+        Anim::new(Play::Cut {duration: 0.2}, vec![
+            Track::color(cx.id("bg.color"), Ease::Lin, vec![(0.0, color("#f55")), (1.0, color("#f55"))]),
+            Track::float(cx.id("bg.hover"), Ease::Lin, vec![(1.0, 1.0)]),
+            Track::float(cx.id("bg.down"), Ease::OutExp, vec![(0.0, 0.0), (1.0, 3.1415 * 0.5)]),
+        ])
     }
 
     pub fn def_bg_shader() -> ShaderGen {
@@ -67,29 +75,30 @@ impl TabClose {
         }) {
             Event::Animate(ae) => self.animator.write_area(cx, self._bg_area, "bg.", ae.time),
             Event::FingerDown(_fe) => {
-                self.animator.play_anim(cx, self.anim_down.clone());
+                self.animator.play_anim(cx, Self::get_down_anim(cx));
+                cx.set_down_mouse_cursor(MouseCursor::Hand);
                 return ButtonEvent::Down;
             },
             Event::FingerHover(fe) => {
-                cx.set_hover_mouse_cursor(MouseCursor::Default);
+                cx.set_hover_mouse_cursor(MouseCursor::Hand);
                 match fe.hover_state {
                     HoverState::In => if fe.any_down {
-                        self.animator.play_anim(cx, self.anim_down.clone())
+                        self.animator.play_anim(cx, Self::get_down_anim(cx))
                     }
                     else {
-                        self.animator.play_anim(cx, self.anim_over.clone())
+                        self.animator.play_anim(cx, Self::get_over_anim(cx))
                     },
-                    HoverState::Out => self.animator.play_default(cx),
+                    HoverState::Out => self.animator.play_anim(cx, Self::get_default_anim(cx)),
                     _ => ()
                 }
             },
             Event::FingerUp(fe) => if fe.is_over {
-                if !fe.is_touch {self.animator.play_anim(cx, self.anim_over.clone())}
-                else {self.animator.play_default(cx)}
+                if !fe.is_touch {self.animator.play_anim(cx, Self::get_over_anim(cx))}
+                else {self.animator.play_anim(cx, Self::get_default_anim(cx))}
                 return ButtonEvent::Clicked;
             }
             else {
-                self.animator.play_default(cx);
+                self.animator.play_anim(cx, Self::get_default_anim(cx));
                 return ButtonEvent::Up;
             }
             _ => ()
@@ -98,10 +107,10 @@ impl TabClose {
     }
     
     pub fn draw_tab_close(&mut self, cx: &mut Cx) {
-        self.bg.color = self.animator.last_color("bg.color");
+        self.bg.color = self.animator.last_color(cx.id("bg.color"));
         let bg_inst = self.bg.draw_quad_walk(cx, Bounds::Fix(10.), Bounds::Fix(10.), self.margin);
-        bg_inst.push_float(cx, self.animator.last_float("bg.hover"));
-        bg_inst.push_float(cx, self.animator.last_float("bg.down"));
+        bg_inst.push_float(cx, self.animator.last_float(cx.id("bg.hover")));
+        bg_inst.push_float(cx, self.animator.last_float(cx.id("bg.down")));
         self._bg_area = bg_inst.into_area();
         self.animator.update_area_refs(cx, self._bg_area); // if our area changed, update animation
     }

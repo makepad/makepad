@@ -216,6 +216,10 @@ impl Cx{
                             }
                         }
                     },
+                    Event::Signal{..}=>{
+                        self.call_event_handler(&mut event_handler, &mut event);
+                        self.call_signals(&mut event_handler);
+                    },
                     Event::None => {
                     },
                     _ => {

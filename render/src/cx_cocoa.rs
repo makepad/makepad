@@ -1,6 +1,6 @@
-// Life is too short for leaky abstractions.
+//  Life is too short for leaky abstractions.
 // Gleaned/learned/templated from https://github.com/tomaka/winit/blob/master/src/platform/macos/
-
+  
 use std::collections::HashMap;
 
 use cocoa::base::{id, nil};
@@ -19,7 +19,7 @@ static mut GLOBAL_COCOA_APP: *mut CocoaApp = 0 as *mut _;
 #[link(name = "Foundation", kind = "framework")]
 extern {
     pub static NSRunLoopCommonModes: id;
-}
+}  
 
 use crate::cx::*;
 
@@ -410,7 +410,6 @@ impl CocoaApp {
             (*post_delegate_instance).set_ivar("cocoa_app_ptr", GLOBAL_COCOA_APP as *mut _ as *mut c_void);
             (*post_delegate_instance).set_ivar("signal_id", signal_id);
             (*post_delegate_instance).set_ivar("value", value);
-            
             let nstimer: id = msg_send![
                 class!(NSTimer),
                 timerWithTimeInterval: 0.
@@ -515,6 +514,7 @@ impl CocoaApp {
                 value: value
             })
         ]);
+        self.do_callback(&mut vec![Event::Paint]);
     }
     
     pub fn send_paint_event(&mut self) {

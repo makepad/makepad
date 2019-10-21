@@ -45,7 +45,7 @@ impl Cx {
                         *zbias += zbias_step;
                     }
                 }
-    
+                
                 if draw_call.uniforms_dirty {
                     draw_call.uniforms_dirty = false;
                     //draw_call.platform.uni_dr.update_with_f32_data(device, &draw_call.uniforms);
@@ -139,7 +139,7 @@ impl Cx {
             }
             
             color_attachment.set_store_action(MTLStoreAction::Store);
-
+            
             match color_texture.clear_color{
                 ClearColor::InitWith(color)=>{
                     if is_initial{
@@ -578,12 +578,4 @@ impl MetalBuffer {
         }
         elem.used = data.len()
     }
-}
-
-use closefds::*;
-use std::process::{Command, Child, Stdio};
-use std::os::unix::process::{CommandExt};
-
-pub fn spawn_process_command(cmd: &str, args: &[&str], current_dir: &str) -> Result<Child, std::io::Error> {
-    unsafe {Command::new(cmd) .args(args) .pre_exec(close_fds_on_exec(vec![0, 1, 2]).unwrap()) .stdout(Stdio::piped()) .stderr(Stdio::piped()) .current_dir(current_dir) .spawn()}
 }
