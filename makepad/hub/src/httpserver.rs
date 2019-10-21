@@ -60,10 +60,12 @@ impl HttpServer {
                         };
                         match rx_write.recv_timeout(Duration::from_secs(30)) {
                             Ok(path) => { // let the watcher know
-                                println!("Got filechange! {}", path);
+                                let _ = tcp_stream.write("HTTP/1.1 200 Ok\r\n".as_bytes());
+                                let _ = tcp_stream.shutdown(Shutdown::Both);
                             },
                             Err(_) => { // close gracefully
-                                
+                                let _ = tcp_stream.write("HTTP/1.1 201 Retry\r\n".as_bytes());
+                                let _ = tcp_stream.shutdown(Shutdown::Both);
                             }
                         }
                         // remove from our watchers array

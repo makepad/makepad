@@ -333,7 +333,7 @@ impl LogList {
         }
     } 
     
-    pub fn draw_log_list(&mut self, cx: &mut Cx, bm: &BuildManager) {
+    pub fn draw_log_list(&mut self, cx: &mut Cx, bm: &BuildManager) { 
         //        println!("REDRAW!");
         let item_draw = &self.item_draw;
         self.list.set_list_len(cx, bm.log_items.len(), |cx, index|{
