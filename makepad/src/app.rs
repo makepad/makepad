@@ -436,7 +436,7 @@ impl App {
                     self.storage.file_tree_file_read = cx.file_read("index.ron");
                     self.default_layout(cx);
                 }
-                
+                  
             },
             Event::KeyDown(ke) => match ke.key_code {
                 KeyCode::KeyR => if ke.modifiers.logo || ke.modifiers.control {

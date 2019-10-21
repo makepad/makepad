@@ -473,9 +473,23 @@ impl HubWorkspace {
                                 if !any_errors {
                                     artifact_path = None;
                                     if let Some(executable) = &parsed.executable {
-                                        if !executable.ends_with(".rmeta") && abs_root_path.len() + 1< executable.len() {
+                                        if !executable.ends_with(".rmeta") && abs_root_path.len() + 1 < executable.len() {
                                             let last = executable.clone().split_off(abs_root_path.len() + 1);
                                             artifact_path = Some(last);
+                                        }
+                                    }
+                                    // detect wasm files being build and tell the http server
+                                    if let Some(filenames) = &parsed.filenames{
+                                        for filename in filenames{
+                                            if filename.ends_with(".wasm") && abs_root_path.len() + 1 < filename.len() {
+                                                let last = filename.clone().split_off(abs_root_path.len() + 1);
+                                                // let our http server know of our filechange
+                                                if let Some(artifact_path) = &artifact_path{
+                                                    if let Ok(mut http_server) = http_server.lock() {
+                                                        http_server.send_file_change(&last);
+                                                    };
+                                                }
+                                            }
                                         }
                                     }
                                 }
@@ -487,13 +501,6 @@ impl HubWorkspace {
                     // do we have any errors?
                     break;
                 }
-            }
-            
-            // let our http server know of our filechange
-            if let Some(artifact_path) = &artifact_path{
-                if let Ok(mut http_server) = http_server.lock() {
-                    http_server.send_file_change(&artifact_path);
-                };
             }
             
             // process ends as well
