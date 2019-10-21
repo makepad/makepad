@@ -16,24 +16,27 @@ We are not accepting pull requests or feature requests or documenting the code f
 IMPORTANT INFO RUNNING THE LOCAL VERSION:
 We are dogfooding the local version ourselves, but it needs a 'current project' which is hardcoded for now. Check out makepad repo 'again' under ./edit_repo in the root with:
 
+The workspace server needs a local 'key.bin' in the makepad directory root. Just put some random garbage in there.
+Future versions will autogenerate it. The workspace server is networked and secured with this key.
+
 ./clone_edit_repo.sh<br/>
 Start makepad:<br/>
 cargo run -p makepad --release<br/>
 
 Features:
 
-Renderstack 2D - Currently working on new Font stack for VR/LowDPI fonts<br/>
+Renderstack 2D - Needs vector API but otherwise working<br/>
 UI Library - Mostly there, needs textinput control/dropwdown/menu<br/>
 3D/VR rendering - Work just started<br/>
 Code editor - Mostly there<br/>
 Shader compiler - Mostly there<br/>
-Buildsystem - Work just started<br/>
+Buildsystem - Has networked workspace server with build<br/>
 Platforms:<br/>
 OSX + Metal - WORKING<br/>
 Win32 + DirectX11 - WORKING<br/>
 WASM + WebGL - WORKING<br/>
 Linux + OpenGL - WORKING<br/>
-Quest Android + OpenGL - TODO<br/>
+Quest Android + OpenGL - In progress<br/>
 
 
 Wasm:
