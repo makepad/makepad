@@ -1,7 +1,5 @@
 use render::*;
 use widget::*;
-//use miniserde::{json,  Deserialize};
-use serde::*;
 
 #[derive(Clone)]
 pub struct FileTree {
