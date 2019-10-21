@@ -494,15 +494,18 @@ impl HubWorkspace {
                                             if filename.ends_with(".wasm") && abs_root_path.len() + 1 < filename.len() {
                                                 let last = filename.clone().split_off(abs_root_path.len() + 1);
                                                 // lets strip this wasm file
-                                                if let Ok(data) = fs::read(&last){
+                                                if let Ok(data) = fs::read(&filename){
                                                     if let Ok(strip) = wasm_strip(&data){
-                                                        if let Err(_) = fs::write(&last, strip){
-                                                            println!("Cannot write stripped wasm {}", last);
+                                                        if let Err(_) = fs::write(&filename, strip){
+                                                            println!("Cannot write stripped wasm {}", filename);
                                                         }
                                                     }
                                                     else{
-                                                        println!("Cannot parse wasm {}", last);
+                                                        println!("Cannot parse wasm {}", filename);
                                                     }
+                                                }
+                                                else{
+                                                    println!("Cannot read wasm {}", filename);
                                                 }
                                                 
                                                 // let our http server know of our filechange
