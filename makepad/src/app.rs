@@ -26,7 +26,7 @@ impl Default for AppSettings {
             builds: vec![BuildTarget {
                 workspace: "makepad".to_string(),
                 package: "makepad".to_string(),
-                target: "check".to_string()
+                build: "check".to_string()
             }]
         }
     }
@@ -36,7 +36,7 @@ impl Default for AppSettings {
 pub struct BuildTarget {
     pub workspace: String,
     pub package: String,
-    pub target: String
+    pub build: String
 }
 
 pub struct AppStorage {

@@ -33,7 +33,7 @@ const SIGNAL_BUILD_MANAGER_ARTIFACT_EXEC_END:usize = 3;
 pub struct BuildActiveTarget {
     pub workspace: String,
     pub package: String,
-    pub target: String,
+    pub build: String,
     pub artifact_path: Option<String>,
     pub cargo_uid: HubUid,
     pub artifact_uid: HubUid,
@@ -185,7 +185,7 @@ impl BuildManager{
                             col:0,
                             tail:0,
                             head:0,
-                            body:format!("Workspace cannot find build {}:{}:{}", active_target.workspace,active_target.package,active_target.target),
+                            body:format!("Workspace cannot find build {}:{}:{}", active_target.workspace,active_target.package,active_target.build),
                             rendered:None,
                             explanation:None,
                             level:HubLogItemLevel::Error
@@ -298,13 +298,13 @@ impl BuildManager{
                 msg: HubMsg::CargoExec {
                     uid: uid.clone(),
                     package: build_target.package.clone(),
-                    target: build_target.target.clone()
+                    build: build_target.build.clone()
                 }
             });
             self.active_targets.push(BuildActiveTarget{
                 workspace: build_target.workspace.to_string(),
                 package: build_target.package.to_string(),
-                target: build_target.target.to_string(),
+                build: build_target.build.to_string(),
                 artifact_path: None,
                 cargo_uid: uid,
                 artifact_uid: HubUid::zero()

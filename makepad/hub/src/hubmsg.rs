@@ -19,7 +19,7 @@ pub enum HubMsg {
     CargoExec {
         uid: HubUid,
         package: String,
-        target: String
+        build: String
     },
     
     CargoExecFail{
@@ -161,7 +161,7 @@ impl PartialOrd for WorkspaceFileTreeNode {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HubCargoPackage {
     pub package_name: String,
-    pub targets: Vec<String>,
+    pub builds: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -178,7 +178,7 @@ impl HubCargoPackage {
     pub fn new(package_name: &str, targets: &[&str]) -> HubCargoPackage {
         HubCargoPackage {
             package_name: package_name.to_string(),
-            targets: targets.iter().map( | v | v.to_string()).collect()
+            builds: targets.iter().map( | v | v.to_string()).collect()
         }
     }
 }

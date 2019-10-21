@@ -130,14 +130,14 @@ impl LogItemDraw {
                 self.text.draw_text(cx, "Running - ");
                 for active_target in &bm.active_targets {
                     if active_target.artifact_uid != HubUid::zero(){
-                        self.text.draw_text(cx, &format!("{}/{}:{} ", active_target.workspace, active_target.package, active_target.target));
+                        self.text.draw_text(cx, &format!("{}/{}:{} ", active_target.workspace, active_target.package, active_target.build));
                     }
                 }
             }
             else {
                 self.text.draw_text(cx, "Done ");
                 for active_target in &bm.active_targets {
-                    self.text.draw_text(cx, &format!("{}/{}:{} ", active_target.workspace, active_target.package, active_target.target));
+                    self.text.draw_text(cx, &format!("{}/{}:{} ", active_target.workspace, active_target.package, active_target.build));
                 }
             }
         }
@@ -147,7 +147,7 @@ impl LogItemDraw {
             self.text.draw_text(cx, &format!("Building ({}) ", bm.artifacts.len()));
             for active_target in &bm.active_targets {
                 if active_target.cargo_uid != HubUid::zero(){
-                    self.text.draw_text(cx, &format!("{}/{}:{} ", active_target.workspace, active_target.package, active_target.target));
+                    self.text.draw_text(cx, &format!("{}/{}:{} ", active_target.workspace, active_target.package, active_target.build));
                 }
             }
             if bm.exec_when_done {
