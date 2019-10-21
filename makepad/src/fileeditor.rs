@@ -81,7 +81,7 @@ impl FileEditor {
                 ..template.rust_editor.clone()
             })
         }
-        else if path.ends_with(".js") {
+        else if path.ends_with(".js") || path.ends_with(".html"){
             FileEditor::JS(JSEditor {
                 ..template.js_editor.clone()
             })

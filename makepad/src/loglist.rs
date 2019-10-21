@@ -182,7 +182,10 @@ impl LogList {
     pub fn style(cx: &mut Cx) -> Self {
         Self {
             item_draw: LogItemDraw::style(cx),
-            list: List::default(),
+            list: List{
+                tail_list = true;
+                ..List::default()
+            },
             view: ScrollView::style_hor_and_vert(cx),
         }
     }

@@ -13,3 +13,6 @@ pub use crate::hubserver::*;
 
 mod hubmsg;
 pub use crate::hubmsg::*;
+
+mod httpserver;
+pub use crate::httpserver::*;

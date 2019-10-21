@@ -59,21 +59,28 @@ fn main() {
     std::thread::spawn(move || {
         // lets start a Make proc
         let key = [1u8, 2u8, 3u8, 4u8];
-        HubWorkspace::run(&key, "makepad", "edit_repo", HubLog::None, | ws, htc | match htc.msg {
+        HubWorkspace::run(&key, "makepad", "edit_repo", HubLog::None, HttpServe::Local(2001), | ws, htc | match htc.msg {
             HubMsg::CargoPackagesRequest {uid} => {
+                let targets = &["check","debug","release"];
                 ws.cargo_packages(htc.from, uid, vec![
-                    HubCargoPackage::new("makepad", &["check", "makepad", "workspace"])
-                ])
+                    HubCargoPackage::new("workspace", targets),
+                    HubCargoPackage::new("makepad", targets),
+                    HubCargoPackage::new("csvproc", targets),
+                    HubCargoPackage::new("ui_example", targets),
+                ]);
             },
-            HubMsg::CargoExec {uid, package, target} => {
-                match package.as_ref() {
-                    "makepad" => match target.as_ref() {
-                        "check" => ws.cargo_exec(uid, &["check", "-p", &package]),
-                        "makepad" => ws.cargo_exec(uid, &["build", "-p", "makepad"]),
-                        "workspace" => ws.cargo_exec(uid, &["build", "-p", "workspace"]),
-                        _ => ()
+            HubMsg::CargoExec {uid, package, target}=>{
+                match target.as_ref(){
+                    "release"=>{
+                        ws.cargo_exec(uid, &["build", "--release", "-p", &package], &[])
                     },
-                    _ => ()
+                    "debug"=>{
+                        ws.cargo_exec(uid, &["build", "-p", &package], &[])
+                    },
+                    "check"=>{
+                        ws.cargo_exec(uid, &["check", "-p", &package], &[])
+                    },
+                    _=>ws.cargo_exec_fail(uid, &package, &target)
                 }
             },
             _ => ws.default(htc)

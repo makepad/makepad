@@ -1,6 +1,7 @@
 use crate::process::*;
 use crate::hubmsg::*;
 use crate::hubclient::*;
+use crate::httpserver::*;
 
 use serde::{Deserialize};
 use std::sync::{Arc, Mutex};
@@ -10,6 +11,7 @@ use std::sync::{mpsc};
 
 pub struct HubWorkspace {
     pub hub_client: HubClient,
+    pub http_server: Arc<Mutex<HttpServer>>,
     pub workspace: String,
     pub root_path: String,
     pub abs_root_path: String,
@@ -23,9 +25,23 @@ pub struct HubWsProcess {
     _thread: Option<std::thread::JoinHandle<()>>
 }
 
+pub enum HttpServe{
+    Disabled,
+    Local(u16),
+    All(u16),
+    Interface((u16, [u8;4]))
+}
+
 impl HubWorkspace {
-    pub fn run<F>(key: &[u8], workspace: &str, root_path: &str, hub_log: HubLog, mut event_handler: F)
+    pub fn run<F>(key: &[u8], workspace: &str, root_path: &str, hub_log: HubLog, http_serve:HttpServe, mut event_handler: F)
     where F: FnMut(&mut HubWorkspace, HubToClientMsg) {
+    
+        let http_server = match http_serve{
+            HttpServe::Disabled=>Arc::new(Mutex::new(HttpServer::default())),
+            HttpServe::Local(port)=>HttpServer::start_http_server(port, [127,0,0,1], root_path),
+            HttpServe::All(port)=>HttpServer::start_http_server(port, [0,0,0,0], root_path),
+            HttpServe::Interface((port, ip))=>HttpServer::start_http_server(port, ip, root_path),
+        };
         
         loop {
             if root_path.contains("..") || root_path.contains("./") || root_path.contains("\\") || root_path.starts_with("/") {
@@ -46,6 +62,7 @@ impl HubWorkspace {
             
             let mut hub_workspace = HubWorkspace {
                 hub_client: hub_client,
+                http_server: Arc::clone(&http_server),
                 workspace: workspace.to_string(),
                 root_path: root_path.to_string(),
                 abs_root_path: format!("{}/{}", std::env::current_dir().unwrap().display(), root_path),
@@ -364,6 +381,7 @@ impl HubWorkspace {
             out.join("/")
         }
         
+        let http_server = Arc::clone(&self.http_server);
         let thread = std::thread::spawn(move || {
             
             let mut any_errors = false;
@@ -469,6 +487,13 @@ impl HubWorkspace {
                 }
             }
             
+            // let our http server know of our filechange
+            if let Some(artifact_path) = &artifact_path{
+                if let Ok(mut http_server) = http_server.lock() {
+                    http_server.send_file_change(&artifact_path);
+                };
+            }
+            
             // process ends as well
             tx_write.send(ClientToHubMsg {
                 to: HubMsgTo::UI,
@@ -477,6 +502,7 @@ impl HubWorkspace {
                     artifact_path: artifact_path
                 }
             }).expect("tx_write fail");
+            
             
             // remove process from process list
             if let Ok(mut processes) = processes.lock() {
@@ -538,6 +564,11 @@ impl HubWorkspace {
         
         let done = std::fs::write(format!("{}/{}", self.root_path, path), &data).is_ok();
         
+        // lets check if any of our http friends had this file
+        if let Ok(mut http_server) = self.http_server.lock() {
+            http_server.send_file_change(path);
+        };
+
         self.hub_client.tx_write.send(ClientToHubMsg {
             to: HubMsgTo::Client(from),
             msg: HubMsg::FileWriteResponse {
