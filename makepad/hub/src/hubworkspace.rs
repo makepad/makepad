@@ -436,8 +436,8 @@ impl HubWorkspace {
                                     }
                                     // lets try to pull path out of rendered, this fixes some rust bugs
                                     let mut path = span.file_name;
-                                    let mut row = span.line_start as usize;
-                                    let mut col = span.column_start as usize;
+                                    let row = span.line_start as usize;
+                                    let col = span.column_start as usize;
                                     if let Some(rendered) = &message.rendered {
                                         let lines: Vec<&str> = rendered.split('\n').collect();
                                         if lines.len() >= 1 {

@@ -13,8 +13,8 @@ members = [
 
 
 [profile.release]
-#lto = true
-#opt-level = 'z'
-#panic = "abort"
+lto = true
+opt-level = 'z'
+panic = "abort"
 debug = true
-#codegen-units = 1
+codegen-units = 1

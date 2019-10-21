@@ -209,6 +209,114 @@ Folder(
                                 ),
                             ],
                         ),
+                        Folder(
+                            name: "wasmparser",
+                            folder: [
+                                Folder(
+                                    name: "src",
+                                    folder: [
+                                        Folder(
+                                            name: "readers",
+                                            folder: [
+                                                File(
+                                                    name: "code_section.rs",
+                                                ),
+                                                File(
+                                                    name: "data_count_section.rs",
+                                                ),
+                                                File(
+                                                    name: "data_section.rs",
+                                                ),
+                                                File(
+                                                    name: "element_section.rs",
+                                                ),
+                                                File(
+                                                    name: "export_section.rs",
+                                                ),
+                                                File(
+                                                    name: "function_section.rs",
+                                                ),
+                                                File(
+                                                    name: "global_section.rs",
+                                                ),
+                                                File(
+                                                    name: "import_section.rs",
+                                                ),
+                                                File(
+                                                    name: "init_expr.rs",
+                                                ),
+                                                File(
+                                                    name: "linking_section.rs",
+                                                ),
+                                                File(
+                                                    name: "memory_section.rs",
+                                                ),
+                                                File(
+                                                    name: "mod.rs",
+                                                ),
+                                                File(
+                                                    name: "module.rs",
+                                                ),
+                                                File(
+                                                    name: "name_section.rs",
+                                                ),
+                                                File(
+                                                    name: "operators.rs",
+                                                ),
+                                                File(
+                                                    name: "producers_section.rs",
+                                                ),
+                                                File(
+                                                    name: "reloc_section.rs",
+                                                ),
+                                                File(
+                                                    name: "section_reader.rs",
+                                                ),
+                                                File(
+                                                    name: "sourcemappingurl_section.rs",
+                                                ),
+                                                File(
+                                                    name: "start_section.rs",
+                                                ),
+                                                File(
+                                                    name: "table_section.rs",
+                                                ),
+                                                File(
+                                                    name: "type_section.rs",
+                                                ),
+                                            ],
+                                        ),
+                                        File(
+                                            name: "binary_reader.rs",
+                                        ),
+                                        File(
+                                            name: "lib.rs",
+                                        ),
+                                        File(
+                                            name: "limits.rs",
+                                        ),
+                                        File(
+                                            name: "operators_validator.rs",
+                                        ),
+                                        File(
+                                            name: "parser.rs",
+                                        ),
+                                        File(
+                                            name: "primitives.rs",
+                                        ),
+                                        File(
+                                            name: "tests.rs",
+                                        ),
+                                        File(
+                                            name: "validator.rs",
+                                        ),
+                                    ],
+                                ),
+                                File(
+                                    name: "Cargo.toml",
+                                ),
+                            ],
+                        ),
                         File(
                             name: "Cargo.toml",
                         ),

@@ -112,7 +112,13 @@ impl LogItemDraw {
             self.text.draw_text(cx, &format!("{}:{} - ", path, log_item.row));
         }
         self.text.color = self.message_color;
-        self.text.draw_text(cx, &format!("{}", log_item.body));
+        
+        if log_item.body.len()>500{
+            self.text.draw_text(cx, &log_item.body[0..500]);
+        }
+        else{
+            self.text.draw_text(cx, &log_item.body);
+        }
         
         let bg_area = self.item_bg.end_quad(cx, &bg_inst);
         list_item.animator.update_area_refs(cx, bg_area);
