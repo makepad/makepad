@@ -127,7 +127,6 @@ impl HttpServer {
     }
     
     pub fn send_file_change(&mut self, path:&str){
-        println!("SEND FILECHANGE {} {:?}", path, self.files_read);
         if !self.files_read.iter().find(|v| **v == path).is_none(){
             for (_, tx) in &self.watchers{
                 let _ = tx.send(format!("{{\"type\":\"file_change\",\"path\":\"{}\"}}", path.to_string()));

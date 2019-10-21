@@ -9,7 +9,7 @@ use crate::buildmanager::*;
 use crate::workspace_main;
 use std::collections::HashMap;
 use serde::*;
-use hub::*; 
+use hub::*;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct AppSettings {
@@ -72,7 +72,7 @@ pub struct AppState {
     pub windows: Vec<AppWindowState>
 }
 
-impl AppStorage {   
+impl AppStorage {
     
     pub fn load_settings(&mut self, cx: &mut Cx, utf8_data: &str) {
         match ron::de::from_str(utf8_data) {
@@ -227,7 +227,7 @@ impl App {
                                     title: "main.rs".to_string(),
                                     item: Panel::FileEditor {
                                         path: "examples/quad_example/src/main.rs".to_string(),
-                                        scroll_pos:Vec2::zero(),
+                                        scroll_pos: Vec2::zero(),
                                         editor_id: 1
                                     }
                                 }
@@ -417,7 +417,7 @@ impl App {
             Event::Construct => {
                 // start the workspace
                 if cx.platform_type.is_desktop() {
-                    std::thread::spawn(move || { 
+                    std::thread::spawn(move || {
                         workspace_main::main();
                     });
                     self.storage.app_state_file_read = cx.file_read("makepad_state.ron");
@@ -436,11 +436,11 @@ impl App {
                     self.storage.file_tree_file_read = cx.file_read("index.ron");
                     self.default_layout(cx);
                 }
-                  
+                
             },
             Event::KeyDown(ke) => match ke.key_code {
                 KeyCode::KeyR => if ke.modifiers.logo || ke.modifiers.control {
-                    self.reload_workspaces(); 
+                    self.reload_workspaces();
                 },
                 _ => ()
             },

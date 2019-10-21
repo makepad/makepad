@@ -29,6 +29,14 @@ pub fn main() {
             }
             ws.cargo_exec(uid, &args, &env);
         },
+        HubMsg::WorkspaceFileTreeRequest {uid} => {
+            ws.workspace_file_tree(
+                htc.from,
+                uid,
+                &[".json", ".toml", ".js", ".rs", ".txt", ".text", ".ron", ".html"],
+                Some("index.ron")
+            );
+        },
         _ => ws.default(htc)
     });
 }

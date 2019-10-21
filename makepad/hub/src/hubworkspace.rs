@@ -25,22 +25,22 @@ pub struct HubWsProcess {
     _thread: Option<std::thread::JoinHandle<()>>
 }
 
-pub enum HttpServe{
+pub enum HttpServe {
     Disabled,
     Local(u16),
     All(u16),
-    Interface((u16, [u8;4]))
+    Interface((u16, [u8; 4]))
 }
 
 impl HubWorkspace {
-    pub fn run<F>(key: &[u8], workspace: &str, root_path: &str, hub_log: HubLog, http_serve:HttpServe, mut event_handler: F)
+    pub fn run<F>(key: &[u8], workspace: &str, root_path: &str, hub_log: HubLog, http_serve: HttpServe, mut event_handler: F)
     where F: FnMut(&mut HubWorkspace, HubToClientMsg) {
-    
-        let http_server = match http_serve{
-            HttpServe::Disabled=>Arc::new(Mutex::new(HttpServer::default())),
-            HttpServe::Local(port)=>HttpServer::start_http_server(port, [127,0,0,1], root_path),
-            HttpServe::All(port)=>HttpServer::start_http_server(port, [0,0,0,0], root_path),
-            HttpServe::Interface((port, ip))=>HttpServer::start_http_server(port, ip, root_path),
+        
+        let http_server = match http_serve {
+            HttpServe::Disabled => Arc::new(Mutex::new(HttpServer::default())),
+            HttpServe::Local(port) => HttpServer::start_http_server(port, [127, 0, 0, 1], root_path),
+            HttpServe::All(port) => HttpServer::start_http_server(port, [0, 0, 0, 0], root_path),
+            HttpServe::Interface((port, ip)) => HttpServer::start_http_server(port, ip, root_path),
         };
         
         loop {
@@ -91,7 +91,12 @@ impl HubWorkspace {
     pub fn default(&mut self, htc: HubToClientMsg) {
         match htc.msg {
             HubMsg::WorkspaceFileTreeRequest {uid} => {
-                self.workspace_file_tree(htc.from, uid, &[".json", ".toml", ".js", ".rs", ".txt", ".text", ".ron", ".html"]);
+                self.workspace_file_tree(
+                    htc.from,
+                    uid,
+                    &[".json", ".toml", ".js", ".rs", ".txt", ".text", ".ron", ".html"],
+                    None
+                );
             },
             HubMsg::FileReadRequest {uid, path} => {
                 self.file_read(htc.from, uid, &path);
@@ -369,14 +374,14 @@ impl HubWorkspace {
         let workspace = self.workspace.clone();
         let abs_root_path = self.abs_root_path.clone();
         
-        fn de_relativize_path(path:&str)->String{
-            let splits:Vec<&str> = path.split("/").collect();
+        fn de_relativize_path(path: &str) -> String {
+            let splits: Vec<&str> = path.split("/").collect();
             let mut out = Vec::new();
-            for split in splits{
-                if split == ".." && out.len()>0{
+            for split in splits {
+                if split == ".." && out.len()>0 {
                     out.pop();
                 }
-                else{
+                else {
                     out.push(split);
                 }
             }
@@ -479,8 +484,8 @@ impl HubWorkspace {
                                         }
                                     }
                                     // detect wasm files being build and tell the http server
-                                    if let Some(filenames) = &parsed.filenames{
-                                        for filename in filenames{
+                                    if let Some(filenames) = &parsed.filenames {
+                                        for filename in filenames {
                                             if filename.ends_with(".wasm") && abs_root_path.len() + 1 < filename.len() {
                                                 let last = filename.clone().split_off(abs_root_path.len() + 1);
                                                 // let our http server know of our filechange
@@ -546,7 +551,7 @@ impl HubWorkspace {
             println!("file_read got relative path, ignoring {}", path);
             return
         }
-
+        
         let data = if let Ok(data) = std::fs::read(format!("{}/{}", self.root_path, path)) {
             Some(data)
         }
@@ -575,7 +580,7 @@ impl HubWorkspace {
         if let Ok(mut http_server) = self.http_server.lock() {
             http_server.send_file_change(path);
         };
-
+        
         self.hub_client.tx_write.send(ClientToHubMsg {
             to: HubMsgTo::Client(from),
             msg: HubMsg::FileWriteResponse {
@@ -586,11 +591,12 @@ impl HubWorkspace {
         }).expect("cannot send message");
     }
     
-    pub fn workspace_file_tree(&mut self, from: HubAddr, uid: HubUid, ext_inc: &[&str]) {
+    pub fn workspace_file_tree(&mut self, from: HubAddr, uid: HubUid, ext_inc: &[&str], ron_out:Option<&str>) {
         let tx_write = self.hub_client.tx_write.clone();
         let path = self.root_path.to_string();
         let workspace = self.workspace.to_string();
         let ext_inc: Vec<String> = ext_inc.to_vec().iter().map( | v | v.to_string()).collect();
+        let ron_out = if let Some(ron_out) = ron_out{Some(ron_out.to_string())}else{None};
         let _thread = std::thread::spawn(move || {
             
             fn read_recur(path: &str, ext_inc: &Vec<String>) -> Vec<WorkspaceFileTreeNode> {
@@ -627,15 +633,21 @@ impl HubWorkspace {
                 ret.sort();
                 ret
             }
+            let tree = WorkspaceFileTreeNode::Folder {
+                name: workspace.clone(),
+                folder: read_recur(&path, &ext_inc)
+            };
             
+            if let Some(ron_out) = ron_out{
+                let ron = ron::ser::to_string_pretty(&tree, ron::ser::PrettyConfig::default()).unwrap();
+                let _ = fs::write(ron_out, ron.as_bytes());
+            }
+
             tx_write.send(ClientToHubMsg {
                 to: HubMsgTo::Client(from),
                 msg: HubMsg::WorkspaceFileTreeResponse {
                     uid: uid,
-                    tree: WorkspaceFileTreeNode::Folder {
-                        name: workspace.clone(),
-                        folder: read_recur(&path, &ext_inc)
-                    }
+                    tree: tree
                 }
             }).expect("cannot send message");
             
