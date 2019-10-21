@@ -183,7 +183,7 @@ impl LogList {
         Self {
             item_draw: LogItemDraw::style(cx),
             list: List{
-                tail_list = true;
+                tail_list:true,
                 ..List::default()
             },
             view: ScrollView::style_hor_and_vert(cx),
