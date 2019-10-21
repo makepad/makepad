@@ -3,7 +3,7 @@ use hub::*;
 pub fn main() {
     let key = std::fs::read("./key.bin").unwrap();
     
-    HubWorkspace::run(&key, "makepad", "edit_repo", HubLog::All, HttpServe::Disabled, | ws, htc | match htc.msg {
+    HubWorkspace::run(&key, "makepad", "edit_repo", HubLog::None, HttpServe::Disabled, | ws, htc | match htc.msg {
         HubMsg::CargoPackagesRequest {uid} => {
             let targets = &["check","debug","release"];
             ws.cargo_packages(htc.from, uid, vec![

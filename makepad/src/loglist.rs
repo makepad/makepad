@@ -178,7 +178,7 @@ pub enum LogListEvent {
     None,
 }
 
-impl LogList {
+impl LogList { 
     pub fn style(cx: &mut Cx) -> Self {
         Self {
             item_draw: LogItemDraw::style(cx),

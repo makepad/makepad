@@ -91,7 +91,7 @@ impl HubWorkspace {
     pub fn default(&mut self, htc: HubToClientMsg) {
         match htc.msg {
             HubMsg::WorkspaceFileTreeRequest {uid} => {
-                self.workspace_file_tree(htc.from, uid, &[".json", ".toml", ".js", ".rs", ".txt", ".text", ".ron"]);
+                self.workspace_file_tree(htc.from, uid, &[".json", ".toml", ".js", ".rs", ".txt", ".text", ".ron", ".html"]);
             },
             HubMsg::FileReadRequest {uid, path} => {
                 self.file_read(htc.from, uid, &path);
