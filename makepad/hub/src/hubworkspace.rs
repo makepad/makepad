@@ -345,7 +345,9 @@ impl HubWorkspace {
     }
     
     pub fn cargo_exec(&mut self, uid: HubUid, args: &[&str], env: &[(&str, &str)]) {
-        
+        if let Ok(mut http_server) = self.http_server.lock() {
+            http_server.send_build_start();
+        };
         // lets start a thread
         let mut extargs = args.to_vec();
         extargs.push("--message-format=json");

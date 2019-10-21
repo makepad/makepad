@@ -417,7 +417,7 @@ impl App {
             Event::Construct => {
                 // start the workspace
                 if cx.platform_type.is_desktop() {
-                    std::thread::spawn(move || {
+                    std::thread::spawn(move || { 
                         workspace_main::main();
                     });
                     self.storage.app_state_file_read = cx.file_read("makepad_state.ron");

@@ -1943,12 +1943,13 @@
         req.addEventListener("load", function() {
             if (req.status === 201) return watchFileChange();
             if (req.status === 200) {
-                let msg = JSON.parse(req.response);
-                if msg.type == "file_change"{
+                var msg = JSON.parse(req.response);
+                if(msg.type == "file_change"){
                     location.href = location.href
                 }
-                if msg.type == "build_started"{
+                if(msg.type == "build_started"){
                     document.title = "Rebuilding..."
+                    watchFileChange();
                 }
             }
         })
