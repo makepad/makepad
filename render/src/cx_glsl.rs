@@ -544,7 +544,7 @@ impl<'a> SlCx<'a> {
             if i != 0{
                 out.push_str(", ");
             }
-            out.push_str(arg.sl);
+            out.push_str(&arg.sl);
         }
         out.push_str(")");
         return out;

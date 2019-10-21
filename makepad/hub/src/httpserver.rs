@@ -59,8 +59,14 @@ impl HttpServer {
                             http_server.watchers.push((watcher_id, tx_write));
                         };
                         match rx_write.recv_timeout(Duration::from_secs(30)) {
-                            Ok(path) => { // let the watcher know
-                                let _ = tcp_stream.write("HTTP/1.1 200 Ok\r\n".as_bytes());
+                            Ok(json_msg) => { // let the watcher know
+                                let data = json_msg.as_bytes();
+                                let header = format!(
+                                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                                    data.len()
+                                );
+                                write_bytes_to_tcp_stream_no_error(&mut tcp_stream, header.as_bytes());
+                                write_bytes_to_tcp_stream_no_error(&mut tcp_stream, &data);
                                 let _ = tcp_stream.shutdown(Shutdown::Both);
                             },
                             Err(_) => { // close gracefully
@@ -123,8 +129,14 @@ impl HttpServer {
     pub fn send_file_change(&mut self, path:&str){
         if !self.files_read.iter().find(|v| **v == path).is_none(){
             for (_, tx) in &self.watchers{
-                let _ = tx.send(path.to_string());
+                let _ = tx.send(format!("{{\"type\":\"file_change\",\"path\":\"{}\"}}", path.to_string()));
             }
+        }
+    }
+
+    pub fn send_build_start(&mut self){
+        for (_, tx) in &self.watchers{
+            let _ = tx.send(format!("{{\"type\":\"build_start\"}}"));
         }
     }
     

@@ -16,7 +16,7 @@ pub fn main() {
         },
         HubMsg::CargoExec {uid, package, build} => {
             let mut args = Vec::new();
-            let mut env = Vec::new();
+            let env = Vec::new();
             match build.as_ref() {
                 "release" => args.extend_from_slice(&["build", "--release", "-p", &package]),
                 "debug" => args.extend_from_slice(&["build", "--release", "-p", &package]),

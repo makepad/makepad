@@ -1943,8 +1943,13 @@
         req.addEventListener("load", function() {
             if (req.status === 201) return watchFileChange();
             if (req.status === 200) {
-                // do something with data, or not
-                location.href = location.href
+                let msg = JSON.parse(req.response);
+                if msg.type == "file_change"{
+                    location.href = location.href
+                }
+                if msg.type == "build_started"{
+                    document.title = "Rebuilding..."
+                }
             }
         })
         req.open("GET", "/$watch?" + ('' + Math.random()).slice(2))

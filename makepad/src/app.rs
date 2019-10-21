@@ -9,7 +9,7 @@ use crate::buildmanager::*;
 use crate::workspace_main;
 use std::collections::HashMap;
 use serde::*;
-use hub::*;
+use hub::*; 
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct AppSettings {
@@ -72,7 +72,7 @@ pub struct AppState {
     pub windows: Vec<AppWindowState>
 }
 
-impl AppStorage {
+impl AppStorage {   
     
     pub fn load_settings(&mut self, cx: &mut Cx, utf8_data: &str) {
         match ron::de::from_str(utf8_data) {
@@ -416,11 +416,10 @@ impl App {
         match event {
             Event::Construct => {
                 // start the workspace
-                std::thread::spawn(move || {
-                    workspace_main::main();
-                });
-                
                 if cx.platform_type.is_desktop() {
+                    std::thread::spawn(move || {
+                        workspace_main::main();
+                    });
                     self.storage.app_state_file_read = cx.file_read("makepad_state.ron");
                     self.storage.app_settings_file_read = cx.file_read("makepad_settings.ron");
                     
