@@ -1947,8 +1947,12 @@
                 if(msg.type == "file_change"){
                     location.href = location.href
                 }
-                if(msg.type == "build_started"){
-                    document.title = "Rebuilding..."
+                if(msg.type == "build_start"){  
+                    let note = "Rebuilding application..."
+                    if(document.title != note){
+                        document.title = note;
+                        console.log(note);
+                    }
                     watchFileChange();
                 }
             }

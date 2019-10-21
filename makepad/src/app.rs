@@ -440,7 +440,7 @@ impl App {
             },
             Event::KeyDown(ke) => match ke.key_code {
                 KeyCode::KeyR => if ke.modifiers.logo || ke.modifiers.control {
-                    self.reload_workspaces();
+                    self.reload_workspaces(); 
                 },
                 _ => ()
             },
