@@ -1,66 +1,48 @@
-# makepad
-Code your design
+# Makepad - Live coding 2D/VR IDE for Rust 
+This repo will be restructured soon! To set the expectations: The current business model idea is to have all library crates be MIT open-source (editor, UI, vectors, renderstack, etc), but to have 'pro features' of the IDE like the VR compile connectivity, or visual design tools be paid as a subscription model. This means all software you develop with the makepad library stack will always have all dependencies be MIT, but we'll try to convince you that the pro features of the IDE are useful to pay for. This means that this repo will have an open part (what you find here today+lots more) and a closed part (currently starting the work).
 
+Makepad: Code your design
 Live demo: https://makepad.github.io/makepad/
 
-This repo is for developing Makepad, a live Rust authoring tool for 2D vector design, shaders and animation. The goal of the containing code is to be a Code Editor / UI kit for the Makepad application and will change without notice to suit that goal. The makepad application itself may be closed-sourced and sold, since we also have to feed our families.
+Right now all makepad can do is 'dogfood' its own development in 2D, which means we use it ourselves every day to write its own code.
 
-The vision is to build a livecoding / design hybrid program, where procedural design and code are fused in one environment. If you have missed 'learnable programming' please check this out: http://worrydream.com/LearnableProgramming/
-Makepad aims to fulfill (some) of these ideas using a completely from-scratch renderstack built on the GPU and Rust. It will be like an IDE meets a vector designtool, and had offspring. Direct manipulation of the vectors modifies the code, the code modifies the vectors. 
+The vision of makepad is to build a livecoding / design hybrid IDE. The entire library stack you use to write programs is opinionated and integrated with IDE tools as much as possible. You can live modify values in code that update the running program (in 2D and VR), and it tries to recompile real code changes code as 'live' as it can. The language its written in, and targets is Rust and only Rust. The IDE will run both in 2D and in VR.  Makepad only depends on a few Rust only platform bindings and Serde, everything else compiles trivially on all supported platforms (gnu-windows as well). Makepad includes its own Rust based shader abstraction that can target GLSL, HLSL, MetalSL directly.
 
-However before we can make this awesome application, we need to build a UI stack. Making a live-code editor with all sorts of visual manipulation components just doesn't work in HTML. We tried. It also doesn't work in JS+WebGL. We tried. But now with Rust we are getting right performance figures (up to 200x HTML). And even with Wasm, its plenty fast.
-This new UI stack has a new way of building UI called 'dual immediate mode' and uses multi-platform shaders for styling that are compiled from Rust source via a proc macro.
-Dual immediate mode has the code simplicity of an immediate mode API with the scalability/componentisation of a retained mode API.
+If you have missed 'learnable programming' please check this out: http://worrydream.com/LearnableProgramming/
+Makepad aims to fulfill (some) of these ideas using a completely from-scratch renderstack built on the GPU and Rust. The first goal of makepad will be to be an IDE for VR that runs natively on your desktop OS, whilst generating/debugging native VR code that runs on standalone VR devices like the Oculus Quest. It will possibly also generate wasm+webXR but that depends on the stability of these API's. Sofar testing showed that its not ready.
 
-The aim of this toolkit is to be our stepping stone into building a livecoding IDE and designtools that don't suck or fall to pieces along the way. We do not aim to maintain this library as everyones new web-UI lib, since we don't have the time and resources to do so. We are just a tiny company.
-
-However since openness is fine and this may be useful to someone, the foundational technologies (UI/rendering/vector engine) will be MIT opensource, but provided AS IS.
-
-We are not accepting pull requests or feature requests or documenting the code for now. However bugreports of obviously overlooked things are welcome.
-You may use, reuse, fork, do whatever you feel like. But our focus is code/designtools and these libraries are just a tool for us to get there. As the technology looks like its working this time we will contemplate our open-source strategy and update this readme along the way.
+We are not accepting pull requests or feature requests or documenting the code for now. However bugreports of obviously overlooked things are welcome. As the stack gets closer to beta we'd love to get more feedback. 
 
 IMPORTANT INFO RUNNING THE LOCAL VERSION:
-The native version is being dogfooded on itself, so when you clone it run this first:
-./run_first_init.sh
-then run
-./build_native.sh
+We are dogfooding the local version ourselves, but it needs a 'current project' which is hardcoded for now. Check out makepad repo 'again' under ./edit_repo in the root with:
 
-Platforms:
+./clone_edit_repo.sh<br/>
+Start makepad:<br/>
+cargo run -p makepad --release<br/>
 
-OSX + Metal - WORKING
+Features:
 
-Win32 + DirectX11 - WORKING
+Renderstack 2D - Currently working on new Font stack for VR/LowDPI fonts<br/>
+UI Library - Mostly there, needs textinput control/dropwdown/menu<br/>
+3D/VR rendering - Work just started<br/>
+Code editor - Mostly there<br/>
+Shader compiler - Mostly there<br/>
+Buildsystem - Work just started<br/>
+Platforms:<br/>
+OSX + Metal - WORKING<br/>
+Win32 + DirectX11 - WORKING<br/>
+WASM + WebGL - WORKING<br/>
+Linux + OpenGL - WORKING<br/>
+Quest Android + OpenGL - TODO<br/>
 
-WASM + WebGL - WORKING
 
-Linux - NEARLY COMPLETE
-
-The project is split out over a few nested crates
-
-src/main.rs - application 'main'
-
-webgl/ - webGL build crate info (actual source is src/main.rs)
-
-widget/src/*.rs - nested crate for the widgets
-
-render/src/*.rs - nested crate for the render engine
-
-The only 'web' JS code sits here, its a typed-array RPC driven simplification of the webGL API
-widgets/render/src/cx_webgl.js
-
-IMPORTANT, on windows may need to do manually with git:
-
-./run_first_init.sh - just downloads the repository again in ./edit_repo for the editor to have something to do
-
-./serve_webgl.sh (uses node to start a tiny server on 127.0.0.1:2001)
-
-./build_webgl.sh - compiles the webGL version
-
-./build_release.sh - compiles the native ap
+Wasm:
 
 Since webassembly can't really use a void main(){} because of the message loop,
 makepad uses a macro, in main.rs you see: main_app!(App, "My App!");
 This macro generates a main function for 'desktop' and a bunch of extern "C" exports for wasm that serve as the App event entrypoint. If you want to see how that works look in widget/render/src/cx.rs 
+
+Application Structure:
 
 Applications are nested structs. Widgets are simply structs you embed on the parent struct. Some widgets are 'generic' as in they have type args: Dock<Panel>.
 
@@ -88,4 +70,5 @@ All gpu data is generated absolutely positioned as draw runs. This is because ot
 
 Clipping is done using vertex-shader clipping. So there is no stencil-state. Makepad is really just a bunch of instanced-array drawcalls on indexed triangles. And one texture for the font. Thats it.
 
-Font rendering in makepad is via an MSDF font format. It doesn't do all sorts of internationalisation layout, its really very well suited for building code editors, IDE's, designtools. Not for replacing a browser. Maybe someday Mozilla will provide the missing pieces to do font rendering properly.
+Font rendering works with a gpu-accelerated trapezoid font engine that reads ttf files directly.
+Its still being tweaked for low DPI quality, it has some ways to go still.

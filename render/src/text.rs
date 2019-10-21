@@ -78,7 +78,7 @@ impl Text {
 
             fn pixel() -> vec4 {
                 let dx = dfdx(tex_coord1.x * 4096.0);
-                
+
                 let dp = 1.0 / 4096.0;
 
                 // basic hardcoded mipmapping so it stops 'swimming' in VR
@@ -100,7 +100,7 @@ impl Text {
                 }
                 else {
                     let s = sample2d(texturez, tex_coord1.xy).x;
-                    return vec4(vec3(s) * color.rgb * brightness * color.a, s * color.a);
+                    return vec4(vec3(s,s,s) * color.rgb * brightness * color.a, s * color.a);
                 }
             }
             
@@ -137,7 +137,7 @@ impl Text {
                     normalized.xy
                 );
                 
-                return camera_projection * (camera_view * (view_transform * vec4(clipped, z + zbias, 1.)));
+                return camera_projection * (camera_view * (view_transform * vec4(clipped.x,clipped.y, z + zbias, 1.)));
             }
         }))
     }
