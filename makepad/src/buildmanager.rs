@@ -258,6 +258,9 @@ impl BuildManager{
     }
     
     pub fn restart_cargo(&mut self, cx: &mut Cx, storage: &mut AppStorage) {
+        if !cx.platform_type.is_desktop(){
+            return
+        }
         
         self.artifacts.truncate(0);
         self.log_items.truncate(0);

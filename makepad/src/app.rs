@@ -145,10 +145,7 @@ impl AppStorage {
     }
     
     pub fn text_buffer_file_write(&mut self, cx: &mut Cx, path: &str) {
-        if !cx.platform_type.is_desktop() {
-            // do nothing
-        }
-        else {
+        if cx.platform_type.is_desktop() {
             if let Some(workspace_pos) = path.find('/') {
                 if let Some(atb) = self.text_buffers.get_mut(path) {
                     let hub_ui = self.hub_ui.as_mut().unwrap();
@@ -351,22 +348,7 @@ impl App {
             },
             HubMsg::WorkspaceFileTreeResponse {uid, tree} => if uid == self.workspaces_request_uid {
                 // replace a workspace node
-                fn hub_to_tree(node: &WorkspaceFileTreeNode) -> FileNode {
-                    match node {
-                        WorkspaceFileTreeNode::File {name} => FileNode::File {
-                            name: name.clone(),
-                            draw: None
-                        },
-                        WorkspaceFileTreeNode::Folder {name, folder} => {
-                            FileNode::Folder {
-                                name: name.clone(),
-                                folder: folder.iter().map( | v | hub_to_tree(v)).collect(),
-                                draw: None,
-                                state: NodeState::Closed
-                            }
-                        }
-                    }
-                }
+
                 if let WorkspaceFileTreeNode::Folder {name, ..} = &tree {
                     let workspace = name.clone();
                     // insert each filetree at the right childnode
@@ -458,8 +440,20 @@ impl App {
                 // lets see which file we loaded
                 if let Some(utf8_data) = self.storage.file_tree_file_read.resolve_utf8(fr) {
                     if let Ok(utf8_data) = utf8_data {
-                        for window in &mut self.windows {
-                            window.file_tree.load_from_ron(cx, &utf8_data);
+                        if let Ok(tree) = ron::de::from_str(utf8_data){
+                            for window in &mut self.windows{
+                                window.file_tree.root_node = hub_to_tree(&tree);
+                                if let FileNode::Folder {folder, state, name, ..} = &mut window.file_tree.root_node {
+                                    *name = "".to_string();
+                                    *state = NodeState::Open;
+                                     for node in folder.iter_mut() {
+                                        if let FileNode::Folder {state, ..} = node {
+                                            *state = NodeState::Open
+                                        }
+                                    }
+                                }
+                                window.file_tree.view.redraw_view_area(cx);
+                            }
                         }
                     }
                 }
@@ -538,6 +532,23 @@ impl App {
         for (window_index, window) in self.windows.iter_mut().enumerate() {
             window.draw_app_window(cx, window_index, &mut self.state, &mut self.storage, &mut self.build_manager);
             // break;
+        }
+    }
+}
+
+fn hub_to_tree(node: &WorkspaceFileTreeNode) -> FileNode {
+    match node {
+        WorkspaceFileTreeNode::File {name} => FileNode::File {
+            name: name.clone(),
+            draw: None
+        },
+        WorkspaceFileTreeNode::Folder {name, folder} => {
+            FileNode::Folder {
+                name: name.clone(),
+                folder: folder.iter().map( | v | hub_to_tree(v)).collect(),
+                draw: None,
+                state: NodeState::Closed
+            }
         }
     }
 }

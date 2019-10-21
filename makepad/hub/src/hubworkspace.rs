@@ -436,12 +436,16 @@ impl HubWorkspace {
                                     }
                                     // lets try to pull path out of rendered, this fixes some rust bugs
                                     let mut path = span.file_name;
+                                    let mut row = span.line_start as usize;
+                                    let mut col = span.column_start as usize;
                                     if let Some(rendered) = &message.rendered {
                                         let lines: Vec<&str> = rendered.split('\n').collect();
                                         if lines.len() >= 1 {
                                             if let Some(start) = lines[1].find("--> ") {
                                                 if let Some(end) = lines[1].find(":") {
                                                     path = lines[1].get((start + 4)..end).unwrap().to_string();
+                                                    // TODO parse row/col from this line
+                                                    
                                                 }
                                             }
                                         }
@@ -453,8 +457,8 @@ impl HubWorkspace {
                                             item: HubLogItem {
                                                 //package_id: parsed.package_id.clone(),
                                                 path: Some(format!("{}/{}", workspace, de_relativize_path(&path))),
-                                                row: span.line_start as usize,
-                                                col: span.column_start as usize,
+                                                row: row,
+                                                col: col,
                                                 tail: span.byte_start as usize,
                                                 head: span.byte_end as usize,
                                                 body: msg,
@@ -607,7 +611,7 @@ impl HubWorkspace {
                             if let Ok(ty) = entry.file_type() {
                                 if let Ok(name) = entry.file_name().into_string() {
                                     if ty.is_dir() {
-                                        if name == ".git" || name == "target" {
+                                        if name == ".git" || name == "target" || name == "edit_repo" {
                                             continue;
                                         }
                                         ret.push(WorkspaceFileTreeNode::Folder {

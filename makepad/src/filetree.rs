@@ -248,7 +248,7 @@ impl FileTree {
             }
         }))
     }
-    
+    /*
     pub fn load_from_ron(&mut self, cx: &mut Cx, ron_data: &str) {
         
         #[derive(Deserialize, Debug)]
@@ -287,7 +287,7 @@ impl FileTree {
             self.root_node = recur_walk(value);
         }
         self.view.redraw_view_area(cx);
-    }
+    }*/
     
     pub fn clear_roots(&mut self, cx: &mut Cx, names: &Vec<String>) {
         self.root_node = FileNode::Folder {
