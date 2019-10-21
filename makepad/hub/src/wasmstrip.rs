@@ -1,7 +1,4 @@
-use std::fs::File;
-use std::io;
-use std::io::prelude::*;
-use std::str;
+ 
 use std::{mem, result};
 
 #[derive(Clone, Debug)]
@@ -131,24 +128,15 @@ fn read_wasm_sections(buf:&[u8])->Result<Vec<WasmSection>>{
     return Ok(sections);
 }
 
-fn main() {
-    let buf: Vec<u8> = read_wasm("makepad2.wasm").unwrap();
+pub fn wasm_strip(buf: &[u8])->Result<Vec<u8>>{
     let mut strip = Vec::new();
     strip.extend_from_slice(&[0, 97, 115, 109, 1, 0, 0, 0]);
-    if let Ok(sections) = read_wasm_sections(&buf){
-        // lets rewrite it
-        for section in &sections{
-            if !section.name.starts_with(".debug"){
-                strip.extend_from_slice(&buf[section.start..section.end]);
-            }
+    let sections = read_wasm_sections(&buf)?;
+    // lets rewrite it
+    for section in &sections{
+        if !section.name.starts_with(".debug"){
+            strip.extend_from_slice(&buf[section.start..section.end]);
         }
     }
-    std::fs::write("makepad3.wasm", strip);
-}
-
-fn read_wasm(file: &str) -> io::Result<Vec<u8>> {
-    let mut data = Vec::new();
-    let mut f = File::open(file) ?;
-    f.read_to_end(&mut data) ?;
-    Ok(data)
+    Ok(strip)
 }

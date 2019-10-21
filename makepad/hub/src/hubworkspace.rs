@@ -2,6 +2,7 @@ use crate::process::*;
 use crate::hubmsg::*;
 use crate::hubclient::*;
 use crate::httpserver::*;
+use crate::wasmstrip::*;
 
 use serde::{Deserialize};
 use std::sync::{Arc, Mutex};
@@ -492,6 +493,18 @@ impl HubWorkspace {
                                         for filename in filenames {
                                             if filename.ends_with(".wasm") && abs_root_path.len() + 1 < filename.len() {
                                                 let last = filename.clone().split_off(abs_root_path.len() + 1);
+                                                // lets strip this wasm file
+                                                if let Ok(data) = fs::read(&last){
+                                                    if let Ok(strip) = wasm_strip(&data){
+                                                        if let Err(_) = fs::write(&last, strip){
+                                                            println!("Cannot write stripped wasm {}", last);
+                                                        }
+                                                    }
+                                                    else{
+                                                        println!("Cannot parse wasm {}", last);
+                                                    }
+                                                }
+                                                
                                                 // let our http server know of our filechange
                                                 if let Ok(mut http_server) = http_server.lock() {
                                                     http_server.send_file_change(&last);

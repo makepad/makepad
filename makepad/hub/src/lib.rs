@@ -16,3 +16,6 @@ pub use crate::hubmsg::*;
 
 mod httpserver;
 pub use crate::httpserver::*;
+
+mod wasmstrip;
+pub use crate::wasmstrip::*;

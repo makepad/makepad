@@ -19,8 +19,8 @@ pub fn main() {
             let env = Vec::new();
             match build.as_ref() {
                 "release" => args.extend_from_slice(&["build", "--release", "-p", &package]),
-                "debug" => args.extend_from_slice(&["build", "--release", "-p", &package]),
-                "check" => args.extend_from_slice(&["build", "--release", "-p", &package]),
+                "debug" => args.extend_from_slice(&["build",  "-p", &package]),
+                "check" => args.extend_from_slice(&["check", "-p", &package]),
                 _ => return ws.cargo_exec_fail(uid, &package, &build)
             }
             match package.as_ref() {

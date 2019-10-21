@@ -11,6 +11,3 @@ snap = "0.1"
 libc = "0.2"
 ron = "0.5"
 serde = { version = "1.0", features = ["derive"] }
-
-[dependencies.wasmparser]
-path="./wasmparser"
