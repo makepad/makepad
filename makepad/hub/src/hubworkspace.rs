@@ -640,7 +640,7 @@ impl HubWorkspace {
             
             if let Some(ron_out) = ron_out{
                 let ron = ron::ser::to_string_pretty(&tree, ron::ser::PrettyConfig::default()).unwrap();
-                let _ = fs::write(ron_out, ron.as_bytes());
+                let _ = fs::write(format!("{}/{}", path, ron_out), ron.as_bytes());
             }
 
             tx_write.send(ClientToHubMsg {
