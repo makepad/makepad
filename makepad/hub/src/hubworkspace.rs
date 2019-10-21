@@ -484,11 +484,9 @@ impl HubWorkspace {
                                             if filename.ends_with(".wasm") && abs_root_path.len() + 1 < filename.len() {
                                                 let last = filename.clone().split_off(abs_root_path.len() + 1);
                                                 // let our http server know of our filechange
-                                                if let Some(artifact_path) = &artifact_path{
-                                                    if let Ok(mut http_server) = http_server.lock() {
-                                                        http_server.send_file_change(&last);
-                                                    };
-                                                }
+                                                if let Ok(mut http_server) = http_server.lock() {
+                                                    http_server.send_file_change(&last);
+                                                };
                                             }
                                         }
                                     }
