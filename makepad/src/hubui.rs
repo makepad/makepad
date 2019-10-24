@@ -62,7 +62,7 @@ impl HubUI {
                     }).expect("Cannot send login");
                     
                     // this is the main messageloop, on rx
-                    while let Ok(htc) = hub_client.rx_read.recv() {
+                    while let Ok(htc) = hub_client.rx_read.as_ref().unwrap().recv() {
                         let restart_connection = if let HubMsg::ConnectionError(_e) = &htc.msg{
                             true
                         }

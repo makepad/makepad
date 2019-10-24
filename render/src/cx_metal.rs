@@ -275,7 +275,7 @@ impl MetalCx {
                 }
             }
         }
-        let device = Device::system_default();
+        let device = Device::system_default().unwrap();
         MetalCx {
             command_queue: device.new_command_queue(),
             device: device

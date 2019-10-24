@@ -6,41 +6,41 @@ use crate::app::*;
 #[derive(Clone)]
 pub struct BuildManager {
     pub signal: Signal,
-    pub active_targets: Vec<BuildActiveTarget>,
+    pub active_builds: Vec<ActiveBuild>,
     pub exec_when_done: bool,
     pub log_items: Vec<HubLogItem>,
     pub artifacts: Vec<String>,
 }
 
-impl BuildManager{
-    pub fn new(cx:&mut Cx)->BuildManager{
-        BuildManager{
-            signal:cx.new_signal(),
+impl BuildManager {
+    pub fn new(cx: &mut Cx) -> BuildManager {
+        BuildManager {
+            signal: cx.new_signal(),
             exec_when_done: false,
             log_items: Vec::new(),
-            artifacts: Vec::new(), 
-            active_targets: Vec::new(),
+            artifacts: Vec::new(),
+            active_builds: Vec::new(),
         }
     }
 }
 
-const SIGNAL_BUILD_MANAGER_NEW_LOG_ITEM:usize = 0;
-const SIGNAL_BUILD_MANAGER_NEW_ARTIFACT:usize = 1;
-const SIGNAL_BUILD_MANAGER_CARGO_EXEC_END:usize = 2;
-const SIGNAL_BUILD_MANAGER_ARTIFACT_EXEC_END:usize = 3;
+const SIGNAL_BUILD_MANAGER_NEW_LOG_ITEM: usize = 0;
+const SIGNAL_BUILD_MANAGER_NEW_ARTIFACT: usize = 1;
+const SIGNAL_BUILD_MANAGER_CARGO_EXEC_END: usize = 2;
+const SIGNAL_BUILD_MANAGER_ARTIFACT_EXEC_END: usize = 3;
 
 #[derive(Clone)]
-pub struct BuildActiveTarget {
+pub struct ActiveBuild {
     pub workspace: String,
     pub package: String,
-    pub build: String,
-    pub artifact_path: Option<String>,
-    pub cargo_uid: HubUid,
-    pub artifact_uid: HubUid,
+    pub config: String,
+    pub build_result: Option<BuildResult>,
+    pub build_uid: Option<HubUid>,
+    pub run_uid: Option<HubUid>,
 }
 
-impl BuildManager{
-
+impl BuildManager {
+    
     fn gc_textbuffer_messages(&self, cx: &mut Cx, storage: &mut AppStorage) {
         // clear all files we missed
         for (_, atb) in &mut storage.text_buffers {
@@ -58,8 +58,10 @@ impl BuildManager{
     pub fn export_messages_to_textbuffers(&self, cx: &mut Cx, storage: &mut AppStorage) {
         
         for dm in &self.log_items {
-            if let Some(path) = &dm.path {
-                let text_buffer = storage.text_buffer_from_path(cx, &path);
+            //println!("{:?}", dm.item.level);
+            if let Some(loc_message) = dm.get_loc_message() {
+                
+                let text_buffer = storage.text_buffer_from_path(cx, &loc_message.path);
                 
                 let messages = &mut text_buffer.messages;
                 messages.mutation_id = text_buffer.mutation_id;
@@ -68,44 +70,48 @@ impl BuildManager{
                     messages.cursors.truncate(0);
                     messages.bodies.truncate(0);
                 }
-                //println!("{:?}", dm.item.level);
-                if dm.level == HubLogItemLevel::Log {
-                    break
-                }
+                
                 // search for insert point
                 let mut inserted = false;
                 if messages.cursors.len()>0 {
                     for i in (0..messages.cursors.len()).rev() {
-                        if dm.head < messages.cursors[i].head && (i == 0 || dm.head >= messages.cursors[i - 1].head) {
-                            messages.cursors.insert(i, TextCursor {
-                                head: dm.head,
-                                tail: dm.tail,
-                                max: 0
-                            });
-                            inserted = true;
-                            break;
+                        if let Some((head, tail)) = loc_message.range {
+                            if head < messages.cursors[i].head && (i == 0 || head >= messages.cursors[i - 1].head) {
+                                messages.cursors.insert(i, TextCursor {
+                                    head: head,
+                                    tail: tail,
+                                    max: 0
+                                });
+                                inserted = true;
+                                break;
+                            }
                         }
                     }
                 }
                 if !inserted {
-                    messages.cursors.push(TextCursor {
-                        head: dm.head,
-                        tail: dm.tail,
-                        max: 0
-                    })
+                    if let Some((head, tail)) = loc_message.range {
+                        messages.cursors.push(TextCursor {
+                            head: head,
+                            tail: tail,
+                            max: 0
+                        })
+                    }
                 }
                 
                 text_buffer.messages.bodies.push(TextBufferMessage {
-                    body: dm.body.clone(),
-                    level: match dm.level {
-                        HubLogItemLevel::Warning => TextBufferMessageLevel::Warning,
-                        HubLogItemLevel::Error => TextBufferMessageLevel::Error,
-                        HubLogItemLevel::Log => TextBufferMessageLevel::Log,
-                        HubLogItemLevel::Panic => TextBufferMessageLevel::Log,
+                    body: loc_message.body.clone(),
+                    level: match dm {
+                        HubLogItem::LocPanic(_) => TextBufferMessageLevel::Log,
+                        HubLogItem::LocError(_) => TextBufferMessageLevel::Error,
+                        HubLogItem::LocWarning(_) => TextBufferMessageLevel::Warning,
+                        HubLogItem::LocMessage(_) => TextBufferMessageLevel::Log,
+                        HubLogItem::Error(_) => TextBufferMessageLevel::Error,
+                        HubLogItem::Warning(_) => TextBufferMessageLevel::Warning,
+                        HubLogItem::Message(_) => TextBufferMessageLevel::Log,
                     }
                 });
             }
-            if dm.level == HubLogItemLevel::Log {
+            else {
                 break
             }
         }
@@ -113,11 +119,11 @@ impl BuildManager{
     }
     
     pub fn is_running_uid(&self, uid: &HubUid) -> bool {
-        for active_target in &self.active_targets {
-            if active_target.cargo_uid == *uid {
+        for ab in &self.active_builds {
+            if ab.build_uid == Some(*uid) {
                 return true
             }
-            if active_target.artifact_uid == *uid {
+            if ab.run_uid == Some(*uid) {
                 return true
             }
         }
@@ -125,8 +131,8 @@ impl BuildManager{
     }
     
     pub fn is_any_cargo_running(&self) -> bool {
-        for active_target in &self.active_targets {
-            if active_target.cargo_uid != HubUid::zero() {
+        for ab in &self.active_builds {
+            if ab.build_uid.is_some() {
                 return true
             }
         }
@@ -134,33 +140,40 @@ impl BuildManager{
     }
     
     pub fn is_any_artifact_running(&self) -> bool {
-        for active_target in &self.active_targets {
-            if active_target.artifact_uid != HubUid::zero() {
+        for ab in &self.active_builds {
+            if ab.run_uid.is_some() {
                 return true
             }
         }
         return false
     }
     
-    pub fn handle_hub_msg(&mut self, cx: &mut Cx, storage: &mut AppStorage, htc: &HubToClientMsg)  {
+    pub fn handle_hub_msg(&mut self, cx: &mut Cx, storage: &mut AppStorage, htc: &HubToClientMsg) {
         //let hub_ui = storage.hub_ui.as_mut().unwrap();
         match &htc.msg {
-            HubMsg::CargoPackagesResponse {uid: _, packages: _} => {
+            HubMsg::PackagesResponse {uid: _, packages: _} => {
             },
-            HubMsg::CargoExecBegin {uid} => if self.is_running_uid(uid) {
+            HubMsg::CargoBegin {uid} => if self.is_running_uid(uid) {
             },
             HubMsg::LogItem {uid, item} => if self.is_running_uid(uid) {
                 let mut export = false;
-                if item.level == HubLogItemLevel::Warning || item.level == HubLogItemLevel::Error {
+                if let Some(loc_msg) = item.get_loc_message() {
                     for check_msg in &self.log_items {
-                        if *check_msg == *item { // ignore duplicates
-                            return 
+                        if let Some(check_msg) = check_msg.get_loc_message() {
+                            if check_msg.body == loc_msg.body
+                                && check_msg.row == loc_msg.row
+                                && check_msg.col == loc_msg.col
+                                && check_msg.path == loc_msg.path { // ignore duplicates
+                                return
+                            }
                         }
-                        if check_msg.level != HubLogItemLevel::Warning && check_msg.level != HubLogItemLevel::Error {
+                        else{
                             break;
                         }
                     }
                     export = true;
+                }
+                else{
                 }
                 self.log_items.push(item.clone());
                 if export {
@@ -174,45 +187,31 @@ impl BuildManager{
                 self.artifacts.push(package_id.clone());
                 cx.send_signal(self.signal, SIGNAL_BUILD_MANAGER_NEW_ARTIFACT);
             },
-            HubMsg::CargoExecFail {uid} => if self.is_running_uid(uid) {
+            HubMsg::BuildFailure {uid} => if self.is_running_uid(uid) {
                 // if we didnt have any errors, check if we need to run
-                for active_target in &mut self.active_targets {
-                    if active_target.cargo_uid == *uid {
-                        active_target.cargo_uid = HubUid::zero();
-                        self.log_items.push(HubLogItem{
-                            path:None,
-                            row:0,
-                            col:0,
-                            tail:0,
-                            head:0,
-                            body:format!("Workspace cannot find build {}:{}:{}", active_target.workspace,active_target.package,active_target.build),
-                            rendered:None,
-                            explanation:None,
-                            level:HubLogItemLevel::Error
-                        });
-                        cx.send_signal(self.signal, SIGNAL_BUILD_MANAGER_NEW_LOG_ITEM);
-                        return
+                for ab in &mut self.active_builds {
+                    if ab.build_uid == Some(*uid) {
+                        ab.build_uid = None;
                     }
                 }
             },
-            HubMsg::CargoExecEnd {uid, artifact_path} => if self.is_running_uid(uid) {
-                // if we didnt have any errors, check if we need to run
-                for active_target in &mut self.active_targets {
-                    if active_target.cargo_uid == *uid {
-                        active_target.cargo_uid = HubUid::zero();
-                        active_target.artifact_path = artifact_path.clone();
+            HubMsg::CargoEnd {uid, build_result} => if self.is_running_uid(uid) {
+                for ab in &mut self.active_builds {
+                    if ab.build_uid == Some(*uid) {
+                        ab.build_uid = None;
+                        ab.build_result = Some(build_result.clone());
                     }
                 }
                 if !self.is_any_cargo_running() && self.exec_when_done {
-                    self.exec_all_artifacts(storage)
+                    self.run_all_artifacts(storage)
                 }
                 cx.send_signal(self.signal, SIGNAL_BUILD_MANAGER_CARGO_EXEC_END);
             },
-            HubMsg::ArtifactExecEnd {uid} => if self.is_running_uid(uid) {
+            HubMsg::ProgramEnd {uid} => if self.is_running_uid(uid) {
                 // if we didnt have any errors, check if we need to run
-                for active_target in &mut self.active_targets {
-                    if active_target.artifact_uid == *uid {
-                        active_target.artifact_uid = HubUid::zero();
+                for ab in &mut self.active_builds {
+                    if ab.run_uid == Some(*uid) {
+                        ab.run_uid = None;
                     }
                 }
                 cx.send_signal(self.signal, SIGNAL_BUILD_MANAGER_ARTIFACT_EXEC_END);
@@ -221,44 +220,46 @@ impl BuildManager{
         }
     }
     
-    pub fn exec_all_artifacts(&mut self, storage: &mut AppStorage) {
+    pub fn run_all_artifacts(&mut self, storage: &mut AppStorage) {
         let hub_ui = storage.hub_ui.as_mut().unwrap();
         // otherwise execute all we have artifacts for
-        for active_target in &mut self.active_targets {
-            if let Some(artifact_path) = &active_target.artifact_path {
-                let uid = hub_ui.alloc_uid();
-                if active_target.artifact_uid != HubUid::zero() {
+        for ab in &mut self.active_builds {
+            if let Some(build_result) = &ab.build_result {
+                if let BuildResult::Executable {path} = build_result {
+                    let uid = hub_ui.alloc_uid();
+                    if let Some(run_uid) = ab.run_uid {
+                        hub_ui.send(ClientToHubMsg {
+                            to: HubMsgTo::Workspace(ab.workspace.clone()),
+                            msg: HubMsg::ProgramKill {
+                                uid: run_uid,
+                            }
+                        });
+                    }
+                    ab.run_uid = Some(uid);
                     hub_ui.send(ClientToHubMsg {
-                        to: HubMsgTo::Workspace(active_target.workspace.clone()),
-                        msg: HubMsg::ArtifactKill {
-                            uid: active_target.artifact_uid,
+                        to: HubMsgTo::Workspace(ab.workspace.clone()),
+                        msg: HubMsg::ProgramRun {
+                            uid: ab.run_uid.unwrap(),
+                            path: path.clone(),
+                            args: Vec::new()
                         }
                     });
                 }
-                active_target.artifact_uid = uid;
-                hub_ui.send(ClientToHubMsg {
-                    to: HubMsgTo::Workspace(active_target.workspace.clone()),
-                    msg: HubMsg::ArtifactExec {
-                        uid: active_target.artifact_uid,
-                        path: artifact_path.clone(),
-                        args: Vec::new()
-                    }
-                });
             }
         }
     }
     
-    pub fn artifact_exec(&mut self, storage: &mut AppStorage) {
+    pub fn artifact_run(&mut self, storage: &mut AppStorage) {
         if self.is_any_cargo_running() {
             self.exec_when_done = true;
         }
         else {
-            self.exec_all_artifacts(storage)
+            self.run_all_artifacts(storage)
         }
     }
     
-    pub fn restart_cargo(&mut self, cx: &mut Cx, storage: &mut AppStorage) {
-        if !cx.platform_type.is_desktop(){
+    pub fn restart_build(&mut self, cx: &mut Cx, storage: &mut AppStorage) {
+        if !cx.platform_type.is_desktop() {
             return
         }
         
@@ -269,49 +270,49 @@ impl BuildManager{
         
         let hub_ui = storage.hub_ui.as_mut().unwrap();
         self.exec_when_done = storage.settings.exec_when_done;
-        for active_target in &mut self.active_targets {
-            active_target.artifact_path = None;
-            if active_target.cargo_uid != HubUid::zero() {
+        for ab in &mut self.active_builds {
+            ab.build_result = None;
+            if let Some(build_uid) = ab.build_uid {
                 hub_ui.send(ClientToHubMsg {
-                    to: HubMsgTo::Workspace(active_target.workspace.clone()),
-                    msg: HubMsg::CargoKill {
-                        uid: active_target.cargo_uid,
+                    to: HubMsgTo::Workspace(ab.workspace.clone()),
+                    msg: HubMsg::BuildKill {
+                        uid: build_uid,
                     }
                 });
-                active_target.cargo_uid = HubUid::zero();
+                ab.build_uid = None
             }
-            if active_target.artifact_uid != HubUid::zero() {
+            if let Some(run_uid) = ab.run_uid {
                 hub_ui.send(ClientToHubMsg {
-                    to: HubMsgTo::Workspace(active_target.workspace.clone()),
-                    msg: HubMsg::ArtifactKill {
-                        uid: active_target.artifact_uid,
+                    to: HubMsgTo::Workspace(ab.workspace.clone()),
+                    msg: HubMsg::ProgramKill {
+                        uid: run_uid,
                     }
                 });
-                active_target.artifact_uid = HubUid::zero();
+                ab.run_uid = None
             }
         }
         
         // lets reset active targets
-        self.active_targets.truncate(0);
+        self.active_builds.truncate(0);
         
-        for build_target in &storage.settings.builds{
+        for build_target in &storage.settings.builds {
             let uid = hub_ui.alloc_uid();
             hub_ui.send(ClientToHubMsg {
                 to: HubMsgTo::Workspace(build_target.workspace.clone()),
-                msg: HubMsg::CargoExec {
+                msg: HubMsg::Build {
                     uid: uid.clone(),
                     package: build_target.package.clone(),
-                    build: build_target.build.clone()
+                    config: build_target.config.clone()
                 }
             });
-            self.active_targets.push(BuildActiveTarget{
+            self.active_builds.push(ActiveBuild {
                 workspace: build_target.workspace.to_string(),
                 package: build_target.package.to_string(),
-                build: build_target.build.to_string(),
-                artifact_path: None,
-                cargo_uid: uid,
-                artifact_uid: HubUid::zero()
+                config: build_target.config.to_string(),
+                build_result: None,
+                build_uid: Some(uid),
+                run_uid: None
             })
         }
-    }    
+    }
 }

@@ -4,7 +4,7 @@ use widget::*;
 use serde::*;
 use editor::*;
 use terminal::*;
-use hub::*;
+
 use crate::app::*;
 use crate::fileeditor::*;
 use crate::filetree::*;
@@ -96,17 +96,15 @@ impl AppWindow {
             match item {
                 Panel::LogList => {
                     match self.log_list.handle_log_list(cx, event, storage, build_manager) {
-                        LogListEvent::SelectLogItem {path, item, level} => {
+                         LogListEvent::SelectLocMessage {loc_message} => {
                             // just make it open an editor
-                            if let Some(path) = path {
-                                file_tree_event = FileTreeEvent::SelectFile {path: path};
+                            if loc_message.path.len()>0 {
+                                file_tree_event = FileTreeEvent::SelectFile {path: loc_message.path.clone()};
                             }
-                            if let Some(item) = item {
-                                self.log_item.load_item(cx, &item, level);
-                            }
+                            self.log_item.load_loc_message(cx, &loc_message);
                         },
-                        LogListEvent::SelectLogRange {items} => {
-                            self.log_item.load_item(cx, &items, HubLogItemLevel::Log);
+                        LogListEvent::SelectMessages {items} => {
+                            self.log_item.load_plain_text(cx, &items);
                         }
                         _ => ()
                     }
@@ -140,7 +138,7 @@ impl AppWindow {
                                 
                                 // lets re-trigger the rust compiler
                                 if storage.settings.build_on_save {
-                                    build_manager.restart_cargo(cx, storage);
+                                    build_manager.restart_build(cx, storage);
                                     self.log_item.clear_msg(cx);
                                 }
                                 

@@ -26,7 +26,7 @@ impl Default for AppSettings {
             builds: vec![BuildTarget {
                 workspace: "makepad".to_string(),
                 package: "makepad".to_string(),
-                build: "check".to_string()
+                config: "check".to_string()
             }]
         }
     }
@@ -36,7 +36,7 @@ impl Default for AppSettings {
 pub struct BuildTarget {
     pub workspace: String,
     pub package: String,
-    pub build: String
+    pub config: String
 }
 
 pub struct AppStorage {
@@ -314,7 +314,7 @@ impl App {
                     });
                     hub_ui.send(ClientToHubMsg {
                         to: HubMsgTo::Workspace(workspace.clone()),
-                        msg: HubMsg::CargoPackagesRequest {uid: uid}
+                        msg: HubMsg::PackagesRequest {uid: uid}
                     });
                 }
                 self.workspaces_request_uid = uid;

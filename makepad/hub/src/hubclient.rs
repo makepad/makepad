@@ -116,7 +116,7 @@ pub struct HubClient {
     read_thread: Option<thread::JoinHandle<()>>,
     write_thread: Option<thread::JoinHandle<()>>,
     pub tx_read: mpsc::Sender<HubToClientMsg>,
-    pub rx_read: mpsc::Receiver<HubToClientMsg>,
+    pub rx_read: Option<mpsc::Receiver<HubToClientMsg>>,
     pub tx_write: mpsc::Sender<ClientToHubMsg>
 }
 
@@ -212,7 +212,7 @@ impl HubClient {
             read_thread: Some(read_thread),
             write_thread: Some(write_thread),
             tx_read: tx_read_copy,
-            rx_read: rx_read,
+            rx_read: Some(rx_read),
             tx_write: tx_write
         })
     }

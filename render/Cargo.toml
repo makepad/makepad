@@ -20,12 +20,12 @@ path = { path = "./vector/path" }
 [target.x86_64-apple-darwin.dependencies]
 time = "0.1.4"
 libc = "0.2"
-metal = "0.14"
-cocoa = "0.18"
-core-graphics = "*"
+metal = "0.17"
+cocoa = "0.19"
+core-graphics = "0.17.3"
 objc-foundation = "0.1"
 objc_id = "0.1"
-objc = "0.2.3"
+objc = "0.2"
 
 [target.x86_64-unknown-linux-gnu.dependencies]
 x11-dl = "*"

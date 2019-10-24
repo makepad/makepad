@@ -16,21 +16,25 @@ pub enum HubMsg {
     ConnectionError(HubError),
     
     // make client stuff
-    CargoExec {
+    Build {
         uid: HubUid,
         package: String,
-        build: String
+        config: String
     },
     
-    CargoExecFail{
+    BuildFailure{
         uid:HubUid,
     },
     
-    CargoKill {
+    BuildSuccess{
+        uid:HubUid,
+    },
+    
+    BuildKill {
         uid: HubUid
     },
     
-    CargoExecBegin {
+    CargoBegin {
         uid: HubUid,
     },
     
@@ -45,35 +49,35 @@ pub enum HubMsg {
         fresh: bool
     },
     
-    CargoExecEnd {
+    CargoEnd {
         uid: HubUid,
-        artifact_path: Option<String>
+        build_result: BuildResult
     },
     
-    CargoPackagesRequest {
+    PackagesRequest {
         uid: HubUid
     },
     
-    CargoPackagesResponse {
+    PackagesResponse {
         uid: HubUid,
-        packages: Vec<HubCargoPackage>
+        packages: Vec<HubPackage>
     },
 
-    ArtifactKill {
+    ProgramKill {
         uid: HubUid
     },
     
-    ArtifactExec {
+    ProgramRun {
         uid: HubUid,
         path: String,
         args: Vec<String>
     },
     
-    ArtifactExecBegin {
+    ProgramBegin {
         uid: HubUid
     },
     
-    ArtifactExecEnd {
+    ProgramEnd {
         uid: HubUid
     },
     
@@ -119,6 +123,8 @@ pub enum HubMsg {
     },
 }
 
+
+
 #[derive(Eq, PartialEq, Debug, Clone, Serialize, Deserialize)]
 pub enum WorkspaceFileTreeNode {
     File {name: String},
@@ -159,24 +165,24 @@ impl PartialOrd for WorkspaceFileTreeNode {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct HubCargoPackage {
+pub enum BuildResult {
+    Executable{path:String},
+    Wasm{path:String},
+    Library{path:String},
+    NoOutput,
+    Error,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HubPackage {
     pub package_name: String,
     pub builds: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum HubCargoTarget {
-    Check,
-    Run,
-    Release,
-    IPC,
-    VR,
-    Custom(String)
-}
 
-impl HubCargoPackage {
-    pub fn new(package_name: &str, targets: &[&str]) -> HubCargoPackage {
-        HubCargoPackage {
+impl HubPackage {
+    pub fn new(package_name: &str, targets: &[&str]) -> HubPackage {
+        HubPackage {
             package_name: package_name.to_string(),
             builds: targets.iter().map( | v | v.to_string()).collect()
         }
@@ -184,26 +190,50 @@ impl HubCargoPackage {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub enum HubLogItemLevel {
-    Warning,
-    Error,
-    Panic,
-    Log,
+pub struct LocMessage{
+    pub path:String, 
+    pub row:usize, 
+    pub col:usize, 
+    pub body:String,
+    pub range:Option<(usize, usize)>,
+    pub rendered:Option<String>,
+    pub explanation: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct HubLogItem {
-//    pub package_id: Option<String>,
-    pub path: Option<String>,
-    pub row: usize,
-    pub col: usize,
-    pub tail: usize,
-    pub head: usize,
-    pub body: String,
-    pub rendered: Option<String>,
-    pub explanation: Option<String>,
-    pub level: HubLogItemLevel
+pub enum HubLogItem {
+    LocPanic(LocMessage),
+    LocError(LocMessage),
+    LocWarning(LocMessage),
+    LocMessage(LocMessage),
+    Error(String),
+    Warning(String),
+    Message(String)
 }
+
+impl HubLogItem{
+    pub fn get_loc_message(&self)->Option<&LocMessage>{
+        match self{
+            HubLogItem::LocPanic(msg)=>Some(msg),
+            HubLogItem::LocError(msg)=>Some(msg),
+            HubLogItem::LocWarning(msg)=>Some(msg),
+            HubLogItem::LocMessage(msg)=>Some(msg),
+            HubLogItem::Error(_)=>None,
+            HubLogItem::Warning(_)=>None,
+            HubLogItem::Message(_)=>None
+        }
+    }
+    pub fn get_body(&self)->&String{
+        match self{
+            HubLogItem::LocPanic(msg)=>&msg.body,
+            HubLogItem::LocError(msg)=>&msg.body,
+            HubLogItem::LocWarning(msg)=>&msg.body,
+            HubLogItem::LocMessage(msg)=>&msg.body,
+            HubLogItem::Error(body)=>body,
+            HubLogItem::Warning(body)=>body,
+            HubLogItem::Message(body)=>body
+        }
+    }}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HubCargoArtifact {

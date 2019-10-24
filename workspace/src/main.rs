@@ -1,33 +1,42 @@
+// makepad uses these workspaces essentially as make files, but networked and persistent and also being a fileserver.
 use hub::*;
 
 pub fn main() {
     let key = std::fs::read("./key.bin").unwrap();
     
-    HubWorkspace::run(&key, "makepad", "edit_repo", HubLog::None, HttpServe::Local(2001), | ws, htc | match htc.msg {
-        HubMsg::CargoPackagesRequest {uid} => {
+    HubWorkspace::run(&key, "makepad", "edit_repo", HubLog::None, HttpServe::Disabled, & | ws, htc | match htc.msg {
+        HubMsg::PackagesRequest {uid} => {
             let builds = &["check", "debug", "release"];
-            ws.cargo_packages(htc.from, uid, vec![
-                HubCargoPackage::new("workspace", builds),
-                HubCargoPackage::new("makepad", builds),
-                HubCargoPackage::new("csvproc", builds),
-                HubCargoPackage::new("ui_example", builds),
-                HubCargoPackage::new("makepad_webgl", builds),
+            ws.packages_response(htc.from, uid, vec![
+                HubPackage::new("workspace", builds),
+                HubPackage::new("makepad", builds),
+                HubPackage::new("csvproc", builds),
+                HubPackage::new("ui_example", builds),
+                HubPackage::new("makepad_webgl", builds),
             ]);
+            Ok(())
         },
-        HubMsg::CargoExec {uid, package, build} => {
+        HubMsg::Build {uid, package, config} => {
             let mut args = Vec::new();
             let env = Vec::new();
-            match build.as_ref() {
+            match config.as_ref() {
                 "release" => args.extend_from_slice(&["build", "--release", "-p", &package]),
-                "debug" => args.extend_from_slice(&["build",  "-p", &package]),
+                "debug" => args.extend_from_slice(&["build", "-p", &package]),
                 "check" => args.extend_from_slice(&["check", "-p", &package]),
-                _ => return ws.cargo_exec_fail(uid, &package, &build)
+                _ => return ws.cannot_find_build(uid, &package, &config)
             }
+            
             match package.as_ref() {
                 "makepad_webgl" => args.push("--target=wasm32-unknown-unknown"),
                 _ => ()
             }
-            ws.cargo_exec(uid, &args, &env);
+            
+            if let BuildResult::Wasm {path} = ws.cargo(uid, &args, &env) ? {
+                if config == "release" { // strip the build
+                    ws.wasm_strip_debug(&path);
+                }
+            }
+            Ok(())
         },
         HubMsg::WorkspaceFileTreeRequest {uid} => {
             ws.workspace_file_tree(
@@ -36,6 +45,7 @@ pub fn main() {
                 &[".json", ".toml", ".js", ".rs", ".txt", ".text", ".ron", ".html"],
                 Some("index.ron")
             );
+            Ok(())
         },
         _ => ws.default(htc)
     });
