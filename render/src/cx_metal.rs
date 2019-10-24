@@ -225,7 +225,7 @@ impl Cx {
             //command_buffer.wait_until_scheduled();
         }
         unsafe {
-            msg_send![pool, release];
+            let () = msg_send![pool, release];
         }
     }
     
@@ -254,7 +254,7 @@ impl Cx {
         encoder.end_encoding();
         command_buffer.commit();
         
-        unsafe {msg_send![pool, release];}
+        unsafe {let () = msg_send![pool, release];}
     }
 }
 
@@ -444,13 +444,13 @@ impl MetalWindow {
     
     pub fn set_vsync_enable(&mut self, enable: bool) {
         unsafe {
-            msg_send![self.core_animation_layer, setDisplaySyncEnabled: enable];
+            let () = msg_send![self.core_animation_layer, setDisplaySyncEnabled: enable];
         }
     }
     
     pub fn set_buffer_count(&mut self, count: u64) {
         unsafe {
-            msg_send![self.core_animation_layer, setMaximumDrawableCount: count];
+            let () = msg_send![self.core_animation_layer, setMaximumDrawableCount: count];
         }
     }
     
