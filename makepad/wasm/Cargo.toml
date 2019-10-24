@@ -1,5 +1,5 @@
 [package]
-name = "makepad_webgl"
+name = "makepad_wasm"
 version = "0.1.0"
 authors = ["arc"]
 edition = "2018"

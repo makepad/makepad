@@ -176,7 +176,7 @@ pub enum BuildResult {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HubPackage {
     pub package_name: String,
-    pub builds: Vec<String>,
+    pub configs: Vec<String>,
 }
 
 
@@ -184,7 +184,7 @@ impl HubPackage {
     pub fn new(package_name: &str, targets: &[&str]) -> HubPackage {
         HubPackage {
             package_name: package_name.to_string(),
-            builds: targets.iter().map( | v | v.to_string()).collect()
+            configs: targets.iter().map( | v | v.to_string()).collect()
         }
     }
 }

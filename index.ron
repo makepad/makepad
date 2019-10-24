@@ -278,7 +278,7 @@ Folder(
                     ],
                 ),
                 Folder(
-                    name: "webgl",
+                    name: "wasm",
                     folder: [
                         File(
                             name: "Cargo.toml",
@@ -777,6 +777,12 @@ Folder(
         ),
         File(
             name: "index.ron",
+        ),
+        File(
+            name: "makepad_settings.ron",
+        ),
+        File(
+            name: "makepad_state.ron",
         ),
         File(
             name: "todo.txt",

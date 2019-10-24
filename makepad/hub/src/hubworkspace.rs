@@ -8,9 +8,10 @@ use serde::{Deserialize};
 use std::sync::{Arc, Mutex};
 use std::fs;
 use std::sync::{mpsc};
+use toml::Value;
 
 pub struct HubWorkspace {
-    pub hub_client: Arc<Mutex<HubClient>>,
+    pub tx_write: Arc<Mutex<mpsc::Sender<ClientToHubMsg>>>,
     pub http_server: Arc<Mutex<HttpServer>>,
     pub workspace: String,
     pub root_path: String,
@@ -39,6 +40,12 @@ pub enum HubWsError {
 impl HubWorkspace {
     pub fn run<F>(key: &[u8], workspace: &str, root_path: &str, hub_log: HubLog, http_serve: HttpServe, event_handler: &'static F)
     where F: Fn(&mut HubWorkspace, HubToClientMsg) -> Result<(), HubWsError> + Clone + Send {
+        let args: Vec<String> = std::env::args().collect();
+        // lets check our cmdline args
+        if args.len() > 1 {
+            return Self::run_commandline(args, key, workspace, root_path, hub_log, http_serve, event_handler);
+        }
+        println!("{:?}", args);
         
         let http_server = match http_serve {
             HttpServe::Disabled => Arc::new(Mutex::new(HttpServer::default())),
@@ -63,22 +70,18 @@ impl HubWorkspace {
             hub_log.msg("Workspace got announce, connecting to {:?}", &address);
             
             // ok now connect to that address
-            let hub_client = Arc::new(Mutex::new(
-                HubClient::connect_to_hub(&key, address, hub_log.clone()).expect("cannot connect to hub")
-            ));
+            let mut hub_client = HubClient::connect_to_hub(&key, address, hub_log.clone()).expect("cannot connect to hub");
             
-            let rx_read = if let Ok(mut hub_client) = hub_client.lock() {
-                hub_log.msg("Workspace connected to {:?}", &hub_client.server_addr);
-                hub_client.tx_write.send(ClientToHubMsg {
-                    to: HubMsgTo::All,
-                    msg: HubMsg::ConnectWorkspace(workspace.to_string())
-                }).expect("Cannot send login");
-                
-                hub_client.rx_read.take().unwrap()
-            }
-            else {
-                panic!("Cannot lock hub_client")
-            };
+            let rx_read = hub_client.rx_read.take().unwrap();
+            let tx_write = hub_client.tx_write.clone();
+            
+            hub_log.msg("Workspace connected to {:?}", &hub_client.server_addr);
+            tx_write.send(ClientToHubMsg {
+                to: HubMsgTo::All,
+                msg: HubMsg::ConnectWorkspace(workspace.to_string())
+            }).expect("Cannot send login");
+            
+            let tx_write_arc = Arc::new(Mutex::new(tx_write));
             
             // this is the main messageloop, on rx
             while let Ok(htc) = rx_read.recv() {
@@ -93,7 +96,7 @@ impl HubWorkspace {
                 let _thread = {
                     let event_handler = event_handler.clone();
                     let mut hub_workspace = HubWorkspace {
-                        hub_client: Arc::clone(&hub_client),
+                        tx_write: Arc::clone(&tx_write_arc),
                         http_server: Arc::clone(&http_server),
                         workspace: workspace.to_string(),
                         root_path: root_path.to_string(),
@@ -101,18 +104,18 @@ impl HubWorkspace {
                         processes: Arc::clone(&processes),
                     };
                     std::thread::spawn(move || {
-                        let is_build_uid = if let HubMsg::Build {uid,..} = &htc.msg {Some(*uid)}else {None};
+                        let is_build_uid = if let HubMsg::Build {uid, ..} = &htc.msg {Some(*uid)}else {None};
                         let result = event_handler(&mut hub_workspace, htc);
-                        if let Some(is_build_uid) = is_build_uid{
-                            if let Ok(hub_client) = hub_workspace.hub_client.lock() {
-                                if result.is_ok(){
-                                    hub_client.tx_write.send(ClientToHubMsg {
+                        if let Some(is_build_uid) = is_build_uid {
+                            if let Ok(tx_write) = hub_workspace.tx_write.lock() {
+                                if result.is_ok() {
+                                    tx_write.send(ClientToHubMsg {
                                         to: HubMsgTo::UI,
                                         msg: HubMsg::BuildFailure {uid: is_build_uid}
                                     }).expect("tx_write fail");
                                 }
-                                else{
-                                    hub_client.tx_write.send(ClientToHubMsg {
+                                else {
+                                    tx_write.send(ClientToHubMsg {
                                         to: HubMsgTo::UI,
                                         msg: HubMsg::BuildSuccess {uid: is_build_uid}
                                     }).expect("tx_write fail");
@@ -125,7 +128,106 @@ impl HubWorkspace {
         }
     }
     
-    pub fn default(&mut self, htc: HubToClientMsg) -> Result<(), HubWsError>{
+    pub fn run_commandline<F>(args: Vec<String>, _key: &[u8], workspace: &str, root_path: &str, _hub_log: HubLog, _http_serve: HttpServe, event_handler: &'static F)
+    where F: Fn(&mut HubWorkspace, HubToClientMsg) -> Result<(), HubWsError> + Clone + Send {
+        
+        let http_server = Arc::new(Mutex::new(HttpServer::default()));
+        let processes = Arc::new(Mutex::new(Vec::<HubWsProcess>::new()));
+        let abs_root_path = format!("{}/{}", std::env::current_dir().unwrap().display(), root_path);
+        
+        let thread = {
+            let (tx_write, rx_write) = mpsc::channel::<ClientToHubMsg>();
+            
+            let mut hub_workspace = HubWorkspace {
+                tx_write: Arc::new(Mutex::new(tx_write.clone())),
+                http_server: Arc::clone(&http_server),
+                workspace: workspace.to_string(),
+                root_path: root_path.to_string(),
+                abs_root_path: abs_root_path.clone(),
+                processes: Arc::clone(&processes),
+            };
+            
+            // lets check our command. its either build or list
+            let thread = std::thread::spawn(move || {
+                while let Ok(htc) = rx_write.recv() {
+                    match htc.msg {
+                        HubMsg::PackagesResponse {packages, ..} => {
+                            println!("{:?}", packages);
+                        },
+                        HubMsg::LogItem{item,..}=>{
+                            println!("{:?}", item)
+                        },
+                        HubMsg::CargoArtifact{package_id,..}=>{
+                            println!("{}", package_id)
+                        },
+                        HubMsg::CargoEnd{build_result,..}=>{
+                            println!("CargoEnd {:?}", build_result)
+                        }
+                        _ => ()
+                    }
+                }
+            });
+            
+            match args[1].as_ref() {
+                "list" => {
+                    let _ = event_handler(&mut hub_workspace, HubToClientMsg {
+                        from: HubAddr::zero(),
+                        msg: HubMsg::PackagesRequest {
+                            uid: HubUid::zero()
+                        }
+                    });
+                }
+                "build" => {
+                    if args.len() != 4 {
+                        println!("Incorrect usage, please use:\nbuild <package> <config>");
+                    }
+                    else {
+                        let result = event_handler(&mut hub_workspace, HubToClientMsg {
+                            from: HubAddr::zero(),
+                            msg: HubMsg::Build {
+                                uid: HubUid::zero(),
+                                package: args[2].clone(),
+                                config: args[3].clone()
+                            }
+                        });
+                        if result.is_ok(){
+                            println!("BuildSuccess!");
+                        }
+                        else{
+                            println!("BuildFailure!");
+                        }
+                    }
+                },
+                _ => {
+                    println!("Workspace commandline interface. Commands available:\nlist\nbuild <package> <config>");
+                }
+            }
+            
+            thread
+        };
+        let _ = thread.join();
+        /*
+        let result = event_handler(&mut hub_workspace, htc);
+        if let Some(is_build_uid) = is_build_uid {
+            if let Ok(hub_client) = hub_workspace.hub_client.lock() {
+                if result.is_ok() {
+                    hub_client.tx_write.send(ClientToHubMsg {
+                        to: HubMsgTo::UI,
+                        msg: HubMsg::BuildFailure {uid: is_build_uid}
+                    }).expect("tx_write fail");
+                }
+                else {
+                    hub_client.tx_write.send(ClientToHubMsg {
+                        to: HubMsgTo::UI,
+                        msg: HubMsg::BuildSuccess {uid: is_build_uid}
+                    }).expect("tx_write fail");
+                }
+            }
+        }*/
+    }
+    
+    
+    pub fn default(&mut self, htc: HubToClientMsg) -> Result<(), HubWsError> {
         match htc.msg {
             HubMsg::WorkspaceFileTreeRequest {uid} => {
                 self.workspace_file_tree(
@@ -172,8 +274,8 @@ impl HubWorkspace {
         let mut process = Process::start(path, args, &self.root_path, &[("RUST_BACKTRACE", "full")]).expect("Cannot start process");
         
         // we now need to start a subprocess and parse the cargo output.
-        let tx_write = if let Ok(hub_client) = self.hub_client.lock() {
-            hub_client.tx_write.clone()
+        let tx_write = if let Ok(tx_write) = self.tx_write.lock() {
+            tx_write.clone()
         }
         else {
             panic!("Cannot lock hub client");
@@ -348,20 +450,12 @@ impl HubWorkspace {
             }
         };
     }
-
+    
     
     pub fn cannot_find_build(&mut self, uid: HubUid, package: &str, target: &str) -> Result<(), HubWsError> {
-        let msg = format!("Workspace {} Cannot find package {} and target {}", self.workspace, package, target);
-        
-        let hub_client = self.hub_client.lock().expect("cannot lock hub client");
-        
-        // MAKE THIS A LOG ERROR
-        hub_client.tx_write.send(ClientToHubMsg {
-            to: HubMsgTo::UI,
-            msg: HubMsg::LogItem {uid: uid,item:HubLogItem::Error(msg.clone())}
-        }).expect("tx_write fail");
-        
-        return Err(HubWsError::Error(msg))
+        Err(
+            self.error(uid, format!("Workspace {} Cannot find package {} and target {}", self.workspace, package, target))
+        )
     }
     
     pub fn cargo(&mut self, uid: HubUid, args: &[&str], env: &[(&str, &str)]) -> Result<BuildResult, HubWsError> {
@@ -376,8 +470,8 @@ impl HubWorkspace {
         //let print_args: Vec<String> = extargs.to_vec().iter().map( | v | v.to_string()).collect();
         
         // we now need to start a subprocess and parse the cargo output.
-        let tx_write = if let Ok(hub_client) = self.hub_client.lock() {
-            hub_client.tx_write.clone()
+        let tx_write = if let Ok(tx_write) = self.tx_write.lock() {
+            tx_write.clone()
         }
         else {
             panic!("Cannot lock hub client");
@@ -435,20 +529,10 @@ impl HubWorkspace {
                                 
                                 let mut msg = message.message.clone();
                                 
-                                //let mut more_lines = vec![];
-                                //more_lines.push(line.clone());
-                                
-                                //if let Some(label) = span.label {
-                                //    msg.push_str(&label);
-                                //}
-                                // if we have children fo process
                                 for child in &message.children {
                                     msg.push_str(" - ");
                                     msg.push_str(&child.message);
                                 }
-                                //if let Some(rendered) = &mut message.rendered{
-                                //    *rendered = format!("{}\n{}", rendered, line.clone());
-                                //}
                                 
                                 // lets try to pull path out of rendered, this fixes some rust bugs
                                 let mut path = span.file_name;
@@ -559,9 +643,9 @@ impl HubWorkspace {
     }
     
     pub fn packages_response(&mut self, from: HubAddr, uid: HubUid, packages: Vec<HubPackage>) {
-        let hub_client = self.hub_client.lock().expect("cannot lock hub client");
+        let tx_write = self.tx_write.lock().expect("cannot lock hub client");
         
-        hub_client.tx_write.send(ClientToHubMsg {
+        tx_write.send(ClientToHubMsg {
             to: HubMsgTo::Client(from),
             msg: HubMsg::PackagesResponse {
                 uid: uid,
@@ -570,23 +654,86 @@ impl HubWorkspace {
         }).expect("cannot send message");
     }
     
-    pub fn wasm_strip_debug(&mut self, path:&str){
+    pub fn error(&mut self, uid: HubUid, msg: String) -> HubWsError {
+        let tx_write = self.tx_write.lock().expect("cannot lock hub client");
+        
+        // MAKE THIS A LOG ERROR
+        tx_write.send(ClientToHubMsg {
+            to: HubMsgTo::UI,
+            msg: HubMsg::LogItem {uid: uid, item: HubLogItem::Error(msg.clone())}
+        }).expect("tx_write fail");
+        
+        return HubWsError::Error(msg)
+    }
+    
+    pub fn wasm_strip_debug(&mut self, uid: HubUid, path: &str) -> Result<BuildResult, HubWsError> {
         let filepath = format!("{}/{}", self.root_path, path);
         // lets strip this wasm file
         if let Ok(data) = fs::read(&filepath) {
             if let Ok(strip) = wasm_strip_debug(&data) {
                 if let Err(_) = fs::write(&filepath, strip) {
-                    println!("Cannot write stripped wasm {}", filepath);
+                    return Err(self.error(uid, format!("Cannot write stripped wasm {}", filepath)));
+                }
+                else {
+                    return Ok(BuildResult::Wasm {path: path.to_string()})
                 }
             }
             else {
-                println!("Cannot parse wasm {}", filepath);
+                return Err(self.error(uid, format!("Cannot parse wasm {}", filepath)));
             }
         }
-        else {
-            println!("Cannot read wasm {}", filepath);
+        Err(self.error(uid, format!("Cannot read wasm {}", filepath)))
+    }
+    
+    pub fn read_packages(&mut self, uid: HubUid) -> Result<Vec<String>, HubWsError> {
+        let root_cargo = match std::fs::read_to_string(format!("{}/Cargo.toml", self.root_path)) {
+            Err(_) => return Err(self.error(uid, format!("Cannot read workspace Cargo.toml"))),
+            Ok(v) => v
+        };
+        let value = match root_cargo.parse::<Value>() {
+            Err(e) => return Err(self.error(uid, format!("Cannot parse workspace Cargo.toml {:?}", e))),
+            Ok(v) => v
+        };
+        let mut ws_members = Vec::new();
+        if let Value::Table(table) = &value {
+            if let Some(table) = table.get("workspace") {
+                if let Value::Table(table) = table {
+                    if let Some(members) = table.get("members") {
+                        if let Value::Array(members) = members {
+                            for member in members {
+                                if let Value::String(member) = member {
+                                    ws_members.push(member);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         }
-        
+        let mut packages = Vec::new();
+        for member in ws_members {
+            let file_path = format!("{}/{}/Cargo.toml", self.root_path, member);
+            let cargo = match std::fs::read_to_string(&file_path) {
+                Err(_) => return Err(self.error(uid, format!("Cannot read cargo {}", file_path))),
+                Ok(v) => v
+            };
+            let value = match cargo.parse::<Value>() {
+                Err(e) => return Err(self.error(uid, format!("Cannot parse cargo {} {:?}", file_path, e))),
+                Ok(v) => v
+            };
+            if let Value::Table(table) = &value {
+                if let Some(table) = table.get("package") {
+                    if let Value::Table(table) = table {
+                        if let Some(name) = table.get("name") {
+                            if let Value::String(name) = name {
+                                packages.push(name.clone());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        return Ok(packages)
     }
     
     pub fn file_read(&mut self, from: HubAddr, uid: HubUid, path: &str) {
@@ -604,9 +751,9 @@ impl HubWorkspace {
             None
         };
         
-        let hub_client = self.hub_client.lock().expect("cannot lock hub client");
+        let tx_write = self.tx_write.lock().expect("cannot lock hub client");
         
-        hub_client.tx_write.send(ClientToHubMsg {
+        tx_write.send(ClientToHubMsg {
             to: HubMsgTo::Client(from),
             msg: HubMsg::FileReadResponse {
                 uid: uid,
@@ -629,9 +776,9 @@ impl HubWorkspace {
             http_server.send_file_change(path);
         };
         
-        let hub_client = self.hub_client.lock().expect("cannot lock hub client");
+        let tx_write = self.tx_write.lock().expect("cannot lock hub client");
         
-        hub_client.tx_write.send(ClientToHubMsg {
+        tx_write.send(ClientToHubMsg {
             to: HubMsgTo::Client(from),
             msg: HubMsg::FileWriteResponse {
                 uid: uid,
@@ -642,8 +789,8 @@ impl HubWorkspace {
     }
     
     pub fn workspace_file_tree(&mut self, from: HubAddr, uid: HubUid, ext_inc: &[&str], ron_out: Option<&str>) {
-        let tx_write = if let Ok(hub_client) = self.hub_client.lock() {
-            hub_client.tx_write.clone()
+        let tx_write = if let Ok(tx_write) = self.tx_write.lock() {
+            tx_write.clone()
         }
         else {
             panic!("Cannot lock hub client");

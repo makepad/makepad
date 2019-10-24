@@ -6,34 +6,38 @@ pub fn main() {
     
     HubWorkspace::run(&key, "makepad", "edit_repo", HubLog::None, HttpServe::Disabled, & | ws, htc | match htc.msg {
         HubMsg::PackagesRequest {uid} => {
-            let builds = &["check", "debug", "release"];
-            ws.packages_response(htc.from, uid, vec![
-                HubPackage::new("workspace", builds),
-                HubPackage::new("makepad", builds),
-                HubPackage::new("csvproc", builds),
-                HubPackage::new("ui_example", builds),
-                HubPackage::new("makepad_webgl", builds),
-            ]);
+            // lets read our Cargo.toml in the root
+            let packages = ws.read_packages(uid) ?;
+            let builds = &["check", "debug", "release", "small"];
+            ws.packages_response(
+                htc.from,
+                uid,
+                packages.iter().map( | v | HubPackage::new(v, builds)).collect()
+            );
             Ok(())
         },
         HubMsg::Build {uid, package, config} => {
             let mut args = Vec::new();
-            let env = Vec::new();
+            let mut env = Vec::new();
             match config.as_ref() {
+                "small" => args.extend_from_slice(&["build", "--release", "-p", &package]),
                 "release" => args.extend_from_slice(&["build", "--release", "-p", &package]),
                 "debug" => args.extend_from_slice(&["build", "-p", &package]),
                 "check" => args.extend_from_slice(&["check", "-p", &package]),
                 _ => return ws.cannot_find_build(uid, &package, &config)
             }
             
-            match package.as_ref() {
-                "makepad_webgl" => args.push("--target=wasm32-unknown-unknown"),
-                _ => ()
+            if config == "small" {
+                env.push(("RUSTFLAGS", "-C opt-level=z -C panic=abort -C codegen-units=1"))
+            }
+            
+            if package.ends_with("wasm") {
+                args.push("--target=wasm32-unknown-unknown");
             }
             
             if let BuildResult::Wasm {path} = ws.cargo(uid, &args, &env) ? {
-                if config == "release" { // strip the build
-                    ws.wasm_strip_debug(&path);
+                if config == "small" { // strip the build
+                    ws.wasm_strip_debug(uid, &path) ?;
                 }
             }
             Ok(())
