@@ -665,16 +665,31 @@ impl HubWorkspace {
         
         return HubWsError::Error(msg)
     }
+
+    pub fn message(&mut self, uid: HubUid, msg: String) {
+        let tx_write = self.tx_write.lock().expect("cannot lock hub client");
+        
+        // MAKE THIS A LOG ERROR
+        tx_write.send(ClientToHubMsg {
+            to: HubMsgTo::UI,
+            msg: HubMsg::LogItem {uid: uid, item: HubLogItem::Message(msg.clone())}
+        }).expect("tx_write fail");
+    }
     
     pub fn wasm_strip_debug(&mut self, uid: HubUid, path: &str) -> Result<BuildResult, HubWsError> {
         let filepath = format!("{}/{}", self.root_path, path);
         // lets strip this wasm file
         if let Ok(data) = fs::read(&filepath) {
             if let Ok(strip) = wasm_strip_debug(&data) {
+                let uncomp_len = strip.len();
+                let mut enc = snap::Encoder::new();
+                let comp_len = if let Ok(compressed) = enc.compress_vec(&strip){compressed.len()}else{0};
+                
                 if let Err(_) = fs::write(&filepath, strip) {
                     return Err(self.error(uid, format!("Cannot write stripped wasm {}", filepath)));
                 }
                 else {
+                    self.message(uid, format!("Wasm file stripped size: {} kb approc {} kb compressed", uncomp_len>>10, comp_len>>10));
                     return Ok(BuildResult::Wasm {path: path.to_string()})
                 }
             }

@@ -415,20 +415,20 @@ impl MetalWindow {
         unsafe {
             //msg_send![layer, displaySyncEnabled:false];
             let count: u64 = 2;
-            msg_send![core_animation_layer, setMaximumDrawableCount: count];
-            msg_send![core_animation_layer, setDisplaySyncEnabled: false];
-            msg_send![core_animation_layer, setNeedsDisplayOnBoundsChange: true];
-            msg_send![core_animation_layer, setAutoresizingMask: (1 << 4) | (1 << 1)];
-            msg_send![core_animation_layer, setAllowsNextDrawableTimeout: false];
-            msg_send![core_animation_layer, setDelegate: cocoa_window.view];
-            msg_send![core_animation_layer, setBackgroundColor: CGColor::rgb(0.0, 0.0, 0.0, 1.0)];
+            let () = msg_send![core_animation_layer, setMaximumDrawableCount: count];
+            let () = msg_send![core_animation_layer, setDisplaySyncEnabled: false];
+            let () = msg_send![core_animation_layer, setNeedsDisplayOnBoundsChange: true];
+            let () = msg_send![core_animation_layer, setAutoresizingMask: (1 << 4) | (1 << 1)];
+            let () = msg_send![core_animation_layer, setAllowsNextDrawableTimeout: false];
+            let () = msg_send![core_animation_layer, setDelegate: cocoa_window.view];
+            let () = msg_send![core_animation_layer, setBackgroundColor: CGColor::rgb(0.0, 0.0, 0.0, 1.0)];
         }
         
         unsafe {
             let view = cocoa_window.view;
             view.setWantsBestResolutionOpenGLSurface_(YES);
             view.setWantsLayer(YES);
-            msg_send![view, setLayerContentsPlacement: 11];
+            let () = msg_send![view, setLayerContentsPlacement: 11];
             view.setLayer(mem::transmute(core_animation_layer.as_ref()));
         }
         

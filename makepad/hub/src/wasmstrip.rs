@@ -133,9 +133,10 @@ pub fn wasm_strip_debug(buf: &[u8])->Result<Vec<u8>,WasmParseError>{
     let sections = read_wasm_sections(&buf)?;
     // lets rewrite it
     for section in &sections{
-        if !section.name.starts_with(".debug"){
+        if section.type_id != 0{// !section.name.starts_with(".debug"){
             strip.extend_from_slice(&buf[section.start..section.end]);
         }
+        
     }
     Ok(strip)
 }
