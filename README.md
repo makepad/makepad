@@ -2,8 +2,7 @@
 This repo will be restructured soon! To set the expectations: The current business model idea is to have all library crates be MIT open-source (editor, UI, vectors, renderstack, etc), but to have 'pro features' of the IDE like the VR compile connectivity, or visual design tools be paid as a subscription model. This means all software you develop with the makepad library stack will always have all dependencies be MIT, but we'll try to convince you that the pro features of the IDE are useful to pay for. This means that this repo will have an open part (what you find here today+lots more) and a closed part (currently starting the work).
 
 Makepad compiled to wasm demo (no live coding, just the UI): https://makepad.github.io/makepad/
-
-Right now all makepad can do is 'dogfood' its own development in 2D, which means we use it ourselves every day to write its own code.
+Right now all makepad can do is 'dogfood' its own development in 2D, which means we use it ourselves every day to write its own code, however we use the native build for that.
 
 The vision of makepad is to build a livecoding / design hybrid IDE. The entire library stack you use to write programs is opinionated and integrated with IDE tools as much as possible. You can live modify values in code that update the running program (in 2D and VR), and it tries to recompile real code changes code as 'live' as it can. The language its written in, and targets is Rust and only Rust. The IDE will run both in 2D and in VR.  Makepad only depends on a few Rust only platform bindings and Serde, everything else compiles trivially on all supported platforms (gnu-windows as well). Makepad includes its own Rust based shader abstraction that can target GLSL, HLSL, MetalSL directly.
 
