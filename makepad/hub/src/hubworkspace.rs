@@ -689,7 +689,7 @@ impl HubWorkspace {
                     return Err(self.error(uid, format!("Cannot write stripped wasm {}", filepath)));
                 }
                 else {
-                    self.message(uid, format!("Wasm file stripped size: {} kb approc {} kb compressed", uncomp_len>>10, comp_len>>10));
+                    self.message(uid, format!("Wasm file stripped size: {} kb uncompressed {} kb with snap", uncomp_len>>10, comp_len>>10));
                     return Ok(BuildResult::Wasm {path: path.to_string()})
                 }
             }

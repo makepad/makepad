@@ -207,8 +207,8 @@ impl CocoaApp {
                                     // plug it into the apple clipboard
                                     let nsstring: id = NSString::alloc(nil).init_str(&response);
                                     let array: id = msg_send![class!(NSArray), arrayWithObject: NSStringPboardType];
-                                    msg_send![self.pasteboard, declareTypes: array owner: nil];
-                                    msg_send![self.pasteboard, setString: nsstring forType: NSStringPboardType];
+                                    let () = msg_send![self.pasteboard, declareTypes: array owner: nil];
+                                    let () = msg_send![self.pasteboard, setString: nsstring forType: NSStringPboardType];
                                 },
                                 _ => ()
                             };
@@ -419,7 +419,7 @@ impl CocoaApp {
                 repeats: false
             ];
             let nsrunloop: id = msg_send![class!(NSRunLoop), mainRunLoop];
-            msg_send![nsrunloop, addTimer: nstimer forMode: NSRunLoopCommonModes];
+            let () = msg_send![nsrunloop, addTimer: nstimer forMode: NSRunLoopCommonModes];
             
             let _: () = msg_send![pool, release];
         }
@@ -453,7 +453,7 @@ impl CocoaApp {
                 repeats: repeats
             ];
             let nsrunloop: id = msg_send![class!(NSRunLoop), mainRunLoop];
-            msg_send![nsrunloop, addTimer: nstimer forMode: NSRunLoopCommonModes];
+            let () = msg_send![nsrunloop, addTimer: nstimer forMode: NSRunLoopCommonModes];
             
             self.timers.push(CocoaTimer {
                 timer_id: timer_id,
@@ -468,7 +468,7 @@ impl CocoaApp {
         for i in 0..self.timers.len() {
             if self.timers[i].timer_id == timer_id {
                 unsafe {
-                    msg_send![self.timers[i].nstimer, invalidate]
+                    let () = msg_send![self.timers[i].nstimer, invalidate];
                 }
                 self.timers.remove(i);
                 return;
@@ -499,7 +499,7 @@ impl CocoaApp {
                         data1: 0u64
                         data2: 0u64
                     ];
-                    msg_send![appkit::NSApp(), postEvent: nsevent atStart: 0];
+                    let () = msg_send![appkit::NSApp(), postEvent: nsevent atStart: 0];
                     let _: () = msg_send![pool, release];
                 }
                 return;
@@ -566,7 +566,7 @@ impl CocoaWindow {
             // set the backpointeers
             (*self.window_delegate).set_ivar("cocoa_window_ptr", self as *mut _ as *mut c_void);
             //(*self.layer_delegate).set_ivar("cocoa_window_ptr", self as *mut _ as *mut c_void);
-            msg_send![self.view, initWithPtr: self as *mut _ as *mut c_void];
+            let () = msg_send![self.view, initWithPtr: self as *mut _ as *mut c_void];
             
             let left_top = if let Some(position) = position {
                 NSPoint::new(position.x as f64, position.y as f64)
@@ -589,20 +589,20 @@ impl CocoaWindow {
                 NO
             );
             
-            msg_send![self.window, setDelegate: self.window_delegate];
+            let () = msg_send![self.window, setDelegate: self.window_delegate];
             
             let title = NSString::alloc(nil).init_str(title);
             self.window.setReleasedWhenClosed_(NO);
             self.window.setTitle_(title);
-            msg_send![self.window, setTitleVisibility: appkit::NSWindowTitleVisibility::NSWindowTitleHidden];
-            msg_send![self.window, setTitlebarAppearsTransparent: YES];
+            let () = msg_send![self.window, setTitleVisibility: appkit::NSWindowTitleVisibility::NSWindowTitleHidden];
+            let () = msg_send![self.window, setTitlebarAppearsTransparent: YES];
             
             //let subviews:id = msg_send![self.window, getSubviews];
             //println!("{}", subviews as u64);
             
             self.window.setAcceptsMouseMovedEvents_(YES);
             
-            msg_send![self.view, setLayerContentsRedrawPolicy: 2]; //duringViewResize
+            let () = msg_send![self.view, setLayerContentsRedrawPolicy: 2]; //duringViewResize
             
             self.window.setContentView_(self.view);
             self.window.makeFirstResponder_(self.view);
@@ -611,7 +611,7 @@ impl CocoaWindow {
                 self.window.center();
             }
             let input_context: id = msg_send![self.view, inputContext];
-            msg_send![input_context, invalidateCharacterCoordinates];
+            let () = msg_send![input_context, invalidateCharacterCoordinates];
             
             let _: () = msg_send![autoreleasepool, drain];
         }
@@ -642,7 +642,7 @@ impl CocoaWindow {
                 repeats: YES
             ];
             let nsrunloop: id = msg_send![class!(NSRunLoop), mainRunLoop];
-            msg_send![nsrunloop, addTimer: self.live_resize_timer forMode: NSRunLoopCommonModes];
+            let () = msg_send![nsrunloop, addTimer: self.live_resize_timer forMode: NSRunLoopCommonModes];
             
             let _: () = msg_send![pool, release];
         }
@@ -651,25 +651,25 @@ impl CocoaWindow {
     pub fn close_window(&mut self) {
         unsafe {
             (*self.cocoa_app).event_recur_block = false;
-            msg_send![self.window, close];
+            let () = msg_send![self.window, close];
         }
     }
     
     pub fn restore(&mut self) {
         unsafe {
-            msg_send![self.window, toggleFullScreen: nil];
+            let () = msg_send![self.window, toggleFullScreen: nil];
         }
     }
     
     pub fn maximize(&mut self) {
         unsafe {
-            msg_send![self.window, toggleFullScreen: nil];
+            let () = msg_send![self.window, toggleFullScreen: nil];
         }
     }
     
     pub fn minimize(&mut self) {
         unsafe {
-            msg_send![self.window, miniaturize: nil];
+            let () = msg_send![self.window, miniaturize: nil];
         }
     }
     
@@ -678,7 +678,7 @@ impl CocoaWindow {
     
     pub fn end_live_resize(&mut self) {
         unsafe {
-            msg_send![self.live_resize_timer, invalidate];
+            let () = msg_send![self.live_resize_timer, invalidate];
             self.live_resize_timer = nil;
         }
     }
@@ -711,7 +711,7 @@ impl CocoaWindow {
         window_frame.origin.x = pos.x as f64;
         window_frame.origin.y = pos.y as f64;
         //not very nice: CGDisplay::main().pixels_high() as f64
-        unsafe {msg_send![self.window, setFrame: window_frame display: YES]};
+        unsafe {let () = msg_send![self.window, setFrame: window_frame display: YES];};
     }
     
     pub fn get_position(&self) -> Vec2 {
@@ -743,7 +743,7 @@ impl CocoaWindow {
         let mut window_frame = unsafe {NSWindow::frame(self.window)};
         window_frame.size.width = size.x as f64;
         window_frame.size.height = size.y as f64;
-        unsafe {msg_send![self.window, setFrame: window_frame display: YES]};
+        unsafe {let () = msg_send![self.window, setFrame: window_frame display: YES];};
     }
     
     pub fn get_dpi_factor(&self) -> f32 {
@@ -1332,7 +1332,7 @@ pub fn define_cocoa_view_class() -> *const Class {
         let cw = get_cocoa_window(this);
         unsafe {
             if cw.mouse_down_can_drag_window() {
-                msg_send![cw.window, performWindowDragWithEvent: event];
+                let () = msg_send![cw.window, performWindowDragWithEvent: event];
                 return
             }
         }
@@ -1534,8 +1534,8 @@ pub fn define_cocoa_view_class() -> *const Class {
             let string = nsstring_to_string(characters);
             cw.send_text_input(string, replacement_range.length != 0);
             let input_context: id = msg_send![this, inputContext];
-            msg_send![input_context, invalidateCharacterCoordinates];
-            msg_send![cw.view, setNeedsDisplay: YES];
+            let () = msg_send![input_context, invalidateCharacterCoordinates];
+            let () = msg_send![cw.view, setNeedsDisplay: YES];
             unmark_text(this, _sel);
         }
     }
@@ -1548,7 +1548,7 @@ pub fn define_cocoa_view_class() -> *const Class {
         let _cw = get_cocoa_window(this);
         unsafe {
             let input_context: id = msg_send![this, inputContext];
-            msg_send![input_context, handleEvent: event];
+            let () = msg_send![input_context, handleEvent: event];
         }
     }
     
