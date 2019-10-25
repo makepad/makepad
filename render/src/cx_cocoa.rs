@@ -1731,7 +1731,7 @@ fn load_undocumented_cursor(cursor_name: &str) -> id {
     unsafe {
         let class = class!(NSCursor);
         let sel = Sel::register(cursor_name);
-        let sel = msg_send![class, respondsToSelector: sel];
+        let sel:id = msg_send![class, respondsToSelector: sel];
         let id: id = msg_send![class, performSelector: sel];
         id
     }
