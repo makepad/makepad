@@ -108,6 +108,16 @@ impl Cx {
             }
         }
     }
+
+    pub fn set_default_depth_and_blend_mode(){
+        unsafe{
+            gl::Enable(gl::DEPTH_TEST);
+            gl::DepthFunc(gl::LEQUAL);
+            gl::BlendEquationSeparate(gl::FUNC_ADD, gl::FUNC_ADD);
+            gl::BlendFuncSeparate(gl::ONE, gl::ONE_MINUS_SRC_ALPHA, gl::ONE, gl::ONE_MINUS_SRC_ALPHA);
+            gl::Enable(gl::BLEND);
+        }
+    }
     
     pub fn draw_pass_to_window(
         &mut self,
@@ -218,6 +228,7 @@ impl Cx {
             gl::ClearColor(clear_color.r, clear_color.g, clear_color.b, clear_color.a);
             gl::Clear(gl::COLOR_BUFFER_BIT | gl::DEPTH_BUFFER_BIT);
         }
+        Self::set_default_depth_and_blend_mode();
         
         let mut zbias = 0.0;
         let zbias_step = self.passes[pass_id].zbias_step;
@@ -321,12 +332,7 @@ impl Cx {
             }
         }
         
-        unsafe {
-            gl::Enable(gl::DEPTH_TEST);
-            gl::BlendEquationSeparate(gl::FUNC_ADD, gl::FUNC_ADD);
-            gl::BlendFuncSeparate(gl::ONE, gl::ONE_MINUS_SRC_ALPHA, gl::ONE, gl::ONE_MINUS_SRC_ALPHA);
-            gl::Enable(gl::BLEND);
-        }
+        Self::set_default_depth_and_blend_mode();
         
         let mut zbias = 0.0;
         let zbias_step = self.passes[pass_id].zbias_step;
