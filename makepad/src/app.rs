@@ -24,7 +24,8 @@ impl Default for AppSettings {
             exec_when_done: false,
             build_on_save: true,
             builds: vec![BuildTarget {
-                workspace: "makepad".to_string(),
+                workspace: "main".to_string(),
+                project: "makepad".to_string(),
                 package: "makepad".to_string(),
                 config: "check".to_string()
             }]
@@ -32,9 +33,10 @@ impl Default for AppSettings {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct BuildTarget {
     pub workspace: String,
+    pub project: String,
     pub package: String,
     pub config: String
 }

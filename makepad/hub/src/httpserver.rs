@@ -13,22 +13,27 @@ pub struct HttpServer {
     pub watchers: Vec<(u64, mpsc::Sender<String>)>,
     pub files_read: Vec<String>,
     pub listen_thread: Option<std::thread::JoinHandle<()>>,
+    pub listen_address: Option<SocketAddr>,
+    pub terminate: bool
 }
 
 impl HttpServer {
     pub fn start_http_server(port: u16, bind_ip:[u8;4], root_dir: &str) -> Arc<Mutex<HttpServer>> {
         let listen_address = SocketAddr::from((bind_ip, port));
 
-        let listener = TcpListener::bind(listen_address).expect("Cannot bind server address");
+        let listener = TcpListener::bind(listen_address.clone()).expect("Cannot bind server address");
         let root_dir = root_dir.to_string();
 
         let http_server_root = Arc::new(Mutex::new(HttpServer::default()));
         let http_server = Arc::clone(&http_server_root);
         
-        // the file signal message forwarder queue
-        
         let listen_thread = std::thread::spawn(move || {
             for tcp_stream in listener.incoming() {
+                if let Ok(http_server) = http_server.lock(){
+                    if http_server.terminate{
+                        return
+                    }
+                }
                 let mut tcp_stream = tcp_stream.expect("Incoming stream failure");
                 let (tx_write, rx_write) = mpsc::channel::<String>();
                 let mut reader = BufReader::new(tcp_stream.try_clone().expect("Cannot clone tcp stream"));
@@ -122,6 +127,7 @@ impl HttpServer {
         });
         if let Ok(mut http_server) = http_server_root.lock() {
             http_server.listen_thread = Some(listen_thread);
+            http_server.listen_address = Some(listen_address.clone());
         };
         http_server_root
     }
@@ -137,6 +143,18 @@ impl HttpServer {
     pub fn send_build_start(&mut self){
         for (_, tx) in &self.watchers{
             let _ = tx.send(format!("{{\"type\":\"build_start\"}}"));
+        }
+    }
+    
+    pub fn terminate(&mut self){
+        self.terminate = true;
+        if let Some(listen_address) = self.listen_address{
+            self.listen_address = None;
+            // just do a single connection to the listen address to break the wait.
+            if let Ok(_) = TcpStream::connect(listen_address) {
+                // wait for the thread to exit
+                self.join_threads();
+            }
         }
     }
     

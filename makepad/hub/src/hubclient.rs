@@ -107,8 +107,6 @@ pub fn write_block_to_tcp_stream(tcp_stream: &mut TcpStream, msg_buf: &[u8], dig
     Ok(())
 }
 
-
-
 pub struct HubClient {
     pub own_addr: HubAddr,
     pub server_addr: HubAddr,

@@ -1,6 +1,7 @@
 use serde::{Serialize, Deserialize};
 use std::net::SocketAddr;
 use std::cmp::Ordering;
+use std::collections::HashMap;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum HubMsg {
@@ -15,9 +16,19 @@ pub enum HubMsg {
     
     ConnectionError(HubError),
     
+    SetWorkspaceConfig{
+        uid: HubUid,
+        config: HubWsConfig
+    },
+    
+    WorkspaceConfigChanged{
+        uid: HubUid,
+    },
+    
     // make client stuff
     Build {
         uid: HubUid,
+        project: String,
         package: String,
         config: String
     },
@@ -123,8 +134,6 @@ pub enum HubMsg {
     },
 }
 
-
-
 #[derive(Eq, PartialEq, Debug, Clone, Serialize, Deserialize)]
 pub enum WorkspaceFileTreeNode {
     File {name: String},
@@ -175,18 +184,34 @@ pub enum BuildResult {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HubPackage {
+    pub project:String,
     pub package_name: String,
     pub configs: Vec<String>,
 }
 
-
 impl HubPackage {
-    pub fn new(package_name: &str, targets: &[&str]) -> HubPackage {
+    pub fn new(project:&str, package_name: &str, targets: &[&str]) -> HubPackage {
         HubPackage {
+            project: project.to_string(),
             package_name: package_name.to_string(),
             configs: targets.iter().map( | v | v.to_string()).collect()
         }
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum HttpServe {
+    Disabled,
+    Local(u16),
+    All(u16),
+    Interface((u16, [u8; 4]))
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HubWsConfig{
+    http_serve: HttpServe,
+    projects: HashMap<String,String>,
+    
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

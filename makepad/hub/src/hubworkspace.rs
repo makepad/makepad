@@ -9,27 +9,25 @@ use std::sync::{Arc, Mutex};
 use std::fs;
 use std::sync::{mpsc};
 use toml::Value;
+use std::collections::HashMap;
 
 pub struct HubWorkspace {
     pub tx_write: Arc<Mutex<mpsc::Sender<ClientToHubMsg>>>,
-    pub http_server: Arc<Mutex<HttpServer>>,
+    pub http_server: Arc<Mutex<Option<HttpServer>>>,
+    pub projects: Arc<Mutex<HashMap<String, String>>>,
     pub workspace: String,
-    pub root_path: String,
-    pub abs_root_path: String,
+    pub abs_cwd_path: String,
     pub processes: Arc<Mutex<Vec<HubWsProcess>>>,
-    //pub restart_connection: bool
+}
+
+pub struct HubWsProject {
+    pub name: String,
+    pub abs_path: String
 }
 
 pub struct HubWsProcess {
     uid: HubUid,
     process: Process,
-}
-
-pub enum HttpServe {
-    Disabled,
-    Local(u16),
-    All(u16),
-    Interface((u16, [u8; 4]))
 }
 
 pub enum HubWsError {
@@ -38,29 +36,26 @@ pub enum HubWsError {
 }
 
 impl HubWorkspace {
-    pub fn run<F>(key: &[u8], workspace: &str, root_path: &str, hub_log: HubLog, http_serve: HttpServe, event_handler: &'static F)
+    pub fn run_networked<F>(key: &[u8], workspace: &str, hub_log: HubLog, event_handler: &'static F)
     where F: Fn(&mut HubWorkspace, HubToClientMsg) -> Result<(), HubWsError> + Clone + Send {
-        let args: Vec<String> = std::env::args().collect();
+        //let args: Vec<String> = std::env::args().collect();
         // lets check our cmdline args
-        if args.len() > 1 {
-            return Self::run_commandline(args, key, workspace, root_path, hub_log, http_serve, event_handler);
-        }
-        println!("{:?}", args);
-        
-        let http_server = match http_serve {
+        let projects = Arc::new(Mutex::new(HashMap::<String, String>::new()));
+        let http_server = Arc::new(Mutex::new(None));
+        let abs_cwd_path = format!("{}", std::env::current_dir().unwrap().display());
+        let processes = Arc::new(Mutex::new(Vec::<HubWsProcess>::new()));
+        /*match http_serve {
             HttpServe::Disabled => Arc::new(Mutex::new(HttpServer::default())),
             HttpServe::Local(port) => HttpServer::start_http_server(port, [127, 0, 0, 1], root_path),
             HttpServe::All(port) => HttpServer::start_http_server(port, [0, 0, 0, 0], root_path),
             HttpServe::Interface((port, ip)) => HttpServer::start_http_server(port, ip, root_path),
-        };
-        
-        let processes = Arc::new(Mutex::new(Vec::<HubWsProcess>::new()));
-        let abs_root_path = format!("{}/{}", std::env::current_dir().unwrap().display(), root_path);
+        };*/
+        //let abs_root_path = format!("{}/{}", std::env::current_dir().unwrap().display(), root_path);
         
         loop {
-            if root_path.contains("..") || root_path.contains("./") || root_path.contains("\\") || root_path.starts_with("/") {
-                panic!("Root path for workspace cant be relative and must be unix style");
-            }
+            //if root_path.contains("..") || root_path.contains("./") || root_path.contains("\\") || root_path.starts_with("/") {
+            //    panic!("Root path for workspace cant be relative and must be unix style");
+            //}
             
             hub_log.msg("Workspace waiting for hub announcement..", &workspace);
             
@@ -92,16 +87,15 @@ impl HubWorkspace {
                     },
                     _ => ()
                 }
-                
                 let _thread = {
                     let event_handler = event_handler.clone();
                     let mut hub_workspace = HubWorkspace {
                         tx_write: Arc::clone(&tx_write_arc),
                         http_server: Arc::clone(&http_server),
-                        workspace: workspace.to_string(),
-                        root_path: root_path.to_string(),
-                        abs_root_path: abs_root_path.clone(),
+                        projects: Arc::clone(&projects),
                         processes: Arc::clone(&processes),
+                        workspace: workspace.to_string(),
+                        abs_cwd_path: abs_cwd_path.clone(),
                     };
                     std::thread::spawn(move || {
                         let is_build_uid = if let HubMsg::Build {uid, ..} = &htc.msg {Some(*uid)}else {None};
@@ -128,12 +122,19 @@ impl HubWorkspace {
         }
     }
     
-    pub fn run_commandline<F>(args: Vec<String>, _key: &[u8], workspace: &str, root_path: &str, _hub_log: HubLog, _http_serve: HttpServe, event_handler: &'static F)
+    pub fn run_commandline<F>(args: Vec<String>, workspace: &str, mount: &str, event_handler: &'static F)
     where F: Fn(&mut HubWorkspace, HubToClientMsg) -> Result<(), HubWsError> + Clone + Send {
         
-        let http_server = Arc::new(Mutex::new(HttpServer::default()));
+        let projects = Arc::new(Mutex::new(HashMap::<String, String>::new()));
+        let http_server = Arc::new(Mutex::new(None));
         let processes = Arc::new(Mutex::new(Vec::<HubWsProcess>::new()));
-        let abs_root_path = format!("{}/{}", std::env::current_dir().unwrap().display(), root_path);
+        let abs_cwd_path = format!("{}", std::env::current_dir().unwrap().display());
+        if let Ok(mut projects) = projects.lock() {
+            projects.insert(
+                "main".to_string(),
+                rel_to_abs_path(&abs_cwd_path, mount)
+            );
+        };
         
         let thread = {
             let (tx_write, rx_write) = mpsc::channel::<ClientToHubMsg>();
@@ -142,9 +143,9 @@ impl HubWorkspace {
                 tx_write: Arc::new(Mutex::new(tx_write.clone())),
                 http_server: Arc::clone(&http_server),
                 workspace: workspace.to_string(),
-                root_path: root_path.to_string(),
-                abs_root_path: abs_root_path.clone(),
                 processes: Arc::clone(&processes),
+                projects: Arc::clone(&projects),
+                abs_cwd_path: abs_cwd_path.clone()
             };
             
             // lets check our command. its either build or list
@@ -154,13 +155,13 @@ impl HubWorkspace {
                         HubMsg::PackagesResponse {packages, ..} => {
                             println!("{:?}", packages);
                         },
-                        HubMsg::LogItem{item,..}=>{
+                        HubMsg::LogItem {item, ..} => {
                             println!("{:?}", item)
                         },
-                        HubMsg::CargoArtifact{package_id,..}=>{
+                        HubMsg::CargoArtifact {package_id, ..} => {
                             println!("{}", package_id)
                         },
-                        HubMsg::CargoEnd{build_result,..}=>{
+                        HubMsg::CargoEnd {build_result, ..} => {
                             println!("CargoEnd {:?}", build_result)
                         }
                         _ => ()
@@ -186,14 +187,15 @@ impl HubWorkspace {
                             from: HubAddr::zero(),
                             msg: HubMsg::Build {
                                 uid: HubUid::zero(),
+                                project: "main".to_string(),
                                 package: args[2].clone(),
                                 config: args[3].clone()
                             }
                         });
-                        if result.is_ok(){
+                        if result.is_ok() {
                             println!("BuildSuccess!");
                         }
-                        else{
+                        else {
                             println!("BuildFailure!");
                         }
                     }
@@ -226,36 +228,56 @@ impl HubWorkspace {
         }*/
     }
     
+    pub fn set_config(&mut self, _uid:HubUid, _config: HubWsConfig) -> Result<(), HubWsError> {
+        // if we have a http server. just shut it down
+        if let Ok(mut http_server) = self.http_server.lock() {
+            if let Some(http_server) = &mut *http_server{
+                http_server.terminate();
+            }
+            *http_server = None;
+        }
+        // start it anew if we need to
+        
+        Ok(())
+    }
     
     pub fn default(&mut self, htc: HubToClientMsg) -> Result<(), HubWsError> {
+        let ws = self;
         match htc.msg {
+            HubMsg::SetWorkspaceConfig {uid, config} => {
+                ws.set_config(uid, config)
+            },
             HubMsg::WorkspaceFileTreeRequest {uid} => {
-                self.workspace_file_tree(
+                ws.workspace_file_tree(
                     htc.from,
                     uid,
                     &[".json", ".toml", ".js", ".rs", ".txt", ".text", ".ron", ".html"],
-                    None
                 );
+                Ok(())
             },
             HubMsg::FileReadRequest {uid, path} => {
-                self.file_read(htc.from, uid, &path);
+                ws.file_read(htc.from, uid, &path);
+                Ok(())
             },
             HubMsg::FileWriteRequest {uid, path, data} => {
-                self.file_write(htc.from, uid, &path, data);
+                ws.file_write(htc.from, uid, &path, data);
+                Ok(())
             },
             HubMsg::BuildKill {uid} => {
-                self.process_kill(uid);
+                ws.process_kill(uid);
+                Ok(())
             },
             HubMsg::ProgramKill {uid} => {
-                self.process_kill(uid);
+                ws.process_kill(uid);
+                Ok(())
             },
             HubMsg::ProgramRun {uid, path, args} => {
                 let v: Vec<&str> = args.iter().map( | v | v.as_ref()).collect();
-                self.program_run(uid, &path, &v);
+                ws.program_run(uid, &path, &v)?;
+                Ok(())
             },
-            _ => ()
+            _ => Ok(())
         }
-        Ok(())
     }
     
     pub fn process_kill(&mut self, uid: HubUid) {
@@ -268,10 +290,40 @@ impl HubWorkspace {
         };
     }
     
-    pub fn program_run(&mut self, uid: HubUid, path: &str, args: &[&str]) {
-        
+    pub fn project_split_from_path(&mut self, uid: HubUid, path: &str) -> Result<(String, String, String), HubWsError> {
+        if let Some(project_pos) = path.find("/") {
+            let (project, rest) = path.split_at(project_pos);
+            let (_, rest) = rest.split_at(1);
+            let abs_dir = self.get_project_abs(uid, project) ?;
+            return Ok((abs_dir.to_string(), project.to_string(), rest.to_string()));
+        }
+        Err(
+            self.error(uid, format!("workspace {} path {} incorrent", self.workspace, path))
+        )
+    }
+    
+    pub fn get_project_abs(&mut self, uid: HubUid, project: &str) -> Result<String, HubWsError> {
+        if let Ok(projects) = self.projects.lock() {
+            if let Some(abs_dir) = projects.get(project) {
+                return Ok(abs_dir.to_string())
+            }
+        }
+        Err(
+            self.error(uid, format!("workspace {} project {} not found", self.workspace, project))
+        )
+    }
+    
+    pub fn program_run(&mut self, uid: HubUid, path: &str, args: &[&str]) -> Result<(), HubWsError> {
+        // we have to turn our path which is in the form project/... into a root path
+        let (abs_dir, project, sub_path) = self.project_split_from_path(uid, path) ?;
         // lets start a thread
-        let mut process = Process::start(path, args, &self.root_path, &[("RUST_BACKTRACE", "full")]).expect("Cannot start process");
+        let process = Process::start(&sub_path, args, &abs_dir, &[("RUST_BACKTRACE", "full")]);
+        if process.is_err() {
+            return Err(
+                self.error(uid, format!("workspace {} program run {} not found", self.workspace, path))
+            );
+        }
+        let mut process = process.unwrap();
         
         // we now need to start a subprocess and parse the cargo output.
         let tx_write = if let Ok(tx_write) = self.tx_write.lock() {
@@ -307,7 +359,7 @@ impl HubWorkspace {
         let mut tracing_panic = false;
         let mut panic_stack: Vec<String> = Vec::new();
         
-        fn send_panic(uid: HubUid, workspace: &str, panic_stack: &Vec<String>, tx_write: &mpsc::Sender<ClientToHubMsg>) {
+        fn send_panic(uid: HubUid, workspace: &str, project: &str, panic_stack: &Vec<String>, tx_write: &mpsc::Sender<ClientToHubMsg>) {
             // this has to be the uglies code in the whole project. If only stacktraces were more cleanly machine readable.
             let mut path = None;
             let mut row = 0;
@@ -322,7 +374,7 @@ impl HubWorkspace {
                     && !panic_line.starts_with("at src/libcore/")
                     && !panic_line.starts_with("at src/libpanic_unwind/") {
                     if let Some(end) = panic_line.find(":") {
-                        let proc_path = format!("{}/{}", workspace, panic_line.get(3..end).unwrap().to_string());
+                        let proc_path = format!("{}/{}/{}", workspace, project, panic_line.get(3..end).unwrap().to_string());
                         let proc_row = panic_line.get((end + 1)..(panic_line.len() - 1)).unwrap().parse::<usize>().unwrap();
                         
                         rendered.push(format!("{}:{} - {}", proc_path, proc_row, last_fn_name));
@@ -377,7 +429,7 @@ impl HubWorkspace {
                             && starts_with_digit(panic_stack.last().unwrap())
                             && starts_with_digit(&trimmed) {
                             tracing_panic = false;
-                            send_panic(uid, &workspace, &panic_stack, &tx_write);
+                            send_panic(uid, &workspace, &project, &panic_stack, &tx_write);
                         }
                         else {
                             panic_stack.push(trimmed);
@@ -392,7 +444,7 @@ impl HubWorkspace {
                                         msg: HubMsg::LogItem {
                                             uid: uid,
                                             item: HubLogItem::LocMessage(LocMessage {
-                                                path: format!("{}/{}", workspace, line.get(1..row_pos).unwrap().to_string()),
+                                                path: format!("{}/{}/{}", workspace, project, line.get(1..row_pos).unwrap().to_string()),
                                                 row: line.get((row_pos + 1)..end_pos).unwrap().parse::<usize>().unwrap(),
                                                 col: 1,
                                                 range: None,
@@ -428,7 +480,7 @@ impl HubWorkspace {
             }
             else { // process terminated
                 if tracing_panic {
-                    send_panic(uid, &workspace, &panic_stack, &tx_write);
+                    send_panic(uid, &workspace, &project, &panic_stack, &tx_write);
                 }
                 // do we have any errors?
                 break;
@@ -449,6 +501,8 @@ impl HubWorkspace {
                 processes.remove(index);
             }
         };
+        
+        Ok(())
     }
     
     
@@ -458,14 +512,20 @@ impl HubWorkspace {
         )
     }
     
-    pub fn cargo(&mut self, uid: HubUid, args: &[&str], env: &[(&str, &str)]) -> Result<BuildResult, HubWsError> {
+    pub fn cargo(&mut self, uid: HubUid, project: &str, args: &[&str], env: &[(&str, &str)]) -> Result<BuildResult, HubWsError> {
+        
         if let Ok(mut http_server) = self.http_server.lock() {
-            http_server.send_build_start();
+            if let Some(http_server) = &mut *http_server {
+                http_server.send_build_start();
+            }
         };
+        
+        let abs_root_path = self.get_project_abs(uid, project) ?;
+        
         // lets start a thread
         let mut extargs = args.to_vec();
         extargs.push("--message-format=json");
-        let mut process = Process::start("cargo", &extargs, &self.root_path, env).expect("Cannot start process");
+        let mut process = Process::start("cargo", &extargs, &abs_root_path, env).expect("Cannot start process");
         
         //let print_args: Vec<String> = extargs.to_vec().iter().map( | v | v.to_string()).collect();
         
@@ -492,21 +552,6 @@ impl HubWorkspace {
         }).expect("tx_write fail");
         
         let workspace = self.workspace.clone();
-        let abs_root_path = self.abs_root_path.clone();
-        
-        fn de_relativize_path(path: &str) -> String {
-            let splits: Vec<&str> = path.split("/").collect();
-            let mut out = Vec::new();
-            for split in splits {
-                if split == ".." && out.len()>0 {
-                    out.pop();
-                }
-                else {
-                    out.push(split);
-                }
-            }
-            out.join("/")
-        }
         
         let mut errors = Vec::new();
         let mut build_result = BuildResult::NoOutput;
@@ -552,7 +597,7 @@ impl HubWorkspace {
                                 }
                                 let loc_message = LocMessage {
                                     //package_id: parsed.package_id.clone(),
-                                    path: format!("{}/{}", workspace, de_relativize_path(&path)),
+                                    path: format!("{}/{}/{}", workspace, project, de_relativize_path(&path)),
                                     row: row,
                                     col: col,
                                     range: Some((span.byte_start as usize, span.byte_end as usize)),
@@ -591,7 +636,7 @@ impl HubWorkspace {
                                 if let Some(executable) = &parsed.executable {
                                     if !executable.ends_with(".rmeta") && abs_root_path.len() + 1 < executable.len() {
                                         let last = executable.clone().split_off(abs_root_path.len() + 1);
-                                        build_result = BuildResult::Executable {path: last};
+                                        build_result = BuildResult::Executable {path: format!("{}/{}", project, last)};
                                     }
                                 }
                                 // detect wasm files being build and tell the http server
@@ -600,9 +645,11 @@ impl HubWorkspace {
                                         if filename.ends_with(".wasm") && abs_root_path.len() + 1 < filename.len() {
                                             let last = filename.clone().split_off(abs_root_path.len() + 1);
                                             if let Ok(mut http_server) = self.http_server.lock() {
-                                                http_server.send_file_change(&last);
+                                                if let Some(http_server) = &mut *http_server {
+                                                    http_server.send_file_change(&last);
+                                                }
                                             };
-                                            build_result = BuildResult::Wasm {path: last};
+                                            build_result = BuildResult::Wasm {path: format!("{}/{}", project, last)};
                                         }
                                     }
                                 }
@@ -665,7 +712,7 @@ impl HubWorkspace {
         
         return HubWsError::Error(msg)
     }
-
+    
     pub fn message(&mut self, uid: HubUid, msg: String) {
         let tx_write = self.tx_write.lock().expect("cannot lock hub client");
         
@@ -677,13 +724,16 @@ impl HubWorkspace {
     }
     
     pub fn wasm_strip_debug(&mut self, uid: HubUid, path: &str) -> Result<BuildResult, HubWsError> {
-        let filepath = format!("{}/{}", self.root_path, path);
+        
+        let (abs_root_path, _project, sub_path) = self.project_split_from_path(uid, path) ?;
+        
+        let filepath = format!("{}/{}", abs_root_path, sub_path);
         // lets strip this wasm file
         if let Ok(data) = fs::read(&filepath) {
             if let Ok(strip) = wasm_strip_debug(&data) {
                 let uncomp_len = strip.len();
                 let mut enc = snap::Encoder::new();
-                let comp_len = if let Ok(compressed) = enc.compress_vec(&strip){compressed.len()}else{0};
+                let comp_len = if let Ok(compressed) = enc.compress_vec(&strip) {compressed.len()}else {0};
                 
                 if let Err(_) = fs::write(&filepath, strip) {
                     return Err(self.error(uid, format!("Cannot write stripped wasm {}", filepath)));
@@ -700,24 +750,76 @@ impl HubWorkspace {
         Err(self.error(uid, format!("Cannot read wasm {}", filepath)))
     }
     
-    pub fn read_packages(&mut self, uid: HubUid) -> Result<Vec<String>, HubWsError> {
-        let root_cargo = match std::fs::read_to_string(format!("{}/Cargo.toml", self.root_path)) {
-            Err(_) => return Err(self.error(uid, format!("Cannot read workspace Cargo.toml"))),
-            Ok(v) => v
-        };
-        let value = match root_cargo.parse::<Value>() {
-            Err(e) => return Err(self.error(uid, format!("Cannot parse workspace Cargo.toml {:?}", e))),
-            Ok(v) => v
-        };
-        let mut ws_members = Vec::new();
-        if let Value::Table(table) = &value {
-            if let Some(table) = table.get("workspace") {
-                if let Value::Table(table) = table {
-                    if let Some(members) = table.get("members") {
-                        if let Value::Array(members) = members {
-                            for member in members {
-                                if let Value::String(member) = member {
-                                    ws_members.push(member);
+    pub fn read_packages(&mut self, uid: HubUid) -> Vec<(String, String)> {
+        // we need to loop over all project paths, and read cargo
+        let mut packages = Vec::new();
+        let projects = Arc::clone(&self.projects);
+        if let Ok(projects) = projects.lock() {
+            for (abs_path, project) in projects.iter() {
+                let vis_path = format!("{}/{}/Cargo.toml", self.workspace, project);
+                let root_cargo = match std::fs::read_to_string(format!("{}/Cargo.toml", abs_path)) {
+                    Err(_) => {
+                        self.error(uid, format!("Cannot read cargo {}", vis_path));
+                        continue;
+                    },
+                    Ok(v) => v
+                };
+                let value = match root_cargo.parse::<Value>() {
+                    Err(e) => {
+                        self.error(uid, format!("Cannot parse {} {:?}", vis_path, e));
+                        continue;
+                    },
+                    Ok(v) => v
+                };
+                let mut ws_members = Vec::new();
+                if let Value::Table(table) = &value {
+                    if let Some(table) = table.get("workspace") {
+                        if let Value::Table(table) = table {
+                            if let Some(members) = table.get("members") {
+                                if let Value::Array(members) = members {
+                                    for member in members {
+                                        if let Value::String(member) = member {
+                                            ws_members.push(member);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    else if let Some(table) = table.get("package") {
+                        if let Value::Table(table) = table {
+                            if let Some(name) = table.get("name") {
+                                if let Value::String(name) = name {
+                                    packages.push((project.clone(), name.clone()));
+                                }
+                            }
+                        }
+                    }
+                }
+                for member in ws_members {
+                    let file_path = format!("{}/{}/Cargo.toml", abs_path, member);
+                    let vis_path = format!("{}/{}/{}/Cargo.toml", self.workspace, project, member);
+                    let cargo = match std::fs::read_to_string(&file_path) {
+                        Err(_) => {
+                            self.error(uid, format!("Cannot read cargo {}", vis_path));
+                            continue;
+                        },
+                        Ok(v) => v
+                    };
+                    let value = match cargo.parse::<Value>() {
+                        Err(e) => {
+                            self.error(uid, format!("Cannot parse cargo {} {:?}", vis_path, e));
+                            continue;
+                        },
+                        Ok(v) => v
+                    };
+                    if let Value::Table(table) = &value {
+                        if let Some(table) = table.get("package") {
+                            if let Value::Table(table) = table {
+                                if let Some(name) = table.get("name") {
+                                    if let Value::String(name) = name {
+                                        packages.push((project.clone(), name.clone()));
+                                    }
                                 }
                             }
                         }
@@ -725,96 +827,76 @@ impl HubWorkspace {
                 }
             }
         }
-        let mut packages = Vec::new();
-        for member in ws_members {
-            let file_path = format!("{}/{}/Cargo.toml", self.root_path, member);
-            let cargo = match std::fs::read_to_string(&file_path) {
-                Err(_) => return Err(self.error(uid, format!("Cannot read cargo {}", file_path))),
-                Ok(v) => v
-            };
-            let value = match cargo.parse::<Value>() {
-                Err(e) => return Err(self.error(uid, format!("Cannot parse cargo {} {:?}", file_path, e))),
-                Ok(v) => v
-            };
-            if let Value::Table(table) = &value {
-                if let Some(table) = table.get("package") {
-                    if let Value::Table(table) = table {
-                        if let Some(name) = table.get("name") {
-                            if let Value::String(name) = name {
-                                packages.push(name.clone());
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        return Ok(packages)
+        return packages
     }
     
     pub fn file_read(&mut self, from: HubAddr, uid: HubUid, path: &str) {
         // lets read a file and send it.
-        
-        if let Some(_) = path.find("..") {
-            println!("file_read got relative path, ignoring {}", path);
-            return
-        }
-        
-        let data = if let Ok(data) = std::fs::read(format!("{}/{}", self.root_path, path)) {
-            Some(data)
-        }
-        else {
-            None
-        };
-        
-        let tx_write = self.tx_write.lock().expect("cannot lock hub client");
-        
-        tx_write.send(ClientToHubMsg {
-            to: HubMsgTo::Client(from),
-            msg: HubMsg::FileReadResponse {
-                uid: uid,
-                path: path.to_string(),
-                data: data
+        if let Ok((abs_dir, _project, sub_path)) = self.project_split_from_path(uid, path) {
+            
+            if let Some(_) = sub_path.find("..") {
+                self.error(uid, format!("file_read got relative path, ignoring {}", path));
+                return
             }
-        }).expect("cannot send message");
+            
+            let data = if let Ok(data) = std::fs::read(format!("{}/{}", abs_dir, path)) {
+                Some(data)
+            }
+            else {
+                None
+            };
+            
+            let tx_write = self.tx_write.lock().expect("cannot lock hub client");
+            
+            tx_write.send(ClientToHubMsg {
+                to: HubMsgTo::Client(from),
+                msg: HubMsg::FileReadResponse {
+                    uid: uid,
+                    path: path.to_string(),
+                    data: data
+                }
+            }).expect("cannot send message");
+        }
     }
     
     pub fn file_write(&mut self, from: HubAddr, uid: HubUid, path: &str, data: Vec<u8>) {
-        if path.contains("..") {
-            println!("file_read got relative path, ignoring {}", path);
-            return
-        }
-        
-        let done = std::fs::write(format!("{}/{}", self.root_path, path), &data).is_ok();
-        
-        // lets check if any of our http friends had this file
-        if let Ok(mut http_server) = self.http_server.lock() {
-            http_server.send_file_change(path);
-        };
-        
-        let tx_write = self.tx_write.lock().expect("cannot lock hub client");
-        
-        tx_write.send(ClientToHubMsg {
-            to: HubMsgTo::Client(from),
-            msg: HubMsg::FileWriteResponse {
-                uid: uid,
-                path: path.to_string(),
-                done: done
+        if let Ok((abs_dir, _project, sub_path)) = self.project_split_from_path(uid, path) {
+            
+            if path.contains("..") {
+                self.error(uid, format!("file_write got relative path, ignoring {}", path));
+                println!("file_read got relative path, ignoring {}", path);
+                return
             }
-        }).expect("cannot send message");
+            
+            let done = std::fs::write(format!("{}/{}", abs_dir, sub_path), &data).is_ok();
+            
+            // lets check if any of our http friends had this file
+            if let Ok(mut http_server) = self.http_server.lock() {
+                if let Some(http_server) = &mut *http_server {
+                    http_server.send_file_change(path);
+                }
+            };
+            
+            let tx_write = self.tx_write.lock().expect("cannot lock hub client");
+            
+            tx_write.send(ClientToHubMsg {
+                to: HubMsgTo::Client(from),
+                msg: HubMsg::FileWriteResponse {
+                    uid: uid,
+                    path: path.to_string(),
+                    done: done
+                }
+            }).expect("cannot send message");
+        }
     }
     
-    pub fn workspace_file_tree(&mut self, from: HubAddr, uid: HubUid, ext_inc: &[&str], ron_out: Option<&str>) {
+    pub fn workspace_file_tree(&mut self, from: HubAddr, uid: HubUid, ext_inc: &[&str]) {
         let tx_write = if let Ok(tx_write) = self.tx_write.lock() {
             tx_write.clone()
         }
         else {
             panic!("Cannot lock hub client");
         };
-        
-        let path = self.root_path.to_string();
-        let workspace = self.workspace.to_string();
-        let ext_inc: Vec<String> = ext_inc.to_vec().iter().map( | v | v.to_string()).collect();
-        let ron_out = if let Some(ron_out) = ron_out {Some(ron_out.to_string())}else {None};
         
         fn read_recur(path: &str, ext_inc: &Vec<String>) -> Vec<WorkspaceFileTreeNode> {
             let mut ret = Vec::new();
@@ -850,26 +932,64 @@ impl HubWorkspace {
             ret.sort();
             ret
         }
-        let tree = WorkspaceFileTreeNode::Folder {
-            name: workspace.clone(),
-            folder: read_recur(&path, &ext_inc)
-        };
         
-        if let Some(ron_out) = ron_out {
-            let ron = ron::ser::to_string_pretty(&tree, ron::ser::PrettyConfig::default()).unwrap();
-            let _ = fs::write(format!("{}/{}", path, ron_out), ron.as_bytes());
+        let ext_inc: Vec<String> = ext_inc.to_vec().iter().map( | v | v.to_string()).collect();
+        //let ron_out = if let Some(ron_out) = ron_out {Some(ron_out.to_string())}else {None};
+        
+        let mut folder = Vec::new();
+        
+        if let Ok(projects) = self.projects.lock() {
+            for (abs_path, project) in projects.iter() {
+
+                let tree = WorkspaceFileTreeNode::Folder {
+                    name: project.clone(),
+                    folder: read_recur(&abs_path, &ext_inc)
+                };
+                
+                //if let Some(ron_out) = ron_out {
+                //    let ron = ron::ser::to_string_pretty(&tree, ron::ser::PrettyConfig::default()).unwrap();
+                //    let _ = fs::write(format!("{}/{}", path, ron_out), ron.as_bytes());
+               // }
+                folder.push(tree);
+            }
+            
         }
+        let root = WorkspaceFileTreeNode::Folder {
+            name: self.workspace.clone(),
+            folder: folder
+        };
         
         tx_write.send(ClientToHubMsg {
             to: HubMsgTo::Client(from),
             msg: HubMsg::WorkspaceFileTreeResponse {
                 uid: uid,
-                tree: tree
+                tree: root
             }
         }).expect("cannot send message");
-        
     }
 }
+
+fn rel_to_abs_path(abs_root: &str, path: &str) -> String {
+    if path.starts_with("/") {
+        return path.to_string();
+    }
+    de_relativize_path(&format!("{}/{}", abs_root, path))
+}
+
+fn de_relativize_path(path: &str) -> String {
+    let splits: Vec<&str> = path.split("/").collect();
+    let mut out = Vec::new();
+    for split in splits {
+        if split == ".." && out.len()>0 {
+            out.pop();
+        }
+        else {
+            out.push(split);
+        }
+    }
+    out.join("/")
+}
+
 
 // rust compiler output json structs
 #[derive(Clone, Deserialize, Default)]

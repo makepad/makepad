@@ -1,22 +1,20 @@
-// makepad uses these workspaces essentially as make files, but networked and persistent and also being a fileserver.
+// workspaces are networked build and file servers. This 'main' one is also compiled into makepad
 use hub::*;
 
-pub fn main() {
-    let key = std::fs::read("./key.bin").unwrap();
-    
-    HubWorkspace::run(&key, "makepad", "edit_repo", HubLog::None, HttpServe::Disabled, & | ws, htc | match htc.msg {
+pub fn workspace(ws: &mut HubWorkspace, htc: HubToClientMsg) -> Result<(), HubWsError> {
+    match htc.msg {
         HubMsg::PackagesRequest {uid} => {
             // lets read our Cargo.toml in the root
-            let packages = ws.read_packages(uid) ?;
+            let packages = ws.read_packages(uid);
             let builds = &["check", "debug", "release", "small"];
             ws.packages_response(
                 htc.from,
                 uid,
-                packages.iter().map( | v | HubPackage::new(v, builds)).collect()
+                packages.iter().map( | (project, v) | HubPackage::new(project, v, builds)).collect()
             );
             Ok(())
         },
-        HubMsg::Build {uid, package, config} => {
+        HubMsg::Build {uid, project, package, config} => {
             let mut args = Vec::new();
             let mut env = Vec::new();
             match config.as_ref() {
@@ -35,22 +33,25 @@ pub fn main() {
                 args.push("--target=wasm32-unknown-unknown");
             }
             
-            if let BuildResult::Wasm {path} = ws.cargo(uid, &args, &env) ? {
+            if let BuildResult::Wasm {path} = ws.cargo(uid, &project, &args, &env) ? {
                 if config == "small" { // strip the build
                     ws.wasm_strip_debug(uid, &path) ?;
                 }
             }
             Ok(())
         },
-        HubMsg::WorkspaceFileTreeRequest {uid} => {
-            ws.workspace_file_tree(
-                htc.from,
-                uid,
-                &[".json", ".toml", ".js", ".rs", ".txt", ".text", ".ron", ".html"],
-                Some("index.ron")
-            );
-            Ok(())
-        },
         _ => ws.default(htc)
-    });
+    }
+}
+
+pub fn main() {
+    let args: Vec<String> = std::env::args().collect();
+    // branch entrypoints
+    if args.len() > 1 {
+        HubWorkspace::run_commandline(args, "main", "edit_repo", & | ws, htc | {workspace(ws, htc)});
+    }
+    else {
+        let key = std::fs::read("./key.bin").unwrap();
+        HubWorkspace::run_networked(&key, "main", HubLog::None, & | ws, htc | {workspace(ws, htc)});
+    };
 }

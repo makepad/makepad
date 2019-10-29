@@ -132,7 +132,11 @@ impl TrapezoidText {
                 if chan < 1.5{
                     return vec4(0., t_area, 0.,0.);
                 }
-                return vec4(0., 0., t_area,0.);
+                if chan < 2.5{
+                    return vec4(0., 0., t_area,0.);
+                }
+                return vec4(t_area, t_area, t_area,0.);
+                
                 //let b_minx = p_min.x + 1.0 / 3.0;
                 //let r_minx = p_min.x - 1.0 / 3.0;
                 //let b_maxx = p_max.x + 1.0 / 3.0;
@@ -160,6 +164,68 @@ impl TrapezoidText {
                 return camera_projection * vec4(pos, 0.0, 1.0);
             }
         }))
+    }
+
+    // test api for directly drawing a glyph
+    pub fn draw_char(&mut self, cx: &mut Cx, c:char, fontdr:&Font, font_size:f32) {
+        // now lets make a draw_character function
+        let inst = cx.new_instance(&self.shader, 1);
+        if inst.need_uniforms_now(cx) {
+        }
+        
+        if let Some(font_id) = fontdr.font_id{
+            let trapezoids = {
+                let cxfont = &cx.fonts[font_id];
+                let font = cxfont.font_loaded.as_ref().unwrap();
+                
+                let slot = if c < '\u{10000}' {
+                    cx.fonts[font_id].font_loaded.as_ref().unwrap().char_code_to_glyph_index_map[c as usize]
+                } else {
+                    0
+                };
+                
+                if slot == 0 {
+                    return
+                }
+                let glyph = &cx.fonts[font_id].font_loaded.as_ref().unwrap().glyphs[slot];
+                let dpi_factor = cx.current_dpi_factor;
+                let pos = cx.get_turtle_walk(); 
+                let font_scale_logical = font_size * 96.0 / (72.0 * font.units_per_em);
+                let font_scale_pixels = font_scale_logical * dpi_factor;
+                
+                let mut trapezoids = Vec::new();
+                trapezoids.extend_from_internal_iter(
+                    self.trapezoidator.trapezoidate(
+                        glyph
+                            .outline
+                            .commands()
+                            .map({
+                            move | command | {
+                                command.transform(
+                                    &AffineTransformation::identity()
+                                        .translate(Vector::new(-glyph.bounds.p_min.x, -glyph.bounds.p_min.y))
+                                        .uniform_scale(font_scale_pixels)
+                                        .translate(Vector::new(pos.x, pos.y))
+                                )
+                            }
+                        }).linearize(0.5),
+                    ),
+                );
+                trapezoids
+            };
+            for trapezoid in trapezoids {
+                let data = [
+                    trapezoid.xs[0],
+                    trapezoid.xs[1],
+                    trapezoid.ys[0],
+                    trapezoid.ys[1],
+                    trapezoid.ys[2],
+                    trapezoid.ys[3],
+                    3.0
+                ];
+                inst.push_slice(cx, &data);
+            }
+        }
     }
     
     pub fn draw_todo(&mut self, cx: &mut Cx, todo: CxFontsAtlasTodo) {

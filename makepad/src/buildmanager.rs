@@ -31,9 +31,7 @@ const SIGNAL_BUILD_MANAGER_ARTIFACT_EXEC_END: usize = 3;
 
 #[derive(Clone)]
 pub struct ActiveBuild {
-    pub workspace: String,
-    pub package: String,
-    pub config: String,
+    pub build_target: BuildTarget,
     pub build_result: Option<BuildResult>,
     pub build_uid: Option<HubUid>,
     pub run_uid: Option<HubUid>,
@@ -167,13 +165,13 @@ impl BuildManager {
                                 return
                             }
                         }
-                        else{
+                        else {
                             break;
                         }
                     }
                     export = true;
                 }
-                else{
+                else {
                 }
                 self.log_items.push(item.clone());
                 if export {
@@ -229,7 +227,7 @@ impl BuildManager {
                     let uid = hub_ui.alloc_uid();
                     if let Some(run_uid) = ab.run_uid {
                         hub_ui.send(ClientToHubMsg {
-                            to: HubMsgTo::Workspace(ab.workspace.clone()),
+                            to: HubMsgTo::Workspace(ab.build_target.workspace.clone()),
                             msg: HubMsg::ProgramKill {
                                 uid: run_uid,
                             }
@@ -237,7 +235,7 @@ impl BuildManager {
                     }
                     ab.run_uid = Some(uid);
                     hub_ui.send(ClientToHubMsg {
-                        to: HubMsgTo::Workspace(ab.workspace.clone()),
+                        to: HubMsgTo::Workspace(ab.build_target.workspace.clone()),
                         msg: HubMsg::ProgramRun {
                             uid: ab.run_uid.unwrap(),
                             path: path.clone(),
@@ -274,7 +272,7 @@ impl BuildManager {
             ab.build_result = None;
             if let Some(build_uid) = ab.build_uid {
                 hub_ui.send(ClientToHubMsg {
-                    to: HubMsgTo::Workspace(ab.workspace.clone()),
+                    to: HubMsgTo::Workspace(ab.build_target.workspace.clone()),
                     msg: HubMsg::BuildKill {
                         uid: build_uid,
                     }
@@ -283,7 +281,7 @@ impl BuildManager {
             }
             if let Some(run_uid) = ab.run_uid {
                 hub_ui.send(ClientToHubMsg {
-                    to: HubMsgTo::Workspace(ab.workspace.clone()),
+                    to: HubMsgTo::Workspace(ab.build_target.workspace.clone()),
                     msg: HubMsg::ProgramKill {
                         uid: run_uid,
                     }
@@ -301,14 +299,13 @@ impl BuildManager {
                 to: HubMsgTo::Workspace(build_target.workspace.clone()),
                 msg: HubMsg::Build {
                     uid: uid.clone(),
+                    project: build_target.project.clone(),
                     package: build_target.package.clone(),
                     config: build_target.config.clone()
                 }
             });
             self.active_builds.push(ActiveBuild {
-                workspace: build_target.workspace.to_string(),
-                package: build_target.package.to_string(),
-                config: build_target.config.to_string(),
+                build_target: build_target.clone(),
                 build_result: None,
                 build_uid: Some(uid),
                 run_uid: None

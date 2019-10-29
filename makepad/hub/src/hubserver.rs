@@ -26,6 +26,7 @@ pub struct HubServer {
     pub announce_thread: Option<std::thread::JoinHandle<()>>,
 }
 
+
 impl HubServer {
     pub fn start_hub_server_default(key: &[u8], hub_log:HubLog)->HubServer{
          HubServer::start_hub_server(

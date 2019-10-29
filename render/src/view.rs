@@ -251,11 +251,11 @@ impl Cx {
     }
     
     pub fn new_instance(&mut self, shader: &Shader, instance_count: usize) -> InstanceArea {
-        let shader_id = shader.shader_id.unwrap();
+        let shader_id = shader.shader_id.expect("shader id invalid");
         if !self.is_in_redraw_cycle {
             panic!("calling new_instance outside of redraw cycle is not possible!");
         }
-        let current_view_id = *self.view_stack.last().unwrap();
+        let current_view_id = *self.view_stack.last().expect("view stack is empty");
         let draw_list = &mut self.views[current_view_id];
         let sh = &self.shaders[shader_id];
         // find our drawcall to append to the current layer
