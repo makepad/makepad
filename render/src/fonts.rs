@@ -228,11 +228,8 @@ impl TrapezoidText {
         }
     }
     
+    // atlas drawing function used by CxAfterDraw
     pub fn draw_todo(&mut self, cx: &mut Cx, todo: CxFontsAtlasTodo) {
-        // lets fetch font
-        
-        
-        // now lets make a draw_character function
         let inst = cx.new_instance(&self.shader, 1);
         if inst.need_uniforms_now(cx) {
         }
