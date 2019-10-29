@@ -73,11 +73,6 @@ impl App {
         };
 
         cx.move_turtle(50., 50.);
-        //self.text.font_size = 9.0;
-        //for _ in 0..7{
-        //    self.text.draw_text(cx, "- num -");
-        // }
-        //self.blit.draw_blit_abs(cx, &Texture {texture_id: Some(cx.fonts_atlas.texture_id)}, Rect {x: 100., y: 100., w: 700., h: 400.});
         let text = "Hello world";
         for c in text.chars(){
             self.trapezoid_text.draw_char(cx, c, &self.text.font, 32.0);
