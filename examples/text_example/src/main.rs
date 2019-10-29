@@ -58,7 +58,8 @@ impl App {
         }
     }
     
-    fn handle_app(&mut self, _cx: &mut Cx, event: &mut Event) {
+    fn handle_app(&mut self, cx: &mut Cx, event: &mut Event) {
+        self.desktop_window.handle_desktop_window(cx, event);
         match event {
             Event::Construct => {
             },
