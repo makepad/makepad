@@ -77,7 +77,7 @@ impl Text {
             let view_do_scroll: vec2<Uniform>;
 
             fn pixel() -> vec4 {
-                let dx = dfdx(tex_coord1.x * 4096.0);
+                let dx = dfdx(vec2(tex_coord1.x * 4096.0,0.)).x;
 
                 let dp = 1.0 / 4096.0;
 
