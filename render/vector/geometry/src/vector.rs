@@ -48,6 +48,10 @@ impl Vector {
         }
     }
 
+    pub fn perpendicular(self) -> Vector {
+        Vector::new(-self.y, self.x)
+    }
+
     /// Returns the dot product of `self` and `other`.
     pub fn dot(self, other: Vector) -> f32 {
         self.x * other.x + self.y * other.y

@@ -204,11 +204,11 @@ impl TrapezoidText {
                                 command.transform(
                                     &AffineTransformation::identity()
                                         .translate(Vector::new(-glyph.bounds.p_min.x, -glyph.bounds.p_min.y))
-                                        .uniform_scale(font_scale_pixels)
+                                        .scale(Vector::new(font_scale_pixels, -font_scale_pixels))
                                         .translate(Vector::new(pos.x, pos.y))
                                 )
                             }
-                        }).linearize(0.5),
+                        }).linearize(0.25)
                     ),
                 );
                 trapezoids
