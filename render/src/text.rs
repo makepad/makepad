@@ -22,6 +22,7 @@ pub struct Text {
     pub do_h_scroll: bool,
     pub do_v_scroll: bool,
     pub brightness: f32,
+    pub curve: f32,
     pub line_spacing: f32,
     pub top_drop: f32,
     pub z: f32,
@@ -40,6 +41,7 @@ impl Text {
             font_scale: 1.0,
             line_spacing: 1.3,
             top_drop: 1.4,
+            curve: 0.7,
             brightness: 1.0,
             z: 0.0,
             wrapping: Wrapping::Word,
@@ -74,6 +76,8 @@ impl Text {
             let rect: vec4<Varying>;
             let zbias: float<Uniform>;
             let brightness: float<Uniform>;
+            let curve: float<Uniform>;
+            
             let view_do_scroll: vec2<Uniform>;
 
             fn pixel() -> vec4 {
@@ -82,26 +86,25 @@ impl Text {
                 let dp = 1.0 / 4096.0;
 
                 // basic hardcoded mipmapping so it stops 'swimming' in VR
+                let s = 1.0;
                 if dx > 2.75 { // combine 3x3
-                    let s = (
+                    s = (
                         sample2d(texturez, tex_coord3.xy + vec2(0.,0.)).z
                         + sample2d(texturez, tex_coord3.xy + vec2(dp,0.)).z
                         + sample2d(texturez, tex_coord3.xy + vec2(0.,dp)).z
                         + sample2d(texturez, tex_coord3.xy + vec2(dp,dp)).z)*0.25;
-                    return vec4(s * color.rgb * brightness * color.a, s * color.a);
                 }
                 else if dx > 1.75 { // combine 3x3
-                    let s = sample2d(texturez, tex_coord3.xy).z;
-                    return vec4(s * color.rgb * brightness * color.a, s * color.a);
+                    s = sample2d(texturez, tex_coord3.xy).z;
                 }
                 else if dx > 1.3 { // combine 2x2
-                    let s = sample2d(texturez, tex_coord2.xy).y;
-                    return vec4(s * color.rgb * brightness * color.a, s * color.a);
+                    s = sample2d(texturez, tex_coord2.xy).y;
                 }
                 else {
-                    let s = sample2d(texturez, tex_coord1.xy).x;
-                    return vec4(vec3(s,s,s) * color.rgb * brightness * color.a, s * color.a);
+                    s = sample2d(texturez, tex_coord1.xy).x;
                 }
+                s = pow(s,curve);
+                return vec4(s * color.rgb * brightness * color.a, s * color.a);
             }
             
             fn vertex() -> vec4 {
@@ -157,6 +160,7 @@ impl Text {
             
             aligned.inst.push_uniform_float(cx, 0.);
             aligned.inst.push_uniform_float(cx, self.brightness);
+            aligned.inst.push_uniform_float(cx, self.curve);
             aligned.inst.push_uniform_vec2f(
                 cx,
                 if self.do_h_scroll {1.0}else {0.0},

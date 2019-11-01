@@ -1,3 +1,5 @@
+mod hubui;
+pub use crate::hubui::*;
 
 mod hubworkspace;
 pub use crate::hubworkspace::*;
@@ -10,6 +12,9 @@ pub use crate::hubclient::*;
 
 mod hubserver;
 pub use crate::hubserver::*;
+
+mod hubrouter;
+pub use crate::hubrouter::*;
 
 mod hubmsg;
 pub use crate::hubmsg::*;

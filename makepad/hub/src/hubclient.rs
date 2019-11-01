@@ -1,8 +1,11 @@
 use crate::hubmsg::*;
+use crate::hubrouter::*;
+
 use std::net::{TcpStream, UdpSocket, SocketAddr, SocketAddrV4, SocketAddrV6, Shutdown};
 use std::io::prelude::*;
-use std::sync::{mpsc};
+use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
+
 #[cfg(any(target_os = "linux",target_os = "macos"))]
 use std::os::unix::io::AsRawFd;
 
@@ -113,13 +116,13 @@ pub struct HubClient {
     pub uid_alloc: u64,
     read_thread: Option<thread::JoinHandle<()>>,
     write_thread: Option<thread::JoinHandle<()>>,
-    pub tx_read: mpsc::Sender<HubToClientMsg>,
-    pub rx_read: Option<mpsc::Receiver<HubToClientMsg>>,
-    pub tx_write: mpsc::Sender<ClientToHubMsg>
+    pub tx_read: mpsc::Sender<FromHubMsg>,
+    pub rx_read: Option<mpsc::Receiver<FromHubMsg>>,
+    pub tx_write: mpsc::Sender<ToHubMsg>
 }
 
 impl HubClient {
-    pub fn connect_to_hub(key: &[u8], server_address: SocketAddr, hub_log: HubLog) -> HubResult<HubClient> {
+    pub fn connect_to_server(digest: [u64;26], server_address: SocketAddr, hub_log: HubLog) -> HubResult<HubClient> {
         
         // first try local address
         let local_address = SocketAddr::from(([127, 0, 0, 1], server_address.port()));
@@ -135,13 +138,13 @@ impl HubClient {
         
         let own_addr = HubAddr::from_socket_addr(tcp_stream.local_addr().expect("Cannot get client local address"));
         
-        let (tx_read, rx_read) = mpsc::channel::<HubToClientMsg>();
-        let (tx_write, rx_write) = mpsc::channel::<ClientToHubMsg>();
+        let (tx_read, rx_read) = mpsc::channel::<FromHubMsg>();
+        let (tx_write, rx_write) = mpsc::channel::<ToHubMsg>();
         let tx_read_copy = tx_read.clone();
         let tx_write_copy = tx_write.clone();
         
-        let mut digest = [0u64; 26];
-        digest_buffer(&mut digest, key);
+        //let mut digest = [0u64; 26];
+        //digest_buffer(&mut digest, key);
         
         let read_thread = {
             let mut tcp_stream = tcp_stream.try_clone().expect_msg("connect_to_hub: cannot clone socket") ?;
@@ -152,18 +155,18 @@ impl HubClient {
                 loop {
                     match read_block_from_tcp_stream(&mut tcp_stream, &mut digest.clone()) {
                         Ok(msg_buf) => {
-                            let htc_msg: HubToClientMsg = bincode::deserialize(&msg_buf).expect("read_thread hub message deserialize fail - version conflict!");
+                            let htc_msg: FromHubMsg = bincode::deserialize(&msg_buf).expect("read_thread hub message deserialize fail - version conflict!");
                             hub_log.msg("HubClient received", &htc_msg);
                             tx_read.send(htc_msg).expect("tx_read.send fails - should never happen");
                         },
                         Err(e) => {
                             let _ = tcp_stream.shutdown(Shutdown::Both);
-                            tx_read.send(HubToClientMsg {
+                            tx_read.send(FromHubMsg {
                                 from: server_hubaddr.clone(),
                                 msg: HubMsg::ConnectionError(e.clone())
                             }).expect("tx_read.send fails - should never happen");
                             // lets break rx write
-                            let _ = tx_write_copy.send(ClientToHubMsg {
+                            let _ = tx_write_copy.send(ToHubMsg {
                                 to: HubMsgTo::Hub,
                                 msg: HubMsg::ConnectionError(e)
                             });
@@ -193,7 +196,7 @@ impl HubClient {
                     if let Err(e) = write_block_to_tcp_stream(&mut tcp_stream, &msg_buf, &mut digest.clone()) {
                         // disconnect the socket and send shutdown
                         let _ = tcp_stream.shutdown(Shutdown::Both);
-                        let _ = tx_read.send(HubToClientMsg {
+                        let _ = tx_read.send(FromHubMsg {
                             from: server_hubaddr.clone(),
                             msg: HubMsg::ConnectionError(e)
                         });
@@ -215,11 +218,11 @@ impl HubClient {
         })
     }
     
-    pub fn wait_for_announce(key: &[u8]) -> Result<SocketAddr, std::io::Error> {
-        Self::wait_for_announce_on(key, SocketAddr::from(([0, 0, 0, 0], HUB_ANNOUNCE_PORT)))
+    pub fn wait_for_announce(digest:[u64;26]) -> Result<SocketAddr, std::io::Error> {
+        Self::wait_for_announce_on(digest, SocketAddr::from(([0, 0, 0, 0], HUB_ANNOUNCE_PORT)))
     }
     
-    pub fn wait_for_announce_on(key: &[u8], announce_address: SocketAddr) -> Result<SocketAddr, std::io::Error> {
+    pub fn wait_for_announce_on(digest:[u64;26], announce_address: SocketAddr) -> Result<SocketAddr, std::io::Error> {
         
         #[cfg(any(target_os = "linux",target_os = "macos"))]
         fn reuse_addr(socket: &mut UdpSocket) {
@@ -243,27 +246,26 @@ impl HubClient {
             if let Ok(mut socket) = UdpSocket::bind(announce_address) {
                 // TODO. FIX FOR WINDOWS
                 reuse_addr(&mut socket);
-                let mut digest = [0u64; 26];
-                let digest_u8 = unsafe {std::mem::transmute::<&mut [u64; 26], &mut [u8; 26 * 8]>(&mut digest)};
+                let mut digest_read = [0u64; 26];
+                let digest_u8 = unsafe {std::mem::transmute::<&mut [u64; 26], &mut [u8; 26 * 8]>(&mut digest_read)};
                 
                 let (bytes, from) = socket.recv_from(digest_u8) ?;
                 if bytes != 26 * 8 {
                     println!("Announce port wrong bytecount");
                 }
                 
-                let mut check_digest = [0u64; 26];
-                check_digest[25] = digest[25];
-                check_digest[0] = digest[25];
-                digest_buffer(&mut check_digest, key);
+                let mut check_digest = digest.clone();
+                check_digest[25] = digest_read[25];
+                check_digest[0] ^= digest_read[25];
+                digest_process_chunk(&mut check_digest);
                 
-                if check_digest == digest { // use this to support multiple hubs on one network
-                    let listen_port = digest[25];
+                if check_digest == digest_read { // use this to support multiple hubs on one network
+                    let listen_port = digest_read[25];
                     return Ok(match from {
                         SocketAddr::V4(v4) => SocketAddr::V4(SocketAddrV4::new(*v4.ip(), listen_port as u16)),
                         SocketAddr::V6(v6) => SocketAddr::V6(SocketAddrV6::new(*v6.ip(), listen_port as u16, v6.flowinfo(), v6.scope_id())),
                     })
                 }
-                //println!("wait for announce found wrong digest");
             }
             //else{
             //    println!("wait for announce bind failed");
@@ -284,6 +286,28 @@ impl HubClient {
         }
     }
     
+    pub fn get_route_send(&self)->HubRouteSend{
+         HubRouteSend::Networked{
+            uid_alloc: Arc::new(Mutex::new(0)),
+            tx_write_arc: Arc::new(Mutex::new(Some(self.tx_write.clone()))),
+            own_addr_arc: Arc::new(Mutex::new(Some(self.own_addr)))
+        }
+    }
+
+    pub fn get_route_send_in_place(&self, route_send:&HubRouteSend){
+        route_send.update_networked_in_place(Some(self.own_addr), Some(self.tx_write.clone()))
+    }
+}
+
+pub fn generate_key()->[u64;26]{
+    let mut result = [0u64;26];
+    for i in 0..25{
+        result[i] ^= time::precise_time_ns();
+        std::thread::sleep(std::time::Duration::from_millis(1));
+        digest_process_chunk(&mut result);
+    }
+    result[25] = 0;
+    result
 }
 
 // digest function to hash tcp data to enable error checking and multiple servers on one network
@@ -388,7 +412,7 @@ macro_rules!unroll24 {
 }
 
 #[allow(non_upper_case_globals, unused_assignments)]
-fn digest_process_chunk(a: &mut [u64; PLEN + 1]) {
+pub fn digest_process_chunk(a: &mut [u64; PLEN + 1]) {
     for i in 0..24 {
         let mut array = [0u64; 5];
         

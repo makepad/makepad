@@ -266,7 +266,6 @@ impl CodeEditor {
             },
             line_number_text: Text {
                 font: cx.load_font_style("mono_font"),
-                brightness: 1.0,
                 z: 9.,
                 line_spacing: 1.4,
                 do_h_scroll: false,

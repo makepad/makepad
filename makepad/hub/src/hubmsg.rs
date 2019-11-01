@@ -2,6 +2,7 @@ use serde::{Serialize, Deserialize};
 use std::net::SocketAddr;
 use std::cmp::Ordering;
 use std::collections::HashMap;
+use crate::httpserver::*;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum HubMsg {
@@ -16,13 +17,9 @@ pub enum HubMsg {
     
     ConnectionError(HubError),
     
-    SetWorkspaceConfig{
+    WorkspaceConfig {
         uid: HubUid,
         config: HubWsConfig
-    },
-    
-    WorkspaceConfigChanged{
-        uid: HubUid,
     },
     
     // make client stuff
@@ -33,12 +30,12 @@ pub enum HubMsg {
         config: String
     },
     
-    BuildFailure{
-        uid:HubUid,
+    BuildFailure {
+        uid: HubUid,
     },
     
-    BuildSuccess{
-        uid:HubUid,
+    BuildSuccess {
+        uid: HubUid,
     },
     
     BuildKill {
@@ -65,15 +62,15 @@ pub enum HubMsg {
         build_result: BuildResult
     },
     
-    PackagesRequest {
+    ListPackagesRequest {
         uid: HubUid
     },
     
-    PackagesResponse {
+    ListPackagesResponse {
         uid: HubUid,
         packages: Vec<HubPackage>
     },
-
+    
     ProgramKill {
         uid: HubUid
     },
@@ -134,6 +131,16 @@ pub enum HubMsg {
     },
 }
 
+impl HubMsg{
+    pub fn is_blocking(&self)->bool{
+        match self{
+            HubMsg::WorkspaceConfig{..}=>true,
+            HubMsg::FileWriteRequest{..}=>true,
+            _=>false
+        }
+    }
+}
+
 #[derive(Eq, PartialEq, Debug, Clone, Serialize, Deserialize)]
 pub enum WorkspaceFileTreeNode {
     File {name: String},
@@ -175,22 +182,22 @@ impl PartialOrd for WorkspaceFileTreeNode {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum BuildResult {
-    Executable{path:String},
-    Wasm{path:String},
-    Library{path:String},
+    Executable {path: String},
+    Wasm {path: String},
+    Library {path: String},
     NoOutput,
     Error,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HubPackage {
-    pub project:String,
+    pub project: String,
     pub package_name: String,
     pub configs: Vec<String>,
 }
 
 impl HubPackage {
-    pub fn new(project:&str, package_name: &str, targets: &[&str]) -> HubPackage {
+    pub fn new(project: &str, package_name: &str, targets: &[&str]) -> HubPackage {
         HubPackage {
             project: project.to_string(),
             package_name: package_name.to_string(),
@@ -199,29 +206,22 @@ impl HubPackage {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum HttpServe {
-    Disabled,
-    Local(u16),
-    All(u16),
-    Interface((u16, [u8; 4]))
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct HubWsConfig{
-    http_serve: HttpServe,
-    projects: HashMap<String,String>,
-    
+pub struct HubWsConfig {
+    pub http_server: HttpServerConfig,
+    pub projects: HashMap<String, String>,
 }
+
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct LocMessage{
-    pub path:String, 
-    pub row:usize, 
-    pub col:usize, 
-    pub body:String,
-    pub range:Option<(usize, usize)>,
-    pub rendered:Option<String>,
+pub struct LocMessage {
+    pub path: String,
+    pub row: usize,
+    pub col: usize,
+    pub body: String,
+    pub range: Option<(usize, usize)>,
+    pub rendered: Option<String>,
     pub explanation: Option<String>,
 }
 
@@ -236,29 +236,30 @@ pub enum HubLogItem {
     Message(String)
 }
 
-impl HubLogItem{
-    pub fn get_loc_message(&self)->Option<&LocMessage>{
-        match self{
-            HubLogItem::LocPanic(msg)=>Some(msg),
-            HubLogItem::LocError(msg)=>Some(msg),
-            HubLogItem::LocWarning(msg)=>Some(msg),
-            HubLogItem::LocMessage(msg)=>Some(msg),
-            HubLogItem::Error(_)=>None,
-            HubLogItem::Warning(_)=>None,
-            HubLogItem::Message(_)=>None
+impl HubLogItem {
+    pub fn get_loc_message(&self) -> Option<&LocMessage> {
+        match self {
+            HubLogItem::LocPanic(msg) => Some(msg),
+            HubLogItem::LocError(msg) => Some(msg),
+            HubLogItem::LocWarning(msg) => Some(msg),
+            HubLogItem::LocMessage(msg) => Some(msg),
+            HubLogItem::Error(_) => None,
+            HubLogItem::Warning(_) => None,
+            HubLogItem::Message(_) => None
         }
     }
-    pub fn get_body(&self)->&String{
-        match self{
-            HubLogItem::LocPanic(msg)=>&msg.body,
-            HubLogItem::LocError(msg)=>&msg.body,
-            HubLogItem::LocWarning(msg)=>&msg.body,
-            HubLogItem::LocMessage(msg)=>&msg.body,
-            HubLogItem::Error(body)=>body,
-            HubLogItem::Warning(body)=>body,
-            HubLogItem::Message(body)=>body
+    pub fn get_body(&self) -> &String {
+        match self {
+            HubLogItem::LocPanic(msg) => &msg.body,
+            HubLogItem::LocError(msg) => &msg.body,
+            HubLogItem::LocWarning(msg) => &msg.body,
+            HubLogItem::LocMessage(msg) => &msg.body,
+            HubLogItem::Error(body) => body,
+            HubLogItem::Warning(body) => body,
+            HubLogItem::Message(body) => body
         }
-    }}
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HubCargoArtifact {
@@ -274,6 +275,8 @@ pub struct HubCargoCheck {
 
 #[derive(PartialEq, Copy, Debug, Clone, Serialize, Deserialize)]
 pub enum HubAddr {
+    None,
+    Local {uid: u64},
     V4 {octets: [u8; 4], port: u16},
     V6 {octets: [u8; 16], port: u16},
 }
@@ -282,15 +285,17 @@ impl HubAddr {
     pub fn port(&self) -> u16 {
         match self {
             HubAddr::V4 {port, ..} => *port,
-            HubAddr::V6 {port, ..} => *port
+            HubAddr::V6 {port, ..} => *port,
+            HubAddr::Local{..}=> 0,
+            HubAddr::None{..}=> 0,
         }
     }
 }
 
 impl HubAddr {
-    pub fn zero() -> HubAddr {
-        HubAddr::V4 {octets: [0, 0, 0, 0], port: 0}
-    }
+    //pub fn zero() -> HubAddr {
+    //    HubAddr::V4 {octets: [0, 0, 0, 0], port: 0}
+   // }
     
     pub fn from_socket_addr(addr: SocketAddr) -> HubAddr {
         match addr {
@@ -317,18 +322,18 @@ pub struct HubUid {
 
 impl HubUid {
     pub fn zero() -> HubUid {
-        HubUid {addr: HubAddr::zero(), id: 0}
+        HubUid {addr: HubAddr::None, id: 0}
     }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ClientToHubMsg {
+pub struct ToHubMsg {
     pub to: HubMsgTo,
     pub msg: HubMsg
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct HubToClientMsg {
+pub struct FromHubMsg {
     pub from: HubAddr,
     pub msg: HubMsg
 }

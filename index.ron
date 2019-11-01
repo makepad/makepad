@@ -196,7 +196,13 @@ Folder(
                                     name: "hubmsg.rs",
                                 ),
                                 File(
+                                    name: "hubrouter.rs",
+                                ),
+                                File(
                                     name: "hubserver.rs",
+                                ),
+                                File(
+                                    name: "hubui.rs",
                                 ),
                                 File(
                                     name: "hubworkspace.rs",

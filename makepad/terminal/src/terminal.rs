@@ -87,7 +87,6 @@ impl Terminal {
             text: Text {
                 font: cx.load_font_style("mono_font"),
                 font_size: 12.0,
-                brightness: 1.0,
                 line_spacing: 1.4,
                 wrapping: Wrapping::Line,
                 ..Text::style(cx)

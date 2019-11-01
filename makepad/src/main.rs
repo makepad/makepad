@@ -16,8 +16,6 @@ mod buildmanager;
 pub use crate::buildmanager::*;
 //mod rustcompiler;
 //pub use crate::rustcompiler::*;
-mod hubui;
-pub use crate::hubui::*;
 use render::*;
 #[path = "../../workspace/src/main.rs"]
 mod workspace_main;

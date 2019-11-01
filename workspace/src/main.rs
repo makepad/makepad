@@ -1,9 +1,9 @@
 // workspaces are networked build and file servers. This 'main' one is also compiled into makepad
 use hub::*;
 
-pub fn workspace(ws: &mut HubWorkspace, htc: HubToClientMsg) -> Result<(), HubWsError> {
+pub fn workspace(ws: &mut HubWorkspace, htc: FromHubMsg) -> Result<(), HubWsError> {
     match htc.msg {
-        HubMsg::PackagesRequest {uid} => {
+        HubMsg::ListPackagesRequest {uid} => {
             // lets read our Cargo.toml in the root
             let packages = ws.read_packages(uid);
             let builds = &["check", "debug", "release", "small"];
@@ -44,14 +44,8 @@ pub fn workspace(ws: &mut HubWorkspace, htc: HubToClientMsg) -> Result<(), HubWs
     }
 }
 
+#[allow(dead_code)]
 pub fn main() {
     let args: Vec<String> = std::env::args().collect();
-    // branch entrypoints
-    if args.len() > 1 {
-        HubWorkspace::run_commandline(args, "main", "edit_repo", & | ws, htc | {workspace(ws, htc)});
-    }
-    else {
-        let key = std::fs::read("./key.bin").unwrap();
-        HubWorkspace::run_networked(&key, "main", HubLog::None, & | ws, htc | {workspace(ws, htc)});
-    };
+    HubWorkspace::run_workspace_commandline(args, | ws, htc | {workspace(ws, htc)});
 }

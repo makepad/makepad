@@ -146,10 +146,10 @@ impl BuildManager {
         return false
     }
     
-    pub fn handle_hub_msg(&mut self, cx: &mut Cx, storage: &mut AppStorage, htc: &HubToClientMsg) {
+    pub fn handle_hub_msg(&mut self, cx: &mut Cx, storage: &mut AppStorage, htc: &FromHubMsg) {
         //let hub_ui = storage.hub_ui.as_mut().unwrap();
         match &htc.msg {
-            HubMsg::PackagesResponse {uid: _, packages: _} => {
+            HubMsg::ListPackagesResponse {uid: _, packages: _} => {
             },
             HubMsg::CargoBegin {uid} => if self.is_running_uid(uid) {
             },
@@ -224,9 +224,9 @@ impl BuildManager {
         for ab in &mut self.active_builds {
             if let Some(build_result) = &ab.build_result {
                 if let BuildResult::Executable {path} = build_result {
-                    let uid = hub_ui.alloc_uid();
+                    let uid = hub_ui.route_send.alloc_uid();
                     if let Some(run_uid) = ab.run_uid {
-                        hub_ui.send(ClientToHubMsg {
+                        hub_ui.route_send.send(ToHubMsg {
                             to: HubMsgTo::Workspace(ab.build_target.workspace.clone()),
                             msg: HubMsg::ProgramKill {
                                 uid: run_uid,
@@ -234,7 +234,7 @@ impl BuildManager {
                         });
                     }
                     ab.run_uid = Some(uid);
-                    hub_ui.send(ClientToHubMsg {
+                    hub_ui.route_send.send(ToHubMsg {
                         to: HubMsgTo::Workspace(ab.build_target.workspace.clone()),
                         msg: HubMsg::ProgramRun {
                             uid: ab.run_uid.unwrap(),
@@ -271,7 +271,7 @@ impl BuildManager {
         for ab in &mut self.active_builds {
             ab.build_result = None;
             if let Some(build_uid) = ab.build_uid {
-                hub_ui.send(ClientToHubMsg {
+                hub_ui.route_send.send(ToHubMsg {
                     to: HubMsgTo::Workspace(ab.build_target.workspace.clone()),
                     msg: HubMsg::BuildKill {
                         uid: build_uid,
@@ -280,7 +280,7 @@ impl BuildManager {
                 ab.build_uid = None
             }
             if let Some(run_uid) = ab.run_uid {
-                hub_ui.send(ClientToHubMsg {
+                hub_ui.route_send.send(ToHubMsg {
                     to: HubMsgTo::Workspace(ab.build_target.workspace.clone()),
                     msg: HubMsg::ProgramKill {
                         uid: run_uid,
@@ -294,8 +294,8 @@ impl BuildManager {
         self.active_builds.truncate(0);
         
         for build_target in &storage.settings.builds {
-            let uid = hub_ui.alloc_uid();
-            hub_ui.send(ClientToHubMsg {
+            let uid = hub_ui.route_send.alloc_uid();
+            hub_ui.route_send.send(ToHubMsg {
                 to: HubMsgTo::Workspace(build_target.workspace.clone()),
                 msg: HubMsg::Build {
                     uid: uid.clone(),

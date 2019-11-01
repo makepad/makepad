@@ -1,63 +1,67 @@
-use std::net::{TcpStream, TcpListener, UdpSocket, SocketAddr, Shutdown};
+use std::net::{TcpListener, TcpStream, UdpSocket, SocketAddr, Shutdown};
 use std::sync::{mpsc, Arc, Mutex};
 use std::{time, thread};
 use crate::hubmsg::*;
 use crate::hubclient::*;
+use crate::hubrouter::*;
+use serde::{Serialize, Deserialize};
 
-#[derive(PartialEq)]
-pub enum HubClientType{
-    Unknown,
-    Workspace(String),
-    Clone(String),
-    UI
+#[derive(Debug, Serialize, Deserialize)]
+pub enum HubServerConfig {
+    Offline, // no network connectivity
+    Announced, // 0.0.0.0:0
+    Network(u16), // 0.0.0.0:port
+    Localhost(u16), // 127.0.0.1:port
+    InterfaceV4((u16, [u8; 4]))
 }
 
-pub struct HubServerConnection {
-    peer_addr: HubAddr,
-    tx_write: mpsc::Sender<HubToClientMsg>,
-    tcp_stream: TcpStream,
-    client_type: HubClientType
+pub struct HubServerShared {
+    pub terminate:bool
 }
 
 pub struct HubServer {
-    pub listen_addr: HubAddr,
+    pub shared: Arc<Mutex<HubServerShared>>,
+    pub listen_address: Option<SocketAddr>,
     pub listen_thread: Option<std::thread::JoinHandle<()>>,
-    pub router_thread: Option<std::thread::JoinHandle<()>>,
     pub announce_thread: Option<std::thread::JoinHandle<()>>,
 }
 
-
 impl HubServer {
-    pub fn start_hub_server_default(key: &[u8], hub_log:HubLog)->HubServer{
-         HubServer::start_hub_server(
-            &key,
-            SocketAddr::from(([0, 0, 0, 0], 0)),
-            hub_log
-        )
-    }
-    
-    pub fn start_hub_server(key: &[u8], listen_address: SocketAddr, hub_log:HubLog) -> HubServer {
+    pub fn start_hub_server(digest: [u64; 26], config: &HubServerConfig, hub_router:&HubRouter) -> Option<HubServer> {
         
-        let listener = TcpListener::bind(listen_address).expect("Cannot bind server address");
-        let listen_addr = HubAddr::from_socket_addr(listener.local_addr().expect("Cannot get server local address"));
+        let (listen_address, announce) = match config {
+            HubServerConfig::Offline => return None,
+            HubServerConfig::Announced=>(SocketAddr::from(([0, 0, 0, 0], 0)),true),
+            HubServerConfig::Localhost(port) => (SocketAddr::from(([127, 0, 0, 1], *port)),false),
+            HubServerConfig::Network(port) => (SocketAddr::from(([0, 0, 0, 0], *port)),false),
+            HubServerConfig::InterfaceV4((port, ip)) => (SocketAddr::from((*ip, *port)),false),
+        };
+
+        let listener = if let Ok(listener) = TcpListener::bind(listen_address){listener}else{println!("start_hub_server bind server address");return None};
+        let listen_address = listener.local_addr().expect("Cannot get local address");
         
-        let (tx_pump, rx_pump) = mpsc::channel::<(HubAddr, ClientToHubMsg)>();
-        
-        let connections = Arc::new(Mutex::new(Vec::<HubServerConnection>::new()));
-        
-        let mut digest = [0u64; 26];
-        digest_buffer(&mut digest, key);
+        let tx_pump = hub_router.tx_pump.clone();
+        let routes = Arc::clone(&hub_router.routes);//Arc::new(Mutex::new(Vec::<HubServerConnection>::new()));
+        let shared = Arc::new(Mutex::new(HubServerShared{
+            terminate:false
+        }));
         
         let listen_thread = {
             //let hub_log = hub_log.clone();
-            let connections = Arc::clone(&connections);
+            let routes = Arc::clone(&routes);
+            let shared = Arc::clone(&shared);
             std::thread::spawn(move || {
                 
                 for tcp_stream in listener.incoming() {
+                    if let Ok(shared) = shared.lock(){
+                        if shared.terminate{
+                            return
+                        }
+                    }
                     let tcp_stream = tcp_stream.expect("Incoming stream failure");
                     let peer_addr = HubAddr::from_socket_addr(tcp_stream.peer_addr().expect("No peer address"));
 
-                    let (tx_write, rx_write) = mpsc::channel::<HubToClientMsg>();
+                    let (tx_write, rx_write) = mpsc::channel::<FromHubMsg>();
                     let tx_write_copy = tx_write.clone();
 
                     // clone our transmit-to-pump
@@ -72,17 +76,17 @@ impl HubServer {
                             loop {
                                 match read_block_from_tcp_stream(&mut tcp_stream, &mut digest.clone()) {
                                     Ok(msg_buf) => {
-                                        let cth_msg: ClientToHubMsg = bincode::deserialize(&msg_buf).expect("read_thread hub message deserialize fail - should never happen");
+                                        let cth_msg: ToHubMsg = bincode::deserialize(&msg_buf).expect("read_thread hub message deserialize fail - should never happen");
                                         tx_pump.send((peer_addr.clone(), cth_msg)).expect("tx_pump.send fails - should never happen");
                                     }
                                     Err(e) => {
                                         let _ = tcp_stream.shutdown(Shutdown::Both);
-                                        let _ = tx_pump.send((peer_addr.clone(), ClientToHubMsg {
+                                        let _ = tx_pump.send((peer_addr.clone(), ToHubMsg {
                                             to: HubMsgTo::Hub,
                                             msg: HubMsg::ConnectionError(e.clone())
                                         })).expect("tx_pump.send fails - should never happen");
                                         // lets break rx write
-                                        let _ = tx_write_copy.send(HubToClientMsg{
+                                        let _ = tx_write_copy.send(FromHubMsg{
                                             from:peer_addr.clone(),
                                             msg:HubMsg::ConnectionError(e)
                                         });
@@ -110,7 +114,7 @@ impl HubServer {
                                 if let Err(e) = write_block_to_tcp_stream(&mut tcp_stream, &msg_buf, &mut digest.clone()) {
                                     // disconnect the socket and send shutdown
                                     let _ = tcp_stream.shutdown(Shutdown::Both);
-                                    tx_pump.send((peer_addr.clone(), ClientToHubMsg {
+                                    tx_pump.send((peer_addr.clone(), ToHubMsg {
                                         to: HubMsgTo::Hub,
                                         msg: HubMsg::ConnectionError(e)
                                     })).expect("tx_pump.send fails - should never happen");
@@ -119,11 +123,11 @@ impl HubServer {
                         })
                     };
                     
-                    if let Ok(mut connections) = connections.lock() {
-                        connections.push(HubServerConnection {
-                            client_type: HubClientType::Unknown,
+                    if let Ok(mut routes) = routes.lock() {
+                        routes.push(HubRoute {
+                            route_type: HubRouteType::Unknown,
                             peer_addr: peer_addr.clone(),
-                            tcp_stream: tcp_stream,
+                            tcp_stream: Some(tcp_stream),
                             tx_write: tx_write
                         })
                     };
@@ -131,173 +135,47 @@ impl HubServer {
             })
         };
         
-        let router_thread = {
-            let hub_log = hub_log.clone();
-            let connections = Arc::clone(&connections);
-            std::thread::spawn(move || {
-                // ok we get inbound messages from the threads
-                while let Ok((from, cth_msg)) = rx_pump.recv() {
-                    let to = cth_msg.to;
-                    let htc_msg = HubToClientMsg {
-                        from: from,
-                        msg: cth_msg.msg
-                    };
-                    // we got a message.. now lets route it elsewhere
-                    if let Ok(mut connections) = connections.lock() {
-                        hub_log.msg("HubServer sending", &htc_msg);
-                        
-                        if let Some(cid) = connections.iter().position( | c | c.peer_addr == htc_msg.from) {
-                            if connections[cid].client_type == HubClientType::Unknown {
-                                match &htc_msg.msg {
-                                    HubMsg::ConnectWorkspace(ws_name) => { // send it to all clients
-                                        let mut connection_refused = false;
-                                        for connection in connections.iter() {
-                                            if let HubClientType::Workspace(existing_ws_name) = &connection.client_type{
-                                                if *existing_ws_name == *ws_name{
-                                                    connection_refused = true;
-                                                    break;
-                                                }
-                                            }
-                                        }
-                                        if connection_refused{
-                                            println!("Already have a workspace by that name {}, disconnecting", ws_name);
-                                            let _ = connections[cid].tcp_stream.shutdown(Shutdown::Both);
-                                            connections.remove(cid);
-                                            continue;
-                                        }
-                                        connections[cid].client_type = HubClientType::Workspace(ws_name.to_string());
-                                    },
-                                    HubMsg::ConnectClone(ws_name)=>{
-                                        connections[cid].client_type = HubClientType::Clone(ws_name.to_string());
-                                    },
-                                    HubMsg::ConnectUI => { // send it to all clients
-                                        connections[cid].client_type = HubClientType::UI;
-                                    },
-                                    _ => {
-                                        println!("Router got message from unknown client {:?}, disconnecting", htc_msg.from);
-                                        let _ = connections[cid].tcp_stream.shutdown(Shutdown::Both);
-                                        connections.remove(cid);
-                                        continue;
-                                    }
-                                }
-                            }
-                        }
-                        
-                        match to {
-                            HubMsgTo::All => { // send it to all
-                                for connection in connections.iter() {
-                                    if connection.client_type != HubClientType::Unknown {
-                                        connection.tx_write.send(htc_msg.clone()).expect("Could not tx_write.send");
-                                    }
-                                }
-                            },
-                            HubMsgTo::Client(addr) => { // find our specific addr and send
-                                if let Some(connection) = connections.iter().find( | c | c.peer_addr == addr) {
-                                    if connection.client_type != HubClientType::Unknown {
-                                        connection.tx_write.send(htc_msg).expect("Could not tx_write.send");
-                                    }
-                                }
-                            },
-                            HubMsgTo::Workspace(to_ws_name)=>{
-                                for connection in connections.iter() {
-                                    match &connection.client_type{
-                                        HubClientType::Workspace(ws_name)=>if to_ws_name == *ws_name{
-                                            connection.tx_write.send(htc_msg.clone()).expect("Could not tx_write.send");
-                                        },
-                                        HubClientType::Clone(ws_name)=>if to_ws_name == *ws_name{
-                                            connection.tx_write.send(htc_msg.clone()).expect("Could not tx_write.send");
-                                        },
-                                        _=>()
-                                    }
-                                }
-                            },
-                            HubMsgTo::UI=>{
-                                for connection in connections.iter() {
-                                    if connection.client_type == HubClientType::UI{
-                                        connection.tx_write.send(htc_msg.clone()).expect("Could not tx_write.send");
-                                    }
-                                }
-                            },
-                            HubMsgTo::Hub => { // process queries on the hub
-                                match &htc_msg.msg {
-                                    HubMsg::ConnectionError(e) => {
-                                        // connection error, lets remove connection
-                                        if let Some(pos) = connections.iter().position( | c | c.peer_addr == htc_msg.from) {
-                                            hub_log.log(&format!("Server closing connection {:?} from error {:?}", htc_msg.from, e));
-                                            // let everyone know we lost something
-                                            let msg = HubToClientMsg{
-                                                from:htc_msg.from,
-                                                msg: match &connections[pos].client_type{
-                                                    HubClientType::Workspace(ws_name)=>HubMsg::DisconnectWorkspace(ws_name.clone()),
-                                                    HubClientType::Clone(ws_name)=>HubMsg::DisconnectClone(ws_name.clone()),
-                                                    HubClientType::UI=>HubMsg::DisconnectUI,
-                                                    HubClientType::Unknown=>{
-                                                        continue
-                                                    }
-                                                }
-                                            };
-                                            connections.remove(pos);
-                                            for connection in connections.iter() {
-                                                connection.tx_write.send(msg.clone()).expect("Could not tx_write.send");
-                                            }
-                                        }
-                                    },
-                                    HubMsg::ListWorkspacesRequest{uid}=>{
-                                        let mut workspaces = Vec::new();
-                                        for connection in connections.iter() {
-                                            match &connection.client_type{
-                                                HubClientType::Workspace(ws_name)=>workspaces.push(ws_name.to_string()),
-                                                _=>()
-                                            }
-                                        }
-                                        // send it back to the caller
-                                        if let Some(connection) = connections.iter().find( | c | c.peer_addr == htc_msg.from) {
-                                            connection.tx_write.send(HubToClientMsg{
-                                                from:htc_msg.from,
-                                                msg:HubMsg::ListWorkspacesResponse{
-                                                    uid:*uid,
-                                                    workspaces:workspaces
-                                                }
-                                            }).expect("Could not tx_write.send");
-                                        }
-                                    },
-                                    _ => ()
-                                }
-                                // return current connections
-                            }
-                        }
-                    }
-                }
-            })
-        };
-        
-        return HubServer {
-            listen_addr: listen_addr,
+        let mut hub_server = HubServer {
+            shared: shared,
+            listen_address: Some(listen_address),
             listen_thread: Some(listen_thread),
-            router_thread: Some(router_thread),
+            //router_thread: Some(router_thread),
             announce_thread: None
         };
+        
+        if announce{
+            hub_server.start_announce_server_default(digest.clone());
+        }
+        
+        return Some(hub_server);
     }
 
-    pub fn start_announce_server_default(&mut self, key: &[u8]) {
+    pub fn start_announce_server_default(&mut self, digest: [u64;26]) {
         self.start_announce_server(
-            &key,
+            digest,
             SocketAddr::from(([0, 0, 0, 0], 0)),
             SocketAddr::from(([255, 255, 255, 255], HUB_ANNOUNCE_PORT)),
             SocketAddr::from(([127, 0, 0, 1], HUB_ANNOUNCE_PORT)),
         )
     }
     
-    pub fn start_announce_server(&mut self, key: &[u8], announce_bind: SocketAddr, announce_send: SocketAddr, announce_backup: SocketAddr) {
-        let listen_port = self.listen_addr.port();
+    pub fn start_announce_server(&mut self, digest: [u64;26], announce_bind: SocketAddr, announce_send: SocketAddr, announce_backup: SocketAddr) {
+        let listen_port = if let Some(listen_address) = self.listen_address{
+            listen_address.port()
+        }
+        else{
+            panic!("No port to announce")
+        };
         
-        let mut digest = [0u64; 26];
+        let mut digest = digest.clone();
         digest[25] = listen_port as u64;
-        digest[0] = listen_port as u64;
-        digest_buffer(&mut digest, key);
+        digest[0] ^= listen_port as u64;
+        digest_process_chunk(&mut digest);
         
         let digest_u8 = unsafe {std::mem::transmute::<[u64; 26], [u8; 26 * 8]>(digest)};
-        
+
+        let shared = Arc::clone(&self.shared);
+
         let announce_thread = std::thread::spawn(move || {
             
             let socket = UdpSocket::bind(announce_bind).expect("Server: Cannot bind announce port");
@@ -305,6 +183,11 @@ impl HubServer {
             
             let thread_sleep_time = time::Duration::from_millis(100);
             loop {
+                if let Ok(shared) = shared.lock() {
+                    if shared.terminate{
+                        return
+                    }
+                }
                 if let Err(_) = socket.send_to(&digest_u8, announce_send){
                     if let Err(_) = socket.send_to(&digest_u8, announce_backup){
                         println!("Cannot send to announce port");
@@ -317,12 +200,20 @@ impl HubServer {
         self.announce_thread = Some(announce_thread);
     }
     
-    pub fn join_threads(&mut self) {
-        self.listen_thread.take().expect("cant take listen thread").join().expect("cant join listen thread");
-        self.router_thread.take().expect("cant take router thread").join().expect("cant join router thread");
+    pub fn terminate(&mut self){
+        if let Ok(mut shared) = self.shared.lock() {
+            shared.terminate = true;
+        }
+        if let Some(listen_address) = self.listen_address {
+            self.listen_address = None;
+            // just do a single connection to the listen address to break the wait.
+            if let Ok(_) = TcpStream::connect(listen_address) {
+                self.listen_thread.take().expect("cant take listen thread").join().expect("cant join listen thread");
+            }
+        }
+        //self.router_thread.take().expect("cant take router thread").join().expect("cant join router thread");
         if self.announce_thread.is_some() {
             self.announce_thread.take().expect("cant take announce thread").join().expect("cant join announce_thread thread");
         }
     }
-    
 }
