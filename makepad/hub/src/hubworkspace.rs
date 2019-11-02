@@ -562,13 +562,15 @@ impl HubWorkspace {
                             item: HubLogItem::Message(line.clone())
                         }
                     });
-                     if tracing_panic {
+                    if tracing_panic {
+                        tracing_panic = false;
                         send_panic(uid, &workspace, &project, &panic_stack, &route_mode);
                     }
                 }
             }
             else { // process terminated
                 if tracing_panic {
+                    tracing_panic = false;
                     send_panic(uid, &workspace, &project, &panic_stack, &route_mode);
                 }
                 // do we have any errors?
