@@ -391,7 +391,7 @@ impl HubWorkspace {
             let (project, rest) = path.split_at(project_pos);
             let (_, rest) = rest.split_at(1);
             let abs_dir = self.get_project_abs(uid, project) ?;
-            println!(" GOT PARTS #{}# #{}# #{}#", abs_dir, project, rest);
+            println!(" GOT PARTS #{}# #{}# #{}# #{}#", abs_dir, project, rest, path);
             return Ok((abs_dir.to_string(), project.to_string(), rest.to_string()));
         }
         Err(
