@@ -37,7 +37,7 @@ impl LogItem {
 
         let text = if let Some(rendered) = &loc_message.rendered {
             if let Some(explanation) = &loc_message.explanation {
-                format!("{}{}{}", loc_message.body,rendered, explanation)
+                format!("{}{}{}", loc_message.body, rendered, explanation)
             }
             else {
                 format!("{}{}", loc_message.body,rendered)
@@ -52,6 +52,7 @@ impl LogItem {
     }
 
     pub fn load_plain_text(&mut self, cx: &mut Cx, val: &str) {
+        println!("PLAIN TEXT {}", val);
         self.needs_formatting = false;
         self.text_buffer.load_from_utf8(cx, val);
         self.code_editor.view.redraw_view_area(cx);
