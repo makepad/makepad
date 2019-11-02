@@ -219,6 +219,7 @@ impl HubWorkspace {
                 let workspace = args[3].to_string();
                 let utf8_data = std::fs::read_to_string(key_file).expect("Can't read key file");
                 let digest: [u64; 26] = ron::de::from_str(&utf8_data).expect("Can't load key file");
+                println!("Starting workspace listening to announce");
                 Self::run_workspace_networked(digest, None, &workspace, HubLog::None, event_handler);
                 return
             },
@@ -231,6 +232,7 @@ impl HubWorkspace {
                 let workspace = args[4].to_string();
                 let utf8_data = std::fs::read_to_string(key_file).expect("Can't read key file");
                 let digest: [u64; 26] = ron::de::from_str(&utf8_data).expect("Can't load key file");
+                println!("Starting workspace connecting to ip");
                 Self::run_workspace_networked(digest, Some(addr), &workspace, HubLog::None, event_handler);
                 return
             },
