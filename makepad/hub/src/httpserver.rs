@@ -33,16 +33,16 @@ pub struct HttpServer {
 }
 
 impl HttpServer {
-    pub fn start_http_server(config:&HttpServerConfig, projects_arc: Arc<Mutex<HashMap<String, String>>>) -> Option<HttpServer> {
-
-        let listen_address = match config{
+    pub fn start_http_server(config: &HttpServerConfig, projects_arc: Arc<Mutex<HashMap<String, String>>>) -> Option<HttpServer> {
+        
+        let listen_address = match config {
             HttpServerConfig::Offline => return None,
             HttpServerConfig::Localhost(port) => SocketAddr::from(([127, 0, 0, 1], *port)),
             HttpServerConfig::Network(port) => SocketAddr::from(([0, 0, 0, 0], *port)),
             HttpServerConfig::InterfaceV4((port, ip)) => SocketAddr::from((*ip, *port)),
         };
-
-        let listener = if let Ok(listener) = TcpListener::bind(listen_address.clone()){listener} else {println!("Cannot bind http server port");return None};
+        
+        let listener = if let Ok(listener) = TcpListener::bind(listen_address.clone()) {listener} else {println!("Cannot bind http server port"); return None};
         let projects = Arc::clone(&projects_arc);
         let shared = Arc::new(Mutex::new(HttpServerShared::default()));
         
@@ -73,7 +73,7 @@ impl HttpServer {
                         let space = line.find(' ').expect("http space fail");
                         let url = line[0..space].to_lowercase();
                         
-                        if url.ends_with("key.bin") || url.find("..").is_some() || url.starts_with("/") {
+                        if url.ends_with("key.ron") || url.find("..").is_some() || url.starts_with("/") {
                             let _ = tcp_stream.shutdown(Shutdown::Both);
                             return
                         }
@@ -85,18 +85,12 @@ impl HttpServer {
                                 shared.watch_pending.push((watcher_id, tx_write));
                             };
                             match rx_write.recv_timeout(Duration::from_secs(30)) {
-                                Ok(json_msg) => { // let the watcher know
-                                    let data = json_msg.as_bytes();
-                                    let header = format!(
-                                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                                        data.len()
-                                    );
-                                    write_bytes_to_tcp_stream_no_error(&mut tcp_stream, header.as_bytes());
-                                    write_bytes_to_tcp_stream_no_error(&mut tcp_stream, &data);
+                                Ok(msg) => { // let the watcher know
+                                    write_bytes_to_tcp_stream_no_error(&mut tcp_stream, msg.as_bytes());
                                     let _ = tcp_stream.shutdown(Shutdown::Both);
                                 },
                                 Err(_) => { // close gracefully
-                                    let _ = tcp_stream.write("HTTP/1.1 201 Retry\r\n".as_bytes());
+                                    write_bytes_to_tcp_stream_no_error(&mut tcp_stream, "HTTP/1.1 201 Retry\r\n\r\n".as_bytes());
                                     let _ = tcp_stream.shutdown(Shutdown::Both);
                                 }
                             }
@@ -173,27 +167,38 @@ impl HttpServer {
         })
     }
     
-    pub fn send_file_change(&mut self, path: &str) {
+    pub fn send_json_message(&mut self, json_msg: &str) {
         if let Ok(shared) = self.shared.lock() {
-            if !shared.files_read.iter().find( | v | **v == path).is_none() {
-                for (_, tx) in &shared.watch_pending {
-                    let _ = tx.send(format!("{{\"type\":\"file_change\",\"path\":\"{}\"}}", path.to_string()));
-                }
+            for (_, tx) in &shared.watch_pending {
+                let msg = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    json_msg.len(),
+                    json_msg
+                );
+                let _ = tx.send(msg);
             }
         }
     }
     
-    pub fn send_build_start(&mut self) {
+    pub fn send_file_change(&mut self, path: &str) {
         if let Ok(shared) = self.shared.lock() {
-            for (_, tx) in &shared.watch_pending {
-                let _ = tx.send(format!("{{\"type\":\"build_start\"}}"));
+            if shared.files_read.iter().find( | v | **v == path).is_none() {
+                return
             }
         }
+        self.send_json_message(&format!("{{\"type\":\"file_change\",\"path\":\"{}\"}}", path));
+    }
+    
+    pub fn send_build_start(&mut self) {
+        self.send_json_message(&format!("{{\"type\":\"build_start\"}}"));
     }
     
     pub fn terminate(&mut self) {
         if let Ok(mut shared) = self.shared.lock() {
             shared.terminate = true;
+            for (_, tx) in &shared.watch_pending {
+                let _ = tx.send("HTTP/1.1 201 Retry\r\n\r\n".to_string());
+            }
         }
         if let Some(listen_address) = self.listen_address {
             self.listen_address = None;

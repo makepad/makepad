@@ -16,7 +16,8 @@ pub enum HubServerConfig {
 }
 
 pub struct HubServerShared {
-    pub terminate:bool
+    pub terminate:bool,
+    pub connections: Vec<(HubAddr, TcpStream)>
 }
 
 pub struct HubServer {
@@ -43,6 +44,7 @@ impl HubServer {
         let tx_pump = hub_router.tx_pump.clone();
         let routes = Arc::clone(&hub_router.routes);//Arc::new(Mutex::new(Vec::<HubServerConnection>::new()));
         let shared = Arc::new(Mutex::new(HubServerShared{
+            connections:Vec::new(),
             terminate:false
         }));
         
@@ -51,23 +53,27 @@ impl HubServer {
             let routes = Arc::clone(&routes);
             let shared = Arc::clone(&shared);
             std::thread::spawn(move || {
-                
                 for tcp_stream in listener.incoming() {
-                    if let Ok(shared) = shared.lock(){
-                        if shared.terminate{
-                            return
-                        }
-                    }
                     let tcp_stream = tcp_stream.expect("Incoming stream failure");
                     let peer_addr = HubAddr::from_socket_addr(tcp_stream.peer_addr().expect("No peer address"));
 
+                    if let Ok(mut shared) = shared.lock(){
+                        if shared.terminate{
+                            for (_, tcp_stream) in &mut shared.connections{
+                                let _ = tcp_stream.shutdown(Shutdown::Both);
+                            }
+                            // lets disconnect all our connections
+                            return
+                        }
+                        let tcp_stream = tcp_stream.try_clone().expect("Cannot clone tcp stream");
+                        shared.connections.push((peer_addr, tcp_stream));
+                    }
+                    
                     let (tx_write, rx_write) = mpsc::channel::<FromHubMsg>();
                     let tx_write_copy = tx_write.clone();
-
                     // clone our transmit-to-pump
                     let _read_thread = {
                         let tx_pump = tx_pump.clone();
-                        let peer_addr = peer_addr.clone();
                         let digest = digest.clone();
                         let peer_addr = peer_addr.clone();
                         let mut tcp_stream = tcp_stream.try_clone().expect("Cannot clone tcp stream");
@@ -100,13 +106,15 @@ impl HubServer {
                         let digest = digest.clone();
                         let peer_addr = peer_addr.clone();
                         let tx_pump = tx_pump.clone();
+                        let shared = Arc::clone(&shared);
                         let mut tcp_stream = tcp_stream.try_clone().expect("Cannot clone tcp stream");
                         //let hub_log = hub_log.clone();
                         std::thread::spawn(move || {
                             while let Ok(htc_msg) = rx_write.recv() {
                                  match &htc_msg.msg{
                                     HubMsg::ConnectionError(_)=>{ // we are closed by the read loop
-                                        return
+                                        let _ = tcp_stream.shutdown(Shutdown::Both);
+                                        break
                                     },
                                     _=>()
                                 }
@@ -118,6 +126,12 @@ impl HubServer {
                                         to: HubMsgTo::Hub,
                                         msg: HubMsg::ConnectionError(e)
                                     })).expect("tx_pump.send fails - should never happen");
+                                }
+                            }
+                            // remove tx_write from our shared pool
+                            if let Ok(mut shared) = shared.lock(){
+                                while let Some(position) = shared.connections.iter().position(|(addr,_)| *addr == peer_addr){
+                                    shared.connections.remove(position);
                                 }
                             }
                         })
