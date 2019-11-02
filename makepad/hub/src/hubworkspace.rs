@@ -514,7 +514,7 @@ impl HubWorkspace {
                 Ok(line)=>{
                     if let Some((is_stderr, line)) = line {
                         if is_stderr { // start collecting stderr
-                            if line.starts_with("thread '") { // this is how we recognise a stacktrace start..Very sturdy.
+                            if tracing_panic == false && line.starts_with("thread '") { // this is how we recognise a stacktrace start..Very sturdy.
                                 tracing_panic = true;
                                 panic_stack.truncate(0);
                             }
@@ -522,7 +522,7 @@ impl HubWorkspace {
                                 let trimmed = line.trim_start().to_string();
                                 panic_stack.push(trimmed);
                             }
-                            else {
+                            /*else {
                                 if line.starts_with("[") { // a dbg! style output with line information
                                     if let Some(row_pos) = line.find(":") {
                                         if let Some(end_pos) = line.find("]") {
@@ -544,7 +544,7 @@ impl HubWorkspace {
                                         }
                                     }
                                 }
-                            }
+                            }*/
                         }
                         else {
                             // lets parse/process our log line
