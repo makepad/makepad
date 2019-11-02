@@ -526,7 +526,7 @@ impl HubWorkspace {
                         range: None,
                         body: rendered[0].clone(),
                         rendered: Some(rendered.join("")),
-                        explanation: Some(panic_stack[2..].join("")),
+                        explanation: Some(panic_stack[1..].join("")),
                     })
                 }
             });
