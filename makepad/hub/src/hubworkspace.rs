@@ -463,10 +463,8 @@ impl HubWorkspace {
                     panic_stack.truncate(0);
                 }
                 if tracing_panic {
-                    let trimmed = line.trim_start().to_string();
-                    if !trimmed.find("\0").is_none(){
-                        continue;
-                    }
+                    let mut trimmed = line.trim_start().to_string();
+                    trimmed.retain(|c| c != '\0');
                     panic_stack.push(trimmed);
                 }
                 else{
