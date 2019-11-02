@@ -323,7 +323,7 @@ impl LogList {
                         }
                     }
                     else {
-                        text_buffer.messages.jump_to_offset = text_buffer.text_pos_to_offset(TextPos {row: loc_message.row - 1, col: loc_message.col - 1})
+                        text_buffer.messages.jump_to_offset = text_buffer.text_pos_to_offset(TextPos {row: loc_message.row.min(1) - 1, col: loc_message.col.min(1) - 1})
                     }
                     cx.send_signal(text_buffer.signal, SIGNAL_TEXTBUFFER_JUMP_TO_OFFSET);
                     

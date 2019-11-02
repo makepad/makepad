@@ -717,8 +717,6 @@ impl HubWorkspace {
                                     if !executable.ends_with(".rmeta") && abs_root_path.len() + 1 < executable.len() {
                                         let last = executable.clone().split_off(abs_root_path.len() + 1);
 
-                                        println!(" GOT EXECUTABLE #{}# #{}#", executable, abs_root_path);
-
                                         build_result = BuildResult::Executable {path: format!("{}/{}", project, last)};
                                     }
                                 }
@@ -1051,7 +1049,7 @@ fn de_relativize_path(path: &str) -> String {
         if split == ".." && out.len()>0 {
             out.pop();
         }
-        else {
+        else if split != "."{
             out.push(split);
         }
     }
