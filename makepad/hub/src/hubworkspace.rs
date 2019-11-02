@@ -511,6 +511,8 @@ impl HubWorkspace {
             if panic_stack.len()<3 {
                 return;
             }
+
+            println!("GOT {}",panic_stack[2..].join(""));
             
             route_send.send(ToHubMsg {
                 to: HubMsgTo::UI,
