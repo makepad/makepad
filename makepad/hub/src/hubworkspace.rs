@@ -391,7 +391,6 @@ impl HubWorkspace {
             let (project, rest) = path.split_at(project_pos);
             let (_, rest) = rest.split_at(1);
             let abs_dir = self.get_project_abs(uid, project) ?;
-            println!(" GOT PARTS #{}# #{}# #{}# #{}#", abs_dir, project, rest, path);
             return Ok((abs_dir.to_string(), project.to_string(), rest.to_string()));
         }
         Err(
@@ -714,6 +713,9 @@ impl HubWorkspace {
                                 if let Some(executable) = &parsed.executable {
                                     if !executable.ends_with(".rmeta") && abs_root_path.len() + 1 < executable.len() {
                                         let last = executable.clone().split_off(abs_root_path.len() + 1);
+
+                                        println!(" GOT EXECUTABLE #{}# #{}#", executable, abs_root_path);
+
                                         build_result = BuildResult::Executable {path: format!("{}/{}", project, last)};
                                     }
                                 }
