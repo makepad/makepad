@@ -507,74 +507,79 @@ impl HubWorkspace {
             });
         }
         
-        while let Ok(line) = rx_line.recv() {
-            if let Some((is_stderr, line)) = line {
-                if is_stderr { // start collecting stderr
-                    if line.starts_with("thread '") { // this is how we recognise a stacktrace start..Very sturdy.
-                        tracing_panic = true;
-                        panic_stack.truncate(0);
-                    }
-                    if tracing_panic {
-                        let trimmed = line.trim_start().to_string();
-                        // we terminate the stacktrace on a double 'no-source' line
-                        // this usually is around the beginning. If only someone thought of marking the 'end'
-                        // of the stacktrace in a recognisable form
-                        //if panic_stack.len()>2
-                        //    && starts_with_digit(panic_stack.last().unwrap())
-                        //    && starts_with_digit(&trimmed) && trimmed.len() != line.len() {
-                        //    tracing_panic = false;
-                        //    send_panic(uid, &workspace, &project, &panic_stack, &route_mode);
-                        //}
-                        //else {
-                        panic_stack.push(trimmed);
-                        //}
-                    }
-                    else {
-                        if line.starts_with("[") { // a dbg! style output with line information
-                            if let Some(row_pos) = line.find(":") {
-                                if let Some(end_pos) = line.find("]") {
-                                    route_mode.send(ToHubMsg {
-                                        to: HubMsgTo::UI,
-                                        msg: HubMsg::LogItem {
-                                            uid: uid,
-                                            item: HubLogItem::LocMessage(LocMessage {
-                                                path: format!("{}/{}/{}", workspace, project, line.get(1..row_pos).unwrap().to_string()),
-                                                row: line.get((row_pos + 1)..end_pos).unwrap().parse::<usize>().unwrap(),
-                                                col: 1,
-                                                range: None,
-                                                body: line.get((end_pos + 1)..).unwrap().to_string(),
-                                                rendered: Some(line.clone()),
-                                                explanation: None,
-                                            })
+        loop{
+            let result = rx_line.recv_timeout(std::time::Duration::from_millis(100));
+            match result{
+                Ok(line)=>{
+                    if let Some((is_stderr, line)) = line {
+                        if is_stderr { // start collecting stderr
+                            if line.starts_with("thread '") { // this is how we recognise a stacktrace start..Very sturdy.
+                                tracing_panic = true;
+                                panic_stack.truncate(0);
+                            }
+                            if tracing_panic {
+                                let trimmed = line.trim_start().to_string();
+                                // we terminate the stacktrace on a double 'no-source' line
+                                // this usually is around the beginning. If only someone thought of marking the 'end'
+                                // of the stacktrace in a recognisable form
+                                //if panic_stack.len()>2
+                                //    && starts_with_digit(panic_stack.last().unwrap())
+                                //    && starts_with_digit(&trimmed) && trimmed.len() != line.len() {
+                                //    tracing_panic = false;
+                                //    send_panic(uid, &workspace, &project, &panic_stack, &route_mode);
+                                //}
+                                //else {
+                                panic_stack.push(trimmed);
+                                //}
+                            }
+                            else {
+                                if line.starts_with("[") { // a dbg! style output with line information
+                                    if let Some(row_pos) = line.find(":") {
+                                        if let Some(end_pos) = line.find("]") {
+                                            route_mode.send(ToHubMsg {
+                                                to: HubMsgTo::UI,
+                                                msg: HubMsg::LogItem {
+                                                    uid: uid,
+                                                    item: HubLogItem::LocMessage(LocMessage {
+                                                        path: format!("{}/{}/{}", workspace, project, line.get(1..row_pos).unwrap().to_string()),
+                                                        row: line.get((row_pos + 1)..end_pos).unwrap().parse::<usize>().unwrap(),
+                                                        col: 1,
+                                                        range: None,
+                                                        body: line.get((end_pos + 1)..).unwrap().to_string(),
+                                                        rendered: Some(line.clone()),
+                                                        explanation: None,
+                                                    })
+                                                }
+                                            });
                                         }
-                                    });
+                                    }
                                 }
                             }
                         }
-                    }
-                }
-                else {
-                    // lets parse/process our log line
-                    route_mode.send(ToHubMsg {
-                        to: HubMsgTo::UI,
-                        msg: HubMsg::LogItem {
-                            uid: uid,
-                            item: HubLogItem::Message(line.clone())
+                        else {
+                            // lets parse/process our log line
+                            route_mode.send(ToHubMsg {
+                                to: HubMsgTo::UI,
+                                msg: HubMsg::LogItem {
+                                    uid: uid,
+                                    item: HubLogItem::Message(line.clone())
+                                }
+                            });
+                            if tracing_panic {
+                                tracing_panic = false;
+                                send_panic(uid, &workspace, &project, &panic_stack, &route_mode);
+                            }
                         }
-                    });
+                    }
+                },
+                Err(err)=>{
                     if tracing_panic {
-                        tracing_panic = false;
                         send_panic(uid, &workspace, &project, &panic_stack, &route_mode);
                     }
+                    println!("{:?}", err);
+                    // do we have any errors?
+                    break;
                 }
-            }
-            else { // process terminated
-                if tracing_panic {
-                    tracing_panic = false;
-                    send_panic(uid, &workspace, &project, &panic_stack, &route_mode);
-                }
-                // do we have any errors?
-                break;
             }
         }
         
