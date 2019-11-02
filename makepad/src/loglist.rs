@@ -312,6 +312,11 @@ impl LogList {
                 self.view.redraw_view_area(cx);
                 let log_item = &bm.log_items[select_index];
                 if let Some(loc_message) = log_item.get_loc_message() {
+                    if loc_message.path.len() == 0{
+                        return LogListEvent::SelectLocMessage {
+                            loc_message: loc_message.clone(),
+                        }
+                    }
                     let text_buffer = storage.text_buffer_from_path(cx, &loc_message.path);
                     // check if we have a range:
                     if let Some((head, tail)) = loc_message.range {

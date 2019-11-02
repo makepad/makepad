@@ -521,7 +521,7 @@ impl HubWorkspace {
                         // of the stacktrace in a recognisable form
                         if panic_stack.len()>2
                             && starts_with_digit(panic_stack.last().unwrap())
-                            && starts_with_digit(&trimmed) {
+                            && starts_with_digit(&trimmed) && trimmed.len() != line.len() {
                             tracing_panic = false;
                             send_panic(uid, &workspace, &project, &panic_stack, &route_mode);
                         }
