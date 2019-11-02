@@ -9,6 +9,7 @@ use serde::{Deserialize};
 use std::sync::{Arc, Mutex};
 use std::fs;
 use std::sync::{mpsc};
+use std::sync::mpsc::RecvTimeoutError;
 use toml::Value;
 use std::collections::HashMap;
 use std::net::{SocketAddr};
@@ -519,18 +520,7 @@ impl HubWorkspace {
                             }
                             if tracing_panic {
                                 let trimmed = line.trim_start().to_string();
-                                // we terminate the stacktrace on a double 'no-source' line
-                                // this usually is around the beginning. If only someone thought of marking the 'end'
-                                // of the stacktrace in a recognisable form
-                                //if panic_stack.len()>2
-                                //    && starts_with_digit(panic_stack.last().unwrap())
-                                //    && starts_with_digit(&trimmed) && trimmed.len() != line.len() {
-                                //    tracing_panic = false;
-                                //    send_panic(uid, &workspace, &project, &panic_stack, &route_mode);
-                                //}
-                                //else {
                                 panic_stack.push(trimmed);
-                                //}
                             }
                             else {
                                 if line.starts_with("[") { // a dbg! style output with line information
@@ -565,20 +555,17 @@ impl HubWorkspace {
                                     item: HubLogItem::Message(line.clone())
                                 }
                             });
-                            if tracing_panic {
-                                tracing_panic = false;
-                                send_panic(uid, &workspace, &project, &panic_stack, &route_mode);
-                            }
                         }
                     }
                 },
                 Err(err)=>{
                     if tracing_panic {
+                        tracing_panic = false;
                         send_panic(uid, &workspace, &project, &panic_stack, &route_mode);
                     }
-                    println!("{:?}", err);
-                    // do we have any errors?
-                    break;
+                    if let RecvTimeoutError::Disconnected = err{
+                        break
+                    }
                 }
             }
         }
