@@ -464,6 +464,9 @@ impl HubWorkspace {
                 }
                 if tracing_panic {
                     let trimmed = line.trim_start().to_string();
+                    if !trimmed.find("\0").is_none(){
+                        continue;
+                    }
                     panic_stack.push(trimmed);
                 }
                 else{
@@ -525,7 +528,7 @@ impl HubWorkspace {
                         range: None,
                         body: rendered[0].clone(),
                         rendered: Some(rendered.join("")),
-                        explanation: Some(panic_stack.join("")),
+                        explanation: Some(panic_stack[2..].join("")),
                     })
                 }
             });
