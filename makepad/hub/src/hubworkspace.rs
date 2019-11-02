@@ -322,7 +322,10 @@ impl HubWorkspace {
         // if we have a http server. just shut it down
         if let Ok(mut projects) = self.projects.lock() {
             *projects = config.projects;
-        }
+            for (_, rel_path) in projects.iter_mut(){
+                *rel_path = rel_to_abs_path(&self.abs_cwd_path, &rel_path)
+            }
+        };
         
         let projects = Arc::clone(&self.projects);
         
