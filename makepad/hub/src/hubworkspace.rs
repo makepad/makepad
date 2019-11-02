@@ -519,15 +519,15 @@ impl HubWorkspace {
                         // we terminate the stacktrace on a double 'no-source' line
                         // this usually is around the beginning. If only someone thought of marking the 'end'
                         // of the stacktrace in a recognisable form
-                        if panic_stack.len()>2
-                            && starts_with_digit(panic_stack.last().unwrap())
-                            && starts_with_digit(&trimmed) && trimmed.len() != line.len() {
-                            tracing_panic = false;
-                            send_panic(uid, &workspace, &project, &panic_stack, &route_mode);
-                        }
-                        else {
-                            panic_stack.push(trimmed);
-                        }
+                        //if panic_stack.len()>2
+                        //    && starts_with_digit(panic_stack.last().unwrap())
+                        //    && starts_with_digit(&trimmed) && trimmed.len() != line.len() {
+                        //    tracing_panic = false;
+                        //    send_panic(uid, &workspace, &project, &panic_stack, &route_mode);
+                        //}
+                        //else {
+                        panic_stack.push(trimmed);
+                        //}
                     }
                     else {
                         if line.starts_with("[") { // a dbg! style output with line information
@@ -562,6 +562,9 @@ impl HubWorkspace {
                             item: HubLogItem::Message(line.clone())
                         }
                     });
+                     if tracing_panic {
+                        send_panic(uid, &workspace, &project, &panic_stack, &route_mode);
+                    }
                 }
             }
             else { // process terminated
