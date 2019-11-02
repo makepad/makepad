@@ -451,18 +451,39 @@ impl HubWorkspace {
             c1 >= '0' && c1 <= '9'
         }
         
-        let mut tracing_panic = false;
-        let mut panic_stack: Vec<String> = Vec::new();
+        let mut stderr: Vec<String> = Vec::new();
         
-        fn send_panic(uid: HubUid, workspace: &str, project: &str, panic_stack: &Vec<String>, route_send: &HubRouteSend) {
-            // this has to be the uglies code in the whole project. If only stacktraces were more cleanly machine readable.
+        fn try_parse_stderr(uid: HubUid, workspace: &str, project: &str, stderr: &Vec<String>, route_send: &HubRouteSend) {
+            
+            let mut tracing_panic = false;
+            let mut panic_stack = Vec::new();
+            for line in stderr{
+                if tracing_panic == false && line.starts_with("thread '") { // this is how we recognise a stacktrace start..Very sturdy.
+                    tracing_panic = true;
+                    panic_stack.truncate(0);
+                }
+                if tracing_panic {
+                    let trimmed = line.trim_start().to_string();
+                    panic_stack.push(trimmed);
+                }
+                else{
+                    route_send.send(ToHubMsg {
+                        to: HubMsgTo::UI,
+                        msg: HubMsg::LogItem {
+                            uid: uid,
+                            item: HubLogItem::Error(line.clone())
+                        }
+                    });
+                }
+            }
+            
+            // filter out the panic_stack
             let mut path = None;
             let mut row = 0;
             let mut rendered = Vec::new();
             rendered.push(panic_stack[0].clone());
             let mut last_fn_name = String::new();
-            for panic_line in panic_stack {
-                
+            for panic_line in &panic_stack {
                 if panic_line.starts_with("at ")
                     && !panic_line.starts_with("at /")
                     && !panic_line.starts_with("at src/libstd/")
@@ -514,39 +535,13 @@ impl HubWorkspace {
                 Ok(line)=>{
                     if let Some((is_stderr, line)) = line {
                         if is_stderr { // start collecting stderr
-                            if tracing_panic == false && line.starts_with("thread '") { // this is how we recognise a stacktrace start..Very sturdy.
-                                tracing_panic = true;
-                                panic_stack.truncate(0);
-                            }
-                            if tracing_panic {
-                                let trimmed = line.trim_start().to_string();
-                                panic_stack.push(trimmed);
-                            }
-                            /*else {
-                                if line.starts_with("[") { // a dbg! style output with line information
-                                    if let Some(row_pos) = line.find(":") {
-                                        if let Some(end_pos) = line.find("]") {
-                                            route_mode.send(ToHubMsg {
-                                                to: HubMsgTo::UI,
-                                                msg: HubMsg::LogItem {
-                                                    uid: uid,
-                                                    item: HubLogItem::LocMessage(LocMessage {
-                                                        path: format!("{}/{}/{}", workspace, project, line.get(1..row_pos).unwrap().to_string()),
-                                                        row: line.get((row_pos + 1)..end_pos).unwrap().parse::<usize>().unwrap(),
-                                                        col: 1,
-                                                        range: None,
-                                                        body: line.get((end_pos + 1)..).unwrap().to_string(),
-                                                        rendered: Some(line.clone()),
-                                                        explanation: None,
-                                                    })
-                                                }
-                                            });
-                                        }
-                                    }
-                                }
-                            }*/
+                            stderr.push(line);
                         }
                         else {
+                            if stderr.len() > 0 {
+                                try_parse_stderr(uid, &workspace, &project, &stderr, &route_mode);
+                                stderr.truncate(0);
+                            }
                             // lets parse/process our log line
                             route_mode.send(ToHubMsg {
                                 to: HubMsgTo::UI,
@@ -559,9 +554,9 @@ impl HubWorkspace {
                     }
                 },
                 Err(err)=>{
-                    if tracing_panic {
-                        tracing_panic = false;
-                        send_panic(uid, &workspace, &project, &panic_stack, &route_mode);
+                    if stderr.len() > 0 {
+                        try_parse_stderr(uid, &workspace, &project, &stderr, &route_mode);
+                        stderr.truncate(0);
                     }
                     if let RecvTimeoutError::Disconnected = err{
                         break
