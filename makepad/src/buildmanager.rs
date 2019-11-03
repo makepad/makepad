@@ -1,7 +1,7 @@
 use render::*;
 use editor::*;
 use hub::*;
-use crate::app::*;
+use crate::appstorage::*;
 
 #[derive(Clone)]
 pub struct BuildManager {

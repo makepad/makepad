@@ -105,7 +105,7 @@ impl HubWorkspace {
         };
     }
     
-    pub fn run_workspace_networked<F>(digest: [u64; 26], in_address: Option<SocketAddr>, workspace: &str, hub_log: HubLog, event_handler: F)
+    pub fn run_workspace_networked<F>(digest: Digest, in_address: Option<SocketAddr>, workspace: &str, hub_log: HubLog, event_handler: F)
     where F: Fn(&mut HubWorkspace, FromHubMsg) -> Result<(), HubWsError> + Clone + Send + 'static {
         
         let projects = Arc::new(Mutex::new(HashMap::<String, String>::new()));
@@ -120,13 +120,15 @@ impl HubWorkspace {
             else {
                 hub_log.msg("Workspace waiting for hub announcement..", &workspace);
                 // lets wait for a server announce
-                HubClient::wait_for_announce(digest).expect("cannot wait for announce")
+                HubClient::wait_for_announce(digest.clone()).expect("cannot wait for announce")
             };
             
             hub_log.msg("Workspace connecting to {:?}", &address);
             
             // ok now connect to that address
-            let mut hub_client = HubClient::connect_to_server(digest, address, hub_log.clone()).expect("cannot connect to hub");
+            let mut hub_client = HubClient::connect_to_server(digest.clone(), address, hub_log.clone()).expect("cannot connect to hub");
+            
+            println!("Workspace connected to {:?}", hub_client.own_addr);
             
             let route_send = hub_client.get_route_send();
             
@@ -218,7 +220,7 @@ impl HubWorkspace {
                 let key_file = args[2].to_string();
                 let workspace = args[3].to_string();
                 let utf8_data = std::fs::read_to_string(key_file).expect("Can't read key file");
-                let digest: [u64; 26] = ron::de::from_str(&utf8_data).expect("Can't load key file");
+                let digest: Digest = ron::de::from_str(&utf8_data).expect("Can't load key file");
                 println!("Starting workspace listening to announce");
                 Self::run_workspace_networked(digest, None, &workspace, HubLog::None, event_handler);
                 return
@@ -231,7 +233,7 @@ impl HubWorkspace {
                 let key_file = args[3].to_string();
                 let workspace = args[4].to_string();
                 let utf8_data = std::fs::read_to_string(key_file).expect("Can't read key file");
-                let digest: [u64; 26] = ron::de::from_str(&utf8_data).expect("Can't load key file");
+                let digest:Digest = ron::de::from_str(&utf8_data).expect("Can't load key file");
                 println!("Starting workspace connecting to ip");
                 Self::run_workspace_networked(digest, Some(addr), &workspace, HubLog::None, event_handler);
                 return
@@ -340,6 +342,7 @@ impl HubWorkspace {
             *http_server = HttpServer::start_http_server(&config.http_server, projects);
         }
         
+        
         Ok(())
     }
     
@@ -349,12 +352,20 @@ impl HubWorkspace {
             HubMsg::WorkspaceConfig {uid, config} => {
                 ws.set_config(uid, config)
             },
-            HubMsg::WorkspaceFileTreeRequest {uid} => {
-                ws.workspace_file_tree(
-                    htc.from,
-                    uid,
+            HubMsg::WorkspaceFileTreeRequest {uid, create_digest} => {
+                let tree = ws.workspace_file_tree(
+                    create_digest,
                     &[".json", ".toml", ".js", ".rs", ".txt", ".text", ".ron", ".html"],
+                    &["key.ron"],
+                    &["target",".git","edit_repo"]
                 );
+                ws.route_send.send(ToHubMsg {
+                    to: HubMsgTo::Client(htc.from),
+                    msg: HubMsg::WorkspaceFileTreeResponse {
+                        uid: uid,
+                        tree: tree
+                    }
+                });
                 Ok(())
             },
             HubMsg::FileReadRequest {uid, path} => {
@@ -910,6 +921,10 @@ impl HubWorkspace {
                 self.error(uid, format!("file_read got relative path, ignoring {}", path));
                 return
             }
+            if sub_path.ends_with("key.ron") {
+                self.error(uid, format!("Ends with key.ron, ignoring {}", path));
+                return
+            }
             
             let data = if let Ok(data) = std::fs::read(format!("{}/{}", abs_dir, sub_path)) {
                 Some(data)
@@ -958,8 +973,31 @@ impl HubWorkspace {
         }
     }
     
-    pub fn workspace_file_tree(&mut self, from: HubAddr, uid: HubUid, ext_inc: &[&str]) {
-        fn read_recur(path: &str, ext_inc: &Vec<String>) -> Vec<WorkspaceFileTreeNode> {
+    pub fn workspace_file_tree(&mut self, create_digest:bool, ext_inc: &[&str], file_ex:&[&str], dir_ex:&[&str])->WorkspaceFileTreeNode {
+        fn digest_folder(create_digest:bool, name:&str, folder:&Vec<WorkspaceFileTreeNode>)->Option<Box<Digest>>{
+            if !create_digest{
+                return None;
+            }
+            let mut digest_out = Digest::default();
+            for item in folder{
+                match item{
+                    WorkspaceFileTreeNode::File{digest, ..}=>{
+                        if let Some(digest) = digest{
+                            digest_out.digest_other(&*digest);
+                        }
+                    },
+                    WorkspaceFileTreeNode::Folder{digest, ..}=>{
+                        if let Some(digest) = digest{
+                            digest_out.digest_other(&*digest);
+                        }
+                    },
+                }
+            }
+            digest_out.digest_buffer(name.as_bytes());
+            Some(Box::new(digest_out))
+        }
+        
+        fn read_recur(path: &str, create_digest:bool, ext_inc: &Vec<String>, file_ex: &Vec<String>, dir_ex: &Vec<String>) -> Vec<WorkspaceFileTreeNode> {
             let mut ret = Vec::new();
             if let Ok(read_dir) = fs::read_dir(path) {
                 for entry in read_dir {
@@ -967,18 +1005,43 @@ impl HubWorkspace {
                         if let Ok(ty) = entry.file_type() {
                             if let Ok(name) = entry.file_name().into_string() {
                                 if ty.is_dir() {
-                                    if name == ".git" || name == "target" || name == "edit_repo" {
+                                    let mut ignore = false;
+                                    for dir in dir_ex {
+                                        if name == *dir{
+                                            ignore = true;
+                                            break;
+                                        }
+                                    }
+                                    if ignore{
                                         continue;
                                     }
+                                    // sort the folders on name
+                                    // then digest them
+                                    let folder = read_recur(&format!("{}/{}", path, name), create_digest, ext_inc, file_ex, dir_ex);
                                     ret.push(WorkspaceFileTreeNode::Folder {
                                         name: name.clone(),
-                                        folder: read_recur(&format!("{}/{}", path, name), ext_inc)
+                                        digest: digest_folder(create_digest, &name, &folder),
+                                        folder: folder
                                     });
                                 }
                                 else {
+                                    let mut ignore = false;
+                                    for file in file_ex {
+                                        if name == *file{
+                                            ignore = true;
+                                            break;
+                                        }
+                                    }
+                                    if ignore{
+                                        continue;
+                                    }
                                     for ext in ext_inc {
                                         if name.ends_with(ext) {
+                                            if create_digest{
+                                                
+                                            }
                                             ret.push(WorkspaceFileTreeNode::File {
+                                                digest:None,
                                                 name: name
                                             });
                                             break;
@@ -991,42 +1054,35 @@ impl HubWorkspace {
                 }
             }
             ret.sort();
+            // make digest out of child nodes
+            
             ret
         }
         
         let ext_inc: Vec<String> = ext_inc.to_vec().iter().map( | v | v.to_string()).collect();
+        let file_ex: Vec<String> = file_ex.to_vec().iter().map( | v | v.to_string()).collect();
+        let dir_ex: Vec<String> = dir_ex.to_vec().iter().map( | v | v.to_string()).collect();
         //let ron_out = if let Some(ron_out) = ron_out {Some(ron_out.to_string())}else {None};
         
-        let mut folder = Vec::new();
+        let mut root_folder = Vec::new();
         
         if let Ok(projects) = self.projects.lock() {
             for (project, abs_path) in projects.iter() {
-                
+                let folder = read_recur(&abs_path, create_digest, &ext_inc, &file_ex, &dir_ex);
                 let tree = WorkspaceFileTreeNode::Folder {
                     name: project.clone(),
-                    folder: read_recur(&abs_path, &ext_inc)
+                    digest: digest_folder(create_digest, &project, &folder),
+                    folder: folder
                 };
-                
-                //if let Some(ron_out) = ron_out {
-                //    let ron = ron::ser::to_string_pretty(&tree, ron::ser::PrettyConfig::default()).unwrap();
-                //    let _ = fs::write(format!("{}/{}", path, ron_out), ron.as_bytes());
-                // }
-                folder.push(tree);
+                root_folder.push(tree);
             }
-            
         }
         let root = WorkspaceFileTreeNode::Folder {
             name: self.workspace.clone(),
-            folder: folder
+            digest: digest_folder(create_digest, &self.workspace, &root_folder),
+            folder: root_folder
         };
-        
-        self.route_send.send(ToHubMsg {
-            to: HubMsgTo::Client(from),
-            msg: HubMsg::WorkspaceFileTreeResponse {
-                uid: uid,
-                tree: root
-            }
-        });
+        root
     }
 }
 

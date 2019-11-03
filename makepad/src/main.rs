@@ -10,6 +10,8 @@ mod app;
 pub use crate::app::*;
 mod appwindow;
 pub use crate::appwindow::*;
+mod appstorage;
+pub use crate::appstorage::*;
 mod filetree;
 pub use crate::filetree::*;
 mod buildmanager;

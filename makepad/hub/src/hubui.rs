@@ -55,7 +55,7 @@ impl HubUI {
         }
     }
 
-    pub fn start_hub_ui_networked<F>(digest: [u64;26], hub_log:HubLog,event_handler: &'static F)->HubUI
+    pub fn start_hub_ui_networked<F>(digest: Digest, hub_log:HubLog,event_handler: &'static F)->HubUI
     where F: Fn() + Clone + Send {
 
         let route_send = HubRouteSend::Networked{
@@ -71,7 +71,6 @@ impl HubUI {
             let htc_msgs_arc = Arc::clone(&htc_msgs_arc);
             let hub_log = hub_log.clone();
             let event_handler = event_handler.clone();
-            
             std::thread::spawn(move || {
                 loop {
                     
@@ -83,7 +82,7 @@ impl HubUI {
                     hub_log.msg("HubUI got announce, connecting to ", &address);
                     
                     // ok now connect to that address
-                    let hub_client = HubClient::connect_to_server(digest, address, hub_log.clone()).expect("cannot connect to hub");
+                    let hub_client = HubClient::connect_to_server(digest.clone(), address, hub_log.clone()).expect("cannot connect to hub");
                     
                     hub_log.msg("HubUI connected to ", &hub_client.server_addr);
                     

@@ -3,6 +3,7 @@ use std::net::SocketAddr;
 use std::cmp::Ordering;
 use std::collections::HashMap;
 use crate::httpserver::*;
+use crate::hubclient::*;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum HubMsg {
@@ -90,7 +91,8 @@ pub enum HubMsg {
     },
     
     WorkspaceFileTreeRequest {
-        uid: HubUid
+        uid: HubUid,
+        create_digest: bool
     },
     
     WorkspaceFileTreeResponse {
@@ -143,8 +145,8 @@ impl HubMsg{
 
 #[derive(Eq, PartialEq, Debug, Clone, Serialize, Deserialize)]
 pub enum WorkspaceFileTreeNode {
-    File {name: String},
-    Folder {name: String, folder: Vec<WorkspaceFileTreeNode>}
+    File {name: String, digest:Option<Box<Digest>>},
+    Folder {name: String, digest:Option<Box<Digest>>, folder: Vec<WorkspaceFileTreeNode>}
 }
 
 impl Ord for WorkspaceFileTreeNode {
@@ -179,6 +181,7 @@ impl PartialOrd for WorkspaceFileTreeNode {
         Some(self.cmp(other))
     }
 }
+
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum BuildResult {

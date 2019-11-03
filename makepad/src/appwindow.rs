@@ -5,7 +5,7 @@ use serde::*;
 use editor::*;
 use terminal::*;
 
-use crate::app::*;
+use crate::appstorage::*;
 use crate::fileeditor::*;
 use crate::filetree::*;
 use crate::loglist::*;
@@ -42,6 +42,11 @@ pub struct AppWindowState {
     pub window_position: Vec2,
     pub window_inner_size: Vec2,
     pub dock_items: DockItem<Panel>,
+}
+
+#[derive(Default, Clone, Serialize, Deserialize)]
+pub struct AppState {
+    pub windows: Vec<AppWindowState>
 }
 
 impl AppWindow {

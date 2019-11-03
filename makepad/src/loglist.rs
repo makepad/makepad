@@ -2,7 +2,7 @@ use render::*;
 use widget::*;
 use editor::*;
 use hub::*;
-use crate::app::*;
+use crate::appstorage::*;
 use crate::buildmanager::*;
 
 #[derive(Clone)]

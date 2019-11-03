@@ -5,8 +5,9 @@ use std::net::{TcpStream, UdpSocket, SocketAddr, SocketAddrV4, SocketAddrV6, Shu
 use std::io::prelude::*;
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
+use serde::{Serialize, Deserialize};
 
-#[cfg(any(target_os = "linux",target_os = "macos"))]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 use std::os::unix::io::AsRawFd;
 
 trait ResultMsg<T> {
@@ -49,13 +50,13 @@ pub fn read_exact_bytes_from_tcp_stream(tcp_stream: &mut TcpStream, bytes: &mut 
     Ok(())
 }
 
-pub fn read_block_from_tcp_stream(tcp_stream: &mut TcpStream, check_digest: &mut [u64; 26]) -> HubResult<Vec<u8>> {
-    let mut digest = [0u64; 26];
+pub fn read_block_from_tcp_stream(tcp_stream: &mut TcpStream, mut check_digest: Digest) -> HubResult<Vec<u8>> {
+    let mut dwd_read = DigestWithData::default();
     
-    let digest_u8 = unsafe {std::mem::transmute::<&mut [u64; 26], &mut [u8; 26 * 8]>(&mut digest)};
-    read_exact_bytes_from_tcp_stream(tcp_stream, digest_u8) ?;
+    let dwd_u8 = unsafe {std::mem::transmute::<&mut DigestWithData, &mut [u8; 26 * 8]>(&mut dwd_read)};
+    read_exact_bytes_from_tcp_stream(tcp_stream, dwd_u8) ?;
     
-    let bytes_total = digest[25] as usize;
+    let bytes_total = dwd_read.data as usize;
     if bytes_total > 250 * 1024 * 1024 {
         return Err(HubError::new("read_block_from_tcp_stream: bytes_total more than 250mb"))
     }
@@ -64,10 +65,9 @@ pub fn read_block_from_tcp_stream(tcp_stream: &mut TcpStream, check_digest: &mut
     msg_buf.resize(bytes_total, 0);
     read_exact_bytes_from_tcp_stream(tcp_stream, &mut msg_buf) ?;
     
-    digest_buffer(check_digest, &msg_buf);
-    check_digest[25] = bytes_total as u64;
+    check_digest.digest_buffer(&msg_buf);
     
-    if check_digest != &mut digest {
+    if check_digest != dwd_read.digest {
         return Err(HubError::new("read_block_from_tcp_stream: block digest check failed"))
     }
     
@@ -91,7 +91,7 @@ pub fn write_exact_bytes_to_tcp_stream(tcp_stream: &mut TcpStream, bytes: &[u8])
     Ok(())
 }
 
-pub fn write_block_to_tcp_stream(tcp_stream: &mut TcpStream, msg_buf: &[u8], digest: &mut [u64; 26]) -> HubResult<()> {
+pub fn write_block_to_tcp_stream(tcp_stream: &mut TcpStream, msg_buf: &[u8], digest: Digest) -> HubResult<()> {
     let bytes_total = msg_buf.len();
     
     if bytes_total > 250 * 1024 * 1024 {
@@ -101,11 +101,15 @@ pub fn write_block_to_tcp_stream(tcp_stream: &mut TcpStream, msg_buf: &[u8], dig
     let mut enc = snap::Encoder::new();
     let compressed = enc.compress_vec(msg_buf).expect_msg("read_block_from_tcp_stream: cannot compress msgbuf") ?;
     
-    digest_buffer(digest, &compressed);
-    digest[25] = compressed.len() as u64;
+    let mut dwd_write = DigestWithData{
+        digest:digest,
+        data: compressed.len() as u64
+    };
     
-    let digest_u8 = unsafe {std::mem::transmute::<&mut [u64; 26], &mut [u8; 26 * 8]>(digest)};
-    write_exact_bytes_to_tcp_stream(tcp_stream, digest_u8) ?;
+    dwd_write.digest.digest_buffer(&compressed);
+    
+    let dwd_u8 = unsafe {std::mem::transmute::<&DigestWithData, &[u8; 26 * 8]>(&dwd_write)};
+    write_exact_bytes_to_tcp_stream(tcp_stream, dwd_u8) ?;
     write_exact_bytes_to_tcp_stream(tcp_stream, &compressed) ?;
     Ok(())
 }
@@ -121,8 +125,14 @@ pub struct HubClient {
     pub tx_write: mpsc::Sender<ToHubMsg>
 }
 
+#[derive(Default, Eq, PartialEq, Debug, Clone, Serialize, Deserialize)]
+pub struct DigestWithData{
+    pub digest:Digest,
+    pub data: u64
+}
+
 impl HubClient {
-    pub fn connect_to_server(digest: [u64;26], server_address: SocketAddr, hub_log: HubLog) -> HubResult<HubClient> {
+    pub fn connect_to_server(digest: Digest, server_address: SocketAddr, hub_log: HubLog) -> HubResult<HubClient> {
         
         // first try local address
         let local_address = SocketAddr::from(([127, 0, 0, 1], server_address.port()));
@@ -143,9 +153,6 @@ impl HubClient {
         let tx_read_copy = tx_read.clone();
         let tx_write_copy = tx_write.clone();
         
-        //let mut digest = [0u64; 26];
-        //digest_buffer(&mut digest, key);
-        
         let read_thread = {
             let mut tcp_stream = tcp_stream.try_clone().expect_msg("connect_to_hub: cannot clone socket") ?;
             let digest = digest.clone();
@@ -153,7 +160,7 @@ impl HubClient {
             let hub_log = hub_log.clone();
             std::thread::spawn(move || {
                 loop {
-                    match read_block_from_tcp_stream(&mut tcp_stream, &mut digest.clone()) {
+                    match read_block_from_tcp_stream(&mut tcp_stream, digest.clone()) {
                         Ok(msg_buf) => {
                             let htc_msg: FromHubMsg = bincode::deserialize(&msg_buf).expect("read_thread hub message deserialize fail - version conflict!");
                             hub_log.msg("HubClient received", &htc_msg);
@@ -193,7 +200,7 @@ impl HubClient {
                     }
                     
                     let msg_buf = bincode::serialize(&cth_msg).expect("write_thread hub message serialize fail - should never happen");
-                    if let Err(e) = write_block_to_tcp_stream(&mut tcp_stream, &msg_buf, &mut digest.clone()) {
+                    if let Err(e) = write_block_to_tcp_stream(&mut tcp_stream, &msg_buf, digest.clone()) {
                         // disconnect the socket and send shutdown
                         let _ = tcp_stream.shutdown(Shutdown::Both);
                         let _ = tx_read.send(FromHubMsg {
@@ -218,13 +225,13 @@ impl HubClient {
         })
     }
     
-    pub fn wait_for_announce(digest:[u64;26]) -> Result<SocketAddr, std::io::Error> {
+    pub fn wait_for_announce(digest: Digest) -> Result<SocketAddr, std::io::Error> {
         Self::wait_for_announce_on(digest, SocketAddr::from(([0, 0, 0, 0], HUB_ANNOUNCE_PORT)))
     }
     
-    pub fn wait_for_announce_on(digest:[u64;26], announce_address: SocketAddr) -> Result<SocketAddr, std::io::Error> {
+    pub fn wait_for_announce_on(digest: Digest, announce_address: SocketAddr) -> Result<SocketAddr, std::io::Error> {
         
-        #[cfg(any(target_os = "linux",target_os = "macos"))]
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         fn reuse_addr(socket: &mut UdpSocket) {
             unsafe {
                 let optval: libc::c_int = 1;
@@ -237,8 +244,8 @@ impl HubClient {
                 );
             }
         }
-
-        #[cfg(any(target_os = "windows",target_arch = "wasm32"))]
+        
+        #[cfg(any(target_os = "windows", target_arch = "wasm32"))]
         fn reuse_addr(_socket: &mut UdpSocket) {
         }
         
@@ -246,21 +253,24 @@ impl HubClient {
             if let Ok(mut socket) = UdpSocket::bind(announce_address) {
                 // TODO. FIX FOR WINDOWS
                 reuse_addr(&mut socket);
-                let mut digest_read = [0u64; 26];
-                let digest_u8 = unsafe {std::mem::transmute::<&mut [u64; 26], &mut [u8; 26 * 8]>(&mut digest_read)};
+                let mut dwd_read = DigestWithData::default();
+                let dwd_u8 = unsafe {std::mem::transmute::<&mut DigestWithData, &mut [u8; 26 * 8]>(&mut dwd_read)};
                 
-                let (bytes, from) = socket.recv_from(digest_u8) ?;
+                let (bytes, from) = socket.recv_from(dwd_u8) ?;
                 if bytes != 26 * 8 {
                     println!("Announce port wrong bytecount");
                 }
                 
-                let mut check_digest = digest.clone();
-                check_digest[25] = digest_read[25];
-                check_digest[0] ^= digest_read[25];
-                digest_process_chunk(&mut check_digest);
+                let mut dwd_check = DigestWithData{
+                    digest: digest.clone(),
+                    data: dwd_read.data
+                };
+                dwd_check.data = dwd_read.data;
+                dwd_check.digest.buf[0] ^= dwd_read.data;
+                dwd_check.digest.digest_cycle();
                 
-                if check_digest == digest_read { // use this to support multiple hubs on one network
-                    let listen_port = digest_read[25];
+                if dwd_check == dwd_read { // use this to support multiple hubs on one network
+                    let listen_port = dwd_read.data;
                     return Ok(match from {
                         SocketAddr::V4(v4) => SocketAddr::V4(SocketAddrV4::new(*v4.ip(), listen_port as u16)),
                         SocketAddr::V6(v6) => SocketAddr::V6(SocketAddrV6::new(*v6.ip(), listen_port as u16, v6.flowinfo(), v6.scope_id())),
@@ -286,47 +296,71 @@ impl HubClient {
         }
     }
     
-    pub fn get_route_send(&self)->HubRouteSend{
-         HubRouteSend::Networked{
+    pub fn get_route_send(&self) -> HubRouteSend {
+        HubRouteSend::Networked {
             uid_alloc: Arc::new(Mutex::new(0)),
             tx_write_arc: Arc::new(Mutex::new(Some(self.tx_write.clone()))),
             own_addr_arc: Arc::new(Mutex::new(Some(self.own_addr)))
         }
     }
-
-    pub fn get_route_send_in_place(&self, route_send:&HubRouteSend){
+    
+    pub fn get_route_send_in_place(&self, route_send: &HubRouteSend) {
         route_send.update_networked_in_place(Some(self.own_addr), Some(self.tx_write.clone()))
     }
 }
 
-pub fn generate_key()->[u64;26]{
-    let mut result = [0u64;26];
-    for i in 0..25{
-        result[i] ^= time::precise_time_ns();
-        std::thread::sleep(std::time::Duration::from_millis(1));
-        digest_process_chunk(&mut result);
-    }
-    result[25] = 0;
-    result
+
+#[derive(Eq, PartialEq, Debug, Clone, Serialize, Deserialize)]
+pub struct Digest {
+    pub buf: [u64; 25]
 }
 
-// digest function to hash tcp data to enable error checking and multiple servers on one network
+impl Default for Digest {
+    fn default() -> Self {Self {buf: [0u64; 25]}}
+}
 
-pub fn digest_buffer(digest: &mut [u64; 26], msg_buf: &[u8]) {
-    let digest_u8 = unsafe {std::mem::transmute::<&mut [u64; 26], &mut [u8; 26 * 8]>(digest)};
-    let mut s = 0;
-    for i in 0..msg_buf.len() {
-        digest_u8[s] ^= msg_buf[i];
-        s += 1;
-        if s >= 25 * 8 {
-            digest_process_chunk(digest);
-            s = 0;
+impl Digest {
+    
+    pub fn generate() -> Digest {
+        let mut result = Digest::default();
+        for i in 0..25 {
+            result.buf[i] ^= time::precise_time_ns();
+            std::thread::sleep(std::time::Duration::from_millis(1));
+            result.digest_cycle();
         }
+        result
     }
-    digest_process_chunk(digest);
+    
+    pub fn digest_cycle(&mut self){
+        digest_cycle(self);
+    }
+
+    pub fn digest_other(&mut self, other: &Digest) {
+        for i in 0..25{
+            self.buf[i] ^= other.buf[i]
+        }
+        self.digest_cycle();
+    }
+    
+    pub fn digest_buffer(&mut self, msg_buf: &[u8]) {
+        let digest_u8 = unsafe {std::mem::transmute::<&mut Digest, &mut [u8; 26 * 8]>(self)};
+        let mut s = 0;
+        for i in 0..msg_buf.len() {
+            digest_u8[s] ^= msg_buf[i];
+            s += 1;
+            if s >= 25 * 8 {
+                self.digest_cycle();
+                s = 0;
+            }
+        }
+        self.digest_cycle();
+    }
+    
 }
 
-const PLEN: usize = 25;
+// digest function to hash tcp data to enable error checking and multiple servers on one network, found various
+// similar versions of this on crates.io and github (as MIT). Not sure which one to attribute it to. Thanks whoever wrote this :)
+
 const RHO: [u32; 24] = [1, 3, 6, 10, 15, 21, 28, 36, 45, 55, 2, 14, 27, 41, 56, 8, 25, 43, 62, 18, 39, 61, 20, 44,];
 const PI: [usize; 24] = [10, 7, 11, 17, 18, 3, 5, 16, 8, 21, 24, 4, 15, 23, 19, 13, 12, 2, 20, 14, 22, 9, 6, 1,];
 const RC: [u64; 24] = [
@@ -412,14 +446,14 @@ macro_rules!unroll24 {
 }
 
 #[allow(non_upper_case_globals, unused_assignments)]
-pub fn digest_process_chunk(a: &mut [u64; PLEN + 1]) {
+pub fn digest_cycle(a:&mut Digest) {
     for i in 0..24 {
         let mut array = [0u64; 5];
         
         // Theta
         unroll5!(x, {
             unroll5!(y, {
-                array[x] ^= a[5 * y + x];
+                array[x] ^= a.buf[5 * y + x];
             });
         });
         
@@ -427,15 +461,15 @@ pub fn digest_process_chunk(a: &mut [u64; PLEN + 1]) {
             unroll5!(y, {
                 let t1 = array[(x + 4) % 5];
                 let t2 = array[(x + 1) % 5].rotate_left(1);
-                a[5 * y + x] ^= t1 ^ t2;
+                a.buf[5 * y + x] ^= t1 ^ t2;
             });
         });
         
         // Rho and pi
-        let mut last = a[1];
+        let mut last = a.buf[1];
         unroll24!(x, {
-            array[0] = a[PI[x]];
-            a[PI[x]] = last.rotate_left(RHO[x]);
+            array[0] = a.buf[PI[x]];
+            a.buf[PI[x]] = last.rotate_left(RHO[x]);
             last = array[0];
         });
         
@@ -444,17 +478,17 @@ pub fn digest_process_chunk(a: &mut [u64; PLEN + 1]) {
             let y = 5 * y_step;
             
             unroll5!(x, {
-                array[x] = a[y + x];
+                array[x] = a.buf[y + x];
             });
             
             unroll5!(x, {
                 let t1 = !array[(x + 1) % 5];
                 let t2 = array[(x + 2) % 5];
-                a[y + x] = array[x] ^ (t1 & t2);
+                a.buf[y + x] = array[x] ^ (t1 & t2);
             });
         });
         
         // Iota
-        a[0] ^= RC[i];
+        a.buf[0] ^= RC[i];
     }
 }

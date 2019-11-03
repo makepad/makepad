@@ -28,7 +28,7 @@ pub struct HubServer {
 }
 
 impl HubServer {
-    pub fn start_hub_server(digest: [u64; 26], config: &HubServerConfig, hub_router:&HubRouter) -> Option<HubServer> {
+    pub fn start_hub_server(digest: Digest, config: &HubServerConfig, hub_router:&HubRouter) -> Option<HubServer> {
         
         let (listen_address, announce) = match config {
             HubServerConfig::Offline => return None,
@@ -52,6 +52,7 @@ impl HubServer {
             //let hub_log = hub_log.clone();
             let routes = Arc::clone(&routes);
             let shared = Arc::clone(&shared);
+            let digest = digest.clone();
             std::thread::spawn(move || {
                 for tcp_stream in listener.incoming() {
                     let tcp_stream = tcp_stream.expect("Incoming stream failure");
@@ -80,7 +81,7 @@ impl HubServer {
                         //let hub_log = hub_log.clone();
                         std::thread::spawn(move || {
                             loop {
-                                match read_block_from_tcp_stream(&mut tcp_stream, &mut digest.clone()) {
+                                match read_block_from_tcp_stream(&mut tcp_stream, digest.clone()) {
                                     Ok(msg_buf) => {
                                         let cth_msg: ToHubMsg = bincode::deserialize(&msg_buf).expect("read_thread hub message deserialize fail - should never happen");
                                         tx_pump.send((peer_addr.clone(), cth_msg)).expect("tx_pump.send fails - should never happen");
@@ -119,7 +120,7 @@ impl HubServer {
                                     _=>()
                                 }
                                 let msg_buf = bincode::serialize(&htc_msg).expect("write_thread hub message serialize fail");
-                                if let Err(e) = write_block_to_tcp_stream(&mut tcp_stream, &msg_buf, &mut digest.clone()) {
+                                if let Err(e) = write_block_to_tcp_stream(&mut tcp_stream, &msg_buf, digest.clone()) {
                                     // disconnect the socket and send shutdown
                                     let _ = tcp_stream.shutdown(Shutdown::Both);
                                     tx_pump.send((peer_addr.clone(), ToHubMsg {
@@ -164,7 +165,7 @@ impl HubServer {
         return Some(hub_server);
     }
 
-    pub fn start_announce_server_default(&mut self, digest: [u64;26]) {
+    pub fn start_announce_server_default(&mut self, digest: Digest) {
         self.start_announce_server(
             digest,
             SocketAddr::from(([0, 0, 0, 0], 0)),
@@ -173,7 +174,7 @@ impl HubServer {
         )
     }
     
-    pub fn start_announce_server(&mut self, digest: [u64;26], announce_bind: SocketAddr, announce_send: SocketAddr, announce_backup: SocketAddr) {
+    pub fn start_announce_server(&mut self, digest: Digest, announce_bind: SocketAddr, announce_send: SocketAddr, announce_backup: SocketAddr) {
         let listen_port = if let Some(listen_address) = self.listen_address{
             listen_address.port()
         }
@@ -181,12 +182,14 @@ impl HubServer {
             panic!("No port to announce")
         };
         
-        let mut digest = digest.clone();
-        digest[25] = listen_port as u64;
-        digest[0] ^= listen_port as u64;
-        digest_process_chunk(&mut digest);
+        let mut dwd = DigestWithData{
+            digest:digest,
+            data:listen_port as u64
+        };
+        dwd.digest.buf[0] ^= listen_port as u64;
+        dwd.digest.digest_cycle();
         
-        let digest_u8 = unsafe {std::mem::transmute::<[u64; 26], [u8; 26 * 8]>(digest)};
+        let digest_u8 = unsafe {std::mem::transmute::<DigestWithData, [u8; 26 * 8]>(dwd)};
 
         let shared = Arc::clone(&self.shared);
 
