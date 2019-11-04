@@ -163,7 +163,7 @@ impl App {
                     if let Ok(utf8_data) = utf8_data {
                         if let Ok(state) = ron::de::from_str(&utf8_data) {
                             self.state = state;
-                            
+                            self.windows.truncate(0);
                             // create our windows with the serialized positions/size
                             for window_state in &self.state.windows {
                                 let mut size = window_state.window_inner_size;
