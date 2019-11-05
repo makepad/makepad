@@ -35,8 +35,9 @@ use widget::*;
 struct App {
     desktop_window: DesktopWindow,
     text: Text,
-    blit: Blit,
     trapezoid_text: TrapezoidText,
+    menu: Menu,
+    menu_signal: Signal
 }
 
 main_app!(App);
@@ -44,6 +45,7 @@ main_app!(App);
 impl App {
     pub fn style(cx: &mut Cx) -> Self {
         set_dark_style(cx);
+        let menu_signal = cx.new_signal();
         Self {
             desktop_window: DesktopWindow::style(cx),
             text: Text {
@@ -51,9 +53,19 @@ impl App {
                 font: cx.load_font_path("resources/Inconsolata-Regular.ttf"),
                 ..Text::style(cx)
             },
-            blit: Blit {
-                ..Blit::style(cx)
-            },
+            menu: Menu::main(vec![
+                Menu::sub("Makepad", "M", vec![
+                    Menu::item("Quitter!", "q", menu_signal, 0),
+                    Menu::line(),
+                    Menu::item("Thingie", "Q", menu_signal, 1),
+                ]),
+                Menu::sub("Edit", "E", vec![
+                    Menu::item("Copy", "C", menu_signal, 2),
+                    Menu::line(),
+                    Menu::item("Paste", "V", menu_signal, 3),
+                ])
+            ]),
+            menu_signal,
             trapezoid_text: TrapezoidText::style(cx),
         }
     }
@@ -63,22 +75,24 @@ impl App {
         match event {
             Event::Construct => {
             },
+            Event::Signal(se) => if self.menu_signal.is_signal(se){
+                println!("CLICKED {}", se.value);
+            },
             _ => ()
         }
     }
     
     fn draw_app(&mut self, cx: &mut Cx) {
-        if self.desktop_window.begin_desktop_window(cx).is_err(){
+        if self.desktop_window.begin_desktop_window(cx, Some(&self.menu)).is_err() {
             return
         };
-
         cx.move_turtle(50., 50.);
         let text = "Hello world";
-        for c in text.chars(){
+        for c in text.chars() {
             self.trapezoid_text.draw_char(cx, c, &self.text.font, 32.0);
-            cx.move_turtle(50.,0.);
+            cx.move_turtle(50., 0.);
         }
-
+        
         self.desktop_window.end_desktop_window(cx);
     }
 }

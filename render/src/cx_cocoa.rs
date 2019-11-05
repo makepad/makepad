@@ -52,8 +52,13 @@ pub struct CocoaApp {
     pub window_delegate_class: *const Class,
     pub post_delegate_class: *const Class,
     pub timer_delegate_class: *const Class,
+    pub menu_delegate_class: *const Class,
+    pub app_delegate_class: *const Class,
+    pub menu_target_class: *const Class,
     //pub layer_delegate_class: *const Class,
     pub view_class: *const Class,
+    pub menu_delegate_instance: id,
+    pub app_delegate_instance: id,
     pub const_attributes_for_marked_text: id,
     pub const_empty_string: id,
     pub time_start: u64,
@@ -76,6 +81,11 @@ impl CocoaApp {
             
             let timer_delegate_class = define_cocoa_timer_delegate();
             let timer_delegate_instance: id = msg_send![timer_delegate_class, new];
+            let menu_delegate_class = define_menu_delegate();
+            let menu_delegate_instance: id = msg_send![menu_delegate_class, new];
+            let app_delegate_class = define_app_delegate();
+            let app_delegate_instance: id = msg_send![app_delegate_class, new];
+            
             // Construct the bits that are shared between windows
             CocoaApp {
                 const_attributes_for_marked_text: NSArray::arrayWithObjects(nil, &vec![
@@ -91,7 +101,11 @@ impl CocoaApp {
                 window_class: define_cocoa_window_class(),
                 window_delegate_class: define_cocoa_window_delegate(),
                 view_class: define_cocoa_view_class(),
-                //layer_delegate_class: define_layer_delegate(),
+                menu_target_class: define_menu_target_class(),
+                menu_delegate_class,
+                menu_delegate_instance,
+                app_delegate_class,
+                app_delegate_instance,
                 timers: Vec::new(),
                 cocoa_windows: Vec::new(),
                 loop_block: false,
@@ -105,6 +119,69 @@ impl CocoaApp {
         }
     }
     
+    pub fn update_app_menu(&mut self, menu: &Menu) {
+        unsafe fn make_menu(parent_menu: id, delegate: id, menu_target_class: *const Class, menu: &Menu) {
+            match menu {
+                Menu::Main {items} => {
+                    let main_menu: id = msg_send![class!(NSMenu), new];
+                    let () = msg_send![main_menu, setTitle: NSString::alloc(nil).init_str("MainMenu")];
+                    let () = msg_send![main_menu, setAutoenablesItems: NO];
+                    let () = msg_send![main_menu, setDelegate: delegate];
+                    
+                    for item in items {
+                        make_menu(main_menu, delegate, menu_target_class, item);
+                    }
+                    let ns_app = appkit::NSApp();
+                    let () = msg_send![
+                        ns_app,
+                        setMainMenu: main_menu
+                    ];
+                },
+                Menu::Sub {name, key, items} => {
+                    let sub_menu: id = msg_send![class!(NSMenu), new];
+                    let () = msg_send![sub_menu, setTitle: NSString::alloc(nil).init_str(name)];
+                    let () = msg_send![sub_menu, setAutoenablesItems: NO];
+                    let () = msg_send![sub_menu, setDelegate: delegate];
+                    // append item to parebt
+                    let sub_item: id = msg_send![
+                        parent_menu,
+                        addItemWithTitle: NSString::alloc(nil).init_str(name)
+                        action: nil
+                        keyEquivalent: NSString::alloc(nil).init_str(key)
+                    ];
+                    // connect submenu
+                    let () = msg_send![parent_menu, setSubmenu: sub_menu forItem: sub_item];
+                    for item in items {
+                        make_menu(sub_menu, delegate, menu_target_class, item);
+                    }
+                },
+                Menu::Item {name, key, signal, value} => {
+                    let sub_item: id = msg_send![
+                        parent_menu,
+                        addItemWithTitle: NSString::alloc(nil).init_str(name)
+                        action: sel!(menuAction:)
+                        keyEquivalent: NSString::alloc(nil).init_str(key)
+                    ];
+                    let target: id = msg_send![menu_target_class, new];
+                    let () = msg_send![sub_item, setTarget:target];
+                    (*target).set_ivar("cocoa_app_ptr", GLOBAL_COCOA_APP as *mut _ as *mut c_void);
+                    (*target).set_ivar("signal_id", signal.signal_id);                    
+                    (*target).set_ivar("value", *value);
+                },
+                Menu::Line => {
+                    let sep_item: id = msg_send![class!(NSMenuItem), separatorItem];
+                    let () = msg_send![
+                        parent_menu,
+                        addItem: sep_item
+                    ];
+                }
+            }
+        }
+        unsafe {
+            make_menu(nil, self.menu_delegate_instance, self.menu_target_class, menu);
+        }
+    }
+    
     pub fn init(&mut self) {
         unsafe {
             GLOBAL_COCOA_APP = self;
@@ -112,117 +189,14 @@ impl CocoaApp {
             if ns_app == nil {
                 panic!("App is nil");
             }
-            
-            let main_menu: id = msg_send![class!(NSMenu), new];
-            let () = msg_send![main_menu, setTitle: NSString::alloc(nil).init_str("MainMenu")];
-            let () = msg_send![main_menu, setAutoenablesItems: NO];
-
-            let apple_menu:id = msg_send![class!(NSMenu), new];
-            let () = msg_send![apple_menu, setAutoenablesItems: NO];
-            let () = msg_send![apple_menu, setTitle: NSString::alloc(nil).init_str("Apple")];
-            //let () = msg_send![apple_menu, initWithTitle: NSString::alloc(nil).init_str("Apple")];
-                
-            let apple_item: id = msg_send![
-                main_menu,
-                addItemWithTitle: NSString::alloc(nil).init_str("Apple")
-                action: nil
-                keyEquivalent: NSString::alloc(nil).init_str("")
-            ];
-
-            msg_send![
-                main_menu,
-                setSubmenu: apple_menu
-                forItem: apple_item
-            ];
-
-            let quit_item: id = msg_send![
-                apple_menu,
-                addItemWithTitle: NSString::alloc(nil).init_str("Quitter")
-                action: NSString::alloc(nil).init_str("terminate:")
-                keyEquivalent: NSString::alloc(nil).init_str("Q")
-            ];
-            msg_send![quit_item, setEnabled:1];
-
-            let test_menu:id = msg_send![class!(NSMenu), new];
-            let () = msg_send![test_menu, initWithTitle: NSString::alloc(nil).init_str("Test")];
-            let () = msg_send![test_menu, setAutoenablesItems: NO];
-
-            let test_item: id = msg_send![
-                main_menu,
-                addItemWithTitle: NSString::alloc(nil).init_str("Test")
-                action: nil
-                keyEquivalent: NSString::alloc(nil).init_str("")
-            ];
-            msg_send![test_item, setEnabled:1];
-
-            msg_send![
-                main_menu,
-                setSubmenu: test_menu
-                forItem: test_item
-            ];
-
-            let test_item2: id = msg_send![
-                test_menu,
-                addItemWithTitle: NSString::alloc(nil).init_str("Blarp")
-                action: nil
-                keyEquivalent: NSString::alloc(nil).init_str("B")
-            ];
-
-            msg_send![
-                ns_app,
-                setMainMenu: main_menu
-            ];
-            /*
-            let () = msg_send![menu, setTitle:NSString::alloc(nil).init_str("MainMenu")];
-            
-            //let apple_item: id = msg_send![class!(NSMenuItem), new];
-            //let () = msg_send![apple_item, setTitle:NSString::alloc(nil).init_str("Apple")];
-
-            //let makepad_item: id = msg_send![class!(NSMenuItem), new];
-            //let () = msg_send![makepad_item, setTitle:NSString::alloc(nil).init_str("Makepad")];
-
-            let edit_item: id = msg_send![class!(NSMenuItem), new];
-            let () = msg_send![edit_item, setTitle:NSString::alloc(nil).init_str("Edit")];
-            
-            let edit_menu: id = msg_send![class!(NSMenu), new];//initWithTitle: NSString::alloc(nil).init_str("MainMenu")];
-            let copy_item: id = msg_send![class!(NSMenuItem), new];
-            let () = msg_send![copy_item, setTitle:NSString::alloc(nil).init_str("Copy")];
-
-            //let () = msg_send![menu, addItem:apple_item];
-            //let () = msg_send![menu, addItem:makepad_item];
-            let () = msg_send![menu, addItem:edit_item];
-            let () = msg_send![edit_menu, addItem:copy_item];
-
-            let () = msg_send![menu, setSubmenu:edit_menu forItem:edit_item];
-            
-            msg_seng![
-                ns_app,
-                
-            ]
-            msg_send![
-                ns_app,
-                setMainMenu: menu
-            ];*/
-            /*
-            ]
-            let makepad_item: id = msg_send![class!(NSMenuItem), initWithTitle: NSString::alloc(nil).init_str("MakePad")];
-            let makepad_quit: id = msg_send![
-                class!(NSMenuItem),
-                title: NSString::alloc(nil).init_str("MakePad")
-                action: NSString::alloc(nil).init_str("terminate:")
-                keyEquivalent: NSString::alloc(nil).init_str("q")
-            ];*/
-            
-            // add our menu
-            
             ns_app.setActivationPolicy_(appkit::NSApplicationActivationPolicy::NSApplicationActivationPolicyRegular);
             ns_app.finishLaunching();
             let current_app = appkit::NSRunningApplication::currentApplication(nil);
             current_app.activateWithOptions_(appkit::NSApplicationActivateIgnoringOtherApps);
             (*self.timer_delegate_instance).set_ivar("cocoa_app_ptr", self as *mut _ as *mut c_void);
-            
-            
-            
+            (*self.menu_delegate_instance).set_ivar("cocoa_app_ptr", self as *mut _ as *mut c_void);
+            (*self.app_delegate_instance).set_ivar("cocoa_app_ptr", self as *mut _ as *mut c_void);
+            let () = msg_send![ns_app, setDelegate: self.app_delegate_instance];
         }
     }
     
@@ -1198,6 +1172,55 @@ pub fn define_cocoa_timer_delegate() -> *const Class {
     return decl.register();
 }
 
+pub fn define_app_delegate() -> *const Class {
+
+    let superclass = class!(NSObject);
+    let mut decl = ClassDecl::new("NSAppDelegate", superclass).unwrap();
+    decl.add_ivar::<*mut c_void>("cocoa_app_ptr");
+    return decl.register();
+}
+
+pub fn define_menu_target_class() -> *const Class {
+    
+    extern fn menu_action(this: &Object, _sel: Sel, _item: id) {
+        //println!("markedRange");
+        let ca = get_cocoa_app(this);
+        unsafe{
+            let signal_id: usize = *this.get_ivar("signal_id");
+            let value: usize = *this.get_ivar("value");
+            ca.send_signal_event(signal_id, value);
+        }
+    }
+    
+    let superclass = class!(NSObject);
+    let mut decl = ClassDecl::new("MenuTarget", superclass).unwrap();
+    unsafe {
+        decl.add_method(sel!(menuAction:), menu_action as extern fn(&Object, Sel, id));
+    }
+    decl.add_ivar::<*mut c_void>("cocoa_app_ptr");
+    decl.add_ivar::<usize>("signal_id");
+    decl.add_ivar::<usize>("value");
+    return decl.register();
+}
+
+pub fn define_menu_delegate() -> *const Class {
+    // NSMenuDelegate protocol
+    extern fn menu_will_open(this: &Object, _sel: Sel, _item: id) {
+        //println!("markedRange");
+        let _ca = get_cocoa_app(this);
+    }
+    
+    let superclass = class!(NSObject);
+    let mut decl = ClassDecl::new("MenuDelegate", superclass).unwrap();
+    unsafe {
+        decl.add_method(sel!(menuWillOpen:), menu_will_open as extern fn(&Object, Sel, id));
+    }
+    decl.add_ivar::<*mut c_void>("cocoa_app_ptr");
+    decl.add_protocol(&Protocol::get("NSMenuDelegate").unwrap());
+    return decl.register();
+}
+
+
 struct CocoaPostInit {
     cocoa_app_ptr: *mut CocoaApp,
     signal_id: u64,
@@ -1224,8 +1247,8 @@ pub fn define_cocoa_post_delegate() -> *const Class {
     }
     // Store internal state as user data
     decl.add_ivar::<*mut c_void>("cocoa_app_ptr");
-    decl.add_ivar::<u64>("signal_id");
-    decl.add_ivar::<u64>("value");
+    decl.add_ivar::<usize>("signal_id");
+    decl.add_ivar::<usize>("value");
     
     return decl.register();
 }

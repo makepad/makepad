@@ -270,6 +270,9 @@ impl Cx{
     pub fn post_signal(signal: Signal, value: usize) {
         XlibApp::post_signal(signal.signal_id, value);
     }
+
+    pub fn update_menu(&mut self, _menu:&Menu){
+    }
 }
 
 #[derive(Clone, Default)]

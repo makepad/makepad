@@ -156,6 +156,13 @@ impl Cx {
                             cocoa_app.stop_timer(timer_id);
                         }
                         
+                        if self.platform.set_menu{
+                            self.platform.set_menu = false;
+                            if let Some(menu) = &self.platform.last_menu{
+                                cocoa_app.update_app_menu(menu)
+                            }
+                        }
+                        
                         // build a list of renderpasses to repaint
                         let mut windows_need_repaint = 0;
                         self.compute_passes_to_repaint(&mut passes_todo, &mut windows_need_repaint);
@@ -267,13 +274,20 @@ impl Cx {
     }
     
     pub fn update_menu(&mut self, menu:&Menu){
-        
+        // lets walk the menu and do the cocoa equivalents
+        let platform = &mut self.platform;
+        if platform.last_menu.is_none() || platform.last_menu.as_ref().unwrap() != menu{
+            platform.last_menu = Some(menu.clone());
+            platform.set_menu = true;
+        }
     }
 }
 
 #[derive(Clone, Default)]
 pub struct CxPlatform {
     pub bytes_written: usize,
+    pub last_menu: Option<Menu>,
+    pub set_menu: bool,
     pub set_window_position: Option<Vec2>,
     pub set_window_outer_size: Option<Vec2>,
     pub set_ime_position: Option<Vec2>,

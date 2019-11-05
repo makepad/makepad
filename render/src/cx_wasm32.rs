@@ -487,6 +487,9 @@ impl Cx {
     }
     
     pub fn http_send(&self, _verb: &str, _path: &str, _domain: &str, _port: &str, _body: &str) {
+    }
+
+    pub fn update_menu(&mut self, _menu:&Menu){
         
     }
 }

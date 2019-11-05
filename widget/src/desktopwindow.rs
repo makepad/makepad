@@ -21,6 +21,8 @@ pub struct DesktopWindow {
     pub caption_size: Vec2,
     pub caption: String,
     
+    pub _last_menu: Option<Menu>,
+    
     // testing
     pub inner_over_chrome: bool,
 }
@@ -56,6 +58,7 @@ impl DesktopWindow {
             caption_size: Vec2::zero(),
             caption: "Makepad".to_string(),
             inner_over_chrome:false,
+            _last_menu: None
         }
     }
 
@@ -131,7 +134,7 @@ impl DesktopWindow {
         }
     }
     
-    pub fn begin_desktop_window(&mut self, cx: &mut Cx) -> ViewRedraw {
+    pub fn begin_desktop_window(&mut self, cx: &mut Cx, menu: Option<&Menu>) -> ViewRedraw {
         
         if !self.main_view.view_will_redraw(cx)  {
             return Err(())
@@ -161,7 +164,10 @@ impl DesktopWindow {
                     });
                     
                     // we need to draw the window menu here.
-                    
+                    if let Some(_menu) = menu{
+                        // lets draw the thing, check with the clone if it changed
+                        // then draw it
+                    }
                     
                     self.min_btn.draw_desktop_button(cx, DesktopButtonType::WindowsMin);
                     if self.window.is_fullscreen(cx) {self.max_btn.draw_desktop_button(cx, DesktopButtonType::WindowsMaxToggled);}
@@ -181,6 +187,9 @@ impl DesktopWindow {
                 },
                 
                 PlatformType::OSX => { // mac still uses the built in buttons, TODO, replace that.
+                    if let Some(menu) = menu{
+                        cx.update_menu(menu);
+                    }
                     let bg_inst = self.caption_bg.begin_quad(cx, &Layout {
                         align: Align::center(),
                         width: Bounds::Fill,
