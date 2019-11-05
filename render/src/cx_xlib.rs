@@ -12,18 +12,12 @@ use std::mem;
 use std::os::raw::{c_char, c_uchar, c_int, c_uint, c_ulong, c_long, c_void};
 use std::ptr;
 use time::precise_time_ns;
-use x11_dl::xlib;
-use x11_dl::xlib::{Display, XVisualInfo, Xlib, XIM, XIC};
-use x11_dl::keysym;
-use x11_dl::xcursor::Xcursor;
 
 static mut GLOBAL_XLIB_APP: *mut XlibApp = 0 as *mut _;
 
 pub struct XlibApp {
-    pub xlib: Xlib,
-    pub xcursor: Xcursor,
-    pub display: *mut Display,
-    pub xim: XIM,
+    pub display: *mut X11_sys::Display,
+    pub xim: X11_sys::XIM,
     pub clipboard: String,
     pub display_fd: c_int,
     pub signal_fd: c_int,
@@ -39,27 +33,27 @@ pub struct XlibApp {
     pub loop_block: bool,
     pub current_cursor: MouseCursor,
     
-    pub atom_clipboard: xlib::Atom,
-    pub atom_net_wm_moveresize: xlib::Atom,
-    pub atom_wm_delete_window: xlib::Atom,
-    pub atom_motif_wm_hints: xlib::Atom,
-    pub atom_net_wm_state: xlib::Atom,
-    pub atom_new_wm_state_maximized_horz: xlib::Atom,
-    pub atom_new_wm_state_maximized_vert: xlib::Atom,
-    pub atom_targets: xlib::Atom,
-    pub atom_utf8_string: xlib::Atom,
-    pub atom_text: xlib::Atom,
-    pub atom_multiple: xlib::Atom,
-    pub atom_text_plain: xlib::Atom,
-    pub atom_atom: xlib::Atom,
+    pub atom_clipboard: X11_sys::Atom,
+    pub atom_net_wm_moveresize: X11_sys::Atom,
+    pub atom_wm_delete_window: X11_sys::Atom,
+    pub atom_motif_wm_hints: X11_sys::Atom,
+    pub atom_net_wm_state: X11_sys::Atom,
+    pub atom_new_wm_state_maximized_horz: X11_sys::Atom,
+    pub atom_new_wm_state_maximized_vert: X11_sys::Atom,
+    pub atom_targets: X11_sys::Atom,
+    pub atom_utf8_string: X11_sys::Atom,
+    pub atom_text: X11_sys::Atom,
+    pub atom_multiple: X11_sys::Atom,
+    pub atom_text_plain: X11_sys::Atom,
+    pub atom_atom: X11_sys::Atom,
 }
 
 #[derive(Clone)]
 pub struct XlibWindow {
     pub window: Option<c_ulong>,
-    pub xic: Option<XIC>,
-    pub attributes: Option<xlib::XSetWindowAttributes>,
-    pub visual_info: Option<XVisualInfo>,
+    pub xic: Option<X11_sys::XIC>,
+    pub attributes: Option<X11_sys::XSetWindowAttributes>,
+    pub visual_info: Option<X11_sys::XVisualInfo>,
     pub child_windows: Vec<XlibChildWindow>,
     
     pub last_nc_mode: Option<c_long>,
@@ -101,29 +95,25 @@ pub struct XlibSignal {
 impl XlibApp {
     pub fn new() -> XlibApp {
         unsafe {
-            let xlib = Xlib::open().unwrap();
-            let xcursor = Xcursor::open().unwrap();
-            let display = (xlib.XOpenDisplay)(ptr::null());
-            let display_fd = (xlib.XConnectionNumber)(display);
-            let xim = (xlib.XOpenIM)(display, ptr::null_mut(), ptr::null_mut(), ptr::null_mut());
+            let display = X11_sys::XOpenDisplay(ptr::null());
+            let display_fd = X11_sys::XConnectionNumber(display);
+            let xim = X11_sys::XOpenIM(display, ptr::null_mut(), ptr::null_mut(), ptr::null_mut());
             let signal_fd = 0i32; //libc::pipe();
             XlibApp {
-                atom_clipboard: (xlib.XInternAtom)(display, CString::new("CLIPBOARD").unwrap().as_ptr(), 0),
-                atom_net_wm_moveresize: (xlib.XInternAtom)(display, CString::new("_NET_WM_MOVERESIZE").unwrap().as_ptr(), 0),
-                atom_wm_delete_window: (xlib.XInternAtom)(display, CString::new("WM_DELETE_WINDOW").unwrap().as_ptr(), 0),
-                atom_motif_wm_hints: (xlib.XInternAtom)(display, CString::new("_MOTIF_WM_HINTS").unwrap().as_ptr(), 0),
-                atom_net_wm_state: (xlib.XInternAtom)(display, CString::new("_NET_WM_STATE").unwrap().as_ptr(), 0),
-                atom_new_wm_state_maximized_horz: (xlib.XInternAtom)(display, CString::new("_NET_WM_STATE_MAXIMIZED_HORZ").unwrap().as_ptr(), 0),
-                atom_new_wm_state_maximized_vert: (xlib.XInternAtom)(display, CString::new("_NET_WM_STATE_MAXIMIZED_VERT").unwrap().as_ptr(), 0),
-                atom_targets: (xlib.XInternAtom)(display, CString::new("TARGETS").unwrap().as_ptr(), 0),
-                atom_utf8_string: (xlib.XInternAtom)(display, CString::new("UTF8_STRING").unwrap().as_ptr(), 1),
-                atom_atom: (xlib.XInternAtom)(display, CString::new("ATOM").unwrap().as_ptr(), 0),
-                atom_text: (xlib.XInternAtom)(display, CString::new("TEXT").unwrap().as_ptr(), 0),
-                atom_text_plain: (xlib.XInternAtom)(display, CString::new("text/plain").unwrap().as_ptr(), 0),
-                atom_multiple: (xlib.XInternAtom)(display, CString::new("MULTIPLE").unwrap().as_ptr(), 0),
-                xlib,
+                atom_clipboard: X11_sys::XInternAtom(display, CString::new("CLIPBOARD").unwrap().as_ptr(), 0),
+                atom_net_wm_moveresize: X11_sys::XInternAtom(display, CString::new("_NET_WM_MOVERESIZE").unwrap().as_ptr(), 0),
+                atom_wm_delete_window: X11_sys::XInternAtom(display, CString::new("WM_DELETE_WINDOW").unwrap().as_ptr(), 0),
+                atom_motif_wm_hints: X11_sys::XInternAtom(display, CString::new("_MOTIF_WM_HINTS").unwrap().as_ptr(), 0),
+                atom_net_wm_state: X11_sys::XInternAtom(display, CString::new("_NET_WM_STATE").unwrap().as_ptr(), 0),
+                atom_new_wm_state_maximized_horz: X11_sys::XInternAtom(display, CString::new("_NET_WM_STATE_MAXIMIZED_HORZ").unwrap().as_ptr(), 0),
+                atom_new_wm_state_maximized_vert: X11_sys::XInternAtom(display, CString::new("_NET_WM_STATE_MAXIMIZED_VERT").unwrap().as_ptr(), 0),
+                atom_targets: X11_sys::XInternAtom(display, CString::new("TARGETS").unwrap().as_ptr(), 0),
+                atom_utf8_string: X11_sys::XInternAtom(display, CString::new("UTF8_STRING").unwrap().as_ptr(), 1),
+                atom_atom: X11_sys::XInternAtom(display, CString::new("ATOM").unwrap().as_ptr(), 0),
+                atom_text: X11_sys::XInternAtom(display, CString::new("TEXT").unwrap().as_ptr(), 0),
+                atom_text_plain: X11_sys::XInternAtom(display, CString::new("text/plain").unwrap().as_ptr(), 0),
+                atom_multiple: X11_sys::XInternAtom(display, CString::new("MULTIPLE").unwrap().as_ptr(), 0),
                 xim,
-                xcursor,
                 display,
                 display_fd,
                 signal_fd,
@@ -146,7 +136,7 @@ impl XlibApp {
     pub fn init(&mut self) {
         unsafe {
             //unsafe {
-            (self.xlib.XrmInitialize)();
+            X11_sys::XrmInitialize();
             //}
             GLOBAL_XLIB_APP = self;
         }
@@ -226,26 +216,26 @@ impl XlibApp {
                     ]);
                 }
                 
-                while self.display != ptr::null_mut() && (self.xlib.XPending)(self.display) != 0 {
+                while self.display != ptr::null_mut() && X11_sys::XPending(self.display) != 0 {
                     let mut event = mem::uninitialized();
-                    (self.xlib.XNextEvent)(self.display, &mut event);
-                    match event.type_ {
-                        xlib::SelectionNotify => {
-                            let selection = event.selection; 
+                    X11_sys::XNextEvent(self.display, &mut event);
+                    match event.type_ as u32 {
+                        X11_sys::SelectionNotify => {
+                            let selection = event.xselection; 
                             // first get the size of the thing
                             let mut actual_type = mem::uninitialized();
                             let mut actual_format = mem::uninitialized();
                             let mut n_items = mem::uninitialized();
                             let mut bytes_to_read = mem::uninitialized();
                             let mut ret = mem::uninitialized(); 
-                            (self.xlib.XGetWindowProperty)(
+                            X11_sys::XGetWindowProperty(
                                 self.display,
                                 selection.requestor, 
                                 selection.property, 
                                 0,
                                 0,
                                 0,
-                                xlib::AnyPropertyType as c_ulong,  
+                                X11_sys::AnyPropertyType as c_ulong,  
                                 &mut actual_type,
                                 &mut actual_format,
                                 &mut n_items,
@@ -254,14 +244,14 @@ impl XlibApp {
                             );
                             //read all of it
                             let mut bytes_after = mem::uninitialized();
-                            (self.xlib.XGetWindowProperty)(
+                            X11_sys::XGetWindowProperty(
                                 self.display,
                                 selection.requestor, 
                                 selection.property, 
                                 0,
                                 bytes_to_read as c_long,
                                 0,
-                                xlib::AnyPropertyType as c_ulong,  
+                                X11_sys::AnyPropertyType as c_ulong,  
                                 &mut actual_type,
                                 &mut actual_format,
                                 &mut n_items,
@@ -279,13 +269,13 @@ impl XlibApp {
                                         })
                                     ]);
                                 }
-                                (self.xlib.XFree)(ret as *mut _ as *mut c_void);
+                                X11_sys::XFree(ret as *mut _ as *mut c_void);
                             }
                         },
-                        xlib::SelectionRequest => {
-                            let request = event.selection_request;
-                            let mut response = xlib::XSelectionEvent {
-                                type_: xlib::SelectionNotify,
+                        X11_sys::SelectionRequest => {
+                            let request = event.xselectionrequest;
+                            let mut response = X11_sys::XSelectionEvent {
+                                type_: X11_sys::SelectionNotify as i32,
                                 serial: 0,
                                 send_event: 0,
                                 display: self.display,
@@ -297,25 +287,25 @@ impl XlibApp {
                             };
                             if request.target == self.atom_targets {
                                 let mut targets = [self.atom_utf8_string];
-                                (self.xlib.XChangeProperty)(
+                                X11_sys::XChangeProperty(
                                     self.display,
                                     request.requestor,
                                     request.property,
                                     4,
                                     32,
-                                    xlib::PropModeReplace,
+                                    X11_sys::PropModeReplace as i32,
                                     targets.as_mut() as *mut _ as *mut c_uchar,
                                     targets.len() as i32
                                 );
                             }
                             else if request.target == self.atom_utf8_string {
-                                (self.xlib.XChangeProperty)(
+                                X11_sys::XChangeProperty(
                                     self.display,
                                     request.requestor,
                                     request.property,
                                     self.atom_utf8_string,
                                     8,
-                                    xlib::PropModeReplace,
+                                    X11_sys::PropModeReplace as i32,
                                     self.clipboard.as_ptr() as *const _ as *const c_uchar,
                                     self.clipboard.len() as i32
                                 );
@@ -323,11 +313,11 @@ impl XlibApp {
                             else {
                                 response.property = 0;
                             }
-                            (self.xlib.XSendEvent)(self.display, request.requestor, 1, 0, &mut response as *mut _ as *mut xlib::XEvent);
+                            X11_sys::XSendEvent(self.display, request.requestor, 1, 0, &mut response as *mut _ as *mut X11_sys::XEvent);
                         },
-                        xlib::DestroyNotify => { // our window got destroyed
+                        X11_sys::DestroyNotify => { // our window got destroyed
                             
-                            let destroy_window = event.destroy_window;
+                            let destroy_window = event.xdestroywindow;
                             if let Some(window_ptr) = self.window_map.get(&destroy_window.window) {
                                 let window = &mut (**window_ptr);
                                 window.do_callback(&mut vec![Event::WindowClosed(WindowClosedEvent {
@@ -335,8 +325,8 @@ impl XlibApp {
                                 })]);
                             }
                         },
-                        xlib::ConfigureNotify => {
-                            let cfg = event.configure;
+                        X11_sys::ConfigureNotify => {
+                            let cfg = event.xconfigure;
                             if let Some(window_ptr) = self.window_map.get(&cfg.window) {
                                 let window = &mut (**window_ptr);
                                 if cfg.window == window.window.unwrap() {
@@ -344,9 +334,9 @@ impl XlibApp {
                                 }
                             }
                         },
-                        xlib::EnterNotify => {},
-                        xlib::LeaveNotify => {
-                            let crossing = event.crossing;
+                        X11_sys::EnterNotify => {},
+                        X11_sys::LeaveNotify => {
+                            let crossing = event.xcrossing;
                             if crossing.detail == 4 {
                                 if let Some(window_ptr) = self.window_map.get(&crossing.window) {
                                     let window = &mut (**window_ptr);
@@ -364,8 +354,8 @@ impl XlibApp {
                                 }
                             }
                         },
-                        xlib::MotionNotify => { // mousemove
-                            let motion = event.motion;
+                        X11_sys::MotionNotify => { // mousemove
+                            let motion = event.xmotion;
                             if let Some(window_ptr) = self.window_map.get(&motion.window) {
                                 let window = &mut (**window_ptr);
                                 let mut x = motion.x;
@@ -443,11 +433,11 @@ impl XlibApp {
                                 }
                             }
                         },
-                        xlib::ButtonPress => { // mouse down
-                            let button = event.button;
+                        X11_sys::ButtonPress => { // mouse down
+                            let button = event.xbutton;
                             if let Some(window_ptr) = self.window_map.get(&button.window) {
                                 let window = &mut (**window_ptr);
-                                (self.xlib.XSetInputFocus)(self.display, window.window.unwrap(), xlib::RevertToNone, xlib::CurrentTime);
+                                X11_sys::XSetInputFocus(self.display, window.window.unwrap(), X11_sys::None as i32, X11_sys::CurrentTime as u64);
                                 // its a mousewheel
                                 if button.button >= 4 && button.button <= 7 {
                                     let last_scroll_time = self.last_scroll_time;
@@ -472,12 +462,12 @@ impl XlibApp {
                                 else {
                                     // do all the 'nonclient' area messaging to the window manager
                                     if let Some(last_nc_mode) = window.last_nc_mode {
-                                        let default_screen = (self.xlib.XDefaultScreen)(self.display);
-                                        let root_window = (self.xlib.XRootWindow)(self.display, default_screen);
-                                        (self.xlib.XUngrabPointer)(self.display, 0);
-                                        (self.xlib.XFlush)(self.display);
-                                        let mut xclient = xlib::XClientMessageEvent {
-                                            type_: xlib::ClientMessage,
+                                        let default_screen = X11_sys::XDefaultScreen(self.display);
+                                        let root_window = X11_sys::XRootWindow(self.display, default_screen);
+                                        X11_sys::XUngrabPointer(self.display, 0);
+                                        X11_sys::XFlush(self.display);
+                                        let mut xclient = X11_sys::XClientMessageEvent {
+                                            type_: X11_sys::ClientMessage as i32,
                                             serial: 0,
                                             send_event: 0,
                                             display: self.display,
@@ -485,14 +475,14 @@ impl XlibApp {
                                             message_type: self.atom_net_wm_moveresize,
                                             format: 32,
                                             data: {
-                                                let mut msg = xlib::ClientMessageData::new();
-                                                msg.set_long(0, button.x_root as c_long);
-                                                msg.set_long(1, button.y_root as c_long);
-                                                msg.set_long(2, last_nc_mode);
+                                                let mut msg = mem::zeroed::<X11_sys::XClientMessageEvent__bindgen_ty_1>();
+                                                msg.l[0] = button.x_root as c_long;
+                                                msg.l[1] = button.y_root as c_long;
+                                                msg.l[2] = last_nc_mode;
                                                 msg
                                             }
                                         };
-                                        (self.xlib.XSendEvent)(self.display, root_window, 0, xlib::SubstructureRedirectMask | xlib::SubstructureNotifyMask, &mut xclient as *mut _ as *mut xlib::XEvent);
+                                        X11_sys::XSendEvent(self.display, root_window, 0, (X11_sys::SubstructureRedirectMask | X11_sys::SubstructureNotifyMask) as i64, &mut xclient as *mut _ as *mut X11_sys::XEvent);
                                     }
                                     else {
                                         window.send_finger_down(button.button as usize, self.xkeystate_to_modifiers(button.state))
@@ -500,31 +490,31 @@ impl XlibApp {
                                 }
                             }
                         },
-                        xlib::ButtonRelease => { // mouse up
-                            let button = event.button;
+                        X11_sys::ButtonRelease => { // mouse up
+                            let button = event.xbutton;
                             if let Some(window_ptr) = self.window_map.get(&button.window) {
                                 let window = &mut (**window_ptr);
                                 window.send_finger_up(button.button as usize, self.xkeystate_to_modifiers(button.state))
                             }
                         },
-                        xlib::KeyPress => {
-                            if let Some(window_ptr) = self.window_map.get(&event.key.window) {
+                        X11_sys::KeyPress => {
+                            if let Some(window_ptr) = self.window_map.get(&event.xkey.window) {
                                 let window = &mut (**window_ptr);
-                                if event.key.keycode != 0 {
-                                    let key_code = self.xkeyevent_to_keycode(&mut event.key);
-                                    let modifiers = self.xkeystate_to_modifiers(event.key.state);
+                                if event.xkey.keycode != 0 {
+                                    let key_code = self.xkeyevent_to_keycode(&mut event.xkey);
+                                    let modifiers = self.xkeystate_to_modifiers(event.xkey.state);
                                     
                                     if modifiers.control || modifiers.logo {
                                         match key_code {
                                             KeyCode::KeyV => { // paste
                                                 // request the pasteable text from the other side
-                                                (self.xlib.XConvertSelection)(
+                                                X11_sys::XConvertSelection(
                                                     self.display,
                                                     self.atom_clipboard,
                                                     self.atom_utf8_string,
                                                     self.atom_clipboard,
                                                     window.window.unwrap(),
-                                                    event.key.time
+                                                    event.xkey.time
                                                 );
                                                 /*
                                                 self.do_callback(&mut vec![
@@ -549,13 +539,13 @@ impl XlibApp {
                                                         self.clipboard = response.clone();
                                                         // lets set the owner
                                                         println!("Set selection owner");
-                                                        (self.xlib.XSetSelectionOwner)(
+                                                        X11_sys::XSetSelectionOwner(
                                                             self.display,
                                                             self.atom_clipboard,
                                                             window.window.unwrap(),
-                                                            event.key.time
+                                                            event.xkey.time
                                                         );
-                                                        (self.xlib.XFlush)(self.display);
+                                                        X11_sys::XFlush(self.display);
                                                     },
                                                     _ => ()
                                                 };
@@ -576,15 +566,15 @@ impl XlibApp {
                                 let mut buffer: [u8; 32] = mem::uninitialized();
                                 let mut keysym = mem::uninitialized();
                                 let mut status = mem::uninitialized();
-                                let count = (self.xlib.Xutf8LookupString)(
+                                let count = X11_sys::Xutf8LookupString(
                                     window.xic.unwrap(),
-                                    &mut event.key,
+                                    &mut event.xkey,
                                     buffer.as_mut_ptr() as *mut c_char,
                                     buffer.len() as c_int,
                                     &mut keysym,
                                     &mut status,
                                 );
-                                if status != xlib::XBufferOverflow {
+                                if status != X11_sys::XBufferOverflow {
                                     let utf8 = std::str::from_utf8(&buffer[..count as usize]).unwrap_or("").to_string();
                                     let char_code = utf8.chars().next().unwrap_or('\0');
                                     if char_code >= ' ' && char_code != 127 as char{
@@ -599,21 +589,21 @@ impl XlibApp {
                                 }
                             }
                         },
-                        xlib::KeyRelease => {
+                        X11_sys::KeyRelease => {
                             self.do_callback(&mut vec![Event::KeyUp(KeyEvent {
-                                key_code: self.xkeyevent_to_keycode(&mut event.key),
+                                key_code: self.xkeyevent_to_keycode(&mut event.xkey),
                                 is_repeat: false,
-                                modifiers: self.xkeystate_to_modifiers(event.key.state),
+                                modifiers: self.xkeystate_to_modifiers(event.xkey.state),
                                 time: self.time_now()
                             })]);
                         },
-                        xlib::ClientMessage => {
+                        X11_sys::ClientMessage => {
                             /*
                             if event.client_message.data.get_long(0) as u64 == wm_delete_message {
                                 self.event_loop_running = false;
                             }*/
                         },
-                        xlib::Expose => {
+                        X11_sys::Expose => {
                             /*
                             (glx.glXMakeCurrent)(display, window, context);
                             gl::ClearColor(1.0, 0.0, 0.0, 1.0);
@@ -742,8 +732,8 @@ impl XlibApp {
     pub fn terminate_event_loop(&mut self) {
         // maybe need to do more here
         self.event_loop_running = false;
-        unsafe {(self.xlib.XCloseIM)(self.xim)};
-        unsafe {(self.xlib.XCloseDisplay)(self.display)};
+        unsafe {X11_sys::XCloseIM(self.xim)};
+        unsafe {X11_sys::XCloseDisplay(self.display)};
         self.display = ptr::null_mut();
     }
     
@@ -755,7 +745,7 @@ impl XlibApp {
     pub fn load_first_cursor(&self, names: &[&[u8]]) -> Option<c_ulong> {
         unsafe {
             for name in names {
-                let cursor = (self.xcursor.XcursorLibraryLoadCursor)(
+                let cursor = X11_sys::XcursorLibraryLoadCursor(
                     self.display,
                     name.as_ptr() as *const c_char,
                 );
@@ -803,10 +793,10 @@ impl XlibApp {
                 unsafe {
                     for (k, v) in &self.window_map {
                         if !(**v).window.is_none() {
-                            (self.xlib.XDefineCursor)(self.display, *k, x11_cursor);
+                            X11_sys::XDefineCursor(self.display, *k, x11_cursor);
                         }
                     }
-                    (self.xlib.XFreeCursor)(self.display, x11_cursor);
+                    X11_sys::XFreeCursor(self.display, x11_cursor);
                 }
             }
         }
@@ -814,17 +804,17 @@ impl XlibApp {
     
     fn xkeystate_to_modifiers(&self, state: c_uint) -> KeyModifiers {
         KeyModifiers {
-            alt: state & xlib::Mod1Mask != 0,
-            shift: state & xlib::ShiftMask != 0,
-            control: state & xlib::ControlMask != 0,
-            logo: state & xlib::Mod4Mask != 0,
+            alt: state & X11_sys::Mod1Mask != 0,
+            shift: state & X11_sys::ShiftMask != 0,
+            control: state & X11_sys::ControlMask != 0,
+            logo: state & X11_sys::Mod4Mask != 0,
         }
     }
     
-    fn xkeyevent_to_keycode(&self, key_event: &mut xlib::XKeyEvent) -> KeyCode {
+    fn xkeyevent_to_keycode(&self, key_event: &mut X11_sys::XKeyEvent) -> KeyCode {
         let mut keysym = 0;
         unsafe {
-            (self.xlib.XLookupString)(
+            X11_sys::XLookupString(
                 key_event,
                 ptr::null_mut(),
                 0,
@@ -833,137 +823,137 @@ impl XlibApp {
             );
         }
         match keysym as u32 {
-            keysym::XK_a => KeyCode::KeyA,
-            keysym::XK_A => KeyCode::KeyA,
-            keysym::XK_b => KeyCode::KeyB,
-            keysym::XK_B => KeyCode::KeyB,
-            keysym::XK_c => KeyCode::KeyC,
-            keysym::XK_C => KeyCode::KeyC,
-            keysym::XK_d => KeyCode::KeyD,
-            keysym::XK_D => KeyCode::KeyD,
-            keysym::XK_e => KeyCode::KeyE,
-            keysym::XK_E => KeyCode::KeyE,
-            keysym::XK_f => KeyCode::KeyF,
-            keysym::XK_F => KeyCode::KeyF,
-            keysym::XK_g => KeyCode::KeyG,
-            keysym::XK_G => KeyCode::KeyG,
-            keysym::XK_h => KeyCode::KeyH,
-            keysym::XK_H => KeyCode::KeyH,
-            keysym::XK_i => KeyCode::KeyI,
-            keysym::XK_I => KeyCode::KeyI,
-            keysym::XK_j => KeyCode::KeyJ,
-            keysym::XK_J => KeyCode::KeyJ,
-            keysym::XK_k => KeyCode::KeyK,
-            keysym::XK_K => KeyCode::KeyK,
-            keysym::XK_l => KeyCode::KeyL,
-            keysym::XK_L => KeyCode::KeyL,
-            keysym::XK_m => KeyCode::KeyM,
-            keysym::XK_M => KeyCode::KeyM,
-            keysym::XK_n => KeyCode::KeyN,
-            keysym::XK_N => KeyCode::KeyN,
-            keysym::XK_o => KeyCode::KeyO,
-            keysym::XK_O => KeyCode::KeyO,
-            keysym::XK_p => KeyCode::KeyP,
-            keysym::XK_P => KeyCode::KeyP,
-            keysym::XK_q => KeyCode::KeyQ,
-            keysym::XK_Q => KeyCode::KeyQ,
-            keysym::XK_r => KeyCode::KeyR,
-            keysym::XK_R => KeyCode::KeyR,
-            keysym::XK_s => KeyCode::KeyS,
-            keysym::XK_S => KeyCode::KeyS,
-            keysym::XK_t => KeyCode::KeyT,
-            keysym::XK_T => KeyCode::KeyT,
-            keysym::XK_u => KeyCode::KeyU,
-            keysym::XK_U => KeyCode::KeyU,
-            keysym::XK_v => KeyCode::KeyV,
-            keysym::XK_V => KeyCode::KeyV,
-            keysym::XK_w => KeyCode::KeyW,
-            keysym::XK_W => KeyCode::KeyW,
-            keysym::XK_x => KeyCode::KeyX,
-            keysym::XK_X => KeyCode::KeyX,
-            keysym::XK_y => KeyCode::KeyY,
-            keysym::XK_Y => KeyCode::KeyY,
-            keysym::XK_z => KeyCode::KeyZ,
-            keysym::XK_Z => KeyCode::KeyZ,
+            X11_sys::XK_a => KeyCode::KeyA,
+            X11_sys::XK_A => KeyCode::KeyA,
+            X11_sys::XK_b => KeyCode::KeyB,
+            X11_sys::XK_B => KeyCode::KeyB,
+            X11_sys::XK_c => KeyCode::KeyC,
+            X11_sys::XK_C => KeyCode::KeyC,
+            X11_sys::XK_d => KeyCode::KeyD,
+            X11_sys::XK_D => KeyCode::KeyD,
+            X11_sys::XK_e => KeyCode::KeyE,
+            X11_sys::XK_E => KeyCode::KeyE,
+            X11_sys::XK_f => KeyCode::KeyF,
+            X11_sys::XK_F => KeyCode::KeyF,
+            X11_sys::XK_g => KeyCode::KeyG,
+            X11_sys::XK_G => KeyCode::KeyG,
+            X11_sys::XK_h => KeyCode::KeyH,
+            X11_sys::XK_H => KeyCode::KeyH,
+            X11_sys::XK_i => KeyCode::KeyI,
+            X11_sys::XK_I => KeyCode::KeyI,
+            X11_sys::XK_j => KeyCode::KeyJ,
+            X11_sys::XK_J => KeyCode::KeyJ,
+            X11_sys::XK_k => KeyCode::KeyK,
+            X11_sys::XK_K => KeyCode::KeyK,
+            X11_sys::XK_l => KeyCode::KeyL,
+            X11_sys::XK_L => KeyCode::KeyL,
+            X11_sys::XK_m => KeyCode::KeyM,
+            X11_sys::XK_M => KeyCode::KeyM,
+            X11_sys::XK_n => KeyCode::KeyN,
+            X11_sys::XK_N => KeyCode::KeyN,
+            X11_sys::XK_o => KeyCode::KeyO,
+            X11_sys::XK_O => KeyCode::KeyO,
+            X11_sys::XK_p => KeyCode::KeyP,
+            X11_sys::XK_P => KeyCode::KeyP,
+            X11_sys::XK_q => KeyCode::KeyQ,
+            X11_sys::XK_Q => KeyCode::KeyQ,
+            X11_sys::XK_r => KeyCode::KeyR,
+            X11_sys::XK_R => KeyCode::KeyR,
+            X11_sys::XK_s => KeyCode::KeyS,
+            X11_sys::XK_S => KeyCode::KeyS,
+            X11_sys::XK_t => KeyCode::KeyT,
+            X11_sys::XK_T => KeyCode::KeyT,
+            X11_sys::XK_u => KeyCode::KeyU,
+            X11_sys::XK_U => KeyCode::KeyU,
+            X11_sys::XK_v => KeyCode::KeyV,
+            X11_sys::XK_V => KeyCode::KeyV,
+            X11_sys::XK_w => KeyCode::KeyW,
+            X11_sys::XK_W => KeyCode::KeyW,
+            X11_sys::XK_x => KeyCode::KeyX,
+            X11_sys::XK_X => KeyCode::KeyX,
+            X11_sys::XK_y => KeyCode::KeyY,
+            X11_sys::XK_Y => KeyCode::KeyY,
+            X11_sys::XK_z => KeyCode::KeyZ,
+            X11_sys::XK_Z => KeyCode::KeyZ,
             
-            keysym::XK_0 => KeyCode::Key0,
-            keysym::XK_1 => KeyCode::Key1,
-            keysym::XK_2 => KeyCode::Key2,
-            keysym::XK_3 => KeyCode::Key3,
-            keysym::XK_4 => KeyCode::Key4,
-            keysym::XK_5 => KeyCode::Key5,
-            keysym::XK_6 => KeyCode::Key6,
-            keysym::XK_7 => KeyCode::Key7,
-            keysym::XK_8 => KeyCode::Key8,
-            keysym::XK_9 => KeyCode::Key9,
+            X11_sys::XK_0 => KeyCode::Key0,
+            X11_sys::XK_1 => KeyCode::Key1,
+            X11_sys::XK_2 => KeyCode::Key2,
+            X11_sys::XK_3 => KeyCode::Key3,
+            X11_sys::XK_4 => KeyCode::Key4,
+            X11_sys::XK_5 => KeyCode::Key5,
+            X11_sys::XK_6 => KeyCode::Key6,
+            X11_sys::XK_7 => KeyCode::Key7,
+            X11_sys::XK_8 => KeyCode::Key8,
+            X11_sys::XK_9 => KeyCode::Key9,
             
-            keysym::XK_Alt_L => KeyCode::Alt,
-            keysym::XK_Alt_R => KeyCode::Alt,
-            keysym::XK_Meta_L => KeyCode::Logo,
-            keysym::XK_Meta_R => KeyCode::Logo,
-            keysym::XK_Shift_L => KeyCode::Shift,
-            keysym::XK_Shift_R => KeyCode::Shift,
-            keysym::XK_Control_L => KeyCode::Control,
-            keysym::XK_Control_R => KeyCode::Control,
+            X11_sys::XK_Alt_L => KeyCode::Alt,
+            X11_sys::XK_Alt_R => KeyCode::Alt,
+            X11_sys::XK_Meta_L => KeyCode::Logo,
+            X11_sys::XK_Meta_R => KeyCode::Logo,
+            X11_sys::XK_Shift_L => KeyCode::Shift,
+            X11_sys::XK_Shift_R => KeyCode::Shift,
+            X11_sys::XK_Control_L => KeyCode::Control,
+            X11_sys::XK_Control_R => KeyCode::Control,
             
-            keysym::XK_equal => KeyCode::Equals,
-            keysym::XK_minus => KeyCode::Minus,
-            keysym::XK_bracketright => KeyCode::RBracket,
-            keysym::XK_bracketleft => KeyCode::LBracket,
-            keysym::XK_Return => KeyCode::Return,
-            keysym::XK_grave => KeyCode::Backtick,
-            keysym::XK_semicolon => KeyCode::Semicolon,
-            keysym::XK_backslash => KeyCode::Backslash,
-            keysym::XK_comma => KeyCode::Comma,
-            keysym::XK_slash => KeyCode::Slash,
-            keysym::XK_period => KeyCode::Period,
-            keysym::XK_Tab => KeyCode::Tab,
-            keysym::XK_space => KeyCode::Space,
-            keysym::XK_BackSpace => KeyCode::Backspace,
-            keysym::XK_Escape => KeyCode::Escape,
-            keysym::XK_Caps_Lock => KeyCode::Capslock,
-            keysym::XK_KP_Decimal => KeyCode::NumpadDecimal,
-            keysym::XK_KP_Multiply => KeyCode::NumpadMultiply,
-            keysym::XK_KP_Add => KeyCode::NumpadAdd,
-            keysym::XK_Num_Lock => KeyCode::Numlock,
-            keysym::XK_KP_Divide => KeyCode::NumpadDivide,
-            keysym::XK_KP_Enter => KeyCode::NumpadEnter,
-            keysym::XK_KP_Subtract => KeyCode::NumpadSubtract,
+            X11_sys::XK_equal => KeyCode::Equals,
+            X11_sys::XK_minus => KeyCode::Minus,
+            X11_sys::XK_bracketright => KeyCode::RBracket,
+            X11_sys::XK_bracketleft => KeyCode::LBracket,
+            X11_sys::XK_Return => KeyCode::Return,
+            X11_sys::XK_grave => KeyCode::Backtick,
+            X11_sys::XK_semicolon => KeyCode::Semicolon,
+            X11_sys::XK_backslash => KeyCode::Backslash,
+            X11_sys::XK_comma => KeyCode::Comma,
+            X11_sys::XK_slash => KeyCode::Slash,
+            X11_sys::XK_period => KeyCode::Period,
+            X11_sys::XK_Tab => KeyCode::Tab,
+            X11_sys::XK_space => KeyCode::Space,
+            X11_sys::XK_BackSpace => KeyCode::Backspace,
+            X11_sys::XK_Escape => KeyCode::Escape,
+            X11_sys::XK_Caps_Lock => KeyCode::Capslock,
+            X11_sys::XK_KP_Decimal => KeyCode::NumpadDecimal,
+            X11_sys::XK_KP_Multiply => KeyCode::NumpadMultiply,
+            X11_sys::XK_KP_Add => KeyCode::NumpadAdd,
+            X11_sys::XK_Num_Lock => KeyCode::Numlock,
+            X11_sys::XK_KP_Divide => KeyCode::NumpadDivide,
+            X11_sys::XK_KP_Enter => KeyCode::NumpadEnter,
+            X11_sys::XK_KP_Subtract => KeyCode::NumpadSubtract,
             //keysim::XK_9 => KeyCode::NumpadEquals,
-            keysym::XK_KP_0 => KeyCode::Numpad0,
-            keysym::XK_KP_1 => KeyCode::Numpad1,
-            keysym::XK_KP_2 => KeyCode::Numpad2,
-            keysym::XK_KP_3 => KeyCode::Numpad3,
-            keysym::XK_KP_4 => KeyCode::Numpad4,
-            keysym::XK_KP_5 => KeyCode::Numpad5,
-            keysym::XK_KP_6 => KeyCode::Numpad6,
-            keysym::XK_KP_7 => KeyCode::Numpad7,
-            keysym::XK_KP_8 => KeyCode::Numpad8,
-            keysym::XK_KP_9 => KeyCode::Numpad9,
+            X11_sys::XK_KP_0 => KeyCode::Numpad0,
+            X11_sys::XK_KP_1 => KeyCode::Numpad1,
+            X11_sys::XK_KP_2 => KeyCode::Numpad2,
+            X11_sys::XK_KP_3 => KeyCode::Numpad3,
+            X11_sys::XK_KP_4 => KeyCode::Numpad4,
+            X11_sys::XK_KP_5 => KeyCode::Numpad5,
+            X11_sys::XK_KP_6 => KeyCode::Numpad6,
+            X11_sys::XK_KP_7 => KeyCode::Numpad7,
+            X11_sys::XK_KP_8 => KeyCode::Numpad8,
+            X11_sys::XK_KP_9 => KeyCode::Numpad9,
             
-            keysym::XK_F1 => KeyCode::F1,
-            keysym::XK_F2 => KeyCode::F2,
-            keysym::XK_F3 => KeyCode::F3,
-            keysym::XK_F4 => KeyCode::F4,
-            keysym::XK_F5 => KeyCode::F5,
-            keysym::XK_F6 => KeyCode::F6,
-            keysym::XK_F7 => KeyCode::F7,
-            keysym::XK_F8 => KeyCode::F8,
-            keysym::XK_F9 => KeyCode::F9,
-            keysym::XK_F10 => KeyCode::F10,
-            keysym::XK_F11 => KeyCode::F11,
-            keysym::XK_F12 => KeyCode::F12,
+            X11_sys::XK_F1 => KeyCode::F1,
+            X11_sys::XK_F2 => KeyCode::F2,
+            X11_sys::XK_F3 => KeyCode::F3,
+            X11_sys::XK_F4 => KeyCode::F4,
+            X11_sys::XK_F5 => KeyCode::F5,
+            X11_sys::XK_F6 => KeyCode::F6,
+            X11_sys::XK_F7 => KeyCode::F7,
+            X11_sys::XK_F8 => KeyCode::F8,
+            X11_sys::XK_F9 => KeyCode::F9,
+            X11_sys::XK_F10 => KeyCode::F10,
+            X11_sys::XK_F11 => KeyCode::F11,
+            X11_sys::XK_F12 => KeyCode::F12,
             
-            keysym::XK_Print => KeyCode::PrintScreen,
-            keysym::XK_Home => KeyCode::Home,
-            keysym::XK_Page_Up => KeyCode::PageUp,
-            keysym::XK_Delete => KeyCode::Delete,
-            keysym::XK_End => KeyCode::End,
-            keysym::XK_Page_Down => KeyCode::PageDown,
-            keysym::XK_Left => KeyCode::ArrowLeft,
-            keysym::XK_Right => KeyCode::ArrowRight,
-            keysym::XK_Down => KeyCode::ArrowDown,
-            keysym::XK_Up => KeyCode::ArrowUp,
+            X11_sys::XK_Print => KeyCode::PrintScreen,
+            X11_sys::XK_Home => KeyCode::Home,
+            X11_sys::XK_Page_Up => KeyCode::PageUp,
+            X11_sys::XK_Delete => KeyCode::Delete,
+            X11_sys::XK_End => KeyCode::End,
+            X11_sys::XK_Page_Down => KeyCode::PageDown,
+            X11_sys::XK_Left => KeyCode::ArrowLeft,
+            X11_sys::XK_Right => KeyCode::ArrowRight,
+            X11_sys::XK_Down => KeyCode::ArrowDown,
+            X11_sys::XK_Up => KeyCode::ArrowUp,
             _ => KeyCode::Unknown,
         }
     }
@@ -994,40 +984,39 @@ impl XlibWindow {
         }
     }
     
-    pub fn init(&mut self, _title: &str, size: Vec2, position: Option<Vec2>, visual_info: *const XVisualInfo) {
+    pub fn init(&mut self, _title: &str, size: Vec2, position: Option<Vec2>, visual_info: *const X11_sys::XVisualInfo) {
         unsafe {
-            let xlib = &(*self.xlib_app).xlib;
             let display = (*self.xlib_app).display;
             
             // The default screen of the display
-            let default_screen = (xlib.XDefaultScreen)(display);
+            let default_screen = X11_sys::XDefaultScreen(display);
             
             // The root window of the default screen
-            let root_window = (xlib.XRootWindow)(display, default_screen);
+            let root_window = X11_sys::XRootWindow(display, default_screen);
             
-            let mut attributes = mem::zeroed::<xlib::XSetWindowAttributes>();
+            let mut attributes = mem::zeroed::<X11_sys::XSetWindowAttributes>();
             
             attributes.border_pixel = 0;
             //attributes.override_redirect = 1;
             attributes.colormap =
-            (xlib.XCreateColormap)(display, root_window, (*visual_info).visual, xlib::AllocNone);
-            attributes.event_mask = xlib::ExposureMask
-                | xlib::StructureNotifyMask
-                | xlib::ButtonMotionMask
-                | xlib::PointerMotionMask
-                | xlib::ButtonPressMask
-                | xlib::ButtonReleaseMask
-                | xlib::KeyPressMask
-                | xlib::KeyReleaseMask
-                | xlib::VisibilityChangeMask
-                | xlib::FocusChangeMask
-                | xlib::EnterWindowMask
-                | xlib::LeaveWindowMask;
+            X11_sys::XCreateColormap(display, root_window, (*visual_info).visual, X11_sys::AllocNone as i32);
+            attributes.event_mask = (X11_sys::ExposureMask
+                | X11_sys::StructureNotifyMask
+                | X11_sys::ButtonMotionMask
+                | X11_sys::PointerMotionMask
+                | X11_sys::ButtonPressMask
+                | X11_sys::ButtonReleaseMask
+                | X11_sys::KeyPressMask
+                | X11_sys::KeyReleaseMask
+                | X11_sys::VisibilityChangeMask
+                | X11_sys::FocusChangeMask
+                | X11_sys::EnterWindowMask
+                | X11_sys::LeaveWindowMask) as i64;
             
             
             let dpi_factor = self.get_dpi_factor();
             // Create a window
-            let window = (xlib.XCreateWindow)(
+            let window = X11_sys::XCreateWindow(
                 display,
                 root_window,
                 if position.is_some() {position.unwrap().x}else {150.0} as i32,
@@ -1036,14 +1025,14 @@ impl XlibWindow {
                 (size.y * dpi_factor) as u32,
                 0,
                 (*visual_info).depth,
-                xlib::InputOutput as u32,
+                X11_sys::InputOutput as u32,
                 (*visual_info).visual,
-                xlib::CWBorderPixel | xlib::CWColormap | xlib::CWEventMask, // | xlib::CWOverrideRedirect,
+                (X11_sys::CWBorderPixel | X11_sys::CWColormap | X11_sys::CWEventMask) as u64, // | X11_sys::CWOverrideRedirect,
                 &mut attributes,
             );
             
             // Tell the window manager that we want to be notified when the window is closed
-            (xlib.XSetWMProtocols)(display, window, &mut (*self.xlib_app).atom_wm_delete_window, 1);
+            X11_sys::XSetWMProtocols(display, window, &mut (*self.xlib_app).atom_wm_delete_window, 1);
             
             let hints = MwmHints {
                 flags: MWM_HINTS_DECORATIONS,
@@ -1055,13 +1044,13 @@ impl XlibWindow {
             
             let atom_motif_wm_hints = (*self.xlib_app).atom_motif_wm_hints;
             
-            (xlib.XChangeProperty)(display, window, atom_motif_wm_hints, atom_motif_wm_hints, 32, xlib::PropModeReplace, &hints as *const _ as *const u8, 5);
+            X11_sys::XChangeProperty(display, window, atom_motif_wm_hints, atom_motif_wm_hints, 32, X11_sys::PropModeReplace as i32, &hints as *const _ as *const u8, 5);
             
             // Map the window to the screen
-            (xlib.XMapWindow)(display, window);
-            (xlib.XFlush)(display);
+            X11_sys::XMapWindow(display, window);
+            X11_sys::XFlush(display);
             
-            let xic = (xlib.XCreateIC)((*self.xlib_app).xim, CString::new(xlib::XNInputStyle).unwrap().as_ptr(), xlib::XIMPreeditNothing | xlib::XIMStatusNothing, CString::new(xlib::XNClientWindow).unwrap().as_ptr(), window, CString::new(xlib::XNFocusWindow).unwrap().as_ptr(), window, ptr::null_mut() as *mut c_void);
+            let xic = X11_sys::XCreateIC((*self.xlib_app).xim, CStr::from_bytes_with_nul(X11_sys::XNInputStyle.as_ref()).unwrap().as_ptr(), (X11_sys::XIMPreeditNothing | X11_sys::XIMStatusNothing) as i32, CStr::from_bytes_with_nul(X11_sys::XNClientWindow.as_ref()).unwrap().as_ptr(), window, CStr::from_bytes_with_nul(X11_sys::XNFocusWindow.as_ref()).unwrap().as_ptr(), window, ptr::null_mut() as *mut c_void);
             
             // Create a window
             (*self.xlib_app).window_map.insert(window, self);
@@ -1088,10 +1077,9 @@ impl XlibWindow {
     pub fn hide_child_windows(&mut self) {
         unsafe {
             let display = (*self.xlib_app).display;
-            let xlib = &(*self.xlib_app).xlib;
             for child in &mut self.child_windows {
                 if child.visible {
-                    (xlib.XUnmapWindow)(display, child.window);
+                    X11_sys::XUnmapWindow(display, child.window);
                     child.visible = false
                 }
             }
@@ -1101,16 +1089,15 @@ impl XlibWindow {
     pub fn alloc_child_window(&mut self, x: i32, y: i32, w: u32, h: u32) -> Option<c_ulong> {
         unsafe {
             let display = (*self.xlib_app).display;
-            let xlib = &(*self.xlib_app).xlib;
             
             // ok lets find a childwindow that matches x/y/w/h and show it if need be
             for child in &mut self.child_windows {
                 if child.x == x && child.y == y && child.w == w && child.h == h {
                     if!child.visible {
-                        (xlib.XMapWindow)(display, child.window);
+                        X11_sys::XMapWindow(display, child.window);
                         child.visible = true;
                     }
-                    (xlib.XRaiseWindow)(display, child.window);
+                    X11_sys::XRaiseWindow(display, child.window);
                     return Some(child.window);
                 }
             }
@@ -1121,15 +1108,15 @@ impl XlibWindow {
                     child.y = y;
                     child.w = w;
                     child.h = h;
-                    (xlib.XMoveResizeWindow)(display, child.window, x, y, w, h);
-                    (xlib.XMapWindow)(display, child.window);
-                    (xlib.XRaiseWindow)(display, child.window);
+                    X11_sys::XMoveResizeWindow(display, child.window, x, y, w, h);
+                    X11_sys::XMapWindow(display, child.window);
+                    X11_sys::XRaiseWindow(display, child.window);
                     child.visible = true;
                     return Some(child.window);
                 }
             }
             
-            let new_child = (xlib.XCreateWindow)(
+            let new_child = X11_sys::XCreateWindow(
                 display,
                 self.window.unwrap(),
                 x,
@@ -1138,17 +1125,17 @@ impl XlibWindow {
                 h,
                 0,
                 self.visual_info.unwrap().depth,
-                xlib::InputOutput as u32,
+                X11_sys::InputOutput as u32,
                 self.visual_info.unwrap().visual,
-                xlib::CWBorderPixel | xlib::CWColormap | xlib::CWEventMask | xlib::CWOverrideRedirect,
+                (X11_sys::CWBorderPixel | X11_sys::CWColormap | X11_sys::CWEventMask | X11_sys::CWOverrideRedirect) as u64,
                 self.attributes.as_mut().unwrap(),
             );
             
             // Map the window to the screen
-            //(xlib.XMapWindow)(display, window_dirty);
+            //X11_sys::XMapWindow(display, window_dirty);
             (*self.xlib_app).window_map.insert(new_child, self);
-            (xlib.XMapWindow)(display, new_child);
-            (xlib.XFlush)(display);
+            X11_sys::XMapWindow(display, new_child);
+            X11_sys::XFlush(display);
             
             self.child_windows.push(XlibChildWindow {
                 window: new_child,
@@ -1193,10 +1180,10 @@ impl XlibWindow {
     fn restore_or_maximize(&self, add_remove: c_long) {
         unsafe {
             let xlib_app = &(*self.xlib_app);
-            let default_screen = (xlib_app.xlib.XDefaultScreen)(xlib_app.display);
-            let root_window = (xlib_app.xlib.XRootWindow)(xlib_app.display, default_screen);
-            let mut xclient = xlib::XClientMessageEvent {
-                type_: xlib::ClientMessage,
+            let default_screen = X11_sys::XDefaultScreen(xlib_app.display);
+            let root_window = X11_sys::XRootWindow(xlib_app.display, default_screen);
+            let mut xclient = X11_sys::XClientMessageEvent {
+                type_: X11_sys::ClientMessage as i32,
                 serial: 0,
                 send_event: 0,
                 display: xlib_app.display,
@@ -1204,14 +1191,14 @@ impl XlibWindow {
                 message_type: xlib_app.atom_net_wm_state,
                 format: 32,
                 data: {
-                    let mut msg = xlib::ClientMessageData::new();
-                    msg.set_long(0, add_remove);
-                    msg.set_long(1, xlib_app.atom_new_wm_state_maximized_horz as c_long);
-                    msg.set_long(2, xlib_app.atom_new_wm_state_maximized_vert as c_long);
+                    let mut msg = mem::zeroed::<X11_sys::XClientMessageEvent__bindgen_ty_1>();
+                    msg.l[0] = add_remove;
+                    msg.l[1] = xlib_app.atom_new_wm_state_maximized_horz as c_long;
+                    msg.l[2] = xlib_app.atom_new_wm_state_maximized_vert as c_long;
                     msg
                 }
             };
-            (xlib_app.xlib.XSendEvent)(xlib_app.display, root_window, 0, xlib::SubstructureNotifyMask | xlib::SubstructureRedirectMask, &mut xclient as *mut _ as *mut xlib::XEvent);
+            X11_sys::XSendEvent(xlib_app.display, root_window, 0, (X11_sys::SubstructureNotifyMask | X11_sys::SubstructureRedirectMask) as i64, &mut xclient as *mut _ as *mut X11_sys::XEvent);
         }
     }
     
@@ -1226,7 +1213,7 @@ impl XlibWindow {
     pub fn close_window(&mut self) {
         unsafe {
             let xlib_app = &(*self.xlib_app);
-            (xlib_app.xlib.XDestroyWindow)(xlib_app.display, self.window.unwrap());
+            X11_sys::XDestroyWindow(xlib_app.display, self.window.unwrap());
             self.window = None;
             // lets remove us from the mapping
             
@@ -1236,9 +1223,9 @@ impl XlibWindow {
     pub fn minimize(&self) {
         unsafe {
             let xlib_app = &(*self.xlib_app);
-            let default_screen = (xlib_app.xlib.XDefaultScreen)(xlib_app.display);
-            (xlib_app.xlib.XIconifyWindow)(xlib_app.display, self.window.unwrap(), default_screen);
-            (xlib_app.xlib.XFlush)(xlib_app.display);
+            let default_screen = X11_sys::XDefaultScreen(xlib_app.display);
+            X11_sys::XIconifyWindow(xlib_app.display, self.window.unwrap(), default_screen);
+            X11_sys::XFlush(xlib_app.display);
         }
     }
     
@@ -1270,14 +1257,14 @@ impl XlibWindow {
             let mut n_item = mem::uninitialized();
             let mut bytes_after = mem::uninitialized();
             let mut properties = mem::uninitialized();
-            let result = (xlib_app.xlib.XGetWindowProperty)(
+            let result = X11_sys::XGetWindowProperty(
                 xlib_app.display,
                 self.window.unwrap(),
                 xlib_app.atom_net_wm_state,
                 0,
                 !0,
                 0,
-                xlib::AnyPropertyType as c_ulong,
+                X11_sys::AnyPropertyType as c_ulong,
                 &mut prop_type,
                 &mut format,
                 &mut n_item,
@@ -1292,7 +1279,7 @@ impl XlibWindow {
                         break;
                     }
                 }
-                (xlib_app.xlib.XFree)(properties as *mut _);
+                X11_sys::XFree(properties as *mut _);
             }
         }
         maximized
@@ -1310,17 +1297,16 @@ impl XlibWindow {
     pub fn get_position(&self) -> Vec2 {
         unsafe {
             let mut xwa = mem::uninitialized();
-            let xlib = &(*self.xlib_app).xlib;
             let display = (*self.xlib_app).display;
-            (xlib.XGetWindowAttributes)(display, self.window.unwrap(), &mut xwa);
+            X11_sys::XGetWindowAttributes(display, self.window.unwrap(), &mut xwa);
             return Vec2 {x: xwa.x as f32, y: xwa.y as f32}
             /*
             let mut child = mem::uninitialized();
-            let default_screen = (xlib.XDefaultScreen)(display);
-            let root_window = (xlib.XRootWindow)(display, default_screen);
+            let default_screen = X11_sys::XDefaultScreen(display);
+            let root_window = X11_sys::XRootWindow(display, default_screen);
             let mut x:c_int = 0;
             let mut y:c_int = 0;
-            (xlib.XTranslateCoordinates)(display, self.window.unwrap(), root_window, 0, 0, &mut x, &mut y, &mut child );
+            X11_sys::XTranslateCoordinates(display, self.window.unwrap(), root_window, 0, 0, &mut x, &mut y, &mut child );
             */
         }
     }
@@ -1329,9 +1315,8 @@ impl XlibWindow {
         let dpi_factor = self.get_dpi_factor();
         unsafe {
             let mut xwa = mem::uninitialized();
-            let xlib = &(*self.xlib_app).xlib;
             let display = (*self.xlib_app).display;
-            (xlib.XGetWindowAttributes)(display, self.window.unwrap(), &mut xwa);
+            X11_sys::XGetWindowAttributes(display, self.window.unwrap(), &mut xwa);
             return Vec2 {x: xwa.width as f32 / dpi_factor, y: xwa.height as f32 / dpi_factor}
         }
     }
@@ -1339,9 +1324,8 @@ impl XlibWindow {
     pub fn get_outer_size(&self) -> Vec2 {
         unsafe {
             let mut xwa = mem::uninitialized();
-            let xlib = &(*self.xlib_app).xlib;
             let display = (*self.xlib_app).display;
-            (xlib.XGetWindowAttributes)(display, self.window.unwrap(), &mut xwa);
+            X11_sys::XGetWindowAttributes(display, self.window.unwrap(), &mut xwa);
             return Vec2 {x: xwa.width as f32, y: xwa.height as f32}
         }
     }
@@ -1358,13 +1342,12 @@ impl XlibWindow {
     pub fn get_dpi_factor(&self) -> f32 {
         unsafe {
             //return 2.0;
-            let xlib = &(*self.xlib_app).xlib;
             let display = (*self.xlib_app).display;
-            let resource_string = (xlib.XResourceManagerString)(display);
-            let db = (xlib.XrmGetStringDatabase)(resource_string);
+            let resource_string = X11_sys::XResourceManagerString(display);
+            let db = X11_sys::XrmGetStringDatabase(resource_string);
             let mut ty = mem::uninitialized();
             let mut value = mem::uninitialized();
-            (xlib.XrmGetResource)(
+            X11_sys::XrmGetResource(
                 db,
                 CString::new("Xft.dpi").unwrap().as_ptr(),
                 CString::new("String").unwrap().as_ptr(),

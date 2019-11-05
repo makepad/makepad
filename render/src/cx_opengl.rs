@@ -4,9 +4,6 @@ use std::ffi::CString;
 use std::ptr;
 use std::slice;
 use std::mem;
-use x11_dl::glx;
-use x11_dl::glx::{GLXContext, Glx};
-use x11_dl::xlib;
 
 impl Cx {
     
@@ -154,7 +151,7 @@ impl Cx {
             let pix_height = opengl_window.window_geom.inner_size.y * opengl_window.window_geom.dpi_factor;
             
             unsafe {
-                (opengl_cx.glx.glXMakeCurrent)(xlib_app.display, window, opengl_cx.context);
+                GLX_sys::glXMakeCurrent(xlib_app.display as *mut GLX_sys::_XDisplay, window, opengl_cx.context);
                 gl::Viewport(0, 0, pix_width as i32, pix_height as i32);
             }
             view_rect = Rect::zero();
@@ -170,7 +167,7 @@ impl Cx {
             }
             /*
             unsafe {
-                (opengl_cx.glx.glXMakeCurrent)(xlib_app.display, opengl_window.xlib_window.window.unwrap(), opengl_cx.context);
+                GLX_sys::glXMakeCurrent(xlib_app.display, opengl_window.xlib_window.window.unwrap(), opengl_cx.context);
                 gl::Viewport(
                     0,
                     0,
@@ -179,7 +176,7 @@ impl Cx {
                 );
                 gl::ClearColor(0.0, 1.0, 0.0, 0.0);
                 gl::Clear(gl::COLOR_BUFFER_BIT | gl::DEPTH_BUFFER_BIT);
-                (opengl_cx.glx.glXSwapBuffers)(xlib_app.display, opengl_window.xlib_window.window.unwrap());
+                GLX_sys::glXSwapBuffers(xlib_app.display, opengl_window.xlib_window.window.unwrap());
             }*/
             
             let pix_width = (view_bounds.max_x - view_bounds.min_x) * opengl_window.window_geom.dpi_factor;
@@ -199,7 +196,7 @@ impl Cx {
             );
             
             unsafe {
-                (opengl_cx.glx.glXMakeCurrent)(xlib_app.display, window, opengl_cx.context);
+                GLX_sys::glXMakeCurrent(xlib_app.display as *mut GLX_sys::_XDisplay, window, opengl_cx.context);
                 gl::Viewport(0, 0, pix_width as i32, pix_height as i32);
             }
             view_rect = Rect {x: view_bounds.min_x, y: view_bounds.min_y, w: view_bounds.max_x - view_bounds.min_x, h: view_bounds.max_y - view_bounds.min_y}
@@ -236,7 +233,7 @@ impl Cx {
         self.render_view(pass_id, view_id, full_repaint, &view_rect, &opengl_cx, &mut zbias, zbias_step);
         
         unsafe {
-            (opengl_cx.glx.glXSwapBuffers)(xlib_app.display, window);
+            GLX_sys::glXSwapBuffers(xlib_app.display as *mut GLX_sys::_XDisplay, window);
         }
         return init_repaint;
     }
@@ -373,11 +370,10 @@ impl Cx {
     //}
     
     pub fn opengl_compile_all_shaders(&mut self, xlib_app: &XlibApp, opengl_cx: &OpenglCx) {
-        let xlib = &xlib_app.xlib;
         unsafe {
-            let default_screen = (xlib.XDefaultScreen)(xlib_app.display);
-            let root_window = (xlib.XRootWindow)(xlib_app.display, default_screen);
-            (opengl_cx.glx.glXMakeCurrent)(xlib_app.display, root_window, opengl_cx.context);
+            let default_screen = X11_sys::XDefaultScreen(xlib_app.display);
+            let root_window = X11_sys::XRootWindow(xlib_app.display, default_screen);
+            GLX_sys::glXMakeCurrent(xlib_app.display as *mut GLX_sys::_XDisplay, root_window, opengl_cx.context);
         }
         for sh in &mut self.shaders {
             let openglsh = Self::opengl_compile_shader(sh, opengl_cx);
@@ -594,20 +590,17 @@ impl ViewBounds {
 }
 
 pub struct OpenglCx {
-    pub glx: Glx,
-    pub context: GLXContext,
-    pub visual_info: *const xlib::XVisualInfo,
+    pub context: GLX_sys::GLXContext,
+    pub visual_info: *const GLX_sys::XVisualInfo,
 }
 
 impl OpenglCx {
     
     pub fn new(xlib_app: &XlibApp) -> OpenglCx {
-        let glx = Glx::open().unwrap();
-        
         // Load the gl function pointers
         gl::load_with( | symbol | {
             unsafe {
-                (glx.glXGetProcAddress)(CString::new(symbol).unwrap().as_bytes_with_nul().as_ptr())
+                GLX_sys::glXGetProcAddress(CString::new(symbol).unwrap().as_bytes_with_nul().as_ptr())
                     .map_or(ptr::null(), | ptr | ptr as *const _)
             }
         });
@@ -615,28 +608,28 @@ impl OpenglCx {
         // start a cx
         // The default screen of the display
         unsafe {
-            let default_screen = (xlib_app.xlib.XDefaultScreen)(xlib_app.display);
+            let default_screen = X11_sys::XDefaultScreen(xlib_app.display);
             
             // Find one or more framebuffer configurations with the given attributes
             let configs = {
                 let mut len = 0;
-                let ptr = (glx.glXChooseFBConfig)(
-                    xlib_app.display,
+                let ptr = GLX_sys::glXChooseFBConfig(
+                    xlib_app.display as *mut GLX_sys::_XDisplay,
                     default_screen,
                     [
-                        glx::GLX_DOUBLEBUFFER,
+                        GLX_sys::GLX_DOUBLEBUFFER as i32,
                         1,
-                        glx::GLX_RENDER_TYPE,
-                        glx::GLX_RGBA_BIT,
-                        glx::GLX_RED_SIZE,
+                        GLX_sys::GLX_RENDER_TYPE as i32,
+                        GLX_sys::GLX_RGBA_BIT as i32,
+                        GLX_sys::GLX_RED_SIZE as i32,
                         8,
-                        glx::GLX_GREEN_SIZE,
+                        GLX_sys::GLX_GREEN_SIZE as i32,
                         8,
-                        glx::GLX_BLUE_SIZE,
+                        GLX_sys::GLX_BLUE_SIZE as i32,
                         8,
-                        glx::GLX_DEPTH_SIZE,
+                        GLX_sys::GLX_DEPTH_SIZE as i32,
                         24,
-                        glx::GLX_STENCIL_SIZE,
+                        GLX_sys::GLX_STENCIL_SIZE as i32,
                         8,
                         0
                     ].as_mut_ptr(),
@@ -646,15 +639,14 @@ impl OpenglCx {
             };
             
             // Get a visual that is compatible with the best found framebuffer configuration
-            let visual_info = (glx.glXGetVisualFromFBConfig)(xlib_app.display, configs[0]);
+            let visual_info = GLX_sys::glXGetVisualFromFBConfig(xlib_app.display as *mut GLX_sys::_XDisplay, configs[0]);
             
             // Create a gl context
-            let context = (glx.glXCreateContext)(xlib_app.display, visual_info, ptr::null_mut(), 1);
+            let context = GLX_sys::glXCreateContext(xlib_app.display as *mut GLX_sys::_XDisplay, visual_info, ptr::null_mut(), 1);
             
             OpenglCx {
                 visual_info,
                 context,
-                glx,
             }
         }
     }
@@ -815,7 +807,7 @@ impl OpenglWindow {
         
         let mut xlib_window = XlibWindow::new(xlib_app, window_id);
         
-        xlib_window.init(title, inner_size, position, opengl_cx.visual_info);
+        xlib_window.init(title, inner_size, position, opengl_cx.visual_info as *const X11_sys::XVisualInfo);
         
         OpenglWindow {
             first_draw: true,
