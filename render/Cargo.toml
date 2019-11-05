@@ -28,13 +28,15 @@ objc_id = "0.1"
 objc = "0.2"
 
 [target.x86_64-unknown-linux-gnu.dependencies]
-x11-dl = "*"
+GLX-sys = { path = "./GLX-sys" }
+X11-sys = { path = "./X11-sys" }
 libc = "*"
 gl = "*"
 time = "0.1.4"
 
 [target.armv7-unknown-linux-gnueabihf.dependencies]
-x11-dl = "*"
+GLX-sys = { path = "./GLX-sys" }
+X11-sys = { path = "./X11-sys" }
 libc = "*"
 gl = "*"
 time = "0.1.4"
