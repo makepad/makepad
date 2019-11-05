@@ -160,6 +160,9 @@ impl DesktopWindow {
                         ..Default::default()
                     });
                     
+                    // we need to draw the window menu here.
+                    
+                    
                     self.min_btn.draw_desktop_button(cx, DesktopButtonType::WindowsMin);
                     if self.window.is_fullscreen(cx) {self.max_btn.draw_desktop_button(cx, DesktopButtonType::WindowsMaxToggled);}
                     else {self.max_btn.draw_desktop_button(cx, DesktopButtonType::WindowsMax);}

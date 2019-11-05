@@ -253,7 +253,7 @@ impl AppStorage {
                                 to: HubMsgTo::Workspace(workspace.to_string()),
                                 msg: HubMsg::FileWriteRequest {
                                     uid: uid.clone(),
-                                    path: path.to_string(),
+                                    path: rest.to_string(),
                                     data: data.clone()
                                 }
                             });

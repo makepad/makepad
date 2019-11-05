@@ -1,6 +1,6 @@
 //  Life is too short for leaky abstractions.
 // Gleaned/learned/templated from https://github.com/tomaka/winit/blob/master/src/platform/macos/
-  
+
 use std::collections::HashMap;
 
 use cocoa::base::{id, nil};
@@ -19,7 +19,7 @@ static mut GLOBAL_COCOA_APP: *mut CocoaApp = 0 as *mut _;
 #[link(name = "Foundation", kind = "framework")]
 extern {
     pub static NSRunLoopCommonModes: id;
-}  
+}
 
 use crate::cx::*;
 
@@ -113,27 +113,116 @@ impl CocoaApp {
                 panic!("App is nil");
             }
             
-            //let menu: id = msg_send![class!(NSMenu), init: NSString::alloc(nil).init_str("MainMenu")];
-            //let makepad_menu: id = msg_send![class!(NSMenu), init: NSString::alloc(nil).init_str("Apple")];
-            //let makepad_item: id = msg_send![class!(NSMenuItem), title: NSString::alloc(nil).init_str("MakePad")];
-            //let makepad_quit: id = msg_send![
-            //    class!(NSMenuItem),
-            //    title: NSString::alloc(nil).init_str("MakePad")
-            //    action: NSString::alloc(nil).init_str("terminate:")
-            //    keyEquivalent: NSString::alloc(nil).init_str("q")
-            //];
+            let main_menu: id = msg_send![class!(NSMenu), new];
+            let () = msg_send![main_menu, setTitle: NSString::alloc(nil).init_str("MainMenu")];
+            let () = msg_send![main_menu, setAutoenablesItems: NO];
+
+            let apple_menu:id = msg_send![class!(NSMenu), new];
+            let () = msg_send![apple_menu, setAutoenablesItems: NO];
+            let () = msg_send![apple_menu, setTitle: NSString::alloc(nil).init_str("Apple")];
+            //let () = msg_send![apple_menu, initWithTitle: NSString::alloc(nil).init_str("Apple")];
+                
+            let apple_item: id = msg_send![
+                main_menu,
+                addItemWithTitle: NSString::alloc(nil).init_str("Apple")
+                action: nil
+                keyEquivalent: NSString::alloc(nil).init_str("")
+            ];
+
+            msg_send![
+                main_menu,
+                setSubmenu: apple_menu
+                forItem: apple_item
+            ];
+
+            let quit_item: id = msg_send![
+                apple_menu,
+                addItemWithTitle: NSString::alloc(nil).init_str("Quitter")
+                action: NSString::alloc(nil).init_str("terminate:")
+                keyEquivalent: NSString::alloc(nil).init_str("Q")
+            ];
+            msg_send![quit_item, setEnabled:1];
+
+            let test_menu:id = msg_send![class!(NSMenu), new];
+            let () = msg_send![test_menu, initWithTitle: NSString::alloc(nil).init_str("Test")];
+            let () = msg_send![test_menu, setAutoenablesItems: NO];
+
+            let test_item: id = msg_send![
+                main_menu,
+                addItemWithTitle: NSString::alloc(nil).init_str("Test")
+                action: nil
+                keyEquivalent: NSString::alloc(nil).init_str("")
+            ];
+            msg_send![test_item, setEnabled:1];
+
+            msg_send![
+                main_menu,
+                setSubmenu: test_menu
+                forItem: test_item
+            ];
+
+            let test_item2: id = msg_send![
+                test_menu,
+                addItemWithTitle: NSString::alloc(nil).init_str("Blarp")
+                action: nil
+                keyEquivalent: NSString::alloc(nil).init_str("B")
+            ];
+
+            msg_send![
+                ns_app,
+                setMainMenu: main_menu
+            ];
+            /*
+            let () = msg_send![menu, setTitle:NSString::alloc(nil).init_str("MainMenu")];
+            
+            //let apple_item: id = msg_send![class!(NSMenuItem), new];
+            //let () = msg_send![apple_item, setTitle:NSString::alloc(nil).init_str("Apple")];
+
+            //let makepad_item: id = msg_send![class!(NSMenuItem), new];
+            //let () = msg_send![makepad_item, setTitle:NSString::alloc(nil).init_str("Makepad")];
+
+            let edit_item: id = msg_send![class!(NSMenuItem), new];
+            let () = msg_send![edit_item, setTitle:NSString::alloc(nil).init_str("Edit")];
+            
+            let edit_menu: id = msg_send![class!(NSMenu), new];//initWithTitle: NSString::alloc(nil).init_str("MainMenu")];
+            let copy_item: id = msg_send![class!(NSMenuItem), new];
+            let () = msg_send![copy_item, setTitle:NSString::alloc(nil).init_str("Copy")];
+
+            //let () = msg_send![menu, addItem:apple_item];
+            //let () = msg_send![menu, addItem:makepad_item];
+            let () = msg_send![menu, addItem:edit_item];
+            let () = msg_send![edit_menu, addItem:copy_item];
+
+            let () = msg_send![menu, setSubmenu:edit_menu forItem:edit_item];
+            
+            msg_seng![
+                ns_app,
+                
+            ]
+            msg_send![
+                ns_app,
+                setMainMenu: menu
+            ];*/
+            /*
+            ]
+            let makepad_item: id = msg_send![class!(NSMenuItem), initWithTitle: NSString::alloc(nil).init_str("MakePad")];
+            let makepad_quit: id = msg_send![
+                class!(NSMenuItem),
+                title: NSString::alloc(nil).init_str("MakePad")
+                action: NSString::alloc(nil).init_str("terminate:")
+                keyEquivalent: NSString::alloc(nil).init_str("q")
+            ];*/
             
             // add our menu
-            //msg_send![
-            //    ns_app,
-            //    setMainMenu: menu
-            //];
             
             ns_app.setActivationPolicy_(appkit::NSApplicationActivationPolicy::NSApplicationActivationPolicyRegular);
             ns_app.finishLaunching();
             let current_app = appkit::NSRunningApplication::currentApplication(nil);
             current_app.activateWithOptions_(appkit::NSApplicationActivateIgnoringOtherApps);
             (*self.timer_delegate_instance).set_ivar("cocoa_app_ptr", self as *mut _ as *mut c_void);
+            
+            
+            
         }
     }
     
@@ -690,7 +779,7 @@ impl CocoaWindow {
     
     pub fn get_window_geom(&self) -> WindowGeom {
         WindowGeom {
-            vr_is_presenting:false,
+            vr_is_presenting: false,
             is_topmost: false,
             is_fullscreen: self.is_fullscreen,
             inner_size: self.get_inner_size(),
@@ -1675,7 +1764,7 @@ fn load_mouse_cursor(cursor: MouseCursor) -> id {
         MouseCursor::Text => load_native_cursor("IBeamCursor"),
         MouseCursor::NotAllowed /*| MouseCursor::NoDrop*/ => load_native_cursor("operationNotAllowedCursor"),
         MouseCursor::Crosshair => load_native_cursor("crosshairCursor"),
-/*
+        /*
         MouseCursor::Grabbing | MouseCursor::Grab => load_native_cursor("closedHandCursor"),
         MouseCursor::VerticalText => load_native_cursor("IBeamCursorForVerticalLayout"),
         MouseCursor::Copy => load_native_cursor("dragCopyCursor"),
@@ -1717,7 +1806,7 @@ fn load_mouse_cursor(cursor: MouseCursor) -> id {
         // completely standard to macOS users.
         // https://stackoverflow.com/a/21786835/5435443
         MouseCursor::Move /*| MouseCursor::AllScroll*/ => load_webkit_cursor("move"),
-       // MouseCursor::Cell => load_webkit_cursor("cell"),
+        // MouseCursor::Cell => load_webkit_cursor("cell"),
     }
 }
 
@@ -1731,7 +1820,7 @@ fn load_undocumented_cursor(cursor_name: &str) -> id {
     unsafe {
         let class = class!(NSCursor);
         let sel = Sel::register(cursor_name);
-        let sel:id = msg_send![class, respondsToSelector: sel];
+        let sel: id = msg_send![class, respondsToSelector: sel];
         let id: id = msg_send![class, performSelector: sel];
         id
     }

@@ -265,6 +265,10 @@ impl Cx {
     pub fn post_signal(signal: Signal, value: usize) {
         CocoaApp::post_signal(signal.signal_id, value);
     }
+    
+    pub fn update_menu(&mut self, menu:&Menu){
+        
+    }
 }
 
 #[derive(Clone, Default)]
