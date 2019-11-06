@@ -4,6 +4,7 @@ use libc::timeval;
 use std::collections::{HashMap, VecDeque};
 use std::ffi::CString;
 use std::ffi::CStr;
+use std::slice;
 use std::sync::Mutex;
 //use std::fs::File;
 //use std::io::Write;
@@ -51,6 +52,7 @@ pub struct XlibApp {
 #[derive(Clone)]
 pub struct XlibWindow {
     pub window: Option<c_ulong>,
+    pub surface: Option<EGL_sys::EGLSurface>,
     pub xic: Option<X11_sys::XIC>,
     pub attributes: Option<X11_sys::XSetWindowAttributes>,
     pub visual_info: Option<X11_sys::XVisualInfo>,
@@ -71,6 +73,7 @@ pub struct XlibWindow {
 #[derive(Clone)]
 pub struct XlibChildWindow {
     pub window: c_ulong,
+    pub surface: Option<EGL_sys::EGLSurface>,
     visible: bool,
     x: i32,
     y: i32,
@@ -968,6 +971,7 @@ impl XlibWindow {
         
         XlibWindow {
             window: None,
+            surface: None,
             xic: None,
             attributes: None,
             visual_info: None,
@@ -984,9 +988,24 @@ impl XlibWindow {
         }
     }
     
-    pub fn init(&mut self, _title: &str, size: Vec2, position: Option<Vec2>, visual_info: *const X11_sys::XVisualInfo) {
+    pub fn init(&mut self, _title: &str, size: Vec2, position: Option<Vec2>, visual_id: X11_sys::VisualID) {
         unsafe {
             let display = (*self.xlib_app).display;
+
+            // Get visual info by id
+            let mut visual_info = mem::zeroed::<X11_sys::XVisualInfo>();
+            visual_info.visualid = visual_id;
+            let mut len = 0;
+            let ptr = X11_sys::XGetVisualInfo(display, X11_sys::VisualIDMask as i64, &mut visual_info, &mut len);
+            if ptr.is_null() {
+                panic!("can't get visual info by id");
+            }
+            let visual_infos = slice::from_raw_parts(ptr, len as usize);
+            if visual_infos.len() != 1 {
+                panic!("can't get visual info by id");
+            }
+            visual_info = visual_infos[0];
+            X11_sys::XFree(ptr as *mut _);
             
             // The default screen of the display
             let default_screen = X11_sys::XDefaultScreen(display);
@@ -999,7 +1018,7 @@ impl XlibWindow {
             attributes.border_pixel = 0;
             //attributes.override_redirect = 1;
             attributes.colormap =
-            X11_sys::XCreateColormap(display, root_window, (*visual_info).visual, X11_sys::AllocNone as i32);
+            X11_sys::XCreateColormap(display, root_window, visual_info.visual, X11_sys::AllocNone as i32);
             attributes.event_mask = (X11_sys::ExposureMask
                 | X11_sys::StructureNotifyMask
                 | X11_sys::ButtonMotionMask
@@ -1024,9 +1043,9 @@ impl XlibWindow {
                 (size.x * dpi_factor) as u32,
                 (size.y * dpi_factor) as u32,
                 0,
-                (*visual_info).depth,
+                visual_info.depth,
                 X11_sys::InputOutput as u32,
-                (*visual_info).visual,
+                visual_info.visual,
                 (X11_sys::CWBorderPixel | X11_sys::CWColormap | X11_sys::CWEventMask) as u64, // | X11_sys::CWOverrideRedirect,
                 &mut attributes,
             );
@@ -1056,7 +1075,7 @@ impl XlibWindow {
             (*self.xlib_app).window_map.insert(window, self);
             
             self.attributes = Some(attributes);
-            self.visual_info = Some(*visual_info);
+            self.visual_info = Some(visual_info);
             self.window = Some(window);
             self.xic = Some(xic);
             self.last_window_geom = self.get_window_geom();
@@ -1139,6 +1158,7 @@ impl XlibWindow {
             
             self.child_windows.push(XlibChildWindow {
                 window: new_child,
+                surface: None,
                 x: x,
                 y: y,
                 w: w,

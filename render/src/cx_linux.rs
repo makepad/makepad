@@ -11,11 +11,11 @@ impl Cx{
         
         xlib_app.init();
         
-        let opengl_cx = OpenglCx::new(&xlib_app);
+        let opengl_cx = OpenglCx::new();
         
         let mut opengl_windows: Vec<OpenglWindow> = Vec::new();
         
-        self.opengl_compile_all_shaders(&xlib_app, &opengl_cx);
+        self.opengl_compile_all_shaders(&opengl_cx);
         
         self.load_fonts_from_file();
         
@@ -180,7 +180,6 @@ impl Cx{
                                             if self.draw_pass_to_window(
                                                 *pass_id,
                                                 dpi_factor,
-                                                xlib_app,
                                                 opengl_window,
                                                 &opengl_cx,
                                             ){
