@@ -14,7 +14,6 @@ pub struct LogList {
 
 #[derive(Clone)]
 pub struct LogItemDraw {
-    pub bg: Quad,
     pub text: Text,
     pub item_bg: Quad,
     pub code_icon: CodeIcon,
@@ -33,7 +32,6 @@ pub struct LogItemDraw {
 impl LogItemDraw {
     pub fn style(cx: &mut Cx) -> Self {
         Self {
-            bg: Quad::style(cx),
             item_bg: Quad::style(cx),
             text: Text {
                 wrapping: Wrapping::Word,

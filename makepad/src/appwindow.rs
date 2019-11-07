@@ -223,8 +223,8 @@ impl AppWindow {
         }
     }
     
-    pub fn draw_app_window(&mut self, cx: &mut Cx, window_index: usize, state: &mut AppState, storage: &mut AppStorage, build_manager: &mut BuildManager) {
-        if let Err(()) = self.desktop_window.begin_desktop_window(cx) {
+    pub fn draw_app_window(&mut self, cx: &mut Cx, menu:&Menu, window_index: usize, state: &mut AppState, storage: &mut AppStorage, build_manager: &mut BuildManager) {
+        if let Err(()) = self.desktop_window.begin_desktop_window(cx, Some(menu)) {
             return
         }
         self.dock.draw_dock(cx);

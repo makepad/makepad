@@ -9,6 +9,8 @@ use crate::buildmanager::*;
 pub struct App {
     pub app_window_state_template: AppWindowState,
     pub app_window_template: AppWindow,
+    pub menu: Menu,
+    pub menu_signal: Signal,
     pub state: AppState,
     pub storage: AppStorage,
     pub build_manager: BuildManager,
@@ -19,8 +21,69 @@ impl App {
     
     pub fn style(cx: &mut Cx) -> Self {
         set_dark_style(cx);
-        
+        let ms = cx.new_signal();
         Self {
+            menu: Menu::main(vec![
+                Menu::sub("Makepad", "M", vec![
+                    Menu::item("About Makepad", "", false, ms, 2),
+                    Menu::line(),
+                    Menu::item("Preferences", ",", false, ms, 2),
+                    Menu::line(),
+                    Menu::item("Quit Makepad", "q", false, ms, 0),
+                ]),
+                Menu::sub("File", "f", vec![
+                    Menu::item("New File", "n", true, ms, 2),
+                    Menu::item("New Window", "N", false, ms, 2),
+                    Menu::line(),
+                    Menu::item("Add Folder to Workspace", "", false, ms, 2),
+                    Menu::line(),
+                    Menu::item("Save As", "S", false, ms, 2),
+                    Menu::line(),
+                    Menu::item("Rename", "", false, ms, 2),
+                    Menu::line(),
+                    Menu::item("Close Editor", "w", false, ms, 2),
+                    Menu::item("Remove Folder from Workspace", "", false, ms, 2),
+                    Menu::item("Close Window", "W", false, ms, 2),
+                ]),                 
+                Menu::sub("Edit", "e", vec![
+                    Menu::item("Undo", "z", false, ms, 2),
+                    Menu::item("Redo", "Z", false, ms, 2),
+                    Menu::line(),
+                    Menu::item("Cut", "x", false, ms, 2),
+                    Menu::item("Copy", "c", false, ms, 2),
+                    Menu::item("Paste", "v", false, ms, 3),
+                    Menu::line(),
+                    Menu::item("Find", "", false, ms, 2),
+                    Menu::item("Replace", "", false, ms, 2),
+                    Menu::line(),
+                    Menu::item("Find in Files", "", false, ms, 2),
+                    Menu::item("Replace in Files", "", false, ms, 2),
+                    Menu::line(),
+                    Menu::item("Toggle Line Comment", "", false, ms, 3),
+                    Menu::item("Toggle Block Comment", "", false, ms, 3),
+                ]),
+                Menu::sub("Selection", "s", vec![
+                    Menu::item("Select All", "a", false, ms, 2),
+                ]),
+                Menu::sub("View", "v", vec![
+                    Menu::item("Zoom In", "+", false, ms, 2),
+                    Menu::item("Zoom Out", "-", false, ms, 2),
+                ]),
+                Menu::sub("Run", "s", vec![
+                    Menu::item("Start Program", "`", false, ms, 2),
+                    Menu::item("Stop Program", "~", false, ms, 2),
+                ]),
+                Menu::sub("Window", "w", vec![
+                    Menu::item("Minimize", "m", false, ms, 2),
+                    Menu::item("Zoom", "", false, ms, 2),
+                    Menu::line(),
+                    Menu::item("Bring All to Front", "", false, ms, 2),
+                ]),
+                Menu::sub("Help", "h", vec![
+                    Menu::item("About Makepad", "",false, ms, 2),
+                ])
+            ]),
+            menu_signal:ms,
             app_window_template: AppWindow::style(cx),
             app_window_state_template: AppWindowState {
                 open_folders: Vec::new(),
@@ -233,7 +296,7 @@ impl App {
     pub fn draw_app(&mut self, cx: &mut Cx) {
         //return;
         for (window_index, window) in self.windows.iter_mut().enumerate() {
-            window.draw_app_window(cx, window_index, &mut self.state, &mut self.storage, &mut self.build_manager);
+            window.draw_app_window(cx, &self.menu, window_index, &mut self.state, &mut self.storage, &mut self.build_manager);
             // break;
         }
     }

@@ -55,7 +55,6 @@ pub struct CocoaApp {
     pub menu_delegate_class: *const Class,
     pub app_delegate_class: *const Class,
     pub menu_target_class: *const Class,
-    //pub layer_delegate_class: *const Class,
     pub view_class: *const Class,
     pub menu_delegate_instance: id,
     pub app_delegate_instance: id,
@@ -155,7 +154,7 @@ impl CocoaApp {
                         make_menu(sub_menu, delegate, menu_target_class, item);
                     }
                 },
-                Menu::Item {name, key, signal, value} => {
+                Menu::Item {name, key, signal, value, enabled} => {
                     let sub_item: id = msg_send![
                         parent_menu,
                         addItemWithTitle: NSString::alloc(nil).init_str(name)
@@ -164,6 +163,7 @@ impl CocoaApp {
                     ];
                     let target: id = msg_send![menu_target_class, new];
                     let () = msg_send![sub_item, setTarget:target];
+                    let () = msg_send![sub_item, setEnabled:if *enabled{YES}else{NO}];
                     (*target).set_ivar("cocoa_app_ptr", GLOBAL_COCOA_APP as *mut _ as *mut c_void);
                     (*target).set_ivar("signal_id", signal.signal_id);                    
                     (*target).set_ivar("value", *value);

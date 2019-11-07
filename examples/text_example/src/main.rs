@@ -57,12 +57,12 @@ impl App {
                 Menu::sub("Makepad", "M", vec![
                     Menu::item("Quitter!", "q", menu_signal, 0),
                     Menu::line(),
-                    Menu::item("Thingie", "Q", menu_signal, 1),
+                    Menu::item("Thingie", "q", menu_signal, 1),
                 ]),
-                Menu::sub("Edit", "E", vec![
-                    Menu::item("Copy", "C", menu_signal, 2),
+                Menu::sub("Edit", "e", vec![
+                    Menu::item("Copy", "c", menu_signal, 2),
                     Menu::line(),
-                    Menu::item("Paste", "V", menu_signal, 3),
+                    Menu::item("Paste", "v", menu_signal, 3),
                 ])
             ]),
             menu_signal,

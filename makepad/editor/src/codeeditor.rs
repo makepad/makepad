@@ -274,7 +274,7 @@ impl CodeEditor {
             },
             base_font_size: 8.0,
             open_font_scale: 1.0,
-            folded_font_scale: 0.05,
+            folded_font_scale: 0.07,
             line_number_width: 45.,
             draw_line_numbers: true,
             cursor_blink_speed: 0.5,

@@ -20,6 +20,8 @@ mod desktopwindow;
 pub use crate::desktopwindow::*;
 mod desktopbutton;
 pub use crate::desktopbutton::*;
+mod windowmenu;
+pub use crate::windowmenu::*;
 mod list;
 pub use crate::list::*;
 //mod textbuffer;

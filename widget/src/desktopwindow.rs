@@ -1,6 +1,7 @@
 use render::*;
 use crate::button::*;
 use crate::desktopbutton::*;
+use crate::windowmenu::*;
 
 #[derive(Clone)]
 pub struct DesktopWindow {
@@ -20,6 +21,8 @@ pub struct DesktopWindow {
     pub caption_bg: Quad,
     pub caption_size: Vec2,
     pub caption: String,
+    
+    pub window_menu: WindowMenu,
     
     pub _last_menu: Option<Menu>,
     
@@ -50,9 +53,12 @@ impl DesktopWindow {
             max_btn: DesktopButton::style(cx),
             close_btn: DesktopButton::style(cx),
             vr_btn: DesktopButton::style(cx),
+            
+            window_menu: WindowMenu::style(cx),
+            
             caption_text: Text::style(cx),
             caption_bg: Quad {
-                color: cx.color("bg_selected"),
+                color: cx.color("bg_selected_over"),
                 ..Quad::style(cx)
             },
             caption_size: Vec2::zero(),
