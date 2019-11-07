@@ -1,7 +1,6 @@
 use crate::cx::*;
 
 pub enum GLShaderType {
-    OpenGLNoPartialDeriv,
     OpenGL,
     WebGL1
 }
@@ -279,18 +278,7 @@ impl Cx {
         
         let mut vtx_out = String::new();
         let mut pix_out = String::new();
-        let mut pix_compat = String::new();
         match shtype {
-            GLShaderType::OpenGLNoPartialDeriv => {
-                vtx_out.push_str("#version 100\n");
-                pix_out.push_str("#version 100\n");
-                vtx_out.push_str("precision highp float;\n");
-                pix_out.push_str("precision highp float;\n");
-                vtx_out.push_str("precision highp int;\n");
-                pix_out.push_str("precision highp int;\n");
-                pix_compat.push_str("vec2 dFdx(vec2 dummy){\nreturn vec2(0.14);\n}\n");
-                pix_compat.push_str("vec2 dFdy(vec2 dummy){\nreturn vec2(0.14);\n}\n")
-            }
             GLShaderType::OpenGL => {
                 vtx_out.push_str("#version 100\n");
                 pix_out.push_str("#version 100\n");
@@ -404,8 +392,6 @@ impl Cx {
         for local in &locals {shared.push_str(&Self::gl_assemble_vardef(&local));}
         
         pix_out.push_str(&shared);
-        
-        pix_out.push_str(&pix_compat);
         
         vtx_out.push_str(&shared);
         
