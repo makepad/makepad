@@ -440,7 +440,7 @@ impl XlibApp {
                             let button = event.xbutton;
                             if let Some(window_ptr) = self.window_map.get(&button.window) {
                                 let window = &mut (**window_ptr);
-                                X11_sys::XSetInputFocus(self.display, window.window.unwrap(), X11_sys::None as i32, X11_sys::CurrentTime as u64);
+                                X11_sys::XSetInputFocus(self.display, window.window.unwrap(), X11_sys::None as i32, X11_sys::CurrentTime as c_ulong);
                                 // its a mousewheel
                                 if button.button >= 4 && button.button <= 7 {
                                     let last_scroll_time = self.last_scroll_time;
@@ -485,7 +485,7 @@ impl XlibApp {
                                                 msg
                                             }
                                         };
-                                        X11_sys::XSendEvent(self.display, root_window, 0, (X11_sys::SubstructureRedirectMask | X11_sys::SubstructureNotifyMask) as i64, &mut xclient as *mut _ as *mut X11_sys::XEvent);
+                                        X11_sys::XSendEvent(self.display, root_window, 0, (X11_sys::SubstructureRedirectMask | X11_sys::SubstructureNotifyMask) as c_long, &mut xclient as *mut _ as *mut X11_sys::XEvent);
                                     }
                                     else {
                                         window.send_finger_down(button.button as usize, self.xkeystate_to_modifiers(button.state))
@@ -996,7 +996,7 @@ impl XlibWindow {
             let mut visual_info = mem::zeroed::<X11_sys::XVisualInfo>();
             visual_info.visualid = visual_id;
             let mut len = 0;
-            let ptr = X11_sys::XGetVisualInfo(display, X11_sys::VisualIDMask as i64, &mut visual_info, &mut len);
+            let ptr = X11_sys::XGetVisualInfo(display, X11_sys::VisualIDMask as c_long, &mut visual_info, &mut len);
             if ptr.is_null() {
                 panic!("can't get visual info by id");
             }
@@ -1030,7 +1030,7 @@ impl XlibWindow {
                 | X11_sys::VisibilityChangeMask
                 | X11_sys::FocusChangeMask
                 | X11_sys::EnterWindowMask
-                | X11_sys::LeaveWindowMask) as i64;
+                | X11_sys::LeaveWindowMask) as c_long;
             
             
             let dpi_factor = self.get_dpi_factor();
@@ -1046,7 +1046,7 @@ impl XlibWindow {
                 visual_info.depth,
                 X11_sys::InputOutput as u32,
                 visual_info.visual,
-                (X11_sys::CWBorderPixel | X11_sys::CWColormap | X11_sys::CWEventMask) as u64, // | X11_sys::CWOverrideRedirect,
+                (X11_sys::CWBorderPixel | X11_sys::CWColormap | X11_sys::CWEventMask) as c_ulong, // | X11_sys::CWOverrideRedirect,
                 &mut attributes,
             );
             
@@ -1146,7 +1146,7 @@ impl XlibWindow {
                 self.visual_info.unwrap().depth,
                 X11_sys::InputOutput as u32,
                 self.visual_info.unwrap().visual,
-                (X11_sys::CWBorderPixel | X11_sys::CWColormap | X11_sys::CWEventMask | X11_sys::CWOverrideRedirect) as u64,
+                (X11_sys::CWBorderPixel | X11_sys::CWColormap | X11_sys::CWEventMask | X11_sys::CWOverrideRedirect) as c_ulong,
                 self.attributes.as_mut().unwrap(),
             );
             
@@ -1218,7 +1218,7 @@ impl XlibWindow {
                     msg
                 }
             };
-            X11_sys::XSendEvent(xlib_app.display, root_window, 0, (X11_sys::SubstructureNotifyMask | X11_sys::SubstructureRedirectMask) as i64, &mut xclient as *mut _ as *mut X11_sys::XEvent);
+            X11_sys::XSendEvent(xlib_app.display, root_window, 0, (X11_sys::SubstructureNotifyMask | X11_sys::SubstructureRedirectMask) as c_long, &mut xclient as *mut _ as *mut X11_sys::XEvent);
         }
     }
     
