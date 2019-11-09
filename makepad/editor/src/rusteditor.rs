@@ -46,9 +46,7 @@ impl RustEditor {
             }
         }
         
-        if let Err(_) = self.code_editor.begin_code_editor(cx, text_buffer) {
-            return
-        }
+        if self.code_editor.begin_code_editor(cx, text_buffer).is_err() {return}
         
         for (index, token_chunk) in text_buffer.token_chunks.iter_mut().enumerate() {
             self.code_editor.draw_chunk(cx, index, &text_buffer.flat_text, token_chunk, &text_buffer.messages.cursors);
@@ -956,6 +954,9 @@ impl RustTokenizer {
                     is_unary_operator = true;
                 },
                 TokenType::Operator => {
+                    
+                    // detect ++ and -- and execute insert or delete macros
+                    
                     let mut is_closing_angle = false;
                     if tp.cur_char() == '<' {
                         paren_stack.last_mut().unwrap().angle_counter += 1;

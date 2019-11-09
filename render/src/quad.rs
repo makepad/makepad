@@ -10,6 +10,13 @@ pub struct Quad {
 }
 
 impl Quad {
+    pub fn style_with_shader(cx: &mut Cx, shader:ShaderGen, name:&str) -> Self {
+        Self {
+            shader: cx.add_shader(shader, name),
+            ..Self::style(cx)
+        }
+    }
+    
     pub fn style(cx: &mut Cx) -> Self {
         Self {
             shader: cx.add_shader(Self::def_quad_shader(), "Quad"),
@@ -74,7 +81,7 @@ impl Quad {
         area
     }
     
-    pub fn draw_quad_walk(&mut self, cx: &mut Cx, w: Bounds, h: Bounds, margin: Margin) -> InstanceArea {
+    pub fn draw_quad_walk(&mut self, cx: &mut Cx, w: Width, h: Height, margin: Margin) -> InstanceArea {
         let geom = cx.walk_turtle(w, h, margin, None);
         let inst = self.draw_quad_abs(cx, geom);
         cx.align_instance(inst);

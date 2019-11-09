@@ -108,7 +108,7 @@ impl TabClose {
     
     pub fn draw_tab_close(&mut self, cx: &mut Cx) {
         self.bg.color = self.animator.last_color(cx.id("bg.color"));
-        let bg_inst = self.bg.draw_quad_walk(cx, Bounds::Fix(10.), Bounds::Fix(10.), self.margin);
+        let bg_inst = self.bg.draw_quad_walk(cx, Width::Fix(10.), Height::Fix(10.), self.margin);
         bg_inst.push_float(cx, self.animator.last_float(cx.id("bg.hover")));
         bg_inst.push_float(cx, self.animator.last_float(cx.id("bg.down")));
         self._bg_area = bg_inst.into_area();

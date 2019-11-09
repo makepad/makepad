@@ -43,7 +43,7 @@ impl Keyboard {
             buttons: Elements::new(Button {
                 ..Button::style(cx)
             }),
-            modifiers: KeyModifiers {..Default::default()},
+            modifiers: KeyModifiers::default(),
             key_down: None,
             key_up: None,
             
@@ -118,16 +118,14 @@ impl Keyboard {
     }
     
     pub fn draw_keyboard(&mut self, cx: &mut Cx) {
-        if let Err(_) = self.view.begin_view(cx, Layout {..Default::default()}) {
-            return
-        }
+        if self.view.begin_view(cx, Layout::default()).is_err() {return}
         
         let keys = vec![KeyType::Alt, KeyType::Control, KeyType::Shift];
         
         for key in keys {
             self.buttons.get_draw(cx, key.clone(), | _cx, templ | {
                 templ.clone()
-            }).draw_button_with_label(cx, &key.name());
+            }).draw_button(cx, &key.name());
         }
         
         self.view.end_view(cx);

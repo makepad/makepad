@@ -8,6 +8,7 @@ use terminal::*;
 use crate::appstorage::*;
 use crate::fileeditor::*;
 use crate::filetree::*;
+use crate::filepanel::*;
 use crate::loglist::*;
 use crate::logitem::*;
 use crate::keyboard::*;
@@ -27,7 +28,7 @@ pub enum Panel {
 #[derive(Clone)]
 pub struct AppWindow {
     pub desktop_window: DesktopWindow,
-    pub file_tree: FileTree,
+    pub file_panel: FilePanel,
     pub log_item: LogItem,
     pub log_list: LogList,
     pub keyboard: Keyboard,
@@ -54,10 +55,7 @@ impl AppWindow {
         Self {
             desktop_window: DesktopWindow {
                 caption: "Makepad".to_string(),
-                window: Window {
-                    create_inner_size: None,
-                    ..Window::style(cx)
-                },
+                window: Window::style(cx),
                 ..DesktopWindow::style(cx)
             },
             file_editors: Elements::new(FileEditorTemplates {
@@ -69,7 +67,7 @@ impl AppWindow {
             keyboard: Keyboard::style(cx),
             log_item: LogItem::style(cx),
             log_list: LogList::style(cx),
-            file_tree: FileTree::style(cx),
+            file_panel: FilePanel::style(cx),
             dock: Dock ::style(cx),
         }
     }
@@ -128,7 +126,7 @@ impl AppWindow {
                     }
                 },
                 Panel::FileTree => {
-                    file_tree_event = self.file_tree.handle_file_tree(cx, event);
+                    file_tree_event = self.file_panel.handle_file_panel(cx, event);
                 },
                 Panel::FileEditor {path, scroll_pos, editor_id} => {
                     if let Some(file_editor) = &mut self.file_editors.get(*editor_id) {
@@ -181,7 +179,7 @@ impl AppWindow {
                 }
             },
             FileTreeEvent::SelectFolder {..} => {
-                state.windows[window_index].open_folders = self.file_tree.save_open_folders();
+                state.windows[window_index].open_folders = self.file_panel.file_tree.save_open_folders();
                 storage.save_state(cx, state);
             },
             _ => {}
@@ -224,14 +222,28 @@ impl AppWindow {
     }
     
     pub fn draw_app_window(&mut self, cx: &mut Cx, menu:&Menu, window_index: usize, state: &mut AppState, storage: &mut AppStorage, build_manager: &mut BuildManager) {
-        if let Err(()) = self.desktop_window.begin_desktop_window(cx, Some(menu)) {
-            return
-        }
+        if self.desktop_window.begin_desktop_window(cx, Some(menu)).is_err() {return}
+
         self.dock.draw_dock(cx);
         
         let dock_items = &mut state.windows[window_index].dock_items;
         let mut dock_walker = self.dock.walker(dock_items);
-        while let Some(item) = dock_walker.walk_draw_dock(cx) {
+        let file_panel = &mut self.file_panel;
+        while let Some(item) = dock_walker.walk_draw_dock(cx, |cx, tab_control, tab, selected|{
+            // this draws the tabs, so we can customimze it
+            match tab.item{
+                Panel::FileTree=>{
+                    // we can now draw our own things 
+                    let tab = tab_control.get_draw_tab(cx, &tab.title, selected, tab.closeable);
+                    // lets open up a draw API in the tab 
+                    if tab.begin_tab(cx).is_ok(){
+                        file_panel.draw_tab_buttons(cx);
+                        tab.end_tab(cx);
+                    };
+                },
+                _=>tab_control.draw_tab(cx, &tab.title, selected, tab.closeable)
+            }
+        }) {
             match item {
                 Panel::LogList => {
                     self.log_list.draw_log_list(cx, build_manager);
@@ -245,7 +257,7 @@ impl AppWindow {
                 Panel::FileEditorTarget => {
                 },
                 Panel::FileTree => {
-                    self.file_tree.draw_file_tree(cx);
+                    file_panel.draw_file_panel(cx);
                 },
                 Panel::LocalTerminal {terminal_id, ..} => {
                     let local_terminal = self.local_terminals.get_draw(cx, *terminal_id, | cx, tmpl | {

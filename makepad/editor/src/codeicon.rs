@@ -129,7 +129,7 @@ impl CodeIcon {
     }
     
     pub fn draw_icon_walk(&mut self, cx: &mut Cx, icon_type: CodeIconType) -> InstanceArea {
-        let geom = cx.walk_turtle(Bounds::Fix(self.width), Bounds::Fix(self.height), self.margin, None);
+        let geom = cx.walk_turtle(Width::Fix(self.width), Height::Fix(self.height), self.margin, None);
         self.draw_icon_abs(cx, geom.x, geom.y, icon_type)
     }
     

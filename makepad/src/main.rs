@@ -2,6 +2,8 @@ pub mod keyboard;
 pub use crate::keyboard::*;
 mod fileeditor;
 pub use crate::fileeditor::*;
+mod filepanel;
+pub use crate::filepanel::*;
 mod loglist;
 pub use crate::loglist::*;
 mod logitem; 

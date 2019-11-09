@@ -207,8 +207,8 @@ impl App {
                     if let Ok(utf8_data) = utf8_data {
                         if let Ok(tree) = ron::de::from_str(utf8_data) {
                             for window in &mut self.windows {
-                                window.file_tree.root_node = hub_to_tree(&tree);
-                                if let FileNode::Folder {folder, state, name, ..} = &mut window.file_tree.root_node {
+                                window.file_panel.file_tree.root_node = hub_to_tree(&tree);
+                                if let FileNode::Folder {folder, state, name, ..} = &mut window.file_panel.file_tree.root_node {
                                     *name = "".to_string();
                                     *state = NodeState::Open;
                                     for node in folder.iter_mut() {
@@ -217,7 +217,7 @@ impl App {
                                         }
                                     }
                                 }
-                                window.file_tree.view.redraw_view_area(cx);
+                                window.file_panel.file_tree.view.redraw_view_area(cx);
                             }
                         }
                     }

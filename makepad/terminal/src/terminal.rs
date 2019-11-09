@@ -78,8 +78,8 @@ impl Terminal {
                 ..Quad::style(cx)
             },
             bg_layout: Layout {
-                width: Bounds::Fill,
-                height: Bounds::Fill,
+                width: Width::Fill,
+                height: Height::Fill,
                 margin: Margin::all(0.),
                 padding: Padding {l: 4.0, t: 4.0, r: 4.0, b: 4.0},
                 ..Default::default()
@@ -471,7 +471,7 @@ impl Terminal {
         
         // lets insert an empty newline at the bottom so its nicer to scroll
         self.draw_new_line(cx);
-        cx.walk_turtle(Bounds::Fix(0.0), Bounds::Fix(self._monospace_size.y), Margin::zero(), None);
+        cx.walk_turtle(Width::Fix(0.0), Height::Fix(self._monospace_size.y), Margin::zero(), None);
         
         self.text.end_text(cx, self._text_inst.as_ref().unwrap());
         self._text_area = self._text_inst.take().unwrap().inst.into_area();

@@ -25,6 +25,7 @@ pub struct Text {
     pub curve: f32,
     pub line_spacing: f32,
     pub top_drop: f32,
+    pub height_factor: f32,
     pub z: f32,
     pub wrapping: Wrapping,
 }
@@ -39,8 +40,9 @@ impl Text {
             text: "".to_string(),
             font_size: 8.0,
             font_scale: 1.0,
-            line_spacing: 1.3,
-            top_drop: 1.4,
+            line_spacing: 1.4,
+            top_drop: 1.1,
+            height_factor: 1.3,
             curve: 0.7,
             brightness: 1.0,
             z: 0.0,
@@ -82,12 +84,14 @@ impl Text {
 
             fn pixel() -> vec4 {
                 let dx = dfdx(vec2(tex_coord1.x * 4096.0,0.)).x;
-
                 let dp = 1.0 / 4096.0;
 
                 // basic hardcoded mipmapping so it stops 'swimming' in VR
                 let s = 1.0;
-                if dx > 2.75 { // combine 3x3
+                if dx > 5.0{
+                    s = 0.7;
+                }
+                else if dx > 2.75 { // combine 3x3
                     s = (
                         sample2d(texturez, tex_coord3.xy + vec2(0.,0.)).z
                         + sample2d(texturez, tex_coord3.xy + vec2(dp,0.)).z
@@ -104,7 +108,7 @@ impl Text {
                     s = sample2d(texturez, tex_coord1.xy).x;
                 }
                 s = pow(s,curve);
-                return vec4(s * color.rgb * brightness * color.a, s * color.a);
+                return vec4(s * color.rgb * brightness * color.a, s * color.a);// + color("#a");
             }
             
             fn vertex() -> vec4 {
@@ -223,18 +227,17 @@ impl Text {
             let subpixel_x_fract = min_pos_x - (min_pos_x * dpi_factor).floor() / dpi_factor;
             let subpixel_y_fract = min_pos_y - (min_pos_y * dpi_factor).floor() / dpi_factor;
 
-            // scale it
+            // scale and snap it
             let scaled_min_pos_x = geom_x + font_size_logical * self.font_scale * glyph.bounds.p_min.x - subpixel_x_fract;
             let scaled_min_pos_y = geom_y - font_size_logical * self.font_scale * glyph.bounds.p_min.y + self.font_size * self.font_scale * self.top_drop - subpixel_y_fract;
-            
-            //println!("{}", subpixel_y_fract);
             
             // only use a subpixel id for really small fonts
             let subpixel_id = if self.font_size>12.0 {
                 0
             }
-            else {
-                (subpixel_x_fract * (ATLAS_SUBPIXEL_SLOTS as f32 - 1.0)) as usize
+            else { // subtle 64 index subpixel id
+               ((subpixel_y_fract * 7.0) as usize) << 3 |
+                (subpixel_x_fract * 7.0) as usize
             };
             
             let tc = if let Some(tc) = &atlas_page.atlas_glyphs[glyph_id][subpixel_id] {
@@ -275,7 +278,7 @@ impl Text {
                 scaled_min_pos_y,
                 w * self.font_scale / dpi_factor,
                 h * self.font_scale / dpi_factor,
-                self.z+0.00001*min_pos_x, //slight z-bias so we don't get z-fighting with neighbouring charsa
+                self.z+0.00001*min_pos_x, //slight z-bias so we don't get z-fighting with neighbouring chars overlap a bit
                 geom_x,
                 geom_y,
                 self.font_size,
@@ -354,10 +357,10 @@ impl Text {
                 }
             }
             if emit {
-                let height = font_size * self.line_spacing * self.font_scale;
+                let height = font_size * self.height_factor * self.font_scale;
                 let geom = cx.walk_turtle(
-                    Bounds::Fix(width),
-                    Bounds::Fix(height),
+                    Width::Fix(width),
+                    Height::Fix(height),
                     Margin::zero(),
                     None
                 );
@@ -421,46 +424,6 @@ impl Text {
         }
         return 0
     }
-                
-        /*
-        if let Some(read) = read {
-            while index < read.count {
-                let y = read.buffer[read.offset + y_o + index * read.slots];
-                //let h = read.buffer[read.offset + h_o + index * read.slots];
-                let font_size = read.buffer[read.offset + font_size_o + index * read.slots];
-                
-                // ok we need to check, wether our mouse cursor hits this char rect.
-                
-                
-                if y  + 0.5*font_size * line_spacing > spos.y { // alright lets find our next x
-                    println!("{}", index);
-
-                    while index < read.count {
-                        let x = read.buffer[read.offset + x_o + index * read.slots];
-                        let y = read.buffer[read.offset + y_o + index * read.slots];
-                        //let h = read.buffer[read.offset + h_o + index * read.slots];
-                        //let font_size = read.buffer[read.offset + font_size_o + index * read.slots];
-                        let w = read.buffer[read.offset + w_o + index * read.slots]; //read.buffer[read.offset + font_geom_o + index * read.slots] * font_size;
-                        if x > spos.x + w * 0.5{// || y - font_size * line_spacing> spos.y {
-                            let prev_index = if index == 0 {0}else {index - 1};
-                            let prev_x = read.buffer[read.offset + x_o + prev_index * read.slots];
-                            let prev_w = read.buffer[read.offset + w_o + index * read.slots];
-                            if prev_x > spos.x + prev_w {
-                                return read.buffer[read.offset + char_offset_o + index * read.slots] as usize;
-                            }
-                            return read.buffer[read.offset + char_offset_o + prev_index * read.slots] as usize;
-                        }
-                        index += 1;
-                    }
-                }
-                index += 1;
-            }
-            if read.count == 0 {
-                return 0
-            }
-            return read.buffer[read.offset + char_offset_o + (read.count - 1) * read.slots] as usize;
-        }
-        */
     
     pub fn get_monospace_base(&self, cx: &Cx) -> Vec2 {
         let font_id = self.font.font_id.unwrap();

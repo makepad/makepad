@@ -46,9 +46,7 @@ impl JSEditor {
             }
         }
         
-        if let Err(_) = self.code_editor.begin_code_editor(cx, text_buffer) {
-            return
-        }
+        if self.code_editor.begin_code_editor(cx, text_buffer).is_err() {return}
         
         for (index, token_chunk) in text_buffer.token_chunks.iter_mut().enumerate(){
             self.code_editor.draw_chunk(cx, index, &text_buffer.flat_text, token_chunk, &text_buffer.messages.cursors);

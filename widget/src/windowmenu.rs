@@ -60,8 +60,8 @@ impl MenuItemDraw {
     
     pub fn get_line_layout(&self) -> Layout {
         Layout {
-            width: Bounds::Fill,
-            height: Bounds::Fix(self.row_height),
+            width: Width::Fill,
+            height: Height::Fix(self.row_height),
             padding: Padding {l: 2., t: 3., b: 2., r: 0.},
             line_wrap: LineWrap::None,
             ..Default::default()

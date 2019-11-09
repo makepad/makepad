@@ -78,8 +78,8 @@ impl LogItemDraw {
     
     pub fn get_line_layout(&self) -> Layout {
         Layout {
-            width: Bounds::Fill,
-            height: Bounds::Fix(self.row_height),
+            width: Width::Fill,
+            height: Height::Fix(self.row_height),
             padding: Padding {l: 2., t: 3., b: 2., r: 0.},
             line_wrap: LineWrap::None,
             ..Default::default()
@@ -188,7 +188,7 @@ impl LogItemDraw {
     pub fn draw_filler(&mut self, cx: &mut Cx, counter: usize) {
         let view_total = cx.get_turtle_bounds();
         self.item_bg.color = if counter & 1 == 0 {self.bg_even} else {self.bg_odd};
-        self.item_bg.draw_quad_walk(cx, Bounds::Fill, Bounds::Fix(self.row_height), Margin::zero());
+        self.item_bg.draw_quad_walk(cx, Width::Fill, Height::Fix(self.row_height), Margin::zero());
         cx.set_turtle_bounds(view_total); // do this so it doesnt impact the turtle
     }
 }
@@ -377,10 +377,8 @@ impl LogList {
             item_draw.get_default_anim(cx, index, false)
         });
         
-        if let Err(_) = self.list.begin_list(cx, &mut self.view, self.item_draw.row_height) {
-            return
-        }
-        
+        if self.list.begin_list(cx, &mut self.view, self.item_draw.row_height).is_err() {return}
+
         let mut counter = 0;
         for i in self.list.start_item..self.list.end_item {
             self.item_draw.draw_log_item(cx, &mut self.list.list_items[i], &bm.log_items[i]);

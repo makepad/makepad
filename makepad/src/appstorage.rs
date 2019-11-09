@@ -334,7 +334,7 @@ impl AppStorage {
                 self.workspaces_request_uid = uid;
                 // add all workspace nodes
                 for window in windows {
-                    window.file_tree.root_node = FileNode::Folder {
+                    window.file_panel.file_tree.root_node = FileNode::Folder {
                         name: "".to_string(),
                         draw: None,
                         state: NodeState::Open,
@@ -350,7 +350,7 @@ impl AppStorage {
                             }
                         )).collect()
                     };
-                    window.file_tree.view.redraw_view_area(cx);
+                    window.file_panel.file_tree.view.redraw_view_area(cx);
                 }
                 // lets resend the file load we haven't gotten
                 for (_path, atb) in &mut self.text_buffers {
@@ -366,7 +366,7 @@ impl AppStorage {
                     let workspace = name.clone();
                     // insert each filetree at the right childnode
                     for (window_index, window) in windows.iter_mut().enumerate() {
-                        if let FileNode::Folder {folder, ..} = &mut window.file_tree.root_node {
+                        if let FileNode::Folder {folder, ..} = &mut window.file_panel.file_tree.root_node {
                             for node in folder.iter_mut() {
                                 if let FileNode::Folder {name, ..} = node {
                                     if *name == workspace {
@@ -376,7 +376,7 @@ impl AppStorage {
                                 }
                             }
                         }
-                        window.file_tree.load_open_folders(cx, &state.windows[window_index].open_folders);
+                        window.file_panel.file_tree.load_open_folders(cx, &state.windows[window_index].open_folders);
                     }
                 }
             },

@@ -154,8 +154,8 @@ impl DesktopWindow {
         let _ = self.main_view.begin_view(cx, Layout::default());
         
         if let Ok(_) = self.caption_view.begin_view(cx, Layout{
-            width:Bounds::Fill,
-            height:Bounds::Compute,
+            width:Width::Fill,
+            height:Height::Compute,
             ..Layout::default()
         }){
             
@@ -164,8 +164,8 @@ impl DesktopWindow {
                 PlatformType::Linux | PlatformType::Windows => {
                     let bg_inst = self.caption_bg.begin_quad(cx, &Layout {
                         align: Align::right_center(),
-                        width: Bounds::Fill,
-                        height: Bounds::Compute,
+                        width: Width::Fill,
+                        height: Height::Compute,
                         ..Default::default()
                     });
                     
@@ -181,7 +181,7 @@ impl DesktopWindow {
                     self.close_btn.draw_desktop_button(cx, DesktopButtonType::WindowsClose);
                     
                     // change alignment
-                    cx.realign_turtle(Align::center());
+                    cx.change_turtle_align(Align::center());
                     cx.compute_turtle_height();
                     cx.reset_turtle_walk();
                     cx.move_turtle(50., 0.);
@@ -198,8 +198,8 @@ impl DesktopWindow {
                     }
                     let bg_inst = self.caption_bg.begin_quad(cx, &Layout {
                         align: Align::center(),
-                        width: Bounds::Fill,
-                        height: Bounds::Fix(22.),
+                        width: Width::Fill,
+                        height: Height::Fix(22.),
                         ..Default::default()
                     });
                     self.caption_size = Vec2 {x: cx.get_width_left(), y: cx.get_height_left()};

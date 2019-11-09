@@ -180,6 +180,13 @@ where TItem: Clone
                         stack_top.counter += 1;
                         stack_top.uid = self.walk_uid;
                         self.walk_uid += 1;
+
+                        if *current < tabs.len() {
+                            return Some(unsafe {mem::transmute(&mut tabs[*current].item)});
+                        }
+                        None
+                    }
+                    else {
                         let tab_control = self.tab_controls.get(stack_top.uid);
                         let mut defocus = false;
                         if !tab_control.is_none() {
@@ -233,12 +240,7 @@ where TItem: Clone
                                 }
                             }
                         }
-                        if *current < tabs.len() {
-                            return Some(unsafe {mem::transmute(&mut tabs[*current].item)});
-                        }
-                        None
-                    }
-                    else {
+
                         None
                     }
                 },
@@ -288,8 +290,9 @@ where TItem: Clone
         }
         return None;
     }
-    
-    pub fn walk_draw_dock(&mut self, cx: &mut Cx) -> Option<&'a mut TItem> {
+
+    pub fn walk_draw_dock<F>(&mut self, cx: &mut Cx, mut tab_handler:F) -> Option<&'a mut TItem> 
+    where F: FnMut(&mut Cx, &mut TabControl, &DockTab<TItem>, bool) {
         // lets get the current item on the stack
         let push_or_pop = if let Some(stack_top) = self.stack.last_mut() {
             // return item 'count'
@@ -312,7 +315,7 @@ where TItem: Clone
                         
                         if let Ok(_) = tab_control.begin_tabs(cx) {
                             for (id, tab) in tabs.iter().enumerate() {
-                                tab_control.draw_tab(cx, &tab.title, *current == id, tab.closeable);
+                                tab_handler(cx, tab_control, tab, *current == id)
                             }
                             tab_control.end_tabs(cx);
                         }
@@ -362,11 +365,11 @@ where TItem: Clone
         };
         if let Some(item) = push_or_pop {
             self.stack.push(item);
-            return self.walk_draw_dock(cx);
+            return self.walk_draw_dock(cx, tab_handler);
         }
         else if self.stack.len() > 0 {
             self.stack.pop();
-            return self.walk_draw_dock(cx);
+            return self.walk_draw_dock(cx, tab_handler);
         }
         None
     }
@@ -396,10 +399,7 @@ where TItem: Clone
             },
             splitters: Elements::new(Splitter::style(cx)),
             tab_controls: Elements::new(TabControl::style(cx)),
-            drop_quad_view: View {
-                is_overlay: true,
-                ..View::style(cx)
-            },
+            drop_quad_view: View::style_overlay(cx),
             _close_tab: None,
             _drag_move: None,
             _drag_end: None,
@@ -716,10 +716,7 @@ where TItem: Clone
     pub fn draw_dock(&mut self, cx: &mut Cx) {
         // lets draw our hover layer if need be
         if let Some(fe) = &self._drag_move {
-            if let Err(()) = self.drop_quad_view.begin_view(cx, Layout {
-                abs_origin: Some(Vec2::zero()),
-                ..Default::default()
-            }) {
+            if let Err(()) = self.drop_quad_view.begin_view(cx, Layout::abs_origin_zero()) {
                 return
             }
             let mut found_drop_zone = false;

@@ -18,6 +18,15 @@ pub struct View{ // draw info per UI element
 }
 
 impl View{
+    pub fn style_overlay(_cx: &mut Cx) -> Self {
+        Self {
+            is_clipped: true,
+            is_overlay: true,
+            always_redraw: false,
+            view_id: None,
+        }
+    }
+    
     pub fn style(_cx: &mut Cx) -> Self {
         Self {
             is_clipped: true,
@@ -123,8 +132,8 @@ impl View{
         if !self.always_redraw && cx.views[view_id].draw_calls_len != 0 && !cx.view_will_redraw(view_id) {
             
             // walk the turtle because we aren't drawing
-            let w = Bounds::Fix(cx.views[view_id].rect.w);
-            let h = Bounds::Fix(cx.views[view_id].rect.h);
+            let w = Width::Fix(cx.views[view_id].rect.w);
+            let h = Height::Fix(cx.views[view_id].rect.h);
             cx.walk_turtle(w, h, override_layout.margin, None);
             return Err(());
         }

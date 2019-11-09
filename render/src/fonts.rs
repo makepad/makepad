@@ -121,8 +121,8 @@ impl TrapezoidText {
             fn pixel() -> vec4 {
                 //if fmod(v_pixel.x,2.0) > 1.0 && fmod(v_pixel.y,2.0) > 1.0{
                 //    return color("white")
-                // }
-                //return color("black");
+               // }
+               // return color("black");
                 let p_min = v_pixel.xy - 0.5;
                 let p_max = v_pixel.xy + 0.5;
                 let t_area = compute_clamped_trapezoid_area(p_min, p_max);
@@ -255,8 +255,8 @@ impl TrapezoidText {
                 }
                 
                 let glyphtc = atlas_page.atlas_glyphs[todo.glyph_id][todo.subpixel_id].unwrap();
-                let tx = glyphtc.tx1 * cx.fonts_atlas.texture_size.x + todo.subpixel_x_fract;
-                let ty = 1.0 + glyphtc.ty1 * cx.fonts_atlas.texture_size.y - todo.subpixel_y_fract;
+                let tx = glyphtc.tx1 * cx.fonts_atlas.texture_size.x + todo.subpixel_x_fract* atlas_page.dpi_factor;
+                let ty = 1.0 + glyphtc.ty1 * cx.fonts_atlas.texture_size.y - todo.subpixel_y_fract* atlas_page.dpi_factor;
                 
                 let font_scale_logical = atlas_page.font_size * 96.0 / (72.0 * font.units_per_em);
                 let font_scale_pixels = font_scale_logical * atlas_page.dpi_factor;
@@ -352,7 +352,7 @@ pub struct CxFont {
     pub atlas_pages: Vec<CxFontAtlasPage>,
 }
 
-pub const ATLAS_SUBPIXEL_SLOTS: usize = 16;
+pub const ATLAS_SUBPIXEL_SLOTS: usize = 64;
 
 pub struct CxFontAtlasPage {
     pub dpi_factor: f32,
