@@ -376,6 +376,7 @@ impl FileTree {
     }
     
     pub fn handle_file_tree(&mut self, cx: &mut Cx, event: &mut Event) -> FileTreeEvent {
+       
         // alright. someone clicking on the tree items.
         let mut file_walker = FileWalker::new(&mut self.root_node);
         let mut counter = 0;
@@ -636,7 +637,8 @@ impl FileTree {
                     inst.push_vec2(cx, Vec2::zero());
                     inst.push_float(cx, 1.);
                     // move the turtle down a bit
-                    cx.move_turtle(0., 3.5);
+                    //cx.move_turtle(0., 3.5);
+                    cx.turtle_align_y();
                     //cx.realign_turtle(Align::left_center(), false);
                     self.tree_text.color = self.tree_folder_color;
                     let wleft = cx.get_width_left() - 10.;
@@ -674,7 +676,8 @@ impl FileTree {
                     scale_stack.push(scale * new_scale);
                 },
                 FileNode::File {name, ..} => {
-                    cx.move_turtle(0., 3.5);
+                    //cx.move_turtle(0., 3.5);
+                    cx.turtle_align_y();
                     let wleft = cx.get_width_left() - 10.;
                     self.tree_text.wrapping = Wrapping::Ellipsis(wleft);
                     //cx.realign_turtle(Align::left_center(), false);

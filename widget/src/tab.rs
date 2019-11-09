@@ -43,7 +43,7 @@ impl Tab {
                 ..Quad::style(cx)
             },
             bg_layout: Layout {
-                align: Align::center(),
+                align: Align::left_center(),
                 width: Width::Compute,
                 height: Height::Fix(40.),
                 margin: Margin::all(0.),
@@ -293,13 +293,13 @@ impl Tab {
             bg_inst.push_color(cx, self.animator.last_color(cx.id("bg.border_color")));
             if self.is_closeable {
                 self.tab_close.draw_tab_close(cx);
-                cx.align_turtle_now();
+                cx.turtle_align_y();
             }
             // push the 2 vars we added to bg shader
             self.text.z = self.z;
             self.text.color = self.animator.last_color(cx.id("text.color"));
             self._text_area = self.text.draw_text(cx, &self.label);
-            cx.align_turtle_now();
+            cx.turtle_align_y();
             self._bg_inst = Some(bg_inst);
             return Ok(())
         }
