@@ -49,8 +49,8 @@ impl Cx {
         let height = layout.height.eval_height(self, layout.margin, is_abs_origin, abs_size.y);
         
         let turtle = Turtle {
-            align_origin_x: self.align_list.len(),
-            align_origin_y: self.align_list.len(),
+            align_list_x: self.align_list.len(),
+            align_list_y: self.align_list.len(),
             layout: layout.clone(),
             origin: origin,
             walk: Vec2 {x: origin.x + layout.padding.l, y: origin.y + layout.padding.t},
@@ -180,12 +180,12 @@ impl Cx {
         
         if align_dx != 0.0 {
             if let Some(old_turtle) = old_turtle {
-                self.do_align_x(align_dx, old_turtle.align_origin_x);
+                self.do_align_x(align_dx, old_turtle.align_list_x);
             }
         };
         if align_dy != 0.0 {
             if let Some(old_turtle) = old_turtle {
-                self.do_align_y(align_dy, old_turtle.align_origin_y);
+                self.do_align_y(align_dy, old_turtle.align_list_y);
             }
         };
         
@@ -280,25 +280,10 @@ impl Cx {
             turtle.biggest = 0.0;
         }
     }
-    /*
-    pub fn turtle_align_origin_x(&mut self) -> usize {
-        if let Some(turtle) = self.turtles.last_mut() {
-            return turtle.align_origin_x
-        }
-        return 0
-    }
-
-    pub fn turtle_align_origin_y(&mut self) -> usize {
-        if let Some(turtle) = self.turtles.last_mut() {
-            return turtle.align_origin_y
-        }
-        return 0
-    }
-*/
     
-    fn do_align_x(&mut self, dx: f32, align_origin: usize) {
+    fn do_align_x(&mut self, dx: f32, align_start: usize) {
         let dx = (dx * self.current_dpi_factor).floor() / self.current_dpi_factor;
-        for i in align_origin..self.align_list.len() {
+        for i in align_start..self.align_list.len() {
             let align_item = &self.align_list[i];
             match align_item {
                 Area::Instance(inst) => {
@@ -316,9 +301,9 @@ impl Cx {
         }
     }
 
-    fn do_align_y(&mut self, dy: f32, align_origin: usize) {
+    fn do_align_y(&mut self, dy: f32, align_start: usize) {
         let dy = (dy * self.current_dpi_factor).floor() / self.current_dpi_factor;
-        for i in align_origin..self.align_list.len() {
+        for i in align_start..self.align_list.len() {
             let align_item = &self.align_list[i];
             match align_item {
                 Area::Instance(inst) => {
@@ -488,7 +473,7 @@ impl Cx {
     // used for a<b>c layouts horizontally
     pub fn change_turtle_align_x(&mut self, fx:f32) {
         let (dx, align_origin_x) = if let Some(turtle) = self.turtles.last_mut() {
-            (Self::compute_align_turtle_x(&turtle), turtle.align_origin_x)
+            (Self::compute_align_turtle_x(&turtle), turtle.align_list_x)
         }
         else {
             (0., 0)
@@ -498,7 +483,7 @@ impl Cx {
         }
         // reset turtle props
         if let Some(turtle) = self.turtles.last_mut() {
-            turtle.align_origin_x = self.align_list.len();
+            turtle.align_list_x = self.align_list.len();
             turtle.layout.align.fx = fx;
             turtle.width_used = turtle.bound_right_bottom.x - turtle.origin.x;
             turtle.bound_right_bottom.x  = std::f32::NEG_INFINITY;
@@ -508,7 +493,7 @@ impl Cx {
     // used for a<b>c layouts vertically
     pub fn change_turtle_align_y(&mut self, fy:f32) {
         let (dy, align_origin_y) = if let Some(turtle) = self.turtles.last_mut() {
-            (Self::compute_align_turtle_y(&turtle), turtle.align_origin_y)
+            (Self::compute_align_turtle_y(&turtle), turtle.align_list_y)
         }
         else {
             (0.0, 0)
@@ -518,7 +503,7 @@ impl Cx {
         }
         // reset turtle props
         if let Some(turtle) = self.turtles.last_mut() {
-            turtle.align_origin_y = self.align_list.len();
+            turtle.align_list_y = self.align_list.len();
             turtle.layout.align.fy = fy;
             turtle.height_used = turtle.bound_right_bottom.y - turtle.origin.y;
             turtle.bound_right_bottom.y  = std::f32::NEG_INFINITY;
@@ -604,11 +589,11 @@ impl Cx {
         // if we have alignment set, we should now align our childnodes
         let dx = Self::compute_align_turtle_x(&old);
         if dx > 0.0{
-            self.do_align_x(dx, old.align_origin_x);
+            self.do_align_x(dx, old.align_list_x);
         } 
         let dy = Self::compute_align_turtle_y(&old);
         if dy > 0.0 {
-            self.do_align_y(dy, old.align_origin_y);
+            self.do_align_y(dy, old.align_list_y);
         }
         
         // when a turtle is x-abs / y-abs you dont walk the parent
@@ -935,8 +920,8 @@ impl Layout{
 
 #[derive(Clone, Default, Debug)]
 pub struct Turtle {
-    pub align_origin_x: usize,
-    pub align_origin_y: usize,
+    pub align_list_x: usize,
+    pub align_list_y: usize,
     pub walk: Vec2,
     pub origin: Vec2,
     pub bound_left_top: Vec2,

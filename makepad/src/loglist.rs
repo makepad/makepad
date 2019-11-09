@@ -79,8 +79,9 @@ impl LogItemDraw {
     pub fn get_line_layout(&self) -> Layout {
         Layout {
             width: Width::Fill,
+            align: Align::left_center(),
             height: Height::Fix(self.row_height),
-            padding: Padding {l: 2., t: 3., b: 2., r: 0.},
+            padding: Padding::zero(),// {l: 2., t: 3., b: 2., r: 0.},
             line_wrap: LineWrap::None,
             ..Default::default()
         }
@@ -108,17 +109,20 @@ impl LogItemDraw {
         match log_item {
             HubLogItem::LocPanic(loc_msg) => {
                 self.code_icon.draw_icon_walk(cx, CodeIconType::Panic);
+                cx.turtle_align_y();
                 self.draw_log_path(cx, &loc_msg.path, loc_msg.row);
                 self.draw_log_body(cx, &loc_msg.body);
                 
             },
             HubLogItem::LocError(loc_msg) => {
                 self.code_icon.draw_icon_walk(cx, CodeIconType::Error);
+                cx.turtle_align_y();
                 self.draw_log_path(cx, &loc_msg.path, loc_msg.row);
                 self.draw_log_body(cx, &loc_msg.body);
             },
             HubLogItem::LocWarning(loc_msg) => {
                 self.code_icon.draw_icon_walk(cx, CodeIconType::Warning);
+                cx.turtle_align_y();
                 self.draw_log_path(cx, &loc_msg.path, loc_msg.row);
                 self.draw_log_body(cx, &loc_msg.body);
             },
@@ -128,10 +132,12 @@ impl LogItemDraw {
             },
             HubLogItem::Error(msg) => {
                 self.code_icon.draw_icon_walk(cx, CodeIconType::Error);
+                cx.turtle_align_y();
                 self.draw_log_body(cx, &msg);
             },
             HubLogItem::Warning(msg) => {
                 self.code_icon.draw_icon_walk(cx, CodeIconType::Warning);
+                cx.turtle_align_y();
                 self.draw_log_body(cx, &msg);
             },
             HubLogItem::Message(msg) => {
@@ -151,6 +157,7 @@ impl LogItemDraw {
         if !bm.is_any_cargo_running() {
             self.text.color = self.path_color;
             self.code_icon.draw_icon_walk(cx, CodeIconType::Ok);
+            cx.turtle_align_y();
             if bm.is_any_artifact_running() {
                 self.text.draw_text(cx, "Running - ");
                 for ab in &bm.active_builds {
@@ -170,6 +177,7 @@ impl LogItemDraw {
         }
         else {
             self.code_icon.draw_icon_walk(cx, CodeIconType::Wait);
+            cx.turtle_align_y();
             self.text.color = self.path_color;
             self.text.draw_text(cx, &format!("Building ({}) ", bm.artifacts.len()));
             for ab in &bm.active_builds {

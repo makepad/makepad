@@ -9,8 +9,7 @@ use time::precise_time_ns;
 pub struct CxDesktop {
     pub file_read_id: u64,
     pub file_reads: Vec<FileRead>,
-    pub profiler_list: Vec<u64>,
-    pub profiler_totals: Vec<u64>
+    pub profiler_start: Option<u64>,
 }
 
 impl Default for CxDesktop {
@@ -18,8 +17,7 @@ impl Default for CxDesktop {
         CxDesktop {
             file_read_id: 1, 
             file_reads: Vec::new(),
-            profiler_list: Vec::new(),
-            profiler_totals: Vec::new()
+            profiler_start: None,
         }
     }
 }
@@ -239,41 +237,15 @@ impl Cx {
         }
     }
     
-    pub fn profile_clear(&mut self) {
-        self.platform.desktop.profiler_totals.truncate(0);
-    }
     
-    pub fn profile_time_ns()->u64{
-        return precise_time_ns()
-    }
-    
-    
-    pub fn profile_report(&self) {
-        let desktop = &self.platform.desktop;
-        println!("-----------------------  Profile Report -------------------------");
-        let mut all = 0;
-        for (id, total) in desktop.profiler_totals.iter().enumerate() {
-            all += total;
-            println!("Profile Id:{} time:{} usec", id, total / 1_000);
+    pub fn profile(&mut self) {
+        if let Some(start) = self.platform.desktop.profiler_start{
+            let delta = precise_time_ns() - start;
+            println!("Profile time:{} usec", delta / 1_000);
+            self.platform.desktop.profiler_start = None
         }
-        println!("Profile total:{} usec", all / 1_000);
-    }
-    
-    pub fn profile_begin(&mut self, id: usize) {
-        let desktop = &mut self.platform.desktop;
-        while desktop.profiler_list.len() <= id {
-            desktop.profiler_list.push(0);
+        else{
+            self.platform.desktop.profiler_start = Some(precise_time_ns())
         }
-        desktop.profiler_list[id] = precise_time_ns();
     }
-    
-    pub fn profile_end(&mut self, id: usize) {
-        let desktop = &mut self.platform.desktop;
-        let delta = precise_time_ns() - desktop.profiler_list[id];
-        while desktop.profiler_totals.len() <= id {
-            desktop.profiler_totals.push(0);
-        }
-        desktop.profiler_totals[id] += delta;
-    }
-    
 }

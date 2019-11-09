@@ -706,6 +706,7 @@ impl Cx {
     pub fn call_draw_event<F>(&mut self, mut event_handler: F)
     where F: FnMut(&mut Cx, &mut Event)
     {
+       // self.profile();
         self.is_in_redraw_cycle = true;
         self.redraw_id += 1;
         std::mem::swap(&mut self._redraw_child_areas, &mut self.redraw_child_areas);
@@ -715,6 +716,7 @@ impl Cx {
         self.redraw_parent_areas.truncate(0);
         self.call_event_handler(&mut event_handler, &mut Event::Draw);
         self.is_in_redraw_cycle = false;
+       //self.profile();
     }
     
     pub fn call_animation_event<F>(&mut self, mut event_handler: F, time: f64)

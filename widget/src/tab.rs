@@ -301,6 +301,7 @@ impl Tab {
             self._text_area = self.text.draw_text(cx, &self.label);
             cx.turtle_align_y();
             self._bg_inst = Some(bg_inst);
+            
             return Ok(())
         }
     }
