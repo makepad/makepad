@@ -14,9 +14,6 @@ We are not accepting pull requests or feature requests or documenting the code f
 IMPORTANT INFO RUNNING THE LOCAL VERSION:
 We are dogfooding the local version ourselves, but it needs a 'current project' which is hardcoded for now. Check out makepad repo 'again' under ./edit_repo in the root with:
 
-The workspace server needs a local 'key.bin' in the makepad directory root. Just put some random garbage in there.
-Future versions will autogenerate it. The workspace server is networked and secured with this key.
-
 ./clone_edit_repo.sh<br/>
 Start makepad:<br/>
 cargo run -p makepad --release<br/>
