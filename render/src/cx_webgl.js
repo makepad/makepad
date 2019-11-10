@@ -890,6 +890,7 @@
             }
 
             window.addEventListener('mouseup', this.mouse_up_handler)
+            
             let mouse_move = e => {
                 document.body.scrollTop = 0;
                 document.body.scrollLeft = 0;
@@ -913,6 +914,7 @@
                 //console.log("Redraw cycle "+(end-begin)+" ms");
             }
             window.addEventListener('mousemove', mouse_move);
+            
             window.addEventListener('mouseout', e => {
                 this.to_wasm.finger_out(mouse_to_finger(e)) //e.pageX, e.pageY, pa;
                 this.do_wasm_io();
@@ -954,8 +956,7 @@
             
             var last_wheel_time;
             var last_was_wheel;
-            
-            canvas.addEventListener('wheel', e => {
+            this.mouse_wheel_handler =  e => {
                 var finger = mouse_to_finger(e)
                 e.preventDefault()
                 let delta = e.timeStamp - last_wheel_time;
@@ -982,7 +983,8 @@
                 finger.is_wheel = last_was_wheel;
                 this.to_wasm.finger_scroll(finger);
                 this.do_wasm_io();
-            })
+            };
+            canvas.addEventListener('wheel', this.mouse_wheel_handler)
             //window.addEventListener('webkitmouseforcewillbegin', this.onCheckMacForce.bind(this), false)
             //window.addEventListener('webkitmouseforcechanged', this.onCheckMacForce.bind(this), false)
         }
@@ -1097,6 +1099,7 @@
             
             ta.addEventListener('mousedown', this.mouse_down_handler);
             ta.addEventListener('mouseup', this.mouse_up_handler);
+            ta.addEventListener('wheel', this.mouse_wheel_handler);
             ta.addEventListener('contextmenu', e=>{
                 e.preventDefault()
             });
