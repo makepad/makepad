@@ -8,7 +8,7 @@ pub use crate::colors::*;
 
 #[derive(Default, Clone, PartialEq)]
 pub struct Shader {
-    pub shader_id: Option<usize>
+    pub shader_id: Option<(usize, usize)>,
 }
 
 #[derive(Default, Clone)]

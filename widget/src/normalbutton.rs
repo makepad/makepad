@@ -1,7 +1,8 @@
 use render::*;
+use crate::buttonux::*;
 
 #[derive(Clone)]
-pub struct Button {
+pub struct NormalButton {
     pub bg: Quad,
     pub bg_layout: Layout,
     pub text: Text,
@@ -9,15 +10,7 @@ pub struct Button {
     pub _bg_area: Area, 
 }
 
-#[derive(Clone, PartialEq)]
-pub enum ButtonEvent {
-    None,
-    Clicked,
-    Down,
-    Up 
-}
-
-impl Button {
+impl NormalButton {
     pub fn style(cx: &mut Cx) -> Self {
         Self {
             bg: Quad {

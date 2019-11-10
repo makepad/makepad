@@ -9,7 +9,7 @@ use crate::buildmanager::*;
 pub struct LogList {
     pub view: ScrollView,
     pub item_draw: LogItemDraw,
-    pub list: List
+    pub list: ListUx
 }
 
 #[derive(Clone)]
@@ -216,9 +216,9 @@ impl LogList {
     pub fn style(cx: &mut Cx) -> Self {
         Self {
             item_draw: LogItemDraw::style(cx),
-            list: List {
+            list: ListUx {
                 tail_list: true,
-                ..List::default()
+                ..ListUx::default()
             },
             view: ScrollView::style_hor_and_vert(cx),
         }
@@ -287,27 +287,27 @@ impl LogList {
         }
         
         let item_draw = &self.item_draw;
-        let le = self.list.handle_selection(cx, event, select, | cx, item_event, item, item_index | {
+        let le = self.list.handle_list_ux(cx, event, select, | cx, item_event, item, item_index | {
             match item_event {
-                ListItemEvent::ItemAnimate(ae) => {
+                ListUxEvent::Animate(ae) => {
                     item.animator.write_area(cx, item.animator.area, "bg.", ae.time);
                 },
-                ListItemEvent::ItemAnimEnded => {
+                ListUxEvent::AnimEnded => {
                     item.animator.end();
                 },
-                ListItemEvent::ItemSelect => {
+                ListUxEvent::Select => {
                     item.animator.play_anim(cx, item_draw.get_over_anim(cx, item_index, true));
                 },
-                ListItemEvent::ItemDeselect => {
+                ListUxEvent::Deselect => {
                     item.animator.play_anim(cx, item_draw.get_default_anim(cx, item_index, false));
                 },
-                ListItemEvent::ItemCleanup => {
+                ListUxEvent::Cleanup => {
                     item.animator.play_anim(cx, item_draw.get_default_anim_cut(cx, item_index, item.is_selected));
                 },
-                ListItemEvent::ItemOver => {
+                ListUxEvent::Over => {
                     item.animator.play_anim(cx, item_draw.get_over_anim(cx, item_index, item.is_selected));
                 },
-                ListItemEvent::ItemOut => {
+                ListUxEvent::Out => {
                     item.animator.play_anim(cx, item_draw.get_default_anim(cx, item_index, item.is_selected));
                 }
             }

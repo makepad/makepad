@@ -217,7 +217,7 @@ impl CodeEditor {
                 ..Quad::style(cx)
             },
             selection: Quad {
-                z: 1.0,
+                z: 0.,
                 ..Quad::style_with_shader(cx, Self::def_selection_shader(), "Editor.selection")
             },
             token_highlight: Quad::style_with_shader(cx, Self::def_token_highlight_shader(), "Editor.token_highlight"),

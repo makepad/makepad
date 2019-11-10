@@ -81,7 +81,7 @@ impl Cx {
                         encoder.set_vertex_texture(i as NSUInteger, Some(&mtl_texture));
                     }
                 }
-                
+                self.platform.draw_calls_done += 1;
                 if let Some(buf) = &shp.geom_ibuf.multi_buffer_read().buffer {
                     encoder.draw_indexed_primitives_instanced(
                         MTLPrimitiveType::Triangle,
@@ -202,6 +202,7 @@ impl Cx {
         metal_cx: &mut MetalCx,
     ) {
         self.platform.bytes_written = 0;
+        self.platform.draw_calls_done = 0;
         let view_id = self.passes[pass_id].main_view_id.unwrap();
         let pool = unsafe {NSAutoreleasePool::new(cocoa::base::nil)};
         //let command_buffer = command_queue.new_command_buffer();

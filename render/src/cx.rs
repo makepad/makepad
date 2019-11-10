@@ -97,6 +97,7 @@ pub struct Cx {
     pub textures_free: Vec<usize>,
     pub shaders: Vec<CxShader>,
     pub shader_map: HashMap<ShaderGen, usize>,
+    pub shader_instance_id: usize,
     
     pub str_to_id: RefCell<HashMap<String, u32>>,
     pub id_to_str: RefCell<HashMap<u32, String>>,
@@ -220,6 +221,7 @@ impl Default for Cx {
             repaint_id: 1,
             timer_id: 1,
             signal_id: 1,
+            shader_instance_id: 1,
             
             last_key_focus: Area::Empty,
             key_focus: Area::Empty,
@@ -284,8 +286,10 @@ impl Cx {
     }
 
     pub fn add_shader(&mut self, sg: ShaderGen, name: &str) -> Shader {
+        let inst_id = self.shader_instance_id;
+        self.shader_instance_id += 1;
         if let Some(stored_id) = self.shader_map.get(&sg){
-            return Shader {shader_id: Some(*stored_id)}
+            return Shader {shader_id: Some((*stored_id, inst_id))}
         }
         
         let new_id = self.shaders.len();
@@ -296,7 +300,7 @@ impl Cx {
             platform: None,
             mapping: CxShaderMapping::default()
         });
-        Shader {shader_id: Some(new_id)}
+        Shader {shader_id: Some((new_id, inst_id))}
     }
     
     pub fn process_tap_count(&mut self, digit: usize, pos: Vec2, time: f64) -> u32 {

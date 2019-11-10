@@ -10,7 +10,7 @@ pub struct Keyboard {
     pub modifiers: KeyModifiers,
     pub key_down: Option<KeyCode>,
     pub key_up: Option<KeyCode>,
-    pub buttons: Elements<KeyType, Button, Button>,
+    pub buttons: Elements<KeyType, NormalButton, NormalButton>,
 }
 
 #[derive(Clone)]
@@ -40,8 +40,8 @@ impl Keyboard {
     pub fn style(cx: &mut Cx) -> Self {
         Self {
             view: ScrollView::style_hor_and_vert(cx),
-            buttons: Elements::new(Button {
-                ..Button::style(cx)
+            buttons: Elements::new(NormalButton {
+                ..NormalButton::style(cx)
             }),
             modifiers: KeyModifiers::default(),
             key_down: None,

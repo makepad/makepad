@@ -286,6 +286,7 @@ impl Cx {
 #[derive(Clone, Default)]
 pub struct CxPlatform {
     pub bytes_written: usize,
+    pub draw_calls_done: usize,
     pub last_menu: Option<Menu>,
     pub set_menu: bool,
     pub set_window_position: Option<Vec2>,

@@ -212,7 +212,7 @@ impl View{
 impl Cx {
     
     pub fn new_instance_draw_call(&mut self, shader: &Shader, instance_count: usize) -> InstanceArea {
-        let shader_id = shader.shader_id.unwrap();
+        let (shader_id, shader_instance_id) = shader.shader_id.unwrap();
         let sh = &self.shaders[shader_id];
         
         let current_view_id = *self.view_stack.last().unwrap();
@@ -230,6 +230,7 @@ impl Cx {
                 redraw_id: self.redraw_id,
                 sub_view_id: 0,
                 shader_id: shader_id,
+                shader_instance_id: shader_instance_id,
                 uniforms_required: sh.mapping.named_uniform_props.total_slots,
                 instance: Vec::new(),
                 uniforms: Vec::new(),
@@ -246,6 +247,7 @@ impl Cx {
         // reuse a draw
         let dc = &mut draw_list.draw_calls[draw_call_id];
         dc.shader_id = shader_id;
+        dc.shader_instance_id = shader_instance_id;
         dc.uniforms_required = sh.mapping.named_uniform_props.total_slots;
         dc.sub_view_id = 0; // make sure its recognised as a draw call
         // truncate buffers and set update frame
@@ -260,7 +262,7 @@ impl Cx {
     }
     
     pub fn new_instance(&mut self, shader: &Shader, instance_count: usize) -> InstanceArea {
-        let shader_id = shader.shader_id.expect("shader id invalid");
+        let (shader_id, shader_instance_id) = shader.shader_id.expect("shader id invalid");
         if !self.is_in_redraw_cycle {
             panic!("calling new_instance outside of redraw cycle is not possible!");
         }
@@ -271,7 +273,7 @@ impl Cx {
         if draw_list.draw_calls_len > 0 {
             for i in (0..draw_list.draw_calls_len).rev() {
                 let dc = &mut draw_list.draw_calls[i];
-                if dc.sub_view_id == 0 && dc.shader_id == shader_id {
+                if dc.sub_view_id == 0 && dc.shader_id == shader_id && dc.shader_instance_id == shader_instance_id{
                     // reuse this drawcmd and add an instance
                     dc.current_instance_offset = dc.instance.len();
                     let slot_align = dc.instance.len() % sh.mapping.instance_slots;
@@ -340,6 +342,7 @@ pub struct DrawCall {
     pub redraw_id: u64,
     pub sub_view_id: usize, // if not 0, its a subnode
     pub shader_id: usize, // if shader_id changed, delete gl vao
+    pub shader_instance_id: usize,
     pub instance: Vec<f32>,
     pub current_instance_offset: usize, // offset of current instance
     pub uniforms: Vec<f32>, // draw uniforms
