@@ -1,42 +1,51 @@
+// workspaces are networked build and file servers. This 'main' one is also compiled into makepad
 use hub::*;
 
-pub fn main() {
-    let key = std::fs::read("./key.bin").unwrap();
-    
-    HubWorkspace::run(&key, "makepad", "edit_repo", HubLog::None, HttpServe::Local(2001), | ws, htc | match htc.msg {
-        HubMsg::CargoPackagesRequest {uid} => {
-            let builds = &["check", "debug", "release"];
-            ws.cargo_packages(htc.from, uid, vec![
-                HubCargoPackage::new("workspace", builds),
-                HubCargoPackage::new("makepad", builds),
-                HubCargoPackage::new("csvproc", builds),
-                HubCargoPackage::new("ui_example", builds),
-                HubCargoPackage::new("makepad_webgl", builds),
-            ]);
-        },
-        HubMsg::CargoExec {uid, package, build} => {
-            let mut args = Vec::new();
-            let env = Vec::new();
-            match build.as_ref() {
-                "release" => args.extend_from_slice(&["build", "--release", "-p", &package]),
-                "debug" => args.extend_from_slice(&["build",  "-p", &package]),
-                "check" => args.extend_from_slice(&["check", "-p", &package]),
-                _ => return ws.cargo_exec_fail(uid, &package, &build)
-            }
-            match package.as_ref() {
-                "makepad_webgl" => args.push("--target=wasm32-unknown-unknown"),
-                _ => ()
-            }
-            ws.cargo_exec(uid, &args, &env);
-        },
-        HubMsg::WorkspaceFileTreeRequest {uid} => {
-            ws.workspace_file_tree(
+pub fn workspace(ws: &mut HubWorkspace, htc: FromHubMsg) -> Result<(), HubWsError> {
+    match htc.msg {
+        HubMsg::ListPackagesRequest {uid} => {
+            // lets read our Cargo.toml in the root
+            let packages = ws.read_packages(uid);
+            let builds = &["check", "debug", "release", "small"];
+            ws.packages_response(
                 htc.from,
                 uid,
-                &[".json", ".toml", ".js", ".rs", ".txt", ".text", ".ron", ".html"],
-                Some("index.ron")
+                packages.iter().map( | (project, v) | HubPackage::new(project, v, builds)).collect()
             );
+            Ok(())
+        },
+        HubMsg::Build {uid, project, package, config} => {
+            let mut args = Vec::new();
+            let mut env = Vec::new();
+            match config.as_ref() {
+                "small" => args.extend_from_slice(&["build", "--release", "-p", &package]),
+                "release" => args.extend_from_slice(&["build", "--release", "-p", &package]),
+                "debug" => args.extend_from_slice(&["build", "-p", &package]),
+                "check" => args.extend_from_slice(&["check", "-p", &package]),
+                _ => return ws.cannot_find_build(uid, &package, &config)
+            }
+            
+            if config == "small" {
+                env.push(("RUSTFLAGS", "-C opt-level=z -C panic=abort -C codegen-units=1"))
+            }
+            
+            if package.ends_with("wasm") {
+                args.push("--target=wasm32-unknown-unknown");
+            }
+            
+            if let BuildResult::Wasm {path} = ws.cargo(uid, &project, &args, &env) ? {
+                if config == "small" { // strip the build
+                    ws.wasm_strip_debug(uid, &path) ?;
+                }
+            }
+            Ok(())
         },
         _ => ws.default(htc)
-    });
+    }
+}
+
+#[allow(dead_code)]
+pub fn main() {
+    let args: Vec<String> = std::env::args().collect();
+    HubWorkspace::run_workspace_commandline(args, | ws, htc | {workspace(ws, htc)});
 }

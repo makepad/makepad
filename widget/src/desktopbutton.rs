@@ -1,5 +1,5 @@
 use render::*;
-use crate::button::*;
+use crate::buttonux::*;
 
 #[derive(Clone)]
 pub struct DesktopButton {
@@ -31,10 +31,7 @@ impl DesktopButtonType {
 impl DesktopButton {
     pub fn style(cx: &mut Cx) -> Self {
         Self {
-            bg: Quad {
-                shader: cx.add_shader(Self::def_bg_shader(), "Button.bg"),
-                ..Quad::style(cx)
-            },
+            bg: Quad::style_with_shader(cx, Self::def_bg_shader(), "Button.bg"),
             animator: Animator::new(Self::get_default_anim(cx)),
             _bg_area: Area::Empty,
         }
@@ -42,7 +39,7 @@ impl DesktopButton {
     
     pub fn get_default_anim(cx:&Cx)->Anim{
         Anim::new(Play::Cut {duration: 0.2}, vec![
-            Track::color(cx.id("bg.color"), Ease::Lin, vec![(1.0, color("#a"))]),
+          //  Track::color(cx.id("bg.color"), Ease::Lin, vec![(1.0, color("#a"))]),
             Track::float(cx.id("bg.hover"), Ease::Lin, vec![(1.0, 0.)]),
             Track::float(cx.id("bg.down"), Ease::Lin, vec![(1.0, 0.)]),
         ])
@@ -50,7 +47,7 @@ impl DesktopButton {
     
     pub fn get_over_anim(cx:&Cx)->Anim{
         Anim::new(Play::Cut {duration: 0.2}, vec![
-            Track::color(cx.id("bg.color"), Ease::Lin, vec![(0.0, color("#f")), (1.0, color("#f"))]),
+           // Track::color(cx.id("bg.color"), Ease::Lin, vec![(0.0, color("#f")), (1.0, color("#f"))]),
             Track::float(cx.id("bg.down"), Ease::Lin, vec![(1.0, 0.)]),
             Track::float(cx.id("bg.hover"), Ease::Lin, vec![(0.0, 1.0), (1.0, 1.0)]),
         ])
@@ -58,7 +55,7 @@ impl DesktopButton {
     
     pub fn get_down_anim(cx:&Cx)->Anim{
         Anim::new(Play::Cut {duration: 0.2}, vec![
-            Track::color(cx.id("bg.color"), Ease::Lin, vec![(0.0, color("#f55")), (1.0, color("#f55"))]),
+            //Track::color(cx.id("bg.color"), Ease::Lin, vec![(0.0, color("#f55")), (1.0, color("#f55"))]),
             Track::float(cx.id("bg.down"), Ease::OutExp, vec![(0.0, 0.0), (1.0, 3.1415 * 0.5)]),
             Track::float(cx.id("bg.hover"), Ease::Lin, vec![(1.0, 1.0)]),
         ])
@@ -192,7 +189,7 @@ impl DesktopButton {
             DesktopButtonType::VRMode => (50.,36.),
         };
 
-        let bg_inst = self.bg.draw_quad_walk(cx, Bounds::Fix(w), Bounds::Fix(h), Margin::zero());
+        let bg_inst = self.bg.draw_quad_walk(cx, Width::Fix(w), Height::Fix(h), Margin::zero());
         bg_inst.push_last_float(cx, &self.animator, "bg.hover");
         bg_inst.push_last_float(cx, &self.animator, "bg.down");
         bg_inst.push_float(cx, ty.shader_float());

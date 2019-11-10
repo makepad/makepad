@@ -81,7 +81,7 @@ impl Cx {
                         encoder.set_vertex_texture(i as NSUInteger, Some(&mtl_texture));
                     }
                 }
-                
+                self.platform.draw_calls_done += 1;
                 if let Some(buf) = &shp.geom_ibuf.multi_buffer_read().buffer {
                     encoder.draw_indexed_primitives_instanced(
                         MTLPrimitiveType::Triangle,
@@ -202,6 +202,7 @@ impl Cx {
         metal_cx: &mut MetalCx,
     ) {
         self.platform.bytes_written = 0;
+        self.platform.draw_calls_done = 0;
         let view_id = self.passes[pass_id].main_view_id.unwrap();
         let pool = unsafe {NSAutoreleasePool::new(cocoa::base::nil)};
         //let command_buffer = command_queue.new_command_buffer();
@@ -225,7 +226,7 @@ impl Cx {
             //command_buffer.wait_until_scheduled();
         }
         unsafe {
-            msg_send![pool, release];
+            let () = msg_send![pool, release];
         }
     }
     
@@ -254,7 +255,7 @@ impl Cx {
         encoder.end_encoding();
         command_buffer.commit();
         
-        unsafe {msg_send![pool, release];}
+        unsafe {let () = msg_send![pool, release];}
     }
 }
 
@@ -275,7 +276,7 @@ impl MetalCx {
                 }
             }
         }
-        let device = Device::system_default();
+        let device = Device::system_default().unwrap();
         MetalCx {
             command_queue: device.new_command_queue(),
             device: device
@@ -415,20 +416,20 @@ impl MetalWindow {
         unsafe {
             //msg_send![layer, displaySyncEnabled:false];
             let count: u64 = 2;
-            msg_send![core_animation_layer, setMaximumDrawableCount: count];
-            msg_send![core_animation_layer, setDisplaySyncEnabled: false];
-            msg_send![core_animation_layer, setNeedsDisplayOnBoundsChange: true];
-            msg_send![core_animation_layer, setAutoresizingMask: (1 << 4) | (1 << 1)];
-            msg_send![core_animation_layer, setAllowsNextDrawableTimeout: false];
-            msg_send![core_animation_layer, setDelegate: cocoa_window.view];
-            msg_send![core_animation_layer, setBackgroundColor: CGColor::rgb(0.0, 0.0, 0.0, 1.0)];
+            let () = msg_send![core_animation_layer, setMaximumDrawableCount: count];
+            let () = msg_send![core_animation_layer, setDisplaySyncEnabled: false];
+            let () = msg_send![core_animation_layer, setNeedsDisplayOnBoundsChange: true];
+            let () = msg_send![core_animation_layer, setAutoresizingMask: (1 << 4) | (1 << 1)];
+            let () = msg_send![core_animation_layer, setAllowsNextDrawableTimeout: false];
+            let () = msg_send![core_animation_layer, setDelegate: cocoa_window.view];
+            let () = msg_send![core_animation_layer, setBackgroundColor: CGColor::rgb(0.0, 0.0, 0.0, 1.0)];
         }
         
         unsafe {
             let view = cocoa_window.view;
             view.setWantsBestResolutionOpenGLSurface_(YES);
             view.setWantsLayer(YES);
-            msg_send![view, setLayerContentsPlacement: 11];
+            let () = msg_send![view, setLayerContentsPlacement: 11];
             view.setLayer(mem::transmute(core_animation_layer.as_ref()));
         }
         
@@ -444,13 +445,13 @@ impl MetalWindow {
     
     pub fn set_vsync_enable(&mut self, enable: bool) {
         unsafe {
-            msg_send![self.core_animation_layer, setDisplaySyncEnabled: enable];
+            let () = msg_send![self.core_animation_layer, setDisplaySyncEnabled: enable];
         }
     }
     
     pub fn set_buffer_count(&mut self, count: u64) {
         unsafe {
-            msg_send![self.core_animation_layer, setMaximumDrawableCount: count];
+            let () = msg_send![self.core_animation_layer, setMaximumDrawableCount: count];
         }
     }
     

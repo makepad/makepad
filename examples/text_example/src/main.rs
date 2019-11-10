@@ -30,63 +30,69 @@
 // press alt or escape for animated codefolding outline view!
 
 use render::*;
+use widget::*;
 
 struct App {
-    window: Window,
-    pass: Pass,
-    color_texture: Texture,
+    desktop_window: DesktopWindow,
     text: Text,
-    blit: Blit,
-    //trapezoid_text: TrapezoidText,
-    main_view: View<NoScroll>,
+    trapezoid_text: TrapezoidText,
+    menu: Menu,
+    menu_signal: Signal
 }
 
 main_app!(App);
 
 impl App {
     pub fn style(cx: &mut Cx) -> Self {
+        set_dark_style(cx);
+        let menu_signal = cx.new_signal();
         Self {
-            window: Window::style(cx),
-            pass: Pass::default(),
-            color_texture: Texture::default(),
+            desktop_window: DesktopWindow::style(cx),
             text: Text {
                 font_size: 8.0,
                 font: cx.load_font_path("resources/Inconsolata-Regular.ttf"),
                 ..Text::style(cx)
             },
-            blit: Blit {
-                ..Blit::style(cx)
-            },
-            //trapezoid_text: TrapezoidText::style(cx),
-            main_view: View::style(cx),
+            menu: Menu::main(vec![
+                Menu::sub("Makepad", "M", vec![
+                    Menu::item("Quitter!", "q", menu_signal, 0),
+                    Menu::line(),
+                    Menu::item("Thingie", "q", menu_signal, 1),
+                ]),
+                Menu::sub("Edit", "e", vec![
+                    Menu::item("Copy", "c", menu_signal, 2),
+                    Menu::line(),
+                    Menu::item("Paste", "v", menu_signal, 3),
+                ])
+            ]),
+            menu_signal,
+            trapezoid_text: TrapezoidText::style(cx),
         }
     }
     
-    fn handle_app(&mut self, _cx: &mut Cx, event: &mut Event) {
+    fn handle_app(&mut self, cx: &mut Cx, event: &mut Event) {
+        self.desktop_window.handle_desktop_window(cx, event);
         match event {
             Event::Construct => {
+            },
+            Event::Signal(se) => if self.menu_signal.is_signal(se){
+                println!("CLICKED {}", se.value);
             },
             _ => ()
         }
     }
     
     fn draw_app(&mut self, cx: &mut Cx) {
-        self.window.begin_window(cx);
-        self.pass.begin_pass(cx);
-        self.pass.add_color_texture(cx, &mut self.color_texture, ClearColor::ClearWith(color256(0, 0, 0)));
-        
-        let _ = self.main_view.begin_view(cx, Layout::default());
+        if self.desktop_window.begin_desktop_window(cx, Some(&self.menu)).is_err() {
+            return
+        };
         cx.move_turtle(50., 50.);
-        self.text.font_size = 9.0;
-        for _ in 0..7{
-            self.text.draw_text(cx, "- num -");
+        let text = "Hello world";
+        for c in text.chars() {
+            self.trapezoid_text.draw_char(cx, c, &self.text.font, 32.0);
+            cx.move_turtle(50., 0.);
         }
-        self.blit.draw_blit_abs(cx, &Texture {texture_id: Some(cx.fonts_atlas.texture_id)}, Rect {x: 100., y: 100., w: 700., h: 400.});
-        //self.trapezoid_text.draw_character(cx, 100.,100., 0.5, 'X', &self.text.font);
-        //self.trapezoid_text.draw_character(cx, 100.,300., 0.2, 'O', &self.text.font);
         
-        self.main_view.end_view(cx);
-        self.pass.end_pass(cx);
-        self.window.end_window(cx);
+        self.desktop_window.end_desktop_window(cx);
     }
 }

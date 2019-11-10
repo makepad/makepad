@@ -184,8 +184,8 @@ impl FileTree {
             },
             drag_bg_layout: Layout {
                 padding: Padding {l: 5., t: 5., r: 5., b: 5.},
-                width: Bounds::Compute,
-                height: Bounds::Compute,
+                width: Width::Compute,
+                height: Height::Compute,
                 ..Default::default()
             },
             filler: Quad {
@@ -196,7 +196,7 @@ impl FileTree {
             },
             tree_folder_color: cx.color("text_selected_focus"),
             tree_file_color: cx.color("text_deselected_focus"),
-            tree_text: Text {z: 0.001, ..Text::style(cx)},
+            tree_text: Text {z: 0.001, top_drop:1.3, ..Text::style(cx)},
             view: ScrollView {
                 scroll_v: Some(ScrollBar {
                     smoothing: Some(0.25),
@@ -376,6 +376,7 @@ impl FileTree {
     }
     
     pub fn handle_file_tree(&mut self, cx: &mut Cx, event: &mut Event) -> FileTreeEvent {
+       
         // alright. someone clicking on the tree items.
         let mut file_walker = FileWalker::new(&mut self.root_node);
         let mut counter = 0;
@@ -536,10 +537,7 @@ impl FileTree {
     }
     
     pub fn draw_file_tree(&mut self, cx: &mut Cx) {
-        if let Err(()) = self.view.begin_view(cx, Layout::default()) {
-            println!("SKIPPING FILETREE");
-            return
-        }
+        if self.view.begin_view(cx, Layout::default()).is_err() {return}
         
         let mut file_walker = FileWalker::new(&mut self.root_node);
         
@@ -575,8 +573,8 @@ impl FileTree {
             self.node_bg.color = node_draw.animator.last_color(cx.id("bg.color"));
             
             let inst = self.node_bg.begin_quad(cx, &Layout {
-                width: Bounds::Fill,
-                height: Bounds::Fix(self.row_height * scale as f32),
+                width: Width::Fill,
+                height: Height::Fix(self.row_height * scale as f32),
                 align: Align::left_center(),
                 padding: self.row_padding,
                 ..Default::default()
@@ -589,8 +587,8 @@ impl FileTree {
                 if i == depth - 2 { // our own thread.
                     let area = self.filler.draw_quad_walk(
                         cx,
-                        Bounds::Fix(10.),
-                        Bounds::Fill,
+                        Width::Fix(10.),
+                        Height::Fill,
                         quad_margin
                     );
                     if is_last {
@@ -617,10 +615,10 @@ impl FileTree {
                 else {
                     let here_last = if last_stack.len()>1 {last_stack[i + 1]} else {false};
                     if here_last {
-                        cx.walk_turtle(Bounds::Fix(10.), Bounds::Fill, quad_margin, None);
+                        cx.walk_turtle(Width::Fix(10.), Height::Fill, quad_margin, None);
                     }
                     else {
-                        let area = self.filler.draw_quad_walk(cx, Bounds::Fix(10.), Bounds::Fill, quad_margin);
+                        let area = self.filler.draw_quad_walk(cx, Width::Fix(10.), Height::Fill, quad_margin);
                         //line_vec
                         area.push_vec2(cx, Vec2 {x: -0.2, y: 1.2});
                         //anim_pos
@@ -635,11 +633,12 @@ impl FileTree {
             match node {
                 FileNode::Folder {name, state, ..} => {
                     // draw the folder icon
-                    let inst = self.filler.draw_quad_walk(cx, Bounds::Fix(14.), Bounds::Fill, Margin {l: 0., t: 0., r: 2., b: 0.});
+                    let inst = self.filler.draw_quad_walk(cx, Width::Fix(14.), Height::Fill, Margin {l: 0., t: 0., r: 2., b: 0.});
                     inst.push_vec2(cx, Vec2::zero());
                     inst.push_float(cx, 1.);
                     // move the turtle down a bit
-                    cx.move_turtle(0., 3.5);
+                    //cx.move_turtle(0., 3.5);
+                    cx.turtle_align_y();
                     //cx.realign_turtle(Align::left_center(), false);
                     self.tree_text.color = self.tree_folder_color;
                     let wleft = cx.get_width_left() - 10.;
@@ -677,7 +676,8 @@ impl FileTree {
                     scale_stack.push(scale * new_scale);
                 },
                 FileNode::File {name, ..} => {
-                    cx.move_turtle(0., 3.5);
+                    //cx.move_turtle(0., 3.5);
+                    cx.turtle_align_y();
                     let wleft = cx.get_width_left() - 10.;
                     self.tree_text.wrapping = Wrapping::Ellipsis(wleft);
                     //cx.realign_turtle(Align::left_center(), false);
@@ -710,8 +710,8 @@ impl FileTree {
             self.node_bg.color = if counter & 1 == 0 {bg_even}else {bg_odd};
             self.node_bg.draw_quad_walk(
                 cx,
-                Bounds::Fill,
-                Bounds::Fix((rect_now.h - y).min(self.row_height)),
+                Width::Fill,
+                Height::Fix((rect_now.h - y).min(self.row_height)),
                 Margin::zero()
             );
             cx.turtle_new_line();

@@ -872,19 +872,24 @@
             }
             
             var mouse_buttons_down = [];
-            canvas.addEventListener('mousedown', e => {
-                //e.preventDefault();
+            this.mouse_down_handler = e => {
+                e.preventDefault();
                 this.focus_keyboard_input();
                 mouse_buttons_down[e.button] = true;
                 this.to_wasm.finger_down(mouse_to_finger(e))
                 this.do_wasm_io();
-            })
-            window.addEventListener('mouseup', e => {
-                //e.preventDefault();
+            }
+
+            canvas.addEventListener('mousedown', this.mouse_down_handler)
+            
+            this.mouse_up_handler = e => {
+                e.preventDefault();
                 mouse_buttons_down[e.button] = false;
                 this.to_wasm.finger_up(mouse_to_finger(e))
                 this.do_wasm_io();
-            })
+            }
+
+            window.addEventListener('mouseup', this.mouse_up_handler)
             let mouse_move = e => {
                 document.body.scrollTop = 0;
                 document.body.scrollLeft = 0;
@@ -1090,8 +1095,13 @@
                 last_len = ta.value.length;
             })
             
-            ta.addEventListener('touchmove', e => {
-            })
+            ta.addEventListener('mousedown', this.mouse_down_handler);
+            ta.addEventListener('mouseup', this.mouse_up_handler);
+            ta.addEventListener('contextmenu', e=>{
+                e.preventDefault()
+            });
+            //ta.addEventListener('touchmove', e => {
+            //})
             
             ta.addEventListener('blur', e => {
                 this.focus_keyboard_input();

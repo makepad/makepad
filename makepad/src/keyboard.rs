@@ -1,6 +1,6 @@
 use render::*; 
 use widget::*; 
-use crate::app::*;
+use crate::appstorage::*;
 use editor::*;
 
 
@@ -10,7 +10,7 @@ pub struct Keyboard {
     pub modifiers: KeyModifiers,
     pub key_down: Option<KeyCode>,
     pub key_up: Option<KeyCode>,
-    pub buttons: Elements<KeyType, Button, Button>,
+    pub buttons: Elements<KeyType, NormalButton, NormalButton>,
 }
 
 #[derive(Clone)]
@@ -40,10 +40,10 @@ impl Keyboard {
     pub fn style(cx: &mut Cx) -> Self {
         Self {
             view: ScrollView::style_hor_and_vert(cx),
-            buttons: Elements::new(Button {
-                ..Button::style(cx)
+            buttons: Elements::new(NormalButton {
+                ..NormalButton::style(cx)
             }),
-            modifiers: KeyModifiers {..Default::default()},
+            modifiers: KeyModifiers::default(),
             key_down: None,
             key_up: None,
             
@@ -118,16 +118,14 @@ impl Keyboard {
     }
     
     pub fn draw_keyboard(&mut self, cx: &mut Cx) {
-        if let Err(_) = self.view.begin_view(cx, Layout {..Default::default()}) {
-            return
-        }
+        if self.view.begin_view(cx, Layout::default()).is_err() {return}
         
         let keys = vec![KeyType::Alt, KeyType::Control, KeyType::Shift];
         
         for key in keys {
             self.buttons.get_draw(cx, key.clone(), | _cx, templ | {
                 templ.clone()
-            }).draw_button_with_label(cx, &key.name());
+            }).draw_button(cx, &key.name());
         }
         
         self.view.end_view(cx);

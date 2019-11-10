@@ -2,38 +2,36 @@ use render::*;
 use widget::*;
 use editor::*;
 use hub::*;
-use crate::app::*;
+use crate::appstorage::*;
 use crate::buildmanager::*;
 
 #[derive(Clone)]
 pub struct LogList {
     pub view: ScrollView,
     pub item_draw: LogItemDraw,
-    pub list: List
+    pub list: ListUx
 }
 
 #[derive(Clone)]
 pub struct LogItemDraw {
-    pub bg: Quad,
     pub text: Text,
-    pub item_bg: Quad, 
+    pub item_bg: Quad,
     pub code_icon: CodeIcon,
     pub row_height: f32,
     pub path_color: Color,
     pub message_color: Color,
-    pub bg_even: Color, 
-    pub bg_odd: Color, 
-    pub bg_marked: Color,  
+    pub bg_even: Color,
+    pub bg_odd: Color,
+    pub bg_marked: Color,
     pub bg_odd_over: Color,
     pub bg_marked_over: Color,
     pub bg_selected: Color,
-    pub bg_selected_over: Color 
+    pub bg_selected_over: Color
 }
 
 impl LogItemDraw {
     pub fn style(cx: &mut Cx) -> Self {
         Self {
-            bg: Quad::style(cx),
             item_bg: Quad::style(cx),
             text: Text {
                 wrapping: Wrapping::Word,
@@ -80,11 +78,27 @@ impl LogItemDraw {
     
     pub fn get_line_layout(&self) -> Layout {
         Layout {
-            width: Bounds::Fill,
-            height: Bounds::Fix(self.row_height),
-            padding: Padding {l: 2., t: 3., b: 2., r: 0.},
+            width: Width::Fill,
+            align: Align::left_center(),
+            height: Height::Fix(self.row_height),
+            padding: Padding::zero(),// {l: 2., t: 3., b: 2., r: 0.},
             line_wrap: LineWrap::None,
             ..Default::default()
+        }
+    }
+    
+    pub fn draw_log_path(&mut self, cx: &mut Cx, path: &str, row: usize) {
+        self.text.color = self.path_color;
+        self.text.draw_text(cx, &format!("{}:{} - ", path, row));
+    }
+    
+    pub fn draw_log_body(&mut self, cx: &mut Cx, body: &str) {
+        self.text.color = self.message_color;
+        if body.len()>500 {
+            self.text.draw_text(cx, &body[0..500]);
+        }
+        else {
+            self.text.draw_text(cx, &body);
         }
     }
     
@@ -92,32 +106,43 @@ impl LogItemDraw {
         self.item_bg.color = list_item.animator.last_color(cx.id("bg.color"));
         let bg_inst = self.item_bg.begin_quad(cx, &self.get_line_layout());
         
-        match log_item.level {
-            HubLogItemLevel::Error => {
-                self.code_icon.draw_icon_walk(cx, CodeIconType::Error);
-            },
-            HubLogItemLevel::Warning => {
-                self.code_icon.draw_icon_walk(cx, CodeIconType::Warning);
-            },
-            HubLogItemLevel::Panic => {
+        match log_item {
+            HubLogItem::LocPanic(loc_msg) => {
                 self.code_icon.draw_icon_walk(cx, CodeIconType::Panic);
+                cx.turtle_align_y();
+                self.draw_log_path(cx, &loc_msg.path, loc_msg.row);
+                self.draw_log_body(cx, &loc_msg.body);
+                
             },
-            HubLogItemLevel::Log => {
-                //self.code_icon.draw_icon_walk(cx, CodeIconType::Ok);
+            HubLogItem::LocError(loc_msg) => {
+                self.code_icon.draw_icon_walk(cx, CodeIconType::Error);
+                cx.turtle_align_y();
+                self.draw_log_path(cx, &loc_msg.path, loc_msg.row);
+                self.draw_log_body(cx, &loc_msg.body);
+            },
+            HubLogItem::LocWarning(loc_msg) => {
+                self.code_icon.draw_icon_walk(cx, CodeIconType::Warning);
+                cx.turtle_align_y();
+                self.draw_log_path(cx, &loc_msg.path, loc_msg.row);
+                self.draw_log_body(cx, &loc_msg.body);
+            },
+            HubLogItem::LocMessage(loc_msg) => {
+                self.draw_log_path(cx, &loc_msg.path, loc_msg.row);
+                self.draw_log_body(cx, &loc_msg.body);
+            },
+            HubLogItem::Error(msg) => {
+                self.code_icon.draw_icon_walk(cx, CodeIconType::Error);
+                cx.turtle_align_y();
+                self.draw_log_body(cx, &msg);
+            },
+            HubLogItem::Warning(msg) => {
+                self.code_icon.draw_icon_walk(cx, CodeIconType::Warning);
+                cx.turtle_align_y();
+                self.draw_log_body(cx, &msg);
+            },
+            HubLogItem::Message(msg) => {
+                self.draw_log_body(cx, &msg);
             }
-        }
-        
-        if let Some(path) = &log_item.path {
-            self.text.color = self.path_color;
-            self.text.draw_text(cx, &format!("{}:{} - ", path, log_item.row));
-        }
-        self.text.color = self.message_color;
-        
-        if log_item.body.len()>500{
-            self.text.draw_text(cx, &log_item.body[0..500]);
-        }
-        else{
-            self.text.draw_text(cx, &log_item.body);
         }
         
         let bg_area = self.item_bg.end_quad(cx, &bg_inst);
@@ -132,28 +157,33 @@ impl LogItemDraw {
         if !bm.is_any_cargo_running() {
             self.text.color = self.path_color;
             self.code_icon.draw_icon_walk(cx, CodeIconType::Ok);
+            cx.turtle_align_y();
             if bm.is_any_artifact_running() {
                 self.text.draw_text(cx, "Running - ");
-                for active_target in &bm.active_targets {
-                    if active_target.artifact_uid != HubUid::zero(){
-                        self.text.draw_text(cx, &format!("{}/{}:{} ", active_target.workspace, active_target.package, active_target.build));
+                for ab in &bm.active_builds {
+                    if ab.run_uid.is_some() {
+                        let bt = &ab.build_target;
+                        self.text.draw_text(cx, &format!("{}/{}/{}:{} ", bt.workspace, bt.project, bt.package, bt.config));
                     }
                 }
             }
             else {
                 self.text.draw_text(cx, "Done ");
-                for active_target in &bm.active_targets {
-                    self.text.draw_text(cx, &format!("{}/{}:{} ", active_target.workspace, active_target.package, active_target.build));
+                for ab in &bm.active_builds {
+                    let bt = &ab.build_target;
+                    self.text.draw_text(cx, &format!("{}/{}/{}:{} ", bt.workspace, bt.project, bt.package, bt.config));
                 }
             }
         }
         else {
             self.code_icon.draw_icon_walk(cx, CodeIconType::Wait);
+            cx.turtle_align_y();
             self.text.color = self.path_color;
             self.text.draw_text(cx, &format!("Building ({}) ", bm.artifacts.len()));
-            for active_target in &bm.active_targets {
-                if active_target.cargo_uid != HubUid::zero(){
-                    self.text.draw_text(cx, &format!("{}/{}:{} ", active_target.workspace, active_target.package, active_target.build));
+            for ab in &bm.active_builds {
+                if ab.build_uid.is_some() {
+                    let bt = &ab.build_target;
+                    self.text.draw_text(cx, &format!("{}/{}/{}:{} ", bt.workspace, bt.project, bt.package, bt.config));
                 }
             }
             if bm.exec_when_done {
@@ -163,52 +193,50 @@ impl LogItemDraw {
         self.item_bg.end_quad(cx, &bg_inst);
     }
     
-    pub fn draw_filler(&mut self, cx:&mut Cx, counter:usize){
+    pub fn draw_filler(&mut self, cx: &mut Cx, counter: usize) {
         let view_total = cx.get_turtle_bounds();
         self.item_bg.color = if counter & 1 == 0 {self.bg_even} else {self.bg_odd};
-        self.item_bg.draw_quad_walk(cx, Bounds::Fill, Bounds::Fix(self.row_height), Margin::zero());
+        self.item_bg.draw_quad_walk(cx, Width::Fill, Height::Fix(self.row_height), Margin::zero());
         cx.set_turtle_bounds(view_total); // do this so it doesnt impact the turtle
     }
 }
 
 #[derive(Clone)]
 pub enum LogListEvent {
-    SelectLogItem {
-        path: Option<String>,
-        item: Option<String>,
-        level: HubLogItemLevel
+    SelectLocMessage {
+        loc_message: LocMessage,
     },
-    SelectLogRange {
+    SelectMessages {
         items: String
     },
     None,
 }
 
-impl LogList { 
+impl LogList {
     pub fn style(cx: &mut Cx) -> Self {
         Self {
             item_draw: LogItemDraw::style(cx),
-            list: List{
-                tail_list:true,
-                ..List::default()
+            list: ListUx {
+                tail_list: true,
+                ..ListUx::default()
             },
             view: ScrollView::style_hor_and_vert(cx),
         }
     }
     
-    pub fn handle_log_list(&mut self, cx: &mut Cx, event: &mut Event, storage: &mut AppStorage, bm:&mut BuildManager) -> LogListEvent {
+    pub fn handle_log_list(&mut self, cx: &mut Cx, event: &mut Event, storage: &mut AppStorage, bm: &mut BuildManager) -> LogListEvent {
         let item_draw = &self.item_draw;
         
-        if bm.log_items.len() < self.list.list_items.len(){
+        if bm.log_items.len() < self.list.list_items.len() {
             self.list.tail_list = true;
         }
         
-        self.list.set_list_len(cx, bm.log_items.len(), |cx, index|{
+        self.list.set_list_len(cx, bm.log_items.len(), | cx, index | {
             item_draw.get_default_anim(cx, index, false)
         });
         
         self.list.handle_list_scroll_bars(cx, event, &mut self.view);
-
+        
         let mut select = ListSelect::None;
         let mut select_at_end = false;
         // global key handle
@@ -242,15 +270,15 @@ impl LogList {
                     self.view.redraw_view_area(cx);
                 },
                 KeyCode::Backtick => if ke.modifiers.logo || ke.modifiers.control {
-                    if bm.active_targets.len() == 0{
-                        bm.restart_cargo(cx, storage);
+                    if bm.active_builds.len() == 0 {
+                        bm.restart_build(cx, storage);
                     }
-                    bm.artifact_exec(storage);
+                    bm.artifact_run(storage);
                     self.view.redraw_view_area(cx);
                 },
                 _ => ()
             },
-            Event::Signal(se)=>if bm.signal.is_signal(se){
+            Event::Signal(se) => if bm.signal.is_signal(se) {
                 // we have new things
                 self.view.redraw_view_area(cx);
                 //println!("SIGNAL!");
@@ -259,27 +287,27 @@ impl LogList {
         }
         
         let item_draw = &self.item_draw;
-        let le = self.list.handle_selection(cx, event, select, | cx, item_event, item, item_index | {
+        let le = self.list.handle_list_ux(cx, event, select, | cx, item_event, item, item_index | {
             match item_event {
-                ListItemEvent::ItemAnimate(ae) => {
+                ListUxEvent::Animate(ae) => {
                     item.animator.write_area(cx, item.animator.area, "bg.", ae.time);
                 },
-                ListItemEvent::ItemAnimEnded => {
+                ListUxEvent::AnimEnded => {
                     item.animator.end();
                 },
-                ListItemEvent::ItemSelect => {
+                ListUxEvent::Select => {
                     item.animator.play_anim(cx, item_draw.get_over_anim(cx, item_index, true));
                 },
-                ListItemEvent::ItemDeselect => {
+                ListUxEvent::Deselect => {
                     item.animator.play_anim(cx, item_draw.get_default_anim(cx, item_index, false));
                 },
-                ListItemEvent::ItemCleanup => {
+                ListUxEvent::Cleanup => {
                     item.animator.play_anim(cx, item_draw.get_default_anim_cut(cx, item_index, item.is_selected));
                 },
-                ListItemEvent::ItemOver => {
+                ListUxEvent::Over => {
                     item.animator.play_anim(cx, item_draw.get_over_anim(cx, item_index, item.is_selected));
                 },
-                ListItemEvent::ItemOut => {
+                ListUxEvent::Out => {
                     item.animator.play_anim(cx, item_draw.get_default_anim(cx, item_index, item.is_selected));
                 }
             }
@@ -289,47 +317,58 @@ impl LogList {
             ListEvent::SelectSingle(select_index) => {
                 self.view.redraw_view_area(cx);
                 let log_item = &bm.log_items[select_index];
-                if let Some(path) = &log_item.path {
-                    let text_buffer = storage.text_buffer_from_path(cx, &path);
-                    text_buffer.messages.jump_to_offset = if log_item.level == HubLogItemLevel::Log || log_item.level == HubLogItemLevel::Panic {
-                        text_buffer.text_pos_to_offset(TextPos {row: log_item.row - 1, col: log_item.col - 1})
+                if let Some(loc_message) = log_item.get_loc_message() {
+                    if loc_message.path.len() == 0{
+                        return LogListEvent::SelectLocMessage {
+                            loc_message: loc_message.clone(),
+                        }
+                    }
+                    let text_buffer = storage.text_buffer_from_path(cx, &loc_message.path);
+                    // check if we have a range:
+                    if let Some((head, tail)) = loc_message.range {
+                        if select_at_end {
+                            text_buffer.messages.jump_to_offset = head;
+                        }
+                        else {
+                            text_buffer.messages.jump_to_offset = tail;
+                        }
                     }
                     else {
-                        if select_at_end {log_item.head}else {log_item.tail}
-                    };
+                        text_buffer.messages.jump_to_offset = text_buffer.text_pos_to_offset(TextPos {row: loc_message.row.max(1) - 1, col: loc_message.col.max(1) - 1})
+                    }
                     cx.send_signal(text_buffer.signal, SIGNAL_TEXTBUFFER_JUMP_TO_OFFSET);
-                }
-                let item = if let Some(rendered) = &log_item.rendered {
-                    if let Some(explanation) = &log_item.explanation {
-                        Some(format!("{}{}", rendered, explanation))
-                    }
-                    else {
-                        Some(rendered.clone())
+                    
+                    LogListEvent::SelectLocMessage {
+                        loc_message: loc_message.clone(),
                     }
                 }
-                else {
-                    None
-                };
-                
-                LogListEvent::SelectLogItem {
-                    item: item,
-                    path: log_item.path.clone(),
-                    level: log_item.level.clone()
+                else{
+                    LogListEvent::SelectMessages {
+                        items: log_item.get_body().clone(),
+                    }
                 }
             },
             ListEvent::SelectMultiple => {
                 self.view.redraw_view_area(cx);
                 let mut items = String::new();
                 for select in &self.list.selection {
-                    if let Some(rendered) = &bm.log_items[*select].rendered {
-                        items.push_str(rendered);
+                    if let Some(loc_message) = bm.log_items[*select].get_loc_message() {
+                        if let Some(rendered) = &loc_message.rendered{
+                            items.push_str(rendered);
+                            if items.len()>1000000 { // safety break
+                                break;
+                            }
+                        }
+                    }
+                    else{
+                        items.push_str(bm.log_items[*select].get_body());
                         if items.len()>1000000 { // safety break
                             break;
                         }
                     }
                 }
                 
-                LogListEvent::SelectLogRange {
+                LogListEvent::SelectMessages {
                     items: items,
                 }
             },
@@ -337,21 +376,19 @@ impl LogList {
                 LogListEvent::None
             }
         }
-    } 
+    }
     
-    pub fn draw_log_list(&mut self, cx: &mut Cx, bm: &BuildManager) { 
+    pub fn draw_log_list(&mut self, cx: &mut Cx, bm: &BuildManager) {
         //        println!("REDRAW!");
         let item_draw = &self.item_draw;
-        self.list.set_list_len(cx, bm.log_items.len(), |cx, index|{
+        self.list.set_list_len(cx, bm.log_items.len(), | cx, index | {
             item_draw.get_default_anim(cx, index, false)
         });
         
-        if let Err(_) = self.list.begin_list(cx, &mut self.view, self.item_draw.row_height){
-            return
-        }
-        
+        if self.list.begin_list(cx, &mut self.view, self.item_draw.row_height).is_err() {return}
+
         let mut counter = 0;
-        for i in self.list.start_item..self.list.end_item{
+        for i in self.list.start_item..self.list.end_item {
             self.item_draw.draw_log_item(cx, &mut self.list.list_items[i], &bm.log_items[i]);
             counter += 1;
         }
@@ -362,11 +399,11 @@ impl LogList {
         counter += 1;
         
         // draw filler nodes
-        for _ in (self.list.end_item + 1)..self.list.end_fill{
+        for _ in (self.list.end_item + 1)..self.list.end_fill {
             self.item_draw.draw_filler(cx, counter);
             counter += 1;
         }
-
+        
         self.list.end_list(cx, &mut self.view);
     }
 }

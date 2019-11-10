@@ -202,8 +202,7 @@ impl CodeEditor {
             },
             indent_lines: Quad {
                 z: 0.001,
-                shader: cx.add_shader(Self::def_indent_lines_shader(), "Editor.indent_lines"),
-                ..Quad::style(cx)
+                ..Quad::style_with_shader(cx,Self::def_indent_lines_shader(), "Editor.indent_lines")
             },
             view: ScrollView::style_hor_and_vert(cx),
             bg: Quad {
@@ -218,40 +217,22 @@ impl CodeEditor {
                 ..Quad::style(cx)
             },
             selection: Quad {
-                shader: cx.add_shader(Self::def_selection_shader(), "Editor.selection"),
-                z: 1.0,
-                ..Quad::style(cx)
+                z: 0.,
+                ..Quad::style_with_shader(cx, Self::def_selection_shader(), "Editor.selection")
             },
-            token_highlight: Quad {
-                shader: cx.add_shader(Self::def_token_highlight_shader(), "Editor.token_highlight"),
-                ..Quad::style(cx)
-            },
+            token_highlight: Quad::style_with_shader(cx, Self::def_token_highlight_shader(), "Editor.token_highlight"),
             //select_highlight:Quad{
             // shader_id:cx.add_shader(select_highlight_sh, "Editor.select_highlight"),
             // ..Style::style(cx)
             //},
-            cursor: Quad {
-                shader: cx.add_shader(Self::def_cursor_shader(), "Editor.cursor"),
-                ..Quad::style(cx)
-            },
-            cursor_row: Quad {
-                shader: cx.add_shader(Self::def_cursor_row_shader(), "Editor.cursor_row"),
-                ..Quad::style(cx)
-            },
-            paren_pair: Quad {
-                shader: cx.add_shader(Self::def_paren_pair_shader(), "Editor.paren_pair"),
-                ..Quad::style(cx)
-            },
-            message_marker: Quad {
-                shader: cx.add_shader(Self::def_message_marker_shader(), "Editor.message_marker"),
-                ..Quad::style(cx)
-            },
-            code_icon: CodeIcon {
-                ..CodeIcon::style(cx)
-            },
+            cursor: Quad::style_with_shader(cx, Self::def_cursor_shader(), "Editor.cursor"),
+            cursor_row: Quad::style_with_shader(cx, Self::def_cursor_row_shader(), "Editor.cursor_row"),
+            paren_pair: Quad::style_with_shader(cx, Self::def_paren_pair_shader(), "Editor.paren_pair"),
+            message_marker: Quad::style_with_shader(cx, Self::def_message_marker_shader(), "Editor.message_marker"),
+            code_icon: CodeIcon::style(cx),
             bg_layout: Layout {
-                width: Bounds::Fill,
-                height: Bounds::Fill,
+                width: Width::Fill,
+                height: Height::Fill,
                 margin: Margin::all(0.),
                 padding: Padding {l: 4.0, t: 4.0, r: 4.0, b: 4.0},
                 ..Default::default()
@@ -261,21 +242,22 @@ impl CodeEditor {
                 brightness: 1.1,
                 z: 2.00,
                 line_spacing: 1.8,
+                top_drop: 1.3,
                 wrapping: Wrapping::Line,
                 ..Text::style(cx)
             },
             line_number_text: Text {
                 font: cx.load_font_style("mono_font"),
-                brightness: 1.0,
                 z: 9.,
-                line_spacing: 1.4,
+                line_spacing: 1.9,
+                top_drop: 1.3,
                 do_h_scroll: false,
                 wrapping: Wrapping::Line,
                 ..Text::style(cx)
             },
             base_font_size: 8.0,
             open_font_scale: 1.0,
-            folded_font_scale: 0.05,
+            folded_font_scale: 0.07,
             line_number_width: 45.,
             draw_line_numbers: true,
             cursor_blink_speed: 0.5,
@@ -1519,7 +1501,7 @@ impl CodeEditor {
         
         // lets insert an empty newline at the bottom so its nicer to scroll
         self.draw_new_line(cx);
-        cx.walk_turtle(Bounds::Fix(0.0), Bounds::Fix(self._monospace_size.y), Margin::zero(), None);
+        cx.walk_turtle(Width::Fix(0.0), Height::Fix(self._monospace_size.y), Margin::zero(), None);
         
         self.text.end_text(cx, self._text_inst.as_ref().unwrap());
         self._text_area = self._text_inst.take().unwrap().inst.into_area();
@@ -1536,7 +1518,7 @@ impl CodeEditor {
         
         // inject a final page
         self._final_fill_height = cx.get_height_total() - self._monospace_size.y;
-        cx.walk_turtle(Bounds::Fix(0.0), Bounds::Fix(self._final_fill_height), Margin::zero(), None);
+        cx.walk_turtle(Width::Fix(0.0), Height::Fix(self._final_fill_height), Margin::zero(), None);
         
         // last bits
         self.do_selection_scrolling(cx, text_buffer);

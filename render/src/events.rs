@@ -451,7 +451,7 @@ impl Event {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(PartialEq, Clone, Copy, Debug, Default)]
 pub struct Signal {
     pub signal_id: usize
 }

@@ -257,15 +257,15 @@ impl Splitter {
         match self.axis {
             Axis::Horizontal => {
                 cx.begin_turtle(&Layout {
-                    width: Bounds::Fill,
-                    height: Bounds::Fix(self._calc_pos),
+                    width: Width::Fill,
+                    height: Height::Fix(self._calc_pos),
                     ..Default::default()
                 }, Area::Empty)
             },
             Axis::Vertical => {
                 cx.begin_turtle(&Layout {
-                    width: Bounds::Fix(self._calc_pos),
-                    height: Bounds::Fill,
+                    width: Width::Fix(self._calc_pos),
+                    height: Height::Fill,
                     ..Default::default()
                 }, Area::Empty)
             }
@@ -282,8 +282,8 @@ impl Splitter {
                 
                 cx.set_turtle_walk(Vec2 {x: origin.x, y: origin.y + self._calc_pos});
                 if let Ok(_) = self.split_view.begin_view(cx, Layout {
-                    width: Bounds::Fix(rect.w),
-                    height: Bounds::Fix(self.split_size),
+                    width: Width::Fix(rect.w),
+                    height: Height::Fix(self.split_size),
                     ..Layout::default()
                 }) {
                     self._split_area = self.split.draw_quad(cx, Rect {x: 0., y: 0., w: rect.w, h: self.split_size}).into_area();
@@ -294,8 +294,8 @@ impl Splitter {
             Axis::Vertical => {
                 cx.set_turtle_walk(Vec2 {x: origin.x + self._calc_pos, y: origin.y});
                 if let Ok(_) = self.split_view.begin_view(cx, Layout {
-                    width: Bounds::Fix(self.split_size),
-                    height: Bounds::Fix(rect.h),
+                    width: Width::Fix(self.split_size),
+                    height: Height::Fix(rect.h),
                     ..Layout::default()
                 }) {
                     self._split_area = self.split.draw_quad(cx, Rect {x: 0., y: 0., w: self.split_size, h: rect.h}).into_area();

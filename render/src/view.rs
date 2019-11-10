@@ -18,6 +18,15 @@ pub struct View{ // draw info per UI element
 }
 
 impl View{
+    pub fn style_overlay(_cx: &mut Cx) -> Self {
+        Self {
+            is_clipped: true,
+            is_overlay: true,
+            always_redraw: false,
+            view_id: None,
+        }
+    }
+    
     pub fn style(_cx: &mut Cx) -> Self {
         Self {
             is_clipped: true,
@@ -123,8 +132,8 @@ impl View{
         if !self.always_redraw && cx.views[view_id].draw_calls_len != 0 && !cx.view_will_redraw(view_id) {
             
             // walk the turtle because we aren't drawing
-            let w = Bounds::Fix(cx.views[view_id].rect.w);
-            let h = Bounds::Fix(cx.views[view_id].rect.h);
+            let w = Width::Fix(cx.views[view_id].rect.w);
+            let h = Height::Fix(cx.views[view_id].rect.h);
             cx.walk_turtle(w, h, override_layout.margin, None);
             return Err(());
         }
@@ -203,7 +212,7 @@ impl View{
 impl Cx {
     
     pub fn new_instance_draw_call(&mut self, shader: &Shader, instance_count: usize) -> InstanceArea {
-        let shader_id = shader.shader_id.unwrap();
+        let (shader_id, shader_instance_id) = shader.shader_id.unwrap();
         let sh = &self.shaders[shader_id];
         
         let current_view_id = *self.view_stack.last().unwrap();
@@ -221,6 +230,7 @@ impl Cx {
                 redraw_id: self.redraw_id,
                 sub_view_id: 0,
                 shader_id: shader_id,
+                shader_instance_id: shader_instance_id,
                 uniforms_required: sh.mapping.named_uniform_props.total_slots,
                 instance: Vec::new(),
                 uniforms: Vec::new(),
@@ -237,6 +247,7 @@ impl Cx {
         // reuse a draw
         let dc = &mut draw_list.draw_calls[draw_call_id];
         dc.shader_id = shader_id;
+        dc.shader_instance_id = shader_instance_id;
         dc.uniforms_required = sh.mapping.named_uniform_props.total_slots;
         dc.sub_view_id = 0; // make sure its recognised as a draw call
         // truncate buffers and set update frame
@@ -251,18 +262,18 @@ impl Cx {
     }
     
     pub fn new_instance(&mut self, shader: &Shader, instance_count: usize) -> InstanceArea {
-        let shader_id = shader.shader_id.unwrap();
+        let (shader_id, shader_instance_id) = shader.shader_id.expect("shader id invalid");
         if !self.is_in_redraw_cycle {
             panic!("calling new_instance outside of redraw cycle is not possible!");
         }
-        let current_view_id = *self.view_stack.last().unwrap();
+        let current_view_id = *self.view_stack.last().expect("view stack is empty");
         let draw_list = &mut self.views[current_view_id];
         let sh = &self.shaders[shader_id];
         // find our drawcall to append to the current layer
         if draw_list.draw_calls_len > 0 {
             for i in (0..draw_list.draw_calls_len).rev() {
                 let dc = &mut draw_list.draw_calls[i];
-                if dc.sub_view_id == 0 && dc.shader_id == shader_id {
+                if dc.sub_view_id == 0 && dc.shader_id == shader_id && dc.shader_instance_id == shader_instance_id{
                     // reuse this drawcmd and add an instance
                     dc.current_instance_offset = dc.instance.len();
                     let slot_align = dc.instance.len() % sh.mapping.instance_slots;
@@ -331,6 +342,7 @@ pub struct DrawCall {
     pub redraw_id: u64,
     pub sub_view_id: usize, // if not 0, its a subnode
     pub shader_id: usize, // if shader_id changed, delete gl vao
+    pub shader_instance_id: usize,
     pub instance: Vec<f32>,
     pub current_instance_offset: usize, // offset of current instance
     pub uniforms: Vec<f32>, // draw uniforms

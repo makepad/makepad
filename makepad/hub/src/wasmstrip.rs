@@ -1,5 +1,5 @@
  
-use std::{mem, result};
+use std::{mem};
 
 #[derive(Clone, Debug)]
 struct Reader<'a> {
@@ -7,27 +7,26 @@ struct Reader<'a> {
     offset: usize
 }
 
-pub type Result<T> = result::Result<T, Error>;
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub struct Error;
+pub struct WasmParseError;
 
 impl<'a> Reader<'a> {
     fn new(bytes: &'a [u8]) -> Reader<'a> {
         Reader { bytes, offset:0 }
     }
 
-    fn skip(&mut self, count: usize) -> Result<()> {
+    fn skip(&mut self, count: usize) -> Result<(),WasmParseError> {
         if count > self.bytes.len() {
-            return Err(Error);
+            return Err(WasmParseError);
         }
         self.offset += count;
         self.bytes = &self.bytes[count..];
         Ok(())
     }
 
-    fn read(&mut self, bytes: &mut [u8]) -> Result<()> {
+    fn read(&mut self, bytes: &mut [u8]) -> Result<(),WasmParseError> {
         if bytes.len() > self.bytes.len() {
-            return Err(Error);
+            return Err(WasmParseError);
         }
         bytes.copy_from_slice(&self.bytes[..bytes.len()]);
         self.bytes = &self.bytes[bytes.len()..];
@@ -35,19 +34,19 @@ impl<'a> Reader<'a> {
         Ok(())
     }
     
-    fn read_u8(&mut self) -> Result<u8> {
+    fn read_u8(&mut self) -> Result<u8,WasmParseError> {
         let mut bytes = [0; mem::size_of::<u8>()];
         self.read(&mut bytes)?;
         Ok(u8::from_le_bytes(bytes))
     }
 
-    fn read_u32(&mut self) -> Result<u32> {
+    fn read_u32(&mut self) -> Result<u32,WasmParseError> {
         let mut bytes = [0; mem::size_of::<u32>()];
         self.read(&mut bytes)?;
         Ok(u32::from_le_bytes(bytes))
     }
     
-    fn read_var_u32(&mut self) -> Result<u32>{
+    fn read_var_u32(&mut self) -> Result<u32,WasmParseError>{
         let byte = self.read_u8()? as  u32;
         if byte&0x80 == 0{
             return Ok(byte)
@@ -60,7 +59,7 @@ impl<'a> Reader<'a> {
             result |= ((byte & 0x7F) as u32) << shift;
             if shift >= 25 && (byte >> (32 - shift)) != 0 {
                 // The continuation bit or unused bits are set.
-                return Err(Error);
+                return Err(WasmParseError);
             }
             shift += 7;
             if (byte & 0x80) == 0 {
@@ -79,16 +78,16 @@ struct WasmSection{
     pub name: String
 }
 
-fn read_wasm_sections(buf:&[u8])->Result<Vec<WasmSection>>{
+fn read_wasm_sections(buf:&[u8])->Result<Vec<WasmSection>,WasmParseError>{
     let mut sections = Vec::new();
     let mut reader = Reader::new(&buf);
     if reader.read_u32()? != 0x6d736100{
         println!("Not a wasm file!");
-        return Err(Error);
+        return Err(WasmParseError);
     }
     if reader.read_u32()? != 0x1{
         println!("Wrong version");
-        return Err(Error);
+        return Err(WasmParseError);
     }
     loop{
         let offset = reader.offset;
@@ -106,7 +105,7 @@ fn read_wasm_sections(buf:&[u8])->Result<Vec<WasmSection>>{
                     })
                 }
                 else{
-                    return Err(Error);
+                    return Err(WasmParseError);
                 }
                 let end = reader.offset;
                 reader.skip(payload_len - (end-start))?;
@@ -128,15 +127,16 @@ fn read_wasm_sections(buf:&[u8])->Result<Vec<WasmSection>>{
     return Ok(sections);
 }
 
-pub fn wasm_strip(buf: &[u8])->Result<Vec<u8>>{
+pub fn wasm_strip_debug(buf: &[u8])->Result<Vec<u8>,WasmParseError>{
     let mut strip = Vec::new();
     strip.extend_from_slice(&[0, 97, 115, 109, 1, 0, 0, 0]);
     let sections = read_wasm_sections(&buf)?;
     // lets rewrite it
     for section in &sections{
-        if !section.name.starts_with(".debug"){
+        if section.type_id != 0{// !section.name.starts_with(".debug"){
             strip.extend_from_slice(&buf[section.start..section.end]);
         }
+        
     }
     Ok(strip)
 }

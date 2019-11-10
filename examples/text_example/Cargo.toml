@@ -8,3 +8,6 @@ edition = "2018"
 
 [dependencies.render]
 path="../../render"
+
+[dependencies.widget]
+path="../../widget"

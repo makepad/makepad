@@ -1,6 +1,7 @@
 use render::*;
-use crate::button::*;
+use crate::buttonux::*;
 use crate::desktopbutton::*;
+use crate::windowmenu::*;
 
 #[derive(Clone)]
 pub struct DesktopWindow {
@@ -20,6 +21,10 @@ pub struct DesktopWindow {
     pub caption_bg: Quad,
     pub caption_size: Vec2,
     pub caption: String,
+    
+    pub window_menu: WindowMenu,
+    
+    pub _last_menu: Option<Menu>,
     
     // testing
     pub inner_over_chrome: bool,
@@ -48,14 +53,18 @@ impl DesktopWindow {
             max_btn: DesktopButton::style(cx),
             close_btn: DesktopButton::style(cx),
             vr_btn: DesktopButton::style(cx),
+            
+            window_menu: WindowMenu::style(cx),
+            
             caption_text: Text::style(cx),
             caption_bg: Quad {
-                color: cx.color("bg_selected"),
+                color: cx.color("bg_selected_over"),
                 ..Quad::style(cx)
             },
             caption_size: Vec2::zero(),
             caption: "Makepad".to_string(),
             inner_over_chrome:false,
+            _last_menu: None
         }
     }
 
@@ -131,7 +140,7 @@ impl DesktopWindow {
         }
     }
     
-    pub fn begin_desktop_window(&mut self, cx: &mut Cx) -> ViewRedraw {
+    pub fn begin_desktop_window(&mut self, cx: &mut Cx, menu: Option<&Menu>) -> ViewRedraw {
         
         if !self.main_view.view_will_redraw(cx)  {
             return Err(())
@@ -145,8 +154,8 @@ impl DesktopWindow {
         let _ = self.main_view.begin_view(cx, Layout::default());
         
         if let Ok(_) = self.caption_view.begin_view(cx, Layout{
-            width:Bounds::Fill,
-            height:Bounds::Compute,
+            width:Width::Fill,
+            height:Height::Compute,
             ..Layout::default()
         }){
             
@@ -155,10 +164,16 @@ impl DesktopWindow {
                 PlatformType::Linux | PlatformType::Windows => {
                     let bg_inst = self.caption_bg.begin_quad(cx, &Layout {
                         align: Align::right_center(),
-                        width: Bounds::Fill,
-                        height: Bounds::Compute,
+                        width: Width::Fill,
+                        height: Height::Compute,
                         ..Default::default()
                     });
+                    
+                    // we need to draw the window menu here.
+                    if let Some(_menu) = menu{
+                        // lets draw the thing, check with the clone if it changed
+                        // then draw it
+                    }
                     
                     self.min_btn.draw_desktop_button(cx, DesktopButtonType::WindowsMin);
                     if self.window.is_fullscreen(cx) {self.max_btn.draw_desktop_button(cx, DesktopButtonType::WindowsMaxToggled);}
@@ -166,7 +181,7 @@ impl DesktopWindow {
                     self.close_btn.draw_desktop_button(cx, DesktopButtonType::WindowsClose);
                     
                     // change alignment
-                    cx.realign_turtle(Align::center());
+                    cx.change_turtle_align_x(0.5);//Align::center());
                     cx.compute_turtle_height();
                     cx.reset_turtle_walk();
                     cx.move_turtle(50., 0.);
@@ -178,10 +193,13 @@ impl DesktopWindow {
                 },
                 
                 PlatformType::OSX => { // mac still uses the built in buttons, TODO, replace that.
+                    if let Some(menu) = menu{
+                        cx.update_menu(menu);
+                    }
                     let bg_inst = self.caption_bg.begin_quad(cx, &Layout {
                         align: Align::center(),
-                        width: Bounds::Fill,
-                        height: Bounds::Fix(22.),
+                        width: Width::Fill,
+                        height: Height::Fix(22.),
                         ..Default::default()
                     });
                     self.caption_size = Vec2 {x: cx.get_width_left(), y: cx.get_height_left()};

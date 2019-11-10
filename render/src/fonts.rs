@@ -121,8 +121,8 @@ impl TrapezoidText {
             fn pixel() -> vec4 {
                 //if fmod(v_pixel.x,2.0) > 1.0 && fmod(v_pixel.y,2.0) > 1.0{
                 //    return color("white")
-                // }
-                //return color("black");
+               // }
+               // return color("black");
                 let p_min = v_pixel.xy - 0.5;
                 let p_max = v_pixel.xy + 0.5;
                 let t_area = compute_clamped_trapezoid_area(p_min, p_max);
@@ -132,7 +132,11 @@ impl TrapezoidText {
                 if chan < 1.5{
                     return vec4(0., t_area, 0.,0.);
                 }
-                return vec4(0., 0., t_area,0.);
+                if chan < 2.5{
+                    return vec4(0., 0., t_area,0.);
+                }
+                return vec4(t_area, t_area, t_area,0.);
+                
                 //let b_minx = p_min.x + 1.0 / 3.0;
                 //let r_minx = p_min.x - 1.0 / 3.0;
                 //let b_maxx = p_max.x + 1.0 / 3.0;
@@ -161,12 +165,71 @@ impl TrapezoidText {
             }
         }))
     }
-    
-    pub fn draw_todo(&mut self, cx: &mut Cx, todo: CxFontsAtlasTodo) {
-        // lets fetch font
-        
-        
+
+    // test api for directly drawing a glyph
+    pub fn draw_char(&mut self, cx: &mut Cx, c:char, fontdr:&Font, font_size:f32) {
         // now lets make a draw_character function
+        let inst = cx.new_instance(&self.shader, 1);
+        if inst.need_uniforms_now(cx) {
+        }
+        
+        if let Some(font_id) = fontdr.font_id{
+            let trapezoids = {
+                let cxfont = &cx.fonts[font_id];
+                let font = cxfont.font_loaded.as_ref().unwrap();
+                
+                let slot = if c < '\u{10000}' {
+                    cx.fonts[font_id].font_loaded.as_ref().unwrap().char_code_to_glyph_index_map[c as usize]
+                } else {
+                    0
+                };
+                
+                if slot == 0 {
+                    return
+                }
+                let glyph = &cx.fonts[font_id].font_loaded.as_ref().unwrap().glyphs[slot];
+                let dpi_factor = cx.current_dpi_factor;
+                let pos = cx.get_turtle_walk(); 
+                let font_scale_logical = font_size * 96.0 / (72.0 * font.units_per_em);
+                let font_scale_pixels = font_scale_logical * dpi_factor;
+                
+                let mut trapezoids = Vec::new();
+                trapezoids.extend_from_internal_iter(
+                    self.trapezoidator.trapezoidate(
+                        glyph
+                            .outline
+                            .commands()
+                            .map({
+                            move | command | {
+                                command.transform(
+                                    &AffineTransformation::identity()
+                                        .translate(Vector::new(-glyph.bounds.p_min.x, -glyph.bounds.p_min.y))
+                                        .uniform_scale(font_scale_pixels)
+                                        .translate(Vector::new(pos.x, pos.y))
+                                )
+                            }
+                        }).linearize(0.5),
+                    ),
+                );
+                trapezoids
+            };
+            for trapezoid in trapezoids {
+                let data = [
+                    trapezoid.xs[0],
+                    trapezoid.xs[1],
+                    trapezoid.ys[0],
+                    trapezoid.ys[1],
+                    trapezoid.ys[2],
+                    trapezoid.ys[3],
+                    3.0
+                ];
+                inst.push_slice(cx, &data);
+            }
+        }
+    }
+    
+    // atlas drawing function used by CxAfterDraw
+    pub fn draw_todo(&mut self, cx: &mut Cx, todo: CxFontsAtlasTodo) {
         let inst = cx.new_instance(&self.shader, 1);
         if inst.need_uniforms_now(cx) {
         }
@@ -192,8 +255,8 @@ impl TrapezoidText {
                 }
                 
                 let glyphtc = atlas_page.atlas_glyphs[todo.glyph_id][todo.subpixel_id].unwrap();
-                let tx = glyphtc.tx1 * cx.fonts_atlas.texture_size.x + todo.subpixel_x_fract;
-                let ty = 1.0 + glyphtc.ty1 * cx.fonts_atlas.texture_size.y - todo.subpixel_y_fract;
+                let tx = glyphtc.tx1 * cx.fonts_atlas.texture_size.x + todo.subpixel_x_fract* atlas_page.dpi_factor;
+                let ty = 1.0 + glyphtc.ty1 * cx.fonts_atlas.texture_size.y - todo.subpixel_y_fract* atlas_page.dpi_factor;
                 
                 let font_scale_logical = atlas_page.font_size * 96.0 / (72.0 * font.units_per_em);
                 let font_scale_pixels = font_scale_logical * atlas_page.dpi_factor;
@@ -289,7 +352,7 @@ pub struct CxFont {
     pub atlas_pages: Vec<CxFontAtlasPage>,
 }
 
-pub const ATLAS_SUBPIXEL_SLOTS: usize = 16;
+pub const ATLAS_SUBPIXEL_SLOTS: usize = 64;
 
 pub struct CxFontAtlasPage {
     pub dpi_factor: f32,

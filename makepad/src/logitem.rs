@@ -6,7 +6,7 @@ use hub::*;
 pub struct LogItem {
     pub code_editor: CodeEditor,
     pub text_buffer: TextBuffer,
-    pub level: HubLogItemLevel
+    pub needs_formatting: bool
 }
 
 impl LogItem {
@@ -27,16 +27,37 @@ impl LogItem {
                 mutation_id: 1,
                 ..TextBuffer::default()
             },
-            level: HubLogItemLevel::Log
+            needs_formatting: false,
         };
         editor
     }
     
-    pub fn load_item(&mut self, cx: &mut Cx, val: &str, level: HubLogItemLevel) {
-        self.level = level;
+    pub fn load_loc_message(&mut self, cx: &mut Cx, loc_message: &LocMessage) {
+        self.needs_formatting = true;
+
+        let text = if let Some(rendered) = &loc_message.rendered {
+            if let Some(explanation) = &loc_message.explanation {
+                format!("{}{}{}", loc_message.body, rendered, explanation)
+            }
+            else {
+                format!("{}{}", loc_message.body,rendered)
+            }
+        }
+        else {
+            loc_message.body.clone()
+        };
+        
+        self.text_buffer.load_from_utf8(cx, &text);
+        self.code_editor.view.redraw_view_area(cx);
+    }
+
+    pub fn load_plain_text(&mut self, cx: &mut Cx, val: &str) {
+        println!("PLAIN TEXT {}", val);
+        self.needs_formatting = false;
         self.text_buffer.load_from_utf8(cx, val);
         self.code_editor.view.redraw_view_area(cx);
     }
+
 
     pub fn clear_msg(&mut self, cx: &mut Cx) {
         self.text_buffer.load_from_utf8(cx, "");
@@ -61,7 +82,7 @@ impl LogItem {
         let text_buffer = &mut self.text_buffer;
         if text_buffer.needs_token_chunks() && text_buffer.lines.len() >0 {
             
-            if self.level != HubLogItemLevel::Log {
+            if self.needs_formatting {
                 let mut state = TokenizerState::new(&text_buffer.lines);
                 let mut tokenizer = RustTokenizer::new();
                 let mut pair_stack = Vec::new();
@@ -148,10 +169,8 @@ impl LogItem {
             }
         }
         
-        if let Err(_) = self.code_editor.begin_code_editor(cx, text_buffer) {
-            return
-        }
-        
+        if self.code_editor.begin_code_editor(cx, text_buffer).is_err() {return}
+
         for (index, token_chunk) in text_buffer.token_chunks.iter_mut().enumerate() {
             self.code_editor.draw_chunk(cx, index, &text_buffer.flat_text, token_chunk, &text_buffer.messages.cursors);
         }

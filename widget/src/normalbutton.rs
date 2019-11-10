@@ -1,7 +1,8 @@
 use render::*;
+use crate::buttonux::*;
 
 #[derive(Clone)]
-pub struct Button {
+pub struct NormalButton {
     pub bg: Quad,
     pub bg_layout: Layout,
     pub text: Text,
@@ -9,15 +10,7 @@ pub struct Button {
     pub _bg_area: Area, 
 }
 
-#[derive(Clone, PartialEq)]
-pub enum ButtonEvent {
-    None,
-    Clicked,
-    Down,
-    Up 
-}
-
-impl Button {
+impl NormalButton {
     pub fn style(cx: &mut Cx) -> Self {
         Self {
             bg: Quad {
@@ -26,8 +19,8 @@ impl Button {
             },
             bg_layout: Layout {
                 align: Align::center(),
-                width: Bounds::Compute,
-                height: Bounds::Compute,
+                width: Width::Compute,
+                height: Height::Compute,
                 margin: Margin::all(1.0),
                 padding: Padding {l: 16.0, t: 14.0, r: 16.0, b: 14.0},
                 ..Default::default()
@@ -123,7 +116,7 @@ impl Button {
         ButtonEvent::None
     }
     
-    pub fn draw_button_with_label(&mut self, cx: &mut Cx, label: &str) {
+    pub fn draw_button(&mut self, cx: &mut Cx, label: &str) {
         self.bg.color = self.animator.last_color(cx.id("bg.color"));
 
         let bg_inst = self.bg.begin_quad(cx, &self.bg_layout);
