@@ -148,9 +148,9 @@ impl Cx {
         let mut init_repaint = false;
         self.calc_dirty_bounds(pass_id, view_id, &mut view_bounds);
         
-        let full_repaint = view_bounds.max_x - view_bounds.min_x > opengl_window.window_geom.inner_size.x - 100.
-            && view_bounds.max_y - view_bounds.min_y > opengl_window.window_geom.inner_size.y - 100. ||
-        opengl_window.opening_repaint_count < 10;
+        let full_repaint = true; // view_bounds.max_x - view_bounds.min_x > opengl_window.window_geom.inner_size.x - 100.
+            // && view_bounds.max_y - view_bounds.min_y > opengl_window.window_geom.inner_size.y - 100. ||
+        // opengl_window.opening_repaint_count < 10;
         if opengl_window.opening_repaint_count < 10 { // for some reason the first repaint doesn't arrive on the window
             opengl_window.opening_repaint_count += 1;
             init_repaint = true;
