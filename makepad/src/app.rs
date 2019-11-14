@@ -1,6 +1,7 @@
 //use syn::Type;
 use render::*;
 use widget::*;
+use editor::*;
 use crate::appwindow::*;
 use crate::appstorage::*;
 use crate::filetree::*;
@@ -20,7 +21,11 @@ pub struct App {
 impl App {
     
     pub fn style(cx: &mut Cx) -> Self {
-        set_dark_style(cx);
+
+        set_default_fonts(cx);
+        set_dark_theme(cx);
+        CodeEditor::set_dark_editor_theme(cx);
+
         let ms = cx.new_signal();
         Self {
             menu: Menu::main(vec![

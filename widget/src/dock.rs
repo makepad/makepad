@@ -765,7 +765,7 @@ where TItem: Clone
                     self.drop_quad.color = self.drop_quad_color;
                     self.drop_quad.color.a = alpha * 0.8;
                     found_drop_zone = true;
-                    self.drop_quad.draw_quad(cx, dr);
+                    self.drop_quad.draw_quad_rel(cx, dr);
                 }
             }
             if !found_drop_zone {

@@ -66,19 +66,19 @@ impl ScrollBar {
     
     pub fn get_over_anim(cx:&Cx)->Anim{
         Anim::new(Play::Cut {duration: 0.05}, vec![
-            Track::color(cx.id("sb.color"), Ease::Lin, vec![(1.0, color("#7"))])
+            Track::color(cx, "sb.color", Ease::Lin, vec![(1.0, color("#7"))])
         ])
     }
     
     pub fn get_scrolling_anim(cx:&Cx)->Anim{
         Anim::new(Play::Cut {duration: 0.05}, vec![
-            Track::color(cx.id("sb.color"), Ease::Lin, vec![(1.0, color("#9"))])
+            Track::color(cx, "sb.color", Ease::Lin, vec![(1.0, color("#9"))])
         ])
     }
     
     pub fn get_default_anim(cx:&Cx)->Anim{
         Anim::new(Play::Cut {duration: 0.5}, vec![
-            Track::color(cx.id("sb.color"), Ease::Lin, vec![(1.0, color("#5"))])
+            Track::color(cx, "sb.color", Ease::Lin, vec![(1.0, color("#5"))])
         ])
     }
 
@@ -369,7 +369,7 @@ impl ScrollBar {
     
     pub fn draw_scroll_bar(&mut self, cx: &mut Cx, axis: Axis, view_area: Area, view_rect: Rect, view_total: Vec2) -> f32 {
         // pull the bg color from our animation system, uses 'default' value otherwise
-        self.sb.color = self.animator.last_color(cx.id("sb.color"));
+        self.sb.color = self.animator.last_color(cx, "sb.color");
         self._sb_area = Area::Empty;
         self._view_area = view_area;
         self.axis = axis;
@@ -387,7 +387,7 @@ impl ScrollBar {
                 self._view_visible = view_rect.w;
                 
                 if self._visible {
-                    let sb_inst = self.sb.draw_quad(
+                    let sb_inst = self.sb.draw_quad_rel(
                         cx,
                         Rect {
                             x: self._bar_side_margin,
@@ -416,7 +416,7 @@ impl ScrollBar {
                 self._view_total = view_total.y;
                 self._view_visible = view_rect.h;
                 if self._visible {
-                    let sb_inst = self.sb.draw_quad(
+                    let sb_inst = self.sb.draw_quad_rel(
                         cx,
                         Rect {
                             x: view_rect.w - self.bar_size,

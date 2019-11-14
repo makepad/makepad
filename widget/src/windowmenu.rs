@@ -36,7 +36,7 @@ impl MenuItemDraw {
     
     pub fn get_default_anim(&self, cx: &Cx) -> Anim {
         Anim::new(Play::Chain {duration: 0.01}, vec![
-            Track::color(cx.id("bg.color"), Ease::Lin, vec![
+            Track::color(cx, "bg.color", Ease::Lin, vec![
                 (1.0, self.bg_color)
             ])
         ])
@@ -44,7 +44,7 @@ impl MenuItemDraw {
     
     pub fn get_default_anim_cut(&self, cx: &Cx) -> Anim {
         Anim::new(Play::Cut {duration: 0.01}, vec![
-            Track::color(cx.id("bg.color"), Ease::Lin, vec![
+            Track::color(cx, "bg.color", Ease::Lin, vec![
                 (0.0, self.bg_color)
             ])
         ])
@@ -52,7 +52,7 @@ impl MenuItemDraw {
     
     pub fn get_over_anim(&self, cx: &Cx) -> Anim {
         Anim::new(Play::Cut {duration: 0.02}, vec![
-            Track::color(cx.id("bg.color"), Ease::Lin, vec![
+            Track::color(cx, "bg.color", Ease::Lin, vec![
                 (0., self.bg_over_color),
             ])
         ])

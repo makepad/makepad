@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::cell::RefCell;
+use std::any::TypeId;
 
 pub use crate::shadergen::*;
 pub use crate::fonts::*;
@@ -9,57 +10,59 @@ pub use crate::window::*;
 pub use crate::view::*;
 pub use crate::pass::*;
 pub use crate::texture::*;
+pub use crate::text::*;
 pub use crate::shader::*;
 
-pub use crate::math::*; 
+pub use crate::math::*;
 pub use crate::events::*;
 pub use crate::colors::*;
 pub use crate::elements::*;
 pub use crate::animator::*;
 pub use crate::area::*;
 pub use crate::menu::*;
+pub use crate::theming::*;
 
-#[cfg(all(not(feature="ipc"),target_os = "linux"))]
+#[cfg(all(not(feature = "ipc"), target_os = "linux"))]
 pub use crate::cx_linux::*;
-#[cfg(all(not(feature="ipc"),target_os = "linux"))]
+#[cfg(all(not(feature = "ipc"), target_os = "linux"))]
 pub use crate::cx_opengl::*;
 
-#[cfg(all(not(feature="ipc"),target_os = "macos"))]
+#[cfg(all(not(feature = "ipc"), target_os = "macos"))]
 pub use crate::cx_macos::*;
-#[cfg(all(not(feature="ipc"),target_os = "macos"))]
+#[cfg(all(not(feature = "ipc"), target_os = "macos"))]
 pub use crate::cx_metal::*;
-#[cfg(all(not(feature="ipc"),target_os = "macos"))]
+#[cfg(all(not(feature = "ipc"), target_os = "macos"))]
 pub use crate::cx_metalsl::*;
 
-#[cfg(all(not(feature="ipc"),target_os = "windows"))]
+#[cfg(all(not(feature = "ipc"), target_os = "windows"))]
 pub use crate::cx_win10::*;
-#[cfg(all(not(feature="ipc"),target_os = "windows"))]
+#[cfg(all(not(feature = "ipc"), target_os = "windows"))]
 pub use crate::cx_dx11::*;
-#[cfg(all(not(feature="ipc"),target_os = "windows"))]
+#[cfg(all(not(feature = "ipc"), target_os = "windows"))]
 pub use crate::cx_hlsl::*;
 
-#[cfg(all(not(feature="ipc"),target_arch = "wasm32"))]
+#[cfg(all(not(feature = "ipc"), target_arch = "wasm32"))]
 pub use crate::cx_webgl::*;
 
-#[cfg(all(not(feature="ipc"),any(target_arch = "wasm32", target_os = "linux")))]
+#[cfg(all(not(feature = "ipc"), any(target_arch = "wasm32", target_os = "linux")))]
 pub use crate::cx_glsl::*;
 
-#[cfg(all(not(feature="ipc"),any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+#[cfg(all(not(feature = "ipc"), any(target_os = "linux", target_os = "macos", target_os = "windows")))]
 pub use crate::cx_desktop::*;
 
-#[cfg(all(not(feature="ipc"),target_arch = "wasm32"))]
+#[cfg(all(not(feature = "ipc"), target_arch = "wasm32"))]
 pub use crate::cx_wasm32::*;
 
-#[cfg(feature="ipc")]
+#[cfg(feature = "ipc")]
 pub use crate::cx_ipc_child::*;
 
-#[cfg(all(feature="ipc",target_arch = "wasm32"))]
+#[cfg(all(feature = "ipc", target_arch = "wasm32"))]
 pub use crate::cx_ipc_wasm32::*;
 
-#[cfg(all(feature="ipc",any(target_os = "linux", target_os = "macos")))]
+#[cfg(all(feature = "ipc", any(target_os = "linux", target_os = "macos")))]
 pub use crate::cx_ipc_posix::*;
 
-#[cfg(all(feature="ipc",target_os = "windows"))]
+#[cfg(all(feature = "ipc", target_os = "windows"))]
 pub use crate::cx_ipc_win32::*;
 
 pub enum PlatformType {
@@ -72,13 +75,14 @@ pub enum PlatformType {
 impl PlatformType {
     pub fn is_desktop(&self) -> bool {
         match self {
-            PlatformType::Windows=>true,
-            PlatformType::OSX=>true,
-            PlatformType::Linux=>true,
-            PlatformType::WASM=>false
+            PlatformType::Windows => true,
+            PlatformType::OSX => true,
+            PlatformType::Linux => true,
+            PlatformType::WASM => false
         }
     }
 }
+
 
 pub struct Cx {
     pub running: bool,
@@ -99,8 +103,8 @@ pub struct Cx {
     pub shader_map: HashMap<ShaderGen, usize>,
     pub shader_instance_id: usize,
     
-    pub str_to_id: RefCell<HashMap<String, u32>>,
-    pub id_to_str: RefCell<HashMap<u32, String>>,
+    pub str_to_id: RefCell<HashMap<String, usize>>,
+    pub id_to_str: RefCell<HashMap<usize, String>>,
     
     pub is_in_redraw_cycle: bool,
     pub vr_can_present: bool,
@@ -146,11 +150,23 @@ pub struct Cx {
     
     pub signals: Vec<(Signal, usize)>,
     
-    pub style_values: HashMap<String, StyleValue>,
+    //pub style_values: HashMap<String, StyleValue>,
+ 
+    pub theme_color_to_id: RefCell<HashMap<TypeId, usize>>,
+    pub theme_text_style_to_id: RefCell<HashMap<TypeId, usize>>,
+    pub theme_layout_to_id: RefCell<HashMap<TypeId, usize>>,
+
+    pub color_id: usize,
+    pub text_style_id: usize,
+    pub layout_id: usize,
+
+    pub colors: CxThemeColors,
+    pub text_styles: CxThemeTextStyles,
+    pub layouts: CxThemeLayouts,
     
     pub panic_now: bool,
     pub panic_redraw: bool,
-
+    
     pub platform: CxPlatform,
 }
 
@@ -175,10 +191,10 @@ impl Default for Cx {
                 height: Some(4),
                 multisample: None
             },
-            image_u32:vec![0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
-            image_f32:Vec::new(),
-            update_image:true,
-            platform:CxPlatformTexture::default()
+            image_u32: vec![0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            image_f32: Vec::new(),
+            update_image: true,
+            platform: CxPlatformTexture::default()
         }];
         
         Self {
@@ -238,7 +254,19 @@ impl Default for Cx {
             finger_over_last_area: Area::Empty,
             _finger_over_last_area: Area::Empty,
             
-            style_values: HashMap::new(),
+            //style_values: HashMap::new(),
+            
+            theme_color_to_id: RefCell::new(HashMap::new()),
+            theme_text_style_to_id: RefCell::new(HashMap::new()),
+            theme_layout_to_id: RefCell::new(HashMap::new()),
+
+            colors: CxThemeColors(Vec::new()),
+            layouts: CxThemeLayouts(Vec::new()),
+            text_styles: CxThemeTextStyles(Vec::new()),
+
+            color_id: 1,
+            text_style_id: 1,
+            layout_id: 1,
             
             playing_anim_areas: Vec::new(),
             ended_anim_areas: Vec::new(),
@@ -257,38 +285,40 @@ impl Default for Cx {
     }
 }
 
-#[derive(PartialEq, Copy, Clone, Debug)]
-pub struct CxId(u32);
+#[derive(Default, PartialEq, Copy, Clone, Debug)]
+pub struct CxId(usize);
 
 impl Cx {
     
-    pub fn id(&self, name:&str)->CxId{
+    pub fn id(&self, name: &str) -> CxId {
         let mut str_to_id = self.str_to_id.borrow_mut();
-        if let Some(stored_id) = str_to_id.get(name){
+        if let Some(stored_id) = str_to_id.get(name) {
             return CxId(*stored_id)
         }
-        let new_id = str_to_id.len() as u32;
+        let new_id = str_to_id.len();
         str_to_id.insert(name.to_string(), new_id);
         let mut id_to_str = self.id_to_str.borrow_mut();
         id_to_str.insert(new_id, name.to_string());
         CxId(new_id)
     }
     
-    pub fn id_starts_with(&self, ident:CxId, begin:&str)->Option<String>{
+    // todo make this alloc free
+    pub fn id_starts_with(&self, ident: CxId, begin: &str) -> Option<String> {
         let id_to_str = self.id_to_str.borrow();
-        if let Some(value) = id_to_str.get(&ident.0){
-            if value.starts_with(begin){
+        if let Some(value) = id_to_str.get(&ident.0) {
+            if value.starts_with(begin) {
                 return Some(value.to_string().split_off(begin.len()))
             }
             return None
         }
         panic!("id not found");
     }
-
+    
+        
     pub fn add_shader(&mut self, sg: ShaderGen, name: &str) -> Shader {
         let inst_id = self.shader_instance_id;
         self.shader_instance_id += 1;
-        if let Some(stored_id) = self.shader_map.get(&sg){
+        if let Some(stored_id) = self.shader_map.get(&sg) {
             return Shader {shader_id: Some((*stored_id, inst_id))}
         }
         
@@ -318,18 +348,18 @@ impl Cx {
             1
         }
     }
-
-    pub fn get_dpi_factor_of(&mut self, area:&Area) -> f32 {
-        match area{
-            Area::Instance(ia)=>{
+    
+    pub fn get_dpi_factor_of(&mut self, area: &Area) -> f32 {
+        match area {
+            Area::Instance(ia) => {
                 let pass_id = self.views[ia.view_id].pass_id;
                 return self.get_delegated_dpi_factor(pass_id)
             },
-            Area::View(va)=>{
+            Area::View(va) => {
                 let pass_id = self.views[va.view_id].pass_id;
                 return self.get_delegated_dpi_factor(pass_id)
             },
-            _=>()
+            _ => ()
         }
         return 1.0;
     }
@@ -340,14 +370,14 @@ impl Cx {
         for _ in 0..25 {
             match self.passes[pass_id_walk].dep_of {
                 CxPassDepOf::Window(window_id) => {
-                    dpi_factor = match self.windows[window_id].window_state{
-                        CxWindowState::Create{..}=>{
+                    dpi_factor = match self.windows[window_id].window_state {
+                        CxWindowState::Create {..} => {
                             self.default_dpi_factor
                         },
-                        CxWindowState::Created=>{
+                        CxWindowState::Created => {
                             self.windows[window_id].window_geom.dpi_factor
                         },
-                        _=>1.0
+                        _ => 1.0
                     };
                     break;
                 },
@@ -379,7 +409,7 @@ impl Cx {
                             }
                         }
                     },
-                    CxPassDepOf::None=>{ // we need to be first
+                    CxPassDepOf::None => { // we need to be first
                         passes_todo.insert(0, pass_id);
                         inserted = true;
                     },
@@ -621,40 +651,7 @@ impl Cx {
             *next_frame = new_area.clone()
         }
     }
-    
-    pub fn color(&self, name: &str) -> Color {
-        if let Some(StyleValue::Color(val)) = self.style_values.get(name) {
-            return *val;
-        }
-        panic!("Cannot find style color key {}", name);
-    }
-    
-    pub fn font(&self, name: &str) -> String {
-        if let Some(StyleValue::Font(val)) = self.style_values.get(name) {
-            return val.clone();
-        }
-        panic!("Cannot find style font key {}", name);
-    }
-    
-    pub fn size(&self, name: &str) -> f64 {
-        if let Some(StyleValue::Size(val)) = self.style_values.get(name) {
-            return *val;
-        }
-        panic!("Cannot find style size key {}", name);
-    }
-    
-    pub fn set_color(&mut self, name: &str, val: Color) {
-        self.style_values.insert(name.to_string(), StyleValue::Color(val));
-    }
-    
-    pub fn set_font(&mut self, name: &str, val: &str) {
-        self.style_values.insert(name.to_string(), StyleValue::Font(val.to_string()));
-    }
-    
-    pub fn set_size(&mut self, name: &str, val: f64) {
-        self.style_values.insert(name.to_string(), StyleValue::Size(val));
-    }
-    
+
     pub fn set_key_focus(&mut self, focus_area: Area) {
         self.key_focus = focus_area;
     }
@@ -710,7 +707,7 @@ impl Cx {
     pub fn call_draw_event<F>(&mut self, mut event_handler: F)
     where F: FnMut(&mut Cx, &mut Event)
     {
-       // self.profile();
+        // self.profile();
         self.is_in_redraw_cycle = true;
         self.redraw_id += 1;
         std::mem::swap(&mut self._redraw_child_areas, &mut self.redraw_child_areas);
@@ -720,7 +717,7 @@ impl Cx {
         self.redraw_parent_areas.truncate(0);
         self.call_event_handler(&mut event_handler, &mut Event::Draw);
         self.is_in_redraw_cycle = false;
-       //self.profile();
+        //self.profile();
     }
     
     pub fn call_animation_event<F>(&mut self, mut event_handler: F, time: f64)
@@ -772,7 +769,7 @@ impl Cx {
                     value: value
                 }));
             }
-            if counter > 100{
+            if counter > 100 {
                 println!("Signal feedback loop detected");
                 break
             }
@@ -842,6 +839,8 @@ impl Cx {
     }*/
 }
 
+// palette types
+
 
 #[derive(Clone)]
 pub enum StyleValue {
@@ -878,7 +877,7 @@ macro_rules!main_app {
         #[export_name = "create_wasm_app"]
         pub extern "C" fn create_wasm_app() -> u32 {
             let mut cx = Box::new(Cx::default());
-            let app = Box::new($ app::style(&mut cx));
+            let app = Box::new( $ app::style(&mut cx));
             let cxafterdraw = Box::new(CxAfterDraw::style(&mut cx));
             Box::into_raw(Box::new((Box::into_raw(app), Box::into_raw(cx), Box::into_raw(cxafterdraw)))) as u32
         }

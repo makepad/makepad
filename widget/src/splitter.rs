@@ -65,19 +65,19 @@ impl Splitter {
     
     pub fn get_default_anim(cx: &Cx) -> Anim {
         Anim::new(Play::Cut {duration: 0.5}, vec![
-            Track::color(cx.id("split.color"), Ease::Lin, vec![(1.0, cx.color("bg_split"))]),
+            Track::color(cx, "split.color", Ease::Lin, vec![(1.0, cx.color("bg_split"))]),
         ])
     }
     
     pub fn get_over_anim(cx: &Cx) -> Anim {
         Anim::new(Play::Cut {duration: 0.05}, vec![
-            Track::color(cx.id("split.color"), Ease::Lin, vec![(1.0, color("#5"))]),
+            Track::color(cx, "split.color", Ease::Lin, vec![(1.0, color("#5"))]),
         ])
     }
     
     pub fn get_moving_anim(cx: &Cx) -> Anim {
         Anim::new(Play::Cut {duration: 0.2}, vec![
-            Track::color(cx.id("split.color"), Ease::Lin, vec![
+            Track::color(cx, "split.color", Ease::Lin, vec![
                 (0.0, color("#f")),
                 (1.0, color("#6"))
             ]),
@@ -276,7 +276,7 @@ impl Splitter {
         cx.end_turtle(Area::Empty);
         let rect = cx.get_turtle_rect();
         let origin = cx.get_turtle_origin();
-        self.split.color = self.animator.last_color(cx.id("split.color"));
+        self.split.color = self.animator.last_color(cx, "split.color");
         match self.axis {
             Axis::Horizontal => {
                 
@@ -286,7 +286,7 @@ impl Splitter {
                     height: Height::Fix(self.split_size),
                     ..Layout::default()
                 }) {
-                    self._split_area = self.split.draw_quad(cx, Rect {x: 0., y: 0., w: rect.w, h: self.split_size}).into_area();
+                    self._split_area = self.split.draw_quad_rel(cx, Rect {x: 0., y: 0., w: rect.w, h: self.split_size}).into_area();
                     self.split_view.end_view(cx);
                 }
                 cx.set_turtle_walk(Vec2 {x: origin.x, y: origin.y + self._calc_pos + self.split_size});
@@ -298,7 +298,7 @@ impl Splitter {
                     height: Height::Fix(rect.h),
                     ..Layout::default()
                 }) {
-                    self._split_area = self.split.draw_quad(cx, Rect {x: 0., y: 0., w: self.split_size, h: rect.h}).into_area();
+                    self._split_area = self.split.draw_quad_rel(cx, Rect {x: 0., y: 0., w: self.split_size, h: rect.h}).into_area();
                     self.split_view.end_view(cx);
                 }
             }

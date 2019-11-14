@@ -196,7 +196,7 @@ impl FileTree {
             },
             tree_folder_color: cx.color("text_selected_focus"),
             tree_file_color: cx.color("text_deselected_focus"),
-            tree_text: Text {z: 0.001, top_drop:1.3, ..Text::style(cx)},
+            tree_text: Text {z: 0.001, top_drop: 1.3, ..Text::style(cx)},
             view: ScrollView {
                 scroll_v: Some(ScrollBar {
                     smoothing: Some(0.25),
@@ -348,14 +348,16 @@ impl FileTree {
     
     pub fn get_default_anim(cx: &Cx, counter: usize, marked: bool) -> Anim {
         Anim::new(Play::Chain {duration: 0.01}, vec![
-            Track::color(cx.id("bg.color"), Ease::Lin, vec![(1.0, if marked {cx.color("bg_marked")} else if counter & 1 == 0 {cx.color("bg_selected")}else {cx.color("bg_odd")})])
+            Track::color(cx, "bg.color", Ease::Lin, vec![
+                (1.0, if marked {cx.color("bg_marked")} else if counter & 1 == 0 {cx.color("bg_selected")}else {cx.color("bg_odd")})
+            ])
         ])
     }
     
     pub fn get_over_anim(cx: &Cx, counter: usize, marked: bool) -> Anim {
         let over_color = if marked {cx.color("bg_marked_over")} else if counter & 1 == 0 {cx.color("bg_selected_over")}else {cx.color("bg_odd_over")};
         Anim::new(Play::Cut {duration: 0.02}, vec![
-            Track::color(cx.id("bg.color"), Ease::Lin, vec![
+            Track::color(cx, "bg.color", Ease::Lin, vec![
                 (0., over_color),
                 (1., over_color)
             ])
@@ -376,7 +378,7 @@ impl FileTree {
     }
     
     pub fn handle_file_tree(&mut self, cx: &mut Cx, event: &mut Event) -> FileTreeEvent {
-       
+        
         // alright. someone clicking on the tree items.
         let mut file_walker = FileWalker::new(&mut self.root_node);
         let mut counter = 0;
@@ -397,7 +399,7 @@ impl FileTree {
                 Event::Animate(ae) => {
                     node_draw.animator.write_area(cx, node_draw.animator.area, "bg.", ae.time);
                 },
-                Event::AnimEnded(_)=>{
+                Event::AnimEnded(_) => {
                     node_draw.animator.end();
                 },
                 Event::FingerDown(_fe) => {
@@ -570,7 +572,7 @@ impl FileTree {
             
             // if we are NOT animating, we need to get change a default color.
             
-            self.node_bg.color = node_draw.animator.last_color(cx.id("bg.color"));
+            self.node_bg.color = node_draw.animator.last_color(cx, "bg.color");
             
             let inst = self.node_bg.begin_quad(cx, &Layout {
                 width: Width::Fill,
@@ -585,7 +587,7 @@ impl FileTree {
             for i in 0..(depth - 1) {
                 let quad_margin = Margin {l: 1., t: 0., r: 4., b: 0.};
                 if i == depth - 2 { // our own thread.
-                    let area = self.filler.draw_quad_walk(
+                    let area = self.filler.draw_quad(
                         cx,
                         Width::Fix(10.),
                         Height::Fill,
@@ -618,7 +620,7 @@ impl FileTree {
                         cx.walk_turtle(Width::Fix(10.), Height::Fill, quad_margin, None);
                     }
                     else {
-                        let area = self.filler.draw_quad_walk(cx, Width::Fix(10.), Height::Fill, quad_margin);
+                        let area = self.filler.draw_quad(cx, Width::Fix(10.), Height::Fill, quad_margin);
                         //line_vec
                         area.push_vec2(cx, Vec2 {x: -0.2, y: 1.2});
                         //anim_pos
@@ -633,7 +635,7 @@ impl FileTree {
             match node {
                 FileNode::Folder {name, state, ..} => {
                     // draw the folder icon
-                    let inst = self.filler.draw_quad_walk(cx, Width::Fix(14.), Height::Fill, Margin {l: 0., t: 0., r: 2., b: 0.});
+                    let inst = self.filler.draw_quad(cx, Width::Fix(14.), Height::Fill, Margin {l: 0., t: 0., r: 2., b: 0.});
                     inst.push_vec2(cx, Vec2::zero());
                     inst.push_float(cx, 1.);
                     // move the turtle down a bit
@@ -708,7 +710,7 @@ impl FileTree {
         let mut y = view_total.y;
         while y < rect_now.h {
             self.node_bg.color = if counter & 1 == 0 {bg_even}else {bg_odd};
-            self.node_bg.draw_quad_walk(
+            self.node_bg.draw_quad(
                 cx,
                 Width::Fill,
                 Height::Fix((rect_now.h - y).min(self.row_height)),

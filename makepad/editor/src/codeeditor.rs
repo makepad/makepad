@@ -148,6 +148,10 @@ pub enum CodeEditorEvent {
 }
 
 impl CodeEditor {
+    pub fn set_dark_editor_theme(cx: &mut Cx){
+        
+    }
+    
     pub fn style(cx: &mut Cx) -> Self {
         Self {
             cursors: TextCursorSet::new(),
@@ -943,7 +947,7 @@ impl CodeEditor {
             return Err(())
         }
         else {
-            self.bg.draw_quad(cx, Rect {x: 0., y: 0., w: cx.get_width_total(), h: cx.get_height_total()});
+            self.bg.draw_quad_rel(cx, Rect {x: 0., y: 0., w: cx.get_width_total(), h: cx.get_height_total()});
             //let bg_area = bg_inst.into_area();
             let view_area = self.view.get_view_area(cx);
             cx.update_area_refs(self._view_area, view_area);
@@ -964,7 +968,7 @@ impl CodeEditor {
             self._cursor_area = cx.new_instance_draw_call(&self.cursor.shader, 0).into_area();
             
             if self.draw_line_numbers {
-                self.gutter_bg.draw_quad(cx, Rect {x: 0., y: 0., w: self.line_number_width, h: cx.get_height_total()});
+                self.gutter_bg.draw_quad_rel(cx, Rect {x: 0., y: 0., w: self.line_number_width, h: cx.get_height_total()});
                 cx.new_instance_draw_call(&self.text.shader, 0);
                 self._line_number_inst = Some(self.line_number_text.begin_text(cx));
             }
@@ -1167,7 +1171,7 @@ impl CodeEditor {
             let (indent_color, indent_id) = if i < self._indent_stack.len() {self._indent_stack[i]}else {(self.colors.indent_line_unknown, 0.)};
             let tab_width = if i < self.folding_depth {tab_fixed_width}else {tab_variable_width};
             self.indent_lines.color = indent_color;
-            let inst = self.indent_lines.draw_quad(cx, Rect {
+            let inst = self.indent_lines.draw_quad_rel(cx, Rect {
                 x: off,
                 y: y_pos,
                 w: tab_width,
@@ -1551,7 +1555,7 @@ impl CodeEditor {
             for rc in &self._draw_cursors.cursors {
                 self.cursor.z = rc.z + 0.1;
                 
-                let inst = self.cursor.draw_quad(cx, Rect {x: rc.x - origin.x, y: rc.y - origin.y, w: rc.w, h: rc.h});
+                let inst = self.cursor.draw_quad_rel(cx, Rect {x: rc.x - origin.x, y: rc.y - origin.y, w: rc.w, h: rc.h});
                 if inst.need_uniforms_now(cx) {
                     inst.push_uniform_float(cx, self._cursor_blink_flipflop);
                     //blink
@@ -1572,7 +1576,7 @@ impl CodeEditor {
                 TextBufferMessageLevel::Error => self.colors.marker_error,
                 TextBufferMessageLevel::Log => self.colors.marker_log,
             };
-            self.message_marker.draw_quad(cx, Rect {x: mark.rc.x - origin.x, y: mark.rc.y - origin.y, w: mark.rc.w, h: mark.rc.h});
+            self.message_marker.draw_quad_rel(cx, Rect {x: mark.rc.x - origin.x, y: mark.rc.y - origin.y, w: mark.rc.w, h: mark.rc.h});
         }
     }
     
@@ -1583,7 +1587,7 @@ impl CodeEditor {
         for i in 0..sel.len() {
             let cur = &sel[i];
             
-            let mk_inst = self.selection.draw_quad(cx, Rect {x: cur.rc.x - origin.x, y: cur.rc.y - origin.y, w: cur.rc.w, h: cur.rc.h});
+            let mk_inst = self.selection.draw_quad_rel(cx, Rect {x: cur.rc.x - origin.x, y: cur.rc.y - origin.y, w: cur.rc.w, h: cur.rc.h});
             
             // do we have a prev?
             if i > 0 && sel[i - 1].index == cur.index {

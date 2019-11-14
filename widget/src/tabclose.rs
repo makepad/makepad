@@ -1,5 +1,5 @@
 use render::*;
-use crate::buttonux::*;
+use crate::buttonlogic::*;
 
 #[derive(Clone)]
 pub struct TabClose {
@@ -26,25 +26,25 @@ impl TabClose {
     
     pub fn get_default_anim(cx:&Cx)->Anim{
         Anim::new(Play::Cut {duration: 0.2}, vec![
-            Track::color(cx.id("bg.color"), Ease::Lin, vec![(1.0, color("#a"))]),
-            Track::float(cx.id("bg.hover"), Ease::Lin, vec![(1.0, 0.)]),
-            Track::float(cx.id("bg.down"), Ease::Lin, vec![(1.0, 0.)]),
+            Track::color(cx, "bg.color", Ease::Lin, vec![(1.0, color("#a"))]),
+            Track::float(cx, "bg.hover", Ease::Lin, vec![(1.0, 0.)]),
+            Track::float(cx, "bg.down", Ease::Lin, vec![(1.0, 0.)]),
         ])
     }
     
     pub fn get_over_anim(cx:&Cx)->Anim{
         Anim::new(Play::Cut {duration: 0.2}, vec![
-            Track::color(cx.id("bg.color"), Ease::Lin, vec![(0.0, color("#f")), (1.0, color("#f"))]),
-            Track::float(cx.id("bg.down"), Ease::Lin, vec![(1.0, 0.)]),
-            Track::float(cx.id("bg.hover"), Ease::Lin, vec![(0.0, 1.0), (1.0, 1.0)]),
+            Track::color(cx, "bg.color", Ease::Lin, vec![(0.0, color("#f")), (1.0, color("#f"))]),
+            Track::float(cx, "bg.down", Ease::Lin, vec![(1.0, 0.)]),
+            Track::float(cx, "bg.hover", Ease::Lin, vec![(0.0, 1.0), (1.0, 1.0)]),
         ])
     }
     
     pub fn get_down_anim(cx:&Cx)->Anim{
         Anim::new(Play::Cut {duration: 0.2}, vec![
-            Track::color(cx.id("bg.color"), Ease::Lin, vec![(0.0, color("#f55")), (1.0, color("#f55"))]),
-            Track::float(cx.id("bg.hover"), Ease::Lin, vec![(1.0, 1.0)]),
-            Track::float(cx.id("bg.down"), Ease::OutExp, vec![(0.0, 0.0), (1.0, 3.1415 * 0.5)]),
+            Track::color(cx, "bg.color", Ease::Lin, vec![(0.0, color("#f55")), (1.0, color("#f55"))]),
+            Track::float(cx, "bg.hover", Ease::Lin, vec![(1.0, 1.0)]),
+            Track::float(cx, "bg.down", Ease::OutExp, vec![(0.0, 0.0), (1.0, 3.1415 * 0.5)]),
         ])
     }
 
@@ -107,10 +107,10 @@ impl TabClose {
     }
     
     pub fn draw_tab_close(&mut self, cx: &mut Cx) {
-        self.bg.color = self.animator.last_color(cx.id("bg.color"));
-        let bg_inst = self.bg.draw_quad_walk(cx, Width::Fix(10.), Height::Fix(10.), self.margin);
-        bg_inst.push_float(cx, self.animator.last_float(cx.id("bg.hover")));
-        bg_inst.push_float(cx, self.animator.last_float(cx.id("bg.down")));
+        self.bg.color = self.animator.last_color(cx, "bg.color");
+        let bg_inst = self.bg.draw_quad(cx, Width::Fix(10.), Height::Fix(10.), self.margin);
+        bg_inst.push_last_float(cx, &self.animator, "bg.hover");
+        bg_inst.push_last_float(cx, &self.animator, "bg.down");
         self._bg_area = bg_inst.into_area();
         self.animator.update_area_refs(cx, self._bg_area); // if our area changed, update animation
     }

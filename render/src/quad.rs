@@ -21,8 +21,8 @@ impl Quad {
         Self {
             shader: cx.add_shader(Self::def_quad_shader(), "Quad"),
             do_h_scroll:true,
-            z:0.0,
             do_v_scroll:true,
+            z:0.0,
             color: color("green")
         }
     }
@@ -68,7 +68,7 @@ impl Quad {
     }
     
     pub fn begin_quad(&mut self, cx: &mut Cx, layout: &Layout) -> InstanceArea {
-        let inst = self.draw_quad(cx, Rect::zero());
+        let inst = self.draw_quad_rel(cx, Rect::zero());
         let area = inst.clone().into_area();
         cx.begin_turtle(layout, area);
         inst
@@ -81,14 +81,14 @@ impl Quad {
         area
     }
     
-    pub fn draw_quad_walk(&mut self, cx: &mut Cx, w: Width, h: Height, margin: Margin) -> InstanceArea {
+    pub fn draw_quad(&mut self, cx: &mut Cx, w: Width, h: Height, margin: Margin) -> InstanceArea {
         let geom = cx.walk_turtle(w, h, margin, None);
         let inst = self.draw_quad_abs(cx, geom);
         cx.align_instance(inst);
         inst
     }
     
-    pub fn draw_quad(&mut self, cx: &mut Cx, rect: Rect) -> InstanceArea {
+    pub fn draw_quad_rel(&mut self, cx: &mut Cx, rect: Rect) -> InstanceArea {
         let pos = cx.get_turtle_origin();
         let inst = self.draw_quad_abs(cx, Rect {x: rect.x + pos.x, y: rect.y + pos.y, w: rect.w, h: rect.h});
         cx.align_instance(inst);

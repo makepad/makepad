@@ -209,7 +209,7 @@ impl TabControl {
     }
     
     pub fn end_tabs(&mut self, cx: &mut Cx) {
-        self.tab_fill.draw_quad_walk(cx, Width::Fill, Height::Fill, Margin::zero());
+        self.tab_fill.draw_quad(cx, Width::Fill, Height::Fill, Margin::zero());
         self.tabs.sweep(cx, | _, _ | ());
         if let Some((fe, id)) = &self._dragging_tab {
             if let Ok(()) = self.drag_tab_view.begin_view(cx, Layout {

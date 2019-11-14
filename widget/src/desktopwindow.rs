@@ -1,5 +1,5 @@
 use render::*;
-use crate::buttonux::*;
+use crate::buttonlogic::*;
 use crate::desktopbutton::*;
 use crate::windowmenu::*;
 
@@ -63,11 +63,11 @@ impl DesktopWindow {
             },
             caption_size: Vec2::zero(),
             caption: "Makepad".to_string(),
-            inner_over_chrome:false,
+            inner_over_chrome: false,
             _last_menu: None
         }
     }
-
+    
     pub fn handle_desktop_window(&mut self, cx: &mut Cx, event: &mut Event) -> DesktopWindowEvent {
         //self.main_view.handle_scroll_bars(cx, event);
         //self.inner_view.handle_scroll_bars(cx, event);
@@ -75,7 +75,7 @@ impl DesktopWindow {
             if self.window.vr_is_presenting(cx) {
                 self.window.vr_stop_presenting(cx);
             }
-            else{
+            else {
                 self.window.vr_start_presenting(cx);
             }
         }
@@ -142,22 +142,22 @@ impl DesktopWindow {
     
     pub fn begin_desktop_window(&mut self, cx: &mut Cx, menu: Option<&Menu>) -> ViewRedraw {
         
-        if !self.main_view.view_will_redraw(cx)  {
+        if !self.main_view.view_will_redraw(cx) {
             return Err(())
         }
         
         self.window.begin_window(cx);
         self.pass.begin_pass(cx);
-        self.pass.add_color_texture(cx, &mut self.color_texture, ClearColor::ClearWith(color256(30,30,30)));
+        self.pass.add_color_texture(cx, &mut self.color_texture, ClearColor::ClearWith(color256(30, 30, 30)));
         self.pass.set_depth_texture(cx, &mut self.depth_texture, ClearDepth::ClearWith(1.0));
         
         let _ = self.main_view.begin_view(cx, Layout::default());
         
-        if let Ok(_) = self.caption_view.begin_view(cx, Layout{
-            width:Width::Fill,
-            height:Height::Compute,
+        if self.caption_view.begin_view(cx, Layout {
+            width: Width::Fill,
+            height: Height::Compute,
             ..Layout::default()
-        }){
+        }).is_ok() {
             
             // alright here we draw our platform buttons.
             match cx.platform_type {
@@ -170,18 +170,22 @@ impl DesktopWindow {
                     });
                     
                     // we need to draw the window menu here.
-                    if let Some(_menu) = menu{
+                    if let Some(_menu) = menu {
                         // lets draw the thing, check with the clone if it changed
                         // then draw it
                     }
                     
                     self.min_btn.draw_desktop_button(cx, DesktopButtonType::WindowsMin);
-                    if self.window.is_fullscreen(cx) {self.max_btn.draw_desktop_button(cx, DesktopButtonType::WindowsMaxToggled);}
-                    else {self.max_btn.draw_desktop_button(cx, DesktopButtonType::WindowsMax);}
+                    if self.window.is_fullscreen(cx) {
+                        self.max_btn.draw_desktop_button(cx, DesktopButtonType::WindowsMaxToggled);
+                    }
+                    else {
+                        self.max_btn.draw_desktop_button(cx, DesktopButtonType::WindowsMax);
+                    }
                     self.close_btn.draw_desktop_button(cx, DesktopButtonType::WindowsClose);
                     
                     // change alignment
-                    cx.change_turtle_align_x(0.5);//Align::center());
+                    cx.change_turtle_align_x(0.5); //Align::center());
                     cx.compute_turtle_height();
                     cx.reset_turtle_walk();
                     cx.move_turtle(50., 0.);
@@ -193,7 +197,7 @@ impl DesktopWindow {
                 },
                 
                 PlatformType::OSX => { // mac still uses the built in buttons, TODO, replace that.
-                    if let Some(menu) = menu{
+                    if let Some(menu) = menu {
                         cx.update_menu(menu);
                     }
                     let bg_inst = self.caption_bg.begin_quad(cx, &Layout {
@@ -213,12 +217,12 @@ impl DesktopWindow {
             }
             self.caption_view.end_view(cx);
         }
-        cx.turtle_new_line(); 
-            
-        if self.inner_over_chrome{
-            let _ = self.inner_view.begin_view(cx, Layout{abs_origin: Some(Vec2::zero()),..Layout::default()});
+        cx.turtle_new_line();
+        
+        if self.inner_over_chrome {
+            let _ = self.inner_view.begin_view(cx, Layout {abs_origin: Some(Vec2::zero()), ..Layout::default()});
         }
-        else{
+        else {
             let _ = self.inner_view.begin_view(cx, Layout::default());
         }
         Ok(())
@@ -227,13 +231,13 @@ impl DesktopWindow {
     pub fn end_desktop_window(&mut self, cx: &mut Cx) {
         self.inner_view.end_view(cx);
         // lets draw a VR button top right over the UI.
-        if cx.vr_can_present{ // show a switch-to-VRMode button
+        if cx.vr_can_present { // show a switch-to-VRMode button
             cx.reset_turtle_walk();
-            cx.move_turtle( cx.get_width_total() - 50.0, 0.);
+            cx.move_turtle(cx.get_width_total() - 50.0, 0.);
             self.vr_btn.draw_desktop_button(cx, DesktopButtonType::VRMode);
         }
         self.main_view.end_view(cx);
-
+        
         self.pass.end_pass(cx);
         
         self.window.end_window(cx);

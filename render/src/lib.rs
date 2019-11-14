@@ -83,6 +83,7 @@ mod blit;
 mod text;
 mod events;
 mod menu; 
+mod theming;
 
 pub use crate::cx::*;
 pub use crate::quad::*;

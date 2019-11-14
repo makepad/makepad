@@ -11,11 +11,22 @@ pub enum Wrapping {
     Ellipsis(f32)
 }
 
+#[derive(Clone, Default)]
+pub struct TextStyle {
+    pub font_path: String,
+    pub font_id: Option<usize>,
+    pub font_size: f32,
+    pub brightness: f32,
+    pub curve: f32,
+    pub line_spacing: f32,
+    pub top_drop: f32,
+    pub height_factor: f32,
+}
+
 #[derive(Clone)]
 pub struct Text {
     pub font: Font,
     pub shader: Shader,
-    pub text: String,
     pub color: Color,
     pub font_size: f32,
     pub font_scale: f32, 
@@ -37,7 +48,6 @@ impl Text {
             font: cx.load_font_path("resources/Ubuntu-R.ttf"),
             do_h_scroll: true,
             do_v_scroll: true,
-            text: "".to_string(),
             font_size: 8.0,
             font_scale: 1.0,
             line_spacing: 1.4,

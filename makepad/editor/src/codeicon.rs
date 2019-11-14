@@ -129,7 +129,7 @@ impl CodeIcon {
     }
     
     pub fn draw_icon_walk(&mut self, cx: &mut Cx, icon_type: CodeIconType) -> InstanceArea {
-        let inst = self.quad.draw_quad_walk(cx, Width::Fix(self.width), Height::Fix(self.height), self.margin);
+        let inst = self.quad.draw_quad(cx, Width::Fix(self.width), Height::Fix(self.height), self.margin);
         inst.push_float(cx, icon_type.shader_float());
         inst
     }
