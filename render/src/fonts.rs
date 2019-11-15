@@ -10,7 +10,7 @@ pub struct Font {
 }
 
 impl Cx {
-    
+    /*
     pub fn load_font_style(&mut self, style: &str) -> Font {
         self.load_font_path(&self.font(style))
     }
@@ -32,7 +32,7 @@ impl Cx {
         return Font {
             font_id: Some(font_id)
         }
-    }
+    }*/
 }
 
 pub struct TrapezoidText {

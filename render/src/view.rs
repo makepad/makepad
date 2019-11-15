@@ -147,7 +147,7 @@ impl View{
         
         cx.view_stack.push(view_id);
         
-        cx.begin_turtle(&override_layout, Area::View(ViewArea {
+        cx.begin_turtle(override_layout, Area::View(ViewArea {
             view_id: view_id,
             redraw_id: cx.redraw_id
         }));

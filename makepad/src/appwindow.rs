@@ -3,7 +3,6 @@ use render::*;
 use widget::*;
 use serde::*;
 use editor::*;
-use terminal::*;
 
 use crate::appstorage::*;
 use crate::fileeditor::*;
@@ -21,8 +20,7 @@ pub enum Panel {
     Keyboard,
     FileTree,
     FileEditorTarget,
-    FileEditor {path: String, scroll_pos:Vec2, editor_id: u64},
-    LocalTerminal {start_path: String, terminal_id: u64}
+    FileEditor {path: String, scroll_pos:Vec2, editor_id: u64}
 }
 
 #[derive(Clone)]
@@ -33,7 +31,6 @@ pub struct AppWindow {
     pub log_list: LogList,
     pub keyboard: Keyboard,
     pub file_editors: Elements<u64, FileEditor, FileEditorTemplates>,
-    pub local_terminals: Elements<u64, LocalTerminal, LocalTerminal>,
     pub dock: Dock<Panel>,
 }
 

@@ -72,7 +72,7 @@ impl Blit {
     }
     
     
-    pub fn begin_blit(&mut self, cx: &mut Cx, texture:&Texture, layout: &Layout) -> InstanceArea {
+    pub fn begin_blit(&mut self, cx: &mut Cx, texture:&Texture, layout: Layout) -> InstanceArea {
         let inst = self.draw_blit(cx, texture, Rect::zero());
         let area = inst.clone().into_area();
         cx.begin_turtle(layout, area);

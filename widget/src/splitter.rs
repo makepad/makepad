@@ -1,5 +1,6 @@
 use render::*;
 use serde::*;
+use crate::theme::*;
 
 #[derive(Clone)]
 pub struct Splitter {
@@ -65,7 +66,7 @@ impl Splitter {
     
     pub fn get_default_anim(cx: &Cx) -> Anim {
         Anim::new(Play::Cut {duration: 0.5}, vec![
-            Track::color(cx, "split.color", Ease::Lin, vec![(1.0, cx.color("bg_split"))]),
+            Track::color_id(cx, "split.color", Ease::Lin, vec![(1.0, ColorBgSplitter::id(cx))]),
         ])
     }
     
@@ -256,14 +257,14 @@ impl Splitter {
         self._calc_pos -= self._calc_pos % (1.0 / dpi_factor);
         match self.axis {
             Axis::Horizontal => {
-                cx.begin_turtle(&Layout {
+                cx.begin_turtle(Layout {
                     width: Width::Fill,
                     height: Height::Fix(self._calc_pos),
                     ..Default::default()
                 }, Area::Empty)
             },
             Axis::Vertical => {
-                cx.begin_turtle(&Layout {
+                cx.begin_turtle(Layout {
                     width: Width::Fix(self._calc_pos),
                     height: Height::Fill,
                     ..Default::default()
@@ -303,7 +304,7 @@ impl Splitter {
                 }
             }
         };
-        cx.begin_turtle(&Layout {..Default::default()}, Area::Empty);
+        cx.begin_turtle(Layout::default(), Area::Empty);
     }
     
     pub fn end_splitter(&mut self, cx: &mut Cx) {

@@ -1,5 +1,6 @@
 // a window menu implementation
 use render::*;
+use crate::theme::*;
 
 #[derive(Clone)]
 pub struct WindowMenu {
@@ -11,11 +12,11 @@ pub struct WindowMenu {
 pub struct MenuItemDraw {
     pub text: Text,
     pub item_bg: Quad,
-    pub row_height: f32,
-    pub name_color: Color,
-    pub bg_color: Color,
-    pub bg_over_color: Color,
-    pub bg_selected_color: Color,
+    pub item_layout: LayoutId,
+    pub name_color: ColorId,
+    pub bg_color: ColorId,
+    pub bg_over_color: ColorId,
+    pub bg_selected_color: ColorId,
 }
 
 impl MenuItemDraw {
@@ -23,20 +24,20 @@ impl MenuItemDraw {
         Self {
             text: Text {
                 wrapping: Wrapping::Word,
-                ..Text::style(cx)
+                ..Text::style(cx, TextStyleWindowMenu::id(cx))
             },
+            item_layout: LayoutWindowMenu::id(cx),
             item_bg: Quad::style(cx),
-            row_height: 20.0,
-            name_color: color("white"),
-            bg_color: cx.color("bg_selected"),
-            bg_over_color: cx.color("bg_odd"),
-            bg_selected_color: cx.color("bg_selected_over"),
+            name_color: ColorTextSelectedFocus::id(cx),
+            bg_color: ColorBgSelected::id(cx),
+            bg_over_color: ColorBgOdd::id(cx),
+            bg_selected_color: ColorBgSelectedOver::id(cx),
         }
     }
     
     pub fn get_default_anim(&self, cx: &Cx) -> Anim {
         Anim::new(Play::Chain {duration: 0.01}, vec![
-            Track::color(cx, "bg.color", Ease::Lin, vec![
+            Track::color_id(cx, "bg.color", Ease::Lin, vec![
                 (1.0, self.bg_color)
             ])
         ])
@@ -44,7 +45,7 @@ impl MenuItemDraw {
     
     pub fn get_default_anim_cut(&self, cx: &Cx) -> Anim {
         Anim::new(Play::Cut {duration: 0.01}, vec![
-            Track::color(cx, "bg.color", Ease::Lin, vec![
+            Track::color_id(cx, "bg.color", Ease::Lin, vec![
                 (0.0, self.bg_color)
             ])
         ])
@@ -52,21 +53,12 @@ impl MenuItemDraw {
     
     pub fn get_over_anim(&self, cx: &Cx) -> Anim {
         Anim::new(Play::Cut {duration: 0.02}, vec![
-            Track::color(cx, "bg.color", Ease::Lin, vec![
+            Track::color_id(cx, "bg.color", Ease::Lin, vec![
                 (0., self.bg_over_color),
             ])
         ])
     }
     
-    pub fn get_line_layout(&self) -> Layout {
-        Layout {
-            width: Width::Fill,
-            height: Height::Fix(self.row_height),
-            padding: Padding {l: 2., t: 3., b: 2., r: 0.},
-            line_wrap: LineWrap::None,
-            ..Default::default()
-        }
-    }
     /*
     pub fn draw_log_path(&mut self, cx: &mut Cx, path: &str, row: usize) {
         self.text.color = self.path_color;

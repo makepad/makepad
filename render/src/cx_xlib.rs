@@ -11,6 +11,7 @@ use std::sync::Mutex;
 //use std::os::unix::io::FromRawFd;
 use std::mem;
 use std::os::raw::{c_char, c_uchar, c_int, c_uint, c_ulong, c_long, c_void};
+use std::path::PathBuf;
 use std::ptr;
 use time::precise_time_ns;
 
@@ -47,6 +48,8 @@ pub struct XlibApp {
     pub atom_multiple: X11_sys::Atom,
     pub atom_text_plain: X11_sys::Atom,
     pub atom_atom: X11_sys::Atom,
+
+    pub dnd: Dnd,
 }
 
 #[derive(Clone)]
@@ -132,6 +135,7 @@ impl XlibApp {
                 timers: VecDeque::new(),
                 free_timers: Vec::new(),
                 current_cursor: MouseCursor::Default,
+                dnd: Dnd::new(display),
             }
         }
     }
@@ -225,54 +229,58 @@ impl XlibApp {
                     match event.type_ as u32 {
                         X11_sys::SelectionNotify => {
                             let selection = event.xselection; 
-                            // first get the size of the thing
-                            let mut actual_type = mem::uninitialized();
-                            let mut actual_format = mem::uninitialized();
-                            let mut n_items = mem::uninitialized();
-                            let mut bytes_to_read = mem::uninitialized();
-                            let mut ret = mem::uninitialized(); 
-                            X11_sys::XGetWindowProperty(
-                                self.display,
-                                selection.requestor, 
-                                selection.property, 
-                                0,
-                                0,
-                                0,
-                                X11_sys::AnyPropertyType as c_ulong,  
-                                &mut actual_type,
-                                &mut actual_format,
-                                &mut n_items,
-                                &mut bytes_to_read,
-                                &mut ret
-                            );
-                            //read all of it
-                            let mut bytes_after = mem::uninitialized();
-                            X11_sys::XGetWindowProperty(
-                                self.display,
-                                selection.requestor, 
-                                selection.property, 
-                                0,
-                                bytes_to_read as c_long,
-                                0,
-                                X11_sys::AnyPropertyType as c_ulong,  
-                                &mut actual_type,
-                                &mut actual_format,
-                                &mut n_items,
-                                &mut bytes_after,
-                                &mut ret
-                            );
-                            if ret != ptr::null_mut() && bytes_to_read > 0{
-                                let utf8_slice = std::slice::from_raw_parts::<u8>(ret as *const _ as *const u8, bytes_to_read as usize);
-                                if let Ok(utf8_string) = String::from_utf8(utf8_slice.to_vec()){
-                                   self.do_callback(&mut vec![
-                                        Event::TextInput(TextInputEvent {
-                                            input: utf8_string,
-                                            was_paste: true,
-                                            replace_last: false
-                                        })
-                                    ]);
+                            if selection.property == self.dnd.atoms.selection {
+                                self.dnd.handle_selection_event(&selection);
+                            } else {
+                                // first get the size of the thing
+                                let mut actual_type = mem::uninitialized();
+                                let mut actual_format = mem::uninitialized();
+                                let mut n_items = mem::uninitialized();
+                                let mut bytes_to_read = mem::uninitialized();
+                                let mut ret = mem::uninitialized(); 
+                                X11_sys::XGetWindowProperty(
+                                    self.display,
+                                    selection.requestor, 
+                                    selection.property, 
+                                    0,
+                                    0,
+                                    0,
+                                    X11_sys::AnyPropertyType as c_ulong,  
+                                    &mut actual_type,
+                                    &mut actual_format,
+                                    &mut n_items,
+                                    &mut bytes_to_read,
+                                    &mut ret
+                                );
+                                //read all of it
+                                let mut bytes_after = mem::uninitialized();
+                                X11_sys::XGetWindowProperty(
+                                    self.display,
+                                    selection.requestor, 
+                                    selection.property, 
+                                    0,
+                                    bytes_to_read as c_long,
+                                    0,
+                                    X11_sys::AnyPropertyType as c_ulong,  
+                                    &mut actual_type,
+                                    &mut actual_format,
+                                    &mut n_items,
+                                    &mut bytes_after,
+                                    &mut ret
+                                );
+                                if ret != ptr::null_mut() && bytes_to_read > 0{
+                                    let utf8_slice = std::slice::from_raw_parts::<u8>(ret as *const _ as *const u8, bytes_to_read as usize);
+                                    if let Ok(utf8_string) = String::from_utf8(utf8_slice.to_vec()){
+                                    self.do_callback(&mut vec![
+                                            Event::TextInput(TextInputEvent {
+                                                input: utf8_string,
+                                                was_paste: true,
+                                                replace_last: false
+                                            })
+                                        ]);
+                                    }
+                                    X11_sys::XFree(ret as *mut _ as *mut c_void);
                                 }
-                                X11_sys::XFree(ret as *mut _ as *mut c_void);
                             }
                         },
                         X11_sys::SelectionRequest => {
@@ -601,10 +609,16 @@ impl XlibApp {
                             })]);
                         },
                         X11_sys::ClientMessage => {
-                            /*
-                            if event.client_message.data.get_long(0) as u64 == wm_delete_message {
-                                self.event_loop_running = false;
-                            }*/
+                            let event = event.xclient;
+                            if event.message_type == self.dnd.atoms.enter {
+                                self.dnd.handle_enter_event(&event);
+                            } else if event.message_type == self.dnd.atoms.drop {
+                                self.dnd.handle_drop_event(&event);
+                            } else if event.message_type == self.dnd.atoms.leave {
+                                self.dnd.handle_leave_event(&event);
+                            } else if event.message_type == self.dnd.atoms.position {
+                                self.dnd.handle_position_event(&event);
+                            }
                         },
                         X11_sys::Expose => {
                             /*
@@ -1065,6 +1079,8 @@ impl XlibWindow {
             
             X11_sys::XChangeProperty(display, window, atom_motif_wm_hints, atom_motif_wm_hints, 32, X11_sys::PropModeReplace as i32, &hints as *const _ as *const u8, 5);
             
+            (*self.xlib_app).dnd.enable_for_window(window);
+
             // Map the window to the screen
             X11_sys::XMapWindow(display, window);
             X11_sys::XFlush(display);
@@ -1557,6 +1573,276 @@ const _NET_WM_STATE_REMOVE: c_long = 0;/* remove/unset property */
 const _NET_WM_STATE_ADD: c_long = 1;/* add/set property */
 const _NET_WM_STATE_TOGGLE: c_long = 2;/* toggle property  */
 
-
-
 /* move via keyboard */
+
+pub struct Dnd {
+    atoms: DndAtoms,
+    display: *mut X11_sys::Display,
+    type_list: Option<Vec<X11_sys::Atom>>,
+    selection: Option<CString>,
+}
+
+impl Dnd {
+    unsafe fn new(display: *mut X11_sys::Display) -> Dnd {
+        Dnd {
+            atoms: DndAtoms::new(display),
+            display,
+            type_list: None,
+            selection: None,
+        }
+    }
+
+    /// Enables drag-and-drop for the given window.
+    unsafe fn enable_for_window(&mut self, window: X11_sys::Window) {
+        // To enable drag-and-drop for a window, we need to set the XDndAware property of the window
+        // to the version of XDnd we support.
+
+        // I took this value from the Winit source code. Apparently, this is the latest version, and
+        // hasn't changed since 2002.
+        let version = 5 as c_ulong;
+
+        X11_sys::XChangeProperty(
+            self.display,
+            window,
+            self.atoms.aware,
+            4, // XA_ATOM
+            32,
+            X11_sys::PropModeReplace as c_int,
+            &version as *const c_ulong  as *const c_uchar,
+            1
+        );
+    }
+
+    /// Handles a XDndEnter event.
+    unsafe fn handle_enter_event(&mut self, event: &X11_sys::XClientMessageEvent) {
+        // The XDndEnter event is sent by the source window when a drag begins. That is, the mouse
+        // enters the client rectangle of the target window. The target window is supposed to
+        // respond to this by requesting the list of types supported by the source.
+
+        let source_window = event.data.l[0] as X11_sys::Window;
+        let has_more_types = event.data.l[1] & (1 << 0) != 0;
+
+        // If the has_more_types flags is set, we have to obtain the list of supported types from
+        // the XDndTypeList property. Otherwise, we can obtain the list of supported types from the
+        // event itself. 
+        self.type_list = Some(if has_more_types {    
+            self.get_type_list_property(source_window)
+        } else {
+            event.data.l[2..4]
+                 .iter()
+                 .map(|&l| l as X11_sys::Atom)
+                 .filter(|&atom| atom != X11_sys::None as X11_sys::Atom)
+                 .collect()
+        });
+    }
+
+    /// Handles a XDndDrop event.
+    unsafe fn handle_drop_event(&mut self, event: &X11_sys::XClientMessageEvent) {
+        // The XDndLeave event is sent by the source window when a drag is confirmed. That is, the
+        // mouse button is released while the mouse is inside the client rectangle of the target
+        // window. The target window is supposed to respond to this by requesting that the selection
+        // representing the thing being dragged is converted to the appropriate data type (in our
+        // case, a URI list). The source window, in turn, is supposed to respond this by sending a
+        // selection event containing the data to the source window.
+
+        let target_window = event.window as X11_sys::Window;
+        self.convert_selection(target_window);
+        self.type_list = None;
+    }
+
+    /// Handles a XDndLeave event.
+    unsafe fn handle_leave_event(&mut self, event: &X11_sys::XClientMessageEvent) {
+        // The XDndLeave event is sent by the source window when a drag is canceled. That is, the
+        // mouse leaves the client rectangle of the target window. The target window is supposed to
+        // repsond this this by pretending the drag never happened.
+
+        self.type_list = None;
+    }
+
+    /// Handles a XDndPosition event.
+    unsafe fn handle_position_event(&mut self, event: &X11_sys::XClientMessageEvent) {
+        // The XDndPosition event is sent by the source window after the XDndEnter event, every time
+        // the mouse is moved. The target window is supposed to respond to this by sending a status
+        // event to the source window notifying whether it can accept the drag at this position.
+
+        let target_window = event.window as X11_sys::Window;
+        let source_window = event.data.l[0] as X11_sys::Window;
+        
+        // For now we accept te drag if and only if the list of types supported by the source
+        // includes a uri list.
+        //
+        // TODO: Extend this test by taking into account the position of the mouse as well.
+        let accepted = self.type_list.as_ref().map_or(false, |type_list| type_list.contains(&self.atoms.uri_list));
+        
+        // Notify the source window whether we can accept the drag at this position.
+        self.send_status_event(source_window, target_window, accepted);
+        
+        // If this is the first time we've accepted the drag, request that the drag-and-drop
+        // selection be converted to a URI list. The target window is supposed to respond to this by
+        // sending a XSelectionEvent containing the URI list.
+
+        // Since this is an asynchronous operation, its possible for another XDndPosition event to
+        // come in before the response to the first conversion request has been received. In this
+        // case, a second conversion request will be sent, the response to which will be ignored. 
+        if accepted && self.selection.is_none() {    
+        }
+    }
+
+    /// Handles a XSelectionEvent.
+    unsafe fn handle_selection_event(&mut self, event: &X11_sys::XSelectionEvent) {
+        // The XSelectionEvent is sent by the source window in response to a request by the source
+        // window to convert the selection representing the thing being dragged to the appropriate
+        // data type. This request is always sent in response to a XDndDrop event, so this event
+        // should only be received after a drop operation has completed.
+
+        let source_window = event.requestor;
+        let selection = CString::new(self.get_selection_property(source_window)).unwrap();
+        println!("{:?}", selection);
+
+        // TODO: Actually use the selection
+    }
+
+    /// Gets the XDndSelection property from the source window.
+    unsafe fn get_selection_property(&mut self, source_window: X11_sys::Window) -> Vec<c_uchar> {
+        let mut selection = Vec::new();
+        let mut offset = 0;
+        let length = 1024;
+        let mut actual_type = 0;
+        let mut actual_format = 0;
+        let mut nitems = 0;
+        let mut bytes_after = 0;
+        let mut prop = ptr::null_mut();
+        loop {
+            X11_sys::XGetWindowProperty(
+                self.display,
+                source_window,
+                self.atoms.selection,
+                offset,
+                length,
+                X11_sys::False as c_int,
+                self.atoms.uri_list,
+                &mut actual_type,
+                &mut actual_format,
+                &mut nitems,
+                &mut bytes_after,
+                &mut prop,
+            );
+            selection.extend_from_slice(slice::from_raw_parts(prop as *mut c_uchar, nitems as usize));
+            X11_sys::XFree(prop as *mut c_void);
+            if bytes_after == 0 {
+                break;
+            }
+            offset += length;
+        };
+        selection
+    }
+
+    /// Gets the XDndTypeList property from the source window.
+    unsafe fn get_type_list_property(&mut self, source_window: X11_sys::Window) -> Vec<X11_sys::Atom> {
+        let mut type_list = Vec::new();
+        let mut offset = 0;
+        let length = 1024;
+        let mut actual_type = 0;
+        let mut actual_format = 0;
+        let mut nitems = 0;
+        let mut bytes_after = 0;
+        let mut prop = ptr::null_mut();
+        loop {
+            X11_sys::XGetWindowProperty(
+                self.display,
+                source_window,
+                self.atoms.type_list,
+                offset,
+                length,
+                X11_sys::False as c_int,
+                4, // XA_ATOM,
+                &mut actual_type,
+                &mut actual_format,
+                &mut nitems,
+                &mut bytes_after,
+                &mut prop,
+            );
+            type_list.extend_from_slice(slice::from_raw_parts(prop as *mut X11_sys::Atom, nitems as usize));
+            X11_sys::XFree(prop as *mut c_void);
+            if bytes_after == 0 {
+                break;
+            }
+            offset += length;
+        };
+        type_list
+    }
+
+    /// Sends a XDndStatus event to the target window.
+    unsafe fn send_status_event(&mut self, source_window: X11_sys::Window, target_window: X11_sys::Window, accepted: bool) {
+        X11_sys::XSendEvent(
+            self.display,
+            source_window,
+            X11_sys::False as c_int,
+            X11_sys::NoEventMask as c_long,
+            &mut X11_sys::XClientMessageEvent {
+                type_: X11_sys::ClientMessage as c_int,
+                serial: 0,
+                send_event: 0,
+                display: self.display,
+                window: source_window,
+                message_type: self.atoms.status,
+                format: 32,
+                data: {
+                    let mut data = mem::zeroed::<X11_sys::XClientMessageEvent__bindgen_ty_1>();
+                    data.l[0] = target_window as c_long;
+                    data.l[1] = if accepted { 1 << 0 } else { 0 };
+                    data.l[2] = 0;
+                    data.l[3] = 0;
+                    data.l[4] = if accepted { self.atoms.action_private } else { self.atoms.none } as c_long;
+                    data
+                }
+            } as *mut X11_sys::XClientMessageEvent as *mut X11_sys::XEvent
+        );
+        X11_sys::XFlush(self.display);
+    }
+
+    // Requests that the selection representing the thing being dragged is converted to the
+    // appropriate data type (in our case, a URI list).
+    unsafe fn convert_selection(&self, target_window: X11_sys::Window) {
+        X11_sys::XConvertSelection(
+            self.display,
+            self.atoms.selection,
+            self.atoms.uri_list,
+            self.atoms.selection,
+            target_window,
+            X11_sys::CurrentTime as X11_sys::Time,
+        );
+    }
+}
+
+struct DndAtoms {
+    action_private: X11_sys::Atom,
+    aware: X11_sys::Atom,
+    drop: X11_sys::Atom,
+    enter: X11_sys::Atom,
+    leave: X11_sys::Atom,
+    none: X11_sys::Atom,
+    position: X11_sys::Atom,
+    selection: X11_sys::Atom,
+    status: X11_sys::Atom,
+    type_list: X11_sys::Atom,
+    uri_list: X11_sys::Atom,
+}
+
+impl DndAtoms {
+    unsafe fn new(display: *mut X11_sys::Display) -> DndAtoms {
+        DndAtoms {
+            action_private: X11_sys::XInternAtom(display, CString::new("XdndActionPrivate").unwrap().as_ptr(), 0),
+            aware: X11_sys::XInternAtom(display, CString::new("XdndAware").unwrap().as_ptr(), 0),
+            drop: X11_sys::XInternAtom(display, CString::new("XdndDrop").unwrap().as_ptr(), 0),
+            enter: X11_sys::XInternAtom(display, CString::new("XdndEnter").unwrap().as_ptr(), 0),
+            leave: X11_sys::XInternAtom(display, CString::new("XdndLeave").unwrap().as_ptr(), 0),
+            none: X11_sys::XInternAtom(display, CString::new("None").unwrap().as_ptr(), 0),
+            position: X11_sys::XInternAtom(display, CString::new("XdndPosition").unwrap().as_ptr(), 0),
+            selection: X11_sys::XInternAtom(display, CString::new("XdndSelection").unwrap().as_ptr(), 0),
+            status: X11_sys::XInternAtom(display, CString::new("XdndStatus").unwrap().as_ptr(), 0),
+            type_list: X11_sys::XInternAtom(display, CString::new("XdndTypeList").unwrap().as_ptr(), 0),
+            uri_list: X11_sys::XInternAtom(display, CString::new("text/uri-list").unwrap().as_ptr(), 0),
+        }
+    }
+}

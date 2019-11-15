@@ -2,6 +2,8 @@
 use crate::cx::*;
 //use std::iter::Peekable;
 
+theme_text_style!(ThemeTextDefault);
+
 #[derive(Clone)]
 pub enum Wrapping {
     Char,
@@ -11,7 +13,7 @@ pub enum Wrapping {
     Ellipsis(f32)
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct TextStyle {
     pub font_path: String,
     pub font_id: Option<usize>,
@@ -23,31 +25,54 @@ pub struct TextStyle {
     pub height_factor: f32,
 }
 
+impl Default for TextStyle{
+    fn default()->Self{
+        TextStyle{
+            font_path:"resources/Ubuntu-R.ttf".to_string(),
+            font_id: None,
+            font_size: 8.0,
+            brightness: 1.0,
+            curve: 0.7,
+            line_spacing: 1.4,
+            top_drop: 1.1,
+            height_factor: 1.3,
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct Text {
-    pub font: Font,
+    pub text_style: TextStyleId,
     pub shader: Shader,
     pub color: Color,
-    pub font_size: f32,
+    pub z: f32,
+    pub wrapping: Wrapping,
     pub font_scale: f32, 
     pub do_h_scroll: bool,
     pub do_v_scroll: bool,
+    /*
+    pub font: Font,
+    pub font_size: f32,
     pub brightness: f32,
     pub curve: f32,
     pub line_spacing: f32,
     pub top_drop: f32,
-    pub height_factor: f32,
-    pub z: f32,
-    pub wrapping: Wrapping,
+    pub height_factor: f32,*/
 }
 
 impl Text {
-    pub fn style(cx: &mut Cx) -> Self {
+    pub fn style(cx: &mut Cx, text_style: TextStyleId) -> Self {
         Self {
             shader: cx.add_shader(Self::def_text_shader(), "TextAtlas"),
-            font: cx.load_font_path("resources/Ubuntu-R.ttf"),
+            text_style: text_style,
             do_h_scroll: true,
             do_v_scroll: true,
+            z: 0.0,
+            wrapping: Wrapping::Word,
+            color: color("white"),
+            font_scale: 1.0,
+            /*
+            font: cx.load_font_path("resources/Ubuntu-R.ttf"),
             font_size: 8.0,
             font_scale: 1.0,
             line_spacing: 1.4,
@@ -55,9 +80,7 @@ impl Text {
             height_factor: 1.3,
             curve: 0.7,
             brightness: 1.0,
-            z: 0.0,
-            wrapping: Wrapping::Word,
-            color: color("white")
+            */
         }
     }
     
@@ -164,7 +187,9 @@ impl Text {
         //let font_id = self.font.font_id.unwrap();
         let inst = cx.new_instance(&self.shader, 0);
         let aligned = cx.align_instance(inst);
-        
+        let text_style = &cx.text_styles[self.text_style];
+        let brightness = text_style.brightness;
+        let curve = text_style.curve;
         if aligned.inst.need_uniforms_now(cx) {
             
             // cx.fonts[font_id].width as f32 , cx.fonts[font_id].height as f32
@@ -173,8 +198,8 @@ impl Text {
             //aligned.inst.push_uniform_vec2(cx, self.font.texture_size);
             
             aligned.inst.push_uniform_float(cx, 0.);
-            aligned.inst.push_uniform_float(cx, self.brightness);
-            aligned.inst.push_uniform_float(cx, self.curve);
+            aligned.inst.push_uniform_float(cx, brightness);
+            aligned.inst.push_uniform_float(cx, curve);
             aligned.inst.push_uniform_vec2f(
                 cx,
                 if self.do_h_scroll {1.0}else {0.0},
@@ -190,20 +215,21 @@ impl Text {
     pub fn add_text<F>(&mut self, cx: &mut Cx, geom_x: f32, geom_y: f32, char_offset: usize, aligned: &mut AlignedInstance, chunk: &[char], mut char_callback: F)
     where F: FnMut(char, usize, f32, f32) -> f32
     {
+        let text_style = &cx.text_styles[self.text_style];
         let mut geom_x = geom_x;
         let mut char_offset = char_offset;
-        let font_id = self.font.font_id.unwrap();
+        let font_id = text_style.font_id.unwrap();
         
         let cxfont = &mut cx.fonts[font_id];
         
         let dpi_factor = cx.current_dpi_factor;
         
         let geom_y = (geom_y * dpi_factor).floor() / dpi_factor;
-        let atlas_page_id = cxfont.get_atlas_page_id(dpi_factor, self.font_size);
+        let atlas_page_id = cxfont.get_atlas_page_id(dpi_factor, text_style.font_size);
         
         let font = &mut cxfont.font_loaded.as_ref().unwrap();
         
-        let font_size_logical = self.font_size * 96.0 / (72.0 * font.units_per_em);
+        let font_size_logical = text_style.font_size * 96.0 / (72.0 * font.units_per_em);
         let font_size_pixels = font_size_logical * dpi_factor;
         
         let atlas_page = &mut cxfont.atlas_pages[atlas_page_id];
@@ -231,7 +257,7 @@ impl Text {
             
             // this one needs pixel snapping
             let min_pos_x = geom_x + font_size_logical * glyph.bounds.p_min.x;
-            let min_pos_y = geom_y - font_size_logical * glyph.bounds.p_min.y + self.font_size * self.top_drop;
+            let min_pos_y = geom_y - font_size_logical * glyph.bounds.p_min.y + text_style.font_size * text_style.top_drop;
             
             // compute subpixel shift
             let subpixel_x_fract = min_pos_x - (min_pos_x * dpi_factor).floor() / dpi_factor;
@@ -239,10 +265,10 @@ impl Text {
 
             // scale and snap it
             let scaled_min_pos_x = geom_x + font_size_logical * self.font_scale * glyph.bounds.p_min.x - subpixel_x_fract;
-            let scaled_min_pos_y = geom_y - font_size_logical * self.font_scale * glyph.bounds.p_min.y + self.font_size * self.font_scale * self.top_drop - subpixel_y_fract;
+            let scaled_min_pos_y = geom_y - font_size_logical * self.font_scale * glyph.bounds.p_min.y + text_style.font_size * self.font_scale * text_style.top_drop - subpixel_y_fract;
             
             // only use a subpixel id for really small fonts
-            let subpixel_id = if self.font_size>12.0 {
+            let subpixel_id = if text_style.font_size>12.0 {
                 0
             }
             else { // subtle 64 index subpixel id
@@ -291,7 +317,7 @@ impl Text {
                 self.z+0.00001*min_pos_x, //slight z-bias so we don't get z-fighting with neighbouring chars overlap a bit
                 geom_x,
                 geom_y,
-                self.font_size,
+                text_style.font_size,
                 char_offset as f32, // char_offset
                 marker, // marker
             ];
@@ -313,11 +339,13 @@ impl Text {
         let mut chunk = Vec::new();
         let mut width = 0.0;
         let mut elipct = 0;
-        let font_size = self.font_size;
+        let text_style = &cx.text_styles[self.text_style];
+        let font_size = text_style.font_size;
+        let height_factor = text_style.height_factor;
         let mut iter = text.chars().peekable();
         
-        let font_id = self.font.font_id.unwrap();
-        let font_size_logical = self.font_size * 96.0 / (72.0 * cx.fonts[font_id].font_loaded.as_ref().unwrap().units_per_em);
+        let font_id = text_style.font_id.unwrap();
+        let font_size_logical = text_style.font_size * 96.0 / (72.0 * cx.fonts[font_id].font_loaded.as_ref().unwrap().units_per_em);
         
         while let Some(c) = iter.next() {
             let last = iter.peek().is_none();
@@ -367,7 +395,7 @@ impl Text {
                 }
             }
             if emit {
-                let height = font_size * self.height_factor * self.font_scale;
+                let height = font_size * height_factor * self.font_scale;
                 let geom = cx.walk_turtle(
                     Width::Fix(width),
                     Height::Fix(height),
@@ -401,7 +429,8 @@ impl Text {
         let font_size_o = area.get_instance_offset(cx, "font_size");
         let char_offset_o = area.get_instance_offset(cx, "char_offset");
         let read = area.get_read_ref(cx);
-        let line_spacing = self.line_spacing;
+        let text_style = &cx.text_styles[self.text_style];
+        let line_spacing = text_style.line_spacing;
         let mut index = 0;
         if let Some(read) = read{
             while index < read.count{
@@ -436,7 +465,8 @@ impl Text {
     }
     
     pub fn get_monospace_base(&self, cx: &Cx) -> Vec2 {
-        let font_id = self.font.font_id.unwrap();
+        let text_style = &cx.text_styles[self.text_style];
+        let font_id = text_style.font_id.unwrap();
         let font = cx.fonts[font_id].font_loaded.as_ref().unwrap();
         let slot = font.char_code_to_glyph_index_map[33];
         let glyph = &font.glyphs[slot];
@@ -444,7 +474,7 @@ impl Text {
         //let font_size = if let Some(font_size) = font_size{font_size}else{self.font_size};
         Vec2 {
             x: glyph.horizontal_metrics.advance_width * (96.0 / (72.0 * font.units_per_em)),
-            y: self.line_spacing
+            y: text_style.line_spacing
         }
     }
 }

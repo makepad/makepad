@@ -15,7 +15,7 @@ impl Cx {
     }
     
     // begin a new turtle with a layout
-    pub fn begin_turtle(&mut self, layout: &Layout, guard_area: Area) {
+    pub fn begin_turtle(&mut self, layout: Layout, guard_area: Area) {
         
         if !self.is_in_redraw_cycle {
             panic!("calling begin_turtle outside of redraw cycle is not possible!");
@@ -51,9 +51,9 @@ impl Cx {
         let turtle = Turtle {
             align_list_x: self.align_list.len(),
             align_list_y: self.align_list.len(),
-            layout: layout.clone(),
             origin: origin,
             walk: Vec2 {x: origin.x + layout.padding.l, y: origin.y + layout.padding.t},
+            layout: layout,
             biggest: 0.0,
             bound_left_top: Vec2 {x: std::f32::INFINITY, y: std::f32::INFINITY},
             bound_right_bottom: Vec2 {x: std::f32::NEG_INFINITY, y: std::f32::NEG_INFINITY},
@@ -724,7 +724,7 @@ pub fn debug_pt(x:f32, y:f32, color:i32, s:&str){
         })*/
 
 
-#[derive(Clone, Debug)]
+#[derive(Copy, Clone, Debug)]
 pub enum Width {
     Fill,
     Fix(f32),
@@ -736,7 +736,7 @@ pub enum Width {
     ScalePad(f32, f32),
 }
 
-#[derive(Clone, Debug)]
+#[derive(Copy, Clone, Debug)]
 pub enum Height {
     Fill,
     Fix(f32),
@@ -859,7 +859,7 @@ impl Padding {
 }
 
 
-#[derive(Clone, Debug)]
+#[derive(Copy, Clone, Debug)]
 pub enum Direction {
     Left,
     Right,
@@ -873,7 +873,7 @@ impl Default for Direction {
     }
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Copy, Clone, Serialize, Deserialize)]
 pub enum Axis {
     Horizontal,
     Vertical
@@ -885,7 +885,7 @@ impl Default for Axis {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Copy, Clone, Debug)]
 pub enum LineWrap {
     None,
     NewLine
@@ -896,7 +896,7 @@ impl Default for LineWrap {
     }
 }
 
-#[derive(Clone, Default, Debug)]
+#[derive(Copy, Clone, Default, Debug)]
 pub struct Layout {
     pub margin: Margin,
     pub padding: Padding,

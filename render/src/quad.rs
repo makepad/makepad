@@ -67,7 +67,7 @@ impl Quad {
         }))
     }
     
-    pub fn begin_quad(&mut self, cx: &mut Cx, layout: &Layout) -> InstanceArea {
+    pub fn begin_quad(&mut self, cx: &mut Cx, layout: Layout) -> InstanceArea {
         let inst = self.draw_quad_rel(cx, Rect::zero());
         let area = inst.clone().into_area();
         cx.begin_turtle(layout, area);

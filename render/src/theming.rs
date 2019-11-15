@@ -7,86 +7,47 @@ pub struct CxThemeTextStyles(pub Vec<TextStyle>);
 
 impl Cx{
     
-    pub fn _set_color(&self, val: Color, type_id:TypeId)->ColorId{
-        // allocate a pal
-        let id = self.color_id;
-        self.color_id += 1;
-        let theme_color_to_id = self.theme_color_to_id.borrow_mut();
-        theme_color_to_id.insert(type_id, id);
-        self.colors.0.resize(id + 1, Color{r:1.0,g:1.0,b:0.0,a:1.0});
+    pub fn _set_color(&mut self, val: Color, type_id:TypeId){
+        // if we already have it don't alloc it
+        let id = if let Some(stored_id) = self.theme_color_to_id.get(&type_id) {
+            *stored_id
+        }
+        else{
+            let new_id = self.color_id;
+            self.color_id += 1;
+            self.colors.0.resize(self.color_id, Color{r:1.0,g:1.0,b:0.0,a:1.0});
+            self.theme_color_to_id.insert(type_id, new_id);
+            new_id
+        };
         self.colors.0[id] = val;
-        ColorId(id)
     }
     
-    pub fn set_color<F>(&self, val: Color)->ColorId 
-    where F: ThemeTextStyle + 'static {
-        self._set_color(val, TypeId::of::<F>())
-    }
-
-    pub fn _set_text_style(&self, val: TextStyle, type_id:TypeId)->TextStyleId{
-        // allocate a pal
-        let id = self.text_style_id;
-        self.text_style_id += 1;
-        let theme_text_style_to_id = self.theme_text_style_to_id.borrow_mut();
-        theme_text_style_to_id.insert(type_id, id);
-        self.text_styles.0.resize(id + 1, TextStyle::default());
+    pub fn _set_text_style(&mut self, val: TextStyle, type_id:TypeId){
+        let id = if let Some(stored_id) = self.theme_text_style_to_id.get(&type_id) {
+            *stored_id
+        }
+        else{
+            let new_id = self.text_style_id;
+            self.text_style_id += 1;
+            self.text_styles.0.resize(self.text_style_id, TextStyle::default());
+            self.theme_text_style_to_id.insert(type_id, new_id);
+            new_id
+        };
         self.text_styles.0[id] = val;
-        TextStyleId(id)
     }
 
-    pub fn set_text_style<F>(&self, val: TextStyle)->TextStyleId
-    where F: ThemeTextStyle + 'static {
-        self._set_text_style(val, TypeId::of::<F>())
-    }
-
-    fn _set_layout(&self, val: Layout, type_id:TypeId)->LayoutId{
-        // allocate a pal
-        let id = self.layout_id;
-        self.layout_id += 1;
-        let theme_layout_to_id = self.theme_layout_to_id.borrow_mut();
-        theme_layout_to_id.insert(type_id, id);
-        self.layouts.0.resize(id + 1, Layout::default());
+    pub fn _set_layout(&mut self, val: Layout, type_id:TypeId){
+        let id = if let Some(stored_id) = self.theme_text_style_to_id.get(&type_id) {
+            *stored_id
+        }
+        else{
+            let new_id = self.layout_id;
+            self.layout_id += 1;
+            self.layouts.0.resize(self.layout_id, Layout::default());
+            self.theme_layout_to_id.insert(type_id, new_id);
+            new_id
+        };
         self.layouts.0[id] = val;
-        LayoutId(id)
-    }
-
-    
-    pub fn set_layout<F>(&self, val: Layout)->LayoutId
-    where F: ThemeLayout + 'static {
-        self._set_layout(val, TypeId::of::<F>())
-    }
-        
-    pub fn theme_color<F>(&self) -> ColorId
-    where F: ThemeColor + 'static {
-        let type_id = TypeId::of::<F>();
-        if let Some(stored_id) = self.theme_color_to_id.borrow().get(&type_id) {
-            ColorId(*stored_id)
-        }
-        else {
-            self._set_color(F::def(), type_id)
-        }
-    }
-    
-    pub fn theme_text_style<F>(&self) -> TextStyleId
-    where F: ThemeTextStyle + 'static {
-        let type_id = TypeId::of::<F>();
-        if let Some(stored_id) = self.theme_text_style_to_id.borrow().get(&type_id) {
-            TextStyleId(*stored_id)
-        }
-        else {
-            self._set_text_style(F::def(), type_id)
-        }
-    }
-    
-    pub fn theme_layout<F>(&self) -> LayoutId
-    where F: ThemeLayout + 'static {
-        let type_id = TypeId::of::<F>();
-        if let Some(stored_id) = self.theme_layout_to_id.borrow().get(&type_id) {
-            LayoutId(*stored_id)
-        }
-        else {
-            self._set_layout(F::def(), type_id)
-        }
     }
 }
 
@@ -172,19 +133,27 @@ impl CxThemeColors{
 }
 
 pub trait ThemeColor{
-    fn name()->&'static str;
+    fn type_id()->std::any::TypeId;
+    fn set(cx:&mut Cx, value:Color);
     fn id(cx:&Cx)->ColorId;
-    fn def()->Color;
 }
 
 #[macro_export]
 macro_rules!theme_color {
-    ( $ theme_color: ident, $def: expr) => {
-        pub struct $theme_color();
-        impl ThemeColor for $theme_color{
-            fn name()->&'static str{stringify!($theme_color)}
-            fn id(cx:&Cx)->ColorId{cx.theme_color::<$theme_color>()}
-            fn def()->Color{$def}
+    ( $ name: ident) => {
+        pub struct $name();
+        impl ThemeColor for $name{
+            fn type_id()->std::any::TypeId{std::any::TypeId::of::<$name>()}
+            fn set(cx:&mut Cx, value:Color){cx._set_color(value, $name::type_id())}
+            fn id(cx:&Cx)->ColorId{
+                let type_id = $name::type_id();
+                if let Some(stored_id) = cx.theme_color_to_id.get(&type_id) {
+                    ColorId(*stored_id)
+                }
+                else {
+                    panic!("ThemeColor {} not set", stringify!($name))
+                }
+            }
         }
     };
 }
@@ -210,32 +179,28 @@ impl std::ops::Index<TextStyleId> for CxThemeTextStyles{
     }
 }
 
-impl CxThemeTextStyles{
-
-    pub fn index(&self, text_style_id:TextStyleId)->&TextStyle{
-        if text_style_id.0 >= self.0.len(){
-            &self.0[0]
-        }
-        else{
-            &self.0[text_style_id.0]
-        }
-    }
-}
-
 pub trait ThemeTextStyle{
-    fn name()->&'static str;
+    fn type_id()->TypeId;
+    fn set(cx:&mut Cx, value:TextStyle);
     fn id(cx:&Cx)->TextStyleId;
-    fn def()->TextStyle;
 }
 
 #[macro_export]
 macro_rules!theme_text_style {
-    ( $ theme_text_style: ident, $def: expr) => {
-        pub struct $theme_text();
-        impl ThemeTextStyle for $theme_text_style{
-            fn name()->&'static str{stringify!($theme_text_style)}
-            fn id(cx:&Cx)->TextStyleId{cx.theme_text_style:<$theme_text_style>()}
-            fn def()->TextStyle{$def}
+    ( $ name: ident) => {
+        pub struct $name();
+        impl ThemeTextStyle for $name{
+            fn type_id()->std::any::TypeId{std::any::TypeId::of::<$name>()}
+            fn set(cx:&mut Cx, value:TextStyle){cx._set_text_style(value, $name::type_id())}
+            fn id(cx:&Cx)->TextStyleId{
+                let type_id = $name::type_id();
+                if let Some(stored_id) = cx.theme_text_style_to_id.get(&type_id) {
+                    TextStyleId(*stored_id)
+                }
+                else {
+                    panic!("ThemeTextStyle {} not set", stringify!($name))
+                }
+            }
         }
     };
 }
@@ -258,33 +223,29 @@ impl std::ops::Index<LayoutId> for CxThemeLayouts{
     }
 }
 
-impl CxThemeLayouts{
-
-    pub fn index(&self, layout_id:TextStyleId)->&Layout{
-        if layout_id.0 >= self.0.len(){
-            &self.0[0]
-        }
-        else{
-            &self.0[layout_id.0]
-        }
-    }
-}
-
 pub trait ThemeLayout{
-    fn name()->&'static str;
+    fn type_id()->TypeId;
+    fn set(cx:&mut Cx, value:Layout);
     fn id(cx:&Cx)->LayoutId;
-    fn def()->Layout;
 }
 
 
 #[macro_export]
 macro_rules!theme_layout {
-    ( $ theme_layout: ident, $def:expr) => {
-        pub struct $theme_layout();
-        impl ThemeLayout for $theme_layout{
-            fn name()->&'static str{stringify!($theme_layout)}
-            fn id(cx:&Cx)->LayoutId{cx.theme_layout:<$theme_layout>()}
-            fn def()->Layout{$def}
+    ( $ name: ident) => {
+        pub struct $name();
+        impl ThemeLayout for $name{
+            fn type_id()->std::any::TypeId{std::any::TypeId::of::<$name>()}
+            fn set(cx:&mut Cx, value:Layout){cx._set_layout(value, $name::type_id())}
+            fn id(cx:&Cx)->LayoutId{
+                let type_id = $name::type_id();
+                if let Some(stored_id) = cx.theme_layout_to_id.get(&type_id) {
+                    LayoutId(*stored_id)
+                }
+                else {
+                    panic!("ThemeLayout {} not set", stringify!($name))
+                }
+            }
         }
     };
 }

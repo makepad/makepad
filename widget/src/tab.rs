@@ -1,10 +1,11 @@
 use render::*;
 use crate::buttonlogic::*;
 use crate::tabclose::*;
+use crate::theme::*;
 
 #[derive(Clone)]
 pub struct Tab {
-    pub bg_layout: Layout,
+    pub bg_layout: LayoutId,
     pub bg: Quad,
     pub text: Text,
     pub tab_close: TabClose,
@@ -12,6 +13,7 @@ pub struct Tab {
     pub is_closeable: bool,
     pub animator: Animator,
     pub z: f32,
+    pub abs_origin: Option<Vec2>,
     pub _is_selected: bool,
     pub _is_focussed: bool,
     pub _bg_area: Area,
@@ -42,23 +44,14 @@ impl Tab {
                 shader: cx.add_shader(Self::def_bg_shader(), "Tab.bg"),
                 ..Quad::style(cx)
             },
-            bg_layout: Layout {
-                align: Align::left_center(),
-                width: Width::Compute,
-                height: Height::Fix(40.),
-                margin: Margin::all(0.),
-                padding: Padding {l: 16.0, t: 1.0, r: 16.0, b: 0.0},
-                ..Default::default()
-            },
+            bg_layout: LayoutTab::id(cx),
             tab_close: TabClose {
                 margin: Margin {l: -4., t: 0., r: 4., b: 0.},
                 ..TabClose::style(cx)
             },
-            text: Text {
-                font_size:8.0,
-                ..Text::style(cx)
-            },
+            text: Text::style(cx, TextStyleTab::id(cx)),
             animator: Animator::new_no_default(),
+            abs_origin: None,
             _is_selected: false,
             _is_focussed: false,
             _is_down: false,
@@ -72,58 +65,58 @@ impl Tab {
         tab
     }
     
-    pub fn get_bg_color(&self, cx: &Cx) -> Color {
+    pub fn get_bg_color(&self, cx: &Cx) -> ColorId {
         if self._is_selected {
-            cx.color("bg_selected")
+            ColorBgSelected::id(cx)
         }
         else {
-            cx.color("bg_normal")
+            ColorBgNormal::id(cx)
         }
     }
     
-    pub fn get_text_color(&self, cx: &Cx) -> Color {
+    pub fn get_text_color(&self, cx: &Cx) -> ColorId {
         if self._is_selected {
             if self._is_focussed {
-                cx.color("text_selected_focus")
+                ColorTextSelectedFocus::id(cx)
             }
             else {
-                cx.color("text_selected_defocus")
+                ColorTextSelectedDefocus::id(cx)
             }
         }
         else {
             if self._is_focussed {
-                cx.color("text_deselected_focus")
+                ColorTextDeselectedFocus::id(cx)
             }
             else {
-                cx.color("text_deselected_defocus")
+                ColorTextDeselectedDefocus::id(cx)
             }
         }
     }
     
     pub fn anim_default(&self, cx: &Cx) -> Anim {
         Anim::new(Play::Cut {duration: 0.05}, vec![
-            Track::color(cx, "bg.color", Ease::Lin, vec![(1.0, self.get_bg_color(cx))]),
-            Track::color(cx, "bg.border_color", Ease::Lin, vec![(1.0, cx.color("bg_selected"))]),
-            Track::color(cx, "text.color", Ease::Lin, vec![(1.0, self.get_text_color(cx))]),
-            Track::color(cx, "icon.color", Ease::Lin, vec![(1.0, self.get_text_color(cx))])
+            Track::color_id(cx, "bg.color", Ease::Lin, vec![(1.0, self.get_bg_color(cx))]),
+            Track::color_id(cx, "bg.border_color", Ease::Lin, vec![(1.0, ColorBgSelected::id(cx))]),
+            Track::color_id(cx, "text.color", Ease::Lin, vec![(1.0, self.get_text_color(cx))]),
+            Track::color_id(cx, "icon.color", Ease::Lin, vec![(1.0, self.get_text_color(cx))])
         ])
     }
     
     pub fn anim_over(&self, cx: &Cx) -> Anim {
         Anim::new(Play::Cut {duration: 0.01}, vec![
-            Track::color(cx, "bg.color", Ease::Lin, vec![(1.0, self.get_bg_color(cx))]),
-            Track::color(cx, "bg.border_color", Ease::Lin, vec![(1.0, cx.color("bg_selected"))]),
-            Track::color(cx, "text.color", Ease::Lin, vec![(1.0, self.get_text_color(cx))]),
-            Track::color(cx, "icon.color", Ease::Lin, vec![(1.0, self.get_text_color(cx))])
+            Track::color_id(cx, "bg.color", Ease::Lin, vec![(1.0, self.get_bg_color(cx))]),
+            Track::color_id(cx, "bg.border_color", Ease::Lin, vec![(1.0, ColorBgSelected::id(cx))]),
+            Track::color_id(cx, "text.color", Ease::Lin, vec![(1.0, self.get_text_color(cx))]),
+            Track::color_id(cx, "icon.color", Ease::Lin, vec![(1.0, self.get_text_color(cx))])
         ])
     }
     
     pub fn anim_down(&self, cx: &Cx) -> Anim {
         Anim::new(Play::Cut {duration: 0.01}, vec![
-            Track::color(cx, "bg.color", Ease::Lin, vec![(1.0, self.get_bg_color(cx))]),
-            Track::color(cx, "bg.border_color", Ease::Lin, vec![(1.0, cx.color("bg_selected"))]),
-            Track::color(cx, "text.color", Ease::Lin, vec![(1.0, self.get_text_color(cx))]),
-            Track::color(cx, "icon.color", Ease::Lin, vec![(1.0, self.get_text_color(cx))])
+            Track::color_id(cx, "bg.color", Ease::Lin, vec![(1.0, self.get_bg_color(cx))]),
+            Track::color_id(cx, "bg.border_color", Ease::Lin, vec![(1.0, ColorBgSelected::id(cx))]),
+            Track::color_id(cx, "text.color", Ease::Lin, vec![(1.0, self.get_text_color(cx))]),
+            Track::color_id(cx, "icon.color", Ease::Lin, vec![(1.0, self.get_text_color(cx))])
         ])
     }
     
@@ -289,7 +282,13 @@ impl Tab {
             return Err(())
         }
         else {
-            let bg_inst = self.bg.begin_quad(cx, &self.bg_layout);
+            let layout = if let Some(abs_origin) = self.abs_origin{
+                Layout{abs_origin: Some(abs_origin), ..cx.layouts[self.bg_layout]}
+            }
+            else{
+                cx.layouts[self.bg_layout]
+            };
+            let bg_inst = self.bg.begin_quad(cx, layout);
             bg_inst.push_last_color(cx, &self.animator, "bg.border_color");
             if self.is_closeable {
                 self.tab_close.draw_tab_close(cx);

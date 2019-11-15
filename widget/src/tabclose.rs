@@ -1,10 +1,10 @@
 use render::*;
 use crate::buttonlogic::*;
+use crate::theme::*;
 
 #[derive(Clone)]
 pub struct TabClose {
     pub bg: Quad,
-    pub text: Text,
     pub animator: Animator,
     pub margin: Margin,
     pub _bg_area: Area,
@@ -13,11 +13,7 @@ pub struct TabClose {
 impl TabClose {
     pub fn style(cx: &mut Cx) -> Self {
         Self {
-            bg: Quad {
-                shader: cx.add_shader(Self::def_bg_shader(), "TabClose.bg"),
-                ..Quad::style(cx)
-            },
-            text: Text::style(cx),
+            bg: Quad::style_with_shader(cx, Self::def_bg_shader(), "TabClose.bg"),
             animator: Animator::new(Self::get_default_anim(cx)),
             margin: Margin::zero(),
             _bg_area: Area::Empty,
@@ -26,7 +22,7 @@ impl TabClose {
     
     pub fn get_default_anim(cx:&Cx)->Anim{
         Anim::new(Play::Cut {duration: 0.2}, vec![
-            Track::color(cx, "bg.color", Ease::Lin, vec![(1.0, color("#a"))]),
+            Track::color_id(cx, "bg.color", Ease::Lin, vec![(1.0, ColorTextDeselectedFocus::id(cx))]),
             Track::float(cx, "bg.hover", Ease::Lin, vec![(1.0, 0.)]),
             Track::float(cx, "bg.down", Ease::Lin, vec![(1.0, 0.)]),
         ])
@@ -34,7 +30,7 @@ impl TabClose {
     
     pub fn get_over_anim(cx:&Cx)->Anim{
         Anim::new(Play::Cut {duration: 0.2}, vec![
-            Track::color(cx, "bg.color", Ease::Lin, vec![(0.0, color("#f")), (1.0, color("#f"))]),
+            Track::color_id(cx, "bg.color", Ease::Lin, vec![(0.0, ColorTextSelectedFocus::id(cx)), (1.0, ColorTextSelectedFocus::id(cx))]),
             Track::float(cx, "bg.down", Ease::Lin, vec![(1.0, 0.)]),
             Track::float(cx, "bg.hover", Ease::Lin, vec![(0.0, 1.0), (1.0, 1.0)]),
         ])
@@ -42,7 +38,7 @@ impl TabClose {
     
     pub fn get_down_anim(cx:&Cx)->Anim{
         Anim::new(Play::Cut {duration: 0.2}, vec![
-            Track::color(cx, "bg.color", Ease::Lin, vec![(0.0, color("#f55")), (1.0, color("#f55"))]),
+            Track::color_id(cx, "bg.color", Ease::Lin, vec![(0.0, ColorTextSelectedFocus::id(cx)), (1.0, ColorTextSelectedFocus::id(cx))]),
             Track::float(cx, "bg.hover", Ease::Lin, vec![(1.0, 1.0)]),
             Track::float(cx, "bg.down", Ease::OutExp, vec![(0.0, 0.0), (1.0, 3.1415 * 0.5)]),
         ])

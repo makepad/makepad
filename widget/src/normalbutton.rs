@@ -6,7 +6,7 @@ use crate::theme::*;
 pub struct NormalButton {
     pub button: ButtonLogic,
     pub bg: Quad,
-    pub bg_layout: Layout,
+    pub bg_layout: LayoutId,
     pub text: Text,
     pub animator: Animator,
     pub _bg_area: Area,
@@ -15,17 +15,10 @@ pub struct NormalButton {
 impl NormalButton {
     pub fn style(cx: &mut Cx) -> Self {
         Self {
-            bg_layout: Layout {
-                align: Align::center(),
-                width: Width::Compute,
-                height: Height::Compute,
-                margin: Margin::all(1.0),
-                padding: Padding {l: 16.0, t: 14.0, r: 16.0, b: 14.0},
-                ..Default::default()
-            },
+            bg_layout: LayoutNormalButton::id(cx),
             button: ButtonLogic::default(),
             bg: Quad::style_with_shader(cx, Self::def_bg_shader(), "Button.bg"),
-            text: Text::style(cx),
+            text: Text::style(cx, TextStyleNormalButton::id(cx)),
             animator: Animator::new(Self::get_default_anim(cx)),
             _bg_area: Area::Empty,
         }
@@ -33,7 +26,7 @@ impl NormalButton {
     
     pub fn get_default_anim(cx: &Cx) -> Anim {
         Anim::new(Play::Cut {duration: 0.5}, vec![
-            Track::color_id(cx, "bg.color", Ease::Lin, vec![(1., ThemeBgNormal::id(cx))]),
+            Track::color_id(cx, "bg.color", Ease::Lin, vec![(1., ColorBgNormal::id(cx))]),
             Track::float(cx, "bg.glow_size", Ease::Lin, vec![(1., 0.0)]),
             Track::color(cx, "bg.border_color", Ease::Lin, vec![(1., color("#6"))]),
         ])
@@ -92,7 +85,7 @@ impl NormalButton {
     pub fn draw_button(&mut self, cx: &mut Cx, label: &str) {
         self.bg.color = self.animator.last_color(cx, "bg.color");
         
-        let bg_inst = self.bg.begin_quad(cx, &self.bg_layout);
+        let bg_inst = self.bg.begin_quad(cx, cx.layouts[self.bg_layout]);
         
         bg_inst.push_last_color(cx, &self.animator, "bg.border_color");
         bg_inst.push_last_float(cx, &self.animator, "bg.glow_size");

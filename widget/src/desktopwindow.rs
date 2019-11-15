@@ -2,6 +2,7 @@ use render::*;
 use crate::buttonlogic::*;
 use crate::desktopbutton::*;
 use crate::windowmenu::*;
+use crate::theme::*;
 
 #[derive(Clone)]
 pub struct DesktopWindow {
@@ -12,7 +13,7 @@ pub struct DesktopWindow {
     pub caption_view: View, // we have a root view otherwise is_overlay subviews can't attach topmost
     pub main_view: View, // we have a root view otherwise is_overlay subviews can't attach topmost
     pub inner_view: View,
-    
+    pub caption_bg_color: ColorId,
     pub min_btn: DesktopButton,
     pub max_btn: DesktopButton,
     pub close_btn: DesktopButton,
@@ -56,11 +57,9 @@ impl DesktopWindow {
             
             window_menu: WindowMenu::style(cx),
             
-            caption_text: Text::style(cx),
-            caption_bg: Quad {
-                color: cx.color("bg_selected_over"),
-                ..Quad::style(cx)
-            },
+            caption_text: Text::style(cx, TextStyleDesktopWindowCaption::id(cx)),
+            caption_bg_color: ColorBgSelectedOver::id(cx),
+            caption_bg: Quad::style(cx),
             caption_size: Vec2::zero(),
             caption: "Makepad".to_string(),
             inner_over_chrome: false,
@@ -162,7 +161,8 @@ impl DesktopWindow {
             // alright here we draw our platform buttons.
             match cx.platform_type {
                 PlatformType::Linux | PlatformType::Windows => {
-                    let bg_inst = self.caption_bg.begin_quad(cx, &Layout {
+                    self.caption_bg.color = cx.colors[self.caption_bg_color];
+                    let bg_inst = self.caption_bg.begin_quad(cx, Layout {
                         align: Align::right_center(),
                         width: Width::Fill,
                         height: Height::Compute,
@@ -200,7 +200,7 @@ impl DesktopWindow {
                     if let Some(menu) = menu {
                         cx.update_menu(menu);
                     }
-                    let bg_inst = self.caption_bg.begin_quad(cx, &Layout {
+                    let bg_inst = self.caption_bg.begin_quad(cx, Layout {
                         align: Align::center(),
                         width: Width::Fill,
                         height: Height::Fix(22.),

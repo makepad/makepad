@@ -1,40 +1,40 @@
 #![allow(dead_code)]
 
 #[cfg(all(not(feature="ipc"),target_os = "linux"))]
-mod cx_opengl; 
+mod cx_opengl;
 #[cfg(all(not(feature="ipc"),target_os = "linux"))]
-mod cx_xlib; 
+mod cx_xlib;
 #[cfg(all(not(feature="ipc"),any(target_os = "linux")))]
 mod cx_linux;
 
 #[cfg(all(not(feature="ipc"),target_os = "macos"))]
-mod cx_metal; 
+mod cx_metal;
 #[cfg(all(not(feature="ipc"),target_os = "macos"))]
-mod cx_metalsl; 
+mod cx_metalsl;
 #[cfg(all(not(feature="ipc"),target_os = "macos"))]
-mod cx_cocoa; 
+mod cx_cocoa;
 #[cfg(all(not(feature="ipc"),any(target_os = "macos")))]
 mod cx_macos;
 
 #[cfg(all(not(feature="ipc"),target_os = "windows"))]
-mod cx_dx11; 
+mod cx_dx11;
 #[cfg(all(not(feature="ipc"),target_os = "windows"))]
-mod cx_hlsl;  
+mod cx_hlsl;
 #[cfg(all(not(feature="ipc"),target_os = "windows"))]
-mod cx_win32; 
+mod cx_win32;
 #[cfg(all(not(feature="ipc"),any(target_os = "windows")))]
-mod cx_win10;
+mod cx_windows;
 
 #[cfg(all(not(feature="ipc"),target_arch = "wasm32"))]
-mod cx_webgl; 
+mod cx_webgl;
 #[cfg(all(not(feature="ipc"),target_arch = "wasm32"))]
-mod cx_wasm32; 
+mod cx_wasm32;
 
 #[cfg(all(not(feature="ipc"),any(target_arch = "wasm32", target_os = "linux")))]
-mod cx_glsl; 
+mod cx_glsl;
 
 #[cfg(all(not(feature="ipc"),any(target_os = "linux", target_os="macos", target_os="windows")))]
-mod cx_desktop; 
+mod cx_desktop;
 
 #[cfg(feature="ipc")]
 mod cx_ipc_child;
@@ -63,12 +63,14 @@ pub use crate::cx_ipc_win32::*;
 
 // shared modules
 #[macro_use]
-mod cx; 
+mod theming;
+#[macro_use]
+mod cx;
 mod turtle;
 mod fonts;
 mod cursor;
-mod window; 
-mod view; 
+mod window;
+mod view;
 mod pass;
 mod texture;
 mod shader;
@@ -83,7 +85,6 @@ mod blit;
 mod text;
 mod events;
 mod menu; 
-mod theming;
 
 pub use crate::cx::*;
 pub use crate::quad::*;

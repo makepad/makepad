@@ -3,6 +3,7 @@ use render::*;
 use crate::scrollbar::*;
 use crate::scrollview::*;
 use crate::tab::*;
+use crate::theme::*;
 
 #[derive(Clone)]
 pub struct TabControl {
@@ -12,6 +13,7 @@ pub struct TabControl {
     pub drag_tab: Tab,
     pub page_view: View,
     pub hover: Quad,
+    pub tab_fill_color: ColorId,
     pub tab_fill: Quad,
     pub animator: Animator,
     
@@ -57,10 +59,8 @@ impl TabControl {
                 color: color("purple"),
                 ..Quad::style(cx)
             },
-            tab_fill: Quad {
-                color: cx.color("bg_normal"),
-                ..Quad::style(cx)
-            },
+            tab_fill_color: ColorBgNormal::id(cx),
+            tab_fill: Quad::style(cx),
             animator: Animator::new(Anim::new(Play::Cut {duration: 0.5}, vec![])),
             _dragging_tab: None,
             _tab_now_selected:None,
@@ -209,6 +209,7 @@ impl TabControl {
     }
     
     pub fn end_tabs(&mut self, cx: &mut Cx) {
+        self.tab_fill.color = cx.colors[self.tab_fill_color];
         self.tab_fill.draw_quad(cx, Width::Fill, Height::Fill, Margin::zero());
         self.tabs.sweep(cx, | _, _ | ());
         if let Some((fe, id)) = &self._dragging_tab {
@@ -217,7 +218,7 @@ impl TabControl {
                 ..Default::default()
             }) {
                 
-                self.drag_tab.bg_layout.abs_origin = Some(Vec2 {x: fe.abs.x - fe.rel_start.x, y: fe.abs.y - fe.rel_start.y});
+                self.drag_tab.abs_origin = Some(Vec2 {x: fe.abs.x - fe.rel_start.x, y: fe.abs.y - fe.rel_start.y});
                 let origin_tab = self.tabs.get_draw(cx, *id, | _cx, tmpl | tmpl.clone());
                 self.drag_tab.label = origin_tab.label.clone();
                 self.drag_tab.is_closeable = origin_tab.is_closeable;

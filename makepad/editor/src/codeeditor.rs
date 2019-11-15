@@ -3,11 +3,12 @@ use widget::*;
 use crate::textbuffer::*;
 use crate::textcursor::*;
 use crate::codeicon::*;
+use crate::theme::*;
 
 #[derive(Clone)]
 pub struct CodeEditor {
     pub view: ScrollView,
-    pub bg_layout: Layout,
+    pub bg_layout: LayoutId,
     pub bg: Quad,
     pub gutter_bg: Quad,
     pub cursor: Quad,
@@ -234,14 +235,9 @@ impl CodeEditor {
             paren_pair: Quad::style_with_shader(cx, Self::def_paren_pair_shader(), "Editor.paren_pair"),
             message_marker: Quad::style_with_shader(cx, Self::def_message_marker_shader(), "Editor.message_marker"),
             code_icon: CodeIcon::style(cx),
-            bg_layout: Layout {
-                width: Width::Fill,
-                height: Height::Fill,
-                margin: Margin::all(0.),
-                padding: Padding {l: 4.0, t: 4.0, r: 4.0, b: 4.0},
-                ..Default::default()
-            },
+            bg_layout: LayoutCodeEditor::id(cx),
             text: Text {
+                text_style: 
                 font: cx.load_font_style("mono_font"),
                 brightness: 1.1,
                 z: 2.00,
