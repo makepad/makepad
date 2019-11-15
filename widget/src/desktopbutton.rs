@@ -162,7 +162,7 @@ impl DesktopButton {
             DesktopButtonType::VRMode => (50.,36.),
         };
 
-        let bg_inst = self.bg.draw_quad(cx, Width::Fix(w), Height::Fix(h), Margin::zero());
+        let bg_inst = self.bg.draw_quad(cx, Walk::wh(Width::Fix(w), Height::Fix(h)));
         bg_inst.push_last_float(cx, &self.animator, "bg.hover");
         bg_inst.push_last_float(cx, &self.animator, "bg.down");
         bg_inst.push_float(cx, ty.shader_float());

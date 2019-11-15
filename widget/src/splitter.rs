@@ -1,6 +1,6 @@
 use render::*;
 use serde::*;
-use crate::theme::*;
+use crate::widgettheme::*;
 
 #[derive(Clone)]
 pub struct Splitter {
@@ -258,16 +258,14 @@ impl Splitter {
         match self.axis {
             Axis::Horizontal => {
                 cx.begin_turtle(Layout {
-                    width: Width::Fill,
-                    height: Height::Fix(self._calc_pos),
-                    ..Default::default()
+                    walk: Walk::wh(Width::Fill, Height::Fix(self._calc_pos)),
+                    ..Layout::default()
                 }, Area::Empty)
             },
             Axis::Vertical => {
                 cx.begin_turtle(Layout {
-                    width: Width::Fix(self._calc_pos),
-                    height: Height::Fill,
-                    ..Default::default()
+                    walk: Walk::wh(Width::Fix(self._calc_pos), Height::Fill),
+                    ..Layout::default()
                 }, Area::Empty)
             }
         }
@@ -281,22 +279,20 @@ impl Splitter {
         match self.axis {
             Axis::Horizontal => {
                 
-                cx.set_turtle_walk(Vec2 {x: origin.x, y: origin.y + self._calc_pos});
+                cx.set_turtle_pos(Vec2 {x: origin.x, y: origin.y + self._calc_pos});
                 if let Ok(_) = self.split_view.begin_view(cx, Layout {
-                    width: Width::Fix(rect.w),
-                    height: Height::Fix(self.split_size),
+                    walk: Walk::wh(Width::Fix(rect.w), Height::Fix(self.split_size)),
                     ..Layout::default()
                 }) {
                     self._split_area = self.split.draw_quad_rel(cx, Rect {x: 0., y: 0., w: rect.w, h: self.split_size}).into_area();
                     self.split_view.end_view(cx);
                 }
-                cx.set_turtle_walk(Vec2 {x: origin.x, y: origin.y + self._calc_pos + self.split_size});
+                cx.set_turtle_pos(Vec2 {x: origin.x, y: origin.y + self._calc_pos + self.split_size});
             },
             Axis::Vertical => {
-                cx.set_turtle_walk(Vec2 {x: origin.x + self._calc_pos, y: origin.y});
+                cx.set_turtle_pos(Vec2 {x: origin.x + self._calc_pos, y: origin.y});
                 if let Ok(_) = self.split_view.begin_view(cx, Layout {
-                    width: Width::Fix(self.split_size),
-                    height: Height::Fix(rect.h),
+                    walk: Walk::wh(Width::Fix(self.split_size), Height::Fix(rect.h)),
                     ..Layout::default()
                 }) {
                     self._split_area = self.split.draw_quad_rel(cx, Rect {x: 0., y: 0., w: self.split_size, h: rect.h}).into_area();

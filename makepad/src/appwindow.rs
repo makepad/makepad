@@ -60,7 +60,6 @@ impl AppWindow {
                 js_editor: JSEditor::style(cx),
                 plain_editor: PlainEditor::style(cx)
             }),
-            local_terminals: Elements::new(LocalTerminal::style(cx)),
             keyboard: Keyboard::style(cx),
             log_item: LogItem::style(cx),
             log_list: LogList::style(cx),
@@ -116,11 +115,6 @@ impl AppWindow {
                     self.keyboard.handle_keyboard(cx, event, storage);
                 },
                 Panel::FileEditorTarget => {
-                },
-                Panel::LocalTerminal {terminal_id, ..} => {
-                    if let Some(local_terminal) = &mut self.local_terminals.get(*terminal_id) {
-                        local_terminal.handle_local_terminal(cx, event);
-                    }
                 },
                 Panel::FileTree => {
                     file_tree_event = self.file_panel.handle_file_panel(cx, event);
@@ -255,14 +249,6 @@ impl AppWindow {
                 },
                 Panel::FileTree => {
                     file_panel.draw_file_panel(cx);
-                },
-                Panel::LocalTerminal {terminal_id, ..} => {
-                    let local_terminal = self.local_terminals.get_draw(cx, *terminal_id, | cx, tmpl | {
-                        let mut new_terminal = tmpl.clone();
-                        new_terminal.start_terminal(cx);
-                        new_terminal
-                    });
-                    local_terminal.draw_local_terminal(cx);
                 },
                 Panel::FileEditor {path, scroll_pos, editor_id} => {
                     let text_buffer = storage.text_buffer_from_path(cx, path);

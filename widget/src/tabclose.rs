@@ -1,12 +1,12 @@
 use render::*;
 use crate::buttonlogic::*;
-use crate::theme::*;
+use crate::widgettheme::*;
 
 #[derive(Clone)]
 pub struct TabClose {
     pub bg: Quad,
     pub animator: Animator,
-    pub margin: Margin,
+    pub walk: WalkId,
     pub _bg_area: Area,
 }
 
@@ -15,7 +15,7 @@ impl TabClose {
         Self {
             bg: Quad::style_with_shader(cx, Self::def_bg_shader(), "TabClose.bg"),
             animator: Animator::new(Self::get_default_anim(cx)),
-            margin: Margin::zero(),
+            walk: WalkTabClose::id(cx),
             _bg_area: Area::Empty,
         }
     }
@@ -104,7 +104,7 @@ impl TabClose {
     
     pub fn draw_tab_close(&mut self, cx: &mut Cx) {
         self.bg.color = self.animator.last_color(cx, "bg.color");
-        let bg_inst = self.bg.draw_quad(cx, Width::Fix(10.), Height::Fix(10.), self.margin);
+        let bg_inst = self.bg.draw_quad(cx, cx.walks[self.walk]);
         bg_inst.push_last_float(cx, &self.animator, "bg.hover");
         bg_inst.push_last_float(cx, &self.animator, "bg.down");
         self._bg_area = bg_inst.into_area();

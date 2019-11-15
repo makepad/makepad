@@ -397,21 +397,38 @@ impl Animator {
     
     pub fn calc_color(&mut self, cx: &mut Cx, ident_str: &str, time: f64) -> Color {
         let ident = cx.id(ident_str);
-        let last = Self::_last_color(ident, &self.last_values);
-        let mut ret = last;
+
         if let Some(time) = self.update_anim_track(cx, time) {
             if let Some(track_index) = self.find_track_index(ident) {
                 if let Track::Color(ft) = &mut self.current.as_mut().unwrap().tracks[track_index] {
-                    ret = Track::compute_track_color(time, &ft.track, &mut ft.cut_init, last, &ft.ease);
+                    let last = Self::_last_color(ident, &self.last_values);
+                    let ret = Track::compute_track_color(time, &ft.track, &mut ft.cut_init, last, &ft.ease);
+                    self.set_last_color(ident, ret);
+                    return ret
                 }
+                else if let Track::ColorId(ft) = &mut self.current.as_mut().unwrap().tracks[track_index] {
+                    let last = Self::_last_color_id(ident, &self.last_values);
+                    let cid_ret = Track::compute_track_color_id(time, &ft.track, &mut ft.cut_init, cx.colors.blend_to_part(last), &ft.ease);
+                    self.set_last_color_id(ident, cid_ret);
+                    return cx.colors.blend(cid_ret);
+                }          
             }
         }
-        self.set_last_color(ident, ret);
-        return ret
+        
+        return Color::zero();
     }
     
     pub fn last_color(&self, cx:&Cx, ident_str: &str) -> Color {
-        Self::_last_color(cx.id(ident_str), &self.last_values)
+        let ident = cx.id(ident_str);
+        if let Some((_,value)) = self.last_values.iter().find( | v | v.0 == ident) {
+            if let AnimLastValue::Color(value) = value{
+                return *value
+            }
+            if let AnimLastValue::ColorId(value) = value{
+                return cx.colors.blend(*value) 
+            }
+        }
+        Color::zero()
     }
     
     pub fn _last_color(ident: CxId, last_values: &Vec<(CxId, AnimLastValue)>) -> Color {
@@ -455,16 +472,6 @@ impl Animator {
     pub fn last_color_id(&self, ident: CxId) -> ColorBlend {
         Self::_last_color_id(ident, &self.last_values)
     }
-
-    pub fn last_color_id_blend(&self, cx:&Cx, name:&str) -> Color {
-        let ident = cx.id(name);
-        if let Some((_,value)) = self.last_values.iter().find( | v | v.0 == ident) {
-             if let AnimLastValue::ColorId(value) = value{
-                return cx.colors.blend(*value) 
-            }
-        }
-        Color::zero()
-    }
     
     pub fn _last_color_id(ident: CxId, last_values: &Vec<(CxId, AnimLastValue)>) -> ColorBlend {
         if let Some((_,value)) = last_values.iter().find( | v | v.0 == ident) {
@@ -472,7 +479,6 @@ impl Animator {
                 return *value
             }
         }
-        
         return ColorBlend{a:ColorPart::Color(Color::zero()), b:ColorId::default(), f:0.}
     }
     

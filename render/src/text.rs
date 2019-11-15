@@ -25,10 +25,10 @@ pub struct TextStyle {
     pub height_factor: f32,
 }
 
-impl Default for TextStyle{
-    fn default()->Self{
-        TextStyle{
-            font_path:"resources/Ubuntu-R.ttf".to_string(),
+impl Default for TextStyle {
+    fn default() -> Self {
+        TextStyle {
+            font_path: "resources/Ubuntu-R.ttf".to_string(),
             font_id: None,
             font_size: 8.0,
             brightness: 1.0,
@@ -47,7 +47,7 @@ pub struct Text {
     pub color: Color,
     pub z: f32,
     pub wrapping: Wrapping,
-    pub font_scale: f32, 
+    pub font_scale: f32,
     pub do_h_scroll: bool,
     pub do_v_scroll: bool,
     /*
@@ -114,22 +114,23 @@ impl Text {
             let curve: float<Uniform>;
             
             let view_do_scroll: vec2<Uniform>;
-
+            
             fn pixel() -> vec4 {
-                let dx = dfdx(vec2(tex_coord1.x * 4096.0,0.)).x;
+                let dx = dfdx(vec2(tex_coord1.x * 4096.0, 0.)).x;
                 let dp = 1.0 / 4096.0;
-
+                
                 // basic hardcoded mipmapping so it stops 'swimming' in VR
                 let s = 1.0;
-                if dx > 5.0{
+                if dx > 5.0 {
                     s = 0.7;
                 }
                 else if dx > 2.75 { // combine 3x3
                     s = (
-                        sample2d(texturez, tex_coord3.xy + vec2(0.,0.)).z
-                        + sample2d(texturez, tex_coord3.xy + vec2(dp,0.)).z
-                        + sample2d(texturez, tex_coord3.xy + vec2(0.,dp)).z
-                        + sample2d(texturez, tex_coord3.xy + vec2(dp,dp)).z)*0.25;
+                        sample2d(texturez, tex_coord3.xy + vec2(0., 0.)).z
+                            + sample2d(texturez, tex_coord3.xy + vec2(dp, 0.)).z
+                            + sample2d(texturez, tex_coord3.xy + vec2(0., dp)).z
+                            + sample2d(texturez, tex_coord3.xy + vec2(dp, dp)).z
+                    ) * 0.25;
                 }
                 else if dx > 1.75 { // combine 3x3
                     s = sample2d(texturez, tex_coord3.xy).z;
@@ -140,8 +141,8 @@ impl Text {
                 else {
                     s = sample2d(texturez, tex_coord1.xy).x;
                 }
-                s = pow(s,curve);
-                return vec4(s * color.rgb * brightness * color.a, s * color.a);// + color("#a");
+                s = pow(s, curve);
+                return vec4(s * color.rgb * brightness * color.a, s * color.a); // + color("#a");
             }
             
             fn vertex() -> vec4 {
@@ -164,20 +165,20 @@ impl Text {
                     font_tc.zw,
                     normalized.xy
                 );
-
+                
                 tex_coord2 = mix(
                     font_tc.xy,
-                    font_tc.xy+(font_tc.zw - font_tc.xy)*0.75,
-                    normalized.xy
-                );
-
-                tex_coord3 = mix(
-                    font_tc.xy,
-                    font_tc.xy+(font_tc.zw - font_tc.xy)*0.6,
+                    font_tc.xy + (font_tc.zw - font_tc.xy) * 0.75,
                     normalized.xy
                 );
                 
-                return camera_projection * (camera_view * (view_transform * vec4(clipped.x,clipped.y, z + zbias, 1.)));
+                tex_coord3 = mix(
+                    font_tc.xy,
+                    font_tc.xy + (font_tc.zw - font_tc.xy) * 0.6,
+                    normalized.xy
+                );
+                
+                return camera_projection * (camera_view * (view_transform * vec4(clipped.x, clipped.y, z + zbias, 1.)));
             }
         }))
     }
@@ -224,7 +225,7 @@ impl Text {
         
         let dpi_factor = cx.current_dpi_factor;
         
-        let geom_y = (geom_y * dpi_factor).floor() / dpi_factor;
+        //let geom_y = (geom_y * dpi_factor).floor() / dpi_factor;
         let atlas_page_id = cxfont.get_atlas_page_id(dpi_factor, text_style.font_size);
         
         let font = &mut cxfont.font_loaded.as_ref().unwrap();
@@ -262,7 +263,7 @@ impl Text {
             // compute subpixel shift
             let subpixel_x_fract = min_pos_x - (min_pos_x * dpi_factor).floor() / dpi_factor;
             let subpixel_y_fract = min_pos_y - (min_pos_y * dpi_factor).floor() / dpi_factor;
-
+            
             // scale and snap it
             let scaled_min_pos_x = geom_x + font_size_logical * self.font_scale * glyph.bounds.p_min.x - subpixel_x_fract;
             let scaled_min_pos_y = geom_y - font_size_logical * self.font_scale * glyph.bounds.p_min.y + text_style.font_size * self.font_scale * text_style.top_drop - subpixel_y_fract;
@@ -272,7 +273,7 @@ impl Text {
                 0
             }
             else { // subtle 64 index subpixel id
-               ((subpixel_y_fract * 7.0) as usize) << 3 |
+                ((subpixel_y_fract * 7.0) as usize) << 3 |
                 (subpixel_x_fract * 7.0) as usize
             };
             
@@ -314,7 +315,7 @@ impl Text {
                 scaled_min_pos_y,
                 w * self.font_scale / dpi_factor,
                 h * self.font_scale / dpi_factor,
-                self.z+0.00001*min_pos_x, //slight z-bias so we don't get z-fighting with neighbouring chars overlap a bit
+                self.z + 0.00001 * min_pos_x, //slight z-bias so we don't get z-fighting with neighbouring chars overlap a bit
                 geom_x,
                 geom_y,
                 text_style.font_size,
@@ -396,12 +397,11 @@ impl Text {
             }
             if emit {
                 let height = font_size * height_factor * self.font_scale;
-                let geom = cx.walk_turtle(
-                    Width::Fix(width),
-                    Height::Fix(height),
-                    Margin::zero(),
-                    None
-                );
+                let geom = cx.walk_turtle(Walk {
+                    width: Width::Fix(width),
+                    height: Height::Fix(height),
+                    margin: Margin::zero()
+                }, None);
                 
                 self.add_text(cx, geom.x, geom.y, 0, &mut aligned, &chunk, | _, _, _, _ | {0.0});
                 width = 0.0;
@@ -422,7 +422,7 @@ impl Text {
     // looks up text with the behavior of a text selection mouse cursor
     pub fn find_closest_offset(&self, cx: &Cx, area: &Area, pos: Vec2) -> usize {
         let scroll_pos = area.get_scroll_pos(cx);
-        let spos = Vec2{x:pos.x + scroll_pos.x, y:pos.y + scroll_pos.y};
+        let spos = Vec2 {x: pos.x + scroll_pos.x, y: pos.y + scroll_pos.y};
         let x_o = area.get_instance_offset(cx, "base_x");
         let y_o = area.get_instance_offset(cx, "base_y");
         let w_o = area.get_instance_offset(cx, "w");
@@ -432,34 +432,34 @@ impl Text {
         let text_style = &cx.text_styles[self.text_style];
         let line_spacing = text_style.line_spacing;
         let mut index = 0;
-        if let Some(read) = read{
-            while index < read.count{
+        if let Some(read) = read {
+            while index < read.count {
                 let y = read.buffer[read.offset + y_o + index * read.slots];
                 let font_size = read.buffer[read.offset + font_size_o + index * read.slots];
-                if y + font_size * line_spacing > spos.y{ // alright lets find our next x
-                    while index < read.count{
+                if y + font_size * line_spacing > spos.y { // alright lets find our next x
+                    while index < read.count {
                         let x = read.buffer[read.offset + x_o + index * read.slots];
                         let y = read.buffer[read.offset + y_o + index * read.slots];
-                        //let font_size = read.buffer[read.offset + font_size_o + index* read.slots]; 
+                        //let font_size = read.buffer[read.offset + font_size_o + index* read.slots];
                         let w = read.buffer[read.offset + w_o + index * read.slots];
-                        if x > spos.x + w*0.5 || y > spos.y{
-                            let prev_index = if index == 0{0}else{index - 1};
-                            let prev_x = read.buffer[read.offset + x_o +  prev_index * read.slots];
+                        if x > spos.x + w * 0.5 || y > spos.y {
+                            let prev_index = if index == 0 {0}else {index - 1};
+                            let prev_x = read.buffer[read.offset + x_o + prev_index * read.slots];
                             let prev_w = read.buffer[read.offset + w_o + index * read.slots];
-                            if index < read.count - 1 && prev_x > spos.x + prev_w{ // fix newline jump-back
+                            if index < read.count - 1 && prev_x > spos.x + prev_w { // fix newline jump-back
                                 return read.buffer[read.offset + char_offset_o + index * read.slots] as usize;
                             }
-                            return read.buffer[read.offset + char_offset_o +  prev_index * read.slots] as usize;
+                            return read.buffer[read.offset + char_offset_o + prev_index * read.slots] as usize;
                         }
                         index += 1;
                     }
                 }
                 index += 1;
             }
-            if read.count == 0{
+            if read.count == 0 {
                 return 0
             }
-            return read.buffer[read.offset + char_offset_o +  (read.count - 1) * read.slots] as usize;
+            return read.buffer[read.offset + char_offset_o + (read.count - 1) * read.slots] as usize;
         }
         return 0
     }

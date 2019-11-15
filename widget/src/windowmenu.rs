@@ -1,6 +1,6 @@
 // a window menu implementation
 use render::*;
-use crate::theme::*;
+use crate::widgettheme::*;
 
 #[derive(Clone)]
 pub struct WindowMenu {

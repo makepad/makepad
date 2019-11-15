@@ -541,7 +541,7 @@ impl InstanceArea{
     }
 
     pub fn push_last_float(&self, cx:&mut Cx, animator:&Animator, ident_str:&str){
-        self.push_float(cx, Animator::_last_float(cx.id(ident_str), &animator.last_values))
+        self.push_float(cx, animator.last_float(cx, ident_str))
     }
 
     pub fn push_float(&self, cx:&mut Cx, value:f32){
@@ -556,7 +556,7 @@ impl InstanceArea{
     }
 
     pub fn push_last_vec2(&self, cx:&mut Cx, animator:&Animator, ident_str:&str){
-        self.push_vec2(cx, Animator::_last_vec2(cx.id(ident_str), &animator.last_values))
+        self.push_vec2(cx, animator.last_vec2(cx, ident_str))
     }
 
     pub fn push_vec2(&self, cx:&mut Cx, value:Vec2){
@@ -572,7 +572,7 @@ impl InstanceArea{
     }
 
     pub fn push_last_vec3(&self, cx:&mut Cx, animator:&Animator, ident_str:&str){
-        self.push_vec3(cx, Animator::_last_vec3(cx.id(ident_str), &animator.last_values))
+        self.push_vec3(cx, animator.last_vec3(cx, ident_str))
     }
 
     pub fn push_vec3(&self, cx:&mut Cx, value:Vec3){
@@ -588,7 +588,7 @@ impl InstanceArea{
     }
 
     pub fn push_last_vec4(&self, cx:&mut Cx, animator:&Animator, ident_str:&str){
-        self.push_vec4(cx, Animator::_last_vec4(cx.id(ident_str), &animator.last_values))
+        self.push_vec4(cx, animator.last_vec4(cx, ident_str));
     }
 
     pub fn push_vec4(&self, cx:&mut Cx, value:Vec4){
@@ -605,7 +605,7 @@ impl InstanceArea{
     }
 
     pub fn push_last_color(&self, cx:&mut Cx, animator:&Animator, ident_str:&str){
-        self.push_color(cx, Animator::_last_color(cx.id(ident_str), &animator.last_values))
+        self.push_color(cx, animator.last_color(cx, ident_str));
     }
 
     pub fn push_color(&self, cx:&mut Cx, value:Color){

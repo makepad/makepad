@@ -23,10 +23,10 @@ impl Cx {
         
         // fetch origin and size from parent
         let (mut origin, mut abs_size) = if let Some(parent) = self.turtles.last() {
-            (Vec2 {x: layout.margin.l + parent.walk.x, y: layout.margin.t + parent.walk.y}, parent.abs_size)
+            (Vec2 {x: layout.walk.margin.l + parent.pos.x, y: layout.walk.margin.t + parent.pos.y}, parent.abs_size)
         }
         else {
-            (Vec2 {x: layout.margin.l, y: layout.margin.t}, Vec2::zero())
+            (Vec2 {x: layout.walk.margin.l, y: layout.walk.margin.t}, Vec2::zero())
         };
         
         // see if layout overrode size
@@ -45,14 +45,14 @@ impl Cx {
         }
         
         // abs origin overrides the computation of width/height to use the parent abs_origin
-        let width = layout.width.eval_width(self, layout.margin, is_abs_origin, abs_size.x);
-        let height = layout.height.eval_height(self, layout.margin, is_abs_origin, abs_size.y);
+        let width = layout.walk.width.eval_width(self, layout.walk.margin, is_abs_origin, abs_size.x);
+        let height = layout.walk.height.eval_height(self, layout.walk.margin, is_abs_origin, abs_size.y);
         
         let turtle = Turtle {
             align_list_x: self.align_list.len(),
             align_list_y: self.align_list.len(),
             origin: origin,
-            walk: Vec2 {x: origin.x + layout.padding.l, y: origin.y + layout.padding.t},
+            pos: Vec2 {x: origin.x + layout.padding.l, y: origin.y + layout.padding.t},
             layout: layout,
             biggest: 0.0,
             bound_left_top: Vec2 {x: std::f32::INFINITY, y: std::f32::INFINITY},
@@ -70,39 +70,39 @@ impl Cx {
     }
     
     // walk the turtle with a 'w/h' and a margin
-    pub fn walk_turtle(&mut self, vw: Width, vh: Height, margin: Margin, old_turtle: Option<&Turtle>) -> Rect {
+    pub fn walk_turtle(&mut self, walk:Walk, old_turtle: Option<&Turtle>) -> Rect {
         let mut align_dx = 0.0;
         let mut align_dy = 0.0;
-        let w = max_zero_keep_nan(vw.eval_width(self, margin, false, 0.0));
-        let h = max_zero_keep_nan(vh.eval_height(self, margin, false, 0.0));
+        let w = max_zero_keep_nan(walk.width.eval_width(self, walk.margin, false, 0.0));
+        let h = max_zero_keep_nan(walk.height.eval_height(self, walk.margin, false, 0.0));
         let ret = if let Some(turtle) = self.turtles.last_mut() {
             let (x, y) = match turtle.layout.direction {
                 Direction::Right => {
                     match turtle.layout.line_wrap {
                         LineWrap::NewLine => {
-                            if (turtle.walk.x + margin.l + w) >
+                            if (turtle.pos.x + walk.margin.l + w) >
                             (turtle.origin.x + turtle.width - turtle.layout.padding.r) {
                                 // what is the move delta.
-                                let old_x = turtle.walk.x;
-                                let old_y = turtle.walk.y;
-                                turtle.walk.x = turtle.origin.x + turtle.layout.padding.l;
-                                turtle.walk.y += turtle.biggest;
+                                let old_x = turtle.pos.x;
+                                let old_y = turtle.pos.y;
+                                turtle.pos.x = turtle.origin.x + turtle.layout.padding.l;
+                                turtle.pos.y += turtle.biggest;
                                 turtle.biggest = 0.0;
-                                align_dx = turtle.walk.x - old_x;
-                                align_dy = turtle.walk.y - old_y;
+                                align_dx = turtle.pos.x - old_x;
+                                align_dy = turtle.pos.y - old_y;
                             }
                         },
                         LineWrap::None => {
                         }
                     }
                     
-                    let x = turtle.walk.x + margin.l;
-                    let y = turtle.walk.y + margin.t;
+                    let x = turtle.pos.x + walk.margin.l;
+                    let y = turtle.pos.y + walk.margin.t;
                     // walk it normally
-                    turtle.walk.x += w + margin.l + margin.r;
+                    turtle.pos.x += w + walk.margin.l + walk.margin.r;
                     
                     // keep track of biggest item in the line (include item margin bottom)
-                    let biggest = h + margin.t + margin.b;
+                    let biggest = h + walk.margin.t + walk.margin.b;
                     if biggest > turtle.biggest {
                         turtle.biggest = biggest;
                     }
@@ -111,45 +111,45 @@ impl Cx {
                 Direction::Down => {
                     match turtle.layout.line_wrap {
                         LineWrap::NewLine => {
-                            if (turtle.walk.y + margin.t + h) >
+                            if (turtle.pos.y + walk.margin.t + h) >
                             (turtle.origin.y + turtle.height - turtle.layout.padding.b) {
                                 // what is the move delta.
-                                let old_x = turtle.walk.x;
-                                let old_y = turtle.walk.y;
-                                turtle.walk.y = turtle.origin.y + turtle.layout.padding.t;
-                                turtle.walk.x += turtle.biggest;
+                                let old_x = turtle.pos.x;
+                                let old_y = turtle.pos.y;
+                                turtle.pos.y = turtle.origin.y + turtle.layout.padding.t;
+                                turtle.pos.x += turtle.biggest;
                                 turtle.biggest = 0.0;
-                                align_dx = turtle.walk.x - old_x;
-                                align_dy = turtle.walk.y - old_y;
+                                align_dx = turtle.pos.x - old_x;
+                                align_dy = turtle.pos.y - old_y;
                             }
                         },
                         LineWrap::None => {
                         }
                     }
                     
-                    let x = turtle.walk.x + margin.l;
-                    let y = turtle.walk.y + margin.t;
+                    let x = turtle.pos.x + walk.margin.l;
+                    let y = turtle.pos.y + walk.margin.t;
                     // walk it normally
-                    turtle.walk.y += h + margin.t + margin.b;
+                    turtle.pos.y += h + walk.margin.t + walk.margin.b;
                     
                     // keep track of biggest item in the line (include item margin bottom)
-                    let biggest = w + margin.r + margin.l;
+                    let biggest = w + walk.margin.r + walk.margin.l;
                     if biggest > turtle.biggest {
                         turtle.biggest = biggest;
                     }
                     (x, y)
                 },
                 _ => {
-                    (turtle.walk.x + margin.l, turtle.walk.y + margin.t)
+                    (turtle.pos.x + walk.margin.l, turtle.pos.y + walk.margin.t)
                 }
             };
             
-            let bound_x2 = x + w + if margin.r < 0. {margin.r} else {0.};
+            let bound_x2 = x + w + if walk.margin.r < 0. {walk.margin.r} else {0.};
             if bound_x2 > turtle.bound_right_bottom.x {
                 turtle.bound_right_bottom.x = bound_x2;
             }
             // update y2 bounds (margin bottom is only added if its negative)
-            let bound_y2 = y + h + margin.t + if margin.b < 0. {margin.b} else {0.};
+            let bound_y2 = y + h + walk.margin.t + if walk.margin.b < 0. {walk.margin.b} else {0.};
             if bound_y2 > turtle.bound_right_bottom.y {
                 turtle.bound_right_bottom.y = bound_y2;
             }
@@ -195,10 +195,10 @@ impl Cx {
     // high perf turtle with no indirections and compute visibility 
     pub fn walk_turtle_right_no_wrap(&mut self, w: f32, h: f32, scroll: Vec2) -> Option<Rect> {
         if let Some(turtle) = self.turtles.last_mut() {
-            let x = turtle.walk.x;
-            let y = turtle.walk.y;
+            let x = turtle.pos.x;
+            let y = turtle.pos.y;
             // walk it normally
-            turtle.walk.x += w;
+            turtle.pos.x += w;
             
             // keep track of biggest item in the line (include item margin bottom)
             let biggest = h;
@@ -211,7 +211,7 @@ impl Cx {
                 turtle.bound_right_bottom.x = bound_x2;
             }
             // update y2 bounds (margin bottom is only added if its negative)
-            let bound_y2 = turtle.walk.y + h;
+            let bound_y2 = turtle.pos.y + h;
             if bound_y2 > turtle.bound_right_bottom.y {
                 turtle.bound_right_bottom.y = bound_y2;
             }
@@ -242,13 +242,13 @@ impl Cx {
         if let Some(turtle) = self.turtles.last_mut() {
             match turtle.layout.direction {
                 Direction::Right => {
-                    turtle.walk.x = turtle.origin.x + turtle.layout.padding.l;
-                    turtle.walk.y += turtle.biggest;
+                    turtle.pos.x = turtle.origin.x + turtle.layout.padding.l;
+                    turtle.pos.y += turtle.biggest;
                     turtle.biggest = 0.0;
                 },
                 Direction::Down => {
-                    turtle.walk.y = turtle.origin.y + turtle.layout.padding.t;
-                    turtle.walk.x += turtle.biggest;
+                    turtle.pos.y = turtle.origin.y + turtle.layout.padding.t;
+                    turtle.pos.x += turtle.biggest;
                     turtle.biggest = 0.0;
                 },
                 _ => ()
@@ -258,7 +258,7 @@ impl Cx {
     
     pub fn turtle_line_is_visible(&mut self, min_height: f32, scroll: Vec2)->bool{
         if let Some(turtle) = self.turtles.last_mut() {
-            let y = turtle.walk.y;
+            let y = turtle.pos.y;
             let h = turtle.biggest.max(min_height);
             let vy = turtle.origin.y + scroll.y;
             let vh = turtle.height;
@@ -275,8 +275,8 @@ impl Cx {
 
     pub fn turtle_new_line_min_height(&mut self, min_height: f32) {
         if let Some(turtle) = self.turtles.last_mut() {
-            turtle.walk.x = turtle.origin.x + turtle.layout.padding.l;
-            turtle.walk.y += turtle.biggest.max(min_height);
+            turtle.pos.x = turtle.origin.x + turtle.layout.padding.l;
+            turtle.pos.y += turtle.biggest.max(min_height);
             turtle.biggest = 0.0;
         }
     }
@@ -371,29 +371,29 @@ impl Cx {
     
     pub fn move_turtle(&mut self, dx: f32, dy: f32) {
         if let Some(turtle) = self.turtles.last_mut() {
-            turtle.walk.x += dx;
-            turtle.walk.y += dy;
+            turtle.pos.x += dx;
+            turtle.pos.y += dy;
         }
     }
     
-    pub fn get_turtle_walk(&self) -> Vec2 {
+    pub fn get_turtle_pos(&self) -> Vec2 {
         if let Some(turtle) = self.turtles.last() {
-            turtle.walk
+            turtle.pos
         }
         else {
             Vec2::zero()
         }
     }
     
-    pub fn set_turtle_walk(&mut self, walk: Vec2) {
+    pub fn set_turtle_pos(&mut self, pos: Vec2) {
         if let Some(turtle) = self.turtles.last_mut() {
-            turtle.walk = walk
+            turtle.pos = pos
         }
     }
     
-    pub fn get_rel_turtle_walk(&self) -> Vec2 {
+    pub fn get_rel_turtle_pos(&self) -> Vec2 {
         if let Some(turtle) = self.turtles.last() {
-            Vec2 {x: turtle.walk.x - turtle.origin.x, y: turtle.walk.y - turtle.origin.y}
+            Vec2 {x: turtle.pos.x - turtle.origin.x, y: turtle.pos.y - turtle.origin.y}
         }
         else {
             Vec2::zero()
@@ -544,10 +544,10 @@ impl Cx {
         }
     }
     
-    pub fn reset_turtle_walk(&mut self) {
+    pub fn reset_turtle_pos(&mut self) {
         if let Some(turtle) = self.turtles.last_mut() {
             // subtract used size so 'fill' works
-            turtle.walk = Vec2 {
+            turtle.pos = Vec2 {
                 x: turtle.origin.x + turtle.layout.padding.l,
                 y: turtle.origin.y + turtle.layout.padding.t
             };
@@ -585,7 +585,7 @@ impl Cx {
             Height::Fix(old.height)
         };
         
-        let margin = old.layout.margin.clone();
+        let margin = old.layout.walk.margin.clone();
         // if we have alignment set, we should now align our childnodes
         let dx = Self::compute_align_turtle_x(&old);
         if dx > 0.0{
@@ -604,7 +604,7 @@ impl Cx {
             return Rect {x: abs_origin.x, y: abs_origin.y, w: w, h: h};
         }
         
-        return self.walk_turtle(w, h, margin, Some(&old))
+        return self.walk_turtle(Walk{width:w, height:h, margin}, Some(&old))
     }
     
     fn _get_width_left(&self, abs: bool, abs_size: f32) -> f32 {
@@ -618,7 +618,7 @@ impl Cx {
     
     pub fn get_width_left(&self) -> f32 {
         if let Some(turtle) = self.turtles.last() {
-            let nan_val = max_zero_keep_nan(turtle.width - turtle.width_used - (turtle.walk.x - turtle.origin.x));
+            let nan_val = max_zero_keep_nan(turtle.width - turtle.width_used - (turtle.pos.x - turtle.origin.x));
             if nan_val.is_nan() { // if we are a computed height, if some value is known, use that
                 if turtle.bound_right_bottom.x != std::f32::NEG_INFINITY {
                     return turtle.bound_right_bottom.x - turtle.origin.x
@@ -662,7 +662,7 @@ impl Cx {
     
     pub fn get_height_left(&self) -> f32 {
         if let Some(turtle) = self.turtles.last() {
-            let nan_val = max_zero_keep_nan(turtle.height - turtle.height_used - (turtle.walk.y - turtle.origin.y));
+            let nan_val = max_zero_keep_nan(turtle.height - turtle.height_used - (turtle.pos.y - turtle.origin.y));
             if nan_val.is_nan() { // if we are a computed height, if some value is known, use that
                 if turtle.bound_right_bottom.y != std::f32::NEG_INFINITY {
                     return turtle.bound_right_bottom.y - turtle.origin.y
@@ -763,6 +763,13 @@ impl Default for Height {
 
 
 impl Width {
+    pub fn fixed(&self)->f32{
+        match self {
+            Width::Fix(v) => *v,
+            _=>0.
+        }
+    }
+
     pub fn eval_width(&self, cx: &Cx, margin: Margin, abs: bool, abs_pos: f32) -> f32 {
         match self {
             Width::Compute => std::f32::NAN,
@@ -778,6 +785,12 @@ impl Width {
 }
 
 impl Height{
+    pub fn fixed(&self)->f32{
+        match self {
+            Height::Fix(v) => *v,
+            _=>0.
+        }
+    }
     pub fn eval_height(&self, cx: &Cx, margin: Margin, abs: bool, abs_pos: f32) -> f32 {
         match self {
             Height::Compute => std::f32::NAN,
@@ -898,15 +911,28 @@ impl Default for LineWrap {
 
 #[derive(Copy, Clone, Default, Debug)]
 pub struct Layout {
-    pub margin: Margin,
     pub padding: Padding,
     pub align: Align,
     pub direction: Direction,
     pub line_wrap: LineWrap,
     pub abs_origin: Option<Vec2>,
     pub abs_size: Option<Vec2>,
+    pub walk: Walk,
+}
+
+#[derive(Copy, Clone, Default, Debug)]
+pub struct Walk{
+    pub margin: Margin,
     pub width: Width,
     pub height: Height,
+}
+
+impl Walk{
+    pub fn wh(w:Width, h:Height)->Self{
+        Self{
+            width:w, height:h, margin:Margin::zero(),
+        }
+    }
 }
 
 impl Layout{
@@ -922,7 +948,7 @@ impl Layout{
 pub struct Turtle {
     pub align_list_x: usize,
     pub align_list_y: usize,
-    pub walk: Vec2,
+    pub pos: Vec2,
     pub origin: Vec2,
     pub bound_left_top: Vec2,
     pub bound_right_bottom: Vec2,

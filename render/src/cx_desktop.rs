@@ -190,7 +190,10 @@ impl Cx {
         0
     }
     
-    pub fn load_fonts_from_file(&mut self) {
+    pub fn load_theme_fonts(&mut self) {
+
+        // lets load all fonts.
+        
         let len = self.fonts.len();
         for i in 0..len {
             let path = self.fonts[i].path.clone();

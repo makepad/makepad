@@ -4,6 +4,7 @@ use crate::cx::*;
 pub struct CxThemeColors(pub Vec<Color>);
 pub struct CxThemeLayouts(pub Vec<Layout>);
 pub struct CxThemeTextStyles(pub Vec<TextStyle>);
+pub struct CxThemeWalks(pub Vec<Walk>);
 
 impl Cx{
     
@@ -48,6 +49,20 @@ impl Cx{
             new_id
         };
         self.layouts.0[id] = val;
+    }
+    
+    pub fn _set_walk(&mut self, val: Walk, type_id:TypeId){
+        let id = if let Some(stored_id) = self.theme_walk_to_id.get(&type_id) {
+            *stored_id
+        }
+        else{
+            let new_id = self.layout_id;
+            self.walk_id += 1;
+            self.walks.0.resize(self.layout_id, Walk::default());
+            self.theme_walk_to_id.insert(type_id, new_id);
+            new_id
+        };
+        self.walks.0[id] = val;
     }
 }
 
@@ -247,5 +262,63 @@ macro_rules!theme_layout {
                 }
             }
         }
+    };
+}
+
+
+// Walks
+
+#[derive(Default, PartialEq, Copy, Clone, Debug)]
+pub struct WalkId(pub usize);
+
+impl std::ops::Index<WalkId> for CxThemeWalks{
+    type Output = Walk;
+    fn index(&self, walk_id:WalkId)->&Self::Output{
+        if walk_id.0 >= self.0.len(){
+            &self.0[0]
+        }
+        else{
+            &self.0[walk_id.0]
+        }
+    }
+}
+
+pub trait ThemeWalk{
+    fn type_id()->TypeId;
+    fn set(cx:&mut Cx, value:Walk);
+    fn id(cx:&Cx)->WalkId;
+}
+
+
+#[macro_export]
+macro_rules!theme_walk {
+    ( $ name: ident) => {
+        pub struct $name();
+        impl ThemeWalk for $name{
+            fn type_id()->std::any::TypeId{std::any::TypeId::of::<$name>()}
+            fn set(cx:&mut Cx, value:Walk){cx._set_walk(value, $name::type_id())}
+            fn id(cx:&Cx)->WalkId{
+                let type_id = $name::type_id();
+                if let Some(stored_id) = cx.theme_walk_to_id.get(&type_id) {
+                    WalkId(*stored_id)
+                }
+                else {
+                    panic!("ThemeWalk {} not set", stringify!($name))
+                }
+            }
+        }
+    };
+}
+
+
+
+#[derive(Hash, PartialEq, Copy, Clone, Debug)]
+pub struct ShaderColorId(pub std::any::TypeId);
+
+#[macro_export]
+macro_rules!shader_color {
+    ( $ name: ident) => {
+        pub struct $name();
+        impl $name{fn id()->ShaderColorId{ShaderColorId(std::any::TypeId::of::<$name>())}}
     };
 }

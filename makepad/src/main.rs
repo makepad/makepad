@@ -18,6 +18,9 @@ mod filetree;
 pub use crate::filetree::*;
 mod buildmanager;
 pub use crate::buildmanager::*;
+mod makepadtheme;
+pub use crate::makepadtheme::*;
+
 //mod rustcompiler;
 //pub use crate::rustcompiler::*;
 use render::*;

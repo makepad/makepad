@@ -1,6 +1,6 @@
 use render::*;
 use crate::buttonlogic::*;
-use crate::theme::*;
+use crate::widgettheme::*;
 
 #[derive(Clone)]
 pub struct NormalButton {
@@ -51,7 +51,7 @@ impl NormalButton {
     pub fn def_bg_shader() -> ShaderGen {
         Quad::def_quad_shader().compose(shader_ast!({
             
-            let border_color: vec4<Instance>;
+            let border_color: vec4<Instance,>;
             let glow_size: float<Instance>;
             
             const glow_color: vec4 = color("#30f");

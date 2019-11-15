@@ -3,7 +3,7 @@ use widget::*;
 use crate::textbuffer::*;
 use crate::textcursor::*;
 use crate::codeicon::*;
-use crate::theme::*;
+use crate::editortheme::*;
 
 #[derive(Clone)]
 pub struct CodeEditor {
@@ -149,9 +149,6 @@ pub enum CodeEditorEvent {
 }
 
 impl CodeEditor {
-    pub fn set_dark_editor_theme(cx: &mut Cx){
-        
-    }
     
     pub fn style(cx: &mut Cx) -> Self {
         Self {
@@ -237,23 +234,15 @@ impl CodeEditor {
             code_icon: CodeIcon::style(cx),
             bg_layout: LayoutCodeEditor::id(cx),
             text: Text {
-                text_style: 
-                font: cx.load_font_style("mono_font"),
-                brightness: 1.1,
                 z: 2.00,
-                line_spacing: 1.8,
-                top_drop: 1.3,
                 wrapping: Wrapping::Line,
-                ..Text::style(cx)
+                ..Text::style(cx, TextStyleCodeEditorText::id(cx))
             },
             line_number_text: Text {
-                font: cx.load_font_style("mono_font"),
                 z: 9.,
-                line_spacing: 1.9,
-                top_drop: 1.3,
                 do_h_scroll: false,
                 wrapping: Wrapping::Line,
-                ..Text::style(cx)
+                ..Text::style(cx, TextStyleCodeEditorText::id(cx))
             },
             base_font_size: 8.0,
             open_font_scale: 1.0,
@@ -1075,7 +1064,7 @@ impl CodeEditor {
     fn draw_new_line(&mut self, cx: &mut Cx) {
         // line geometry is used for scrolling look up of cursors
         let line_geom = LineGeom {
-            walk: cx.get_rel_turtle_walk(),
+            walk: cx.get_rel_turtle_pos(),
             font_size: self._line_largest_font,
             was_folded: self._line_was_folded,
             indent_id: if let Some((_, id)) = self._indent_stack.last() {*id}else {0.}
@@ -1155,7 +1144,7 @@ impl CodeEditor {
         
         // search for all markings
         self._line_geometry.push(line_geom);
-        self._line_largest_font = self.text.font_size;
+        self._line_largest_font = cx.text_styles[self.text.text_style].font_size;
     }
     
     fn draw_indent_lines(&mut self, cx: &mut Cx, geom_y: f32, tabs: usize) {
@@ -1501,7 +1490,7 @@ impl CodeEditor {
         
         // lets insert an empty newline at the bottom so its nicer to scroll
         self.draw_new_line(cx);
-        cx.walk_turtle(Width::Fix(0.0), Height::Fix(self._monospace_size.y), Margin::zero(), None);
+        cx.walk_turtle(Walk::wh(Width::Fix(0.0), Height::Fix(self._monospace_size.y)), None);
         
         self.text.end_text(cx, self._text_inst.as_ref().unwrap());
         self._text_area = self._text_inst.take().unwrap().inst.into_area();
@@ -1518,7 +1507,7 @@ impl CodeEditor {
         
         // inject a final page
         self._final_fill_height = cx.get_height_total() - self._monospace_size.y;
-        cx.walk_turtle(Width::Fix(0.0), Height::Fix(self._final_fill_height), Margin::zero(), None);
+        cx.walk_turtle(Walk::wh(Width::Fix(0.0), Height::Fix(self._final_fill_height)), None);
         
         // last bits
         self.do_selection_scrolling(cx, text_buffer);

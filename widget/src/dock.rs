@@ -3,7 +3,7 @@ use std::mem;
 use render::*;
 use crate::splitter::*;
 use crate::tabcontrol::*;
-use crate::theme::*;
+use crate::widgettheme::*;
 use serde::*;
 
 #[derive(Clone)]

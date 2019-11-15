@@ -86,8 +86,8 @@ impl Blit {
         area
     }
     
-    pub fn draw_blit_walk(&mut self, cx: &mut Cx, texture:&Texture, w: Width, h: Height, margin: Margin) -> InstanceArea {
-        let geom = cx.walk_turtle(w, h, margin, None);
+    pub fn draw_blit_walk(&mut self, cx: &mut Cx, texture:&Texture, walk:Walk) -> InstanceArea {
+        let geom = cx.walk_turtle(walk, None);
         let inst = self.draw_blit_abs(cx, texture, geom);
         cx.align_instance(inst);
         inst

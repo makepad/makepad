@@ -189,7 +189,7 @@ impl TrapezoidText {
                 }
                 let glyph = &cx.fonts[font_id].font_loaded.as_ref().unwrap().glyphs[slot];
                 let dpi_factor = cx.current_dpi_factor;
-                let pos = cx.get_turtle_walk(); 
+                let pos = cx.get_turtle_pos(); 
                 let font_scale_logical = font_size * 96.0 / (72.0 * font.units_per_em);
                 let font_scale_pixels = font_scale_logical * dpi_factor;
                 

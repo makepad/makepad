@@ -2,7 +2,7 @@ use render::*;
 use crate::buttonlogic::*;
 use crate::desktopbutton::*;
 use crate::windowmenu::*;
-use crate::theme::*;
+use crate::widgettheme::*;
 
 #[derive(Clone)]
 pub struct DesktopWindow {
@@ -153,8 +153,7 @@ impl DesktopWindow {
         let _ = self.main_view.begin_view(cx, Layout::default());
         
         if self.caption_view.begin_view(cx, Layout {
-            width: Width::Fill,
-            height: Height::Compute,
+            walk:Walk::wh(Width::Fill, Height::Compute),
             ..Layout::default()
         }).is_ok() {
             
@@ -164,8 +163,7 @@ impl DesktopWindow {
                     self.caption_bg.color = cx.colors[self.caption_bg_color];
                     let bg_inst = self.caption_bg.begin_quad(cx, Layout {
                         align: Align::right_center(),
-                        width: Width::Fill,
-                        height: Height::Compute,
+                        walk: Walk::wh(Width::Fill, Height::Compute),
                         ..Default::default()
                     });
                     
@@ -187,7 +185,7 @@ impl DesktopWindow {
                     // change alignment
                     cx.change_turtle_align_x(0.5); //Align::center());
                     cx.compute_turtle_height();
-                    cx.reset_turtle_walk();
+                    cx.reset_turtle_pos();
                     cx.move_turtle(50., 0.);
                     // we need to store our caption rect somewhere.
                     self.caption_size = Vec2 {x: cx.get_width_left(), y: cx.get_height_left()};
@@ -202,8 +200,7 @@ impl DesktopWindow {
                     }
                     let bg_inst = self.caption_bg.begin_quad(cx, Layout {
                         align: Align::center(),
-                        width: Width::Fill,
-                        height: Height::Fix(22.),
+                        walk: Walk::wh(Width::Fill, Height::Fix(22.)),
                         ..Default::default()
                     });
                     self.caption_size = Vec2 {x: cx.get_width_left(), y: cx.get_height_left()};
@@ -232,7 +229,7 @@ impl DesktopWindow {
         self.inner_view.end_view(cx);
         // lets draw a VR button top right over the UI.
         if cx.vr_can_present { // show a switch-to-VRMode button
-            cx.reset_turtle_walk();
+            cx.reset_turtle_pos();
             cx.move_turtle(cx.get_width_total() - 50.0, 0.);
             self.vr_btn.draw_desktop_button(cx, DesktopButtonType::VRMode);
         }

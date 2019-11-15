@@ -1,11 +1,10 @@
 use render::*;
+use crate::editortheme::*;
 
 #[derive(Clone)]
 pub struct CodeIcon {
     pub quad: Quad,
-    pub margin: Margin,
-    pub width: f32,
-    pub height: f32,
+    pub walk: WalkId,
 }
 
 pub enum CodeIconType {
@@ -31,9 +30,7 @@ impl CodeIconType {
 impl CodeIcon {
     pub fn style(cx: &mut Cx) -> Self {
         Self {
-            width: 14.0,
-            height: 14.0,
-            margin: Margin {l: 0., t: 0.5, r: 4., b: 0.},
+            walk: WalkCodeIcon::id(cx),
             quad: Quad {
                 shader: cx.add_shader(Self::def_code_icon_shader(), "CodeIcon"),
                 ..Quad::style(cx)
@@ -121,15 +118,16 @@ impl CodeIcon {
             }
         }))
     }
-    
+    /*
     pub fn draw_icon_abs(&mut self, cx: &mut Cx, x: f32, y: f32, icon_type: CodeIconType) -> InstanceArea {
         let inst = self.quad.draw_quad_abs(cx, Rect {x: x, y: y, w: self.width, h: self.height});
         inst.push_float(cx, icon_type.shader_float());
         inst
-    }
+    }*/
     
-    pub fn draw_icon_walk(&mut self, cx: &mut Cx, icon_type: CodeIconType) -> InstanceArea {
-        let inst = self.quad.draw_quad(cx, Width::Fix(self.width), Height::Fix(self.height), self.margin);
+    pub fn draw_icon(&mut self, cx: &mut Cx, icon_type: CodeIconType) -> InstanceArea {
+        
+        let inst = self.quad.draw_quad(cx, cx.walks[self.walk]);
         inst.push_float(cx, icon_type.shader_float());
         inst
     }

@@ -1,7 +1,7 @@
 use render::*;
 use crate::buttonlogic::*;
 use crate::tabclose::*;
-use crate::theme::*;
+use crate::widgettheme::*;
 
 #[derive(Clone)]
 pub struct Tab {
@@ -45,10 +45,7 @@ impl Tab {
                 ..Quad::style(cx)
             },
             bg_layout: LayoutTab::id(cx),
-            tab_close: TabClose {
-                margin: Margin {l: -4., t: 0., r: 4., b: 0.},
-                ..TabClose::style(cx)
-            },
+            tab_close: TabClose::style(cx),
             text: Text::style(cx, TextStyleTab::id(cx)),
             animator: Animator::new_no_default(),
             abs_origin: None,
@@ -194,7 +191,7 @@ impl Tab {
                 if self.animator.term_anim_playing() {
                     return TabEvent::Close;
                 }
-                else{
+                else {
                     self.animator.end();
                 }
             },
@@ -267,7 +264,7 @@ impl Tab {
         self._bg_area.get_rect(cx, false)
     }
     
-    pub fn begin_tab(&mut self, cx: &mut Cx)->Result<(),()>{
+    pub fn begin_tab(&mut self, cx: &mut Cx) -> Result<(), ()> {
         // pull the bg color from our animation system, uses 'default' value otherwise
         self.bg.z = self.z;
         self.bg.color = self.animator.last_color(cx, "bg.color");
@@ -275,17 +272,23 @@ impl Tab {
         // check if we are closing
         if self.animator.term_anim_playing() {
             // so so BUT how would we draw this thing with its own clipping
-            let bg_inst = self.bg.draw_quad(cx, Width::Fix(self._close_anim_rect.w * self.animator.last_float(cx, "closing")), Height::Fix(self._close_anim_rect.h), Margin::zero(),);
+            let bg_inst = self.bg.draw_quad(
+                cx,
+                Walk::wh(
+                    Width::Fix(self._close_anim_rect.w * self.animator.last_float(cx, "closing")),
+                    Height::Fix(self._close_anim_rect.h),
+                )
+            );
             bg_inst.push_last_color(cx, &self.animator, "bg.border_color");
             self._bg_area = bg_inst.into_area();
-            self.animator.update_area_refs(cx, self._bg_area); 
+            self.animator.update_area_refs(cx, self._bg_area);
             return Err(())
         }
         else {
-            let layout = if let Some(abs_origin) = self.abs_origin{
-                Layout{abs_origin: Some(abs_origin), ..cx.layouts[self.bg_layout]}
+            let layout = if let Some(abs_origin) = self.abs_origin {
+                Layout {abs_origin: Some(abs_origin), ..cx.layouts[self.bg_layout]}
             }
-            else{
+            else {
                 cx.layouts[self.bg_layout]
             };
             let bg_inst = self.bg.begin_quad(cx, layout);
@@ -305,15 +308,15 @@ impl Tab {
         }
     }
     
-    pub fn end_tab(&mut self, cx: &mut Cx){
-        if let Some(bg_inst) = self._bg_inst.take(){
+    pub fn end_tab(&mut self, cx: &mut Cx) {
+        if let Some(bg_inst) = self._bg_inst.take() {
             self._bg_area = self.bg.end_quad(cx, &bg_inst);
             self.animator.update_area_refs(cx, self._bg_area); // if our area changed, update animation
         }
     }
     
     pub fn draw_tab(&mut self, cx: &mut Cx) {
-        if self.begin_tab(cx).is_err(){return};
+        if self.begin_tab(cx).is_err() {return};
         self.end_tab(cx);
     }
     

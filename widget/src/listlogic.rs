@@ -102,7 +102,7 @@ impl ListLogic {
     
     pub fn walk_turtle_to_end(&mut self, cx: &mut Cx, row_height: f32) {
         let left = (self.list_items.len() - self.end_item) as f32 * row_height;
-        cx.walk_turtle(Width::Fill, Height::Fix(left), Margin::zero(), None);
+        cx.walk_turtle(Walk::wh(Width::Fill, Height::Fix(left)), None);
     }
     
     

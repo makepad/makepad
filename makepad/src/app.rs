@@ -6,6 +6,7 @@ use crate::appwindow::*;
 use crate::appstorage::*;
 use crate::filetree::*;
 use crate::buildmanager::*;
+use crate::makepadtheme::*;
 
 pub struct App {
     pub app_window_state_template: AppWindowState,
@@ -22,10 +23,10 @@ impl App {
     
     pub fn style(cx: &mut Cx) -> Self {
 
-        set_default_fonts(cx);
-        set_dark_theme(cx);
-        CodeEditor::set_dark_editor_theme(cx);
-
+        set_dark_widget_theme(cx);
+        set_dark_editor_theme(cx);
+        set_dark_makepad_theme(cx);
+        
         let ms = cx.new_signal();
         Self {
             menu: Menu::main(vec![
@@ -137,6 +138,11 @@ impl App {
                             tabs: vec![
                                 DockTab {
                                     closeable: false,
+                                    title: "Keyboard".to_string(),
+                                    item: Panel::Keyboard
+                                },
+                                DockTab {
+                                    closeable: false,
                                     title: "Log List".to_string(),
                                     item: Panel::LogList
                                 },
@@ -145,16 +151,6 @@ impl App {
                                     title: "Log Item".to_string(),
                                     item: Panel::LogItem
                                 },
-                                DockTab {
-                                    closeable: false,
-                                    title: "Local Terminal".to_string(),
-                                    item: Panel::LocalTerminal {start_path: "./".to_string(), terminal_id: 1}
-                                },
-                                DockTab {
-                                    closeable: false,
-                                    title: "Keyboard".to_string(),
-                                    item: Panel::Keyboard
-                                }
                             ]
                         })
                     })
