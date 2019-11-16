@@ -37,10 +37,10 @@ impl Cx {
                 1 => { // fetch_deps
                     
                     // send the UI our deps, overlap with shadercompiler
-                    let mut load_deps = Vec::new();
+                    let mut load_deps = Vec::<String>::new();
                     for text_style in &mut self.text_styles.0{
-                        if load_deps.iter().find(|v| v == text_style.font_path).is_none(){
-                            load_deps.push(text_style.font_path);
+                        if load_deps.iter().find(|v| **v == text_style.font_path).is_none(){
+                            load_deps.push(text_style.font_path.clone());
                         }
                     }
                     // other textures, things
@@ -57,21 +57,21 @@ impl Cx {
                         let vec_len = to_wasm.mu32() as usize;
                         let vec_rec = unsafe {Vec::<u8>::from_raw_parts(vec_ptr, vec_len, vec_len)};
                         // check if its a font
-                        if self.text_styles.iter().find(|ts| ts.font_path == dep_path).is_some(){
+                        if self.text_styles.0.iter().find(|ts| ts.font_path == dep_path).is_some(){
                             // load it
                             let mut font = CxFont::default();
-                            font.path = dep_path;
                             if font.load_from_ttf_bytes(&vec_rec).is_err() {
                                 println!("Error loading font {} ", dep_path);
                             }
                             else{
                                 let id = self.fonts.len();
-                                self.fonts.push(font);
                                 for text_style in &mut self.text_styles.0{
                                     if text_style.font_path == dep_path{
                                         text_style.font_id = Some(id);
                                     }
                                 }
+                                font.path = dep_path;
+                                self.fonts.push(font);
                             }
                         }
                     }
