@@ -51,7 +51,7 @@ impl NormalButton {
     pub fn def_bg_shader() -> ShaderGen {
         Quad::def_quad_shader().compose(shader_ast!({
             
-            let border_color: vec4<Instance,>;
+            let border_color: vec4<Instance>;
             let glow_size: float<Instance>;
             
             const glow_color: vec4 = color("#30f");
@@ -86,7 +86,7 @@ impl NormalButton {
         self.bg.color = self.animator.last_color(cx, "bg.color");
         
         let bg_inst = self.bg.begin_quad(cx, cx.layouts[self.bg_layout]);
-        
+
         bg_inst.push_last_color(cx, &self.animator, "bg.border_color");
         bg_inst.push_last_float(cx, &self.animator, "bg.glow_size");
         

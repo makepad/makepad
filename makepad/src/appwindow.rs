@@ -13,7 +13,7 @@ use crate::logitem::*;
 use crate::keyboard::*;
 use crate::buildmanager::*;
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Panel {
     LogList,
     LogItem,

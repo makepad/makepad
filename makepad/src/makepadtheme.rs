@@ -30,7 +30,7 @@ pub fn set_makepad_theme_values(cx: &mut Cx){
     });
     
     LayoutFileTreeNode::set(cx, Layout {
-        walk: Walk::wh(Width::Fill, Height::Compute),
+        walk: Walk::wh(Width::Fill, Height::Fix(20.)),
         align: Align::left_center(),
         padding: Padding {l: 5., t: 0., r: 0., b: 1.},
         ..Default::default()

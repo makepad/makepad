@@ -730,20 +730,22 @@ impl FileTree {
         }
         
         // draw filler nodes
-        let view_total = cx.get_turtle_bounds();
-        let rect_now = cx.get_turtle_rect();
-        let mut y = view_total.y;
-        while y < rect_now.h {
-            self.item_draw.node_bg.color = cx.colors[
-                if counter & 1 == 0 {self.item_draw.bg_selected}else {self.item_draw.bg_odd}
-            ];
-            self.item_draw.node_bg.draw_quad(
-                cx,
-                Walk::wh(Width::Fill, Height::Fix((rect_now.h - y).min(row_height))),
-            );
-            cx.turtle_new_line();
-            y += row_height;
-            counter += 1;
+        if row_height > 0.{
+            let view_total = cx.get_turtle_bounds();
+            let rect_now = cx.get_turtle_rect();
+            let mut y = view_total.y;
+            while y < rect_now.h {
+                self.item_draw.node_bg.color = cx.colors[
+                    if counter & 1 == 0 {self.item_draw.bg_selected}else {self.item_draw.bg_odd}
+                ];
+                self.item_draw.node_bg.draw_quad(
+                    cx,
+                    Walk::wh(Width::Fill, Height::Fix((rect_now.h - y).min(row_height))),
+                );
+                cx.turtle_new_line();
+                y += row_height;
+                counter += 1;
+            }
         }
         
         // draw the drag item overlay layer if need be

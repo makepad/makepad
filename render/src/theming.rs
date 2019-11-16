@@ -56,9 +56,9 @@ impl Cx{
             *stored_id
         }
         else{
-            let new_id = self.layout_id;
+            let new_id = self.walk_id;
             self.walk_id += 1;
-            self.walks.0.resize(self.layout_id, Walk::default());
+            self.walks.0.resize(self.walk_id, Walk::default());
             self.theme_walk_to_id.insert(type_id, new_id);
             new_id
         };
@@ -185,12 +185,7 @@ pub struct TextStyleId(pub usize);
 impl std::ops::Index<TextStyleId> for CxThemeTextStyles{
     type Output = TextStyle;
     fn index(&self, text_style_id:TextStyleId)->&Self::Output{
-        if text_style_id.0 >= self.0.len(){
-            &self.0[0]
-        }
-        else{
-            &self.0[text_style_id.0]
-        }
+        &self.0[text_style_id.0]
     }
 }
 
@@ -229,12 +224,7 @@ pub struct LayoutId(pub usize);
 impl std::ops::Index<LayoutId> for CxThemeLayouts{
     type Output = Layout;
     fn index(&self, layout_id:LayoutId)->&Self::Output{
-        if layout_id.0 >= self.0.len(){
-            &self.0[0]
-        }
-        else{
-            &self.0[layout_id.0]
-        }
+        &self.0[layout_id.0]
     }
 }
 
@@ -274,12 +264,7 @@ pub struct WalkId(pub usize);
 impl std::ops::Index<WalkId> for CxThemeWalks{
     type Output = Walk;
     fn index(&self, walk_id:WalkId)->&Self::Output{
-        if walk_id.0 >= self.0.len(){
-            &self.0[0]
-        }
-        else{
-            &self.0[walk_id.0]
-        }
+        &self.0[walk_id.0]
     }
 }
 

@@ -156,11 +156,11 @@ impl DesktopWindow {
             walk:Walk::wh(Width::Fill, Height::Compute),
             ..Layout::default()
         }).is_ok() {
-            
+            self.caption_bg.color = cx.colors[self.caption_bg_color];
             // alright here we draw our platform buttons.
             match cx.platform_type {
                 PlatformType::Linux | PlatformType::Windows => {
-                    self.caption_bg.color = cx.colors[self.caption_bg_color];
+                    
                     let bg_inst = self.caption_bg.begin_quad(cx, Layout {
                         align: Align::right_center(),
                         walk: Walk::wh(Width::Fill, Height::Compute),

@@ -191,25 +191,33 @@ impl Cx {
     }
     
     pub fn load_theme_fonts(&mut self) {
-
-        // lets load all fonts.
-        
-        let len = self.fonts.len();
-        for i in 0..len {
-            let path = self.fonts[i].path.clone();
-            // lets turn a file into a binary dep
-            let file_result = File::open(&path);
+        // lets load all fonts that aren't loaded yet
+        for text_style in &mut self.text_styles.0{
+            // lets see if we have it.
+            if let Some(id) = self.fonts.iter().position(|f| f.path == text_style.font_path){
+                text_style.font_id = Some(id);
+                continue;
+            }
+            // load it
+            let file_result = File::open(&text_style.font_path);
             if let Ok(mut file) = file_result {
                 let mut buffer = Vec::<u8>::new();
                 // read the whole file
                 if file.read_to_end(&mut buffer).is_ok() {
-                    if let Err(_) = self.fonts[i].load_from_ttf_bytes(&buffer){
-                        println!("Error loading font {} ", path);
+                    let mut font = CxFont::default();
+                    font.path = text_style.font_path.clone();
+                    if font.load_from_ttf_bytes(&buffer).is_err(){
+                        println!("Error loading font {} ", text_style.font_path);
+                    }
+                    else{
+                        let id = self.fonts.len();
+                        self.fonts.push(font);
+                        text_style.font_id = Some(id);
                     }
                 }
             }
             else{
-                println!("Error loading font {} ", path);
+                println!("Error loading font {} ", text_style.font_path);
             }
         }
     }

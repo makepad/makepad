@@ -26,7 +26,6 @@ impl App {
         set_dark_widget_theme(cx);
         set_dark_editor_theme(cx);
         set_dark_makepad_theme(cx);
-        
         let ms = cx.new_signal();
         Self {
             menu: Menu::main(vec![

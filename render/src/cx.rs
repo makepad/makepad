@@ -83,7 +83,6 @@ impl PlatformType {
     }
 }
 
-
 pub struct Cx {
     pub running: bool,
     pub platform_type: PlatformType,
