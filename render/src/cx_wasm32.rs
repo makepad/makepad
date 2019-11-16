@@ -38,8 +38,10 @@ impl Cx {
                     
                     // send the UI our deps, overlap with shadercompiler
                     let mut load_deps = Vec::new();
-                    for font in &self.fonts {
-                        load_deps.push(font.path.clone());
+                    for text_style in &mut self.text_styles.0{
+                        if load_deps.iter().find(|v| v == text_style.font_path).is_none(){
+                            load_deps.push(text_style.font_path);
+                        }
                     }
                     // other textures, things
                     self.platform.from_wasm.load_deps(load_deps);
@@ -53,21 +55,26 @@ impl Cx {
                         let dep_path = to_wasm.parse_string();
                         let vec_ptr = to_wasm.mu32() as *mut u8;
                         let vec_len = to_wasm.mu32() as usize;
-                        
-                        let len = self.fonts.len();
-                        for i in 0..len {
-                            let path = self.fonts[i].path.clone();
-                            // lets find path in deps
-                            if dep_path == path {
-                                let vec_rec = unsafe {Vec::<u8>::from_raw_parts(vec_ptr, vec_len, vec_len)};
-                                if let Err(_) = self.fonts[i].load_from_ttf_bytes(&vec_rec) {
-                                    println!("Error loading font {} ", path);
+                        let vec_rec = unsafe {Vec::<u8>::from_raw_parts(vec_ptr, vec_len, vec_len)};
+                        // check if its a font
+                        if self.text_styles.iter().find(|ts| ts.font_path == dep_path).is_some(){
+                            // load it
+                            let mut font = CxFont::default();
+                            font.path = dep_path;
+                            if font.load_from_ttf_bytes(&vec_rec).is_err() {
+                                println!("Error loading font {} ", dep_path);
+                            }
+                            else{
+                                let id = self.fonts.len();
+                                self.fonts.push(font);
+                                for text_style in &mut self.text_styles.0{
+                                    if text_style.font_path == dep_path{
+                                        text_style.font_id = Some(id);
+                                    }
                                 }
-                                continue;
                             }
                         }
                     }
-                    
                 },
                 3 => { // init
                     self.platform.window_geom = WindowGeom {
