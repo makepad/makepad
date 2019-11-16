@@ -9,6 +9,8 @@ pub struct TabClose {
     pub walk: WalkId,
     pub _bg_area: Area,
 }
+instance_float!(InstanceHover);
+instance_float!(InstanceDown);
 
 impl TabClose {
     pub fn style(cx: &mut Cx) -> Self {
@@ -46,8 +48,8 @@ impl TabClose {
 
     pub fn def_bg_shader() -> ShaderGen {
         Quad::def_quad_shader().compose(shader_ast!({
-            let hover: float<Instance>;
-            let down: float<Instance>;
+            let hover: InstanceHover;
+            let down: InstanceDown;
             fn pixel() -> vec4 {
                 df_viewport(pos * vec2(w, h));
                 let hover_max: float = (hover * 0.2 + 0.8) * 0.5;

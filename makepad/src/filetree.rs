@@ -186,6 +186,9 @@ impl<'a> FileWalker<'a> {
     }
 }
 
+instance_vec2!(InstanceLineVec);
+instance_float!(InstanceAnimPos);
+
 impl FileTreeItemDraw {
     fn style(cx: &mut Cx) -> Self {
         Self {
@@ -214,8 +217,8 @@ impl FileTreeItemDraw {
     pub fn def_filler_shader() -> ShaderGen {
         Quad::def_quad_shader().compose(shader_ast!({
             
-            let line_vec: vec2<Instance>;
-            let anim_pos: float<Instance>;
+            let line_vec: InstanceLineVec;
+            let anim_pos: InstanceAnimPos;
             
             fn pixel() -> vec4 {
                 df_viewport(pos * vec2(w, h));

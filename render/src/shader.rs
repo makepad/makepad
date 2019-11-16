@@ -6,6 +6,157 @@ pub use crate::cx::*;
 pub use crate::math::*;
 pub use crate::colors::*;
 
+#[derive(Hash, PartialEq, Copy, Clone, Debug)]
+pub struct ShInsColorId(pub std::any::TypeId);
+
+#[derive(Clone, Hash, PartialEq)]
+pub struct ShInsVec4Id(pub std::any::TypeId);
+
+#[derive(Clone, Hash, PartialEq)]
+pub struct ShInsVec3Id(pub std::any::TypeId);
+
+#[derive(Clone, Hash, PartialEq)]
+pub struct ShInsVec2Id(pub std::any::TypeId);
+
+#[derive(Clone, Hash, PartialEq)]
+pub struct ShInsFloatId(pub std::any::TypeId);
+
+#[derive(Clone, Hash, PartialEq)]
+pub struct ShUniColorId(pub std::any::TypeId);
+
+#[derive(Clone, Hash, PartialEq)]
+pub struct ShUniVec4Id(pub std::any::TypeId);
+
+#[derive(Clone, Hash, PartialEq)]
+pub struct ShUniVec3Id(pub std::any::TypeId);
+
+#[derive(Clone, Hash, PartialEq)]
+pub struct ShUniVec2Id(pub std::any::TypeId);
+
+#[derive(Clone, Hash, PartialEq)]
+pub struct ShUniFloatId(pub std::any::TypeId);
+
+#[macro_export]
+macro_rules!instance_color { 
+    ( $ name: ident) => {
+        pub struct $ name();
+        impl $ name {
+            fn ty() -> String{"vec4".to_string()}
+            fn store() -> ShVarStore{ShVarStore::Instance(ShInsId::Color($name::id()))}
+            fn id() -> ShInsColorId {ShInsColorId(std::any::TypeId::of::< $ name>())}
+        }
+    };
+}
+
+#[macro_export]
+macro_rules!instance_vec4 {
+    ( $ name: ident) => {
+        pub struct $ name();
+        impl $ name {
+            fn ty() -> String{"vec4".to_string()}
+            fn store() -> ShVarStore{ShVarStore::Instance(ShInsId::Vec4($name::id()))}
+            fn id() -> ShInsVec4Id {ShInsVec4Id(std::any::TypeId::of::< $ name>())}
+        }
+    };
+}
+
+#[macro_export]
+macro_rules!instance_vec3 {
+    ( $ name: ident) => {
+        pub struct $ name();
+        impl $ name {
+            fn ty() -> String{"vec3".to_string()}
+            fn store() -> ShVarStore{ShVarStore::Instance(ShInsId::Vec3($name::id()))}
+            fn id() -> ShInsVec3Id {ShInsVec3Id(std::any::TypeId::of::< $ name>())}
+        }
+    };
+}
+
+#[macro_export]
+macro_rules!instance_vec2 {
+    ( $ name: ident) => {
+        pub struct $ name();
+        impl $ name {
+            fn ty() -> String{"vec2".to_string()}
+            fn store() -> ShVarStore{ShVarStore::Instance(ShInsId::Vec2($name::id()))}
+            fn id() -> ShInsVec2Id {ShInsVec2Id(std::any::TypeId::of::< $ name>())}
+        }
+    };
+}
+
+#[macro_export]
+macro_rules!instance_float {
+    ( $ name: ident) => {
+        pub struct $ name();
+        impl $ name {
+            fn ty() -> String{"float".to_string()}
+            fn store() -> ShVarStore{ShVarStore::Instance(ShInsId::Float($name::id()))}
+            fn id() -> ShInsFloatId {ShInsFloatId(std::any::TypeId::of::< $ name>())}
+        }
+    };
+}
+
+
+#[macro_export]
+macro_rules!uniform_color {
+    ( $ name: ident) => {
+        pub struct $ name();
+        impl $ name {
+            fn ty() -> String{"vec4".to_string()}
+            fn store() -> ShVarStore{ShVarStore::Uniform(ShUniId::Color($name::id()))}
+            fn id() -> ShUniColorId {ShUniColorId(std::any::TypeId::of::< $ name>())}
+        }
+    };
+}
+
+#[macro_export]
+macro_rules!uniform_vec4 {
+    ( $ name: ident) => {
+        pub struct $ name();
+        impl $ name {
+            fn ty() -> String{"vec4".to_string()}
+            fn store() -> ShVarStore{ShVarStore::Uniform(ShUniId::Vec4($name::id()))}
+            fn id() -> ShUniVec4Id {ShUniVec4Id(std::any::TypeId::of::< $ name>())}
+        }
+    };
+}
+
+#[macro_export]
+macro_rules!uniform_vec3 {
+    ( $ name: ident) => {
+        pub struct $ name();
+        impl $ name {
+            fn ty() -> String{"vec3".to_string()}
+            fn store() -> ShVarStore{ShVarStore::Uniform(ShUniId::Vec3($name::id()))}
+            fn id() -> ShUniVec3Id {ShUniVec3Id(std::any::TypeId::of::< $ name>())}
+        }
+    };
+}
+
+#[macro_export]
+macro_rules!uniform_vec2 {
+    ( $ name: ident) => {
+        pub struct $ name();
+        impl $ name {
+            fn ty() -> String{"vec2".to_string()}
+            fn store() -> ShVarStore{ShVarStore::Uniform(ShUniId::Vec2($name::id()))}
+            fn id() -> ShUniVec2Id {ShUniVec2Id(std::any::TypeId::of::< $ name>())}
+        }
+    };
+}
+
+#[macro_export]
+macro_rules!uniform_float {
+    ( $ name: ident) => {
+        pub struct $ name();
+        impl $ name {
+            fn ty() -> String{"float".to_string()}
+            fn store() -> ShVarStore{ShVarStore::Uniform(ShUniId::Float($name::id()))}
+            fn id() -> ShUniFloatId {ShUniFloatId(std::any::TypeId::of::< $ name>())}
+        }
+    };
+}
+
 #[derive(Default, Clone, PartialEq)]
 pub struct Shader {
     pub shader_id: Option<(usize, usize)>,
@@ -68,7 +219,7 @@ impl NamedProps {
             if aligned && (offset & 3) + slots > 4 { // goes over the boundary
                 offset += 4 - (offset & 3); // make jump to new slot
             }
-            if aligned && slots == 2 && (offset&1) != 0{
+            if aligned && slots == 2 && (offset & 1) != 0 {
                 panic!("Please re-order uniform {} to be size-2 aligned", prop.name);
             }
             
@@ -88,9 +239,9 @@ impl NamedProps {
         }
     }
     
-    pub fn find_zbias_uniform_prop(&self)->Option<usize>{
+    pub fn find_zbias_uniform_prop(&self) -> Option<usize> {
         for prop in &self.props {
-            if prop.name == "zbias"{
+            if prop.name == "zbias" {
                 return Some(prop.offset)
             }
         }
@@ -111,7 +262,7 @@ pub struct CxShaderMapping {
     pub rect_instance_props: RectInstanceProps,
     pub named_uniform_props: NamedProps,
     pub named_instance_props: NamedProps,
-    pub zbias_uniform_prop: Option<usize> 
+    pub zbias_uniform_prop: Option<usize>
 }
 
 #[derive(Default, Clone)]
@@ -311,39 +462,39 @@ impl CxShader {
             let df_scale: float<Local>;
             let df_field: float<Local>;
             
-            fn df_iq_pal(t: float, a: vec3, b: vec3, c: vec3, d: vec3)->vec3{
+            fn df_iq_pal(t: float, a: vec3, b: vec3, c: vec3, d: vec3) -> vec3 {
                 return a + b * cos(6.28318 * (c * t + d));
             }
             
-            fn df_iq_pal0(t: float)->vec3{
-                return mix(vec3(0.,0.,0.),vec3(1.,1.,1.),cos(t*PI)*0.5+0.5)
+            fn df_iq_pal0(t: float) -> vec3 {
+                return mix(vec3(0., 0., 0.), vec3(1., 1., 1.), cos(t * PI) * 0.5 + 0.5)
             }
             
-            fn df_iq_pal1(t: float)->vec3{
+            fn df_iq_pal1(t: float) -> vec3 {
                 return df_iq_pal(t, vec3(0.5, 0.5, 0.5), vec3(0.5, 0.5, 0.5), vec3(1., 1., 1.), vec3(0., 0.33, 0.67));
             }
             
-            fn df_iq_pal2(t: float)->vec3{
-                return df_iq_pal(t, vec3(0.5,0.5,0.5), vec3(0.5,0.5,0.5), vec3(1.,1.,1.), vec3(0., 0.1, 0.2));
+            fn df_iq_pal2(t: float) -> vec3 {
+                return df_iq_pal(t, vec3(0.5, 0.5, 0.5), vec3(0.5, 0.5, 0.5), vec3(1., 1., 1.), vec3(0., 0.1, 0.2));
             }
             
-            fn df_iq_pal3(t: float)->vec3{
-                return df_iq_pal(t, vec3(0.5,0.5,0.5), vec3(0.5,0.5,0.5), vec3(1.,1.,1.), vec3(0.3, 0.2, 0.2));
+            fn df_iq_pal3(t: float) -> vec3 {
+                return df_iq_pal(t, vec3(0.5, 0.5, 0.5), vec3(0.5, 0.5, 0.5), vec3(1., 1., 1.), vec3(0.3, 0.2, 0.2));
             }
             
-            fn df_iq_pal4(t: float)->vec3{
-                return df_iq_pal(t, vec3(0.5,0.5,0.5), vec3(0.5,0.5,0.5), vec3(1., 1., 0.5), vec3(0.8, 0.9, 0.3));
+            fn df_iq_pal4(t: float) -> vec3 {
+                return df_iq_pal(t, vec3(0.5, 0.5, 0.5), vec3(0.5, 0.5, 0.5), vec3(1., 1., 0.5), vec3(0.8, 0.9, 0.3));
             }
             
-            fn df_iq_pal5(t: float)->vec3{
-                return df_iq_pal(t, vec3(0.5,0.5,0.5), vec3(0.5,0.5,0.5), vec3(1., 0.7, 0.4), vec3(0, 0.15, 0.20));
+            fn df_iq_pal5(t: float) -> vec3 {
+                return df_iq_pal(t, vec3(0.5, 0.5, 0.5), vec3(0.5, 0.5, 0.5), vec3(1., 0.7, 0.4), vec3(0, 0.15, 0.20));
             }
             
-            fn df_iq_pal6(t: float)->vec3{
-                return df_iq_pal(t, vec3(0.5,0.5,0.5), vec3(0.5,0.5,0.5), vec3(2., 1.0, 0.), vec3(0.5, 0.2, 0.25));
+            fn df_iq_pal6(t: float) -> vec3 {
+                return df_iq_pal(t, vec3(0.5, 0.5, 0.5), vec3(0.5, 0.5, 0.5), vec3(2., 1.0, 0.), vec3(0.5, 0.2, 0.25));
             }
             
-            fn df_iq_pal7(t: float)->vec3{
+            fn df_iq_pal7(t: float) -> vec3 {
                 return df_iq_pal(t, vec3(0.8, 0.5, 0.4), vec3(0.2, 0.4, 0.2), vec3(2., 1.0, 1.0), vec3(0., 0.25, 0.25));
             }
             

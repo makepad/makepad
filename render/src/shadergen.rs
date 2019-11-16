@@ -1,7 +1,7 @@
 // Shared shader-compiler code for generating GLSL and Metal shading language
 
 use std::hash::{Hash, Hasher};
-
+use std::any::TypeId;
 use crate::shader::*;
 
 #[derive(Default, Clone, PartialEq)]
@@ -43,12 +43,12 @@ impl ShaderGen {
     }
     
     // flatten our
-    pub fn flat_vars(&self, store: ShVarStore) -> Vec<ShVar> {
+    pub fn flat_vars<F>(&self, cb:F) -> Vec<ShVar> 
+    where F: Fn(&ShVarStore)->bool{
         let mut ret = Vec::new();
         for ast in self.asts.iter() {
             for shvar in &ast.vars {
-                // abusing an enum with flags complicates flattening a bit
-                if shvar.store == store {
+                if cb(&shvar.store){
                     ret.push(shvar.clone());
                 }
             }
@@ -162,11 +162,54 @@ pub struct ShFn {
 }
 
 #[derive(Clone, Hash, PartialEq)]
+pub enum ShUniId {
+    Color(ShUniColorId),
+    Vec4(ShUniVec4Id),
+    Vec3(ShUniVec3Id),
+    Vec2(ShUniVec2Id),
+    Float(ShUniFloatId)
+}
+
+impl ShUniId{
+    fn type_name(&self)->String{
+        match self{
+            ShUniId::Color(_)=>"vec4".to_string(),
+            ShUniId::Vec4(_)=>"vec4".to_string(),
+            ShUniId::Vec3(_)=>"vec3".to_string(),
+            ShUniId::Vec2(_)=>"vec2".to_string(),
+            ShUniId::Float(_)=>"float".to_string(),
+        }
+    }
+}
+
+#[derive(Clone, Hash, PartialEq)]
+pub enum ShInsId {
+    Color(ShInsColorId),
+    Vec4(ShInsVec4Id),
+    Vec3(ShInsVec3Id),
+    Vec2(ShInsVec2Id),
+    Float(ShInsFloatId)
+}
+
+impl ShInsId{
+    fn type_name(&self)->String{
+        match self{
+            ShInsId::Color(_)=>"vec4".to_string(),
+            ShInsId::Vec4(_)=>"vec4".to_string(),
+            ShInsId::Vec3(_)=>"vec3".to_string(),
+            ShInsId::Vec2(_)=>"vec2".to_string(),
+            ShInsId::Float(_)=>"float".to_string(),
+        }
+    }
+}
+
+#[derive(Clone, Hash, PartialEq)]
 pub enum ShVarStore {
-    Uniform,
+    Uniform(ShUniId),
+    UniformColor(TypeId),
     UniformVw,
     UniformCx,
-    Instance,
+    Instance(ShInsId),
     Geometry,
     Texture,
     Local,
@@ -615,7 +658,7 @@ impl ShField {
             }
             if self.member.len() >4 {
                 return Err(SlErr {
-                    msg: format!("member {} not found or a valid swizzle of {}", self.member, base.ty)
+                    msg: format!("member {} not found or a valid swizzle of {} {}", self.member, base.ty, base.sl)
                 })
             }
             for chr in self.member.chars() {
@@ -626,7 +669,7 @@ impl ShField {
                     if mode == 0 {mode = 1;}
                     else if mode != 1 {
                         return Err(SlErr {
-                            msg: format!("member {} not a valid swizzle of {}", self.member, base.ty)
+                            msg: format!("member {} not a valid swizzle of {} {}", self.member, base.ty, base.sl)
                         })
                     }
                 }
@@ -637,7 +680,7 @@ impl ShField {
                     if mode == 0 {mode = 2;}
                     else if mode != 2 {
                         return Err(SlErr {
-                            msg: format!("member {} not a valid swizzle of {}", self.member, base.ty)
+                            msg: format!("member {} not a valid swizzle of {} {}", self.member, base.ty, base.sl)
                         })
                     }
                 }
@@ -661,7 +704,7 @@ impl ShField {
                     ty: "vec4".to_string()
                 }),
                 _ => Err(SlErr {
-                    msg: format!("member {} not cannot be found on type {}", self.member, base.ty)
+                    msg: format!("member {} not cannot be found on type {} {}", self.member, base.ty, base.sl)
                 })
             }
         }

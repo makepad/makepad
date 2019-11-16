@@ -29,6 +29,10 @@ impl DesktopButtonType {
     }
 }
 
+instance_float!(InstanceHover);
+instance_float!(InstanceDown);
+instance_float!(InstanceButtonType);
+
 impl DesktopButton {
     pub fn style(cx: &mut Cx) -> Self {
         Self {
@@ -63,9 +67,9 @@ impl DesktopButton {
     pub fn def_bg_shader() -> ShaderGen {
         Quad::def_quad_shader().compose(shader_ast!({
             
-            let hover: float<Instance>;
-            let down: float<Instance>;
-            let button_type: float<Instance>;
+            let hover: InstanceHover;
+            let down: InstanceDown;
+            let button_type: InstanceButtonType;
             
             fn pixel() -> vec4 {
                 df_viewport(pos * vec2(w, h)); // );

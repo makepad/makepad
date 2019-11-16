@@ -148,6 +148,14 @@ pub enum CodeEditorEvent {
     Change
 }
 
+instance_float!(InstanceIndentId);
+uniform_float!(UniformIndentSel);
+uniform_float!(UniformBlink);
+instance_float!(InstancePrevX);
+instance_float!(InstancePrevW);
+instance_float!(InstanceNextX);
+instance_float!(InstanceNextW);
+uniform_float!(UniformVisible);
 impl CodeEditor {
     
     pub fn style(cx: &mut Cx) -> Self {
@@ -317,8 +325,8 @@ impl CodeEditor {
     
     pub fn def_indent_lines_shader() -> ShaderGen {
         Quad::def_quad_shader().compose(shader_ast !({
-            let indent_id: float<Instance>;
-            let indent_sel: float<Uniform>;
+            let indent_id: InstanceIndentId;
+            let indent_sel: UniformIndentSel;
             fn pixel() -> vec4 {
                 let col = color;
                 let thickness = 0.8 + dpi_dilate * 0.5;
@@ -339,7 +347,7 @@ impl CodeEditor {
     
     pub fn def_cursor_shader() -> ShaderGen {
         Quad::def_quad_shader().compose(shader_ast !({
-            let blink: float<Uniform>;
+            let blink: UniformBlink;
             fn pixel() -> vec4 {
                 if blink<0.5 {
                     return vec4(color.rgb * color.a, color.a)
@@ -353,10 +361,10 @@ impl CodeEditor {
     
     pub fn def_selection_shader() -> ShaderGen {
         Quad::def_quad_shader().compose(shader_ast !({
-            let prev_x: float<Instance>;
-            let prev_w: float<Instance>;
-            let next_x: float<Instance>;
-            let next_w: float<Instance>;
+            let prev_x: InstancePrevX;
+            let prev_w: InstancePrevW;
+            let next_x: InstanceNextX;
+            let next_w: InstanceNextW;
             const gloopiness: float = 8.;
             const border_radius: float = 2.;
             
@@ -432,7 +440,7 @@ impl CodeEditor {
     
     pub fn def_token_highlight_shader() -> ShaderGen {
         Quad::def_quad_shader().compose(shader_ast!({
-            let visible: float<Uniform>;
+            let visible: UniformVisible;
             fn pixel() -> vec4 {
                 if visible<0.5 {
                     return vec4(0., 0., 0., 0.)

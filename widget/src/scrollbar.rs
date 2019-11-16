@@ -32,6 +32,11 @@ pub enum ScrollBarEvent {
     ScrollDone
 }
 
+instance_float!(InstanceIsVertical);
+instance_float!(InstanceNormHandle);
+instance_float!(InstanceNormScroll);
+
+
 impl ScrollBar {
     pub fn style(cx: &mut Cx) -> Self {
         Self {
@@ -85,10 +90,9 @@ impl ScrollBar {
     pub fn def_shader() -> ShaderGen {
         Quad::def_quad_shader().compose(shader_ast!({
             
-            let is_vertical: float<Instance>;
-            
-            let norm_handle: float<Instance>;
-            let norm_scroll: float<Instance>;
+            let is_vertical: InstanceIsVertical;
+            let norm_handle: InstanceNormHandle;
+            let norm_scroll: InstanceNormScroll;
             
             const border_radius: float = 1.5;
             

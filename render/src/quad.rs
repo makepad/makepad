@@ -9,6 +9,15 @@ pub struct Quad {
     pub color: Color
 }
 
+instance_float!(InstanceX);
+instance_float!(InstanceY);
+instance_float!(InstanceZ);
+instance_float!(InstanceW);
+instance_float!(InstanceH);
+instance_color!(InstanceColor);
+uniform_vec2!(UniformViewDoScroll);
+uniform_float!(UniformZBias);
+
 impl Quad {
     pub fn style_with_shader(cx: &mut Cx, shader:ShaderGen, name:&str) -> Self {
         Self {
@@ -36,15 +45,17 @@ impl Quad {
         sg.compose(shader_ast!({
             
             let geom: vec2<Geometry>;
-            let x: float<Instance>;
-            let y: float<Instance>;
-            let w: float<Instance>;
-            let h: float<Instance>;
-            let z: float<Instance>;
-            let color: vec4<Instance>;
             let pos: vec2<Varying>;
-            let view_do_scroll: vec2<Uniform>;
-            let zbias: float<Uniform>;
+            
+            let x: InstanceX;
+            let y: InstanceY;
+            let w: InstanceW;
+            let h: InstanceH;
+            let z: InstanceZ; 
+            let color: InstanceColor;
+
+            let view_do_scroll: UniformViewDoScroll;
+            let zbias: UniformZBias;
             //let dpi_dilate: float<Uniform>;
             
             fn vertex() -> vec4 {

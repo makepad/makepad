@@ -35,6 +35,10 @@ pub struct TrapezoidText {
     trapezoidator: Trapezoidator
 }
 
+instance_vec2!(InstanceAxS);
+instance_vec4!(InstanceAyS);
+instance_float!(InstanceChan);
+
 impl TrapezoidText {
     pub fn style(cx: &mut Cx) -> Self {
         Self {
@@ -52,9 +56,9 @@ impl TrapezoidText {
             
             let geom: vec2<Geometry>;
             
-            let a_xs: vec2<Instance>;
-            let a_ys: vec4<Instance>;
-            let chan: float<Instance>;
+            let a_xs: InstanceAxS;
+            let a_ys: InstanceAyS;
+            let chan: InstanceChan;
             
             let v_p0: vec2<Varying>;
             let v_p1: vec2<Varying>;

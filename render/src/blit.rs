@@ -11,6 +11,18 @@ pub struct Blit {
     pub do_scroll: bool
 }
 
+instance_float!(InstanceX);
+instance_float!(InstanceY);
+instance_float!(InstanceMinX);
+instance_float!(InstanceMinY);
+instance_float!(InstanceMaxX);
+instance_float!(InstanceMaxY);
+instance_float!(InstanceZ);
+instance_float!(InstanceW);
+instance_float!(InstanceH);
+uniform_vec2!(UniformViewDoScroll);
+uniform_float!(UniformAlpha);
+
 impl Blit {
     pub fn style(cx: &mut Cx) -> Self {
         Self {
@@ -34,17 +46,17 @@ impl Blit {
         sb.compose(shader_ast!({
             
             let geom: vec2<Geometry>;
-            let x: float<Instance>;
-            let y: float<Instance>;
-            let w: float<Instance>;
-            let h: float<Instance>;
-            let min_x: float<Instance>;
-            let min_y: float<Instance>;
-            let max_x: float<Instance>;
-            let max_y: float<Instance>;
+            let x: InstanceX;
+            let y: InstanceY;
+            let w: InstanceW;
+            let h: InstanceH;
+            let min_x: InstanceMinX;
+            let min_y: InstanceMinY;
+            let max_x: InstanceMaxX;
+            let max_y: InstanceMaxY;
             let tc: vec2<Varying>;
-            let view_do_scroll: float<Uniform>;
-            let alpha: float<Uniform>;
+            let view_do_scroll: UniformViewDoScroll;
+            let alpha: UniformAlpha;
             let texturez:texture2d<Texture>;
             let v_pixel: vec2<Varying>;
             //let dpi_dilate: float<Uniform>;

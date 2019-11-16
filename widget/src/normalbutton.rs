@@ -12,6 +12,9 @@ pub struct NormalButton {
     pub _bg_area: Area,
 }
 
+instance_color!(InstanceBorderColor);
+instance_float!(InstanceGlowSize);
+
 impl NormalButton {
     pub fn style(cx: &mut Cx) -> Self {
         Self {
@@ -51,8 +54,8 @@ impl NormalButton {
     pub fn def_bg_shader() -> ShaderGen {
         Quad::def_quad_shader().compose(shader_ast!({
             
-            let border_color: vec4<Instance>;
-            let glow_size: float<Instance>;
+            let border_color: InstanceBorderColor;
+            let glow_size: InstanceGlowSize;
             
             const glow_color: vec4 = color("#30f");
             const border_radius: float = 6.5;

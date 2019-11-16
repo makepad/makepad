@@ -82,7 +82,14 @@ fn generate_shvar_defs(stmt:Local)->TokenStream{
                 }
             }
             else{
-                return error(seg.ident.span(), "type should have storage specifier like float<Uniform> or float<Local>");
+                let ident = &seg.ident;
+                return quote!{
+                    ShVar{
+                        name:#name.to_string(),
+                        ty:#ident::ty(),
+                        store:#ident::store()
+                    }
+                }
             }
         }
         else{

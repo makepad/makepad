@@ -148,6 +148,7 @@ impl CxThemeColors{
 }
 
 pub trait ThemeColor{
+    fn store()->ShVarStore;
     fn type_id()->std::any::TypeId;
     fn set(cx:&mut Cx, value:Color);
     fn id(cx:&Cx)->ColorId;
@@ -158,6 +159,7 @@ macro_rules!theme_color {
     ( $ name: ident) => {
         pub struct $name();
         impl ThemeColor for $name{
+            fn store()->ShVarStore{ShVarStore::UniformColor($name::type_id())}
             fn type_id()->std::any::TypeId{std::any::TypeId::of::<$name>()}
             fn set(cx:&mut Cx, value:Color){cx._set_color(value, $name::type_id())}
             fn id(cx:&Cx)->ColorId{
@@ -269,7 +271,7 @@ impl std::ops::Index<WalkId> for CxThemeWalks{
 }
 
 pub trait ThemeWalk{
-    fn type_id()->TypeId;
+    fn walk_type_id()->TypeId;
     fn set(cx:&mut Cx, value:Walk);
     fn id(cx:&Cx)->WalkId;
 }
@@ -280,10 +282,10 @@ macro_rules!theme_walk {
     ( $ name: ident) => {
         pub struct $name();
         impl ThemeWalk for $name{
-            fn type_id()->std::any::TypeId{std::any::TypeId::of::<$name>()}
-            fn set(cx:&mut Cx, value:Walk){cx._set_walk(value, $name::type_id())}
+            fn walk_type_id()->std::any::TypeId{std::any::TypeId::of::<$name>()}
+            fn set(cx:&mut Cx, value:Walk){cx._set_walk(value, $name::walk_type_id())}
             fn id(cx:&Cx)->WalkId{
-                let type_id = $name::type_id();
+                let type_id = $name::walk_type_id();
                 if let Some(stored_id) = cx.theme_walk_to_id.get(&type_id) {
                     WalkId(*stored_id)
                 }
@@ -295,15 +297,3 @@ macro_rules!theme_walk {
     };
 }
 
-
-
-#[derive(Hash, PartialEq, Copy, Clone, Debug)]
-pub struct ShaderColorId(pub std::any::TypeId);
-
-#[macro_export]
-macro_rules!shader_color {
-    ( $ name: ident) => {
-        pub struct $name();
-        impl $name{fn id()->ShaderColorId{ShaderColorId(std::any::TypeId::of::<$name>())}}
-    };
-}

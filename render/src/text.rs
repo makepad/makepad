@@ -60,6 +60,25 @@ pub struct Text {
     pub height_factor: f32,*/
 }
 
+instance_vec4!(InstanceFontTc);
+instance_color!(InstanceColor);
+
+instance_float!(InstanceX);
+instance_float!(InstanceY);
+instance_float!(InstanceW);
+instance_float!(InstanceH);
+instance_float!(InstanceZ);
+instance_float!(InstanceBaseX);
+instance_float!(InstanceBaseY);
+instance_float!(InstanceFontSize);
+instance_float!(InstanceCharOffset);
+instance_float!(InstanceMarker);
+
+uniform_float!(UniformZBias);
+uniform_float!(UniformBrightness);
+uniform_float!(UniformCurve);
+uniform_vec2!(UniformViewDoScroll);
+
 impl Text {
     pub fn style(cx: &mut Cx, text_style: TextStyleId) -> Self {
         Self {
@@ -92,28 +111,30 @@ impl Text {
         sg.compose(shader_ast!({
             let geom: vec2<Geometry>;
             let texturez: texture2d<Texture>;
-            let font_tc: vec4<Instance>;
-            let color: vec4<Instance>;
-            let x: float<Instance>;
-            let y: float<Instance>;
-            let w: float<Instance>;
-            let h: float<Instance>;
-            let z: float<Instance>;
-            let base_x: float<Instance>;
-            let base_y: float<Instance>;
-            let font_size: float<Instance>;
-            let char_offset: float<Instance>;
-            let marker: float<Instance>;
+
+            let font_tc: InstanceFontTc;
+            let color: InstanceColor;
+            let x: InstanceX;
+            let y: InstanceY;
+            let w: InstanceW;
+            let h: InstanceH;
+            let z: InstanceZ;
+            let base_x: InstanceBaseX;
+            let base_y: InstanceBaseY;
+            let font_size: InstanceFontSize;
+            let char_offset:InstanceCharOffset;
+            let marker: InstanceMarker;
+            
             let tex_coord1: vec2<Varying>;
             let tex_coord2: vec2<Varying>;
             let tex_coord3: vec2<Varying>;
             let clipped: vec2<Varying>;
             let rect: vec4<Varying>;
-            let zbias: float<Uniform>;
-            let brightness: float<Uniform>;
-            let curve: float<Uniform>;
             
-            let view_do_scroll: vec2<Uniform>;
+            let zbias: UniformZBias;
+            let brightness: UniformBrightness;
+            let curve: UniformCurve;
+            let view_do_scroll: UniformViewDoScroll;
             
             fn pixel() -> vec4 {
                 let dx = dfdx(vec2(tex_coord1.x * 4096.0, 0.)).x;

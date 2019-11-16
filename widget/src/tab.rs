@@ -34,6 +34,8 @@ pub enum TabEvent {
     Select,
 }
 
+instance_color!(InstanceBorderColor);
+
 impl Tab {
     pub fn style(cx: &mut Cx) -> Self {
         let mut tab = Self {
@@ -126,7 +128,7 @@ impl Tab {
     pub fn def_bg_shader() -> ShaderGen {
         Quad::def_quad_shader().compose(shader_ast!({
             
-            let border_color: vec4<Instance>;
+            let border_color: InstanceBorderColor;
             const border_width: float = 1.0;
             
             fn pixel() -> vec4 {

@@ -69,7 +69,7 @@ impl Cx {
                                     if text_style.font_path == dep_path{
                                         text_style.font_id = Some(id);
                                     }
-                                }
+                                } 
                                 font.path = dep_path;
                                 self.fonts.push(font);
                             }

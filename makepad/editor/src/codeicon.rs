@@ -27,6 +27,8 @@ impl CodeIconType {
     }
 }
 
+instance_float!(InstanceIconId);
+
 impl CodeIcon {
     pub fn style(cx: &mut Cx) -> Self {
         Self {
@@ -40,7 +42,7 @@ impl CodeIcon {
 
     pub fn def_code_icon_shader() -> ShaderGen {
         Quad::def_quad_shader().compose(shader_ast!({
-            let icon_id: float<Instance>;
+            let icon_id: InstanceIconId;
             
             fn pixel() -> vec4 {
                 let col = color;
