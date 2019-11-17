@@ -36,26 +36,26 @@ impl LogItemDraw {
         }
     }
     
-    pub fn get_default_anim(&self, _cx: &Cx, counter: usize, marked: bool) -> Anim {
+    pub fn get_default_anim(cx: &Cx, counter: usize, marked: bool) -> Anim {
         Anim::new(Play::Chain {duration: 0.01}, vec![
-            Track::color_id(Quad_color::id(), Ease::Lin, vec![
-                (1.0, if marked {Color_bg_marked::id()} else if counter & 1 == 0 {Color_bg_selected::id()}else {Color_bg_odd::id()})
+            Track::color(Quad_color::id(), Ease::Lin, vec![
+                (1.0, if marked {Color_bg_marked::base(cx)} else if counter & 1 == 0 {Color_bg_selected::base(cx)}else {Color_bg_odd::base(cx)})
             ])
         ])
     }
     
-    pub fn get_default_anim_cut(&self, _cx: &Cx, counter: usize, marked: bool) -> Anim {
+    pub fn get_default_anim_cut(cx: &Cx, counter: usize, marked: bool) -> Anim {
         Anim::new(Play::Cut {duration: 0.01}, vec![
-            Track::color_id(Quad_color::id(), Ease::Lin, vec![
-                (0.0, if marked {Color_bg_marked::id()} else if counter & 1 == 0 {Color_bg_selected::id()}else {Color_bg_odd::id()})
+            Track::color(Quad_color::id(), Ease::Lin, vec![
+                (0.0, if marked {Color_bg_marked::base(cx)} else if counter & 1 == 0 {Color_bg_selected::base(cx)}else {Color_bg_odd::base(cx)})
             ])
         ])
     }
     
-    pub fn get_over_anim(&self, _cx: &Cx, counter: usize, marked: bool) -> Anim {
-        let over_color = if marked {Color_bg_marked_over::id()} else if counter & 1 == 0 {Color_bg_selected_over::id()}else {Color_bg_odd_over::id()};
+    pub fn get_over_anim(cx: &Cx, counter: usize, marked: bool) -> Anim {
+        let over_color = if marked {Color_bg_marked_over::base(cx)} else if counter & 1 == 0 {Color_bg_selected_over::base(cx)}else {Color_bg_odd_over::base(cx)};
         Anim::new(Play::Cut {duration: 0.02}, vec![
-            Track::color_id(Quad_color::id(), Ease::Lin, vec![
+            Track::color(Quad_color::id(), Ease::Lin, vec![
                 (0., over_color),
             ])
         ])
@@ -76,8 +76,11 @@ impl LogItemDraw {
         }
     }
     
-    pub fn draw_log_item(&mut self, cx: &mut Cx, list_item: &mut ListItem, log_item: &HubLogItem) {
-        self.item_bg.color = list_item.animator.last_color(cx, ThemeBase::id(), Quad_color::id());
+    pub fn draw_log_item(&mut self, cx: &mut Cx, index:usize, list_item: &mut ListItem, log_item: &HubLogItem) {
+        
+        list_item.animator.init(cx, |cx| LogItemDraw::get_default_anim(cx, index, false));
+        
+        self.item_bg.color = list_item.animator.last_color(cx, Quad_color::id());
 
         let bg_inst = self.item_bg.begin_quad(cx, LogList_layout_item::base(cx));//&self.get_line_layout());
         
@@ -200,15 +203,12 @@ impl LogList {
     }
     
     pub fn handle_log_list(&mut self, cx: &mut Cx, event: &mut Event, storage: &mut AppStorage, bm: &mut BuildManager) -> LogListEvent {
-        let item_draw = &self.item_draw;
         
         if bm.log_items.len() < self.list.list_items.len() {
             self.list.tail_list = true;
         }
         
-        self.list.set_list_len(cx, bm.log_items.len(), | cx, index | {
-            item_draw.get_default_anim(cx, index, false)
-        });
+        self.list.set_list_len(cx, bm.log_items.len());
         
         self.list.handle_list_scroll_bars(cx, event, &mut self.view);
         
@@ -261,28 +261,27 @@ impl LogList {
             _ => ()
         }
         
-        let item_draw = &self.item_draw;
         let le = self.list.handle_list_logic(cx, event, select, | cx, item_event, item, item_index | match item_event {
             ListLogicEvent::Animate(ae) => {
-                item.animator.write_area(cx, ThemeBase::id(), item.animator.area, ae.time);
+                item.animator.write_area(cx, item.animator.area, ae.time);
             },
             ListLogicEvent::AnimEnded => {
                 item.animator.end();
             },
             ListLogicEvent::Select => {
-                item.animator.play_anim(cx, item_draw.get_over_anim(cx, item_index, true));
+                item.animator.play_anim(cx, LogItemDraw::get_over_anim(cx, item_index, true));
             },
             ListLogicEvent::Deselect => {
-                item.animator.play_anim(cx, item_draw.get_default_anim(cx, item_index, false));
+                item.animator.play_anim(cx, LogItemDraw::get_default_anim(cx, item_index, false));
             },
             ListLogicEvent::Cleanup => {
-                item.animator.play_anim(cx, item_draw.get_default_anim_cut(cx, item_index, item.is_selected));
+                item.animator.play_anim(cx, LogItemDraw::get_default_anim_cut(cx, item_index, item.is_selected));
             },
             ListLogicEvent::Over => {
-                item.animator.play_anim(cx, item_draw.get_over_anim(cx, item_index, item.is_selected));
+                item.animator.play_anim(cx, LogItemDraw::get_over_anim(cx, item_index, item.is_selected));
             },
             ListLogicEvent::Out => {
-                item.animator.play_anim(cx, item_draw.get_default_anim(cx, item_index, item.is_selected));
+                item.animator.play_anim(cx, LogItemDraw::get_default_anim(cx, item_index, item.is_selected));
             }
         });
         
@@ -352,11 +351,8 @@ impl LogList {
     }
     
     pub fn draw_log_list(&mut self, cx: &mut Cx, bm: &BuildManager) {
-        //        println!("REDRAW!");
-        let item_draw = &self.item_draw;
-        self.list.set_list_len(cx, bm.log_items.len(), | cx, index | {
-            item_draw.get_default_anim(cx, index, false)
-        });
+        
+        self.list.set_list_len(cx, bm.log_items.len());
         
         let row_height = LogList_layout_item::base(cx).walk.height.fixed();
         
@@ -364,7 +360,7 @@ impl LogList {
         
         let mut counter = 0;
         for i in self.list.start_item..self.list.end_item {
-            self.item_draw.draw_log_item(cx, &mut self.list.list_items[i], &bm.log_items[i]);
+            self.item_draw.draw_log_item(cx, i, &mut self.list.list_items[i], &bm.log_items[i]);
             counter += 1;
         }
         

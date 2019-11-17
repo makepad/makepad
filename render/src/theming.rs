@@ -19,63 +19,6 @@ impl ColorId {
     }
 }
 
-#[derive(Copy, Clone, Debug)]
-pub enum ColorPart {
-    Color(Color),
-    Id(ColorId)
-}
-
-impl ColorPart {
-    fn color(&self, cx: &Cx, class: ClassId) -> Color {
-        return match self {
-            ColorPart::Color(color) => *color,
-            ColorPart::Id(id) => *cx.theme_colors.get(&(*id, class)).expect("Cannot find ColorId")
-        }
-    }
-}
-
-#[derive(Copy, Clone, Debug)]
-pub struct ColorBlend {
-    pub a: ColorPart,
-    pub b: Option<ColorId>,
-    pub f: f32
-}
-
-impl ColorBlend {
-    
-    pub fn blend(&self, cx: &Cx, class: ClassId) -> Color {
-        if self.f<0.00001 {
-            return self.a.color(cx, class)
-        }
-        if let Some(b) = self.b {
-            if self.f>0.99999 {
-                return *cx.theme_colors.get(&(b, class)).expect("Cannot find ColorId");
-            }
-            let a = self.a.color(cx, class);
-            let b = *cx.theme_colors.get(&(b, class)).expect("Cannot find ColorId");
-            let of = 1.0 - self.f;
-            return Color {r: a.r * of + b.r * self.f, g: a.g * of + b.g * self.f, b: a.b * of + b.b * self.f, a: a.a * of + b.a * self.f}
-        }
-        Color::zero()
-    }
-    
-    pub fn blend_to_part(&self, cx: &Cx, class: ClassId) -> ColorPart {
-        if self.f<0.00001 {
-            return self.a
-        }
-        if let Some(b) = self.b {
-            if self.f>0.99999 {
-                return ColorPart::Id(b)
-            }
-            let a = self.a.color(cx, class);
-            let b = *cx.theme_colors.get(&(b, class)).expect("Cannot find ColorId");
-            let of = 1.0 - self.f;
-            return ColorPart::Color(Color {r: a.r * of + b.r * self.f, g: a.g * of + b.g * self.f, b: a.b * of + b.b * self.f, a: a.a * of + b.a * self.f})
-        }
-        ColorPart::Color(Color::zero())
-    }
-}
-
 pub trait ThemeColor {
     fn id() -> ColorId;
     fn store() -> ShVarStore {

@@ -124,6 +124,7 @@ pub struct Cx {
     pub event_id: u64,
     pub timer_id: u64,
     pub signal_id: usize,
+    pub theme_update_id: usize,
     
     pub last_key_focus: Area,
     pub key_focus: Area,
@@ -228,7 +229,8 @@ impl Default for Cx {
             timer_id: 1,
             signal_id: 1,
             shader_instance_id: 1,
-
+            theme_update_id: 1, 
+            
             last_key_focus: Area::Empty,
             key_focus: Area::Empty,
             keys_down: Vec::new(),

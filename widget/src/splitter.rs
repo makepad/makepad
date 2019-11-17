@@ -61,27 +61,27 @@ impl Splitter {
                 shader: cx.add_shader(Self::def_split_shader(), "Splitter.split"),
                 ..Quad::style(cx)
             },
-            animator: Animator::new(Self::get_default_anim(cx)),
+            animator: Animator::default(),
         }
     }
     
-    pub fn get_default_anim(_cx: &Cx) -> Anim {
+    pub fn get_default_anim(cx: &Cx) -> Anim {
         Anim::new(Play::Cut {duration: 0.5}, vec![
-            Track::color_id(Quad_color::id(), Ease::Lin, vec![(1.0, Color_bg_splitter::id())]),
+            Track::color(Quad_color::id(), Ease::Lin, vec![(1.0, Color_bg_splitter::base(cx))]),
         ])
     }
     
-    pub fn get_over_anim(_cx: &Cx) -> Anim {
+    pub fn get_over_anim(cx: &Cx) -> Anim {
         Anim::new(Play::Cut {duration: 0.05}, vec![
-            Track::color_id(Quad_color::id(), Ease::Lin, vec![(1.0,Color_bg_splitter_over::id())]),
+            Track::color(Quad_color::id(), Ease::Lin, vec![(1.0,Color_bg_splitter_over::base(cx))]),
         ])
     }
     
-    pub fn get_moving_anim(_cx: &Cx) -> Anim {
+    pub fn get_moving_anim(cx: &Cx) -> Anim {
         Anim::new(Play::Cut {duration: 0.2}, vec![
-            Track::color_id(Quad_color::id(), Ease::Lin, vec![
-                (0.0, Color_bg_splitter_peak::id()),
-                (1.0, Color_bg_splitter_drag::id())
+            Track::color(Quad_color::id(), Ease::Lin, vec![
+                (0.0, Color_bg_splitter_peak::base(cx)),
+                (1.0, Color_bg_splitter_drag::base(cx))
             ]),
         ])
     }
@@ -102,7 +102,7 @@ impl Splitter {
     pub fn handle_splitter(&mut self, cx: &mut Cx, event: &mut Event) -> SplitterEvent {
         match event.hits(cx, self._split_area, HitOpt {margin: self._hit_state_margin, ..Default::default()}) {
             Event::Animate(ae) => {
-                self.animator.write_area(cx, ThemeBase::id(), self._split_area, ae.time);
+                self.animator.write_area(cx, self._split_area, ae.time);
             },
             Event::AnimEnded(_) => self.animator.end(),
             Event::FingerDown(fe) => {
@@ -242,6 +242,7 @@ impl Splitter {
     }
     
     pub fn begin_splitter(&mut self, cx: &mut Cx) {
+        self.animator.init(cx, |cx| Self::get_default_anim(cx));
         let rect = cx.get_turtle_rect();
         self._calc_pos = match self.align {
             SplitterAlign::First => self.pos,
@@ -276,7 +277,7 @@ impl Splitter {
         cx.end_turtle(Area::Empty);
         let rect = cx.get_turtle_rect();
         let origin = cx.get_turtle_origin();
-        self.split.color = self.animator.last_color(cx, ThemeBase::id(), Quad_color::id());
+        self.split.color = self.animator.last_color(cx, Quad_color::id());
         match self.axis {
             Axis::Horizontal => {
                 cx.set_turtle_pos(Vec2 {x: origin.x, y: origin.y + self._calc_pos});

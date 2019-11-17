@@ -45,7 +45,7 @@ impl ScrollBar {
             smoothing: None,
             
             axis: Axis::Horizontal,
-            animator: Animator::new(Self::get_default_anim(cx)),
+            animator: Animator::default(),
             sb: Quad {
                 z: 10.,
                 shader: cx.add_shader(Self::def_shader(), "ScrollBar.sb"),
@@ -69,23 +69,23 @@ impl ScrollBar {
         }
     }
     
-    pub fn get_over_anim(_cx:&Cx)->Anim{
+    pub fn get_over_anim(cx:&Cx)->Anim{
         Anim::new(Play::Cut {duration: 0.05}, vec![
-            Track::color_id(Quad_color::id(), Ease::Lin, vec![(1.0, Color_scrollbar_base::id())])
+            Track::color(Quad_color::id(), Ease::Lin, vec![(1.0, Color_scrollbar_base::base(cx))])
         ])
     }
     
-    pub fn get_scrolling_anim(_cx:&Cx)->Anim{
+    pub fn get_scrolling_anim(cx:&Cx)->Anim{
         Anim::new(Play::Cut {duration: 0.05}, vec![
-            Track::color_id(Quad_color::id(), Ease::Lin, vec![(1.0, Color_scrollbar_down::id())])
+            Track::color(Quad_color::id(), Ease::Lin, vec![(1.0, Color_scrollbar_down::base(cx))])
         ])
     }
     
-    pub fn get_default_anim(_cx:&Cx)->Anim{
+    pub fn get_default_anim(cx:&Cx)->Anim{
         Anim::new(Play::Cut {duration: 0.5}, vec![
-            Track::color_id(Quad_color::id(), Ease::Lin, vec![(1.0, Color_scrollbar_over::id())])
+            Track::color(Quad_color::id(), Ease::Lin, vec![(1.0, Color_scrollbar_over::base(cx))])
         ])
-    }
+    } 
 
     pub fn def_shader() -> ShaderGen {
         Quad::def_quad_shader().compose(shader_ast!({
@@ -291,7 +291,7 @@ impl ScrollBar {
         if self._visible {
             match event.hits(cx, self._sb_area, HitOpt {no_scrolling: true, ..Default::default()}) {
                 Event::Animate(ae) => {
-                    self.animator.write_area(cx, ThemeBase::id(), self._sb_area, ae.time);
+                    self.animator.write_area(cx, self._sb_area, ae.time);
                 },
                 Event::AnimEnded(_) => self.animator.end(),
                 Event::Frame(_ae) => {
@@ -373,7 +373,10 @@ impl ScrollBar {
     
     pub fn draw_scroll_bar(&mut self, cx: &mut Cx, axis: Axis, view_area: Area, view_rect: Rect, view_total: Vec2) -> f32 {
         // pull the bg color from our animation system, uses 'default' value otherwise
-        self.sb.color = self.animator.last_color(cx, ThemeBase::id(), Quad_color::id());
+        
+        self.animator.init(cx, |cx| Self::get_default_anim(cx));
+        
+        self.sb.color = self.animator.last_color(cx, Quad_color::id());
         self._sb_area = Area::Empty;
         self._view_area = view_area;
         self.axis = axis;

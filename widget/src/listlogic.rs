@@ -55,13 +55,12 @@ impl ListSelect {
 }
 
 impl ListLogic {
-    pub fn set_list_len<F>(&mut self, cx: &mut Cx, len: usize, mut cb: F)
-    where F: FnMut(&mut Cx, usize) -> Anim
+    pub fn set_list_len(&mut self, cx: &mut Cx, len: usize)
     {
         if self.list_items.len() < len {
             for i in self.list_items.len()..len {
                 self.list_items.push(ListItem {
-                    animator: Animator::new(cb(cx, i)),
+                    animator: Animator::default(),
                     is_selected: false
                 })
             }

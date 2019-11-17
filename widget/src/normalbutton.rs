@@ -28,7 +28,7 @@ impl NormalButton {
             button: ButtonLogic::default(),
             bg: Quad::style(cx),
             text: Text::style(cx, TextStyle_normal::id()),
-            animator: Animator::new(NormalButton_anim_default::base(cx)),
+            animator: Animator::default(),//NormalButton_anim_default::base(cx)),
             _bg_area: Area::Empty,
         }
     }
@@ -46,7 +46,7 @@ impl NormalButton {
         });
         
         NormalButton_anim_default::set_base(cx, Anim::new(Play::Cut {duration: 0.5}, vec![
-            Track::color_id(Quad_color::id(), Ease::Lin, vec![(1., Color_bg_normal::id())]),
+            Track::color(Quad_color::id(), Ease::Lin, vec![(1., Color_bg_normal::base(cx))]),
             Track::float(NormalButton_glow_size::id(), Ease::Lin, vec![(1., 0.0)]),
             Track::color(NormalButton_border_color::id(), Ease::Lin, vec![(1., color("#6"))]),
         ]));
@@ -90,7 +90,7 @@ impl NormalButton {
         let animator = &mut self.animator;
         let class = self.class;
         self.button.handle_button_logic(cx, event, self._bg_area, | cx, logic_event, area | match logic_event {
-            ButtonLogicEvent::Animate(ae) => animator.write_area(cx, class, area, ae.time),
+            ButtonLogicEvent::Animate(ae) => animator.write_area(cx, area, ae.time),
             ButtonLogicEvent::AnimEnded(_) => animator.end(),
             ButtonLogicEvent::Down => animator.play_anim(cx, NormalButton_anim_down::class(cx, class)),
             ButtonLogicEvent::Default => animator.play_anim(cx, NormalButton_anim_default::class(cx, class)),
@@ -99,12 +99,19 @@ impl NormalButton {
     }
     
     pub fn draw_button(&mut self, cx: &mut Cx, label: &str) {
-        self.bg.shader = NormalButton_shader_bg::class(cx, self.class);
-        self.bg.color = self.animator.last_color(cx, self.class, Quad_color::id());
+        let class = self.class;
         
-        let bg_inst = self.bg.begin_quad(cx, NormalButton_layout_bg::class(cx, self.class));
+        self.bg.shader = NormalButton_shader_bg::class(cx, class);
+
+        self.animator.init(cx, |cx| NormalButton_anim_default::class(cx, class));
         
-        bg_inst.push_last_color(cx, self.class, &self.animator, NormalButton_border_color::id());
+        self.bg.color = self.animator.last_color(cx, Quad_color::id());
+        
+        let bg_inst = self.bg.begin_quad(cx, NormalButton_layout_bg::class(cx, class));
+        
+        //self.animator.write_inst(cx, bg_inst);
+        
+        bg_inst.push_last_color(cx, &self.animator, NormalButton_border_color::id());
         bg_inst.push_last_float(cx, &self.animator, NormalButton_glow_size::id());
 
         self.text.draw_text(cx, label);

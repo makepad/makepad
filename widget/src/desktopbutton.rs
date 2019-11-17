@@ -38,7 +38,7 @@ impl DesktopButton {
         Self {
             button: ButtonLogic::default(),
             bg: Quad::style_with_shader(cx, Self::def_bg_shader(), "Button.bg"),
-            animator: Animator::new(Self::get_default_anim(cx)),
+            animator: Animator::default(),
             _bg_area: Area::Empty,
         }
     }
@@ -147,7 +147,7 @@ impl DesktopButton {
         //let mut ret_event = ButtonEvent::None;
         let animator = &mut self.animator;
         self.button.handle_button_logic(cx, event, self._bg_area, | cx, logic_event, area | match logic_event {
-            ButtonLogicEvent::Animate(ae) => animator.write_area(cx, ThemeBase::id(), area, ae.time),
+            ButtonLogicEvent::Animate(ae) => animator.write_area(cx, area, ae.time),
             ButtonLogicEvent::AnimEnded(_)=> animator.end(),
             ButtonLogicEvent::Down => animator.play_anim(cx, Self::get_down_anim(cx)),
             ButtonLogicEvent::Default=> animator.play_anim(cx, Self::get_default_anim(cx)),
@@ -157,7 +157,7 @@ impl DesktopButton {
 
     pub fn draw_desktop_button(&mut self, cx: &mut Cx, ty: DesktopButtonType) {
         //self.bg.color = self.animator.last_color(cx, Quad_color::id());
-        
+        self.animator.init(cx, |cx| Self::get_default_anim(cx));
         let (w,h) = match ty {
             DesktopButtonType::WindowsMin 
             | DesktopButtonType::WindowsMax 

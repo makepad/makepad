@@ -35,26 +35,26 @@ impl MenuItemDraw {
         }
     }
     
-    pub fn get_default_anim(&self, _cx: &Cx) -> Anim {
+    pub fn get_default_anim(&self, cx: &Cx) -> Anim {
         Anim::new(Play::Chain {duration: 0.01}, vec![
-            Track::color_id(Quad_color::id(), Ease::Lin, vec![
-                (1.0,  Color_bg_selected::id())
+            Track::color(Quad_color::id(), Ease::Lin, vec![
+                (1.0,  Color_bg_selected::base(cx))
             ])
         ])
     }
     
-    pub fn get_default_anim_cut(&self, _cx: &Cx) -> Anim {
+    pub fn get_default_anim_cut(&self, cx: &Cx) -> Anim {
         Anim::new(Play::Cut {duration: 0.01}, vec![
-            Track::color_id(Quad_color::id(), Ease::Lin, vec![
-                (0.0, Color_bg_selected::id())
+            Track::color(Quad_color::id(), Ease::Lin, vec![
+                (0.0, Color_bg_selected::base(cx))
             ])
         ])
     }
     
-    pub fn get_over_anim(&self, _cx: &Cx) -> Anim {
+    pub fn get_over_anim(&self, cx: &Cx) -> Anim {
         Anim::new(Play::Cut {duration: 0.02}, vec![
-            Track::color_id(Quad_color::id(), Ease::Lin, vec![
-                (0., Color_bg_odd::id()),
+            Track::color(Quad_color::id(), Ease::Lin, vec![
+                (0., Color_bg_odd::base(cx)),
             ])
         ])
     }

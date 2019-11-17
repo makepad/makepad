@@ -606,8 +606,8 @@ impl InstanceArea{
         draw_call.instance.push(value.w);
     }
 
-    pub fn push_last_color(&self, cx:&mut Cx, class:ClassId, animator:&Animator, ident:ShInsColorId){
-        self.push_color(cx, animator.last_color(cx, class, ident));
+    pub fn push_last_color(&self, cx:&mut Cx, animator:&Animator, ident:ShInsColorId){
+        self.push_color(cx, animator.last_color(cx, ident));
     }
 
     pub fn push_color(&self, cx:&mut Cx, value:Color){

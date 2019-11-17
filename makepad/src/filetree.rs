@@ -214,18 +214,18 @@ impl FileTreeItemDraw {
         }))
     }
     
-    pub fn get_default_anim(&self, _cx: &Cx, counter: usize, marked: bool) -> Anim {
+    pub fn get_default_anim( cx: &Cx, counter: usize, marked: bool) -> Anim {
         Anim::new(Play::Chain {duration: 0.01}, vec![
-            Track::color_id(Quad_color::id(), Ease::Lin, vec![
-                (1.0, if marked {Color_bg_marked::id()} else if counter & 1 == 0 {Color_bg_selected::id()}else {Color_bg_odd::id()})
+            Track::color(Quad_color::id(), Ease::Lin, vec![
+                (1.0, if marked {Color_bg_marked::base(cx)} else if counter & 1 == 0 {Color_bg_selected::base(cx)}else {Color_bg_odd::base(cx)})
             ])
         ])
     }
     
-    pub fn get_over_anim(&self, _cx: &Cx, counter: usize, marked: bool) -> Anim {
-        let over_color = if marked {Color_bg_marked_over::id()} else if counter & 1 == 0 {Color_bg_selected_over::id()}else {Color_bg_odd_over::id()};
+    pub fn get_over_anim( cx: &Cx, counter: usize, marked: bool) -> Anim {
+        let over_color = if marked {Color_bg_marked_over::base(cx)} else if counter & 1 == 0 {Color_bg_selected_over::base(cx)}else {Color_bg_odd_over::base(cx)};
         Anim::new(Play::Cut {duration: 0.02}, vec![
-            Track::color_id(Quad_color::id(), Ease::Lin, vec![
+            Track::color(Quad_color::id(), Ease::Lin, vec![
                 (0., over_color),
                 (1., over_color)
             ])
@@ -406,7 +406,7 @@ impl FileTree {
             
             match event.hits(cx, node_draw.animator.area, HitOpt::default()) {
                 Event::Animate(ae) => {
-                    node_draw.animator.write_area(cx, ThemeBase::id(), node_draw.animator.area, ae.time);
+                    node_draw.animator.write_area(cx, node_draw.animator.area, ae.time);
                 },
                 Event::AnimEnded(_) => {
                     node_draw.animator.end();
@@ -422,7 +422,7 @@ impl FileTree {
                     node_draw.marked = cx.event_id;
                     
                     unmark_nodes = true;
-                    node_draw.animator.play_anim(cx, self.item_draw.get_over_anim(cx, counter, node_draw.marked != 0));
+                    node_draw.animator.play_anim(cx, FileTreeItemDraw::get_over_anim(cx, counter, node_draw.marked != 0));
                     
                     if let FileNode::Folder {state, ..} = node {
                         *state = match state {
@@ -471,10 +471,10 @@ impl FileTree {
                     cx.set_hover_mouse_cursor(MouseCursor::Hand);
                     match fe.hover_state {
                         HoverState::In => {
-                            node_draw.animator.play_anim(cx, self.item_draw.get_over_anim(cx, counter, node_draw.marked != 0));
+                            node_draw.animator.play_anim(cx, FileTreeItemDraw::get_over_anim(cx, counter, node_draw.marked != 0));
                         },
                         HoverState::Out => {
-                            node_draw.animator.play_anim(cx, self.item_draw.get_default_anim(cx, counter, node_draw.marked != 0));
+                            node_draw.animator.play_anim(cx, FileTreeItemDraw::get_default_anim(cx, counter, node_draw.marked != 0));
                         },
                         _ => ()
                     }
@@ -492,7 +492,7 @@ impl FileTree {
                 if let Some(node_draw) = node.get_draw() {
                     if node_draw.marked != cx.event_id || node_draw.marked == 0 {
                         node_draw.marked = 0;
-                        node_draw.animator.play_anim(cx, self.item_draw.get_default_anim(cx, counter, false));
+                        node_draw.animator.play_anim(cx, FileTreeItemDraw::get_default_anim(cx, counter, false));
                     }
                 }
                 if !file_walker.current_closing() {
@@ -577,15 +577,15 @@ impl FileTree {
             let node_draw = node.get_draw();
             if node_draw.is_none() {
                 *node_draw = Some(NodeDraw {
-                    animator: Animator::new(self.item_draw.get_default_anim(cx, counter, false)),
+                    animator: Animator::default(),
                     marked: 0
                 })
             }
             let node_draw = node_draw.as_mut().unwrap();
-            
+            node_draw.animator.init(cx, |cx| FileTreeItemDraw::get_default_anim(cx, counter, false));
             // if we are NOT animating, we need to get change a default color.
             
-            self.item_draw.node_bg.color = node_draw.animator.last_color(cx, ThemeBase::id(), Quad_color::id());
+            self.item_draw.node_bg.color = node_draw.animator.last_color(cx, Quad_color::id());
             
             let mut node_layout = node_layout.clone();
             node_layout.walk.height = Height::Fix(row_height * scale as f32);
