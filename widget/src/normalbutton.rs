@@ -92,14 +92,13 @@ impl NormalButton {
         self.button.handle_button_logic(cx, event, self._bg_area, | cx, logic_event, area | match logic_event {
             ButtonLogicEvent::Animate(ae) => animator.write_area(cx, class, area, ae.time),
             ButtonLogicEvent::AnimEnded(_) => animator.end(),
-            ButtonLogicEvent::Down => animator.play_anim(cx, NormalButton_anim_down::base(cx)),
-            ButtonLogicEvent::Default => animator.play_anim(cx, NormalButton_anim_default::base(cx)),
-            ButtonLogicEvent::Over => animator.play_anim(cx, NormalButton_anim_over::base(cx))
+            ButtonLogicEvent::Down => animator.play_anim(cx, NormalButton_anim_down::class(cx, class)),
+            ButtonLogicEvent::Default => animator.play_anim(cx, NormalButton_anim_default::class(cx, class)),
+            ButtonLogicEvent::Over => animator.play_anim(cx, NormalButton_anim_over::class(cx, class))
         })
     }
     
     pub fn draw_button(&mut self, cx: &mut Cx, label: &str) {
-
         self.bg.shader = NormalButton_shader_bg::class(cx, self.class);
         self.bg.color = self.animator.last_color(cx, self.class, Quad_color::id());
         
