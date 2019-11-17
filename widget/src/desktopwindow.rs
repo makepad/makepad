@@ -156,7 +156,7 @@ impl DesktopWindow {
             walk:Walk::wh(Width::Fill, Height::Compute),
             ..Layout::default()
         }).is_ok() {
-            self.caption_bg.color = Color_bg_selected_over::get(cx);//cx.colors[self.caption_bg_color];
+            self.caption_bg.color = Color_bg_selected_over::base(cx);//cx.colors[self.caption_bg_color];
             // alright here we draw our platform buttons.
             match cx.platform_type {
                 PlatformType::Linux | PlatformType::Windows => {

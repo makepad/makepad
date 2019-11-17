@@ -179,7 +179,7 @@ impl FileTreeItemDraw {
         Self {
             tree_folder_color: Color_text_selected_focus::id(),
             tree_file_color: Color_text_deselected_focus::id(),
-            tree_text: Text {z: 0.001, ..Text::style(cx, FileTreeTextStyle::id())},
+            tree_text: Text {z: 0.001, ..Text::style(cx, FileTree_text_style::id())},
             node_bg: Quad::style(cx),
             //node_layout: LayoutFileTreeNode::id(),
             filler_color: Color_icon::id(),
@@ -557,11 +557,11 @@ impl FileTree {
         let mut scale_stack = Vec::new();
         let mut last_stack = Vec::new();
         scale_stack.push(1.0f64);
-        self.item_draw.filler.color = self.item_draw.filler_color.get(cx);
-        let node_layout = FileTreeLayout_node::get(cx);
+        self.item_draw.filler.color = self.item_draw.filler_color.base(cx);
+        let node_layout = FileTree_layout_node::base(cx);
         let row_height = node_layout.walk.height.fixed();
-        let filler_walk = FileTreeWalk_filler::get(cx);
-        let folder_walk = FileTreeWalk_folder::get(cx);
+        let filler_walk = FileTree_walk_filler::base(cx);
+        let folder_walk = FileTree_walk_folder::base(cx);
         while let Some((depth, index, len, node)) = file_walker.walk() {
             
             let is_first = index == 0;
@@ -646,7 +646,7 @@ impl FileTree {
                     //cx.move_turtle(0., 3.5);
                     cx.turtle_align_y();
                     //cx.realign_turtle(Align::left_center(), false);
-                    self.item_draw.tree_text.color = self.item_draw.tree_folder_color.get(cx);
+                    self.item_draw.tree_text.color = self.item_draw.tree_folder_color.base(cx);
                     let wleft = cx.get_width_left() - 10.;
                     self.item_draw.tree_text.wrapping = Wrapping::Ellipsis(wleft);
                     self.item_draw.tree_text.draw_text(cx, name);
@@ -688,10 +688,10 @@ impl FileTree {
                     self.item_draw.tree_text.wrapping = Wrapping::Ellipsis(wleft);
                     //cx.realign_turtle(Align::left_center(), false);
                     self.item_draw.tree_text.color = if is_marked {
-                        self.item_draw.tree_folder_color.get(cx)
+                        self.item_draw.tree_folder_color.base(cx)
                     }
                     else {
-                        self.item_draw.tree_file_color.get(cx)
+                        self.item_draw.tree_file_color.base(cx)
                     };
                     self.item_draw.tree_text.draw_text(cx, name);
                 }
@@ -712,7 +712,7 @@ impl FileTree {
             let rect_now = cx.get_turtle_rect();
             let mut y = view_total.y;
             while y < rect_now.h {
-                self.item_draw.node_bg.color = if counter & 1 == 0 {Color_bg_selected::get(cx)}else {Color_bg_odd::get(cx)};
+                self.item_draw.node_bg.color = if counter & 1 == 0 {Color_bg_selected::base(cx)}else {Color_bg_odd::base(cx)};
                 self.item_draw.node_bg.draw_quad(
                     cx,
                     Walk::wh(Width::Fill, Height::Fix((rect_now.h - y).min(row_height))),
@@ -733,9 +733,9 @@ impl FileTree {
                 while let Some((_depth, _index, _len, node)) = file_walker.walk() {
                     let node_draw = if let Some(node_draw) = node.get_draw() {node_draw}else {continue};
                     if node_draw.marked != 0 {
-                        self.drag_bg.color = self.drag_bg_color.get(cx);
-                        let inst = self.drag_bg.begin_quad(cx, FileTreeLayout_drag_bg::get(cx));
-                        self.item_draw.tree_text.color = self.item_draw.tree_folder_color.get(cx);
+                        self.drag_bg.color = self.drag_bg_color.base(cx);
+                        let inst = self.drag_bg.begin_quad(cx, FileTree_layout_drag_bg::base(cx));
+                        self.item_draw.tree_text.color = self.item_draw.tree_folder_color.base(cx);
                         self.item_draw.tree_text.draw_text(cx, match node {
                             FileNode::Folder {name, ..} => {name},
                             FileNode::File {name, ..} => {name}

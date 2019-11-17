@@ -10,12 +10,12 @@ use crate::cx::*;
 pub struct ColorId(pub TypeId);
 
 impl ColorId {
-    pub fn get(&self, cx: &Cx) -> Color {
+    pub fn base(&self, cx: &Cx) -> Color {
         *cx.theme_colors.get(&(*self, ThemeBase::id())).expect("Cannot find ColorId")
     }
-    pub fn get_class(&self, cx: &Cx, class: ClassId) -> Color {
+    pub fn class(&self, cx: &Cx, class: ClassId) -> Color {
         if let Some(c) = cx.theme_colors.get(&(*self, class)) {return *c};
-        self.get(cx)
+        self.base(cx)
     }
 }
 
@@ -81,18 +81,18 @@ pub trait ThemeColor {
     fn store() -> ShVarStore {
         ShVarStore::UniformColor(Self::id())
     }
-    fn set(cx: &mut Cx, value: Color) {
+    fn set_base(cx: &mut Cx, value: Color) {
         cx.theme_colors.insert((Self::id(), ThemeBase::id()), value);
     }
     fn set_class(cx: &mut Cx, class: ClassId, value: Color) {
         cx.theme_colors.insert((Self::id(), class), value);
     }
-    fn get(cx: &Cx) -> Color {
+    fn base(cx: &Cx) -> Color {
         *cx.theme_colors.get(&(Self::id(), ThemeBase::id())).expect("Cannot find ColorId")
     }
-    fn get_class(cx: &Cx, class: ClassId) -> Color {
+    fn class(cx: &Cx, class: ClassId) -> Color {
         if let Some(color) = cx.theme_colors.get(&(Self::id(), class)) {return *color};
-        Self::get(cx)
+        Self::base(cx)
     }
 }
 
@@ -117,29 +117,29 @@ macro_rules!theme_color {
 pub struct TextStyleId(pub TypeId);
 
 impl TextStyleId {
-    pub fn get(&self, cx: &Cx) -> TextStyle {
+    pub fn base(&self, cx: &Cx) -> TextStyle {
         cx.theme_text_styles.get(&(*self, ThemeBase::id())).expect("Cannot find TextStyle").clone()
     }
-    pub fn get_class(&self, cx: &Cx, class: ClassId) -> TextStyle {
+    pub fn class(&self, cx: &Cx, class: ClassId) -> TextStyle {
         if let Some(ts) = cx.theme_text_styles.get(&(*self, class)) {return ts.clone()};
-        self.get(cx)
+        self.base(cx)
     }
 }
 
 pub trait ThemeTextStyle {
     fn id() -> TextStyleId;
-    fn set(cx: &mut Cx, value: TextStyle) {
+    fn set_base(cx: &mut Cx, value: TextStyle) {
         cx.theme_text_styles.insert((Self::id(), ThemeBase::id()), value);
     }
     fn set_class(cx: &mut Cx, class: ClassId, value: TextStyle) {
         cx.theme_text_styles.insert((Self::id(), class), value);
     }
-    fn get(cx: &Cx) -> TextStyle {
+    fn base(cx: &Cx) -> TextStyle {
         cx.theme_text_styles.get(&(Self::id(), ThemeBase::id())).expect("Cannot find TextStyle").clone()
     }
-    fn get_class(cx: &Cx, class: ClassId) -> TextStyle {
+    fn class(cx: &Cx, class: ClassId) -> TextStyle {
         if let Some(ts) = cx.theme_text_styles.get(&(Self::id(), class)) {return ts.clone()};
-        Self::get(cx)
+        Self::base(cx)
     }
 }
 
@@ -161,29 +161,29 @@ macro_rules!theme_text_style {
 pub struct LayoutId(pub TypeId);
 
 impl LayoutId {
-    pub fn get(&self, cx: &Cx) -> Layout {
+    pub fn base(&self, cx: &Cx) -> Layout {
         *cx.theme_layouts.get(&(*self, ThemeBase::id())).expect("Cannot find LayoutId")
     }
-    pub fn get_class(&self, cx: &Cx, class: ClassId) -> Layout {
+    pub fn class(&self, cx: &Cx, class: ClassId) -> Layout {
         if let Some(l) = cx.theme_layouts.get(&(*self, class)) {return *l};
-        self.get(cx)
+        self.base(cx)
     }
 }
 
 pub trait ThemeLayout {
     fn id() -> LayoutId;
-    fn set(cx: &mut Cx, value: Layout) {
+    fn set_base(cx: &mut Cx, value: Layout) {
         cx.theme_layouts.insert((Self::id(), ThemeBase::id()), value);
     }
     fn set_class(cx: &mut Cx, class: ClassId, value: Layout) {
         cx.theme_layouts.insert((Self::id(), class), value);
     }
-    fn get(cx: &Cx) -> Layout {
+    fn base(cx: &Cx) -> Layout {
         *cx.theme_layouts.get(&(Self::id(), ThemeBase::id())).expect("Cannot find Layout")
     }
-    fn get_class(cx: &Cx, class: ClassId) -> Layout {
+    fn class(cx: &Cx, class: ClassId) -> Layout {
         if let Some(l) = cx.theme_layouts.get(&(Self::id(), class)) {return *l};
-        Self::get(cx)
+        Self::base(cx)
     }
 }
 
@@ -206,27 +206,27 @@ macro_rules!theme_layout {
 pub struct WalkId(pub TypeId);
 
 impl WalkId {
-    pub fn get(&self, cx: &Cx) -> Walk {*cx.theme_walks.get(&(*self, ThemeBase::id())).expect("Cannot find WalkId")}
-    pub fn get_class(&self, cx: &Cx, class: ClassId) -> Walk {
+    pub fn base(&self, cx: &Cx) -> Walk {*cx.theme_walks.get(&(*self, ThemeBase::id())).expect("Cannot find WalkId")}
+    pub fn class(&self, cx: &Cx, class: ClassId) -> Walk {
         if let Some(w) = cx.theme_walks.get(&(*self, class)) {return *w};
-        self.get(cx)
+        self.base(cx)
     }
 }
 
 pub trait ThemeWalk {
     fn id() -> WalkId;
-    fn set(cx: &mut Cx, value: Walk) {
+    fn set_base(cx: &mut Cx, value: Walk) {
         cx.theme_walks.insert((Self::id(), ThemeBase::id()), value);
     }
     fn set_class(cx: &mut Cx, class: ClassId, value: Walk) {
         cx.theme_walks.insert((Self::id(), class), value);
     }
-    fn get(cx: &Cx) -> Walk {
+    fn base(cx: &Cx) -> Walk {
         *cx.theme_walks.get(&(Self::id(), ThemeBase::id())).expect("Cannot find WalkId")
     }
-    fn get_class(cx: &Cx, class: ClassId) -> Walk {
+    fn class(cx: &Cx, class: ClassId) -> Walk {
         if let Some(w) = cx.theme_walks.get(&(Self::id(), class)) {return *w};
-        Self::get(cx)
+        Self::base(cx)
     }
 }
 
@@ -249,27 +249,27 @@ macro_rules!theme_walk {
 pub struct AnimId(pub TypeId);
 
 impl AnimId {
-    pub fn get(&self, cx: &Cx) -> Anim {cx.theme_anims.get(&(*self, ThemeBase::id())).expect("Cannot find WalkId").clone()}
-    pub fn get_class(&self, cx: &Cx, class: ClassId) -> Anim {
+    pub fn base(&self, cx: &Cx) -> Anim {cx.theme_anims.get(&(*self, ThemeBase::id())).expect("Cannot find WalkId").clone()}
+    pub fn class(&self, cx: &Cx, class: ClassId) -> Anim {
         if let Some(a) = cx.theme_anims.get(&(*self, class)) {return a.clone()};
-        self.get(cx)
+        self.base(cx)
     }
 }
 
 pub trait ThemeAnim {
     fn id() -> AnimId;
-    fn set(cx: &mut Cx, value: Anim) {
+    fn set_base(cx: &mut Cx, value: Anim) {
         cx.theme_anims.insert(( Self::id(), ThemeBase::id()), value);
     }
     fn set_class(cx: &mut Cx, class: ClassId, value: Anim) {
         cx.theme_anims.insert(( Self::id(), class), value);
     }
-    fn get(cx: &Cx) -> Anim {
+    fn base(cx: &Cx) -> Anim {
         cx.theme_anims.get(&( Self::id(), ThemeBase::id())).expect("Cannot find WalkId").clone()
     }
-    fn get_class(cx: &Cx, class: ClassId) -> Anim {
+    fn class(cx: &Cx, class: ClassId) -> Anim {
         if let Some(a) = cx.theme_anims.get(&( Self::id(), class)) {return a.clone()};
-        Self::get(cx)
+        Self::base(cx)
     }
 }
 
@@ -291,27 +291,30 @@ macro_rules!theme_anim {
 pub struct ShaderId(pub TypeId);
 
 impl ShaderId {
-    pub fn get(&self, cx: &Cx) -> Shader {cx.theme_shaders.get(&(*self, ThemeBase::id())).expect("Cannot find WalkId").clone()}
-    pub fn get_class(&self, cx: &Cx, class: ClassId) -> Shader {
+    pub fn base(&self, cx: &Cx) -> Shader {cx.theme_shaders.get(&(*self, ThemeBase::id())).expect("Cannot find WalkId").clone()}
+    pub fn class(&self, cx: &Cx, class: ClassId) -> Shader {
         if let Some(a) = cx.theme_shaders.get(&(*self, class)) {return a.clone()};
-        self.get(cx)
+        self.base(cx)
     }
 }
 
 pub trait ThemeShader {
     fn id() -> ShaderId;
-    fn set(cx: &mut Cx, value: Shader) {
-        cx.theme_shaders.insert(( Self::id(), ThemeBase::id()), value);
+    fn name() -> &'static str;
+    fn set_base(cx: &mut Cx, sg: ShaderGen) {
+        let shader = cx.add_shader(sg, Self::name());
+        cx.theme_shaders.insert(( Self::id(), ThemeBase::id()), shader);
     }
-    fn set_class(cx: &mut Cx, class: ClassId, value: Shader) {
-        cx.theme_shaders.insert(( Self::id(), class), value);
+    fn set_class(cx: &mut Cx, class: ClassId, sg: ShaderGen) {
+        let shader = cx.add_shader(sg, Self::name());
+        cx.theme_shaders.insert(( Self::id(), class), shader);
     }
-    fn get(cx: &Cx) -> Shader {
+    fn base(cx: &Cx) -> Shader {
         cx.theme_shaders.get(&( Self::id(), ThemeBase::id())).expect("Cannot find WalkId").clone()
     }
-    fn get_class(cx: &Cx, class: ClassId) -> Shader {
+    fn class(cx: &Cx, class: ClassId) -> Shader {
         if let Some(a) = cx.theme_shaders.get(&( Self::id(), class)) {return a.clone()};
-        Self::get(cx)
+        Self::base(cx)
     }
 }
 
@@ -322,6 +325,7 @@ macro_rules!theme_shader {
         pub struct $ name();
         impl ThemeShader for $ name {
             fn id() -> ShaderId {ShaderId(std::any::TypeId::of::< $ name>())}
+            fn name() -> &'static str {stringify!($ name)}
         }
     };
 }

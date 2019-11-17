@@ -209,7 +209,7 @@ impl Text {
         //let font_id = self.font.font_id.unwrap();
         let inst = cx.new_instance(&self.shader, 0);
         let aligned = cx.align_instance(inst);
-        let text_style = self.text_style.get(cx);
+        let text_style = self.text_style.base(cx);
         let brightness = text_style.brightness;
         let curve = text_style.curve;
         if aligned.inst.need_uniforms_now(cx) {
@@ -237,7 +237,7 @@ impl Text {
     pub fn add_text<F>(&mut self, cx: &mut Cx, geom_x: f32, geom_y: f32, char_offset: usize, aligned: &mut AlignedInstance, chunk: &[char], mut char_callback: F)
     where F: FnMut(char, usize, f32, f32) -> f32
     {
-        let text_style = self.text_style.get(cx);
+        let text_style = self.text_style.base(cx);
         let mut geom_x = geom_x;
         let mut char_offset = char_offset;
         let font_id = text_style.font_id.unwrap();
@@ -361,7 +361,7 @@ impl Text {
         let mut chunk = Vec::new();
         let mut width = 0.0;
         let mut elipct = 0;
-        let text_style = self.text_style.get(cx);
+        let text_style = self.text_style.base(cx);
         let font_size = text_style.font_size;
         let height_factor = text_style.height_factor;
         let mut iter = text.chars().peekable();
@@ -450,7 +450,7 @@ impl Text {
         let font_size_o = area.get_instance_offset(cx, Text_font_size::ins_id()).unwrap();
         let char_offset_o = area.get_instance_offset(cx, Text_char_offset::ins_id()).unwrap();
         let read = area.get_read_ref(cx);
-        let text_style = self.text_style.get(cx);
+        let text_style = self.text_style.base(cx);
         let line_spacing = text_style.line_spacing;
         let mut index = 0;
         if let Some(read) = read {
@@ -486,7 +486,7 @@ impl Text {
     }
     
     pub fn get_monospace_base(&self, cx: &Cx) -> Vec2 {
-        let text_style = self.text_style.get(cx);
+        let text_style = self.text_style.base(cx);
         let font_id = text_style.font_id.unwrap();
         let font = cx.fonts[font_id].font_loaded.as_ref().unwrap();
         let slot = font.char_code_to_glyph_index_map[33];

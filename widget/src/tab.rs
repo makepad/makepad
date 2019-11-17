@@ -287,10 +287,10 @@ impl Tab {
         }
         else {
             let layout = if let Some(abs_origin) = self.abs_origin {
-                Layout {abs_origin: Some(abs_origin), ..TabLayout_bg::get(cx)}
+                Layout {abs_origin: Some(abs_origin), ..Tab_layout_bg::base(cx)}
             }
             else {
-                TabLayout_bg::get(cx)
+                Tab_layout_bg::base(cx)
             };
             let bg_inst = self.bg.begin_quad(cx, layout);
             bg_inst.push_last_color(cx, ThemeBase::id(), &self.animator, Tab_border_color::id());

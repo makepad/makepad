@@ -762,7 +762,7 @@ where TItem: Clone
                         self._tweening_quad = Some((id, rc, alpha));
                         (rc, alpha)
                     };
-                    self.drop_quad.color = Color_drop_quad::get(cx);
+                    self.drop_quad.color = Color_drop_quad::base(cx);
                     self.drop_quad.color.a = alpha * 0.8;
                     found_drop_zone = true;
                     self.drop_quad.draw_quad_rel(cx, dr);
