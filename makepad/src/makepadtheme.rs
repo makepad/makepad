@@ -1,21 +1,20 @@
 use render::*;
 
-theme_layout!(LayoutLogListItem);
+theme_layout!(LogListLayout_item);
+
 theme_layout!(FileTreeLayout_drag_bg);
 theme_layout!(FileTreeLayout_node);
-
-theme_text_style!(TextStyleFileTree);
-
+theme_text_style!(FileTreeTextStyle);
 theme_walk!(FileTreeWalk_filler);
 theme_walk!(FileTreeWalk_folder);
 
 pub fn set_makepad_theme_values(cx: &mut Cx){
-    TextStyleFileTree::set(cx, TextStyle {
+    FileTreeTextStyle::set(cx, TextStyle {
         top_drop: 1.3,
         ..TextStyle::default()
     });
     
-    LayoutLogListItem::set(cx, Layout {
+    LogListLayout_item::set(cx, Layout {
         walk: Walk::wh(Width::Fill, Height::Fix(20.)),
         align: Align::left_center(),
         padding: Padding::zero(), // {l: 2., t: 3., b: 2., r: 0.},

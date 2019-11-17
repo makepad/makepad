@@ -18,16 +18,16 @@ pub struct LogItemDraw {
     pub text: Text,
     pub item_bg: Quad,
     pub code_icon: CodeIcon,
-    pub item_layout: LayoutId,
+    //pub item_layout: LayoutId,
     pub path_color: ColorId,
     pub message_color: ColorId,
-    pub bg_even: ColorId,
-    pub bg_odd: ColorId,
-    pub bg_marked: ColorId,
-    pub bg_odd_over: ColorId,
-    pub bg_marked_over: ColorId,
-    pub bg_selected: ColorId,
-    pub bg_selected_over: ColorId
+    //pub bg_even: ColorId,
+    //pub bg_odd: ColorId,
+    //pub bg_marked: ColorId,
+    //pub bg_odd_over: ColorId,
+    //pub bg_marked_over: ColorId,
+    //pub bg_selected: ColorId,
+    //pub bg_selected_over: ColorId
 }
 
 impl LogItemDraw {
@@ -39,24 +39,24 @@ impl LogItemDraw {
                 ..Text::style(cx, TextStyle_normal::id())
             },
             code_icon: CodeIcon::style(cx),
-            item_layout: LayoutLogListItem::id(),
+            //item_layout: LayoutLogListItem::id(),
             path_color: Color_text_defocus::id(),
             message_color: Color_text_focus::id(),
             //row_height: 20.0,
-            bg_even: Color_bg_selected::id(),
-            bg_odd: Color_bg_odd::id(),
-            bg_marked: Color_bg_marked::id(),
-            bg_selected: Color_bg_selected::id(),
-            bg_marked_over: Color_bg_marked_over::id(),
-            bg_selected_over: Color_bg_selected_over::id(),
-            bg_odd_over: Color_bg_odd_over::id()
+            //bg_even: Color_bg_selected::id(),
+            //bg_odd: Color_bg_odd::id(),
+            //bg_marked: Color_bg_marked::id(),
+            //bg_selected: Color_bg_selected::id(),
+            //bg_marked_over: Color_bg_marked_over::id(),
+            //bg_selected_over: Color_bg_selected_over::id(),
+            //bg_odd_over: Color_bg_odd_over::id()
         }
     }
     
     pub fn get_default_anim(&self, _cx: &Cx, counter: usize, marked: bool) -> Anim {
         Anim::new(Play::Chain {duration: 0.01}, vec![
             Track::color_id(Quad_color::id(), Ease::Lin, vec![
-                (1.0, if marked {self.bg_marked} else if counter & 1 == 0 {self.bg_selected}else {self.bg_odd})
+                (1.0, if marked {Color_bg_marked::id()} else if counter & 1 == 0 {Color_bg_selected::id()}else {Color_bg_odd::id()})
             ])
         ])
     }
@@ -64,13 +64,13 @@ impl LogItemDraw {
     pub fn get_default_anim_cut(&self, _cx: &Cx, counter: usize, marked: bool) -> Anim {
         Anim::new(Play::Cut {duration: 0.01}, vec![
             Track::color_id(Quad_color::id(), Ease::Lin, vec![
-                (0.0, if marked {self.bg_marked} else if counter & 1 == 0 {self.bg_selected}else {self.bg_odd})
+                (0.0, if marked {Color_bg_marked::id()} else if counter & 1 == 0 {Color_bg_selected::id()}else {Color_bg_odd::id()})
             ])
         ])
     }
     
     pub fn get_over_anim(&self, _cx: &Cx, counter: usize, marked: bool) -> Anim {
-        let over_color = if marked {self.bg_marked_over} else if counter & 1 == 0 {self.bg_selected_over}else {self.bg_odd_over};
+        let over_color = if marked {Color_bg_marked_over::id()} else if counter & 1 == 0 {Color_bg_selected_over::id()}else {Color_bg_odd_over::id()};
         Anim::new(Play::Cut {duration: 0.02}, vec![
             Track::color_id(Quad_color::id(), Ease::Lin, vec![
                 (0., over_color),
@@ -96,7 +96,7 @@ impl LogItemDraw {
     pub fn draw_log_item(&mut self, cx: &mut Cx, list_item: &mut ListItem, log_item: &HubLogItem) {
         self.item_bg.color = list_item.animator.last_color(cx, Quad_color::id());
 
-        let bg_inst = self.item_bg.begin_quad(cx, self.item_layout.get(cx));//&self.get_line_layout());
+        let bg_inst = self.item_bg.begin_quad(cx, LogListLayout_item::get(cx));//&self.get_line_layout());
         
         match log_item {
             HubLogItem::LocPanic(loc_msg) => {
@@ -143,8 +143,8 @@ impl LogItemDraw {
     
     pub fn draw_status_line(&mut self, cx: &mut Cx, counter: usize, bm: &BuildManager) {
         // draw status line
-        self.item_bg.color = if counter & 1 == 0 {self.bg_even.get(cx)}else {self.bg_odd.get(cx)};
-        let bg_inst = self.item_bg.begin_quad(cx, self.item_layout.get(cx));
+        self.item_bg.color = if counter & 1 == 0 {Color_bg_selected::get(cx)}else {Color_bg_odd::get(cx)};
+        let bg_inst = self.item_bg.begin_quad(cx, LogListLayout_item::get(cx));
         
         if !bm.is_any_cargo_running() {
             self.text.color = self.path_color.get(cx);
@@ -187,8 +187,8 @@ impl LogItemDraw {
     
     pub fn draw_filler(&mut self, cx: &mut Cx, counter: usize) {
         let view_total = cx.get_turtle_bounds();
-        self.item_bg.color = if counter & 1 == 0 {self.bg_even.get(cx)} else {self.bg_odd.get(cx)};
-        self.item_bg.draw_quad(cx, self.item_layout.get(cx).walk);
+        self.item_bg.color = if counter & 1 == 0 {Color_bg_selected::get(cx)} else {Color_bg_odd::get(cx)};
+        self.item_bg.draw_quad(cx, LogListLayout_item::get(cx).walk);
         cx.set_turtle_bounds(view_total); // do this so it doesnt impact the turtle
     }
 }
@@ -375,7 +375,7 @@ impl LogList {
             item_draw.get_default_anim(cx, index, false)
         });
         
-        let row_height = self.item_draw.item_layout.get(cx).walk.height.fixed();
+        let row_height = LogListLayout_item::get(cx).walk.height.fixed();
         
         if self.list.begin_list(cx, &mut self.view, row_height).is_err() {return}
         

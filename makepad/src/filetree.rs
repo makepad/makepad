@@ -13,13 +13,13 @@ pub struct FileTreeItemDraw {
     pub tree_file_color: ColorId,
     pub tree_text: Text,
     pub node_bg: Quad,
-    pub bg_even: ColorId,
-    pub bg_odd: ColorId,
-    pub bg_marked: ColorId,
-    pub bg_odd_over: ColorId,
-    pub bg_marked_over: ColorId,
-    pub bg_selected: ColorId,
-    pub bg_selected_over: ColorId
+    //pub bg_even: ColorId,
+    //pub bg_odd: ColorId,
+    //pub bg_marked: ColorId,
+    //pub bg_odd_over: ColorId,
+    //pub bg_marked_over: ColorId,
+    //pub bg_selected: ColorId,
+    //pub bg_selected_over: ColorId
 }
 
 #[derive(Clone)]
@@ -196,7 +196,7 @@ impl FileTreeItemDraw {
             //folder_walk: WalkFileTreeFolder::id(),
             tree_folder_color: Color_text_selected_focus::id(),
             tree_file_color: Color_text_deselected_focus::id(),
-            tree_text: Text {z: 0.001, ..Text::style(cx, TextStyleFileTree::id())},
+            tree_text: Text {z: 0.001, ..Text::style(cx, FileTreeTextStyle::id())},
             node_bg: Quad::style(cx),
             //node_layout: LayoutFileTreeNode::id(),
             filler_color: Color_icon::id(),
@@ -204,13 +204,13 @@ impl FileTreeItemDraw {
                 z: 0.001,
                 ..Quad::style_with_shader(cx, Self::def_filler_shader(), "FileTree.filler")
             },
-            bg_even: Color_bg_selected::id(),
-            bg_odd: Color_bg_odd::id(),
-            bg_marked: Color_bg_marked::id(),
-            bg_selected: Color_bg_selected::id(),
-            bg_marked_over: Color_bg_marked_over::id(),
-            bg_selected_over: Color_bg_selected_over::id(),
-            bg_odd_over: Color_bg_odd_over::id()
+            //bg_even: Color_bg_selected::id(),
+            //bg_odd: Color_bg_odd::id(),
+            //bg_marked: Color_bg_marked::id(),
+            //bg_selected: Color_bg_selected::id(),
+            //bg_marked_over: Color_bg_marked_over::id(),
+            //bg_selected_over: Color_bg_selected_over::id(),
+            //bg_odd_over: Color_bg_odd_over::id()
         }
     }
     
@@ -241,13 +241,13 @@ impl FileTreeItemDraw {
     pub fn get_default_anim(&self, _cx: &Cx, counter: usize, marked: bool) -> Anim {
         Anim::new(Play::Chain {duration: 0.01}, vec![
             Track::color_id(Quad_color::id(), Ease::Lin, vec![
-                (1.0, if marked {self.bg_marked} else if counter & 1 == 0 {self.bg_selected}else {self.bg_odd})
+                (1.0, if marked {Color_bg_marked::id()} else if counter & 1 == 0 {Color_bg_selected::id()}else {Color_bg_odd::id()})
             ])
         ])
     }
     
     pub fn get_over_anim(&self, _cx: &Cx, counter: usize, marked: bool) -> Anim {
-        let over_color = if marked {self.bg_marked_over} else if counter & 1 == 0 {self.bg_selected_over}else {self.bg_odd_over};
+        let over_color = if marked {Color_bg_marked_over::id()} else if counter & 1 == 0 {Color_bg_selected_over::id()}else {Color_bg_odd_over::id()};
         Anim::new(Play::Cut {duration: 0.02}, vec![
             Track::color_id(Quad_color::id(), Ease::Lin, vec![
                 (0., over_color),
@@ -738,7 +738,7 @@ impl FileTree {
             let rect_now = cx.get_turtle_rect();
             let mut y = view_total.y;
             while y < rect_now.h {
-                self.item_draw.node_bg.color = if counter & 1 == 0 {self.item_draw.bg_selected.get(cx)}else {self.item_draw.bg_odd.get(cx)};
+                self.item_draw.node_bg.color = if counter & 1 == 0 {Color_bg_selected::get(cx)}else {Color_bg_odd::get(cx)};
                 self.item_draw.node_bg.draw_quad(
                     cx,
                     Walk::wh(Width::Fill, Height::Fix((rect_now.h - y).min(row_height))),
