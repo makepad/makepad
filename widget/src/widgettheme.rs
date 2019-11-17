@@ -1,39 +1,46 @@
 use render::*;
 
-theme_text_style!(TextStyleNormal);
-theme_text_style!(TextStyleTab);
-theme_text_style!(TextStyleNormalButton);
-theme_text_style!(TextStyleDesktopWindowCaption);
-theme_text_style!(TextStyleWindowMenu);
+theme_text_style!(TextStyle_normal);
+theme_text_style!(TextStyle_tab_title);
+theme_text_style!(TextStyle_button_title);
+theme_text_style!(TextStyle_window_caption);
+theme_text_style!(TextStyle_window_menu);
 
-theme_layout!(LayoutNormalButton);
-theme_layout!(LayoutTab);
-theme_layout!(LayoutWindowMenu);
+theme_layout!(Layout_button);
+theme_layout!(Layout_tab);
+theme_layout!(Layout_window_menu);
 
-theme_walk!(WalkTabClose);
+theme_walk!(Walk_tab_close);
 
-theme_color!(ColorBgSplitter);
-theme_color!(ColorBgSplitterOver);
-theme_color!(ColorBgSplitterPeak);
-theme_color!(ColorBgSplitterDrag);
+theme_color!(Color_bg_splitter);
+theme_color!(Color_bg_splitter_over);
+theme_color!(Color_bg_splitter_peak);
+theme_color!(Color_bg_splitter_drag);
 
-theme_color!(ColorBgNormal);
-theme_color!(ColorBgSelected);
-theme_color!(ColorBgOdd);
-theme_color!(ColorBgSelectedOver);
-theme_color!(ColorBgOddOver);
-theme_color!(ColorBgMarked);
-theme_color!(ColorBgMarkedOver);
-theme_color!(ColorOverBorder);
-theme_color!(ColorIcon);
-theme_color!(ColorDropQuad);
+theme_color!(Color_scrollbar_base);
+theme_color!(Color_scrollbar_over);
+theme_color!(Color_scrollbar_down);
 
-theme_color!(ColorTextFocus);
-theme_color!(ColorTextDefocus);
-theme_color!(ColorTextSelectedFocus);
-theme_color!(ColorTextDeselectedFocus);
-theme_color!(ColorTextSelectedDefocus);
-theme_color!(ColorTextDeselectedDefocus);
+theme_color!(Color_bg_normal);
+theme_color!(Color_bg_selected);
+theme_color!(Color_bg_odd);
+theme_color!(Color_bg_selected_over);
+theme_color!(Color_bg_odd_over);
+theme_color!(Color_bg_marked);
+theme_color!(Color_bg_marked_over);
+theme_color!(Color_over_border);
+theme_color!(Color_icon);
+theme_color!(Color_drop_quad);
+
+theme_color!(Color_text_focus);
+theme_color!(Color_text_defocus);
+theme_color!(Color_text_selected_focus);
+theme_color!(Color_text_deselected_focus);
+theme_color!(Color_text_selected_defocus);
+theme_color!(Color_text_deselected_defocus);
+
+instance_color!(NormalButton_border_color);
+instance_float!(NormalButton_glow_size);
 
 pub fn set_widget_theme_values(cx: &mut Cx) {
     let default_text = TextStyle {
@@ -47,12 +54,13 @@ pub fn set_widget_theme_values(cx: &mut Cx) {
         height_factor: 1.3,
     };
     
-    TextStyleDesktopWindowCaption::set(cx, default_text.clone());
-    TextStyleWindowMenu::set(cx, default_text.clone());
-    TextStyleNormalButton::set(cx, default_text.clone());
-    TextStyleNormal::set(cx, default_text.clone());
+    TextStyle_window_caption::set(cx, default_text.clone());
+    TextStyle_window_menu::set(cx, default_text.clone());
+    TextStyle_button_title::set(cx, default_text.clone());
+    TextStyle_normal::set(cx, default_text.clone());
+    TextStyle_tab_title::set(cx, default_text.clone());
     
-    LayoutNormalButton::set(cx, Layout {
+    Layout_button::set(cx, Layout {
         align: Align::center(),
         walk: Walk {
             width: Width::Compute,
@@ -63,48 +71,58 @@ pub fn set_widget_theme_values(cx: &mut Cx) {
         ..Default::default()
     });
     
-    TextStyleTab::set(cx, default_text.clone());
-    LayoutTab::set(cx, Layout {
+    Layout_tab::set(cx, Layout {
         align: Align::left_center(),
         walk: Walk::wh(Width::Compute, Height::Fix(40.)),
         padding: Padding {l: 16.0, t: 1.0, r: 16.0, b: 0.0},
         ..Default::default()
     });
     
-    WalkTabClose::set(cx, Walk {
+    Walk_tab_close::set(cx, Walk {
         width: Width::Fix(10.),
         height: Height::Fix(10.),
         margin: Margin {l: -4., t: 0., r: 4., b: 0.}
     });
     
-    LayoutWindowMenu::set(cx, Layout {
+    Layout_window_menu::set(cx, Layout {
         walk: Walk::wh(Width::Fill, Height::Fix(20.)),
         padding: Padding {l: 2., t: 3., b: 2., r: 0.},
         line_wrap: LineWrap::None,
         ..Default::default()
     });
+
+    
 }
 
 pub fn set_dark_widget_theme(cx: &mut Cx) {
     set_widget_theme_values(cx);
-    ColorBgSplitter::set(cx, color256(25, 25, 25));
-    ColorBgSplitterOver::set(cx, color256(25, 25, 25));
+    Color_bg_splitter::set(cx, color256(25, 25, 25));
+    Color_bg_splitter_over::set(cx, color("#5"));
+    Color_bg_splitter_peak::set(cx, color("#f"));
+    Color_bg_splitter_drag::set(cx, color("#6"));
+    Color_scrollbar_base::set(cx, color("#5"));
+    Color_scrollbar_over::set(cx, color("#7"));
+    Color_scrollbar_down::set(cx, color("#9"));
+    Color_bg_normal::set(cx, color256(52, 52, 52));
+    Color_bg_selected::set(cx, color256(40, 40, 40));
+    Color_bg_odd::set(cx, color256(37, 37, 37));
+    Color_bg_selected_over::set(cx, color256(61, 61, 61));
+    Color_bg_odd_over::set(cx, color256(56, 56, 56));
+    Color_bg_marked::set(cx, color256(17, 70, 110));
+    Color_bg_marked_over::set(cx, color256(17, 70, 110));
+    Color_over_border::set(cx, color256(255, 255, 255));
+    Color_drop_quad::set(cx, color("#a"));
+    Color_text_defocus::set(cx, color("#9"));
+    Color_text_focus::set(cx, color("#b"));
+    Color_icon::set(cx, color256(127, 127, 127));
     
-    ColorBgNormal::set(cx, color256(52, 52, 52));
-    ColorBgSelected::set(cx, color256(40, 40, 40));
-    ColorBgOdd::set(cx, color256(37, 37, 37));
-    ColorBgSelectedOver::set(cx, color256(61, 61, 61));
-    ColorBgOddOver::set(cx, color256(56, 56, 56));
-    ColorBgMarked::set(cx, color256(17, 70, 110));
-    ColorBgMarkedOver::set(cx, color256(17, 70, 110));
-    ColorOverBorder::set(cx, color256(255, 255, 255));
-    ColorDropQuad::set(cx, color("#a"));
-    ColorTextDefocus::set(cx, color("#9"));
-    ColorTextFocus::set(cx, color("#b"));
-    ColorIcon::set(cx, color256(127, 127, 127));
-    
-    ColorTextSelectedFocus::set(cx, color256(255, 255, 255));
-    ColorTextDeselectedFocus::set(cx, color256(157, 157, 157));
-    ColorTextSelectedDefocus::set(cx, color256(157, 157, 157));
-    ColorTextDeselectedDefocus::set(cx, color256(130, 130, 130));
+    Color_text_selected_focus::set(cx, color256(255, 255, 255));
+    Color_text_deselected_focus::set(cx, color256(157, 157, 157));
+    Color_text_selected_defocus::set(cx, color256(157, 157, 157));
+    Color_text_deselected_defocus::set(cx, color256(130, 130, 130));
 }
+
+
+// TabClose styles
+
+

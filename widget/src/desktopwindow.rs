@@ -57,8 +57,8 @@ impl DesktopWindow {
             
             window_menu: WindowMenu::style(cx),
             
-            caption_text: Text::style(cx, TextStyleDesktopWindowCaption::id(cx)),
-            caption_bg_color: ColorBgSelectedOver::id(cx),
+            caption_text: Text::style(cx, TextStyle_window_caption::id(cx)),
+            caption_bg_color: Color_bg_selected_over::id(cx),
             caption_bg: Quad::style(cx),
             caption_size: Vec2::zero(),
             caption: "Makepad".to_string(),

@@ -148,14 +148,18 @@ pub enum CodeEditorEvent {
     Change
 }
 
-instance_float!(InstanceIndentId);
-uniform_float!(UniformIndentSel);
-uniform_float!(UniformBlink);
-instance_float!(InstancePrevX);
-instance_float!(InstancePrevW);
-instance_float!(InstanceNextX);
-instance_float!(InstanceNextW);
-uniform_float!(UniformVisible);
+instance_float!(CodeEditor_indent_id);
+
+uniform_float!(CodeEditor_indent_sel);
+uniform_float!(CodeEditor_cursor_blink);
+
+instance_float!(CodeEditor_select_prev_x);
+instance_float!(CodeEditor_select_prev_w);
+instance_float!(CodeEditor_select_next_x);
+instance_float!(CodeEditor_select_next_w);
+
+uniform_float!(CodeEditor_highlight_visible);
+
 impl CodeEditor {
     
     pub fn style(cx: &mut Cx) -> Self {
@@ -325,8 +329,9 @@ impl CodeEditor {
     
     pub fn def_indent_lines_shader() -> ShaderGen {
         Quad::def_quad_shader().compose(shader_ast !({
-            let indent_id: InstanceIndentId;
-            let indent_sel: UniformIndentSel;
+            let indent_id: CodeEditor_indent_id;
+            // uniforms
+            let indent_sel: CodeEditor_indent_sel;
             fn pixel() -> vec4 {
                 let col = color;
                 let thickness = 0.8 + dpi_dilate * 0.5;
@@ -347,7 +352,7 @@ impl CodeEditor {
     
     pub fn def_cursor_shader() -> ShaderGen {
         Quad::def_quad_shader().compose(shader_ast !({
-            let blink: UniformBlink;
+            let blink: CodeEditor_cursor_blink;
             fn pixel() -> vec4 {
                 if blink<0.5 {
                     return vec4(color.rgb * color.a, color.a)
@@ -361,10 +366,10 @@ impl CodeEditor {
     
     pub fn def_selection_shader() -> ShaderGen {
         Quad::def_quad_shader().compose(shader_ast !({
-            let prev_x: InstancePrevX;
-            let prev_w: InstancePrevW;
-            let next_x: InstanceNextX;
-            let next_w: InstanceNextW;
+            let prev_x: CodeEditor_select_prev_x;
+            let prev_w: CodeEditor_select_prev_w;
+            let next_x: CodeEditor_select_next_x;
+            let next_w: CodeEditor_select_next_w;
             const gloopiness: float = 8.;
             const border_radius: float = 2.;
             
@@ -440,7 +445,7 @@ impl CodeEditor {
     
     pub fn def_token_highlight_shader() -> ShaderGen {
         Quad::def_quad_shader().compose(shader_ast!({
-            let visible: UniformVisible;
+            let visible: CodeEditor_highlight_visible;
             fn pixel() -> vec4 {
                 if visible<0.5 {
                     return vec4(0., 0., 0., 0.)
@@ -466,14 +471,14 @@ impl CodeEditor {
     
     fn reset_highlight_visible(&mut self, cx: &mut Cx) {
         self._highlight_visibility = 0.0;
-        self._highlight_area.write_uniform_float(cx, "visible", self._highlight_visibility);
+        self._highlight_area.write_uniform_float(cx, CodeEditor_highlight_visible::id(), self._highlight_visibility);
     }
     
     fn reset_cursor_blinker(&mut self, cx: &mut Cx) {
         cx.stop_timer(&mut self._cursor_blink_timer);
         self._cursor_blink_timer = cx.start_timer(self.cursor_blink_speed * 0.5, false);
         self._cursor_blink_flipflop = 0.;
-        self._cursor_area.write_uniform_float(cx, "blink", self._cursor_blink_flipflop);
+        self._cursor_area.write_uniform_float(cx, CodeEditor_cursor_blink::id(), self._cursor_blink_flipflop);
     }
     
     fn handle_finger_down(&mut self, cx: &mut Cx, fe: &FingerDownEvent, text_buffer: &mut TextBuffer) {
@@ -808,8 +813,8 @@ impl CodeEditor {
                 // update the cursor uniform to blink it.
                 self._cursor_blink_flipflop = 1.0 - self._cursor_blink_flipflop;
                 self._highlight_visibility = 1.0;
-                self._cursor_area.write_uniform_float(cx, "blink", self._cursor_blink_flipflop);
-                self._highlight_area.write_uniform_float(cx, "visible", self._highlight_visibility);
+                self._cursor_area.write_uniform_float(cx, CodeEditor_cursor_blink::id(), self._cursor_blink_flipflop);
+                self._highlight_area.write_uniform_float(cx, CodeEditor_highlight_visible::id(), self._highlight_visibility);
                 // ok see if we changed.
                 if self._last_lag_mutation_id != text_buffer.mutation_id {
                     let was_filechange = self._last_lag_mutation_id != 0;
@@ -1712,7 +1717,7 @@ impl CodeEditor {
             let indent_id = if self.cursors.is_last_cursor_singular() && self._last_cursor_pos.row < self._line_geometry.len() {
                 self._line_geometry[self._last_cursor_pos.row].indent_id
             }else {0.};
-            indent_inst.clone().into_area().write_uniform_float(cx, "indent_sel", indent_id);
+            indent_inst.clone().into_area().write_uniform_float(cx, CodeEditor_indent_sel::id(), indent_id);
         }
     }
     

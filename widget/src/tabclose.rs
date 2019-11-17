@@ -9,47 +9,47 @@ pub struct TabClose {
     pub walk: WalkId,
     pub _bg_area: Area,
 }
-instance_float!(InstanceHover);
-instance_float!(InstanceDown);
+instance_float!(TabClose_hover);
+instance_float!(TabClose_down);
 
 impl TabClose {
     pub fn style(cx: &mut Cx) -> Self {
         Self {
             bg: Quad::style_with_shader(cx, Self::def_bg_shader(), "TabClose.bg"),
             animator: Animator::new(Self::get_default_anim(cx)),
-            walk: WalkTabClose::id(cx),
+            walk: Walk_tab_close::id(cx),
             _bg_area: Area::Empty,
         }
     }
     
     pub fn get_default_anim(cx:&Cx)->Anim{
         Anim::new(Play::Cut {duration: 0.2}, vec![
-            Track::color_id(cx, "bg.color", Ease::Lin, vec![(1.0, ColorTextDeselectedFocus::id(cx))]),
-            Track::float(cx, "bg.hover", Ease::Lin, vec![(1.0, 0.)]),
-            Track::float(cx, "bg.down", Ease::Lin, vec![(1.0, 0.)]),
+            Track::color_id(Quad_color::id(), Ease::Lin, vec![(1.0, Color_text_deselected_focus::id(cx))]),
+            Track::float(TabClose_hover::id(), Ease::Lin, vec![(1.0, 0.)]),
+            Track::float(TabClose_down::id(), Ease::Lin, vec![(1.0, 0.)]),
         ])
     }
     
     pub fn get_over_anim(cx:&Cx)->Anim{
         Anim::new(Play::Cut {duration: 0.2}, vec![
-            Track::color_id(cx, "bg.color", Ease::Lin, vec![(0.0, ColorTextSelectedFocus::id(cx)), (1.0, ColorTextSelectedFocus::id(cx))]),
-            Track::float(cx, "bg.down", Ease::Lin, vec![(1.0, 0.)]),
-            Track::float(cx, "bg.hover", Ease::Lin, vec![(0.0, 1.0), (1.0, 1.0)]),
+            Track::color_id(Quad_color::id(), Ease::Lin, vec![(0.0, Color_text_selected_focus::id(cx)), (1.0, Color_text_selected_focus::id(cx))]),
+            Track::float(TabClose_hover::id(), Ease::Lin, vec![(1.0, 1.0)]),
+            Track::float(TabClose_down::id(), Ease::Lin, vec![(1.0, 0.)]),
         ])
     }
     
     pub fn get_down_anim(cx:&Cx)->Anim{
         Anim::new(Play::Cut {duration: 0.2}, vec![
-            Track::color_id(cx, "bg.color", Ease::Lin, vec![(0.0, ColorTextSelectedFocus::id(cx)), (1.0, ColorTextSelectedFocus::id(cx))]),
-            Track::float(cx, "bg.hover", Ease::Lin, vec![(1.0, 1.0)]),
-            Track::float(cx, "bg.down", Ease::OutExp, vec![(0.0, 0.0), (1.0, 3.1415 * 0.5)]),
+            Track::color_id(Quad_color::id(), Ease::Lin, vec![(0.0, Color_text_selected_focus::id(cx)), (1.0, Color_text_selected_focus::id(cx))]),
+            Track::float(TabClose_hover::id(), Ease::Lin, vec![(1.0, 1.0)]),
+            Track::float(TabClose_down::id(), Ease::OutExp, vec![(0.0, 0.0), (1.0, 3.1415 * 0.5)]),
         ])
     }
 
     pub fn def_bg_shader() -> ShaderGen {
         Quad::def_quad_shader().compose(shader_ast!({
-            let hover: InstanceHover;
-            let down: InstanceDown;
+            let hover: TabClose_hover;
+            let down: TabClose_down;
             fn pixel() -> vec4 {
                 df_viewport(pos * vec2(w, h));
                 let hover_max: float = (hover * 0.2 + 0.8) * 0.5;
@@ -71,7 +71,7 @@ impl TabClose {
             margin: Some(Margin {l: 5., t: 5., r: 5., b: 5.}),
             ..Default::default()
         }) {
-            Event::Animate(ae) => self.animator.write_area(cx, self._bg_area, "bg.", ae.time),
+            Event::Animate(ae) => self.animator.write_area(cx, self._bg_area, ae.time),
             Event::FingerDown(_fe) => {
                 self.animator.play_anim(cx, Self::get_down_anim(cx));
                 cx.set_down_mouse_cursor(MouseCursor::Hand);
@@ -105,10 +105,10 @@ impl TabClose {
     }
     
     pub fn draw_tab_close(&mut self, cx: &mut Cx) {
-        self.bg.color = self.animator.last_color(cx, "bg.color");
+        self.bg.color = self.animator.last_color(cx, Quad_color::id());
         let bg_inst = self.bg.draw_quad(cx, cx.walks[self.walk]);
-        bg_inst.push_last_float(cx, &self.animator, "bg.hover");
-        bg_inst.push_last_float(cx, &self.animator, "bg.down");
+        bg_inst.push_last_float(cx, &self.animator, TabClose_hover::id());
+        bg_inst.push_last_float(cx, &self.animator, TabClose_down::id());
         self._bg_area = bg_inst.into_area();
         self.animator.update_area_refs(cx, self._bg_area); // if our area changed, update animation
     }

@@ -231,7 +231,7 @@ impl Cx {
                 sub_view_id: 0,
                 shader_id: shader_id,
                 shader_instance_id: shader_instance_id,
-                uniforms_required: sh.mapping.named_uniform_props.total_slots,
+                uniforms_required: sh.mapping.uniform_props.total_slots,
                 instance: Vec::new(),
                 uniforms: Vec::new(),
                 textures_2d: Vec::new(),
@@ -248,7 +248,7 @@ impl Cx {
         let dc = &mut draw_list.draw_calls[draw_call_id];
         dc.shader_id = shader_id;
         dc.shader_instance_id = shader_instance_id;
-        dc.uniforms_required = sh.mapping.named_uniform_props.total_slots;
+        dc.uniforms_required = sh.mapping.uniform_props.total_slots;
         dc.sub_view_id = 0; // make sure its recognised as a draw call
         // truncate buffers and set update frame
         dc.redraw_id = self.redraw_id;

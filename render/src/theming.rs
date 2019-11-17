@@ -157,6 +157,7 @@ pub trait ThemeColor{
 #[macro_export]
 macro_rules!theme_color {
     ( $ name: ident) => {
+        #[allow(non_camel_case_types)]
         pub struct $name();
         impl ThemeColor for $name{
             fn store()->ShVarStore{ShVarStore::UniformColor($name::type_id())}
@@ -200,6 +201,7 @@ pub trait ThemeTextStyle{
 #[macro_export]
 macro_rules!theme_text_style {
     ( $ name: ident) => {
+        #[allow(non_camel_case_types)]
         pub struct $name();
         impl ThemeTextStyle for $name{
             fn type_id()->std::any::TypeId{std::any::TypeId::of::<$name>()}
@@ -240,6 +242,7 @@ pub trait ThemeLayout{
 #[macro_export]
 macro_rules!theme_layout {
     ( $ name: ident) => {
+        #[allow(non_camel_case_types)]
         pub struct $name();
         impl ThemeLayout for $name{
             fn type_id()->std::any::TypeId{std::any::TypeId::of::<$name>()}
@@ -280,6 +283,7 @@ pub trait ThemeWalk{
 #[macro_export]
 macro_rules!theme_walk {
     ( $ name: ident) => {
+        #[allow(non_camel_case_types)]
         pub struct $name();
         impl ThemeWalk for $name{
             fn walk_type_id()->std::any::TypeId{std::any::TypeId::of::<$name>()}

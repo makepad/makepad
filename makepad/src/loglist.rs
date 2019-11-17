@@ -36,43 +36,43 @@ impl LogItemDraw {
             item_bg: Quad::style(cx),
             text: Text {
                 wrapping: Wrapping::Word,
-                ..Text::style(cx, TextStyleNormal::id(cx))
+                ..Text::style(cx, TextStyle_normal::id(cx))
             },
             code_icon: CodeIcon::style(cx),
             item_layout: LayoutLogListItem::id(cx),
-            path_color: ColorTextDefocus::id(cx),
-            message_color: ColorTextFocus::id(cx),
+            path_color: Color_text_defocus::id(cx),
+            message_color: Color_text_focus::id(cx),
             //row_height: 20.0,
-            bg_even: ColorBgSelected::id(cx),
-            bg_odd: ColorBgOdd::id(cx),
-            bg_marked: ColorBgMarked::id(cx),
-            bg_selected: ColorBgSelected::id(cx),
-            bg_marked_over: ColorBgMarkedOver::id(cx),
-            bg_selected_over: ColorBgSelectedOver::id(cx),
-            bg_odd_over: ColorBgOddOver::id(cx)
+            bg_even: Color_bg_selected::id(cx),
+            bg_odd: Color_bg_odd::id(cx),
+            bg_marked: Color_bg_marked::id(cx),
+            bg_selected: Color_bg_selected::id(cx),
+            bg_marked_over: Color_bg_marked_over::id(cx),
+            bg_selected_over: Color_bg_selected_over::id(cx),
+            bg_odd_over: Color_bg_odd_over::id(cx)
         }
     }
     
-    pub fn get_default_anim(&self, cx: &Cx, counter: usize, marked: bool) -> Anim {
+    pub fn get_default_anim(&self, _cx: &Cx, counter: usize, marked: bool) -> Anim {
         Anim::new(Play::Chain {duration: 0.01}, vec![
-            Track::color_id(cx, "bg.color", Ease::Lin, vec![
+            Track::color_id(Quad_color::id(), Ease::Lin, vec![
                 (1.0, if marked {self.bg_marked} else if counter & 1 == 0 {self.bg_selected}else {self.bg_odd})
             ])
         ])
     }
     
-    pub fn get_default_anim_cut(&self, cx: &Cx, counter: usize, marked: bool) -> Anim {
+    pub fn get_default_anim_cut(&self, _cx: &Cx, counter: usize, marked: bool) -> Anim {
         Anim::new(Play::Cut {duration: 0.01}, vec![
-            Track::color_id(cx, "bg.color", Ease::Lin, vec![
+            Track::color_id(Quad_color::id(), Ease::Lin, vec![
                 (0.0, if marked {self.bg_marked} else if counter & 1 == 0 {self.bg_selected}else {self.bg_odd})
             ])
         ])
     }
     
-    pub fn get_over_anim(&self, cx: &Cx, counter: usize, marked: bool) -> Anim {
+    pub fn get_over_anim(&self, _cx: &Cx, counter: usize, marked: bool) -> Anim {
         let over_color = if marked {self.bg_marked_over} else if counter & 1 == 0 {self.bg_selected_over}else {self.bg_odd_over};
         Anim::new(Play::Cut {duration: 0.02}, vec![
-            Track::color_id(cx, "bg.color", Ease::Lin, vec![
+            Track::color_id(Quad_color::id(), Ease::Lin, vec![
                 (0., over_color),
             ])
         ])
@@ -94,7 +94,7 @@ impl LogItemDraw {
     }
     
     pub fn draw_log_item(&mut self, cx: &mut Cx, list_item: &mut ListItem, log_item: &HubLogItem) {
-        self.item_bg.color = list_item.animator.last_color(cx, "bg.color");
+        self.item_bg.color = list_item.animator.last_color(cx, Quad_color::id());
 
         let bg_inst = self.item_bg.begin_quad(cx, cx.layouts[self.item_layout]);//&self.get_line_layout());
         
@@ -281,7 +281,7 @@ impl LogList {
         let item_draw = &self.item_draw;
         let le = self.list.handle_list_logic(cx, event, select, | cx, item_event, item, item_index | match item_event {
             ListLogicEvent::Animate(ae) => {
-                item.animator.write_area(cx, item.animator.area, "bg.", ae.time);
+                item.animator.write_area(cx, item.animator.area, ae.time);
             },
             ListLogicEvent::AnimEnded => {
                 item.animator.end();

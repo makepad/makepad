@@ -29,7 +29,7 @@ pub struct Animator {
     current: Option<Anim>,
     next: Option<Anim>,
     pub area: Area,
-    pub last_values: Vec<(CxId, AnimLastValue)>,
+    pub last_values: Vec<(ShInsId, AnimLastValue)>,
 }
 
 impl Animator {
@@ -221,7 +221,7 @@ impl Animator {
         }
     }
     
-    pub fn find_track_index(&mut self, ident: CxId) -> Option<usize> {
+    pub fn find_track_index(&mut self, ident: ShInsId) -> Option<usize> {
         // find our track
         for (track_index, track) in &mut self.current.as_ref().unwrap().tracks.iter().enumerate() {
             if track.ident() == ident {
@@ -231,12 +231,11 @@ impl Animator {
         None
     }
     
-    pub fn calc_float(&mut self, cx: &mut Cx, ident_str: &str, time: f64) -> f32 {
-        let ident = cx.id(ident_str);
+    pub fn calc_float(&mut self, cx:&mut Cx, ident:ShInsFloatId, time: f64) -> f32 {
         let last = Self::_last_float(ident, &self.last_values);
         let mut ret = last;
         if let Some(time) = self.update_anim_track(cx, time) {
-            if let Some(track_index) = self.find_track_index(ident) {
+            if let Some(track_index) = self.find_track_index(ShInsId::Float(ident)) {
                 if let Track::Float(ft) = &mut self.current.as_mut().unwrap().tracks[track_index] {
                     ret = Track::compute_track_float(time, &ft.track, &mut ft.cut_init, last, &ft.ease);
                 }
@@ -246,12 +245,12 @@ impl Animator {
         return ret
     }
     
-    pub fn last_float(&self, cx:&Cx, ident_str: &str) -> f32 {
-        Self::_last_float(cx.id(ident_str), &self.last_values)
+    pub fn last_float(&self, _cx:&Cx, ident:ShInsFloatId) -> f32 {
+        Self::_last_float(ident, &self.last_values)
     }
     
-    pub fn _last_float(ident: CxId, last_float: &Vec<(CxId, AnimLastValue)>) -> f32 {
-        if let Some((_, value)) = last_float.iter().find( | v | v.0 == ident) {
+    pub fn _last_float(ident: ShInsFloatId, last_float: &Vec<(ShInsId, AnimLastValue)>) -> f32 {
+        if let Some((_, value)) = last_float.iter().find( | v | v.0 == ShInsId::Float(ident)) {
             if let AnimLastValue::Float(value) = value {
                 return *value
             }
@@ -259,25 +258,25 @@ impl Animator {
         return 0.0
     }
     
-    pub fn set_last_float(&mut self, ident: CxId, value: f32) {
+    pub fn set_last_float(&mut self, ident: ShInsFloatId, value: f32) {
         Self::_set_last_float(ident, value, &mut self.last_values)
     }
     
-    pub fn _set_last_float(ident: CxId, value: f32, last_values: &mut Vec<(CxId, AnimLastValue)>) {
-        if let Some((_, last)) = last_values.iter_mut().find( | v | v.0 == ident) {
+    pub fn _set_last_float(ident: ShInsFloatId, value: f32, last_values: &mut Vec<(ShInsId, AnimLastValue)>) {
+        let ty_ident = ShInsId::Float(ident);
+        if let Some((_, last)) = last_values.iter_mut().find( | v | v.0 == ty_ident) {
             *last = AnimLastValue::Float(value);
         }
         else {
-            last_values.push((ident, AnimLastValue::Float(value)))
+            last_values.push((ty_ident, AnimLastValue::Float(value)))
         }
     }
     
-    pub fn calc_vec2(&mut self, cx: &mut Cx, ident_str: &str, time: f64) -> Vec2 {
-        let ident = cx.id(ident_str);
+    pub fn calc_vec2(&mut self, cx: &mut Cx, ident: ShInsVec2Id, time: f64) -> Vec2 {
         let last = Self::_last_vec2(ident, &self.last_values);
         let mut ret = last;
         if let Some(time) = self.update_anim_track(cx, time) {
-            if let Some(track_index) = self.find_track_index(ident) {
+            if let Some(track_index) = self.find_track_index(ShInsId::Vec2(ident)) {
                 if let Track::Vec2(ft) = &mut self.current.as_mut().unwrap().tracks[track_index] {
                     ret = Track::compute_track_vec2(time, &ft.track, &mut ft.cut_init, last, &ft.ease);
                 }
@@ -287,12 +286,12 @@ impl Animator {
         return ret
     }
     
-    pub fn last_vec2(&self, cx:&Cx, ident_str: &str) -> Vec2 {
-        Self::_last_vec2(cx.id(ident_str), &self.last_values)
+    pub fn last_vec2(&self, _cx:&Cx, ident: ShInsVec2Id) -> Vec2 {
+        Self::_last_vec2(ident, &self.last_values)
     }
     
-    pub fn _last_vec2(ident: CxId, last_values: &Vec<(CxId, AnimLastValue)>) -> Vec2 {
-        if let Some((_,value)) = last_values.iter().find( | v | v.0 == ident) {
+    pub fn _last_vec2(ident: ShInsVec2Id, last_values: &Vec<(ShInsId, AnimLastValue)>) -> Vec2 {
+        if let Some((_,value)) = last_values.iter().find( | v | v.0 == ShInsId::Vec2(ident)) {
             if let AnimLastValue::Vec2(value) = value{
                 return *value
             }
@@ -300,25 +299,25 @@ impl Animator {
         return Vec2::zero()
     }
     
-    pub fn set_last_vec2(&mut self, ident: CxId, value: Vec2) {
+    pub fn set_last_vec2(&mut self, ident: ShInsVec2Id, value: Vec2) {
         Self::_set_last_vec2(ident, value, &mut self.last_values);
     }
     
-    pub fn _set_last_vec2(ident: CxId, value: Vec2, last_values: &mut Vec<(CxId, AnimLastValue)>) {
-        if let Some((_, last)) = last_values.iter_mut().find( | v | v.0 == ident) {
+    pub fn _set_last_vec2(ident: ShInsVec2Id, value: Vec2, last_values: &mut Vec<(ShInsId, AnimLastValue)>) {
+        let ty_ident = ShInsId::Vec2(ident);
+        if let Some((_, last)) = last_values.iter_mut().find( | v | v.0 == ty_ident) {
             *last = AnimLastValue::Vec2(value);
         }
         else {
-            last_values.push((ident, AnimLastValue::Vec2(value)))
+            last_values.push((ty_ident, AnimLastValue::Vec2(value)))
         }
     }
     
-    pub fn calc_vec3(&mut self, cx: &mut Cx, ident_str: &str, time: f64) -> Vec3 {
-        let ident = cx.id(ident_str);
+    pub fn calc_vec3(&mut self, cx: &mut Cx, ident: ShInsVec3Id, time: f64) -> Vec3 {
         let last = Self::_last_vec3(ident, &self.last_values);
         let mut ret = last;
         if let Some(time) = self.update_anim_track(cx, time) {
-            if let Some(track_index) = self.find_track_index(ident) {
+            if let Some(track_index) = self.find_track_index(ShInsId::Vec3(ident)) {
                 if let Track::Vec3(ft) = &mut self.current.as_mut().unwrap().tracks[track_index] {
                     ret = Track::compute_track_vec3(time, &ft.track, &mut ft.cut_init, last, &ft.ease);
                 }
@@ -328,12 +327,12 @@ impl Animator {
         return ret
     }
     
-    pub fn last_vec3(&self, cx:&Cx, ident_str: &str) -> Vec3 {
-        Self::_last_vec3(cx.id(ident_str), &self.last_values)
+    pub fn last_vec3(&self, _cx:&Cx, ident: ShInsVec3Id) -> Vec3 {
+        Self::_last_vec3(ident, &self.last_values)
     }
     
-    pub fn _last_vec3(ident: CxId, last_values: &Vec<(CxId, AnimLastValue)>) -> Vec3 {
-        if let Some((_,value)) = last_values.iter().find( | v | v.0 == ident) {
+    pub fn _last_vec3(ident: ShInsVec3Id, last_values: &Vec<(ShInsId, AnimLastValue)>) -> Vec3 {
+        if let Some((_,value)) = last_values.iter().find( | v | v.0 == ShInsId::Vec3(ident)) {
              if let AnimLastValue::Vec3(value) = value{
                 return *value
             }
@@ -341,25 +340,25 @@ impl Animator {
         return Vec3::zero()
     }
     
-    pub fn set_last_vec3(&mut self, ident: CxId, value: Vec3) {
+    pub fn set_last_vec3(&mut self, ident: ShInsVec3Id, value: Vec3) {
         Self::_set_last_vec3(ident, value, &mut self.last_values);
     }
     
-    pub fn _set_last_vec3(ident: CxId, value: Vec3, last_values: &mut Vec<(CxId, AnimLastValue)>) {
-        if let Some((_,last)) = last_values.iter_mut().find( | v | v.0 == ident) {
+    pub fn _set_last_vec3(ident: ShInsVec3Id, value: Vec3, last_values: &mut Vec<(ShInsId, AnimLastValue)>) {
+        let ty_ident = ShInsId::Vec3(ident);
+        if let Some((_,last)) = last_values.iter_mut().find( | v | v.0 == ty_ident) {
             *last = AnimLastValue::Vec3(value);
         }
         else {
-            last_values.push((ident, AnimLastValue::Vec3(value)))
+            last_values.push((ty_ident, AnimLastValue::Vec3(value)))
         }
     }
     
-    pub fn calc_vec4(&mut self, cx: &mut Cx, ident_str: &str, time: f64) -> Vec4 {
-        let ident = cx.id(ident_str);
+    pub fn calc_vec4(&mut self, cx: &mut Cx, ident:ShInsVec4Id, time: f64) -> Vec4 {
         let last = Self::_last_vec4(ident, &self.last_values);
         let mut ret = last;
         if let Some(time) = self.update_anim_track(cx, time) {
-            if let Some(track_index) = self.find_track_index(ident) {
+            if let Some(track_index) = self.find_track_index(ShInsId::Vec4(ident)) {
                 if let Track::Vec4(ft) = &mut self.current.as_mut().unwrap().tracks[track_index] {
                     ret = Track::compute_track_vec4(time, &ft.track, &mut ft.cut_init, last, &ft.ease);
                 }
@@ -369,12 +368,12 @@ impl Animator {
         return ret
     }
     
-    pub fn last_vec4(&self, cx:&Cx, ident_str: &str) -> Vec4 {
-        Self::_last_vec4(cx.id(ident_str), &self.last_values)
+    pub fn last_vec4(&self, _cx:&Cx, ident: ShInsVec4Id) -> Vec4 {
+        Self::_last_vec4(ident, &self.last_values)
     }
     
-    pub fn _last_vec4(ident: CxId, last_values: &Vec<(CxId, AnimLastValue)>) -> Vec4 {
-        if let Some((_,value)) = last_values.iter().find( | v | v.0 == ident) {
+    pub fn _last_vec4(ident: ShInsVec4Id, last_values: &Vec<(ShInsId, AnimLastValue)>) -> Vec4 {
+        if let Some((_,value)) = last_values.iter().find( | v | v.0 == ShInsId::Vec4(ident)) {
             if let AnimLastValue::Vec4(value) = value{
                 return *value
             }
@@ -382,24 +381,23 @@ impl Animator {
         return Vec4::zero()
     }
     
-    pub fn set_last_vec4(&mut self, ident: CxId, value: Vec4) {
+    pub fn set_last_vec4(&mut self, ident: ShInsVec4Id, value: Vec4) {
         Self::_set_last_vec4(ident, value, &mut self.last_values);
     }
     
-    pub fn _set_last_vec4(ident: CxId, value: Vec4, last_values: &mut Vec<(CxId, AnimLastValue)>) {
-        if let Some((_,last)) = last_values.iter_mut().find( | v | v.0 == ident) {
+    pub fn _set_last_vec4(ident: ShInsVec4Id, value: Vec4, last_values: &mut Vec<(ShInsId, AnimLastValue)>) {
+        let ty_ident = ShInsId::Vec4(ident);
+        if let Some((_,last)) = last_values.iter_mut().find( | v | v.0 == ty_ident) {
             *last = AnimLastValue::Vec4(value);
         }
         else {
-            last_values.push((ident, AnimLastValue::Vec4(value)))
+            last_values.push((ty_ident, AnimLastValue::Vec4(value)))
         }
     }
     
-    pub fn calc_color(&mut self, cx: &mut Cx, ident_str: &str, time: f64) -> Color {
-        let ident = cx.id(ident_str);
-
+    pub fn calc_color(&mut self, cx: &mut Cx, ident: ShInsColorId, time: f64) -> Color {
         if let Some(time) = self.update_anim_track(cx, time) {
-            if let Some(track_index) = self.find_track_index(ident) {
+            if let Some(track_index) = self.find_track_index(ShInsId::Color(ident)) {
                 if let Track::Color(ft) = &mut self.current.as_mut().unwrap().tracks[track_index] {
                     let last = Self::_last_color(ident, &self.last_values);
                     let ret = Track::compute_track_color(time, &ft.track, &mut ft.cut_init, last, &ft.ease);
@@ -418,9 +416,8 @@ impl Animator {
         return Color::zero();
     }
     
-    pub fn last_color(&self, cx:&Cx, ident_str: &str) -> Color {
-        let ident = cx.id(ident_str);
-        if let Some((_,value)) = self.last_values.iter().find( | v | v.0 == ident) {
+    pub fn last_color(&self, cx:&Cx, ident:ShInsColorId) -> Color {
+        if let Some((_,value)) = self.last_values.iter().find( | v | v.0 == ShInsId::Color(ident)) {
             if let AnimLastValue::Color(value) = value{
                 return *value
             }
@@ -431,8 +428,8 @@ impl Animator {
         Color::zero()
     }
     
-    pub fn _last_color(ident: CxId, last_values: &Vec<(CxId, AnimLastValue)>) -> Color {
-        if let Some((_,value)) = last_values.iter().find( | v | v.0 == ident) {
+    pub fn _last_color(ident: ShInsColorId, last_values: &Vec<(ShInsId, AnimLastValue)>) -> Color {
+        if let Some((_,value)) = last_values.iter().find( | v | v.0 == ShInsId::Color(ident)) {
              if let AnimLastValue::Color(value) = value{
                 return *value
             }
@@ -441,25 +438,25 @@ impl Animator {
         return Color::zero()
     }
     
-    pub fn set_last_color(&mut self, ident: CxId, value: Color) {
+    pub fn set_last_color(&mut self, ident: ShInsColorId, value: Color) {
         Self::_set_last_color(ident, value, &mut self.last_values);
     }
     
-    pub fn _set_last_color(ident: CxId, value: Color, last_values: &mut Vec<(CxId, AnimLastValue)>) {
-        if let Some((_,last)) = last_values.iter_mut().find( | v | v.0 == ident) {
+    pub fn _set_last_color(ident: ShInsColorId, value: Color, last_values: &mut Vec<(ShInsId, AnimLastValue)>) {
+        let ty_ident = ShInsId::Color(ident);
+        if let Some((_,last)) = last_values.iter_mut().find( | v | v.0 == ty_ident) {
             *last = AnimLastValue::Color(value)
         }
         else {
-            last_values.push((ident, AnimLastValue::Color(value)))
+            last_values.push((ty_ident, AnimLastValue::Color(value)))
         }
     }
 
-    pub fn calc_color_id(&mut self, cx: &mut Cx, ident_str: &str, time: f64) -> ColorBlend {
-        let ident = cx.id(ident_str);
-        let last = self.last_color_id(ident);
+    pub fn calc_color_id(&mut self, cx: &mut Cx, ident: ShInsColorId, time: f64) -> ColorBlend {
+        let last = self.last_color_id(cx, ident);
         let mut ret = last;
         if let Some(time) = self.update_anim_track(cx, time) {
-            if let Some(track_index) = self.find_track_index(ident) {
+            if let Some(track_index) = self.find_track_index(ShInsId::Color(ident)) {
                 if let Track::ColorId(ft) = &mut self.current.as_mut().unwrap().tracks[track_index] {
                     ret = Track::compute_track_color_id(time, &ft.track, &mut ft.cut_init, cx.colors.blend_to_part(last), &ft.ease);
                 }
@@ -469,12 +466,12 @@ impl Animator {
         return ret
     }
     
-    pub fn last_color_id(&self, ident: CxId) -> ColorBlend {
+    pub fn last_color_id(&self, _cx:&Cx, ident: ShInsColorId) -> ColorBlend {
         Self::_last_color_id(ident, &self.last_values)
     }
     
-    pub fn _last_color_id(ident: CxId, last_values: &Vec<(CxId, AnimLastValue)>) -> ColorBlend {
-        if let Some((_,value)) = last_values.iter().find( | v | v.0 == ident) {
+    pub fn _last_color_id(ident: ShInsColorId, last_values: &Vec<(ShInsId, AnimLastValue)>) -> ColorBlend {
+        if let Some((_,value)) = last_values.iter().find( | v | v.0 == ShInsId::Color(ident)) {
              if let AnimLastValue::ColorId(value) = value{
                 return *value
             }
@@ -482,20 +479,21 @@ impl Animator {
         return ColorBlend{a:ColorPart::Color(Color::zero()), b:ColorId::default(), f:0.}
     }
     
-    pub fn set_last_color_id(&mut self, ident: CxId, value: ColorBlend) {
+    pub fn set_last_color_id(&mut self, ident: ShInsColorId, value: ColorBlend) {
         Self::_set_last_color_id(ident, value, &mut self.last_values);
     }
     
-    pub fn _set_last_color_id(ident: CxId, value: ColorBlend, last_values: &mut Vec<(CxId, AnimLastValue)>) {
-        if let Some((_,last)) = last_values.iter_mut().find( | v | v.0 == ident) {
+    pub fn _set_last_color_id(ident: ShInsColorId, value: ColorBlend, last_values: &mut Vec<(ShInsId, AnimLastValue)>) {
+        let ty_ident = ShInsId::Color(ident);
+        if let Some((_,last)) = last_values.iter_mut().find( | v | v.0 == ty_ident) {
             *last = AnimLastValue::ColorId(value)
         }
         else {
-            last_values.push((ident, AnimLastValue::ColorId(value)))
+            last_values.push((ty_ident, AnimLastValue::ColorId(value)))
         }
     }
     
-    pub fn write_area(&mut self, cx: &mut Cx, area: Area, prefix: &str, time: f64) {
+    pub fn write_area(&mut self, cx: &mut Cx, area: Area, time: f64) {
         
         if let Some(time) = self.update_anim_track(cx, time) {
             
@@ -503,52 +501,41 @@ impl Animator {
                 //if let Some((time, track_index)) = self.fetch_calc_track(cx, ident, time) {
                 match &mut self.current.as_mut().unwrap().tracks[track_index] {
                     Track::ColorId(ft) => {
-                        if let Some(begin) = cx.id_starts_with(ft.ident, prefix) {
-                            let init = Self::_last_color_id(ft.ident, &self.last_values);
-                            let ret = Track::compute_track_color_id(time, &ft.track, &mut ft.cut_init, cx.colors.blend_to_part(init), &ft.ease);
-                            Self::_set_last_color_id(ft.ident, ret, &mut self.last_values);
-                            area.write_color(cx, &begin, cx.colors.blend(ret));
-                        }
+                        // ok we have a ft.ident, now what we want is to calc it and write it
+                        let init = Self::_last_color_id(ft.ident, &self.last_values);
+                        let ret = Track::compute_track_color_id(time, &ft.track, &mut ft.cut_init, cx.colors.blend_to_part(init), &ft.ease);
+                        Self::_set_last_color_id(ft.ident, ret, &mut self.last_values);
+                        area.write_color(cx, ft.ident, cx.colors.blend(ret));
                     },
                     Track::Color(ft) => {
-                        if let Some(begin) = cx.id_starts_with(ft.ident, prefix) {
-                            let init = Self::_last_color(ft.ident, &self.last_values);
-                            let ret = Track::compute_track_color(time, &ft.track, &mut ft.cut_init, init, &ft.ease);
-                            Self::_set_last_color(ft.ident, ret, &mut self.last_values);
-                            area.write_color(cx, &begin, ret);
-                        }
+                        let init = Self::_last_color(ft.ident, &self.last_values);
+                        let ret = Track::compute_track_color(time, &ft.track, &mut ft.cut_init, init, &ft.ease);
+                        Self::_set_last_color(ft.ident, ret, &mut self.last_values);
+                        area.write_color(cx, ft.ident, ret);
                     },
                     Track::Vec4(ft) => {
-                        if let Some(begin) = cx.id_starts_with(ft.ident, prefix) {
-                            let init = Self::_last_vec4(ft.ident, &self.last_values);
-                            let ret = Track::compute_track_vec4(time, &ft.track, &mut ft.cut_init, init, &ft.ease);
-                            Self::_set_last_vec4(ft.ident, ret, &mut self.last_values);
-                            area.write_vec4(cx, &begin, ret);
-                        }
+                        let init = Self::_last_vec4(ft.ident, &self.last_values);
+                        let ret = Track::compute_track_vec4(time, &ft.track, &mut ft.cut_init, init, &ft.ease);
+                        Self::_set_last_vec4(ft.ident, ret, &mut self.last_values);
+                        area.write_vec4(cx, ft.ident, ret);
                     },
                     Track::Vec3(ft) => {
-                        if let Some(begin) = cx.id_starts_with(ft.ident, prefix) {
-                            let init = Self::_last_vec3(ft.ident, &self.last_values);
-                            let ret = Track::compute_track_vec3(time, &ft.track, &mut ft.cut_init, init, &ft.ease);
-                            Self::_set_last_vec3(ft.ident, ret, &mut self.last_values);
-                            area.write_vec3(cx, &begin, ret);
-                        }
+                        let init = Self::_last_vec3(ft.ident, &self.last_values);
+                        let ret = Track::compute_track_vec3(time, &ft.track, &mut ft.cut_init, init, &ft.ease);
+                        Self::_set_last_vec3(ft.ident, ret, &mut self.last_values);
+                        area.write_vec3(cx, ft.ident, ret);
                     },
                     Track::Vec2(ft) => {
-                        if let Some(begin) = cx.id_starts_with(ft.ident, prefix) {
-                            let init = Self::_last_vec2(ft.ident, &self.last_values);
-                            let ret = Track::compute_track_vec2(time, &ft.track, &mut ft.cut_init, init, &ft.ease);
-                            Self::_set_last_vec2(ft.ident, ret, &mut self.last_values);
-                            area.write_vec2(cx, &begin, ret);
-                        }
+                        let init = Self::_last_vec2(ft.ident, &self.last_values);
+                        let ret = Track::compute_track_vec2(time, &ft.track, &mut ft.cut_init, init, &ft.ease);
+                        Self::_set_last_vec2(ft.ident, ret, &mut self.last_values);
+                        area.write_vec2(cx, ft.ident, ret);
                     },
                     Track::Float(ft) => {
-                        if let Some(begin) = cx.id_starts_with(ft.ident, prefix) {
-                            let init = Self::_last_float(ft.ident, &self.last_values);
-                            let ret = Track::compute_track_float(time, &ft.track, &mut ft.cut_init, init, &ft.ease);
-                            Self::_set_last_float(ft.ident, ret, &mut self.last_values);
-                            area.write_float(cx, &begin, ret);
-                        }
+                        let init = Self::_last_float(ft.ident, &self.last_values);
+                        let ret = Track::compute_track_float(time, &ft.track, &mut ft.cut_init, init, &ft.ease);
+                        Self::_set_last_float(ft.ident, ret, &mut self.last_values);
+                        area.write_float(cx, ft.ident, ret);
                     }
                 };
             }
@@ -943,7 +930,7 @@ impl Ease {
 
 #[derive(Clone, Debug)]
 pub struct ColorIdTrack {
-    pub ident: CxId,
+    pub ident: ShInsColorId,
     pub ease: Ease,
     pub cut_init: Option<ColorPart>,
     pub track: Vec<(f64, ColorId)>
@@ -951,7 +938,7 @@ pub struct ColorIdTrack {
 
 #[derive(Clone, Debug)]
 pub struct FloatTrack {
-    pub ident: CxId,
+    pub ident: ShInsFloatId,
     pub ease: Ease,
     pub cut_init: Option<f32>,
     pub track: Vec<(f64, f32)>
@@ -959,7 +946,7 @@ pub struct FloatTrack {
 
 #[derive(Clone, Debug)]
 pub struct Vec2Track {
-    pub ident: CxId,
+    pub ident: ShInsVec2Id,
     pub ease: Ease,
     pub cut_init: Option<Vec2>,
     pub track: Vec<(f64, Vec2)>
@@ -967,7 +954,7 @@ pub struct Vec2Track {
 
 #[derive(Clone, Debug)]
 pub struct Vec3Track {
-    pub ident: CxId,
+    pub ident: ShInsVec3Id,
     pub ease: Ease,
     pub cut_init: Option<Vec3>,
     pub track: Vec<(f64, Vec3)>
@@ -975,7 +962,7 @@ pub struct Vec3Track {
 
 #[derive(Clone, Debug)]
 pub struct Vec4Track {
-    pub ident: CxId,
+    pub ident: ShInsVec4Id,
     pub ease: Ease,
     pub cut_init: Option<Vec4>,
     pub track: Vec<(f64, Vec4)>
@@ -983,7 +970,7 @@ pub struct Vec4Track {
 
 #[derive(Clone, Debug)]
 pub struct ColorTrack {
-    pub ident: CxId,
+    pub ident: ShInsColorId,
     pub ease: Ease,
     pub cut_init: Option<Color>,
     pub track: Vec<(f64, Color)>
@@ -1000,113 +987,61 @@ pub enum Track {
 }
 
 impl Track {
-    pub fn color_id(cx:&Cx, ident_str: &str, ease: Ease, track: Vec<(f64, ColorId)>) -> Track {
+    pub fn color_id(ident:ShInsColorId, ease: Ease, track: Vec<(f64, ColorId)>) -> Track {
         Track::ColorId(ColorIdTrack {
             cut_init: None,
             ease: ease,
-            ident: cx.id(ident_str),
+            ident: ident,
             track: track
         })
     }
     
-    pub fn to_color_id(cx:&Cx, ident_str: &str, value: ColorId) -> Track {
-        Track::ColorId(ColorIdTrack {
-            cut_init: None,
-            ease: Ease::Lin,
-            ident: cx.id(ident_str),
-            track: vec![(1.0, value)]
-        })
-    }
-    
-    pub fn float(cx:&Cx, ident_str: &str, ease: Ease, track: Vec<(f64, f32)>) -> Track {
+    pub fn float(ident:ShInsFloatId, ease: Ease, track: Vec<(f64, f32)>) -> Track {
         Track::Float(FloatTrack {
             cut_init: None,
             ease: ease,
-            ident: cx.id(ident_str),
+            ident: ident,
             track: track
         })
     }
     
-    pub fn to_float(cx:&Cx, ident_str: &str, value: f32) -> Track {
-        Track::Float(FloatTrack {
-            cut_init: None,
-            ease: Ease::Lin,
-            ident: cx.id(ident_str),
-            track: vec![(1.0, value)]
-        })
-    }
-    
-    pub fn vec2(cx:&Cx, ident_str: &str, ease: Ease, track: Vec<(f64, Vec2)>) -> Track {
+    pub fn vec2(ident:ShInsVec2Id, ease: Ease, track: Vec<(f64, Vec2)>) -> Track {
         Track::Vec2(Vec2Track {
             cut_init: None,
             ease: ease,
-            ident: cx.id(ident_str),
+            ident: ident,
             track: track
         })
     }
     
-    pub fn to_vec2(cx:&Cx, ident_str: &str, value: Vec2) -> Track {
-        Track::Vec2(Vec2Track {
-            cut_init: None,
-            ease: Ease::Lin,
-            ident: cx.id(ident_str),
-            track: vec![(1.0, value)]
-        })
-    }
-    
-    pub fn vec3(cx:&Cx, ident_str: &str, ease: Ease, track: Vec<(f64, Vec3)>) -> Track {
+    pub fn vec3(ident:ShInsVec3Id, ease: Ease, track: Vec<(f64, Vec3)>) -> Track {
         Track::Vec3(Vec3Track {
             cut_init: None,
             ease: ease,
-            ident: cx.id(ident_str),
+            ident: ident,
             track: track
         })
     }
     
-    pub fn to_vec3(cx:&Cx, ident_str: &str, value: Vec3) -> Track {
-        Track::Vec3(Vec3Track {
-            cut_init: None,
-            ease: Ease::Lin,
-            ident: cx.id(ident_str),
-            track: vec![(1.0, value)]
-        })
-    }
-    
-    pub fn vec4(cx:&Cx, ident_str: &str, ease: Ease, track: Vec<(f64, Vec4)>) -> Track {
+    pub fn vec4(ident:ShInsVec4Id, ease: Ease, track: Vec<(f64, Vec4)>) -> Track {
         Track::Vec4(Vec4Track {
             cut_init: None,
             ease: ease,
-            ident: cx.id(ident_str),
+            ident: ident,
             track: track
         })
     }
     
-    pub fn to_vec4(cx:&Cx, ident_str: &str, value: Vec4) -> Track {
-        Track::Vec4(Vec4Track {
-            cut_init: None,
-            ease: Ease::Lin,
-            ident: cx.id(ident_str),
-            track: vec![(1.0, value)]
-        })
-    }
     
-    pub fn color(cx:&Cx, ident_str: &str, ease: Ease, track: Vec<(f64, Color)>) -> Track {
+    pub fn color(ident:ShInsColorId, ease: Ease, track: Vec<(f64, Color)>) -> Track {
         Track::Color(ColorTrack {
             cut_init: None,
             ease: ease,
-            ident: cx.id(ident_str),
+            ident: ident,
             track: track
         })
     }
     
-    pub fn to_color(cx:&Cx, ident_str: &str, value: Color) -> Track {
-        Track::Color(ColorTrack {
-            cut_init: None,
-            ease: Ease::Lin,
-            ident: cx.id(ident_str),
-            track: vec![(1.0, value)]
-        })
-    }
     
     fn compute_track_float(time: f64, track: &Vec<(f64, f32)>, cut_init: &mut Option<f32>, init: f32, ease: &Ease) -> f32 {
         if track.is_empty() {return init}
@@ -1271,25 +1206,25 @@ impl Track {
         return ColorBlend{a:*val1, b:val2.1, f:f}
     }
     
-    pub fn ident(&self) -> CxId {
+    pub fn ident(&self) -> ShInsId {
         match self {
             Track::ColorId(ft) => {
-                ft.ident
+                ShInsId::Color(ft.ident)
             },
             Track::Float(ft) => {
-                ft.ident
+                ShInsId::Float(ft.ident)
             },
             Track::Vec2(ft) => {
-                ft.ident
+                ShInsId::Vec2(ft.ident)
             }
             Track::Vec3(ft) => {
-                ft.ident
+                ShInsId::Vec3(ft.ident)
             }
             Track::Vec4(ft) => {
-                ft.ident
+                ShInsId::Vec4(ft.ident)
             }
             Track::Color(ft) => {
-                ft.ident
+                ShInsId::Color(ft.ident)
             }
         }
     }

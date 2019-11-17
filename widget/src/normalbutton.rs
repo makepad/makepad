@@ -12,16 +12,16 @@ pub struct NormalButton {
     pub _bg_area: Area,
 }
 
-instance_color!(InstanceBorderColor);
-instance_float!(InstanceGlowSize);
+instance_color!(NormalButton_border_color);
+instance_float!(NormalButton_glow_size);
 
 impl NormalButton {
     pub fn style(cx: &mut Cx) -> Self {
         Self {
-            bg_layout: LayoutNormalButton::id(cx),
+            bg_layout: Layout_button::id(cx),
             button: ButtonLogic::default(),
             bg: Quad::style_with_shader(cx, Self::def_bg_shader(), "Button.bg"),
-            text: Text::style(cx, TextStyleNormalButton::id(cx)),
+            text: Text::style(cx, TextStyle_normal::id(cx)),
             animator: Animator::new(Self::get_default_anim(cx)),
             _bg_area: Area::Empty,
         }
@@ -29,33 +29,33 @@ impl NormalButton {
     
     pub fn get_default_anim(cx: &Cx) -> Anim {
         Anim::new(Play::Cut {duration: 0.5}, vec![
-            Track::color_id(cx, "bg.color", Ease::Lin, vec![(1., ColorBgNormal::id(cx))]),
-            Track::float(cx, "bg.glow_size", Ease::Lin, vec![(1., 0.0)]),
-            Track::color(cx, "bg.border_color", Ease::Lin, vec![(1., color("#6"))]),
+            Track::color_id(Quad_color::id(), Ease::Lin, vec![(1., Color_bg_normal::id(cx))]),
+            Track::float(NormalButton_glow_size::id(), Ease::Lin, vec![(1., 0.0)]),
+            Track::color(NormalButton_border_color::id(), Ease::Lin, vec![(1., color("#6"))]),
         ])
     }
     
-    pub fn get_over_anim(cx: &Cx) -> Anim {
+    pub fn get_over_anim(_cx: &Cx) -> Anim {
         Anim::new(Play::Cut {duration: 0.05}, vec![
-            Track::color(cx, "bg.color", Ease::Lin, vec![(1., color("#999"))]),
-            Track::float(cx, "bg.glow_size", Ease::Lin, vec![(1., 1.0)]),
-            Track::color(cx, "bg.border_color", Ease::Lin, vec![(1., color("white"))]),
+            Track::color(Quad_color::id(), Ease::Lin, vec![(1., color("#999"))]),
+            Track::float(NormalButton_glow_size::id(), Ease::Lin, vec![(1., 1.0)]),
+            Track::color(NormalButton_border_color::id(), Ease::Lin, vec![(1., color("white"))]),
         ])
     }
     
-    pub fn get_down_anim(cx: &Cx) -> Anim {
+    pub fn get_down_anim(_cx: &Cx) -> Anim {
         Anim::new(Play::Cut {duration: 0.2}, vec![
-            Track::color(cx, "bg.color", Ease::Lin, vec![(0.0, color("#f")), (1.0, color("#6"))]),
-            Track::float(cx, "bg.glow_size", Ease::Lin, vec![(0.0, 1.0), (1.0, 1.0)]),
-            Track::color(cx, "bg.border_color", Ease::Lin, vec![(0.0, color("white")), (1.0, color("white"))]),
+            Track::color(Quad_color::id(), Ease::Lin, vec![(0.0, color("#f")), (1.0, color("#6"))]),
+            Track::float(NormalButton_glow_size::id(), Ease::Lin, vec![(0.0, 1.0), (1.0, 1.0)]),
+            Track::color(NormalButton_border_color::id(), Ease::Lin, vec![(0.0, color("white")), (1.0, color("white"))]),
         ])
     }
     
     pub fn def_bg_shader() -> ShaderGen {
         Quad::def_quad_shader().compose(shader_ast!({
             
-            let border_color: InstanceBorderColor;
-            let glow_size: InstanceGlowSize;
+            let border_color: NormalButton_border_color;
+            let glow_size: NormalButton_glow_size;
             
             const glow_color: vec4 = color("#30f");
             const border_radius: float = 6.5;
@@ -77,7 +77,7 @@ impl NormalButton {
         //let mut ret_event = ButtonEvent::None;
         let animator = &mut self.animator;
         self.button.handle_button_logic(cx, event, self._bg_area, | cx, logic_event, area | match logic_event {
-            ButtonLogicEvent::Animate(ae) => animator.write_area(cx, area, "bg.", ae.time),
+            ButtonLogicEvent::Animate(ae) => animator.write_area(cx, area, ae.time),
             ButtonLogicEvent::AnimEnded(_) => animator.end(),
             ButtonLogicEvent::Down => animator.play_anim(cx, Self::get_down_anim(cx)),
             ButtonLogicEvent::Default => animator.play_anim(cx, Self::get_default_anim(cx)),
@@ -86,12 +86,12 @@ impl NormalButton {
     }
     
     pub fn draw_button(&mut self, cx: &mut Cx, label: &str) {
-        self.bg.color = self.animator.last_color(cx, "bg.color");
+        self.bg.color = self.animator.last_color(cx, Quad_color::id());
         
         let bg_inst = self.bg.begin_quad(cx, cx.layouts[self.bg_layout]);
-
-        bg_inst.push_last_color(cx, &self.animator, "bg.border_color");
-        bg_inst.push_last_float(cx, &self.animator, "bg.glow_size");
+        
+        bg_inst.push_last_color(cx, &self.animator, NormalButton_border_color::id());
+        bg_inst.push_last_float(cx, &self.animator, NormalButton_glow_size::id());
         
         self.text.draw_text(cx, label);
 

@@ -24,36 +24,36 @@ impl MenuItemDraw {
         Self {
             text: Text {
                 wrapping: Wrapping::Word,
-                ..Text::style(cx, TextStyleWindowMenu::id(cx))
+                ..Text::style(cx, TextStyle_window_menu::id(cx))
             },
-            item_layout: LayoutWindowMenu::id(cx),
+            item_layout: Layout_window_menu::id(cx),
             item_bg: Quad::style(cx),
-            name_color: ColorTextSelectedFocus::id(cx),
-            bg_color: ColorBgSelected::id(cx),
-            bg_over_color: ColorBgOdd::id(cx),
-            bg_selected_color: ColorBgSelectedOver::id(cx),
+            name_color: Color_text_selected_focus::id(cx),
+            bg_color: Color_bg_selected::id(cx),
+            bg_over_color: Color_bg_odd::id(cx),
+            bg_selected_color: Color_bg_selected_over::id(cx),
         }
     }
     
-    pub fn get_default_anim(&self, cx: &Cx) -> Anim {
+    pub fn get_default_anim(&self, _cx: &Cx) -> Anim {
         Anim::new(Play::Chain {duration: 0.01}, vec![
-            Track::color_id(cx, "bg.color", Ease::Lin, vec![
+            Track::color_id(Quad_color::id(), Ease::Lin, vec![
                 (1.0, self.bg_color)
             ])
         ])
     }
     
-    pub fn get_default_anim_cut(&self, cx: &Cx) -> Anim {
+    pub fn get_default_anim_cut(&self, _cx: &Cx) -> Anim {
         Anim::new(Play::Cut {duration: 0.01}, vec![
-            Track::color_id(cx, "bg.color", Ease::Lin, vec![
+            Track::color_id(Quad_color::id(), Ease::Lin, vec![
                 (0.0, self.bg_color)
             ])
         ])
     }
     
-    pub fn get_over_anim(&self, cx: &Cx) -> Anim {
+    pub fn get_over_anim(&self, _cx: &Cx) -> Anim {
         Anim::new(Play::Cut {duration: 0.02}, vec![
-            Track::color_id(cx, "bg.color", Ease::Lin, vec![
+            Track::color_id(Quad_color::id(), Ease::Lin, vec![
                 (0., self.bg_over_color),
             ])
         ])

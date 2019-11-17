@@ -29,9 +29,9 @@ impl DesktopButtonType {
     }
 }
 
-instance_float!(InstanceHover);
-instance_float!(InstanceDown);
-instance_float!(InstanceButtonType);
+instance_float!(DesktopButton_hover);
+instance_float!(DesktopButton_down);
+instance_float!(DesktopButton_type);
 
 impl DesktopButton {
     pub fn style(cx: &mut Cx) -> Self {
@@ -43,33 +43,33 @@ impl DesktopButton {
         }
     }
     
-    pub fn get_default_anim(cx:&Cx)->Anim{
+    pub fn get_default_anim(_cx:&Cx)->Anim{
         Anim::new(Play::Cut {duration: 0.2}, vec![
-            Track::float(cx, "bg.hover", Ease::Lin, vec![(1.0, 0.)]),
-            Track::float(cx, "bg.down", Ease::Lin, vec![(1.0, 0.)]),
+            Track::float(DesktopButton_hover::id(), Ease::Lin, vec![(1.0, 0.)]),
+            Track::float(DesktopButton_down::id(), Ease::Lin, vec![(1.0, 0.)]),
         ])
     }
     
-    pub fn get_over_anim(cx:&Cx)->Anim{
+    pub fn get_over_anim(_cx:&Cx)->Anim{
         Anim::new(Play::Cut {duration: 0.2}, vec![
-            Track::float(cx, "bg.down", Ease::Lin, vec![(1.0, 0.)]),
-            Track::float(cx, "bg.hover", Ease::Lin, vec![(0.0, 1.0), (1.0, 1.0)]),
+            Track::float(DesktopButton_down::id(), Ease::Lin, vec![(1.0, 0.)]),
+            Track::float(DesktopButton_hover::id(), Ease::Lin, vec![(0.0, 1.0), (1.0, 1.0)]),
         ])
     }
     
-    pub fn get_down_anim(cx:&Cx)->Anim{
+    pub fn get_down_anim(_cx:&Cx)->Anim{
         Anim::new(Play::Cut {duration: 0.2}, vec![
-            Track::float(cx, "bg.down", Ease::OutExp, vec![(0.0, 0.0), (1.0, 3.1415 * 0.5)]),
-            Track::float(cx, "bg.hover", Ease::Lin, vec![(1.0, 1.0)]),
+            Track::float(DesktopButton_down::id(), Ease::OutExp, vec![(0.0, 0.0), (1.0, 3.1415 * 0.5)]),
+            Track::float(DesktopButton_hover::id(), Ease::Lin, vec![(1.0, 1.0)]),
         ])
     }
 
     pub fn def_bg_shader() -> ShaderGen {
         Quad::def_quad_shader().compose(shader_ast!({
             
-            let hover: InstanceHover;
-            let down: InstanceDown;
-            let button_type: InstanceButtonType;
+            let hover: DesktopButton_hover;
+            let down: DesktopButton_down;
+            let button_type: DesktopButton_type;
             
             fn pixel() -> vec4 {
                 df_viewport(pos * vec2(w, h)); // );
@@ -147,7 +147,7 @@ impl DesktopButton {
         //let mut ret_event = ButtonEvent::None;
         let animator = &mut self.animator;
         self.button.handle_button_logic(cx, event, self._bg_area, | cx, logic_event, area | match logic_event {
-            ButtonLogicEvent::Animate(ae) => animator.write_area(cx, area, "bg.", ae.time),
+            ButtonLogicEvent::Animate(ae) => animator.write_area(cx, area, ae.time),
             ButtonLogicEvent::AnimEnded(_)=> animator.end(),
             ButtonLogicEvent::Down => animator.play_anim(cx, Self::get_down_anim(cx)),
             ButtonLogicEvent::Default=> animator.play_anim(cx, Self::get_default_anim(cx)),
@@ -156,7 +156,7 @@ impl DesktopButton {
     }
 
     pub fn draw_desktop_button(&mut self, cx: &mut Cx, ty: DesktopButtonType) {
-        self.bg.color = self.animator.last_color(cx, "bg.color");
+        //self.bg.color = self.animator.last_color(cx, Quad_color::id());
         
         let (w,h) = match ty {
             DesktopButtonType::WindowsMin 
@@ -167,8 +167,8 @@ impl DesktopButton {
         };
 
         let bg_inst = self.bg.draw_quad(cx, Walk::wh(Width::Fix(w), Height::Fix(h)));
-        bg_inst.push_last_float(cx, &self.animator, "bg.hover");
-        bg_inst.push_last_float(cx, &self.animator, "bg.down");
+        bg_inst.push_last_float(cx, &self.animator, DesktopButton_down::id());
+        bg_inst.push_last_float(cx, &self.animator, DesktopButton_hover::id());
         bg_inst.push_float(cx, ty.shader_float());
         self._bg_area = bg_inst.into_area();
         self.animator.update_area_refs(cx, self._bg_area); // if our area changed, update animation

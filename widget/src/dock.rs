@@ -392,7 +392,7 @@ where TItem: Clone
         Dock {
             // dock_items:None,
             drop_size: Vec2 {x: 100., y: 70.},
-            drop_quad_color: ColorDropQuad::id(cx),
+            drop_quad_color: Color_drop_quad::id(cx),
             drop_quad: Quad {
                 z: 10.,
                 ..Quad::style(cx)

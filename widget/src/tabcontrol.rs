@@ -59,7 +59,7 @@ impl TabControl {
                 color: color("purple"),
                 ..Quad::style(cx)
             },
-            tab_fill_color: ColorBgNormal::id(cx),
+            tab_fill_color: Color_bg_normal::id(cx),
             tab_fill: Quad::style(cx),
             animator: Animator::new(Anim::new(Play::Cut {duration: 0.5}, vec![])),
             _dragging_tab: None,

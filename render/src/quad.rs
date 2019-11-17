@@ -9,14 +9,14 @@ pub struct Quad {
     pub color: Color
 }
 
-instance_float!(InstanceX);
-instance_float!(InstanceY);
-instance_float!(InstanceZ);
-instance_float!(InstanceW);
-instance_float!(InstanceH);
-instance_color!(InstanceColor);
-uniform_vec2!(UniformViewDoScroll);
-uniform_float!(UniformZBias);
+instance_float!(Quad_x);
+instance_float!(Quad_y);
+instance_float!(Quad_z);
+instance_float!(Quad_w);
+instance_float!(Quad_h);
+instance_color!(Quad_color);
+uniform_vec2!(Quad_view_do_scroll);
+uniform_float!(Quad_zbias);
 
 impl Quad {
     pub fn style_with_shader(cx: &mut Cx, shader:ShaderGen, name:&str) -> Self {
@@ -47,15 +47,15 @@ impl Quad {
             let geom: vec2<Geometry>;
             let pos: vec2<Varying>;
             
-            let x: InstanceX;
-            let y: InstanceY;
-            let w: InstanceW;
-            let h: InstanceH;
-            let z: InstanceZ; 
-            let color: InstanceColor;
+            let x: Quad_x;
+            let y: Quad_y;
+            let w: Quad_w;
+            let h: Quad_h;
+            let z: Quad_z; 
+            let color: Quad_color;
 
-            let view_do_scroll: UniformViewDoScroll;
-            let zbias: UniformZBias;
+            let view_do_scroll: Quad_view_do_scroll;
+            let zbias: Quad_zbias;
             //let dpi_dilate: float<Uniform>;
             
             fn vertex() -> vec4 {

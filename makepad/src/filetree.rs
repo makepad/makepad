@@ -194,23 +194,23 @@ impl FileTreeItemDraw {
         Self {
             filler_walk: WalkFileTreeFiller::id(cx),
             folder_walk: WalkFileTreeFolder::id(cx),
-            tree_folder_color: ColorTextSelectedFocus::id(cx),
-            tree_file_color: ColorTextDeselectedFocus::id(cx),
+            tree_folder_color: Color_text_selected_focus::id(cx),
+            tree_file_color: Color_text_deselected_focus::id(cx),
             tree_text: Text {z: 0.001, ..Text::style(cx, TextStyleFileTree::id(cx))},
             node_bg: Quad::style(cx),
             node_layout: LayoutFileTreeNode::id(cx),
-            filler_color: ColorIcon::id(cx),
+            filler_color: Color_icon::id(cx),
             filler: Quad {
                 z: 0.001,
                 ..Quad::style_with_shader(cx, Self::def_filler_shader(), "FileTree.filler")
             },
-            bg_even: ColorBgSelected::id(cx),
-            bg_odd: ColorBgOdd::id(cx),
-            bg_marked: ColorBgMarked::id(cx),
-            bg_selected: ColorBgSelected::id(cx),
-            bg_marked_over: ColorBgMarkedOver::id(cx),
-            bg_selected_over: ColorBgSelectedOver::id(cx),
-            bg_odd_over: ColorBgOddOver::id(cx)
+            bg_even: Color_bg_selected::id(cx),
+            bg_odd: Color_bg_odd::id(cx),
+            bg_marked: Color_bg_marked::id(cx),
+            bg_selected: Color_bg_selected::id(cx),
+            bg_marked_over: Color_bg_marked_over::id(cx),
+            bg_selected_over: Color_bg_selected_over::id(cx),
+            bg_odd_over: Color_bg_odd_over::id(cx)
         }
     }
     
@@ -238,18 +238,18 @@ impl FileTreeItemDraw {
         }))
     }
     
-    pub fn get_default_anim(&self, cx: &Cx, counter: usize, marked: bool) -> Anim {
+    pub fn get_default_anim(&self, _cx: &Cx, counter: usize, marked: bool) -> Anim {
         Anim::new(Play::Chain {duration: 0.01}, vec![
-            Track::color_id(cx, "bg.color", Ease::Lin, vec![
+            Track::color_id(Quad_color::id(), Ease::Lin, vec![
                 (1.0, if marked {self.bg_marked} else if counter & 1 == 0 {self.bg_selected}else {self.bg_odd})
             ])
         ])
     }
     
-    pub fn get_over_anim(&self, cx: &Cx, counter: usize, marked: bool) -> Anim {
+    pub fn get_over_anim(&self, _cx: &Cx, counter: usize, marked: bool) -> Anim {
         let over_color = if marked {self.bg_marked_over} else if counter & 1 == 0 {self.bg_selected_over}else {self.bg_odd_over};
         Anim::new(Play::Cut {duration: 0.02}, vec![
-            Track::color_id(cx, "bg.color", Ease::Lin, vec![
+            Track::color_id(Quad_color::id(), Ease::Lin, vec![
                 (0., over_color),
                 (1., over_color)
             ])
@@ -266,7 +266,7 @@ impl FileTree {
             root_node: FileNode::Folder {name: "".to_string(), state: NodeState::Open, draw: None, folder: vec![
                 FileNode::File {name: "loading...".to_string(), draw: None},
             ]},
-            drag_bg_color: ColorBgMarked::id(cx),
+            drag_bg_color: Color_bg_marked::id(cx),
             drag_bg: Quad {
                 shader: cx.add_shader(Self::def_drag_bg_shader(), "FileTree.drag_bg"),
                 ..Quad::style(cx)
@@ -432,7 +432,7 @@ impl FileTree {
             
             match event.hits(cx, node_draw.animator.area, HitOpt::default()) {
                 Event::Animate(ae) => {
-                    node_draw.animator.write_area(cx, node_draw.animator.area, "bg.", ae.time);
+                    node_draw.animator.write_area(cx, node_draw.animator.area, ae.time);
                 },
                 Event::AnimEnded(_) => {
                     node_draw.animator.end();
@@ -611,7 +611,7 @@ impl FileTree {
             
             // if we are NOT animating, we need to get change a default color.
             
-            self.item_draw.node_bg.color = node_draw.animator.last_color(cx, "bg.color");
+            self.item_draw.node_bg.color = node_draw.animator.last_color(cx, Quad_color::id());
             
             let mut node_layout = node_layout.clone();
             node_layout.walk.height = Height::Fix(row_height * scale as f32);

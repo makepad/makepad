@@ -9,41 +9,43 @@ pub use crate::colors::*;
 #[derive(Hash, PartialEq, Copy, Clone, Debug)]
 pub struct ShInsColorId(pub std::any::TypeId);
 
-#[derive(Clone, Hash, PartialEq)]
+#[derive(Hash, PartialEq, Copy, Clone, Debug)]
 pub struct ShInsVec4Id(pub std::any::TypeId);
 
-#[derive(Clone, Hash, PartialEq)]
+#[derive(Hash, PartialEq, Copy, Clone, Debug)]
 pub struct ShInsVec3Id(pub std::any::TypeId);
 
-#[derive(Clone, Hash, PartialEq)]
+#[derive(Hash, PartialEq, Copy, Clone, Debug)]
 pub struct ShInsVec2Id(pub std::any::TypeId);
 
-#[derive(Clone, Hash, PartialEq)]
+#[derive(Hash, PartialEq, Copy, Clone, Debug)]
 pub struct ShInsFloatId(pub std::any::TypeId);
 
-#[derive(Clone, Hash, PartialEq)]
+#[derive(Hash, PartialEq, Copy, Clone, Debug)]
 pub struct ShUniColorId(pub std::any::TypeId);
 
-#[derive(Clone, Hash, PartialEq)]
+#[derive(Hash, PartialEq, Copy, Clone, Debug)]
 pub struct ShUniVec4Id(pub std::any::TypeId);
 
-#[derive(Clone, Hash, PartialEq)]
+#[derive(Hash, PartialEq, Copy, Clone, Debug)]
 pub struct ShUniVec3Id(pub std::any::TypeId);
 
-#[derive(Clone, Hash, PartialEq)]
+#[derive(Hash, PartialEq, Copy, Clone, Debug)]
 pub struct ShUniVec2Id(pub std::any::TypeId);
 
-#[derive(Clone, Hash, PartialEq)]
+#[derive(Hash, PartialEq, Copy, Clone, Debug)]
 pub struct ShUniFloatId(pub std::any::TypeId);
 
 #[macro_export]
 macro_rules!instance_color { 
     ( $ name: ident) => {
+        #[allow(non_camel_case_types)]
         pub struct $ name();
         impl $ name {
-            fn ty() -> String{"vec4".to_string()}
-            fn store() -> ShVarStore{ShVarStore::Instance(ShInsId::Color($name::id()))}
-            fn id() -> ShInsColorId {ShInsColorId(std::any::TypeId::of::< $ name>())}
+            pub fn ty() -> String{"vec4".to_string()}
+            pub fn ins_id() -> ShInsId{ShInsId::Color($name::id())}
+            pub fn store() -> ShVarStore{ShVarStore::Instance($name::ins_id())}
+            pub fn id() -> ShInsColorId {ShInsColorId(std::any::TypeId::of::< $ name>())}
         }
     };
 }
@@ -51,11 +53,13 @@ macro_rules!instance_color {
 #[macro_export]
 macro_rules!instance_vec4 {
     ( $ name: ident) => {
+        #[allow(non_camel_case_types)]
         pub struct $ name();
         impl $ name {
-            fn ty() -> String{"vec4".to_string()}
-            fn store() -> ShVarStore{ShVarStore::Instance(ShInsId::Vec4($name::id()))}
-            fn id() -> ShInsVec4Id {ShInsVec4Id(std::any::TypeId::of::< $ name>())}
+            pub fn ty() -> String{"vec4".to_string()}
+            pub fn ins_id() -> ShInsId{ShInsId::Vec4($name::id())}
+            pub fn store() -> ShVarStore{ShVarStore::Instance($name::ins_id())}
+            pub fn id() -> ShInsVec4Id {ShInsVec4Id(std::any::TypeId::of::< $ name>())}
         }
     };
 }
@@ -63,11 +67,13 @@ macro_rules!instance_vec4 {
 #[macro_export]
 macro_rules!instance_vec3 {
     ( $ name: ident) => {
+        #[allow(non_camel_case_types)]
         pub struct $ name();
         impl $ name {
-            fn ty() -> String{"vec3".to_string()}
-            fn store() -> ShVarStore{ShVarStore::Instance(ShInsId::Vec3($name::id()))}
-            fn id() -> ShInsVec3Id {ShInsVec3Id(std::any::TypeId::of::< $ name>())}
+            pub fn ty() -> String{"vec3".to_string()}
+            pub fn ins_id() -> ShInsId{ShInsId::Vec3($name::id())}
+            pub fn store() -> ShVarStore{ShVarStore::Instance($name::ins_id())}
+            pub fn id() -> ShInsVec3Id {ShInsVec3Id(std::any::TypeId::of::< $ name>())}
         }
     };
 }
@@ -75,11 +81,13 @@ macro_rules!instance_vec3 {
 #[macro_export]
 macro_rules!instance_vec2 {
     ( $ name: ident) => {
+        #[allow(non_camel_case_types)]
         pub struct $ name();
         impl $ name {
-            fn ty() -> String{"vec2".to_string()}
-            fn store() -> ShVarStore{ShVarStore::Instance(ShInsId::Vec2($name::id()))}
-            fn id() -> ShInsVec2Id {ShInsVec2Id(std::any::TypeId::of::< $ name>())}
+            pub fn ty() -> String{"vec2".to_string()}
+            pub fn ins_id() -> ShInsId{ShInsId::Vec2($name::id())}
+            pub fn store() -> ShVarStore{ShVarStore::Instance($name::ins_id())}
+            pub fn id() -> ShInsVec2Id {ShInsVec2Id(std::any::TypeId::of::< $ name>())}
         }
     };
 }
@@ -87,11 +95,13 @@ macro_rules!instance_vec2 {
 #[macro_export]
 macro_rules!instance_float {
     ( $ name: ident) => {
+        #[allow(non_camel_case_types)]
         pub struct $ name();
         impl $ name {
-            fn ty() -> String{"float".to_string()}
-            fn store() -> ShVarStore{ShVarStore::Instance(ShInsId::Float($name::id()))}
-            fn id() -> ShInsFloatId {ShInsFloatId(std::any::TypeId::of::< $ name>())}
+            pub fn ty() -> String{"float".to_string()}
+            pub fn ins_id() -> ShInsId{ShInsId::Float($name::id())}
+            pub fn store() -> ShVarStore{ShVarStore::Instance($name::ins_id())}
+            pub fn id() -> ShInsFloatId {ShInsFloatId(std::any::TypeId::of::< $ name>())}
         }
     };
 }
@@ -100,11 +110,13 @@ macro_rules!instance_float {
 #[macro_export]
 macro_rules!uniform_color {
     ( $ name: ident) => {
+        #[allow(non_camel_case_types)]
         pub struct $ name();
         impl $ name {
-            fn ty() -> String{"vec4".to_string()}
-            fn store() -> ShVarStore{ShVarStore::Uniform(ShUniId::Color($name::id()))}
-            fn id() -> ShUniColorId {ShUniColorId(std::any::TypeId::of::< $ name>())}
+            pub fn ty() -> String{"vec4".to_string()}
+            pub fn uni_id() -> ShUniId{ShUniId::Color($name::id())}
+            pub fn store() -> ShVarStore{ShVarStore::Uniform($name::uni_id())}
+            pub fn id() -> ShUniColorId {ShUniColorId(std::any::TypeId::of::< $ name>())}
         }
     };
 }
@@ -112,11 +124,13 @@ macro_rules!uniform_color {
 #[macro_export]
 macro_rules!uniform_vec4 {
     ( $ name: ident) => {
+        #[allow(non_camel_case_types)]
         pub struct $ name();
         impl $ name {
-            fn ty() -> String{"vec4".to_string()}
-            fn store() -> ShVarStore{ShVarStore::Uniform(ShUniId::Vec4($name::id()))}
-            fn id() -> ShUniVec4Id {ShUniVec4Id(std::any::TypeId::of::< $ name>())}
+            pub fn ty() -> String{"vec4".to_string()}
+            pub fn uni_id() -> ShUniId{ShUniId::Vec4($name::id())}
+            pub fn store() -> ShVarStore{ShVarStore::Uniform($name::uni_id())}
+            pub fn id() -> ShUniVec4Id {ShUniVec4Id(std::any::TypeId::of::< $ name>())}
         }
     };
 }
@@ -124,11 +138,13 @@ macro_rules!uniform_vec4 {
 #[macro_export]
 macro_rules!uniform_vec3 {
     ( $ name: ident) => {
+        #[allow(non_camel_case_types)]
         pub struct $ name();
         impl $ name {
-            fn ty() -> String{"vec3".to_string()}
-            fn store() -> ShVarStore{ShVarStore::Uniform(ShUniId::Vec3($name::id()))}
-            fn id() -> ShUniVec3Id {ShUniVec3Id(std::any::TypeId::of::< $ name>())}
+            pub fn ty() -> String{"vec3".to_string()}
+            pub fn uni_id() -> ShUniId{ShUniId::Vec3($name::id())}
+            pub fn store() -> ShVarStore{ShVarStore::Uniform($name::uni_id())}
+            pub fn id() -> ShUniVec3Id {ShUniVec3Id(std::any::TypeId::of::< $ name>())}
         }
     };
 }
@@ -136,11 +152,13 @@ macro_rules!uniform_vec3 {
 #[macro_export]
 macro_rules!uniform_vec2 {
     ( $ name: ident) => {
+        #[allow(non_camel_case_types)]
         pub struct $ name();
         impl $ name {
-            fn ty() -> String{"vec2".to_string()}
-            fn store() -> ShVarStore{ShVarStore::Uniform(ShUniId::Vec2($name::id()))}
-            fn id() -> ShUniVec2Id {ShUniVec2Id(std::any::TypeId::of::< $ name>())}
+            pub fn ty() -> String{"vec2".to_string()}
+            pub fn uni_id() -> ShUniId{ShUniId::Vec2($name::id())}
+            pub fn store() -> ShVarStore{ShVarStore::Uniform($name::uni_id())}
+            pub fn id() -> ShUniVec2Id {ShUniVec2Id(std::any::TypeId::of::< $ name>())}
         }
     };
 }
@@ -148,11 +166,13 @@ macro_rules!uniform_vec2 {
 #[macro_export]
 macro_rules!uniform_float {
     ( $ name: ident) => {
+        #[allow(non_camel_case_types)]
         pub struct $ name();
         impl $ name {
-            fn ty() -> String{"float".to_string()}
-            fn store() -> ShVarStore{ShVarStore::Uniform(ShUniId::Float($name::id()))}
-            fn id() -> ShUniFloatId {ShUniFloatId(std::any::TypeId::of::< $ name>())}
+            pub fn ty() -> String{"float".to_string()}
+            pub fn uni_id() -> ShUniId{ShUniId::Float($name::id())}
+            pub fn store() -> ShVarStore{ShVarStore::Uniform($name::uni_id())}
+            pub fn id() -> ShUniFloatId {ShUniFloatId(std::any::TypeId::of::< $ name>())}
         }
     };
 }
@@ -196,49 +216,96 @@ impl RectInstanceProps {
     }
 }
 
-#[derive(Default, Clone, Debug)]
-pub struct NamedProp {
+#[derive(Clone)]
+pub struct InstanceProp {
     pub name: String,
+    pub ident: ShInsId,
     pub offset: usize,
     pub slots: usize
 }
 
-#[derive(Default, Clone, Debug)]
-pub struct NamedProps {
-    pub props: Vec<NamedProp>,
+#[derive(Default, Clone)]
+pub struct InstanceProps {
+    pub props: Vec<InstanceProp>,
     pub total_slots: usize,
 }
 
-impl NamedProps {
-    pub fn construct(sg: &ShaderGen, in_props: &Vec<ShVar>, aligned: bool) -> NamedProps {
+#[derive(Clone)]
+pub struct UniformProp {
+    pub name: String,
+    pub ident: ShUniId,
+    pub offset: usize,
+    pub slots: usize
+}
+
+#[derive(Default, Clone)]
+pub struct UniformProps {
+    pub props: Vec<UniformProp>,
+    pub total_slots: usize,
+}
+
+impl InstanceProps {
+    pub fn construct(sg: &ShaderGen, in_props: &Vec<ShVar>)->InstanceProps{
         let mut offset = 0;
         let mut out_props = Vec::new();
         for prop in in_props {
             let slots = sg.get_type_slots(&prop.ty);
-            
-            if aligned && (offset & 3) + slots > 4 { // goes over the boundary
-                offset += 4 - (offset & 3); // make jump to new slot
+            match &prop.store{
+                ShVarStore::Instance(t)=>{
+                    out_props.push(InstanceProp {
+                        ident: t.clone(),
+                        name: prop.name.clone(),
+                        offset: offset,
+                        slots: slots
+                    })
+                },
+                _=>panic!("Non instance in props")
             }
-            if aligned && slots == 2 && (offset & 1) != 0 {
-                panic!("Please re-order uniform {} to be size-2 aligned", prop.name);
-            }
-            
-            out_props.push(NamedProp {
-                name: prop.name.clone(),
-                offset: offset,
-                slots: slots
-            });
             offset += slots
         };
-        if aligned && offset & 3 > 0 {
-            offset += 4 - (offset & 3);
-        }
-        NamedProps {
+        InstanceProps {
             props: out_props,
             total_slots: offset
         }
     }
+}
+
+impl UniformProps{
+    pub fn construct(sg: &ShaderGen, in_props: &Vec<ShVar>)->UniformProps{
+        let mut out_props = Vec::new();
+        let mut offset = 0;
     
+        for prop in in_props {
+            let slots = sg.get_type_slots(&prop.ty);
+            
+            if (offset & 3) + slots > 4 { // goes over the boundary
+                offset += 4 - (offset & 3); // make jump to new slot
+            }
+            if slots == 2 && (offset & 1) != 0 {
+                panic!("Please re-order uniform {} to be size-2 aligned", prop.name);
+            }
+            match &prop.store{
+                ShVarStore::Uniform(t)=>{
+                    out_props.push(UniformProp {
+                        ident:t.clone(),  
+                        name: prop.name.clone(),
+                        offset: offset,
+                        slots: slots
+                    })
+                },
+                _=>panic!("Non uniform in props")
+            }
+            offset += slots
+        };
+        if offset & 3 > 0 {
+            offset += 4 - (offset & 3);
+        }
+        UniformProps {
+            props: out_props,
+            total_slots: offset
+        }
+    }
+
     pub fn find_zbias_uniform_prop(&self) -> Option<usize> {
         for prop in &self.props {
             if prop.name == "zbias" {
@@ -260,8 +327,8 @@ pub struct CxShaderMapping {
     pub uniforms_cx: Vec<ShVar>,
     pub texture_slots: Vec<ShVar>,
     pub rect_instance_props: RectInstanceProps,
-    pub named_uniform_props: NamedProps,
-    pub named_instance_props: NamedProps,
+    pub uniform_props: UniformProps,
+    pub instance_props: InstanceProps,
     pub zbias_uniform_prop: Option<usize>
 }
 

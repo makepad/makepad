@@ -66,21 +66,21 @@ impl Splitter {
     
     pub fn get_default_anim(cx: &Cx) -> Anim {
         Anim::new(Play::Cut {duration: 0.5}, vec![
-            Track::color_id(cx, "split.color", Ease::Lin, vec![(1.0, ColorBgSplitter::id(cx))]),
+            Track::color_id(Quad_color::id(), Ease::Lin, vec![(1.0, Color_bg_splitter::id(cx))]),
         ])
     }
     
     pub fn get_over_anim(cx: &Cx) -> Anim {
         Anim::new(Play::Cut {duration: 0.05}, vec![
-            Track::color(cx, "split.color", Ease::Lin, vec![(1.0, color("#5"))]),
+            Track::color_id(Quad_color::id(), Ease::Lin, vec![(1.0,Color_bg_splitter_over::id(cx))]),
         ])
     }
     
     pub fn get_moving_anim(cx: &Cx) -> Anim {
         Anim::new(Play::Cut {duration: 0.2}, vec![
-            Track::color(cx, "split.color", Ease::Lin, vec![
-                (0.0, color("#f")),
-                (1.0, color("#6"))
+            Track::color_id(Quad_color::id(), Ease::Lin, vec![
+                (0.0, Color_bg_splitter_peak::id(cx)),
+                (1.0, Color_bg_splitter_drag::id(cx))
             ]),
         ])
     }
@@ -101,7 +101,7 @@ impl Splitter {
     pub fn handle_splitter(&mut self, cx: &mut Cx, event: &mut Event) -> SplitterEvent {
         match event.hits(cx, self._split_area, HitOpt {margin: self._hit_state_margin, ..Default::default()}) {
             Event::Animate(ae) => {
-                self.animator.write_area(cx, self._split_area, "split.", ae.time);
+                self.animator.write_area(cx, self._split_area, ae.time);
             },
             Event::AnimEnded(_) => self.animator.end(),
             Event::FingerDown(fe) => {
@@ -275,7 +275,7 @@ impl Splitter {
         cx.end_turtle(Area::Empty);
         let rect = cx.get_turtle_rect();
         let origin = cx.get_turtle_origin();
-        self.split.color = self.animator.last_color(cx, "split.color");
+        self.split.color = self.animator.last_color(cx, Quad_color::id());
         match self.axis {
             Axis::Horizontal => {
                 
