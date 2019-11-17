@@ -36,20 +36,20 @@ impl LogItemDraw {
             item_bg: Quad::style(cx),
             text: Text {
                 wrapping: Wrapping::Word,
-                ..Text::style(cx, TextStyle_normal::id(cx))
+                ..Text::style(cx, TextStyle_normal::id())
             },
             code_icon: CodeIcon::style(cx),
-            item_layout: LayoutLogListItem::id(cx),
-            path_color: Color_text_defocus::id(cx),
-            message_color: Color_text_focus::id(cx),
+            item_layout: LayoutLogListItem::id(),
+            path_color: Color_text_defocus::id(),
+            message_color: Color_text_focus::id(),
             //row_height: 20.0,
-            bg_even: Color_bg_selected::id(cx),
-            bg_odd: Color_bg_odd::id(cx),
-            bg_marked: Color_bg_marked::id(cx),
-            bg_selected: Color_bg_selected::id(cx),
-            bg_marked_over: Color_bg_marked_over::id(cx),
-            bg_selected_over: Color_bg_selected_over::id(cx),
-            bg_odd_over: Color_bg_odd_over::id(cx)
+            bg_even: Color_bg_selected::id(),
+            bg_odd: Color_bg_odd::id(),
+            bg_marked: Color_bg_marked::id(),
+            bg_selected: Color_bg_selected::id(),
+            bg_marked_over: Color_bg_marked_over::id(),
+            bg_selected_over: Color_bg_selected_over::id(),
+            bg_odd_over: Color_bg_odd_over::id()
         }
     }
     
@@ -79,12 +79,12 @@ impl LogItemDraw {
     }
     
     pub fn draw_log_path(&mut self, cx: &mut Cx, path: &str, row: usize) {
-        self.text.color = cx.colors[self.path_color];
+        self.text.color = self.path_color.get(cx);
         self.text.draw_text(cx, &format!("{}:{} - ", path, row));
     }
     
     pub fn draw_log_body(&mut self, cx: &mut Cx, body: &str) {
-        self.text.color = cx.colors[self.message_color];
+        self.text.color = self.message_color.get(cx);
         if body.len()>500 {
             self.text.draw_text(cx, &body[0..500]);
         }
@@ -96,7 +96,7 @@ impl LogItemDraw {
     pub fn draw_log_item(&mut self, cx: &mut Cx, list_item: &mut ListItem, log_item: &HubLogItem) {
         self.item_bg.color = list_item.animator.last_color(cx, Quad_color::id());
 
-        let bg_inst = self.item_bg.begin_quad(cx, cx.layouts[self.item_layout]);//&self.get_line_layout());
+        let bg_inst = self.item_bg.begin_quad(cx, self.item_layout.get(cx));//&self.get_line_layout());
         
         match log_item {
             HubLogItem::LocPanic(loc_msg) => {
@@ -143,11 +143,11 @@ impl LogItemDraw {
     
     pub fn draw_status_line(&mut self, cx: &mut Cx, counter: usize, bm: &BuildManager) {
         // draw status line
-        self.item_bg.color = cx.colors[if counter & 1 == 0 {self.bg_even}else {self.bg_odd}];
-        let bg_inst = self.item_bg.begin_quad(cx, cx.layouts[self.item_layout]);
+        self.item_bg.color = if counter & 1 == 0 {self.bg_even.get(cx)}else {self.bg_odd.get(cx)};
+        let bg_inst = self.item_bg.begin_quad(cx, self.item_layout.get(cx));
         
         if !bm.is_any_cargo_running() {
-            self.text.color = cx.colors[self.path_color];
+            self.text.color = self.path_color.get(cx);
             self.code_icon.draw_icon(cx, CodeIconType::Ok);
             cx.turtle_align_y();
             if bm.is_any_artifact_running() {
@@ -170,7 +170,7 @@ impl LogItemDraw {
         else {
             self.code_icon.draw_icon(cx, CodeIconType::Wait);
             cx.turtle_align_y();
-            self.text.color = cx.colors[self.path_color];
+            self.text.color = self.path_color.get(cx);
             self.text.draw_text(cx, &format!("Building ({}) ", bm.artifacts.len()));
             for ab in &bm.active_builds {
                 if ab.build_uid.is_some() {
@@ -187,8 +187,8 @@ impl LogItemDraw {
     
     pub fn draw_filler(&mut self, cx: &mut Cx, counter: usize) {
         let view_total = cx.get_turtle_bounds();
-        self.item_bg.color = cx.colors[if counter & 1 == 0 {self.bg_even} else {self.bg_odd}];
-        self.item_bg.draw_quad(cx, cx.layouts[self.item_layout].walk);
+        self.item_bg.color = if counter & 1 == 0 {self.bg_even.get(cx)} else {self.bg_odd.get(cx)};
+        self.item_bg.draw_quad(cx, self.item_layout.get(cx).walk);
         cx.set_turtle_bounds(view_total); // do this so it doesnt impact the turtle
     }
 }
@@ -375,7 +375,7 @@ impl LogList {
             item_draw.get_default_anim(cx, index, false)
         });
         
-        let row_height = cx.layouts[self.item_draw.item_layout].walk.height.fixed();
+        let row_height = self.item_draw.item_layout.get(cx).walk.height.fixed();
         
         if self.list.begin_list(cx, &mut self.view, row_height).is_err() {return}
         

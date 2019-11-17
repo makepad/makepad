@@ -13,7 +13,7 @@ pub struct TabControl {
     pub drag_tab: Tab,
     pub page_view: View,
     pub hover: Quad,
-    pub tab_fill_color: ColorId,
+    //pub tab_fill_color: ColorId,
     pub tab_fill: Quad,
     pub animator: Animator,
     
@@ -59,7 +59,7 @@ impl TabControl {
                 color: color("purple"),
                 ..Quad::style(cx)
             },
-            tab_fill_color: Color_bg_normal::id(cx),
+            //tab_fill_color: Color_bg_normal::id(),
             tab_fill: Quad::style(cx),
             animator: Animator::new(Anim::new(Play::Cut {duration: 0.5}, vec![])),
             _dragging_tab: None,
@@ -208,7 +208,7 @@ impl TabControl {
     }
     
     pub fn end_tabs(&mut self, cx: &mut Cx) {
-        self.tab_fill.color = cx.colors[self.tab_fill_color];
+        self.tab_fill.color = Color_bg_normal::get(cx);
         self.tab_fill.draw_quad(cx, Walk::wh(Width::Fill, Height::Fill));
         self.tabs.sweep(cx, | _, _ | ());
         if let Some((fe, id)) = &self._dragging_tab {

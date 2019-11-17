@@ -13,7 +13,7 @@ pub struct DesktopWindow {
     pub caption_view: View, // we have a root view otherwise is_overlay subviews can't attach topmost
     pub main_view: View, // we have a root view otherwise is_overlay subviews can't attach topmost
     pub inner_view: View,
-    pub caption_bg_color: ColorId,
+    //pub caption_bg_color: ColorId,
     pub min_btn: DesktopButton,
     pub max_btn: DesktopButton,
     pub close_btn: DesktopButton,
@@ -57,8 +57,8 @@ impl DesktopWindow {
             
             window_menu: WindowMenu::style(cx),
             
-            caption_text: Text::style(cx, TextStyle_window_caption::id(cx)),
-            caption_bg_color: Color_bg_selected_over::id(cx),
+            caption_text: Text::style(cx, TextStyle_window_caption::id()),
+            //caption_bg_color: Color_bg_selected_over::id(cx),
             caption_bg: Quad::style(cx),
             caption_size: Vec2::zero(),
             caption: "Makepad".to_string(),
@@ -156,7 +156,7 @@ impl DesktopWindow {
             walk:Walk::wh(Width::Fill, Height::Compute),
             ..Layout::default()
         }).is_ok() {
-            self.caption_bg.color = cx.colors[self.caption_bg_color];
+            self.caption_bg.color = Color_bg_selected_over::get(cx);//cx.colors[self.caption_bg_color];
             // alright here we draw our platform buttons.
             match cx.platform_type {
                 PlatformType::Linux | PlatformType::Windows => {

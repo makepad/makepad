@@ -18,10 +18,10 @@ instance_float!(NormalButton_glow_size);
 impl NormalButton {
     pub fn style(cx: &mut Cx) -> Self {
         Self {
-            bg_layout: Layout_button::id(cx),
+            bg_layout: Layout_button::id(),
             button: ButtonLogic::default(),
             bg: Quad::style_with_shader(cx, Self::def_bg_shader(), "Button.bg"),
-            text: Text::style(cx, TextStyle_normal::id(cx)),
+            text: Text::style(cx, TextStyle_normal::id()),
             animator: Animator::new(Self::get_default_anim(cx)),
             _bg_area: Area::Empty,
         }
@@ -29,7 +29,7 @@ impl NormalButton {
     
     pub fn get_default_anim(cx: &Cx) -> Anim {
         Anim::new(Play::Cut {duration: 0.5}, vec![
-            Track::color_id(Quad_color::id(), Ease::Lin, vec![(1., Color_bg_normal::id(cx))]),
+            Track::color_id(Quad_color::id(), Ease::Lin, vec![(1., Color_bg_normal::id())]),
             Track::float(NormalButton_glow_size::id(), Ease::Lin, vec![(1., 0.0)]),
             Track::color(NormalButton_border_color::id(), Ease::Lin, vec![(1., color("#6"))]),
         ])
@@ -88,7 +88,7 @@ impl NormalButton {
     pub fn draw_button(&mut self, cx: &mut Cx, label: &str) {
         self.bg.color = self.animator.last_color(cx, Quad_color::id());
         
-        let bg_inst = self.bg.begin_quad(cx, cx.layouts[self.bg_layout]);
+        let bg_inst = self.bg.begin_quad(cx, self.bg_layout.get(cx));
         
         bg_inst.push_last_color(cx, &self.animator, NormalButton_border_color::id());
         bg_inst.push_last_float(cx, &self.animator, NormalButton_glow_size::id());

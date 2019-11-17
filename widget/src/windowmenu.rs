@@ -12,11 +12,11 @@ pub struct WindowMenu {
 pub struct MenuItemDraw {
     pub text: Text,
     pub item_bg: Quad,
-    pub item_layout: LayoutId,
-    pub name_color: ColorId,
-    pub bg_color: ColorId,
-    pub bg_over_color: ColorId,
-    pub bg_selected_color: ColorId,
+    //pub item_layout: LayoutId,
+    //pub name_color: ColorId,
+    //pub bg_color: ColorId,
+    //pub bg_over_color: ColorId,
+    //pub bg_selected_color: ColorId,
 }
 
 impl MenuItemDraw {
@@ -24,21 +24,21 @@ impl MenuItemDraw {
         Self {
             text: Text {
                 wrapping: Wrapping::Word,
-                ..Text::style(cx, TextStyle_window_menu::id(cx))
+                ..Text::style(cx, TextStyle_window_menu::id())
             },
-            item_layout: Layout_window_menu::id(cx),
+            //item_layout: Layout_window_menu::id(cx),
             item_bg: Quad::style(cx),
-            name_color: Color_text_selected_focus::id(cx),
-            bg_color: Color_bg_selected::id(cx),
-            bg_over_color: Color_bg_odd::id(cx),
-            bg_selected_color: Color_bg_selected_over::id(cx),
+            //name_color: Color_text_selected_focus::id(cx),
+            //bg_color: Color_bg_selected::id(cx),
+            //bg_over_color: Color_bg_odd::id(cx),
+            //bg_selected_color: Color_bg_selected_over::id(cx),
         }
     }
     
     pub fn get_default_anim(&self, _cx: &Cx) -> Anim {
         Anim::new(Play::Chain {duration: 0.01}, vec![
             Track::color_id(Quad_color::id(), Ease::Lin, vec![
-                (1.0, self.bg_color)
+                (1.0,  Color_bg_selected::id())
             ])
         ])
     }
@@ -46,7 +46,7 @@ impl MenuItemDraw {
     pub fn get_default_anim_cut(&self, _cx: &Cx) -> Anim {
         Anim::new(Play::Cut {duration: 0.01}, vec![
             Track::color_id(Quad_color::id(), Ease::Lin, vec![
-                (0.0, self.bg_color)
+                (0.0, Color_bg_selected::id())
             ])
         ])
     }
@@ -54,7 +54,7 @@ impl MenuItemDraw {
     pub fn get_over_anim(&self, _cx: &Cx) -> Anim {
         Anim::new(Play::Cut {duration: 0.02}, vec![
             Track::color_id(Quad_color::id(), Ease::Lin, vec![
-                (0., self.bg_over_color),
+                (0., Color_bg_odd::id()),
             ])
         ])
     }

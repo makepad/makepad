@@ -71,19 +71,19 @@ impl ScrollBar {
     
     pub fn get_over_anim(cx:&Cx)->Anim{
         Anim::new(Play::Cut {duration: 0.05}, vec![
-            Track::color_id(Quad_color::id(), Ease::Lin, vec![(1.0, Color_scrollbar_base::id(cx))])
+            Track::color_id(Quad_color::id(), Ease::Lin, vec![(1.0, Color_scrollbar_base::id())])
         ])
     }
     
     pub fn get_scrolling_anim(cx:&Cx)->Anim{
         Anim::new(Play::Cut {duration: 0.05}, vec![
-            Track::color_id(Quad_color::id(), Ease::Lin, vec![(1.0, Color_scrollbar_down::id(cx))])
+            Track::color_id(Quad_color::id(), Ease::Lin, vec![(1.0, Color_scrollbar_down::id())])
         ])
     }
     
     pub fn get_default_anim(cx:&Cx)->Anim{
         Anim::new(Play::Cut {duration: 0.5}, vec![
-            Track::color_id(Quad_color::id(), Ease::Lin, vec![(1.0, Color_scrollbar_over::id(cx))])
+            Track::color_id(Quad_color::id(), Ease::Lin, vec![(1.0, Color_scrollbar_over::id())])
         ])
     }
 

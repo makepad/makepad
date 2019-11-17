@@ -1,6 +1,5 @@
 use std::collections::HashMap;
 use std::cell::RefCell;
-use std::any::TypeId;
 
 pub use crate::shadergen::*;
 pub use crate::fonts::*;
@@ -148,22 +147,11 @@ pub struct Cx {
     pub _frame_callbacks: Vec<Area>,
 
     pub signals: Vec<(Signal, usize)>,
-    //pub style_values: HashMap<String, StyleValue>,
- 
-    pub theme_color_to_id: HashMap<TypeId, usize>,
-    pub theme_text_style_to_id: HashMap<TypeId, usize>,
-    pub theme_layout_to_id: HashMap<TypeId, usize>,
-    pub theme_walk_to_id: HashMap<TypeId, usize>,
-    
-    pub color_id: usize,
-    pub text_style_id: usize,
-    pub layout_id: usize,
-    pub walk_id: usize,
-    
-    pub colors: CxThemeColors,
-    pub text_styles: CxThemeTextStyles,
-    pub layouts: CxThemeLayouts,
-    pub walks: CxThemeWalks,
+
+    pub theme_colors: HashMap<ColorId, Color>,
+    pub theme_text_styles: HashMap<TextStyleId, TextStyle>,
+    pub theme_layouts: HashMap<LayoutId, Layout>,
+    pub theme_walks: HashMap<WalkId, Walk>, 
 
     pub panic_now: bool,
     pub panic_redraw: bool,
@@ -257,21 +245,11 @@ impl Default for Cx {
 
             //style_values: HashMap::new(),
             
-            theme_color_to_id: HashMap::new(),
-            theme_text_style_to_id: HashMap::new(),
-            theme_layout_to_id: HashMap::new(),
-            theme_walk_to_id: HashMap::new(),
+            theme_colors: HashMap::new(),
+            theme_text_styles: HashMap::new(),
+            theme_layouts: HashMap::new(),
+            theme_walks: HashMap::new(),
 
-            color_id: 1,
-            text_style_id: 1,
-            layout_id: 1,
-            walk_id: 1,
-
-            colors: CxThemeColors(Vec::new()),
-            layouts: CxThemeLayouts(Vec::new()),
-            text_styles: CxThemeTextStyles(Vec::new()),
-            walks: CxThemeWalks(Vec::new()),
-            
             playing_anim_areas: Vec::new(),
             ended_anim_areas: Vec::new(),
 

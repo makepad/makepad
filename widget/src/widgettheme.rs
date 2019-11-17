@@ -90,8 +90,6 @@ pub fn set_widget_theme_values(cx: &mut Cx) {
         line_wrap: LineWrap::None,
         ..Default::default()
     });
-
-    
 }
 
 pub fn set_dark_widget_theme(cx: &mut Cx) {

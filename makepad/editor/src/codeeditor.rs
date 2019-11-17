@@ -30,7 +30,7 @@ pub struct CodeEditor {
     pub line_number_width: f32,
     pub draw_line_numbers: bool,
     pub top_padding: f32,
-    pub colors: CodeEditorColors,
+    //pub colors: CodeEditorColors,
     pub cursor_blink_speed: f64,
     
     pub mark_unmatched_parens: bool,
@@ -93,7 +93,7 @@ pub struct CodeEditor {
     
     pub _last_lag_mutation_id: u64
 }
-
+/*
 #[derive(Clone)]
 pub struct CodeEditorColors {
     // UI
@@ -137,8 +137,7 @@ pub struct CodeEditorColors {
     pub warning: Color,
     pub error: Color,
     pub defocus: Color
-    
-}
+}*/
 
 #[derive(Clone, PartialEq)]
 pub enum CodeEditorEvent {
@@ -165,6 +164,7 @@ impl CodeEditor {
     pub fn style(cx: &mut Cx) -> Self {
         Self {
             cursors: TextCursorSet::new(),
+            /*
             colors: CodeEditorColors {
                 bg: color256(30, 30, 30),
                 gutter_bg: color256(30, 30, 30),
@@ -213,10 +213,10 @@ impl CodeEditor {
                 warning: color256(225, 229, 112),
                 error: color256(254, 0, 0),
                 defocus: color256(128, 128, 128),
-            },
+            },*/
             indent_lines: Quad {
                 z: 0.001,
-                ..Quad::style_with_shader(cx,Self::def_indent_lines_shader(), "Editor.indent_lines")
+                ..Quad::style_with_shader(cx, Self::def_indent_lines_shader(), "Editor.indent_lines")
             },
             view: ScrollView::style_hor_and_vert(cx),
             bg: Quad {
@@ -244,17 +244,17 @@ impl CodeEditor {
             paren_pair: Quad::style_with_shader(cx, Self::def_paren_pair_shader(), "Editor.paren_pair"),
             message_marker: Quad::style_with_shader(cx, Self::def_message_marker_shader(), "Editor.message_marker"),
             code_icon: CodeIcon::style(cx),
-            bg_layout: LayoutCodeEditor::id(cx),
+            bg_layout: LayoutCodeEditor::id(),
             text: Text {
                 z: 2.00,
                 wrapping: Wrapping::Line,
-                ..Text::style(cx, TextStyleCodeEditorText::id(cx))
+                ..Text::style(cx, TextStyleCodeEditorText::id())
             },
             line_number_text: Text {
                 z: 9.,
                 do_h_scroll: false,
                 wrapping: Wrapping::Line,
-                ..Text::style(cx, TextStyleCodeEditorText::id(cx))
+                ..Text::style(cx, TextStyleCodeEditorText::id())
             },
             base_font_size: 8.0,
             open_font_scale: 1.0,
@@ -537,7 +537,7 @@ impl CodeEditor {
                 let pos = self.compute_grid_text_pos_from_abs(cx, fe.abs);
                 self._grid_select_corner = Some(self.cursors.grid_select_corner(pos, text_buffer));
                 self.cursors.grid_select(self._grid_select_corner.unwrap(), pos, text_buffer);
-                if self.cursors.set.len() == 0{
+                if self.cursors.set.len() == 0 {
                     self.cursors.clear_and_set_last_cursor_head_and_tail(offset, text_buffer);
                 }
             }
@@ -923,14 +923,18 @@ impl CodeEditor {
         self.view.begin_view(cx, Layout {..Default::default()}) ?;
         
         // copy over colors
-        self._last_indent_color = self.colors.indent_line_unknown;
-        self.bg.color = self.colors.bg;
-        self.gutter_bg.color = self.colors.gutter_bg;
-        self.selection.color = if self.has_key_focus(cx) {self.colors.selection}else {self.colors.selection_defocus};
+        self._last_indent_color = Color_code_indent_line_unknown::get(cx);
+        self.bg.color = Color_code_bg::get(cx);
+        self.gutter_bg.color = Color_code_gutter_bg::get(cx);
+        self.selection.color = if self.has_key_focus(cx) {
+            Color_code_selection::get(cx)
+        }else {
+            Color_code_selection_defocus::get(cx)
+        };
         //self.select_highlight.color = self.colors.highlight;
-        self.token_highlight.color = self.colors.highlight;
-        self.cursor.color = self.colors.cursor;
-        self.cursor_row.color = self.colors.cursor_row;
+        self.token_highlight.color = Color_code_highlight::get(cx);
+        self.cursor.color = Color_code_cursor::get(cx);
+        self.cursor_row.color = Color_code_cursor_row::get(cx);
         
         if text_buffer.is_loading {
             //et bg_inst = self.bg.begin_quad(cx, &Layout {
@@ -1045,7 +1049,7 @@ impl CodeEditor {
                         ypos_at_line = ypos;
                     }
                     ypos += if geom.was_folded {
-                        self._monospace_base.y  * self.base_font_size * self._anim_font_scale
+                        self._monospace_base.y * self.base_font_size * self._anim_font_scale
                     }
                     else {
                         self._monospace_base.y * self.base_font_size
@@ -1110,10 +1114,10 @@ impl CodeEditor {
                 scale /= 10;
             }
             if line_num == self._last_cursor_pos.row + 1 {
-                self.line_number_text.color = self.colors.line_number_highlight;
+                self.line_number_text.color = Color_code_line_number_highlight::get(cx);
             }
             else {
-                self.line_number_text.color = self.colors.line_number_normal;
+                self.line_number_text.color = Color_code_line_number_normal::get(cx);
             }
             let chunk_width = self._monospace_size.x * 5.0;
             self.line_number_text.add_text(cx, origin.x + (self.line_number_width - chunk_width - 10.), origin.y + line_geom.walk.y, 0, self._line_number_inst.as_mut().unwrap(), chunk, | _, _, _, _ | {0.});
@@ -1157,7 +1161,7 @@ impl CodeEditor {
         
         // search for all markings
         self._line_geometry.push(line_geom);
-        self._line_largest_font = cx.text_styles[self.text.text_style].font_size;
+        self._line_largest_font = self.text.text_style.get(cx).font_size;
     }
     
     fn draw_indent_lines(&mut self, cx: &mut Cx, geom_y: f32, tabs: usize) {
@@ -1166,7 +1170,9 @@ impl CodeEditor {
         let tab_fixed_width = self._monospace_base.x * 4. * self.base_font_size;
         let mut off = self.line_number_width;
         for i in 0..tabs {
-            let (indent_color, indent_id) = if i < self._indent_stack.len() {self._indent_stack[i]}else {(self.colors.indent_line_unknown, 0.)};
+            let (indent_color, indent_id) = if i < self._indent_stack.len() {self._indent_stack[i]}else {
+                (Color_code_indent_line_unknown::get(cx), 0.)
+            };
             let tab_width = if i < self.folding_depth {tab_fixed_width}else {tab_variable_width};
             self.indent_lines.color = indent_color;
             let inst = self.indent_lines.draw_quad_rel(cx, Rect {
@@ -1241,16 +1247,16 @@ impl CodeEditor {
         if self._tokens_on_line < 4 {
             match token_type {
                 TokenType::Flow => {
-                    self._last_indent_color = self.colors.indent_line_flow;
+                    self._last_indent_color = Color_code_indent_line_flow::get(cx);
                 },
                 TokenType::Looping => {
-                    self._last_indent_color = self.colors.indent_line_looping;
+                    self._last_indent_color = Color_code_indent_line_looping::get(cx);
                 },
                 TokenType::TypeDef => {
-                    self._last_indent_color = self.colors.indent_line_typedef;
+                    self._last_indent_color = Color_code_indent_line_typedef::get(cx);
                 },
                 TokenType::Fn | TokenType::Call => {
-                    self._last_indent_color = self.colors.indent_line_fn;
+                    self._last_indent_color = Color_code_indent_line_fn::get(cx);
                 }
                 _ => ()
             }
@@ -1275,7 +1281,7 @@ impl CodeEditor {
                     else if next_char == '\n' {
                         mark_spaces = 1.0;
                     }
-                    self.colors.whitespace
+                    Color_code_whitespace::get(cx)
                 },
                 TokenType::Newline => {
                     if self._tokens_on_line == 0 {
@@ -1286,58 +1292,58 @@ impl CodeEditor {
                         self._last_tabs = self._newline_tabs;
                         self._newline_tabs = 0;
                     }
-                    self.colors.whitespace
+                    Color_code_whitespace::get(cx)
                 },
-                TokenType::BuiltinType => self.colors.keyword,
-                TokenType::Keyword => self.colors.keyword,
-                TokenType::Bool => self.colors.keyword,
-                TokenType::Error => self.colors.error,
-                TokenType::Warning => self.colors.warning,
-                TokenType::Defocus => self.colors.defocus,
+                TokenType::BuiltinType => Color_code_keyword::get(cx),
+                TokenType::Keyword => Color_code_keyword::get(cx),
+                TokenType::Bool => Color_code_keyword::get(cx),
+                TokenType::Error => Color_code_error::get(cx),
+                TokenType::Warning => Color_code_warning::get(cx),
+                TokenType::Defocus => Color_code_defocus::get(cx),
                 TokenType::Flow => {
-                    self.colors.flow
+                    Color_code_flow::get(cx)
                 }
                 TokenType::Looping => {
-                    self.colors.looping
+                    Color_code_looping::get(cx)
                 }
                 TokenType::TypeDef => {
-                    self.colors.keyword
+                    Color_code_keyword::get(cx)
                 }
                 TokenType::Fn => {
-                    self.colors.keyword
+                    Color_code_keyword::get(cx)
                 }
                 TokenType::Identifier => {
                     if chunk == &self._highlight_token[0..] {
                         self.draw_token_highlight_quad(cx, geom);
                         
                     }
-                    self.colors.identifier
+                    Color_code_identifier::get(cx)
                 }
                 TokenType::Call => {
                     if chunk == &self._highlight_token[0..] {
                         self.draw_token_highlight_quad(cx, geom);
                     }
-                    self.colors.call
+                    Color_code_call::get(cx)
                 },
                 TokenType::TypeName => {
                     if chunk == &self._highlight_token[0..] {
                         self.draw_token_highlight_quad(cx, geom);
                     }
-                    self.colors.type_name
+                    Color_code_type_name::get(cx)
                 },
-                TokenType::Regex => self.colors.string,
-                TokenType::String => self.colors.string,
-                TokenType::Number => self.colors.number,
-                TokenType::CommentMultiBegin => self.colors.comment,
-                TokenType::CommentMultiEnd => self.colors.comment,
-                TokenType::CommentLine => self.colors.comment,
-                TokenType::CommentChunk => self.colors.comment,
+                TokenType::Regex => Color_code_string::get(cx),
+                TokenType::String => Color_code_string::get(cx),
+                TokenType::Number => Color_code_number::get(cx),
+                TokenType::CommentMultiBegin => Color_code_comment::get(cx),
+                TokenType::CommentMultiEnd => Color_code_comment::get(cx),
+                TokenType::CommentLine => Color_code_comment::get(cx),
+                TokenType::CommentChunk => Color_code_comment::get(cx),
                 TokenType::ParenOpen => {
                     let depth = self._paren_stack.len();
                     self._paren_stack.last_mut().unwrap().geom_open = Some(geom);
                     match depth % 2 {
-                        0 => self.colors.paren_d1,
-                        _ => self.colors.paren_d2,
+                        0 => Color_code_paren_d1::get(cx),
+                        _ => Color_code_paren_d2::get(cx),
                     }
                 },
                 TokenType::ParenClose => {
@@ -1345,24 +1351,24 @@ impl CodeEditor {
                         paren.geom_close = Some(geom);
                     }
                     else {
-                        self.paren_pair.color = self.colors.paren_pair_fail;
+                        self.paren_pair.color = Color_code_paren_pair_fail::get(cx);
                         self.paren_pair.draw_quad_abs(cx, geom);
                     }
                     let depth = self._paren_stack.len();
                     match depth % 2 {
-                        0 => self.colors.paren_d1,
-                        _ => self.colors.paren_d2,
+                        0 => Color_code_paren_d1::get(cx),
+                        _ => Color_code_paren_d2::get(cx),
                         //_=>self.colors.paren_d3
                     }
                 },
-                TokenType::Operator => self.colors.operator,
-                TokenType::Namespace => self.colors.operator,
-                TokenType::Hash => self.colors.operator,
-                TokenType::Delimiter => self.colors.delimiter,
-                TokenType::Colon => self.colors.delimiter,
-                TokenType::Splat => self.colors.operator,
-                TokenType::Eof => self.colors.unexpected,
-                TokenType::Unexpected => self.colors.unexpected
+                TokenType::Operator => Color_code_operator::get(cx),
+                TokenType::Namespace => Color_code_operator::get(cx),
+                TokenType::Hash => Color_code_operator::get(cx),
+                TokenType::Delimiter => Color_code_delimiter::get(cx),
+                TokenType::Colon => Color_code_delimiter::get(cx),
+                TokenType::Splat => Color_code_operator::get(cx),
+                TokenType::Eof => Color_code_unexpected::get(cx),
+                TokenType::Unexpected => Color_code_unexpected::get(cx)
             };
             
             if self._tokens_on_line == 0 {
@@ -1378,7 +1384,7 @@ impl CodeEditor {
             let height = self._monospace_size.y;
             
             // actually generate the GPU data for the text
-            let z = 2.0;// + self._paren_stack.len() as f32;
+            let z = 2.0; // + self._paren_stack.len() as f32;
             //self.text.z = z;
             if self._highlight_selection.len() > 0 { // slow loop
                 //let draw_search = &mut self._draw_search;
@@ -1451,11 +1457,11 @@ impl CodeEditor {
                 let fail = if last.exp_paren == '(' && chunk[0] != ')' ||
                 last.exp_paren == '[' && chunk[0] != ']' ||
                 last.exp_paren == '{' && chunk[0] != '}' {
-                    self.paren_pair.color = self.colors.paren_pair_fail;
+                    self.paren_pair.color = Color_code_paren_pair_fail::get(cx);
                     true
                 }
                 else {
-                    self.paren_pair.color = self.colors.paren_pair_match;
+                    self.paren_pair.color = Color_code_paren_pair_match::get(cx);
                     false
                 };
                 if fail || pos == offset || pos == offset + 1 && next_char != ')' && next_char != '}' && next_char != ']' || last.marked {
@@ -1491,7 +1497,7 @@ impl CodeEditor {
         while self._paren_stack.len()>0 {
             let last = self._paren_stack.pop().unwrap();
             if self.has_key_focus(cx) && !last.geom_open.is_none() {
-                self.paren_pair.color = self.colors.paren_pair_fail;
+                self.paren_pair.color = Color_code_paren_pair_fail::get(cx);
                 if let Some(rc) = last.geom_open {
                     self.paren_pair.draw_quad_abs(cx, rc);
                 }
@@ -1529,11 +1535,11 @@ impl CodeEditor {
         
         self.view.end_view(cx);
         
-        if self._jump_to_offset{
+        if self._jump_to_offset {
             self._jump_to_offset = false;
-            self.do_jump_to_offset(cx, text_buffer);            
+            self.do_jump_to_offset(cx, text_buffer);
         }
-        else if let Some(scroll_pos_on_load) = self._scroll_pos_on_load{
+        else if let Some(scroll_pos_on_load) = self._scroll_pos_on_load {
             self.view.set_scroll_pos(cx, scroll_pos_on_load);
             self._scroll_pos_on_load = None;
         }
@@ -1570,9 +1576,9 @@ impl CodeEditor {
             let mark = &message_markers[i];
             let body = &text_buffer.messages.bodies[mark.index];
             self.message_marker.color = match body.level {
-                TextBufferMessageLevel::Warning => self.colors.marker_warning,
-                TextBufferMessageLevel::Error => self.colors.marker_error,
-                TextBufferMessageLevel::Log => self.colors.marker_log,
+                TextBufferMessageLevel::Warning => Color_code_marker_warning::get(cx),
+                TextBufferMessageLevel::Error => Color_code_marker_error::get(cx),
+                TextBufferMessageLevel::Log => Color_code_marker_log::get(cx),
             };
             self.message_marker.draw_quad_rel(cx, Rect {x: mark.rc.x - origin.x, y: mark.rc.y - origin.y, w: mark.rc.w, h: mark.rc.h});
         }

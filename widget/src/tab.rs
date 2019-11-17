@@ -47,9 +47,9 @@ impl Tab {
                 shader: cx.add_shader(Self::def_bg_shader(), "Tab.bg"),
                 ..Quad::style(cx)
             },
-            bg_layout: Layout_tab::id(cx),
+            bg_layout: Layout_tab::id(),
             tab_close: TabClose::style(cx),
-            text: Text::style(cx, TextStyle_tab_title::id(cx)),
+            text: Text::style(cx, TextStyle_tab_title::id()),
             animator: Animator::new_no_default(),
             abs_origin: None,
             _is_selected: false,
@@ -65,57 +65,57 @@ impl Tab {
         tab
     }
     
-    pub fn get_bg_color(&self, cx: &Cx) -> ColorId {
+    pub fn get_bg_color(&self) -> ColorId {
         if self._is_selected {
-            Color_bg_selected::id(cx)
+            Color_bg_selected::id()
         }
         else {
-            Color_bg_normal::id(cx)
+            Color_bg_normal::id()
         }
     }
     
-    pub fn get_text_color(&self, cx: &Cx) -> ColorId {
+    pub fn get_text_color(&self) -> ColorId {
         if self._is_selected {
             if self._is_focussed {
-                Color_text_selected_focus::id(cx)
+                Color_text_selected_focus::id()
             }
             else {
-                Color_text_selected_defocus::id(cx)
+                Color_text_selected_defocus::id()
             }
         }
         else {
             if self._is_focussed {
-                Color_text_deselected_focus::id(cx)
+                Color_text_deselected_focus::id()
             }
             else {
-                Color_text_deselected_defocus::id(cx)
+                Color_text_deselected_defocus::id()
             }
         }
     }
     
     pub fn anim_default(&self, cx: &Cx) -> Anim {
         Anim::new(Play::Cut {duration: 0.05}, vec![
-            Track::color_id(Quad_color::id(), Ease::Lin, vec![(1.0, self.get_bg_color(cx))]),
-            Track::color_id(Tab_border_color::id(), Ease::Lin, vec![(1.0, Color_bg_selected::id(cx))]),
-            Track::color_id(Text_color::id(), Ease::Lin, vec![(1.0, self.get_text_color(cx))]),
+            Track::color_id(Quad_color::id(), Ease::Lin, vec![(1.0, self.get_bg_color())]),
+            Track::color_id(Tab_border_color::id(), Ease::Lin, vec![(1.0, Color_bg_selected::id())]),
+            Track::color_id(Text_color::id(), Ease::Lin, vec![(1.0, self.get_text_color())]),
             //Track::color_id(cx, "icon.color", Ease::Lin, vec![(1.0, self.get_text_color(cx))])
         ])
     }
     
     pub fn anim_over(&self, cx: &Cx) -> Anim {
         Anim::new(Play::Cut {duration: 0.01}, vec![
-            Track::color_id(Quad_color::id(), Ease::Lin, vec![(1.0, self.get_bg_color(cx))]),
-            Track::color_id(Tab_border_color::id(), Ease::Lin, vec![(1.0, Color_bg_selected::id(cx))]),
-            Track::color_id(Text_color::id(), Ease::Lin, vec![(1.0, self.get_text_color(cx))]),
+            Track::color_id(Quad_color::id(), Ease::Lin, vec![(1.0, self.get_bg_color())]),
+            Track::color_id(Tab_border_color::id(), Ease::Lin, vec![(1.0, Color_bg_selected::id())]),
+            Track::color_id(Text_color::id(), Ease::Lin, vec![(1.0, self.get_text_color())]),
             //Track::color_id(cx, "icon.color", Ease::Lin, vec![(1.0, self.get_text_color(cx))])
         ])
     }
     
     pub fn anim_down(&self, cx: &Cx) -> Anim {
         Anim::new(Play::Cut {duration: 0.01}, vec![
-            Track::color_id(Quad_color::id(), Ease::Lin, vec![(1.0, self.get_bg_color(cx))]),
-            Track::color_id(Tab_border_color::id(), Ease::Lin, vec![(1.0, Color_bg_selected::id(cx))]),
-            Track::color_id(Text_color::id(), Ease::Lin, vec![(1.0, self.get_text_color(cx))]),
+            Track::color_id(Quad_color::id(), Ease::Lin, vec![(1.0, self.get_bg_color())]),
+            Track::color_id(Tab_border_color::id(), Ease::Lin, vec![(1.0, Color_bg_selected::id())]),
+            Track::color_id(Text_color::id(), Ease::Lin, vec![(1.0, self.get_text_color())]),
            // Track::color_id(cx, "icon.color", Ease::Lin, vec![(1.0, self.get_text_color(cx))])
         ])
     }
@@ -289,10 +289,10 @@ impl Tab {
         }
         else {
             let layout = if let Some(abs_origin) = self.abs_origin {
-                Layout {abs_origin: Some(abs_origin), ..cx.layouts[self.bg_layout]}
+                Layout {abs_origin: Some(abs_origin), ..self.bg_layout.get(cx)}
             }
             else {
-                cx.layouts[self.bg_layout]
+                self.bg_layout.get(cx)
             };
             let bg_inst = self.bg.begin_quad(cx, layout);
             bg_inst.push_last_color(cx, &self.animator, Tab_border_color::id());

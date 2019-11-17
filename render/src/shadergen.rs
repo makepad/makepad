@@ -206,7 +206,7 @@ impl ShInsId{
 #[derive(Clone, Hash, PartialEq)]
 pub enum ShVarStore {
     Uniform(ShUniId),
-    UniformColor(TypeId),
+    UniformColor(ColorId),
     UniformVw,
     UniformCx,
     Instance(ShInsId),

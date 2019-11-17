@@ -32,7 +32,7 @@ instance_float!(InstanceIconId);
 impl CodeIcon {
     pub fn style(cx: &mut Cx) -> Self {
         Self {
-            walk: WalkCodeIcon::id(cx),
+            walk: WalkCodeIcon::id(),
             quad: Quad {
                 shader: cx.add_shader(Self::def_code_icon_shader(), "CodeIcon"),
                 ..Quad::style(cx)
@@ -129,7 +129,7 @@ impl CodeIcon {
     
     pub fn draw_icon(&mut self, cx: &mut Cx, icon_type: CodeIconType) -> InstanceArea {
         
-        let inst = self.quad.draw_quad(cx, cx.walks[self.walk]);
+        let inst = self.quad.draw_quad(cx, self.walk.get(cx));
         inst.push_float(cx, icon_type.shader_float());
         inst
     }

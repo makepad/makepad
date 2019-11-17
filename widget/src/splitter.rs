@@ -66,21 +66,21 @@ impl Splitter {
     
     pub fn get_default_anim(cx: &Cx) -> Anim {
         Anim::new(Play::Cut {duration: 0.5}, vec![
-            Track::color_id(Quad_color::id(), Ease::Lin, vec![(1.0, Color_bg_splitter::id(cx))]),
+            Track::color_id(Quad_color::id(), Ease::Lin, vec![(1.0, Color_bg_splitter::id())]),
         ])
     }
     
     pub fn get_over_anim(cx: &Cx) -> Anim {
         Anim::new(Play::Cut {duration: 0.05}, vec![
-            Track::color_id(Quad_color::id(), Ease::Lin, vec![(1.0,Color_bg_splitter_over::id(cx))]),
+            Track::color_id(Quad_color::id(), Ease::Lin, vec![(1.0,Color_bg_splitter_over::id())]),
         ])
     }
     
     pub fn get_moving_anim(cx: &Cx) -> Anim {
         Anim::new(Play::Cut {duration: 0.2}, vec![
             Track::color_id(Quad_color::id(), Ease::Lin, vec![
-                (0.0, Color_bg_splitter_peak::id(cx)),
-                (1.0, Color_bg_splitter_drag::id(cx))
+                (0.0, Color_bg_splitter_peak::id()),
+                (1.0, Color_bg_splitter_drag::id())
             ]),
         ])
     }

@@ -1,13 +1,13 @@
 use render::*;
 
 theme_layout!(LayoutLogListItem);
-theme_layout!(LayoutFileTreeDragBg);
-theme_layout!(LayoutFileTreeNode);
+theme_layout!(FileTreeLayout_drag_bg);
+theme_layout!(FileTreeLayout_node);
 
 theme_text_style!(TextStyleFileTree);
 
-theme_walk!(WalkFileTreeFiller);
-theme_walk!(WalkFileTreeFolder);
+theme_walk!(FileTreeWalk_filler);
+theme_walk!(FileTreeWalk_folder);
 
 pub fn set_makepad_theme_values(cx: &mut Cx){
     TextStyleFileTree::set(cx, TextStyle {
@@ -23,26 +23,26 @@ pub fn set_makepad_theme_values(cx: &mut Cx){
         ..Default::default()
     });
     
-    LayoutFileTreeDragBg::set(cx, Layout {
+    FileTreeLayout_drag_bg::set(cx, Layout {
         padding: Padding {l: 5., t: 5., r: 5., b: 5.},
         walk: Walk::wh(Width::Compute, Height::Compute),
         ..Default::default()
     });
     
-    LayoutFileTreeNode::set(cx, Layout {
+    FileTreeLayout_node::set(cx, Layout {
         walk: Walk::wh(Width::Fill, Height::Fix(20.)),
         align: Align::left_center(),
         padding: Padding {l: 5., t: 0., r: 0., b: 1.},
         ..Default::default()
     });
     
-    WalkFileTreeFiller::set(cx, Walk{
+    FileTreeWalk_filler::set(cx, Walk{
         width:Width::Fix(10.),
         height:Height::Fill,
         margin:Margin {l: 1., t: 0., r: 4., b: 0.}
     });
 
-    WalkFileTreeFolder::set(cx, Walk{
+    FileTreeWalk_folder::set(cx, Walk{
         width:Width::Fix(14.), 
         height:Height::Fill, 
         margin: Margin {l: 0., t: 0., r: 2., b: 0.}
