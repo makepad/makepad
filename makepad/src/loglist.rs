@@ -208,7 +208,7 @@ impl LogList {
             self.list.tail_list = true;
         }
         
-        self.list.set_list_len(cx, bm.log_items.len());
+        self.list.set_list_len(bm.log_items.len());
         
         self.list.handle_list_scroll_bars(cx, event, &mut self.view);
         
@@ -352,7 +352,7 @@ impl LogList {
     
     pub fn draw_log_list(&mut self, cx: &mut Cx, bm: &BuildManager) {
         
-        self.list.set_list_len(cx, bm.log_items.len());
+        self.list.set_list_len(bm.log_items.len());
         
         let row_height = LogList_layout_item::base(cx).walk.height.fixed();
         

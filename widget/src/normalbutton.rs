@@ -23,17 +23,16 @@ instance_float!(NormalButton_glow_size);
 impl NormalButton {
     pub fn style(cx: &mut Cx) -> Self {
         Self {
-            class:ThemeBase::id(),
-            //bg_layout: NormalButton_layout_bg::id(),
+            class: ThemeBase::id(),
             button: ButtonLogic::default(),
             bg: Quad::style(cx),
             text: Text::style(cx, TextStyle_normal::id()),
-            animator: Animator::default(),//NormalButton_anim_default::base(cx)),
+            animator: Animator::default(), //NormalButton_anim_default::base(cx)),
             _bg_area: Area::Empty,
         }
     }
     
-    pub fn def_theme(cx: &mut Cx){
+    pub fn def_theme(cx: &mut Cx) {
         NormalButton_layout_bg::set_base(cx, Layout {
             align: Align::center(),
             walk: Walk {
@@ -82,9 +81,9 @@ impl NormalButton {
                 df_blur = 2.;
                 return df_glow(glow_color, glow_size);
             }
-        })));    
+        })));
     }
-
+    
     pub fn handle_button(&mut self, cx: &mut Cx, event: &mut Event) -> ButtonEvent {
         //let mut ret_event = ButtonEvent::None;
         let animator = &mut self.animator;
@@ -102,8 +101,8 @@ impl NormalButton {
         let class = self.class;
         
         self.bg.shader = NormalButton_shader_bg::class(cx, class);
-
-        self.animator.init(cx, |cx| NormalButton_anim_default::class(cx, class));
+        
+        self.animator.init(cx, | cx | NormalButton_anim_default::class(cx, class));
         
         self.bg.color = self.animator.last_color(cx, Quad_color::id());
         
@@ -113,9 +112,9 @@ impl NormalButton {
         
         bg_inst.push_last_color(cx, &self.animator, NormalButton_border_color::id());
         bg_inst.push_last_float(cx, &self.animator, NormalButton_glow_size::id());
-
+        
         self.text.draw_text(cx, label);
-
+        
         self._bg_area = self.bg.end_quad(cx, &bg_inst);
         self.animator.update_area_refs(cx, self._bg_area);
     }

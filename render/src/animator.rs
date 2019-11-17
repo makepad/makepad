@@ -427,6 +427,11 @@ impl Animator {
         }
     }
     
+    pub fn push_area(&mut self, cx: &mut Cx, area: Area, time: f64) {
+        // we fetch a write pointer to area
+        // lookup our last values and fetch offsets
+        // write directly
+    }
     
     pub fn write_area(&mut self, cx: &mut Cx, area: Area, time: f64) {
         
