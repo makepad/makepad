@@ -76,18 +76,33 @@ impl ColorBlend {
     }
 }
 
+pub trait ThemeColor {
+    fn id() -> ColorId;
+    fn store() -> ShVarStore {
+        ShVarStore::UniformColor(Self::id())
+    }
+    fn set(cx: &mut Cx, value: Color) {
+        cx.theme_colors.insert((Self::id(), ThemeBase::id()), value);
+    }
+    fn set_class(cx: &mut Cx, class: ClassId, value: Color) {
+        cx.theme_colors.insert((Self::id(), class), value);
+    }
+    fn get(cx: &Cx) -> Color {
+        *cx.theme_colors.get(&(Self::id(), ThemeBase::id())).expect("Cannot find ColorId")
+    }
+    fn get_class(cx: &Cx, class: ClassId) -> Color {
+        if let Some(color) = cx.theme_colors.get(&(Self::id(), class)) {return *color};
+        Self::get(cx)
+    }
+}
+
 #[macro_export]
 macro_rules!theme_color {
     ( $ name: ident) => {
         #[allow(non_camel_case_types)]
         pub struct $ name();
-        impl $ name {
-            pub fn store() -> ShVarStore {ShVarStore::UniformColor( $ name::id())}
-            pub fn id() -> ColorId {ColorId(std::any::TypeId::of::< $ name>())}
-            pub fn set(cx: &mut Cx, value: Color) {cx.theme_colors.insert(( $ name::id(), ThemeBase::id()), value);}
-            pub fn set_class(cx: &mut Cx, class: ClassId, value: Color) {cx.theme_colors.insert(( $ name::id(), class), value);}
-            pub fn get(cx: &Cx) -> Color {*cx.theme_colors.get(&( $ name::id(), ThemeBase::id())).expect("Cannot find ColorId")}
-            pub fn get_class(cx: &Cx, class: ClassId) -> Color {if let Some(color) = cx.theme_colors.get(&( $ name::id(), class)) {return *color}; $ name::get(cx)}
+        impl ThemeColor for $ name {
+            fn id() -> ColorId {ColorId(std::any::TypeId::of::< $ name>())}
         }
     };
 }
@@ -111,17 +126,30 @@ impl TextStyleId {
     }
 }
 
+pub trait ThemeTextStyle {
+    fn id() -> TextStyleId;
+    fn set(cx: &mut Cx, value: TextStyle) {
+        cx.theme_text_styles.insert((Self::id(), ThemeBase::id()), value);
+    }
+    fn set_class(cx: &mut Cx, class: ClassId, value: TextStyle) {
+        cx.theme_text_styles.insert((Self::id(), class), value);
+    }
+    fn get(cx: &Cx) -> TextStyle {
+        cx.theme_text_styles.get(&(Self::id(), ThemeBase::id())).expect("Cannot find TextStyle").clone()
+    }
+    fn get_class(cx: &Cx, class: ClassId) -> TextStyle {
+        if let Some(ts) = cx.theme_text_styles.get(&(Self::id(), class)) {return ts.clone()};
+        Self::get(cx)
+    }
+}
+
 #[macro_export]
 macro_rules!theme_text_style {
     ( $ name: ident) => {
         #[allow(non_camel_case_types)]
         pub struct $ name();
-        impl $ name {
-            pub fn id() -> TextStyleId {TextStyleId(std::any::TypeId::of::< $ name>())}
-            pub fn set(cx: &mut Cx, value: TextStyle) {cx.theme_text_styles.insert(( $ name::id(), ThemeBase::id()), value);}
-            pub fn set_class(cx: &mut Cx, class: ClassId, value: TextStyle) {cx.theme_text_styles.insert(( $ name::id(), class), value);}
-            pub fn get(cx: &Cx) -> TextStyle {cx.theme_text_styles.get(&( $ name::id(), ThemeBase::id())).expect("Cannot find TextStyle").clone()}
-            pub fn get_class(cx: &Cx, class: ClassId) -> TextStyle {if let Some(ts) = cx.theme_text_styles.get(&( $ name::id(), class)) {return ts.clone()}; $ name::get(cx)}
+        impl ThemeTextStyle for $ name {
+            fn id() -> TextStyleId {TextStyleId(std::any::TypeId::of::< $ name>())}
         }
     };
 }
@@ -142,18 +170,30 @@ impl LayoutId {
     }
 }
 
+pub trait ThemeLayout {
+    fn id() -> LayoutId;
+    fn set(cx: &mut Cx, value: Layout) {
+        cx.theme_layouts.insert((Self::id(), ThemeBase::id()), value);
+    }
+    fn set_class(cx: &mut Cx, class: ClassId, value: Layout) {
+        cx.theme_layouts.insert((Self::id(), class), value);
+    }
+    fn get(cx: &Cx) -> Layout {
+        *cx.theme_layouts.get(&(Self::id(), ThemeBase::id())).expect("Cannot find Layout")
+    }
+    fn get_class(cx: &Cx, class: ClassId) -> Layout {
+        if let Some(l) = cx.theme_layouts.get(&(Self::id(), class)) {return *l};
+        Self::get(cx)
+    }
+}
 
 #[macro_export]
 macro_rules!theme_layout {
     ( $ name: ident) => {
         #[allow(non_camel_case_types)]
         pub struct $ name();
-        impl $ name {
-            pub fn id() -> LayoutId {LayoutId(std::any::TypeId::of::< $ name>())}
-            pub fn set(cx: &mut Cx, value: Layout) {cx.theme_layouts.insert(( $ name::id(), ThemeBase::id()), value);}
-            pub fn set_class(cx: &mut Cx, class: ClassId, value: Layout) {cx.theme_layouts.insert(( $ name::id(), class), value);}
-            pub fn get(cx: &Cx) -> Layout {*cx.theme_layouts.get(&( $ name::id(), ThemeBase::id())).expect("Cannot find Layout")}
-            pub fn get_class(cx: &Cx, class: ClassId) -> Layout {if let Some(l) = cx.theme_layouts.get(&( $ name::id(), class)) {return *l}; $ name::get(cx)}
+        impl ThemeLayout for $ name {
+            fn id() -> LayoutId {LayoutId(std::any::TypeId::of::< $ name>())}
         }
     };
 }
@@ -173,17 +213,30 @@ impl WalkId {
     }
 }
 
+pub trait ThemeWalk {
+    fn id() -> WalkId;
+    fn set(cx: &mut Cx, value: Walk) {
+        cx.theme_walks.insert((Self::id(), ThemeBase::id()), value);
+    }
+    fn set_class(cx: &mut Cx, class: ClassId, value: Walk) {
+        cx.theme_walks.insert((Self::id(), class), value);
+    }
+    fn get(cx: &Cx) -> Walk {
+        *cx.theme_walks.get(&(Self::id(), ThemeBase::id())).expect("Cannot find WalkId")
+    }
+    fn get_class(cx: &Cx, class: ClassId) -> Walk {
+        if let Some(w) = cx.theme_walks.get(&(Self::id(), class)) {return *w};
+        Self::get(cx)
+    }
+}
+
 #[macro_export]
 macro_rules!theme_walk {
     ( $ name: ident) => {
         #[allow(non_camel_case_types)]
         pub struct $ name();
-        impl $ name {
-            pub fn id() -> WalkId {WalkId(std::any::TypeId::of::< $ name>())}
-            pub fn set(cx: &mut Cx, value: Walk) {cx.theme_walks.insert(( $ name::id(), ThemeBase::id()), value);}
-            pub fn set_class(cx: &mut Cx, class: ClassId, value: Walk) {cx.theme_walks.insert(( $ name::id(), class), value);}
-            pub fn get(cx: &Cx) -> Walk {*cx.theme_walks.get(&( $ name::id(), ThemeBase::id())).expect("Cannot find WalkId")}
-            pub fn get_class(cx: &Cx, class: ClassId) -> Walk {if let Some(w) = cx.theme_walks.get(&( $ name::id(), class)) {return *w}; $ name::get(cx)}
+        impl ThemeWalk for $ name {
+            fn id() -> WalkId {WalkId(std::any::TypeId::of::< $ name>())}
         }
     };
 }
@@ -203,17 +256,30 @@ impl AnimId {
     }
 }
 
+pub trait ThemeAnim {
+    fn id() -> AnimId;
+    fn set(cx: &mut Cx, value: Anim) {
+        cx.theme_anims.insert(( Self::id(), ThemeBase::id()), value);
+    }
+    fn set_class(cx: &mut Cx, class: ClassId, value: Anim) {
+        cx.theme_anims.insert(( Self::id(), class), value);
+    }
+    fn get(cx: &Cx) -> Anim {
+        cx.theme_anims.get(&( Self::id(), ThemeBase::id())).expect("Cannot find WalkId").clone()
+    }
+    fn get_class(cx: &Cx, class: ClassId) -> Anim {
+        if let Some(a) = cx.theme_anims.get(&( Self::id(), class)) {return a.clone()};
+        Self::get(cx)
+    }
+}
+
 #[macro_export]
 macro_rules!theme_anim {
     ( $ name: ident) => {
         #[allow(non_camel_case_types)]
         pub struct $ name();
-        impl $ name {
+        impl ThemeAnim for $ name {
             pub fn id() -> AnimId {AnimId(std::any::TypeId::of::< $ name>())}
-            pub fn set(cx: &mut Cx, value: Anim) {cx.theme_anims.insert(( $ name::id(), ThemeBase::id()), value);}
-            pub fn set_class(cx: &mut Cx, class: ClassId, value: Anim) {cx.theme_anims.insert(( $ name::id(), class), value);}
-            pub fn get(cx: &Cx) -> Anim {*cx.theme_anims.get(&( $ name::id(), ThemeBase::id())).expect("Cannot find WalkId")}
-            pub fn get_class(cx: &Cx, class: ClassId) -> Anim {if let Some(a) = cx.theme_anims.get(&( $ name::id(), class)) {return *a}; $ name::get(cx)}
         }
     };
 }
