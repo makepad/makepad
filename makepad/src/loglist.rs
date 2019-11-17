@@ -18,16 +18,8 @@ pub struct LogItemDraw {
     pub text: Text,
     pub item_bg: Quad,
     pub code_icon: CodeIcon,
-    //pub item_layout: LayoutId,
     pub path_color: ColorId,
     pub message_color: ColorId,
-    //pub bg_even: ColorId,
-    //pub bg_odd: ColorId,
-    //pub bg_marked: ColorId,
-    //pub bg_odd_over: ColorId,
-    //pub bg_marked_over: ColorId,
-    //pub bg_selected: ColorId,
-    //pub bg_selected_over: ColorId
 }
 
 impl LogItemDraw {
@@ -39,17 +31,8 @@ impl LogItemDraw {
                 ..Text::style(cx, TextStyle_normal::id())
             },
             code_icon: CodeIcon::style(cx),
-            //item_layout: LayoutLogListItem::id(),
             path_color: Color_text_defocus::id(),
             message_color: Color_text_focus::id(),
-            //row_height: 20.0,
-            //bg_even: Color_bg_selected::id(),
-            //bg_odd: Color_bg_odd::id(),
-            //bg_marked: Color_bg_marked::id(),
-            //bg_selected: Color_bg_selected::id(),
-            //bg_marked_over: Color_bg_marked_over::id(),
-            //bg_selected_over: Color_bg_selected_over::id(),
-            //bg_odd_over: Color_bg_odd_over::id()
         }
     }
     
@@ -94,7 +77,7 @@ impl LogItemDraw {
     }
     
     pub fn draw_log_item(&mut self, cx: &mut Cx, list_item: &mut ListItem, log_item: &HubLogItem) {
-        self.item_bg.color = list_item.animator.last_color(cx, Quad_color::id());
+        self.item_bg.color = list_item.animator.last_color(cx, ThemeBase::id(), Quad_color::id());
 
         let bg_inst = self.item_bg.begin_quad(cx, LogListLayout_item::get(cx));//&self.get_line_layout());
         
@@ -281,7 +264,7 @@ impl LogList {
         let item_draw = &self.item_draw;
         let le = self.list.handle_list_logic(cx, event, select, | cx, item_event, item, item_index | match item_event {
             ListLogicEvent::Animate(ae) => {
-                item.animator.write_area(cx, item.animator.area, ae.time);
+                item.animator.write_area(cx, ThemeBase::id(), item.animator.area, ae.time);
             },
             ListLogicEvent::AnimEnded => {
                 item.animator.end();

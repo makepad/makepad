@@ -4,22 +4,12 @@ use crate::makepadtheme::*;
 
 #[derive(Clone)]
 pub struct FileTreeItemDraw {
-    //pub filler_walk: WalkId,
-    //pub folder_walk: WalkId,
-    //pub node_layout: LayoutId,
     pub filler_color: ColorId,
     pub filler: Quad,
     pub tree_folder_color: ColorId,
     pub tree_file_color: ColorId,
     pub tree_text: Text,
     pub node_bg: Quad,
-    //pub bg_even: ColorId,
-    //pub bg_odd: ColorId,
-    //pub bg_marked: ColorId,
-    //pub bg_odd_over: ColorId,
-    //pub bg_marked_over: ColorId,
-    //pub bg_selected: ColorId,
-    //pub bg_selected_over: ColorId
 }
 
 #[derive(Clone)]
@@ -32,11 +22,6 @@ pub struct FileTree {
     
     pub drag_bg_color: ColorId,
     pub drag_bg: Quad,
-    //pub drag_bg_layout: LayoutId,
-    
-    //    pub animator: Animator,
-    //    pub row_height: f32,
-    //    pub font_size: f32,
 }
 
 #[derive(Clone, PartialEq)]
@@ -192,8 +177,6 @@ instance_float!(FileTree_anim_pos);
 impl FileTreeItemDraw {
     fn style(cx: &mut Cx) -> Self {
         Self {
-            //filler_walk: WalkFileTreeFiller::id(),
-            //folder_walk: WalkFileTreeFolder::id(),
             tree_folder_color: Color_text_selected_focus::id(),
             tree_file_color: Color_text_deselected_focus::id(),
             tree_text: Text {z: 0.001, ..Text::style(cx, FileTreeTextStyle::id())},
@@ -204,13 +187,6 @@ impl FileTreeItemDraw {
                 z: 0.001,
                 ..Quad::style_with_shader(cx, Self::def_filler_shader(), "FileTree.filler")
             },
-            //bg_even: Color_bg_selected::id(),
-            //bg_odd: Color_bg_odd::id(),
-            //bg_marked: Color_bg_marked::id(),
-            //bg_selected: Color_bg_selected::id(),
-            //bg_marked_over: Color_bg_marked_over::id(),
-            //bg_selected_over: Color_bg_selected_over::id(),
-            //bg_odd_over: Color_bg_odd_over::id()
         }
     }
     
@@ -271,7 +247,6 @@ impl FileTree {
                 shader: cx.add_shader(Self::def_drag_bg_shader(), "FileTree.drag_bg"),
                 ..Quad::style(cx)
             },
-            //drag_bg_layout: LayoutFileTreeDragBg::id(),
             view: ScrollView {
                 scroll_v: Some(ScrollBar {
                     smoothing: Some(0.25),
@@ -283,7 +258,6 @@ impl FileTree {
                 is_overlay: true,
                 ..View::style(cx)
             },
-            //animator: Animator::new(Anim::empty()),
             _drag_move: None,
         }
     }
@@ -432,7 +406,7 @@ impl FileTree {
             
             match event.hits(cx, node_draw.animator.area, HitOpt::default()) {
                 Event::Animate(ae) => {
-                    node_draw.animator.write_area(cx, node_draw.animator.area, ae.time);
+                    node_draw.animator.write_area(cx, ThemeBase::id(), node_draw.animator.area, ae.time);
                 },
                 Event::AnimEnded(_) => {
                     node_draw.animator.end();
@@ -611,7 +585,7 @@ impl FileTree {
             
             // if we are NOT animating, we need to get change a default color.
             
-            self.item_draw.node_bg.color = node_draw.animator.last_color(cx, Quad_color::id());
+            self.item_draw.node_bg.color = node_draw.animator.last_color(cx, ThemeBase::id(), Quad_color::id());
             
             let mut node_layout = node_layout.clone();
             node_layout.walk.height = Height::Fix(row_height * scale as f32);

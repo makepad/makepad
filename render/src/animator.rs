@@ -397,7 +397,7 @@ impl Animator {
         }
     }
     
-    pub fn calc_color(&mut self, cx: &mut Cx, ident: ShInsColorId, time: f64) -> Color {
+    pub fn calc_color(&mut self, cx: &mut Cx, class:ClassId, ident: ShInsColorId, time: f64) -> Color {
         if let Some(time) = self.update_anim_track(cx, time) {
             if let Some(track_index) = self.find_track_index(ShInsId::Color(ident)) {
                 if let Track::Color(ft) = &mut self.current.as_mut().unwrap().tracks[track_index] {
@@ -408,9 +408,9 @@ impl Animator {
                 }
                 else if let Track::ColorId(ft) = &mut self.current.as_mut().unwrap().tracks[track_index] {
                     let last = Self::_last_color_id(ident, &self.last_values);
-                    let cid_ret = Track::compute_track_color_id(time, &ft.track, &mut ft.cut_init, last.blend_to_part(cx), &ft.ease);
+                    let cid_ret = Track::compute_track_color_id(time, &ft.track, &mut ft.cut_init, last.blend_to_part(cx, class), &ft.ease);
                     self.set_last_color_id(ident, cid_ret);
-                    return cid_ret.blend(cx);
+                    return cid_ret.blend(cx, class);
                 }
             }
         }
@@ -418,13 +418,13 @@ impl Animator {
         return Color::zero();
     }
     
-    pub fn last_color(&self, cx: &Cx, ident: ShInsColorId) -> Color {
+    pub fn last_color(&self, cx: &Cx, class:ClassId, ident: ShInsColorId) -> Color {
         if let Some((_, value)) = self.last_values.iter().find( | v | v.0 == ShInsId::Color(ident)) {
             if let AnimLastValue::Color(value) = value {
                 return *value
             }
             if let AnimLastValue::ColorId(value) = value {
-                return value.blend(cx)
+                return value.blend(cx, class)
             }
         }
         Color::zero()
@@ -454,13 +454,13 @@ impl Animator {
         }
     }
     
-    pub fn calc_color_id(&mut self, cx: &mut Cx, ident: ShInsColorId, time: f64) -> ColorBlend {
+    pub fn calc_color_id(&mut self, cx: &mut Cx, ident: ShInsColorId, class:ClassId, time: f64) -> ColorBlend {
         let last = self.last_color_id(cx, ident);
         let mut ret = last;
         if let Some(time) = self.update_anim_track(cx, time) {
             if let Some(track_index) = self.find_track_index(ShInsId::Color(ident)) {
                 if let Track::ColorId(ft) = &mut self.current.as_mut().unwrap().tracks[track_index] {
-                    ret = Track::compute_track_color_id(time, &ft.track, &mut ft.cut_init, last.blend_to_part(cx), &ft.ease);
+                    ret = Track::compute_track_color_id(time, &ft.track, &mut ft.cut_init, last.blend_to_part(cx, class), &ft.ease);
                 }
             }
         }
@@ -495,7 +495,7 @@ impl Animator {
         }
     }
     
-    pub fn write_area(&mut self, cx: &mut Cx, area: Area, time: f64) {
+    pub fn write_area(&mut self, cx: &mut Cx, class:ClassId, area: Area, time: f64) {
         
         if let Some(time) = self.update_anim_track(cx, time) {
             
@@ -505,9 +505,9 @@ impl Animator {
                     Track::ColorId(ft) => {
                         // ok we have a ft.ident, now what we want is to calc it and write it
                         let init = Self::_last_color_id(ft.ident, &self.last_values);
-                        let ret = Track::compute_track_color_id(time, &ft.track, &mut ft.cut_init, init.blend_to_part(cx), &ft.ease);
+                        let ret = Track::compute_track_color_id(time, &ft.track, &mut ft.cut_init, init.blend_to_part(cx, class), &ft.ease);
                         Self::_set_last_color_id(ft.ident, ret, &mut self.last_values);
-                        area.write_color(cx, ft.ident, ret.blend(cx));
+                        area.write_color(cx, ft.ident, ret.blend(cx, class));
                     },
                     Track::Color(ft) => {
                         let init = Self::_last_color(ft.ident, &self.last_values);

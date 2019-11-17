@@ -171,6 +171,10 @@ impl App {
     pub fn handle_app(&mut self, cx: &mut Cx, event: &mut Event) {
         match event {
             Event::Construct => {
+                cx.profile();
+                
+                cx.profile();
+                
                 // start the workspace
                 self.storage.init(cx);
                 if !cx.platform_type.is_desktop() {

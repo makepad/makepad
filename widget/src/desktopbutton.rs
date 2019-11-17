@@ -147,7 +147,7 @@ impl DesktopButton {
         //let mut ret_event = ButtonEvent::None;
         let animator = &mut self.animator;
         self.button.handle_button_logic(cx, event, self._bg_area, | cx, logic_event, area | match logic_event {
-            ButtonLogicEvent::Animate(ae) => animator.write_area(cx, area, ae.time),
+            ButtonLogicEvent::Animate(ae) => animator.write_area(cx, ThemeBase::id(), area, ae.time),
             ButtonLogicEvent::AnimEnded(_)=> animator.end(),
             ButtonLogicEvent::Down => animator.play_anim(cx, Self::get_down_anim(cx)),
             ButtonLogicEvent::Default=> animator.play_anim(cx, Self::get_default_anim(cx)),

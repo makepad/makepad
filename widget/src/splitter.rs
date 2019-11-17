@@ -4,6 +4,7 @@ use crate::widgettheme::*;
 
 #[derive(Clone)]
 pub struct Splitter {
+    pub class: ClassId,
     pub axis: Axis,
     pub align: SplitterAlign,
     pub pos: f32,
@@ -40,7 +41,7 @@ pub enum SplitterEvent {
 impl Splitter {
     pub fn style(cx: &mut Cx) -> Self {
         Self {
-            
+            class: ThemeBase::id(),
             axis: Axis::Vertical,
             align: SplitterAlign::First,
             pos: 0.0,
@@ -64,19 +65,19 @@ impl Splitter {
         }
     }
     
-    pub fn get_default_anim(cx: &Cx) -> Anim {
+    pub fn get_default_anim(_cx: &Cx) -> Anim {
         Anim::new(Play::Cut {duration: 0.5}, vec![
             Track::color_id(Quad_color::id(), Ease::Lin, vec![(1.0, Color_bg_splitter::id())]),
         ])
     }
     
-    pub fn get_over_anim(cx: &Cx) -> Anim {
+    pub fn get_over_anim(_cx: &Cx) -> Anim {
         Anim::new(Play::Cut {duration: 0.05}, vec![
             Track::color_id(Quad_color::id(), Ease::Lin, vec![(1.0,Color_bg_splitter_over::id())]),
         ])
     }
     
-    pub fn get_moving_anim(cx: &Cx) -> Anim {
+    pub fn get_moving_anim(_cx: &Cx) -> Anim {
         Anim::new(Play::Cut {duration: 0.2}, vec![
             Track::color_id(Quad_color::id(), Ease::Lin, vec![
                 (0.0, Color_bg_splitter_peak::id()),
@@ -101,7 +102,7 @@ impl Splitter {
     pub fn handle_splitter(&mut self, cx: &mut Cx, event: &mut Event) -> SplitterEvent {
         match event.hits(cx, self._split_area, HitOpt {margin: self._hit_state_margin, ..Default::default()}) {
             Event::Animate(ae) => {
-                self.animator.write_area(cx, self._split_area, ae.time);
+                self.animator.write_area(cx, ThemeBase::id(), self._split_area, ae.time);
             },
             Event::AnimEnded(_) => self.animator.end(),
             Event::FingerDown(fe) => {
@@ -275,10 +276,9 @@ impl Splitter {
         cx.end_turtle(Area::Empty);
         let rect = cx.get_turtle_rect();
         let origin = cx.get_turtle_origin();
-        self.split.color = self.animator.last_color(cx, Quad_color::id());
+        self.split.color = self.animator.last_color(cx, ThemeBase::id(), Quad_color::id());
         match self.axis {
             Axis::Horizontal => {
-                
                 cx.set_turtle_pos(Vec2 {x: origin.x, y: origin.y + self._calc_pos});
                 if let Ok(_) = self.split_view.begin_view(cx, Layout {
                     walk: Walk::wh(Width::Fix(rect.w), Height::Fix(self.split_size)),

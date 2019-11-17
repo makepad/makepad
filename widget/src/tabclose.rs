@@ -6,7 +6,6 @@ use crate::widgettheme::*;
 pub struct TabClose {
     pub bg: Quad,
     pub animator: Animator,
-    pub walk: WalkId,
     pub _bg_area: Area,
 }
 instance_float!(TabClose_hover);
@@ -17,12 +16,11 @@ impl TabClose {
         Self {
             bg: Quad::style_with_shader(cx, Self::def_bg_shader(), "TabClose.bg"),
             animator: Animator::new(Self::get_default_anim(cx)),
-            walk: Walk_tab_close::id(),
             _bg_area: Area::Empty,
         }
     }
     
-    pub fn get_default_anim(cx:&Cx)->Anim{
+    pub fn get_default_anim(_cx:&Cx)->Anim{
         Anim::new(Play::Cut {duration: 0.2}, vec![
             Track::color_id(Quad_color::id(), Ease::Lin, vec![(1.0, Color_text_deselected_focus::id())]),
             Track::float(TabClose_hover::id(), Ease::Lin, vec![(1.0, 0.)]),
@@ -30,7 +28,7 @@ impl TabClose {
         ])
     }
     
-    pub fn get_over_anim(cx:&Cx)->Anim{
+    pub fn get_over_anim(_cx:&Cx)->Anim{
         Anim::new(Play::Cut {duration: 0.2}, vec![
             Track::color_id(Quad_color::id(), Ease::Lin, vec![(0.0, Color_text_selected_focus::id()), (1.0, Color_text_selected_focus::id())]),
             Track::float(TabClose_hover::id(), Ease::Lin, vec![(1.0, 1.0)]),
@@ -38,7 +36,7 @@ impl TabClose {
         ])
     }
     
-    pub fn get_down_anim(cx:&Cx)->Anim{
+    pub fn get_down_anim(_cx:&Cx)->Anim{
         Anim::new(Play::Cut {duration: 0.2}, vec![
             Track::color_id(Quad_color::id(), Ease::Lin, vec![(0.0, Color_text_selected_focus::id()), (1.0, Color_text_selected_focus::id())]),
             Track::float(TabClose_hover::id(), Ease::Lin, vec![(1.0, 1.0)]),
@@ -71,7 +69,7 @@ impl TabClose {
             margin: Some(Margin {l: 5., t: 5., r: 5., b: 5.}),
             ..Default::default()
         }) {
-            Event::Animate(ae) => self.animator.write_area(cx, self._bg_area, ae.time),
+            Event::Animate(ae) => self.animator.write_area(cx, ThemeBase::id(), self._bg_area, ae.time),
             Event::FingerDown(_fe) => {
                 self.animator.play_anim(cx, Self::get_down_anim(cx));
                 cx.set_down_mouse_cursor(MouseCursor::Hand);
@@ -105,8 +103,8 @@ impl TabClose {
     }
     
     pub fn draw_tab_close(&mut self, cx: &mut Cx) {
-        self.bg.color = self.animator.last_color(cx, Quad_color::id());
-        let bg_inst = self.bg.draw_quad(cx, self.walk.get(cx));
+        self.bg.color = self.animator.last_color(cx, ThemeBase::id(), Quad_color::id());
+        let bg_inst = self.bg.draw_quad(cx, Walk_tab_close::get(cx));
         bg_inst.push_last_float(cx, &self.animator, TabClose_hover::id());
         bg_inst.push_last_float(cx, &self.animator, TabClose_down::id());
         self._bg_area = bg_inst.into_area();

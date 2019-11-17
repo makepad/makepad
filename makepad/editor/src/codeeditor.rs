@@ -93,51 +93,6 @@ pub struct CodeEditor {
     
     pub _last_lag_mutation_id: u64
 }
-/*
-#[derive(Clone)]
-pub struct CodeEditorColors {
-    // UI
-    pub bg: Color,
-    pub gutter_bg: Color,
-    pub indent_line_unknown: Color,
-    pub indent_line_fn: Color,
-    pub indent_line_typedef: Color,
-    pub indent_line_looping: Color,
-    pub indent_line_flow: Color,
-    pub selection: Color,
-    pub selection_defocus: Color,
-    pub highlight: Color,
-    pub cursor: Color,
-    pub cursor_row: Color,
-    pub paren_pair_match: Color,
-    pub paren_pair_fail: Color,
-    pub line_number_normal: Color,
-    pub line_number_highlight: Color,
-    pub marker_error: Color,
-    pub marker_warning: Color,
-    pub marker_log: Color,
-    
-    pub whitespace: Color,
-    pub keyword: Color,
-    pub flow: Color,
-    pub looping: Color,
-    pub identifier: Color,
-    pub call: Color,
-    pub type_name: Color,
-    pub string: Color,
-    pub number: Color,
-    pub comment: Color,
-    pub doc_comment: Color,
-    pub paren_d1: Color,
-    pub paren_d2: Color,
-    pub operator: Color,
-    pub delimiter: Color,
-    pub unexpected: Color,
-    
-    pub warning: Color,
-    pub error: Color,
-    pub defocus: Color
-}*/
 
 #[derive(Clone, PartialEq)]
 pub enum CodeEditorEvent {
@@ -164,56 +119,6 @@ impl CodeEditor {
     pub fn style(cx: &mut Cx) -> Self {
         Self {
             cursors: TextCursorSet::new(),
-            /*
-            colors: CodeEditorColors {
-                bg: color256(30, 30, 30),
-                gutter_bg: color256(30, 30, 30),
-                indent_line_unknown: color("#5"),
-                indent_line_fn: color256(220, 220, 174),
-                indent_line_typedef: color256(91, 155, 211),
-                indent_line_looping: color("darkorange"),
-                indent_line_flow: color256(196, 133, 190),
-                selection: color256(42, 78, 117),
-                selection_defocus: color256(75, 75, 75),
-                highlight: color256a(75, 75, 95, 128),
-                cursor: color256(176, 176, 176),
-                cursor_row: color256(45, 45, 45),
-                
-                paren_pair_match: color256(255, 255, 255),
-                paren_pair_fail: color256(255, 0, 0),
-                
-                marker_error: color256(200, 0, 0),
-                marker_warning: color256(0, 200, 0),
-                marker_log: color256(200, 200, 200),
-                line_number_normal: color256(136, 136, 136),
-                line_number_highlight: color256(212, 212, 212),
-                
-                whitespace: color256(110, 110, 110),
-                
-                keyword: color256(91, 155, 211),
-                flow: color256(196, 133, 190),
-                looping: color("darkorange"),
-                identifier: color256(212, 212, 212),
-                call: color256(220, 220, 174),
-                type_name: color256(86, 201, 177),
-                
-                string: color256(204, 145, 123),
-                number: color256(182, 206, 170),
-                
-                comment: color256(99, 141, 84),
-                doc_comment: color256(120, 171, 104),
-                paren_d1: color256(212, 212, 212),
-                //color("#eee"),
-                paren_d2: color256(212, 212, 212),
-                //color("#888"),
-                operator: color256(212, 212, 212),
-                delimiter: color256(212, 212, 212),
-                unexpected: color256(255, 0, 0),
-                
-                warning: color256(225, 229, 112),
-                error: color256(254, 0, 0),
-                defocus: color256(128, 128, 128),
-            },*/
             indent_lines: Quad {
                 z: 0.001,
                 ..Quad::style_with_shader(cx, Self::def_indent_lines_shader(), "Editor.indent_lines")
@@ -235,10 +140,7 @@ impl CodeEditor {
                 ..Quad::style_with_shader(cx, Self::def_selection_shader(), "Editor.selection")
             },
             token_highlight: Quad::style_with_shader(cx, Self::def_token_highlight_shader(), "Editor.token_highlight"),
-            //select_highlight:Quad{
-            // shader_id:cx.add_shader(select_highlight_sh, "Editor.select_highlight"),
-            // ..Style::style(cx)
-            //},
+
             cursor: Quad::style_with_shader(cx, Self::def_cursor_shader(), "Editor.cursor"),
             cursor_row: Quad::style_with_shader(cx, Self::def_cursor_row_shader(), "Editor.cursor_row"),
             paren_pair: Quad::style_with_shader(cx, Self::def_paren_pair_shader(), "Editor.paren_pair"),

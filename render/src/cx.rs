@@ -124,7 +124,7 @@ pub struct Cx {
     pub event_id: u64,
     pub timer_id: u64,
     pub signal_id: usize,
-
+    
     pub last_key_focus: Area,
     pub key_focus: Area,
     pub keys_down: Vec<KeyEvent>,
@@ -148,10 +148,11 @@ pub struct Cx {
 
     pub signals: Vec<(Signal, usize)>,
 
-    pub theme_colors: HashMap<ColorId, Color>,
-    pub theme_text_styles: HashMap<TextStyleId, TextStyle>,
-    pub theme_layouts: HashMap<LayoutId, Layout>,
-    pub theme_walks: HashMap<WalkId, Walk>, 
+    pub theme_colors: HashMap<(ColorId,ClassId), Color>,
+    pub theme_text_styles: HashMap<(TextStyleId,ClassId), TextStyle>,
+    pub theme_layouts: HashMap<(LayoutId,ClassId), Layout>,
+    pub theme_walks: HashMap<(WalkId,ClassId), Walk>, 
+    pub theme_anims: HashMap<(AnimId,ClassId), Anim>, 
 
     pub panic_now: bool,
     pub panic_redraw: bool,
@@ -243,12 +244,11 @@ impl Default for Cx {
             finger_over_last_area: Area::Empty,
             _finger_over_last_area: Area::Empty,
 
-            //style_values: HashMap::new(),
-            
             theme_colors: HashMap::new(),
             theme_text_styles: HashMap::new(),
             theme_layouts: HashMap::new(),
             theme_walks: HashMap::new(),
+            theme_anims: HashMap::new(),
 
             playing_anim_areas: Vec::new(),
             ended_anim_areas: Vec::new(),

@@ -6,8 +6,8 @@ theme_text_style!(TextStyle_button_title);
 theme_text_style!(TextStyle_window_caption);
 theme_text_style!(TextStyle_window_menu);
 
-theme_layout!(Layout_button);
-theme_layout!(Layout_tab);
+theme_layout!(NormalButtonLayout_bg);
+theme_layout!(TabLayout_bg);
 theme_layout!(Layout_window_menu);
 
 theme_walk!(Walk_tab_close);
@@ -60,7 +60,7 @@ pub fn set_widget_theme_values(cx: &mut Cx) {
     TextStyle_normal::set(cx, default_text.clone());
     TextStyle_tab_title::set(cx, default_text.clone());
     
-    Layout_button::set(cx, Layout {
+    NormalButtonLayout_bg::set(cx, Layout {
         align: Align::center(),
         walk: Walk {
             width: Width::Compute,
@@ -71,7 +71,7 @@ pub fn set_widget_theme_values(cx: &mut Cx) {
         ..Default::default()
     });
     
-    Layout_tab::set(cx, Layout {
+    TabLayout_bg::set(cx, Layout {
         align: Align::left_center(),
         walk: Walk::wh(Width::Compute, Height::Fix(40.)),
         padding: Padding {l: 16.0, t: 1.0, r: 16.0, b: 0.0},
