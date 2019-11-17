@@ -153,7 +153,7 @@ pub struct Cx {
     pub theme_layouts: HashMap<(LayoutId,ClassId), Layout>,
     pub theme_walks: HashMap<(WalkId,ClassId), Walk>, 
     pub theme_anims: HashMap<(AnimId,ClassId), Anim>, 
-
+    pub theme_shaders: HashMap<(ShaderId,ClassId), Shader>,
     pub panic_now: bool,
     pub panic_redraw: bool,
     
@@ -249,6 +249,7 @@ impl Default for Cx {
             theme_layouts: HashMap::new(),
             theme_walks: HashMap::new(),
             theme_anims: HashMap::new(),
+            theme_shaders: HashMap::new(),
 
             playing_anim_areas: Vec::new(),
             ended_anim_areas: Vec::new(),

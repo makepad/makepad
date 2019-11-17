@@ -4,9 +4,10 @@ use crate::widgettheme::*;
 
 #[derive(Clone)]
 pub struct NormalButton {
+    pub class: ClassId,
     pub button: ButtonLogic,
     pub bg: Quad,
-    pub bg_layout: LayoutId,
+    //pub bg_layout: LayoutId,
     pub text: Text,
     pub animator: Animator,
     pub _bg_area: Area,
@@ -18,7 +19,8 @@ instance_float!(NormalButton_glow_size);
 impl NormalButton {
     pub fn style(cx: &mut Cx) -> Self {
         Self {
-            bg_layout: NormalButtonLayout_bg::id(),
+            class:ThemeBase::id(),
+            //bg_layout: NormalButton_layout_bg::id(),
             button: ButtonLogic::default(),
             bg: Quad::style_with_shader(cx, Self::def_bg_shader(), "Button.bg"),
             text: Text::style(cx, TextStyle_normal::id()),
@@ -76,8 +78,9 @@ impl NormalButton {
     pub fn handle_button(&mut self, cx: &mut Cx, event: &mut Event) -> ButtonEvent {
         //let mut ret_event = ButtonEvent::None;
         let animator = &mut self.animator;
+        let class = self.class;
         self.button.handle_button_logic(cx, event, self._bg_area, | cx, logic_event, area | match logic_event {
-            ButtonLogicEvent::Animate(ae) => animator.write_area(cx, ThemeBase::id(), area, ae.time),
+            ButtonLogicEvent::Animate(ae) => animator.write_area(cx, class, area, ae.time),
             ButtonLogicEvent::AnimEnded(_) => animator.end(),
             ButtonLogicEvent::Down => animator.play_anim(cx, Self::get_down_anim(cx)),
             ButtonLogicEvent::Default => animator.play_anim(cx, Self::get_default_anim(cx)),
@@ -86,11 +89,11 @@ impl NormalButton {
     }
     
     pub fn draw_button(&mut self, cx: &mut Cx, label: &str) {
-        self.bg.color = self.animator.last_color(cx, ThemeBase::id(), Quad_color::id());
+        self.bg.color = self.animator.last_color(cx, self.class, Quad_color::id());
         
-        let bg_inst = self.bg.begin_quad(cx, self.bg_layout.get(cx));
+        let bg_inst = self.bg.begin_quad(cx, NormalButton_layout_bg::get_class(cx, self.class));
         
-        bg_inst.push_last_color(cx, ThemeBase::id(), &self.animator, NormalButton_border_color::id());
+        bg_inst.push_last_color(cx, self.class, &self.animator, NormalButton_border_color::id());
         bg_inst.push_last_float(cx, &self.animator, NormalButton_glow_size::id());
 
         self.text.draw_text(cx, label);

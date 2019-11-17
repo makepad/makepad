@@ -873,7 +873,7 @@ impl JSTokenizer {
                     out.extend(tp.cur_chunk());
                 },
                 // these are followeable by non unary operators
-                TokenType::Identifier | TokenType::BuiltinType | TokenType::TypeName |
+                TokenType::Identifier | TokenType::BuiltinType | TokenType::TypeName | TokenType::ThemeName |
                 TokenType::Call | TokenType::String | TokenType::Regex | TokenType::Number |
                 TokenType::Bool | TokenType::Unexpected | TokenType::Error | TokenType::Warning | TokenType::Defocus=> {
                     is_unary_operator = false;

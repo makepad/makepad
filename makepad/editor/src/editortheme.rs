@@ -23,6 +23,7 @@ theme_color!(Color_code_marker_warning);
 theme_color!(Color_code_marker_log);
 theme_color!(Color_code_line_number_normal);
 theme_color!(Color_code_line_number_highlight);
+
 theme_color!(Color_code_whitespace);
 theme_color!(Color_code_keyword);
 theme_color!(Color_code_flow);
@@ -30,6 +31,7 @@ theme_color!(Color_code_looping);
 theme_color!(Color_code_identifier);
 theme_color!(Color_code_call);
 theme_color!(Color_code_type_name);
+theme_color!(Color_code_theme_name);
 theme_color!(Color_code_string);
 theme_color!(Color_code_number);
 theme_color!(Color_code_comment);
@@ -102,6 +104,7 @@ pub fn set_dark_editor_theme(cx: &mut Cx) {
     Color_code_identifier::set(cx, color256(212, 212, 212));
     Color_code_call::set(cx, color256(220, 220, 174));
     Color_code_type_name::set(cx, color256(86, 201, 177));
+    Color_code_theme_name::set(cx, color("gold"));
     
     Color_code_string::set(cx, color256(204, 145, 123));
     Color_code_number::set(cx, color256(182, 206, 170));

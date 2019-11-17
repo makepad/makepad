@@ -6,7 +6,6 @@ theme_text_style!(TextStyle_button_title);
 theme_text_style!(TextStyle_window_caption);
 theme_text_style!(TextStyle_window_menu);
 
-theme_layout!(NormalButtonLayout_bg);
 theme_layout!(TabLayout_bg);
 theme_layout!(Layout_window_menu);
 
@@ -39,10 +38,58 @@ theme_color!(Color_text_deselected_focus);
 theme_color!(Color_text_selected_defocus);
 theme_color!(Color_text_deselected_defocus);
 
+
+// NormalButton styles
+
+
+theme_layout!(NormalButton_layout_bg);
+theme_anim!(NormalButton_anim_default);
+theme_anim!(NormalButton_anim_over);
+theme_anim!(NormalButton_anim_down);
+theme_shader!(NormalButton_shader_bg);
 instance_color!(NormalButton_border_color);
 instance_float!(NormalButton_glow_size);
 
+pub fn set_normal_button_values(cx:&mut Cx){
+    NormalButton_layout_bg::set(cx, Layout {
+        align: Align::center(),
+        walk: Walk {
+            width: Width::Compute,
+            height: Height::Compute,
+            margin: Margin::all(1.0),
+        },
+        padding: Padding {l: 16.0, t: 14.0, r: 16.0, b: 14.0},
+        ..Default::default()
+    });
+    
+    NormalButton_anim_default::set(cx, Anim::new(Play::Cut {duration: 0.5}, vec![
+        Track::color_id(Quad_color::id(), Ease::Lin, vec![(1., Color_bg_normal::id())]),
+        Track::float(NormalButton_glow_size::id(), Ease::Lin, vec![(1., 0.0)]),
+        Track::color(NormalButton_border_color::id(), Ease::Lin, vec![(1., color("#6"))]),
+    ]));
+    
+    NormalButton_anim_over::set(cx, Anim::new(Play::Cut {duration: 0.05}, vec![
+        Track::color(Quad_color::id(), Ease::Lin, vec![(1., color("#999"))]),
+        Track::float(NormalButton_glow_size::id(), Ease::Lin, vec![(1., 1.0)]),
+        Track::color(NormalButton_border_color::id(), Ease::Lin, vec![(1., color("white"))]),
+    ]));
+    
+    NormalButton_anim_down::set(cx, Anim::new(Play::Cut {duration: 0.2}, vec![
+        Track::color(Quad_color::id(), Ease::Lin, vec![(0.0, color("#f")), (1.0, color("#6"))]),
+        Track::float(NormalButton_glow_size::id(), Ease::Lin, vec![(0.0, 1.0), (1.0, 1.0)]),
+        Track::color(NormalButton_border_color::id(), Ease::Lin, vec![(0.0, color("white")), (1.0, color("white"))]),
+    ]));
+    
+    // lets define the shader
+    
+}
+
+
+
+
+
 pub fn set_widget_theme_values(cx: &mut Cx) {
+
     let default_text = TextStyle {
         font_path: "resources/Ubuntu-R.ttf".to_string(),
         font_id: None,
@@ -60,16 +107,6 @@ pub fn set_widget_theme_values(cx: &mut Cx) {
     TextStyle_normal::set(cx, default_text.clone());
     TextStyle_tab_title::set(cx, default_text.clone());
     
-    NormalButtonLayout_bg::set(cx, Layout {
-        align: Align::center(),
-        walk: Walk {
-            width: Width::Compute,
-            height: Height::Compute,
-            margin: Margin::all(1.0),
-        },
-        padding: Padding {l: 16.0, t: 14.0, r: 16.0, b: 14.0},
-        ..Default::default()
-    });
     
     TabLayout_bg::set(cx, Layout {
         align: Align::left_center(),
@@ -90,6 +127,9 @@ pub fn set_widget_theme_values(cx: &mut Cx) {
         line_wrap: LineWrap::None,
         ..Default::default()
     });
+
+    set_normal_button_values(cx);
+
 }
 
 pub fn set_dark_widget_theme(cx: &mut Cx) {
@@ -119,8 +159,3 @@ pub fn set_dark_widget_theme(cx: &mut Cx) {
     Color_text_selected_defocus::set(cx, color256(157, 157, 157));
     Color_text_deselected_defocus::set(cx, color256(130, 130, 130));
 }
-
-
-// TabClose styles
-
-

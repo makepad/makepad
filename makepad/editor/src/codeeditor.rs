@@ -1233,6 +1233,12 @@ impl CodeEditor {
                     }
                     Color_code_type_name::get(cx)
                 },
+                TokenType::ThemeName => {
+                    if chunk == &self._highlight_token[0..] {
+                        self.draw_token_highlight_quad(cx, geom);
+                    }
+                    Color_code_theme_name::get(cx)
+                },
                 TokenType::Regex => Color_code_string::get(cx),
                 TokenType::String => Color_code_string::get(cx),
                 TokenType::Number => Color_code_number::get(cx),

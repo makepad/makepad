@@ -1,7 +1,6 @@
 // Shared shader-compiler code for generating GLSL and Metal shading language
 
 use std::hash::{Hash, Hasher};
-use std::any::TypeId;
 use crate::shader::*;
 
 #[derive(Default, Clone, PartialEq)]

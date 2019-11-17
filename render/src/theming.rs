@@ -279,11 +279,52 @@ macro_rules!theme_anim {
         #[allow(non_camel_case_types)]
         pub struct $ name();
         impl ThemeAnim for $ name {
-            pub fn id() -> AnimId {AnimId(std::any::TypeId::of::< $ name>())}
+            fn id() -> AnimId {AnimId(std::any::TypeId::of::< $ name>())}
         }
     };
 }
 
+
+// Shaders
+
+#[derive(PartialEq, Copy, Clone, Debug, Hash, Eq)]
+pub struct ShaderId(pub TypeId);
+
+impl ShaderId {
+    pub fn get(&self, cx: &Cx) -> Shader {cx.theme_shaders.get(&(*self, ThemeBase::id())).expect("Cannot find WalkId").clone()}
+    pub fn get_class(&self, cx: &Cx, class: ClassId) -> Shader {
+        if let Some(a) = cx.theme_shaders.get(&(*self, class)) {return a.clone()};
+        self.get(cx)
+    }
+}
+
+pub trait ThemeShader {
+    fn id() -> ShaderId;
+    fn set(cx: &mut Cx, value: Shader) {
+        cx.theme_shaders.insert(( Self::id(), ThemeBase::id()), value);
+    }
+    fn set_class(cx: &mut Cx, class: ClassId, value: Shader) {
+        cx.theme_shaders.insert(( Self::id(), class), value);
+    }
+    fn get(cx: &Cx) -> Shader {
+        cx.theme_shaders.get(&( Self::id(), ThemeBase::id())).expect("Cannot find WalkId").clone()
+    }
+    fn get_class(cx: &Cx, class: ClassId) -> Shader {
+        if let Some(a) = cx.theme_shaders.get(&( Self::id(), class)) {return a.clone()};
+        Self::get(cx)
+    }
+}
+
+#[macro_export]
+macro_rules!theme_shader {
+    ( $ name: ident) => {
+        #[allow(non_camel_case_types)]
+        pub struct $ name();
+        impl ThemeShader for $ name {
+            fn id() -> ShaderId {ShaderId(std::any::TypeId::of::< $ name>())}
+        }
+    };
+}
 
 
 // Classes

@@ -192,7 +192,7 @@ impl Cx {
     
     pub fn load_theme_fonts(&mut self) {
         // lets load all fonts that aren't loaded yet
-        for (key, text_style) in &mut self.theme_text_styles{
+        for (_key, text_style) in &mut self.theme_text_styles{
             // lets see if we have it.
             if let Some(id) = self.fonts.iter().position(|f| f.path == text_style.font_path){
                 text_style.font_id = Some(id);
