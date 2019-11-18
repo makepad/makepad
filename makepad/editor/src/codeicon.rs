@@ -1,10 +1,8 @@
 use render::*;
-use crate::editortheme::*;
 
 #[derive(Clone)]
 pub struct CodeIcon {
     pub quad: Quad,
-    pub walk: WalkId,
 }
 
 pub enum CodeIconType {
@@ -32,12 +30,21 @@ instance_float!(InstanceIconId);
 impl CodeIcon {
     pub fn style(cx: &mut Cx) -> Self {
         Self {
-            walk: WalkCodeIcon::id(),
             quad: Quad {
                 shader: cx.add_shader(Self::def_code_icon_shader(), "CodeIcon"),
                 ..Quad::style(cx)
             }
         }
+    }
+    
+    pub fn walk()->WalkId{walk_id!()}
+    
+    pub fn theme(cx:&mut Cx){
+        Self::walk().set_base(cx, Walk{
+            width: Width::Fix(14.0),
+            height: Height::Fix(14.0),
+            margin: Margin {l: 0., t: 0.5, r: 4., b: 0.},
+        })
     }
 
     pub fn def_code_icon_shader() -> ShaderGen {
@@ -129,7 +136,7 @@ impl CodeIcon {
     
     pub fn draw_icon(&mut self, cx: &mut Cx, icon_type: CodeIconType) -> InstanceArea {
         
-        let inst = self.quad.draw_quad(cx, self.walk.base(cx));
+        let inst = self.quad.draw_quad(cx, Self::walk().base(cx));
         inst.push_float(cx, icon_type.shader_float());
         inst
     }

@@ -1,9 +1,5 @@
 
 use crate::cx::*;
-//use crate::quad::*; 
-//use std::iter::Peekable;
-
-theme_text_style!(ThemeTextDefault);
 
 #[derive(Clone)]
 pub enum Wrapping {
@@ -43,6 +39,7 @@ impl Default for TextStyle {
 
 #[derive(Clone)]
 pub struct Text {
+    pub class: ClassId,
     pub text_style: TextStyleId,
     pub shader: Shader,
     pub color: Color,
@@ -51,14 +48,6 @@ pub struct Text {
     pub font_scale: f32,
     pub do_h_scroll: bool,
     pub do_v_scroll: bool,
-    /*
-    pub font: Font,
-    pub font_size: f32,
-    pub brightness: f32,
-    pub curve: f32,
-    pub line_spacing: f32,
-    pub top_drop: f32,
-    pub height_factor: f32,*/
 }
 
 instance_vec4!(Text_font_tc);
@@ -80,10 +69,11 @@ uniform_float!(Text_curve);
 uniform_vec2!(Text_view_do_scroll);
 
 impl Text {
-    pub fn style(cx: &mut Cx, text_style: TextStyleId) -> Self {
+    pub fn style(cx: &mut Cx, text_style:TextStyleId) -> Self {
         Self {
-            shader: cx.add_shader(Self::def_text_shader(), "TextAtlas"),
+            class: ClassId::base(),
             text_style: text_style,
+            shader: cx.add_shader(Self::def_text_shader(), "TextAtlas"),
             do_h_scroll: true,
             do_v_scroll: true,
             z: 0.0,

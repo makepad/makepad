@@ -74,7 +74,7 @@ impl HttpServer {
                         let url = &line[0..space];
                         let url_lc = url.to_string();
                         url_lc.to_lowercase();
-                        if url_lc.ends_with("key.ron") || url.find("..").is_some() || url.starts_with("/") {
+                        if url_lc.ends_with("/key.ron") || url.find("..").is_some() || url.starts_with("/") {
                             let _ = tcp_stream.shutdown(Shutdown::Both);
                             return
                         }

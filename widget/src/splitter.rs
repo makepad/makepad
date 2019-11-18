@@ -41,7 +41,7 @@ pub enum SplitterEvent {
 impl Splitter {
     pub fn style(cx: &mut Cx) -> Self {
         Self {
-            class: ThemeBase::id(),
+            class: ClassId::base(),
             axis: Axis::Vertical,
             align: SplitterAlign::First,
             pos: 0.0,
@@ -67,21 +67,21 @@ impl Splitter {
     
     pub fn get_default_anim(cx: &Cx) -> Anim {
         Anim::new(Play::Cut {duration: 0.5}, vec![
-            Track::color(Quad_color::id(), Ease::Lin, vec![(1.0, Color_bg_splitter::base(cx))]),
+            Track::color(Quad_color::id(), Ease::Lin, vec![(1.0, Theme::color_bg_splitter().base(cx))]),
         ])
     }
     
     pub fn get_over_anim(cx: &Cx) -> Anim {
         Anim::new(Play::Cut {duration: 0.05}, vec![
-            Track::color(Quad_color::id(), Ease::Lin, vec![(1.0,Color_bg_splitter_over::base(cx))]),
+            Track::color(Quad_color::id(), Ease::Lin, vec![(1.0,Theme::color_bg_splitter_over().base(cx))]),
         ])
     }
     
     pub fn get_moving_anim(cx: &Cx) -> Anim {
         Anim::new(Play::Cut {duration: 0.2}, vec![
             Track::color(Quad_color::id(), Ease::Lin, vec![
-                (0.0, Color_bg_splitter_peak::base(cx)),
-                (1.0, Color_bg_splitter_drag::base(cx))
+                (0.0, Theme::color_bg_splitter_peak().base(cx)),
+                (1.0, Theme::color_bg_splitter_drag().base(cx))
             ]),
         ])
     }

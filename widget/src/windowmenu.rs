@@ -24,7 +24,7 @@ impl MenuItemDraw {
         Self {
             text: Text {
                 wrapping: Wrapping::Word,
-                ..Text::style(cx, TextStyle_window_menu::id())
+                ..Text::style(cx, Self::text_style_menu_label())
             },
             //item_layout: Layout_window_menu::id(cx),
             item_bg: Quad::style(cx),
@@ -38,7 +38,7 @@ impl MenuItemDraw {
     pub fn get_default_anim(&self, cx: &Cx) -> Anim {
         Anim::new(Play::Chain {duration: 0.01}, vec![
             Track::color(Quad_color::id(), Ease::Lin, vec![
-                (1.0,  Color_bg_selected::base(cx))
+                (1.0,  Theme::color_bg_selected().base(cx))
             ])
         ])
     }
@@ -46,7 +46,7 @@ impl MenuItemDraw {
     pub fn get_default_anim_cut(&self, cx: &Cx) -> Anim {
         Anim::new(Play::Cut {duration: 0.01}, vec![
             Track::color(Quad_color::id(), Ease::Lin, vec![
-                (0.0, Color_bg_selected::base(cx))
+                (0.0, Theme::color_bg_selected().base(cx))
             ])
         ])
     }
@@ -54,10 +54,16 @@ impl MenuItemDraw {
     pub fn get_over_anim(&self, cx: &Cx) -> Anim {
         Anim::new(Play::Cut {duration: 0.02}, vec![
             Track::color(Quad_color::id(), Ease::Lin, vec![
-                (0., Color_bg_odd::base(cx)),
+                (0., Theme::color_bg_odd().base(cx)),
             ])
         ])
     }
+    
+    pub fn text_style_menu_label() ->TextStyleId{text_style_id!()}
+    
+    pub fn theme(cx:&mut Cx){ 
+        Self::text_style_menu_label().set_base(cx, Theme::text_style_normal().base(cx));
+    }   
     
     /*
     pub fn draw_log_path(&mut self, cx: &mut Cx, path: &str, row: usize) {

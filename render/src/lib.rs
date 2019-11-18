@@ -1,5 +1,13 @@
 #![allow(dead_code)]
 
+// shared modules
+#[macro_use]
+mod theming;
+#[macro_use]
+mod cx;
+#[macro_use]
+mod shader;
+
 #[cfg(all(not(feature="ipc"),target_os = "linux"))]
 mod cx_opengl;
 #[cfg(all(not(feature="ipc"),target_os = "linux"))]
@@ -60,13 +68,6 @@ mod cx_ipc_win32;
 #[cfg(all(feature="ipc",target_os = "windows"))]
 pub use crate::cx_ipc_win32::*;
 
-// shared modules
-#[macro_use]
-mod theming;
-#[macro_use]
-mod cx;
-#[macro_use]
-mod shader;
 mod turtle;
 mod fonts;
 mod cursor;

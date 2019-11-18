@@ -20,9 +20,19 @@ impl TabClose {
         }
     }
     
+    pub fn walk()->WalkId{walk_id!()}
+    
+    pub fn theme(cx: &mut Cx){
+        Self::walk().set_base(cx, Walk {
+            width: Width::Fix(10.),
+            height: Height::Fix(10.),
+            margin: Margin {l: -4., t: 0., r: 4., b: 0.}
+        });
+    }
+    
     pub fn get_default_anim(cx:&Cx)->Anim{
         Anim::new(Play::Cut {duration: 0.2}, vec![
-            Track::color(Quad_color::id(), Ease::Lin, vec![(1.0, Color_text_deselected_focus::base(cx))]),
+            Track::color(Quad_color::id(), Ease::Lin, vec![(1.0, Theme::color_text_deselected_focus().base(cx))]),
             Track::float(TabClose_hover::id(), Ease::Lin, vec![(1.0, 0.)]),
             Track::float(TabClose_down::id(), Ease::Lin, vec![(1.0, 0.)]),
         ])
@@ -30,7 +40,7 @@ impl TabClose {
     
     pub fn get_over_anim(cx:&Cx)->Anim{
         Anim::new(Play::Cut {duration: 0.2}, vec![
-            Track::color(Quad_color::id(), Ease::Lin, vec![(0.0, Color_text_selected_focus::base(cx)), (1.0, Color_text_selected_focus::base(cx))]),
+            Track::color(Quad_color::id(), Ease::Lin, vec![(0.0, Theme::color_text_selected_focus().base(cx)), (1.0, Theme::color_text_selected_focus().base(cx))]),
             Track::float(TabClose_hover::id(), Ease::Lin, vec![(1.0, 1.0)]),
             Track::float(TabClose_down::id(), Ease::Lin, vec![(1.0, 0.)]),
         ])
@@ -38,7 +48,7 @@ impl TabClose {
     
     pub fn get_down_anim(cx:&Cx)->Anim{
         Anim::new(Play::Cut {duration: 0.2}, vec![
-            Track::color(Quad_color::id(), Ease::Lin, vec![(0.0, Color_text_selected_focus::base(cx)), (1.0, Color_text_selected_focus::base(cx))]),
+            Track::color(Quad_color::id(), Ease::Lin, vec![(0.0, Theme::color_text_selected_focus().base(cx)), (1.0, Theme::color_text_selected_focus().base(cx))]),
             Track::float(TabClose_hover::id(), Ease::Lin, vec![(1.0, 1.0)]),
             Track::float(TabClose_down::id(), Ease::OutExp, vec![(0.0, 0.0), (1.0, 3.1415 * 0.5)]),
         ])
@@ -105,7 +115,7 @@ impl TabClose {
     pub fn draw_tab_close(&mut self, cx: &mut Cx) {
         self.animator.init(cx, |cx| Self::get_default_anim(cx));
         self.bg.color = self.animator.last_color(cx, Quad_color::id());
-        let bg_inst = self.bg.draw_quad(cx, TabClose_walk::base(cx));
+        let bg_inst = self.bg.draw_quad(cx, Self::walk().base(cx));
         bg_inst.push_last_float(cx, &self.animator, TabClose_hover::id());
         bg_inst.push_last_float(cx, &self.animator, TabClose_down::id());
         self._bg_area = bg_inst.into_area();

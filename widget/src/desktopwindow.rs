@@ -57,7 +57,7 @@ impl DesktopWindow {
             
             window_menu: WindowMenu::style(cx),
             
-            caption_text: Text::style(cx, TextStyle_window_caption::id()),
+            caption_text: Text::style(cx, Self::text_style_window_caption()),
             //caption_bg_color: Color_bg_selected_over::id(cx),
             caption_bg: Quad::style(cx),
             caption_size: Vec2::zero(),
@@ -65,6 +65,12 @@ impl DesktopWindow {
             inner_over_chrome: false,
             _last_menu: None
         }
+    }
+    
+    pub fn text_style_window_caption() ->TextStyleId{text_style_id!()}
+    
+    pub fn theme(cx:&mut Cx){
+        Self::text_style_window_caption().set_base(cx, Theme::text_style_normal().base(cx));
     }
     
     pub fn handle_desktop_window(&mut self, cx: &mut Cx, event: &mut Event) -> DesktopWindowEvent {
@@ -156,7 +162,7 @@ impl DesktopWindow {
             walk:Walk::wh(Width::Fill, Height::Compute),
             ..Layout::default()
         }).is_ok() {
-            self.caption_bg.color = Color_bg_selected_over::base(cx);//cx.colors[self.caption_bg_color];
+            self.caption_bg.color = Theme::color_bg_selected_over().base(cx);//cx.colors[self.caption_bg_color];
             // alright here we draw our platform buttons.
             match cx.platform_type {
                 PlatformType::Linux | PlatformType::Windows => {
