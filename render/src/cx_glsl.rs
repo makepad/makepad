@@ -301,14 +301,14 @@ impl Cx {
         pix_out.push_str("vec4 texture2Dflip(sampler2D sampler, vec2 pos){return texture2D(sampler, vec2(pos.x, 1.0-pos.y));}\n");
 
         // ok now define samplers from our sh.
-        let texture_slots = sg.flat_vars(ShVarStore::Texture);
-        let geometries = sg.flat_vars(ShVarStore::Geometry);
-        let instances = sg.flat_vars(ShVarStore::Instance);
-        let mut varyings = sg.flat_vars(ShVarStore::Varying);
-        let locals = sg.flat_vars(ShVarStore::Local);
-        let uniforms_cx = sg.flat_vars(ShVarStore::UniformCx);
-        let uniforms_vw = sg.flat_vars(ShVarStore::UniformVw);
-        let uniforms_dr = sg.flat_vars(ShVarStore::Uniform);
+        let texture_slots = sg.flat_vars(|v| if let ShVarStore::Texture = *v{true} else {false});
+        let geometries = sg.flat_vars(|v| if let ShVarStore::Geometry = *v{true} else {false});
+        let instances = sg.flat_vars(|v| if let ShVarStore::Instance(_) = *v{true} else {false});
+        let mut varyings = sg.flat_vars(|v| if let ShVarStore::Varying = *v{true} else {false});
+        let locals = sg.flat_vars(|v| if let ShVarStore::Local = *v{true} else {false});
+        let uniforms_cx = sg.flat_vars(|v| if let ShVarStore::UniformCx = *v{true} else {false});
+        let uniforms_vw = sg.flat_vars(|v| if let ShVarStore::UniformVw = *v{true} else {false});
+        let uniforms_dr = sg.flat_vars(|v| if let ShVarStore::Uniform(_) = *v{true} else {false});
         
         let mut const_cx = SlCx {
             depth: 0,
@@ -460,12 +460,12 @@ impl Cx {
         // we can also flatten our uniform variable set
         
         // lets composite our ShAst structure into a set of methods
-        let named_uniform_props = NamedProps::construct(sg, &uniforms_dr, true);
+        let uniform_props = UniformProps::construct(sg, &uniforms_dr);
         Ok((vtx_out, pix_out, CxShaderMapping {
-            zbias_uniform_prop: named_uniform_props.find_zbias_uniform_prop(),
-            named_instance_props: NamedProps::construct(sg, &instances, false),
+            zbias_uniform_prop: uniform_props.find_zbias_uniform_prop(),
+            instance_props: InstanceProps::construct(sg, &instances),
             rect_instance_props: RectInstanceProps::construct(sg, &instances),
-            named_uniform_props,
+            uniform_props,
             instances: instances,
             geometries: geometries,
             geometry_slots: geometry_slots,
@@ -538,7 +538,7 @@ impl<'a> SlCx<'a> {
     
     pub fn map_var(&mut self, var: &ShVar) -> String {
         match var.store {
-            ShVarStore::Instance => {
+            ShVarStore::Instance(_) => {
                 if let SlTarget::Pixel = self.target {
                     if self.auto_vary.iter().find( | v | v.name == var.name).is_none() {
                         self.auto_vary.push(var.clone());

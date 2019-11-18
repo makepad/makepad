@@ -344,6 +344,7 @@ impl Text {
                 marker, // marker
             ];
             instance.extend_from_slice(&data);
+            // !TODO make sure a derived shader adds 'empty' values here.
             
             geom_x += advance;
             char_offset += 1;

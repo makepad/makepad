@@ -394,7 +394,7 @@ impl Animator {
         return Color::zero();
     }
     
-    pub fn last_color(&self, cx: &Cx, ident: ShInsColorId) -> Color {
+    pub fn last_color(&self, _cx: &Cx, ident: ShInsColorId) -> Color {
         if let Some((_, value)) = self.last_values.iter().find( | v | v.0 == ShInsId::Color(ident)) {
             if let AnimLastValue::Color(value) = value {
                 return *value
@@ -427,10 +427,12 @@ impl Animator {
         }
     }
     
-    pub fn push_area(&mut self, cx: &mut Cx, area: Area, time: f64) {
+    pub fn push_area(&mut self, _cx: &mut Cx, _area: Area, _time: f64) {
         // we fetch a write pointer to area
         // lookup our last values and fetch offsets
         // write directly
+        // check if shader_id is correct
+        
     }
     
     pub fn write_area(&mut self, cx: &mut Cx, area: Area, time: f64) {
