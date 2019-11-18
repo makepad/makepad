@@ -145,7 +145,7 @@ impl HttpServer {
                             
                             // write the header
                             let header = format!(
-                                "HTTP/1.1 200 OK\r\nContent-Type: {}\r\nContent-encoding: identity\r\Transfer-encoding: identity\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                                "HTTP/1.1 200 OK\r\nContent-Type: {}\r\nContent-encoding: identity\r\nTransfer-encoding: identity\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
                                 mime_type,
                                 data.len()
                             );
