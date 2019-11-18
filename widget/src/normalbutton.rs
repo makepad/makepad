@@ -32,6 +32,7 @@ impl NormalButton {
         }
     }
     
+    
     pub fn def_theme(cx: &mut Cx) {
         NormalButton_layout_bg::set_base(cx, Layout {
             align: Align::center(),

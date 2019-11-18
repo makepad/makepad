@@ -144,7 +144,7 @@ impl HttpServer {
                             
                             // write the header
                             let header = format!(
-                                "HTTP/1.1 200 OK\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                                "HTTP/1.1 200 OK\r\nContent-Type: {}\r\nContent-encoding: identity\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
                                 mime_type,
                                 data.len()
                             );
@@ -171,7 +171,7 @@ impl HttpServer {
         if let Ok(shared) = self.shared.lock() {
             for (_, tx) in &shared.watch_pending {
                 let msg = format!(
-                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-encoding: identity\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
                     json_msg.len(),
                     json_msg
                 );

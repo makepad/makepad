@@ -462,10 +462,10 @@ impl<'a> SlCx<'a> {
     pub fn map_var(&mut self, var: &ShVar) -> String {
         //let mty = Cx::hlsl_type(&var.ty);
         match var.store {
-            ShVarStore::Uniform => return var.name.clone(), //format!("_uni_dr.{}", var.name),
+            ShVarStore::Uniform(_) => return var.name.clone(), //format!("_uni_dr.{}", var.name),
             ShVarStore::UniformVw => return var.name.clone(), //format!("_uni_dl.{}", var.name),
             ShVarStore::UniformCx => return var.name.clone(), //format!("_uni_cx.{}", var.name),
-            ShVarStore::Instance => {
+            ShVarStore::Instance(_) => {
                 if let SlTarget::Pixel = self.target {
                     if self.auto_vary.iter().find( | v | v.name == var.name).is_none() {
                         self.auto_vary.push(var.clone());
