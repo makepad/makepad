@@ -19,20 +19,20 @@ impl NormalButton {
             button: ButtonLogic::default(),
             bg: Quad::proto(cx),
             text: Text::proto(cx, Self::text_style_label()),
-            animator: Animator::default(), //NormalButton_anim_default::base(cx)),
+            animator: Animator::default(),
             _bg_area: Area::Empty,
         }
     }
     
-    pub fn layout_bg() -> LayoutId{uid!()}
-    pub fn text_style_label() ->TextStyleId{uid!()}
-    pub fn anim_default()->AnimId{uid!()}
-    pub fn anim_over()->AnimId{uid!()}
-    pub fn anim_down()->AnimId{uid!()}
-    pub fn shader_bg()->ShaderId{uid!()}
-    pub fn instance_border_color()->InstanceColor{uid!()}
-    pub fn instance_glow_size()->InstanceFloat{uid!()}
-
+    pub fn layout_bg() -> LayoutId {uid!()}
+    pub fn text_style_label() -> TextStyleId {uid!()}
+    pub fn anim_default() -> AnimId {uid!()}
+    pub fn anim_over() -> AnimId {uid!()}
+    pub fn anim_down() -> AnimId {uid!()}
+    pub fn shader_bg() -> ShaderId {uid!()}
+    pub fn instance_border_color() -> InstanceColor {uid!()}
+    pub fn instance_glow_size() -> InstanceFloat {uid!()}
+    
     pub fn theme(cx: &mut Cx) {
         Self::layout_bg().set_base(cx, Layout {
             align: Align::center(),
@@ -113,7 +113,7 @@ impl NormalButton {
         
         bg_inst.push_last_color(cx, &self.animator, Self::instance_border_color());
         bg_inst.push_last_float(cx, &self.animator, Self::instance_glow_size());
-
+        
         self.text.class = class;
         self.text.draw_text(cx, label);
         
