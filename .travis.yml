@@ -1,0 +1,5 @@
+language: rust
+before_install:
+  - sudo apt-get install libegl1-mesa-dev libx11-dev libxcursor-dev
+script:
+  - cargo build -p makepad
