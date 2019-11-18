@@ -10,14 +10,14 @@ pub struct Quad {
 }
 
 impl Quad {
-    pub fn style_with_shader(cx: &mut Cx, shader:ShaderGen, name:&str) -> Self {
+    pub fn proto_with_shader(cx: &mut Cx, shader:ShaderGen, name:&str) -> Self {
         Self {
             shader: cx.add_shader(shader, name),
-            ..Self::style(cx)
+            ..Self::proto(cx)
         }
     }
     
-    pub fn style(cx: &mut Cx) -> Self {
+    pub fn proto(cx: &mut Cx) -> Self {
         Self {
             shader: cx.add_shader(Self::def_quad_shader(), "Quad"),
             do_h_scroll:true,

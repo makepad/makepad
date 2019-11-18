@@ -21,7 +21,7 @@ pub struct App {
 
 impl App {
     
-    pub fn style(cx: &mut Cx) -> Self {
+    pub fn proto(cx: &mut Cx) -> Self {
 
         set_dark_widget_theme(cx);
         set_dark_editor_theme(cx);
@@ -248,7 +248,7 @@ impl App {
                                     desktop_window: DesktopWindow {window: Window {
                                         create_inner_size: Some(size),
                                         create_position: create_pos,
-                                        ..Window::style(cx)
+                                        ..Window::proto(cx)
                                     }, ..self.app_window_template.desktop_window.clone()},
                                     ..self.app_window_template.clone()
                                 })

@@ -10,20 +10,20 @@ pub struct ScrollView{
 
 impl ScrollView{
 
-    pub fn style_hor_and_vert(cx: &mut Cx) -> Self {
+    pub fn proto_hor_and_vert(cx: &mut Cx) -> Self {
         Self {
-            view: View::style(cx),
-            scroll_h: Some(ScrollBar::style(cx)),
+            view: View::proto(cx),
+            scroll_h: Some(ScrollBar::proto(cx)),
             scroll_v: Some(ScrollBar {
                 smoothing: Some(0.15),
-                ..ScrollBar::style(cx)
+                ..ScrollBar::proto(cx)
             }),
         }
     }
     
-    pub fn style(cx: &mut Cx) -> Self {
+    pub fn proto(cx: &mut Cx) -> Self {
         Self {
-            view: View::style(cx),
+            view: View::proto(cx),
             scroll_h: None,
             scroll_v: None
         }

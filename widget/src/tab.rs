@@ -34,17 +34,17 @@ pub enum TabEvent {
 }
 
 impl Tab {
-    pub fn style(cx: &mut Cx) -> Self {
+    pub fn proto(cx: &mut Cx) -> Self {
         let mut tab = Self {
             label: "Tab".to_string(),
             is_closeable: true,
             z: 0.,
             bg: Quad {
                 shader: cx.add_shader(Self::def_bg_shader(), "Tab.bg"),
-                ..Quad::style(cx)
+                ..Quad::proto(cx)
             },
-            tab_close: TabClose::style(cx),
-            text: Text::style(cx, Self::text_style_title()),
+            tab_close: TabClose::proto(cx),
+            text: Text::proto(cx, Self::text_style_title()),
             animator: Animator::default(),
             abs_origin: None,
             _is_selected: false,

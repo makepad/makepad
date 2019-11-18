@@ -20,14 +20,14 @@ pub struct MenuItemDraw {
 }
 
 impl MenuItemDraw {
-    pub fn style(cx: &mut Cx) -> Self {
+    pub fn proto(cx: &mut Cx) -> Self {
         Self {
             text: Text {
                 wrapping: Wrapping::Word,
-                ..Text::style(cx, Self::text_style_menu_label())
+                ..Text::proto(cx, Self::text_style_menu_label())
             },
             //item_layout: Layout_window_menu::id(cx),
-            item_bg: Quad::style(cx),
+            item_bg: Quad::proto(cx),
             //name_color: Color_text_selected_focus::id(cx),
             //bg_color: Color_bg_selected::id(cx),
             //bg_over_color: Color_bg_odd::id(cx),
@@ -132,10 +132,10 @@ pub enum WindowMenuEvent {
 }
 
 impl WindowMenu {
-    pub fn style(cx: &mut Cx) -> Self {
+    pub fn proto(cx: &mut Cx) -> Self {
         Self {
-            item_draw: MenuItemDraw::style(cx),
-            view: View::style(cx),
+            item_draw: MenuItemDraw::proto(cx),
+            view: View::proto(cx),
         }
     }
     

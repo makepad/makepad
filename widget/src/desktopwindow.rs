@@ -40,26 +40,26 @@ pub enum DesktopWindowEvent {
 }
 
 impl DesktopWindow {
-    pub fn style(cx: &mut Cx) -> Self {
+    pub fn proto(cx: &mut Cx) -> Self {
         Self {
-            window: Window::style(cx),
+            window: Window::proto(cx),
             pass: Pass::default(),
             color_texture: Texture::default(),
             depth_texture: Texture::default(),
-            main_view: View::style(cx),
-            caption_view: View::style(cx),
-            inner_view: View::style(cx),
+            main_view: View::proto(cx),
+            caption_view: View::proto(cx),
+            inner_view: View::proto(cx),
             
-            min_btn: DesktopButton::style(cx),
-            max_btn: DesktopButton::style(cx),
-            close_btn: DesktopButton::style(cx),
-            vr_btn: DesktopButton::style(cx),
+            min_btn: DesktopButton::proto(cx),
+            max_btn: DesktopButton::proto(cx),
+            close_btn: DesktopButton::proto(cx),
+            vr_btn: DesktopButton::proto(cx),
             
-            window_menu: WindowMenu::style(cx),
+            window_menu: WindowMenu::proto(cx),
             
-            caption_text: Text::style(cx, Self::text_style_window_caption()),
+            caption_text: Text::proto(cx, Self::text_style_window_caption()),
             //caption_bg_color: Color_bg_selected_over::id(cx),
-            caption_bg: Quad::style(cx),
+            caption_bg: Quad::proto(cx),
             caption_size: Vec2::zero(),
             caption: "Makepad".to_string(),
             inner_over_chrome: false,

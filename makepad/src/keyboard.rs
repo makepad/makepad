@@ -37,11 +37,11 @@ impl KeyType {
 }
 
 impl Keyboard {
-    pub fn style(cx: &mut Cx) -> Self {
+    pub fn proto(cx: &mut Cx) -> Self {
         Self {
-            view: ScrollView::style_hor_and_vert(cx),
+            view: ScrollView::proto_hor_and_vert(cx),
             buttons: Elements::new(NormalButton {
-                ..NormalButton::style(cx)
+                ..NormalButton::proto(cx)
             }),
             modifiers: KeyModifiers::default(),
             key_down: None,

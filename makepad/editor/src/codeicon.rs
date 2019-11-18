@@ -26,11 +26,11 @@ impl CodeIconType {
 }
 
 impl CodeIcon {
-    pub fn style(cx: &mut Cx) -> Self {
+    pub fn proto(cx: &mut Cx) -> Self {
         Self {
             quad: Quad {
                 shader: cx.add_shader(Self::def_code_icon_shader(), "CodeIcon"),
-                ..Quad::style(cx)
+                ..Quad::proto(cx)
             }
         }
     }

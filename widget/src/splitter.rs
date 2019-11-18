@@ -39,7 +39,7 @@ pub enum SplitterEvent {
 }
 
 impl Splitter {
-    pub fn style(cx: &mut Cx) -> Self {
+    pub fn proto(cx: &mut Cx) -> Self {
         Self {
             class: ClassId::base(),
             axis: Axis::Vertical,
@@ -56,10 +56,10 @@ impl Splitter {
             realign_dist: 30.,
             split_size: 2.0,
             min_size: 25.0,
-            split_view: View::style(cx),
+            split_view: View::proto(cx),
             split: Quad {
                 shader: cx.add_shader(Self::def_split_shader(), "Splitter.split"),
-                ..Quad::style(cx)
+                ..Quad::proto(cx)
             },
             animator: Animator::default(),
         }

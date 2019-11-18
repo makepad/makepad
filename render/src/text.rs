@@ -52,7 +52,7 @@ pub struct Text {
 
 
 impl Text {
-    pub fn style(cx: &mut Cx, text_style:TextStyleId) -> Self {
+    pub fn proto(cx: &mut Cx, text_style:TextStyleId) -> Self {
         Self {
             class: ClassId::base(),
             text_style: text_style,

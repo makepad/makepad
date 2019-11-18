@@ -30,10 +30,10 @@ impl DesktopButtonType {
 }
 
 impl DesktopButton {
-    pub fn style(cx: &mut Cx) -> Self {
+    pub fn proto(cx: &mut Cx) -> Self {
         Self {
             button: ButtonLogic::default(),
-            bg: Quad::style_with_shader(cx, Self::def_bg_shader(), "Button.bg"),
+            bg: Quad::proto_with_shader(cx, Self::def_bg_shader(), "Button.bg"),
             animator: Animator::default(),
             _bg_area: Area::Empty,
         }

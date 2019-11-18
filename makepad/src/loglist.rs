@@ -22,14 +22,14 @@ pub struct LogItemDraw {
 }
 
 impl LogItemDraw {
-    pub fn style(cx: &mut Cx) -> Self {
+    pub fn proto(cx: &mut Cx) -> Self {
         Self {
-            item_bg: Quad::style(cx),
+            item_bg: Quad::proto(cx),
             text: Text {
                 wrapping: Wrapping::Word,
-                ..Text::style(cx, Self::text_style_item())
+                ..Text::proto(cx, Self::text_style_item())
             },
-            code_icon: CodeIcon::style(cx),
+            code_icon: CodeIcon::proto(cx),
             path_color: Theme::color_text_defocus(),
             message_color: Theme::color_text_focus(),
         }
@@ -206,14 +206,14 @@ pub enum LogListEvent {
 }
 
 impl LogList {
-    pub fn style(cx: &mut Cx) -> Self {
+    pub fn proto(cx: &mut Cx) -> Self {
         Self {
-            item_draw: LogItemDraw::style(cx),
+            item_draw: LogItemDraw::proto(cx),
             list: ListLogic {
                 tail_list: true,
                 ..ListLogic::default()
             },
-            view: ScrollView::style_hor_and_vert(cx),
+            view: ScrollView::proto_hor_and_vert(cx),
         }
     }
     

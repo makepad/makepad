@@ -52,19 +52,19 @@ impl AppWindow {
         Self {
             desktop_window: DesktopWindow {
                 caption: "Makepad".to_string(),
-                window: Window::style(cx),
-                ..DesktopWindow::style(cx)
+                window: Window::proto(cx),
+                ..DesktopWindow::proto(cx)
             },
             file_editors: Elements::new(FileEditorTemplates {
-                rust_editor: RustEditor::style(cx),
-                js_editor: JSEditor::style(cx),
-                plain_editor: PlainEditor::style(cx)
+                rust_editor: RustEditor::proto(cx),
+                js_editor: JSEditor::proto(cx),
+                plain_editor: PlainEditor::proto(cx)
             }),
-            keyboard: Keyboard::style(cx),
-            log_item: LogItem::style(cx),
-            log_list: LogList::style(cx),
-            file_panel: FilePanel::style(cx),
-            dock: Dock ::style(cx),
+            keyboard: Keyboard::proto(cx),
+            log_item: LogItem::proto(cx),
+            log_list: LogList::proto(cx),
+            file_panel: FilePanel::proto(cx),
+            dock: Dock ::proto(cx),
         }
     }
     

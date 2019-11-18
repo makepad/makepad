@@ -34,7 +34,7 @@ pub enum ScrollBarEvent {
 }
 
 impl ScrollBar {
-    pub fn style(cx: &mut Cx) -> Self {
+    pub fn proto(cx: &mut Cx) -> Self {
         Self {
             bar_size: 12.0,
             min_handle_size: 30.0,
@@ -45,7 +45,7 @@ impl ScrollBar {
             sb: Quad {
                 z: 10.,
                 shader: cx.add_shader(Self::def_shader(), "ScrollBar.sb"),
-                ..Quad::style(cx)
+                ..Quad::proto(cx)
             },
             use_vertical_finger_scroll: false,
             _visible: false,

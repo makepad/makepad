@@ -166,14 +166,14 @@ impl<'a> FileWalker<'a> {
 }
 
 impl FileTreeItemDraw {
-    fn style(cx: &mut Cx) -> Self {
+    fn proto(cx: &mut Cx) -> Self {
         Self {
-            tree_text: Text {z: 0.001, ..Text::style(cx, Self::text_style_label())},
-            node_bg: Quad::style(cx),
+            tree_text: Text {z: 0.001, ..Text::proto(cx, Self::text_style_label())},
+            node_bg: Quad::proto(cx),
             //node_layout: LayoutFileTreeNode::id(),
             filler: Quad {
                 z: 0.001,
-                ..Quad::style_with_shader(cx, Self::def_filler_shader(), "FileTree.filler")
+                ..Quad::proto_with_shader(cx, Self::def_filler_shader(), "FileTree.filler")
             },
         }
     }
@@ -272,28 +272,28 @@ impl FileTreeItemDraw {
 }
 
 impl FileTree {
-    pub fn style(cx: &mut Cx) -> Self {
+    pub fn proto(cx: &mut Cx) -> Self {
         Self {
             //row_height: 20.,
             //font_size: 8.0,
-            item_draw: FileTreeItemDraw::style(cx),
+            item_draw: FileTreeItemDraw::proto(cx),
             root_node: FileNode::Folder {name: "".to_string(), state: NodeState::Open, draw: None, folder: vec![
                 FileNode::File {name: "loading...".to_string(), draw: None},
             ]},
             drag_bg: Quad {
                 shader: cx.add_shader(Self::def_drag_bg_shader(), "FileTree.drag_bg"),
-                ..Quad::style(cx)
+                ..Quad::proto(cx)
             },
             view: ScrollView {
                 scroll_v: Some(ScrollBar {
                     smoothing: Some(0.25),
-                    ..ScrollBar::style(cx)
+                    ..ScrollBar::proto(cx)
                 }),
-                ..ScrollView::style(cx)
+                ..ScrollView::proto(cx)
             },
             drag_view: View {
                 is_overlay: true,
-                ..View::style(cx)
+                ..View::proto(cx)
             },
             _drag_move: None,
         }

@@ -13,12 +13,12 @@ pub struct NormalButton {
 }
 
 impl NormalButton {
-    pub fn style(cx: &mut Cx) -> Self {
+    pub fn proto(cx: &mut Cx) -> Self {
         Self {
             class: ClassId::base(),
             button: ButtonLogic::default(),
-            bg: Quad::style(cx),
-            text: Text::style(cx, Self::text_style_label()),
+            bg: Quad::proto(cx),
+            text: Text::proto(cx, Self::text_style_label()),
             animator: Animator::default(), //NormalButton_anim_default::base(cx)),
             _bg_area: Area::Empty,
         }

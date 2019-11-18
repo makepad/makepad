@@ -10,9 +10,9 @@ pub struct TabClose {
 }
 
 impl TabClose {
-    pub fn style(cx: &mut Cx) -> Self {
+    pub fn proto(cx: &mut Cx) -> Self {
         Self {
-            bg: Quad::style_with_shader(cx, Self::def_bg_shader(), "TabClose.bg"),
+            bg: Quad::proto_with_shader(cx, Self::def_bg_shader(), "TabClose.bg"),
             animator: Animator::default(),
             _bg_area: Area::Empty,
         }

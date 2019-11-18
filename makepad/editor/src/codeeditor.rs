@@ -103,47 +103,47 @@ pub enum CodeEditorEvent {
 
 impl CodeEditor {
     
-    pub fn style(cx: &mut Cx) -> Self {
+    pub fn proto(cx: &mut Cx) -> Self {
         Self {
             cursors: TextCursorSet::new(),
             indent_lines: Quad {
                 z: 0.001,
-                ..Quad::style_with_shader(cx, Self::def_indent_lines_shader(), "Editor.indent_lines")
+                ..Quad::proto_with_shader(cx, Self::def_indent_lines_shader(), "Editor.indent_lines")
             },
-            view: ScrollView::style_hor_and_vert(cx),
+            view: ScrollView::proto_hor_and_vert(cx),
             bg: Quad {
                 do_h_scroll: false,
                 do_v_scroll: false,
-                ..Quad::style(cx)
+                ..Quad::proto(cx)
             },
             gutter_bg: Quad {
                 z: 9.0,
                 do_h_scroll: false,
                 do_v_scroll: false,
-                ..Quad::style(cx)
+                ..Quad::proto(cx)
             },
             selection: Quad {
                 z: 0.,
-                ..Quad::style_with_shader(cx, Self::def_selection_shader(), "Editor.selection")
+                ..Quad::proto_with_shader(cx, Self::def_selection_shader(), "Editor.selection")
             },
-            token_highlight: Quad::style_with_shader(cx, Self::def_token_highlight_shader(), "Editor.token_highlight"),
+            token_highlight: Quad::proto_with_shader(cx, Self::def_token_highlight_shader(), "Editor.token_highlight"),
 
-            cursor: Quad::style_with_shader(cx, Self::def_cursor_shader(), "Editor.cursor"),
-            cursor_row: Quad::style_with_shader(cx, Self::def_cursor_row_shader(), "Editor.cursor_row"),
-            paren_pair: Quad::style_with_shader(cx, Self::def_paren_pair_shader(), "Editor.paren_pair"),
-            message_marker: Quad::style_with_shader(cx, Self::def_message_marker_shader(), "Editor.message_marker"),
-            code_icon: CodeIcon::style(cx),
+            cursor: Quad::proto_with_shader(cx, Self::def_cursor_shader(), "Editor.cursor"),
+            cursor_row: Quad::proto_with_shader(cx, Self::def_cursor_row_shader(), "Editor.cursor_row"),
+            paren_pair: Quad::proto_with_shader(cx, Self::def_paren_pair_shader(), "Editor.paren_pair"),
+            message_marker: Quad::proto_with_shader(cx, Self::def_message_marker_shader(), "Editor.message_marker"),
+            code_icon: CodeIcon::proto(cx),
             bg_layout: Self::layout_bg(),
             text: Text {
                 z: 2.00,
                 wrapping: Wrapping::Line,
-                ..Text::style(cx, Self::text_style_editor_text())
+                ..Text::proto(cx, Self::text_style_editor_text())
             },
             line_number_text: Text {
                 z: 9.,
                 do_h_scroll: false,
                 wrapping: Wrapping::Line,
-                ..Text::style(cx, Self::text_style_editor_text())
+                ..Text::proto(cx, Self::text_style_editor_text())
             },
             base_font_size: 8.0,
             open_font_scale: 1.0,
