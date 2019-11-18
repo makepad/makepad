@@ -136,6 +136,7 @@ impl HttpServer {
                         };
                         
                         // lets read the file from disk and dump it back.
+                        println!("HTTP Server serving file: {}", file_path);
                         if let Ok(data) = std::fs::read(&file_path) {
                             let mime_type = if url.ends_with(".html") {"text/html"}
                             else if url.ends_with(".wasm") {"application/wasm"}
