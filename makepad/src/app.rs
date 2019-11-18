@@ -171,7 +171,6 @@ impl App {
     pub fn handle_app(&mut self, cx: &mut Cx, event: &mut Event) {
         match event {
             Event::Construct => {
-                // start the workspace
                 self.storage.init(cx);
                 if !cx.platform_type.is_desktop() {
                     self.default_layout(cx);
@@ -294,6 +293,7 @@ impl App {
     
     
     pub fn draw_app(&mut self, cx: &mut Cx) {
+        
         //return;
         for (window_index, window) in self.windows.iter_mut().enumerate() {
             window.draw_app_window(cx, &self.menu, window_index, &mut self.state, &mut self.storage, &mut self.build_manager);

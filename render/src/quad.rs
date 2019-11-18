@@ -9,15 +9,6 @@ pub struct Quad {
     pub color: Color
 }
 
-instance_float!(Quad_x);
-instance_float!(Quad_y);
-instance_float!(Quad_z);
-instance_float!(Quad_w);
-instance_float!(Quad_h);
-instance_color!(Quad_color);
-uniform_vec2!(Quad_view_do_scroll);
-uniform_float!(Quad_zbias);
-
 impl Quad {
     pub fn style_with_shader(cx: &mut Cx, shader:ShaderGen, name:&str) -> Self {
         Self {
@@ -35,7 +26,16 @@ impl Quad {
             color: color("green")
         }
     }
-
+    
+    pub fn instance_x()->InstanceFloat{uid!()}
+    pub fn instance_y()->InstanceFloat{uid!()}
+    pub fn instance_w()->InstanceFloat{uid!()}
+    pub fn instance_h()->InstanceFloat{uid!()}
+    pub fn instance_z()->InstanceFloat{uid!()}
+    pub fn instance_color()->InstanceColor{uid!()}
+    pub fn uniform_view_do_scroll()->UniformVec2{uid!()}
+    pub fn uniform_zbias()->UniformFloat{uid!()}
+    
     pub fn def_quad_shader() -> ShaderGen {
         // lets add the draw shader lib
         let mut sg = ShaderGen::new();
@@ -47,15 +47,15 @@ impl Quad {
             let geom: vec2<Geometry>;
             let pos: vec2<Varying>;
             
-            let x: Quad_x;
-            let y: Quad_y;
-            let w: Quad_w;
-            let h: Quad_h;
-            let z: Quad_z; 
-            let color: Quad_color;
+            let x: Self::instance_x();
+            let y: Self::instance_y();
+            let w: Self::instance_w();
+            let h: Self::instance_h();
+            let z: Self::instance_z(); 
+            let color: Self::instance_color();
 
-            let view_do_scroll: Quad_view_do_scroll;
-            let zbias: Quad_zbias;
+            let view_do_scroll: Self::uniform_view_do_scroll();
+            let zbias: Self::uniform_zbias();
             //let dpi_dilate: float<Uniform>;
             
             fn vertex() -> vec4 {

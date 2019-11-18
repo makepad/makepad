@@ -223,7 +223,7 @@ impl Area{
          }
     }
 
-    pub fn get_instance_offset(&self, cx:&Cx, prop_ident:ShInsId)->Option<usize>{
+    pub fn get_instance_offset(&self, cx:&Cx, prop_ident:InstanceType)->Option<usize>{
         match self{
             Area::Instance(inst)=>{
                 let cxview = &cx.views[inst.view_id];
@@ -240,7 +240,7 @@ impl Area{
         None
     }
 
-    pub fn get_uniform_offset(&self, cx:&Cx, prop_ident:ShUniId)->Option<usize>{
+    pub fn get_uniform_offset(&self, cx:&Cx, prop_ident:UniformType)->Option<usize>{
         match self{
             Area::Instance(inst)=>{
                 let cxview = &cx.views[inst.view_id];
@@ -334,8 +334,8 @@ impl Area{
         return None;
     }
 
-    pub fn write_float(&self, cx:&mut Cx, prop_ident:ShInsFloatId, value:f32){
-        if let Some(inst_offset) = self.get_instance_offset(cx, ShInsId::Float(prop_ident)){
+    pub fn write_float(&self, cx:&mut Cx, prop_ident:InstanceFloat, value:f32){
+        if let Some(inst_offset) = self.get_instance_offset(cx, InstanceType::Float(prop_ident)){
             let write = self.get_write_ref(cx);
             if let Some(write) = write{
                 for i in 0..write.count{
@@ -345,8 +345,8 @@ impl Area{
         }
     }
 
-    pub fn read_float(&self, cx:&Cx, prop_ident:ShInsFloatId)->f32{
-        if let Some(inst_offset) = self.get_instance_offset(cx, ShInsId::Float(prop_ident)){
+    pub fn read_float(&self, cx:&Cx, prop_ident:InstanceFloat)->f32{
+        if let Some(inst_offset) = self.get_instance_offset(cx, InstanceType::Float(prop_ident)){
             let read = self.get_read_ref(cx);
             if let Some(read) = read{
                 return read.buffer[read.offset + inst_offset]
@@ -355,8 +355,8 @@ impl Area{
         0.0
     }
 
-   pub fn write_vec2(&self, cx:&mut Cx, prop_ident:ShInsVec2Id, value:Vec2){
-        if let Some(inst_offset) = self.get_instance_offset(cx, ShInsId::Vec2(prop_ident)){
+   pub fn write_vec2(&self, cx:&mut Cx, prop_ident:InstanceVec2, value:Vec2){
+        if let Some(inst_offset) = self.get_instance_offset(cx, InstanceType::Vec2(prop_ident)){
             let write = self.get_write_ref(cx);
             if let Some(write) = write{
                 for i in 0..write.count{
@@ -367,8 +367,8 @@ impl Area{
         }
    }
 
-    pub fn read_vec2(&self, cx:&Cx, prop_ident:ShInsVec2Id)->Vec2{
-        if let Some(inst_offset) = self.get_instance_offset(cx, ShInsId::Vec2(prop_ident)){
+    pub fn read_vec2(&self, cx:&Cx, prop_ident:InstanceVec2)->Vec2{
+        if let Some(inst_offset) = self.get_instance_offset(cx, InstanceType::Vec2(prop_ident)){
             let read = self.get_read_ref(cx);
             if let Some(read) = read{
                 return Vec2{
@@ -380,8 +380,8 @@ impl Area{
         Vec2::zero()
     }
 
-   pub fn write_vec3(&self, cx:&mut Cx, prop_ident:ShInsVec3Id, value:Vec3){
-        if let Some(inst_offset) = self.get_instance_offset(cx, ShInsId::Vec3(prop_ident)){
+   pub fn write_vec3(&self, cx:&mut Cx, prop_ident:InstanceVec3, value:Vec3){
+        if let Some(inst_offset) = self.get_instance_offset(cx, InstanceType::Vec3(prop_ident)){
             let write = self.get_write_ref(cx);
             if let Some(write) = write{
                 for i in 0..write.count{
@@ -393,8 +393,8 @@ impl Area{
         }
     }
 
-    pub fn read_vec3(&self, cx:&Cx, prop_ident:ShInsVec3Id)->Vec3{
-        if let Some(inst_offset) = self.get_instance_offset(cx, ShInsId::Vec3(prop_ident)){
+    pub fn read_vec3(&self, cx:&Cx, prop_ident:InstanceVec3)->Vec3{
+        if let Some(inst_offset) = self.get_instance_offset(cx, InstanceType::Vec3(prop_ident)){
             let read = self.get_read_ref(cx);
             if let Some(read) = read{
                 return Vec3{
@@ -407,8 +407,8 @@ impl Area{
         Vec3::zero()
     }
 
-   pub fn write_vec4(&self, cx:&mut Cx, prop_ident:ShInsVec4Id, value:Vec4){
-        if let Some(inst_offset) = self.get_instance_offset(cx, ShInsId::Vec4(prop_ident)){
+   pub fn write_vec4(&self, cx:&mut Cx, prop_ident:InstanceVec4, value:Vec4){
+        if let Some(inst_offset) = self.get_instance_offset(cx, InstanceType::Vec4(prop_ident)){
             let write = self.get_write_ref(cx);
             if let Some(write) = write{
                 for i in 0..write.count{
@@ -421,8 +421,8 @@ impl Area{
         }
    }
 
-    pub fn read_vec4(&self, cx:&Cx, prop_ident:ShInsVec4Id)->Vec4{
-        if let Some(inst_offset) = self.get_instance_offset(cx, ShInsId::Vec4(prop_ident)){
+    pub fn read_vec4(&self, cx:&Cx, prop_ident:InstanceVec4)->Vec4{
+        if let Some(inst_offset) = self.get_instance_offset(cx, InstanceType::Vec4(prop_ident)){
             let read = self.get_read_ref(cx);
             if let Some(read) = read{
                 return Vec4{
@@ -436,8 +436,8 @@ impl Area{
         Vec4::zero()
     }
 
-    pub fn write_color(&self, cx:&mut Cx, prop_ident:ShInsColorId, value:Color){
-        if let Some(inst_offset) = self.get_instance_offset(cx, ShInsId::Color(prop_ident)){
+    pub fn write_color(&self, cx:&mut Cx, prop_ident:InstanceColor, value:Color){
+        if let Some(inst_offset) = self.get_instance_offset(cx, InstanceType::Color(prop_ident)){
             let write = self.get_write_ref(cx);
             if let Some(write) = write{
                 for i in 0..write.count{
@@ -450,8 +450,8 @@ impl Area{
         }
    }
 
-    pub fn read_color(&self, cx:&Cx, prop_ident:ShInsColorId)->Color{
-        if let Some(inst_offset) = self.get_instance_offset(cx, ShInsId::Color(prop_ident)){
+    pub fn read_color(&self, cx:&Cx, prop_ident:InstanceColor)->Color{
+        if let Some(inst_offset) = self.get_instance_offset(cx, InstanceType::Color(prop_ident)){
             let read = self.get_read_ref(cx);
             if let Some(read) = read{
                 return Color{
@@ -465,8 +465,8 @@ impl Area{
         Color::zero()
     }
 
-    pub fn write_uniform_float(&self, cx:&mut Cx, prop_ident:ShUniFloatId, v:f32){
-        if let Some(uni_offset) = self.get_uniform_offset(cx, ShUniId::Float(prop_ident)){
+    pub fn write_uniform_float(&self, cx:&mut Cx, prop_ident:UniformFloat, v:f32){
+        if let Some(uni_offset) = self.get_uniform_offset(cx, UniformType::Float(prop_ident)){
             let write = self.get_uniform_write_ref(cx);
             if let Some(write) = write{
                 while uni_offset >= write.len(){
@@ -542,7 +542,7 @@ impl InstanceArea{
         draw_call.instance.extend_from_slice(data);
     }
 
-    pub fn push_last_float(&self, cx:&mut Cx, animator:&Animator, ident:ShInsFloatId){
+    pub fn push_last_float(&self, cx:&mut Cx, animator:&Animator, ident:InstanceFloat){
         self.push_float(cx, animator.last_float(cx, ident))
     }
 
@@ -557,7 +557,7 @@ impl InstanceArea{
         draw_call.instance.push(value);
     }
 
-    pub fn push_last_vec2(&self, cx:&mut Cx, animator:&Animator, ident:ShInsVec2Id){
+    pub fn push_last_vec2(&self, cx:&mut Cx, animator:&Animator, ident:InstanceVec2){
         self.push_vec2(cx, animator.last_vec2(cx, ident))
     }
 
@@ -573,7 +573,7 @@ impl InstanceArea{
         draw_call.instance.push(value.y);
     }
 
-    pub fn push_last_vec3(&self, cx:&mut Cx, animator:&Animator, ident:ShInsVec3Id){
+    pub fn push_last_vec3(&self, cx:&mut Cx, animator:&Animator, ident:InstanceVec3){
         self.push_vec3(cx, animator.last_vec3(cx, ident))
     }
 
@@ -589,7 +589,7 @@ impl InstanceArea{
         draw_call.instance.push(value.z);
     }
 
-    pub fn push_last_vec4(&self, cx:&mut Cx, animator:&Animator, ident:ShInsVec4Id){
+    pub fn push_last_vec4(&self, cx:&mut Cx, animator:&Animator, ident:InstanceVec4){
         self.push_vec4(cx, animator.last_vec4(cx, ident));
     }
 
@@ -606,7 +606,7 @@ impl InstanceArea{
         draw_call.instance.push(value.w);
     }
 
-    pub fn push_last_color(&self, cx:&mut Cx, animator:&Animator, ident:ShInsColorId){
+    pub fn push_last_color(&self, cx:&mut Cx, animator:&Animator, ident:InstanceColor){
         self.push_color(cx, animator.last_color(cx, ident));
     }
 

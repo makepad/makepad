@@ -2,11 +2,11 @@
 
 // shared modules
 #[macro_use]
+mod shader;
+#[macro_use]
 mod theming;
 #[macro_use]
 mod cx;
-#[macro_use]
-mod shader;
 
 #[cfg(all(not(feature="ipc"),target_os = "linux"))]
 mod cx_opengl;

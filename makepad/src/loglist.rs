@@ -35,8 +35,8 @@ impl LogItemDraw {
         }
     }
     
-    pub fn layout_item() -> LayoutId {layout_id!()}
-    pub fn text_style_item() ->TextStyleId{text_style_id!()}
+    pub fn layout_item() -> LayoutId {uid!()}
+    pub fn text_style_item() ->TextStyleId{uid!()}
 
     pub fn theme(cx: &mut Cx) {
         
@@ -53,7 +53,7 @@ impl LogItemDraw {
     
     pub fn get_default_anim(cx: &Cx, counter: usize, marked: bool) -> Anim {
         Anim::new(Play::Chain {duration: 0.01}, vec![
-            Track::color(Quad_color::id(), Ease::Lin, vec![
+            Track::color(Quad::instance_color(), Ease::Lin, vec![
                 (1.0, if marked {Theme::color_bg_marked().base(cx)} else if counter & 1 == 0 {Theme::color_bg_selected().base(cx)}else {Theme::color_bg_odd().base(cx)})
             ])
         ])
@@ -61,7 +61,7 @@ impl LogItemDraw {
     
     pub fn get_default_anim_cut(cx: &Cx, counter: usize, marked: bool) -> Anim {
         Anim::new(Play::Cut {duration: 0.01}, vec![
-            Track::color(Quad_color::id(), Ease::Lin, vec![
+            Track::color(Quad::instance_color(), Ease::Lin, vec![
                 (0.0, if marked {Theme::color_bg_marked().base(cx)} else if counter & 1 == 0 {Theme::color_bg_selected().base(cx)}else {Theme::color_bg_odd().base(cx)})
             ])
         ])
@@ -70,7 +70,7 @@ impl LogItemDraw {
     pub fn get_over_anim(cx: &Cx, counter: usize, marked: bool) -> Anim {
         let over_color = if marked {Theme::color_bg_marked_over().base(cx)} else if counter & 1 == 0 {Theme::color_bg_selected_over().base(cx)}else {Theme::color_bg_odd_over().base(cx)};
         Anim::new(Play::Cut {duration: 0.02}, vec![
-            Track::color(Quad_color::id(), Ease::Lin, vec![
+            Track::color(Quad::instance_color(), Ease::Lin, vec![
                 (0., over_color),
             ])
         ])
@@ -95,7 +95,7 @@ impl LogItemDraw {
         
         list_item.animator.init(cx, | cx | LogItemDraw::get_default_anim(cx, index, false));
         
-        self.item_bg.color = list_item.animator.last_color(cx, Quad_color::id());
+        self.item_bg.color = list_item.animator.last_color(cx, Quad::instance_color());
         
         let bg_inst = self.item_bg.begin_quad(cx, Self::layout_item().base(cx)); //&self.get_line_layout());
         

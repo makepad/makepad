@@ -165,9 +165,6 @@ impl<'a> FileWalker<'a> {
     }
 }
 
-instance_vec2!(FileTree_line_vec);
-instance_float!(FileTree_anim_pos);
-
 impl FileTreeItemDraw {
     fn style(cx: &mut Cx) -> Self {
         Self {
@@ -181,16 +178,19 @@ impl FileTreeItemDraw {
         }
     }
       
-    pub fn layout_drag_bg()->LayoutId{layout_id!()}
-    pub fn layout_node()->LayoutId{layout_id!()}
-    pub fn text_style_label() ->TextStyleId{text_style_id!()}
+    pub fn layout_drag_bg()->LayoutId{uid!()}
+    pub fn layout_node()->LayoutId{uid!()}
+    pub fn text_style_label() ->TextStyleId{uid!()}
 
-    pub fn color_tree_folder()->ColorId{color_id!()}
-    pub fn color_tree_file()->ColorId{color_id!()}
-    pub fn color_filler()->ColorId{color_id!()}
+    pub fn color_tree_folder()->ColorId{uid!()}
+    pub fn color_tree_file()->ColorId{uid!()}
+    pub fn color_filler()->ColorId{uid!()}
 
-    pub fn walk_filler()->WalkId{walk_id!()}
-    pub fn walk_folder()->WalkId{walk_id!()}
+    pub fn walk_filler()->WalkId{uid!()}
+    pub fn walk_folder()->WalkId{uid!()}
+
+    pub fn instance_line_vec()->InstanceVec2{uid!()}
+    pub fn instance_anim_pos()->InstanceFloat{uid!()}
 
     pub fn theme(cx: &mut Cx){
         Self::color_tree_folder().set_base(cx, Theme::color_text_selected_focus().base(cx));
@@ -231,8 +231,8 @@ impl FileTreeItemDraw {
     pub fn def_filler_shader() -> ShaderGen {
         Quad::def_quad_shader().compose(shader_ast!({
             
-            let line_vec: FileTree_line_vec;
-            let anim_pos: FileTree_anim_pos;
+            let line_vec: Self::instance_line_vec();
+            let anim_pos: Self::instance_anim_pos();
             
             fn pixel() -> vec4 {
                 df_viewport(pos * vec2(w, h));
@@ -254,7 +254,7 @@ impl FileTreeItemDraw {
     
     pub fn get_default_anim( cx: &Cx, counter: usize, marked: bool) -> Anim {
         Anim::new(Play::Chain {duration: 0.01}, vec![
-            Track::color(Quad_color::id(), Ease::Lin, vec![
+            Track::color(Quad::instance_color(), Ease::Lin, vec![
                 (1.0, if marked {Theme::color_bg_marked().base(cx)} else if counter & 1 == 0 {Theme::color_bg_selected().base(cx)}else {Theme::color_bg_odd().base(cx)})
             ])
         ])
@@ -263,7 +263,7 @@ impl FileTreeItemDraw {
     pub fn get_over_anim( cx: &Cx, counter: usize, marked: bool) -> Anim {
         let over_color = if marked {Theme::color_bg_marked_over().base(cx)} else if counter & 1 == 0 {Theme::color_bg_selected_over().base(cx)}else {Theme::color_bg_odd_over().base(cx)};
         Anim::new(Play::Cut {duration: 0.02}, vec![
-            Track::color(Quad_color::id(), Ease::Lin, vec![
+            Track::color(Quad::instance_color(), Ease::Lin, vec![
                 (0., over_color),
                 (1., over_color)
             ])
@@ -299,7 +299,7 @@ impl FileTree {
         }
     }
 
-    pub fn color_drag_bg()->ColorId{color_id!()}
+    pub fn color_drag_bg()->ColorId{uid!()}
     
     pub fn theme(cx: &mut Cx){
         Self::color_drag_bg().set_base(cx, Theme::color_bg_marked().base(cx));
@@ -629,7 +629,7 @@ impl FileTree {
             node_draw.animator.init(cx, |cx| FileTreeItemDraw::get_default_anim(cx, counter, false));
             // if we are NOT animating, we need to get change a default color.
             
-            self.item_draw.node_bg.color = node_draw.animator.last_color(cx, Quad_color::id());
+            self.item_draw.node_bg.color = node_draw.animator.last_color(cx, Quad::instance_color());
             
             let mut node_layout = node_layout.clone();
             node_layout.walk.height = Height::Fix(row_height * scale as f32);

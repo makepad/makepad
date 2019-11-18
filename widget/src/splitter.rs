@@ -67,19 +67,19 @@ impl Splitter {
     
     pub fn get_default_anim(cx: &Cx) -> Anim {
         Anim::new(Play::Cut {duration: 0.5}, vec![
-            Track::color(Quad_color::id(), Ease::Lin, vec![(1.0, Theme::color_bg_splitter().base(cx))]),
+            Track::color(Quad::instance_color(), Ease::Lin, vec![(1.0, Theme::color_bg_splitter().base(cx))]),
         ])
     }
     
     pub fn get_over_anim(cx: &Cx) -> Anim {
         Anim::new(Play::Cut {duration: 0.05}, vec![
-            Track::color(Quad_color::id(), Ease::Lin, vec![(1.0,Theme::color_bg_splitter_over().base(cx))]),
+            Track::color(Quad::instance_color(), Ease::Lin, vec![(1.0,Theme::color_bg_splitter_over().base(cx))]),
         ])
     }
     
     pub fn get_moving_anim(cx: &Cx) -> Anim {
         Anim::new(Play::Cut {duration: 0.2}, vec![
-            Track::color(Quad_color::id(), Ease::Lin, vec![
+            Track::color(Quad::instance_color(), Ease::Lin, vec![
                 (0.0, Theme::color_bg_splitter_peak().base(cx)),
                 (1.0, Theme::color_bg_splitter_drag().base(cx))
             ]),
@@ -277,7 +277,7 @@ impl Splitter {
         cx.end_turtle(Area::Empty);
         let rect = cx.get_turtle_rect();
         let origin = cx.get_turtle_origin();
-        self.split.color = self.animator.last_color(cx, Quad_color::id());
+        self.split.color = self.animator.last_color(cx, Quad::instance_color());
         match self.axis {
             Axis::Horizontal => {
                 cx.set_turtle_pos(Vec2 {x: origin.x, y: origin.y + self._calc_pos});

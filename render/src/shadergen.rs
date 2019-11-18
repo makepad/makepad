@@ -161,54 +161,54 @@ pub struct ShFn {
 }
 
 #[derive(Clone, Hash, PartialEq)]
-pub enum ShUniId {
-    Color(ShUniColorId),
-    Vec4(ShUniVec4Id),
-    Vec3(ShUniVec3Id),
-    Vec2(ShUniVec2Id),
-    Float(ShUniFloatId)
+pub enum UniformType {
+    Color(UniformColor),
+    Vec4(UniformVec4),
+    Vec3(UniformVec3),
+    Vec2(UniformVec2),
+    Float(UniformFloat)
 }
 
-impl ShUniId{
+impl UniformType{
     fn type_name(&self)->String{
         match self{
-            ShUniId::Color(_)=>"vec4".to_string(),
-            ShUniId::Vec4(_)=>"vec4".to_string(),
-            ShUniId::Vec3(_)=>"vec3".to_string(),
-            ShUniId::Vec2(_)=>"vec2".to_string(),
-            ShUniId::Float(_)=>"float".to_string(),
+            UniformType::Color(_)=>"vec4".to_string(),
+            UniformType::Vec4(_)=>"vec4".to_string(),
+            UniformType::Vec3(_)=>"vec3".to_string(),
+            UniformType::Vec2(_)=>"vec2".to_string(),
+            UniformType::Float(_)=>"float".to_string(),
         }
     }
 }
 
 #[derive(Clone, Hash, PartialEq)]
-pub enum ShInsId {
-    Color(ShInsColorId),
-    Vec4(ShInsVec4Id),
-    Vec3(ShInsVec3Id),
-    Vec2(ShInsVec2Id),
-    Float(ShInsFloatId)
+pub enum InstanceType {
+    Color(InstanceColor),
+    Vec4(InstanceVec4),
+    Vec3(InstanceVec3),
+    Vec2(InstanceVec2),
+    Float(InstanceFloat)
 }
 
-impl ShInsId{
+impl InstanceType{
     fn type_name(&self)->String{
         match self{
-            ShInsId::Color(_)=>"vec4".to_string(),
-            ShInsId::Vec4(_)=>"vec4".to_string(),
-            ShInsId::Vec3(_)=>"vec3".to_string(),
-            ShInsId::Vec2(_)=>"vec2".to_string(),
-            ShInsId::Float(_)=>"float".to_string(),
+            InstanceType::Color(_)=>"vec4".to_string(),
+            InstanceType::Vec4(_)=>"vec4".to_string(),
+            InstanceType::Vec3(_)=>"vec3".to_string(),
+            InstanceType::Vec2(_)=>"vec2".to_string(),
+            InstanceType::Float(_)=>"float".to_string(),
         }
     }
 }
 
 #[derive(Clone, Hash, PartialEq)]
 pub enum ShVarStore {
-    Uniform(ShUniId),
+    Uniform(UniformType),
     UniformColor(ColorId),
     UniformVw,
     UniformCx,
-    Instance(ShInsId),
+    Instance(InstanceType),
     Geometry,
     Texture,
     Local,

@@ -101,18 +101,6 @@ pub enum CodeEditorEvent {
     Change
 }
 
-instance_float!(CodeEditor_indent_id);
-
-uniform_float!(CodeEditor_indent_sel);
-uniform_float!(CodeEditor_cursor_blink);
-
-instance_float!(CodeEditor_select_prev_x);
-instance_float!(CodeEditor_select_prev_w);
-instance_float!(CodeEditor_select_next_x);
-instance_float!(CodeEditor_select_next_w);
-
-uniform_float!(CodeEditor_highlight_visible);
-
 impl CodeEditor {
     
     pub fn style(cx: &mut Cx) -> Self {
@@ -228,49 +216,49 @@ impl CodeEditor {
         }
     }
     
-    pub fn layout_bg() -> LayoutId{layout_id!()}
-    pub fn text_style_editor_text() ->TextStyleId{text_style_id!()}
+    pub fn layout_bg() -> LayoutId{uid!()}
+    pub fn text_style_editor_text() ->TextStyleId{uid!()}
     
-    pub fn color_bg()->ColorId{color_id!()}
-    pub fn color_gutter_bg()->ColorId{color_id!()}
-    pub fn color_indent_line_unknown()->ColorId{color_id!()}
-    pub fn color_indent_line_fn()->ColorId{color_id!()}
-    pub fn color_indent_line_typedef()->ColorId{color_id!()}
-    pub fn color_indent_line_looping()->ColorId{color_id!()}
-    pub fn color_indent_line_flow()->ColorId{color_id!()}
-    pub fn color_selection()->ColorId{color_id!()}
-    pub fn color_selection_defocus()->ColorId{color_id!()}
-    pub fn color_highlight()->ColorId{color_id!()}
-    pub fn color_cursor()->ColorId{color_id!()}
-    pub fn color_cursor_row()->ColorId{color_id!()}
-    pub fn color_paren_pair_match()->ColorId{color_id!()}
-    pub fn color_paren_pair_fail()->ColorId{color_id!()}
-    pub fn color_marker_error()->ColorId{color_id!()}
-    pub fn color_marker_warning()->ColorId{color_id!()}
-    pub fn color_marker_log()->ColorId{color_id!()}
-    pub fn color_line_number_normal()->ColorId{color_id!()}
-    pub fn color_line_number_highlight()->ColorId{color_id!()}
+    pub fn color_bg()->ColorId{uid!()}
+    pub fn color_gutter_bg()->ColorId{uid!()}
+    pub fn color_indent_line_unknown()->ColorId{uid!()}
+    pub fn color_indent_line_fn()->ColorId{uid!()}
+    pub fn color_indent_line_typedef()->ColorId{uid!()}
+    pub fn color_indent_line_looping()->ColorId{uid!()}
+    pub fn color_indent_line_flow()->ColorId{uid!()}
+    pub fn color_selection()->ColorId{uid!()}
+    pub fn color_selection_defocus()->ColorId{uid!()}
+    pub fn color_highlight()->ColorId{uid!()}
+    pub fn color_cursor()->ColorId{uid!()}
+    pub fn color_cursor_row()->ColorId{uid!()}
+    pub fn color_paren_pair_match()->ColorId{uid!()}
+    pub fn color_paren_pair_fail()->ColorId{uid!()}
+    pub fn color_marker_error()->ColorId{uid!()}
+    pub fn color_marker_warning()->ColorId{uid!()}
+    pub fn color_marker_log()->ColorId{uid!()}
+    pub fn color_line_number_normal()->ColorId{uid!()}
+    pub fn color_line_number_highlight()->ColorId{uid!()}
     
-    pub fn color_whitespace()->ColorId{color_id!()}
-    pub fn color_keyword()->ColorId{color_id!()}
-    pub fn color_flow()->ColorId{color_id!()}
-    pub fn color_looping()->ColorId{color_id!()}
-    pub fn color_identifier()->ColorId{color_id!()}
-    pub fn color_call()->ColorId{color_id!()}
-    pub fn color_type_name()->ColorId{color_id!()}
-    pub fn color_theme_name()->ColorId{color_id!()}
-    pub fn color_string()->ColorId{color_id!()}
-    pub fn color_number()->ColorId{color_id!()}
-    pub fn color_comment()->ColorId{color_id!()}
-    pub fn color_doc_comment()->ColorId{color_id!()}
-    pub fn color_paren_d1()->ColorId{color_id!()}
-    pub fn color_paren_d2()->ColorId{color_id!()}
-    pub fn color_operator()->ColorId{color_id!()}
-    pub fn color_delimiter()->ColorId{color_id!()}
-    pub fn color_unexpected()->ColorId{color_id!()}
-    pub fn color_warning()->ColorId{color_id!()}
-    pub fn color_error()->ColorId{color_id!()}
-    pub fn color_defocus()->ColorId{color_id!()}
+    pub fn color_whitespace()->ColorId{uid!()}
+    pub fn color_keyword()->ColorId{uid!()}
+    pub fn color_flow()->ColorId{uid!()}
+    pub fn color_looping()->ColorId{uid!()}
+    pub fn color_identifier()->ColorId{uid!()}
+    pub fn color_call()->ColorId{uid!()}
+    pub fn color_type_name()->ColorId{uid!()}
+    pub fn color_theme_name()->ColorId{uid!()}
+    pub fn color_string()->ColorId{uid!()}
+    pub fn color_number()->ColorId{uid!()}
+    pub fn color_comment()->ColorId{uid!()}
+    pub fn color_doc_comment()->ColorId{uid!()}
+    pub fn color_paren_d1()->ColorId{uid!()}
+    pub fn color_paren_d2()->ColorId{uid!()}
+    pub fn color_operator()->ColorId{uid!()}
+    pub fn color_delimiter()->ColorId{uid!()}
+    pub fn color_unexpected()->ColorId{uid!()}
+    pub fn color_warning()->ColorId{uid!()}
+    pub fn color_error()->ColorId{uid!()}
+    pub fn color_defocus()->ColorId{uid!()}
     
     pub fn theme(cx:&mut Cx){
         
@@ -283,11 +271,21 @@ impl CodeEditor {
         Self::text_style_editor_text().set_base(cx, Theme::text_style_fixed().base(cx));
     }
     
+    pub fn instance_indent_id()->InstanceFloat{uid!()}
+    pub fn uniform_indent_sel()->UniformFloat{uid!()}
+    pub fn uniform_cursor_blink()->UniformFloat{uid!()}
+    pub fn instance_select_prev_x()->InstanceFloat{uid!()}
+    pub fn instance_select_prev_w()->InstanceFloat{uid!()}
+    pub fn instance_select_next_x()->InstanceFloat{uid!()}
+    pub fn instance_select_next_w()->InstanceFloat{uid!()}
+    pub fn uniform_highlight_visible()->UniformFloat{uid!()}
+    
+    
     pub fn def_indent_lines_shader() -> ShaderGen {
         Quad::def_quad_shader().compose(shader_ast !({
-            let indent_id: CodeEditor_indent_id;
+            let indent_id: Self::instance_indent_id();
             // uniforms
-            let indent_sel: CodeEditor_indent_sel;
+            let indent_sel: Self::uniform_indent_sel();
             fn pixel() -> vec4 {
                 let col = color;
                 let thickness = 0.8 + dpi_dilate * 0.5;
@@ -308,7 +306,7 @@ impl CodeEditor {
     
     pub fn def_cursor_shader() -> ShaderGen {
         Quad::def_quad_shader().compose(shader_ast !({
-            let blink: CodeEditor_cursor_blink;
+            let blink: Self::uniform_cursor_blink();
             fn pixel() -> vec4 {
                 if blink<0.5 {
                     return vec4(color.rgb * color.a, color.a)
@@ -322,10 +320,10 @@ impl CodeEditor {
     
     pub fn def_selection_shader() -> ShaderGen {
         Quad::def_quad_shader().compose(shader_ast !({
-            let prev_x: CodeEditor_select_prev_x;
-            let prev_w: CodeEditor_select_prev_w;
-            let next_x: CodeEditor_select_next_x;
-            let next_w: CodeEditor_select_next_w;
+            let prev_x: Self::instance_select_prev_x();
+            let prev_w: Self::instance_select_prev_w();
+            let next_x: Self::instance_select_next_x();
+            let next_w: Self::instance_select_next_w();
             const gloopiness: float = 8.;
             const border_radius: float = 2.;
             
@@ -401,7 +399,7 @@ impl CodeEditor {
     
     pub fn def_token_highlight_shader() -> ShaderGen {
         Quad::def_quad_shader().compose(shader_ast!({
-            let visible: CodeEditor_highlight_visible;
+            let visible: Self::uniform_highlight_visible();
             fn pixel() -> vec4 {
                 if visible<0.5 {
                     return vec4(0., 0., 0., 0.)
@@ -427,14 +425,14 @@ impl CodeEditor {
     
     fn reset_highlight_visible(&mut self, cx: &mut Cx) {
         self._highlight_visibility = 0.0;
-        self._highlight_area.write_uniform_float(cx, CodeEditor_highlight_visible::id(), self._highlight_visibility);
+        self._highlight_area.write_uniform_float(cx, Self::uniform_highlight_visible(), self._highlight_visibility);
     }
     
     fn reset_cursor_blinker(&mut self, cx: &mut Cx) {
         cx.stop_timer(&mut self._cursor_blink_timer);
         self._cursor_blink_timer = cx.start_timer(self.cursor_blink_speed * 0.5, false);
         self._cursor_blink_flipflop = 0.;
-        self._cursor_area.write_uniform_float(cx, CodeEditor_cursor_blink::id(), self._cursor_blink_flipflop);
+        self._cursor_area.write_uniform_float(cx, Self::uniform_cursor_blink(), self._cursor_blink_flipflop);
     }
     
     fn handle_finger_down(&mut self, cx: &mut Cx, fe: &FingerDownEvent, text_buffer: &mut TextBuffer) {
@@ -769,8 +767,8 @@ impl CodeEditor {
                 // update the cursor uniform to blink it.
                 self._cursor_blink_flipflop = 1.0 - self._cursor_blink_flipflop;
                 self._highlight_visibility = 1.0;
-                self._cursor_area.write_uniform_float(cx, CodeEditor_cursor_blink::id(), self._cursor_blink_flipflop);
-                self._highlight_area.write_uniform_float(cx, CodeEditor_highlight_visible::id(), self._highlight_visibility);
+                self._cursor_area.write_uniform_float(cx, Self::uniform_cursor_blink(), self._cursor_blink_flipflop);
+                self._highlight_area.write_uniform_float(cx, Self::uniform_highlight_visible(), self._highlight_visibility);
                 // ok see if we changed.
                 if self._last_lag_mutation_id != text_buffer.mutation_id {
                     let was_filechange = self._last_lag_mutation_id != 0;
@@ -1685,7 +1683,7 @@ impl CodeEditor {
             let indent_id = if self.cursors.is_last_cursor_singular() && self._last_cursor_pos.row < self._line_geometry.len() {
                 self._line_geometry[self._last_cursor_pos.row].indent_id
             }else {0.};
-            indent_inst.clone().into_area().write_uniform_float(cx, CodeEditor_indent_sel::id(), indent_id);
+            indent_inst.clone().into_area().write_uniform_float(cx, Self::uniform_indent_sel(), indent_id);
         }
     }
     

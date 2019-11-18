@@ -11,18 +11,6 @@ pub struct Blit {
     pub do_scroll: bool
 }
 
-instance_float!(InstanceX);
-instance_float!(InstanceY);
-instance_float!(InstanceMinX);
-instance_float!(InstanceMinY);
-instance_float!(InstanceMaxX);
-instance_float!(InstanceMaxY);
-instance_float!(InstanceZ);
-instance_float!(InstanceW);
-instance_float!(InstanceH);
-uniform_vec2!(UniformViewDoScroll);
-uniform_float!(UniformAlpha);
-
 impl Blit {
     pub fn style(cx: &mut Cx) -> Self {
         Self {
@@ -36,6 +24,19 @@ impl Blit {
         }
     }
     
+    pub fn instance_x()->InstanceFloat{uid!()}
+    pub fn instance_y()->InstanceFloat{uid!()}
+    pub fn instance_w()->InstanceFloat{uid!()}
+    pub fn instance_h()->InstanceFloat{uid!()}
+    pub fn instance_min_x()->InstanceFloat{uid!()}
+    pub fn instance_min_y()->InstanceFloat{uid!()}
+    pub fn instance_max_x()->InstanceFloat{uid!()}
+    pub fn instance_max_y()->InstanceFloat{uid!()}
+    pub fn instance_z()->InstanceFloat{uid!()}
+    pub fn instance_color()->InstanceColor{uid!()}
+    pub fn uniform_view_do_scroll()->UniformVec2{uid!()}
+    pub fn uniform_alpha()->UniformFloat{uid!()}
+    
     pub fn def_blit_shader() -> ShaderGen {
         // lets add the draw shader lib
         let mut sb = ShaderGen::new();
@@ -46,17 +47,17 @@ impl Blit {
         sb.compose(shader_ast!({
             
             let geom: vec2<Geometry>;
-            let x: InstanceX;
-            let y: InstanceY;
-            let w: InstanceW;
-            let h: InstanceH;
-            let min_x: InstanceMinX;
-            let min_y: InstanceMinY;
-            let max_x: InstanceMaxX;
-            let max_y: InstanceMaxY;
+            let x: Self::instance_x();
+            let y: Self::instance_y();
+            let w: Self::instance_w();
+            let h: Self::instance_h();
+            let min_x: Self::instance_min_x();
+            let min_y: Self::instance_min_y();
+            let max_x: Self::instance_max_x();
+            let max_y: Self::instance_max_y();
             let tc: vec2<Varying>;
-            let view_do_scroll: UniformViewDoScroll;
-            let alpha: UniformAlpha;
+            let view_do_scroll: Self::uniform_view_do_scroll();
+            let alpha: Self::uniform_alpha();
             let texturez:texture2d<Texture>;
             let v_pixel: vec2<Varying>;
             //let dpi_dilate: float<Uniform>;

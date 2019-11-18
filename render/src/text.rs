@@ -50,23 +50,6 @@ pub struct Text {
     pub do_v_scroll: bool,
 }
 
-instance_vec4!(Text_font_tc);
-instance_color!(Text_color);
-instance_float!(Text_x);
-instance_float!(Text_y);
-instance_float!(Text_w);
-instance_float!(Text_h);
-instance_float!(Text_z);
-instance_float!(Text_base_x);
-instance_float!(Text_base_y);
-instance_float!(Text_font_size);
-instance_float!(Text_char_offset);
-instance_float!(Text_marker);
-
-uniform_float!(Text_zbias);
-uniform_float!(Text_brightness);
-uniform_float!(Text_curve);
-uniform_vec2!(Text_view_do_scroll);
 
 impl Text {
     pub fn style(cx: &mut Cx, text_style:TextStyleId) -> Self {
@@ -92,6 +75,24 @@ impl Text {
             */
         }
     }
+
+    pub fn instance_font_tc()->InstanceVec4{uid!()}
+    pub fn instance_color()->InstanceColor{uid!()}
+    pub fn instance_x()->InstanceFloat{uid!()}
+    pub fn instance_y()->InstanceFloat{uid!()}
+    pub fn instance_w()->InstanceFloat{uid!()}
+    pub fn instance_h()->InstanceFloat{uid!()}
+    pub fn instance_z()->InstanceFloat{uid!()}
+    pub fn instance_base_x()->InstanceFloat{uid!()}
+    pub fn instance_base_y()->InstanceFloat{uid!()}
+    pub fn instance_font_size()->InstanceFloat{uid!()}
+    pub fn instance_marker()->InstanceFloat{uid!()}
+    pub fn instance_char_offset()->InstanceFloat{uid!()}
+    
+    pub fn uniform_zbias()->UniformFloat{uid!()}
+    pub fn uniform_brightness()->UniformFloat{uid!()}
+    pub fn uniform_curve()->UniformFloat{uid!()}
+    pub fn uniform_view_do_scroll()->UniformVec2{uid!()}
     
     pub fn def_text_shader() -> ShaderGen {
         // lets add the draw shader lib
@@ -102,18 +103,18 @@ impl Text {
             let geom: vec2<Geometry>;
             let texturez: texture2d<Texture>;
 
-            let font_tc: Text_font_tc;
-            let color: Text_color;
-            let x: Text_x;
-            let y: Text_y;
-            let w: Text_w;
-            let h: Text_h;
-            let z: Text_z;
-            let base_x: Text_base_x;
-            let base_y: Text_base_y;
-            let font_size: Text_font_size;
-            let char_offset:Text_char_offset;
-            let marker: Text_marker;
+            let font_tc: Self::instance_font_tc();
+            let color: Self::instance_color();
+            let x: Self::instance_x();
+            let y: Self::instance_y();
+            let w: Self::instance_w();
+            let h: Self::instance_h();
+            let z: Self::instance_z();
+            let base_x: Self::instance_base_x();
+            let base_y: Self::instance_base_y();
+            let font_size: Self::instance_font_size();
+            let char_offset:Self::instance_char_offset();
+            let marker: Self::instance_marker();
             
             let tex_coord1: vec2<Varying>;
             let tex_coord2: vec2<Varying>;
@@ -121,10 +122,10 @@ impl Text {
             let clipped: vec2<Varying>;
             let rect: vec4<Varying>;
             
-            let zbias: Text_zbias;
-            let brightness: Text_brightness;
-            let curve: Text_curve;
-            let view_do_scroll: Text_view_do_scroll;
+            let zbias: Self::uniform_zbias();
+            let brightness: Self::uniform_brightness();
+            let curve: Self::uniform_curve();
+            let view_do_scroll: Self::uniform_view_do_scroll();
             
             fn pixel() -> vec4 {
                 let dx = dfdx(vec2(tex_coord1.x * 4096.0, 0.)).x;
@@ -435,11 +436,11 @@ impl Text {
     pub fn find_closest_offset(&self, cx: &Cx, area: &Area, pos: Vec2) -> usize {
         let scroll_pos = area.get_scroll_pos(cx);
         let spos = Vec2 {x: pos.x + scroll_pos.x, y: pos.y + scroll_pos.y};
-        let x_o = area.get_instance_offset(cx, Text_base_x::ins_id()).unwrap();
-        let y_o = area.get_instance_offset(cx, Text_base_y::ins_id()).unwrap();
-        let w_o = area.get_instance_offset(cx, Text_w::ins_id()).unwrap();
-        let font_size_o = area.get_instance_offset(cx, Text_font_size::ins_id()).unwrap();
-        let char_offset_o = area.get_instance_offset(cx, Text_char_offset::ins_id()).unwrap();
+        let x_o = area.get_instance_offset(cx, Self::instance_base_x().instance_type()).unwrap();
+        let y_o = area.get_instance_offset(cx, Self::instance_base_y().instance_type()).unwrap();
+        let w_o = area.get_instance_offset(cx, Self::instance_w().instance_type()).unwrap();
+        let font_size_o = area.get_instance_offset(cx, Self::instance_font_size().instance_type()).unwrap();
+        let char_offset_o = area.get_instance_offset(cx, Self::instance_char_offset().instance_type()).unwrap();
         let read = area.get_read_ref(cx);
         let text_style = self.text_style.base(cx);
         let line_spacing = text_style.line_spacing;

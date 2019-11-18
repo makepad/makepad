@@ -25,8 +25,6 @@ impl CodeIconType {
     }
 }
 
-instance_float!(InstanceIconId);
-
 impl CodeIcon {
     pub fn style(cx: &mut Cx) -> Self {
         Self {
@@ -37,7 +35,7 @@ impl CodeIcon {
         }
     }
     
-    pub fn walk()->WalkId{walk_id!()}
+    pub fn walk()->WalkId{uid!()}
     
     pub fn theme(cx:&mut Cx){
         Self::walk().set_base(cx, Walk{
@@ -46,10 +44,12 @@ impl CodeIcon {
             margin: Margin {l: 0., t: 0.5, r: 4., b: 0.},
         })
     }
-
+    
+    pub fn instance_icon_id()->InstanceFloat{uid!()}
+    
     pub fn def_code_icon_shader() -> ShaderGen {
         Quad::def_quad_shader().compose(shader_ast!({
-            let icon_id: InstanceIconId;
+            let icon_id: Self::instance_icon_id();
             
             fn pixel() -> vec4 {
                 let col = color;

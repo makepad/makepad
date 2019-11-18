@@ -67,7 +67,7 @@ impl DesktopWindow {
         }
     }
     
-    pub fn text_style_window_caption() ->TextStyleId{text_style_id!()}
+    pub fn text_style_window_caption() ->TextStyleId{uid!()}
     
     pub fn theme(cx:&mut Cx){
         Self::text_style_window_caption().set_base(cx, Theme::text_style_normal().base(cx));

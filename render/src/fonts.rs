@@ -34,11 +34,7 @@ pub struct TrapezoidText {
     shader: Shader,
     trapezoidator: Trapezoidator
 }
-
-instance_vec2!(InstanceAxS);
-instance_vec4!(InstanceAyS);
-instance_float!(InstanceChan);
-
+ 
 impl TrapezoidText {
     pub fn style(cx: &mut Cx) -> Self {
         Self {
@@ -47,7 +43,11 @@ impl TrapezoidText {
         }
     }
     
-    pub fn def_trapezoid_shader() -> ShaderGen {
+    fn instance_a_xs()->InstanceVec2{uid!()}
+    fn instance_a_ys()->InstanceVec4{uid!()}
+    fn instance_chan()->InstanceFloat{uid!()}
+    
+    pub fn def_trapezoid_shader() -> ShaderGen { 
         let mut sg = ShaderGen::new();
         sg.geometry_vertices = vec![0.0, 0.0, 1.0, 0.0, 1.0, 1.0, 0.0, 1.0];
         sg.geometry_indices = vec![0, 1, 2, 2, 3, 0];
@@ -56,9 +56,9 @@ impl TrapezoidText {
             
             let geom: vec2<Geometry>;
             
-            let a_xs: InstanceAxS;
-            let a_ys: InstanceAyS;
-            let chan: InstanceChan;
+            let a_xs: Self::instance_a_xs();
+            let a_ys: Self::instance_a_ys();
+            let chan: Self::instance_chan();
             
             let v_p0: vec2<Varying>;
             let v_p1: vec2<Varying>;

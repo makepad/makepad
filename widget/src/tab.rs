@@ -33,9 +33,6 @@ pub enum TabEvent {
     Select,
 }
 
-instance_color!(Tab_border_color);
-instance_float!(Tab_closing);
-
 impl Tab {
     pub fn style(cx: &mut Cx) -> Self {
         let mut tab = Self {
@@ -63,8 +60,10 @@ impl Tab {
         tab
     }
     
-    pub fn layout_bg() -> LayoutId{layout_id!()}
-    pub fn text_style_title() ->TextStyleId{text_style_id!()}
+    pub fn layout_bg() -> LayoutId{uid!()}
+    pub fn text_style_title() ->TextStyleId{uid!()}
+    pub fn instance_border_color()->InstanceColor{uid!()}
+    pub fn tab_closing()->InstanceFloat{uid!()}
     
     pub fn theme(cx:&mut Cx){ 
         Self::layout_bg().set_base(cx, Layout {
@@ -106,41 +105,41 @@ impl Tab {
     
     pub fn anim_default(&self, cx: &Cx) -> Anim {
         Anim::new(Play::Cut {duration: 0.05}, vec![
-            Track::color(Quad_color::id(), Ease::Lin, vec![(1.0, self.get_bg_color(cx))]),
-            Track::color(Tab_border_color::id(), Ease::Lin, vec![(1.0, Theme::color_bg_selected().base(cx))]),
-            Track::color(Text_color::id(), Ease::Lin, vec![(1.0, self.get_text_color(cx))]),
+            Track::color(Quad::instance_color(), Ease::Lin, vec![(1.0, self.get_bg_color(cx))]),
+            Track::color(Self::instance_border_color(), Ease::Lin, vec![(1.0, Theme::color_bg_selected().base(cx))]),
+            Track::color(Text::instance_color(), Ease::Lin, vec![(1.0, self.get_text_color(cx))]),
             //Track::color_id(cx, "icon.color", Ease::Lin, vec![(1.0, self.get_text_color(cx))])
         ])
     }
     
     pub fn anim_over(&self, cx: &Cx) -> Anim {
         Anim::new(Play::Cut {duration: 0.01}, vec![
-            Track::color(Quad_color::id(), Ease::Lin, vec![(1.0, self.get_bg_color(cx))]),
-            Track::color(Tab_border_color::id(), Ease::Lin, vec![(1.0, Theme::color_bg_selected().base(cx))]),
-            Track::color(Text_color::id(), Ease::Lin, vec![(1.0, self.get_text_color(cx))]),
+            Track::color(Quad::instance_color(), Ease::Lin, vec![(1.0, self.get_bg_color(cx))]),
+            Track::color(Self::instance_border_color(), Ease::Lin, vec![(1.0, Theme::color_bg_selected().base(cx))]),
+            Track::color(Text::instance_color(), Ease::Lin, vec![(1.0, self.get_text_color(cx))]),
             //Track::color_id(cx, "icon.color", Ease::Lin, vec![(1.0, self.get_text_color(cx))])
         ])
     }
     
     pub fn anim_down(&self, cx: &Cx) -> Anim {
         Anim::new(Play::Cut {duration: 0.01}, vec![
-            Track::color(Quad_color::id(), Ease::Lin, vec![(1.0, self.get_bg_color(cx))]),
-            Track::color(Tab_border_color::id(), Ease::Lin, vec![(1.0, Theme::color_bg_selected().base(cx))]),
-            Track::color(Text_color::id(), Ease::Lin, vec![(1.0, self.get_text_color(cx))]),
+            Track::color(Quad::instance_color(), Ease::Lin, vec![(1.0, self.get_bg_color(cx))]),
+            Track::color(Self::instance_border_color(), Ease::Lin, vec![(1.0, Theme::color_bg_selected().base(cx))]),
+            Track::color(Text::instance_color(), Ease::Lin, vec![(1.0, self.get_text_color(cx))]),
            // Track::color_id(cx, "icon.color", Ease::Lin, vec![(1.0, self.get_text_color(cx))])
         ])
     }
     
     pub fn anim_close(&self, _cx: &Cx) -> Anim {
         Anim::new(Play::Single {duration: 0.1, cut: true, term: true, end: 1.0}, vec![
-            Track::float(Tab_closing::id(), Ease::OutExp, vec![(0.0, 1.0), (1.0, 0.0)]),
+            Track::float(Self::tab_closing(), Ease::OutExp, vec![(0.0, 1.0), (1.0, 0.0)]),
         ])
     }
     
     pub fn def_bg_shader() -> ShaderGen {
         Quad::def_quad_shader().compose(shader_ast!({
             
-            let border_color: Tab_border_color;
+            let border_color: Self::instance_border_color();
             const border_width: float = 1.0;
             
             fn pixel() -> vec4 {
@@ -193,7 +192,7 @@ impl Tab {
             Event::Animate(ae) => {
                 // its playing the term anim, run a redraw
                 if self.animator.term_anim_playing() {
-                    self.animator.calc_float(cx, Tab_closing::id(), ae.time);
+                    self.animator.calc_float(cx, Self::tab_closing(), ae.time);
                     cx.redraw_child_area(self._bg_area);
                 }
                 else {
@@ -281,7 +280,7 @@ impl Tab {
     pub fn begin_tab(&mut self, cx: &mut Cx) -> Result<(), ()> {
         // pull the bg color from our animation system, uses 'default' value otherwise
         self.bg.z = self.z;
-        self.bg.color = self.animator.last_color(cx, Quad_color::id());
+        self.bg.color = self.animator.last_color(cx, Quad::instance_color());
         
         // check if we are closing
         if self.animator.term_anim_playing() {
@@ -289,11 +288,11 @@ impl Tab {
             let bg_inst = self.bg.draw_quad(
                 cx,
                 Walk::wh(
-                    Width::Fix(self._close_anim_rect.w * self.animator.last_float(cx, Tab_closing::id())),
+                    Width::Fix(self._close_anim_rect.w * self.animator.last_float(cx, Self::tab_closing())),
                     Height::Fix(self._close_anim_rect.h),
                 )
             );
-            bg_inst.push_last_color(cx, &self.animator, Tab_border_color::id());
+            bg_inst.push_last_color(cx, &self.animator, Self::instance_border_color());
             self._bg_area = bg_inst.into_area();
             self.animator.update_area_refs(cx, self._bg_area);
             return Err(())
@@ -306,14 +305,14 @@ impl Tab {
                 Self::layout_bg().base(cx)
             };
             let bg_inst = self.bg.begin_quad(cx, layout);
-            bg_inst.push_last_color(cx, &self.animator, Tab_border_color::id());
+            bg_inst.push_last_color(cx, &self.animator, Self::instance_border_color());
             if self.is_closeable {
                 self.tab_close.draw_tab_close(cx);
                 cx.turtle_align_y();
             }
             // push the 2 vars we added to bg shader
             self.text.z = self.z;
-            self.text.color = self.animator.last_color(cx, Text_color::id());
+            self.text.color = self.animator.last_color(cx, Text::instance_color());
             self._text_area = self.text.draw_text(cx, &self.label);
             cx.turtle_align_y();
             self._bg_inst = Some(bg_inst);

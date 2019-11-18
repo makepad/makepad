@@ -7,35 +7,35 @@ use crate::tabclose::*;
 
 pub struct Theme{}
 impl Theme{
-    pub fn text_style_normal()->TextStyleId{text_style_id!()}
-    pub fn text_style_fixed()->TextStyleId{text_style_id!()}
+    pub fn text_style_normal()->TextStyleId{uid!()}
+    pub fn text_style_fixed()->TextStyleId{uid!()}
 
-    pub fn color_bg_splitter()->ColorId{color_id!()}
-    pub fn color_bg_splitter_over()->ColorId{color_id!()}
-    pub fn color_bg_splitter_peak()->ColorId{color_id!()}
-    pub fn color_bg_splitter_drag()->ColorId{color_id!()}
+    pub fn color_bg_splitter()->ColorId{uid!()}
+    pub fn color_bg_splitter_over()->ColorId{uid!()}
+    pub fn color_bg_splitter_peak()->ColorId{uid!()}
+    pub fn color_bg_splitter_drag()->ColorId{uid!()}
     
-    pub fn color_scrollbar_base()->ColorId{color_id!()}
-    pub fn color_scrollbar_over()->ColorId{color_id!()}
-    pub fn color_scrollbar_down()->ColorId{color_id!()}
+    pub fn color_scrollbar_base()->ColorId{uid!()}
+    pub fn color_scrollbar_over()->ColorId{uid!()}
+    pub fn color_scrollbar_down()->ColorId{uid!()}
     
-    pub fn color_bg_normal()->ColorId{color_id!()}
-    pub fn color_bg_selected()->ColorId{color_id!()}
-    pub fn color_bg_odd()->ColorId{color_id!()}
-    pub fn color_bg_selected_over()->ColorId{color_id!()}
-    pub fn color_bg_odd_over()->ColorId{color_id!()}
-    pub fn color_bg_marked()->ColorId{color_id!()}
-    pub fn color_bg_marked_over()->ColorId{color_id!()}
-    pub fn color_over_border()->ColorId{color_id!()}
-    pub fn color_icon()->ColorId{color_id!()}
-    pub fn color_drop_quad()->ColorId{color_id!()}
+    pub fn color_bg_normal()->ColorId{uid!()}
+    pub fn color_bg_selected()->ColorId{uid!()}
+    pub fn color_bg_odd()->ColorId{uid!()}
+    pub fn color_bg_selected_over()->ColorId{uid!()}
+    pub fn color_bg_odd_over()->ColorId{uid!()}
+    pub fn color_bg_marked()->ColorId{uid!()}
+    pub fn color_bg_marked_over()->ColorId{uid!()}
+    pub fn color_over_border()->ColorId{uid!()}
+    pub fn color_icon()->ColorId{uid!()}
+    pub fn color_drop_quad()->ColorId{uid!()}
     
-    pub fn color_text_focus()->ColorId{color_id!()}
-    pub fn color_text_defocus()->ColorId{color_id!()}
-    pub fn color_text_selected_focus()->ColorId{color_id!()}
-    pub fn color_text_deselected_focus()->ColorId{color_id!()}
-    pub fn color_text_selected_defocus()->ColorId{color_id!()}
-    pub fn color_text_deselected_defocus()->ColorId{color_id!()}
+    pub fn color_text_focus()->ColorId{uid!()}
+    pub fn color_text_defocus()->ColorId{uid!()}
+    pub fn color_text_selected_focus()->ColorId{uid!()}
+    pub fn color_text_deselected_focus()->ColorId{uid!()}
+    pub fn color_text_selected_defocus()->ColorId{uid!()}
+    pub fn color_text_deselected_defocus()->ColorId{uid!()}
 }
 
 pub fn set_widget_theme_values(cx: &mut Cx) {

@@ -7,219 +7,148 @@ pub use crate::math::*;
 pub use crate::colors::*;
 
 #[derive(Hash, PartialEq, Copy, Clone, Debug)]
-pub struct ShInsColorId(pub std::any::TypeId);
+pub struct InstanceColor(pub &'static str, pub u32);
 
 #[derive(Hash, PartialEq, Copy, Clone, Debug)]
-pub struct ShInsVec4Id(pub std::any::TypeId);
+pub struct InstanceVec4(pub &'static str, pub u32);
 
 #[derive(Hash, PartialEq, Copy, Clone, Debug)]
-pub struct ShInsVec3Id(pub std::any::TypeId);
+pub struct InstanceVec3(pub &'static str, pub u32);
 
 #[derive(Hash, PartialEq, Copy, Clone, Debug)]
-pub struct ShInsVec2Id(pub std::any::TypeId);
+pub struct InstanceVec2(pub &'static str, pub u32);
 
 #[derive(Hash, PartialEq, Copy, Clone, Debug)]
-pub struct ShInsFloatId(pub std::any::TypeId);
+pub struct InstanceFloat(pub &'static str, pub u32);
 
 #[derive(Hash, PartialEq, Copy, Clone, Debug)]
-pub struct ShUniColorId(pub std::any::TypeId);
+pub struct UniformColor(pub &'static str, pub u32);
 
 #[derive(Hash, PartialEq, Copy, Clone, Debug)]
-pub struct ShUniVec4Id(pub std::any::TypeId);
+pub struct UniformVec4(pub &'static str, pub u32);
 
 #[derive(Hash, PartialEq, Copy, Clone, Debug)]
-pub struct ShUniVec3Id(pub std::any::TypeId);
+pub struct UniformVec3(pub &'static str, pub u32);
 
 #[derive(Hash, PartialEq, Copy, Clone, Debug)]
-pub struct ShUniVec2Id(pub std::any::TypeId);
+pub struct UniformVec2(pub &'static str, pub u32);
 
 #[derive(Hash, PartialEq, Copy, Clone, Debug)]
-pub struct ShUniFloatId(pub std::any::TypeId);
+pub struct UniformFloat(pub &'static str, pub u32);
 
-pub trait InstanceColor{
-    fn id() -> ShInsColorId;
-    fn ty() -> String{"vec4".to_string()}
-    fn ins_id() -> ShInsId{ShInsId::Color(Self::id())}
-    fn store() -> ShVarStore{ShVarStore::Instance(Self::ins_id())}
-}
+pub struct UniqueId(pub &'static str, pub u32);
 
 #[macro_export]
-macro_rules!instance_color { 
-    ( $ name: ident) => {
-        #[allow(non_camel_case_types)]
-        pub struct $ name();
-        impl InstanceColor for $ name {
-            fn id() -> ShInsColorId {ShInsColorId(std::any::TypeId::of::< $ name>())}
-        }
-    };
+macro_rules!uid { 
+    () => {
+        UniqueId(file!(), line!()).into()
+    }
 }
 
-pub trait InstanceVec4{
-    fn id() -> ShInsVec4Id;
-    fn ty() -> String{"vec4".to_string()}
-    fn ins_id() -> ShInsId{ShInsId::Vec4(Self::id())}
-    fn store() -> ShVarStore{ShVarStore::Instance(Self::ins_id())}
+impl InstanceColor{
+    pub fn shader_type(&self) -> String{"vec4".to_string()}
+    pub fn instance_type(&self) -> InstanceType{InstanceType::Color(*self)}
+    pub fn var_store(&self) -> ShVarStore{ShVarStore::Instance(self.instance_type())}
 }
 
-#[macro_export]
-macro_rules!instance_vec4 {
-    ( $ name: ident) => {
-        #[allow(non_camel_case_types)]
-        pub struct $ name();
-        impl InstanceVec4 for $ name {
-            fn id() -> ShInsVec4Id {ShInsVec4Id(std::any::TypeId::of::< $ name>())}
-        }
-    };
+impl Into<InstanceColor> for UniqueId{
+    fn into(self) -> InstanceColor{InstanceColor(self.0, self.1)}
 }
 
-pub trait InstanceVec3{
-    fn id() -> ShInsVec3Id;
-    fn ty() -> String{"vec3".to_string()}
-    fn ins_id() -> ShInsId{ShInsId::Vec3(Self::id())}
-    fn store() -> ShVarStore{ShVarStore::Instance(Self::ins_id())}
+impl InstanceVec4{
+    pub fn shader_type(&self) -> String{"vec4".to_string()}
+    pub fn instance_type(&self) -> InstanceType{InstanceType::Vec4(*self)}
+    pub fn var_store(&self) -> ShVarStore{ShVarStore::Instance(self.instance_type())}
 }
 
-#[macro_export]
-macro_rules!instance_vec3 {
-    ( $ name: ident) => {
-        #[allow(non_camel_case_types)]
-        pub struct $ name();
-        impl InstanceVec3 for $ name {
-            fn id() -> ShInsVec3Id {ShInsVec3Id(std::any::TypeId::of::< $ name>())}
-        }
-    };
+impl Into<InstanceVec4> for UniqueId{
+    fn into(self) -> InstanceVec4{InstanceVec4(self.0, self.1)}
 }
 
-pub trait InstanceVec2{
-    fn id() -> ShInsVec2Id;
-    fn ty() -> String{"vec2".to_string()}
-    fn ins_id() -> ShInsId{ShInsId::Vec2(Self::id())}
-    fn store() -> ShVarStore{ShVarStore::Instance(Self::ins_id())}
+impl InstanceVec3{
+    pub fn shader_type(&self) -> String{"vec3".to_string()}
+    pub fn instance_type(&self) -> InstanceType{InstanceType::Vec3(*self)}
+    pub fn var_store(&self) -> ShVarStore{ShVarStore::Instance(self.instance_type())}
 }
 
-#[macro_export]
-macro_rules!instance_vec2 {
-    ( $ name: ident) => {
-        #[allow(non_camel_case_types)]
-        pub struct $ name();
-        impl InstanceVec2 for $ name {
-            fn id() -> ShInsVec2Id {ShInsVec2Id(std::any::TypeId::of::< $ name>())}
-        }
-    };
+impl Into<InstanceVec3> for UniqueId{
+    fn into(self) -> InstanceVec3{InstanceVec3(self.0, self.1)}
 }
 
-pub trait InstanceFloat{
-    fn id() -> ShInsFloatId;
-    fn ty() -> String{"float".to_string()}
-    fn ins_id() -> ShInsId{ShInsId::Float(Self::id())}
-    fn store() -> ShVarStore{ShVarStore::Instance(Self::ins_id())}
+impl InstanceVec2{
+    pub fn shader_type(&self) -> String{"vec2".to_string()}
+    pub fn instance_type(&self) -> InstanceType{InstanceType::Vec2(*self)}
+    pub fn var_store(&self) -> ShVarStore{ShVarStore::Instance(self.instance_type())}
 }
 
-#[macro_export]
-macro_rules!instance_float {
-    ( $ name: ident) => {
-        #[allow(non_camel_case_types)]
-        pub struct $ name();
-        impl InstanceFloat for $ name {
-            fn id() -> ShInsFloatId {ShInsFloatId(std::any::TypeId::of::< $ name>())}
-        }
-    };
+impl Into<InstanceVec2> for UniqueId{
+    fn into(self) -> InstanceVec2{InstanceVec2(self.0, self.1)}
 }
 
-pub trait UniformColor{
-    fn id() -> ShUniColorId;
-    fn ty() -> String{"vec4".to_string()}
-    fn uni_id() -> ShUniId{ShUniId::Color(Self::id())}
-    fn store() -> ShVarStore{ShVarStore::Uniform(Self::uni_id())}
+impl InstanceFloat{
+    pub fn shader_type(&self) -> String{"float".to_string()}
+    pub fn instance_type(&self) -> InstanceType{InstanceType::Float(*self)}
+    pub fn var_store(&self) -> ShVarStore{ShVarStore::Instance(self.instance_type())}
 }
 
-#[macro_export]
-macro_rules!uniform_color {
-    ( $ name: ident) => {
-        #[allow(non_camel_case_types)]
-        pub struct $ name();
-        impl UniformColor for $ name {
-            fn id() -> ShUniColorId {ShUniColorId(std::any::TypeId::of::< $ name>())}
-        }
-    };
+impl Into<InstanceFloat> for UniqueId{
+    fn into(self) -> InstanceFloat{InstanceFloat(self.0, self.1)}
 }
 
-pub trait UniformVec4{
-    fn id() -> ShUniVec4Id;
-    fn ty() -> String{"vec4".to_string()}
-    fn uni_id() -> ShUniId{ShUniId::Vec4(Self::id())}
-    fn store() -> ShVarStore{ShVarStore::Uniform(Self::uni_id())}
+impl UniformColor{
+    pub fn shader_type(&self) -> String{"vec4".to_string()}
+    pub fn uniform_type(&self) -> UniformType{UniformType::Color(*self)}
+    pub fn var_store(&self) -> ShVarStore{ShVarStore::Uniform(self.uniform_type())}
 }
 
-#[macro_export]
-macro_rules!uniform_vec4 {
-    ( $ name: ident) => {
-        #[allow(non_camel_case_types)]
-        pub struct $ name();
-        impl UniformVec4 for $ name {
-            fn id() -> ShUniVec4Id {ShUniVec4Id(std::any::TypeId::of::< $ name>())}
-        }
-    };
+impl Into<UniformColor> for UniqueId{
+    fn into(self) -> UniformColor{UniformColor(self.0, self.1)}
 }
 
-pub trait UniformVec3{
-    fn id() -> ShUniVec3Id;
-    fn ty() -> String{"vec3".to_string()}
-    fn uni_id() -> ShUniId{ShUniId::Vec3(Self::id())}
-    fn store() -> ShVarStore{ShVarStore::Uniform(Self::uni_id())}
+impl UniformVec4{
+    pub fn shader_type(&self) -> String{"vec4".to_string()}
+    pub fn uniform_type(&self) -> UniformType{UniformType::Vec4(*self)}
+    pub fn var_store(&self) -> ShVarStore{ShVarStore::Uniform(self.uniform_type())}
 }
 
-#[macro_export]
-macro_rules!uniform_vec3 {
-    ( $ name: ident) => {
-        #[allow(non_camel_case_types)]
-        pub struct $ name();
-        impl UniformVec3 for $ name {
-            fn id() -> ShUniVec3Id {ShUniVec3Id(std::any::TypeId::of::< $ name>())}
-        }
-    };
+impl Into<UniformVec4> for UniqueId{
+    fn into(self) -> UniformVec4{UniformVec4(self.0, self.1)}
 }
 
-pub trait UniformVec2{
-    fn id() -> ShUniVec2Id;
-    fn ty() -> String{"vec2".to_string()}
-    fn uni_id() -> ShUniId{ShUniId::Vec2(Self::id())}
-    fn store() -> ShVarStore{ShVarStore::Uniform(Self::uni_id())}
+impl UniformVec3{
+    pub fn shader_type(&self) -> String{"vec3".to_string()}
+    pub fn uniform_type(&self) -> UniformType{UniformType::Vec3(*self)}
+    pub fn var_store(&self) -> ShVarStore{ShVarStore::Uniform(self.uniform_type())}
 }
 
-#[macro_export]
-macro_rules!uniform_vec2 {
-    ( $ name: ident) => {
-        #[allow(non_camel_case_types)]
-        pub struct $ name();
-        impl UniformVec2 for $ name {
-            fn id() -> ShUniVec2Id {ShUniVec2Id(std::any::TypeId::of::< $ name>())}
-        }
-    };
+impl Into<UniformVec3> for UniqueId{
+    fn into(self) -> UniformVec3{UniformVec3(self.0, self.1)}
 }
 
-pub trait UniformFloat{
-    fn id() -> ShUniFloatId;
-    fn ty() -> String{"float".to_string()}
-    fn uni_id() -> ShUniId{ShUniId::Float(Self::id())}
-    fn store() -> ShVarStore{ShVarStore::Uniform(Self::uni_id())}
+impl UniformVec2{
+    pub fn shader_type(&self) -> String{"vec2".to_string()}
+    pub fn uniform_type(&self) -> UniformType{UniformType::Vec2(*self)}
+    pub fn var_store(&self) -> ShVarStore{ShVarStore::Uniform(self.uniform_type())}
 }
 
-#[macro_export]
-macro_rules!uniform_float {
-    ( $ name: ident) => {
-        #[allow(non_camel_case_types)]
-        pub struct $ name();
-        impl UniformFloat for $ name {
-            fn id() -> ShUniFloatId {ShUniFloatId(std::any::TypeId::of::< $ name>())}
-        }
-    }; 
+impl Into<UniformVec2> for UniqueId{
+    fn into(self) -> UniformVec2{UniformVec2(self.0, self.1)}
+}
+
+impl UniformFloat{
+    pub fn shader_type(&self) -> String{"float".to_string()}
+    pub fn uniform_type(&self) -> UniformType{UniformType::Float(*self)}
+    pub fn var_store(&self) -> ShVarStore{ShVarStore::Uniform(self.uniform_type())}
+}
+
+impl Into<UniformFloat> for UniqueId{
+    fn into(self) -> UniformFloat{UniformFloat(self.0, self.1)}
 }
 
 #[derive(Default, Clone, PartialEq)]
 pub struct Shader {
     pub shader_id: Option<(usize, usize)>,
-}
+} 
 
 #[derive(Default, Clone)]
 pub struct RectInstanceProps {
@@ -258,7 +187,7 @@ impl RectInstanceProps {
 #[derive(Clone)]
 pub struct InstanceProp {
     pub name: String,
-    pub ident: ShInsId,
+    pub ident: InstanceType,
     pub offset: usize,
     pub slots: usize
 }
@@ -272,7 +201,7 @@ pub struct InstanceProps {
 #[derive(Clone)]
 pub struct UniformProp {
     pub name: String,
-    pub ident: ShUniId,
+    pub ident: UniformType,
     pub offset: usize,
     pub slots: usize
 }
@@ -353,8 +282,8 @@ impl UniformProps{
         }
         return None
     }
-}
-
+} 
+ 
 #[derive(Default, Clone)]
 pub struct CxShaderMapping {
     pub instance_slots: usize,
