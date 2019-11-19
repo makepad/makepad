@@ -87,13 +87,13 @@ impl Blit {
     
     pub fn begin_blit(&mut self, cx: &mut Cx, texture:&Texture, layout: Layout) -> InstanceArea {
         let inst = self.draw_blit(cx, texture, Rect::zero());
-        let area = inst.clone().into_area();
+        let area = inst.clone().into();
         cx.begin_turtle(layout, area);
         inst
     }
     
     pub fn end_blit(&mut self, cx: &mut Cx, inst: &InstanceArea) -> Area {
-        let area = inst.clone().into_area();
+        let area = inst.clone().into();
         let rect = cx.end_turtle(area);
         area.set_rect(cx, &rect);
         area

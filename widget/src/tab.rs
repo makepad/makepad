@@ -44,7 +44,7 @@ impl Tab {
                 ..Quad::proto(cx)
             },
             tab_close: TabClose::proto(cx),
-            text: Text::proto(cx, Self::text_style_title()),
+            text: Text::proto(cx),
             animator: Animator::default(),
             abs_origin: None,
             _is_selected: false,
@@ -196,8 +196,8 @@ impl Tab {
                     cx.redraw_child_area(self._bg_area);
                 }
                 else {
-                    self.animator.write_area(cx, self._bg_area, ae.time);
-                    self.animator.write_area(cx, self._text_area, ae.time);
+                    self.animator.calc_area(cx, self._bg_area, ae.time);
+                    self.animator.calc_area(cx, self._text_area, ae.time);
                 }
             },
             Event::AnimEnded(_ae) => {
@@ -293,8 +293,8 @@ impl Tab {
                 )
             );
             bg_inst.push_last_color(cx, &self.animator, Self::instance_border_color());
-            self._bg_area = bg_inst.into_area();
-            self.animator.update_area_refs(cx, self._bg_area);
+            self._bg_area = bg_inst.into();
+            self.animator.set_area(cx, self._bg_area);
             return Err(())
         }
         else {
@@ -312,6 +312,7 @@ impl Tab {
             }
             // push the 2 vars we added to bg shader
             self.text.z = self.z;
+            self.text.text_style = Self::text_style_title().base(cx);
             self.text.color = self.animator.last_color(cx, Text::instance_color());
             self._text_area = self.text.draw_text(cx, &self.label);
             cx.turtle_align_y();
@@ -324,7 +325,7 @@ impl Tab {
     pub fn end_tab(&mut self, cx: &mut Cx) {
         if let Some(bg_inst) = self._bg_inst.take() {
             self._bg_area = self.bg.end_quad(cx, &bg_inst);
-            self.animator.update_area_refs(cx, self._bg_area); // if our area changed, update animation
+            self.animator.set_area(cx, self._bg_area); // if our area changed, update animation
         }
     }
     

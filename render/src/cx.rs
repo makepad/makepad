@@ -274,34 +274,6 @@ impl Default for Cx {
 pub struct CxId(usize);
 
 impl Cx {
-
-    
-    pub fn id(&self, name: &str) -> CxId {
-
-        let mut str_to_id = self.str_to_id.borrow_mut();
-        if let Some(stored_id) = str_to_id.get(name) {
-            return CxId(*stored_id)
-        }
-        let new_id = str_to_id.len();
-        str_to_id.insert(name.to_string(), new_id);
-        let mut id_to_str = self.id_to_str.borrow_mut();
-        id_to_str.insert(new_id, name.to_string());
-        CxId(new_id)
-    }
-
-    
-    // todo make this alloc free
-    pub fn id_starts_with(&self, ident: CxId, begin: &str) -> Option<String> {
-
-        let id_to_str = self.id_to_str.borrow();
-        if let Some(value) = id_to_str.get(&ident.0) {
-            if value.starts_with(begin) {
-                return Some(value.to_string().split_off(begin.len()))
-            }
-            return None
-        }
-        panic!("id not found");
-    }
     
         
     pub fn add_shader(&mut self, sg: ShaderGen, name: &str) -> Shader {

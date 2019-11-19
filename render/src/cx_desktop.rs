@@ -15,7 +15,7 @@ pub struct CxDesktop {
 impl Default for CxDesktop {
     fn default() -> CxDesktop {
         CxDesktop {
-            file_read_id: 1, 
+            file_read_id: 1,
             file_reads: Vec::new(),
             profiler_start: None,
         }
@@ -24,8 +24,8 @@ impl Default for CxDesktop {
 
 impl Cx {
     
-    pub fn get_default_window_size(&self)->Vec2{
-        return Vec2{x:800., y:600.}
+    pub fn get_default_window_size(&self) -> Vec2 {
+        return Vec2 {x: 800., y: 600.}
     }
     
     pub fn file_read(&mut self, path: &str) -> FileRead {
@@ -93,7 +93,7 @@ impl Cx {
         };
     }
     
-    pub fn process_desktop_post_event(&mut self, event: &mut Event)->bool{
+    pub fn process_desktop_post_event(&mut self, event: &mut Event) -> bool {
         match event {
             Event::FingerUp(fe) => { // decapture automatically
                 self.captured_fingers[fe.digit] = Area::Empty;
@@ -115,7 +115,7 @@ impl Cx {
         if self.playing_anim_areas.len() != 0 {
             self.call_animation_event(&mut event_handler, time);
         }
-
+        
         let mut vsync = false;
         
         if self.frame_callbacks.len() != 0 {
@@ -184,7 +184,7 @@ impl Cx {
         }
     }
     
-    pub fn process_to_wasm<F>(&mut self, _msg: u32, mut _event_handler: F) -> u32 
+    pub fn process_to_wasm<F>(&mut self, _msg: u32, mut _event_handler: F) -> u32
     where F: FnMut(&mut Cx, &mut Event)
     {
         0
@@ -192,32 +192,29 @@ impl Cx {
     
     pub fn load_theme_fonts(&mut self) {
         // lets load all fonts that aren't loaded yet
-        for (_key, text_style) in &mut self.theme_text_styles{
-            // lets see if we have it.
-            if let Some(id) = self.fonts.iter().position(|f| f.path == text_style.font_path){
-                text_style.font_id = Some(id);
-                continue;
-            }
-            // load it
-            let file_result = File::open(&text_style.font_path);
-            if let Ok(mut file) = file_result {
-                let mut buffer = Vec::<u8>::new();
-                // read the whole file
-                if file.read_to_end(&mut buffer).is_ok() {
-                    let mut font = CxFont::default();
-                    font.path = text_style.font_path.clone();
-                    if font.load_from_ttf_bytes(&buffer).is_err(){
-                        println!("Error loading font {} ", text_style.font_path);
-                    }
-                    else{
-                        let id = self.fonts.len();
-                        self.fonts.push(font);
-                        text_style.font_id = Some(id);
+        for cxfont in &mut self.fonts{
+            let path = cxfont.path.clone();
+            if cxfont.font_loaded.is_none() {
+                // load it
+                let file_result = File::open(&path);
+                if let Ok(mut file) = file_result {
+                    let mut buffer = Vec::<u8>::new();
+                    // read the whole file
+                    if file.read_to_end(&mut buffer).is_ok() {
+                        let mut font = CxFont::default();
+                        if font.load_from_ttf_bytes(&buffer).is_err() {
+                            println!("Error loading font {} ", path);
+                        }
+                        else {
+                            font.path = path.clone();
+                            *cxfont = font;
+                        }
                     }
                 }
-            }
-            else{
-                println!("Error loading font {} ", text_style.font_path);
+                else {
+                    println!("Error loading font {} ", path);
+                }
+                
             }
         }
     }
@@ -250,12 +247,12 @@ impl Cx {
     
     
     pub fn profile(&mut self) {
-        if let Some(start) = self.platform.desktop.profiler_start{
+        if let Some(start) = self.platform.desktop.profiler_start {
             let delta = precise_time_ns() - start;
             println!("Profile time:{} usec", delta / 1_000);
             self.platform.desktop.profiler_start = None
         }
-        else{
+        else {
             self.platform.desktop.profiler_start = Some(precise_time_ns())
         }
     }

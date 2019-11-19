@@ -57,7 +57,7 @@ impl DesktopWindow {
             
             window_menu: WindowMenu::proto(cx),
             
-            caption_text: Text::proto(cx, Self::text_style_window_caption()),
+            caption_text: Text::proto(cx),
             //caption_bg_color: Color_bg_selected_over::id(cx),
             caption_bg: Quad::proto(cx),
             caption_size: Vec2::zero(),
@@ -162,6 +162,7 @@ impl DesktopWindow {
             walk:Walk::wh(Width::Fill, Height::Compute),
             ..Layout::default()
         }).is_ok() {
+            self.caption_text.text_style = Self::text_style_window_caption().base(cx);
             self.caption_bg.color = Theme::color_bg_selected_over().base(cx);//cx.colors[self.caption_bg_color];
             // alright here we draw our platform buttons.
             match cx.platform_type {

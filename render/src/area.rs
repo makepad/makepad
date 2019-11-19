@@ -526,10 +526,13 @@ impl Area{
     }    */
 }
 
-impl InstanceArea{
-    pub fn into_area(self)->Area{
+impl Into<Area> for InstanceArea{
+    fn into(self)->Area{
         Area::Instance(self)
     }
+}
+
+impl InstanceArea{
     
     pub fn push_slice(&self, cx:&mut Cx, data:&[f32]){
         let cxview = &mut cx.views[self.view_id];

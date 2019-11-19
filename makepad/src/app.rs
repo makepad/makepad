@@ -124,7 +124,7 @@ impl App {
                                     closeable: true,
                                     title: "main.rs".to_string(),
                                     item: Panel::FileEditor {
-                                        path: "examples/quad_example/src/main.rs".to_string(),
+                                        path: "examples/text_example/src/main.rs".to_string(),
                                         scroll_pos: Vec2::zero(),
                                         editor_id: 1
                                     }

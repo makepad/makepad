@@ -11,7 +11,6 @@ use std::sync::Mutex;
 //use std::os::unix::io::FromRawFd;
 use std::mem;
 use std::os::raw::{c_char, c_uchar, c_int, c_uint, c_ulong, c_long, c_void};
-use std::path::PathBuf;
 use std::ptr;
 use time::precise_time_ns;
 
@@ -1651,7 +1650,7 @@ impl Dnd {
     }
 
     /// Handles a XDndLeave event.
-    unsafe fn handle_leave_event(&mut self, event: &X11_sys::XClientMessageEvent) {
+    unsafe fn handle_leave_event(&mut self, _event: &X11_sys::XClientMessageEvent) {
         // The XDndLeave event is sent by the source window when a drag is canceled. That is, the
         // mouse leaves the client rectangle of the target window. The target window is supposed to
         // repsond this this by pretending the drag never happened.

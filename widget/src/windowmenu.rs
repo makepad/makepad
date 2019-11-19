@@ -24,7 +24,7 @@ impl MenuItemDraw {
         Self {
             text: Text {
                 wrapping: Wrapping::Word,
-                ..Text::proto(cx, Self::text_style_menu_label())
+                ..Text::proto(cx)
             },
             //item_layout: Layout_window_menu::id(cx),
             item_bg: Quad::proto(cx),

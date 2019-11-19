@@ -5,44 +5,46 @@ pub use shader_ast::*;
 pub use crate::cx::*;
 pub use crate::math::*;
 pub use crate::colors::*;
+use std::any::TypeId;
 
 #[derive(Hash, PartialEq, Copy, Clone, Debug)]
-pub struct InstanceColor(pub &'static str, pub u32);
+pub struct InstanceColor(pub TypeId);
 
 #[derive(Hash, PartialEq, Copy, Clone, Debug)]
-pub struct InstanceVec4(pub &'static str, pub u32);
+pub struct InstanceVec4(pub TypeId);
 
 #[derive(Hash, PartialEq, Copy, Clone, Debug)]
-pub struct InstanceVec3(pub &'static str, pub u32);
+pub struct InstanceVec3(pub TypeId);
 
 #[derive(Hash, PartialEq, Copy, Clone, Debug)]
-pub struct InstanceVec2(pub &'static str, pub u32);
+pub struct InstanceVec2(pub TypeId);
 
 #[derive(Hash, PartialEq, Copy, Clone, Debug)]
-pub struct InstanceFloat(pub &'static str, pub u32);
+pub struct InstanceFloat(pub TypeId);
 
 #[derive(Hash, PartialEq, Copy, Clone, Debug)]
-pub struct UniformColor(pub &'static str, pub u32);
+pub struct UniformColor(pub TypeId);
 
 #[derive(Hash, PartialEq, Copy, Clone, Debug)]
-pub struct UniformVec4(pub &'static str, pub u32);
+pub struct UniformVec4(pub TypeId);
 
 #[derive(Hash, PartialEq, Copy, Clone, Debug)]
-pub struct UniformVec3(pub &'static str, pub u32);
+pub struct UniformVec3(pub TypeId);
 
 #[derive(Hash, PartialEq, Copy, Clone, Debug)]
-pub struct UniformVec2(pub &'static str, pub u32);
+pub struct UniformVec2(pub TypeId);
 
 #[derive(Hash, PartialEq, Copy, Clone, Debug)]
-pub struct UniformFloat(pub &'static str, pub u32);
+pub struct UniformFloat(pub TypeId);
 
-pub struct UniqueId(pub &'static str, pub u32);
+pub struct UniqueId(pub TypeId);
 
 #[macro_export]
 macro_rules!uid { 
-    () => {
-        UniqueId(file!(), line!()).into()
-    }
+    () => {{
+        struct Unique{};
+        UniqueId(std::any::TypeId::of::<Unique>()).into()
+    }}
 }
 
 impl InstanceColor{
@@ -52,7 +54,7 @@ impl InstanceColor{
 }
 
 impl Into<InstanceColor> for UniqueId{
-    fn into(self) -> InstanceColor{InstanceColor(self.0, self.1)}
+    fn into(self) -> InstanceColor{InstanceColor(self.0)}
 }
 
 impl InstanceVec4{
@@ -62,7 +64,7 @@ impl InstanceVec4{
 }
 
 impl Into<InstanceVec4> for UniqueId{
-    fn into(self) -> InstanceVec4{InstanceVec4(self.0, self.1)}
+    fn into(self) -> InstanceVec4{InstanceVec4(self.0)}
 }
 
 impl InstanceVec3{
@@ -72,7 +74,7 @@ impl InstanceVec3{
 }
 
 impl Into<InstanceVec3> for UniqueId{
-    fn into(self) -> InstanceVec3{InstanceVec3(self.0, self.1)}
+    fn into(self) -> InstanceVec3{InstanceVec3(self.0)}
 }
 
 impl InstanceVec2{
@@ -82,7 +84,7 @@ impl InstanceVec2{
 }
 
 impl Into<InstanceVec2> for UniqueId{
-    fn into(self) -> InstanceVec2{InstanceVec2(self.0, self.1)}
+    fn into(self) -> InstanceVec2{InstanceVec2(self.0)}
 }
 
 impl InstanceFloat{
@@ -92,7 +94,7 @@ impl InstanceFloat{
 }
 
 impl Into<InstanceFloat> for UniqueId{
-    fn into(self) -> InstanceFloat{InstanceFloat(self.0, self.1)}
+    fn into(self) -> InstanceFloat{InstanceFloat(self.0)}
 }
 
 impl UniformColor{
@@ -102,7 +104,7 @@ impl UniformColor{
 }
 
 impl Into<UniformColor> for UniqueId{
-    fn into(self) -> UniformColor{UniformColor(self.0, self.1)}
+    fn into(self) -> UniformColor{UniformColor(self.0)}
 }
 
 impl UniformVec4{
@@ -112,7 +114,7 @@ impl UniformVec4{
 }
 
 impl Into<UniformVec4> for UniqueId{
-    fn into(self) -> UniformVec4{UniformVec4(self.0, self.1)}
+    fn into(self) -> UniformVec4{UniformVec4(self.0)}
 }
 
 impl UniformVec3{
@@ -122,7 +124,7 @@ impl UniformVec3{
 }
 
 impl Into<UniformVec3> for UniqueId{
-    fn into(self) -> UniformVec3{UniformVec3(self.0, self.1)}
+    fn into(self) -> UniformVec3{UniformVec3(self.0)}
 }
 
 impl UniformVec2{
@@ -132,7 +134,7 @@ impl UniformVec2{
 }
 
 impl Into<UniformVec2> for UniqueId{
-    fn into(self) -> UniformVec2{UniformVec2(self.0, self.1)}
+    fn into(self) -> UniformVec2{UniformVec2(self.0)}
 }
 
 impl UniformFloat{
@@ -142,7 +144,7 @@ impl UniformFloat{
 }
 
 impl Into<UniformFloat> for UniqueId{
-    fn into(self) -> UniformFloat{UniformFloat(self.0, self.1)}
+    fn into(self) -> UniformFloat{UniformFloat(self.0)}
 }
 
 #[derive(Default, Clone, PartialEq)]

@@ -80,13 +80,15 @@ impl Quad {
     
     pub fn begin_quad(&mut self, cx: &mut Cx, layout: Layout) -> InstanceArea {
         let inst = self.draw_quad_rel(cx, Rect::zero());
-        let area = inst.clone().into_area();
+        let area = inst.clone().into();
         cx.begin_turtle(layout, area);
         inst
     }
     
     pub fn end_quad(&mut self, cx: &mut Cx, inst: &InstanceArea) -> Area {
-        let area = inst.clone().into_area();
+        // at this point, we should fill in any missing slots.
+        
+        let area = inst.clone().into();
         let rect = cx.end_turtle(area);
         area.set_rect(cx, &rect);
         area

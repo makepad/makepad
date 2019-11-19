@@ -158,7 +158,7 @@ impl Animator {
         }
     }
     
-    pub fn update_area_refs(&mut self, cx: &mut Cx, area: Area) {
+    pub fn set_area(&mut self, cx: &mut Cx, area: Area) {
         if self.area != Area::Empty {
             cx.update_area_refs(self.area, area.clone());
         }
@@ -427,15 +427,11 @@ impl Animator {
         }
     }
     
-    pub fn push_area(&mut self, _cx: &mut Cx, _area: Area, _time: f64) {
-        // we fetch a write pointer to area
-        // lookup our last values and fetch offsets
-        // write directly
-        // check if shader_id is correct
+    pub fn last_area(&mut self, _cx: &mut Cx, _area: Area, _time: f64) {
         
     }
     
-    pub fn write_area(&mut self, cx: &mut Cx, area: Area, time: f64) {
+    pub fn calc_area(&mut self, cx: &mut Cx, area: Area, time: f64) {
         
         if let Some(time) = self.update_anim_track(cx, time) {
             

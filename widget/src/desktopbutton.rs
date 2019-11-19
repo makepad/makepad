@@ -147,7 +147,7 @@ impl DesktopButton {
         //let mut ret_event = ButtonEvent::None;
         let animator = &mut self.animator;
         self.button.handle_button_logic(cx, event, self._bg_area, | cx, logic_event, area | match logic_event {
-            ButtonLogicEvent::Animate(ae) => animator.write_area(cx, area, ae.time),
+            ButtonLogicEvent::Animate(ae) => animator.calc_area(cx, area, ae.time),
             ButtonLogicEvent::AnimEnded(_)=> animator.end(),
             ButtonLogicEvent::Down => animator.play_anim(cx, Self::get_down_anim(cx)),
             ButtonLogicEvent::Default=> animator.play_anim(cx, Self::get_default_anim(cx)),
@@ -170,7 +170,7 @@ impl DesktopButton {
         bg_inst.push_last_float(cx, &self.animator, Self::instance_down());
         bg_inst.push_last_float(cx, &self.animator, Self::instance_hover());
         bg_inst.push_float(cx, ty.shader_float());
-        self._bg_area = bg_inst.into_area();
-        self.animator.update_area_refs(cx, self._bg_area); // if our area changed, update animation
+        self._bg_area = bg_inst.into();
+        self.animator.set_area(cx, self._bg_area); // if our area changed, update animation
     }
 }

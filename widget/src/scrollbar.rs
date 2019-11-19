@@ -291,7 +291,7 @@ impl ScrollBar {
         if self._visible {
             match event.hits(cx, self._sb_area, HitOpt {no_scrolling: true, ..Default::default()}) {
                 Event::Animate(ae) => {
-                    self.animator.write_area(cx, self._sb_area, ae.time);
+                    self.animator.calc_area(cx, self._sb_area, ae.time);
                 },
                 Event::AnimEnded(_) => self.animator.end(),
                 Event::Frame(_ae) => {
@@ -408,7 +408,7 @@ impl ScrollBar {
                     sb_inst.push_float(cx, 0.0);
                     sb_inst.push_float(cx, norm_handle);
                     sb_inst.push_float(cx, norm_scroll);
-                    self._sb_area = sb_inst.into_area();
+                    self._sb_area = sb_inst.into();
                 }
             },
             Axis::Vertical => {
@@ -437,14 +437,14 @@ impl ScrollBar {
                     sb_inst.push_float(cx, 1.0);
                     sb_inst.push_float(cx, norm_handle);
                     sb_inst.push_float(cx, norm_scroll);
-                    self._sb_area = sb_inst.into_area();
+                    self._sb_area = sb_inst.into();
                 }
             }
         }
         
         // push the var added to the sb shader
         if self._visible {
-            self.animator.update_area_refs(cx, self._sb_area); // if our area changed, update animation
+            self.animator.set_area(cx, self._sb_area); // if our area changed, update animation
         }
         
         // see if we need to clamp

@@ -18,7 +18,7 @@ impl NormalButton {
             class: ClassId::base(),
             button: ButtonLogic::default(),
             bg: Quad::proto(cx),
-            text: Text::proto(cx, Self::text_style_label()),
+            text: Text::proto(cx),
             animator: Animator::default(),
             _bg_area: Area::Empty,
         }
@@ -33,7 +33,7 @@ impl NormalButton {
     pub fn instance_border_color() -> InstanceColor {uid!()}
     pub fn instance_glow_size() -> InstanceFloat {uid!()}
     
-    pub fn theme(cx: &mut Cx) {
+    pub fn theme(cx: &mut Cx) { 
         Self::layout_bg().set_base(cx, Layout {
             align: Align::center(),
             walk: Walk {
@@ -92,7 +92,7 @@ impl NormalButton {
         let animator = &mut self.animator;
         let class = self.class;
         self.button.handle_button_logic(cx, event, self._bg_area, | cx, logic_event, area | match logic_event {
-            ButtonLogicEvent::Animate(ae) => animator.write_area(cx, area, ae.time),
+            ButtonLogicEvent::Animate(ae) => animator.calc_area(cx, area, ae.time),
             ButtonLogicEvent::AnimEnded(_) => animator.end(),
             ButtonLogicEvent::Down => animator.play_anim(cx, Self::anim_down().class(cx, class)),
             ButtonLogicEvent::Default => animator.play_anim(cx, Self::anim_default().class(cx, class)),
@@ -106,18 +106,18 @@ impl NormalButton {
         self.bg.shader = Self::shader_bg().class(cx, class);
         
         self.animator.init(cx, | cx | Self::anim_default().class(cx, class));
-        
+
         self.bg.color = self.animator.last_color(cx, Quad::instance_color());
         
         let bg_inst = self.bg.begin_quad(cx, Self::layout_bg().class(cx, class));
-        
+
         bg_inst.push_last_color(cx, &self.animator, Self::instance_border_color());
         bg_inst.push_last_float(cx, &self.animator, Self::instance_glow_size());
         
-        self.text.class = class;
+        self.text.text_style = Self::text_style_label().class(cx, class);
         self.text.draw_text(cx, label);
         
         self._bg_area = self.bg.end_quad(cx, &bg_inst);
-        self.animator.update_area_refs(cx, self._bg_area);
+        self.animator.set_area(cx, self._bg_area);
     }
 }

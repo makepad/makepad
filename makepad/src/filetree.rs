@@ -168,7 +168,7 @@ impl<'a> FileWalker<'a> {
 impl FileTreeItemDraw {
     fn proto(cx: &mut Cx) -> Self {
         Self {
-            tree_text: Text {z: 0.001, ..Text::proto(cx, Self::text_style_label())},
+            tree_text: Text {z: 0.001, ..Text::proto(cx)},
             node_bg: Quad::proto(cx),
             //node_layout: LayoutFileTreeNode::id(),
             filler: Quad {
@@ -450,7 +450,7 @@ impl FileTree {
             
             match event.hits(cx, node_draw.animator.area, HitOpt::default()) {
                 Event::Animate(ae) => {
-                    node_draw.animator.write_area(cx, node_draw.animator.area, ae.time);
+                    node_draw.animator.calc_area(cx, node_draw.animator.area, ae.time);
                 },
                 Event::AnimEnded(_) => {
                     node_draw.animator.end();
@@ -606,6 +606,10 @@ impl FileTree {
         let row_height = node_layout.walk.height.fixed();
         let filler_walk = FileTreeItemDraw::walk_filler().base(cx);
         let folder_walk = FileTreeItemDraw::walk_folder().base(cx);
+        let color_tree_folder =  FileTreeItemDraw::color_tree_folder().base(cx);
+        let color_tree_file = FileTreeItemDraw::color_tree_file().base(cx);
+        self.item_draw.tree_text.text_style = FileTreeItemDraw::text_style_label().base(cx);
+        
         while let Some((depth, index, len, node)) = file_walker.walk() {
             
             let is_first = index == 0;
@@ -635,7 +639,7 @@ impl FileTree {
             node_layout.walk.height = Height::Fix(row_height * scale as f32);
             let inst = self.item_draw.node_bg.begin_quad(cx, node_layout);
             
-            node_draw.animator.update_area_refs(cx, inst.clone().into_area());
+            node_draw.animator.set_area(cx, inst.clone().into());
             let is_marked = node_draw.marked != 0;
             
             for i in 0..(depth - 1) {
@@ -690,7 +694,7 @@ impl FileTree {
                     //cx.move_turtle(0., 3.5);
                     cx.turtle_align_y();
                     //cx.realign_turtle(Align::left_center(), false);
-                    self.item_draw.tree_text.color = FileTreeItemDraw::color_tree_folder().base(cx);
+                    self.item_draw.tree_text.color = color_tree_folder;
                     let wleft = cx.get_width_left() - 10.;
                     self.item_draw.tree_text.wrapping = Wrapping::Ellipsis(wleft);
                     self.item_draw.tree_text.draw_text(cx, name);
@@ -732,10 +736,10 @@ impl FileTree {
                     self.item_draw.tree_text.wrapping = Wrapping::Ellipsis(wleft);
                     //cx.realign_turtle(Align::left_center(), false);
                     self.item_draw.tree_text.color = if is_marked {
-                        FileTreeItemDraw::color_tree_folder().base(cx)
+                        color_tree_folder
                     }
                     else {
-                        FileTreeItemDraw::color_tree_file().base(cx)
+                        color_tree_file
                     };
                     self.item_draw.tree_text.draw_text(cx, name);
                 }

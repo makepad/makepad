@@ -3,10 +3,8 @@
 members = [
     "makepad",
     "makepad/wasm",
-    "tools/testhub",
     "tools/csvproc",
     "examples/text_example",
-    "examples/quad_example",
     "examples/ui_example",
     "workspace"
 ]

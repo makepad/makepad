@@ -27,7 +27,7 @@ impl LogItemDraw {
             item_bg: Quad::proto(cx),
             text: Text {
                 wrapping: Wrapping::Word,
-                ..Text::proto(cx, Self::text_style_item())
+                ..Text::proto(cx)
             },
             code_icon: CodeIcon::proto(cx),
             path_color: Theme::color_text_defocus(),
@@ -139,7 +139,7 @@ impl LogItemDraw {
         }
         
         let bg_area = self.item_bg.end_quad(cx, &bg_inst);
-        list_item.animator.update_area_refs(cx, bg_area);
+        list_item.animator.set_area(cx, bg_area);
     }
     
     pub fn draw_status_line(&mut self, cx: &mut Cx, counter: usize, bm: &BuildManager) {
@@ -282,7 +282,7 @@ impl LogList {
         
         let le = self.list.handle_list_logic(cx, event, select, | cx, item_event, item, item_index | match item_event {
             ListLogicEvent::Animate(ae) => {
-                item.animator.write_area(cx, item.animator.area, ae.time);
+                item.animator.calc_area(cx, item.animator.area, ae.time);
             },
             ListLogicEvent::AnimEnded => {
                 item.animator.end();
@@ -372,6 +372,8 @@ impl LogList {
     pub fn draw_log_list(&mut self, cx: &mut Cx, bm: &BuildManager) {
         
         self.list.set_list_len(bm.log_items.len());
+        
+        self.item_draw.text.text_style = LogItemDraw::text_style_item().base(cx);
         
         let row_height = LogItemDraw::layout_item().base(cx).walk.height.fixed();
         

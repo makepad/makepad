@@ -10,10 +10,9 @@ pub enum Wrapping {
     Ellipsis(f32)
 }
 
-#[derive(Clone)]
+#[derive(Clone, Copy)]
 pub struct TextStyle {
-    pub font_path: String,
-    pub font_id: Option<usize>,
+    pub font: Font,
     pub font_size: f32,
     pub brightness: f32,
     pub curve: f32,
@@ -25,8 +24,7 @@ pub struct TextStyle {
 impl Default for TextStyle {
     fn default() -> Self {
         TextStyle {
-            font_path: "resources/Ubuntu-R.ttf".to_string(),
-            font_id: None,
+            font: Font::default(),
             font_size: 8.0,
             brightness: 1.0,
             curve: 0.7,
@@ -40,7 +38,7 @@ impl Default for TextStyle {
 #[derive(Clone)]
 pub struct Text {
     pub class: ClassId,
-    pub text_style: TextStyleId,
+    pub text_style: TextStyle,
     pub shader: Shader,
     pub color: Color,
     pub z: f32,
@@ -52,10 +50,10 @@ pub struct Text {
 
 
 impl Text {
-    pub fn proto(cx: &mut Cx, text_style:TextStyleId) -> Self {
+    pub fn proto(cx: &mut Cx) -> Self {
         Self {
             class: ClassId::base(),
-            text_style: text_style,
+            text_style: TextStyle::default(),
             shader: cx.add_shader(Self::def_text_shader(), "TextAtlas"),
             do_h_scroll: true,
             do_v_scroll: true,
@@ -200,7 +198,7 @@ impl Text {
         //let font_id = self.font.font_id.unwrap();
         let inst = cx.new_instance(&self.shader, 0);
         let aligned = cx.align_instance(inst);
-        let text_style = self.text_style.base(cx);
+        let text_style = &self.text_style;
         let brightness = text_style.brightness;
         let curve = text_style.curve;
         if aligned.inst.need_uniforms_now(cx) {
@@ -228,10 +226,10 @@ impl Text {
     pub fn add_text<F>(&mut self, cx: &mut Cx, geom_x: f32, geom_y: f32, char_offset: usize, aligned: &mut AlignedInstance, chunk: &[char], mut char_callback: F)
     where F: FnMut(char, usize, f32, f32) -> f32
     {
-        let text_style = self.text_style.base(cx);
+        let text_style = &self.text_style;
         let mut geom_x = geom_x;
         let mut char_offset = char_offset;
-        let font_id = text_style.font_id.unwrap();
+        let font_id = text_style.font.font_id.unwrap();
         
         let cxfont = &mut cx.fonts[font_id];
         
@@ -343,8 +341,9 @@ impl Text {
         }
     }
     
-    pub fn end_text(&mut self, cx: &mut Cx, aligned: &AlignedInstance) {
+    pub fn end_text(&mut self, cx: &mut Cx, aligned: &AlignedInstance)->Area{
         cx.update_aligned_instance_count(aligned);
+        aligned.inst.into()
     }
     
     pub fn draw_text(&mut self, cx: &mut Cx, text: &str) -> Area {
@@ -353,12 +352,12 @@ impl Text {
         let mut chunk = Vec::new();
         let mut width = 0.0;
         let mut elipct = 0;
-        let text_style = self.text_style.base(cx);
+        let text_style = &self.text_style;
         let font_size = text_style.font_size;
         let height_factor = text_style.height_factor;
         let mut iter = text.chars().peekable();
         
-        let font_id = text_style.font_id.unwrap();
+        let font_id = text_style.font.font_id.unwrap();
         let font_size_logical = text_style.font_size * 96.0 / (72.0 * cx.fonts[font_id].font_loaded.as_ref().unwrap().units_per_em);
         
         while let Some(c) = iter.next() {
@@ -428,8 +427,7 @@ impl Text {
                 }
             }
         }
-        self.end_text(cx, &aligned);
-        aligned.inst.into_area()
+        self.end_text(cx, &aligned)
     }
     
     // looks up text with the behavior of a text selection mouse cursor
@@ -442,7 +440,7 @@ impl Text {
         let font_size_o = area.get_instance_offset(cx, Self::instance_font_size().instance_type()).unwrap();
         let char_offset_o = area.get_instance_offset(cx, Self::instance_char_offset().instance_type()).unwrap();
         let read = area.get_read_ref(cx);
-        let text_style = self.text_style.base(cx);
+        let text_style = &self.text_style;
         let line_spacing = text_style.line_spacing;
         let mut index = 0;
         if let Some(read) = read {
@@ -478,8 +476,7 @@ impl Text {
     }
     
     pub fn get_monospace_base(&self, cx: &Cx) -> Vec2 {
-        let text_style = self.text_style.base(cx);
-        let font_id = text_style.font_id.unwrap();
+        let font_id = self.text_style.font.font_id.unwrap();
         let font = cx.fonts[font_id].font_loaded.as_ref().unwrap();
         let slot = font.char_code_to_glyph_index_map[33];
         let glyph = &font.glyphs[slot];
@@ -487,7 +484,7 @@ impl Text {
         //let font_size = if let Some(font_size) = font_size{font_size}else{self.font_size};
         Vec2 {
             x: glyph.horizontal_metrics.advance_width * (96.0 / (72.0 * font.units_per_em)),
-            y: text_style.line_spacing
+            y: self.text_style.line_spacing
         }
     }
 }

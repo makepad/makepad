@@ -38,10 +38,8 @@ impl Cx {
                     
                     // send the UI our deps, overlap with shadercompiler
                     let mut load_deps = Vec::<String>::new();
-                    for (_key, text_style) in &mut self.theme_text_styles{
-                        if load_deps.iter().find(|v| **v == text_style.font_path).is_none(){
-                            load_deps.push(text_style.font_path.clone());
-                        }
+                    for cxfont in &self.fonts{
+                        load_deps.push(cxfont.path.clone());
                     }
                     // other textures, things
                     self.platform.from_wasm.load_deps(load_deps);
@@ -57,22 +55,16 @@ impl Cx {
                         let vec_len = to_wasm.mu32() as usize;
                         let vec_rec = unsafe {Vec::<u8>::from_raw_parts(vec_ptr, vec_len, vec_len)};
                         // check if its a font
-                        for (_key, text_style) in &mut self.theme_text_styles{
-                            if text_style.font_path == dep_path{
+                        for cxfont in &mut self.fonts{
+                            if cxfont.path == dep_path{
                                 // load it
                                 let mut font = CxFont::default();
                                 if font.load_from_ttf_bytes(&vec_rec).is_err() {
                                     println!("Error loading font {} ", dep_path);
                                 }
                                 else{
-                                    let id = self.fonts.len();
-                                    for (_key, text_style) in &mut self.theme_text_styles{
-                                        if text_style.font_path == dep_path{
-                                            text_style.font_id = Some(id);
-                                        }
-                                    } 
-                                    font.path = dep_path;
-                                    self.fonts.push(font);
+                                    font.path = cxfont.path.clone();
+                                    *cxfont = font;
                                 }
                                 break;
                             }

@@ -1,11 +1,11 @@
 use crate::cx::*;
-
+use std::any::TypeId;
 
 // Colors
 
-
+ 
 #[derive(PartialEq, Copy, Clone, Debug, Hash, Eq)]
-pub struct ColorId(pub &'static str, pub u32);
+pub struct ColorId(pub TypeId);
 
 impl ColorId {
     pub fn store(&self) -> ShVarStore {
@@ -27,7 +27,7 @@ impl ColorId {
 }
 
 impl Into<ColorId> for UniqueId{
-    fn into(self) -> ColorId{ColorId(self.0, self.1)}
+    fn into(self) -> ColorId{ColorId(self.0)}
 }
 
 
@@ -36,7 +36,7 @@ impl Into<ColorId> for UniqueId{
 
 
 #[derive(PartialEq, Copy, Clone, Debug, Hash, Eq)]
-pub struct TextStyleId(pub &'static str, pub u32);
+pub struct TextStyleId(pub TypeId);
 
 impl TextStyleId {
     pub fn set_base(&self, cx: &mut Cx, value: TextStyle) {
@@ -55,14 +55,14 @@ impl TextStyleId {
 }
 
 impl Into<TextStyleId> for UniqueId{
-    fn into(self) -> TextStyleId{TextStyleId(self.0, self.1)}
+    fn into(self) -> TextStyleId{TextStyleId(self.0)}
 }
 
 
 // Layout
 
 #[derive(PartialEq, Copy, Clone, Debug, Hash, Eq)]
-pub struct LayoutId(pub &'static str, pub u32);
+pub struct LayoutId(pub TypeId);
 
 impl LayoutId {
     pub fn set_base(&self, cx: &mut Cx, value: Layout) {
@@ -83,7 +83,7 @@ impl LayoutId {
 }
 
 impl Into<LayoutId> for UniqueId{
-    fn into(self) -> LayoutId{LayoutId(self.0, self.1)}
+    fn into(self) -> LayoutId{LayoutId(self.0)}
 }
 
 
@@ -91,7 +91,7 @@ impl Into<LayoutId> for UniqueId{
 
 
 #[derive(PartialEq, Copy, Clone, Debug, Hash, Eq)]
-pub struct WalkId(pub &'static str, pub u32);
+pub struct WalkId(pub TypeId);
 
 impl WalkId {
     pub fn set_base(&self, cx: &mut Cx, value: Walk) {
@@ -109,7 +109,7 @@ impl WalkId {
 
 
 impl Into<WalkId> for UniqueId{
-    fn into(self) -> WalkId{WalkId(self.0, self.1)}
+    fn into(self) -> WalkId{WalkId(self.0)}
 }
 
 
@@ -118,7 +118,7 @@ impl Into<WalkId> for UniqueId{
 
 
 #[derive(PartialEq, Copy, Clone, Debug, Hash, Eq)]
-pub struct AnimId(pub &'static str, pub u32);
+pub struct AnimId(pub TypeId);
 
 impl AnimId {
     pub fn set_base(&self, cx: &mut Cx, value: Anim) {
@@ -135,22 +135,22 @@ impl AnimId {
 }
 
 impl Into<AnimId> for UniqueId{
-    fn into(self) -> AnimId{AnimId(self.0, self.1)}
+    fn into(self) -> AnimId{AnimId(self.0)}
 }
 
 
 // Shaders
 
 #[derive(PartialEq, Copy, Clone, Debug, Hash, Eq)]
-pub struct ShaderId(pub &'static str, pub u32);
+pub struct ShaderId(pub TypeId);
 
 impl ShaderId {
     pub fn set_base(&self, cx: &mut Cx, sg: ShaderGen) {
-        let shader = cx.add_shader(sg, &format!("{}:{}", self.0,self.1));
+        let shader = cx.add_shader(sg, &format!("{:?}", self.0));
         cx.theme_shaders.insert((*self, ClassId::base()), shader);
     }
     pub fn set_class(&self, cx: &mut Cx, class: ClassId, sg: ShaderGen) {
-        let shader = cx.add_shader(sg, &format!("{}:{}", self.0,self.1));
+        let shader = cx.add_shader(sg, &format!("{:?}", self.0));
         cx.theme_shaders.insert((*self, class), shader);
     }
     pub fn base(&self, cx: &Cx) -> Shader {cx.theme_shaders.get(&(*self, ClassId::base())).expect("Cannot find WalkId").clone()}
@@ -162,7 +162,7 @@ impl ShaderId {
 
 
 impl Into<ShaderId> for UniqueId{
-    fn into(self) -> ShaderId{ShaderId(self.0, self.1)}
+    fn into(self) -> ShaderId{ShaderId(self.0)}
 }
 
 
@@ -170,10 +170,10 @@ impl Into<ShaderId> for UniqueId{
 
 
 #[derive(PartialEq, Copy, Clone, Debug, Hash, Eq)]
-pub struct ClassId(pub &'static str, pub u32);
+pub struct ClassId(pub TypeId);
 
 impl Into<ClassId> for UniqueId{
-    fn into(self) -> ClassId{ClassId(self.0, self.1)}
+    fn into(self) -> ClassId{ClassId(self.0)}
 }
 
 

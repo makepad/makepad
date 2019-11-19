@@ -9,8 +9,8 @@ impl Cx {
     pub fn load_font_style(&mut self, style: &str) -> Font {
         self.load_font_path(&self.font(style))
     }
-    
-    pub fn load_font_path(&mut self, path: &str) -> Font {
+    */
+    pub fn load_font(&mut self, path: &str) -> Font {
         let found = self.fonts.iter().position( | v | v.path == path);
         if let Some(font_id) = found {
             return Font {
@@ -27,7 +27,12 @@ impl Cx {
         return Font {
             font_id: Some(font_id)
         }
-    }*/
+    }
+}
+
+#[derive(Copy, Clone, Default)]
+pub struct Font{
+    pub font_id: Option<usize>
 }
 
 pub struct TrapezoidText {

@@ -34,8 +34,6 @@ use widget::*;
 
 struct App {
     desktop_window: DesktopWindow,
-    text: Text,
-    trapezoid_text: TrapezoidText,
     menu: Menu,
     menu_signal: Signal
 }
@@ -43,30 +41,23 @@ struct App {
 main_app!(App);
 
 impl App {
-    pub fn style(cx: &mut Cx) -> Self {
-        set_dark_style(cx);
+    pub fn proto(cx: &mut Cx) -> Self {
         let menu_signal = cx.new_signal();
         Self {
-            desktop_window: DesktopWindow::style(cx),
-            text: Text {
-                font_size: 8.0,
-                font: cx.load_font_path("resources/Inconsolata-Regular.ttf"),
-                ..Text::style(cx)
-            },
+            desktop_window: DesktopWindow::proto(cx),
             menu: Menu::main(vec![
                 Menu::sub("Makepad", "M", vec![
-                    Menu::item("Quitter!", "q", menu_signal, 0),
+                    Menu::item("Quitter!", "q", false, menu_signal, 0),
                     Menu::line(),
-                    Menu::item("Thingie", "q", menu_signal, 1),
+                    Menu::item("Thingie", "q", false, menu_signal, 1),
                 ]),
                 Menu::sub("Edit", "e", vec![
-                    Menu::item("Copy", "c", menu_signal, 2),
+                    Menu::item("Copy", "c", false, menu_signal, 2),
                     Menu::line(),
-                    Menu::item("Paste", "v", menu_signal, 3),
+                    Menu::item("Paste", "v", false, menu_signal, 3),
                 ])
             ]),
             menu_signal,
-            trapezoid_text: TrapezoidText::style(cx),
         }
     }
     
@@ -86,12 +77,6 @@ impl App {
         if self.desktop_window.begin_desktop_window(cx, Some(&self.menu)).is_err() {
             return
         };
-        cx.move_turtle(50., 50.);
-        let text = "Hello world";
-        for c in text.chars() {
-            self.trapezoid_text.draw_char(cx, c, &self.text.font, 32.0);
-            cx.move_turtle(50., 0.);
-        }
         
         self.desktop_window.end_desktop_window(cx);
     }

@@ -102,7 +102,7 @@ impl Splitter {
     pub fn handle_splitter(&mut self, cx: &mut Cx, event: &mut Event) -> SplitterEvent {
         match event.hits(cx, self._split_area, HitOpt {margin: self._hit_state_margin, ..Default::default()}) {
             Event::Animate(ae) => {
-                self.animator.write_area(cx, self._split_area, ae.time);
+                self.animator.calc_area(cx, self._split_area, ae.time);
             },
             Event::AnimEnded(_) => self.animator.end(),
             Event::FingerDown(fe) => {
@@ -285,7 +285,7 @@ impl Splitter {
                     walk: Walk::wh(Width::Fix(rect.w), Height::Fix(self.split_size)),
                     ..Layout::default()
                 }) {
-                    self._split_area = self.split.draw_quad_rel(cx, Rect {x: 0., y: 0., w: rect.w, h: self.split_size}).into_area();
+                    self._split_area = self.split.draw_quad_rel(cx, Rect {x: 0., y: 0., w: rect.w, h: self.split_size}).into();
                     self.split_view.end_view(cx);
                 }
                 cx.set_turtle_pos(Vec2 {x: origin.x, y: origin.y + self._calc_pos + self.split_size});
@@ -296,7 +296,7 @@ impl Splitter {
                     walk: Walk::wh(Width::Fix(self.split_size), Height::Fix(rect.h)),
                     ..Layout::default()
                 }) {
-                    self._split_area = self.split.draw_quad_rel(cx, Rect {x: 0., y: 0., w: self.split_size, h: rect.h}).into_area();
+                    self._split_area = self.split.draw_quad_rel(cx, Rect {x: 0., y: 0., w: self.split_size, h: rect.h}).into();
                     self.split_view.end_view(cx);
                 }
             }
@@ -318,6 +318,6 @@ impl Splitter {
             }
         };
         
-        self.animator.update_area_refs(cx, self._split_area);
+        self.animator.set_area(cx, self._split_area);
     }
 }

@@ -39,9 +39,9 @@ impl Theme{
 }
 
 pub fn set_widget_theme_values(cx: &mut Cx) {
+    let font = cx.load_font("resources/Ubuntu-R.ttf");
     Theme::text_style_normal().set_base(cx, TextStyle {
-        font_path: "resources/Ubuntu-R.ttf".to_string(),
-        font_id: None,
+        font: font,
         font_size: 8.0,
         brightness: 1.0,
         curve: 0.7,
@@ -49,9 +49,10 @@ pub fn set_widget_theme_values(cx: &mut Cx) {
         top_drop: 1.1,
         height_factor: 1.3,
     });
-    
+
+    let font = cx.load_font("resources/LiberationMono-Regular.ttf");
     Theme::text_style_fixed().set_base(cx, TextStyle{
-        font_path: "resources/LiberationMono-Regular.ttf".to_string(),
+        font: font,
         brightness: 1.1,
         line_spacing: 1.8,
         top_drop: 1.3,

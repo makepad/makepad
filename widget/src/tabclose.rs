@@ -79,7 +79,7 @@ impl TabClose {
             margin: Some(Margin {l: 5., t: 5., r: 5., b: 5.}),
             ..Default::default()
         }) {
-            Event::Animate(ae) => self.animator.write_area(cx, self._bg_area, ae.time),
+            Event::Animate(ae) => self.animator.calc_area(cx, self._bg_area, ae.time),
             Event::FingerDown(_fe) => {
                 self.animator.play_anim(cx, Self::get_down_anim(cx));
                 cx.set_down_mouse_cursor(MouseCursor::Hand);
@@ -118,7 +118,7 @@ impl TabClose {
         let bg_inst = self.bg.draw_quad(cx, Self::walk().base(cx));
         bg_inst.push_last_float(cx, &self.animator, Self::instance_hover());
         bg_inst.push_last_float(cx, &self.animator, Self::instance_down());
-        self._bg_area = bg_inst.into_area();
-        self.animator.update_area_refs(cx, self._bg_area); // if our area changed, update animation
+        self._bg_area = bg_inst.into();
+        self.animator.set_area(cx, self._bg_area); // if our area changed, update animation
     }
 }
