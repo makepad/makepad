@@ -38,6 +38,10 @@ pub enum HubWsError {
     LocErrors(Vec<LocMessage>)
 }
 
+const INCLUDED_FILES: &[&'static str] = &[".json", ".toml", ".js", ".rs", ".txt", ".text", ".ron", ".html"];
+const EXCLUDED_FILES: &[&'static str] = &["key.ron"];
+const EXCLUDED_DIRS: &[&'static str] = &["target",".git","edit_repo"];
+
 impl HubWorkspace {
     
     pub fn run_workspace_direct<F>(workspace: &str, hub_router: &mut HubRouter, event_handler: F)
@@ -206,6 +210,10 @@ impl HubWorkspace {
             println!("List packages");
             println!("cargo run -p workspace -- list <path>");
             println!("example: cargo run -p workspace -- list edit_repo");
+            println!("");
+            println!("Build index.ron");
+            println!("cargo run -p workspace -- index <path>");
+            println!("example: cargo run -p workspace -- index edit_repo");
         }
         
         if args.len()<2 {
@@ -257,6 +265,15 @@ impl HubWorkspace {
                     config: args[4].clone()
                 }, args[2].clone())
             },
+            "index" =>{
+                if args.len() != 3 {
+                    return print_help();
+                }
+                (HubMsg::WorkspaceFileTreeRequest {
+                    uid: HubUid::zero(),
+                    create_digest:false,
+                }, args[2].clone())
+            },
             _ => {
                 return print_help();
             }
@@ -293,6 +310,14 @@ impl HubWorkspace {
         let thread = std::thread::spawn(move || {
             while let Ok((_addr, htc)) = rx_write.recv() {
                 match htc.msg {
+                    HubMsg::WorkspaceFileTreeResponse{tree, ..}=>{
+                        //write index.ron
+                        if let WorkspaceFileTreeNode::Folder{folder,..} = tree{
+                            let ron = ron::ser::to_string_pretty(&folder[0], ron::ser::PrettyConfig::default()).expect("cannot serialize settings");
+                            fs::write("index.ron", ron).expect("cannot write index.ron");
+                        }
+                        return  
+                    },
                     HubMsg::ListPackagesResponse {packages, ..} => {
                         println!("{:?}", packages);
                     },
@@ -303,7 +328,8 @@ impl HubWorkspace {
                         println!("{}", package_id)
                     },
                     HubMsg::CargoEnd {build_result, ..} => {
-                        println!("CargoEnd {:?}", build_result)
+                        println!("CargoEnd {:?}", build_result);
+                        return
                     }
                     _ => ()
                 }
@@ -355,9 +381,9 @@ impl HubWorkspace {
             HubMsg::WorkspaceFileTreeRequest {uid, create_digest} => {
                 let tree = ws.workspace_file_tree(
                     create_digest,
-                    &[".json", ".toml", ".js", ".rs", ".txt", ".text", ".ron", ".html"],
-                    &["key.ron"],
-                    &["target",".git","edit_repo"]
+                    INCLUDED_FILES,
+                    EXCLUDED_FILES,
+                    EXCLUDED_DIRS
                 );
                 ws.route_send.send(ToHubMsg {
                     to: HubMsgTo::Client(htc.from),
@@ -1062,7 +1088,6 @@ impl HubWorkspace {
         let ext_inc: Vec<String> = ext_inc.to_vec().iter().map( | v | v.to_string()).collect();
         let file_ex: Vec<String> = file_ex.to_vec().iter().map( | v | v.to_string()).collect();
         let dir_ex: Vec<String> = dir_ex.to_vec().iter().map( | v | v.to_string()).collect();
-        //let ron_out = if let Some(ron_out) = ron_out {Some(ron_out.to_string())}else {None};
         
         let mut root_folder = Vec::new();
         
