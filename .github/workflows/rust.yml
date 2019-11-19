@@ -4,11 +4,12 @@ on: [push]
 
 jobs:
   build:
-
     runs-on: ubuntu-latest
-
     steps:
-    - uses: actions/checkout@v1
+    - name: Install dependencies
+      run: sudo apt-get install libegl1-mesa-dev libxcursor-dev
+    - name: Checkout repository
+      uses: actions/checkout@v1
     - name: Build
       run: cargo build -p makepad --verbose
     - name: Run tests
