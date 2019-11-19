@@ -68,7 +68,59 @@ impl Cx {
         
         self.turtles.push(turtle);
     }
-
+    
+    pub fn end_turtle(&mut self, guard_area: Area) -> Rect {
+        let old = self.turtles.pop().unwrap();
+        if guard_area != old.guard_area {
+            panic!("End turtle guard area misaligned!, begin/end pair not matched begin {:?} end {:?}", old.guard_area, guard_area)
+        }
+        
+        let w = if old.width.is_nan() {
+            if old.bound_right_bottom.x == std::f32::NEG_INFINITY { // nothing happened, use padding
+                Width::Fix(old.layout.padding.l + old.layout.padding.r)
+            }
+            else { // use the bounding box
+                Width::Fix(max_zero_keep_nan(old.bound_right_bottom.x - old.origin.x + old.layout.padding.r))
+            }
+        }
+        else {
+            Width::Fix(old.width)
+        };
+        
+        let h = if old.height.is_nan() {
+            if old.bound_right_bottom.y == std::f32::NEG_INFINITY { // nothing happened use the padding
+                Height::Fix(old.layout.padding.t + old.layout.padding.b)
+            }
+            else { // use the bounding box
+                Height::Fix(max_zero_keep_nan(old.bound_right_bottom.y - old.origin.y + old.layout.padding.b))
+            }
+        }
+        else {
+            Height::Fix(old.height)
+        };
+        
+        let margin = old.layout.walk.margin.clone();
+        // if we have alignment set, we should now align our childnodes
+        let dx = Self::compute_align_turtle_x(&old);
+        if dx > 0.0{
+            self.do_align_x(dx, old.align_list_x);
+        } 
+        let dy = Self::compute_align_turtle_y(&old);
+        if dy > 0.0 {
+            self.do_align_y(dy, old.align_list_y);
+        }
+        
+        // when a turtle is x-abs / y-abs you dont walk the parent
+        if !old.layout.abs_origin.is_none() {
+            let abs_origin = if let Some(abs_origin) = old.layout.abs_origin {abs_origin} else {Vec2::zero()};
+            let w = if let Width::Fix(vw) = w {vw} else {0.};
+            let h = if let Height::Fix(vh) = h {vh} else {0.};
+            return Rect {x: abs_origin.x, y: abs_origin.y, w: w, h: h};
+        }
+        
+        return self.walk_turtle_with_old(Walk{width:w, height:h, margin}, Some(&old))
+    }
+    
     pub fn walk_turtle(&mut self, walk:Walk) -> Rect {
         self.walk_turtle_with_old(walk, None)
     }
@@ -557,59 +609,7 @@ impl Cx {
             };
         }
     }
-    
-    // end a turtle returning computed geometry
-    pub fn end_turtle(&mut self, guard_area: Area) -> Rect {
-        let old = self.turtles.pop().unwrap();
-        if guard_area != old.guard_area {
-            panic!("End turtle guard area misaligned!, begin/end pair not matched begin {:?} end {:?}", old.guard_area, guard_area)
-        }
-        
-        let w = if old.width.is_nan() {
-            if old.bound_right_bottom.x == std::f32::NEG_INFINITY { // nothing happened, use padding
-                Width::Fix(old.layout.padding.l + old.layout.padding.r)
-            }
-            else { // use the bounding box
-                Width::Fix(max_zero_keep_nan(old.bound_right_bottom.x - old.origin.x + old.layout.padding.r))
-            }
-        }
-        else {
-            Width::Fix(old.width)
-        };
-        
-        let h = if old.height.is_nan() {
-            if old.bound_right_bottom.y == std::f32::NEG_INFINITY { // nothing happened use the padding
-                Height::Fix(old.layout.padding.t + old.layout.padding.b)
-            }
-            else { // use the bounding box
-                Height::Fix(max_zero_keep_nan(old.bound_right_bottom.y - old.origin.y + old.layout.padding.b))
-            }
-        }
-        else {
-            Height::Fix(old.height)
-        };
-        
-        let margin = old.layout.walk.margin.clone();
-        // if we have alignment set, we should now align our childnodes
-        let dx = Self::compute_align_turtle_x(&old);
-        if dx > 0.0{
-            self.do_align_x(dx, old.align_list_x);
-        } 
-        let dy = Self::compute_align_turtle_y(&old);
-        if dy > 0.0 {
-            self.do_align_y(dy, old.align_list_y);
-        }
-        
-        // when a turtle is x-abs / y-abs you dont walk the parent
-        if !old.layout.abs_origin.is_none() {
-            let abs_origin = if let Some(abs_origin) = old.layout.abs_origin {abs_origin} else {Vec2::zero()};
-            let w = if let Width::Fix(vw) = w {vw} else {0.};
-            let h = if let Height::Fix(vh) = h {vh} else {0.};
-            return Rect {x: abs_origin.x, y: abs_origin.y, w: w, h: h};
-        }
-        
-        return self.walk_turtle_with_old(Walk{width:w, height:h, margin}, Some(&old))
-    }
+
     
     fn _get_width_left(&self, abs: bool, abs_size: f32) -> f32 {
         if !abs {
