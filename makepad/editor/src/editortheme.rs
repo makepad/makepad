@@ -40,7 +40,7 @@ pub fn set_dark_editor_theme(cx: &mut Cx) {
     CodeEditor::color_identifier().set_base(cx, color256(212, 212, 212));
     CodeEditor::color_call().set_base(cx, color256(220, 220, 174));
     CodeEditor::color_type_name().set_base(cx, color256(86, 201, 177));
-    CodeEditor::color_theme_name().set_base(cx, color("gold"));
+    CodeEditor::color_theme_name().set_base(cx, color256(204, 145, 123));
     
     CodeEditor::color_string().set_base(cx, color256(204, 145, 123));
     CodeEditor::color_number().set_base(cx, color256(182, 206, 170));
