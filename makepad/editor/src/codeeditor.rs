@@ -1550,7 +1550,7 @@ impl CodeEditor {
         
         // lets insert an empty newline at the bottom so its nicer to scroll
         self.draw_new_line(cx);
-        cx.walk_turtle(Walk::wh(Width::Fix(0.0), Height::Fix(self._monospace_size.y)), None);
+        cx.walk_turtle(Walk::wh(Width::Fix(0.0), Height::Fix(self._monospace_size.y)));
         
         self._text_area = self.text.end_text(cx, self._text_inst.as_ref().unwrap());
         
@@ -1567,7 +1567,7 @@ impl CodeEditor {
         
         // inject a final page
         self._final_fill_height = cx.get_height_total() - self._monospace_size.y;
-        cx.walk_turtle(Walk::wh(Width::Fix(0.0), Height::Fix(self._final_fill_height)), None);
+        cx.walk_turtle(Walk::wh(Width::Fix(0.0), Height::Fix(self._final_fill_height)));
         
         // last bits
         self.do_selection_scrolling(cx, text_buffer);

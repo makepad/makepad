@@ -413,7 +413,7 @@ impl Text {
                     width: Width::Fix(width),
                     height: Height::Fix(height),
                     margin: Margin::zero()
-                }, None);
+                });
                 
                 self.add_text(cx, geom.x, geom.y, 0, &mut aligned, &chunk, | _, _, _, _ | {0.0});
                 width = 0.0;

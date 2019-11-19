@@ -669,7 +669,7 @@ impl FileTree {
                 else {
                     let here_last = if last_stack.len()>1 {last_stack[i + 1]} else {false};
                     if here_last {
-                        cx.walk_turtle(filler_walk, None);
+                        cx.walk_turtle(filler_walk);
                     }
                     else {
                         let area = self.item_draw.filler.draw_quad(cx, filler_walk);

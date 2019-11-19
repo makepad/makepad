@@ -95,7 +95,7 @@ impl Quad {
     }
     
     pub fn draw_quad(&mut self, cx: &mut Cx, walk:Walk) -> InstanceArea {
-        let geom = cx.walk_turtle(walk, None);
+        let geom = cx.walk_turtle(walk);
         let inst = self.draw_quad_abs(cx, geom);
         cx.align_instance(inst);
         inst

@@ -68,9 +68,13 @@ impl Cx {
         
         self.turtles.push(turtle);
     }
+
+    pub fn walk_turtle(&mut self, walk:Walk) -> Rect {
+        self.walk_turtle_with_old(walk, None)
+    }
     
     // walk the turtle with a 'w/h' and a margin
-    pub fn walk_turtle(&mut self, walk:Walk, old_turtle: Option<&Turtle>) -> Rect {
+    pub fn walk_turtle_with_old(&mut self, walk:Walk, old_turtle: Option<&Turtle>) -> Rect {
         let mut align_dx = 0.0;
         let mut align_dy = 0.0;
         let w = max_zero_keep_nan(walk.width.eval_width(self, walk.margin, false, 0.0));
@@ -243,12 +247,12 @@ impl Cx {
             match turtle.layout.direction {
                 Direction::Right => {
                     turtle.pos.x = turtle.origin.x + turtle.layout.padding.l;
-                    turtle.pos.y += turtle.biggest;
+                    turtle.pos.y += turtle.biggest + turtle.layout.new_line_padding;
                     turtle.biggest = 0.0;
                 },
                 Direction::Down => {
                     turtle.pos.y = turtle.origin.y + turtle.layout.padding.t;
-                    turtle.pos.x += turtle.biggest;
+                    turtle.pos.x += turtle.biggest+ turtle.layout.new_line_padding;
                     turtle.biggest = 0.0;
                 },
                 _ => ()
@@ -604,7 +608,7 @@ impl Cx {
             return Rect {x: abs_origin.x, y: abs_origin.y, w: w, h: h};
         }
         
-        return self.walk_turtle(Walk{width:w, height:h, margin}, Some(&old))
+        return self.walk_turtle_with_old(Walk{width:w, height:h, margin}, Some(&old))
     }
     
     fn _get_width_left(&self, abs: bool, abs_size: f32) -> f32 {
@@ -915,6 +919,7 @@ pub struct Layout {
     pub align: Align,
     pub direction: Direction,
     pub line_wrap: LineWrap,
+    pub new_line_padding: f32,
     pub abs_origin: Option<Vec2>,
     pub abs_size: Option<Vec2>,
     pub walk: Walk,

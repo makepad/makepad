@@ -134,7 +134,7 @@ impl View{
             // walk the turtle because we aren't drawing
             let w = Width::Fix(cx.views[view_id].rect.w);
             let h = Height::Fix(cx.views[view_id].rect.h);
-            cx.walk_turtle(Walk{width:w, height:h, margin:override_layout.walk.margin}, None);
+            cx.walk_turtle(Walk{width:w, height:h, margin:override_layout.walk.margin});
             return Err(());
         }
         
