@@ -1,0 +1,15 @@
+[package]
+name = "hub"
+version = "0.1.0"
+authors = ["makepaddev"]
+edition = "2018"
+
+[dependencies]
+serde_json = "*"
+bincode = "1.2"
+snap = "0.1"
+libc = "0.2"
+ron = "0.5"
+toml = "0.5"
+serde = { version = "1.0", features = ["derive"] }
+time = "0.1.4"

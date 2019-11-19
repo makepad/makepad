@@ -1,0 +1,28 @@
+[package]
+name = "makepad"
+version = "0.1.0"
+authors = ["makepaddev"]
+edition = "2018"
+
+#[profile.release]
+#lto = true
+#opt-level = 'z'
+#panic = "abort"
+#debug = false
+#bgcodegen-units = 1
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+ron = "0.5"
+
+[dependencies.widget]
+path="../widget"
+
+[dependencies.editor]
+path="./editor"
+
+[dependencies.render]
+path="../render"
+
+[dependencies.hub]
+path="./hub"

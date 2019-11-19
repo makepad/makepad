@@ -1,0 +1,31 @@
+name: Rust
+
+on: [pull_request]
+
+jobs:
+  build-linux:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Install dependencies
+      run: sudo apt-get install libegl1-mesa-dev libxcursor-dev
+    - name: Checkout repository
+      uses: actions/checkout@v1
+    - name: Build
+      run: cargo build -p makepad --verbose
+    - name: Run tests
+      run: cargo test -p makepad --verbose
+  build-macos:
+    runs-on: macos-latest
+    steps:
+    - name: Install dependencies
+      run: curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+    - name: Checkout repository
+      uses: actions/checkout@v1
+    - name: Build
+      run: |
+        source $HOME/.cargo/env
+        cargo build -p makepad --verbose
+    - name: Run tests
+      run: |
+        source $HOME/.cargo/env
+        cargo test -p makepad --verbose
