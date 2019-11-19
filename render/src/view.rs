@@ -18,7 +18,7 @@ pub struct View{ // draw info per UI element
 }
 
 impl View{
-    pub fn style_overlay(_cx: &mut Cx) -> Self {
+    pub fn proto_overlay(_cx: &mut Cx) -> Self {
         Self {
             is_clipped: true,
             is_overlay: true,
@@ -27,7 +27,7 @@ impl View{
         }
     }
     
-    pub fn style(_cx: &mut Cx) -> Self {
+    pub fn proto(_cx: &mut Cx) -> Self {
         Self {
             is_clipped: true,
             is_overlay: false,
@@ -134,7 +134,7 @@ impl View{
             // walk the turtle because we aren't drawing
             let w = Width::Fix(cx.views[view_id].rect.w);
             let h = Height::Fix(cx.views[view_id].rect.h);
-            cx.walk_turtle(w, h, override_layout.margin, None);
+            cx.walk_turtle(Walk{width:w, height:h, margin:override_layout.walk.margin});
             return Err(());
         }
         
@@ -147,7 +147,7 @@ impl View{
         
         cx.view_stack.push(view_id);
         
-        cx.begin_turtle(&override_layout, Area::View(ViewArea {
+        cx.begin_turtle(override_layout, Area::View(ViewArea {
             view_id: view_id,
             redraw_id: cx.redraw_id
         }));
@@ -231,7 +231,7 @@ impl Cx {
                 sub_view_id: 0,
                 shader_id: shader_id,
                 shader_instance_id: shader_instance_id,
-                uniforms_required: sh.mapping.named_uniform_props.total_slots,
+                uniforms_required: sh.mapping.uniform_props.total_slots,
                 instance: Vec::new(),
                 uniforms: Vec::new(),
                 textures_2d: Vec::new(),
@@ -248,7 +248,7 @@ impl Cx {
         let dc = &mut draw_list.draw_calls[draw_call_id];
         dc.shader_id = shader_id;
         dc.shader_instance_id = shader_instance_id;
-        dc.uniforms_required = sh.mapping.named_uniform_props.total_slots;
+        dc.uniforms_required = sh.mapping.uniform_props.total_slots;
         dc.sub_view_id = 0; // make sure its recognised as a draw call
         // truncate buffers and set update frame
         dc.redraw_id = self.redraw_id;

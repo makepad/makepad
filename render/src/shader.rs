@@ -5,11 +5,152 @@ pub use shader_ast::*;
 pub use crate::cx::*;
 pub use crate::math::*;
 pub use crate::colors::*;
+use std::any::TypeId;
+
+#[derive(Hash, PartialEq, Copy, Clone, Debug)]
+pub struct InstanceColor(pub TypeId);
+
+#[derive(Hash, PartialEq, Copy, Clone, Debug)]
+pub struct InstanceVec4(pub TypeId);
+
+#[derive(Hash, PartialEq, Copy, Clone, Debug)]
+pub struct InstanceVec3(pub TypeId);
+
+#[derive(Hash, PartialEq, Copy, Clone, Debug)]
+pub struct InstanceVec2(pub TypeId);
+
+#[derive(Hash, PartialEq, Copy, Clone, Debug)]
+pub struct InstanceFloat(pub TypeId);
+
+#[derive(Hash, PartialEq, Copy, Clone, Debug)]
+pub struct UniformColor(pub TypeId);
+
+#[derive(Hash, PartialEq, Copy, Clone, Debug)]
+pub struct UniformVec4(pub TypeId);
+
+#[derive(Hash, PartialEq, Copy, Clone, Debug)]
+pub struct UniformVec3(pub TypeId);
+
+#[derive(Hash, PartialEq, Copy, Clone, Debug)]
+pub struct UniformVec2(pub TypeId);
+
+#[derive(Hash, PartialEq, Copy, Clone, Debug)]
+pub struct UniformFloat(pub TypeId);
+
+pub struct UniqueId(pub TypeId);
+
+#[macro_export]
+macro_rules!uid { 
+    () => {{
+        struct Unique{};
+        UniqueId(std::any::TypeId::of::<Unique>()).into()
+    }}
+}
+
+impl InstanceColor{
+    pub fn shader_type(&self) -> String{"vec4".to_string()}
+    pub fn instance_type(&self) -> InstanceType{InstanceType::Color(*self)}
+    pub fn var_store(&self) -> ShVarStore{ShVarStore::Instance(self.instance_type())}
+}
+
+impl Into<InstanceColor> for UniqueId{
+    fn into(self) -> InstanceColor{InstanceColor(self.0)}
+}
+
+impl InstanceVec4{
+    pub fn shader_type(&self) -> String{"vec4".to_string()}
+    pub fn instance_type(&self) -> InstanceType{InstanceType::Vec4(*self)}
+    pub fn var_store(&self) -> ShVarStore{ShVarStore::Instance(self.instance_type())}
+}
+
+impl Into<InstanceVec4> for UniqueId{
+    fn into(self) -> InstanceVec4{InstanceVec4(self.0)}
+}
+
+impl InstanceVec3{
+    pub fn shader_type(&self) -> String{"vec3".to_string()}
+    pub fn instance_type(&self) -> InstanceType{InstanceType::Vec3(*self)}
+    pub fn var_store(&self) -> ShVarStore{ShVarStore::Instance(self.instance_type())}
+}
+
+impl Into<InstanceVec3> for UniqueId{
+    fn into(self) -> InstanceVec3{InstanceVec3(self.0)}
+}
+
+impl InstanceVec2{
+    pub fn shader_type(&self) -> String{"vec2".to_string()}
+    pub fn instance_type(&self) -> InstanceType{InstanceType::Vec2(*self)}
+    pub fn var_store(&self) -> ShVarStore{ShVarStore::Instance(self.instance_type())}
+}
+
+impl Into<InstanceVec2> for UniqueId{
+    fn into(self) -> InstanceVec2{InstanceVec2(self.0)}
+}
+
+impl InstanceFloat{
+    pub fn shader_type(&self) -> String{"float".to_string()}
+    pub fn instance_type(&self) -> InstanceType{InstanceType::Float(*self)}
+    pub fn var_store(&self) -> ShVarStore{ShVarStore::Instance(self.instance_type())}
+}
+
+impl Into<InstanceFloat> for UniqueId{
+    fn into(self) -> InstanceFloat{InstanceFloat(self.0)}
+}
+
+impl UniformColor{
+    pub fn shader_type(&self) -> String{"vec4".to_string()}
+    pub fn uniform_type(&self) -> UniformType{UniformType::Color(*self)}
+    pub fn var_store(&self) -> ShVarStore{ShVarStore::Uniform(self.uniform_type())}
+}
+
+impl Into<UniformColor> for UniqueId{
+    fn into(self) -> UniformColor{UniformColor(self.0)}
+}
+
+impl UniformVec4{
+    pub fn shader_type(&self) -> String{"vec4".to_string()}
+    pub fn uniform_type(&self) -> UniformType{UniformType::Vec4(*self)}
+    pub fn var_store(&self) -> ShVarStore{ShVarStore::Uniform(self.uniform_type())}
+}
+
+impl Into<UniformVec4> for UniqueId{
+    fn into(self) -> UniformVec4{UniformVec4(self.0)}
+}
+
+impl UniformVec3{
+    pub fn shader_type(&self) -> String{"vec3".to_string()}
+    pub fn uniform_type(&self) -> UniformType{UniformType::Vec3(*self)}
+    pub fn var_store(&self) -> ShVarStore{ShVarStore::Uniform(self.uniform_type())}
+}
+
+impl Into<UniformVec3> for UniqueId{
+    fn into(self) -> UniformVec3{UniformVec3(self.0)}
+}
+
+impl UniformVec2{
+    pub fn shader_type(&self) -> String{"vec2".to_string()}
+    pub fn uniform_type(&self) -> UniformType{UniformType::Vec2(*self)}
+    pub fn var_store(&self) -> ShVarStore{ShVarStore::Uniform(self.uniform_type())}
+}
+
+impl Into<UniformVec2> for UniqueId{
+    fn into(self) -> UniformVec2{UniformVec2(self.0)}
+}
+
+impl UniformFloat{
+    pub fn shader_type(&self) -> String{"float".to_string()}
+    pub fn uniform_type(&self) -> UniformType{UniformType::Float(*self)}
+    pub fn var_store(&self) -> ShVarStore{ShVarStore::Uniform(self.uniform_type())}
+}
+
+impl Into<UniformFloat> for UniqueId{
+    fn into(self) -> UniformFloat{UniformFloat(self.0)}
+}
 
 #[derive(Default, Clone, PartialEq)]
 pub struct Shader {
     pub shader_id: Option<(usize, usize)>,
-}
+} 
 
 #[derive(Default, Clone)]
 pub struct RectInstanceProps {
@@ -45,59 +186,106 @@ impl RectInstanceProps {
     }
 }
 
-#[derive(Default, Clone, Debug)]
-pub struct NamedProp {
+#[derive(Clone)]
+pub struct InstanceProp {
     pub name: String,
+    pub ident: InstanceType,
     pub offset: usize,
     pub slots: usize
 }
 
-#[derive(Default, Clone, Debug)]
-pub struct NamedProps {
-    pub props: Vec<NamedProp>,
+#[derive(Default, Clone)]
+pub struct InstanceProps {
+    pub props: Vec<InstanceProp>,
     pub total_slots: usize,
 }
 
-impl NamedProps {
-    pub fn construct(sg: &ShaderGen, in_props: &Vec<ShVar>, aligned: bool) -> NamedProps {
+#[derive(Clone)]
+pub struct UniformProp {
+    pub name: String,
+    pub ident: UniformType,
+    pub offset: usize,
+    pub slots: usize
+}
+
+#[derive(Default, Clone)]
+pub struct UniformProps {
+    pub props: Vec<UniformProp>,
+    pub total_slots: usize,
+}
+
+impl InstanceProps {
+    pub fn construct(sg: &ShaderGen, in_props: &Vec<ShVar>)->InstanceProps{
         let mut offset = 0;
         let mut out_props = Vec::new();
         for prop in in_props {
             let slots = sg.get_type_slots(&prop.ty);
-            
-            if aligned && (offset & 3) + slots > 4 { // goes over the boundary
-                offset += 4 - (offset & 3); // make jump to new slot
+            match &prop.store{
+                ShVarStore::Instance(t)=>{
+                    out_props.push(InstanceProp {
+                        ident: t.clone(),
+                        name: prop.name.clone(),
+                        offset: offset,
+                        slots: slots
+                    })
+                },
+                _=>panic!("Non instance in props")
             }
-            if aligned && slots == 2 && (offset&1) != 0{
-                panic!("Please re-order uniform {} to be size-2 aligned", prop.name);
-            }
-            
-            out_props.push(NamedProp {
-                name: prop.name.clone(),
-                offset: offset,
-                slots: slots
-            });
             offset += slots
         };
-        if aligned && offset & 3 > 0 {
-            offset += 4 - (offset & 3);
-        }
-        NamedProps {
+        InstanceProps {
             props: out_props,
             total_slots: offset
         }
     }
+}
+
+impl UniformProps{
+    pub fn construct(sg: &ShaderGen, in_props: &Vec<ShVar>)->UniformProps{
+        let mut out_props = Vec::new();
+        let mut offset = 0;
     
-    pub fn find_zbias_uniform_prop(&self)->Option<usize>{
+        for prop in in_props {
+            let slots = sg.get_type_slots(&prop.ty);
+            
+            if (offset & 3) + slots > 4 { // goes over the boundary
+                offset += 4 - (offset & 3); // make jump to new slot
+            }
+            if slots == 2 && (offset & 1) != 0 {
+                panic!("Please re-order uniform {} to be size-2 aligned", prop.name);
+            }
+            match &prop.store{
+                ShVarStore::Uniform(t)=>{
+                    out_props.push(UniformProp {
+                        ident:t.clone(),  
+                        name: prop.name.clone(),
+                        offset: offset,
+                        slots: slots
+                    })
+                },
+                _=>panic!("Non uniform in props")
+            }
+            offset += slots
+        };
+        if offset & 3 > 0 {
+            offset += 4 - (offset & 3);
+        }
+        UniformProps {
+            props: out_props,
+            total_slots: offset
+        }
+    }
+
+    pub fn find_zbias_uniform_prop(&self) -> Option<usize> {
         for prop in &self.props {
-            if prop.name == "zbias"{
+            if prop.name == "zbias" {
                 return Some(prop.offset)
             }
         }
         return None
     }
-}
-
+} 
+ 
 #[derive(Default, Clone)]
 pub struct CxShaderMapping {
     pub instance_slots: usize,
@@ -109,9 +297,9 @@ pub struct CxShaderMapping {
     pub uniforms_cx: Vec<ShVar>,
     pub texture_slots: Vec<ShVar>,
     pub rect_instance_props: RectInstanceProps,
-    pub named_uniform_props: NamedProps,
-    pub named_instance_props: NamedProps,
-    pub zbias_uniform_prop: Option<usize> 
+    pub uniform_props: UniformProps,
+    pub instance_props: InstanceProps,
+    pub zbias_uniform_prop: Option<usize>
 }
 
 #[derive(Default, Clone)]
@@ -311,39 +499,39 @@ impl CxShader {
             let df_scale: float<Local>;
             let df_field: float<Local>;
             
-            fn df_iq_pal(t: float, a: vec3, b: vec3, c: vec3, d: vec3)->vec3{
+            fn df_iq_pal(t: float, a: vec3, b: vec3, c: vec3, d: vec3) -> vec3 {
                 return a + b * cos(6.28318 * (c * t + d));
             }
             
-            fn df_iq_pal0(t: float)->vec3{
-                return mix(vec3(0.,0.,0.),vec3(1.,1.,1.),cos(t*PI)*0.5+0.5)
+            fn df_iq_pal0(t: float) -> vec3 {
+                return mix(vec3(0., 0., 0.), vec3(1., 1., 1.), cos(t * PI) * 0.5 + 0.5)
             }
             
-            fn df_iq_pal1(t: float)->vec3{
+            fn df_iq_pal1(t: float) -> vec3 {
                 return df_iq_pal(t, vec3(0.5, 0.5, 0.5), vec3(0.5, 0.5, 0.5), vec3(1., 1., 1.), vec3(0., 0.33, 0.67));
             }
             
-            fn df_iq_pal2(t: float)->vec3{
-                return df_iq_pal(t, vec3(0.5,0.5,0.5), vec3(0.5,0.5,0.5), vec3(1.,1.,1.), vec3(0., 0.1, 0.2));
+            fn df_iq_pal2(t: float) -> vec3 {
+                return df_iq_pal(t, vec3(0.5, 0.5, 0.5), vec3(0.5, 0.5, 0.5), vec3(1., 1., 1.), vec3(0., 0.1, 0.2));
             }
             
-            fn df_iq_pal3(t: float)->vec3{
-                return df_iq_pal(t, vec3(0.5,0.5,0.5), vec3(0.5,0.5,0.5), vec3(1.,1.,1.), vec3(0.3, 0.2, 0.2));
+            fn df_iq_pal3(t: float) -> vec3 {
+                return df_iq_pal(t, vec3(0.5, 0.5, 0.5), vec3(0.5, 0.5, 0.5), vec3(1., 1., 1.), vec3(0.3, 0.2, 0.2));
             }
             
-            fn df_iq_pal4(t: float)->vec3{
-                return df_iq_pal(t, vec3(0.5,0.5,0.5), vec3(0.5,0.5,0.5), vec3(1., 1., 0.5), vec3(0.8, 0.9, 0.3));
+            fn df_iq_pal4(t: float) -> vec3 {
+                return df_iq_pal(t, vec3(0.5, 0.5, 0.5), vec3(0.5, 0.5, 0.5), vec3(1., 1., 0.5), vec3(0.8, 0.9, 0.3));
             }
             
-            fn df_iq_pal5(t: float)->vec3{
-                return df_iq_pal(t, vec3(0.5,0.5,0.5), vec3(0.5,0.5,0.5), vec3(1., 0.7, 0.4), vec3(0, 0.15, 0.20));
+            fn df_iq_pal5(t: float) -> vec3 {
+                return df_iq_pal(t, vec3(0.5, 0.5, 0.5), vec3(0.5, 0.5, 0.5), vec3(1., 0.7, 0.4), vec3(0, 0.15, 0.20));
             }
             
-            fn df_iq_pal6(t: float)->vec3{
-                return df_iq_pal(t, vec3(0.5,0.5,0.5), vec3(0.5,0.5,0.5), vec3(2., 1.0, 0.), vec3(0.5, 0.2, 0.25));
+            fn df_iq_pal6(t: float) -> vec3 {
+                return df_iq_pal(t, vec3(0.5, 0.5, 0.5), vec3(0.5, 0.5, 0.5), vec3(2., 1.0, 0.), vec3(0.5, 0.2, 0.25));
             }
             
-            fn df_iq_pal7(t: float)->vec3{
+            fn df_iq_pal7(t: float) -> vec3 {
                 return df_iq_pal(t, vec3(0.8, 0.5, 0.4), vec3(0.2, 0.4, 0.2), vec3(2., 1.0, 1.0), vec3(0., 0.25, 0.25));
             }
             

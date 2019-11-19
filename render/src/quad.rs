@@ -10,23 +10,32 @@ pub struct Quad {
 }
 
 impl Quad {
-    pub fn style_with_shader(cx: &mut Cx, shader:ShaderGen, name:&str) -> Self {
+    pub fn proto_with_shader(cx: &mut Cx, shader:ShaderGen, name:&str) -> Self {
         Self {
             shader: cx.add_shader(shader, name),
-            ..Self::style(cx)
+            ..Self::proto(cx)
         }
     }
     
-    pub fn style(cx: &mut Cx) -> Self {
+    pub fn proto(cx: &mut Cx) -> Self {
         Self {
             shader: cx.add_shader(Self::def_quad_shader(), "Quad"),
             do_h_scroll:true,
-            z:0.0,
             do_v_scroll:true,
+            z:0.0,
             color: color("green")
         }
     }
-
+    
+    pub fn instance_x()->InstanceFloat{uid!()}
+    pub fn instance_y()->InstanceFloat{uid!()}
+    pub fn instance_w()->InstanceFloat{uid!()}
+    pub fn instance_h()->InstanceFloat{uid!()}
+    pub fn instance_z()->InstanceFloat{uid!()}
+    pub fn instance_color()->InstanceColor{uid!()}
+    pub fn uniform_view_do_scroll()->UniformVec2{uid!()}
+    pub fn uniform_zbias()->UniformFloat{uid!()}
+    
     pub fn def_quad_shader() -> ShaderGen {
         // lets add the draw shader lib
         let mut sg = ShaderGen::new();
@@ -36,15 +45,17 @@ impl Quad {
         sg.compose(shader_ast!({
             
             let geom: vec2<Geometry>;
-            let x: float<Instance>;
-            let y: float<Instance>;
-            let w: float<Instance>;
-            let h: float<Instance>;
-            let z: float<Instance>;
-            let color: vec4<Instance>;
             let pos: vec2<Varying>;
-            let view_do_scroll: vec2<Uniform>;
-            let zbias: float<Uniform>;
+            
+            let x: Self::instance_x();
+            let y: Self::instance_y();
+            let w: Self::instance_w();
+            let h: Self::instance_h();
+            let z: Self::instance_z(); 
+            let color: Self::instance_color();
+
+            let view_do_scroll: Self::uniform_view_do_scroll();
+            let zbias: Self::uniform_zbias();
             //let dpi_dilate: float<Uniform>;
             
             fn vertex() -> vec4 {
@@ -67,28 +78,30 @@ impl Quad {
         }))
     }
     
-    pub fn begin_quad(&mut self, cx: &mut Cx, layout: &Layout) -> InstanceArea {
-        let inst = self.draw_quad(cx, Rect::zero());
-        let area = inst.clone().into_area();
+    pub fn begin_quad(&mut self, cx: &mut Cx, layout: Layout) -> InstanceArea {
+        let inst = self.draw_quad_rel(cx, Rect::zero());
+        let area = inst.clone().into();
         cx.begin_turtle(layout, area);
         inst
     }
     
     pub fn end_quad(&mut self, cx: &mut Cx, inst: &InstanceArea) -> Area {
-        let area = inst.clone().into_area();
+        // at this point, we should fill in any missing slots.
+        
+        let area = inst.clone().into();
         let rect = cx.end_turtle(area);
         area.set_rect(cx, &rect);
         area
     }
     
-    pub fn draw_quad_walk(&mut self, cx: &mut Cx, w: Width, h: Height, margin: Margin) -> InstanceArea {
-        let geom = cx.walk_turtle(w, h, margin, None);
+    pub fn draw_quad(&mut self, cx: &mut Cx, walk:Walk) -> InstanceArea {
+        let geom = cx.walk_turtle(walk);
         let inst = self.draw_quad_abs(cx, geom);
         cx.align_instance(inst);
         inst
     }
     
-    pub fn draw_quad(&mut self, cx: &mut Cx, rect: Rect) -> InstanceArea {
+    pub fn draw_quad_rel(&mut self, cx: &mut Cx, rect: Rect) -> InstanceArea {
         let pos = cx.get_turtle_origin();
         let inst = self.draw_quad_abs(cx, Rect {x: rect.x + pos.x, y: rect.y + pos.y, w: rect.w, h: rect.h});
         cx.align_instance(inst);

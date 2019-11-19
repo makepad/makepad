@@ -2,22 +2,20 @@ use render::*;
 use widget::*;
 
 #[derive(Clone)]
+pub struct FileTreeItemDraw {
+    pub filler: Quad,
+    pub tree_text: Text,
+    pub node_bg: Quad,
+}
+
+#[derive(Clone)]
 pub struct FileTree {
     pub view: ScrollView,
     pub drag_view: View,
     pub _drag_move: Option<FingerMoveEvent>,
-    pub drag_bg: Quad,
-    pub drag_bg_layout: Layout,
-    pub node_bg: Quad,
-    pub filler: Quad,
-    pub tree_folder_color: Color,
-    pub tree_file_color: Color,
-    pub tree_text: Text,
     pub root_node: FileNode,
-    pub animator: Animator,
-    pub row_height: f32,
-    pub font_size: f32,
-    pub row_padding: Padding
+    pub item_draw: FileTreeItemDraw,
+    pub drag_bg: Quad,
 }
 
 #[derive(Clone, PartialEq)]
@@ -167,67 +165,74 @@ impl<'a> FileWalker<'a> {
     }
 }
 
-impl FileTree {
-    pub fn style(cx: &mut Cx) -> Self {
+impl FileTreeItemDraw {
+    fn proto(cx: &mut Cx) -> Self {
         Self {
-            row_height: 20.,
-            font_size: 8.0,
-            row_padding: Padding {l: 5., t: 0., r: 0., b: 1.},
-            root_node: FileNode::Folder {name: "".to_string(), state: NodeState::Open, draw: None, folder: vec![
-                FileNode::File {name: "loading...".to_string(), draw: None},
-            ]},
-            node_bg: Quad::style(cx),
-            drag_bg: Quad {
-                color: cx.color("bg_marked"),
-                shader: cx.add_shader(Self::def_drag_bg_shader(), "FileTree.drag_bg"),
-                ..Quad::style(cx)
-            },
-            drag_bg_layout: Layout {
-                padding: Padding {l: 5., t: 5., r: 5., b: 5.},
-                width: Width::Compute,
-                height: Height::Compute,
-                ..Default::default()
-            },
+            tree_text: Text {z: 0.001, ..Text::proto(cx)},
+            node_bg: Quad::proto(cx),
+            //node_layout: LayoutFileTreeNode::id(),
             filler: Quad {
-                color: cx.color("icon_color"),
                 z: 0.001,
-                shader: cx.add_shader(Self::def_filler_shader(), "FileTree.filler"),
-                ..Quad::style(cx)
+                ..Quad::proto_with_shader(cx, Self::def_filler_shader(), "FileTree.filler")
             },
-            tree_folder_color: cx.color("text_selected_focus"),
-            tree_file_color: cx.color("text_deselected_focus"),
-            tree_text: Text {z: 0.001, top_drop:1.3, ..Text::style(cx)},
-            view: ScrollView {
-                scroll_v: Some(ScrollBar {
-                    smoothing: Some(0.25),
-                    ..ScrollBar::style(cx)
-                }),
-                ..ScrollView::style(cx)
-            },
-            drag_view: View {
-                is_overlay: true,
-                ..View::style(cx)
-            },
-            animator: Animator::new(Anim::empty()),
-            _drag_move: None,
         }
     }
+      
+    pub fn layout_drag_bg()->LayoutId{uid!()}
+    pub fn layout_node()->LayoutId{uid!()}
+    pub fn text_style_label() ->TextStyleId{uid!()}
+
+    pub fn color_tree_folder()->ColorId{uid!()}
+    pub fn color_tree_file()->ColorId{uid!()}
+    pub fn color_filler()->ColorId{uid!()}
+
+    pub fn walk_filler()->WalkId{uid!()}
+    pub fn walk_folder()->WalkId{uid!()}
+
+    pub fn instance_line_vec()->InstanceVec2{uid!()}
+    pub fn instance_anim_pos()->InstanceFloat{uid!()}
+
+    pub fn theme(cx: &mut Cx){
+        Self::color_tree_folder().set_base(cx, Theme::color_text_selected_focus().base(cx));
+        Self::color_tree_file().set_base(cx, Theme::color_text_deselected_focus().base(cx));
+        Self::color_filler().set_base(cx, Theme::color_icon().base(cx));
+        
+        Self::layout_drag_bg().set_base(cx, Layout {
+            padding: Padding {l: 5., t: 5., r: 5., b: 5.},
+            walk: Walk::wh(Width::Compute, Height::Compute),
+            ..Default::default()
+        });
+        
+        Self::layout_node().set_base(cx, Layout {
+            walk: Walk::wh(Width::Fill, Height::Fix(20.)),
+            align: Align::left_center(),
+            padding: Padding {l: 5., t: 0., r: 0., b: 1.},
+            ..Default::default()
+        });
+        
+        Self::text_style_label().set_base(cx, TextStyle {
+            top_drop: 1.3,
+            ..Theme::text_style_normal().base(cx)
+        });
+
+        Self::walk_filler().set_base(cx, Walk{
+            width:Width::Fix(10.),
+            height:Height::Fill,
+            margin:Margin {l: 1., t: 0., r: 4., b: 0.}
+        });
     
-    pub fn def_drag_bg_shader() -> ShaderGen {
-        Quad::def_quad_shader().compose(shader_ast!({
-            fn pixel() -> vec4 {
-                df_viewport(pos * vec2(w, h));
-                df_box(0., 0., w, h, 2.);
-                return df_fill(color);
-            }
-        }))
+        Self::walk_folder().set_base(cx, Walk{
+            width:Width::Fix(14.), 
+            height:Height::Fill, 
+            margin: Margin {l: 0., t: 0., r: 2., b: 0.}
+        });
     }
     
     pub fn def_filler_shader() -> ShaderGen {
         Quad::def_quad_shader().compose(shader_ast!({
             
-            let line_vec: vec2<Instance>;
-            let anim_pos: float<Instance>;
+            let line_vec: Self::instance_line_vec();
+            let anim_pos: Self::instance_anim_pos();
             
             fn pixel() -> vec4 {
                 df_viewport(pos * vec2(w, h));
@@ -246,6 +251,71 @@ impl FileTree {
             }
         }))
     }
+    
+    pub fn get_default_anim( cx: &Cx, counter: usize, marked: bool) -> Anim {
+        Anim::new(Play::Chain {duration: 0.01}, vec![
+            Track::color(Quad::instance_color(), Ease::Lin, vec![
+                (1.0, if marked {Theme::color_bg_marked().base(cx)} else if counter & 1 == 0 {Theme::color_bg_selected().base(cx)}else {Theme::color_bg_odd().base(cx)})
+            ])
+        ])
+    }
+    
+    pub fn get_over_anim( cx: &Cx, counter: usize, marked: bool) -> Anim {
+        let over_color = if marked {Theme::color_bg_marked_over().base(cx)} else if counter & 1 == 0 {Theme::color_bg_selected_over().base(cx)}else {Theme::color_bg_odd_over().base(cx)};
+        Anim::new(Play::Cut {duration: 0.02}, vec![
+            Track::color(Quad::instance_color(), Ease::Lin, vec![
+                (0., over_color),
+                (1., over_color)
+            ])
+        ])
+    }
+}
+
+impl FileTree {
+    pub fn proto(cx: &mut Cx) -> Self {
+        Self {
+            //row_height: 20.,
+            //font_size: 8.0,
+            item_draw: FileTreeItemDraw::proto(cx),
+            root_node: FileNode::Folder {name: "".to_string(), state: NodeState::Open, draw: None, folder: vec![
+                FileNode::File {name: "loading...".to_string(), draw: None},
+            ]},
+            drag_bg: Quad {
+                shader: cx.add_shader(Self::def_drag_bg_shader(), "FileTree.drag_bg"),
+                ..Quad::proto(cx)
+            },
+            view: ScrollView {
+                scroll_v: Some(ScrollBar {
+                    smoothing: Some(0.25),
+                    ..ScrollBar::proto(cx)
+                }),
+                ..ScrollView::proto(cx)
+            },
+            drag_view: View {
+                is_overlay: true,
+                ..View::proto(cx)
+            },
+            _drag_move: None,
+        }
+    }
+
+    pub fn color_drag_bg()->ColorId{uid!()}
+    
+    pub fn theme(cx: &mut Cx){
+        Self::color_drag_bg().set_base(cx, Theme::color_bg_marked().base(cx));
+        FileTreeItemDraw::theme(cx)
+    }
+  
+    pub fn def_drag_bg_shader() -> ShaderGen {
+        Quad::def_quad_shader().compose(shader_ast!({
+            fn pixel() -> vec4 {
+                df_viewport(pos * vec2(w, h));
+                df_box(0., 0., w, h, 2.);
+                return df_fill(color);
+            }
+        }))
+    }
+    
     /*
     pub fn load_from_ron(&mut self, cx: &mut Cx, ron_data: &str) {
         
@@ -346,21 +416,6 @@ impl FileTree {
         self.view.redraw_view_area(cx);
     }
     
-    pub fn get_default_anim(cx: &Cx, counter: usize, marked: bool) -> Anim {
-        Anim::new(Play::Chain {duration: 0.01}, vec![
-            Track::color(cx.id("bg.color"), Ease::Lin, vec![(1.0, if marked {cx.color("bg_marked")} else if counter & 1 == 0 {cx.color("bg_selected")}else {cx.color("bg_odd")})])
-        ])
-    }
-    
-    pub fn get_over_anim(cx: &Cx, counter: usize, marked: bool) -> Anim {
-        let over_color = if marked {cx.color("bg_marked_over")} else if counter & 1 == 0 {cx.color("bg_selected_over")}else {cx.color("bg_odd_over")};
-        Anim::new(Play::Cut {duration: 0.02}, vec![
-            Track::color(cx.id("bg.color"), Ease::Lin, vec![
-                (0., over_color),
-                (1., over_color)
-            ])
-        ])
-    }
     
     pub fn get_marked_paths(root: &mut FileNode) -> Vec<String> {
         let mut paths = Vec::new();
@@ -376,7 +431,7 @@ impl FileTree {
     }
     
     pub fn handle_file_tree(&mut self, cx: &mut Cx, event: &mut Event) -> FileTreeEvent {
-       
+        
         // alright. someone clicking on the tree items.
         let mut file_walker = FileWalker::new(&mut self.root_node);
         let mut counter = 0;
@@ -395,9 +450,9 @@ impl FileTree {
             
             match event.hits(cx, node_draw.animator.area, HitOpt::default()) {
                 Event::Animate(ae) => {
-                    node_draw.animator.write_area(cx, node_draw.animator.area, "bg.", ae.time);
+                    node_draw.animator.calc_area(cx, node_draw.animator.area, ae.time);
                 },
-                Event::AnimEnded(_)=>{
+                Event::AnimEnded(_) => {
                     node_draw.animator.end();
                 },
                 Event::FingerDown(_fe) => {
@@ -411,7 +466,7 @@ impl FileTree {
                     node_draw.marked = cx.event_id;
                     
                     unmark_nodes = true;
-                    node_draw.animator.play_anim(cx, Self::get_over_anim(cx, counter, node_draw.marked != 0));
+                    node_draw.animator.play_anim(cx, FileTreeItemDraw::get_over_anim(cx, counter, node_draw.marked != 0));
                     
                     if let FileNode::Folder {state, ..} = node {
                         *state = match state {
@@ -460,10 +515,10 @@ impl FileTree {
                     cx.set_hover_mouse_cursor(MouseCursor::Hand);
                     match fe.hover_state {
                         HoverState::In => {
-                            node_draw.animator.play_anim(cx, Self::get_over_anim(cx, counter, node_draw.marked != 0));
+                            node_draw.animator.play_anim(cx, FileTreeItemDraw::get_over_anim(cx, counter, node_draw.marked != 0));
                         },
                         HoverState::Out => {
-                            node_draw.animator.play_anim(cx, Self::get_default_anim(cx, counter, node_draw.marked != 0));
+                            node_draw.animator.play_anim(cx, FileTreeItemDraw::get_default_anim(cx, counter, node_draw.marked != 0));
                         },
                         _ => ()
                     }
@@ -481,7 +536,7 @@ impl FileTree {
                 if let Some(node_draw) = node.get_draw() {
                     if node_draw.marked != cx.event_id || node_draw.marked == 0 {
                         node_draw.marked = 0;
-                        node_draw.animator.play_anim(cx, Self::get_default_anim(cx, counter, false));
+                        node_draw.animator.play_anim(cx, FileTreeItemDraw::get_default_anim(cx, counter, false));
                     }
                 }
                 if !file_walker.current_closing() {
@@ -546,6 +601,14 @@ impl FileTree {
         let mut scale_stack = Vec::new();
         let mut last_stack = Vec::new();
         scale_stack.push(1.0f64);
+        self.item_draw.filler.color = FileTreeItemDraw::color_filler().base(cx);
+        let node_layout = FileTreeItemDraw::layout_node().base(cx);
+        let row_height = node_layout.walk.height.fixed();
+        let filler_walk = FileTreeItemDraw::walk_filler().base(cx);
+        let folder_walk = FileTreeItemDraw::walk_folder().base(cx);
+        let color_tree_folder =  FileTreeItemDraw::color_tree_folder().base(cx);
+        let color_tree_file = FileTreeItemDraw::color_tree_file().base(cx);
+        self.item_draw.tree_text.text_style = FileTreeItemDraw::text_style_label().base(cx);
         
         while let Some((depth, index, len, node)) = file_walker.walk() {
             
@@ -562,35 +625,26 @@ impl FileTree {
             let node_draw = node.get_draw();
             if node_draw.is_none() {
                 *node_draw = Some(NodeDraw {
-                    animator: Animator::new(Self::get_default_anim(cx, counter, false)),
+                    animator: Animator::default(),
                     marked: 0
                 })
             }
             let node_draw = node_draw.as_mut().unwrap();
-            
+            node_draw.animator.init(cx, |cx| FileTreeItemDraw::get_default_anim(cx, counter, false));
             // if we are NOT animating, we need to get change a default color.
             
-            self.node_bg.color = node_draw.animator.last_color(cx.id("bg.color"));
+            self.item_draw.node_bg.color = node_draw.animator.last_color(cx, Quad::instance_color());
             
-            let inst = self.node_bg.begin_quad(cx, &Layout {
-                width: Width::Fill,
-                height: Height::Fix(self.row_height * scale as f32),
-                align: Align::left_center(),
-                padding: self.row_padding,
-                ..Default::default()
-            });
-            node_draw.animator.update_area_refs(cx, inst.clone().into_area());
+            let mut node_layout = node_layout.clone();
+            node_layout.walk.height = Height::Fix(row_height * scale as f32);
+            let inst = self.item_draw.node_bg.begin_quad(cx, node_layout);
+            
+            node_draw.animator.set_area(cx, inst.clone().into());
             let is_marked = node_draw.marked != 0;
             
             for i in 0..(depth - 1) {
-                let quad_margin = Margin {l: 1., t: 0., r: 4., b: 0.};
                 if i == depth - 2 { // our own thread.
-                    let area = self.filler.draw_quad_walk(
-                        cx,
-                        Width::Fix(10.),
-                        Height::Fill,
-                        quad_margin
-                    );
+                    let area = self.item_draw.filler.draw_quad(cx, filler_walk);
                     if is_last {
                         if is_first {
                             //line_vec
@@ -615,10 +669,10 @@ impl FileTree {
                 else {
                     let here_last = if last_stack.len()>1 {last_stack[i + 1]} else {false};
                     if here_last {
-                        cx.walk_turtle(Width::Fix(10.), Height::Fill, quad_margin, None);
+                        cx.walk_turtle(filler_walk);
                     }
                     else {
-                        let area = self.filler.draw_quad_walk(cx, Width::Fix(10.), Height::Fill, quad_margin);
+                        let area = self.item_draw.filler.draw_quad(cx, filler_walk);
                         //line_vec
                         area.push_vec2(cx, Vec2 {x: -0.2, y: 1.2});
                         //anim_pos
@@ -626,24 +680,24 @@ impl FileTree {
                     }
                 }
             };
-            self.filler.z = depth as f32 + 1.0;
-            self.tree_text.z = depth as f32 + 1.0;
-            self.tree_text.font_size = self.font_size;
-            self.tree_text.font_scale = scale as f32;
+            self.item_draw.filler.z = depth as f32 + 1.0;
+            self.item_draw.tree_text.z = depth as f32 + 1.0;
+            //self.item_draw.tree_text.font_size = self.font_size;
+            self.item_draw.tree_text.font_scale = scale as f32;
             match node {
                 FileNode::Folder {name, state, ..} => {
                     // draw the folder icon
-                    let inst = self.filler.draw_quad_walk(cx, Width::Fix(14.), Height::Fill, Margin {l: 0., t: 0., r: 2., b: 0.});
+                    let inst = self.item_draw.filler.draw_quad(cx, folder_walk);
                     inst.push_vec2(cx, Vec2::zero());
                     inst.push_float(cx, 1.);
                     // move the turtle down a bit
                     //cx.move_turtle(0., 3.5);
                     cx.turtle_align_y();
                     //cx.realign_turtle(Align::left_center(), false);
-                    self.tree_text.color = self.tree_folder_color;
+                    self.item_draw.tree_text.color = color_tree_folder;
                     let wleft = cx.get_width_left() - 10.;
-                    self.tree_text.wrapping = Wrapping::Ellipsis(wleft);
-                    self.tree_text.draw_text(cx, name);
+                    self.item_draw.tree_text.wrapping = Wrapping::Ellipsis(wleft);
+                    self.item_draw.tree_text.draw_text(cx, name);
                     
                     let (new_scale, new_state) = match state {
                         NodeState::Opening(fac) => {
@@ -679,19 +733,19 @@ impl FileTree {
                     //cx.move_turtle(0., 3.5);
                     cx.turtle_align_y();
                     let wleft = cx.get_width_left() - 10.;
-                    self.tree_text.wrapping = Wrapping::Ellipsis(wleft);
+                    self.item_draw.tree_text.wrapping = Wrapping::Ellipsis(wleft);
                     //cx.realign_turtle(Align::left_center(), false);
-                    self.tree_text.color = if is_marked {
-                        self.tree_folder_color
+                    self.item_draw.tree_text.color = if is_marked {
+                        color_tree_folder
                     }
                     else {
-                        self.tree_file_color
+                        color_tree_file
                     };
-                    self.tree_text.draw_text(cx, name);
+                    self.item_draw.tree_text.draw_text(cx, name);
                 }
             }
             
-            self.node_bg.end_quad(cx, &inst);
+            self.item_draw.node_bg.end_quad(cx, &inst);
             
             cx.turtle_new_line();
             // if any of the parents is closing, don't count alternating lines
@@ -701,22 +755,20 @@ impl FileTree {
         }
         
         // draw filler nodes
-        let view_total = cx.get_turtle_bounds();
-        let rect_now = cx.get_turtle_rect();
-        let bg_even = cx.color("bg_selected");
-        let bg_odd = cx.color("bg_odd");
-        let mut y = view_total.y;
-        while y < rect_now.h {
-            self.node_bg.color = if counter & 1 == 0 {bg_even}else {bg_odd};
-            self.node_bg.draw_quad_walk(
-                cx,
-                Width::Fill,
-                Height::Fix((rect_now.h - y).min(self.row_height)),
-                Margin::zero()
-            );
-            cx.turtle_new_line();
-            y += self.row_height;
-            counter += 1;
+        if row_height > 0.{
+            let view_total = cx.get_turtle_bounds();
+            let rect_now = cx.get_turtle_rect();
+            let mut y = view_total.y;
+            while y < rect_now.h {
+                self.item_draw.node_bg.color = if counter & 1 == 0 {Theme::color_bg_selected().base(cx)}else {Theme::color_bg_odd().base(cx)};
+                self.item_draw.node_bg.draw_quad(
+                    cx,
+                    Walk::wh(Width::Fill, Height::Fix((rect_now.h - y).min(row_height))),
+                );
+                cx.turtle_new_line();
+                y += row_height;
+                counter += 1;
+            }
         }
         
         // draw the drag item overlay layer if need be
@@ -729,9 +781,10 @@ impl FileTree {
                 while let Some((_depth, _index, _len, node)) = file_walker.walk() {
                     let node_draw = if let Some(node_draw) = node.get_draw() {node_draw}else {continue};
                     if node_draw.marked != 0 {
-                        let inst = self.drag_bg.begin_quad(cx, &self.drag_bg_layout);
-                        self.tree_text.color = self.tree_folder_color;
-                        self.tree_text.draw_text(cx, match node {
+                        self.drag_bg.color = Self::color_drag_bg().base(cx);
+                        let inst = self.drag_bg.begin_quad(cx, FileTreeItemDraw::layout_drag_bg().base(cx));
+                        self.item_draw.tree_text.color = FileTreeItemDraw::color_tree_folder().base(cx);
+                        self.item_draw.tree_text.draw_text(cx, match node {
                             FileNode::Folder {name, ..} => {name},
                             FileNode::File {name, ..} => {name}
                         });

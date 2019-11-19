@@ -1,57 +1,63 @@
 use render::*;
-use crate::buttonux::*;
+use crate::buttonlogic::*;
+use crate::widgettheme::*;
 
 #[derive(Clone)]
 pub struct TabClose {
     pub bg: Quad,
-    pub text: Text,
     pub animator: Animator,
-    pub margin: Margin,
     pub _bg_area: Area,
 }
 
 impl TabClose {
-    pub fn style(cx: &mut Cx) -> Self {
+    pub fn proto(cx: &mut Cx) -> Self {
         Self {
-            bg: Quad {
-                shader: cx.add_shader(Self::def_bg_shader(), "TabClose.bg"),
-                ..Quad::style(cx)
-            },
-            text: Text::style(cx),
-            animator: Animator::new(Self::get_default_anim(cx)),
-            margin: Margin::zero(),
+            bg: Quad::proto_with_shader(cx, Self::def_bg_shader(), "TabClose.bg"),
+            animator: Animator::default(),
             _bg_area: Area::Empty,
         }
     }
     
+    pub fn walk()->WalkId{uid!()}
+    pub fn instance_hover()->InstanceFloat{uid!()}
+    pub fn instance_down()->InstanceFloat{uid!()}
+    
+    pub fn theme(cx: &mut Cx){
+        Self::walk().set_base(cx, Walk {
+            width: Width::Fix(10.),
+            height: Height::Fix(10.),
+            margin: Margin {l: -4., t: 0., r: 4., b: 0.}
+        });
+    }
+    
     pub fn get_default_anim(cx:&Cx)->Anim{
         Anim::new(Play::Cut {duration: 0.2}, vec![
-            Track::color(cx.id("bg.color"), Ease::Lin, vec![(1.0, color("#a"))]),
-            Track::float(cx.id("bg.hover"), Ease::Lin, vec![(1.0, 0.)]),
-            Track::float(cx.id("bg.down"), Ease::Lin, vec![(1.0, 0.)]),
+            Track::color(Quad::instance_color(), Ease::Lin, vec![(1.0, Theme::color_text_deselected_focus().base(cx))]),
+            Track::float(Self::instance_hover(), Ease::Lin, vec![(1.0, 0.)]),
+            Track::float(Self::instance_down(), Ease::Lin, vec![(1.0, 0.)]),
         ])
     }
     
     pub fn get_over_anim(cx:&Cx)->Anim{
         Anim::new(Play::Cut {duration: 0.2}, vec![
-            Track::color(cx.id("bg.color"), Ease::Lin, vec![(0.0, color("#f")), (1.0, color("#f"))]),
-            Track::float(cx.id("bg.down"), Ease::Lin, vec![(1.0, 0.)]),
-            Track::float(cx.id("bg.hover"), Ease::Lin, vec![(0.0, 1.0), (1.0, 1.0)]),
+            Track::color(Quad::instance_color(), Ease::Lin, vec![(0.0, Theme::color_text_selected_focus().base(cx)), (1.0, Theme::color_text_selected_focus().base(cx))]),
+            Track::float(Self::instance_hover(), Ease::Lin, vec![(1.0, 1.0)]),
+            Track::float(Self::instance_down(), Ease::Lin, vec![(1.0, 0.)]),
         ])
     }
     
     pub fn get_down_anim(cx:&Cx)->Anim{
         Anim::new(Play::Cut {duration: 0.2}, vec![
-            Track::color(cx.id("bg.color"), Ease::Lin, vec![(0.0, color("#f55")), (1.0, color("#f55"))]),
-            Track::float(cx.id("bg.hover"), Ease::Lin, vec![(1.0, 1.0)]),
-            Track::float(cx.id("bg.down"), Ease::OutExp, vec![(0.0, 0.0), (1.0, 3.1415 * 0.5)]),
+            Track::color(Quad::instance_color(), Ease::Lin, vec![(0.0, Theme::color_text_selected_focus().base(cx)), (1.0, Theme::color_text_selected_focus().base(cx))]),
+            Track::float(Self::instance_hover(), Ease::Lin, vec![(1.0, 1.0)]),
+            Track::float(Self::instance_down(), Ease::OutExp, vec![(0.0, 0.0), (1.0, 3.1415 * 0.5)]),
         ])
     }
 
     pub fn def_bg_shader() -> ShaderGen {
         Quad::def_quad_shader().compose(shader_ast!({
-            let hover: float<Instance>;
-            let down: float<Instance>;
+            let hover: Self::instance_hover();
+            let down: Self::instance_down();
             fn pixel() -> vec4 {
                 df_viewport(pos * vec2(w, h));
                 let hover_max: float = (hover * 0.2 + 0.8) * 0.5;
@@ -73,7 +79,7 @@ impl TabClose {
             margin: Some(Margin {l: 5., t: 5., r: 5., b: 5.}),
             ..Default::default()
         }) {
-            Event::Animate(ae) => self.animator.write_area(cx, self._bg_area, "bg.", ae.time),
+            Event::Animate(ae) => self.animator.calc_area(cx, self._bg_area, ae.time),
             Event::FingerDown(_fe) => {
                 self.animator.play_anim(cx, Self::get_down_anim(cx));
                 cx.set_down_mouse_cursor(MouseCursor::Hand);
@@ -107,11 +113,12 @@ impl TabClose {
     }
     
     pub fn draw_tab_close(&mut self, cx: &mut Cx) {
-        self.bg.color = self.animator.last_color(cx.id("bg.color"));
-        let bg_inst = self.bg.draw_quad_walk(cx, Width::Fix(10.), Height::Fix(10.), self.margin);
-        bg_inst.push_float(cx, self.animator.last_float(cx.id("bg.hover")));
-        bg_inst.push_float(cx, self.animator.last_float(cx.id("bg.down")));
-        self._bg_area = bg_inst.into_area();
-        self.animator.update_area_refs(cx, self._bg_area); // if our area changed, update animation
+        self.animator.init(cx, |cx| Self::get_default_anim(cx));
+        self.bg.color = self.animator.last_color(cx, Quad::instance_color());
+        let bg_inst = self.bg.draw_quad(cx, Self::walk().base(cx));
+        bg_inst.push_last_float(cx, &self.animator, Self::instance_hover());
+        bg_inst.push_last_float(cx, &self.animator, Self::instance_down());
+        self._bg_area = bg_inst.into();
+        self.animator.set_area(cx, self._bg_area); // if our area changed, update animation
     }
 }

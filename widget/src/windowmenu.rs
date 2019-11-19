@@ -1,5 +1,6 @@
 // a window menu implementation
 use render::*;
+use crate::widgettheme::*;
 
 #[derive(Clone)]
 pub struct WindowMenu {
@@ -11,62 +12,59 @@ pub struct WindowMenu {
 pub struct MenuItemDraw {
     pub text: Text,
     pub item_bg: Quad,
-    pub row_height: f32,
-    pub name_color: Color,
-    pub bg_color: Color,
-    pub bg_over_color: Color,
-    pub bg_selected_color: Color,
+    //pub item_layout: LayoutId,
+    //pub name_color: ColorId,
+    //pub bg_color: ColorId,
+    //pub bg_over_color: ColorId,
+    //pub bg_selected_color: ColorId,
 }
 
 impl MenuItemDraw {
-    pub fn style(cx: &mut Cx) -> Self {
+    pub fn proto(cx: &mut Cx) -> Self {
         Self {
             text: Text {
                 wrapping: Wrapping::Word,
-                ..Text::style(cx)
+                ..Text::proto(cx)
             },
-            item_bg: Quad::style(cx),
-            row_height: 20.0,
-            name_color: color("white"),
-            bg_color: cx.color("bg_selected"),
-            bg_over_color: cx.color("bg_odd"),
-            bg_selected_color: cx.color("bg_selected_over"),
+            //item_layout: Layout_window_menu::id(cx),
+            item_bg: Quad::proto(cx),
+            //name_color: Color_text_selected_focus::id(cx),
+            //bg_color: Color_bg_selected::id(cx),
+            //bg_over_color: Color_bg_odd::id(cx),
+            //bg_selected_color: Color_bg_selected_over::id(cx),
         }
     }
     
     pub fn get_default_anim(&self, cx: &Cx) -> Anim {
         Anim::new(Play::Chain {duration: 0.01}, vec![
-            Track::color(cx.id("bg.color"), Ease::Lin, vec![
-                (1.0, self.bg_color)
+            Track::color(Quad::instance_color(), Ease::Lin, vec![
+                (1.0,  Theme::color_bg_selected().base(cx))
             ])
         ])
     }
     
     pub fn get_default_anim_cut(&self, cx: &Cx) -> Anim {
         Anim::new(Play::Cut {duration: 0.01}, vec![
-            Track::color(cx.id("bg.color"), Ease::Lin, vec![
-                (0.0, self.bg_color)
+            Track::color(Quad::instance_color(), Ease::Lin, vec![
+                (0.0, Theme::color_bg_selected().base(cx))
             ])
         ])
     }
     
     pub fn get_over_anim(&self, cx: &Cx) -> Anim {
         Anim::new(Play::Cut {duration: 0.02}, vec![
-            Track::color(cx.id("bg.color"), Ease::Lin, vec![
-                (0., self.bg_over_color),
+            Track::color(Quad::instance_color(), Ease::Lin, vec![
+                (0., Theme::color_bg_odd().base(cx)),
             ])
         ])
     }
     
-    pub fn get_line_layout(&self) -> Layout {
-        Layout {
-            width: Width::Fill,
-            height: Height::Fix(self.row_height),
-            padding: Padding {l: 2., t: 3., b: 2., r: 0.},
-            line_wrap: LineWrap::None,
-            ..Default::default()
-        }
-    }
+    pub fn text_style_menu_label() ->TextStyleId{uid!()}
+    
+    pub fn theme(cx:&mut Cx){ 
+        Self::text_style_menu_label().set_base(cx, Theme::text_style_normal().base(cx));
+    }   
+    
     /*
     pub fn draw_log_path(&mut self, cx: &mut Cx, path: &str, row: usize) {
         self.text.color = self.path_color;
@@ -134,10 +132,10 @@ pub enum WindowMenuEvent {
 }
 
 impl WindowMenu {
-    pub fn style(cx: &mut Cx) -> Self {
+    pub fn proto(cx: &mut Cx) -> Self {
         Self {
-            item_draw: MenuItemDraw::style(cx),
-            view: View::style(cx),
+            item_draw: MenuItemDraw::proto(cx),
+            view: View::proto(cx),
         }
     }
     

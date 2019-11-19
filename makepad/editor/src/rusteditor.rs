@@ -9,14 +9,13 @@ pub struct RustEditor {
 }
 
 impl RustEditor {
-    pub fn style(cx: &mut Cx) -> Self {
+    pub fn proto(cx: &mut Cx) -> Self {
         let editor = Self {
-            code_editor: CodeEditor::style(cx),
+            code_editor: CodeEditor::proto(cx),
         };
         //tab.animator.default = tab.anim_default(cx);
         editor
     }
-
       
     pub fn handle_rust_editor(&mut self, cx: &mut Cx, event: &mut Event, text_buffer: &mut TextBuffer) -> CodeEditorEvent {
         let ce = self.code_editor.handle_code_editor(cx, event, text_buffer);
@@ -183,7 +182,8 @@ impl RustTokenizer {
                     }
                     else { // parse a single char or lifetime
                         let offset = state.offset;
-                        if Self::parse_rust_ident_tail(state, chunk) && ((state.offset - offset) >1 || state.next != '\'') {
+                        let (is_ident, _) = Self::parse_rust_ident_tail(state, chunk);
+                        if is_ident && ((state.offset - offset) >1 || state.next != '\'') {
                             return TokenType::TypeName;
                         }
                         if state.next != '\n' {
@@ -367,8 +367,8 @@ impl RustTokenizer {
                     chunk.push(state.cur);
                     
                     let keyword_type = Self::parse_rust_lc_keyword(state, chunk, token_chunks);
-                    
-                    if Self::parse_rust_ident_tail(state, chunk) {
+                    let (is_ident, _) = Self::parse_rust_ident_tail(state, chunk);
+                    if is_ident {
                         if state.next == '(' {
                             return TokenType::Call;
                         }
@@ -386,8 +386,12 @@ impl RustTokenizer {
                             is_keyword = true;
                         }
                     }
-                    if Self::parse_rust_ident_tail(state, chunk) {
+                    let (is_ident, has_underscores) = Self::parse_rust_ident_tail(state, chunk);
+                    if is_ident {
                         is_keyword = false;
+                    }
+                    if has_underscores {
+                        return TokenType::ThemeName;
                     }
                     if is_keyword {
                         return TokenType::Keyword;
@@ -402,14 +406,18 @@ impl RustTokenizer {
         }
     }
     
-    fn parse_rust_ident_tail<'a>(state: &mut TokenizerState<'a>, chunk: &mut Vec<char>) -> bool {
+    fn parse_rust_ident_tail<'a>(state: &mut TokenizerState<'a>, chunk: &mut Vec<char>) -> (bool,bool) {
         let mut ret = false;
+        let mut has_underscores = false;
         while state.next_is_digit() || state.next_is_letter() || state.next == '_' || state.next == '$' {
+            if state.next == '_'{
+                has_underscores = true;
+            }
             ret = true;
             chunk.push(state.next);
             state.advance();
         }
-        ret
+        (ret, has_underscores)
     }
     
     
@@ -993,7 +1001,7 @@ impl RustTokenizer {
                     
                     is_unary_operator = true;
                 },
-                TokenType::Identifier | TokenType::BuiltinType | TokenType::TypeName => { // these dont reset the angle counter
+                TokenType::Identifier | TokenType::BuiltinType | TokenType::TypeName | TokenType::ThemeName=> { // these dont reset the angle counter
                     is_unary_operator = false;
                     
                     first_after_open = false;

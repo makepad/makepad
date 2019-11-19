@@ -2,7 +2,7 @@ use render::*;
 use crate::scrollview::*;
 
 #[derive(Clone, Default)]
-pub struct ListUx {
+pub struct ListLogic {
     pub list_items: Vec<ListItem>,
     pub scroll_item_in_view: Option<usize>,
     pub set_scroll_pos: Option<Vec2>,
@@ -20,7 +20,7 @@ pub struct ListItem {
     pub is_selected: bool
 }
 
-pub enum ListUxEvent {
+pub enum ListLogicEvent {
     Animate(AnimateEvent),
     AnimEnded,
     Select,
@@ -54,14 +54,13 @@ impl ListSelect {
     }
 }
 
-impl ListUx {
-    pub fn set_list_len<F>(&mut self, cx: &mut Cx, len: usize, mut cb: F)
-    where F: FnMut(&mut Cx, usize) -> Anim
+impl ListLogic {
+    pub fn set_list_len(&mut self,  len: usize)
     {
         if self.list_items.len() < len {
-            for i in self.list_items.len()..len {
+            for _ in self.list_items.len()..len {
                 self.list_items.push(ListItem {
-                    animator: Animator::new(cb(cx, i)),
+                    animator: Animator::default(),
                     is_selected: false
                 })
             }
@@ -102,7 +101,7 @@ impl ListUx {
     
     pub fn walk_turtle_to_end(&mut self, cx: &mut Cx, row_height: f32) {
         let left = (self.list_items.len() - self.end_item) as f32 * row_height;
-        cx.walk_turtle(Width::Fill, Height::Fix(left), Margin::zero(), None);
+        cx.walk_turtle(Walk::wh(Width::Fill, Height::Fix(left)));
     }
     
     
@@ -199,8 +198,8 @@ impl ListUx {
         }
     }
     
-    pub fn handle_list_ux<F>(&mut self, cx: &mut Cx, event: &mut Event, select: ListSelect, mut cb: F) -> ListEvent
-    where F: FnMut(&mut Cx, ListUxEvent, &mut ListItem, usize)
+    pub fn handle_list_logic<F>(&mut self, cx: &mut Cx, event: &mut Event, select: ListSelect, mut cb: F) -> ListEvent
+    where F: FnMut(&mut Cx, ListLogicEvent, &mut ListItem, usize)
     {
         let mut select = select;
         
@@ -211,10 +210,10 @@ impl ListUx {
             let item = &mut self.list_items[counter];
             match event.hits(cx, item.animator.area, HitOpt::default()) {
                 Event::Animate(ae) => {
-                    cb(cx, ListUxEvent::Animate(ae), item, counter)
+                    cb(cx, ListLogicEvent::Animate(ae), item, counter)
                 },
                 Event::AnimEnded(_) => {
-                    cb(cx, ListUxEvent::AnimEnded, item, counter)
+                    cb(cx, ListLogicEvent::AnimEnded, item, counter)
                 },
                 Event::FingerDown(fe) => {
                     cx.set_down_mouse_cursor(MouseCursor::Hand);
@@ -236,10 +235,10 @@ impl ListUx {
                     cx.set_hover_mouse_cursor(MouseCursor::Hand);
                     match fe.hover_state {
                         HoverState::In => {
-                            cb(cx, ListUxEvent::Over, item, counter);
+                            cb(cx, ListLogicEvent::Over, item, counter);
                         },
                         HoverState::Out => {
-                            cb(cx, ListUxEvent::Out, item, counter);
+                            cb(cx, ListLogicEvent::Out, item, counter);
                         },
                         _ => ()
                     }
@@ -255,7 +254,7 @@ impl ListUx {
                 }
                 if counter < self.start_item || counter >= self.end_item {
                     let dm = &mut self.list_items[counter];
-                    cb(cx, ListUxEvent::Deselect, dm, counter);
+                    cb(cx, ListLogicEvent::Deselect, dm, counter);
                 }
             }
         }
@@ -283,14 +282,14 @@ impl ListUx {
                             let dm = &mut self.list_items[*counter];
                             if *counter != select_index {
                                 dm.is_selected = false;
-                                cb(cx, ListUxEvent::Deselect, dm, select_index);
+                                cb(cx, ListLogicEvent::Deselect, dm, select_index);
                             }
                         }
                         self.selection.truncate(0);
                         for i in start..= end {
                             let dm = &mut self.list_items[i];
                             dm.is_selected = true;
-                            cb(cx, ListUxEvent::Select, dm, i);
+                            cb(cx, ListLogicEvent::Select, dm, i);
                             self.selection.push(i);
                         }
                         
@@ -301,7 +300,7 @@ impl ListUx {
                 let dm = &mut self.list_items[select_index];
                 if dm.is_selected {
                     dm.is_selected = false;
-                    cb(cx, ListUxEvent::Deselect, dm, select_index);
+                    cb(cx, ListLogicEvent::Deselect, dm, select_index);
                     if let Some(pos) = self.selection.iter().position( | v | *v == select_index) {
                         self.selection.remove(pos);
                     }
@@ -309,7 +308,7 @@ impl ListUx {
                 else {
                     self.selection.push(select_index);
                     dm.is_selected = true;
-                    cb(cx, ListUxEvent::Over, dm, select_index);
+                    cb(cx, ListLogicEvent::Over, dm, select_index);
                 }
             },
             ListSelect::All => {
@@ -318,7 +317,7 @@ impl ListUx {
                     self.selection.push(i);
                     let dm = &mut self.list_items[i];
                     dm.is_selected = true;
-                    cb(cx, ListUxEvent::Over, dm, i);
+                    cb(cx, ListLogicEvent::Over, dm, i);
                 }
             },
             ListSelect::Single(select_index) => {
@@ -329,14 +328,14 @@ impl ListUx {
                     let dm = &mut self.list_items[*counter];
                     if *counter != select_index {
                         dm.is_selected = false;
-                        cb(cx, ListUxEvent::Cleanup, dm, *counter);
+                        cb(cx, ListLogicEvent::Cleanup, dm, *counter);
                     }
                 }
                 self.selection.truncate(0);
                 self.selection.push(select_index);
                 let dm = &mut self.list_items[select_index];
                 dm.is_selected = true;
-                cb(cx, ListUxEvent::Over, dm, select_index);
+                cb(cx, ListLogicEvent::Over, dm, select_index);
                 
                 return ListEvent::SelectSingle(select_index)
             },

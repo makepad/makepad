@@ -37,9 +37,9 @@ impl Cx {
                 1 => { // fetch_deps
                     
                     // send the UI our deps, overlap with shadercompiler
-                    let mut load_deps = Vec::new();
-                    for font in &self.fonts {
-                        load_deps.push(font.path.clone());
+                    let mut load_deps = Vec::<String>::new();
+                    for cxfont in &self.fonts{
+                        load_deps.push(cxfont.path.clone());
                     }
                     // other textures, things
                     self.platform.from_wasm.load_deps(load_deps);
@@ -53,21 +53,23 @@ impl Cx {
                         let dep_path = to_wasm.parse_string();
                         let vec_ptr = to_wasm.mu32() as *mut u8;
                         let vec_len = to_wasm.mu32() as usize;
-                        
-                        let len = self.fonts.len();
-                        for i in 0..len {
-                            let path = self.fonts[i].path.clone();
-                            // lets find path in deps
-                            if dep_path == path {
-                                let vec_rec = unsafe {Vec::<u8>::from_raw_parts(vec_ptr, vec_len, vec_len)};
-                                if let Err(_) = self.fonts[i].load_from_ttf_bytes(&vec_rec) {
-                                    println!("Error loading font {} ", path);
+                        let vec_rec = unsafe {Vec::<u8>::from_raw_parts(vec_ptr, vec_len, vec_len)};
+                        // check if its a font
+                        for cxfont in &mut self.fonts{
+                            if cxfont.path == dep_path{
+                                // load it
+                                let mut font = CxFont::default();
+                                if font.load_from_ttf_bytes(&vec_rec).is_err() {
+                                    println!("Error loading font {} ", dep_path);
                                 }
-                                continue;
+                                else{
+                                    font.path = cxfont.path.clone();
+                                    *cxfont = font;
+                                }
+                                break;
                             }
                         }
                     }
-                    
                 },
                 3 => { // init
                     self.platform.window_geom = WindowGeom {

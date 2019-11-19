@@ -826,6 +826,7 @@ pub enum TokenType {
     Identifier,
     Call,
     TypeName,
+    ThemeName,
     BuiltinType,
     Hash,
     

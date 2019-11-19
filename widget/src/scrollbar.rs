@@ -1,4 +1,5 @@
 use render::*;
+use crate::widgettheme::*;
 
 #[derive(Clone)]
 pub struct ScrollBar {
@@ -33,18 +34,18 @@ pub enum ScrollBarEvent {
 }
 
 impl ScrollBar {
-    pub fn style(cx: &mut Cx) -> Self {
+    pub fn proto(cx: &mut Cx) -> Self {
         Self {
             bar_size: 12.0,
             min_handle_size: 30.0,
             smoothing: None,
             
             axis: Axis::Horizontal,
-            animator: Animator::new(Self::get_default_anim(cx)),
+            animator: Animator::default(),
             sb: Quad {
                 z: 10.,
                 shader: cx.add_shader(Self::def_shader(), "ScrollBar.sb"),
-                ..Quad::style(cx)
+                ..Quad::proto(cx)
             },
             use_vertical_finger_scroll: false,
             _visible: false,
@@ -63,32 +64,35 @@ impl ScrollBar {
             _sb_area: Area::Empty,
         }
     }
-    
+
+    pub fn instance_is_vertical()->InstanceFloat{uid!()}
+    pub fn instance_norm_handle()->InstanceFloat{uid!()}
+    pub fn instance_norm_scroll()->InstanceFloat{uid!()}
+
     pub fn get_over_anim(cx:&Cx)->Anim{
         Anim::new(Play::Cut {duration: 0.05}, vec![
-            Track::color(cx.id("sb.color"), Ease::Lin, vec![(1.0, color("#7"))])
+            Track::color(Quad::instance_color(), Ease::Lin, vec![(1.0, Theme::color_scrollbar_base().base(cx))])
         ])
     }
     
     pub fn get_scrolling_anim(cx:&Cx)->Anim{
         Anim::new(Play::Cut {duration: 0.05}, vec![
-            Track::color(cx.id("sb.color"), Ease::Lin, vec![(1.0, color("#9"))])
+            Track::color(Quad::instance_color(), Ease::Lin, vec![(1.0, Theme::color_scrollbar_down().base(cx))])
         ])
     }
     
     pub fn get_default_anim(cx:&Cx)->Anim{
         Anim::new(Play::Cut {duration: 0.5}, vec![
-            Track::color(cx.id("sb.color"), Ease::Lin, vec![(1.0, color("#5"))])
+            Track::color(Quad::instance_color(), Ease::Lin, vec![(1.0, Theme::color_scrollbar_over().base(cx))])
         ])
-    }
+    } 
 
     pub fn def_shader() -> ShaderGen {
         Quad::def_quad_shader().compose(shader_ast!({
             
-            let is_vertical: float<Instance>;
-            
-            let norm_handle: float<Instance>;
-            let norm_scroll: float<Instance>;
+            let is_vertical: Self::instance_is_vertical();
+            let norm_handle: Self::instance_norm_handle();
+            let norm_scroll: Self::instance_norm_scroll();
             
             const border_radius: float = 1.5;
             
@@ -150,7 +154,7 @@ impl ScrollBar {
     // writes the norm_scroll value into the shader
     pub fn update_shader_scroll_pos(&mut self, cx: &mut Cx) {
         let (norm_scroll, _) = self.get_normalized_scroll_pos();
-        self._sb_area.write_float(cx, "norm_scroll", norm_scroll);
+        self._sb_area.write_float(cx, Self::instance_norm_scroll(), norm_scroll);
     }
     
     // turns scroll_pos into an event on this.event
@@ -287,7 +291,7 @@ impl ScrollBar {
         if self._visible {
             match event.hits(cx, self._sb_area, HitOpt {no_scrolling: true, ..Default::default()}) {
                 Event::Animate(ae) => {
-                    self.animator.write_area(cx, self._sb_area, "sb.", ae.time);
+                    self.animator.calc_area(cx, self._sb_area, ae.time);
                 },
                 Event::AnimEnded(_) => self.animator.end(),
                 Event::Frame(_ae) => {
@@ -369,7 +373,10 @@ impl ScrollBar {
     
     pub fn draw_scroll_bar(&mut self, cx: &mut Cx, axis: Axis, view_area: Area, view_rect: Rect, view_total: Vec2) -> f32 {
         // pull the bg color from our animation system, uses 'default' value otherwise
-        self.sb.color = self.animator.last_color(cx.id("sb.color"));
+        
+        self.animator.init(cx, |cx| Self::get_default_anim(cx));
+        
+        self.sb.color = self.animator.last_color(cx, Quad::instance_color());
         self._sb_area = Area::Empty;
         self._view_area = view_area;
         self.axis = axis;
@@ -387,7 +394,7 @@ impl ScrollBar {
                 self._view_visible = view_rect.w;
                 
                 if self._visible {
-                    let sb_inst = self.sb.draw_quad(
+                    let sb_inst = self.sb.draw_quad_rel(
                         cx,
                         Rect {
                             x: self._bar_side_margin,
@@ -401,7 +408,7 @@ impl ScrollBar {
                     sb_inst.push_float(cx, 0.0);
                     sb_inst.push_float(cx, norm_handle);
                     sb_inst.push_float(cx, norm_scroll);
-                    self._sb_area = sb_inst.into_area();
+                    self._sb_area = sb_inst.into();
                 }
             },
             Axis::Vertical => {
@@ -416,7 +423,7 @@ impl ScrollBar {
                 self._view_total = view_total.y;
                 self._view_visible = view_rect.h;
                 if self._visible {
-                    let sb_inst = self.sb.draw_quad(
+                    let sb_inst = self.sb.draw_quad_rel(
                         cx,
                         Rect {
                             x: view_rect.w - self.bar_size,
@@ -430,14 +437,14 @@ impl ScrollBar {
                     sb_inst.push_float(cx, 1.0);
                     sb_inst.push_float(cx, norm_handle);
                     sb_inst.push_float(cx, norm_scroll);
-                    self._sb_area = sb_inst.into_area();
+                    self._sb_area = sb_inst.into();
                 }
             }
         }
         
         // push the var added to the sb shader
         if self._visible {
-            self.animator.update_area_refs(cx, self._sb_area); // if our area changed, update animation
+            self.animator.set_area(cx, self._sb_area); // if our area changed, update animation
         }
         
         // see if we need to clamp

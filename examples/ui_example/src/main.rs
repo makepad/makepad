@@ -29,36 +29,25 @@
 // Multi cursor/grid cursor also works with ctrl+click / ctrl+shift+click
 // press alt or escape for animated codefolding outline view!
 
-use widget::*;
+use render::*;
 
 struct App {
     window: Window,
     pass: Pass,
     color_texture: Texture,
-    text: Text,
-    blit: Blit,
-    //trapezoid_text: TrapezoidText,
-    main_view: View<NoScroll>,
+    main_view: View,
 }
 
 main_app!(App);
 
 impl App {
-    pub fn style(cx: &mut Cx) -> Self {
+    pub fn proto(cx: &mut Cx) -> Self {
         Self {
-            window: Window::style(cx),
+            window: Window::proto(cx),
             pass: Pass::default(),
             color_texture: Texture::default(),
-            text: Text {
-                font_size: 8.0,
-                font: cx.load_font_path("resources/Inconsolata-Regular.ttf"),
-                ..Text::style(cx)
-            },
-            blit: Blit {
-                ..Blit::style(cx)
-            },
-            //trapezoid_text: TrapezoidText::style(cx),
-            main_view: View::style(cx),
+
+            main_view: View::proto(cx),
         }
     }
     
@@ -74,17 +63,7 @@ impl App {
         self.window.begin_window(cx);
         self.pass.begin_pass(cx);
         self.pass.add_color_texture(cx, &mut self.color_texture, ClearColor::ClearWith(color256(0, 0, 0)));
-        
-        let _ = self.main_view.begin_view(cx, Layout::default());
-        cx.move_turtle(50., 50.);
-        self.text.font_size = 9.0;
-        for _ in 0..7{
-            self.text.draw_text(cx, "- num -");
-        }
-        self.blit.draw_blit_abs(cx, &Texture {texture_id: Some(cx.fonts_atlas.texture_id)}, Rect {x: 100., y: 100., w: 700., h: 400.});
-        //self.trapezoid_text.draw_character(cx, 100.,100., 0.5, 'X', &self.text.font);
-        //self.trapezoid_text.draw_character(cx, 100.,300., 0.2, 'O', &self.text.font);
-        
+
         self.main_view.end_view(cx);
         self.pass.end_pass(cx);
         self.window.end_window(cx);

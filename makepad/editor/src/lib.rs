@@ -12,6 +12,7 @@ mod jseditor;
 pub use crate::jseditor::*;
 mod plaineditor;
 pub use crate::plaineditor::*;
-
+mod editortheme;
+pub use crate::editortheme::*;
 //mod texteditor;
 //pub use crate::texteditor::*;

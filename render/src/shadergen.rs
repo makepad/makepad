@@ -1,7 +1,6 @@
 // Shared shader-compiler code for generating GLSL and Metal shading language
 
 use std::hash::{Hash, Hasher};
-
 use crate::shader::*;
 
 #[derive(Default, Clone, PartialEq)]
@@ -43,12 +42,12 @@ impl ShaderGen {
     }
     
     // flatten our
-    pub fn flat_vars(&self, store: ShVarStore) -> Vec<ShVar> {
+    pub fn flat_vars<F>(&self, cb:F) -> Vec<ShVar> 
+    where F: Fn(&ShVarStore)->bool{
         let mut ret = Vec::new();
         for ast in self.asts.iter() {
             for shvar in &ast.vars {
-                // abusing an enum with flags complicates flattening a bit
-                if shvar.store == store {
+                if cb(&shvar.store){
                     ret.push(shvar.clone());
                 }
             }
@@ -162,11 +161,54 @@ pub struct ShFn {
 }
 
 #[derive(Clone, Hash, PartialEq)]
+pub enum UniformType {
+    Color(UniformColor),
+    Vec4(UniformVec4),
+    Vec3(UniformVec3),
+    Vec2(UniformVec2),
+    Float(UniformFloat)
+}
+
+impl UniformType{
+    fn type_name(&self)->String{
+        match self{
+            UniformType::Color(_)=>"vec4".to_string(),
+            UniformType::Vec4(_)=>"vec4".to_string(),
+            UniformType::Vec3(_)=>"vec3".to_string(),
+            UniformType::Vec2(_)=>"vec2".to_string(),
+            UniformType::Float(_)=>"float".to_string(),
+        }
+    }
+}
+
+#[derive(Clone, Hash, PartialEq)]
+pub enum InstanceType {
+    Color(InstanceColor),
+    Vec4(InstanceVec4),
+    Vec3(InstanceVec3),
+    Vec2(InstanceVec2),
+    Float(InstanceFloat)
+}
+
+impl InstanceType{
+    fn type_name(&self)->String{
+        match self{
+            InstanceType::Color(_)=>"vec4".to_string(),
+            InstanceType::Vec4(_)=>"vec4".to_string(),
+            InstanceType::Vec3(_)=>"vec3".to_string(),
+            InstanceType::Vec2(_)=>"vec2".to_string(),
+            InstanceType::Float(_)=>"float".to_string(),
+        }
+    }
+}
+
+#[derive(Clone, Hash, PartialEq)]
 pub enum ShVarStore {
-    Uniform,
+    Uniform(UniformType),
+    UniformColor(ColorId),
     UniformVw,
     UniformCx,
-    Instance,
+    Instance(InstanceType),
     Geometry,
     Texture,
     Local,
@@ -615,7 +657,7 @@ impl ShField {
             }
             if self.member.len() >4 {
                 return Err(SlErr {
-                    msg: format!("member {} not found or a valid swizzle of {}", self.member, base.ty)
+                    msg: format!("member {} not found or a valid swizzle of {} {}", self.member, base.ty, base.sl)
                 })
             }
             for chr in self.member.chars() {
@@ -626,7 +668,7 @@ impl ShField {
                     if mode == 0 {mode = 1;}
                     else if mode != 1 {
                         return Err(SlErr {
-                            msg: format!("member {} not a valid swizzle of {}", self.member, base.ty)
+                            msg: format!("member {} not a valid swizzle of {} {}", self.member, base.ty, base.sl)
                         })
                     }
                 }
@@ -637,7 +679,7 @@ impl ShField {
                     if mode == 0 {mode = 2;}
                     else if mode != 2 {
                         return Err(SlErr {
-                            msg: format!("member {} not a valid swizzle of {}", self.member, base.ty)
+                            msg: format!("member {} not a valid swizzle of {} {}", self.member, base.ty, base.sl)
                         })
                     }
                 }
@@ -661,7 +703,7 @@ impl ShField {
                     ty: "vec4".to_string()
                 }),
                 _ => Err(SlErr {
-                    msg: format!("member {} not cannot be found on type {}", self.member, base.ty)
+                    msg: format!("member {} not cannot be found on type {} {}", self.member, base.ty, base.sl)
                 })
             }
         }

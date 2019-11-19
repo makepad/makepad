@@ -55,6 +55,18 @@ fn generate_shvar_defs(stmt:Local)->TokenStream{
         let store;
         if let Type::Path(typath) = &*pat.ty{
             if typath.path.segments.len() != 1{
+                 
+                return quote!{
+                    ShVar{
+                        name:#name.to_string(),
+                        ty:#typath.shader_type(),
+                        store:#typath.var_store()
+                    }
+                }
+                
+            }
+
+            if typath.path.segments.len() != 1{
                 return error(typath.span(), "Only simple typenames such as float or vec4 are supported");
             }
             let seg = &typath.path.segments[0];
@@ -62,7 +74,7 @@ fn generate_shvar_defs(stmt:Local)->TokenStream{
             // lets read the path args
             if let PathArguments::AngleBracketed(angle) = &seg.arguments{
                 if angle.args.len() != 1{
-                    return error(angle.span(), "Please pass one storage arg like float<Uniform> or float<Local>");
+                    return error(angle.span(), "Please pass one storage arg like float<Local>");
                 }
                 let arg = &angle.args[0];
                 if let GenericArgument::Type(ty) = arg{
@@ -78,15 +90,15 @@ fn generate_shvar_defs(stmt:Local)->TokenStream{
                     }
                 }
                 else{
-                    return error(arg.span(), "Please pass one storage arg like float<Uniform> or float<Local>");
+                    return error(arg.span(), "Please pass one storage arg like float<Local>");
                 }
             }
             else{
-                return error(seg.ident.span(), "type should have storage specifier like float<Uniform> or float<Local>");
+               return error(stmt.span(), "Please pass one storage arg like float<Local>");
             }
         }
         else{
-            return error(stmt.span(), "Please give the variable a type of the form float<Local> or vec4<Uniform>");
+            return error(stmt.span(), "Please give the variable a type of the form float<Local> ");
         }
         return quote!{
             ShVar{

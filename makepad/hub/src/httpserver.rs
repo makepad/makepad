@@ -71,13 +71,14 @@ impl HttpServer {
                         
                         let line = &line[5..];
                         let space = line.find(' ').expect("http space fail");
-                        let url = line[0..space].to_lowercase();
-                        
-                        if url.ends_with("key.ron") || url.find("..").is_some() || url.starts_with("/") {
+                        let url = &line[0..space];
+                        let url_lc = url.to_string();
+                        url_lc.to_lowercase();
+                        if url_lc.ends_with("/key.ron") || url.find("..").is_some() || url.starts_with("/") {
                             let _ = tcp_stream.shutdown(Shutdown::Both);
                             return
                         }
-                        if url.starts_with("$watch") { // its a watcher wait for the finish
+                        if url_lc.starts_with("$watch") { // its a watcher wait for the finish
                             let mut watcher_id = 0;
                             if let Ok(mut shared) = shared.lock() {
                                 shared.watcher_id += 1;
@@ -136,6 +137,7 @@ impl HttpServer {
                         };
                         
                         // lets read the file from disk and dump it back.
+                        println!("HTTP Server serving file: {}", file_path);
                         if let Ok(data) = std::fs::read(&file_path) {
                             let mime_type = if url.ends_with(".html") {"text/html"}
                             else if url.ends_with(".wasm") {"application/wasm"}
@@ -144,7 +146,7 @@ impl HttpServer {
                             
                             // write the header
                             let header = format!(
-                                "HTTP/1.1 200 OK\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                                "HTTP/1.1 200 OK\r\nContent-Type: {}\r\nContent-encoding: identity\r\nTransfer-encoding: identity\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
                                 mime_type,
                                 data.len()
                             );
@@ -171,7 +173,7 @@ impl HttpServer {
         if let Ok(shared) = self.shared.lock() {
             for (_, tx) in &shared.watch_pending {
                 let msg = format!(
-                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-encoding: identity\r\nTransfer-encoding: identity\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
                     json_msg.len(),
                     json_msg
                 );

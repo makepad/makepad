@@ -9,11 +9,11 @@ pub struct PlainEditor {
 }
 
 impl PlainEditor {
-    pub fn style(cx: &mut Cx) -> Self {
+    pub fn proto(cx: &mut Cx) -> Self {
         let editor = Self {
             code_editor: CodeEditor{
                 folding_depth: 3,
-                ..CodeEditor::style(cx)
+                ..CodeEditor::proto(cx)
             }
         };
         editor

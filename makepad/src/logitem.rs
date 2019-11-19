@@ -10,7 +10,7 @@ pub struct LogItem {
 }
 
 impl LogItem {
-    pub fn style(cx: &mut Cx) -> Self {
+    pub fn proto(cx: &mut Cx) -> Self {
         let editor = Self {
             code_editor: CodeEditor {
                 draw_line_numbers: false,
@@ -19,7 +19,7 @@ impl LogItem {
                 top_padding: 10.,
                 mark_unmatched_parens: false,
                 folding_depth: 3,
-                ..CodeEditor::style(cx)
+                ..CodeEditor::proto(cx)
             },
             text_buffer: TextBuffer {
                 is_loading: true,

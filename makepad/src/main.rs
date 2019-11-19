@@ -4,6 +4,8 @@ mod fileeditor;
 pub use crate::fileeditor::*;
 mod filepanel;
 pub use crate::filepanel::*;
+mod homepage;
+pub use crate::homepage::*;
 mod loglist;
 pub use crate::loglist::*;
 mod logitem; 
@@ -18,6 +20,9 @@ mod filetree;
 pub use crate::filetree::*;
 mod buildmanager;
 pub use crate::buildmanager::*;
+mod makepadtheme;
+pub use crate::makepadtheme::*;
+
 //mod rustcompiler;
 //pub use crate::rustcompiler::*;
 use render::*;

@@ -3,7 +3,7 @@ use std::mem;
 use render::*;
 use crate::splitter::*;
 use crate::tabcontrol::*;
-
+use crate::widgettheme::*;
 use serde::*;
 
 #[derive(Clone)]
@@ -17,7 +17,7 @@ where TItem: Clone
     pub drop_size: Vec2,
     pub drop_quad: Quad,
     pub drop_quad_view: View,
-    pub drop_quad_color: Color,
+    //pub drop_quad_color: ColorId,
     pub _drag_move: Option<FingerMoveEvent>,
     pub _drag_end: Option<DockDragEnd<TItem>>,
     pub _close_tab: Option<DockTabIdent>,
@@ -388,18 +388,18 @@ enum DockDropKind {
 impl<TItem> Dock<TItem>
 where TItem: Clone
 {
-    pub fn style(cx: &mut Cx) -> Dock<TItem> {
+    pub fn proto(cx: &mut Cx) -> Dock<TItem> {
         Dock {
             // dock_items:None,
             drop_size: Vec2 {x: 100., y: 70.},
-            drop_quad_color: color("#a"),
+            //drop_quad_color: Color_drop_quad::id(),
             drop_quad: Quad {
                 z: 10.,
-                ..Quad::style(cx)
+                ..Quad::proto(cx)
             },
-            splitters: Elements::new(Splitter::style(cx)),
-            tab_controls: Elements::new(TabControl::style(cx)),
-            drop_quad_view: View::style_overlay(cx),
+            splitters: Elements::new(Splitter::proto(cx)),
+            tab_controls: Elements::new(TabControl::proto(cx)),
+            drop_quad_view: View::proto_overlay(cx),
             _close_tab: None,
             _drag_move: None,
             _drag_end: None,
@@ -762,10 +762,10 @@ where TItem: Clone
                         self._tweening_quad = Some((id, rc, alpha));
                         (rc, alpha)
                     };
-                    self.drop_quad.color = self.drop_quad_color;
+                    self.drop_quad.color = Theme::color_drop_quad().base(cx);
                     self.drop_quad.color.a = alpha * 0.8;
                     found_drop_zone = true;
-                    self.drop_quad.draw_quad(cx, dr);
+                    self.drop_quad.draw_quad_rel(cx, dr);
                 }
             }
             if !found_drop_zone {

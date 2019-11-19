@@ -3,9 +3,6 @@ use render::*;
 #[derive(Clone)]
 pub struct CodeIcon {
     pub quad: Quad,
-    pub margin: Margin,
-    pub width: f32,
-    pub height: f32,
 }
 
 pub enum CodeIconType {
@@ -29,21 +26,30 @@ impl CodeIconType {
 }
 
 impl CodeIcon {
-    pub fn style(cx: &mut Cx) -> Self {
+    pub fn proto(cx: &mut Cx) -> Self {
         Self {
-            width: 14.0,
-            height: 14.0,
-            margin: Margin {l: 0., t: 0.5, r: 4., b: 0.},
             quad: Quad {
                 shader: cx.add_shader(Self::def_code_icon_shader(), "CodeIcon"),
-                ..Quad::style(cx)
+                ..Quad::proto(cx)
             }
         }
     }
-
+    
+    pub fn walk()->WalkId{uid!()}
+    
+    pub fn theme(cx:&mut Cx){
+        Self::walk().set_base(cx, Walk{
+            width: Width::Fix(14.0),
+            height: Height::Fix(14.0),
+            margin: Margin {l: 0., t: 0.5, r: 4., b: 0.},
+        })
+    }
+    
+    pub fn instance_icon_id()->InstanceFloat{uid!()}
+    
     pub fn def_code_icon_shader() -> ShaderGen {
         Quad::def_quad_shader().compose(shader_ast!({
-            let icon_id: float<Instance>;
+            let icon_id: Self::instance_icon_id();
             
             fn pixel() -> vec4 {
                 let col = color;
@@ -121,15 +127,16 @@ impl CodeIcon {
             }
         }))
     }
-    
+    /*
     pub fn draw_icon_abs(&mut self, cx: &mut Cx, x: f32, y: f32, icon_type: CodeIconType) -> InstanceArea {
         let inst = self.quad.draw_quad_abs(cx, Rect {x: x, y: y, w: self.width, h: self.height});
         inst.push_float(cx, icon_type.shader_float());
         inst
-    }
+    }*/
     
-    pub fn draw_icon_walk(&mut self, cx: &mut Cx, icon_type: CodeIconType) -> InstanceArea {
-        let inst = self.quad.draw_quad_walk(cx, Width::Fix(self.width), Height::Fix(self.height), self.margin);
+    pub fn draw_icon(&mut self, cx: &mut Cx, icon_type: CodeIconType) -> InstanceArea {
+        
+        let inst = self.quad.draw_quad(cx, Self::walk().base(cx));
         inst.push_float(cx, icon_type.shader_float());
         inst
     }

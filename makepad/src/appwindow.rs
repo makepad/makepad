@@ -3,7 +3,6 @@ use render::*;
 use widget::*;
 use serde::*;
 use editor::*;
-use terminal::*;
 
 use crate::appstorage::*;
 use crate::fileeditor::*;
@@ -13,27 +12,27 @@ use crate::loglist::*;
 use crate::logitem::*;
 use crate::keyboard::*;
 use crate::buildmanager::*;
+use crate::homepage::*;
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Panel {
     LogList,
     LogItem,
     Keyboard,
     FileTree,
     FileEditorTarget,
-    FileEditor {path: String, scroll_pos:Vec2, editor_id: u64},
-    LocalTerminal {start_path: String, terminal_id: u64}
+    FileEditor {path: String, scroll_pos:Vec2, editor_id: u64}
 }
 
 #[derive(Clone)]
 pub struct AppWindow {
     pub desktop_window: DesktopWindow,
     pub file_panel: FilePanel,
+    pub home_page: HomePage,
     pub log_item: LogItem,
     pub log_list: LogList,
     pub keyboard: Keyboard,
     pub file_editors: Elements<u64, FileEditor, FileEditorTemplates>,
-    pub local_terminals: Elements<u64, LocalTerminal, LocalTerminal>,
     pub dock: Dock<Panel>,
 }
 
@@ -55,20 +54,20 @@ impl AppWindow {
         Self {
             desktop_window: DesktopWindow {
                 caption: "Makepad".to_string(),
-                window: Window::style(cx),
-                ..DesktopWindow::style(cx)
+                window: Window::proto(cx),
+                ..DesktopWindow::proto(cx)
             },
             file_editors: Elements::new(FileEditorTemplates {
-                rust_editor: RustEditor::style(cx),
-                js_editor: JSEditor::style(cx),
-                plain_editor: PlainEditor::style(cx)
+                rust_editor: RustEditor::proto(cx),
+                js_editor: JSEditor::proto(cx),
+                plain_editor: PlainEditor::proto(cx)
             }),
-            local_terminals: Elements::new(LocalTerminal::style(cx)),
-            keyboard: Keyboard::style(cx),
-            log_item: LogItem::style(cx),
-            log_list: LogList::style(cx),
-            file_panel: FilePanel::style(cx),
-            dock: Dock ::style(cx),
+            home_page: HomePage::proto(cx),
+            keyboard: Keyboard::proto(cx),
+            log_item: LogItem::proto(cx),
+            log_list: LogList::proto(cx),
+            file_panel: FilePanel::proto(cx),
+            dock: Dock ::proto(cx),
         }
     }
     
@@ -119,11 +118,7 @@ impl AppWindow {
                     self.keyboard.handle_keyboard(cx, event, storage);
                 },
                 Panel::FileEditorTarget => {
-                },
-                Panel::LocalTerminal {terminal_id, ..} => {
-                    if let Some(local_terminal) = &mut self.local_terminals.get(*terminal_id) {
-                        local_terminal.handle_local_terminal(cx, event);
-                    }
+                    self.home_page.handle_home_page(cx, event);
                 },
                 Panel::FileTree => {
                     file_tree_event = self.file_panel.handle_file_panel(cx, event);
@@ -255,17 +250,10 @@ impl AppWindow {
                     self.keyboard.draw_keyboard(cx);
                 },
                 Panel::FileEditorTarget => {
+                    self.home_page.draw_home_page(cx);
                 },
                 Panel::FileTree => {
                     file_panel.draw_file_panel(cx);
-                },
-                Panel::LocalTerminal {terminal_id, ..} => {
-                    let local_terminal = self.local_terminals.get_draw(cx, *terminal_id, | cx, tmpl | {
-                        let mut new_terminal = tmpl.clone();
-                        new_terminal.start_terminal(cx);
-                        new_terminal
-                    });
-                    local_terminal.draw_local_terminal(cx);
                 },
                 Panel::FileEditor {path, scroll_pos, editor_id} => {
                     let text_buffer = storage.text_buffer_from_path(cx, path);

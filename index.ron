@@ -407,7 +407,7 @@ Folder(
                             name: "cx_webgl.rs",
                         ),
                         File(
-                            name: "cx_win10.rs",
+                            name: "cx_windows.rs",
                         ),
                         File(
                             name: "cx_win32.rs",

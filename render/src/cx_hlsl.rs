@@ -1,5 +1,4 @@
 use crate::cx::*;
-use crate::cx_dx11::*;
 use std::ffi;
 use winapi::shared::{dxgiformat};
 use winapi::um::{d3d11, d3dcommon};
@@ -115,14 +114,14 @@ impl Cx {
         hlsl_out.push_str("float4 float4_22(float2 xy, float2 zw){return float4(xy.x, xy.y, zw.x, zw.y);};\n");
         
         // ok now define samplers from our sh.
-        let texture_slots = sg.flat_vars(ShVarStore::Texture);
-        let geometries = sg.flat_vars(ShVarStore::Geometry);
-        let instances = sg.flat_vars(ShVarStore::Instance);
-        let mut varyings = sg.flat_vars(ShVarStore::Varying);
-        let locals = sg.flat_vars(ShVarStore::Local);
-        let uniforms_cx = sg.flat_vars(ShVarStore::UniformCx);
-        let uniforms_vw = sg.flat_vars(ShVarStore::UniformVw);
-        let uniforms_dr = sg.flat_vars(ShVarStore::Uniform);
+        let texture_slots = sg.flat_vars(|v| if let ShVarStore::Texture = *v{true} else {false});
+        let geometries = sg.flat_vars(|v| if let ShVarStore::Geometry = *v{true} else {false});
+        let instances = sg.flat_vars(|v| if let ShVarStore::Instance(_) = *v{true} else {false});
+        let mut varyings = sg.flat_vars(|v| if let ShVarStore::Varying = *v{true} else {false});
+        let locals = sg.flat_vars(|v| if let ShVarStore::Local = *v{true} else {false});
+        let uniforms_cx = sg.flat_vars(|v| if let ShVarStore::UniformCx = *v{true} else {false});
+        let uniforms_vw = sg.flat_vars(|v| if let ShVarStore::UniformVw = *v{true} else {false});
+        let uniforms_dr = sg.flat_vars(|v| if let ShVarStore::Uniform(_) = *v{true} else {false});
         
         // lets count the slots
         let geometry_slots = sg.compute_slot_total(&geometries);
@@ -224,7 +223,7 @@ impl Cx {
                 hlsl_out.push_str(&auto.name);
                 hlsl_out.push_str(";\n");
             }
-            else if let ShVarStore::Instance = auto.store {
+            else if let ShVarStore::Instance(_) = auto.store {
                 hlsl_out.push_str("       _vary.");
                 hlsl_out.push_str(&auto.name);
                 hlsl_out.push_str(" = _inst.");
@@ -252,12 +251,12 @@ impl Cx {
             }
         }
         
-        let named_uniform_props = NamedProps::construct(sg, &uniforms_dr, true);
+        let uniform_props = UniformProps::construct(sg, &uniforms_dr);
         Ok((hlsl_out, CxShaderMapping {
-            zbias_uniform_prop: named_uniform_props.find_zbias_uniform_prop(),
+            zbias_uniform_prop: uniform_props.find_zbias_uniform_prop(),
             rect_instance_props: RectInstanceProps::construct(sg, &instances),
-            named_instance_props: NamedProps::construct(sg, &instances, false),
-            named_uniform_props,
+            instance_props: InstanceProps::construct(sg, &instances),
+            uniform_props,
             geometries: geometries,
             instances: instances,
             geometry_slots: geometry_slots,
@@ -289,8 +288,8 @@ impl Cx {
         let ps = d3d11_cx.create_pixel_shader(&ps_blob) ?;
         
         let mut layout_desc = Vec::new();
-        let geom_named = NamedProps::construct(&sh.shader_gen, &mapping.geometries, false);
-        let inst_named = NamedProps::construct(&sh.shader_gen, &mapping.instances, false);
+        let geom_named = InstanceProps::construct(&sh.shader_gen, &mapping.geometries);
+        let inst_named = InstanceProps::construct(&sh.shader_gen, &mapping.instances);
         let mut strings = Vec::new();
         
         for (index, geom) in geom_named.props.iter().enumerate() {
@@ -462,10 +461,11 @@ impl<'a> SlCx<'a> {
     pub fn map_var(&mut self, var: &ShVar) -> String {
         //let mty = Cx::hlsl_type(&var.ty);
         match var.store {
-            ShVarStore::Uniform => return var.name.clone(), //format!("_uni_dr.{}", var.name),
+            ShVarStore::Uniform(_) => return var.name.clone(), //format!("_uni_dr.{}", var.name),
             ShVarStore::UniformVw => return var.name.clone(), //format!("_uni_dl.{}", var.name),
             ShVarStore::UniformCx => return var.name.clone(), //format!("_uni_cx.{}", var.name),
-            ShVarStore::Instance => {
+            ShVarStore::UniformColor(_) => return var.name.clone(), //format!("_uni_cx.{}", var.name),
+            ShVarStore::Instance(_) => {
                 if let SlTarget::Pixel = self.target {
                     if self.auto_vary.iter().find( | v | v.name == var.name).is_none() {
                         self.auto_vary.push(var.clone());

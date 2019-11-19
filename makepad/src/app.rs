@@ -1,10 +1,12 @@
 //use syn::Type;
 use render::*;
 use widget::*;
+use editor::*;
 use crate::appwindow::*;
 use crate::appstorage::*;
 use crate::filetree::*;
 use crate::buildmanager::*;
+use crate::makepadtheme::*;
 
 pub struct App {
     pub app_window_state_template: AppWindowState,
@@ -19,8 +21,11 @@ pub struct App {
 
 impl App {
     
-    pub fn style(cx: &mut Cx) -> Self {
-        set_dark_style(cx);
+    pub fn proto(cx: &mut Cx) -> Self {
+
+        set_dark_widget_theme(cx);
+        set_dark_editor_theme(cx);
+        set_dark_makepad_theme(cx);
         let ms = cx.new_signal();
         Self {
             menu: Menu::main(vec![
@@ -107,29 +112,34 @@ impl App {
                         align: SplitterAlign::Last,
                         pos: 150.0,
                         first: Box::new(DockItem::TabControl {
-                            current: 1,
+                            current: 0,
                             previous: 0,
                             tabs: vec![
                                 DockTab {
                                     closeable: false,
                                     title: "Edit".to_string(),
                                     item: Panel::FileEditorTarget
-                                },
+                                },/*
                                 DockTab {
                                     closeable: true,
                                     title: "main.rs".to_string(),
                                     item: Panel::FileEditor {
-                                        path: "examples/quad_example/src/main.rs".to_string(),
+                                        path: "examples/text_example/src/main.rs".to_string(),
                                         scroll_pos: Vec2::zero(),
                                         editor_id: 1
                                     }
-                                }
+                                }*/
                             ],
                         }),
                         last: Box::new(DockItem::TabControl {
                             current: 0,
                             previous: 0,
                             tabs: vec![
+                                DockTab {
+                                    closeable: false,
+                                    title: "Keyboard".to_string(),
+                                    item: Panel::Keyboard
+                                },
                                 DockTab {
                                     closeable: false,
                                     title: "Log List".to_string(),
@@ -140,16 +150,6 @@ impl App {
                                     title: "Log Item".to_string(),
                                     item: Panel::LogItem
                                 },
-                                DockTab {
-                                    closeable: false,
-                                    title: "Local Terminal".to_string(),
-                                    item: Panel::LocalTerminal {start_path: "./".to_string(), terminal_id: 1}
-                                },
-                                DockTab {
-                                    closeable: false,
-                                    title: "Keyboard".to_string(),
-                                    item: Panel::Keyboard
-                                }
                             ]
                         })
                     })
@@ -171,7 +171,6 @@ impl App {
     pub fn handle_app(&mut self, cx: &mut Cx, event: &mut Event) {
         match event {
             Event::Construct => {
-                // start the workspace
                 self.storage.init(cx);
                 if !cx.platform_type.is_desktop() {
                     self.default_layout(cx);
@@ -249,7 +248,7 @@ impl App {
                                     desktop_window: DesktopWindow {window: Window {
                                         create_inner_size: Some(size),
                                         create_position: create_pos,
-                                        ..Window::style(cx)
+                                        ..Window::proto(cx)
                                     }, ..self.app_window_template.desktop_window.clone()},
                                     ..self.app_window_template.clone()
                                 })
@@ -294,6 +293,7 @@ impl App {
     
     
     pub fn draw_app(&mut self, cx: &mut Cx) {
+        
         //return;
         for (window_index, window) in self.windows.iter_mut().enumerate() {
             window.draw_app_window(cx, &self.menu, window_index, &mut self.state, &mut self.storage, &mut self.build_manager);

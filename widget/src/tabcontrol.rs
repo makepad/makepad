@@ -3,6 +3,7 @@ use render::*;
 use crate::scrollbar::*;
 use crate::scrollview::*;
 use crate::tab::*;
+use crate::widgettheme::*;
 
 #[derive(Clone)]
 pub struct TabControl {
@@ -12,6 +13,7 @@ pub struct TabControl {
     pub drag_tab: Tab,
     pub page_view: View,
     pub hover: Quad,
+    //pub tab_fill_color: ColorId,
     pub tab_fill: Quad,
     pub animator: Animator,
     
@@ -32,36 +34,34 @@ pub enum TabControlEvent {
 }
 
 impl TabControl {
-    pub fn style(cx: &mut Cx) -> Self {
+    pub fn proto(cx: &mut Cx) -> Self {
         Self {
             tabs_view: ScrollView {
                 scroll_h: Some(ScrollBar {
                     bar_size: 8.0,
                     smoothing: Some(0.15),
                     use_vertical_finger_scroll: true,
-                    ..ScrollBar::style(cx)
+                    ..ScrollBar::proto(cx)
                 }),
-                ..ScrollView::style(cx)
+                ..ScrollView::proto(cx)
             },
-            page_view: View::style(cx),
-            tabs: Elements::new(Tab::style(cx)),
+            page_view: View::proto(cx),
+            tabs: Elements::new(Tab::proto(cx)),
             drag_tab: Tab {
                 z: 10.,
-                ..Tab::style(cx)
+                ..Tab::proto(cx)
             },
             drag_tab_view: View {
                 is_overlay: true,
-                ..View::style(cx)
+                ..View::proto(cx)
             },
             hover: Quad {
                 color: color("purple"),
-                ..Quad::style(cx)
+                ..Quad::proto(cx)
             },
-            tab_fill: Quad {
-                color: cx.color("bg_normal"),
-                ..Quad::style(cx)
-            },
-            animator: Animator::new(Anim::new(Play::Cut {duration: 0.5}, vec![])),
+            //tab_fill_color: Color_bg_normal::id(),
+            tab_fill: Quad::proto(cx),
+            animator: Animator::default(),
             _dragging_tab: None,
             _tab_now_selected:None,
             _tab_last_selected:None,
@@ -174,9 +174,8 @@ impl TabControl {
     pub fn begin_tabs(&mut self, cx: &mut Cx) -> ViewRedraw {
         //cx.begin_turtle(&Layout{
         if let Err(_) = self.tabs_view.begin_view(cx, Layout {
-            width: Width::Fill,
-            height: Height::Compute,
-            ..Default::default()
+            walk:Walk::wh(Width::Fill, Height::Compute),
+            ..Layout::default()
         }) {
             return Err(())
         }
@@ -209,7 +208,8 @@ impl TabControl {
     }
     
     pub fn end_tabs(&mut self, cx: &mut Cx) {
-        self.tab_fill.draw_quad_walk(cx, Width::Fill, Height::Fill, Margin::zero());
+        self.tab_fill.color = Theme::color_bg_normal().base(cx);
+        self.tab_fill.draw_quad(cx, Walk::wh(Width::Fill, Height::Fill));
         self.tabs.sweep(cx, | _, _ | ());
         if let Some((fe, id)) = &self._dragging_tab {
             if let Ok(()) = self.drag_tab_view.begin_view(cx, Layout {
@@ -217,7 +217,7 @@ impl TabControl {
                 ..Default::default()
             }) {
                 
-                self.drag_tab.bg_layout.abs_origin = Some(Vec2 {x: fe.abs.x - fe.rel_start.x, y: fe.abs.y - fe.rel_start.y});
+                self.drag_tab.abs_origin = Some(Vec2 {x: fe.abs.x - fe.rel_start.x, y: fe.abs.y - fe.rel_start.y});
                 let origin_tab = self.tabs.get_draw(cx, *id, | _cx, tmpl | tmpl.clone());
                 self.drag_tab.label = origin_tab.label.clone();
                 self.drag_tab.is_closeable = origin_tab.is_closeable;

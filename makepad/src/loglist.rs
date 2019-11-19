@@ -9,7 +9,7 @@ use crate::buildmanager::*;
 pub struct LogList {
     pub view: ScrollView,
     pub item_draw: LogItemDraw,
-    pub list: ListUx
+    pub list: ListLogic
 }
 
 #[derive(Clone)]
@@ -17,83 +17,72 @@ pub struct LogItemDraw {
     pub text: Text,
     pub item_bg: Quad,
     pub code_icon: CodeIcon,
-    pub row_height: f32,
-    pub path_color: Color,
-    pub message_color: Color,
-    pub bg_even: Color,
-    pub bg_odd: Color,
-    pub bg_marked: Color,
-    pub bg_odd_over: Color,
-    pub bg_marked_over: Color,
-    pub bg_selected: Color,
-    pub bg_selected_over: Color
+    pub path_color: ColorId,
+    pub message_color: ColorId,
 }
 
 impl LogItemDraw {
-    pub fn style(cx: &mut Cx) -> Self {
+    pub fn proto(cx: &mut Cx) -> Self {
         Self {
-            item_bg: Quad::style(cx),
+            item_bg: Quad::proto(cx),
             text: Text {
                 wrapping: Wrapping::Word,
-                ..Text::style(cx)
+                ..Text::proto(cx)
             },
-            code_icon: CodeIcon::style(cx),
-            path_color: color("#999"),
-            message_color: color("#bbb"),
-            row_height: 20.0,
-            bg_even: cx.color("bg_selected"),
-            bg_odd: cx.color("bg_odd"),
-            bg_marked: cx.color("bg_marked"),
-            bg_selected: cx.color("bg_selected"),
-            bg_marked_over: cx.color("bg_marked_over"),
-            bg_selected_over: cx.color("bg_selected_over"),
-            bg_odd_over: cx.color("bg_odd_over")
+            code_icon: CodeIcon::proto(cx),
+            path_color: Theme::color_text_defocus(),
+            message_color: Theme::color_text_focus(),
         }
     }
     
-    pub fn get_default_anim(&self, cx: &Cx, counter: usize, marked: bool) -> Anim {
+    pub fn layout_item() -> LayoutId {uid!()}
+    pub fn text_style_item() ->TextStyleId{uid!()}
+
+    pub fn theme(cx: &mut Cx) {
+        
+        Self::layout_item().set_base(cx, Layout {
+            walk: Walk::wh(Width::Fill, Height::Fix(20.)),
+            align: Align::left_center(),
+            padding: Padding::zero(), // {l: 2., t: 3., b: 2., r: 0.},
+            line_wrap: LineWrap::None,
+            ..Default::default()
+        });
+        
+        Self::text_style_item().set_base(cx, Theme::text_style_normal().base(cx));
+    }
+    
+    pub fn get_default_anim(cx: &Cx, counter: usize, marked: bool) -> Anim {
         Anim::new(Play::Chain {duration: 0.01}, vec![
-            Track::color(cx.id("bg.color"), Ease::Lin, vec![
-                (1.0, if marked {self.bg_marked} else if counter & 1 == 0 {self.bg_selected}else {self.bg_odd})
+            Track::color(Quad::instance_color(), Ease::Lin, vec![
+                (1.0, if marked {Theme::color_bg_marked().base(cx)} else if counter & 1 == 0 {Theme::color_bg_selected().base(cx)}else {Theme::color_bg_odd().base(cx)})
             ])
         ])
     }
     
-    pub fn get_default_anim_cut(&self, cx: &Cx, counter: usize, marked: bool) -> Anim {
+    pub fn get_default_anim_cut(cx: &Cx, counter: usize, marked: bool) -> Anim {
         Anim::new(Play::Cut {duration: 0.01}, vec![
-            Track::color(cx.id("bg.color"), Ease::Lin, vec![
-                (0.0, if marked {self.bg_marked} else if counter & 1 == 0 {self.bg_selected}else {self.bg_odd})
+            Track::color(Quad::instance_color(), Ease::Lin, vec![
+                (0.0, if marked {Theme::color_bg_marked().base(cx)} else if counter & 1 == 0 {Theme::color_bg_selected().base(cx)}else {Theme::color_bg_odd().base(cx)})
             ])
         ])
     }
     
-    pub fn get_over_anim(&self, cx: &Cx, counter: usize, marked: bool) -> Anim {
-        let over_color = if marked {self.bg_marked_over} else if counter & 1 == 0 {self.bg_selected_over}else {self.bg_odd_over};
+    pub fn get_over_anim(cx: &Cx, counter: usize, marked: bool) -> Anim {
+        let over_color = if marked {Theme::color_bg_marked_over().base(cx)} else if counter & 1 == 0 {Theme::color_bg_selected_over().base(cx)}else {Theme::color_bg_odd_over().base(cx)};
         Anim::new(Play::Cut {duration: 0.02}, vec![
-            Track::color(cx.id("bg.color"), Ease::Lin, vec![
+            Track::color(Quad::instance_color(), Ease::Lin, vec![
                 (0., over_color),
             ])
         ])
     }
     
-    pub fn get_line_layout(&self) -> Layout {
-        Layout {
-            width: Width::Fill,
-            align: Align::left_center(),
-            height: Height::Fix(self.row_height),
-            padding: Padding::zero(),// {l: 2., t: 3., b: 2., r: 0.},
-            line_wrap: LineWrap::None,
-            ..Default::default()
-        }
-    }
-    
     pub fn draw_log_path(&mut self, cx: &mut Cx, path: &str, row: usize) {
-        self.text.color = self.path_color;
+        self.text.color = self.path_color.base(cx);
         self.text.draw_text(cx, &format!("{}:{} - ", path, row));
     }
     
     pub fn draw_log_body(&mut self, cx: &mut Cx, body: &str) {
-        self.text.color = self.message_color;
+        self.text.color = self.message_color.base(cx);
         if body.len()>500 {
             self.text.draw_text(cx, &body[0..500]);
         }
@@ -102,26 +91,30 @@ impl LogItemDraw {
         }
     }
     
-    pub fn draw_log_item(&mut self, cx: &mut Cx, list_item: &mut ListItem, log_item: &HubLogItem) {
-        self.item_bg.color = list_item.animator.last_color(cx.id("bg.color"));
-        let bg_inst = self.item_bg.begin_quad(cx, &self.get_line_layout());
+    pub fn draw_log_item(&mut self, cx: &mut Cx, index: usize, list_item: &mut ListItem, log_item: &HubLogItem) {
+        
+        list_item.animator.init(cx, | cx | LogItemDraw::get_default_anim(cx, index, false));
+        
+        self.item_bg.color = list_item.animator.last_color(cx, Quad::instance_color());
+        
+        let bg_inst = self.item_bg.begin_quad(cx, Self::layout_item().base(cx)); //&self.get_line_layout());
         
         match log_item {
             HubLogItem::LocPanic(loc_msg) => {
-                self.code_icon.draw_icon_walk(cx, CodeIconType::Panic);
+                self.code_icon.draw_icon(cx, CodeIconType::Panic);
                 cx.turtle_align_y();
                 self.draw_log_path(cx, &loc_msg.path, loc_msg.row);
                 self.draw_log_body(cx, &loc_msg.body);
                 
             },
             HubLogItem::LocError(loc_msg) => {
-                self.code_icon.draw_icon_walk(cx, CodeIconType::Error);
+                self.code_icon.draw_icon(cx, CodeIconType::Error);
                 cx.turtle_align_y();
                 self.draw_log_path(cx, &loc_msg.path, loc_msg.row);
                 self.draw_log_body(cx, &loc_msg.body);
             },
             HubLogItem::LocWarning(loc_msg) => {
-                self.code_icon.draw_icon_walk(cx, CodeIconType::Warning);
+                self.code_icon.draw_icon(cx, CodeIconType::Warning);
                 cx.turtle_align_y();
                 self.draw_log_path(cx, &loc_msg.path, loc_msg.row);
                 self.draw_log_body(cx, &loc_msg.body);
@@ -131,12 +124,12 @@ impl LogItemDraw {
                 self.draw_log_body(cx, &loc_msg.body);
             },
             HubLogItem::Error(msg) => {
-                self.code_icon.draw_icon_walk(cx, CodeIconType::Error);
+                self.code_icon.draw_icon(cx, CodeIconType::Error);
                 cx.turtle_align_y();
                 self.draw_log_body(cx, &msg);
             },
             HubLogItem::Warning(msg) => {
-                self.code_icon.draw_icon_walk(cx, CodeIconType::Warning);
+                self.code_icon.draw_icon(cx, CodeIconType::Warning);
                 cx.turtle_align_y();
                 self.draw_log_body(cx, &msg);
             },
@@ -146,17 +139,17 @@ impl LogItemDraw {
         }
         
         let bg_area = self.item_bg.end_quad(cx, &bg_inst);
-        list_item.animator.update_area_refs(cx, bg_area);
+        list_item.animator.set_area(cx, bg_area);
     }
     
     pub fn draw_status_line(&mut self, cx: &mut Cx, counter: usize, bm: &BuildManager) {
         // draw status line
-        self.item_bg.color = if counter & 1 == 0 {self.bg_even}else {self.bg_odd};
-        let bg_inst = self.item_bg.begin_quad(cx, &self.get_line_layout());
+        self.item_bg.color = if counter & 1 == 0 {Theme::color_bg_selected().base(cx)}else {Theme::color_bg_odd().base(cx)};
+        let bg_inst = self.item_bg.begin_quad(cx, Self::layout_item().base(cx));
         
         if !bm.is_any_cargo_running() {
-            self.text.color = self.path_color;
-            self.code_icon.draw_icon_walk(cx, CodeIconType::Ok);
+            self.text.color = self.path_color.base(cx);
+            self.code_icon.draw_icon(cx, CodeIconType::Ok);
             cx.turtle_align_y();
             if bm.is_any_artifact_running() {
                 self.text.draw_text(cx, "Running - ");
@@ -176,9 +169,9 @@ impl LogItemDraw {
             }
         }
         else {
-            self.code_icon.draw_icon_walk(cx, CodeIconType::Wait);
+            self.code_icon.draw_icon(cx, CodeIconType::Wait);
             cx.turtle_align_y();
-            self.text.color = self.path_color;
+            self.text.color = self.path_color.base(cx);
             self.text.draw_text(cx, &format!("Building ({}) ", bm.artifacts.len()));
             for ab in &bm.active_builds {
                 if ab.build_uid.is_some() {
@@ -195,8 +188,8 @@ impl LogItemDraw {
     
     pub fn draw_filler(&mut self, cx: &mut Cx, counter: usize) {
         let view_total = cx.get_turtle_bounds();
-        self.item_bg.color = if counter & 1 == 0 {self.bg_even} else {self.bg_odd};
-        self.item_bg.draw_quad_walk(cx, Width::Fill, Height::Fix(self.row_height), Margin::zero());
+        self.item_bg.color = if counter & 1 == 0 {Theme::color_bg_selected().base(cx)} else {Theme::color_bg_odd().base(cx)};
+        self.item_bg.draw_quad(cx, Self::layout_item().base(cx).walk);
         cx.set_turtle_bounds(view_total); // do this so it doesnt impact the turtle
     }
 }
@@ -213,27 +206,28 @@ pub enum LogListEvent {
 }
 
 impl LogList {
-    pub fn style(cx: &mut Cx) -> Self {
+    pub fn proto(cx: &mut Cx) -> Self {
         Self {
-            item_draw: LogItemDraw::style(cx),
-            list: ListUx {
+            item_draw: LogItemDraw::proto(cx),
+            list: ListLogic {
                 tail_list: true,
-                ..ListUx::default()
+                ..ListLogic::default()
             },
-            view: ScrollView::style_hor_and_vert(cx),
+            view: ScrollView::proto(cx),
         }
     }
     
+    pub fn theme(cx: &mut Cx) {
+        LogItemDraw::theme(cx);
+    }
+    
     pub fn handle_log_list(&mut self, cx: &mut Cx, event: &mut Event, storage: &mut AppStorage, bm: &mut BuildManager) -> LogListEvent {
-        let item_draw = &self.item_draw;
         
         if bm.log_items.len() < self.list.list_items.len() {
             self.list.tail_list = true;
         }
         
-        self.list.set_list_len(cx, bm.log_items.len(), | cx, index | {
-            item_draw.get_default_anim(cx, index, false)
-        });
+        self.list.set_list_len(bm.log_items.len());
         
         self.list.handle_list_scroll_bars(cx, event, &mut self.view);
         
@@ -286,30 +280,27 @@ impl LogList {
             _ => ()
         }
         
-        let item_draw = &self.item_draw;
-        let le = self.list.handle_list_ux(cx, event, select, | cx, item_event, item, item_index | {
-            match item_event {
-                ListUxEvent::Animate(ae) => {
-                    item.animator.write_area(cx, item.animator.area, "bg.", ae.time);
-                },
-                ListUxEvent::AnimEnded => {
-                    item.animator.end();
-                },
-                ListUxEvent::Select => {
-                    item.animator.play_anim(cx, item_draw.get_over_anim(cx, item_index, true));
-                },
-                ListUxEvent::Deselect => {
-                    item.animator.play_anim(cx, item_draw.get_default_anim(cx, item_index, false));
-                },
-                ListUxEvent::Cleanup => {
-                    item.animator.play_anim(cx, item_draw.get_default_anim_cut(cx, item_index, item.is_selected));
-                },
-                ListUxEvent::Over => {
-                    item.animator.play_anim(cx, item_draw.get_over_anim(cx, item_index, item.is_selected));
-                },
-                ListUxEvent::Out => {
-                    item.animator.play_anim(cx, item_draw.get_default_anim(cx, item_index, item.is_selected));
-                }
+        let le = self.list.handle_list_logic(cx, event, select, | cx, item_event, item, item_index | match item_event {
+            ListLogicEvent::Animate(ae) => {
+                item.animator.calc_area(cx, item.animator.area, ae.time);
+            },
+            ListLogicEvent::AnimEnded => {
+                item.animator.end();
+            },
+            ListLogicEvent::Select => {
+                item.animator.play_anim(cx, LogItemDraw::get_over_anim(cx, item_index, true));
+            },
+            ListLogicEvent::Deselect => {
+                item.animator.play_anim(cx, LogItemDraw::get_default_anim(cx, item_index, false));
+            },
+            ListLogicEvent::Cleanup => {
+                item.animator.play_anim(cx, LogItemDraw::get_default_anim_cut(cx, item_index, item.is_selected));
+            },
+            ListLogicEvent::Over => {
+                item.animator.play_anim(cx, LogItemDraw::get_over_anim(cx, item_index, item.is_selected));
+            },
+            ListLogicEvent::Out => {
+                item.animator.play_anim(cx, LogItemDraw::get_default_anim(cx, item_index, item.is_selected));
             }
         });
         
@@ -318,7 +309,7 @@ impl LogList {
                 self.view.redraw_view_area(cx);
                 let log_item = &bm.log_items[select_index];
                 if let Some(loc_message) = log_item.get_loc_message() {
-                    if loc_message.path.len() == 0{
+                    if loc_message.path.len() == 0 {
                         return LogListEvent::SelectLocMessage {
                             loc_message: loc_message.clone(),
                         }
@@ -342,7 +333,7 @@ impl LogList {
                         loc_message: loc_message.clone(),
                     }
                 }
-                else{
+                else {
                     LogListEvent::SelectMessages {
                         items: log_item.get_body().clone(),
                     }
@@ -353,14 +344,14 @@ impl LogList {
                 let mut items = String::new();
                 for select in &self.list.selection {
                     if let Some(loc_message) = bm.log_items[*select].get_loc_message() {
-                        if let Some(rendered) = &loc_message.rendered{
+                        if let Some(rendered) = &loc_message.rendered {
                             items.push_str(rendered);
                             if items.len()>1000000 { // safety break
                                 break;
                             }
                         }
                     }
-                    else{
+                    else {
                         items.push_str(bm.log_items[*select].get_body());
                         if items.len()>1000000 { // safety break
                             break;
@@ -379,21 +370,22 @@ impl LogList {
     }
     
     pub fn draw_log_list(&mut self, cx: &mut Cx, bm: &BuildManager) {
-        //        println!("REDRAW!");
-        let item_draw = &self.item_draw;
-        self.list.set_list_len(cx, bm.log_items.len(), | cx, index | {
-            item_draw.get_default_anim(cx, index, false)
-        });
         
-        if self.list.begin_list(cx, &mut self.view, self.item_draw.row_height).is_err() {return}
-
+        self.list.set_list_len(bm.log_items.len());
+        
+        self.item_draw.text.text_style = LogItemDraw::text_style_item().base(cx);
+        
+        let row_height = LogItemDraw::layout_item().base(cx).walk.height.fixed();
+        
+        if self.list.begin_list(cx, &mut self.view, row_height).is_err() {return}
+        
         let mut counter = 0;
         for i in self.list.start_item..self.list.end_item {
-            self.item_draw.draw_log_item(cx, &mut self.list.list_items[i], &bm.log_items[i]);
+            self.item_draw.draw_log_item(cx, i, &mut self.list.list_items[i], &bm.log_items[i]);
             counter += 1;
         }
         
-        self.list.walk_turtle_to_end(cx, self.item_draw.row_height);
+        self.list.walk_turtle_to_end(cx, row_height);
         
         self.item_draw.draw_status_line(cx, counter, &bm);
         counter += 1;

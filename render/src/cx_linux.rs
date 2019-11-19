@@ -17,7 +17,7 @@ impl Cx{
         
         self.opengl_compile_all_shaders(&opengl_cx);
         
-        self.load_fonts_from_file();
+        self.load_theme_fonts();
         
         self.call_event_handler(&mut event_handler, &mut Event::Construct);
         
