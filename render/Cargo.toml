@@ -1,0 +1,58 @@
+[package]
+name = "render"
+version = "0.1.0"
+authors = ["makepaddev"]
+edition = "2018"
+
+[features]
+ipc=[]
+
+[dependencies]
+font = { path = "./vector/font" }
+geometry = { path = "./vector/geometry" }
+internal_iter = { path = "./vector/internal_iter" }
+shader_ast = {path="./shader_ast"}
+serde = { version = "1.0", features = ["derive"] }
+trapezoidator = { path = "./vector/trapezoidator" }
+ttf_parser = { path = "./vector/ttf_parser" }
+path = { path = "./vector/path" }
+
+[target.x86_64-apple-darwin.dependencies]
+time = "0.1.4"
+libc = "0.2"
+metal = "0.17"
+cocoa = "0.19"
+core-graphics = "0.17.3"
+objc-foundation = "0.1"
+objc_id = "0.1"
+objc = "0.2"
+
+[target.x86_64-unknown-linux-gnu.dependencies]
+EGL-sys = { path = "./bind/EGL-sys" }
+X11-sys = { path = "./bind/X11-sys" }
+libc = "*"
+gl = "*"
+time = "0.1.4"
+
+[target.armv7-unknown-linux-gnueabihf.dependencies]
+EGL-sys = { path = "./bind/EGL-sys" }
+X11-sys = { path = "./bind/X11-sys" }
+libc = "*"
+gl = "*"
+time = "0.1.4"
+
+[target.x86_64-pc-windows-gnu.dependencies]
+wio = "*"
+time = "0.1.4"
+
+[target.x86_64-pc-windows-gnu.dependencies.winapi]
+version = "*"
+features = ["dwmapi", "libloaderapi", "shellscalingapi", "winuser", "winbase", "d3d11", "d3d11sdklayers", "d3dcommon", "d3dcompiler", "dxgi1_2", "dxgiformat", "dxgitype", "winerror"]
+
+[target.x86_64-pc-windows-msvc.dependencies]
+wio = "*"
+time = "0.1.4"
+
+[target.x86_64-pc-windows-msvc.dependencies.winapi]
+version = "*"
+features = ["dwmapi","libloaderapi", "shellscalingapi", "winuser", "winbase", "d3d11", "d3d11sdklayers", "d3dcommon", "d3dcompiler", "dxgi1_2", "dxgiformat", "dxgitype", "winerror"]
