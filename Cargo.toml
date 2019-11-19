@@ -1,0 +1,10 @@
+[workspace]
+
+members = [
+    "makepad",
+    "makepad/wasm",
+    "examples/bare_example",
+    "examples/widget_example",
+    "examples/cmdline_example",
+    "workspace"
+]

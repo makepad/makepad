@@ -1,0 +1,17 @@
+[package]
+name = "shader_ast_impl"
+version = "0.1.0"
+authors = ["makepaddev"]
+edition = "2018"
+
+[lib]
+proc-macro = true
+
+[dependencies]
+quote = "1.0.2"
+proc-macro-hack = "*"
+proc-macro2 = "1.0.1"
+
+[dependencies.syn]
+version = "1.0.4"
+features = ["full"]

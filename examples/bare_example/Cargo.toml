@@ -1,0 +1,10 @@
+[package]
+name = "bare_example"
+version = "0.1.0"
+authors = ["makepaddev"]
+edition = "2018"
+
+[dependencies]
+
+[dependencies.render]
+path="../../render"
