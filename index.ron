@@ -1,78 +1,73 @@
 Folder(
-    name: "makepad",
+    name: "main",
+    digest: None,
     folder: [
         Folder(
+            name: "bin",
+            digest: None,
+            folder: [],
+        ),
+        Folder(
             name: "examples",
+            digest: None,
             folder: [
                 Folder(
                     name: "mandelbrot_example",
+                    digest: None,
                     folder: [
                         Folder(
                             name: "src",
+                            digest: None,
                             folder: [
                                 File(
                                     name: "main.rs",
+                                    digest: None,
                                 ),
                                 File(
                                     name: "mandelbrot.rs",
+                                    digest: None,
                                 ),
                             ],
-                        ),
-                    ],
-                ),
-                Folder(
-                    name: "quad_example",
-                    folder: [
-                        Folder(
-                            name: "src",
-                            folder: [
-                                File(
-                                    name: "main.rs",
-                                ),
-                            ],
-                        ),
-                        Folder(
-                            name: "webgl",
-                            folder: [
-                                File(
-                                    name: "Cargo.toml",
-                                ),
-                            ],
-                        ),
-                        File(
-                            name: "Cargo.toml",
                         ),
                     ],
                 ),
                 Folder(
                     name: "text_example",
+                    digest: None,
                     folder: [
                         Folder(
                             name: "src",
+                            digest: None,
                             folder: [
                                 File(
                                     name: "main.rs",
+                                    digest: None,
                                 ),
                             ],
                         ),
                         File(
                             name: "Cargo.toml",
+                            digest: None,
                         ),
                     ],
                 ),
                 Folder(
                     name: "ui_example",
+                    digest: None,
                     folder: [
                         Folder(
                             name: "src",
+                            digest: None,
                             folder: [
                                 File(
                                     name: "main.rs",
+                                    digest: None,
                                 ),
                             ],
                         ),
                         File(
                             name: "Cargo.toml",
+                            digest: None,
                         ),
                     ],
                 ),
@@ -80,18 +75,23 @@ Folder(
         ),
         Folder(
             name: "io",
+            digest: None,
             folder: [
                 Folder(
                     name: "capture",
+                    digest: None,
                     folder: [
                         Folder(
                             name: "src",
+                            digest: None,
                             folder: [
                                 File(
                                     name: "capture_winmf.rs",
+                                    digest: None,
                                 ),
                                 File(
                                     name: "lib.rs",
+                                    digest: None,
                                 ),
                             ],
                         ),
@@ -99,15 +99,19 @@ Folder(
                 ),
                 Folder(
                     name: "gamepad",
+                    digest: None,
                     folder: [
                         Folder(
                             name: "src",
+                            digest: None,
                             folder: [
                                 File(
                                     name: "gamepad_winxinput.rs",
+                                    digest: None,
                                 ),
                                 File(
                                     name: "lib.rs",
+                                    digest: None,
                                 ),
                             ],
                         ),
@@ -115,26 +119,33 @@ Folder(
                 ),
                 Folder(
                     name: "process",
+                    digest: None,
                     folder: [
                         Folder(
                             name: "src",
+                            digest: None,
                             folder: [
                                 File(
                                     name: "lib.rs",
+                                    digest: None,
                                 ),
                                 File(
                                     name: "process_conpty.rs",
+                                    digest: None,
                                 ),
                                 File(
                                     name: "process_dummy.rs",
+                                    digest: None,
                                 ),
                                 File(
                                     name: "process_forkpty.rs",
+                                    digest: None,
                                 ),
                             ],
                         ),
                         File(
                             name: "Cargo.toml",
+                            digest: None,
                         ),
                     ],
                 ),
@@ -142,505 +153,713 @@ Folder(
         ),
         Folder(
             name: "makepad",
+            digest: None,
             folder: [
                 Folder(
                     name: "editor",
+                    digest: None,
                     folder: [
                         Folder(
                             name: "src",
+                            digest: None,
                             folder: [
                                 File(
                                     name: "codeeditor.rs",
+                                    digest: None,
                                 ),
                                 File(
                                     name: "codeicon.rs",
+                                    digest: None,
+                                ),
+                                File(
+                                    name: "editortheme.rs",
+                                    digest: None,
                                 ),
                                 File(
                                     name: "jseditor.rs",
+                                    digest: None,
                                 ),
                                 File(
                                     name: "lib.rs",
+                                    digest: None,
                                 ),
                                 File(
                                     name: "plaineditor.rs",
+                                    digest: None,
                                 ),
                                 File(
                                     name: "rusteditor.rs",
+                                    digest: None,
                                 ),
                                 File(
                                     name: "textbuffer.rs",
+                                    digest: None,
                                 ),
                                 File(
                                     name: "textcursor.rs",
+                                    digest: None,
                                 ),
                             ],
                         ),
                         File(
                             name: "Cargo.toml",
+                            digest: None,
                         ),
                     ],
                 ),
                 Folder(
                     name: "hub",
+                    digest: None,
                     folder: [
                         Folder(
                             name: "src",
+                            digest: None,
                             folder: [
                                 File(
                                     name: "httpserver.rs",
+                                    digest: None,
                                 ),
                                 File(
                                     name: "hubclient.rs",
+                                    digest: None,
                                 ),
                                 File(
                                     name: "hubmsg.rs",
+                                    digest: None,
                                 ),
                                 File(
                                     name: "hubrouter.rs",
+                                    digest: None,
                                 ),
                                 File(
                                     name: "hubserver.rs",
+                                    digest: None,
                                 ),
                                 File(
                                     name: "hubui.rs",
+                                    digest: None,
                                 ),
                                 File(
                                     name: "hubworkspace.rs",
+                                    digest: None,
                                 ),
                                 File(
                                     name: "lib.rs",
+                                    digest: None,
                                 ),
                                 File(
                                     name: "process.rs",
+                                    digest: None,
                                 ),
                                 File(
                                     name: "wasmstrip.rs",
+                                    digest: None,
                                 ),
                             ],
                         ),
                         File(
                             name: "Cargo.toml",
+                            digest: None,
                         ),
                     ],
                 ),
                 Folder(
                     name: "src",
+                    digest: None,
                     folder: [
                         File(
                             name: "app.rs",
+                            digest: None,
+                        ),
+                        File(
+                            name: "appstorage.rs",
+                            digest: None,
                         ),
                         File(
                             name: "appwindow.rs",
-                        ),
-                        File(
-                            name: "buildconfig.rs",
+                            digest: None,
                         ),
                         File(
                             name: "buildmanager.rs",
+                            digest: None,
                         ),
                         File(
                             name: "fileeditor.rs",
+                            digest: None,
+                        ),
+                        File(
+                            name: "filepanel.rs",
+                            digest: None,
                         ),
                         File(
                             name: "filetree.rs",
+                            digest: None,
                         ),
                         File(
-                            name: "hubui.rs",
+                            name: "homepage.rs",
+                            digest: None,
                         ),
                         File(
                             name: "keyboard.rs",
+                            digest: None,
                         ),
                         File(
                             name: "logitem.rs",
+                            digest: None,
                         ),
                         File(
                             name: "loglist.rs",
+                            digest: None,
                         ),
                         File(
                             name: "main.rs",
-                        ),
-                    ],
-                ),
-                Folder(
-                    name: "terminal",
-                    folder: [
-                        Folder(
-                            name: "src",
-                            folder: [
-                                File(
-                                    name: "lib.rs",
-                                ),
-                                File(
-                                    name: "localterminal.rs",
-                                ),
-                                File(
-                                    name: "terminal.rs",
-                                ),
-                            ],
+                            digest: None,
                         ),
                         File(
-                            name: "Cargo.toml",
+                            name: "makepadtheme.rs",
+                            digest: None,
                         ),
                     ],
                 ),
                 Folder(
                     name: "wasm",
+                    digest: None,
                     folder: [
                         File(
                             name: "Cargo.toml",
+                            digest: None,
                         ),
                     ],
                 ),
                 File(
                     name: "Cargo.toml",
+                    digest: None,
+                ),
+                File(
+                    name: "rustcompiler.rs",
+                    digest: None,
                 ),
             ],
         ),
         Folder(
             name: "render",
+            digest: None,
             folder: [
                 Folder(
-                    name: "shader_ast",
+                    name: "bind",
+                    digest: None,
                     folder: [
                         Folder(
-                            name: "shader_ast_impl",
+                            name: "EGL-sys",
+                            digest: None,
                             folder: [
                                 Folder(
                                     name: "src",
+                                    digest: None,
                                     folder: [
                                         File(
+                                            name: "bindings.rs",
+                                            digest: None,
+                                        ),
+                                        File(
                                             name: "lib.rs",
+                                            digest: None,
                                         ),
                                     ],
                                 ),
                                 File(
                                     name: "Cargo.toml",
+                                    digest: None,
+                                ),
+                                File(
+                                    name: "build.rs",
+                                    digest: None,
+                                ),
+                            ],
+                        ),
+                        Folder(
+                            name: "X11-sys",
+                            digest: None,
+                            folder: [
+                                Folder(
+                                    name: "src",
+                                    digest: None,
+                                    folder: [
+                                        File(
+                                            name: "bindings.rs",
+                                            digest: None,
+                                        ),
+                                        File(
+                                            name: "lib.rs",
+                                            digest: None,
+                                        ),
+                                    ],
+                                ),
+                                File(
+                                    name: "Cargo.toml",
+                                    digest: None,
+                                ),
+                                File(
+                                    name: "build.rs",
+                                    digest: None,
+                                ),
+                            ],
+                        ),
+                    ],
+                ),
+                Folder(
+                    name: "shader_ast",
+                    digest: None,
+                    folder: [
+                        Folder(
+                            name: "shader_ast_impl",
+                            digest: None,
+                            folder: [
+                                Folder(
+                                    name: "src",
+                                    digest: None,
+                                    folder: [
+                                        File(
+                                            name: "lib.rs",
+                                            digest: None,
+                                        ),
+                                    ],
+                                ),
+                                File(
+                                    name: "Cargo.toml",
+                                    digest: None,
                                 ),
                             ],
                         ),
                         Folder(
                             name: "src",
+                            digest: None,
                             folder: [
                                 File(
                                     name: "lib.rs",
+                                    digest: None,
                                 ),
                             ],
                         ),
                         File(
                             name: "Cargo.toml",
+                            digest: None,
                         ),
                     ],
                 ),
                 Folder(
                     name: "src",
+                    digest: None,
                     folder: [
                         File(
                             name: "animator.rs",
+                            digest: None,
                         ),
                         File(
                             name: "area.rs",
+                            digest: None,
                         ),
                         File(
                             name: "blit.rs",
+                            digest: None,
                         ),
                         File(
                             name: "colors.rs",
+                            digest: None,
                         ),
                         File(
                             name: "cursor.rs",
+                            digest: None,
                         ),
                         File(
                             name: "cx.rs",
+                            digest: None,
                         ),
                         File(
                             name: "cx_cocoa.rs",
+                            digest: None,
                         ),
                         File(
                             name: "cx_desktop.rs",
+                            digest: None,
                         ),
                         File(
                             name: "cx_dx11.rs",
+                            digest: None,
                         ),
                         File(
                             name: "cx_glsl.rs",
+                            digest: None,
                         ),
                         File(
                             name: "cx_hlsl.rs",
+                            digest: None,
                         ),
                         File(
                             name: "cx_ipc_child.rs",
+                            digest: None,
                         ),
                         File(
                             name: "cx_ipc_host.rs",
+                            digest: None,
                         ),
                         File(
                             name: "cx_ipc_posix.rs",
+                            digest: None,
                         ),
                         File(
                             name: "cx_ipc_wasm32.rs",
+                            digest: None,
                         ),
                         File(
                             name: "cx_ipc_win32.rs",
+                            digest: None,
                         ),
                         File(
                             name: "cx_linux.rs",
+                            digest: None,
                         ),
                         File(
                             name: "cx_macos.rs",
+                            digest: None,
                         ),
                         File(
                             name: "cx_metal.rs",
+                            digest: None,
                         ),
                         File(
                             name: "cx_metalsl.rs",
+                            digest: None,
                         ),
                         File(
                             name: "cx_opengl.rs",
+                            digest: None,
                         ),
                         File(
                             name: "cx_wasm32.rs",
+                            digest: None,
                         ),
                         File(
                             name: "cx_webgl.js",
+                            digest: None,
                         ),
                         File(
                             name: "cx_webgl.rs",
-                        ),
-                        File(
-                            name: "cx_windows.rs",
+                            digest: None,
                         ),
                         File(
                             name: "cx_win32.rs",
+                            digest: None,
+                        ),
+                        File(
+                            name: "cx_windows.rs",
+                            digest: None,
                         ),
                         File(
                             name: "cx_xlib.rs",
+                            digest: None,
                         ),
                         File(
                             name: "elements.rs",
+                            digest: None,
                         ),
                         File(
                             name: "events.rs",
+                            digest: None,
                         ),
                         File(
                             name: "fonts.rs",
+                            digest: None,
                         ),
                         File(
                             name: "lib.rs",
+                            digest: None,
                         ),
                         File(
                             name: "math.rs",
+                            digest: None,
+                        ),
+                        File(
+                            name: "menu.rs",
+                            digest: None,
                         ),
                         File(
                             name: "pass.rs",
+                            digest: None,
                         ),
                         File(
                             name: "quad.rs",
+                            digest: None,
                         ),
                         File(
                             name: "shader.rs",
+                            digest: None,
                         ),
                         File(
                             name: "shadergen.rs",
+                            digest: None,
                         ),
                         File(
                             name: "text.rs",
+                            digest: None,
                         ),
                         File(
                             name: "texture.rs",
+                            digest: None,
+                        ),
+                        File(
+                            name: "theming.rs",
+                            digest: None,
                         ),
                         File(
                             name: "turtle.rs",
+                            digest: None,
                         ),
                         File(
                             name: "view.rs",
+                            digest: None,
                         ),
                         File(
                             name: "window.rs",
+                            digest: None,
                         ),
                     ],
                 ),
                 Folder(
                     name: "vector",
+                    digest: None,
                     folder: [
                         Folder(
                             name: "font",
+                            digest: None,
                             folder: [
                                 Folder(
                                     name: "src",
+                                    digest: None,
                                     folder: [
                                         File(
                                             name: "font.rs",
+                                            digest: None,
                                         ),
                                         File(
                                             name: "glyph.rs",
+                                            digest: None,
                                         ),
                                         File(
                                             name: "horizontal_metrics.rs",
+                                            digest: None,
                                         ),
                                         File(
                                             name: "lib.rs",
+                                            digest: None,
                                         ),
                                         File(
                                             name: "outline.rs",
+                                            digest: None,
                                         ),
                                         File(
                                             name: "outline_point.rs",
+                                            digest: None,
                                         ),
                                     ],
                                 ),
                                 File(
                                     name: "Cargo.toml",
+                                    digest: None,
                                 ),
                             ],
                         ),
                         Folder(
                             name: "geometry",
+                            digest: None,
                             folder: [
                                 Folder(
                                     name: "src",
+                                    digest: None,
                                     folder: [
                                         File(
                                             name: "affine_transformation.rs",
+                                            digest: None,
                                         ),
                                         File(
                                             name: "f32_ext.rs",
+                                            digest: None,
                                         ),
                                         File(
                                             name: "lib.rs",
+                                            digest: None,
                                         ),
                                         File(
                                             name: "line_segment.rs",
+                                            digest: None,
                                         ),
                                         File(
                                             name: "linear_transformation.rs",
+                                            digest: None,
                                         ),
                                         File(
                                             name: "point.rs",
+                                            digest: None,
                                         ),
                                         File(
                                             name: "quadratic_segment.rs",
+                                            digest: None,
                                         ),
                                         File(
                                             name: "rectangle.rs",
+                                            digest: None,
                                         ),
                                         File(
                                             name: "transform.rs",
+                                            digest: None,
                                         ),
                                         File(
                                             name: "transformation.rs",
+                                            digest: None,
                                         ),
                                         File(
                                             name: "trapezoid.rs",
+                                            digest: None,
                                         ),
                                         File(
                                             name: "vector.rs",
+                                            digest: None,
                                         ),
                                     ],
                                 ),
                                 File(
                                     name: "Cargo.toml",
+                                    digest: None,
                                 ),
                             ],
                         ),
                         Folder(
                             name: "internal_iter",
+                            digest: None,
                             folder: [
                                 Folder(
                                     name: "src",
+                                    digest: None,
                                     folder: [
                                         File(
                                             name: "extend_from_internal_iterator.rs",
+                                            digest: None,
                                         ),
                                         File(
                                             name: "from_internal_iterator.rs",
+                                            digest: None,
                                         ),
                                         File(
                                             name: "internal_iterator.rs",
+                                            digest: None,
                                         ),
                                         File(
                                             name: "into_internal_iterator.rs",
+                                            digest: None,
                                         ),
                                         File(
                                             name: "lib.rs",
+                                            digest: None,
                                         ),
                                     ],
                                 ),
                                 File(
                                     name: "Cargo.toml",
+                                    digest: None,
                                 ),
                             ],
                         ),
                         Folder(
                             name: "path",
+                            digest: None,
                             folder: [
                                 Folder(
                                     name: "src",
+                                    digest: None,
                                     folder: [
                                         File(
                                             name: "lib.rs",
+                                            digest: None,
                                         ),
                                         File(
                                             name: "line_path.rs",
+                                            digest: None,
                                         ),
                                         File(
                                             name: "line_path_command.rs",
+                                            digest: None,
                                         ),
                                         File(
                                             name: "line_path_iterator.rs",
+                                            digest: None,
                                         ),
                                         File(
                                             name: "path.rs",
+                                            digest: None,
                                         ),
                                         File(
                                             name: "path_command.rs",
+                                            digest: None,
                                         ),
                                         File(
                                             name: "path_iterator.rs",
+                                            digest: None,
                                         ),
                                     ],
                                 ),
                                 File(
                                     name: "Cargo.toml",
+                                    digest: None,
                                 ),
                             ],
                         ),
                         Folder(
                             name: "trapezoidator",
+                            digest: None,
                             folder: [
                                 Folder(
                                     name: "src",
+                                    digest: None,
                                     folder: [
                                         File(
                                             name: "lib.rs",
+                                            digest: None,
                                         ),
                                     ],
                                 ),
                                 File(
                                     name: "Cargo.toml",
+                                    digest: None,
                                 ),
                             ],
                         ),
                         Folder(
                             name: "ttf_parser",
+                            digest: None,
                             folder: [
                                 Folder(
                                     name: "src",
+                                    digest: None,
                                     folder: [
                                         File(
                                             name: "lib.rs",
+                                            digest: None,
                                         ),
                                     ],
                                 ),
                                 Folder(
                                     name: "tests",
+                                    digest: None,
                                     folder: [
                                         File(
                                             name: "test.rs",
+                                            digest: None,
                                         ),
                                     ],
                                 ),
                                 File(
                                     name: "Cargo.toml",
+                                    digest: None,
                                 ),
                             ],
                         ),
@@ -648,150 +867,184 @@ Folder(
                 ),
                 File(
                     name: "Cargo.toml",
+                    digest: None,
                 ),
             ],
         ),
         Folder(
             name: "resources",
+            digest: None,
             folder: [],
         ),
         Folder(
             name: "tools",
+            digest: None,
             folder: [
                 Folder(
                     name: "csvproc",
+                    digest: None,
                     folder: [
                         Folder(
                             name: "src",
+                            digest: None,
                             folder: [
                                 File(
                                     name: "main.rs",
+                                    digest: None,
                                 ),
                             ],
                         ),
                         File(
                             name: "Cargo.toml",
-                        ),
-                    ],
-                ),
-                Folder(
-                    name: "testhub",
-                    folder: [
-                        Folder(
-                            name: "src",
-                            folder: [
-                                File(
-                                    name: "main.rs",
-                                ),
-                            ],
-                        ),
-                        File(
-                            name: "Cargo.toml",
+                            digest: None,
                         ),
                     ],
                 ),
                 File(
                     name: "build_index.js",
+                    digest: None,
                 ),
                 File(
                     name: "devserver.js",
+                    digest: None,
                 ),
                 File(
                     name: "devwebsocket.js",
+                    digest: None,
                 ),
             ],
         ),
         Folder(
             name: "widget",
+            digest: None,
             folder: [
                 Folder(
                     name: "src",
+                    digest: None,
                     folder: [
                         File(
-                            name: "button.rs",
+                            name: "buttonlogic.rs",
+                            digest: None,
                         ),
                         File(
                             name: "desktopbutton.rs",
+                            digest: None,
                         ),
                         File(
                             name: "desktopwindow.rs",
+                            digest: None,
                         ),
                         File(
                             name: "dock.rs",
+                            digest: None,
                         ),
                         File(
                             name: "icons.rs",
+                            digest: None,
                         ),
                         File(
                             name: "lib.rs",
+                            digest: None,
                         ),
                         File(
-                            name: "list.rs",
+                            name: "listlogic.rs",
+                            digest: None,
+                        ),
+                        File(
+                            name: "normalbutton.rs",
+                            digest: None,
                         ),
                         File(
                             name: "scrollbar.rs",
+                            digest: None,
                         ),
                         File(
                             name: "scrollview.rs",
+                            digest: None,
                         ),
                         File(
                             name: "splitter.rs",
-                        ),
-                        File(
-                            name: "style.rs",
+                            digest: None,
                         ),
                         File(
                             name: "tab.rs",
+                            digest: None,
                         ),
                         File(
                             name: "tabclose.rs",
+                            digest: None,
                         ),
                         File(
                             name: "tabcontrol.rs",
+                            digest: None,
+                        ),
+                        File(
+                            name: "widgettheme.rs",
+                            digest: None,
+                        ),
+                        File(
+                            name: "windowmenu.rs",
+                            digest: None,
                         ),
                     ],
                 ),
                 File(
                     name: "Cargo.toml",
+                    digest: None,
                 ),
             ],
         ),
         Folder(
             name: "workspace",
+            digest: None,
             folder: [
                 Folder(
                     name: "src",
+                    digest: None,
                     folder: [
                         File(
                             name: "main.rs",
+                            digest: None,
                         ),
                     ],
                 ),
                 File(
                     name: "Cargo.toml",
+                    digest: None,
                 ),
             ],
         ),
         File(
             name: "Cargo.toml",
+            digest: None,
         ),
         File(
             name: "example.html",
+            digest: None,
         ),
         File(
             name: "index.html",
+            digest: None,
         ),
         File(
             name: "index.ron",
+            digest: None,
+        ),
+        File(
+            name: "index2.ron",
+            digest: None,
         ),
         File(
             name: "makepad_settings.ron",
+            digest: None,
         ),
         File(
             name: "makepad_state.ron",
+            digest: None,
         ),
         File(
             name: "todo.txt",
+            digest: None,
         ),
     ],
 )
