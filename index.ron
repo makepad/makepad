@@ -1019,10 +1019,6 @@ Folder(
             digest: None,
         ),
         File(
-            name: "example.html",
-            digest: None,
-        ),
-        File(
             name: "index.html",
             digest: None,
         ),
@@ -1031,19 +1027,7 @@ Folder(
             digest: None,
         ),
         File(
-            name: "index2.ron",
-            digest: None,
-        ),
-        File(
             name: "makepad_settings.ron",
-            digest: None,
-        ),
-        File(
-            name: "makepad_state.ron",
-            digest: None,
-        ),
-        File(
-            name: "todo.txt",
             digest: None,
         ),
     ],

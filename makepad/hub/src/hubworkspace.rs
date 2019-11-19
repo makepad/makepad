@@ -39,7 +39,7 @@ pub enum HubWsError {
 }
 
 const INCLUDED_FILES: &[&'static str] = &[".json", ".toml", ".js", ".rs", ".txt", ".text", ".ron", ".html"];
-const EXCLUDED_FILES: &[&'static str] = &["key.ron"];
+const EXCLUDED_FILES: &[&'static str] = &["key.ron","todo.txt","makepad_state.ron"];
 const EXCLUDED_DIRS: &[&'static str] = &["target",".git","edit_repo"];
 
 impl HubWorkspace {
@@ -315,6 +315,7 @@ impl HubWorkspace {
                         if let WorkspaceFileTreeNode::Folder{folder,..} = tree{
                             let ron = ron::ser::to_string_pretty(&folder[0], ron::ser::PrettyConfig::default()).expect("cannot serialize settings");
                             fs::write("index.ron", ron).expect("cannot write index.ron");
+                            println!("Written index.ron")
                         }
                         return  
                     },
