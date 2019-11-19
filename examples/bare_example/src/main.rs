@@ -30,54 +30,46 @@
 // press alt or escape for animated codefolding outline view!
 
 use render::*;
-use widget::*;
 
 struct App {
-    desktop_window: DesktopWindow,
-    menu: Menu,
-    menu_signal: Signal
+    window: Window,
+    pass: Pass,
+    color_texture: Texture,
+    main_view: View,
 }
 
 main_app!(App);
 
 impl App {
     pub fn proto(cx: &mut Cx) -> Self {
-        let menu_signal = cx.new_signal();
         Self {
-            desktop_window: DesktopWindow::proto(cx),
-            menu: Menu::main(vec![
-                Menu::sub("Makepad", "M", vec![
-                    Menu::item("Quitter!", "q", false, menu_signal, 0),
-                    Menu::line(),
-                    Menu::item("Thingie", "q", false, menu_signal, 1),
-                ]),
-                Menu::sub("Edit", "e", vec![
-                    Menu::item("Copy", "c", false, menu_signal, 2),
-                    Menu::line(),
-                    Menu::item("Paste", "v", false, menu_signal, 3),
-                ])
-            ]),
-            menu_signal,
+            window: Window::proto(cx),
+            pass: Pass::default(),
+            color_texture: Texture::default(),
+            
+            main_view: View::proto(cx),
         }
     }
     
-    fn handle_app(&mut self, cx: &mut Cx, event: &mut Event) {
-        self.desktop_window.handle_desktop_window(cx, event);
+    fn handle_app(&mut self, _cx: &mut Cx, event: &mut Event) {
         match event {
             Event::Construct => {
-            },
-            Event::Signal(se) => if self.menu_signal.is_signal(se){
-                println!("CLICKED {}", se.value);
             },
             _ => ()
         }
     }
     
     fn draw_app(&mut self, cx: &mut Cx) {
-        if self.desktop_window.begin_desktop_window(cx, Some(&self.menu)).is_err() {
-            return
-        };
-        
-        self.desktop_window.end_desktop_window(cx);
+        self.window.begin_window(cx);
+        self.pass.begin_pass(cx);
+        self.pass.add_color_texture(cx, &mut self.color_texture, ClearColor::ClearWith(color256(0, 0, 0)));
+        if self.main_view.begin_view(cx, Layout::default()).is_ok() {
+            
+            
+            
+            self.main_view.end_view(cx);
+        }
+        self.pass.end_pass(cx);
+        self.window.end_window(cx);
     }
 }

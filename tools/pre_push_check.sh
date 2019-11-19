@@ -3,7 +3,7 @@ rustup target add x86_64-pc-windows-msvc
 rustup target add wasm32-unknown-unknown
 rustup target add x86_64-unknown-linux-gnu
 rustup target add x86_64-apple-darwin
-
+cd ..
 echo "Checking Windows GNU"
 cargo check --release --target=x86_64-pc-windows-gnu
 echo "Checking Windows MSVC"
