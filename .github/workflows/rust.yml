@@ -1,0 +1,15 @@
+name: Rust
+
+on: [push]
+
+jobs:
+  build:
+
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v1
+    - name: Build
+      run: cargo build -p makepad --verbose
+    - name: Run tests
+      run: cargo test -p makepad --verbose
