@@ -74,7 +74,7 @@ impl HomePage {
         self.text.draw_text(cx, "- Step 1. Installing Rust <we could copy the rust site instructions and not link there> ");
         cx.turtle_new_line();
         cx.move_turtle(0.,line_spacing);
-        self.text.draw_text(cx, "- Step 2.  type cargo install <something>");
+        self.text.draw_text(cx, "- Step 2. type cargo install <something>");
         cx.turtle_new_line();
         cx.move_turtle(0.,line_spacing);
         self.text.draw_text(cx, "- Step 3. Type your first Rust program in makepad!");
