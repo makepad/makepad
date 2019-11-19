@@ -12,6 +12,7 @@ use crate::loglist::*;
 use crate::logitem::*;
 use crate::keyboard::*;
 use crate::buildmanager::*;
+use crate::homepage::*;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Panel {
@@ -27,6 +28,7 @@ pub enum Panel {
 pub struct AppWindow {
     pub desktop_window: DesktopWindow,
     pub file_panel: FilePanel,
+    pub home_page: HomePage,
     pub log_item: LogItem,
     pub log_list: LogList,
     pub keyboard: Keyboard,
@@ -60,6 +62,7 @@ impl AppWindow {
                 js_editor: JSEditor::proto(cx),
                 plain_editor: PlainEditor::proto(cx)
             }),
+            home_page: HomePage::proto(cx),
             keyboard: Keyboard::proto(cx),
             log_item: LogItem::proto(cx),
             log_list: LogList::proto(cx),
@@ -115,6 +118,7 @@ impl AppWindow {
                     self.keyboard.handle_keyboard(cx, event, storage);
                 },
                 Panel::FileEditorTarget => {
+                    self.home_page.handle_home_page(cx, event);
                 },
                 Panel::FileTree => {
                     file_tree_event = self.file_panel.handle_file_panel(cx, event);
@@ -246,6 +250,7 @@ impl AppWindow {
                     self.keyboard.draw_keyboard(cx);
                 },
                 Panel::FileEditorTarget => {
+                    self.home_page.draw_home_page(cx);
                 },
                 Panel::FileTree => {
                     file_panel.draw_file_panel(cx);

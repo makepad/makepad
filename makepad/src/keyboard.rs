@@ -39,7 +39,7 @@ impl KeyType {
 impl Keyboard {
     pub fn proto(cx: &mut Cx) -> Self {
         Self {
-            view: ScrollView::proto_hor_and_vert(cx),
+            view: ScrollView::proto(cx),
             buttons: Elements::new(NormalButton {
                 ..NormalButton::proto(cx)
             }),

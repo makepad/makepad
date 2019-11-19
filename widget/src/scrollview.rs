@@ -10,7 +10,7 @@ pub struct ScrollView{
 
 impl ScrollView{
 
-    pub fn proto_hor_and_vert(cx: &mut Cx) -> Self {
+    pub fn proto(cx: &mut Cx) -> Self {
         Self {
             view: View::proto(cx),
             scroll_h: Some(ScrollBar::proto(cx)),
@@ -21,7 +21,7 @@ impl ScrollView{
         }
     }
     
-    pub fn proto(cx: &mut Cx) -> Self {
+    pub fn proto_no_scroll(cx: &mut Cx) -> Self {
         Self {
             view: View::proto(cx),
             scroll_h: None,

@@ -4,6 +4,8 @@ mod fileeditor;
 pub use crate::fileeditor::*;
 mod filepanel;
 pub use crate::filepanel::*;
+mod homepage;
+pub use crate::homepage::*;
 mod loglist;
 pub use crate::loglist::*;
 mod logitem; 

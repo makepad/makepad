@@ -112,14 +112,14 @@ impl App {
                         align: SplitterAlign::Last,
                         pos: 150.0,
                         first: Box::new(DockItem::TabControl {
-                            current: 1,
+                            current: 0,
                             previous: 0,
                             tabs: vec![
                                 DockTab {
                                     closeable: false,
                                     title: "Edit".to_string(),
                                     item: Panel::FileEditorTarget
-                                },
+                                },/*
                                 DockTab {
                                     closeable: true,
                                     title: "main.rs".to_string(),
@@ -128,7 +128,7 @@ impl App {
                                         scroll_pos: Vec2::zero(),
                                         editor_id: 1
                                     }
-                                }
+                                }*/
                             ],
                         }),
                         last: Box::new(DockItem::TabControl {

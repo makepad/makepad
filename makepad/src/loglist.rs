@@ -213,7 +213,7 @@ impl LogList {
                 tail_list: true,
                 ..ListLogic::default()
             },
-            view: ScrollView::proto_hor_and_vert(cx),
+            view: ScrollView::proto(cx),
         }
     }
     

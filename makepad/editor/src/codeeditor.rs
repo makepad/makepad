@@ -148,7 +148,7 @@ impl CodeEditor {
                 z: 0.001,
                 ..Quad::proto_with_shader(cx, Self::def_indent_lines_shader(), "Editor.indent_lines")
             },
-            view: ScrollView::proto_hor_and_vert(cx),
+            view: ScrollView::proto(cx),
             bg: Quad {
                 do_h_scroll: false,
                 do_v_scroll: false,
