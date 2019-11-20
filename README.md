@@ -4,6 +4,8 @@ Makepad is a creative software development platform built around Rust. We aim to
 
 As we're working towards our first public alpha version, you'll be able to see our final steps towards it here. The alpha version of Makepad will show off the development platform, but does not include the visual design tools or library ecosystem yet.
 
+The Makepad development platform and library ecosystem are MIT licensed, and will be available for free as part of Makepad Basic. In the near future, we will also introduce Makepad Pro, which will be available as a subscription model. Makepad Pro will include the visual design tools, and and live VR environment. Because the library ecosystem is MIT licensed, all applications made with the Pro version are entirely free licensed.
+
 Makepad currently has the following features:
 - Compiles natively to Linux, MacOS, and Windows.
 - Compiles to WebAssembly for demo purposes (see caveats below).
