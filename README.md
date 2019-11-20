@@ -27,3 +27,11 @@ git clone https://github.com/makepad/makepad makepad/edit_repo
 cd makepad 
 cargo run -p makepad --release 
 ```
+
+# Troubleshooting
+
+Makepad keeps settings and layout in local files, right now they can change a lot still, to clear them:
+```
+rm makepad_settings.ron
+rm makepad_state.ron
+```
