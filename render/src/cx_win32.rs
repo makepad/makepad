@@ -683,6 +683,7 @@ impl Win32Window {
                 // }
             },
             winuser::WM_USER => {
+                println!("SIGNAL EVENT");
                 window.do_callback(&mut vec![
                     Event::Signal(SignalEvent {
                         signal_id: wparam as usize,
