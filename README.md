@@ -15,7 +15,8 @@ Alpha
 What features we have now:
 - Native compiles to linux, windows, macos
 - Compiles to Wasm for demo purposes (no compiler integration, no backend)
-- Rust Compiler integration with errors/stdout in editor
+- Rust Compiler integration with errors/warnings in editor
+- Virtual viewport log viewer that can take infinite loop printlns
 - Code editor with live code folding (press alt)
 - Dock panel system / filetree
 - Workspaces (for file access/builds) with networking support
