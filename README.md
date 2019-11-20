@@ -2,6 +2,12 @@
 
 Alpha release soon, as its all public you see our final steps towards it here. Not just fully ready yet, but will be soon.
 The alpha release will first target developing commandline rust applications, as this is what we use makepad for ourselves (dogfooding makepad). The fancy live visual editing we estimate at end Q1 '20.
+Our feature todo list for this alpha:
+Pre alpha (what is here now essentially)
+- Homepage in application
+Alpha
+- File/new file menu and find replace
+- Documentation how to work with your own projects in makepad via the settings
 
 Makepad is a creative software development platform built around Rust. We aim to make the creative software development process as fun as possible! To do this we will provide a set of visual design tools that modify your application in real time, as well as a library ecosystem that allows you to write highly performant multimedia applications. 
 
