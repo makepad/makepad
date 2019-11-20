@@ -110,11 +110,11 @@ impl AppStorage {
             
             // lets start the router
             let mut hub_router = HubRouter::start_hub_router(HubLog::None);
-            println!("START DIRECT");
             // lets start the hub UI connected directly
             let hub_ui = HubUI::start_hub_ui_direct(&mut hub_router, {
                 let signal = self.hub_ui_message.clone();
                 move || {
+                    println!("GOT MESSAGE, POSTING");
                     Cx::post_signal(signal, 0);
                 }
             });
