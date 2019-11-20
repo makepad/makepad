@@ -5,16 +5,6 @@
 		<script type='text/javascript' src='main.js'></script>
 		<script>
 
-    function downloadWasm() {
-        fetch("/makepad/target/wasm32-unknown-unknown/debug/nov28_step1_wasm.wasm")
-            .then(response => response.arrayBuffer())
-            .then(bytes => WebAssembly.instantiate(bytes, {}))
-            .then(results => {
-                main_wasm(results);
-        }, errors => {
-            console.log("Error compiling wasm file");
-        });
-    }
     
     function watchFileChange() {
         var req = new XMLHttpRequest()
@@ -46,7 +36,7 @@
         req.open("GET", "/$watch?" + ('' + Math.random()).slice(2))
         req.send()
     }
-    document.addEventListener('DOMContentLoaded', downloadWasm)
+    document.addEventListener('DOMContentLoaded', main)
     watchFileChange()
   </script>
 		
