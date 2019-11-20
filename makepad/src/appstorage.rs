@@ -298,6 +298,7 @@ impl AppStorage {
         match htc.msg {
             // our own connectUI message, means we are ready to talk to the hub
             HubMsg::ConnectUI => if hub_ui.route_send.is_own_addr(&htc.from) {
+                println!("CONNECT UI!");
                 // now start talking
                 self.reload_workspaces();
             },
@@ -305,6 +306,7 @@ impl AppStorage {
                 self.reload_workspaces();
             },
             HubMsg::ListWorkspacesResponse {uid, workspaces} => if uid == self.workspaces_request_uid {
+                println!("ListWorkspacesResponse UI!");
                 let uid = hub_ui.route_send.alloc_uid();
                 // from these workspaces query filetrees
                 for workspace in &workspaces {
