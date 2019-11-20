@@ -22,21 +22,23 @@ Note that the web build of Makepad does not feature any compiler integration. If
 
 To install Makepad locally, run the following commands:
 ```
+rustup target add wasm32-unknown-unknown
 git clone https://github.com/makepad/makepad makepad 
 cd makepad 
 cargo run -p makepad --release 
-rustup 
 ```
 
-Right now makepad is set up to run a live wasm-example for a workshop. To run this install the wasm-toolchain
-```
-rustup target add wasm32-unknown-unknown
-```
+Right now makepad is set up to run a live wasm-example for a workshop, thats why you want the wasm32 toolchain.
+
 And now you can open this in the browser: (open the devtools in console mode too)
 ```
 http://127.0.0.1:2001/makepad/workshops/nov28_step1_wasm/index.html
 ```
-and open the file makepad/workshops/nov28_step1_wasm/main.js and makepad/workshops/nov28_step1_wasm/src/lib.rs for some wasm livecoding
+and open these files for some wasm livecoding
+```
+makepad/workshops/nov28_step1_wasm/main.js
+makepad/workshops/nov28_step1_wasm/src/lib.rs 
+```
 
 # Troubleshooting
 
