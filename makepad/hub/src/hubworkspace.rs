@@ -1145,7 +1145,7 @@ fn de_relativize_path(path: &str) -> String {
             out.push(split);
         }
     }
-    out.join("/")
+    out.join("/").replace("\\","/")
 }
 
 
