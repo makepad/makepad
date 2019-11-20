@@ -40,7 +40,7 @@ pub enum HubWsError {
 
 const INCLUDED_FILES: &[&'static str] = &[".json", ".toml", ".js", ".rs", ".txt", ".text", ".ron", ".html"];
 const EXCLUDED_FILES: &[&'static str] = &["key.ron","makepad_state.ron"];
-const EXCLUDED_DIRS: &[&'static str] = &["target",".git","edit_repo"];
+const EXCLUDED_DIRS: &[&'static str] = &["target",".git",".github","edit_repo"];
 
 impl HubWorkspace {
     
@@ -330,8 +330,15 @@ impl HubWorkspace {
                     },
                     HubMsg::CargoEnd {build_result, ..} => {
                         println!("CargoEnd {:?}", build_result);
-                        return
                     }
+                    HubMsg::BuildSuccess{..}=>{
+                        println!("Success!");
+                        return
+                    },
+                    HubMsg::BuildFailure{..}=>{
+                        println!("Failure!");
+                        return
+                    },
                     _ => ()
                 }
             }
@@ -342,10 +349,16 @@ impl HubWorkspace {
             msg:message
         });
         if result.is_ok() {
-            println!("Success!");
+            let _ = tx_write.send((HubAddr::None,ToHubMsg {
+                to: HubMsgTo::All,
+                msg:HubMsg::BuildSuccess{uid:HubUid{id:0, addr:HubAddr::None}}
+            }));
         }
         else {
-            println!("Failure!");
+            let _ = tx_write.send((HubAddr::None,ToHubMsg {
+                to: HubMsgTo::All,
+                msg:HubMsg::BuildFailure{uid:HubUid{id:0, addr:HubAddr::None}}
+            }));
         }
         let _ = thread.join();
     }
