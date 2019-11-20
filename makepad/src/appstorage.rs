@@ -30,7 +30,7 @@ impl Default for AppSettings {
                     http_server: HttpServerConfig::Offline,
                     projects: {
                         let mut project = HashMap::new();
-                        project.insert("makepad".to_string(), "edit_repo".to_string());
+                        project.insert("makepad".to_string(), ".".to_string());
                         project
                     }
                 });
