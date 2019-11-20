@@ -37,7 +37,7 @@ impl Default for AppSettings {
                 cfg
             },
             sync: {
-                let mut sync = HashMap::new();
+                let sync = HashMap::new();
                 //sync.insert("main/makepad".to_string(), vec!["windows/makepad".to_string()]);
                 sync
             },
