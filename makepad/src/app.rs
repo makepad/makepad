@@ -186,7 +186,6 @@ impl App {
                 // process network messages for hub_ui
                 if let Some(hub_ui) = &mut self.storage.hub_ui {
                     if self.storage.hub_ui_message.is_signal(se) {
-                        println!("GOT MESSAGE, POSTING");
                         if let Some(mut msgs) = hub_ui.get_messages() {
                             for htc in msgs.drain(..) {
                                 self.build_manager.handle_hub_msg(cx, &mut self.storage, &htc);
