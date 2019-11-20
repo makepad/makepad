@@ -4,7 +4,7 @@ Makepad is a creative software development platform built around Rust. We aim to
 
 As we're working towards our first public alpha version, you'll be able to see our final steps towards it here. The alpha version of Makepad will show off the development platform, but does not include the visual design tools or library ecosystem yet.
 
-Makepad currently boasts the following features:
+Makepad currently has the following features:
 - Compiles natively to Linux, MacOS, and Windows.
 - Compiles to WebAssembly for demo purposes (see caveats below).
 - Has a built-in HTTP server with live reload support for WebAssembly development.
