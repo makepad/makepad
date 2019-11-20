@@ -7,13 +7,16 @@ As we're working towards our first public alpha version, you'll be able to see o
 Makepad currently has the following features:
 - Compiles natively to Linux, MacOS, and Windows.
 - Compiles to WebAssembly for demo purposes (see caveats below).
-- Has a built-in HTTP server with live reload support for WebAssembly development.
-- Has a code editor with live code folding (press alt).
-- Has a log viewer with a virtual viewport, that can handle printlns in an infinite loop.
-- Has a dock panel system / file tree.
-- Has Rust compiler integration, with errors/warning in the IDE.
+- Built-in HTTP server with live reload support for WebAssembly development.
+- Code editor with live code folding (press alt).
+- Log viewer with a virtual viewport, that can handle printlns in an infinite loop.
+- Dock panel system / file tree.
+- Rust compiler integration, with errors/warning in the IDE.
 
-Note that although Makepad compiles to WebAssembly, and therefore runs on the web, the web build of Makepad does not feature any compiler integration. If you want to be able to compile code, you have to install Makepad locally.
+If you're interested in Makepad, you can check out the web build here:
+https://makepad.github.io/
+
+Note that the web build of Makepad does not feature any compiler integration. If you want to be able to compile code, you have to install Makepad locally.
 
 To install Makepad locally, run the following commands:
 ```
