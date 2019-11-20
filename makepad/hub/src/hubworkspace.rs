@@ -751,7 +751,7 @@ impl HubWorkspace {
                         else { // other type of message
                             route_send.send(ToHubMsg {
                                 to: HubMsgTo::UI,
-                                msg: HubMsg::CargoArtifact {
+                                msg: HubMsg::CargoArtifact { 
                                     uid: uid,
                                     package_id: parsed.package_id.clone(),
                                     fresh: if let Some(fresh) = parsed.fresh {fresh}else {false}
