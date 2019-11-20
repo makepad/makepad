@@ -723,7 +723,7 @@ impl HubWorkspace {
                                 }
                                 let loc_message = LocMessage {
                                     //package_id: parsed.package_id.clone(),
-                                    path: format!("{}/{}/{}", workspace, project, de_relativize_path(&path)),
+                                    path: format!("{}/{}/{}", workspace, project, de_relativize_path(&path)).replace("\\","/"),
                                     row: row,
                                     col: col,
                                     range: Some((span.byte_start as usize, span.byte_end as usize)),
@@ -763,7 +763,7 @@ impl HubWorkspace {
                                     if !executable.ends_with(".rmeta") && abs_root_path.len() + 1 < executable.len() {
                                         let last = executable.clone().split_off(abs_root_path.len() + 1);
 
-                                        build_result = BuildResult::Executable {path: format!("{}/{}", project, last)};
+                                        build_result = BuildResult::Executable {path: format!("{}/{}", project, last).replace("\\","/")};
                                     }
                                 }
                                 // detect wasm files being build and tell the http server
@@ -771,7 +771,7 @@ impl HubWorkspace {
                                     for filename in filenames {
                                         if filename.ends_with(".wasm") && abs_root_path.len() + 1 < filename.len() {
                                             let last = filename.clone().split_off(abs_root_path.len() + 1);
-                                            let path = format!("{}/{}", project, last);
+                                            let path = format!("{}/{}", project, last).replace("\\","/");
                                             if let Ok(mut http_server) = self.http_server.lock() {
                                                 if let Some(http_server) = &mut *http_server {
                                                     http_server.send_file_change(&path);
@@ -1145,7 +1145,7 @@ fn de_relativize_path(path: &str) -> String {
             out.push(split);
         }
     }
-    out.join("/").replace("\\","/")
+    out.join("/")
 }
 
 
