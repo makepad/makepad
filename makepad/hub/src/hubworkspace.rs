@@ -771,12 +771,13 @@ impl HubWorkspace {
                                     for filename in filenames {
                                         if filename.ends_with(".wasm") && abs_root_path.len() + 1 < filename.len() {
                                             let last = filename.clone().split_off(abs_root_path.len() + 1);
+                                            let path = format!("{}/{}", project, last);
                                             if let Ok(mut http_server) = self.http_server.lock() {
                                                 if let Some(http_server) = &mut *http_server {
-                                                    http_server.send_file_change(&last);
+                                                    http_server.send_file_change(&path);
                                                 }
                                             };
-                                            build_result = BuildResult::Wasm {path: format!("{}/{}", project, last)};
+                                            build_result = BuildResult::Wasm {path: path};
                                         }
                                     }
                                 }
