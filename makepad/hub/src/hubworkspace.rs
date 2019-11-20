@@ -1040,6 +1040,7 @@ impl HubWorkspace {
         
         fn read_recur(path: &str, create_digest:bool, ext_inc: &Vec<String>, file_ex: &Vec<String>, dir_ex: &Vec<String>) -> Vec<WorkspaceFileTreeNode> {
             let mut ret = Vec::new();
+            println!("FILE TREE AT {}", path);
             if let Ok(read_dir) = fs::read_dir(path) {
                 for entry in read_dir {
                     if let Ok(entry) = entry {
