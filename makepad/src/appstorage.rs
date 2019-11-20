@@ -110,7 +110,7 @@ impl AppStorage {
             
             // lets start the router
             let mut hub_router = HubRouter::start_hub_router(HubLog::None);
-            
+            println!("START DIRECT");
             // lets start the hub UI connected directly
             let hub_ui = HubUI::start_hub_ui_direct(&mut hub_router, {
                 let signal = self.hub_ui_message.clone();
@@ -298,7 +298,6 @@ impl AppStorage {
         match htc.msg {
             // our own connectUI message, means we are ready to talk to the hub
             HubMsg::ConnectUI => if hub_ui.route_send.is_own_addr(&htc.from) {
-                println!("CONNECT UI!");
                 // now start talking
                 self.reload_workspaces();
             },
@@ -306,7 +305,6 @@ impl AppStorage {
                 self.reload_workspaces();
             },
             HubMsg::ListWorkspacesResponse {uid, workspaces} => if uid == self.workspaces_request_uid {
-                println!("ListWorkspacesResponse UI!");
                 let uid = hub_ui.route_send.alloc_uid();
                 // from these workspaces query filetrees
                 for workspace in &workspaces {
