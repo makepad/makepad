@@ -166,10 +166,10 @@ impl DesktopWindow {
             self.caption_bg.color = Theme::color_bg_selected_over().base(cx);//cx.colors[self.caption_bg_color];
             // alright here we draw our platform buttons.
             match cx.platform_type {
-                PlatformType::Linux | PlatformType::Windows => {
+                PlatformType::OSX | PlatformType::Linux | PlatformType::Windows => {
                     
                     let bg_inst = self.caption_bg.begin_quad(cx, Layout {
-                        align: Align::right_center(),
+                        align: Align::right_top(),
                         walk: Walk::wh(Width::Fill, Height::Compute),
                         ..Default::default()
                     });
@@ -192,6 +192,7 @@ impl DesktopWindow {
                     // change alignment
                     cx.change_turtle_align_x(0.5); //Align::center());
                     cx.compute_turtle_height();
+                    cx.change_turtle_align_y(0.5); //Align::center());
                     cx.reset_turtle_pos();
                     cx.move_turtle(50., 0.);
                     // we need to store our caption rect somewhere.
