@@ -8,9 +8,9 @@ Today, we launch an early alpha of Makepad Basic. This version shows off the dev
 
 The Makepad development platform and library ecosystem are MIT licensed, and will be available for free as part of Makepad Basic. In the near future, we will also introduce Makepad Pro, which will be available as a subscription model. Makepad Pro will include the visual design tools, and and live VR environment. Because the library ecosystem is MIT licensed, all applications made with the Pro version are entirely free licensed. 
 
-```
 Install makepad locally so you can compile code: 
 
+```
 git clone https://github.com/makepad/makepad makepad 
 
 git clone https://github.com/makepad/makepad makepad/edit_repo 
