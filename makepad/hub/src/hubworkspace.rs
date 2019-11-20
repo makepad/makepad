@@ -704,7 +704,7 @@ impl HubWorkspace {
                                     msg.push_str(" - ");
                                     msg.push_str(&child.message);
                                 }
-                                
+                                msg = msg.replace("\n","");
                                 // lets try to pull path out of rendered, this fixes some rust bugs
                                 let mut path = span.file_name;
                                 let row = span.line_start as usize;
