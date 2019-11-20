@@ -1106,9 +1106,12 @@ impl HubWorkspace {
         let dir_ex: Vec<String> = dir_ex.to_vec().iter().map( | v | v.to_string()).collect();
         
         let mut root_folder = Vec::new();
+                println!("WORKSPACE FILE TREE!" );
         
         if let Ok(projects) = self.projects.lock() {
             for (project, abs_path) in projects.iter() {
+                println!("WORKSPACE FILE TREE {}", abs_path );
+
                 let folder = read_recur(&abs_path, create_digest, &ext_inc, &file_ex, &dir_ex);
                 let tree = WorkspaceFileTreeNode::Folder {
                     name: project.clone(),
