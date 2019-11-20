@@ -114,7 +114,6 @@ impl AppStorage {
             let hub_ui = HubUI::start_hub_ui_direct(&mut hub_router, {
                 let signal = self.hub_ui_message.clone();
                 move || {
-                    println!("GOT MESSAGE, POSTING");
                     Cx::post_signal(signal, 0);
                 }
             });
