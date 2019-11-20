@@ -39,8 +39,8 @@ pub enum HubWsError {
 }
 
 const INCLUDED_FILES: &[&'static str] = &[".json", ".toml", ".js", ".rs", ".txt", ".text", ".ron", ".html"];
-const EXCLUDED_FILES: &[&'static str] = &["key.ron","todo.txt","makepad_state.ron"];
-const EXCLUDED_DIRS: &[&'static str] = &["target",".git","edit_repo"];
+const EXCLUDED_FILES: &[&'static str] = &["key.ron","makepad_state.ron"];
+const EXCLUDED_DIRS: &[&'static str] = &["target",".git",".github","edit_repo"];
 
 impl HubWorkspace {
     
@@ -330,8 +330,15 @@ impl HubWorkspace {
                     },
                     HubMsg::CargoEnd {build_result, ..} => {
                         println!("CargoEnd {:?}", build_result);
-                        return
                     }
+                    HubMsg::BuildSuccess{..}=>{
+                        println!("Success!");
+                        return
+                    },
+                    HubMsg::BuildFailure{..}=>{
+                        println!("Failure!");
+                        return
+                    },
                     _ => ()
                 }
             }
@@ -342,10 +349,16 @@ impl HubWorkspace {
             msg:message
         });
         if result.is_ok() {
-            println!("Success!");
+            let _ = tx_write.send((HubAddr::None,ToHubMsg {
+                to: HubMsgTo::All,
+                msg:HubMsg::BuildSuccess{uid:HubUid{id:0, addr:HubAddr::None}}
+            }));
         }
         else {
-            println!("Failure!");
+            let _ = tx_write.send((HubAddr::None,ToHubMsg {
+                to: HubMsgTo::All,
+                msg:HubMsg::BuildFailure{uid:HubUid{id:0, addr:HubAddr::None}}
+            }));
         }
         let _ = thread.join();
     }
@@ -691,7 +704,7 @@ impl HubWorkspace {
                                     msg.push_str(" - ");
                                     msg.push_str(&child.message);
                                 }
-                                
+                                msg = msg.replace("\n","");
                                 // lets try to pull path out of rendered, this fixes some rust bugs
                                 let mut path = span.file_name;
                                 let row = span.line_start as usize;
@@ -710,7 +723,7 @@ impl HubWorkspace {
                                 }
                                 let loc_message = LocMessage {
                                     //package_id: parsed.package_id.clone(),
-                                    path: format!("{}/{}/{}", workspace, project, de_relativize_path(&path)),
+                                    path: format!("{}/{}/{}", workspace, project, de_relativize_path(&path)).replace("\\","/"),
                                     row: row,
                                     col: col,
                                     range: Some((span.byte_start as usize, span.byte_end as usize)),
@@ -736,9 +749,9 @@ impl HubWorkspace {
                             }
                         }
                         else { // other type of message
-                            route_send.send(ToHubMsg {
+                            route_send.send(ToHubMsg { 
                                 to: HubMsgTo::UI,
-                                msg: HubMsg::CargoArtifact {
+                                msg: HubMsg::CargoArtifact { 
                                     uid: uid,
                                     package_id: parsed.package_id.clone(),
                                     fresh: if let Some(fresh) = parsed.fresh {fresh}else {false}
@@ -750,7 +763,7 @@ impl HubWorkspace {
                                     if !executable.ends_with(".rmeta") && abs_root_path.len() + 1 < executable.len() {
                                         let last = executable.clone().split_off(abs_root_path.len() + 1);
 
-                                        build_result = BuildResult::Executable {path: format!("{}/{}", project, last)};
+                                        build_result = BuildResult::Executable {path: format!("{}/{}", project, last).replace("\\","/")};
                                     }
                                 }
                                 // detect wasm files being build and tell the http server
@@ -758,12 +771,13 @@ impl HubWorkspace {
                                     for filename in filenames {
                                         if filename.ends_with(".wasm") && abs_root_path.len() + 1 < filename.len() {
                                             let last = filename.clone().split_off(abs_root_path.len() + 1);
+                                            let path = format!("{}/{}", project, last).replace("\\","/");
                                             if let Ok(mut http_server) = self.http_server.lock() {
                                                 if let Some(http_server) = &mut *http_server {
-                                                    http_server.send_file_change(&last);
+                                                    http_server.send_file_change(&path);
                                                 }
                                             };
-                                            build_result = BuildResult::Wasm {path: format!("{}/{}", project, last)};
+                                            build_result = BuildResult::Wasm {path: path};
                                         }
                                     }
                                 }
@@ -1094,6 +1108,7 @@ impl HubWorkspace {
         
         if let Ok(projects) = self.projects.lock() {
             for (project, abs_path) in projects.iter() {
+
                 let folder = read_recur(&abs_path, create_digest, &ext_inc, &file_ex, &dir_ex);
                 let tree = WorkspaceFileTreeNode::Folder {
                     name: project.clone(),
