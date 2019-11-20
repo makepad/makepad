@@ -288,8 +288,8 @@ impl Cx {
         let ps = d3d11_cx.create_pixel_shader(&ps_blob) ?;
         
         let mut layout_desc = Vec::new();
-        let geom_named = InstanceProps::construct(&sh.shader_gen, &mapping.geometries);
-        let inst_named = InstanceProps::construct(&sh.shader_gen, &mapping.instances);
+        let geom_named = NamedProps::construct(&sh.shader_gen, &mapping.geometries);
+        let inst_named = NamedProps::construct(&sh.shader_gen, &mapping.instances);
         let mut strings = Vec::new();
         
         for (index, geom) in geom_named.props.iter().enumerate() {
