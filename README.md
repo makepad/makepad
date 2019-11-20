@@ -23,6 +23,7 @@ What features we have now:
 - Built in HTTP server with livereload for wasm development
 
 What we do NOT have, but will in the future:
+- A documented usable render API, all makepads' own render libraries are still internal and can change in any way.
 - Visual editors
 - Autocomplete
 - VR Support (although the web version you can 'see' in webVR, try it in the Quest browser)
