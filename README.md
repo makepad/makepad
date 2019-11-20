@@ -1,7 +1,7 @@
 # Introducing Makepad
 
 Alpha release soon, as its all public you see our final steps towards it here. Not just fully ready yet, but will be soon.
-The alpha release will first target developing commandline rust applications, as this is what we use makepad for ourselves (dogfooding makepad). Essentially makepad as it will be for the next few months is a a compile-yourself (in 2 minutes) local Rust IDE that has a very tight live copmile cycle with in-editor errors and std-out logviewer.
+The alpha release will first target developing commandline rust applications, as this is what we use makepad for ourselves (dogfooding makepad). Essentially makepad as it will be for the next few months is a a compile-yourself (in 2 minutes) local Rust IDE that has a very tight live compile cycle with in-editor errors and std-out logviewer.
 The fancy live visual editing we estimate at end Q1 '20.
 
 Our feature todo list for this alpha:
