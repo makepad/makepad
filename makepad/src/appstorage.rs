@@ -34,27 +34,21 @@ impl Default for AppSettings {
                         project
                     }
                 });
-                cfg.insert("windows".to_string(), HubWsConfig {
-                    http_server: HttpServerConfig::Offline,
-                    projects: {
-                        let mut project = HashMap::new();
-                        project.insert("makepad".to_string(), ".".to_string());
-                        project
-                    }
-                });
                 cfg
             },
             sync: {
                 let mut sync = HashMap::new();
-                sync.insert("main/makepad".to_string(), vec!["windows/makepad".to_string()]);
+                //sync.insert("main/makepad".to_string(), vec!["windows/makepad".to_string()]);
                 sync
             },
-            builds: vec![BuildTarget {
+            builds: vec![
+           BuildTarget {
                 workspace: "main".to_string(),
                 project: "makepad".to_string(),
-                package: "makepad".to_string(),
-                config: "check".to_string()
-            }]
+                package: "nov28_step1_wasm".to_string(),
+                config: "debug".to_string()
+            }    
+    ]
         }
     }
 }
