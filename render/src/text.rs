@@ -73,24 +73,24 @@ impl Text {
             */
         }
     }
-
-    pub fn instance_font_tc()->InstanceVec4{uid!()}
-    pub fn instance_color()->InstanceColor{uid!()}
-    pub fn instance_x()->InstanceFloat{uid!()}
-    pub fn instance_y()->InstanceFloat{uid!()}
-    pub fn instance_w()->InstanceFloat{uid!()}
-    pub fn instance_h()->InstanceFloat{uid!()}
-    pub fn instance_z()->InstanceFloat{uid!()}
-    pub fn instance_base_x()->InstanceFloat{uid!()}
-    pub fn instance_base_y()->InstanceFloat{uid!()}
-    pub fn instance_font_size()->InstanceFloat{uid!()}
-    pub fn instance_marker()->InstanceFloat{uid!()}
-    pub fn instance_char_offset()->InstanceFloat{uid!()}
     
-    pub fn uniform_zbias()->UniformFloat{uid!()}
-    pub fn uniform_brightness()->UniformFloat{uid!()}
-    pub fn uniform_curve()->UniformFloat{uid!()}
-    pub fn uniform_view_do_scroll()->UniformVec2{uid!()}
+    pub fn instance_font_tc() -> InstanceVec4 {uid!()}
+    pub fn instance_color() -> InstanceColor {uid!()}
+    pub fn instance_x() -> InstanceFloat {uid!()}
+    pub fn instance_y() -> InstanceFloat {uid!()}
+    pub fn instance_w() -> InstanceFloat {uid!()}
+    pub fn instance_h() -> InstanceFloat {uid!()}
+    pub fn instance_z() -> InstanceFloat {uid!()}
+    pub fn instance_base_x() -> InstanceFloat {uid!()}
+    pub fn instance_base_y() -> InstanceFloat {uid!()}
+    pub fn instance_font_size() -> InstanceFloat {uid!()}
+    pub fn instance_marker() -> InstanceFloat {uid!()}
+    pub fn instance_char_offset() -> InstanceFloat {uid!()}
+    
+    pub fn uniform_zbias() -> UniformFloat {uid!()}
+    pub fn uniform_brightness() -> UniformFloat {uid!()}
+    pub fn uniform_curve() -> UniformFloat {uid!()}
+    pub fn uniform_view_do_scroll() -> UniformVec2 {uid!()}
     
     pub fn def_text_shader() -> ShaderGen {
         // lets add the draw shader lib
@@ -100,7 +100,7 @@ impl Text {
         sg.compose(shader_ast!({
             let geom: vec2<Geometry>;
             let texturez: texture2d<Texture>;
-
+            
             let font_tc: Self::instance_font_tc();
             let color: Self::instance_color();
             let x: Self::instance_x();
@@ -111,7 +111,7 @@ impl Text {
             let base_x: Self::instance_base_x();
             let base_y: Self::instance_base_y();
             let font_size: Self::instance_font_size();
-            let char_offset:Self::instance_char_offset();
+            let char_offset: Self::instance_char_offset();
             let marker: Self::instance_marker();
             
             let tex_coord1: vec2<Varying>;
@@ -341,7 +341,7 @@ impl Text {
         }
     }
     
-    pub fn end_text(&mut self, cx: &mut Cx, aligned: &AlignedInstance)->Area{
+    pub fn end_text(&mut self, cx: &mut Cx, aligned: &AlignedInstance) -> Area {
         cx.update_aligned_instance_count(aligned);
         aligned.inst.into()
     }
@@ -354,6 +354,7 @@ impl Text {
         let mut elipct = 0;
         let text_style = &self.text_style;
         let font_size = text_style.font_size;
+        let line_spacing = text_style.line_spacing;
         let height_factor = text_style.height_factor;
         let mut iter = text.chars().peekable();
         
@@ -364,13 +365,16 @@ impl Text {
             let last = iter.peek().is_none();
             
             let mut emit = last;
-            
+            let mut newline = false;
             let slot = if c < '\u{10000}' {
                 cx.fonts[font_id].font_loaded.as_ref().unwrap().char_code_to_glyph_index_map[c as usize]
             } else {
                 0
             };
-            
+            if c == '\n' {
+                emit = true;
+                newline = true;
+            }            
             if slot != 0 {
                 let glyph = &cx.fonts[font_id].font_loaded.as_ref().unwrap().glyphs[slot];
                 width += glyph.horizontal_metrics.advance_width * font_size_logical * self.font_scale;
@@ -381,7 +385,7 @@ impl Text {
                     },
                     Wrapping::Word => {
                         chunk.push(c);
-                        if c == ' ' || c == '\t' || c == '\n' || c == ',' {
+                        if c == ' ' || c == '\t' || c == ',' || c == '\n'{
                             emit = true;
                         }
                     },
@@ -390,6 +394,7 @@ impl Text {
                         if c == 10 as char || c == 13 as char {
                             emit = true;
                         }
+                        newline = true;
                     },
                     Wrapping::None => {
                         chunk.push(c);
@@ -418,12 +423,8 @@ impl Text {
                 self.add_text(cx, geom.x, geom.y, 0, &mut aligned, &chunk, | _, _, _, _ | {0.0});
                 width = 0.0;
                 chunk.truncate(0);
-                match self.wrapping {
-                    Wrapping::Line => {
-                        cx.turtle_new_line();
-                    },
-                    _ => ()
-                    
+                if newline {
+                    cx.turtle_new_line_min_height(font_size * line_spacing * self.font_scale);
                 }
             }
         }

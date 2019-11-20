@@ -17,6 +17,7 @@ use winapi::um::shellscalingapi::{MDT_EFFECTIVE_DPI, MONITOR_DPI_TYPE, PROCESS_D
 use winapi::um::wingdi::{GetDeviceCaps, LOGPIXELSX};
 use winapi::um::winuser::{MONITOR_DEFAULTTONEAREST, TRACKMOUSEEVENT};
 use winapi::um::uxtheme::MARGINS;
+use std::sync::{Arc, Mutex};
 
 static mut GLOBAL_WIN32_APP: *mut Win32App = 0 as *mut _;
 
@@ -29,7 +30,7 @@ pub struct Win32App {
     pub all_windows: Vec<HWND>,
     pub timers: Vec<Win32Timer>,
     pub free_timers: Vec<usize>,
-    
+    pub race_signals: Arc<Mutex<Vec<(usize,isize)>>>,
     pub loop_block: bool,
     pub dpi_functions: DpiFunctions,
     pub current_cursor: MouseCursor,
@@ -89,6 +90,7 @@ impl Win32App {
         let win32_app = Win32App {
             class_name_wstr: class_name_wstr,
             time_start: precise_time_ns(),
+            race_signals: Arc::new(Mutex::new(Vec::new())),
             event_callback: None,
             event_recur_block: false,
             event_loop_running: true,
@@ -252,8 +254,13 @@ impl Win32App {
     pub fn post_signal(signal_id: usize, value: usize) {
         unsafe {
             let win32_app = &mut (*GLOBAL_WIN32_APP);
-            if win32_app.all_windows.len()>0 {
-                winuser::PostMessageW(win32_app.all_windows[0], winuser::WM_USER, signal_id as usize, value as isize);
+            if let Ok(mut sigs) = win32_app.race_signals.lock(){
+                if win32_app.all_windows.len()>0 {
+                    winuser::PostMessageW(win32_app.all_windows[0], winuser::WM_USER, signal_id as usize, value as isize);
+                }
+                else{ // we have no windows
+                    sigs.push((signal_id, value as isize));
+                }
             }
         }
     }
@@ -378,8 +385,6 @@ impl Win32Window {
             
             self.hwnd = Some(hwnd);
             
-            // TODO remove it as well
-            (*self.win32_app).all_windows.push(hwnd);
             
             winuser::SetWindowLongPtrW(hwnd, winuser::GWLP_USERDATA, self as *const _ as isize);
             
@@ -388,6 +393,15 @@ impl Win32Window {
             winuser::ShowWindow(hwnd, winuser::SW_SHOW);
             
             (*self.win32_app).dpi_functions.enable_non_client_dpi_scaling(self.hwnd.unwrap());
+
+            if let Ok(mut sigs) = (*self.win32_app).race_signals.lock(){
+                (*self.win32_app).all_windows.push(hwnd);
+                for sig in sigs.iter(){
+                    winuser::PostMessageW(hwnd, winuser::WM_USER, sig.0, sig.1 as isize);
+                }
+                sigs.truncate(0);
+            }
+
         }
     }
     
