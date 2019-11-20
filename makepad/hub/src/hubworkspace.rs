@@ -749,7 +749,7 @@ impl HubWorkspace {
                             }
                         }
                         else { // other type of message
-                            route_send.send(ToHubMsg {
+                            route_send.send(ToHubMsg { 
                                 to: HubMsgTo::UI,
                                 msg: HubMsg::CargoArtifact { 
                                     uid: uid,
