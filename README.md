@@ -3,15 +3,6 @@
 Alpha release soon, as its all public you see our final steps towards it here. Not just fully ready yet, but will be soon.
 The alpha release will first target developing commandline rust applications, as this is what we use makepad for ourselves. Makepad as it will be for the next few months is a a compile-yourself (in 2 minutes) local Rust IDE that has a very tight live compile cycle with in-editor errors and std-out logviewer. No fancy visual editors and all the Learnable Programming (http://worrydream.com/LearnableProgramming/) vision just yet. The live visual editing we estimate earliest at end Q1 '20.
 
-Our feature todo list for this alpha:
-
-Pre alpha (what is here now essentially)
-- Homepage in application
-
-Alpha
-- File/new file menu and find replace
-- Documentation how to work with your own projects in makepad via the settings
-
 What features we have now:
 - Native compiles to linux, windows, macos
 - Compiles to Wasm for demo purposes (no compiler integration, no backend)
