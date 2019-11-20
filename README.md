@@ -4,24 +4,21 @@ Makepad is a creative software development platform built around Rust. We aim to
 
 As we're working towards our first public alpha version, you'll be able to see our final steps towards it here. The alpha version of Makepad will show off the development platform, but does not include the visual design tools or library ecosystem yet.
 
-What features we have now:
-- Native compiles to linux, windows, macos
-- Compiles to Wasm for demo purposes (no compiler integration, no backend)
-- Rust Compiler integration with errors/warnings in editor
-- Virtual viewport log viewer that can take infinite loop printlns
-- Code editor with live code folding (press alt)
-- Dock panel system / filetree
-- Workspaces (for file access/builds) with networking support
-- Built in HTTP server with livereload for wasm development
+Makepad currently boasts the following features:
+- Compiles natively to Linux, MacOS, and Windows.
+- Compiles to WebAssembly for demo purposes (see caveats below).
+- Has a built-in HTTP server with live reload support for WebAssembly development.
+- Has a code editor with live code folding (press alt).
+- Has a log viewer with a virtual viewport, that can handle printlns in an infinite loop.
+- Has a dock panel system / file tree.
+- Has Rust compiler integration, with errors/warning in the IDE.
 
-Install makepad locally so you can compile code: 
+Note that although Makepad compiles to WebAssembly, and therefore runs on the web, the web build of Makepad does not feature any compiler integration. If you want to be able to compile code, you have to install Makepad locally.
 
+To install Makepad locally, run the following commands:
 ```
 git clone https://github.com/makepad/makepad makepad 
-
 git clone https://github.com/makepad/makepad makepad/edit_repo 
-
 cd makepad 
-
 cargo run -p makepad --release 
 ```
