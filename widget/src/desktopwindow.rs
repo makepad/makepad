@@ -166,7 +166,7 @@ impl DesktopWindow {
             self.caption_bg.color = Theme::color_bg_selected_over().base(cx);//cx.colors[self.caption_bg_color];
             // alright here we draw our platform buttons.
             match cx.platform_type {
-                PlatformType::OSX | PlatformType::Linux | PlatformType::Windows => {
+                PlatformType::Linux | PlatformType::Windows => {
                     
                     let bg_inst = self.caption_bg.begin_quad(cx, Layout {
                         align: Align::right_top(),
