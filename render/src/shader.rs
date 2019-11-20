@@ -214,6 +214,39 @@ pub struct UniformProps {
     pub total_slots: usize,
 }
 
+#[derive(Clone)]
+pub struct NamedProp {
+    pub name: String,
+    pub offset: usize,
+    pub slots: usize
+}
+
+#[derive(Default, Clone)]
+pub struct NamedProps {
+    pub props: Vec<NamedProp>,
+    pub total_slots: usize,
+}
+
+impl NamedProps {
+    pub fn construct(sg: &ShaderGen, in_props: &Vec<ShVar>)->NamedProps{
+        let mut offset = 0;
+        let mut out_props = Vec::new();
+        for prop in in_props {
+            let slots = sg.get_type_slots(&prop.ty);
+            out_props.push(NamedProp {
+                name: prop.name.clone(),
+                offset: offset,
+                slots: slots
+            });
+            offset += slots
+        };
+        NamedProps {
+            props: out_props,
+            total_slots: offset
+        }
+    }
+}
+
 impl InstanceProps {
     pub fn construct(sg: &ShaderGen, in_props: &Vec<ShVar>)->InstanceProps{
         let mut offset = 0;
