@@ -23,7 +23,6 @@ Note that the web build of Makepad does not feature any compiler integration. If
 To install Makepad locally, run the following commands:
 ```
 git clone https://github.com/makepad/makepad makepad 
-git clone https://github.com/makepad/makepad makepad/edit_repo 
 cd makepad 
 cargo run -p makepad --release 
 ```
