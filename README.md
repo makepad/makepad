@@ -1,8 +1,7 @@
 # Introducing Makepad
 
 Alpha release soon, as its all public you see our final steps towards it here. Not just fully ready yet, but will be soon.
-The alpha release will first target developing commandline rust applications, as this is what we use makepad for ourselves (dogfooding makepad). Essentially makepad as it will be for the next few months is a a compile-yourself (in 2 minutes) local Rust IDE that has a very tight live compile cycle with in-editor errors and std-out logviewer.
-The fancy live visual editing we estimate at end Q1 '20.
+The alpha release will first target developing commandline rust applications, as this is what we use makepad for ourselves. Makepad as it will be for the next few months is a a compile-yourself (in 2 minutes) local Rust IDE that has a very tight live compile cycle with in-editor errors and std-out logviewer. No fancy visual editors and all the Learnable Programming )(http://worrydream.com/LearnableProgramming/) vision just yet. The live visual editing we estimate earliest at end Q1 '20.
 
 Our feature todo list for this alpha:
 
@@ -12,6 +11,22 @@ Pre alpha (what is here now essentially)
 Alpha
 - File/new file menu and find replace
 - Documentation how to work with your own projects in makepad via the settings
+
+What features we have now:
+- Native compiles to linux, windows, macos
+- Compiles to Wasm for demo purposes (no compiler integration, no backend)
+- Rust Compiler integration with errors/stdout in editor
+- Code editor with live code folding (press alt)
+- Dock panel system / filetree
+- Workspaces (for file access/builds) with networking support
+- Built in HTTP server with livereload for wasm development
+
+What we do NOT have, but will in the future:
+- Visual editors
+- Autocomplete
+- VR Support (although the web version you can 'see' in webVR, try it in the Quest browser)
+
+# The Story
 
 Makepad is a creative software development platform built around Rust. We aim to make the creative software development process as fun as possible! To do this we will provide a set of visual design tools that modify your application in real time, as well as a library ecosystem that allows you to write highly performant multimedia applications. 
 
