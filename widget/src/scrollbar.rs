@@ -96,16 +96,6 @@ impl ScrollBar {
             
             const border_radius: float = 1.5;
             
-            fn vertex() -> vec4 {
-                let clipped: vec2 = clamp(
-                    geom * vec2(w, h) + vec2(x, y),
-                    view_clip.xy,
-                    view_clip.zw
-                );
-                pos = (clipped - vec2(x, y)) / vec2(w, h);
-                return camera_projection*(camera_view*(view_transform*vec4(clipped, z + zbias, 1.)));
-            }
-            
             fn pixel() -> vec4 {
                 df_viewport(pos * vec2(w, h));
                 if is_vertical > 0.5 {
@@ -263,8 +253,8 @@ impl ScrollBar {
     pub fn handle_scroll_bar(&mut self, cx: &mut Cx, event: &mut Event) -> ScrollBarEvent {
         // lets check if our view-area gets a mouse-scroll.
         match event {
-            Event::FingerScroll(fe) => {
-                let rect = self._view_area.get_rect(cx, false);
+            Event::FingerScroll(fe) => if !fe.handled{
+                let rect = self._view_area.get_rect(cx);
                 if rect.contains(fe.abs.x, fe.abs.y) { // handle mousewheel
                     // we should scroll in either x or y
                     let scroll = match self.axis {
@@ -273,14 +263,17 @@ impl ScrollBar {
                     };
                     if !self.smoothing.is_none() {
                         let scroll_pos_target = self.get_scroll_target();
-                        
-                        self.set_scroll_target(cx, scroll_pos_target + scroll);
+                        if self.set_scroll_target(cx, scroll_pos_target + scroll){
+                            fe.handled = true;
+                        };
                         self.move_towards_scroll_target(cx); // take the first step now
                         return self.make_scroll_event();
                     }
                     else {
                         let scroll_pos = self.get_scroll_pos();
-                        self.set_scroll_pos(cx, scroll_pos + scroll);
+                        if self.set_scroll_pos(cx, scroll_pos + scroll){
+                            fe.handled = true;
+                        }
                         return self.make_scroll_event();
                     }
                 }
@@ -289,7 +282,7 @@ impl ScrollBar {
             _ => ()
         };
         if self._visible {
-            match event.hits(cx, self._sb_area, HitOpt {no_scrolling: true, ..Default::default()}) {
+            match event.hits(cx, self._sb_area, HitOpt::default()) {
                 Event::Animate(ae) => {
                     self.animator.calc_area(cx, self._sb_area, ae.time);
                 },
@@ -403,6 +396,7 @@ impl ScrollBar {
                             h: self.bar_size,
                         }
                     );
+                    sb_inst.set_do_scroll(cx, false, false);
                     //is_vertical
                     let (norm_scroll, norm_handle) = self.get_normalized_scroll_pos();
                     sb_inst.push_float(cx, 0.0);
@@ -432,6 +426,7 @@ impl ScrollBar {
                             h: self._scroll_size
                         }
                     );
+                    sb_inst.set_do_scroll(cx, false, false);
                     //is_vertical
                     let (norm_scroll, norm_handle) = self.get_normalized_scroll_pos();
                     sb_inst.push_float(cx, 1.0);

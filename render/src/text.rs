@@ -87,10 +87,8 @@ impl Text {
     pub fn instance_marker() -> InstanceFloat {uid!()}
     pub fn instance_char_offset() -> InstanceFloat {uid!()}
     
-    pub fn uniform_zbias() -> UniformFloat {uid!()}
     pub fn uniform_brightness() -> UniformFloat {uid!()}
     pub fn uniform_curve() -> UniformFloat {uid!()}
-    pub fn uniform_view_do_scroll() -> UniformVec2 {uid!()}
     
     pub fn def_text_shader() -> ShaderGen {
         // lets add the draw shader lib
@@ -120,10 +118,8 @@ impl Text {
             let clipped: vec2<Varying>;
             let rect: vec4<Varying>;
             
-            let zbias: Self::uniform_zbias();
             let brightness: Self::uniform_brightness();
             let curve: Self::uniform_curve();
-            let view_do_scroll: Self::uniform_view_do_scroll();
             
             fn pixel() -> vec4 {
                 let dx = dfdx(vec2(tex_coord1.x * 4096.0, 0.)).x;
@@ -156,19 +152,17 @@ impl Text {
             }
             
             fn vertex() -> vec4 {
-                let shift: vec2 = -view_scroll * view_do_scroll; // + vec2(x, y);
-                
                 let min_pos = vec2(x, y);
                 let max_pos = vec2(x + w, y - h);
                 
                 clipped = clamp(
-                    mix(min_pos, max_pos, geom) + shift,
-                    view_clip.xy,
-                    view_clip.zw
+                    mix(min_pos, max_pos, geom) - draw_scroll,
+                    draw_clip.xy,
+                    draw_clip.zw
                 );
                 
-                let normalized: vec2 = (clipped - min_pos - shift) / (max_pos - min_pos);
-                rect = vec4(min_pos.x, min_pos.y, max_pos.x, max_pos.y) + shift.xyxy;
+                let normalized: vec2 = (clipped - min_pos + draw_scroll) / (max_pos - min_pos);
+                rect = vec4(min_pos.x, min_pos.y, max_pos.x, max_pos.y) - draw_scroll.xyxy;
                 
                 tex_coord1 = mix(
                     font_tc.xy,
@@ -188,7 +182,7 @@ impl Text {
                     normalized.xy
                 );
                 
-                return camera_projection * (camera_view * (view_transform * vec4(clipped.x, clipped.y, z + zbias, 1.)));
+                return camera_projection * (camera_view * (view_transform * vec4(clipped.x, clipped.y, z + draw_zbias, 1.)));
             }
         }))
     }
@@ -208,14 +202,8 @@ impl Text {
             //tex_size
             //aligned.inst.push_uniform_vec2(cx, self.font.texture_size);
             
-            aligned.inst.push_uniform_float(cx, 0.);
             aligned.inst.push_uniform_float(cx, brightness);
             aligned.inst.push_uniform_float(cx, curve);
-            aligned.inst.push_uniform_vec2f(
-                cx,
-                if self.do_h_scroll {1.0}else {0.0},
-                if self.do_v_scroll {1.0}else {0.0}
-            );
             //aligned.inst.push_uniform_float(cx, if self.do_subpixel_aa{1.0}else{0.0});
             //list_clip
             //area.push_uniform_vec4f(cx, -50000.0,-50000.0,50000.0,50000.0);
