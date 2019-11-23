@@ -106,9 +106,10 @@ impl Cx {
         let instances = sg.flat_vars(|v| if let ShVarStore::Instance(_) = *v{true} else {false});
         let mut varyings = sg.flat_vars(|v| if let ShVarStore::Varying = *v{true} else {false});
         let locals = sg.flat_vars(|v| if let ShVarStore::Local = *v{true} else {false});
-        let uniforms_cx = sg.flat_vars(|v| if let ShVarStore::UniformCx = *v{true} else {false});
-        let uniforms_vw = sg.flat_vars(|v| if let ShVarStore::UniformVw = *v{true} else {false});
-        let uniforms_dr = sg.flat_vars(|v| if let ShVarStore::Uniform(_) = *v{true} else {false});
+        let pass_uniforms = sg.flat_vars(|v| if let ShVarStore::PassUniform = *v{true} else {false});
+        let view_uniforms = sg.flat_vars(|v| if let ShVarStore::ViewUniform = *v{true} else {false});
+        let draw_uniforms = sg.flat_vars(|v| if let ShVarStore::DrawUniform = *v{true} else {false});
+        let uniforms = sg.flat_vars(|v| if let ShVarStore::Uniform(_) = *v{true} else {false});
         
         // lets count the slots
         let geometry_slots = sg.compute_slot_total(&geometries);
@@ -117,9 +118,10 @@ impl Cx {
         
         mtl_out.push_str(&Self::mtl_assemble_struct("_Geom", &geometries, PackType::Packed, ""));
         mtl_out.push_str(&Self::mtl_assemble_struct("_Inst", &instances, PackType::Packed, ""));
-        mtl_out.push_str(&Self::mtl_assemble_struct("_UniCx", &uniforms_cx, PackType::Unpacked, ""));
-        mtl_out.push_str(&Self::mtl_assemble_struct("_UniVw", &uniforms_vw, PackType::Unpacked, ""));
-        mtl_out.push_str(&Self::mtl_assemble_struct("_UniDr", &uniforms_dr, PackType::Unpacked, ""));
+        mtl_out.push_str(&Self::mtl_assemble_struct("_UniPs", &pass_uniforms, PackType::Unpacked, ""));
+        mtl_out.push_str(&Self::mtl_assemble_struct("_UniVw", &view_uniforms, PackType::Unpacked, ""));
+        mtl_out.push_str(&Self::mtl_assemble_struct("_UniDr", &draw_uniforms, PackType::Unpacked, ""));
+        mtl_out.push_str(&Self::mtl_assemble_struct("_Uni", &uniforms, PackType::Unpacked, ""));
         mtl_out.push_str(&Self::mtl_assemble_struct("_Loc", &locals, PackType::Unpacked, ""));
         
         // we need to figure out which texture slots exist
@@ -153,8 +155,8 @@ impl Cx {
         let mut vtx_cx = SlCx {
             depth: 0,
             target: SlTarget::Vertex,
-            defargs_fn: "_Tex _tex, thread _Loc &_loc, thread _Vary &_vary, thread _Geom &_geom, thread _Inst &_inst, device _UniCx &_uni_cx, device _UniVw &_uni_vw, device _UniDr &_uni_dr".to_string(),
-            defargs_call: "_tex, _loc, _vary, _geom, _inst, _uni_cx, _uni_vw, _uni_dr".to_string(),
+            defargs_fn: "_Tex _tex, thread _Loc &_loc, thread _Vary &_vary, thread _Geom &_geom, thread _Inst &_inst, device _UniPs &_uni_ps, device _UniVw &_uni_vw, device _UniDr &_uni_dr, device _Uni &_uni".to_string(),
+            defargs_call: "_tex, _loc, _vary, _geom, _inst, _uni_ps, _uni_vw, _uni_dr, _uni".to_string(),
             call_prefix: "_".to_string(),
             shader_gen: sg,
             scope: Vec::new(),
@@ -166,8 +168,8 @@ impl Cx {
         let mut pix_cx = SlCx {
             depth: 0,
             target: SlTarget::Pixel,
-            defargs_fn: "_Tex _tex, thread _Loc &_loc, thread _Vary &_vary, device _UniCx &_uni_cx, device _UniVw &_uni_vw, device _UniDr &_uni_dr".to_string(),
-            defargs_call: "_tex, _loc, _vary, _uni_cx, _uni_vw, _uni_dr".to_string(),
+            defargs_fn: "_Tex _tex, thread _Loc &_loc, thread _Vary &_vary, device _UniPs &_uni_ps, device _UniVw &_uni_vw, device _UniDr &_uni_dr, device _Uni &_uni".to_string(),
+            defargs_call: "_tex, _loc, _vary, _uni_ps, _uni_vw, _uni_dr, _uni".to_string(),
             call_prefix: "_".to_string(),
             shader_gen: sg,
             scope: Vec::new(),
@@ -191,7 +193,7 @@ impl Cx {
         
         // lets define the vertex shader
         mtl_out.push_str("vertex _Vary _vertex_shader(_Tex _tex, device _Geom *in_geometries [[buffer(0)]], device _Inst *in_instances [[buffer(1)]],\n");
-        mtl_out.push_str("  device _UniCx &_uni_cx [[buffer(2)]], device _UniVw &_uni_vw [[buffer(3)]], device _UniDr &_uni_dr [[buffer(4)]],\n");
+        mtl_out.push_str("  device _UniPs &_uni_ps [[buffer(2)]], device _UniVw &_uni_vw [[buffer(3)]], device _UniDr &_uni_dr [[buffer(4)]], device _Uni &_uni [[buffer(5)]],\n");
         mtl_out.push_str("  uint vtx_id [[vertex_id]], uint inst_id [[instance_id]]){\n");
         mtl_out.push_str("  _Loc _loc;\n");
         mtl_out.push_str("  _Vary _vary;\n");
@@ -222,7 +224,7 @@ impl Cx {
         mtl_out.push_str("};\n");
         // then the fragment shader
         mtl_out.push_str("fragment float4 _fragment_shader(_Vary _vary[[stage_in]],_Tex _tex,\n");
-        mtl_out.push_str("  device _UniCx &_uni_cx [[buffer(0)]], device _UniVw &_uni_vw [[buffer(1)]], device _UniDr &_uni_dr [[buffer(2)]]){\n");
+        mtl_out.push_str("  device _UniPs &_uni_ps [[buffer(0)]], device _UniVw &_uni_vw [[buffer(1)]], device _UniDr &_uni_dr [[buffer(2)]], device _Uni &_uni [[buffer(3)]]){\n");
         mtl_out.push_str("  _Loc _loc;\n");
         mtl_out.push_str("  return _pixel(");
         mtl_out.push_str(&pix_cx.defargs_call);
@@ -232,20 +234,20 @@ impl Cx {
             println!("---- Metal shader -----\n{}", mtl_out);
         }
 
-        let uniform_props =  UniformProps::construct(sg, &uniforms_dr);
+        let uniform_props =  UniformProps::construct(sg, &uniforms);
         Ok((mtl_out, CxShaderMapping {
-            zbias_uniform_prop: uniform_props.find_zbias_uniform_prop(),
             rect_instance_props: RectInstanceProps::construct(sg, &instances),
             instance_props: InstanceProps::construct(sg, &instances),
-            uniform_props: uniform_props,
-            instances: instances,
-            geometries: geometries,
-            instance_slots: instance_slots,
-            geometry_slots: geometry_slots,
-            uniforms_dr: uniforms_dr,
-            uniforms_vw: uniforms_vw,
-            uniforms_cx: uniforms_cx,
-            texture_slots: texture_slots,
+            uniform_props,
+            instances,
+            geometries,
+            instance_slots,
+            geometry_slots,
+            draw_uniforms,
+            view_uniforms,
+            pass_uniforms,
+            uniforms,
+            texture_slots,
         }))
     }
     
@@ -347,10 +349,11 @@ impl<'a> SlCx<'a> {
     pub fn map_var(&mut self, var: &ShVar) -> String {
         let mty = Cx::mtl_type_to_metal(&var.ty);
         match var.store {
-            ShVarStore::Uniform(_) => return format!("_uni_dr.{}", var.name),
+            ShVarStore::Uniform(_) => return format!("_uni.{}", var.name),
             ShVarStore::UniformColor(_) => return format!("_uni_col.{}", var.name),
-            ShVarStore::UniformVw => return format!("_uni_vw.{}", var.name),
-            ShVarStore::UniformCx => return format!("_uni_cx.{}", var.name),
+            ShVarStore::ViewUniform => return format!("_uni_vw.{}", var.name),
+            ShVarStore::PassUniform => return format!("_uni_ps.{}", var.name),
+            ShVarStore::DrawUniform => return format!("_uni_dr.{}", var.name),
             ShVarStore::Instance(_) => {
                 if let SlTarget::Pixel = self.target {
                     if self.auto_vary.iter().find( | v | v.name == var.name).is_none() {

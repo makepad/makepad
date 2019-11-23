@@ -21,9 +21,9 @@ impl Cx {
             for _i in 0..10 {
                 self.platform.fingers_down.push(false);
             }
-            self.platform_type = PlatformType::WASM; 
+            self.platform_type = PlatformType::WASM;
         }
-         
+        
         //let root_view = unsafe {&mut *(self.platform.root_view_ptr as *mut View<NoScrollBar>)};
         let mut to_wasm = ToWasm::from(msg);
         self.platform.from_wasm = FromWasm::new();
@@ -32,13 +32,13 @@ impl Cx {
             let msg_type = to_wasm.mu32();
             match msg_type {
                 0 => { // end
-                    break;  
+                    break;
                 },
                 1 => { // fetch_deps
                     
                     // send the UI our deps, overlap with shadercompiler
                     let mut load_deps = Vec::<String>::new();
-                    for cxfont in &self.fonts{
+                    for cxfont in &self.fonts {
                         load_deps.push(cxfont.path.clone());
                     }
                     // other textures, things
@@ -55,14 +55,14 @@ impl Cx {
                         let vec_len = to_wasm.mu32() as usize;
                         let vec_rec = unsafe {Vec::<u8>::from_raw_parts(vec_ptr, vec_len, vec_len)};
                         // check if its a font
-                        for cxfont in &mut self.fonts{
-                            if cxfont.path == dep_path{
+                        for cxfont in &mut self.fonts {
+                            if cxfont.path == dep_path {
                                 // load it
                                 let mut font = CxFont::default();
                                 if font.load_from_ttf_bytes(&vec_rec).is_err() {
                                     println!("Error loading font {} ", dep_path);
                                 }
-                                else{
+                                else {
                                     font.path = cxfont.path.clone();
                                     *cxfont = font;
                                 }
@@ -490,8 +490,8 @@ impl Cx {
     
     pub fn http_send(&self, _verb: &str, _path: &str, _domain: &str, _port: &str, _body: &str) {
     }
-
-    pub fn update_menu(&mut self, _menu:&Menu){
+    
+    pub fn update_menu(&mut self, _menu: &Menu) {
         
     }
 }
@@ -843,9 +843,10 @@ impl FromWasm {
         self.fit(2);
         self.mu32(mapping.geometry_slots as u32);
         self.mu32(mapping.instance_slots as u32);
-        self.add_shvarvec(&mapping.uniforms_cx);
-        self.add_shvarvec(&mapping.uniforms_vw);
-        self.add_shvarvec(&mapping.uniforms_dr);
+        self.add_shvarvec(&mapping.pass_uniforms);
+        self.add_shvarvec(&mapping.view_uniforms);
+        self.add_shvarvec(&mapping.draw_uniforms);
+        self.add_shvarvec(&mapping.uniforms);
         self.add_shvarvec(&mapping.texture_slots);
     }
     
@@ -875,17 +876,24 @@ impl FromWasm {
         self.mu32(inst_vb_id as u32);
     }
     
-    pub fn draw_call(&mut self, shader_id: usize, vao_id: usize, uniforms_cx: &Vec<f32>, uni_cx_update: usize, uniforms_dl: &Vec<f32>, uni_dl_update: usize, uniforms_dr: &Vec<f32>, uni_dr_update: usize, textures: &Vec<u32>) {
-        self.fit(10);
+    pub fn draw_call(
+        &mut self,
+        shader_id: usize,
+        vao_id: usize,
+        uniforms_cx: &[f32],
+        uniforms_dl: &[f32],
+        uniforms_dr: &[f32],
+        uniforms: &[f32],
+        textures: &Vec<u32>
+    ) {
+        self.fit(8);
         self.mu32(6);
         self.mu32(shader_id as u32);
         self.mu32(vao_id as u32);
         self.mu32(uniforms_cx.as_ptr() as u32);
-        self.mu32(uni_cx_update as u32);
         self.mu32(uniforms_dl.as_ptr() as u32);
-        self.mu32(uni_dl_update as u32);
         self.mu32(uniforms_dr.as_ptr() as u32);
-        self.mu32(uni_dr_update as u32);
+        self.mu32(uniforms.as_ptr() as u32);
         self.mu32(textures.as_ptr() as u32);
     }
     
@@ -1054,12 +1062,12 @@ impl FromWasm {
         self.mu32(26);
     }
     
-    pub fn set_default_depth_and_blend_mode(&mut self){
+    pub fn set_default_depth_and_blend_mode(&mut self) {
         self.fit(1);
         self.mu32(27);
     }
-
-    pub fn begin_main_canvas(&mut self,color: Color, depth:f32) {
+    
+    pub fn begin_main_canvas(&mut self, color: Color, depth: f32) {
         self.fit(6);
         self.mu32(28);
         self.mf32(color.r);
@@ -1068,8 +1076,8 @@ impl FromWasm {
         self.mf32(color.a);
         self.mf32(depth);
     }
-
-
+    
+    
     fn add_string(&mut self, msg: &str) {
         let len = msg.chars().count();
         self.fit(len + 1);

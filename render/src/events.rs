@@ -259,7 +259,6 @@ pub enum HitTouch {
 #[derive(Clone, Debug, Default)]
 pub struct HitOpt {
     pub use_multi_touch: bool,
-    pub no_scrolling: bool,
     pub margin: Option<Margin>,
 }
 
@@ -319,9 +318,9 @@ impl Event {
                 }
             },
             Event::FingerScroll(fe) => {
-                let rect = area.get_rect(&cx, opt.no_scrolling);
+                let rect = area.get_rect(&cx);
                 if !fe.handled && rect.contains_with_margin(fe.abs.x, fe.abs.y, &opt.margin) {
-                    fe.handled = true;
+                    //fe.handled = true;
                     return Event::FingerScroll(FingerScrollEvent {
                         rel: Vec2 {x: fe.abs.x - rect.x, y: fe.abs.y - rect.y},
                         rect: rect,
@@ -330,7 +329,7 @@ impl Event {
                 }
             },
             Event::FingerHover(fe) => {
-                let rect = area.get_rect(&cx, opt.no_scrolling);
+                let rect = area.get_rect(&cx);
                 
                 if cx._finger_over_last_area == area {
                     let mut any_down = false;
@@ -349,7 +348,7 @@ impl Event {
                             cx.finger_over_last_area = area;
                         }
                         return Event::FingerHover(FingerHoverEvent {
-                            rel: area.abs_to_rel(cx, fe.abs, opt.no_scrolling),
+                            rel: area.abs_to_rel(cx, fe.abs),
                             rect: rect,
                             any_down:any_down,
                             ..fe.clone()
@@ -358,7 +357,7 @@ impl Event {
                     else {
                         //self.was_over_last_call = false;
                         return Event::FingerHover(FingerHoverEvent {
-                            rel: area.abs_to_rel(cx, fe.abs, opt.no_scrolling),
+                            rel: area.abs_to_rel(cx, fe.abs),
                             rect: rect,
                             any_down:any_down,
                             hover_state: HoverState::Out,
@@ -379,7 +378,7 @@ impl Event {
                         fe.handled = true;
                         //self.was_over_last_call = true;
                         return Event::FingerHover(FingerHoverEvent {
-                            rel: area.abs_to_rel(cx, fe.abs, opt.no_scrolling),
+                            rel: area.abs_to_rel(cx, fe.abs),
                             rect: rect,
                             any_down:any_down,
                             hover_state: HoverState::In,
@@ -393,10 +392,10 @@ impl Event {
                 if cx.captured_fingers[fe.digit] == area {
                     let abs_start = cx.finger_down_abs_start[fe.digit];
                     let rel_start = cx.finger_down_rel_start[fe.digit];
-                    let rect = area.get_rect(&cx, opt.no_scrolling);
+                    let rect = area.get_rect(&cx);
                     return Event::FingerMove(FingerMoveEvent {
                         abs_start: abs_start,
-                        rel: area.abs_to_rel(cx, fe.abs, opt.no_scrolling),
+                        rel: area.abs_to_rel(cx, fe.abs),
                         rel_start: rel_start,
                         rect: rect,
                         is_over: rect.contains_with_margin(fe.abs.x, fe.abs.y, &opt.margin),
@@ -406,7 +405,7 @@ impl Event {
             },
             Event::FingerDown(fe) => {
                 if !fe.handled {
-                    let rect = area.get_rect(&cx, opt.no_scrolling);
+                    let rect = area.get_rect(&cx);
                     if rect.contains_with_margin(fe.abs.x, fe.abs.y, &opt.margin) {
                         // scan if any of the fingers already captured this area
                         if !opt.use_multi_touch {
@@ -417,7 +416,7 @@ impl Event {
                             }
                         }
                         cx.captured_fingers[fe.digit] = area;
-                        let rel = area.abs_to_rel(cx, fe.abs, opt.no_scrolling);
+                        let rel = area.abs_to_rel(cx, fe.abs);
                         cx.finger_down_abs_start[fe.digit] = fe.abs;
                         cx.finger_down_rel_start[fe.digit] = rel;
                         fe.handled = true;
@@ -434,12 +433,12 @@ impl Event {
                     cx.captured_fingers[fe.digit] = Area::Empty;
                     let abs_start = cx.finger_down_abs_start[fe.digit];
                     let rel_start = cx.finger_down_rel_start[fe.digit];
-                    let rect = area.get_rect(&cx, opt.no_scrolling);
+                    let rect = area.get_rect(&cx);
                     return Event::FingerUp(FingerUpEvent {
                         is_over: rect.contains(fe.abs.x, fe.abs.y),
                         abs_start: abs_start,
                         rel_start: rel_start,
-                        rel: area.abs_to_rel(cx, fe.abs, opt.no_scrolling),
+                        rel: area.abs_to_rel(cx, fe.abs),
                         rect: rect,
                         ..fe.clone()
                     })

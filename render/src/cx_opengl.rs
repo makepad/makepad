@@ -26,7 +26,16 @@ fn get_egl_error_string(error: i32) -> &'static str {
 
 impl Cx {
     
-    pub fn render_view(&mut self, pass_id: usize, view_id: usize, full_repaint: bool, view_rect: &Rect, opengl_cx: &OpenglCx, zbias: &mut f32, zbias_step: f32) {
+    pub fn render_view(
+        &mut self,
+        pass_id: usize,
+        view_id: usize,
+        full_repaint: bool,
+        view_rect: &Rect,
+        opengl_cx: &OpenglCx,
+        zbias: &mut f32,
+        zbias_step: f32
+    ) {
         
         // tad ugly otherwise the borrow checker locks 'self' and we can't recur
         let draw_calls_len = self.views[view_id].draw_calls_len;
@@ -124,9 +133,9 @@ impl Cx {
             }
         }
     }
-
-    pub fn set_default_depth_and_blend_mode(){
-        unsafe{
+    
+    pub fn set_default_depth_and_blend_mode() {
+        unsafe {
             gl::Enable(gl::DEPTH_TEST);
             gl::DepthFunc(gl::LEQUAL);
             gl::BlendEquationSeparate(gl::FUNC_ADD, gl::FUNC_ADD);
@@ -149,7 +158,7 @@ impl Cx {
         self.calc_dirty_bounds(pass_id, view_id, &mut view_bounds);
         
         let full_repaint = true; // view_bounds.max_x - view_bounds.min_x > opengl_window.window_geom.inner_size.x - 100.
-            // && view_bounds.max_y - view_bounds.min_y > opengl_window.window_geom.inner_size.y - 100. ||
+        // && view_bounds.max_y - view_bounds.min_y > opengl_window.window_geom.inner_size.y - 100. ||
         // opengl_window.opening_repaint_count < 10;
         if opengl_window.opening_repaint_count < 10 { // for some reason the first repaint doesn't arrive on the window
             opengl_window.opening_repaint_count += 1;
@@ -162,7 +171,7 @@ impl Cx {
             opengl_window.xlib_window.hide_child_windows();
             
             window = opengl_window.xlib_window.window.unwrap();
-
+            
             surface = unsafe {
                 if opengl_window.xlib_window.surface.is_none() {
                     // Create EGL window surface
@@ -180,11 +189,11 @@ impl Cx {
             
             let pix_width = opengl_window.window_geom.inner_size.x * opengl_window.window_geom.dpi_factor;
             let pix_height = opengl_window.window_geom.inner_size.y * opengl_window.window_geom.dpi_factor;
-
+            
             unsafe {
                 // Make EGL context current
                 if EGL_sys::eglMakeCurrent(opengl_cx.display, surface, surface, opengl_cx.context) == EGL_sys::EGL_FALSE {
-
+                    
                     panic!("can't make EGL context current: {}", get_egl_error_string(EGL_sys::eglGetError()));
                 }
                 gl::Viewport(0, 0, pix_width as i32, pix_height as i32);
@@ -223,7 +232,7 @@ impl Cx {
                 pix_width as u32,
                 pix_height as u32
             ).unwrap();
-
+            
             surface = unsafe {
                 if opengl_window.xlib_window.surface.is_none() {
                     // Create EGL window surface
@@ -446,7 +455,7 @@ impl Cx {
             else {
                 gl::GetProgramiv(shader as u32, gl::LINK_STATUS, &mut success);
             };
-
+            
             if success != i32::from(gl::TRUE) {
                 let mut length = 0;
                 if compile {
@@ -654,7 +663,7 @@ impl OpenglCx {
         // Load the gl function pointers
         gl::load_with( | symbol | {
             unsafe {
-                EGL_sys::eglGetProcAddress(CString::new(symbol).unwrap().as_ptr()).map_or(ptr::null(), |ptr| ptr as *const _)
+                EGL_sys::eglGetProcAddress(CString::new(symbol).unwrap().as_ptr()).map_or(ptr::null(), | ptr | ptr as *const _)
             }
         });
         
@@ -666,12 +675,12 @@ impl OpenglCx {
             if display.is_null() {
                 panic!("can't open EGL display connection");
             }
-
+            
             // Initialize EGL display connection
             if EGL_sys::eglInitialize(display, ptr::null_mut(), ptr::null_mut()) == EGL_sys::EGL_FALSE {
                 panic!("can't initialize EGL display connection:: {}", get_egl_error_string(EGL_sys::eglGetError()));
             }
-
+            
             // Choose EGL config
             let attribs = [
                 EGL_sys::EGL_RENDERABLE_TYPE as i32,
@@ -715,7 +724,7 @@ impl OpenglCx {
             if context.is_null() {
                 panic!("can't create EGL context: {}", get_egl_error_string(EGL_sys::eglGetError()));
             }
-
+            
             // Create EGL pbuffer surface
             let attribs = [
                 EGL_sys::EGL_WIDTH as i32,
@@ -881,7 +890,7 @@ pub struct CxPlatformShader {
 
 #[derive(Clone)]
 pub struct OpenglWindow {
-    pub first_draw:bool,
+    pub first_draw: bool,
     pub window_id: usize,
     pub window_geom: WindowGeom,
     pub opening_repaint_count: u32,
@@ -893,7 +902,7 @@ impl OpenglWindow {
     pub fn new(window_id: usize, opengl_cx: &OpenglCx, xlib_app: &mut XlibApp, inner_size: Vec2, position: Option<Vec2>, title: &str) -> OpenglWindow {
         
         let mut xlib_window = XlibWindow::new(xlib_app, window_id);
-       
+        
         // Get native visual id
         let visual_id = unsafe {
             let mut visual_id = 0;
@@ -902,7 +911,7 @@ impl OpenglWindow {
             }
             visual_id
         };
-
+        
         xlib_window.init(title, inner_size, position, visual_id as X11_sys::VisualID);
         
         OpenglWindow {
