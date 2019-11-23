@@ -129,7 +129,7 @@ impl Cx {
         
         if vr_is_presenting {
             self.platform.from_wasm.mark_vr_draw_eye();
-        }
+        } 
         self.render_view(
             pass_id,
             view_id,
