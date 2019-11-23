@@ -27,7 +27,7 @@ https://www.rust-lang.org/tools/install
 
 On linux install these packages to compile makepad:
 ```
-sudo apt get install libegl1-mesa-dev libxcursor-dev libx11-dev
+sudo apt install libegl1-mesa-dev libxcursor-dev libx11-dev
 ```
 
 If you want to play with wasm, install the wasm toolchain
