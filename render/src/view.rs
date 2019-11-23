@@ -461,12 +461,12 @@ pub struct CxView {
     pub clipped: bool
 }
 
-impl CxView {
+impl CxView { 
     pub fn initialize(&mut self, pass_id: usize, clipped: bool, redraw_id: u64) {
         self.clipped = clipped;
         self.redraw_id = redraw_id;
-        self.pass_id = pass_id;
-    }
+        self.pass_id = pass_id; 
+    } 
     
     pub fn get_scrolled_rect(&self)->Rect{
         Rect{
