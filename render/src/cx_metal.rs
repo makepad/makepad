@@ -13,16 +13,39 @@ use crate::cx::*;
 
 impl Cx {
     
-    pub fn render_view(&mut self, pass_id: usize, view_id: usize, metal_cx: &MetalCx, zbias:&mut f32, zbias_step:f32, encoder: &RenderCommandEncoderRef) {
+    pub fn render_view(
+        &mut self,
+        pass_id: usize,
+        view_id: usize,
+        scroll: Vec2,
+        clip: (Vec2,Vec2),
+        zbias: &mut f32,
+        zbias_step: f32,
+        encoder: &RenderCommandEncoderRef,
+        metal_cx: &MetalCx,
+    ) {
         
         // tad ugly otherwise the borrow checker locks 'self' and we can't recur
         let draw_calls_len = self.views[view_id].draw_calls_len;
-        self.views[view_id].set_clipping_uniforms();
+        //self.views[view_id].set_clipping_uniforms();
         self.views[view_id].uniform_view_transform(&Mat4::identity());
+        self.views[view_id].parent_scroll = scroll;
+        let local_scroll = self.views[view_id].get_local_scroll();
+        let clip  =  self.views[view_id].intersect_clip(clip);
+        
         for draw_call_id in 0..draw_calls_len {
             let sub_view_id = self.views[view_id].draw_calls[draw_call_id].sub_view_id;
             if sub_view_id != 0 {
-                self.render_view(pass_id, sub_view_id, metal_cx, zbias, zbias_step, encoder);
+                self.render_view(
+                    pass_id,
+                    sub_view_id,
+                    Vec2 {x: local_scroll.x + scroll.x, y: local_scroll.y + scroll.y},
+                    clip,
+                    zbias,
+                    zbias_step,
+                    encoder,
+                    metal_cx,
+                );
             }
             else {
                 let cxview = &mut self.views[view_id];
@@ -37,18 +60,15 @@ impl Cx {
                     self.platform.bytes_written += draw_call.instance.len() * 4;
                     draw_call.platform.inst_vbuf.update_with_f32_data(metal_cx, &draw_call.instance);
                 }
-
+                
                 // update the zbias uniform if we have it.
-                if  draw_call.uniforms.len() > 0{
-                    if let Some(zbias_offset) = sh.mapping.zbias_uniform_prop{
-                        draw_call.uniforms[zbias_offset] = *zbias;
-                        *zbias += zbias_step;
-                    }
-                }
+                draw_call.set_zbias(*zbias);
+                draw_call.set_local_scroll(scroll, local_scroll);
+                draw_call.set_clip(clip);
+                *zbias += zbias_step;
                 
                 if draw_call.uniforms_dirty {
                     draw_call.uniforms_dirty = false;
-                    //draw_call.platform.uni_dr.update_with_f32_data(device, &draw_call.uniforms);
                 }
                 
                 // lets verify our instance_offset is not disaligned
@@ -61,15 +81,18 @@ impl Cx {
                 if let Some(buf) = &draw_call.platform.inst_vbuf.multi_buffer_read().buffer {encoder.set_vertex_buffer(1, Some(&buf), 0);}
                 else {println!("Drawing error: inst_vbuf None")}
                 
-                let cxuniforms = &self.passes[pass_id].uniforms;
+                let pass_uniforms = self.passes[pass_id].pass_uniforms.as_slice();
+                let view_uniforms = cxview.view_uniforms.as_slice();
+                let draw_uniforms = draw_call.draw_uniforms.as_slice();
                 
-                encoder.set_vertex_bytes(2, (cxuniforms.len() * 4) as u64, cxuniforms.as_ptr() as *const std::ffi::c_void);
-                encoder.set_vertex_bytes(3, (cxview.uniforms.len() * 4) as u64, cxview.uniforms.as_ptr() as *const std::ffi::c_void);
-                encoder.set_vertex_bytes(4, (draw_call.uniforms.len() * 4) as u64, draw_call.uniforms.as_ptr() as *const std::ffi::c_void);
-                encoder.set_fragment_bytes(0, (cxuniforms.len() * 4) as u64, cxuniforms.as_ptr() as *const std::ffi::c_void);
-                encoder.set_fragment_bytes(1, (cxview.uniforms.len() * 4) as u64, cxview.uniforms.as_ptr() as *const std::ffi::c_void);
-                encoder.set_fragment_bytes(2, (draw_call.uniforms.len() * 4) as u64, draw_call.uniforms.as_ptr() as *const std::ffi::c_void);
-                
+                encoder.set_vertex_bytes(2, (pass_uniforms.len() * 4) as u64, pass_uniforms.as_ptr() as *const std::ffi::c_void);
+                encoder.set_vertex_bytes(3, (view_uniforms.len() * 4) as u64, view_uniforms.as_ptr() as *const std::ffi::c_void);
+                encoder.set_vertex_bytes(4, (draw_uniforms.len() * 4) as u64, draw_uniforms.as_ptr() as *const std::ffi::c_void);
+                encoder.set_vertex_bytes(5, (draw_call.uniforms.len() * 4) as u64, draw_call.uniforms.as_ptr() as *const std::ffi::c_void);
+                encoder.set_fragment_bytes(0, (pass_uniforms.len() * 4) as u64, pass_uniforms.as_ptr() as *const std::ffi::c_void);
+                encoder.set_fragment_bytes(1, (view_uniforms.len() * 4) as u64, view_uniforms.as_ptr() as *const std::ffi::c_void);
+                encoder.set_fragment_bytes(2, (draw_uniforms.len() * 4) as u64, draw_uniforms.as_ptr() as *const std::ffi::c_void);
+                encoder.set_fragment_bytes(3, (draw_call.uniforms.len() * 4) as u64, draw_call.uniforms.as_ptr() as *const std::ffi::c_void);
                 // lets set our textures
                 for (i, texture_id) in draw_call.textures_2d.iter().enumerate() {
                     let cxtexture = &mut self.textures[*texture_id as usize];
@@ -108,10 +131,10 @@ impl Cx {
         self.passes[pass_id].set_ortho_matrix(Vec2::zero(), pass_size);
         self.passes[pass_id].uniform_camera_view(&Mat4::identity());
         self.passes[pass_id].paint_dirty = false;
-        let dpi_factor = if let Some(override_dpi_factor) = self.passes[pass_id].override_dpi_factor{
+        let dpi_factor = if let Some(override_dpi_factor) = self.passes[pass_id].override_dpi_factor {
             override_dpi_factor
         }
-        else{
+        else {
             inherit_dpi_factor
         };
         self.passes[pass_id].set_dpi_factor(dpi_factor);
@@ -140,17 +163,17 @@ impl Cx {
             
             color_attachment.set_store_action(MTLStoreAction::Store);
             
-            match color_texture.clear_color{
-                ClearColor::InitWith(color)=>{
-                    if is_initial{
+            match color_texture.clear_color {
+                ClearColor::InitWith(color) => {
+                    if is_initial {
                         color_attachment.set_load_action(MTLLoadAction::Clear);
                         color_attachment.set_clear_color(MTLClearColor::new(color.r as f64, color.g as f64, color.b as f64, color.a as f64));
                     }
-                    else{
+                    else {
                         color_attachment.set_load_action(MTLLoadAction::Load);
                     }
                 },
-                ClearColor::ClearWith(color)=>{
+                ClearColor::ClearWith(color) => {
                     color_attachment.set_load_action(MTLLoadAction::Clear);
                     color_attachment.set_clear_color(MTLClearColor::new(color.r as f64, color.g as f64, color.b as f64, color.a as f64));
                 }
@@ -169,9 +192,9 @@ impl Cx {
             }
             depth_attachment.set_store_action(MTLStoreAction::Store);
             
-            match self.passes[pass_id].clear_depth{
-                ClearDepth::InitWith(depth)=>{
-                    if is_initial{
+            match self.passes[pass_id].clear_depth {
+                ClearDepth::InitWith(depth) => {
+                    if is_initial {
                         depth_attachment.set_load_action(MTLLoadAction::Clear);
                         depth_attachment.set_clear_depth(depth);
                     }
@@ -179,7 +202,7 @@ impl Cx {
                         depth_attachment.set_load_action(MTLLoadAction::Load);
                     }
                 },
-                ClearDepth::ClearWith(depth)=>{
+                ClearDepth::ClearWith(depth) => {
                     depth_attachment.set_load_action(MTLLoadAction::Clear);
                     depth_attachment.set_clear_depth(depth);
                 }
@@ -218,7 +241,17 @@ impl Cx {
             }
             let mut zbias = 0.0;
             let zbias_step = self.passes[pass_id].zbias_step;
-            self.render_view(pass_id, view_id, &metal_cx, &mut zbias, zbias_step, encoder);
+            
+            self.render_view(
+                pass_id,
+                view_id,
+                Vec2::zero(),
+                (Vec2{x:-50000.,y:-50000.},Vec2{x:50000.,y:50000.}),
+                &mut zbias,
+                zbias_step,
+                encoder,
+                &metal_cx,
+            );
             
             encoder.end_encoding();
             command_buffer.present_drawable(&drawable);
@@ -250,7 +283,16 @@ impl Cx {
         }
         let mut zbias = 0.0;
         let zbias_step = self.passes[pass_id].zbias_step;
-        self.render_view(pass_id, view_id, &metal_cx, &mut zbias, zbias_step, encoder);
+        self.render_view(
+            pass_id,
+            view_id,
+            Vec2::zero(),
+            (Vec2{x:-50000.,y:-50000.},Vec2{x:50000.,y:50000.}),
+            &mut zbias,
+            zbias_step,
+            encoder,
+            &metal_cx,
+        );
         
         encoder.end_encoding();
         command_buffer.commit();
@@ -283,7 +325,7 @@ impl MetalCx {
         }
     }
     
-    pub fn update_platform_render_target(&self, cxtexture: &mut CxTexture, dpi_factor: f32, size: Vec2, is_depth: bool)->bool {
+    pub fn update_platform_render_target(&self, cxtexture: &mut CxTexture, dpi_factor: f32, size: Vec2, is_depth: bool) -> bool {
         
         let width = if let Some(width) = cxtexture.desc.width {width as u64} else {(size.x * dpi_factor) as u64};
         let height = if let Some(height) = cxtexture.desc.height {height as u64} else {(size.y * dpi_factor) as u64};
@@ -434,7 +476,7 @@ impl MetalWindow {
         }
         
         MetalWindow {
-            first_draw:true,
+            first_draw: true,
             window_id,
             cal_size: Vec2::zero(),
             core_animation_layer,

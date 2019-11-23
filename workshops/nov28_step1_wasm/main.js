@@ -23,7 +23,7 @@ function main_wasm(wasm) {
     let rust = wasm.instance.exports;
     // lets call the wasm function
     let vec = grab_float_vec(rust, rust.hello_world(10));
-    
+    console.log("hello")
     console.log(vec.buf);
     
     // free it again

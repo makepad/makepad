@@ -325,14 +325,14 @@ pub struct CxShaderMapping {
     pub geometry_slots: usize,
     pub geometries: Vec<ShVar>,
     pub instances: Vec<ShVar>,
-    pub uniforms_dr: Vec<ShVar>,
-    pub uniforms_vw: Vec<ShVar>,
-    pub uniforms_cx: Vec<ShVar>,
+    pub draw_uniforms: Vec<ShVar>,
+    pub view_uniforms: Vec<ShVar>,
+    pub pass_uniforms: Vec<ShVar>,
+    pub uniforms: Vec<ShVar>,
     pub texture_slots: Vec<ShVar>,
     pub rect_instance_props: RectInstanceProps,
     pub uniform_props: UniformProps,
     pub instance_props: InstanceProps,
-    pub zbias_uniform_prop: Option<usize>
 }
 
 #[derive(Default, Clone)]

@@ -180,7 +180,7 @@ impl Tab {
         if !self.animator.term_anim_playing() {
             match self.tab_close.handle_tab_close(cx, event) {
                 ButtonEvent::Down => {
-                    self._close_anim_rect = self._bg_area.get_rect(cx, false);
+                    self._close_anim_rect = self._bg_area.get_rect(cx);
                     self.animator.play_anim(cx, self.anim_close(cx));
                     return TabEvent::Closing;
                 },
@@ -274,7 +274,7 @@ impl Tab {
     }
     
     pub fn get_tab_rect(&mut self, cx: &Cx) -> Rect {
-        self._bg_area.get_rect(cx, false)
+        self._bg_area.get_rect(cx)
     }
     
     pub fn begin_tab(&mut self, cx: &mut Cx) -> Result<(), ()> {

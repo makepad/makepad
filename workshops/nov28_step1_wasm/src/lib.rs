@@ -26,7 +26,7 @@ pub extern "C" fn hello_world(amount: u32) -> u32 {
     // this is the data we are returning
     let mut data = Vec::new();
     for i in 0..amount {
-        data.push(i as f32)
+        data.push(45.+i as f32)
     }
     vec_to_js(data)
 }

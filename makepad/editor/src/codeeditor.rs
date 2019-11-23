@@ -371,14 +371,14 @@ impl CodeEditor {
             const border_radius: float = 2.;
             
             fn vertex() -> vec4 { // custom vertex shader because we widen the draweable area a bit for the gloopiness
-                let shift: vec2 = -view_scroll * view_do_scroll;
+                let shift: vec2 = -draw_scroll;
                 let clipped: vec2 = clamp(
                     geom * vec2(w + 16., h) + vec2(x, y) + shift - vec2(8., 0.),
-                    view_clip.xy,
-                    view_clip.zw
+                    draw_clip.xy,
+                    draw_clip.zw
                 );
                 pos = (clipped - shift - vec2(x, y)) / vec2(w, h);
-                return camera_projection * (camera_view * (view_transform * vec4(clipped.x, clipped.y, z + zbias, 1.)));
+                return camera_projection * (camera_view * (view_transform * vec4(clipped.x, clipped.y, z + draw_zbias, 1.)));
             }
             
             fn pixel() -> vec4 {
@@ -861,7 +861,7 @@ impl CodeEditor {
             _ => ()
         }
         // editor local
-        match event.hits(cx, self.view.get_view_area(cx), HitOpt {no_scrolling: true, ..Default::default()}) {
+        match event.hits(cx, self.view.get_view_area(cx), HitOpt::default()) {
             Event::KeyFocusLost(_kf) => {
                 self.view.redraw_view_area(cx)
             },
@@ -982,7 +982,8 @@ impl CodeEditor {
             return Err(())
         }
         else {
-            self.bg.draw_quad_rel(cx, Rect {x: 0., y: 0., w: cx.get_width_total(), h: cx.get_height_total()});
+            let inst = self.bg.draw_quad_rel(cx, Rect {x: 0., y: 0., w: cx.get_width_total(), h: cx.get_height_total()});
+            inst.set_do_scroll(cx, false, false);
             //let bg_area = bg_inst.into_area();
             let view_area = self.view.get_view_area(cx);
             cx.update_area_refs(self._view_area, view_area);
@@ -1006,7 +1007,8 @@ impl CodeEditor {
             self._cursor_area = cx.new_instance_draw_call(&self.cursor.shader, 0).into();
             
             if self.draw_line_numbers {
-                self.gutter_bg.draw_quad_rel(cx, Rect {x: 0., y: 0., w: self.line_number_width, h: cx.get_height_total()});
+                let inst = self.gutter_bg.draw_quad_rel(cx, Rect {x: 0., y: 0., w: self.line_number_width, h: cx.get_height_total()});
+                inst.set_do_scroll(cx, false, false);
                 cx.new_instance_draw_call(&self.text.shader, 0);
                 self._line_number_inst = Some(self.line_number_text.begin_text(cx));
             }
@@ -1808,7 +1810,7 @@ impl CodeEditor {
     
     fn compute_grid_text_pos_from_abs(&mut self, cx: &Cx, abs: Vec2) -> TextPos {
         //
-        let rel = self.view.get_view_area(cx).abs_to_rel(cx, abs, false);
+        let rel = self.view.get_view_area(cx).abs_to_rel(cx, abs);
         let mut mono_size = Vec2::zero();
         for (row, geom) in self._line_geometry.iter().enumerate() {
             //let geom = &self._line_geometry[pos.row];
@@ -1824,7 +1826,8 @@ impl CodeEditor {
     }
     
     fn compute_offset_from_ypos(&mut self, cx: &Cx, ypos_abs: f32, text_buffer: &TextBuffer, end: bool) -> usize {
-        let rel = self.view.get_view_area(cx).abs_to_rel(cx, Vec2 {x: 0.0, y: ypos_abs}, false);
+        let rel = self.view.get_view_area(cx).abs_to_rel(cx, Vec2 {x: 0.0, y: ypos_abs});
+        println!("{} {}",ypos_abs, rel.y);
         let mut mono_size;
         // = Vec2::zero();
         let end_col = if end {1 << 31}else {0};
@@ -1937,7 +1940,7 @@ impl CodeEditor {
     
     fn compute_focussed_line_for_folding(&self, cx: &Cx, text_buffer: &TextBuffer) -> usize {
         let scroll = self.view.get_scroll_pos(cx);
-        let rect = self.view.get_view_area(cx).get_rect(cx, false);
+        let rect = self.view.get_view_area(cx).get_rect(cx);
         
         // first try if our last cursor is in view
         let pos = self.cursors.get_last_cursor_text_pos(text_buffer);

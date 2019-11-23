@@ -650,7 +650,7 @@ impl HubWorkspace {
             if let Some(http_server) = &mut *http_server {
                 http_server.send_build_start();
             }
-        };
+        }; 
         
         let abs_root_path = self.get_project_abs(uid, project) ?;
         
@@ -684,7 +684,7 @@ impl HubWorkspace {
         while let Ok(line) = rx_line.recv() {
             if let Some((_is_stderr, line)) = line {
                 
-                // lets parse the line
+                // lets parse the line 
                 let mut parsed: serde_json::Result<RustcCompilerMessage> = serde_json::from_str(&line);
                 match &mut parsed {
                     Err(_) => (), //self.hub_log.log(&format!("Json Parse Error {:?} {}", err, line)),
@@ -696,14 +696,14 @@ impl HubWorkspace {
                                 let span = spans[i].clone();
                                 if !span.is_primary {
                                     continue
-                                }
-                                
+                                }    
+                                      
                                 let mut msg = message.message.clone();
-                                
+                                  
                                 for child in &message.children {
                                     msg.push_str(" - ");
                                     msg.push_str(&child.message);
-                                }
+                                } 
                                 msg = msg.replace("\n","");
                                 // lets try to pull path out of rendered, this fixes some rust bugs
                                 let mut path = span.file_name;

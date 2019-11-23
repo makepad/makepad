@@ -547,7 +547,7 @@ impl FileTree {
         if let Some(fe) = drag_end {
             self._drag_move = None;
             let paths = Self::get_marked_paths(&mut self.root_node);
-            if !self.view.get_view_area(cx).get_rect(cx, true).contains(fe.abs.x, fe.abs.y) {
+            if !self.view.get_view_area(cx).get_rect(cx).contains(fe.abs.x, fe.abs.y) {
                 return FileTreeEvent::DragEnd {
                     fe: fe.clone(),
                     paths: paths
@@ -559,7 +559,7 @@ impl FileTree {
                 // lets check if we are over our own filetree
                 // ifso, we need to support moving files with directories
                 let paths = Self::get_marked_paths(&mut self.root_node);
-                if !self.view.get_view_area(cx).get_rect(cx, true).contains(fe.abs.x, fe.abs.y) {
+                if !self.view.get_view_area(cx).get_rect(cx).contains(fe.abs.x, fe.abs.y) {
                     return FileTreeEvent::DragMove {
                         fe: fe.clone(),
                         paths: paths

@@ -231,7 +231,7 @@ impl TabControl {
             // lets scroll the thing into view
             if let Some(tab_id) = self._tab_now_selected{
                 if let Some(tab) = self.tabs.get(tab_id){
-                    let tab_rect = tab._bg_area.get_rect(cx, true);
+                    let tab_rect = tab._bg_area.get_rect(cx);
                     self.tabs_view.scroll_into_view_abs(cx, tab_rect);
                 }
             }
