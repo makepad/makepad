@@ -30,7 +30,7 @@ impl Cx {
         &mut self,
         pass_id: usize,
         view_id: usize,
-        scroll: Vec2, 
+        scroll: Vec2,
         clip: (Vec2, Vec2),
         full_repaint: bool,
         view_rect: &Rect,
@@ -41,7 +41,7 @@ impl Cx {
         
         // tad ugly otherwise the borrow checker locks 'self' and we can't recur
         let draw_calls_len = self.views[view_id].draw_calls_len;
-        if !full_repaint && !view_rect.intersects(self.views[view_id].rect) {
+        if !full_repaint && !view_rect.intersects(self.views[view_id].get_scrolled_rect()) {
             return
         }
         self.views[view_id].uniform_view_transform(&Mat4::identity());
@@ -51,7 +51,17 @@ impl Cx {
         for draw_call_id in 0..draw_calls_len {
             let sub_view_id = self.views[view_id].draw_calls[draw_call_id].sub_view_id;
             if sub_view_id != 0 {
-                self.render_view(pass_id, sub_view_id, full_repaint, view_rect, opengl_cx, zbias, zbias_step);
+                self.render_view(
+                    pass_id,
+                    sub_view_id,
+                    Vec2 {x: local_scroll.x + scroll.x, y: local_scroll.y + scroll.y},
+                    clip,
+                    full_repaint,
+                    view_rect,
+                    opengl_cx,
+                    zbias,
+                    zbias_step
+                );
             }
             else {
                 let cxview = &mut self.views[view_id];
@@ -67,12 +77,10 @@ impl Cx {
                 
                 draw_call.platform.check_vao(draw_call.shader_id, &shp);
                 
-                if draw_call.uniforms.len() > 0 {
-                    if let Some(zbias_offset) = sh.mapping.zbias_uniform_prop {
-                        draw_call.uniforms[zbias_offset] = *zbias;
-                        *zbias += zbias_step;
-                    }
-                }
+                draw_call.set_zbias(*zbias);
+                draw_call.set_local_scroll(scroll, local_scroll);
+                draw_call.set_clip(clip);
+                *zbias += zbias_step;
                 
                 if draw_call.uniforms_dirty {
                     draw_call.uniforms_dirty = false;
@@ -84,11 +92,14 @@ impl Cx {
                     let instances = draw_call.instance.len() / sh.mapping.instance_slots;
                     let indices = sh.shader_gen.geometry_indices.len();
                     
-                    let cxuniforms = &self.passes[pass_id].uniforms;
+                    let pass_uniforms = self.passes[pass_id].pass_uniforms.as_slice();
+                    let view_uniforms = cxview.view_uniforms.as_slice();
+                    let draw_uniforms = draw_call.draw_uniforms.as_slice();
                     
-                    opengl_cx.set_uniform_buffer(&shp.uniforms_cx, &cxuniforms);
-                    opengl_cx.set_uniform_buffer(&shp.uniforms_vw, &cxview.uniforms);
-                    opengl_cx.set_uniform_buffer(&shp.uniforms_dr, &draw_call.uniforms);
+                    opengl_cx.set_uniform_buffer(&shp.pass_uniforms, pass_uniforms);
+                    opengl_cx.set_uniform_buffer(&shp.view_uniforms, view_uniforms);
+                    opengl_cx.set_uniform_buffer(&shp.draw_uniforms, draw_uniforms);
+                    opengl_cx.set_uniform_buffer(&shp.uniforms, &draw_call.uniforms);
                     
                     // lets set our textures
                     for (i, texture_id) in draw_call.textures_2d.iter().enumerate() {
@@ -132,7 +143,7 @@ impl Cx {
                 //let shp = sh.platform.as_ref().unwrap();
                 
                 if draw_call.instance_dirty || draw_call.uniforms_dirty {
-                    view_bounds.add_rect(&cxview.rect);
+                    view_bounds.add_rect(&cxview.get_inverse_scrolled_rect());
                 }
             }
         }
@@ -154,17 +165,17 @@ impl Cx {
         dpi_factor: f32,
         opengl_window: &mut OpenglWindow,
         opengl_cx: &OpenglCx,
+        force_full_repaint: bool,
     ) -> bool {
         let view_id = self.passes[pass_id].main_view_id.unwrap();
         
         let mut view_bounds = ViewBounds::new();
         let mut init_repaint = false;
         self.calc_dirty_bounds(pass_id, view_id, &mut view_bounds);
-        
-        let full_repaint =  view_bounds.max_x - view_bounds.min_x > opengl_window.window_geom.inner_size.x - 100.
+        println!("{:?}", view_bounds);
+        let full_repaint =  force_full_repaint || view_bounds.max_x - view_bounds.min_x > opengl_window.window_geom.inner_size.x - 100.
          && view_bounds.max_y - view_bounds.min_y > opengl_window.window_geom.inner_size.y - 100. ||
          opengl_window.opening_repaint_count < 10;
-        
         if opengl_window.opening_repaint_count < 10 { // for some reason the first repaint doesn't arrive on the window
             opengl_window.opening_repaint_count += 1;
             init_repaint = true;
@@ -239,15 +250,18 @@ impl Cx {
             ).unwrap();
             
             surface = unsafe {
-                if opengl_window.xlib_window.surface.is_none() {
+                let cwindow = opengl_window.xlib_window.child_windows.iter_mut().find(|cw| cw.window == window).unwrap();
+                if cwindow.surface.is_none() {
                     // Create EGL window surface
                     let surface = EGL_sys::eglCreateWindowSurface(opengl_cx.display, opengl_cx.config, window, ptr::null_mut());
                     if surface.is_null() {
-                        panic!("can't create EGL window surface: {}", get_egl_error_string(EGL_sys::eglGetError()));
+                        // do a full repaint
+                        return self.draw_pass_to_window(pass_id, dpi_factor, opengl_window, opengl_cx, true);
+                        //panic!("can't create EGL window surface: {} {}", get_egl_error_string(EGL_sys::eglGetError()), window);
                     }
-                    opengl_window.xlib_window.surface = Some(surface);
+                    cwindow.surface = Some(surface);
                 }
-                opengl_window.xlib_window.surface.unwrap()
+                cwindow.surface.unwrap()
             };
             
             //let pass_size = self.passes[pass_id].pass_size;
@@ -294,7 +308,17 @@ impl Cx {
         let mut zbias = 0.0;
         let zbias_step = self.passes[pass_id].zbias_step;
         
-        self.render_view(pass_id, view_id, full_repaint, &view_rect, &opengl_cx, &mut zbias, zbias_step);
+        self.render_view(
+            pass_id,
+            view_id,
+            Vec2::zero(),
+            (Vec2 {x: -50000., y: -50000.}, Vec2 {x: 50000., y: 50000.}),
+            full_repaint,
+            &view_rect,
+            &opengl_cx,
+            &mut zbias,
+            zbias_step
+        );
         
         unsafe {
             EGL_sys::eglSwapBuffers(opengl_cx.display, surface);
@@ -329,9 +353,9 @@ impl Cx {
         // make a framebuffer
         if self.passes[pass_id].platform.gl_framebuffer.is_none() {
             unsafe {
-                let mut gl_framebuffer = mem::uninitialized();
-                gl::GenFramebuffers(1, &mut gl_framebuffer);
-                self.passes[pass_id].platform.gl_framebuffer = Some(gl_framebuffer);
+                let mut gl_framebuffer = std::mem::MaybeUninit::uninit();
+                gl::GenFramebuffers(1, gl_framebuffer.as_mut_ptr());
+                self.passes[pass_id].platform.gl_framebuffer = Some(gl_framebuffer.assume_init());
             }
         }
         
@@ -399,7 +423,17 @@ impl Cx {
         let zbias_step = self.passes[pass_id].zbias_step;
         let view_id = self.passes[pass_id].main_view_id.unwrap();
         
-        self.render_view(pass_id, view_id, true, &Rect::zero(), &opengl_cx, &mut zbias, zbias_step);
+        self.render_view(
+            pass_id,
+            view_id,
+            Vec2::zero(),
+            (Vec2 {x: -50000., y: -50000.}, Vec2 {x: 50000., y: 50000.}),
+            true,
+            &Rect::zero(),
+            &opengl_cx,
+            &mut zbias,
+            zbias_step
+        );
         
     }
     
@@ -599,7 +633,7 @@ impl Cx {
             
             // lets fetch the uniform positions for our uniforms
             sh.platform = Some(CxPlatformShader {
-                program: program,
+                program: program, 
                 geom_ibuf: {
                     let mut buf = OpenglBuffer::default();
                     buf.update_with_u32_data(opengl_cx, &sh.shader_gen.geometry_indices);
@@ -612,9 +646,10 @@ impl Cx {
                 },
                 geom_attribs,
                 inst_attribs,
-                uniforms_cx: Self::opengl_get_uniforms(program, &sh.shader_gen, &mapping.uniforms_cx),
-                uniforms_vw: Self::opengl_get_uniforms(program, &sh.shader_gen, &mapping.uniforms_vw),
-                uniforms_dr: Self::opengl_get_uniforms(program, &sh.shader_gen, &mapping.uniforms_dr),
+                pass_uniforms: Self::opengl_get_uniforms(program, &sh.shader_gen, &mapping.pass_uniforms),
+                view_uniforms: Self::opengl_get_uniforms(program, &sh.shader_gen, &mapping.view_uniforms),
+                draw_uniforms: Self::opengl_get_uniforms(program, &sh.shader_gen, &mapping.draw_uniforms),
+                uniforms: Self::opengl_get_uniforms(program, &sh.shader_gen, &mapping.uniforms),
             });
             sh.mapping = mapping;
             return Ok(());
@@ -622,7 +657,7 @@ impl Cx {
     }
 }
 
-#[derive(Clone, PartialEq)]
+#[derive(Clone, PartialEq, Debug)]
 pub struct ViewBounds {
     pub min_x: f32,
     pub min_y: f32,
@@ -752,7 +787,7 @@ impl OpenglCx {
         }
     }
     
-    pub fn set_uniform_buffer(&self, locs: &Vec<OpenglUniform>, uni: &Vec<f32>) {
+    pub fn set_uniform_buffer(&self, locs: &Vec<OpenglUniform>, uni: &[f32]) {
         
         let mut o = 0;
         for loc in locs {
@@ -803,19 +838,20 @@ impl OpenglCx {
             cxtexture.platform.width = width as u64;
             cxtexture.platform.height = height as u64;
             
-            let mut gl_texture;
-            match cxtexture.platform.gl_texture {
+            let gl_texture = match cxtexture.platform.gl_texture {
                 None => {
                     unsafe {
-                        gl_texture = mem::uninitialized();
-                        gl::GenTextures(1, &mut gl_texture);
+                        let mut gl_texture = std::mem::MaybeUninit::uninit();
+                        gl::GenTextures(1, gl_texture.as_mut_ptr());
+                        let gl_texture = gl_texture.assume_init();
                         cxtexture.platform.gl_texture = Some(gl_texture);
+                        gl_texture
                     }
                 }
                 Some(gl_texture_old) => {
-                    gl_texture = gl_texture_old
+                    gl_texture_old
                 }
-            }
+            };
             unsafe {
                 gl::BindTexture(gl::TEXTURE_2D, gl_texture);
                 gl::TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_MIN_FILTER, gl::LINEAR as i32);
@@ -841,8 +877,9 @@ impl OpenglCx {
                 gl::DeleteTextures(1, &gl_texture);
             }
             
-            let mut gl_texture = mem::uninitialized();
-            gl::GenTextures(1, &mut gl_texture);
+            let mut gl_texture = std::mem::MaybeUninit::uninit();
+            gl::GenTextures(1, gl_texture.as_mut_ptr());
+            let gl_texture = gl_texture.assume_init();
             gl::BindTexture(gl::TEXTURE_2D, gl_texture);
             gl::TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_MIN_FILTER, gl::LINEAR as i32);
             gl::TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_MAG_FILTER, gl::LINEAR as i32);
@@ -887,9 +924,10 @@ pub struct CxPlatformShader {
     pub geom_ibuf: OpenglBuffer,
     pub geom_attribs: Vec<OpenglAttribute>,
     pub inst_attribs: Vec<OpenglAttribute>,
-    pub uniforms_cx: Vec<OpenglUniform>,
-    pub uniforms_vw: Vec<OpenglUniform>,
-    pub uniforms_dr: Vec<OpenglUniform>,
+    pub pass_uniforms: Vec<OpenglUniform>,
+    pub view_uniforms: Vec<OpenglUniform>,
+    pub draw_uniforms: Vec<OpenglUniform>,
+    pub uniforms: Vec<OpenglUniform>
 }
 
 
@@ -985,8 +1023,9 @@ impl CxPlatformDrawCall {
             self.free_vao();
             // create the VAO
             unsafe {
-                let mut vao = mem::uninitialized();
-                gl::GenVertexArrays(1, &mut vao);
+                let mut vao = std::mem::MaybeUninit::uninit();
+                gl::GenVertexArrays(1, vao.as_mut_ptr());
+                let vao = vao.assume_init();
                 gl::BindVertexArray(vao);
                 
                 // bind the vertex and indexbuffers
@@ -1046,9 +1085,9 @@ impl OpenglBuffer {
     
     pub fn alloc_gl_buffer(&mut self) {
         unsafe {
-            let mut gl_buffer = mem::uninitialized();
-            gl::GenBuffers(1, &mut gl_buffer);
-            self.gl_buffer = Some(gl_buffer);
+            let mut gl_buffer = std::mem::MaybeUninit::uninit();
+            gl::GenBuffers(1, gl_buffer.as_mut_ptr());
+            self.gl_buffer = Some(gl_buffer.assume_init());
         }
     }
     
