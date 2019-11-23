@@ -476,6 +476,15 @@ impl CxView {
             h:self.rect.h ,
         }
     }
+
+    pub fn get_inverse_scrolled_rect(&self)->Rect{
+        Rect{
+            x:self.rect.x - self.parent_scroll.x,
+            y:self.rect.y - self.parent_scroll.y,
+            w:self.rect.w, 
+            h:self.rect.h ,
+        }
+    }
     
     pub fn intersect_clip(&self, clip: (Vec2, Vec2)) -> (Vec2, Vec2) {
         if self.clipped {
