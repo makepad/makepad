@@ -166,9 +166,9 @@ impl XlibApp {
             
             while self.event_loop_running {
                 if self.loop_block {
-                    let mut fds = mem::uninitialized();
-                    libc::FD_ZERO(&mut fds);
-                    libc::FD_SET(self.display_fd, &mut fds);
+                    let mut fds = mem::MaybeUninit::uninit();
+                    libc::FD_ZERO(fds.as_mut_ptr());
+                    libc::FD_SET(self.display_fd, fds.as_mut_ptr());
                     // If there are any timers, we set the timeout for select to the `delta_timeout`
                     // of the first timer that should be fired. Otherwise, we set the timeout to
                     // None, so that select will block indefinitely.
@@ -187,7 +187,7 @@ impl XlibApp {
                     };
                     let _nfds = libc::select(
                         self.display_fd + 1,
-                        &mut fds,
+                        fds.as_mut_ptr(),
                         ptr::null_mut(),
                         ptr::null_mut(),
                         if let Some(mut timeout) = timeout {&mut timeout} else {ptr::null_mut()}
@@ -223,8 +223,9 @@ impl XlibApp {
                 }
                 
                 while self.display != ptr::null_mut() && X11_sys::XPending(self.display) != 0 {
-                    let mut event = mem::uninitialized();
-                    X11_sys::XNextEvent(self.display, &mut event);
+                    let mut event = mem::MaybeUninit::uninit();
+                    X11_sys::XNextEvent(self.display, event.as_mut_ptr());
+                    let mut event = event.assume_init();
                     match event.type_ as u32 {
                         X11_sys::SelectionNotify => {
                             let selection = event.xselection; 
@@ -232,11 +233,11 @@ impl XlibApp {
                                 self.dnd.handle_selection_event(&selection);
                             } else {
                                 // first get the size of the thing
-                                let mut actual_type = mem::uninitialized();
-                                let mut actual_format = mem::uninitialized();
-                                let mut n_items = mem::uninitialized();
-                                let mut bytes_to_read = mem::uninitialized();
-                                let mut ret = mem::uninitialized(); 
+                                let mut actual_type = mem::MaybeUninit::uninit();
+                                let mut actual_format = mem::MaybeUninit::uninit();
+                                let mut n_items = mem::MaybeUninit::uninit();
+                                let mut bytes_to_read = mem::MaybeUninit::uninit();
+                                let mut ret = mem::MaybeUninit::uninit();
                                 X11_sys::XGetWindowProperty(
                                     self.display,
                                     selection.requestor, 
@@ -245,14 +246,18 @@ impl XlibApp {
                                     0,
                                     0,
                                     X11_sys::AnyPropertyType as c_ulong,  
-                                    &mut actual_type,
-                                    &mut actual_format,
-                                    &mut n_items,
-                                    &mut bytes_to_read,
-                                    &mut ret
+                                    actual_type.as_mut_ptr(),
+                                    actual_format.as_mut_ptr(),
+                                    n_items.as_mut_ptr(),
+                                    bytes_to_read.as_mut_ptr(),
+                                    ret.as_mut_ptr()
                                 );
-                                //read all of it
-                                let mut bytes_after = mem::uninitialized();
+                                //let actual_type = actual_type.assume_init();
+                                //let actual_format = actual_format.assume_init();
+                                //let n_items = n_items.assume_init();
+                                let bytes_to_read = bytes_to_read.assume_init();
+                                //let mut ret = ret.assume_init();
+                                let mut bytes_after = mem::MaybeUninit::uninit();
                                 X11_sys::XGetWindowProperty(
                                     self.display,
                                     selection.requestor, 
@@ -261,12 +266,14 @@ impl XlibApp {
                                     bytes_to_read as c_long,
                                     0,
                                     X11_sys::AnyPropertyType as c_ulong,  
-                                    &mut actual_type,
-                                    &mut actual_format,
-                                    &mut n_items,
-                                    &mut bytes_after,
-                                    &mut ret
+                                    actual_type.as_mut_ptr(),
+                                    actual_format.as_mut_ptr(),
+                                    n_items.as_mut_ptr(),
+                                    bytes_after.as_mut_ptr(),
+                                    ret.as_mut_ptr()
                                 );
+                                let ret = ret.assume_init();
+                                //let bytes_after = bytes_after.assume_init();
                                 if ret != ptr::null_mut() && bytes_to_read > 0{
                                     let utf8_slice = std::slice::from_raw_parts::<u8>(ret as *const _ as *const u8, bytes_to_read as usize);
                                     if let Ok(utf8_string) = String::from_utf8(utf8_slice.to_vec()){
@@ -559,7 +566,7 @@ impl XlibApp {
                                                     },
                                                     _ => ()
                                                 };
-                                            }
+                                            } 
                                             _ => ()
                                         }
                                     }
@@ -573,17 +580,19 @@ impl XlibApp {
                                 }
                                 
                                 // decode the character
-                                let mut buffer: [u8; 32] = mem::uninitialized();
-                                let mut keysym = mem::uninitialized();
-                                let mut status = mem::uninitialized();
+                                let mut buffer = [0u8; 32];
+                                let mut keysym = mem::MaybeUninit::uninit();
+                                let mut status = mem::MaybeUninit::uninit();
                                 let count = X11_sys::Xutf8LookupString(
                                     window.xic.unwrap(),
                                     &mut event.xkey,
                                     buffer.as_mut_ptr() as *mut c_char,
                                     buffer.len() as c_int,
-                                    &mut keysym,
-                                    &mut status,
+                                    keysym.as_mut_ptr(),
+                                    status.as_mut_ptr(),
                                 );
+                                //let keysym = keysym.assume_init();
+                                let status = status.assume_init();
                                 if status != X11_sys::XBufferOverflow {
                                     let utf8 = std::str::from_utf8(&buffer[..count as usize]).unwrap_or("").to_string();
                                     let char_code = utf8.chars().next().unwrap_or('\0');
@@ -1287,11 +1296,11 @@ impl XlibWindow {
         let mut maximized = false;
         unsafe {
             let xlib_app = &(*self.xlib_app);
-            let mut prop_type = mem::uninitialized();
-            let mut format = mem::uninitialized();
-            let mut n_item = mem::uninitialized();
-            let mut bytes_after = mem::uninitialized();
-            let mut properties = mem::uninitialized();
+            let mut prop_type = mem::MaybeUninit::uninit();
+            let mut format = mem::MaybeUninit::uninit();
+            let mut n_item = mem::MaybeUninit::uninit();
+            let mut bytes_after = mem::MaybeUninit::uninit();
+            let mut properties = mem::MaybeUninit::uninit();
             let result = X11_sys::XGetWindowProperty(
                 xlib_app.display,
                 self.window.unwrap(),
@@ -1300,12 +1309,17 @@ impl XlibWindow {
                 !0,
                 0,
                 X11_sys::AnyPropertyType as c_ulong,
-                &mut prop_type,
-                &mut format,
-                &mut n_item,
-                &mut bytes_after,
-                &mut properties
+                prop_type.as_mut_ptr(),
+                format.as_mut_ptr(),
+                n_item.as_mut_ptr(),
+                bytes_after.as_mut_ptr(),
+                properties.as_mut_ptr()
             );
+            //let prop_type = prop_type.assume_init();
+            //let format = format.assume_init();
+            let n_item = n_item.assume_init();
+            //let bytes_after = bytes_after.assume_init();
+            let properties = properties.assume_init();
             if result == 0 && properties != ptr::null_mut() {
                 let items = std::slice::from_raw_parts::<c_ulong>(properties as *mut _, n_item as usize);
                 for item in items {
@@ -1331,9 +1345,10 @@ impl XlibWindow {
     
     pub fn get_position(&self) -> Vec2 {
         unsafe {
-            let mut xwa = mem::uninitialized();
+            let mut xwa = mem::MaybeUninit::uninit();
             let display = (*self.xlib_app).display;
-            X11_sys::XGetWindowAttributes(display, self.window.unwrap(), &mut xwa);
+            X11_sys::XGetWindowAttributes(display, self.window.unwrap(), xwa.as_mut_ptr());
+            let xwa = xwa.assume_init();
             return Vec2 {x: xwa.x as f32, y: xwa.y as f32}
             /*
             let mut child = mem::uninitialized();
@@ -1349,18 +1364,20 @@ impl XlibWindow {
     pub fn get_inner_size(&self) -> Vec2 {
         let dpi_factor = self.get_dpi_factor();
         unsafe {
-            let mut xwa = mem::uninitialized();
+            let mut xwa = mem::MaybeUninit::uninit();
             let display = (*self.xlib_app).display;
-            X11_sys::XGetWindowAttributes(display, self.window.unwrap(), &mut xwa);
+            X11_sys::XGetWindowAttributes(display, self.window.unwrap(), xwa.as_mut_ptr());
+            let xwa = xwa.assume_init();
             return Vec2 {x: xwa.width as f32 / dpi_factor, y: xwa.height as f32 / dpi_factor}
         }
     }
     
     pub fn get_outer_size(&self) -> Vec2 {
         unsafe {
-            let mut xwa = mem::uninitialized();
+            let mut xwa = mem::MaybeUninit::uninit();
             let display = (*self.xlib_app).display;
-            X11_sys::XGetWindowAttributes(display, self.window.unwrap(), &mut xwa);
+            X11_sys::XGetWindowAttributes(display, self.window.unwrap(), xwa.as_mut_ptr());
+            let xwa = xwa.assume_init();
             return Vec2 {x: xwa.width as f32, y: xwa.height as f32}
         }
     }
@@ -1380,15 +1397,17 @@ impl XlibWindow {
             let display = (*self.xlib_app).display;
             let resource_string = X11_sys::XResourceManagerString(display);
             let db = X11_sys::XrmGetStringDatabase(resource_string);
-            let mut ty = mem::uninitialized();
-            let mut value = mem::uninitialized();
+            let mut ty = mem::MaybeUninit::uninit();
+            let mut value = mem::MaybeUninit::uninit();
             X11_sys::XrmGetResource(
                 db,
                 CString::new("Xft.dpi").unwrap().as_ptr(),
                 CString::new("String").unwrap().as_ptr(),
-                &mut ty,
-                &mut value
+                ty.as_mut_ptr(),
+                value.as_mut_ptr()
             );
+            //let ty = ty.assume_init();
+            let value = value.assume_init();
             if value.addr == std::ptr::null_mut() {
                 return 2.0; // TODO find some other way to figure it out
             }
