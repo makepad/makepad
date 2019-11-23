@@ -182,6 +182,7 @@ impl Cx{
                                                 dpi_factor,
                                                 opengl_window,
                                                 &opengl_cx,
+                                                false
                                             ){
                                                 // paint it again a few times, apparently this is necessary
                                                 self.passes[*pass_id].paint_dirty = true;
