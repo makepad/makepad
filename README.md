@@ -20,9 +20,23 @@ https://makepad.github.io/
 
 Note that the web build of Makepad does not feature any compiler integration. If you want to be able to compile code, you have to install Makepad locally.
 
-To install Makepad locally, run the following commands:
+To install Makepad locally, first install Rust:
+```
+https://www.rust-lang.org/tools/install
+```
+
+On linux install these packages to compile makepad:
+```
+sudo apt get install libegl1-mesa-dev libxcursor-dev libx11-dev
+```
+
+If you want to play with wasm, install the wasm toolchain
 ```
 rustup target add wasm32-unknown-unknown
+```
+
+To install Makepad locally, run the following commands:
+```
 git clone https://github.com/makepad/makepad makepad 
 cd makepad 
 cargo run -p makepad --release 
