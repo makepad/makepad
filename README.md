@@ -29,7 +29,7 @@ On linux install these packages to compile makepad:
 ```
 sudo apt install libegl1-mesa-dev libxcursor-dev libx11-dev
 ```
-Also rust installer sometimes doesn't set the path, app this to ~/.bashrc:
+Also rust installer sometimes doesn't set the path, append this to ~/.bashrc:
 ```
 export PATH=~/.cargo/bin:$PATH
 ```
