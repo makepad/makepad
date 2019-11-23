@@ -30,6 +30,8 @@ impl Cx {
         &mut self,
         pass_id: usize,
         view_id: usize,
+        scroll: Vec2,
+        clip: (Vec2, Vec2),
         full_repaint: bool,
         view_rect: &Rect,
         opengl_cx: &OpenglCx,
@@ -42,8 +44,10 @@ impl Cx {
         if !full_repaint && !view_rect.intersects(self.views[view_id].rect) {
             return
         }
-        self.views[view_id].set_clipping_uniforms();
         self.views[view_id].uniform_view_transform(&Mat4::identity());
+        self.views[view_id].parent_scroll = scroll;
+        let local_scroll = self.views[view_id].get_local_scroll();
+        let clip = self.views[view_id].intersect_clip(clip);
         for draw_call_id in 0..draw_calls_len {
             let sub_view_id = self.views[view_id].draw_calls[draw_call_id].sub_view_id;
             if sub_view_id != 0 {
