@@ -535,7 +535,7 @@ impl HubWorkspace {
             let mut path = None;
             let mut row = 0;
             let mut rendered = Vec::new();
-            rendered.push(panic_stack[0].clone());
+            if panic_stack.len()>0{rendered.push(panic_stack[0].clone())};
             let mut last_fn_name = String::new();
             for panic_line in &panic_stack {
                 if panic_line.starts_with("at ")

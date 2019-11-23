@@ -30,7 +30,7 @@ impl Cx {
         &mut self,
         pass_id: usize,
         view_id: usize,
-        scroll: Vec2,
+        scroll: Vec2, 
         clip: (Vec2, Vec2),
         full_repaint: bool,
         view_rect: &Rect,
