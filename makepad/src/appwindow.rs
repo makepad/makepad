@@ -2,7 +2,6 @@
 use render::*;
 use widget::*;
 use serde::*;
-use editor::*;
 
 use crate::appstorage::*;
 use crate::fileeditor::*;

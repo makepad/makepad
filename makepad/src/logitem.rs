@@ -1,6 +1,6 @@
 use render::*;
-use editor::*;
 use hub::*;
+use widget::*;
 
 #[derive(Clone)]
 pub struct LogItem {

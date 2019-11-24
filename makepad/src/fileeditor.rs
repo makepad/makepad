@@ -1,6 +1,6 @@
 //use syn::Type;
 use render::*;
-use editor::*;
+use widget::*;
 
 #[derive(Clone)]
 pub struct FileEditorTemplates {

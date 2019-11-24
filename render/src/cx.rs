@@ -710,7 +710,9 @@ impl Cx {
     }
 
     pub fn send_signal(&mut self, signal: Signal, message: usize) {
-        self.signals.push((signal, message));
+        if signal.signal_id != 0{
+            self.signals.push((signal, message));
+        }
     }
 
     pub fn call_signals<F>(&mut self, mut event_handler: F)

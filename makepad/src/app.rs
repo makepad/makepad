@@ -1,7 +1,6 @@
 //use syn::Type;
 use render::*;
 use widget::*;
-use editor::*;
 use crate::appwindow::*;
 use crate::appstorage::*;
 use crate::filetree::*;
@@ -24,7 +23,6 @@ impl App {
     pub fn proto(cx: &mut Cx) -> Self {
 
         set_dark_widget_theme(cx);
-        set_dark_editor_theme(cx);
         set_dark_makepad_theme(cx);
         let ms = cx.new_signal();
         Self {
