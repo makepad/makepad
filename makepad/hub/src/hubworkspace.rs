@@ -473,7 +473,7 @@ impl HubWorkspace {
         let process = Process::start(&sub_path, args, &abs_dir, &[("RUST_BACKTRACE", "full")]);
         if let Err(e) = process {
             return Err(
-                self.error(uid, format!("workspace {} program run {} not found {:?}", self.workspace, path, e))
+                self.error(uid, format!("workspace {} program run {} not found {:?}", self.workspace, sub_path, e))
             );
         }
         let mut process = process.unwrap();
