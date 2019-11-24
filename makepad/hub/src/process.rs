@@ -20,7 +20,7 @@ impl Process {
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
                 .current_dir(current_dir);
-            for (key,value) in env{
+            for (key,value) in env{ 
                 cbuild.env(key,value); 
             }
             cbuild.spawn()

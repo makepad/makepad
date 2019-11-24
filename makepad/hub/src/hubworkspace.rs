@@ -471,9 +471,9 @@ impl HubWorkspace {
         let (abs_dir, project, sub_path) = self.project_split_from_path(uid, path) ?;
         // lets start a thread
         let process = Process::start(&sub_path, args, &abs_dir, &[("RUST_BACKTRACE", "full")]);
-        if process.is_err() {
+        if let Err(e) = process {
             return Err(
-                self.error(uid, format!("workspace {} program run {} not found", self.workspace, path))
+                self.error(uid, format!("workspace {} program run {} not found {:?}", self.workspace, path, e))
             );
         }
         let mut process = process.unwrap();

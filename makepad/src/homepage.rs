@@ -74,7 +74,9 @@ impl HomePage {
         self.example_texts.get_draw(cx).draw_plain_text(cx);
         cx.turtle_new_line();
         
-        println!("{:?}", CodeEditor::color_bg().class(cx, Self::my_code_editor()));
+        let color = CodeEditor::color_bg().class(cx, Self::my_code_editor());
+        
+        println!("{}", color.r);
         
         self.text.color = Self::color_heading().base(cx);
         self.text.text_style = Self::text_style_heading().base(cx);
