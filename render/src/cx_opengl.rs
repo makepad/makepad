@@ -172,7 +172,7 @@ impl Cx {
         let mut view_bounds = ViewBounds::new();
         let mut init_repaint = false;
         self.calc_dirty_bounds(pass_id, view_id, &mut view_bounds);
-        println!("{:?}", view_bounds);
+
         let full_repaint =  force_full_repaint || view_bounds.max_x - view_bounds.min_x > opengl_window.window_geom.inner_size.x - 100.
          && view_bounds.max_y - view_bounds.min_y > opengl_window.window_geom.inner_size.y - 100. ||
          opengl_window.opening_repaint_count < 10;
@@ -657,7 +657,7 @@ impl Cx {
     }
 }
 
-#[derive(Clone, PartialEq, Debug)]
+#[derive(Clone, PartialEq)]
 pub struct ViewBounds {
     pub min_x: f32,
     pub min_y: f32,
@@ -1009,7 +1009,7 @@ pub struct OpenglTextureSlot {
 pub struct CxPlatformView {
 }
 
-#[derive(Default, Clone, Debug)]
+#[derive(Default, Clone)]
 pub struct CxPlatformDrawCall {
     pub inst_vbuf: OpenglBuffer,
     pub vao_shader_id: Option<usize>,
@@ -1063,7 +1063,7 @@ impl CxPlatformDrawCall {
     }
 }
 
-#[derive(Default, Clone, Debug)]
+#[derive(Default, Clone)]
 pub struct CxPlatformTexture {
     pub alloc_desc: TextureDesc,
     pub width: u64,
@@ -1071,12 +1071,12 @@ pub struct CxPlatformTexture {
     pub gl_texture: Option<u32>,
 }
 
-#[derive(Default, Clone, Debug)]
+#[derive(Default, Clone)]
 pub struct CxPlatformPass {
     pub gl_framebuffer: Option<u32>
 }
 
-#[derive(Default, Clone, Debug)]
+#[derive(Default, Clone)]
 pub struct OpenglBuffer {
     pub gl_buffer: Option<u32>
 }

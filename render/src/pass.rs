@@ -1,6 +1,6 @@
 use crate::cx::*;
 
-#[derive(Default, Clone, Debug)]
+#[derive(Default, Clone)]
 pub struct Pass {
     pub pass_id: Option<usize>
 }
@@ -110,7 +110,7 @@ impl Pass {
     
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub enum ClearColor {
     InitWith(Color),
     ClearWith(Color)
@@ -122,19 +122,19 @@ impl Default for ClearColor {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub enum ClearDepth {
     InitWith(f64),
     ClearWith(f64)
 }
 
-#[derive(Default, Clone, Debug)]
+#[derive(Default, Clone)]
 pub struct CxPassColorTexture {
     pub clear_color: ClearColor,
     pub texture_id: usize
 }
 
-#[derive(Default, Clone, Debug)]
+#[derive(Default, Clone)]
 #[repr(C)]
 pub struct PassUniforms{
     camera_projection:[f32;16],
@@ -151,7 +151,7 @@ impl PassUniforms{
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct CxPass {
     pub color_textures: Vec<CxPassColorTexture>,
     pub depth_texture: Option<usize>,

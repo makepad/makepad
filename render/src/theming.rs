@@ -4,7 +4,7 @@ use std::any::TypeId;
 // Colors
 
  
-#[derive(PartialEq, Copy, Clone, Debug, Hash, Eq)]
+#[derive(PartialEq, Copy, Clone, Hash, Eq)]
 pub struct ColorId(pub TypeId);
 
 impl ColorId {
@@ -35,7 +35,7 @@ impl Into<ColorId> for UniqueId{
 
 
 
-#[derive(PartialEq, Copy, Clone, Debug, Hash, Eq)]
+#[derive(PartialEq, Copy, Clone, Hash, Eq)]
 pub struct TextStyleId(pub TypeId);
 
 impl TextStyleId {
@@ -61,7 +61,7 @@ impl Into<TextStyleId> for UniqueId{
 
 // Layout
 
-#[derive(PartialEq, Copy, Clone, Debug, Hash, Eq)]
+#[derive(PartialEq, Copy, Clone, Hash, Eq)]
 pub struct LayoutId(pub TypeId);
 
 impl LayoutId {
@@ -90,7 +90,7 @@ impl Into<LayoutId> for UniqueId{
 // Walks
 
 
-#[derive(PartialEq, Copy, Clone, Debug, Hash, Eq)]
+#[derive(PartialEq, Copy, Clone, Hash, Eq)]
 pub struct WalkId(pub TypeId);
 
 impl WalkId {
@@ -117,7 +117,7 @@ impl Into<WalkId> for UniqueId{
 // Animations
 
 
-#[derive(PartialEq, Copy, Clone, Debug, Hash, Eq)]
+#[derive(PartialEq, Copy, Clone, Hash, Eq)]
 pub struct AnimId(pub TypeId);
 
 impl AnimId {
@@ -141,7 +141,7 @@ impl Into<AnimId> for UniqueId{
 
 // Shaders
 
-#[derive(PartialEq, Copy, Clone, Debug, Hash, Eq)]
+#[derive(PartialEq, Copy, Clone, Hash, Eq)]
 pub struct ShaderId(pub TypeId);
 
 impl ShaderId {
@@ -169,7 +169,7 @@ impl Into<ShaderId> for UniqueId{
 // Classes
 
 
-#[derive(PartialEq, Copy, Clone, Debug, Hash, Eq)]
+#[derive(PartialEq, Copy, Clone, Hash, Eq)]
 pub struct ClassId(pub TypeId);
 
 impl Into<ClassId> for UniqueId{
