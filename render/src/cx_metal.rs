@@ -520,13 +520,13 @@ impl MetalWindow {
 pub struct CxPlatformView {
 }
 
-#[derive(Default, Clone, Debug)]
+#[derive(Default, Clone)]
 pub struct CxPlatformDrawCall {
     //pub uni_dr: MetalBuffer,
     pub inst_vbuf: MetalBuffer
 }
 
-#[derive(Default, Clone, Debug)]
+#[derive(Default, Clone)]
 pub struct CxPlatformTexture {
     pub alloc_desc: TextureDesc,
     pub width: u64,
@@ -534,19 +534,19 @@ pub struct CxPlatformTexture {
     pub mtl_texture: Option<metal::Texture>
 }
 
-#[derive(Default, Clone, Debug)]
+#[derive(Default, Clone)]
 pub struct CxPlatformPass {
     pub mtl_depth_state: Option<metal::DepthStencilState>
 }
 
-#[derive(Default, Clone, Debug)]
+#[derive(Default, Clone)]
 pub struct MultiMetalBuffer {
     pub buffer: Option<metal::Buffer>,
     pub size: usize,
     pub used: usize
 }
 
-#[derive(Default, Clone, Debug)]
+#[derive(Default, Clone)]
 pub struct MetalBuffer {
     pub last_written: usize,
     pub multi1: MultiMetalBuffer,

@@ -83,7 +83,7 @@ pub struct XlibChildWindow {
     h: u32
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy)]
 pub struct XlibTimer {
     id: u64,
     timeout: f64,
@@ -1556,7 +1556,7 @@ impl XlibWindow {
     
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq)]
 #[repr(C)]
 struct MwmHints {
     pub flags: c_ulong,
