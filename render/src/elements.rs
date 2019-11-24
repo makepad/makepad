@@ -18,55 +18,55 @@ use std::collections::HashMap;
 // The idea is to use get_draw in a draw function
 // and use the iter/enumerate/get functions in the event handle code
 // This does not work for single item Element though
-// Keep a redraw ID with each element 
+// Keep a redraw ID with each element
 // to make iterating only 'redrawn in last pass' items possible
 #[derive(Clone, Default)]
-pub struct ElementsRedraw<T>{
-    redraw_id:u64,
-    item:T
+pub struct ElementsRedraw<T> {
+    redraw_id: u64,
+    item: T
 }
 
 // Multiple elements
 #[derive(Clone, Default)]
 pub struct Elements<ID, T, TEMPL>
-where ID:std::cmp::Ord + std::hash::Hash {
-    pub template:TEMPL,
-    pub element_list:Vec<ID>,
-    pub element_map:HashMap<ID,ElementsRedraw<T>>,
-    pub redraw_id:u64
+where ID: std::cmp::Ord + std::hash::Hash {
+    pub template: TEMPL,
+    pub element_list: Vec<ID>,
+    pub element_map: HashMap<ID, ElementsRedraw<T>>,
+    pub redraw_id: u64
 }
 
 pub struct ElementsIterator<'a, ID, T, TEMPL>
-where ID:std::cmp::Ord + std::hash::Hash{
-    elements:&'a mut Elements<ID, T, TEMPL>,
-    counter:usize 
+where ID: std::cmp::Ord + std::hash::Hash {
+    elements: &'a mut Elements<ID, T, TEMPL>,
+    counter: usize
 }
 
 impl<'a, T, ID, TEMPL> ElementsIterator<'a, ID, T, TEMPL>
-where ID:std::cmp::Ord + std::hash::Hash{
-    fn new(elements:&'a mut Elements<ID, T, TEMPL>)->Self{
-        ElementsIterator{
-            elements:elements,
-            counter:0
+where ID: std::cmp::Ord + std::hash::Hash {
+    fn new(elements: &'a mut Elements<ID, T, TEMPL>) -> Self {
+        ElementsIterator {
+            elements: elements,
+            counter: 0
         }
     }
 }
 
 impl<'a, ID, T, TEMPL> Iterator for ElementsIterator<'a, ID, T, TEMPL>
-where ID:std::cmp::Ord + std::hash::Hash + Clone
+where ID: std::cmp::Ord + std::hash::Hash + Clone
 {
     type Item = &'a mut T;
-
+    
     fn next(&mut self) -> Option<Self::Item> {
-        loop{
-            if self.counter >= self.elements.element_list.len(){
+        loop {
+            if self.counter >= self.elements.element_list.len() {
                 return None
             }
             let element_id = &self.elements.element_list[self.counter];
             let element = self.elements.element_map.get_mut(&element_id).unwrap();
             self.counter += 1;
-            if element.redraw_id == self.elements.redraw_id{
-                return Some(unsafe{std::mem::transmute(&mut element.item)});
+            if element.redraw_id == self.elements.redraw_id {
+                return Some(unsafe {std::mem::transmute(&mut element.item)});
             }
         }
     }
@@ -74,96 +74,96 @@ where ID:std::cmp::Ord + std::hash::Hash + Clone
 
 
 pub struct ElementsIteratorNamed<'a, ID, T, TEMPL>
-where ID:std::cmp::Ord + std::hash::Hash{
-    elements:&'a mut Elements<ID, T, TEMPL>,
-    counter:usize 
+where ID: std::cmp::Ord + std::hash::Hash {
+    elements: &'a mut Elements<ID, T, TEMPL>,
+    counter: usize
 }
 
 impl<'a, ID, T, TEMPL> ElementsIteratorNamed<'a, ID, T, TEMPL>
-where ID:std::cmp::Ord + std::hash::Hash{
-    fn new(elements:&'a mut Elements<ID, T, TEMPL>)->Self{
-        ElementsIteratorNamed{
-            elements:elements,
-            counter:0
+where ID: std::cmp::Ord + std::hash::Hash {
+    fn new(elements: &'a mut Elements<ID, T, TEMPL>) -> Self {
+        ElementsIteratorNamed {
+            elements: elements,
+            counter: 0
         }
     }
 }
 
 impl<'a, ID, T, TEMPL> Iterator for ElementsIteratorNamed<'a, ID, T, TEMPL>
-where ID:std::cmp::Ord + std::hash::Hash + Clone
+where ID: std::cmp::Ord + std::hash::Hash + Clone
 {
     type Item = (&'a ID, &'a mut T);
-
+    
     fn next(&mut self) -> Option<Self::Item> {
-        loop{
-            if self.counter >= self.elements.element_list.len(){
+        loop {
+            if self.counter >= self.elements.element_list.len() {
                 return None
             }
             let element_id = &mut self.elements.element_list[self.counter];
             let element = self.elements.element_map.get_mut(&element_id).unwrap();
             self.counter += 1;
-            if element.redraw_id == self.elements.redraw_id{
-                return Some((unsafe{std::mem::transmute(element_id)}, unsafe{std::mem::transmute(&mut element.item)}));
+            if element.redraw_id == self.elements.redraw_id {
+                return Some((unsafe {std::mem::transmute(element_id)}, unsafe {std::mem::transmute(&mut element.item)}));
             }
         }
     }
 }
 
-impl<ID,T, TEMPL> Elements<ID, T, TEMPL>
-where ID:std::cmp::Ord + std::hash::Hash + Clone
+impl<ID, T, TEMPL> Elements<ID, T, TEMPL>
+where ID: std::cmp::Ord + std::hash::Hash + Clone
 {
-    pub fn new(template:TEMPL)->Elements<ID, T, TEMPL>{
-        Elements::<ID, T, TEMPL>{
-            template:template,
-            redraw_id:0,
-            element_list:Vec::new(),
-            element_map:HashMap::new(),
+    pub fn new(template: TEMPL) -> Elements<ID, T, TEMPL> {
+        Elements::<ID, T, TEMPL> {
+            template: template,
+            redraw_id: 0,
+            element_list: Vec::new(),
+            element_map: HashMap::new(),
         }
     }
-
+    
     // if you don't atleast get_draw 1 item
     // you have to call mark for sweep to work
-    pub fn mark(&mut self, cx:&Cx){
-        if !cx.is_in_redraw_cycle{
+    pub fn mark(&mut self, cx: &Cx) {
+        if !cx.is_in_redraw_cycle {
             panic!("Cannot call mark outside of redraw cycle!")
         }
         self.redraw_id = cx.redraw_id;
     }
-
+    
     // destructs all the items that didn't get a mark/get_draw call this time
-    pub fn sweep<F>(&mut self, cx:&mut Cx, mut destruct_callback:F)
-    where F: FnMut(&mut Cx, &mut T){
-        if !cx.is_in_redraw_cycle{
+    pub fn sweep<F>(&mut self, cx: &mut Cx, mut destruct_callback: F)
+    where F: FnMut(&mut Cx, &mut T) {
+        if !cx.is_in_redraw_cycle {
             panic!("Cannot call sweep outside of redraw cycle!")
         }
         let mut i = 0;
-        loop{
-            if i >= self.element_list.len(){
+        loop {
+            if i >= self.element_list.len() {
                 break;
             }
             let elem_id = self.element_list[i].clone();
             let elem = self.element_map.get(&elem_id).unwrap();
-            if elem.redraw_id != self.redraw_id{
+            if elem.redraw_id != self.redraw_id {
                 self.element_list.remove(i);
                 let mut elem = self.element_map.remove(&elem_id).unwrap();
                 destruct_callback(cx, &mut elem.item);
             }
-            else{
+            else {
                 i = i + 1;
             }
         }
     }
     
     // clear all the items
-    pub fn clear<F>(&mut self, cx:&mut Cx, mut destruct_callback:F)
-    where F: FnMut(&mut Cx, &mut T){
-        for elem_id in &self.element_list{
+    pub fn clear<F>(&mut self, cx: &mut Cx, mut destruct_callback: F)
+    where F: FnMut(&mut Cx, &mut T) {
+        for elem_id in &self.element_list {
             let mut elem = self.element_map.remove(&elem_id).unwrap();
             destruct_callback(cx, &mut elem.item);
         }
         self.element_list.truncate(0);
     }
-
+    
     // destruct a particular item
     /*
     pub fn destruct(&mut self, index:ID){
@@ -175,46 +175,101 @@ where ID:std::cmp::Ord + std::hash::Hash + Clone
             return Some(&mut elem.item)
         }
     }*/
-
+    
     // iterate the set of 'last drawn' items
-    pub fn iter<'a>(&'a mut self)->ElementsIterator<'a, ID, T, TEMPL>{
+    pub fn iter<'a>(&'a mut self) -> ElementsIterator<'a, ID, T, TEMPL> {
         return ElementsIterator::new(self)
     }
-
+    
     // enumerate the set of 'last drawn' items
-    pub fn enumerate<'a>(&'a mut self)->ElementsIteratorNamed<'a, ID, T, TEMPL>{
+    pub fn enumerate<'a>(&'a mut self) -> ElementsIteratorNamed<'a, ID, T, TEMPL> {
         return ElementsIteratorNamed::new(self)
     }
-
+    
     // gets a particular item. Returns None when not created (yet)
-    pub fn get<'a>(&'a mut self, index:ID)->Option<&mut T>{
+    pub fn get<'a>(&'a mut self, index: ID) -> Option<&mut T> {
         let elem = self.element_map.get_mut(&index);
-        if let Some(elem) = elem{
+        if let Some(elem) = elem {
             return Some(&mut elem.item)
         }
-        else{
+        else {
             return None
         }
     }
-   
-    pub fn get_draw<F>(&mut self, cx: &mut Cx, index:ID, mut insert_callback:F)->&mut T
-    where F: FnMut(&mut Cx, &TEMPL)->T{
-        if !cx.is_in_redraw_cycle{
+    
+    pub fn get_draw<F>(&mut self, cx: &mut Cx, index: ID, mut insert_callback: F) -> &mut T
+    where F: FnMut(&mut Cx, &TEMPL) -> T {
+        if !cx.is_in_redraw_cycle {
             panic!("Cannot call get_draw outside of redraw cycle!")
         }
         self.mark(cx);
         let template = &self.template;
         let element_list = &mut self.element_list;
         let redraw_id = self.redraw_id;
-        let redraw = self.element_map.entry(index.clone()).or_insert_with(||{
+        let redraw = self.element_map.entry(index.clone()).or_insert_with( || {
             element_list.push(index);
             let elem = insert_callback(cx, &template);
-            ElementsRedraw{
-                redraw_id:redraw_id,
-                item:elem
+            ElementsRedraw {
+                redraw_id: redraw_id,
+                item: elem
             }
         });
         redraw.redraw_id = redraw_id;
         &mut redraw.item
+    }
+}
+
+
+// Multiple elements
+#[derive(Clone, Default)]
+pub struct ElementsCounted<T>
+where T: Clone {
+    pub counter: u64,
+    pub elements: Elements<u64, T, T>
+}
+
+impl<T> ElementsCounted<T>
+where T:Clone{
+    pub fn new(template: T) -> ElementsCounted<T>
+    where T: Clone {
+        ElementsCounted::<T> {
+            counter: 0,
+            elements: Elements::new(template)
+        }
+    }
+    
+    pub fn iter<'a>(&'a mut self) -> ElementsIterator<'a, u64, T, T>
+    where T: Clone {
+        return ElementsIterator::new(&mut self.elements)
+    }
+    
+    // enumerate the set of 'last drawn' items
+    pub fn enumerate<'a>(&'a mut self) -> ElementsIteratorNamed<'a, u64, T, T>
+    where T: Clone {
+        return ElementsIteratorNamed::new(&mut self.elements)
+    }
+    
+    // gets a particular item. Returns None when not created (yet)
+    pub fn get<'a>(&'a mut self, index: u64) -> Option<&mut T>
+    where T: Clone {
+        return self.elements.get(index)
+    }
+    
+    pub fn template(&mut self)->&mut T{
+        &mut self.elements.template
+    }
+    
+    pub fn get_draw(&mut self, cx: &mut Cx) -> &mut T 
+    where T:Clone{
+        if !cx.is_in_redraw_cycle {
+            panic!("Cannot call get_draw outside of redraw cycle!")
+        }
+        if self.elements.redraw_id != cx.redraw_id {
+            self.counter = 0;
+        }
+        else {
+            self.counter += 1;
+        }
+        self.elements.get_draw(cx, self.counter, | _cx, tmpl | tmpl.clone())
     }
 }

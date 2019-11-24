@@ -1,6 +1,6 @@
 //use syn::Type;
 use render::*;
-use editor::*;
+use widget::*;
 use hub::*;
 use crate::appwindow::*;
 use crate::filetree::*;

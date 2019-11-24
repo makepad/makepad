@@ -295,3 +295,4 @@ pub struct CxPlatform {
     pub desktop: CxDesktop,
     pub d3d11_cx: Option<*const D3d11Cx>
 }
+

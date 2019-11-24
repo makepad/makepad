@@ -1,14 +1,15 @@
 use render::*;
-use widget::*;
+use crate::scrollview::*;
 use crate::textbuffer::*;
 use crate::textcursor::*;
 use crate::codeicon::*;
+use crate::widgettheme::*;
 
 #[derive(Clone)]
 pub struct CodeEditor {
     pub class: ClassId,
     pub view: ScrollView,
-    pub bg_layout: LayoutId,
+    pub bg_layout: Layout,
     pub bg: Quad,
     pub gutter_bg: Quad,
     pub cursor: Quad,
@@ -37,7 +38,9 @@ pub struct CodeEditor {
     pub draw_cursor_row: bool,
     pub folding_depth: usize,
     pub colors: CodeEditorColors,
-
+    
+    pub read_only: bool,
+    
     //pub _bg_area: Area,
     pub _scroll_pos_on_load: Option<Vec2>,
     pub _jump_to_offset: bool,
@@ -105,45 +108,46 @@ pub enum CodeEditorEvent {
 }
 
 #[derive(Default, Clone)]
-pub struct CodeEditorColors{
-    indent_line_unknown:Color,
-    indent_line_fn:Color,
-    indent_line_typedef:Color,
-    indent_line_looping:Color,
-    indent_line_flow:Color,
-    paren_pair_match:Color,
-    paren_pair_fail:Color,
-    marker_error:Color,
-    marker_warning:Color,
-    marker_log:Color,
-    line_number_normal:Color,
-    line_number_highlight:Color,
-    whitespace:Color,
-    keyword:Color,
-    flow:Color,
-    looping:Color,
-    identifier:Color,
-    call:Color,
-    type_name:Color,
-    theme_name:Color,
-    string:Color,
-    number:Color,
-    comment:Color,
-    doc_comment:Color,
-    paren_d1:Color,
-    paren_d2:Color,
-    operator:Color,
-    delimiter:Color,
-    unexpected:Color,
-    warning:Color,
-    error:Color,
-    defocus:Color,
+pub struct CodeEditorColors {
+    indent_line_unknown: Color,
+    indent_line_fn: Color,
+    indent_line_typedef: Color,
+    indent_line_looping: Color,
+    indent_line_flow: Color,
+    paren_pair_match: Color,
+    paren_pair_fail: Color,
+    marker_error: Color,
+    marker_warning: Color,
+    marker_log: Color,
+    line_number_normal: Color,
+    line_number_highlight: Color,
+    whitespace: Color,
+    keyword: Color,
+    flow: Color,
+    looping: Color,
+    identifier: Color,
+    call: Color,
+    type_name: Color,
+    theme_name: Color,
+    string: Color,
+    number: Color,
+    comment: Color,
+    doc_comment: Color,
+    paren_d1: Color,
+    paren_d2: Color,
+    operator: Color,
+    delimiter: Color,
+    unexpected: Color,
+    warning: Color,
+    error: Color,
+    defocus: Color,
 }
 
 impl CodeEditor {
     
     pub fn proto(cx: &mut Cx) -> Self {
         Self {
+            read_only: false,
             class: ClassId::base(),
             cursors: TextCursorSet::new(),
             indent_lines: Quad {
@@ -168,13 +172,13 @@ impl CodeEditor {
                 ..Quad::proto_with_shader(cx, Self::def_selection_shader(), "Editor.selection")
             },
             token_highlight: Quad::proto_with_shader(cx, Self::def_token_highlight_shader(), "Editor.token_highlight"),
-
+            
             cursor: Quad::proto_with_shader(cx, Self::def_cursor_shader(), "Editor.cursor"),
             cursor_row: Quad::proto_with_shader(cx, Self::def_cursor_row_shader(), "Editor.cursor_row"),
             paren_pair: Quad::proto_with_shader(cx, Self::def_paren_pair_shader(), "Editor.paren_pair"),
             message_marker: Quad::proto_with_shader(cx, Self::def_message_marker_shader(), "Editor.message_marker"),
             code_icon: CodeIcon::proto(cx),
-            bg_layout: Self::layout_bg(),
+            bg_layout: Layout::default(),
             text: Text {
                 z: 2.00,
                 wrapping: Wrapping::Line,
@@ -257,71 +261,64 @@ impl CodeEditor {
         }
     }
     
-    pub fn layout_bg() -> LayoutId{uid!()}
-    pub fn text_style_editor_text() ->TextStyleId{uid!()}
+    pub fn layout_bg() -> LayoutId {uid!()}
+    pub fn text_style_editor_text() -> TextStyleId {uid!()}
     
-    pub fn color_bg()->ColorId{uid!()}
-    pub fn color_gutter_bg()->ColorId{uid!()}
+    pub fn color_bg() -> ColorId {uid!()}
+    pub fn color_gutter_bg() -> ColorId {uid!()}
     
-    pub fn color_selection()->ColorId{uid!()}
-    pub fn color_selection_defocus()->ColorId{uid!()}
-    pub fn color_highlight()->ColorId{uid!()}
-    pub fn color_cursor()->ColorId{uid!()}
-    pub fn color_cursor_row()->ColorId{uid!()}
-
-    pub fn color_indent_line_unknown()->ColorId{uid!()}
-    pub fn color_indent_line_fn()->ColorId{uid!()}
-    pub fn color_indent_line_typedef()->ColorId{uid!()}
-    pub fn color_indent_line_looping()->ColorId{uid!()}
-    pub fn color_indent_line_flow()->ColorId{uid!()}
-    pub fn color_paren_pair_match()->ColorId{uid!()}
-    pub fn color_paren_pair_fail()->ColorId{uid!()}
-    pub fn color_marker_error()->ColorId{uid!()}
-    pub fn color_marker_warning()->ColorId{uid!()}
-    pub fn color_marker_log()->ColorId{uid!()}
-    pub fn color_line_number_normal()->ColorId{uid!()}
-    pub fn color_line_number_highlight()->ColorId{uid!()}
+    pub fn color_selection() -> ColorId {uid!()}
+    pub fn color_selection_defocus() -> ColorId {uid!()}
+    pub fn color_highlight() -> ColorId {uid!()}
+    pub fn color_cursor() -> ColorId {uid!()}
+    pub fn color_cursor_row() -> ColorId {uid!()}
     
-    pub fn color_whitespace()->ColorId{uid!()}
-    pub fn color_keyword()->ColorId{uid!()}
-    pub fn color_flow()->ColorId{uid!()}
-    pub fn color_looping()->ColorId{uid!()}
-    pub fn color_identifier()->ColorId{uid!()}
-    pub fn color_call()->ColorId{uid!()}
-    pub fn color_type_name()->ColorId{uid!()}
-    pub fn color_theme_name()->ColorId{uid!()}
-    pub fn color_string()->ColorId{uid!()}
-    pub fn color_number()->ColorId{uid!()}
-    pub fn color_comment()->ColorId{uid!()}
-    pub fn color_doc_comment()->ColorId{uid!()}
-    pub fn color_paren_d1()->ColorId{uid!()}
-    pub fn color_paren_d2()->ColorId{uid!()}
-    pub fn color_operator()->ColorId{uid!()}
-    pub fn color_delimiter()->ColorId{uid!()}
-    pub fn color_unexpected()->ColorId{uid!()}
-    pub fn color_warning()->ColorId{uid!()}
-    pub fn color_error()->ColorId{uid!()}
-    pub fn color_defocus()->ColorId{uid!()}
+    pub fn color_indent_line_unknown() -> ColorId {uid!()}
+    pub fn color_indent_line_fn() -> ColorId {uid!()}
+    pub fn color_indent_line_typedef() -> ColorId {uid!()}
+    pub fn color_indent_line_looping() -> ColorId {uid!()}
+    pub fn color_indent_line_flow() -> ColorId {uid!()}
+    pub fn color_paren_pair_match() -> ColorId {uid!()}
+    pub fn color_paren_pair_fail() -> ColorId {uid!()}
+    pub fn color_marker_error() -> ColorId {uid!()}
+    pub fn color_marker_warning() -> ColorId {uid!()}
+    pub fn color_marker_log() -> ColorId {uid!()}
+    pub fn color_line_number_normal() -> ColorId {uid!()}
+    pub fn color_line_number_highlight() -> ColorId {uid!()}
     
-    pub fn theme(cx:&mut Cx){
-        
-        Self::layout_bg().set_base(cx, Layout {
-            walk: Walk::wh(Width::Fill, Height::Fill),
-            padding: Padding {l: 4.0, t: 4.0, r: 4.0, b: 4.0},
-            ..Layout::default()
-        });
-        
+    pub fn color_whitespace() -> ColorId {uid!()}
+    pub fn color_keyword() -> ColorId {uid!()}
+    pub fn color_flow() -> ColorId {uid!()}
+    pub fn color_looping() -> ColorId {uid!()}
+    pub fn color_identifier() -> ColorId {uid!()}
+    pub fn color_call() -> ColorId {uid!()}
+    pub fn color_type_name() -> ColorId {uid!()}
+    pub fn color_theme_name() -> ColorId {uid!()}
+    pub fn color_string() -> ColorId {uid!()}
+    pub fn color_number() -> ColorId {uid!()}
+    pub fn color_comment() -> ColorId {uid!()}
+    pub fn color_doc_comment() -> ColorId {uid!()}
+    pub fn color_paren_d1() -> ColorId {uid!()}
+    pub fn color_paren_d2() -> ColorId {uid!()}
+    pub fn color_operator() -> ColorId {uid!()}
+    pub fn color_delimiter() -> ColorId {uid!()}
+    pub fn color_unexpected() -> ColorId {uid!()}
+    pub fn color_warning() -> ColorId {uid!()}
+    pub fn color_error() -> ColorId {uid!()}
+    pub fn color_defocus() -> ColorId {uid!()}
+    
+    pub fn theme(cx: &mut Cx) {
         Self::text_style_editor_text().set_base(cx, Theme::text_style_fixed().base(cx));
     }
     
-    pub fn instance_indent_id()->InstanceFloat{uid!()}
-    pub fn uniform_indent_sel()->UniformFloat{uid!()}
-    pub fn uniform_cursor_blink()->UniformFloat{uid!()}
-    pub fn instance_select_prev_x()->InstanceFloat{uid!()}
-    pub fn instance_select_prev_w()->InstanceFloat{uid!()}
-    pub fn instance_select_next_x()->InstanceFloat{uid!()}
-    pub fn instance_select_next_w()->InstanceFloat{uid!()}
-    pub fn uniform_highlight_visible()->UniformFloat{uid!()}
+    pub fn instance_indent_id() -> InstanceFloat {uid!()}
+    pub fn uniform_indent_sel() -> UniformFloat {uid!()}
+    pub fn uniform_cursor_blink() -> UniformFloat {uid!()}
+    pub fn instance_select_prev_x() -> InstanceFloat {uid!()}
+    pub fn instance_select_prev_w() -> InstanceFloat {uid!()}
+    pub fn instance_select_next_x() -> InstanceFloat {uid!()}
+    pub fn instance_select_next_w() -> InstanceFloat {uid!()}
+    pub fn uniform_highlight_visible() -> UniformFloat {uid!()}
     
     
     pub fn def_indent_lines_shader() -> ShaderGen {
@@ -635,7 +632,7 @@ impl CodeEditor {
                 else {
                     self.cursors.move_left(1, ke.modifiers.shift, text_buffer);
                 }
-                true
+                true 
             },
             KeyCode::ArrowRight => {
                 if ke.modifiers.logo || ke.modifiers.control { // token skipping
@@ -664,22 +661,37 @@ impl CodeEditor {
                 true
             },
             KeyCode::Backspace => {
-                self.cursors.backspace(text_buffer);
-                true
+                if !self.read_only {
+                    self.cursors.backspace(text_buffer);
+                    true
+                }
+                else{
+                    false
+                }
             },
             KeyCode::Delete => {
-                self.cursors.delete(text_buffer);
-                true
+                if !self.read_only {
+                    self.cursors.delete(text_buffer);
+                    true
+                }
+                else{
+                    false
+                }
             },
             KeyCode::KeyZ => {
-                if ke.modifiers.logo || ke.modifiers.control {
-                    if ke.modifiers.shift { // redo
-                        text_buffer.redo(true, &mut self.cursors);
-                        true
+                if !self.read_only {
+                    if ke.modifiers.logo || ke.modifiers.control {
+                        if ke.modifiers.shift { // redo
+                            text_buffer.redo(true, &mut self.cursors);
+                            true
+                        }
+                        else { // undo
+                            text_buffer.undo(true, &mut self.cursors);
+                            true
+                        }
                     }
-                    else { // undo
-                        text_buffer.undo(true, &mut self.cursors);
-                        true
+                    else {
+                        false
                     }
                 }
                 else {
@@ -687,7 +699,7 @@ impl CodeEditor {
                 }
             },
             KeyCode::KeyX => { // cut, the actual copy comes from the TextCopy event from the platform layer
-                if ke.modifiers.logo || ke.modifiers.control { // cut
+                if !self.read_only && (ke.modifiers.logo || ke.modifiers.control) { // cut
                     self.cursors.replace_text("", text_buffer);
                     true
                 }
@@ -714,19 +726,29 @@ impl CodeEditor {
                 //return CodeEditorEvent::FoldStart
             },
             KeyCode::Tab => {
-                if ke.modifiers.shift {
-                    self.cursors.remove_tab(text_buffer, 4);
+                if !self.read_only{
+                    if ke.modifiers.shift {
+                        self.cursors.remove_tab(text_buffer, 4);
+                    }
+                    else {
+                        self.cursors.insert_tab(text_buffer, "    ");
+                    }
+                    true
                 }
-                else {
-                    self.cursors.insert_tab(text_buffer, "    ");
+                else{
+                    false
                 }
-                true
             },
             KeyCode::Return => {
-                if !ke.modifiers.control && !ke.modifiers.logo {
-                    self.cursors.insert_newline_with_indent(text_buffer);
+                if !self.read_only{
+                    if !ke.modifiers.control && !ke.modifiers.logo {
+                        self.cursors.insert_newline_with_indent(text_buffer);
+                    }
+                    true
                 }
-                true
+                else{
+                    false
+                }
             },
             _ => false
         };
@@ -893,7 +915,9 @@ impl CodeEditor {
                 self.reset_cursor_blinker(cx);
             },
             Event::TextInput(te) => {
-                self.handle_text_input(cx, &te, text_buffer);
+                if !self.read_only {
+                    self.handle_text_input(cx, &te, text_buffer);
+                }
             },
             Event::TextCopy(_) => match event { // access the original event
                 Event::TextCopy(req) => {
@@ -917,10 +941,10 @@ impl CodeEditor {
     
     pub fn begin_code_editor(&mut self, cx: &mut Cx, text_buffer: &TextBuffer) -> Result<(), ()> {
         // adjust dilation based on DPI factor
-        self.view.begin_view(cx, Layout {..Default::default()}) ?;
+        self.view.begin_view(cx, self.bg_layout) ?;
         
         // copy over colors
-        let cls = self.class;    
+        let cls = self.class;
         self.colors.indent_line_unknown = Self::color_indent_line_unknown().class(cx, cls);
         self.colors.indent_line_fn = Self::color_indent_line_fn().class(cx, cls);
         self.colors.indent_line_typedef = Self::color_indent_line_typedef().class(cx, cls);
@@ -1336,7 +1360,7 @@ impl CodeEditor {
                 TokenType::Keyword => self.colors.keyword,
                 TokenType::Bool => self.colors.keyword,
                 TokenType::Error => self.colors.error,
-                TokenType::Warning =>self.colors.warning,
+                TokenType::Warning => self.colors.warning,
                 TokenType::Defocus => self.colors.defocus,
                 TokenType::Flow => {
                     self.colors.flow
@@ -1361,7 +1385,7 @@ impl CodeEditor {
                     if chunk == &self._highlight_token[0..] {
                         self.draw_token_highlight_quad(cx, geom);
                     }
-                   self.colors.call
+                    self.colors.call
                 },
                 TokenType::TypeName => {
                     if chunk == &self._highlight_token[0..] {
@@ -1379,7 +1403,7 @@ impl CodeEditor {
                 TokenType::String => self.colors.string,
                 TokenType::Number => self.colors.number,
                 TokenType::CommentMultiBegin => self.colors.comment,
-                TokenType::CommentMultiEnd =>self.colors.comment,
+                TokenType::CommentMultiEnd => self.colors.comment,
                 TokenType::CommentLine => self.colors.comment,
                 TokenType::CommentChunk => self.colors.comment,
                 TokenType::ParenOpen => {
@@ -1767,7 +1791,7 @@ impl CodeEditor {
             let indent_id = if self.cursors.is_last_cursor_singular() && self._last_cursor_pos.row < self._line_geometry.len() {
                 self._line_geometry[self._last_cursor_pos.row].indent_id
             }else {0.};
-            let area:Area = indent_inst.clone().into();
+            let area: Area = indent_inst.clone().into();
             area.write_uniform_float(cx, Self::uniform_indent_sel(), indent_id);
         }
     }
@@ -1827,7 +1851,7 @@ impl CodeEditor {
     
     fn compute_offset_from_ypos(&mut self, cx: &Cx, ypos_abs: f32, text_buffer: &TextBuffer, end: bool) -> usize {
         let rel = self.view.get_view_area(cx).abs_to_rel(cx, Vec2 {x: 0.0, y: ypos_abs});
-        println!("{} {}",ypos_abs, rel.y);
+        println!("{} {}", ypos_abs, rel.y);
         let mut mono_size;
         // = Vec2::zero();
         let end_col = if end {1 << 31}else {0};

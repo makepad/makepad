@@ -1,6 +1,5 @@
 use render::*;
 use widget::*;
-use editor::*;
 use hub::*;
 use crate::appstorage::*;
 use crate::buildmanager::*;
