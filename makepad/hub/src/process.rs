@@ -14,7 +14,11 @@ impl Process {
     
     pub fn start(cmd: &str, args: &[&str], current_dir: &str, env:&[(&str,&str)]) -> Result<Process, std::io::Error> {
         fn create_process(cmd: &str, args: &[&str], current_dir: &str, env:&[(&str,&str)]) -> Result<Child, std::io::Error> {
-            let mut cbuild = Command::new(cmd);
+	    let mut cbuild = if cmd.find("/").is_some(){	
+            	Command::new(&format!("{}/{}",current_dir,cmd))
+	}else{
+Command::new(cmd)
+};
             cbuild.args(args)
                 .stdin(Stdio::null())
                 .stdout(Stdio::piped())
