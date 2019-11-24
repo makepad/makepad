@@ -18,9 +18,6 @@ ron = "0.5"
 [dependencies.widget]
 path="../widget"
 
-[dependencies.editor]
-path="./editor"
-
 [dependencies.render]
 path="../render"
 
