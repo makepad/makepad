@@ -7,34 +7,34 @@ pub use crate::math::*;
 pub use crate::colors::*;
 use std::any::TypeId;
 
-#[derive(Hash, PartialEq, Copy, Clone, Debug)]
+#[derive(Hash, PartialEq, Copy, Clone)]
 pub struct InstanceColor(pub TypeId);
 
-#[derive(Hash, PartialEq, Copy, Clone, Debug)]
+#[derive(Hash, PartialEq, Copy, Clone)]
 pub struct InstanceVec4(pub TypeId);
 
-#[derive(Hash, PartialEq, Copy, Clone, Debug)]
+#[derive(Hash, PartialEq, Copy, Clone)]
 pub struct InstanceVec3(pub TypeId);
 
-#[derive(Hash, PartialEq, Copy, Clone, Debug)]
+#[derive(Hash, PartialEq, Copy, Clone)]
 pub struct InstanceVec2(pub TypeId);
 
-#[derive(Hash, PartialEq, Copy, Clone, Debug)]
+#[derive(Hash, PartialEq, Copy, Clone)]
 pub struct InstanceFloat(pub TypeId);
 
-#[derive(Hash, PartialEq, Copy, Clone, Debug)]
+#[derive(Hash, PartialEq, Copy, Clone)]
 pub struct UniformColor(pub TypeId);
 
-#[derive(Hash, PartialEq, Copy, Clone, Debug)]
+#[derive(Hash, PartialEq, Copy, Clone)]
 pub struct UniformVec4(pub TypeId);
 
-#[derive(Hash, PartialEq, Copy, Clone, Debug)]
+#[derive(Hash, PartialEq, Copy, Clone)]
 pub struct UniformVec3(pub TypeId);
 
-#[derive(Hash, PartialEq, Copy, Clone, Debug)]
+#[derive(Hash, PartialEq, Copy, Clone)]
 pub struct UniformVec2(pub TypeId);
 
-#[derive(Hash, PartialEq, Copy, Clone, Debug)]
+#[derive(Hash, PartialEq, Copy, Clone)]
 pub struct UniformFloat(pub TypeId);
 
 pub struct UniqueId(pub TypeId);

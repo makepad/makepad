@@ -236,7 +236,7 @@ impl Cx {
     
 }
 
-#[derive(Default, Clone, Debug)]
+#[derive(Default, Clone)]
 pub struct CxPlatformPass {
 }
 

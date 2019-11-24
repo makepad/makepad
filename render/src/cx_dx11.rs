@@ -15,20 +15,43 @@ use std::ffi;
 
 impl Cx {
     
-    pub fn render_view(&mut self, pass_id: usize, view_id: usize, repaint_id: u64, d3d11_cx: &D3d11Cx, zbias: &mut f32, zbias_step: f32) {
+    pub fn render_view(
+        &mut self,
+        pass_id: usize,
+        view_id: usize,
+        scroll: Vec2,
+        clip: (Vec2, Vec2),
+        repaint_id: u64,
+        d3d11_cx: &D3d11Cx,
+        zbias: &mut f32,
+        zbias_step: f32
+    ) {
         
         // tad ugly otherwise the borrow checker locks 'self' and we can't recur
-        let draw_calls_len = {
-            let cxview = &mut self.views[view_id];
-            cxview.set_clipping_uniforms();
-            cxview.uniform_view_transform(&Mat4::identity());
-            cxview.platform.uni_dl.update_with_f32_constant_data(d3d11_cx, &mut cxview.uniforms);
-            cxview.draw_calls_len
-        };
+        let draw_calls_len = self.views[view_id].draw_calls_len;
+        
+        self.views[view_id].uniform_view_transform(&Mat4::identity());
+        self.views[view_id].parent_scroll = scroll;
+        
+        let local_scroll = self.views[view_id].get_local_scroll();
+        let clip = self.views[view_id].intersect_clip(clip);
+        
+        let cxview = &mut self.views[view_id];
+        cxview.platform.view_uniforms.update_with_f32_constant_data(d3d11_cx, cxview.view_uniforms.as_slice());
+        
         for draw_call_id in 0..draw_calls_len {
             let sub_view_id = self.views[view_id].draw_calls[draw_call_id].sub_view_id;
             if sub_view_id != 0 {
-                self.render_view(pass_id, sub_view_id, repaint_id, d3d11_cx, zbias, zbias_step);
+                self.render_view(
+                    pass_id,
+                    sub_view_id,
+                    Vec2 {x: local_scroll.x + scroll.x, y: local_scroll.y + scroll.y},
+                    clip,
+                    repaint_id,
+                    d3d11_cx,
+                    zbias,
+                    zbias_step
+                );
             }
             else {
                 let cxview = &mut self.views[view_id];
@@ -47,20 +70,17 @@ impl Cx {
                 }
                 
                 // update the zbias uniform if we have it.
-                if draw_call.uniforms.len() > 0 {
-                    if let Some(zbias_offset) = sh.mapping.zbias_uniform_prop {
-                        if draw_call.uniforms[zbias_offset] != *zbias {
-                            draw_call.uniforms[zbias_offset] = *zbias;
-                            draw_call.uniforms_dirty = true;
-                        }
-                        *zbias += zbias_step;
-                    }
-                }
+                draw_call.set_zbias(*zbias);
+                draw_call.set_local_scroll(scroll, local_scroll);
+                draw_call.set_clip(clip);
+                *zbias += zbias_step;
+                
+                draw_call.platform.draw_uniforms.update_with_f32_constant_data(d3d11_cx, draw_call.draw_uniforms.as_slice());
                 
                 if draw_call.uniforms_dirty {
                     draw_call.uniforms_dirty = false;
                     if draw_call.uniforms.len() != 0 {
-                        draw_call.platform.uni_dr.update_with_f32_constant_data(d3d11_cx, &mut draw_call.uniforms);
+                        draw_call.platform.uniforms.update_with_f32_constant_data(d3d11_cx, &mut draw_call.uniforms);
                     }
                 }
                 
@@ -80,7 +100,12 @@ impl Cx {
                 
                 d3d11_cx.set_vertex_buffers(&shp.geom_vbuf, sh.mapping.geometry_slots, &draw_call.platform.inst_vbuf, sh.mapping.instance_slots);
                 
-                d3d11_cx.set_constant_buffers(&self.platform.uni_cx, &cxview.platform.uni_dl, &draw_call.platform.uni_dr);
+                d3d11_cx.set_constant_buffers(
+                    &self.passes[pass_id].platform.pass_uniforms,
+                    &cxview.platform.view_uniforms,
+                    &draw_call.platform.draw_uniforms,
+                    &draw_call.platform.uniforms
+                );
                 
                 for (i, texture_id) in draw_call.textures_2d.iter().enumerate() {
                     let cxtexture = &mut self.textures[*texture_id as usize];
@@ -116,10 +141,10 @@ impl Cx {
         self.passes[pass_id].set_ortho_matrix(Vec2::zero(), pass_size);
         self.passes[pass_id].uniform_camera_view(&Mat4::identity());
         self.passes[pass_id].paint_dirty = false;
-        let dpi_factor = if let Some(override_dpi_factor) = self.passes[pass_id].override_dpi_factor{
+        let dpi_factor = if let Some(override_dpi_factor) = self.passes[pass_id].override_dpi_factor {
             override_dpi_factor
         }
-        else{
+        else {
             inherit_dpi_factor
         };
         self.passes[pass_id].set_dpi_factor(dpi_factor);
@@ -143,13 +168,13 @@ impl Cx {
             }
             color_textures.push(render_target.as_raw() as *mut _);
             // possibly clear it
-            match color_texture.clear_color{
-                ClearColor::InitWith(color)=>{
-                    if is_initial{
+            match color_texture.clear_color {
+                ClearColor::InitWith(color) => {
+                    if is_initial {
                         d3d11_cx.clear_render_target_view(&render_target, color); //self.clear_color);
                     }
                 },
-                ClearColor::ClearWith(color)=>{
+                ClearColor::ClearWith(color) => {
                     d3d11_cx.clear_render_target_view(&render_target, color); //self.clear_color);
                 }
             }
@@ -159,13 +184,13 @@ impl Cx {
         if let Some(depth_texture_id) = self.passes[pass_id].depth_texture {
             let cxtexture = &mut self.textures[depth_texture_id];
             let is_initial = d3d11_cx.update_depth_stencil(cxtexture, dpi_factor, pass_size);
-            match self.passes[pass_id].clear_depth{
-                ClearDepth::InitWith(depth_clear)=>{
-                    if is_initial{
+            match self.passes[pass_id].clear_depth {
+                ClearDepth::InitWith(depth_clear) => {
+                    if is_initial {
                         d3d11_cx.clear_depth_stencil_view(cxtexture.platform.depth_stencil_view.as_ref().unwrap(), depth_clear as f32);
                     }
                 },
-                ClearDepth::ClearWith(depth_clear)=>{
+                ClearDepth::ClearWith(depth_clear) => {
                     d3d11_cx.clear_depth_stencil_view(cxtexture.platform.depth_stencil_view.as_ref().unwrap(), depth_clear as f32);
                 }
             }
@@ -198,8 +223,8 @@ impl Cx {
         
         d3d11_cx.set_raster_state(self.passes[pass_id].platform.raster_state.as_ref().unwrap());
         d3d11_cx.set_blend_state(self.passes[pass_id].platform.blend_state.as_ref().unwrap());
-        
-        self.platform.uni_cx.update_with_f32_constant_data(&d3d11_cx, &mut self.passes[pass_id].uniforms);
+        let cxpass = &mut self.passes[pass_id];
+        cxpass.platform.pass_uniforms.update_with_f32_constant_data(&d3d11_cx, cxpass.pass_uniforms.as_slice());
     }
     
     pub fn draw_pass_to_window(&mut self, pass_id: usize, vsync: bool, dpi_factor: f32, d3d11_window: &mut D3d11Window, d3d11_cx: &D3d11Cx) {
@@ -209,7 +234,16 @@ impl Cx {
         self.setup_pass_render_targets(pass_id, dpi_factor, d3d11_window.render_target_view.as_ref(), d3d11_cx);
         let mut zbias = 0.0;
         let zbias_step = self.passes[pass_id].zbias_step;
-        self.render_view(pass_id, view_id, self.repaint_id, &d3d11_cx, &mut zbias, zbias_step);
+        self.render_view(
+            pass_id,
+            view_id,
+            Vec2::zero(),
+            (Vec2 {x: -50000., y: -50000.}, Vec2 {x: 50000., y: 50000.}),
+            self.repaint_id,
+            &d3d11_cx,
+            &mut zbias,
+            zbias_step
+        );
         d3d11_window.present(vsync);
         //println!("{}", (Cx::profile_time_ns() - time1)as f64 / 1000.0);
     }
@@ -220,7 +254,16 @@ impl Cx {
         self.setup_pass_render_targets(pass_id, dpi_factor, None, d3d11_cx);
         let mut zbias = 0.0;
         let zbias_step = self.passes[pass_id].zbias_step;
-        self.render_view(pass_id, view_id, self.repaint_id, &d3d11_cx, &mut zbias, zbias_step);
+        self.render_view(
+            pass_id,
+            view_id,
+            Vec2::zero(),
+            (Vec2{x:-50000.,y:-50000.},Vec2{x:50000.,y:50000.}),
+            self.repaint_id,
+            &d3d11_cx,
+            &mut zbias,
+            zbias_step
+        );
     }
 }
 
@@ -472,39 +515,42 @@ impl D3d11Cx {
         )};
     }
     
-    pub fn set_constant_buffers(&self, cx_buf: &D3d11Buffer, dl_buf: &D3d11Buffer, dr_buf: &D3d11Buffer) {
-        let cx_buf = cx_buf.buffer.as_ref().unwrap();
-        let dl_buf = dl_buf.buffer.as_ref().unwrap();
-        if let Some(dr_buf) = dr_buf.buffer.as_ref(){
+    pub fn set_constant_buffers(&self, pass_uni: &D3d11Buffer, view_uni: &D3d11Buffer, draw_uni: &D3d11Buffer, uni: &D3d11Buffer) {
+        let pass_uni = pass_uni.buffer.as_ref().unwrap();
+        let view_uni = view_uni.buffer.as_ref().unwrap();
+        let draw_uni = draw_uni.buffer.as_ref().unwrap();
+        if let Some(uni) = uni.buffer.as_ref() {
             let buffers = [
-                cx_buf.as_raw() as *const std::ffi::c_void,
-                dl_buf.as_raw() as *const std::ffi::c_void,
-                dr_buf.as_raw() as *const std::ffi::c_void
+                pass_uni.as_raw() as *const std::ffi::c_void,
+                view_uni.as_raw() as *const std::ffi::c_void,
+                draw_uni.as_raw() as *const std::ffi::c_void,
+                uni.as_raw() as *const std::ffi::c_void,
             ];
             unsafe {self.context.VSSetConstantBuffers(
                 0,
-                3,
+                4,
                 buffers.as_ptr() as *const *mut _,
             )};
             unsafe {self.context.PSSetConstantBuffers(
                 0,
-                3,
+                4,
                 buffers.as_ptr() as *const *mut _,
             )};
         }
-        else{
+        else {
             let buffers = [
-                cx_buf.as_raw() as *const std::ffi::c_void,
-                dl_buf.as_raw() as *const std::ffi::c_void,
+                pass_uni.as_raw() as *const std::ffi::c_void,
+                view_uni.as_raw() as *const std::ffi::c_void,
+                draw_uni.as_raw() as *const std::ffi::c_void,
             ];
             unsafe {self.context.VSSetConstantBuffers(
                 0,
-                2,
+                3,
                 buffers.as_ptr() as *const *mut _,
             )};
             unsafe {self.context.PSSetConstantBuffers(
                 0,
-                2,
+                3,
                 buffers.as_ptr() as *const *mut _,
             )};
         }
@@ -854,7 +900,7 @@ impl D3d11Cx {
         }
     }
     
-    pub fn update_render_target(&self, cxtexture: &mut CxTexture, dpi_factor: f32, size: Vec2) ->bool {
+    pub fn update_render_target(&self, cxtexture: &mut CxTexture, dpi_factor: f32, size: Vec2) -> bool {
         
         let width = if let Some(width) = cxtexture.desc.width {width as usize} else {(size.x * dpi_factor) as usize};
         let height = if let Some(height) = cxtexture.desc.height {height as usize} else {(size.y * dpi_factor) as usize};
@@ -916,7 +962,7 @@ impl D3d11Cx {
         return true
     }
     
-    pub fn update_depth_stencil(&self, cxtexture: &mut CxTexture, dpi_factor: f32, size: Vec2)->bool{
+    pub fn update_depth_stencil(&self, cxtexture: &mut CxTexture, dpi_factor: f32, size: Vec2) -> bool {
         
         let width = if let Some(width) = cxtexture.desc.width {width as usize} else {(size.x * dpi_factor) as usize};
         let height = if let Some(height) = cxtexture.desc.height {height as usize} else {(size.y * dpi_factor) as usize};
@@ -1285,16 +1331,17 @@ impl D3d11Cx {
 
 #[derive(Clone, Default)]
 pub struct CxPlatformView {
-    pub uni_dl: D3d11Buffer
+    pub view_uniforms: D3d11Buffer
 }
 
-#[derive(Default, Clone, Debug)]
+#[derive(Default, Clone)]
 pub struct CxPlatformDrawCall {
-    pub uni_dr: D3d11Buffer,
+    pub draw_uniforms: D3d11Buffer,
+    pub uniforms: D3d11Buffer,
     pub inst_vbuf: D3d11Buffer
 }
 
-#[derive(Default, Clone, Debug)]
+#[derive(Default, Clone)]
 pub struct D3d11Buffer {
     pub last_size: usize,
     pub buffer: Option<ComPtr<d3d11::ID3D11Buffer>>
@@ -1337,14 +1384,15 @@ impl D3d11Buffer {
         self.update_with_data(d3d11_cx, d3d11::D3D11_BIND_VERTEX_BUFFER, data.len(), data.as_ptr() as *const _);
     }
     
-    pub fn update_with_f32_constant_data(&mut self, d3d11_cx: &D3d11Cx, data: &mut Vec<f32>) {
+    pub fn update_with_f32_constant_data(&mut self, d3d11_cx: &D3d11Cx, data: &[f32]) {
         let mut buffer = ptr::null_mut();
-        
         if (data.len() & 3) != 0 { // we have to align the data at the end
+            let mut new_data = data.to_vec();
             let steps = 4 - (data.len() & 3);
             for _ in 0..steps {
-                data.push(0.0);
+                new_data.push(0.0);
             };
+            return self.update_with_f32_constant_data(d3d11_cx, &new_data);
         }
         let sub_data = d3d11::D3D11_SUBRESOURCE_DATA {
             pSysMem: data.as_ptr() as *const _,
@@ -1390,8 +1438,9 @@ pub struct CxPlatformTexture {
     depth_stencil_view: Option<ComPtr<d3d11::ID3D11DepthStencilView>>
 }
 
-#[derive(Default, Clone, Debug)]
+#[derive(Default, Clone)]
 pub struct CxPlatformPass {
+    pass_uniforms: D3d11Buffer,
     blend_state: Option<ComPtr<d3d11::ID3D11BlendState>>,
     raster_state: Option<ComPtr<d3d11::ID3D11RasterizerState>>,
     depth_stencil_state: Option<ComPtr<d3d11::ID3D11DepthStencilState>>

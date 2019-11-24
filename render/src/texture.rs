@@ -1,6 +1,6 @@
 use crate::cx::*;
 
-#[derive(Clone, PartialEq, Debug)]
+#[derive(Clone, PartialEq)]
 pub enum TextureFormat {
     Default,
     ImageBGRA,
@@ -17,7 +17,7 @@ pub enum TextureFormat {
     //    MappedRGf32,
 }
 
-#[derive(Clone, PartialEq, Debug)]
+#[derive(Clone, PartialEq)]
 pub struct TextureDesc {
     pub format: TextureFormat,
     pub width: Option<usize>,

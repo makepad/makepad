@@ -270,8 +270,6 @@ impl Default for Cx {
     }
 }
 
-#[derive(Default, PartialEq, Copy, Clone, Debug)]
-pub struct CxId(usize);
 
 impl Cx {
     
