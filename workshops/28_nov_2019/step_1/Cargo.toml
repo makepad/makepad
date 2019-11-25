@@ -1,5 +1,5 @@
 [package]
-name = "nov28_step1_wasm"
+name = "step_1_wasm"
 version = "0.1.0"
 authors = ["makepaddev"]
 edition = "2018"
