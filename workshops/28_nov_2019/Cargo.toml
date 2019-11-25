@@ -1,4 +1,4 @@
 [workspace]
 members = [
-    "step_1_wasm"
+    "step_1"
 ]
