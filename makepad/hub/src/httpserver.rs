@@ -33,7 +33,7 @@ pub struct HttpServer {
 }
 
 impl HttpServer {
-    pub fn start_http_server(config: &HttpServerConfig, projects_arc: Arc<Mutex<HashMap<String, String>>>) -> Option<HttpServer> {
+    pub fn start_http_server(config: &HttpServerConfig, workspaces_arc: Arc<Mutex<HashMap<String, String>>>) -> Option<HttpServer> {
         
         let listen_address = match config {
             HttpServerConfig::Offline => return None,
@@ -43,7 +43,7 @@ impl HttpServer {
         };
         
         let listener = if let Ok(listener) = TcpListener::bind(listen_address.clone()) {listener} else {println!("Cannot bind http server port"); return None};
-        let projects = Arc::clone(&projects_arc);
+        let workspaces = Arc::clone(&workspaces_arc);
         let shared = Arc::new(Mutex::new(HttpServerShared::default()));
         
         let listen_thread = {
@@ -110,11 +110,11 @@ impl HttpServer {
                         
                         // lets look up the first part of url, the project.
                         let file_path = if let Some(file_pos) = url.find('/') {
-                            let (project, rest) = url.split_at(file_pos);
+                            let (workspace, rest) = url.split_at(file_pos);
                             let (_, rest) = rest.split_at(1);
                             // find the project
                             if let Ok(projects) = projects.lock() {
-                                if let Some(abs_path) = projects.get(project) {
+                                if let Some(abs_path) = workspaces.get(workspace) {
                                     Some(format!("{}/{}", abs_path, rest))
                                 }
                                 else {None}
