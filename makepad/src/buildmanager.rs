@@ -227,7 +227,7 @@ impl BuildManager {
                     let uid = hub_ui.route_send.alloc_uid();
                     if let Some(run_uid) = ab.run_uid {
                         hub_ui.route_send.send(ToHubMsg {
-                            to: HubMsgTo::Workspace(ab.build_target.workspace.clone()),
+                            to: HubMsgTo::Builder(ab.build_target.builder.clone()),
                             msg: HubMsg::ProgramKill {
                                 uid: run_uid,
                             }
@@ -235,7 +235,7 @@ impl BuildManager {
                     }
                     ab.run_uid = Some(uid);
                     hub_ui.route_send.send(ToHubMsg {
-                        to: HubMsgTo::Workspace(ab.build_target.workspace.clone()),
+                        to: HubMsgTo::Builder(ab.build_target.builder.clone()),
                         msg: HubMsg::ProgramRun {
                             uid: ab.run_uid.unwrap(),
                             path: path.clone(),
@@ -272,7 +272,7 @@ impl BuildManager {
             ab.build_result = None;
             if let Some(build_uid) = ab.build_uid {
                 hub_ui.route_send.send(ToHubMsg {
-                    to: HubMsgTo::Workspace(ab.build_target.workspace.clone()),
+                    to: HubMsgTo::Builder(ab.build_target.builder.clone()),
                     msg: HubMsg::BuildKill {
                         uid: build_uid,
                     }
@@ -281,7 +281,7 @@ impl BuildManager {
             }
             if let Some(run_uid) = ab.run_uid {
                 hub_ui.route_send.send(ToHubMsg {
-                    to: HubMsgTo::Workspace(ab.build_target.workspace.clone()),
+                    to: HubMsgTo::Builder(ab.build_target.builder.clone()),
                     msg: HubMsg::ProgramKill {
                         uid: run_uid,
                     }
@@ -296,10 +296,10 @@ impl BuildManager {
         for build_target in &storage.settings.builds {
             let uid = hub_ui.route_send.alloc_uid();
             hub_ui.route_send.send(ToHubMsg {
-                to: HubMsgTo::Workspace(build_target.workspace.clone()),
+                to: HubMsgTo::Builder(build_target.builder.clone()),
                 msg: HubMsg::Build {
                     uid: uid.clone(),
-                    project: build_target.project.clone(),
+                    workspace: build_target.workspace.clone(),
                     package: build_target.package.clone(),
                     config: build_target.config.clone()
                 }

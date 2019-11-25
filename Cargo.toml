@@ -7,7 +7,6 @@ members = [
     "examples/bare_example",
     "examples/widget_example",
     "examples/cmdline_example",
-    "workshops/nov28_step1_wasm", 
-    "workspace"
+    "builder"
 ]
  
