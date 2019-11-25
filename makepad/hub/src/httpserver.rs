@@ -58,7 +58,7 @@ impl HttpServer {
                     let mut tcp_stream = tcp_stream.expect("Incoming stream failure");
                     let (tx_write, rx_write) = mpsc::channel::<String>();
                     let mut reader = BufReader::new(tcp_stream.try_clone().expect("Cannot clone tcp stream"));
-                    let projects = Arc::clone(&projects);
+                    let workspaces = Arc::clone(&workspaces);
                     let shared = Arc::clone(&shared);
                     let _read_thread = std::thread::spawn(move || {
                         
