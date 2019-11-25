@@ -71,8 +71,11 @@ impl HttpServer {
                         
                         let line = &line[5..];
                         let space = line.find(' ').expect("http space fail");
-                        let url = &line[0..space];
-                        let url_lc = url.to_string();
+                        let mut url = line[0..space].to_string();
+                        if url.ends_with("/"){
+                            url.push_str("index.html");
+                        }
+                        let url_lc = url.clone();
                         url_lc.to_lowercase();
                         if url_lc.ends_with("/key.ron") || url.find("..").is_some() || url.starts_with("/") {
                             let _ = tcp_stream.shutdown(Shutdown::Both);
