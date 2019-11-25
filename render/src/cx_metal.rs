@@ -491,9 +491,9 @@ impl MetalWindow {
         }
     }
     
-    pub fn set_buffer_count(&mut self, count: u64) {
+    pub fn set_buffer_count(&mut self, _count: u64) {
         unsafe {
-            let () = msg_send![self.core_animation_layer, setMaximumDrawableCount: count];
+            let () = msg_send![self.core_animation_layer, setMaximumDrawableCount: 3];
         }
     }
     
