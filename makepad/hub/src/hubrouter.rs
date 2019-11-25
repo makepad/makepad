@@ -103,14 +103,14 @@ impl HubRouteSend{
             HubRouteSend::Networked{tx_write_arc,..}=>{
                 if let Ok(tx_write) = tx_write_arc.lock(){
                     if let Some(tx_write) = &*tx_write{
-                        tx_write.send(msg).expect("Cannot tx_write.send - unexpected");;
+                        tx_write.send(msg).expect("Cannot tx_write.send - unexpected");
                     }//else{ // lets queue up
                     //    self.hub_log.log("HubUI - Warning, trying to send messages whilst disconnected from hub");
                    // }
                 }
             },
             HubRouteSend::Direct{tx_pump,own_addr,..}=>{
-                tx_pump.send((*own_addr, msg)).expect("Cannot tx_write.send - unexpected");;
+                tx_pump.send((*own_addr, msg)).expect("Cannot tx_write.send - unexpected");
             }
         }
     }

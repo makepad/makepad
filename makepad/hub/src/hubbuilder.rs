@@ -44,7 +44,7 @@ const EXCLUDED_DIRS: &[&'static str] = &["target",".git",".github","edit_repo"];
 
 impl HubBuilder {
     
-    pub fn run_builder_direct<F>(builder: &str, hub_router: &mut HubRouter, event_handler: F)
+    pub fn run_builder_direct<F>(builder: &str, hub_router: &mut HubRouter, event_handler: F)->HubRouteSend
     where F: Fn(&mut HubBuilder, FromHubMsg) -> Result<(), HubWsError> + Clone + Send + 'static {
         let workspaces = Arc::new(Mutex::new(HashMap::<String, String>::new()));
         let http_server = Arc::new(Mutex::new(None));
@@ -107,6 +107,7 @@ impl HubBuilder {
                 }
             })
         };
+        route_send.clone()
     }
     
     pub fn run_builder_networked<F>(digest: Digest, in_address: Option<SocketAddr>, builder: &str, hub_log: HubLog, event_handler: F)
@@ -447,7 +448,7 @@ impl HubBuilder {
         if let Some(workspace_pos) = path.find("/") {
             let (workspace, rest) = path.split_at(workspace_pos);
             let (_, rest) = rest.split_at(1);
-            let abs_dir = self.get_project_abs(uid, workspace) ?;
+            let abs_dir = self.get_workspace_abs(uid, workspace) ?;
             return Ok((abs_dir.to_string(), workspace.to_string(), rest.to_string()));
         }
         Err(
@@ -455,14 +456,14 @@ impl HubBuilder {
         )
     }
     
-    pub fn get_project_abs(&mut self, uid: HubUid, project: &str) -> Result<String, HubWsError> {
+    pub fn get_workspace_abs(&mut self, uid: HubUid, workspace: &str) -> Result<String, HubWsError> {
         if let Ok(workspaces) = self.workspaces.lock() {
-            if let Some(abs_dir) = workspaces.get(project) {
+            if let Some(abs_dir) = workspaces.get(workspace) {
                 return Ok(abs_dir.to_string())
             }
         }
         Err(
-            self.error(uid, format!("Builder {} project {} not found", self.builder, project))
+            self.error(uid, format!("Builder {} workspace {} not found", self.builder, workspace))
         )
     }
     
@@ -644,7 +645,7 @@ impl HubBuilder {
         )
     }
     
-    pub fn cargo(&mut self, uid: HubUid, project: &str, args: &[&str], env: &[(&str, &str)]) -> Result<BuildResult, HubWsError> {
+    pub fn cargo(&mut self, uid: HubUid, workspace: &str, args: &[&str], env: &[(&str, &str)]) -> Result<BuildResult, HubWsError> {
         
         if let Ok(mut http_server) = self.http_server.lock() {
             if let Some(http_server) = &mut *http_server {
@@ -652,7 +653,7 @@ impl HubBuilder {
             }
         }; 
         
-        let abs_root_path = self.get_project_abs(uid, project) ?;
+        let abs_root_path = self.get_workspace_abs(uid, workspace) ?;
         
         // lets start a thread
         let mut extargs = args.to_vec();
@@ -723,7 +724,7 @@ impl HubBuilder {
                                 }
                                 let loc_message = LocMessage {
                                     //package_id: parsed.package_id.clone(),
-                                    path: format!("{}/{}/{}", builder, project, de_relativize_path(&path)).replace("\\","/"),
+                                    path: format!("{}/{}/{}", builder, workspace, de_relativize_path(&path)).replace("\\","/"),
                                     row: row,
                                     col: col,
                                     range: Some((span.byte_start as usize, span.byte_end as usize)),
@@ -763,7 +764,7 @@ impl HubBuilder {
                                     if !executable.ends_with(".rmeta") && abs_root_path.len() + 1 < executable.len() {
                                         let last = executable.clone().split_off(abs_root_path.len() + 1);
 
-                                        build_result = BuildResult::Executable {path: format!("{}/{}", project, last).replace("\\","/")};
+                                        build_result = BuildResult::Executable {path: format!("{}/{}", workspace, last).replace("\\","/")};
                                     }
                                 }
                                 // detect wasm files being build and tell the http server
@@ -771,7 +772,7 @@ impl HubBuilder {
                                     for filename in filenames {
                                         if filename.ends_with(".wasm") && abs_root_path.len() + 1 < filename.len() {
                                             let last = filename.clone().split_off(abs_root_path.len() + 1);
-                                            let path = format!("{}/{}", project, last).replace("\\","/");
+                                            let path = format!("{}/{}", workspace, last).replace("\\","/");
                                             if let Ok(mut http_server) = self.http_server.lock() {
                                                 if let Some(http_server) = &mut *http_server {
                                                     http_server.send_file_change(&path);

@@ -16,7 +16,8 @@ impl Process {
         fn create_process(cmd: &str, args: &[&str], current_dir: &str, env: &[(&str, &str)]) -> Result<Child, std::io::Error> {
             let mut cbuild = if cmd.find("/").is_some() {
                 Command::new(&format!("{}/{}", current_dir, cmd))
-            }else {
+            }
+            else {
                 Command::new(cmd)
             };
             cbuild.args(args)
@@ -56,7 +57,6 @@ impl Process {
                             // emit a line
                             if let Ok(line) = str::from_utf8(&storage[start..(index + 1)]) {
                                 tx_line.send(Some((false, line.to_string()))).expect("tx_line cannot send - unexpected");
-                                ;
                             }
                             start = index + 1;
                         }
@@ -84,7 +84,6 @@ impl Process {
                             // emit a line
                             if let Ok(line) = str::from_utf8(&storage[start..(index + 1)]) {
                                 tx_err.send(Some((true, line.to_string()))).expect("tx_err cannot send - unexpected");
-                                ;
                             }
                             start = index + 1;
                         }
