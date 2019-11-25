@@ -113,7 +113,7 @@ impl HttpServer {
                             let (workspace, rest) = url.split_at(file_pos);
                             let (_, rest) = rest.split_at(1);
                             // find the project
-                            if let Ok(projects) = projects.lock() {
+                            if let Ok(workspaces) = workspaces.lock() {
                                 if let Some(abs_path) = workspaces.get(workspace) {
                                     Some(format!("{}/{}", abs_path, rest))
                                 }
