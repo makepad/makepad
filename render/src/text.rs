@@ -127,7 +127,7 @@ impl Text {
                 
                 // basic hardcoded mipmapping so it stops 'swimming' in VR
                 let s = 1.0;
-                /*if dx > 5.0 {
+                if dx > 5.0 {
                     s = 0.7;
                 }
                 else if dx > 2.75 { // combine 3x3
@@ -145,8 +145,9 @@ impl Text {
                     s = sample2d(texturez, tex_coord2.xy).y;
                 }
                 else {
-                }*/
-                s = sample2d(texturez, tex_coord1.xy).x;
+                    s = sample2d(texturez, tex_coord1.xy).x;
+                }
+                
                 s = pow(s, curve);
                 return vec4(s * color.rgb * brightness * color.a, s * color.a); // + color("#a");
             }
@@ -161,7 +162,7 @@ impl Text {
                     draw_clip.zw
                 );
                 
-                let normalized: vec2 = (clipped - min_pos + draw_scroll) / (max_pos - min_pos);
+                let normalized: vec2 = (clipped - min_pos + draw_scroll) / vec2(w,-h);
                 rect = vec4(min_pos.x, min_pos.y, max_pos.x, max_pos.y) - draw_scroll.xyxy;
                 
                 tex_coord1 = mix(
