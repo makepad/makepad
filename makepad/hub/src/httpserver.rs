@@ -192,7 +192,7 @@ impl HttpServer {
     }
     
     pub fn send_build_start(&mut self) {
-        self.send_json_message(&format!("{{\"type\":\"build_start\"}}"));
+        //self.send_json_message(&format!("{{\"type\":\"build_start\"}}"));
     }
     
     pub fn terminate(&mut self) {
