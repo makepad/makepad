@@ -260,8 +260,8 @@ impl Text {
             let min_pos_y = geom_y - font_size_logical * glyph.bounds.p_min.y + text_style.font_size * text_style.top_drop;
             
             // compute subpixel shift
-            let subpixel_x_fract = 0.;//min_pos_x - (min_pos_x * dpi_factor).floor() / dpi_factor;
-            let subpixel_y_fract = 0.;//min_pos_y - (min_pos_y * dpi_factor).floor() / dpi_factor;
+            let subpixel_x_fract = min_pos_x - (min_pos_x * dpi_factor).floor() / dpi_factor;
+            let subpixel_y_fract = min_pos_y - (min_pos_y * dpi_factor).floor() / dpi_factor;
             
             // scale and snap it
             let scaled_min_pos_x = geom_x + font_size_logical * self.font_scale * glyph.bounds.p_min.x - subpixel_x_fract;
