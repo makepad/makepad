@@ -311,12 +311,12 @@ impl MetalCx {
     pub fn new() -> MetalCx {
         let devices = Device::all();
         for device in devices {
-            if device.is_low_power() {
-                return MetalCx {
-                    command_queue: device.new_command_queue(),
-                    device: device
-                }
-            }
+            //if device.is_low_power() {
+            //    return MetalCx {
+            //        command_queue: device.new_command_queue(),
+            //        device: device
+            //    }
+           // }
         }
         let device = Device::system_default().unwrap();
         MetalCx {
