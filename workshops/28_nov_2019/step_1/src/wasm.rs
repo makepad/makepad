@@ -18,7 +18,7 @@ pub unsafe extern "C" fn free_vec_f32(raw_parts: u32) {
 }
 
 unsafe fn vec_f32_into_js(mut vec: Vec<f32>) -> u32 {
-    let raw_parts = Box::new([
+    let raw_parts = Box::new([ 
         vec.as_mut_ptr() as u32,
         vec.len() as u32,
         vec.capacity() as u32,
