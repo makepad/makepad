@@ -62,10 +62,12 @@ pub struct BuildTarget {
 }
 
 pub struct AppStorage {
+    pub init_builders_counter:usize,
     pub builders_request_uid: HubUid,
     pub builder_sync_uid: HubUid,
     pub hub_router: Option<HubRouter>,
     pub hub_server: Option<HubServer>,
+    pub builder_route_send: Option<HubRouteSend>,
     pub hub_ui: Option<HubUI>,
     pub hub_ui_message: Signal,
     pub settings_changed: Signal,
@@ -86,8 +88,10 @@ pub struct AppTextBuffer {
 impl AppStorage {
     pub fn style(cx: &mut Cx) -> Self {
         AppStorage {
+            init_builders_counter:2,
             builders_request_uid: HubUid::zero(),
             builder_sync_uid: HubUid::zero(),
+            builder_route_send: None,
             hub_router: None,
             hub_server: None,
             hub_ui: None,
@@ -118,8 +122,8 @@ impl AppStorage {
                 }
             });
             
-            HubBuilder::run_builder_direct("main", &mut hub_router, | ws, htc | {builder_main::builder(ws, htc)});
-            
+            let send = HubBuilder::run_builder_direct("main", &mut hub_router, | ws, htc | {builder_main::builder(ws, htc)});
+            self.builder_route_send = Some(send);
             self.hub_router = Some(hub_router);
             self.hub_ui = Some(hub_ui);
         }
@@ -284,22 +288,24 @@ impl AppStorage {
         self.builders_request_uid = uid;
     }
     
-    pub fn handle_hub_msg(&mut self, cx: &mut Cx, htc: FromHubMsg, windows: &mut Vec<AppWindow>, state: &AppState) {
+    pub fn handle_hub_msg(&mut self, cx: &mut Cx, htc: &FromHubMsg, windows: &mut Vec<AppWindow>, state: &AppState) {
         let hub_ui = self.hub_ui.as_mut().unwrap();
         // only in ConnectUI of ourselves do we list the workspaces
-        match htc.msg {
+        match &htc.msg {
             // our own connectUI message, means we are ready to talk to the hub
             HubMsg::ConnectUI => if hub_ui.route_send.is_own_addr(&htc.from) {
                 // now start talking
-                self.reload_builders();
             },
             HubMsg::DisconnectBuilder(_) | HubMsg::ConnectBuilder(_) => {
-                self.reload_builders();
+                let own = if let Some(send) = &self.builder_route_send{send.is_own_addr(&htc.from)}else{false};
+                if !own{
+                    self.reload_builders();
+                }
             },
-            HubMsg::ListBuildersResponse {uid, builders} => if uid == self.builders_request_uid {
+            HubMsg::ListBuildersResponse {uid, builders} => if *uid == self.builders_request_uid {
                 let uid = hub_ui.route_send.alloc_uid();
                 // from these workspaces query filetrees
-                for builder in &builders {
+                for builder in builders {
                     // lets look up a workspace and configure it!
                     // lets config it
                     if let Some(builder_config) = self.settings.builders.get(builder) {
@@ -346,7 +352,7 @@ impl AppStorage {
                 }
                 
             },
-            HubMsg::BuilderFileTreeResponse {uid, tree} => if uid == self.builders_request_uid {
+            HubMsg::BuilderFileTreeResponse {uid, tree} => if *uid == self.builders_request_uid {
                 // replace a workspace node
                 if let BuilderFileTreeNode::Folder {name, ..} = &tree {
                     let workspace = name.clone();
@@ -370,10 +376,10 @@ impl AppStorage {
                 for (_path, atb) in &mut self.text_buffers {
                     if let Some(cth_msg) = &atb.read_msg {
                         if let HubMsg::FileReadRequest {uid: read_uid, ..} = &cth_msg.msg {
-                            if *read_uid == uid {
+                            if *read_uid == *uid {
                                 atb.read_msg = None;
                                 if let Some(data) = data {
-                                    if let Ok(utf8_data) = String::from_utf8(data) {
+                                    if let Ok(utf8_data) = std::str::from_utf8(data) {
                                         atb.text_buffer.load_from_utf8(&utf8_data);
                                         atb.text_buffer.send_textbuffer_loaded_signal(cx);
                                     }

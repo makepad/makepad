@@ -149,7 +149,8 @@ impl BuildManager {
     pub fn handle_hub_msg(&mut self, cx: &mut Cx, storage: &mut AppStorage, htc: &FromHubMsg) {
         //let hub_ui = storage.hub_ui.as_mut().unwrap();
         match &htc.msg {
-            HubMsg::ListPackagesResponse {uid: _, packages: _} => {
+            HubMsg::ListBuildersResponse{..}=>{
+                self.restart_build(cx, storage);
             },
             HubMsg::CargoBegin {uid} => if self.is_running_uid(uid) {
             },
