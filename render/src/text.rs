@@ -116,7 +116,7 @@ impl Text {
             let tex_coord2: vec2<Varying>;
             let tex_coord3: vec2<Varying>;
             let clipped: vec2<Varying>;
-            let rect: vec4<Varying>;
+            //let rect: vec4<Varying>;
             
             let brightness: Self::uniform_brightness();
             let curve: Self::uniform_curve();
@@ -163,7 +163,7 @@ impl Text {
                 );
                 
                 let normalized: vec2 = (clipped - min_pos + draw_scroll) / vec2(w,-h);
-                rect = vec4(min_pos.x, min_pos.y, max_pos.x, max_pos.y) - draw_scroll.xyxy;
+                //rect = vec4(min_pos.x, min_pos.y, max_pos.x, max_pos.y) - draw_scroll.xyxy;
                 
                 tex_coord1 = mix(
                     font_tc.xy,
@@ -260,8 +260,8 @@ impl Text {
             let min_pos_y = geom_y - font_size_logical * glyph.bounds.p_min.y + text_style.font_size * text_style.top_drop;
             
             // compute subpixel shift
-            let subpixel_x_fract = min_pos_x - (min_pos_x * dpi_factor).floor() / dpi_factor;
-            let subpixel_y_fract = min_pos_y - (min_pos_y * dpi_factor).floor() / dpi_factor;
+            let subpixel_x_fract = 0.;//min_pos_x - (min_pos_x * dpi_factor).floor() / dpi_factor;
+            let subpixel_y_fract = 0.;//min_pos_y - (min_pos_y * dpi_factor).floor() / dpi_factor;
             
             // scale and snap it
             let scaled_min_pos_x = geom_x + font_size_logical * self.font_scale * glyph.bounds.p_min.x - subpixel_x_fract;
