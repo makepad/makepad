@@ -27,7 +27,7 @@ impl Default for AppSettings {
             workspaces: {
                 let mut cfg = HashMap::new();
                 cfg.insert("main".to_string(), HubWsConfig {
-                    http_server: HttpServerConfig::Localhost(2001),
+                    http_server: HttpServerConfig::Localhost(8000),
                     projects: {
                         let mut project = HashMap::new();
                         project.insert("makepad".to_string(), ".".to_string());
