@@ -4,7 +4,7 @@ use widget::*;
 
 #[derive(Clone)]
 pub struct LogItem {
-    pub code_editor: CodeEditor,
+    pub text_editor: TextEditor,
     pub text_buffer: TextBuffer,
     pub needs_formatting: bool
 }
@@ -12,19 +12,17 @@ pub struct LogItem {
 impl LogItem {
     pub fn proto(cx: &mut Cx) -> Self {
         let editor = Self {
-            code_editor: CodeEditor {
+            text_editor: TextEditor {
+                read_only: true,
                 draw_line_numbers: false,
                 draw_cursor_row: false,
                 line_number_width: 10.,
                 top_padding: 10.,
                 mark_unmatched_parens: false,
                 folding_depth: 3,
-                ..CodeEditor::proto(cx)
+                ..TextEditor::proto(cx)
             },
             text_buffer: TextBuffer {
-                is_loading: true,
-                signal: cx.new_signal(),
-                mutation_id: 1,
                 ..TextBuffer::default()
             },
             needs_formatting: false,
@@ -47,30 +45,29 @@ impl LogItem {
             loc_message.body.clone()
         };
         
-        self.text_buffer.load_from_utf8(cx, &text);
-        self.code_editor.view.redraw_view_area(cx);
+        self.text_buffer.load_from_utf8(&text);
+        self.text_editor.view.redraw_view_area(cx);
     }
 
     pub fn load_plain_text(&mut self, cx: &mut Cx, val: &str) {
-        println!("PLAIN TEXT {}", val);
         self.needs_formatting = false;
-        self.text_buffer.load_from_utf8(cx, val);
-        self.code_editor.view.redraw_view_area(cx);
+        self.text_buffer.load_from_utf8(val);
+        self.text_editor.view.redraw_view_area(cx);
     }
 
 
     pub fn clear_msg(&mut self, cx: &mut Cx) {
-        self.text_buffer.load_from_utf8(cx, "");
+        self.text_buffer.load_from_utf8("");
     }
     
-    pub fn handle_log_item(&mut self, cx: &mut Cx, event: &mut Event) -> CodeEditorEvent {
+    pub fn handle_log_item(&mut self, cx: &mut Cx, event: &mut Event) -> TextEditorEvent {
         let text_buffer = &mut self.text_buffer;
-        let ce = self.code_editor.handle_code_editor(cx, event, text_buffer);
+        let ce = self.text_editor.handle_text_editor(cx, event, text_buffer);
         match ce {
-            CodeEditorEvent::AutoFormat => {
+            TextEditorEvent::AutoFormat => {
                 let formatted = RustTokenizer::auto_format(text_buffer, true).out_lines;
-                self.code_editor.cursors.replace_lines_formatted(formatted, text_buffer);
-                self.code_editor.view.redraw_view_area(cx);
+                self.text_editor.cursors.replace_lines_formatted(formatted, text_buffer);
+                self.text_editor.view.redraw_view_area(cx);
             },
             _ => ()
         }
@@ -169,12 +166,12 @@ impl LogItem {
             }
         }
         
-        if self.code_editor.begin_code_editor(cx, text_buffer).is_err() {return}
+        if self.text_editor.begin_text_editor(cx, text_buffer).is_err() {return}
 
         for (index, token_chunk) in text_buffer.token_chunks.iter_mut().enumerate() {
-            self.code_editor.draw_chunk(cx, index, &text_buffer.flat_text, token_chunk, &text_buffer.messages.cursors);
+            self.text_editor.draw_chunk(cx, index, &text_buffer.flat_text, token_chunk, &text_buffer.messages.cursors);
         }
         
-        self.code_editor.end_code_editor(cx, text_buffer);
+        self.text_editor.end_text_editor(cx, text_buffer);
     }
 }

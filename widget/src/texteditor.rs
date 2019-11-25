@@ -2,14 +2,13 @@ use render::*;
 use crate::scrollview::*;
 use crate::textbuffer::*;
 use crate::textcursor::*;
-use crate::codeicon::*;
 use crate::widgettheme::*;
 
 #[derive(Clone)]
-pub struct CodeEditor {
+pub struct TextEditor {
     pub class: ClassId,
     pub view: ScrollView,
-    pub bg_layout: Layout,
+    pub view_layout: Layout,
     pub bg: Quad,
     pub gutter_bg: Quad,
     pub cursor: Quad,
@@ -19,7 +18,7 @@ pub struct CodeEditor {
     pub cursor_row: Quad,
     pub paren_pair: Quad,
     pub indent_lines: Quad,
-    pub code_icon: CodeIcon,
+
     pub message_marker: Quad,
     pub text: Text,
     pub line_number_text: Text,
@@ -33,6 +32,7 @@ pub struct CodeEditor {
     pub top_padding: f32,
     //pub colors: CodeEditorColors,
     pub cursor_blink_speed: f64,
+    pub highlight_area_on: bool,
     
     pub mark_unmatched_parens: bool,
     pub draw_cursor_row: bool,
@@ -40,6 +40,9 @@ pub struct CodeEditor {
     pub colors: CodeEditorColors,
     
     pub read_only: bool,
+    pub multiline: bool,
+    
+    pub empty_message: String,
     
     //pub _bg_area: Area,
     pub _scroll_pos_on_load: Option<Vec2>,
@@ -56,6 +59,7 @@ pub struct CodeEditor {
     pub _indent_stack: Vec<(Color, f32)>,
     pub _indent_id_alloc: f32,
     pub _indent_line_inst: Option<InstanceArea>,
+    pub _bg_inst: Option<InstanceArea>,
     pub _last_indent_color: Color,
     
     pub _line_geometry: Vec<LineGeom>,
@@ -100,7 +104,7 @@ pub struct CodeEditor {
 }
 
 #[derive(Clone, PartialEq)]
-pub enum CodeEditorEvent {
+pub enum TextEditorEvent {
     None,
     AutoFormat,
     LagChange,
@@ -143,11 +147,13 @@ pub struct CodeEditorColors {
     defocus: Color,
 }
 
-impl CodeEditor {
+impl TextEditor {
     
     pub fn proto(cx: &mut Cx) -> Self {
         Self {
+            empty_message:"".to_string(),
             read_only: false,
+            multiline: true,
             class: ClassId::base(),
             cursors: TextCursorSet::new(),
             indent_lines: Quad {
@@ -172,13 +178,12 @@ impl CodeEditor {
                 ..Quad::proto_with_shader(cx, Self::def_selection_shader(), "Editor.selection")
             },
             token_highlight: Quad::proto_with_shader(cx, Self::def_token_highlight_shader(), "Editor.token_highlight"),
-            
             cursor: Quad::proto_with_shader(cx, Self::def_cursor_shader(), "Editor.cursor"),
             cursor_row: Quad::proto_with_shader(cx, Self::def_cursor_row_shader(), "Editor.cursor_row"),
             paren_pair: Quad::proto_with_shader(cx, Self::def_paren_pair_shader(), "Editor.paren_pair"),
             message_marker: Quad::proto_with_shader(cx, Self::def_message_marker_shader(), "Editor.message_marker"),
-            code_icon: CodeIcon::proto(cx),
-            bg_layout: Layout::default(),
+            //code_icon: CodeIcon::proto(cx),
+            view_layout: Layout::default(),
             text: Text {
                 z: 2.00,
                 wrapping: Wrapping::Line,
@@ -198,6 +203,7 @@ impl CodeEditor {
             cursor_blink_speed: 0.5,
             top_padding: 27.,
             mark_unmatched_parens: true,
+            highlight_area_on: true,
             draw_cursor_row: true,
             _scroll_pos_on_load: None,
             _jump_to_offset: true,
@@ -220,7 +226,7 @@ impl CodeEditor {
             //_bg_area: Area::Empty,
             _highlight_area: Area::Empty,
             _highlight_visibility: 0.,
-            
+            _bg_inst: None,
             _text_inst: None,
             _text_area: Area::Empty,
             _line_number_inst: None,
@@ -632,7 +638,7 @@ impl CodeEditor {
                 else {
                     self.cursors.move_left(1, ke.modifiers.shift, text_buffer);
                 }
-                true 
+                true
             },
             KeyCode::ArrowRight => {
                 if ke.modifiers.logo || ke.modifiers.control { // token skipping
@@ -665,7 +671,7 @@ impl CodeEditor {
                     self.cursors.backspace(text_buffer);
                     true
                 }
-                else{
+                else {
                     false
                 }
             },
@@ -674,7 +680,7 @@ impl CodeEditor {
                     self.cursors.delete(text_buffer);
                     true
                 }
-                else{
+                else {
                     false
                 }
             },
@@ -726,7 +732,7 @@ impl CodeEditor {
                 //return CodeEditorEvent::FoldStart
             },
             KeyCode::Tab => {
-                if !self.read_only{
+                if !self.read_only {
                     if ke.modifiers.shift {
                         self.cursors.remove_tab(text_buffer, 4);
                     }
@@ -735,18 +741,18 @@ impl CodeEditor {
                     }
                     true
                 }
-                else{
+                else {
                     false
                 }
             },
             KeyCode::Return => {
-                if !self.read_only{
+                if !self.read_only && self.multiline{
                     if !ke.modifiers.control && !ke.modifiers.logo {
                         self.cursors.insert_newline_with_indent(text_buffer);
                     }
                     true
                 }
-                else{
+                else {
                     false
                 }
             },
@@ -795,7 +801,13 @@ impl CodeEditor {
             // lets insert a newline
         }
         else {
-            self.cursors.replace_text(&te.input, text_buffer);
+            if !self.multiline{
+                let replaced = te.input.replace("\n","");
+                self.cursors.replace_text(&replaced, text_buffer);
+            }
+            else{
+                self.cursors.replace_text(&te.input, text_buffer);
+            }
         }
         self.update_highlight(cx, text_buffer);
         self.scroll_last_cursor_visible(cx, text_buffer, 0.);
@@ -806,7 +818,7 @@ impl CodeEditor {
         
     }
     
-    pub fn handle_code_editor(&mut self, cx: &mut Cx, event: &mut Event, text_buffer: &mut TextBuffer) -> CodeEditorEvent {
+    pub fn handle_text_editor(&mut self, cx: &mut Cx, event: &mut Event, text_buffer: &mut TextBuffer) -> TextEditorEvent {
         if self.view.handle_scroll_bars(cx, event) {
             if let Some(last_finger_move) = self._last_finger_move {
                 if let Some(grid_select_corner) = self._grid_select_corner {
@@ -833,13 +845,15 @@ impl CodeEditor {
                 self._cursor_blink_flipflop = 1.0 - self._cursor_blink_flipflop;
                 self._highlight_visibility = 1.0;
                 self._cursor_area.write_uniform_float(cx, Self::uniform_cursor_blink(), self._cursor_blink_flipflop);
-                self._highlight_area.write_uniform_float(cx, Self::uniform_highlight_visible(), self._highlight_visibility);
+                if self.highlight_area_on{
+                    self._highlight_area.write_uniform_float(cx, Self::uniform_highlight_visible(), self._highlight_visibility);
+                }
                 // ok see if we changed.
                 if self._last_lag_mutation_id != text_buffer.mutation_id {
                     let was_filechange = self._last_lag_mutation_id != 0;
                     self._last_lag_mutation_id = text_buffer.mutation_id;
                     if was_filechange {
-                        return CodeEditorEvent::LagChange;
+                        return TextEditorEvent::LagChange;
                     }
                 }
             },
@@ -852,7 +866,7 @@ impl CodeEditor {
                         self.view.redraw_view_area(cx);
                     },
                     SIGNAL_TEXTBUFFER_JUMP_TO_OFFSET => {
-                        if text_buffer.is_loading {
+                        if !text_buffer.is_loaded {
                             self._jump_to_offset = true;
                         }
                         else {
@@ -901,7 +915,7 @@ impl CodeEditor {
             },
             Event::KeyDown(ke) => {
                 if ke.key_code == KeyCode::Return && (ke.modifiers.logo || ke.modifiers.control) {
-                    return CodeEditorEvent::AutoFormat
+                    return TextEditorEvent::AutoFormat
                 }
                 self.handle_key_down(cx, &ke, text_buffer);
             },
@@ -927,7 +941,7 @@ impl CodeEditor {
             },
             _ => ()
         };
-        CodeEditorEvent::None
+        TextEditorEvent::None
     }
     
     pub fn has_key_focus(&self, cx: &Cx) -> bool {
@@ -939,9 +953,9 @@ impl CodeEditor {
         self.reset_cursor_blinker(cx);
     }
     
-    pub fn begin_code_editor(&mut self, cx: &mut Cx, text_buffer: &TextBuffer) -> Result<(), ()> {
+    pub fn begin_text_editor(&mut self, cx: &mut Cx, text_buffer: &TextBuffer) -> Result<(), ()> {
         // adjust dilation based on DPI factor
-        self.view.begin_view(cx, self.bg_layout) ?;
+        self.view.begin_view(cx, self.view_layout) ?;
         
         // copy over colors
         let cls = self.class;
@@ -993,7 +1007,7 @@ impl CodeEditor {
         self.cursor_row.color = Self::color_cursor_row().class(cx, cls);
         self.text.text_style = Self::text_style_editor_text().class(cx, cls);
         
-        if text_buffer.is_loading {
+        if !text_buffer.is_loaded {
             //et bg_inst = self.bg.begin_quad(cx, &Layout {
             //    align: Align::left_top(),
             //    ..self.bg_layout.clone()
@@ -1006,8 +1020,17 @@ impl CodeEditor {
             return Err(())
         }
         else {
-            let inst = self.bg.draw_quad_rel(cx, Rect {x: 0., y: 0., w: cx.get_width_total(), h: cx.get_height_total()});
-            inst.set_do_scroll(cx, false, false);
+            let inst = self.bg.begin_quad_fill(cx);
+            inst.set_do_scroll(cx, false, false); // don't scroll the bg
+            self._bg_inst = Some(inst);
+            
+            if text_buffer.is_empty(){
+                let pos = cx.get_turtle_pos();
+                self.text.color = color("#666");
+                self.text.draw_text(cx, &self.empty_message);
+                cx.set_turtle_pos(pos);
+            }
+            
             //let bg_area = bg_inst.into_area();
             let view_area = self.view.get_view_area(cx);
             cx.update_area_refs(self._view_area, view_area);
@@ -1056,7 +1079,6 @@ impl CodeEditor {
             self._draw_cursors = DrawCursors::new();
             self._draw_messages = DrawCursors::new();
             self._tokens_on_line = 0;
-            self._line_largest_font = 0.;
             self._visible_lines = 0;
             self._newline_tabs = 0;
             self._last_tabs = 0;
@@ -1079,6 +1101,7 @@ impl CodeEditor {
             self.do_folding_animation_step(cx);
             
             self._line_geometry.truncate(0);
+            self._line_largest_font = self.text.text_style.font_size;
             self._scroll_pos = self.view.get_scroll_pos(cx);
             
             return Ok(())
@@ -1287,7 +1310,7 @@ impl CodeEditor {
                         cx.move_turtle(dx, 0.0);
                         self._line_was_folded = true;
                         self._anim_font_scale
-                    }
+                    } 
                     else {
                         self._line_was_folded = false;
                         self.open_font_scale
@@ -1573,11 +1596,13 @@ impl CodeEditor {
         }
     }
     
-    pub fn end_code_editor(&mut self, cx: &mut Cx, text_buffer: &TextBuffer) {
+    pub fn end_text_editor(&mut self, cx: &mut Cx, text_buffer: &TextBuffer) {
         
         // lets insert an empty newline at the bottom so its nicer to scroll
         self.draw_new_line(cx);
-        cx.walk_turtle(Walk::wh(Width::Fix(0.0), Height::Fix(self._monospace_size.y)));
+        if !cx.is_height_computed() {
+            cx.walk_turtle(Walk::wh(Width::Fix(0.0), Height::Fix(self._monospace_size.y)));
+        }
         
         self._text_area = self.text.end_text(cx, self._text_inst.as_ref().unwrap());
         
@@ -1594,13 +1619,16 @@ impl CodeEditor {
         
         // inject a final page
         self._final_fill_height = cx.get_height_total() - self._monospace_size.y;
-        cx.walk_turtle(Walk::wh(Width::Fix(0.0), Height::Fix(self._final_fill_height)));
-        
+        if !cx.is_height_computed() {
+            cx.walk_turtle(Walk::wh(Width::Fix(0.0), Height::Fix(self._final_fill_height)));
+        }
         // last bits
         self.do_selection_scrolling(cx, text_buffer);
         self.place_ime_and_draw_cursor_row(cx);
         self.set_indent_line_highlight_id(cx);
-        
+
+        self.bg.end_quad_fill(cx, &self._bg_inst.take().unwrap());
+    
         self.view.end_view(cx);
         
         if self._jump_to_offset {

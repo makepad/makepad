@@ -10,18 +10,20 @@ pub struct HomePage {
 
 impl HomePage {
     pub fn proto(cx: &mut Cx) -> Self {
-        let mut text_buffer = TextBuffer::default();
-        text_buffer.load_from_utf8(cx, "Inline Code editor demo");
         Self {
             view: ScrollView::proto(cx),
             text: Text::proto(cx),
-            example_texts: ElementsCounted::new(TextInput{
-                ..TextInput::proto(cx)
-            }),
+            example_texts: ElementsCounted::new(
+                TextInput::proto(cx, TextInputOptions{
+                    multiline:true,
+                    read_only:false,
+                    empty_message: "Enter email".to_string()
+                })
+            ),
         }
     }
     
-    pub fn my_code_editor() -> ClassId {uid!()}
+    pub fn my_mail_input() -> ClassId {uid!()}
     pub fn color_heading() -> ColorId {uid!()}
     pub fn color_body() -> ColorId {uid!()}
     pub fn layout_main() -> LayoutId {uid!()}
@@ -31,8 +33,8 @@ impl HomePage {
     pub fn walk_paragraph() -> WalkId {uid!()}
     
     pub fn theme(cx: &mut Cx) {
-        CodeEditor::color_bg().set_class(cx, Self::my_code_editor(), color("#8"));
-        CodeEditor::color_gutter_bg().set_class(cx, Self::my_code_editor(), color("#4"));
+        TextEditor::color_bg().set_class(cx, Self::my_mail_input(), color("#4"));
+        //CodeEditor::color_gutter_bg().set_class(cx, Self::my_code_editor(), color("#4"));
         
         Self::text_style_heading().set_base(cx, TextStyle {
             font_size: 28.0,
@@ -70,13 +72,10 @@ impl HomePage {
     
     pub fn draw_home_page(&mut self, cx: &mut Cx) {
         if self.view.begin_view(cx, Self::layout_main().base(cx)).is_err() {return};
-        self.example_texts.template().class = Self::my_code_editor();
+        self.example_texts.template().class = Self::my_mail_input();
         self.example_texts.get_draw(cx).draw_plain_text(cx);
+        
         cx.turtle_new_line();
-        
-        let color = CodeEditor::color_bg().class(cx, Self::my_code_editor());
-        
-        println!("{}", color.r);
         
         self.text.color = Self::color_heading().base(cx);
         self.text.text_style = Self::text_style_heading().base(cx);

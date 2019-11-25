@@ -1,29 +1,29 @@
 use render::*;
 
 use crate::textbuffer::*;
-use crate::codeeditor::*;
+use crate::texteditor::*;
 
 #[derive(Clone)]
 pub struct RustEditor {
-    pub code_editor: CodeEditor,
+    pub text_editor: TextEditor,
 }
 
 impl RustEditor {
     pub fn proto(cx: &mut Cx) -> Self {
         let editor = Self {
-            code_editor: CodeEditor::proto(cx),
+            text_editor: TextEditor::proto(cx),
         };
         //tab.animator.default = tab.anim_default(cx);
         editor
     }
       
-    pub fn handle_rust_editor(&mut self, cx: &mut Cx, event: &mut Event, text_buffer: &mut TextBuffer) -> CodeEditorEvent {
-        let ce = self.code_editor.handle_code_editor(cx, event, text_buffer);
+    pub fn handle_rust_editor(&mut self, cx: &mut Cx, event: &mut Event, text_buffer: &mut TextBuffer) -> TextEditorEvent {
+        let ce = self.text_editor.handle_text_editor(cx, event, text_buffer);
         match ce {
-            CodeEditorEvent::AutoFormat => {
+            TextEditorEvent::AutoFormat => {
                 let formatted = RustTokenizer::auto_format(text_buffer, false).out_lines;
-                self.code_editor.cursors.replace_lines_formatted(formatted, text_buffer);
-                self.code_editor.view.redraw_view_area(cx);
+                self.text_editor.cursors.replace_lines_formatted(formatted, text_buffer);
+                self.text_editor.view.redraw_view_area(cx);
             },
             _ => ()
         }
@@ -45,13 +45,13 @@ impl RustEditor {
             }
         }
         
-        if self.code_editor.begin_code_editor(cx, text_buffer).is_err() {return}
+        if self.text_editor.begin_text_editor(cx, text_buffer).is_err() {return}
         
         for (index, token_chunk) in text_buffer.token_chunks.iter_mut().enumerate() {
-            self.code_editor.draw_chunk(cx, index, &text_buffer.flat_text, token_chunk, &text_buffer.messages.cursors);
+            self.text_editor.draw_chunk(cx, index, &text_buffer.flat_text, token_chunk, &text_buffer.messages.cursors);
         }
         
-        self.code_editor.end_code_editor(cx, text_buffer);
+        self.text_editor.end_text_editor(cx, text_buffer);
     }
 }
 

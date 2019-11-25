@@ -273,7 +273,8 @@ impl App {
                     for (_path, atb) in &mut self.storage.text_buffers {
                         if let Some(utf8_data) = atb.file_read.resolve_utf8(fr) {
                             if let Ok(utf8_data) = utf8_data {
-                                atb.text_buffer.load_from_utf8(cx, utf8_data);
+                                atb.text_buffer.load_from_utf8( utf8_data);
+                                atb.text_buffer.send_textbuffer_loaded_signal(cx);
                                 break;
                             }
                         }
