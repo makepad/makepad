@@ -1,4 +1,4 @@
-// workspaces are networked build and file servers. This 'main' one is also compiled into makepad
+// builders are networked build and file servers. This 'main' one is also compiled into makepad
 use hub::*;
 
 pub fn builder(ws: &mut HubBuilder, htc: FromHubMsg) -> Result<(), HubWsError> {

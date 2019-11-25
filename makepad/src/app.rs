@@ -186,8 +186,8 @@ impl App {
                     if self.storage.hub_ui_message.is_signal(se) {
                         if let Some(mut msgs) = hub_ui.get_messages() {
                             for htc in msgs.drain(..) {
+                                self.storage.handle_hub_msg(cx, &htc, &mut self.windows, &mut self.state);
                                 self.build_manager.handle_hub_msg(cx, &mut self.storage, &htc);
-                                self.storage.handle_hub_msg(cx, htc, &mut self.windows, &mut self.state);
                             }
                             return
                         }
