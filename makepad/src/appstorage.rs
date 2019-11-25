@@ -42,13 +42,13 @@ impl Default for AppSettings {
                 sync
             },
             builds: vec![
-           BuildTarget {
-                workspace: "main".to_string(),
-                project: "makepad".to_string(),
-                package: "nov28_step1_wasm".to_string(),
-                config: "debug".to_string()
-            }    
-    ]
+                BuildTarget {
+                    workspace: "main".to_string(),
+                    project: "makepad".to_string(),
+                    package: "nov28_step1_wasm".to_string(),
+                    config: "debug".to_string()
+                }
+            ]
         }
     }
 }
@@ -250,10 +250,10 @@ impl AppStorage {
                     let utf8_bytes = utf8_data.into_bytes();
                     send_file_write_request(hub_ui, uid, path, &utf8_bytes);
                     // lets send our file write to all sync points.
-                    for (sync, points) in &self.settings.sync{
-                        if path.starts_with(sync){
+                    for (sync, points) in &self.settings.sync {
+                        if path.starts_with(sync) {
                             let mut sync_path = path.to_string();
-                            for point in points{
+                            for point in points {
                                 sync_path.replace_range(0..sync.len(), point);
                                 send_file_write_request(hub_ui, uid, &sync_path, &utf8_bytes);
                             }
