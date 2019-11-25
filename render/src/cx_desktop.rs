@@ -7,7 +7,7 @@ use time::precise_time_ns;
 
 #[derive(Clone)]
 pub struct CxDesktop {
-    pub repaint_via_scroll_event: bool,
+    //pub repaint_via_scroll_event: bool,
     pub file_read_id: u64,
     pub file_reads: Vec<FileRead>,
     pub profiler_start: Option<u64>,
@@ -16,7 +16,7 @@ pub struct CxDesktop {
 impl Default for CxDesktop {
     fn default() -> CxDesktop {
         CxDesktop {
-            repaint_via_scroll_event: false,
+            //repaint_via_scroll_event: false,
             file_read_id: 1,
             file_reads: Vec::new(),
             profiler_start: None,
@@ -106,12 +106,12 @@ impl Cx {
                 //    self.hover_mouse_cursor = None;
                 //}
             },
-            Event::FingerScroll(_)=>{
+            //Event::FingerScroll(_)=>{
                 // check for anything being paint or dra dirty
-                if self.redraw_child_areas.len()>0 || self.redraw_parent_areas.len()>0 {
-                    self.platform.desktop.repaint_via_scroll_event = true;
-                }
-            }
+            //    if self.redraw_child_areas.len()>0 || self.redraw_parent_areas.len()>0 {
+             //       self.platform.desktop.repaint_via_scroll_event = true;
+             //   }
+            //}
             _ => {}
         }
         false
@@ -124,8 +124,8 @@ impl Cx {
             self.call_animation_event(&mut event_handler, time);
         }
         
-        let mut vsync = self.platform.desktop.repaint_via_scroll_event;
-        self.platform.desktop.repaint_via_scroll_event = false;
+        let mut vsync = false;//self.platform.desktop.repaint_via_scroll_event;
+        //self.platform.desktop.repaint_via_scroll_event = false;
         if self.frame_callbacks.len() != 0 {
             self.call_frame_event(&mut event_handler, time);
             if self.frame_callbacks.len() != 0 {
