@@ -31,6 +31,7 @@ impl Default for AppSettings {
                     projects: {
                         let mut project = HashMap::new();
                         project.insert("makepad".to_string(), ".".to_string());
+                        project.insert("rust_workshop".to_string(), "workshops/28_nov_2019".to_string());
                         project
                     }
                 });
@@ -44,9 +45,9 @@ impl Default for AppSettings {
             builds: vec![
            BuildTarget {
                 workspace: "main".to_string(),
-                project: "makepad".to_string(),
-                package: "nov28_step1_wasm".to_string(),
-                config: "debug".to_string()
+                project: "rust_workshop".to_string(),
+                package: "step_1_wasm".to_string(),
+                config: "release".to_string()
             }    
     ]
         }
