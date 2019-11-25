@@ -258,7 +258,7 @@ impl ScrollBar {
                 if rect.contains(fe.abs.x, fe.abs.y) { // handle mousewheel
                     // we should scroll in either x or y
                     let scroll = match self.axis {
-                        Axis::Horizontal => if self.use_vertical_finger_scroll {fe.scroll.y}else {fe.scroll.x},
+                        Axis::Horizontal => if self.use_vertical_finger_scroll {-fe.scroll.y}else {fe.scroll.x},
                         Axis::Vertical => fe.scroll.y
                     };
                     if !self.smoothing.is_none() {
