@@ -1,6 +1,5 @@
 use render::*;
 use widget::*;
-
 #[derive(Clone)]
 pub struct FileTreeItemDraw {
     pub filler: Quad,

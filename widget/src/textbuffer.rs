@@ -1,4 +1,4 @@
- use render::*;
+use render::*;
 
 use crate::textcursor::*;
 
@@ -12,11 +12,11 @@ pub struct TextBuffer {
     pub lines: Vec<Vec<char>>,
     pub undo_stack: Vec<TextUndo>,
     pub redo_stack: Vec<TextUndo>,
-
+    
     //pub load_file_read: FileRead,
-    pub is_loading:bool,
+    pub is_loaded: bool,
     pub signal: Signal,
-
+    
     pub mutation_id: u64,
     pub is_crlf: bool,
     pub messages: TextBufferMessages,
@@ -24,19 +24,8 @@ pub struct TextBuffer {
     pub token_chunks: Vec<TokenChunk>,
     pub token_chunks_id: u64,
     pub keyboard: TextBufferKeyboard,
-} 
-
-impl TextBuffer {
-    pub fn needs_token_chunks(&mut self) -> bool {
-        if self.token_chunks_id != self.mutation_id && !self.is_loading {
-            self.token_chunks_id = self.mutation_id;
-            self.token_chunks.truncate(0);
-            self.flat_text.truncate(0);
-            return true
-        }
-        return false
-    }
 }
+
 
 pub const SIGNAL_TEXTBUFFER_LOADED: usize = 1;
 pub const SIGNAL_TEXTBUFFER_MESSAGE_UPDATE: usize = 2;
@@ -194,6 +183,27 @@ fn calc_char_count(lines: &Vec<Vec<char>>) -> usize {
 }
 
 impl TextBuffer {
+    pub fn with_signal(cx:&mut Cx)->Self{
+        let mut tb = TextBuffer::default();
+        tb.signal = cx.new_signal();
+        tb
+    }
+    
+    pub fn from_utf8(data: &str) -> Self {
+        let mut tb = TextBuffer::default();
+        tb.load_from_utf8(data);
+        tb
+    }
+    
+    pub fn needs_token_chunks(&mut self) -> bool {
+        if self.token_chunks_id != self.mutation_id && self.is_loaded {
+            self.token_chunks_id = self.mutation_id;
+            self.token_chunks.truncate(0);
+            self.flat_text.truncate(0);
+            return true
+        }
+        return false
+    }
     
     pub fn offset_to_text_pos(&self, char_offset: usize) -> TextPos {
         let mut char_count = 0;
@@ -357,6 +367,10 @@ impl TextBuffer {
         self.lines.len()
     }
     
+    pub fn is_empty(&self) -> bool {
+        self.lines.len() == 0 || self.lines.len() == 1 && self.lines[0].len() == 0
+    }
+    
     pub fn get_range_as_string(&self, start: usize, len: usize, ret: &mut String) {
         let mut pos = self.offset_to_text_pos(start);
         for _ in 0..len {
@@ -397,11 +411,11 @@ impl TextBuffer {
                 ret.push(*ch);
             }
             if i != self.lines.len() - 1 {
-                if self.is_crlf{
+                if self.is_crlf {
                     ret.push('\r');
                     ret.push('\n');
                 }
-                else{
+                else {
                     ret.push('\n');
                 }
             }
@@ -409,12 +423,15 @@ impl TextBuffer {
         return ret
     }
     
-    pub fn load_from_utf8(&mut self, cx:&mut Cx, utf8:&str){
-        self.is_loading = false;
-        self.is_crlf =  !utf8.find("\r\n").is_none();
+    pub fn send_textbuffer_loaded_signal(&self, cx: &mut Cx) {
+        cx.send_signal(self.signal, SIGNAL_TEXTBUFFER_LOADED);
+    }
+    
+    pub fn load_from_utf8(&mut self, utf8: &str) {
+        self.is_loaded = true;
+        self.is_crlf = !utf8.find("\r\n").is_none();
         self.lines = TextBuffer::split_string_to_lines(utf8);
         self.mutation_id += 1;
-        cx.send_signal(self.signal, SIGNAL_TEXTBUFFER_LOADED);
     }
     
     pub fn replace_line(&mut self, row: usize, start_col: usize, len: usize, rep_line: Vec<char>) -> Vec<char> {
@@ -443,8 +460,8 @@ impl TextBuffer {
         if start_pos.row == end_pos.row && rep_lines.len() == 1 { // replace in one line
             let rep_line_zero = rep_lines.drain(0..1).next().unwrap();
             
-            if start_pos.col>end_pos.col{ 
-               return vec![];
+            if start_pos.col>end_pos.col {
+                return vec![];
             }
             let line = self.lines[start_pos.row].splice(start_pos.col..end_pos.col, rep_line_zero).collect();
             return vec![line];
@@ -528,10 +545,10 @@ impl TextBuffer {
     }
     
     pub fn split_string_to_lines(string: &str) -> Vec<Vec<char>> {
-        if !string.find("\r\n").is_none(){
+        if !string.find("\r\n").is_none() {
             return string.split("\r\n").map( | s | s.chars().collect()).collect()
         }
-        else{
+        else {
             return string.split("\n").map( | s | s.chars().collect()).collect()
         }
     }

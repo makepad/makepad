@@ -189,9 +189,7 @@ impl AppStorage {
                     read_msg: None,
                     // write_msg: None,
                     text_buffer: TextBuffer {
-                        is_loading: true,
                         signal: cx.new_signal(),
-                        mutation_id: 1,
                         ..Default::default()
                     }
                 }
@@ -218,12 +216,7 @@ impl AppStorage {
                     file_read: FileRead::default(),
                     read_msg: Some(msg),
                     // write_msg: None,
-                    text_buffer: TextBuffer {
-                        is_loading: true,
-                        signal: cx.new_signal(),
-                        mutation_id: 1,
-                        ..Default::default()
-                    }
+                    text_buffer: TextBuffer::with_signal(cx)
                 }
             });
             atb
@@ -381,7 +374,8 @@ impl AppStorage {
                                 atb.read_msg = None;
                                 if let Some(data) = data {
                                     if let Ok(utf8_data) = String::from_utf8(data) {
-                                        atb.text_buffer.load_from_utf8(cx, &utf8_data);
+                                        atb.text_buffer.load_from_utf8(&utf8_data);
+                                        atb.text_buffer.send_textbuffer_loaded_signal(cx);
                                     }
                                 }
                                 else {
