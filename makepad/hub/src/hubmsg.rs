@@ -7,26 +7,26 @@ use crate::hubclient::*;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum HubMsg {
-    ConnectWorkspace(String),
+    ConnectBuilder(String),
     ConnectClone(String),
     ConnectUI,
     
-    DisconnectWorkspace(String),
+    DisconnectBuilder(String),
     DisconnectClone(String),
     DisconnectUI,
     DisconnectUnknown,
     
     ConnectionError(HubError),
     
-    WorkspaceConfig {
+    BuilderConfig {
         uid: HubUid,
-        config: HubWsConfig
+        config: HubBuilderConfig
     },
     
     // make client stuff
     Build {
         uid: HubUid,
-        project: String,
+        workspace: String,
         package: String,
         config: String
     },
@@ -90,23 +90,23 @@ pub enum HubMsg {
         uid: HubUid
     },
     
-    WorkspaceFileTreeRequest {
+    BuilderFileTreeRequest {
         uid: HubUid,
         create_digest: bool
     },
     
-    WorkspaceFileTreeResponse {
+    BuilderFileTreeResponse {
         uid: HubUid,
-        tree: WorkspaceFileTreeNode
+        tree: BuilderFileTreeNode
     },
     
-    ListWorkspacesRequest {
+    ListBuildersRequest {
         uid: HubUid,
     },
     
-    ListWorkspacesResponse {
+    ListBuildersResponse {
         uid: HubUid,
-        workspaces: Vec<String>
+        builders: Vec<String>
     },
     
     FileReadRequest {
@@ -136,7 +136,7 @@ pub enum HubMsg {
 impl HubMsg{
     pub fn is_blocking(&self)->bool{
         match self{
-            HubMsg::WorkspaceConfig{..}=>true,
+            HubMsg::BuilderConfig{..}=>true,
             HubMsg::FileWriteRequest{..}=>true,
             _=>false
         }
@@ -144,30 +144,30 @@ impl HubMsg{
 }
 
 #[derive(Eq, PartialEq, Debug, Clone, Serialize, Deserialize)]
-pub enum WorkspaceFileTreeNode {
+pub enum BuilderFileTreeNode {
     File {name: String, digest:Option<Box<Digest>>},
-    Folder {name: String, digest:Option<Box<Digest>>, folder: Vec<WorkspaceFileTreeNode>}
+    Folder {name: String, digest:Option<Box<Digest>>, folder: Vec<BuilderFileTreeNode>}
 }
 
-impl Ord for WorkspaceFileTreeNode {
-    fn cmp(&self, other: &WorkspaceFileTreeNode) -> Ordering {
+impl Ord for BuilderFileTreeNode {
+    fn cmp(&self, other: &BuilderFileTreeNode) -> Ordering {
         match self {
-            WorkspaceFileTreeNode::File {name: lhs, ..} => {
+            BuilderFileTreeNode::File {name: lhs, ..} => {
                 match other {
-                    WorkspaceFileTreeNode::File {name: rhs, ..} => {
+                    BuilderFileTreeNode::File {name: rhs, ..} => {
                         lhs.cmp(rhs)
                     },
-                    WorkspaceFileTreeNode::Folder {name: _rhs, ..} => {
+                    BuilderFileTreeNode::Folder {name: _rhs, ..} => {
                         Ordering::Greater
                     },
                 }
             },
-            WorkspaceFileTreeNode::Folder {name: lhs, ..} => {
+            BuilderFileTreeNode::Folder {name: lhs, ..} => {
                 match other {
-                    WorkspaceFileTreeNode::File {name: _rhs, ..} => {
+                    BuilderFileTreeNode::File {name: _rhs, ..} => {
                         Ordering::Less
                     },
-                    WorkspaceFileTreeNode::Folder {name: rhs, ..} => {
+                    BuilderFileTreeNode::Folder {name: rhs, ..} => {
                         lhs.cmp(rhs)
                     },
                 }
@@ -176,7 +176,7 @@ impl Ord for WorkspaceFileTreeNode {
     }
 }
 
-impl PartialOrd for WorkspaceFileTreeNode {
+impl PartialOrd for BuilderFileTreeNode {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
     }
@@ -211,9 +211,9 @@ impl HubPackage {
 
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct HubWsConfig {
+pub struct HubBuilderConfig {
     pub http_server: HttpServerConfig,
-    pub projects: HashMap<String, String>,
+    pub workspaces: HashMap<String, String>,
 }
 
 
@@ -311,7 +311,7 @@ impl HubAddr {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum HubMsgTo {
     Client(HubAddr),
-    Workspace(String),
+    Builder(String),
     UI,
     All,
     Hub

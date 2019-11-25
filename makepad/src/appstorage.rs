@@ -6,14 +6,14 @@ use crate::appwindow::*;
 use crate::filetree::*;
 use std::collections::HashMap;
 use serde::{Serialize, Deserialize};
-use crate::workspace_main;
+use crate::builder_main;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct AppSettings {
     pub build_on_save: bool,
     pub exec_when_done: bool,
     pub hub_server: HubServerConfig,
-    pub workspaces: HashMap<String, HubWsConfig>,
+    pub builders: HashMap<String, HubBuilderConfig>,
     pub builds: Vec<BuildTarget>,
     pub sync: HashMap<String, Vec<String>>,
 }
@@ -24,14 +24,14 @@ impl Default for AppSettings {
             exec_when_done: false,
             build_on_save: true,
             hub_server: HubServerConfig::Offline,
-            workspaces: {
+            builders: {
                 let mut cfg = HashMap::new();
-                cfg.insert("main".to_string(), HubWsConfig {
+                cfg.insert("main".to_string(), HubBuilderConfig {
                     http_server: HttpServerConfig::Localhost(2001),
-                    projects: {
-                        let mut project = HashMap::new();
-                        project.insert("makepad".to_string(), ".".to_string());
-                        project
+                    workspaces: {
+                        let mut workspace = HashMap::new();
+                        workspace.insert("makepad".to_string(), ".".to_string());
+                        workspace
                     }
                 });
                 cfg
@@ -43,8 +43,8 @@ impl Default for AppSettings {
             },
             builds: vec![
                 BuildTarget {
-                    workspace: "main".to_string(),
-                    project: "makepad".to_string(),
+                    builder: "main".to_string(),
+                    workspace: "makepad".to_string(),
                     package: "nov28_step1_wasm".to_string(),
                     config: "debug".to_string()
                 }
@@ -55,15 +55,15 @@ impl Default for AppSettings {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct BuildTarget {
+    pub builder: String,
     pub workspace: String,
-    pub project: String,
     pub package: String,
     pub config: String
 }
 
 pub struct AppStorage {
-    pub workspaces_request_uid: HubUid,
-    pub workspace_sync_uid: HubUid,
+    pub builders_request_uid: HubUid,
+    pub builder_sync_uid: HubUid,
     pub hub_router: Option<HubRouter>,
     pub hub_server: Option<HubServer>,
     pub hub_ui: Option<HubUI>,
@@ -86,8 +86,8 @@ pub struct AppTextBuffer {
 impl AppStorage {
     pub fn style(cx: &mut Cx) -> Self {
         AppStorage {
-            workspaces_request_uid: HubUid::zero(),
-            workspace_sync_uid: HubUid::zero(),
+            builders_request_uid: HubUid::zero(),
+            builder_sync_uid: HubUid::zero(),
             hub_router: None,
             hub_server: None,
             hub_ui: None,
@@ -118,7 +118,7 @@ impl AppStorage {
                 }
             });
             
-            HubWorkspace::run_workspace_direct("main", &mut hub_router, | ws, htc | {workspace_main::workspace(ws, htc)});
+            HubBuilder::run_builder_direct("main", &mut hub_router, | ws, htc | {builder_main::builder(ws, htc)});
             
             self.hub_router = Some(hub_router);
             self.hub_ui = Some(hub_ui);
@@ -199,13 +199,13 @@ impl AppStorage {
         else {
             let hub_ui = self.hub_ui.as_mut().unwrap();
             let atb = self.text_buffers.entry(path.to_string()).or_insert_with( || {
-                // lets find the right workspace
-                let workspace_pos = path.find('/').unwrap();
+                // lets find the right builder
+                let builder_pos = path.find('/').unwrap();
                 let uid = hub_ui.route_send.alloc_uid();
-                let (workspace, rest) = path.split_at(workspace_pos);
+                let (builder, rest) = path.split_at(builder_pos);
                 let (_, rest) = rest.split_at(1);
                 let msg = ToHubMsg {
-                    to: HubMsgTo::Workspace(workspace.to_string()),
+                    to: HubMsgTo::Builder(builder.to_string()),
                     msg: HubMsg::FileReadRequest {
                         uid: uid.clone(),
                         path: rest.to_string()
@@ -231,12 +231,12 @@ impl AppStorage {
                     let hub_ui = self.hub_ui.as_mut().unwrap();
                     let utf8_data = atb.text_buffer.get_as_string();
                     fn send_file_write_request(hub_ui: &HubUI, uid: HubUid, path: &str, data: &Vec<u8>) {
-                        if let Some(workspace_pos) = path.find('/') {
-                            let (workspace, rest) = path.split_at(workspace_pos);
+                        if let Some(builder_pos) = path.find('/') {
+                            let (builder, rest) = path.split_at(builder_pos);
                             let (_, rest) = rest.split_at(1);
                             
                             hub_ui.route_send.send(ToHubMsg {
-                                to: HubMsgTo::Workspace(workspace.to_string()),
+                                to: HubMsgTo::Builder(builder.to_string()),
                                 msg: HubMsg::FileWriteRequest {
                                     uid: uid.clone(),
                                     path: rest.to_string(),
@@ -274,14 +274,14 @@ impl AppStorage {
         }
     }
     
-    pub fn reload_workspaces(&mut self) {
+    pub fn reload_builders(&mut self) {
         let hub_ui = self.hub_ui.as_mut().unwrap();
         let uid = hub_ui.route_send.alloc_uid();
         hub_ui.route_send.send(ToHubMsg {
             to: HubMsgTo::Hub,
-            msg: HubMsg::ListWorkspacesRequest {uid: uid}
+            msg: HubMsg::ListBuildersRequest {uid: uid}
         });
-        self.workspaces_request_uid = uid;
+        self.builders_request_uid = uid;
     }
     
     pub fn handle_hub_msg(&mut self, cx: &mut Cx, htc: FromHubMsg, windows: &mut Vec<AppWindow>, state: &AppState) {
@@ -291,40 +291,40 @@ impl AppStorage {
             // our own connectUI message, means we are ready to talk to the hub
             HubMsg::ConnectUI => if hub_ui.route_send.is_own_addr(&htc.from) {
                 // now start talking
-                self.reload_workspaces();
+                self.reload_builders();
             },
-            HubMsg::DisconnectWorkspace(_) | HubMsg::ConnectWorkspace(_) => {
-                self.reload_workspaces();
+            HubMsg::DisconnectBuilder(_) | HubMsg::ConnectBuilder(_) => {
+                self.reload_builders();
             },
-            HubMsg::ListWorkspacesResponse {uid, workspaces} => if uid == self.workspaces_request_uid {
+            HubMsg::ListBuildersResponse {uid, builders} => if uid == self.builders_request_uid {
                 let uid = hub_ui.route_send.alloc_uid();
                 // from these workspaces query filetrees
-                for workspace in &workspaces {
+                for builder in &builders {
                     // lets look up a workspace and configure it!
                     // lets config it
-                    if let Some(workspace_config) = self.settings.workspaces.get(workspace) {
+                    if let Some(builder_config) = self.settings.builders.get(builder) {
                         hub_ui.route_send.send(ToHubMsg {
-                            to: HubMsgTo::Workspace(workspace.clone()),
-                            msg: HubMsg::WorkspaceConfig {uid: uid, config: workspace_config.clone()}
+                            to: HubMsgTo::Builder(builder.clone()),
+                            msg: HubMsg::BuilderConfig {uid: uid, config: builder_config.clone()}
                         });
                     }
                     hub_ui.route_send.send(ToHubMsg {
-                        to: HubMsgTo::Workspace(workspace.clone()),
-                        msg: HubMsg::WorkspaceFileTreeRequest {uid: uid, create_digest: false}
+                        to: HubMsgTo::Builder(builder.clone()),
+                        msg: HubMsg::BuilderFileTreeRequest {uid: uid, create_digest: false}
                     });
                     hub_ui.route_send.send(ToHubMsg {
-                        to: HubMsgTo::Workspace(workspace.clone()),
+                        to: HubMsgTo::Builder(builder.clone()),
                         msg: HubMsg::ListPackagesRequest {uid: uid}
                     });
                 }
-                self.workspaces_request_uid = uid;
+                self.builders_request_uid = uid;
                 // add all workspace nodes
                 for window in windows {
                     window.file_panel.file_tree.root_node = FileNode::Folder {
                         name: "".to_string(),
                         draw: None,
                         state: NodeState::Open,
-                        folder: workspaces.iter().map( | v | FileNode::Folder {
+                        folder: builders.iter().map( | v | FileNode::Folder {
                             name: v.clone(),
                             draw: None,
                             state: NodeState::Open,
@@ -346,9 +346,9 @@ impl AppStorage {
                 }
                 
             },
-            HubMsg::WorkspaceFileTreeResponse {uid, tree} => if uid == self.workspaces_request_uid {
+            HubMsg::BuilderFileTreeResponse {uid, tree} => if uid == self.builders_request_uid {
                 // replace a workspace node
-                if let WorkspaceFileTreeNode::Folder {name, ..} = &tree {
+                if let BuilderFileTreeNode::Folder {name, ..} = &tree {
                     let workspace = name.clone();
                     // insert each filetree at the right childnode
                     for (window_index, window) in windows.iter_mut().enumerate() {
@@ -393,13 +393,13 @@ impl AppStorage {
     }
 }
 
-pub fn hub_to_tree(node: &WorkspaceFileTreeNode) -> FileNode {
+pub fn hub_to_tree(node: &BuilderFileTreeNode) -> FileNode {
     match node {
-        WorkspaceFileTreeNode::File {name, ..} => FileNode::File {
+        BuilderFileTreeNode::File {name, ..} => FileNode::File {
             name: name.clone(),
             draw: None
         },
-        WorkspaceFileTreeNode::Folder {name, folder, ..} => {
+        BuilderFileTreeNode::Folder {name, folder, ..} => {
             FileNode::Folder {
                 name: name.clone(),
                 folder: folder.iter().map( | v | hub_to_tree(v)).collect(),

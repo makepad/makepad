@@ -14,21 +14,21 @@ use toml::Value;
 use std::collections::HashMap;
 use std::net::{SocketAddr};
 
-pub struct HubWorkspace {
+pub struct HubBuilder {
     pub route_send: HubRouteSend,
     pub http_server: Arc<Mutex<Option<HttpServer>>>,
-    pub projects: Arc<Mutex<HashMap<String, String>>>,
-    pub workspace: String,
+    pub workspaces: Arc<Mutex<HashMap<String, String>>>,
+    pub builder: String,
     pub abs_cwd_path: String,
-    pub processes: Arc<Mutex<Vec<HubWsProcess>>>,
+    pub processes: Arc<Mutex<Vec<HubProcess>>>,
 }
 
-pub struct HubWsProject {
+pub struct HubWorkspace {
     pub name: String,
     pub abs_path: String
 }
 
-pub struct HubWsProcess {
+pub struct HubProcess {
     uid: HubUid,
     process: Process,
 }
@@ -42,29 +42,29 @@ const INCLUDED_FILES: &[&'static str] = &[".json", ".toml", ".js", ".rs", ".txt"
 const EXCLUDED_FILES: &[&'static str] = &["key.ron","makepad_state.ron"];
 const EXCLUDED_DIRS: &[&'static str] = &["target",".git",".github","edit_repo"];
 
-impl HubWorkspace {
+impl HubBuilder {
     
-    pub fn run_workspace_direct<F>(workspace: &str, hub_router: &mut HubRouter, event_handler: F)
-    where F: Fn(&mut HubWorkspace, FromHubMsg) -> Result<(), HubWsError> + Clone + Send + 'static {
-        let projects = Arc::new(Mutex::new(HashMap::<String, String>::new()));
+    pub fn run_builder_direct<F>(builder: &str, hub_router: &mut HubRouter, event_handler: F)
+    where F: Fn(&mut HubBuilder, FromHubMsg) -> Result<(), HubWsError> + Clone + Send + 'static {
+        let workspaces = Arc::new(Mutex::new(HashMap::<String, String>::new()));
         let http_server = Arc::new(Mutex::new(None));
         let abs_cwd_path = format!("{}", std::env::current_dir().unwrap().display());
-        let processes = Arc::new(Mutex::new(Vec::<HubWsProcess>::new()));
+        let processes = Arc::new(Mutex::new(Vec::<HubProcess>::new()));
         
         // lets allocate a local address
         let (tx_write, rx_write) = mpsc::channel::<FromHubMsg>();
         
-        let route_send = hub_router.connect_direct(HubRouteType::Workspace(workspace.to_string()), tx_write);
+        let route_send = hub_router.connect_direct(HubRouteType::Builder(builder.to_string()), tx_write);
         // mode direct
         let _thread = {
-            let workspace = workspace.to_string();
+            let builder = builder.to_string();
             let route_send = route_send.clone();
             let event_handler = event_handler.clone();
             std::thread::spawn(move || {
                 // lets transmit a BuildServer ack
                 route_send.send(ToHubMsg {
                     to: HubMsgTo::All,
-                    msg: HubMsg::ConnectWorkspace(workspace.to_string())
+                    msg: HubMsg::ConnectBuilder(builder.to_string())
                 });
                 
                 // this is the main messageloop, on rx
@@ -72,28 +72,28 @@ impl HubWorkspace {
                     let is_blocking = htc.msg.is_blocking();
                     let thread = {
                         let event_handler = event_handler.clone();
-                        let mut hub_workspace = HubWorkspace {
+                        let mut hub_builder = HubBuilder {
                             route_send: route_send.clone(),
                             http_server: Arc::clone(&http_server),
-                            projects: Arc::clone(&projects),
+                            workspaces: Arc::clone(&workspaces),
                             processes: Arc::clone(&processes),
-                            workspace: workspace.to_string(),
+                            builder: builder.to_string(),
                             abs_cwd_path: abs_cwd_path.clone(),
                         };
                         std::thread::spawn(move || {
                             let is_build_uid = if let HubMsg::Build {uid, ..} = &htc.msg {Some(*uid)}else {None};
                             
-                            let result = event_handler(&mut hub_workspace, htc);
+                            let result = event_handler(&mut hub_builder, htc);
                             
                             if let Some(is_build_uid) = is_build_uid {
                                 if result.is_ok() {
-                                    hub_workspace.route_send.send(ToHubMsg {
+                                    hub_builder.route_send.send(ToHubMsg {
                                         to: HubMsgTo::UI,
                                         msg: HubMsg::BuildFailure {uid: is_build_uid}
                                     });
                                 }
                                 else {
-                                    hub_workspace.route_send.send(ToHubMsg {
+                                    hub_builder.route_send.send(ToHubMsg {
                                         to: HubMsgTo::UI,
                                         msg: HubMsg::BuildSuccess {uid: is_build_uid}
                                     });
@@ -109,36 +109,36 @@ impl HubWorkspace {
         };
     }
     
-    pub fn run_workspace_networked<F>(digest: Digest, in_address: Option<SocketAddr>, workspace: &str, hub_log: HubLog, event_handler: F)
-    where F: Fn(&mut HubWorkspace, FromHubMsg) -> Result<(), HubWsError> + Clone + Send + 'static {
+    pub fn run_builder_networked<F>(digest: Digest, in_address: Option<SocketAddr>, builder: &str, hub_log: HubLog, event_handler: F)
+    where F: Fn(&mut HubBuilder, FromHubMsg) -> Result<(), HubWsError> + Clone + Send + 'static {
         
-        let projects = Arc::new(Mutex::new(HashMap::<String, String>::new()));
+        let workspaces = Arc::new(Mutex::new(HashMap::<String, String>::new()));
         let http_server = Arc::new(Mutex::new(None));
         let abs_cwd_path = format!("{}", std::env::current_dir().unwrap().display());
-        let processes = Arc::new(Mutex::new(Vec::<HubWsProcess>::new()));
+        let processes = Arc::new(Mutex::new(Vec::<HubProcess>::new()));
         
         loop {
             let address = if let Some(address) = in_address {
                 address
             }
             else {
-                hub_log.msg("Workspace waiting for hub announcement..", &workspace);
+                hub_log.msg("Builder waiting for hub announcement..", &builder);
                 // lets wait for a server announce
                 HubClient::wait_for_announce(digest.clone()).expect("cannot wait for announce")
             };
             
-            hub_log.msg("Workspace connecting to {:?}", &address);
+            hub_log.msg("Builder connecting to {:?}", &address);
             
             // ok now connect to that address
             let mut hub_client = HubClient::connect_to_server(digest.clone(), address, hub_log.clone()).expect("cannot connect to hub");
             
-            println!("Workspace connected to {:?}", hub_client.own_addr);
+            println!("Builder connected to {:?}", hub_client.own_addr);
             
             let route_send = hub_client.get_route_send();
             
             route_send.send(ToHubMsg {
                 to: HubMsgTo::All,
-                msg: HubMsg::ConnectWorkspace(workspace.to_string())
+                msg: HubMsg::ConnectBuilder(builder.to_string())
             });
             
             let rx_read = hub_client.rx_read.take().unwrap();
@@ -154,28 +154,28 @@ impl HubWorkspace {
                 let is_blocking = htc.msg.is_blocking();
                 let thread = {
                     let event_handler = event_handler.clone();
-                    let mut hub_workspace = HubWorkspace {
+                    let mut hub_builder = HubBuilder {
                         route_send: route_send.clone(),
                         http_server: Arc::clone(&http_server),
-                        projects: Arc::clone(&projects),
+                        workspaces: Arc::clone(&workspaces),
                         processes: Arc::clone(&processes),
-                        workspace: workspace.to_string(),
+                        builder: builder.to_string(),
                         abs_cwd_path: abs_cwd_path.clone(),
                     };
                     std::thread::spawn(move || {
                         let is_build_uid = if let HubMsg::Build {uid, ..} = &htc.msg {Some(*uid)}else {None};
                         
-                        let result = event_handler(&mut hub_workspace, htc);
+                        let result = event_handler(&mut hub_builder, htc);
                         
                         if let Some(is_build_uid) = is_build_uid {
                             if result.is_ok() {
-                                hub_workspace.route_send.send(ToHubMsg {
+                                hub_builder.route_send.send(ToHubMsg {
                                     to: HubMsgTo::UI,
                                     msg: HubMsg::BuildFailure {uid: is_build_uid}
                                 });
                             }
                             else {
-                                hub_workspace.route_send.send(ToHubMsg {
+                                hub_builder.route_send.send(ToHubMsg {
                                     to: HubMsgTo::UI,
                                     msg: HubMsg::BuildSuccess {uid: is_build_uid}
                                 });
@@ -190,29 +190,29 @@ impl HubWorkspace {
         }
     }
     
-    pub fn run_workspace_commandline<F>(args: Vec<String>, event_handler: F)
-    where F: Fn(&mut HubWorkspace, FromHubMsg) -> Result<(), HubWsError> + Clone + Send + 'static {
+    pub fn run_builder_commandline<F>(args: Vec<String>, event_handler: F)
+    where F: Fn(&mut HubBuilder, FromHubMsg) -> Result<(), HubWsError> + Clone + Send + 'static {
         
         fn print_help() {
-            println!("----- Workspace commandline interface -----");
+            println!("----- Builder commandline interface -----");
             println!("Connect to a specific hub server:");
-            println!("cargo run -p workspace -- connect <ip>:<port> <key.ron> <workspace>");
-            println!("example: cargo run -p workspace -- connect 127.0.0.1:7243 key.ron windows");
+            println!("cargo run -p builder -- connect <ip>:<port> <key.ron> <workspace>");
+            println!("example: cargo run -p builder -- connect 127.0.0.1:7243 key.ron windows");
             println!("");
             println!("Listen to hub server announce");
-            println!("cargo run -p workspace -- listen <key.ron> <workspace>");
-            println!("example: cargo run -p workspace -- listen key.ron windows");
+            println!("cargo run -p builder -- listen <key.ron> <workspace>");
+            println!("example: cargo run -p builder -- listen key.ron windows");
             println!("");
             println!("Build a specific package");
-            println!("cargo run -p workspace -- build <path> <package> <config>");
-            println!("example: cargo run -p workspace -- build edit_repo makepad release");
+            println!("cargo run -p builder -- build <path> <package> <config>");
+            println!("example: cargo run -p builder -- build edit_repo makepad release");
             println!("");
             println!("List packages");
-            println!("cargo run -p workspace -- list <path>");
-            println!("example: cargo run -p workspace -- list edit_repo");
+            println!("cargo run -p builder -- list <path>");
+            println!("example: cargo run -p builder -- list edit_repo");
             println!("");
             println!("Build index.ron");
-            println!("cargo run -p workspace -- index <path>");
+            println!("cargo run -p builder -- index <path>");
             println!("example: cargo run -p workspace -- index edit_repo");
         }
         
@@ -226,11 +226,11 @@ impl HubWorkspace {
                     return print_help();
                 }
                 let key_file = args[2].to_string();
-                let workspace = args[3].to_string();
+                let builder = args[3].to_string();
                 let utf8_data = std::fs::read_to_string(key_file).expect("Can't read key file");
                 let digest: Digest = ron::de::from_str(&utf8_data).expect("Can't load key file");
                 println!("Starting workspace listening to announce");
-                Self::run_workspace_networked(digest, None, &workspace, HubLog::None, event_handler);
+                Self::run_builder_networked(digest, None, &builder, HubLog::None, event_handler);
                 return
             },
             "connect" => {
@@ -239,11 +239,11 @@ impl HubWorkspace {
                 }
                 let addr = args[2].parse().expect("cant parse address");
                 let key_file = args[3].to_string();
-                let workspace = args[4].to_string();
+                let builder = args[4].to_string();
                 let utf8_data = std::fs::read_to_string(key_file).expect("Can't read key file");
                 let digest:Digest = ron::de::from_str(&utf8_data).expect("Can't load key file");
                 println!("Starting workspace connecting to ip");
-                Self::run_workspace_networked(digest, Some(addr), &workspace, HubLog::None, event_handler);
+                Self::run_builder_networked(digest, Some(addr), &builder, HubLog::None, event_handler);
                 return
             },
             "list" => {
@@ -260,7 +260,7 @@ impl HubWorkspace {
                 }
                 (HubMsg::Build {
                     uid: HubUid::zero(),
-                    project: "main".to_string(),
+                    workspace: "main".to_string(),
                     package: args[3].clone(),
                     config: args[4].clone()
                 }, args[2].clone())
@@ -269,7 +269,7 @@ impl HubWorkspace {
                 if args.len() != 3 {
                     return print_help();
                 }
-                (HubMsg::WorkspaceFileTreeRequest {
+                (HubMsg::BuilderFileTreeRequest {
                     uid: HubUid::zero(),
                     create_digest:false,
                 }, args[2].clone())
@@ -279,13 +279,13 @@ impl HubWorkspace {
             }
         };
         
-        let projects = Arc::new(Mutex::new(HashMap::<String, String>::new()));
+        let workspaces = Arc::new(Mutex::new(HashMap::<String, String>::new()));
         let http_server = Arc::new(Mutex::new(None));
-        let processes = Arc::new(Mutex::new(Vec::<HubWsProcess>::new()));
+        let processes = Arc::new(Mutex::new(Vec::<HubProcess>::new()));
         let abs_cwd_path = format!("{}", std::env::current_dir().unwrap().display());
         
-        if let Ok(mut projects) = projects.lock() {
-            projects.insert(
+        if let Ok(mut workspaces) = workspaces.lock() {
+            workspaces.insert(
                 "main".to_string(),
                 rel_to_abs_path(&abs_cwd_path, &path)
             );
@@ -293,16 +293,16 @@ impl HubWorkspace {
         
         let (tx_write, rx_write) = mpsc::channel::<(HubAddr, ToHubMsg)>();
         
-        let mut hub_workspace = HubWorkspace {
+        let mut hub_builder = HubBuilder {
             route_send: HubRouteSend::Direct {
                 uid_alloc: Arc::new(Mutex::new(0)),
                 tx_pump: tx_write.clone(),
                 own_addr: HubAddr::None
             },
             http_server: Arc::clone(&http_server),
-            workspace: "".to_string(),
+            builder: "".to_string(),
             processes: Arc::clone(&processes),
-            projects: Arc::clone(&projects),
+            workspaces: Arc::clone(&workspaces),
             abs_cwd_path: abs_cwd_path.clone()
         };
         
@@ -310,9 +310,9 @@ impl HubWorkspace {
         let thread = std::thread::spawn(move || {
             while let Ok((_addr, htc)) = rx_write.recv() {
                 match htc.msg {
-                    HubMsg::WorkspaceFileTreeResponse{tree, ..}=>{
+                    HubMsg::BuilderFileTreeResponse{tree, ..}=>{
                         //write index.ron
-                        if let WorkspaceFileTreeNode::Folder{folder,..} = tree{
+                        if let BuilderFileTreeNode::Folder{folder,..} = tree{
                             let ron = ron::ser::to_string_pretty(&folder[0], ron::ser::PrettyConfig::default()).expect("cannot serialize settings");
                             fs::write("index.ron", ron).expect("cannot write index.ron");
                             println!("Written index.ron")
@@ -344,7 +344,7 @@ impl HubWorkspace {
             }
         });
         
-        let result = event_handler(&mut hub_workspace, FromHubMsg {
+        let result = event_handler(&mut hub_builder, FromHubMsg {
             from: HubAddr::None,
             msg:message
         });
@@ -363,23 +363,23 @@ impl HubWorkspace {
         let _ = thread.join();
     }
     
-    pub fn set_config(&mut self, _uid: HubUid, config: HubWsConfig) -> Result<(), HubWsError> {
+    pub fn set_config(&mut self, _uid: HubUid, config: HubBuilderConfig) -> Result<(), HubWsError> {
         // if we have a http server. just shut it down
-        if let Ok(mut projects) = self.projects.lock() {
-            *projects = config.projects;
-            for (_, rel_path) in projects.iter_mut(){
+        if let Ok(mut workspaces) = self.workspaces.lock() {
+            *workspaces = config.workspaces;
+            for (_, rel_path) in workspaces.iter_mut(){
                 *rel_path = rel_to_abs_path(&self.abs_cwd_path, &rel_path)
             }
         };
         
-        let projects = Arc::clone(&self.projects);
+        let workspaces = Arc::clone(&self.workspaces);
         
         if let Ok(mut http_server) = self.http_server.lock() {
             if let Some(http_server) = &mut *http_server {
                 http_server.terminate();
             }
             
-            *http_server = HttpServer::start_http_server(&config.http_server, projects);
+            *http_server = HttpServer::start_http_server(&config.http_server, workspaces);
         }
         
         
@@ -389,10 +389,10 @@ impl HubWorkspace {
     pub fn default(&mut self, htc: FromHubMsg) -> Result<(), HubWsError> {
         let ws = self;
         match htc.msg {
-            HubMsg::WorkspaceConfig {uid, config} => {
+            HubMsg::BuilderConfig {uid, config} => {
                 ws.set_config(uid, config)
             },
-            HubMsg::WorkspaceFileTreeRequest {uid, create_digest} => {
+            HubMsg::BuilderFileTreeRequest {uid, create_digest} => {
                 let tree = ws.workspace_file_tree(
                     create_digest,
                     INCLUDED_FILES,
@@ -401,7 +401,7 @@ impl HubWorkspace {
                 );
                 ws.route_send.send(ToHubMsg {
                     to: HubMsgTo::Client(htc.from),
-                    msg: HubMsg::WorkspaceFileTreeResponse {
+                    msg: HubMsg::BuilderFileTreeResponse {
                         uid: uid,
                         tree: tree
                     }
@@ -443,37 +443,37 @@ impl HubWorkspace {
         };
     }
     
-    pub fn project_split_from_path(&mut self, uid: HubUid, path: &str) -> Result<(String, String, String), HubWsError> {
-        if let Some(project_pos) = path.find("/") {
-            let (project, rest) = path.split_at(project_pos);
+    pub fn workspace_split_from_path(&mut self, uid: HubUid, path: &str) -> Result<(String, String, String), HubWsError> {
+        if let Some(workspace_pos) = path.find("/") {
+            let (workspace, rest) = path.split_at(workspace_pos);
             let (_, rest) = rest.split_at(1);
-            let abs_dir = self.get_project_abs(uid, project) ?;
-            return Ok((abs_dir.to_string(), project.to_string(), rest.to_string()));
+            let abs_dir = self.get_project_abs(uid, workspace) ?;
+            return Ok((abs_dir.to_string(), workspace.to_string(), rest.to_string()));
         }
         Err(
-            self.error(uid, format!("workspace {} path {} incorrent", self.workspace, path))
+            self.error(uid, format!("Builder {} path {} incorrent", self.builder, path))
         )
     }
     
     pub fn get_project_abs(&mut self, uid: HubUid, project: &str) -> Result<String, HubWsError> {
-        if let Ok(projects) = self.projects.lock() {
-            if let Some(abs_dir) = projects.get(project) {
+        if let Ok(workspaces) = self.workspaces.lock() {
+            if let Some(abs_dir) = workspaces.get(project) {
                 return Ok(abs_dir.to_string())
             }
         }
         Err(
-            self.error(uid, format!("workspace {} project {} not found", self.workspace, project))
+            self.error(uid, format!("Builder {} project {} not found", self.builder, project))
         )
     }
     
     pub fn program_run(&mut self, uid: HubUid, path: &str, args: &[&str]) -> Result<(), HubWsError> {
         // we have to turn our path which is in the form project/... into a root path
-        let (abs_dir, project, sub_path) = self.project_split_from_path(uid, path) ?;
+        let (abs_dir, workspace, sub_path) = self.workspace_split_from_path(uid, path) ?;
         // lets start a thread
         let process = Process::start(&sub_path, args, &abs_dir, &[("RUST_BACKTRACE", "full")]);
         if let Err(e) = process {
             return Err(
-                self.error(uid, format!("workspace {} program run {} {} not found {:?}", self.workspace, abs_dir, sub_path, e))
+                self.error(uid, format!("Builder {} program run {} {} not found {:?}", self.builder, abs_dir, sub_path, e))
             );
         }
         let mut process = process.unwrap();
@@ -484,13 +484,13 @@ impl HubWorkspace {
         let rx_line = process.rx_line.take().unwrap();
         
         if let Ok(mut processes) = self.processes.lock() {
-            processes.push(HubWsProcess {
+            processes.push(HubProcess {
                 uid: uid,
                 process: process,
             });
         };
         
-        let workspace = self.workspace.clone();
+        //let builder = self.builder.clone();
         route_mode.send(ToHubMsg {
             to: HubMsgTo::UI,
             msg: HubMsg::ProgramBegin {uid: uid}
@@ -506,7 +506,7 @@ impl HubWorkspace {
         
         let mut stderr: Vec<String> = Vec::new();
         
-        fn try_parse_stderr(uid: HubUid, workspace: &str, project: &str, stderr: &Vec<String>, route_send: &HubRouteSend) {
+        fn try_parse_stderr(uid: HubUid, builder: &str, workspace: &str, stderr: &Vec<String>, route_send: &HubRouteSend) {
             
             let mut tracing_panic = false;
             let mut panic_stack = Vec::new();
@@ -544,7 +544,7 @@ impl HubWorkspace {
                     && !panic_line.starts_with("at src/libcore/")
                     && !panic_line.starts_with("at src/libpanic_unwind/") {
                     if let Some(end) = panic_line.find(":") {
-                        let proc_path = format!("{}/{}/{}", workspace, project, panic_line.get(3..end).unwrap().to_string());
+                        let proc_path = format!("{}/{}/{}", builder, workspace, panic_line.get(3..end).unwrap().to_string());
                         let proc_row = panic_line.get((end + 1)..(panic_line.len() - 1)).unwrap().parse::<usize>().unwrap();
                         
                         rendered.push(format!("{}:{} - {}", proc_path, proc_row, last_fn_name));
@@ -593,7 +593,7 @@ impl HubWorkspace {
                         }
                         else {
                             if stderr.len() > 0 {
-                                try_parse_stderr(uid, &workspace, &project, &stderr, &route_mode);
+                                try_parse_stderr(uid, &workspace, &workspace, &stderr, &route_mode);
                                 stderr.truncate(0);
                             }
                             // lets parse/process our log line
@@ -609,7 +609,7 @@ impl HubWorkspace {
                 },
                 Err(err)=>{
                     if stderr.len() > 0 {
-                        try_parse_stderr(uid, &workspace, &project, &stderr, &route_mode);
+                        try_parse_stderr(uid, &workspace, &workspace, &stderr, &route_mode);
                         stderr.truncate(0);
                     }
                     if let RecvTimeoutError::Disconnected = err{
@@ -640,7 +640,7 @@ impl HubWorkspace {
     
     pub fn cannot_find_build(&mut self, uid: HubUid, package: &str, target: &str) -> Result<(), HubWsError> {
         Err(
-            self.error(uid, format!("Workspace {} Cannot find package {} and target {}", self.workspace, package, target))
+            self.error(uid, format!("Builder {} Cannot find package {} and target {}", self.builder, package, target))
         )
     }
     
@@ -666,7 +666,7 @@ impl HubWorkspace {
         let rx_line = process.rx_line.take().unwrap();
         
         if let Ok(mut processes) = self.processes.lock() {
-            processes.push(HubWsProcess {
+            processes.push(HubProcess {
                 uid: uid,
                 process: process,
             });
@@ -677,7 +677,7 @@ impl HubWorkspace {
             msg: HubMsg::CargoBegin {uid: uid}
         });
         
-        let workspace = self.workspace.clone();
+        let builder = self.builder.clone();
         
         let mut errors = Vec::new();
         let mut build_result = BuildResult::NoOutput;
@@ -723,7 +723,7 @@ impl HubWorkspace {
                                 }
                                 let loc_message = LocMessage {
                                     //package_id: parsed.package_id.clone(),
-                                    path: format!("{}/{}/{}", workspace, project, de_relativize_path(&path)).replace("\\","/"),
+                                    path: format!("{}/{}/{}", builder, project, de_relativize_path(&path)).replace("\\","/"),
                                     row: row,
                                     col: col,
                                     range: Some((span.byte_start as usize, span.byte_end as usize)),
@@ -849,7 +849,7 @@ impl HubWorkspace {
     
     pub fn wasm_strip_debug(&mut self, uid: HubUid, path: &str) -> Result<BuildResult, HubWsError> {
         
-        let (abs_root_path, _project, sub_path) = self.project_split_from_path(uid, path) ?;
+        let (abs_root_path, _project, sub_path) = self.workspace_split_from_path(uid, path) ?;
         
         let filepath = format!("{}/{}", abs_root_path, sub_path);
         // lets strip this wasm file
@@ -877,10 +877,10 @@ impl HubWorkspace {
     pub fn read_packages(&mut self, uid: HubUid) -> Vec<(String, String)> {
         // we need to loop over all project paths, and read cargo
         let mut packages = Vec::new();
-        let projects = Arc::clone(&self.projects);
-        if let Ok(projects) = projects.lock() {
-            for (project, abs_path) in projects.iter() {
-                let vis_path = format!("{}/{}/Cargo.toml", self.workspace, project);
+        let workspaces = Arc::clone(&self.workspaces);
+        if let Ok(workspaces) = workspaces.lock() {
+            for (workspace, abs_path) in workspaces.iter() {
+                let vis_path = format!("{}/{}/Cargo.toml", self.builder, workspace);
                 let root_cargo = match std::fs::read_to_string(format!("{}/Cargo.toml", abs_path)) {
                     Err(_) => {
                         self.error(uid, format!("Cannot read cargo {}", vis_path));
@@ -914,7 +914,7 @@ impl HubWorkspace {
                         if let Value::Table(table) = table {
                             if let Some(name) = table.get("name") {
                                 if let Value::String(name) = name {
-                                    packages.push((project.clone(), name.clone()));
+                                    packages.push((workspace.clone(), name.clone()));
                                 }
                             }
                         }
@@ -922,7 +922,7 @@ impl HubWorkspace {
                 }
                 for member in ws_members {
                     let file_path = format!("{}/{}/Cargo.toml", abs_path, member);
-                    let vis_path = format!("{}/{}/{}/Cargo.toml", self.workspace, project, member);
+                    let vis_path = format!("{}/{}/{}/Cargo.toml", self.builder, workspace, member);
                     let cargo = match std::fs::read_to_string(&file_path) {
                         Err(_) => {
                             self.error(uid, format!("Cannot read cargo {}", vis_path));
@@ -942,7 +942,7 @@ impl HubWorkspace {
                             if let Value::Table(table) = table {
                                 if let Some(name) = table.get("name") {
                                     if let Value::String(name) = name {
-                                        packages.push((project.clone(), name.clone()));
+                                        packages.push((workspace.clone(), name.clone()));
                                     }
                                 }
                             }
@@ -956,7 +956,7 @@ impl HubWorkspace {
     
     pub fn file_read(&mut self, from: HubAddr, uid: HubUid, path: &str) {
         // lets read a file and send it.
-        if let Ok((abs_dir, _project, sub_path)) = self.project_split_from_path(uid, path) {
+        if let Ok((abs_dir, _workspace, sub_path)) = self.workspace_split_from_path(uid, path) {
             
             if let Some(_) = sub_path.find("..") {
                 self.error(uid, format!("file_read got relative path, ignoring {}", path));
@@ -986,7 +986,7 @@ impl HubWorkspace {
     }
     
     pub fn file_write(&mut self, from: HubAddr, uid: HubUid, path: &str, data: Vec<u8>) {
-        if let Ok((abs_dir, _project, sub_path)) = self.project_split_from_path(uid, path) {
+        if let Ok((abs_dir, _project, sub_path)) = self.workspace_split_from_path(uid, path) {
             
             if path.contains("..") {
                 self.error(uid, format!("file_write got relative path, ignoring {}", path));
@@ -1014,20 +1014,20 @@ impl HubWorkspace {
         }
     }
     
-    pub fn workspace_file_tree(&mut self, create_digest:bool, ext_inc: &[&str], file_ex:&[&str], dir_ex:&[&str])->WorkspaceFileTreeNode {
-        fn digest_folder(create_digest:bool, name:&str, folder:&Vec<WorkspaceFileTreeNode>)->Option<Box<Digest>>{
+    pub fn workspace_file_tree(&mut self, create_digest:bool, ext_inc: &[&str], file_ex:&[&str], dir_ex:&[&str])->BuilderFileTreeNode {
+        fn digest_folder(create_digest:bool, name:&str, folder:&Vec<BuilderFileTreeNode>)->Option<Box<Digest>>{
             if !create_digest{
                 return None;
             }
             let mut digest_out = Digest::default();
             for item in folder{
                 match item{
-                    WorkspaceFileTreeNode::File{digest, ..}=>{
+                    BuilderFileTreeNode::File{digest, ..}=>{
                         if let Some(digest) = digest{
                             digest_out.digest_other(&*digest);
                         }
                     },
-                    WorkspaceFileTreeNode::Folder{digest, ..}=>{
+                    BuilderFileTreeNode::Folder{digest, ..}=>{
                         if let Some(digest) = digest{
                             digest_out.digest_other(&*digest);
                         }
@@ -1038,7 +1038,7 @@ impl HubWorkspace {
             Some(Box::new(digest_out))
         }
         
-        fn read_recur(path: &str, create_digest:bool, ext_inc: &Vec<String>, file_ex: &Vec<String>, dir_ex: &Vec<String>) -> Vec<WorkspaceFileTreeNode> {
+        fn read_recur(path: &str, create_digest:bool, ext_inc: &Vec<String>, file_ex: &Vec<String>, dir_ex: &Vec<String>) -> Vec<BuilderFileTreeNode> {
             let mut ret = Vec::new();
             if let Ok(read_dir) = fs::read_dir(path) {
                 for entry in read_dir {
@@ -1059,7 +1059,7 @@ impl HubWorkspace {
                                     // sort the folders on name
                                     // then digest them
                                     let folder = read_recur(&format!("{}/{}", path, name), create_digest, ext_inc, file_ex, dir_ex);
-                                    ret.push(WorkspaceFileTreeNode::Folder {
+                                    ret.push(BuilderFileTreeNode::Folder {
                                         name: name.clone(),
                                         digest: digest_folder(create_digest, &name, &folder),
                                         folder: folder
@@ -1081,7 +1081,7 @@ impl HubWorkspace {
                                             if create_digest{
                                                 
                                             }
-                                            ret.push(WorkspaceFileTreeNode::File {
+                                            ret.push(BuilderFileTreeNode::File {
                                                 digest:None,
                                                 name: name
                                             });
@@ -1106,11 +1106,11 @@ impl HubWorkspace {
         
         let mut root_folder = Vec::new();
         
-        if let Ok(projects) = self.projects.lock() {
-            for (project, abs_path) in projects.iter() {
+        if let Ok(workspaces) = self.workspaces.lock() {
+            for (project, abs_path) in workspaces.iter() {
 
                 let folder = read_recur(&abs_path, create_digest, &ext_inc, &file_ex, &dir_ex);
-                let tree = WorkspaceFileTreeNode::Folder {
+                let tree =BuilderFileTreeNode::Folder {
                     name: project.clone(),
                     digest: digest_folder(create_digest, &project, &folder),
                     folder: folder
@@ -1118,9 +1118,9 @@ impl HubWorkspace {
                 root_folder.push(tree);
             }
         }
-        let root = WorkspaceFileTreeNode::Folder {
-            name: self.workspace.clone(),
-            digest: digest_folder(create_digest, &self.workspace, &root_folder),
+        let root = BuilderFileTreeNode::Folder {
+            name: self.builder.clone(),
+            digest: digest_folder(create_digest, &self.builder, &root_folder),
             folder: root_folder
         };
         root

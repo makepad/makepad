@@ -176,7 +176,7 @@ impl App {
             },
             Event::KeyDown(ke) => match ke.key_code {
                 KeyCode::KeyR => if ke.modifiers.logo || ke.modifiers.control {
-                    self.storage.reload_workspaces();
+                    self.storage.reload_builders();
                 },
                 _ => ()
             },
@@ -195,7 +195,7 @@ impl App {
                 }
                 if self.storage.settings_changed.is_signal(se) {
                     // we have to reload settings.
-                    self.storage.reload_workspaces();
+                    self.storage.reload_builders();
                 }
             },
             Event::FileRead(fr) => {

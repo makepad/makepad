@@ -26,7 +26,7 @@ pub use crate::makepadtheme::*;
 //mod rustcompiler;
 //pub use crate::rustcompiler::*;
 use render::*;
-#[path = "../../workspace/src/main.rs"]
-mod workspace_main;
+#[path = "../../builder/src/main.rs"]
+mod builder_main;
 
 main_app!(App);

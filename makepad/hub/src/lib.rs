@@ -1,8 +1,8 @@
 mod hubui;
 pub use crate::hubui::*;
 
-mod hubworkspace;
-pub use crate::hubworkspace::*;
+mod hubbuilder;
+pub use crate::hubbuilder::*;
 
 mod process;
 pub use crate::process::*;

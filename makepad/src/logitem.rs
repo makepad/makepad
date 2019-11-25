@@ -58,6 +58,7 @@ impl LogItem {
 
     pub fn clear_msg(&mut self, cx: &mut Cx) {
         self.text_buffer.load_from_utf8("");
+        self.text_editor.view.redraw_view_area(cx);
     }
     
     pub fn handle_log_item(&mut self, cx: &mut Cx, event: &mut Event) -> TextEditorEvent {

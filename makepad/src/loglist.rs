@@ -155,7 +155,7 @@ impl LogItemDraw {
                 for ab in &bm.active_builds {
                     if ab.run_uid.is_some() {
                         let bt = &ab.build_target;
-                        self.text.draw_text(cx, &format!("{}/{}/{}:{} ", bt.workspace, bt.project, bt.package, bt.config));
+                        self.text.draw_text(cx, &format!("{}/{}/{}:{} ", bt.builder, bt.workspace, bt.package, bt.config));
                     }
                 }
             }
@@ -163,7 +163,7 @@ impl LogItemDraw {
                 self.text.draw_text(cx, "Done ");
                 for ab in &bm.active_builds {
                     let bt = &ab.build_target;
-                    self.text.draw_text(cx, &format!("{}/{}/{}:{} ", bt.workspace, bt.project, bt.package, bt.config));
+                    self.text.draw_text(cx, &format!("{}/{}/{}:{} ", bt.builder, bt.workspace, bt.package, bt.config));
                 }
             }
         }
@@ -175,7 +175,7 @@ impl LogItemDraw {
             for ab in &bm.active_builds {
                 if ab.build_uid.is_some() {
                     let bt = &ab.build_target;
-                    self.text.draw_text(cx, &format!("{}/{}/{}:{} ", bt.workspace, bt.project, bt.package, bt.config));
+                    self.text.draw_text(cx, &format!("{}/{}/{}:{} ", bt.builder, bt.workspace, bt.package, bt.config));
                 }
             }
             if bm.exec_when_done {
