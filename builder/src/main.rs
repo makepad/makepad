@@ -1,7 +1,7 @@
 // workspaces are networked build and file servers. This 'main' one is also compiled into makepad
 use hub::*;
 
-pub fn workspace(ws: &mut HubWorkspace, htc: FromHubMsg) -> Result<(), HubWsError> {
+pub fn builder(ws: &mut HubBuilder, htc: FromHubMsg) -> Result<(), HubWsError> {
     match htc.msg {
         HubMsg::ListPackagesRequest {uid} => {
             // lets read our Cargo.toml in the root
@@ -14,7 +14,7 @@ pub fn workspace(ws: &mut HubWorkspace, htc: FromHubMsg) -> Result<(), HubWsErro
             );
             Ok(())
         },
-        HubMsg::Build {uid, project, package, config} => {
+        HubMsg::Build {uid, workspace, package, config} => {
             let mut args = Vec::new();
             let mut env = Vec::new();
             match config.as_ref() {
@@ -33,7 +33,7 @@ pub fn workspace(ws: &mut HubWorkspace, htc: FromHubMsg) -> Result<(), HubWsErro
                 args.push("--target=wasm32-unknown-unknown");
             }
             
-            if let BuildResult::Wasm {path} = ws.cargo(uid, &project, &args, &env) ? {
+            if let BuildResult::Wasm {path} = ws.cargo(uid, &workspace, &args, &env) ? {
                 if config == "small" { // strip the build
                     ws.wasm_strip_debug(uid, &path) ?;
                 }
@@ -47,5 +47,5 @@ pub fn workspace(ws: &mut HubWorkspace, htc: FromHubMsg) -> Result<(), HubWsErro
 #[allow(dead_code)]
 pub fn main() {
     let args: Vec<String> = std::env::args().collect();
-    HubWorkspace::run_workspace_commandline(args, | ws, htc | {workspace(ws, htc)});
+    HubBuilder::run_builder_commandline(args, | ws, htc | {builder(ws, htc)});
 }
