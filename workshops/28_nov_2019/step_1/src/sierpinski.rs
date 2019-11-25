@@ -9,7 +9,7 @@ pub fn sierpinski(level: u32) -> Vec<f32> {
         Vec3::new(-f32::sqrt(2.0 / 9.0), -f32::sqrt(2.0 / 3.0), -1.0 / 3.0),
         level,
         &mut vertices,
-    );
+    );  
     vertices
 }
 
