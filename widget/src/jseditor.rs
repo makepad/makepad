@@ -1,30 +1,30 @@
 use render::*; 
 
 use crate::textbuffer::*;
-use crate::codeeditor::*;
+use crate::texteditor::*;
 
 #[derive(Clone)]
 pub struct JSEditor {
-    pub code_editor: CodeEditor,
+    pub text_editor: TextEditor,
 }
 
 impl JSEditor {
     pub fn proto(cx: &mut Cx) -> Self {
         Self {
-            code_editor: CodeEditor{
+            text_editor: TextEditor{
                 folding_depth: 3,
-                ..CodeEditor::proto(cx)
+                ..TextEditor::proto(cx)
             }
         }
     }
     
-    pub fn handle_js_editor(&mut self, cx: &mut Cx, event: &mut Event,  text_buffer: &mut TextBuffer) -> CodeEditorEvent {
-        let ce = self.code_editor.handle_code_editor(cx, event, text_buffer);
+    pub fn handle_js_editor(&mut self, cx: &mut Cx, event: &mut Event,  text_buffer: &mut TextBuffer) -> TextEditorEvent {
+        let ce = self.text_editor.handle_text_editor(cx, event, text_buffer);
         match ce {
-            CodeEditorEvent::AutoFormat => {
+            TextEditorEvent::AutoFormat => {
                 let formatted = JSTokenizer::auto_format(text_buffer).out_lines;
-                self.code_editor.cursors.replace_lines_formatted(formatted, text_buffer);
-                self.code_editor.view.redraw_view_area(cx);
+                self.text_editor.cursors.replace_lines_formatted(formatted, text_buffer);
+                self.text_editor.view.redraw_view_area(cx);
             },
             _ => ()
         }
@@ -46,13 +46,13 @@ impl JSEditor {
             }
         }
         
-        if self.code_editor.begin_code_editor(cx, text_buffer).is_err() {return}
+        if self.text_editor.begin_text_editor(cx, text_buffer).is_err() {return}
         
         for (index, token_chunk) in text_buffer.token_chunks.iter_mut().enumerate(){
-            self.code_editor.draw_chunk(cx, index, &text_buffer.flat_text, token_chunk, &text_buffer.messages.cursors);
+            self.text_editor.draw_chunk(cx, index, &text_buffer.flat_text, token_chunk, &text_buffer.messages.cursors);
         }
         
-        self.code_editor.end_code_editor(cx, text_buffer);
+        self.text_editor.end_text_editor(cx, text_buffer);
     }
 }
 
