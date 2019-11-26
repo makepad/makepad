@@ -65,10 +65,10 @@ impl Tab {
     pub fn instance_border_color()->InstanceColor{uid!()}
     pub fn tab_closing()->InstanceFloat{uid!()}
     
-    pub fn theme(cx:&mut Cx){ 
+    pub fn theme(cx:&mut Cx, opt:&ThemeOptions){ 
         Self::layout_bg().set_base(cx, Layout {
             align: Align::left_center(),
-            walk: Walk::wh(Width::Compute, Height::Fix(40.)),
+            walk: Walk::wh(Width::Compute, Height::Fix(40.* opt.scale.powf(0.5))),
             padding: Padding {l: 16.0, t: 1.0, r: 16.0, b: 0.0},
             ..Default::default()
         });

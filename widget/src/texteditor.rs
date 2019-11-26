@@ -24,7 +24,7 @@ pub struct TextEditor {
     pub line_number_text: Text,
     pub cursors: TextCursorSet,
     
-    pub base_font_size: f32,
+    //pub base_font_size: f32,
     pub open_font_scale: f32,
     pub folded_font_scale: f32,
     pub line_number_width: f32,
@@ -195,7 +195,7 @@ impl TextEditor {
                 wrapping: Wrapping::Line,
                 ..Text::proto(cx)
             },
-            base_font_size: 8.0,
+            //base_font_size: 8.0,
             open_font_scale: 1.0,
             folded_font_scale: 0.07,
             line_number_width: 45.,
@@ -313,7 +313,7 @@ impl TextEditor {
     pub fn color_error() -> ColorId {uid!()}
     pub fn color_defocus() -> ColorId {uid!()}
     
-    pub fn theme(cx: &mut Cx) {
+    pub fn theme(cx: &mut Cx, _opt:&ThemeOptions) {
         Self::text_style_editor_text().set_base(cx, Theme::text_style_fixed().base(cx));
     }
     
@@ -1134,10 +1134,10 @@ impl TextEditor {
                         ypos_at_line = ypos;
                     }
                     ypos += if geom.was_folded {
-                        self._monospace_base.y * self.base_font_size * self._anim_font_scale
+                        self._monospace_base.y * self.text.text_style.font_size * self._anim_font_scale
                     }
                     else {
-                        self._monospace_base.y * self.base_font_size
+                        self._monospace_base.y * self.text.text_style.font_size
                     }
                 }
                 ypos += self._final_fill_height;
@@ -1251,8 +1251,8 @@ impl TextEditor {
     
     fn draw_indent_lines(&mut self, cx: &mut Cx, geom_y: f32, tabs: usize) {
         let y_pos = geom_y - cx.get_turtle_origin().y;
-        let tab_variable_width = self._monospace_base.x * 4. * self.base_font_size * self._anim_font_scale;
-        let tab_fixed_width = self._monospace_base.x * 4. * self.base_font_size;
+        let tab_variable_width = self._monospace_base.x * 4. * self.text.text_style.font_size * self._anim_font_scale;
+        let tab_fixed_width = self._monospace_base.x * 4. * self.text.text_style.font_size;
         let mut off = self.line_number_width;
         for i in 0..tabs {
             let (indent_color, indent_id) = if i < self._indent_stack.len() {self._indent_stack[i]}else {
@@ -1306,7 +1306,7 @@ impl TextEditor {
                     // lets change the fontsize
                     if tabs >= self.folding_depth || next_char == '\n' {
                         // ok lets think. we need to move it over by the delta of 8 spaces * _anim_font_size
-                        let dx = (self._monospace_base.x * self.base_font_size * 4. * (self.folding_depth as f32)) - (self._monospace_base.x * self.base_font_size * self._anim_font_scale * 4. * (self.folding_depth as f32));
+                        let dx = (self._monospace_base.x * self.text.text_style.font_size * 4. * (self.folding_depth as f32)) - (self._monospace_base.x * self.text.text_style.font_size * self._anim_font_scale * 4. * (self.folding_depth as f32));
                         cx.move_turtle(dx, 0.0);
                         self._line_was_folded = true;
                         self._anim_font_scale
@@ -1831,8 +1831,8 @@ impl TextEditor {
         if font_scale > self._line_largest_font {
             self._line_largest_font = font_scale;
         }
-        self._monospace_size.x = self._monospace_base.x * self.base_font_size * font_scale;
-        self._monospace_size.y = self._monospace_base.y * self.base_font_size * font_scale;
+        self._monospace_size.x = self._monospace_base.x * self.text.text_style.font_size * font_scale;
+        self._monospace_size.y = self._monospace_base.y * self.text.text_style.font_size * font_scale;
     }
     
     fn scroll_last_cursor_visible(&mut self, cx: &mut Cx, text_buffer: &TextBuffer, height_pad: f32) {
@@ -1879,7 +1879,6 @@ impl TextEditor {
     
     fn compute_offset_from_ypos(&mut self, cx: &Cx, ypos_abs: f32, text_buffer: &TextBuffer, end: bool) -> usize {
         let rel = self.view.get_view_area(cx).abs_to_rel(cx, Vec2 {x: 0.0, y: ypos_abs});
-        println!("{} {}", ypos_abs, rel.y);
         let mut mono_size;
         // = Vec2::zero();
         let end_col = if end {1 << 31}else {0};

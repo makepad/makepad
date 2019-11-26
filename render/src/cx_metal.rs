@@ -574,28 +574,18 @@ impl MetalBuffer {
             1 => &self.multi2,
             2 => &self.multi3,
             3 => &self.multi4,
-            4 => &self.multi5,
-            5 => &self.multi6,
-            6 => &self.multi7,
-            7 => &self.multi8,
-            8 => &self.multi9,
-            _ => &self.multi10,
+            _ => &self.multi5,
         }
     }
     
     pub fn multi_buffer_write(&mut self) -> &mut MultiMetalBuffer {
-        self.last_written = (self.last_written + 1) % 9;
+        self.last_written = (self.last_written + 1) % 5;
         match self.last_written {
             0 => &mut self.multi1,
             1 => &mut self.multi2,
             2 => &mut self.multi3,
             3 => &mut self.multi4,
-            4 => &mut self.multi5,
-            5 => &mut self.multi6,
-            6 => &mut self.multi7,
-            7 => &mut self.multi8,
-            8 => &mut self.multi9,
-            _ => &mut self.multi10,
+            _ => &mut self.multi5,
         }
     }
     
