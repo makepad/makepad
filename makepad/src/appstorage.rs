@@ -20,6 +20,7 @@ pub struct AppSettings {
 }
 
 impl Default for AppSettings {
+
     fn default() -> Self {
         Self {
             exec_when_done: false,
@@ -185,6 +186,20 @@ impl AppStorage {
         let ron = ron::ser::to_string_pretty(state, ron::ser::PrettyConfig::default()).unwrap();
         cx.file_write("makepad_state.ron", ron.as_bytes());
     }
+
+    pub fn remap_sync_path(&self, path:&str)->String{
+        let mut path = path.to_string();
+        for (key,sync_to) in &self.settings.sync{
+            for sync in sync_to{
+                if path.starts_with(sync){
+                    path.replace_range(0..sync.len(), key);
+                    break
+                }
+            }
+        }
+        path
+    }
+    
     
     pub fn text_buffer_from_path(&mut self, cx: &mut Cx, path: &str) -> &mut TextBuffer {
         
