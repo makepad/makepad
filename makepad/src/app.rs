@@ -183,6 +183,11 @@ impl App {
                 KeyCode::KeyR => if ke.modifiers.logo || ke.modifiers.control {
                     self.storage.reload_builders();
                 },
+                KeyCode::Key0=>if ke.modifiers.logo || ke.modifiers.control {
+                    self.storage.settings.theme_options.scale = 1.0;
+                    self.reload_theme(cx);
+                    cx.reset_font_atlas_and_redraw();
+                },
                 KeyCode::Equals=>if ke.modifiers.logo || ke.modifiers.control {
                     self.storage.settings.theme_options.scale *= 1.1;
                     self.reload_theme(cx);
