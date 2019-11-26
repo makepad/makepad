@@ -1020,11 +1020,11 @@ impl XlibWindow {
             let mut len = 0;
             let ptr = X11_sys::XGetVisualInfo(display, X11_sys::VisualIDMask as c_long, &mut visual_info, &mut len);
             if ptr.is_null() {
-                panic!("can't get visual info by id");
+                panic!("can't get visual info by id1");
             }
             let visual_infos = slice::from_raw_parts(ptr, len as usize);
             if visual_infos.len() != 1 {
-                panic!("can't get visual info by id");
+                panic!("can't get visual info by id2");
             }
             visual_info = visual_infos[0];
             X11_sys::XFree(ptr as *mut _);

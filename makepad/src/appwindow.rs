@@ -100,7 +100,17 @@ impl AppWindow {
                          LogListEvent::SelectLocMessage {loc_message} => {
                             // just make it open an editor
                             if loc_message.path.len()>0 {
-                                file_tree_event = FileTreeEvent::SelectFile {path: loc_message.path.clone()};
+                                // ok so. lets lookup the path in our remap list
+                                let mut path = loc_message.path.clone();
+                                for (key,sync_to) in &storage.settings.sync{
+                                    for sync in sync_to{
+                                        if path.starts_with(sync){
+                                            path.replace_range(0..sync.len(), key);
+                                            break
+                                        }
+                                    }
+                                }
+                                file_tree_event = FileTreeEvent::SelectFile {path: path};
                             }
                             self.log_item.load_loc_message(cx, &loc_message);
                         },
