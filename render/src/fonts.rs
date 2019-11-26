@@ -262,7 +262,6 @@ impl TrapezoidText {
                 
                 let font_scale_logical = atlas_page.font_size * 96.0 / (72.0 * font.units_per_em);
                 let font_scale_pixels = font_scale_logical * atlas_page.dpi_factor;
-                println!("x: {} y: {}", tx, ty); 
                 let mut trapezoids = Vec::new();
                 trapezoids.extend_from_internal_iter(
                     self.trapezoidator.trapezoidate(
