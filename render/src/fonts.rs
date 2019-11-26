@@ -262,7 +262,7 @@ impl TrapezoidText {
                 
                 let font_scale_logical = atlas_page.font_size * 96.0 / (72.0 * font.units_per_em);
                 let font_scale_pixels = font_scale_logical * atlas_page.dpi_factor;
-                
+                println!("x: {} y: {}", tx, ty); 
                 let mut trapezoids = Vec::new();
                 trapezoids.extend_from_internal_iter(
                     self.trapezoidator.trapezoidate(
@@ -308,7 +308,7 @@ pub struct CxAfterDraw {
 
 impl CxAfterDraw {
     pub fn proto(cx: &mut Cx) -> Self {
-        cx.fonts_atlas.texture_size = Vec2 {x: 4096.0, y: 4096.0};
+        cx.fonts_atlas.texture_size = Vec2 {x: 2048.0, y: 2048.0};
         let mut atlas_texture = Texture::default();
         atlas_texture.set_desc(cx, None);
         cx.fonts_atlas.texture_id = atlas_texture.texture_id.unwrap();
