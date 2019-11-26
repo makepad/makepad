@@ -493,7 +493,7 @@ impl MetalWindow {
     
     pub fn set_vsync_enable(&mut self, enable: bool) {
         unsafe {
-            let () = msg_send![self.core_animation_layer, setDisplaySyncEnabled:false];
+            let () = msg_send![self.core_animation_layer, setDisplaySyncEnabled:enable];
         }
     }
     
