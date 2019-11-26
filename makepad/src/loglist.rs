@@ -313,7 +313,7 @@ impl LogList {
                             loc_message: loc_message.clone(),
                         }
                     }
-                    let text_buffer = storage.text_buffer_from_path(cx, &loc_message.path);
+                    let text_buffer = storage.text_buffer_from_path(cx, &storage.remap_sync_path(&loc_message.path));
                     // check if we have a range:
                     if let Some((head, tail)) = loc_message.range {
                         if select_at_end {
