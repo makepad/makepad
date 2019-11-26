@@ -32,7 +32,7 @@ impl HomePage {
     pub fn text_style_point() -> TextStyleId {uid!()}
     pub fn walk_paragraph() -> WalkId {uid!()}
     
-    pub fn theme(cx: &mut Cx) {
+    pub fn theme(cx: &mut Cx, _opt:&ThemeOptions) {
         TextEditor::color_bg().set_class(cx, Self::my_mail_input(), color("#4"));
         //CodeEditor::color_gutter_bg().set_class(cx, Self::my_code_editor(), color("#4"));
         

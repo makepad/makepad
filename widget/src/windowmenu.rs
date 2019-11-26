@@ -61,7 +61,7 @@ impl MenuItemDraw {
     
     pub fn text_style_menu_label() ->TextStyleId{uid!()}
     
-    pub fn theme(cx:&mut Cx){ 
+    pub fn theme(cx:&mut Cx, _opt:&ThemeOptions){ 
         Self::text_style_menu_label().set_base(cx, Theme::text_style_normal().base(cx));
     }   
     

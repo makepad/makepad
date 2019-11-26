@@ -33,7 +33,7 @@ impl NormalButton {
     pub fn instance_border_color() -> InstanceColor {uid!()}
     pub fn instance_glow_size() -> InstanceFloat {uid!()}
     
-    pub fn theme(cx: &mut Cx) { 
+    pub fn theme(cx: &mut Cx, _opt:&ThemeOptions) { 
         Self::layout_bg().set_base(cx, Layout {
             align: Align::center(),
             walk: Walk {
