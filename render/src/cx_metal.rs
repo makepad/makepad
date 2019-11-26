@@ -558,6 +558,8 @@ pub struct MetalBuffer {
     pub multi1: MultiMetalBuffer,
     pub multi2: MultiMetalBuffer,
     pub multi3: MultiMetalBuffer,
+    pub multi4: MultiMetalBuffer,
+    pub multi5: MultiMetalBuffer,
 }
 
 impl MetalBuffer {
@@ -565,15 +567,19 @@ impl MetalBuffer {
         match self.last_written {
             0 => &self.multi1,
             1 => &self.multi2,
+            2 => &self.multi2,
+            3 => &self.multi2,
             _ => &self.multi3,
         }
     }
     
     pub fn multi_buffer_write(&mut self) -> &mut MultiMetalBuffer {
-        self.last_written = (self.last_written + 1) % 3;
+        self.last_written = (self.last_written + 1) % 5;
         match self.last_written {
             0 => &mut self.multi1,
             1 => &mut self.multi2,
+            2 => &mut self.multi2,
+            3 => &mut self.multi2,
             _ => &mut self.multi3,
         }
     }
