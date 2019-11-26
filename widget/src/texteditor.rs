@@ -1057,7 +1057,9 @@ impl TextEditor {
                 let inst = self.gutter_bg.draw_quad_rel(cx, Rect {x: 0., y: 0., w: self.line_number_width, h: cx.get_height_total()});
                 inst.set_do_scroll(cx, false, false);
                 cx.new_instance_draw_call(&self.text.shader, 0);
-                self._line_number_inst = Some(self.line_number_text.begin_text(cx));
+                let inst = self.line_number_text.begin_text(cx);
+                inst.inst.set_do_scroll(cx, false, true);
+                self._line_number_inst = Some(inst);
             }
             
             if let Some(select_scroll) = &mut self._select_scroll {
