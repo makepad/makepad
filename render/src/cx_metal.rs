@@ -584,7 +584,7 @@ impl MetalBuffer {
     }
     
     pub fn multi_buffer_write(&mut self) -> &mut MultiMetalBuffer {
-        self.last_written = (self.last_written + 1) % 5;
+        self.last_written = (self.last_written + 1) % 9;
         match self.last_written {
             0 => &mut self.multi1,
             1 => &mut self.multi2,
