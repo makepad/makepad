@@ -1,8 +1,0 @@
-[package]
-name = "rust_workshop_28_nov_2019_step_1_wasm"
-version = "0.1.0"
-authors = ["makepaddev"]
-edition = "2018"
-
-[lib]
-crate-type = ["cdylib"]
