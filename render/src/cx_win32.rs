@@ -25,7 +25,7 @@ pub struct Win32App {
     pub time_start: u64,
     pub event_callback: Option<*mut dyn FnMut(&mut Win32App, &mut Vec<Event>) -> bool>,
     pub event_recur_block: bool,
-    pub event_loop_running: bool,
+    pub event_loop_running: bool, 
     pub class_name_wstr: Vec<u16>,
     pub all_windows: Vec<HWND>,
     pub timers: Vec<Win32Timer>,
@@ -123,10 +123,12 @@ impl Win32App {
             );
             
             while self.event_loop_running {
-                let mut msg = std::mem::MaybeUninit::uninit();  
                  
                 if self.loop_block {
-                    if winuser::GetMessageW(&mut msg, ptr::null_mut(), 0, 0) == 0 {
+                    let mut msg = std::mem::MaybeUninit::uninit();   
+                    let ret =  winuser::GetMessageW(msg.as_mut_ptr(), ptr::null_mut(), 0, 0);
+                    let msg = msg.assume_init();
+                    if ret == 0 {
                         // Only happens if the message is `WM_QUIT`.
                         debug_assert_eq!(msg.message, winuser::WM_QUIT);
                         self.event_loop_running = false;
@@ -138,7 +140,10 @@ impl Win32App {
                     }
                 }
                 else {
-                    if winuser::PeekMessageW(&mut msg, ptr::null_mut(), 0, 0, 1) == 0 {
+                    let mut msg = std::mem::MaybeUninit::uninit();   
+                    let ret = winuser::PeekMessageW(msg.as_mut_ptr(), ptr::null_mut(), 0, 0, 1);
+                    let msg = msg.assume_init();
+                    if ret == 0 {
                         self.do_callback(&mut vec![Event::Paint])
                     }
                     else {

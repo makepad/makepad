@@ -101,6 +101,7 @@ impl AppWindow {
                             // just make it open an editor
                             if loc_message.path.len()>0 {
                                 // ok so. lets lookup the path in our remap list
+                                //println!("TRYING TO SELECT FILE {} ")
                                 file_tree_event = FileTreeEvent::SelectFile {path: storage.remap_sync_path(&loc_message.path)};
                             }
                             self.log_item.load_loc_message(cx, &loc_message);
