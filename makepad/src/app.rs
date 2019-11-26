@@ -189,16 +189,18 @@ impl App {
                     cx.reset_font_atlas_and_redraw();
                 },
                 KeyCode::Equals=>if ke.modifiers.logo || ke.modifiers.control {
-                    self.storage.settings.theme_options.scale *= 1.1;
+                    let scale = self.storage.settings.theme_options.scale * 1.1;
+                    self.storage.settings.theme_options.scale = if scale > 3.0{3.0}else{scale};
                     self.reload_theme(cx);
                     cx.reset_font_atlas_and_redraw();
                 },
                 KeyCode::Minus=>if ke.modifiers.logo || ke.modifiers.control {
-                    self.storage.settings.theme_options.scale /= 1.1;
+                    let scale = self.storage.settings.theme_options.scale / 1.1;
+                    self.storage.settings.theme_options.scale = if scale < 0.3{0.3}else{scale};
                     self.reload_theme(cx);
                     cx.reset_font_atlas_and_redraw();
                 },
-                _ => ()
+                _ => () 
             },
             Event::Signal(se) => {
                 // process network messages for hub_ui
