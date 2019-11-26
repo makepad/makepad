@@ -123,8 +123,8 @@ impl Win32App {
             );
             
             while self.event_loop_running {
-                let mut msg = mem::uninitialized();
-                
+                let mut msg = std::mem::MaybeUninit::uninit(); 
+                 
                 if self.loop_block {
                     if winuser::GetMessageW(&mut msg, ptr::null_mut(), 0, 0) == 0 {
                         // Only happens if the message is `WM_QUIT`.
