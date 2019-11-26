@@ -1,5 +1,5 @@
 [package]
-name = "step_1_wasm"
+name = "step_6_wasm"
 version = "0.1.0"
 authors = ["Eddy Bruel <ejpbruel@gmail.com>"]
 edition = "2018"
