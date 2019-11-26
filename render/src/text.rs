@@ -277,7 +277,7 @@ impl Text {
             };
             
             let tc = if let Some(tc) = &atlas_page.atlas_glyphs[glyph_id][subpixel_id] {
-                println!("{} {} {} {}", tc.tx1,tc.tx2,tc.ty1,tc.ty2);
+                //println!("{} {} {} {}", tc.tx1,tc.tx2,tc.ty1,tc.ty2);
                 tc
             }
             else {
