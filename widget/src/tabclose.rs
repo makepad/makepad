@@ -22,10 +22,10 @@ impl TabClose {
     pub fn instance_hover()->InstanceFloat{uid!()}
     pub fn instance_down()->InstanceFloat{uid!()}
     
-    pub fn theme(cx: &mut Cx){
+    pub fn theme(cx: &mut Cx, opt:&ThemeOptions){
         Self::walk().set_base(cx, Walk {
-            width: Width::Fix(10.),
-            height: Height::Fix(10.),
+            width: Width::Fix(10.* opt.scale),
+            height: Height::Fix(10.* opt.scale),
             margin: Margin {l: -4., t: 0., r: 4., b: 0.}
         });
     }

@@ -37,10 +37,10 @@ impl LogItemDraw {
     pub fn layout_item() -> LayoutId {uid!()}
     pub fn text_style_item() ->TextStyleId{uid!()}
 
-    pub fn theme(cx: &mut Cx) {
+    pub fn theme(cx: &mut Cx, opt:&ThemeOptions) {
         
         Self::layout_item().set_base(cx, Layout {
-            walk: Walk::wh(Width::Fill, Height::Fix(20.)),
+            walk: Walk::wh(Width::Fill, Height::Fix(20.* opt.scale)),
             align: Align::left_center(),
             padding: Padding::zero(), // {l: 2., t: 3., b: 2., r: 0.},
             line_wrap: LineWrap::None,
@@ -216,8 +216,8 @@ impl LogList {
         }
     }
     
-    pub fn theme(cx: &mut Cx) {
-        LogItemDraw::theme(cx);
+    pub fn theme(cx: &mut Cx, opt:&ThemeOptions) {
+        LogItemDraw::theme(cx, opt);
     }
     
     pub fn handle_log_list(&mut self, cx: &mut Cx, event: &mut Event, storage: &mut AppStorage, bm: &mut BuildManager) -> LogListEvent {

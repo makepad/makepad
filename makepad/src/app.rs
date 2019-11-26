@@ -21,9 +21,9 @@ pub struct App {
 impl App {
     
     pub fn proto(cx: &mut Cx) -> Self {
-
-        set_dark_widget_theme(cx);
-        set_dark_makepad_theme(cx);
+        let default_opt = ThemeOptions{scale:1.0, dark:true};
+        set_widget_theme(cx, &default_opt);
+        set_makepad_theme(cx, &default_opt);
         let ms = cx.new_signal();
         Self {
             menu: Menu::main(vec![
@@ -166,6 +166,11 @@ impl App {
         cx.redraw_child_area(Area::All);
     }
     
+    pub fn reload_theme(&mut self, cx: &mut Cx){
+        set_widget_theme(cx, &self.storage.settings.theme_options);
+        set_makepad_theme(cx, &self.storage.settings.theme_options);
+    }
+    
     pub fn handle_app(&mut self, cx: &mut Cx, event: &mut Event) {
         match event {
             Event::Construct => {
@@ -177,6 +182,16 @@ impl App {
             Event::KeyDown(ke) => match ke.key_code {
                 KeyCode::KeyR => if ke.modifiers.logo || ke.modifiers.control {
                     self.storage.reload_builders();
+                },
+                KeyCode::Equals=>if ke.modifiers.logo || ke.modifiers.control {
+                    self.storage.settings.theme_options.scale *= 1.1;
+                    self.reload_theme(cx);
+                    cx.reset_font_atlas_and_redraw();
+                },
+                KeyCode::Minus=>if ke.modifiers.logo || ke.modifiers.control {
+                    self.storage.settings.theme_options.scale /= 1.1;
+                    self.reload_theme(cx);
+                    cx.reset_font_atlas_and_redraw();
                 },
                 _ => ()
             },

@@ -69,8 +69,8 @@ impl DesktopWindow {
     
     pub fn text_style_window_caption() ->TextStyleId{uid!()}
     
-    pub fn theme(cx:&mut Cx){
-        Self::text_style_window_caption().set_base(cx, Theme::text_style_normal().base(cx));
+    pub fn theme(cx:&mut Cx, _opt:&ThemeOptions){
+        Self::text_style_window_caption().set_base(cx, Theme::text_style_unscaled().base(cx));
     }
     
     pub fn handle_desktop_window(&mut self, cx: &mut Cx, event: &mut Event) -> DesktopWindowEvent {

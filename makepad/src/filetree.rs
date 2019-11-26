@@ -191,7 +191,7 @@ impl FileTreeItemDraw {
     pub fn instance_line_vec()->InstanceVec2{uid!()}
     pub fn instance_anim_pos()->InstanceFloat{uid!()}
 
-    pub fn theme(cx: &mut Cx){
+    pub fn theme(cx: &mut Cx, opt:&ThemeOptions){
         Self::color_tree_folder().set_base(cx, Theme::color_text_selected_focus().base(cx));
         Self::color_tree_file().set_base(cx, Theme::color_text_deselected_focus().base(cx));
         Self::color_filler().set_base(cx, Theme::color_icon().base(cx));
@@ -203,7 +203,7 @@ impl FileTreeItemDraw {
         });
         
         Self::layout_node().set_base(cx, Layout {
-            walk: Walk::wh(Width::Fill, Height::Fix(20.)),
+            walk: Walk::wh(Width::Fill, Height::Fix(20.* opt.scale)),
             align: Align::left_center(),
             padding: Padding {l: 5., t: 0., r: 0., b: 1.},
             ..Default::default()
@@ -215,13 +215,13 @@ impl FileTreeItemDraw {
         });
 
         Self::walk_filler().set_base(cx, Walk{
-            width:Width::Fix(10.),
+            width:Width::Fix(10.* opt.scale),
             height:Height::Fill,
             margin:Margin {l: 1., t: 0., r: 4., b: 0.}
         });
     
         Self::walk_folder().set_base(cx, Walk{
-            width:Width::Fix(14.), 
+            width:Width::Fix(14.* opt.scale), 
             height:Height::Fill, 
             margin: Margin {l: 0., t: 0., r: 2., b: 0.}
         });
@@ -300,9 +300,9 @@ impl FileTree {
 
     pub fn color_drag_bg()->ColorId{uid!()}
     
-    pub fn theme(cx: &mut Cx){
+    pub fn theme(cx: &mut Cx, opt:&ThemeOptions){
         Self::color_drag_bg().set_base(cx, Theme::color_bg_marked().base(cx));
-        FileTreeItemDraw::theme(cx)
+        FileTreeItemDraw::theme(cx, opt)
     }
   
     pub fn def_drag_bg_shader() -> ShaderGen {
