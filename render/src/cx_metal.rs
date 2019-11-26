@@ -73,6 +73,9 @@ impl Cx {
                 
                 // lets verify our instance_offset is not disaligned
                 let instances = (draw_call.instance.len() / sh.mapping.instance_slots) as u64;
+                if instances == 0{
+                    continue;
+                }
                 let pipeline_state = &shp.pipeline_state;
                 encoder.set_render_pipeline_state(pipeline_state);
                 if let Some(buf) = &shp.geom_vbuf.multi_buffer_read().buffer {encoder.set_vertex_buffer(0, Some(&buf), 0);}
@@ -311,12 +314,12 @@ impl MetalCx {
     pub fn new() -> MetalCx {
         let devices = Device::all();
         for device in devices {
-            //if device.is_low_power() {
-            //    return MetalCx {
-            //        command_queue: device.new_command_queue(),
-            //        device: device
-            //    }
-           // }
+            if device.is_low_power() {
+                return MetalCx {
+                    command_queue: device.new_command_queue(),
+                    device: device
+                }
+            }
         }
         let device = Device::system_default().unwrap();
         MetalCx {
