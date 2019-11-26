@@ -567,9 +567,9 @@ impl MetalBuffer {
         match self.last_written {
             0 => &self.multi1,
             1 => &self.multi2,
-            2 => &self.multi2,
-            3 => &self.multi2,
-            _ => &self.multi3,
+            2 => &self.multi3,
+            3 => &self.multi4,
+            _ => &self.multi5,
         }
     }
     
@@ -578,9 +578,9 @@ impl MetalBuffer {
         match self.last_written {
             0 => &mut self.multi1,
             1 => &mut self.multi2,
-            2 => &mut self.multi2,
-            3 => &mut self.multi2,
-            _ => &mut self.multi3,
+            2 => &mut self.multi3,
+            3 => &mut self.multi4,
+            _ => &mut self.multi5,
         }
     }
     
