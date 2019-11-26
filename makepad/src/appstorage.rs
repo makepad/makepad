@@ -29,10 +29,11 @@ impl Default for AppSettings {
             builders: {
                 let mut cfg = HashMap::new();
                 cfg.insert("main".to_string(), HubBuilderConfig {
-                    http_server: HttpServerConfig::Localhost(2001),
+                    http_server: HttpServerConfig::Localhost(8000),
                     workspaces: {
                         let mut workspace = HashMap::new();
                         workspace.insert("makepad".to_string(), ".".to_string());
+                        workspace.insert("rust_workshop".to_string(), "./workshops/28_nov_2019".to_string());
                         workspace
                     }
                 });
@@ -46,9 +47,9 @@ impl Default for AppSettings {
             builds: vec![
                 BuildTarget {
                     builder: "main".to_string(),
-                    workspace: "makepad".to_string(),
-                    package: "nov28_step1_wasm".to_string(),
-                    config: "debug".to_string()
+                    workspace: "rust_workshop".to_string(),
+                    package: "step_0".to_string(),
+                    config: "release".to_string()
                 }
             ]
         }
