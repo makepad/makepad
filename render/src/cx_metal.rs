@@ -18,7 +18,7 @@ impl Cx {
         pass_id: usize,
         view_id: usize,
         scroll: Vec2,
-        clip: (Vec2,Vec2),
+        clip: (Vec2, Vec2),
         zbias: &mut f32,
         zbias_step: f32,
         encoder: &RenderCommandEncoderRef,
@@ -31,7 +31,7 @@ impl Cx {
         self.views[view_id].uniform_view_transform(&Mat4::identity());
         self.views[view_id].parent_scroll = scroll;
         let local_scroll = self.views[view_id].get_local_scroll();
-        let clip  =  self.views[view_id].intersect_clip(clip);
+        let clip = self.views[view_id].intersect_clip(clip);
         
         for draw_call_id in 0..draw_calls_len {
             let sub_view_id = self.views[view_id].draw_calls[draw_call_id].sub_view_id;
@@ -73,7 +73,7 @@ impl Cx {
                 
                 // lets verify our instance_offset is not disaligned
                 let instances = (draw_call.instance.len() / sh.mapping.instance_slots) as u64;
-                if instances == 0{
+                if instances == 0 {
                     continue;
                 }
                 let pipeline_state = &shp.pipeline_state;
@@ -240,7 +240,7 @@ impl Cx {
             let command_buffer = metal_cx.command_queue.new_command_buffer();
             let encoder = command_buffer.new_render_command_encoder(&render_pass_descriptor);
             
-            unsafe{msg_send![encoder, textureBarrier]}
+            unsafe {msg_send![encoder, textureBarrier]}
             
             if let Some(depth_state) = &self.passes[pass_id].platform.mtl_depth_state {
                 encoder.set_depth_stencil_state(depth_state);
@@ -252,7 +252,7 @@ impl Cx {
                 pass_id,
                 view_id,
                 Vec2::zero(),
-                (Vec2{x:-50000.,y:-50000.},Vec2{x:50000.,y:50000.}),
+                (Vec2 {x: -50000., y: -50000.}, Vec2 {x: 50000., y: 50000.}),
                 &mut zbias,
                 zbias_step,
                 encoder,
@@ -293,7 +293,7 @@ impl Cx {
             pass_id,
             view_id,
             Vec2::zero(),
-            (Vec2{x:-50000.,y:-50000.},Vec2{x:50000.,y:50000.}),
+            (Vec2 {x: -50000., y: -50000.}, Vec2 {x: 50000., y: 50000.}),
             &mut zbias,
             zbias_step,
             encoder,
@@ -560,6 +560,11 @@ pub struct MetalBuffer {
     pub multi3: MultiMetalBuffer,
     pub multi4: MultiMetalBuffer,
     pub multi5: MultiMetalBuffer,
+    pub multi6: MultiMetalBuffer,
+    pub multi7: MultiMetalBuffer,
+    pub multi8: MultiMetalBuffer,
+    pub multi9: MultiMetalBuffer,
+    pub multi10: MultiMetalBuffer,
 }
 
 impl MetalBuffer {
@@ -569,7 +574,12 @@ impl MetalBuffer {
             1 => &self.multi2,
             2 => &self.multi3,
             3 => &self.multi4,
-            _ => &self.multi5,
+            4 => &self.multi5,
+            5 => &self.multi6,
+            6 => &self.multi7,
+            7 => &self.multi8,
+            8 => &self.multi9,
+            _ => &self.multi10,
         }
     }
     
@@ -580,7 +590,12 @@ impl MetalBuffer {
             1 => &mut self.multi2,
             2 => &mut self.multi3,
             3 => &mut self.multi4,
-            _ => &mut self.multi5,
+            4 => &mut self.multi5,
+            5 => &mut self.multi6,
+            6 => &mut self.multi7,
+            7 => &mut self.multi8,
+            8 => &mut self.multi9,
+            _ => &mut self.multi10,
         }
     }
     
