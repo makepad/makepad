@@ -239,6 +239,9 @@ impl Cx {
             
             let command_buffer = metal_cx.command_queue.new_command_buffer();
             let encoder = command_buffer.new_render_command_encoder(&render_pass_descriptor);
+            
+            unsafe{msg_send![encoder, textureBarrier]}
+            
             if let Some(depth_state) = &self.passes[pass_id].platform.mtl_depth_state {
                 encoder.set_depth_stencil_state(depth_state);
             }
