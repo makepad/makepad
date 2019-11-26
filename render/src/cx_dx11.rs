@@ -853,7 +853,7 @@ impl D3d11Cx {
             adapter.as_raw() as *mut _,
             d3dcommon::D3D_DRIVER_TYPE_UNKNOWN,
             ptr::null_mut(),
-            d3d11::D3D11_CREATE_DEVICE_VIDEO_SUPPORT, //d3dcommonLLD3D11_CREATE_DEVICE_DEBUG,
+            0,//d3d11::D3D11_CREATE_DEVICE_VIDEO_SUPPORT, //d3dcommonLLD3D11_CREATE_DEVICE_DEBUG,
             [d3dcommon::D3D_FEATURE_LEVEL_11_0].as_ptr(),
             1,
             d3d11::D3D11_SDK_VERSION,
