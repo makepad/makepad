@@ -475,7 +475,7 @@ impl HubBuilder {
         if let Err(e) = process {
             return Err(
                 self.error(uid, format!("Builder {} program run {} {} not found {:?}", self.builder, abs_dir, sub_path, e))
-            );
+            ); 
         }
         let mut process = process.unwrap();
         
@@ -491,7 +491,7 @@ impl HubBuilder {
             });
         };
         
-        //let builder = self.builder.clone();
+        let builder = self.builder.clone();
         route_mode.send(ToHubMsg {
             to: HubMsgTo::UI,
             msg: HubMsg::ProgramBegin {uid: uid}
@@ -594,7 +594,7 @@ impl HubBuilder {
                         }
                         else {
                             if stderr.len() > 0 {
-                                try_parse_stderr(uid, &workspace, &workspace, &stderr, &route_mode);
+                                try_parse_stderr(uid, &builder, &workspace, &stderr, &route_mode);
                                 stderr.truncate(0);
                             }
                             // lets parse/process our log line
@@ -610,7 +610,7 @@ impl HubBuilder {
                 },
                 Err(err)=>{
                     if stderr.len() > 0 {
-                        try_parse_stderr(uid, &workspace, &workspace, &stderr, &route_mode);
+                        try_parse_stderr(uid, &builder, &workspace, &stderr, &route_mode);
                         stderr.truncate(0);
                     }
                     if let RecvTimeoutError::Disconnected = err{

@@ -126,7 +126,7 @@ impl Cx {
                     );
                 }
             }
-        }
+        } 
     }
     
     pub fn calc_dirty_bounds(&mut self, pass_id: usize, view_id: usize, view_bounds: &mut ViewBounds) {

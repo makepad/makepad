@@ -21,7 +21,7 @@ impl Cx{
         
         self.call_event_handler(&mut event_handler, &mut Event::Construct);
         
-        self.redraw_child_area(Area::All);
+        self.redraw_child_area(Area::All); 
         
         let mut passes_todo = Vec::new();
         
