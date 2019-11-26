@@ -274,10 +274,9 @@ impl AppStorage {
                     // lets send our file write to all sync points.
                     for (sync, points) in &self.settings.sync {
                         if path.starts_with(sync) {
-                            let mut sync_path = path.to_string();
                             for point in points {
+                                let mut sync_path = path.to_string();
                                 sync_path.replace_range(0..sync.len(), point);
-                                println!("WRITING TO {}", sync_path);
                                 send_file_write_request(hub_ui, uid, &sync_path, &utf8_bytes);
                             }
                         }
