@@ -59,7 +59,7 @@ impl BuildManager {
             //println!("{:?}", dm.item.level);
             if let Some(loc_message) = dm.get_loc_message() {
                 
-                let text_buffer = storage.text_buffer_from_path(cx, &loc_message.path);
+                let text_buffer = storage.text_buffer_from_path(cx, &storage.remap_sync_path(&loc_message.path));
                 
                 let messages = &mut text_buffer.messages;
                 messages.mutation_id = text_buffer.mutation_id;
