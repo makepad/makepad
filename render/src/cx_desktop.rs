@@ -124,7 +124,7 @@ impl Cx {
             self.call_animation_event(&mut event_handler, time);
         }
         
-        let mut vsync = self.platform.desktop.repaint_via_scroll_event;
+        let mut vsync = false;//self.platform.desktop.repaint_via_scroll_event;
         self.platform.desktop.repaint_via_scroll_event = false;
         if self.frame_callbacks.len() != 0 {
             self.call_frame_event(&mut event_handler, time);
