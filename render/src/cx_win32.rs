@@ -4,7 +4,7 @@ use std::{ptr};
 use winapi::um::{libloaderapi, winuser, winbase, dwmapi};
 use winapi::shared::minwindef::{LPARAM, LRESULT, DWORD, WPARAM, BOOL, UINT, FALSE};
 use winapi::shared::ntdef::{NULL};
-use winapi::um::winnt::{LPCWSTR, HRESULT, LPCSTR};
+use winapi::um::winnt::{LPCWSTR, HRESULT, LPCSTR}; 
 use std::ffi::OsStr;
 use std::os::windows::ffi::OsStrExt;
 use std::mem;
@@ -849,7 +849,8 @@ impl Win32Window {
     
     pub fn get_is_maximized(&self) -> bool {
         unsafe {
-            let mut wp: winuser::WINDOWPLACEMENT = mem::uninitialized();
+            let wp:mem::MaybeUninit<winuser::WINDOWPLACEMENT> = mem::MaybeUninit::uninit();
+            let mut wp = wp.assume_init();
             wp.length = mem::size_of::<winuser::WINDOWPLACEMENT>() as u32;
             winuser::GetWindowPlacement(self.hwnd.unwrap(), &mut wp);
             if wp.showCmd as i32 == winuser::SW_MAXIMIZE {
