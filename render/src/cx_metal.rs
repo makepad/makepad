@@ -299,7 +299,7 @@ impl Cx {
         
         encoder.end_encoding();
         command_buffer.commit();
-        
+        command_buffer.wait_until_scheduled();
         unsafe {let () = msg_send![pool, release];}
     }
 }
