@@ -299,7 +299,7 @@ impl Cx {
             encoder,
             &metal_cx,
         );
-        
+        unsafe {msg_send![encoder, textureBarrier]}
         encoder.end_encoding();
         command_buffer.commit();
         //command_buffer.wait_until_scheduled();
