@@ -32,23 +32,23 @@ impl HomePage {
     pub fn text_style_point() -> TextStyleId {uid!()}
     pub fn walk_paragraph() -> WalkId {uid!()}
     
-    pub fn theme(cx: &mut Cx, _opt:&ThemeOptions) {
+    pub fn theme(cx: &mut Cx, opt:&ThemeOptions) {
         TextEditor::color_bg().set_class(cx, Self::my_mail_input(), color("#4"));
         //CodeEditor::color_gutter_bg().set_class(cx, Self::my_code_editor(), color("#4"));
         
         Self::text_style_heading().set_base(cx, TextStyle {
-            font_size: 28.0,
+            font_size: 28.0 * opt.scale,
             line_spacing: 2.0,
             ..Theme::text_style_normal().base(cx)
         });
         Self::text_style_body().set_base(cx, TextStyle {
-            font_size: 10.0,
+            font_size: 10.0 * opt.scale,
             height_factor: 2.0,
             line_spacing: 3.0,
             ..Theme::text_style_normal().base(cx)
         });
         Self::text_style_point().set_base(cx, TextStyle {
-            font_size: 8.0,
+            font_size: 8.0 * opt.scale,
             line_spacing: 2.5,
             ..Theme::text_style_normal().base(cx)
         });
