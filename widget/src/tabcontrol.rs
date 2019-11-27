@@ -3,7 +3,7 @@ use render::*;
 use crate::scrollbar::*;
 use crate::scrollview::*;
 use crate::tab::*;
-use crate::widgettheme::*;
+use crate::widgetstyle::*;
 
 #[derive(Clone)]
 pub struct TabControl {
@@ -208,7 +208,7 @@ impl TabControl {
     }
     
     pub fn end_tabs(&mut self, cx: &mut Cx) {
-        self.tab_fill.color = Theme::color_bg_normal().base(cx);
+        self.tab_fill.color = Theme::color_bg_normal().get(cx);
         self.tab_fill.draw_quad(cx, Walk::wh(Width::Fill, Height::Fill));
         self.tabs.sweep(cx, | _, _ | ());
         if let Some((fe, id)) = &self._dragging_tab {

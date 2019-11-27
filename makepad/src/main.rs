@@ -20,8 +20,8 @@ mod filetree;
 pub use crate::filetree::*;
 mod buildmanager;
 pub use crate::buildmanager::*;
-mod makepadtheme;
-pub use crate::makepadtheme::*;
+mod makepadstyle;
+pub use crate::makepadstyle::*;
 
 //mod rustcompiler;
 //pub use crate::rustcompiler::*;
