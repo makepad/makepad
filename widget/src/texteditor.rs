@@ -1861,7 +1861,7 @@ impl TextEditor {
             let rect = Rect {
                 x: (pos.col as f32) * mono_size.x, // - self.line_number_width,
                 y: geom.walk.y - mono_size.y * 1. - 0.5 * height_pad,
-                w: mono_size.x * 4., // + self.line_number_width,
+                w: mono_size.x * 4. + self.line_number_width,
                 h: mono_size.y * 4. + height_pad
             };
             // scroll this cursor into view

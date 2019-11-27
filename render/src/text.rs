@@ -445,7 +445,7 @@ impl Text {
                         if x > spos.x + w * 0.5 || y > spos.y {
                             let prev_index = if index == 0 {0}else {index - 1};
                             let prev_x = read.buffer[read.offset + x_o + prev_index * read.slots];
-                            let prev_w = read.buffer[read.offset + w_o + index * read.slots];
+                            let prev_w = read.buffer[read.offset + w_o + prev_index * read.slots];
                             if index < read.count - 1 && prev_x > spos.x + prev_w { // fix newline jump-back
                                 return read.buffer[read.offset + char_offset_o + index * read.slots] as usize;
                             }
