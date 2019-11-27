@@ -110,7 +110,14 @@ impl HttpServer {
                             };
                             return
                         }
-                        
+
+                        if url.ends_with("favicon.ico"){
+                            let header =  "HTTP/1.1 200 OK\r\nContent-Type: image/x-icon\r\nTransfer-encoding: identity\r\nContent-Length: 0\r\n: close\r\n\r\n";
+                            write_bytes_to_tcp_stream_no_error(&mut tcp_stream, header.as_bytes());
+                            let _ = tcp_stream.shutdown(Shutdown::Both);
+                            return
+                        }
+
                         // lets look up the first part of url, the project.
                         let file_path = if let Some(file_pos) = url.find('/') {
                             let (workspace, rest) = url.split_at(file_pos);
@@ -131,7 +138,12 @@ impl HttpServer {
                             return
                         }
                         let file_path = file_path.unwrap();
-                        
+                        let file_path = if file_path.ends_with("/"){
+                            format!("{}/{}", file_path, "index.html")
+                        }
+                        else{
+                            file_path
+                        };
                         // keep track of the files we read
                         if let Ok(mut shared) = shared.lock() {
                             if shared.files_read.iter().find( | v | **v == url).is_none() {
@@ -139,8 +151,9 @@ impl HttpServer {
                             }
                         };
                         
+                        
                         // lets read the file from disk and dump it back.
-                        println!("HTTP Server serving file: {}", file_path);
+                        //println!("HTTP Server serving file: {}", file_path);
                         if let Ok(data) = std::fs::read(&file_path) {
                             let mime_type = if url.ends_with(".html") {"text/html"}
                             else if url.ends_with(".wasm") {"application/wasm"}
@@ -158,7 +171,7 @@ impl HttpServer {
                             let _ = tcp_stream.shutdown(Shutdown::Both);
                         }
                         else { // 404
-                            let _ = tcp_stream.write("HTTP/1.1 404 NotFound\r\n".as_bytes());
+                            write_bytes_to_tcp_stream_no_error(&mut tcp_stream, "HTTP/1.1 404 NotFound\r\n".as_bytes());
                             let _ = tcp_stream.shutdown(Shutdown::Both);
                         }
                     });
@@ -186,7 +199,7 @@ impl HttpServer {
     }
     
     pub fn send_file_change(&mut self, path: &str) {
-        println!("send_file_change {}", path);
+        //println!("send_file_change {}", path);
         if let Ok(shared) = self.shared.lock() {
             if shared.files_read.iter().find( | v | **v == path).is_none() {
                 return
