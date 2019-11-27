@@ -215,7 +215,7 @@ impl App {
                         }
                     }
                 }
-                if self.storage.settings_changed.is_signal(se) {
+                if self.storage.reload_builders.is_signal(se) {
                     // we have to reload settings.
                     self.storage.reload_builders();
                 }
@@ -286,7 +286,8 @@ impl App {
                         self.storage.load_settings(cx, utf8_data);
                     }
                     else { // create default settings file
-                        let ron = ron::ser::to_string_pretty(&self.storage.settings, ron::ser::PrettyConfig::default()).expect("cannot serialize settings");
+                        let def_settings = self.storage.settings = AppSettings::initial();
+                        let ron = ron::ser::to_string_pretty(&def_settings, ron::ser::PrettyConfig::default()).expect("cannot serialize settings");
                         cx.file_write("makepad_settings.ron", ron.as_bytes());
                         self.storage.load_settings(cx, &ron);
                     }

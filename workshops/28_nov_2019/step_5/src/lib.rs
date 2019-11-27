@@ -12,7 +12,7 @@ extern "C" fn sierpinski(level: i32) -> i32 {
     println!(
         "Generating Sierpinski tetrahedron with level {} in Rust",
         level
-    );
+    ); 
     Box::into_raw(Box::new([1, 2, 3])) as i32
 }
 
