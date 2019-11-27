@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use serde::{Serialize, Deserialize};
 use crate::builder_main;
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppSettings {
     pub build_on_save: bool,
     pub exec_when_done: bool,
@@ -22,6 +22,20 @@ pub struct AppSettings {
 impl Default for AppSettings {
 
     fn default() -> Self {
+        Self {
+            exec_when_done: false,
+            build_on_save: true,
+            style_options: StyleOptions{scale:1.0, dark:true},
+            hub_server: HubServerConfig::Offline,
+            builders: HashMap::new(),
+            sync: HashMap::new(),
+            builds: vec![]
+        }
+    }
+}
+
+impl AppSettings{
+    pub fn initial()->Self{
         Self {
             exec_when_done: false,
             build_on_save: true,
@@ -75,6 +89,7 @@ pub struct AppStorage {
     pub hub_ui: Option<HubUI>,
     pub hub_ui_message: Signal,
     pub settings_changed: Signal,
+    pub reload_builders: Signal,
     pub settings: AppSettings,
     pub file_tree_file_read: FileRead,
     pub app_state_file_read: FileRead,
@@ -101,6 +116,7 @@ impl AppStorage {
             hub_ui: None,
             hub_ui_message: cx.new_signal(),
             settings_changed: cx.new_signal(),
+            reload_builders: cx.new_signal(),
             settings: AppSettings::default(),
             //rust_compiler: RustCompiler::style(cx),
             text_buffers: HashMap::new(),
@@ -139,12 +155,19 @@ impl AppStorage {
     pub fn load_settings(&mut self, cx: &mut Cx, utf8_data: &str) {
         match ron::de::from_str(utf8_data) {
             Ok(settings) => {
+                let last_settings = self.settings.clone();
                 self.settings = settings;
                 cx.send_signal(self.settings_changed, 0);
                 
                 // so now, here we restart our hub_server if need be.
                 if cx.platform_type.is_desktop() {
-                    self.restart_hub_server();
+                    if last_settings.hub_server != self.settings.hub_server{
+                        self.restart_hub_server();
+                        cx.send_signal(self.reload_builders, 0);
+                    }
+                    else if last_settings.builders != self.settings.builders{
+                        cx.send_signal(self.reload_builders, 0);
+                    }
                 }
             },
             Err(e) => {
