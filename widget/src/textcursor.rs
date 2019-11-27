@@ -618,13 +618,13 @@ impl TextCursorSet {
                     delta += cursor.collapse(start, start + 1, 0);
                     text_buffer.replace_lines_with_string(start, 1, "")
                 };
-                if op.lines.len()>0{
+                if op.lines.len()>0 {
                     ops.push(op);
                 }
             }
             else if start != end {
                 let op = text_buffer.replace_lines_with_string(start, end - start, "");
-                if op.lines.len()>0{
+                if op.lines.len()>0 {
                     ops.push(op);
                 }
                 delta += cursor.collapse(start, end, 0);
@@ -633,7 +633,7 @@ impl TextCursorSet {
         }
         let del_pos = self.set[self.last_cursor].head;
         text_buffer.redo_stack.truncate(0);
-        if ops.len()>0{
+        if ops.len()>0 {
             text_buffer.undo_stack.push(TextUndo {
                 ops: ops,
                 grouping: TextUndoGrouping::Delete(del_pos),
@@ -654,7 +654,7 @@ impl TextCursorSet {
                 // check our indent depth
                 let (new_start, new_len) = text_buffer.calc_backspace_line_indent_depth_and_pair(start);
                 let op = text_buffer.replace_lines_with_string(new_start, new_len, "");
-                if op.lines.len()>0{
+                if op.lines.len()>0 {
                     ops.push(op);
                 }
                 delta += cursor.collapse(new_start, new_start + new_len, 0);
@@ -662,7 +662,7 @@ impl TextCursorSet {
             }
             else if start != end {
                 let op = text_buffer.replace_lines_with_string(start, end - start, "");
-                if op.lines.len()>0{
+                if op.lines.len()>0 {
                     ops.push(op);
                 }
                 delta += cursor.collapse(start, end, 0);
@@ -670,7 +670,7 @@ impl TextCursorSet {
             old_max = cursor.calc_max(text_buffer, old_max);
         }
         text_buffer.redo_stack.truncate(0);
-        if ops.len()>0{
+        if ops.len()>0 {
             text_buffer.undo_stack.push(TextUndo {
                 ops: ops,
                 grouping: TextUndoGrouping::Backspace,
@@ -984,23 +984,27 @@ impl TextCursorSet {
                 if pair_token > i {
                     return Some((token_chunks[i].offset, token_chunks[pair_token].len + (token_chunks[pair_token].offset - token_chunks[i].offset)));
                 }
-                if token_chunks[i].token_type == TokenType::String || token_chunks[i].token_type == TokenType::CommentChunk{
+                if token_chunks[i].token_type == TokenType::String || token_chunks[i].token_type == TokenType::CommentChunk {
                     if token_chunks[i].len <= 2 {
                         return Some((token_chunks[i].offset, token_chunks[i].len));
                     }
                     else { // scan for the nearest left and right space in the string
                         let mut scan_left = offset;
                         let boundary_tokens = "' :(){}[]+-|/<,.>;\"'!%^&*=";
-                        while scan_left > 0 && scan_left > token_chunks[i].offset + 1 {
+                        while scan_left > 0 && scan_left > token_chunks[i].offset {
                             if let Some(_) = boundary_tokens.find(text_buffer.flat_text[scan_left]) {
                                 scan_left += 1;
                                 break
                             }
                             scan_left -= 1;
                         }
+                        if let Some(_) = boundary_tokens.find(text_buffer.flat_text[scan_left]) {
+                            scan_left += 1;
+                        }
                         let mut scan_right = offset;
-                        while scan_right < token_chunks[i].offset + token_chunks[i].len - 1 {
+                        while scan_right < token_chunks[i].offset + token_chunks[i].len {
                             if let Some(_) = boundary_tokens.find(text_buffer.flat_text[scan_right]) {
+                                //scan_left += 1;
                                 break
                             }
                             scan_right += 1;

@@ -49,7 +49,7 @@ pub struct AppState {
 }
 
 impl AppWindow {
-    pub fn style(cx: &mut Cx) -> Self {
+    pub fn proto(cx: &mut Cx) -> Self {
         Self {
             desktop_window: DesktopWindow {
                 caption: "Makepad".to_string(),
@@ -75,7 +75,7 @@ impl AppWindow {
         match self.desktop_window.handle_desktop_window(cx, event) {
             DesktopWindowEvent::EventForOtherWindow => {
                 return
-            },
+            }, 
             DesktopWindowEvent::WindowClosed => {
                 return
             },
