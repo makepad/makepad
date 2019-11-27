@@ -6,15 +6,13 @@ export async function init(url) {
   }
 
   function sierpinski(level) {
-    let rawPartsPtr = exports.sierpinski(level);
-    let int32Memory = new Int32Array(exports.memory.buffer);
-    let ptr = int32Memory[rawPartsPtr / 4 + 0];
-    let len = int32Memory[rawPartsPtr / 4 + 1];
-    let capacity = int32Memory[rawPartsPtr / 4 + 2];
-    let float32Memory = new Float32Array(exports.memory.buffer);
-    let result = float32Memory.subarray(ptr / 4, ptr / 4 + len).slice();
-    exports.free_vec_f32(rawPartsPtr);
-    return result;
+    let valuesPtr = exports.sierpinski(level);
+    let uint32Memory = new Uint32Array(exports.memory.buffer);
+    let value_0 = uint32Memory[valuesPtr / 4 + 0];
+    let value_1 = uint32Memory[valuesPtr / 4 + 1];
+    let value_2 = uint32Memory[valuesPtr / 4 + 2];
+    exports.free_values(valuesPtr);
+    return [value_0, value_1, value_2];
   }
 
   let decoder = new TextDecoder("utf-8", { ignoreBOM: true, fatal: true });
@@ -24,5 +22,5 @@ export async function init(url) {
     env: { console_log: consoleLog }
   });
   let { exports } = result.instance;
-  return { sierpinski };
+  return { sierpinski }
 }
