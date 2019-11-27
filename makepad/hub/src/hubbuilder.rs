@@ -683,8 +683,16 @@ impl HubBuilder {
         let mut errors = Vec::new();
         let mut build_result = BuildResult::NoOutput;
         while let Ok(line) = rx_line.recv() {
-            if let Some((_is_stderr, line)) = line {
-                
+            if let Some((is_stderr, line)) = line {
+                if is_stderr && line != "\n" && !line.contains("Finished") {
+                    route_send.send(ToHubMsg {
+                        to: HubMsgTo::UI,
+                        msg: HubMsg::LogItem {
+                            uid: uid,
+                            item: HubLogItem::Error(line.clone())
+                        } 
+                    });                    
+                }
                 // lets parse the line 
                 let mut parsed: serde_json::Result<RustcCompilerMessage> = serde_json::from_str(&line);
                 match &mut parsed {

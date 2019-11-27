@@ -13,7 +13,7 @@ export async function main() {
   let gl = canvas.getContext("webgl");
   let { render } = initWebgl(gl, vertices);
   requestAnimationFrame(function frame(timestamp) {
-    render(timestamp);
+    render(timestamp); && 
     requestAnimationFrame(frame);
   });
 }
