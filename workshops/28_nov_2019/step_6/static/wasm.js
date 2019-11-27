@@ -6,14 +6,14 @@ export async function init(url) {
   }
 
   function sierpinski(level) {
-    let raw_parts = exports.sierpinski(level);
+    let rawPartsPtr = exports.sierpinski(level);
     let int32Memory = new Int32Array(exports.memory.buffer);
-    let ptr = int32Memory[raw_parts / 4 + 0];
-    let len = int32Memory[raw_parts / 4 + 1];
-    let capacity = int32Memory[raw_parts / 4 + 1];
+    let ptr = int32Memory[rawPartsPtr / 4 + 0];
+    let len = int32Memory[rawPartsPtr / 4 + 1];
+    let capacity = int32Memory[rawPartsPtr / 4 + 2];
     let float32Memory = new Float32Array(exports.memory.buffer);
     let result = float32Memory.subarray(ptr / 4, ptr / 4 + len).slice();
-    exports.free_vec_f32(raw_parts);
+    exports.free_vec_f32(rawPartsPtr);
     return result;
   }
 
