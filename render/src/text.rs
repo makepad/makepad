@@ -37,7 +37,6 @@ impl Default for TextStyle {
 
 #[derive(Clone)]
 pub struct Text {
-    pub class: ClassId,
     pub text_style: TextStyle,
     pub shader: Shader,
     pub color: Color,
@@ -52,7 +51,6 @@ pub struct Text {
 impl Text {
     pub fn proto(cx: &mut Cx) -> Self {
         Self {
-            class: ClassId::base(),
             text_style: TextStyle::default(),
             shader: cx.add_shader(Self::def_text_shader(), "TextAtlas"),
             do_h_scroll: true,

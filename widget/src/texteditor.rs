@@ -2,11 +2,10 @@ use render::*;
 use crate::scrollview::*;
 use crate::textbuffer::*;
 use crate::textcursor::*;
-use crate::widgettheme::*;
+use crate::widgetstyle::*;
 
 #[derive(Clone)]
 pub struct TextEditor {
-    pub class: ClassId,
     pub view: ScrollView,
     pub view_layout: Layout,
     pub bg: Quad,
@@ -18,7 +17,7 @@ pub struct TextEditor {
     pub cursor_row: Quad,
     pub paren_pair: Quad,
     pub indent_lines: Quad,
-
+    
     pub message_marker: Quad,
     pub text: Text,
     pub line_number_text: Text,
@@ -151,10 +150,9 @@ impl TextEditor {
     
     pub fn proto(cx: &mut Cx) -> Self {
         Self {
-            empty_message:"".to_string(),
+            empty_message: "".to_string(),
             read_only: false,
             multiline: true,
-            class: ClassId::base(),
             cursors: TextCursorSet::new(),
             indent_lines: Quad {
                 z: 0.001,
@@ -267,6 +265,9 @@ impl TextEditor {
         }
     }
     
+    pub fn gutter_width() -> FloatId {uid!()}
+    pub fn padding_top() -> FloatId {uid!()}
+    
     pub fn layout_bg() -> LayoutId {uid!()}
     pub fn text_style_editor_text() -> TextStyleId {uid!()}
     
@@ -313,8 +314,10 @@ impl TextEditor {
     pub fn color_error() -> ColorId {uid!()}
     pub fn color_defocus() -> ColorId {uid!()}
     
-    pub fn theme(cx: &mut Cx, _opt:&ThemeOptions) {
-        Self::text_style_editor_text().set_base(cx, Theme::text_style_fixed().base(cx));
+    pub fn style(cx: &mut Cx, _opt: &StyleOptions) {
+        Self::gutter_width().set(cx, 45.0);
+        Self::padding_top().set(cx, 27.);
+        Self::text_style_editor_text().set(cx, Theme::text_style_fixed().get(cx));
     }
     
     pub fn instance_indent_id() -> InstanceFloat {uid!()}
@@ -325,7 +328,6 @@ impl TextEditor {
     pub fn instance_select_next_x() -> InstanceFloat {uid!()}
     pub fn instance_select_next_w() -> InstanceFloat {uid!()}
     pub fn uniform_highlight_visible() -> UniformFloat {uid!()}
-    
     
     pub fn def_indent_lines_shader() -> ShaderGen {
         Quad::def_quad_shader().compose(shader_ast !({
@@ -746,7 +748,7 @@ impl TextEditor {
                 }
             },
             KeyCode::Return => {
-                if !self.read_only && self.multiline{
+                if !self.read_only && self.multiline {
                     if !ke.modifiers.control && !ke.modifiers.logo {
                         self.cursors.insert_newline_with_indent(text_buffer);
                     }
@@ -801,11 +803,11 @@ impl TextEditor {
             // lets insert a newline
         }
         else {
-            if !self.multiline{
-                let replaced = te.input.replace("\n","");
+            if !self.multiline {
+                let replaced = te.input.replace("\n", "");
                 self.cursors.replace_text(&replaced, text_buffer);
             }
-            else{
+            else {
                 self.cursors.replace_text(&te.input, text_buffer);
             }
         }
@@ -845,7 +847,7 @@ impl TextEditor {
                 self._cursor_blink_flipflop = 1.0 - self._cursor_blink_flipflop;
                 self._highlight_visibility = 1.0;
                 self._cursor_area.write_uniform_float(cx, Self::uniform_cursor_blink(), self._cursor_blink_flipflop);
-                if self.highlight_area_on{
+                if self.highlight_area_on {
                     self._highlight_area.write_uniform_float(cx, Self::uniform_highlight_visible(), self._highlight_visibility);
                 }
                 // ok see if we changed.
@@ -953,59 +955,67 @@ impl TextEditor {
         self.reset_cursor_blinker(cx);
     }
     
+    pub fn apply_theme(&mut self, cx: &mut Cx) {
+        // copy over colors
+        self.colors.indent_line_unknown = Self::color_indent_line_unknown().get(cx);
+        self.colors.indent_line_fn = Self::color_indent_line_fn().get(cx);
+        self.colors.indent_line_typedef = Self::color_indent_line_typedef().get(cx);
+        self.colors.indent_line_looping = Self::color_indent_line_looping().get(cx);
+        self.colors.indent_line_flow = Self::color_indent_line_flow().get(cx);
+        
+        self.colors.paren_pair_match = Self::color_paren_pair_match().get(cx);
+        self.colors.paren_pair_fail = Self::color_paren_pair_fail().get(cx);
+        self.colors.marker_error = Self::color_marker_error().get(cx);
+        self.colors.marker_warning = Self::color_marker_warning().get(cx);
+        self.colors.marker_log = Self::color_marker_log().get(cx);
+        self.colors.line_number_normal = Self::color_line_number_normal().get(cx);
+        self.colors.line_number_highlight = Self::color_line_number_highlight().get(cx);
+        self.colors.whitespace = Self::color_whitespace().get(cx);
+        self.colors.keyword = Self::color_keyword().get(cx);
+        self.colors.flow = Self::color_flow().get(cx);
+        self.colors.looping = Self::color_looping().get(cx);
+        self.colors.identifier = Self::color_identifier().get(cx);
+        self.colors.call = Self::color_call().get(cx);
+        self.colors.type_name = Self::color_type_name().get(cx);
+        self.colors.theme_name = Self::color_theme_name().get(cx);
+        self.colors.string = Self::color_string().get(cx);
+        self.colors.number = Self::color_number().get(cx);
+        self.colors.comment = Self::color_comment().get(cx);
+        self.colors.doc_comment = Self::color_doc_comment().get(cx);
+        self.colors.paren_d1 = Self::color_paren_d1().get(cx);
+        self.colors.paren_d2 = Self::color_paren_d2().get(cx);
+        self.colors.operator = Self::color_operator().get(cx);
+        self.colors.delimiter = Self::color_delimiter().get(cx);
+        self.colors.unexpected = Self::color_unexpected().get(cx);
+        self.colors.warning = Self::color_warning().get(cx);
+        self.colors.error = Self::color_error().get(cx);
+        self.colors.defocus = Self::color_defocus().get(cx);
+        self.bg.color = Self::color_bg().get(cx);
+        self.gutter_bg.color = Self::color_gutter_bg().get(cx);
+        
+        self.line_number_width = Self::gutter_width().get(cx);
+        self.top_padding = Self::padding_top().get(cx);
+        
+        self.selection.color = if self.has_key_focus(cx) {
+            Self::color_selection().get(cx)
+        }else {
+            Self::color_selection_defocus().get(cx)
+        };
+        self.token_highlight.color = Self::color_highlight().get(cx);
+        self.cursor.color = Self::color_cursor().get(cx);
+        self.cursor_row.color = Self::color_cursor_row().get(cx);
+        self.text.text_style = Self::text_style_editor_text().get(cx);
+        self.line_number_text.text_style = Self::text_style_editor_text().get(cx);
+    }
+    
     pub fn begin_text_editor(&mut self, cx: &mut Cx, text_buffer: &TextBuffer) -> Result<(), ()> {
         // adjust dilation based on DPI factor
         self.view.begin_view(cx, self.view_layout) ?;
         
-        // copy over colors
-        let cls = self.class;
-        self.colors.indent_line_unknown = Self::color_indent_line_unknown().class(cx, cls);
-        self.colors.indent_line_fn = Self::color_indent_line_fn().class(cx, cls);
-        self.colors.indent_line_typedef = Self::color_indent_line_typedef().class(cx, cls);
-        self.colors.indent_line_looping = Self::color_indent_line_looping().class(cx, cls);
-        self.colors.indent_line_flow = Self::color_indent_line_flow().class(cx, cls);
-        
-        self.colors.paren_pair_match = Self::color_paren_pair_match().class(cx, cls);
-        self.colors.paren_pair_fail = Self::color_paren_pair_fail().class(cx, cls);
-        self.colors.marker_error = Self::color_marker_error().class(cx, cls);
-        self.colors.marker_warning = Self::color_marker_warning().class(cx, cls);
-        self.colors.marker_log = Self::color_marker_log().class(cx, cls);
-        self.colors.line_number_normal = Self::color_line_number_normal().class(cx, cls);
-        self.colors.line_number_highlight = Self::color_line_number_highlight().class(cx, cls);
-        self.colors.whitespace = Self::color_whitespace().class(cx, cls);
-        self.colors.keyword = Self::color_keyword().class(cx, cls);
-        self.colors.flow = Self::color_flow().class(cx, cls);
-        self.colors.looping = Self::color_looping().class(cx, cls);
-        self.colors.identifier = Self::color_identifier().class(cx, cls);
-        self.colors.call = Self::color_call().class(cx, cls);
-        self.colors.type_name = Self::color_type_name().class(cx, cls);
-        self.colors.theme_name = Self::color_theme_name().class(cx, cls);
-        self.colors.string = Self::color_string().class(cx, cls);
-        self.colors.number = Self::color_number().class(cx, cls);
-        self.colors.comment = Self::color_comment().class(cx, cls);
-        self.colors.doc_comment = Self::color_doc_comment().class(cx, cls);
-        self.colors.paren_d1 = Self::color_paren_d1().class(cx, cls);
-        self.colors.paren_d2 = Self::color_paren_d2().class(cx, cls);
-        self.colors.operator = Self::color_operator().class(cx, cls);
-        self.colors.delimiter = Self::color_delimiter().class(cx, cls);
-        self.colors.unexpected = Self::color_unexpected().class(cx, cls);
-        self.colors.warning = Self::color_warning().class(cx, cls);
-        self.colors.error = Self::color_error().class(cx, cls);
-        self.colors.defocus = Self::color_defocus().class(cx, cls);
+        self.apply_theme(cx);
         
         self._last_indent_color = self.colors.indent_line_unknown;
-        self.bg.color = Self::color_bg().class(cx, cls);
-        self.gutter_bg.color = Self::color_gutter_bg().class(cx, cls);
-        self.selection.color = if self.has_key_focus(cx) {
-            Self::color_selection().class(cx, cls)
-        }else {
-            Self::color_selection_defocus().class(cx, cls)
-        };
         //self.select_highlight.color = self.colors.highlight;
-        self.token_highlight.color = Self::color_highlight().class(cx, cls);
-        self.cursor.color = Self::color_cursor().class(cx, cls);
-        self.cursor_row.color = Self::color_cursor_row().class(cx, cls);
-        self.text.text_style = Self::text_style_editor_text().class(cx, cls);
         
         if !text_buffer.is_loaded {
             //et bg_inst = self.bg.begin_quad(cx, &Layout {
@@ -1024,7 +1034,7 @@ impl TextEditor {
             inst.set_do_scroll(cx, false, false); // don't scroll the bg
             self._bg_inst = Some(inst);
             
-            if text_buffer.is_empty(){
+            if text_buffer.is_empty() {
                 let pos = cx.get_turtle_pos();
                 self.text.color = color("#666");
                 self.text.draw_text(cx, &self.empty_message);
@@ -1045,9 +1055,6 @@ impl TextEditor {
             cx.new_instance_draw_call(&self.paren_pair.shader, 0);
             
             // force next begin_text in another drawcall
-            
-            self.line_number_text.text_style = Self::text_style_editor_text().class(cx, cls);
-            
             self._text_inst = Some(self.text.begin_text(cx));
             self._indent_line_inst = Some(cx.new_instance_draw_call(&self.indent_lines.shader, 0));
             
@@ -1312,7 +1319,7 @@ impl TextEditor {
                         cx.move_turtle(dx, 0.0);
                         self._line_was_folded = true;
                         self._anim_font_scale
-                    } 
+                    }
                     else {
                         self._line_was_folded = false;
                         self.open_font_scale
@@ -1628,9 +1635,9 @@ impl TextEditor {
         self.do_selection_scrolling(cx, text_buffer);
         self.place_ime_and_draw_cursor_row(cx);
         self.set_indent_line_highlight_id(cx);
-
+        
         self.bg.end_quad_fill(cx, &self._bg_inst.take().unwrap());
-    
+        
         self.view.end_view(cx);
         
         if self._jump_to_offset {

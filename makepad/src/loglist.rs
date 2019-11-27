@@ -37,9 +37,9 @@ impl LogItemDraw {
     pub fn layout_item() -> LayoutId {uid!()}
     pub fn text_style_item() ->TextStyleId{uid!()}
 
-    pub fn theme(cx: &mut Cx, opt:&ThemeOptions) {
+    pub fn style(cx: &mut Cx, opt:&StyleOptions) {
         
-        Self::layout_item().set_base(cx, Layout {
+        Self::layout_item().set(cx, Layout {
             walk: Walk::wh(Width::Fill, Height::Fix(20.* opt.scale)),
             align: Align::left_center(),
             padding: Padding::zero(), // {l: 2., t: 3., b: 2., r: 0.},
@@ -47,13 +47,13 @@ impl LogItemDraw {
             ..Default::default()
         });
         
-        Self::text_style_item().set_base(cx, Theme::text_style_normal().base(cx));
+        Self::text_style_item().set(cx, Theme::text_style_normal().get(cx));
     }
     
     pub fn get_default_anim(cx: &Cx, counter: usize, marked: bool) -> Anim {
         Anim::new(Play::Chain {duration: 0.01}, vec![
             Track::color(Quad::instance_color(), Ease::Lin, vec![
-                (1.0, if marked {Theme::color_bg_marked().base(cx)} else if counter & 1 == 0 {Theme::color_bg_selected().base(cx)}else {Theme::color_bg_odd().base(cx)})
+                (1.0, if marked {Theme::color_bg_marked().get(cx)} else if counter & 1 == 0 {Theme::color_bg_selected().get(cx)}else {Theme::color_bg_odd().get(cx)})
             ])
         ])
     }
@@ -61,13 +61,13 @@ impl LogItemDraw {
     pub fn get_default_anim_cut(cx: &Cx, counter: usize, marked: bool) -> Anim {
         Anim::new(Play::Cut {duration: 0.01}, vec![
             Track::color(Quad::instance_color(), Ease::Lin, vec![
-                (0.0, if marked {Theme::color_bg_marked().base(cx)} else if counter & 1 == 0 {Theme::color_bg_selected().base(cx)}else {Theme::color_bg_odd().base(cx)})
+                (0.0, if marked {Theme::color_bg_marked().get(cx)} else if counter & 1 == 0 {Theme::color_bg_selected().get(cx)}else {Theme::color_bg_odd().get(cx)})
             ])
         ])
     }
     
     pub fn get_over_anim(cx: &Cx, counter: usize, marked: bool) -> Anim {
-        let over_color = if marked {Theme::color_bg_marked_over().base(cx)} else if counter & 1 == 0 {Theme::color_bg_selected_over().base(cx)}else {Theme::color_bg_odd_over().base(cx)};
+        let over_color = if marked {Theme::color_bg_marked_over().get(cx)} else if counter & 1 == 0 {Theme::color_bg_selected_over().get(cx)}else {Theme::color_bg_odd_over().get(cx)};
         Anim::new(Play::Cut {duration: 0.02}, vec![
             Track::color(Quad::instance_color(), Ease::Lin, vec![
                 (0., over_color),
@@ -76,12 +76,12 @@ impl LogItemDraw {
     }
     
     pub fn draw_log_path(&mut self, cx: &mut Cx, path: &str, row: usize) {
-        self.text.color = self.path_color.base(cx);
+        self.text.color = self.path_color.get(cx);
         self.text.draw_text(cx, &format!("{}:{} - ", path, row));
     }
     
     pub fn draw_log_body(&mut self, cx: &mut Cx, body: &str) {
-        self.text.color = self.message_color.base(cx);
+        self.text.color = self.message_color.get(cx);
         if body.len()>500 {
             self.text.draw_text(cx, &body[0..500]);
         }
@@ -96,7 +96,7 @@ impl LogItemDraw {
         
         self.item_bg.color = list_item.animator.last_color(cx, Quad::instance_color());
         
-        let bg_inst = self.item_bg.begin_quad(cx, Self::layout_item().base(cx)); //&self.get_line_layout());
+        let bg_inst = self.item_bg.begin_quad(cx, Self::layout_item().get(cx)); //&self.get_line_layout());
         
         match log_item {
             HubLogItem::LocPanic(loc_msg) => {
@@ -143,11 +143,11 @@ impl LogItemDraw {
     
     pub fn draw_status_line(&mut self, cx: &mut Cx, counter: usize, bm: &BuildManager) {
         // draw status line
-        self.item_bg.color = if counter & 1 == 0 {Theme::color_bg_selected().base(cx)}else {Theme::color_bg_odd().base(cx)};
-        let bg_inst = self.item_bg.begin_quad(cx, Self::layout_item().base(cx));
+        self.item_bg.color = if counter & 1 == 0 {Theme::color_bg_selected().get(cx)}else {Theme::color_bg_odd().get(cx)};
+        let bg_inst = self.item_bg.begin_quad(cx, Self::layout_item().get(cx));
         
         if !bm.is_any_cargo_running() {
-            self.text.color = self.path_color.base(cx);
+            self.text.color = self.path_color.get(cx);
             self.code_icon.draw_icon(cx, CodeIconType::Ok);
             cx.turtle_align_y();
             if bm.is_any_artifact_running() {
@@ -170,7 +170,7 @@ impl LogItemDraw {
         else {
             self.code_icon.draw_icon(cx, CodeIconType::Wait);
             cx.turtle_align_y();
-            self.text.color = self.path_color.base(cx);
+            self.text.color = self.path_color.get(cx);
             self.text.draw_text(cx, &format!("Building ({}) ", bm.artifacts.len()));
             for ab in &bm.active_builds {
                 if ab.build_uid.is_some() {
@@ -187,8 +187,8 @@ impl LogItemDraw {
     
     pub fn draw_filler(&mut self, cx: &mut Cx, counter: usize) {
         let view_total = cx.get_turtle_bounds();
-        self.item_bg.color = if counter & 1 == 0 {Theme::color_bg_selected().base(cx)} else {Theme::color_bg_odd().base(cx)};
-        self.item_bg.draw_quad(cx, Self::layout_item().base(cx).walk);
+        self.item_bg.color = if counter & 1 == 0 {Theme::color_bg_selected().get(cx)} else {Theme::color_bg_odd().get(cx)};
+        self.item_bg.draw_quad(cx, Self::layout_item().get(cx).walk);
         cx.set_turtle_bounds(view_total); // do this so it doesnt impact the turtle
     }
 }
@@ -216,8 +216,8 @@ impl LogList {
         }
     }
     
-    pub fn theme(cx: &mut Cx, opt:&ThemeOptions) {
-        LogItemDraw::theme(cx, opt);
+    pub fn style(cx: &mut Cx, opt:&StyleOptions) {
+        LogItemDraw::style(cx, opt);
     }
     
     pub fn handle_log_list(&mut self, cx: &mut Cx, event: &mut Event, storage: &mut AppStorage, bm: &mut BuildManager) -> LogListEvent {
@@ -372,9 +372,9 @@ impl LogList {
         
         self.list.set_list_len(bm.log_items.len());
         
-        self.item_draw.text.text_style = LogItemDraw::text_style_item().base(cx);
+        self.item_draw.text.text_style = LogItemDraw::text_style_item().get(cx);
         
-        let row_height = LogItemDraw::layout_item().base(cx).walk.height.fixed();
+        let row_height = LogItemDraw::layout_item().get(cx).walk.height.fixed();
         
         if self.list.begin_list(cx, &mut self.view, row_height).is_err() {return}
         

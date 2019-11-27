@@ -5,7 +5,7 @@ use crate::appwindow::*;
 use crate::appstorage::*;
 use crate::filetree::*;
 use crate::buildmanager::*;
-use crate::makepadtheme::*;
+use crate::makepadstyle::*;
 
 pub struct App {
     pub app_window_state_template: AppWindowState,
@@ -21,9 +21,9 @@ pub struct App {
 impl App {
     
     pub fn proto(cx: &mut Cx) -> Self {
-        let default_opt = ThemeOptions{scale:1.0, dark:true};
-        set_widget_theme(cx, &default_opt);
-        set_makepad_theme(cx, &default_opt);
+        let default_opt = StyleOptions{scale:1.0, dark:true};
+        set_widget_style(cx, &default_opt);
+        set_makepad_style(cx, &default_opt);
         let ms = cx.new_signal();
         Self {
             menu: Menu::main(vec![
@@ -166,9 +166,9 @@ impl App {
         cx.redraw_child_area(Area::All);
     }
     
-    pub fn reload_theme(&mut self, cx: &mut Cx){
-        set_widget_theme(cx, &self.storage.settings.theme_options);
-        set_makepad_theme(cx, &self.storage.settings.theme_options);
+    pub fn reload_style(&mut self, cx: &mut Cx){
+        set_widget_style(cx, &self.storage.settings.style_options);
+        set_makepad_style(cx, &self.storage.settings.style_options);
     }
     
     pub fn handle_app(&mut self, cx: &mut Cx, event: &mut Event) {
@@ -184,20 +184,20 @@ impl App {
                     self.storage.reload_builders();
                 },
                 KeyCode::Key0=>if ke.modifiers.logo || ke.modifiers.control {
-                    self.storage.settings.theme_options.scale = 1.0;
-                    self.reload_theme(cx);
+                    self.storage.settings.style_options.scale = 1.0;
+                    self.reload_style(cx);
                     cx.reset_font_atlas_and_redraw();
                 },
                 KeyCode::Equals=>if ke.modifiers.logo || ke.modifiers.control {
-                    let scale = self.storage.settings.theme_options.scale * 1.1;
-                    self.storage.settings.theme_options.scale = if scale > 3.0{3.0}else{scale};
-                    self.reload_theme(cx);
+                    let scale = self.storage.settings.style_options.scale * 1.1;
+                    self.storage.settings.style_options.scale = if scale > 3.0{3.0}else{scale};
+                    self.reload_style(cx);
                     cx.reset_font_atlas_and_redraw();
                 },
                 KeyCode::Minus=>if ke.modifiers.logo || ke.modifiers.control {
-                    let scale = self.storage.settings.theme_options.scale / 1.1;
-                    self.storage.settings.theme_options.scale = if scale < 0.3{0.3}else{scale};
-                    self.reload_theme(cx);
+                    let scale = self.storage.settings.style_options.scale / 1.1;
+                    self.storage.settings.style_options.scale = if scale < 0.3{0.3}else{scale};
+                    self.reload_style(cx);
                     cx.reset_font_atlas_and_redraw();
                 },
                 _ => () 

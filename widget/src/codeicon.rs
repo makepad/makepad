@@ -1,5 +1,5 @@
 use render::*;
-use crate::widgettheme::*;
+use crate::widgetstyle::*;
 
 #[derive(Clone)]
 pub struct CodeIcon {
@@ -38,8 +38,8 @@ impl CodeIcon {
     
     pub fn walk()->WalkId{uid!()}
     
-    pub fn theme(cx:&mut Cx, _opt:&ThemeOptions){
-        Self::walk().set_base(cx, Walk{
+    pub fn style(cx:&mut Cx, _opt:&StyleOptions){
+        Self::walk().set(cx, Walk{
             width: Width::Fix(14.0),
             height: Height::Fix(14.0),
             margin: Margin {l: 0., t: 0.5, r: 4., b: 0.},
@@ -137,7 +137,7 @@ impl CodeIcon {
     
     pub fn draw_icon(&mut self, cx: &mut Cx, icon_type: CodeIconType) -> InstanceArea {
         
-        let inst = self.quad.draw_quad(cx, Self::walk().base(cx));
+        let inst = self.quad.draw_quad(cx, Self::walk().get(cx));
         inst.push_float(cx, icon_type.shader_float());
         inst
     }
