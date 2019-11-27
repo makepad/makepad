@@ -380,7 +380,7 @@ impl D3d11Window {
         if self.alloc_size == self.window_geom.inner_size {
             return
         }
-        
+        self.alloc_size = self.window_geom.inner_size;
         self.swap_texture = None;
         self.render_target_view = None;
         
