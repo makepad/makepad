@@ -210,7 +210,7 @@ impl HubPackage {
 }
 
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct HubBuilderConfig {
     pub http_server: HttpServerConfig,
     pub workspaces: HashMap<String, String>,

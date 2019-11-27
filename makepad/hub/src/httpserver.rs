@@ -9,7 +9,7 @@ use std::time::Duration;
 use std::collections::HashMap;
 use serde::{Serialize, Deserialize};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum HttpServerConfig {
     Offline,
     Localhost(u16),
