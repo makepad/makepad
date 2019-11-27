@@ -1,5 +1,5 @@
-export let mat4 = {
-  create: function() {
+export const mat4 = {
+  create() {
     let out = new Float32Array(16);
     out[0] = 1;
     out[5] = 1;
@@ -8,7 +8,7 @@ export let mat4 = {
     return out;
   },
 
-  rotate: function(out, a, rad, axis) {
+  rotate(out, a, rad, axis) {
     let x = axis[0];
     let y = axis[1];
     let z = axis[2];
@@ -71,23 +71,19 @@ export let mat4 = {
     }
 
     return out;
-  }
+  },
 };
 
-export let vec3 = {
-  create: function() {
+export const vec3 = {
+  create() {
     return new Float32Array(3);
   },
 
-  fromValues: function(x, y, z) {
-    let out = new Float32Array(3);
-    out[0] = x;
-    out[1] = y;
-    out[2] = z;
-    return out;
+  fromValues(x, y, z) {
+    return Float32Array.of(x, y, z);
   },
 
-  lerp: function(out, a, b, t) {
+  lerp(out, a, b, t) {
     let ax = a[0];
     let ay = a[1];
     let az = a[2];
@@ -95,5 +91,5 @@ export let vec3 = {
     out[1] = ay + t * (b[1] - ay);
     out[2] = az + t * (b[2] - az);
     return out;
-  }
+  },
 };
