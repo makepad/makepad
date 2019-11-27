@@ -12,7 +12,7 @@ use crate::builder_main;
 pub struct AppSettings {
     pub build_on_save: bool,
     pub exec_when_done: bool,
-    pub theme_options: ThemeOptions,
+    pub style_options: StyleOptions,
     pub hub_server: HubServerConfig,
     pub builders: HashMap<String, HubBuilderConfig>,
     pub builds: Vec<BuildTarget>,
@@ -25,7 +25,7 @@ impl Default for AppSettings {
         Self {
             exec_when_done: false,
             build_on_save: true,
-            theme_options: ThemeOptions{scale:1.0, dark:true},
+            style_options: StyleOptions{scale:1.0, dark:true},
             hub_server: HubServerConfig::Offline,
             builders: {
                 let mut cfg = HashMap::new();

@@ -147,7 +147,7 @@ impl Into<UniformFloat> for UniqueId{
     fn into(self) -> UniformFloat{UniformFloat(self.0)}
 }
 
-#[derive(Default, Clone, PartialEq)]
+#[derive(Default, Copy, Clone, PartialEq)]
 pub struct Shader {
     pub shader_id: Option<(usize, usize)>,
 } 

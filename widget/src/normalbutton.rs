@@ -1,10 +1,9 @@
 use render::*;
 use crate::buttonlogic::*;
-use crate::widgettheme::*;
+use crate::widgetstyle::*;
 
 #[derive(Clone)]
 pub struct NormalButton {
-    pub class: ClassId,
     pub button: ButtonLogic,
     pub bg: Quad,
     pub text: Text,
@@ -15,7 +14,6 @@ pub struct NormalButton {
 impl NormalButton {
     pub fn proto(cx: &mut Cx) -> Self {
         Self {
-            class: ClassId::base(),
             button: ButtonLogic::default(),
             bg: Quad::proto(cx),
             text: Text::proto(cx),
@@ -33,8 +31,8 @@ impl NormalButton {
     pub fn instance_border_color() -> InstanceColor {uid!()}
     pub fn instance_glow_size() -> InstanceFloat {uid!()}
     
-    pub fn theme(cx: &mut Cx, _opt:&ThemeOptions) { 
-        Self::layout_bg().set_base(cx, Layout {
+    pub fn style(cx: &mut Cx, _opt:&StyleOptions) { 
+        Self::layout_bg().set(cx, Layout {
             align: Align::center(),
             walk: Walk {
                 width: Width::Compute,
@@ -45,28 +43,28 @@ impl NormalButton {
             ..Default::default()
         });
         
-        Self::text_style_label().set_base(cx, Theme::text_style_normal().base(cx));
+        Self::text_style_label().set(cx, Theme::text_style_normal().get(cx));
         
-        Self::anim_default().set_base(cx, Anim::new(Play::Cut {duration: 0.5}, vec![
-            Track::color(Quad::instance_color(), Ease::Lin, vec![(1., Theme::color_bg_normal().base(cx))]),
+        Self::anim_default().set(cx, Anim::new(Play::Cut {duration: 0.5}, vec![
+            Track::color(Quad::instance_color(), Ease::Lin, vec![(1., Theme::color_bg_normal().get(cx))]),
             Track::float(Self::instance_glow_size(), Ease::Lin, vec![(1., 0.0)]),
             Track::color(Self::instance_border_color(), Ease::Lin, vec![(1., color("#6"))]),
         ]));
         
-        Self::anim_over().set_base(cx, Anim::new(Play::Cut {duration: 0.05}, vec![
+        Self::anim_over().set(cx, Anim::new(Play::Cut {duration: 0.05}, vec![
             Track::color(Quad::instance_color(), Ease::Lin, vec![(1., color("#999"))]),
             Track::float(Self::instance_glow_size(), Ease::Lin, vec![(1., 1.0)]),
             Track::color(Self::instance_border_color(), Ease::Lin, vec![(1., color("white"))]),
         ]));
         
-        Self::anim_down().set_base(cx, Anim::new(Play::Cut {duration: 0.2}, vec![
+        Self::anim_down().set(cx, Anim::new(Play::Cut {duration: 0.2}, vec![
             Track::color(Quad::instance_color(), Ease::Lin, vec![(0.0, color("#f")), (1.0, color("#6"))]),
             Track::float(Self::instance_glow_size(), Ease::Lin, vec![(0.0, 1.0), (1.0, 1.0)]),
             Track::color(Self::instance_border_color(), Ease::Lin, vec![(0.0, color("white")), (1.0, color("white"))]),
         ]));
         
         // lets define the shader
-        Self::shader_bg().set_base(cx, Quad::def_quad_shader().compose(shader_ast!({
+        Self::shader_bg().set(cx, Quad::def_quad_shader().compose(shader_ast!({
             
             let border_color: Self::instance_border_color();
             let glow_size: Self::instance_glow_size();
@@ -90,31 +88,28 @@ impl NormalButton {
     pub fn handle_button(&mut self, cx: &mut Cx, event: &mut Event) -> ButtonEvent {
         //let mut ret_event = ButtonEvent::None;
         let animator = &mut self.animator;
-        let class = self.class;
         self.button.handle_button_logic(cx, event, self._bg_area, | cx, logic_event, area | match logic_event {
             ButtonLogicEvent::Animate(ae) => animator.calc_area(cx, area, ae.time),
             ButtonLogicEvent::AnimEnded(_) => animator.end(),
-            ButtonLogicEvent::Down => animator.play_anim(cx, Self::anim_down().class(cx, class)),
-            ButtonLogicEvent::Default => animator.play_anim(cx, Self::anim_default().class(cx, class)),
-            ButtonLogicEvent::Over => animator.play_anim(cx, Self::anim_over().class(cx, class))
+            ButtonLogicEvent::Down => animator.play_anim(cx, Self::anim_down().get(cx)),
+            ButtonLogicEvent::Default => animator.play_anim(cx, Self::anim_default().get(cx)),
+            ButtonLogicEvent::Over => animator.play_anim(cx, Self::anim_over().get(cx))
         })
     }
     
     pub fn draw_button(&mut self, cx: &mut Cx, label: &str) {
-        let class = self.class;
+        self.bg.shader = Self::shader_bg().get(cx);
         
-        self.bg.shader = Self::shader_bg().class(cx, class);
-        
-        self.animator.init(cx, | cx | Self::anim_default().class(cx, class));
+        self.animator.init(cx, | cx | Self::anim_default().get(cx));
 
         self.bg.color = self.animator.last_color(cx, Quad::instance_color());
         
-        let bg_inst = self.bg.begin_quad(cx, Self::layout_bg().class(cx, class));
+        let bg_inst = self.bg.begin_quad(cx, Self::layout_bg().get(cx));
 
         bg_inst.push_last_color(cx, &self.animator, Self::instance_border_color());
         bg_inst.push_last_float(cx, &self.animator, Self::instance_glow_size());
         
-        self.text.text_style = Self::text_style_label().class(cx, class);
+        self.text.text_style = Self::text_style_label().get(cx);
         self.text.draw_text(cx, label);
         
         self._bg_area = self.bg.end_quad(cx, &bg_inst);

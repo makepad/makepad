@@ -557,7 +557,7 @@ impl Win32Window {
                         window_id: window.window_id,
                         scroll: Vec2 {
                             x: 0.0,
-                            y: delta
+                            y: -delta
                         },
                         abs: window.last_mouse_pos,
                         rel: window.last_mouse_pos,
