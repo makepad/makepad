@@ -188,8 +188,8 @@ impl Area{
             Area::View(view_area)=>{
                 let cxview = &cx.views[view_area.view_id];
                 return Vec2{
-                    x:abs.x - cxview.rect.x + cxview.parent_scroll.x,
-                    y:abs.y - cxview.rect.y - cxview.parent_scroll.y
+                    x:abs.x - cxview.rect.x + cxview.parent_scroll.x + cxview.unsnapped_scroll.x,
+                    y:abs.y - cxview.rect.y - cxview.parent_scroll.y + cxview.unsnapped_scroll.y
                 }
             },
             _=>abs,

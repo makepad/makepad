@@ -87,7 +87,7 @@ impl App {
                 ])
             ]),
             menu_signal:ms,
-            app_window_template: AppWindow::style(cx),
+            app_window_template: AppWindow::proto(cx),
             app_window_state_template: AppWindowState {
                 open_folders: Vec::new(),
                 window_inner_size: Vec2::zero(),
