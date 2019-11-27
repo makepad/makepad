@@ -1,7 +1,7 @@
 import { vec3 } from "./math.js";
 
 export function sierpinski(level) {
-  console.log("Generating sierpinski tetrahedron with level " + level + " in JavaScript");
+  console.log("Generating Sierpinski tetrahedron with level " + level + " in JavaScript");
   let vertices = [];
   generateTetrahedron(
     vec3.fromValues(0.0, 0.0, 1.0),
