@@ -156,7 +156,7 @@ impl App {
             windows: vec![],
             build_manager: BuildManager::new(cx),
             state: AppState::default(),
-            storage: AppStorage::style(cx)
+            storage: AppStorage::proto(cx)
         }
     }
     
@@ -187,18 +187,21 @@ impl App {
                     self.storage.settings.style_options.scale = 1.0;
                     self.reload_style(cx);
                     cx.reset_font_atlas_and_redraw();
+                    self.storage.save_settings(cx);
                 },
                 KeyCode::Equals=>if ke.modifiers.logo || ke.modifiers.control {
-                    let scale = self.storage.settings.style_options.scale * 1.1;
-                    self.storage.settings.style_options.scale = if scale > 3.0{3.0}else{scale};
+                    let scale = self.storage.settings.style_options.scale *1.1;
+                    self.storage.settings.style_options.scale = scale.min(3.0).max(0.3);
                     self.reload_style(cx);
                     cx.reset_font_atlas_and_redraw();
+                    self.storage.save_settings(cx);
                 },
                 KeyCode::Minus=>if ke.modifiers.logo || ke.modifiers.control {
-                    let scale = self.storage.settings.style_options.scale / 1.1;
-                    self.storage.settings.style_options.scale = if scale < 0.3{0.3}else{scale};
+                    let scale = self.storage.settings.style_options.scale /1.1;
+                    self.storage.settings.style_options.scale = scale.min(3.0).max(0.3);
                     self.reload_style(cx);
                     cx.reset_font_atlas_and_redraw();
+                    self.storage.save_settings(cx);
                 },
                 _ => () 
             },
@@ -215,9 +218,14 @@ impl App {
                         }
                     }
                 }
-                if self.storage.reload_builders.is_signal(se) {
-                    // we have to reload settings.
-                    self.storage.reload_builders();
+                if self.storage.settings_changed.is_signal(se) {
+                    if self.storage.settings_old.builders != self.storage.settings.builders{
+                        self.storage.reload_builders();
+                    }
+                    if self.storage.settings_old.style_options != self.storage.settings.style_options{
+                        self.reload_style(cx);
+                        cx.reset_font_atlas_and_redraw();
+                    }
                 }
             },
             Event::FileRead(fr) => {
