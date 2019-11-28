@@ -266,7 +266,7 @@ impl Text {
             let scaled_min_pos_y = geom_y - font_size_logical * self.font_scale * glyph.bounds.p_min.y + text_style.font_size * self.font_scale * text_style.top_drop - subpixel_y_fract;
             
             // only use a subpixel id for really small fonts
-            let subpixel_id = if text_style.font_size>12.0 {
+            let subpixel_id = if text_style.font_size>32.0 {
                 0
             }
             else { // subtle 64 index subpixel id
