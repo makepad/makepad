@@ -71,7 +71,7 @@ impl AppSettings{
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct BuildTarget {
     pub builder: String,
     pub workspace: String,

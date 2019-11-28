@@ -684,7 +684,7 @@ impl HubBuilder {
         let mut build_result = BuildResult::NoOutput;
         while let Ok(line) = rx_line.recv() {
             if let Some((is_stderr, line)) = line {
-                if is_stderr && line != "\n" && !line.contains("Finished") {
+                if is_stderr && line != "\n" && !line.contains("Finished") && !line.contains("Blocking")&& !line.contains("Compiling"){
                     route_send.send(ToHubMsg {
                         to: HubMsgTo::UI,
                         msg: HubMsg::LogItem {

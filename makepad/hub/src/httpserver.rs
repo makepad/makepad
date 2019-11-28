@@ -199,7 +199,6 @@ impl HttpServer {
     }
     
     pub fn send_file_change(&mut self, path: &str) {
-        //println!("send_file_change {}", path);
         if let Ok(shared) = self.shared.lock() {
             if shared.files_read.iter().find( | v | **v == path).is_none() {
                 return
