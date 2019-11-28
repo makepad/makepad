@@ -297,8 +297,9 @@ impl App {
                         self.storage.load_settings(cx, utf8_data);
                     }
                     else { // create default settings file
-                        let new_settings = AppSettings::initial();
-                        let ron = ron::ser::to_string_pretty(&new_settings, ron::ser::PrettyConfig::default()).expect("cannot serialize settings");
+                        let def_settings = AppSettings::initial();
+                        let ron = ron::ser::to_string_pretty(&def_settings, ron::ser::PrettyConfig::default()).expect("cannot serialize settings");
+                        cx.file_write("makepad_settings.ron", ron.as_bytes());
                         self.storage.load_settings(cx, &ron);
                     }
                 }
