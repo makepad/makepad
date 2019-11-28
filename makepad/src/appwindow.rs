@@ -173,13 +173,14 @@ impl AppWindow {
                 // search for the tabcontrol with the maximum amount of editors
                 if self.focus_or_new_editor(cx, window_index, state, &path) {
                     storage.save_state(cx, state);
+                    //self.ensure_unique_tab_title_for_file_editors(window_index, )
                 }
             },
             FileTreeEvent::SelectFolder {..} => {
                 state.windows[window_index].open_folders = self.file_panel.file_tree.save_open_folders();
                 storage.save_state(cx, state);
             },
-            _ => {}
+            _ => {} 
         }
         
         let dock_items = &mut state.windows[window_index].dock_items;
@@ -306,7 +307,7 @@ impl AppWindow {
         for (_, values) in &mut collisions {
             if values.len()>0 { // we have a collision
                 let mut splits = Vec::new();
-                for (path, ctrl_id, id, out) in values.iter_mut() {
+                for (path, _ctrl_id, _id, _out) in values.iter_mut() {
                     // we have to find the shortest unique path combo
                     let item: Vec<String> = path.split("/").map( | v | v.to_string()).collect();
                     splits.push(item);
@@ -326,7 +327,9 @@ impl AppWindow {
                             }
                         }
                     }
+                    
                 }
+                println!("MAX {}", max_equal);
                 break;
             }
         }
