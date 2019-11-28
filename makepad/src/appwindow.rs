@@ -2,6 +2,7 @@
 use render::*;
 use widget::*;
 use serde::*;
+use std::collections::HashMap;
 
 use crate::appstorage::*;
 use crate::fileeditor::*;
@@ -274,7 +275,62 @@ impl AppWindow {
         }
         self.desktop_window.end_desktop_window(cx);
     }
-    
+    /*
+    pub fn ensure_unique_tab_title_for_file_editors(&mut self, window_index: usize, state: &mut AppState){
+        // we walk through the dock collecting tab titles, if we run into a collision
+        // we need to find the shortest uniqueness
+        let mut collisions:HashMap<String, Vec<(String, usize, usize, String)>> = HashMap::new();
+        let dock_items = &mut state.windows[window_index].dock_items;
+        // enumerate dockspace and collect all names
+        let mut dock_walker = self.dock.walker(dock_items);
+        while let Some((ctrl_id, dock_item)) = dock_walker.walk_dock_item() {
+            match dock_item {
+                DockItem::TabControl {tabs, ..} => for (id, tab) in tabs.iter().enumerate() {
+                    match &tab.item {
+                        Panel::FileEditor {path, ..} => {
+                            let title = path_file_name(&path);
+                            if let Some(items) = collisions.get_mut(&title){
+                                items.push((path.clone(),ctrl_id, id, String::new()));
+                            }
+                            else{
+                                collisions.insert(title, vec![(path.clone(),ctrl_id, id, String::new())]);
+                            }
+                        },
+                        _=>()
+                    }
+                },
+                _=>()
+            }
+        }
+        // walk through hashmap and update collisions with new title
+        for (_, values) in &mut collisions{
+            if values.len()>0{// we have a collision
+                let mut splits =  Vec::new();
+                for (path, ctrl_id, id, out) in values.iter_mut(){
+                    // we have to find the shortest unique path combo
+                    let item: Vec<String> = path.split("/").map( | v | v.to_string()).collect();
+                    splits.push(item);
+                }
+                // ok now we walk over all until all of them are different
+                let step = 0;
+                loop{
+                    let diff_count = 0;
+                    for i in 0..splits.len() - 1{
+                        // lets compare 2 and find when they are different
+                        // lets iterate from the end of 
+                        let a = &splits[i];
+                        let b = &splits[i+1];
+                        // lets pair iterate from the end both a and b
+                        
+                    }
+                    break;
+                    //step += 1;
+                }
+            }
+        }
+        // run again, using collision titles
+    }
+    */
     pub fn highest_file_editor_id(&self) -> u64 {
         let mut max_id = 0;
         for id in &self.file_editors.element_list {
@@ -304,7 +360,7 @@ impl AppWindow {
         // first find existing editor, or 
         while let Some((ctrl_id, dock_item)) = dock_walker.walk_dock_item() {
             match dock_item {
-                DockItem::TabControl {current, previous:_, tabs} => {
+                DockItem::TabControl {current, tabs, ..} => {
                     for (id, tab) in tabs.iter().enumerate() {
                         match &tab.item {
                             Panel::FileEditor {path, scroll_pos:_, editor_id} => {
@@ -333,7 +389,7 @@ impl AppWindow {
             let mut dock_walker = self.dock.walker(dock_items);
             while let Some((ctrl_id, dock_item)) = dock_walker.walk_dock_item() {
                 if ctrl_id == target_ctrl_id { 
-                    if let DockItem::TabControl {current, previous:_, tabs} = dock_item {
+                    if let DockItem::TabControl {current, tabs, ..} = dock_item {
                         tabs.insert(*current + 1, new_tab);
                         *current = *current + 1;
                         cx.redraw_child_area(Area::All);

@@ -4,7 +4,7 @@
 #[macro_use]
 mod shader;
 #[macro_use]
-mod theming;
+mod styling;
 #[macro_use]
 mod cx;
 

@@ -89,7 +89,7 @@ pub struct AppStorage {
     pub hub_ui: Option<HubUI>,
     pub hub_ui_message: Signal,
     pub settings_changed: Signal,
-    pub reload_builders: Signal,
+    pub settings_old: AppSettings,
     pub settings: AppSettings,
     pub file_tree_file_read: FileRead,
     pub app_state_file_read: FileRead,
@@ -105,7 +105,7 @@ pub struct AppTextBuffer {
 }
 
 impl AppStorage {
-    pub fn style(cx: &mut Cx) -> Self {
+    pub fn proto(cx: &mut Cx) -> Self {
         AppStorage {
             init_builders_counter:2,
             builders_request_uid: HubUid::zero(),
@@ -116,7 +116,7 @@ impl AppStorage {
             hub_ui: None,
             hub_ui_message: cx.new_signal(),
             settings_changed: cx.new_signal(),
-            reload_builders: cx.new_signal(),
+            settings_old: AppSettings::default(),
             settings: AppSettings::default(),
             //rust_compiler: RustCompiler::style(cx),
             text_buffers: HashMap::new(),
@@ -155,24 +155,32 @@ impl AppStorage {
     pub fn load_settings(&mut self, cx: &mut Cx, utf8_data: &str) {
         match ron::de::from_str(utf8_data) {
             Ok(settings) => {
-                let last_settings = self.settings.clone();
+                self.settings_old = self.settings.clone();
                 self.settings = settings;
+                self.settings.style_options.scale = self.settings.style_options.scale.min(3.0).max(0.3);
                 cx.send_signal(self.settings_changed, 0);
                 
                 // so now, here we restart our hub_server if need be.
                 if cx.platform_type.is_desktop() {
-                    if last_settings.hub_server != self.settings.hub_server{
+                    if self.settings_old.hub_server != self.settings.hub_server{
                         self.restart_hub_server();
-                        cx.send_signal(self.reload_builders, 0);
-                    }
-                    else if last_settings.builders != self.settings.builders{
-                        cx.send_signal(self.reload_builders, 0);
                     }
                 }
             },
             Err(e) => {
                 println!("Cannot deserialize settings {:?}", e);
             }
+        }
+    }
+    
+    pub fn save_settings(&mut self, cx:&mut Cx){
+        if let Ok(utf8_data) = ron::ser::to_string_pretty(&self.settings, ron::ser::PrettyConfig::default()){
+            let path = "makepad_settings.ron";
+            if let Some(atb) = self.text_buffers.get_mut(path) {
+                atb.text_buffer.load_from_utf8(&utf8_data);
+                atb.text_buffer.send_textbuffer_loaded_signal(cx);
+            }
+            cx.file_write(path, utf8_data.as_bytes());
         }
     }
     
