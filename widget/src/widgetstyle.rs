@@ -9,7 +9,7 @@ use crate::codeicon::*;
 use crate::textinput::*;
 use serde::{Serialize, Deserialize};
 
-#[derive(Debug, Copy, Clone, Serialize, Deserialize)]
+#[derive(Debug, Copy, Clone, Serialize, Deserialize, PartialEq)]
 pub struct StyleOptions {
     pub scale: f32,
     pub dark: bool
@@ -51,7 +51,7 @@ impl Theme {
 
 pub fn set_widget_style(cx: &mut Cx, opt: &StyleOptions) {
     
-    if opt.dark {
+    //if opt.dark {
         Theme::color_bg_splitter().set(cx, color256(25, 25, 25));
         Theme::color_bg_splitter_over().set(cx, color("#5"));
         Theme::color_bg_splitter_peak().set(cx, color("#f"));
@@ -123,7 +123,7 @@ pub fn set_widget_style(cx: &mut Cx, opt: &StyleOptions) {
         TextEditor::color_warning().set(cx, color256(225, 229, 112));
         TextEditor::color_error().set(cx, color256(254, 0, 0));
         TextEditor::color_defocus().set(cx, color256(128, 128, 128));
-    }
+    //}
     
     let font = cx.load_font("resources/Ubuntu-R.ttf");
     Theme::text_style_unscaled().set(cx, TextStyle {

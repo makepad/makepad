@@ -19,7 +19,7 @@ pub use crate::elements::*;
 pub use crate::animator::*;
 pub use crate::area::*;
 pub use crate::menu::*;
-pub use crate::theming::*;
+pub use crate::styling::*;
 
 #[cfg(all(not(feature = "ipc"), target_os = "linux"))]
 pub use crate::cx_linux::*;
