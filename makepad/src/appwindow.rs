@@ -306,7 +306,7 @@ impl AppWindow {
         for (_, values) in &mut collisions {
             if values.len()>0 { // we have a collision
                 let mut splits = Vec::new();
-                for (path, ctrl_id, id, out) in values.iter_mut() {
+                for (path, _ctrl_id, _id, _out) in values.iter_mut() {
                     // we have to find the shortest unique path combo
                     let item: Vec<String> = path.split("/").map( | v | v.to_string()).collect();
                     splits.push(item);
