@@ -226,6 +226,9 @@ impl App {
                         self.reload_style(cx);
                         cx.reset_font_atlas_and_redraw();
                     }
+                    if self.storage.settings_old.builds != self.storage.settings.builds{
+                        self.build_manager.restart_build(cx, &mut self.storage);
+                    }                    
                 }
             },
             Event::FileRead(fr) => {

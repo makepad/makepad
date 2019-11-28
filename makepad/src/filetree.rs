@@ -290,7 +290,7 @@ impl FileTree {
                 }),
                 ..ScrollView::proto(cx)
             },
-            drag_view: View {
+            drag_view: View { 
                 is_overlay: true,
                 ..View::proto(cx)
             },

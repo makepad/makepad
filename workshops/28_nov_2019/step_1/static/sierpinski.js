@@ -9,10 +9,10 @@ export function sierpinski(level) {
     vec3.fromValues(-Math.sqrt(2.0 / 9.0), Math.sqrt(2.0 / 3.0), -1.0 / 3.0),
     vec3.fromValues(-Math.sqrt(2.0 / 9.0), -Math.sqrt(2.0 / 3.0), -1.0 / 3.0),
     level,
-    vertices
+    vertices      
   );
   return vertices;
-}
+} 
 
 function generateTetrahedron(p0, p1, p2, p3, level, vertices) {
   if (level == 0) {
