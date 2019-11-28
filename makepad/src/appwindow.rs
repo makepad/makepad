@@ -275,7 +275,7 @@ impl AppWindow {
         }
         self.desktop_window.end_desktop_window(cx);
     }
-    /*
+    
     pub fn ensure_unique_tab_title_for_file_editors(&mut self, window_index: usize, state: &mut AppState){
         // we walk through the dock collecting tab titles, if we run into a collision
         // we need to find the shortest uniqueness
@@ -330,7 +330,7 @@ impl AppWindow {
         }
         // run again, using collision titles
     }
-    */
+    
     pub fn highest_file_editor_id(&self) -> u64 {
         let mut max_id = 0;
         for id in &self.file_editors.element_list {
