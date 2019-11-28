@@ -173,13 +173,14 @@ impl AppWindow {
                 // search for the tabcontrol with the maximum amount of editors
                 if self.focus_or_new_editor(cx, window_index, state, &path) {
                     storage.save_state(cx, state);
+                    //self.ensure_unique_tab_title_for_file_editors(window_index, )
                 }
             },
             FileTreeEvent::SelectFolder {..} => {
                 state.windows[window_index].open_folders = self.file_panel.file_tree.save_open_folders();
                 storage.save_state(cx, state);
             },
-            _ => {}
+            _ => {} 
         }
         
         let dock_items = &mut state.windows[window_index].dock_items;
@@ -326,7 +327,9 @@ impl AppWindow {
                             }
                         }
                     }
+                    
                 }
+                println!("MAX {}", max_equal);
                 break;
             }
         }

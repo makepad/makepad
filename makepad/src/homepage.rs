@@ -72,13 +72,13 @@ impl HomePage {
     pub fn draw_home_page(&mut self, cx: &mut Cx) {
         if self.view.begin_view(cx, Self::layout_main().get(cx)).is_err() {return};
         //self.example_texts.template().class = Self::my_mail_input();
-        self.example_texts.get_draw(cx).draw_plain_text(cx);
+        //self.example_texts.get_draw(cx).draw_plain_text(cx);
         
         cx.turtle_new_line();
         
         self.text.color = Self::color_heading().get(cx);
         self.text.text_style = Self::text_style_heading().get(cx);
-        self.text.draw_text(cx, "Introducing Makepad!!\n");
+        self.text.draw_text(cx, "Introducing Makepad\n");
         
         self.text.color = Self::color_body().get(cx);
         self.text.text_style = Self::text_style_body().get(cx);
