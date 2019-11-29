@@ -168,19 +168,20 @@ impl AppWindow {
                     tabs.push(self.new_file_editor_tab(/*window_index, state,*/ &path));
                 }
                 self.dock.dock_drag_end(cx, fe, tabs);
+                self.ensure_unique_tab_title_for_file_editors(window_index, state);
             },
             FileTreeEvent::SelectFile {path} => {
                 // search for the tabcontrol with the maximum amount of editors
                 if self.focus_or_new_editor(cx, window_index, state, &path) {
                     storage.save_state(cx, state);
-                    //self.ensure_unique_tab_title_for_file_editors(window_index, )
+                    self.ensure_unique_tab_title_for_file_editors(window_index, state);
                 }
             },
             FileTreeEvent::SelectFolder {..} => {
                 state.windows[window_index].open_folders = self.file_panel.file_tree.save_open_folders();
                 storage.save_state(cx, state);
             },
-            _ => {} 
+            _ => {}
         }
         
         let dock_items = &mut state.windows[window_index].dock_items;
@@ -189,6 +190,7 @@ impl AppWindow {
                 storage.save_state(cx, state);
             },
             DockEvent::DockTabClosed => {
+                self.ensure_unique_tab_title_for_file_editors(window_index, state);
                 storage.save_state(cx, state);
             },
             DockEvent::DockTabCloned {tab_control_id, tab_id} => {
@@ -277,24 +279,25 @@ impl AppWindow {
         self.desktop_window.end_desktop_window(cx);
     }
     
-    pub fn ensure_unique_tab_title_for_file_editors(&mut self, window_index: usize, state: &mut AppState) {
+    pub fn ensure_unique_tab_title_for_file_editors(&mut self, window_index: usize, state: &mut AppState){
         // we walk through the dock collecting tab titles, if we run into a collision
         // we need to find the shortest uniqueness
-        let mut collisions: HashMap<String, Vec<(String, usize, usize, String)>> = HashMap::new();
+        let mut collisions: HashMap<String, Vec<(String, usize, usize)>> = HashMap::new();
         let dock_items = &mut state.windows[window_index].dock_items;
         // enumerate dockspace and collect all names
         let mut dock_walker = self.dock.walker(dock_items);
         while let Some((ctrl_id, dock_item)) = dock_walker.walk_dock_item() {
             match dock_item {
-                DockItem::TabControl {tabs, ..} => for (id, tab) in tabs.iter().enumerate() {
+                DockItem::TabControl {tabs, ..} => for (id, tab) in tabs.iter_mut().enumerate() {
                     match &tab.item {
                         Panel::FileEditor {path, ..} => {
                             let title = path_file_name(&path);
+                            tab.title = title.clone(); // set the title here once
                             if let Some(items) = collisions.get_mut(&title) {
-                                items.push((path.clone(), ctrl_id, id, String::new()));
+                                items.push((path.clone(), ctrl_id, id));
                             }
                             else {
-                                collisions.insert(title, vec![(path.clone(), ctrl_id, id, String::new())]);
+                                collisions.insert(title, vec![(path.clone(), ctrl_id, id)]);
                             }
                         },
                         _ => ()
@@ -303,37 +306,56 @@ impl AppWindow {
                 _ => ()
             }
         }
+                
         // walk through hashmap and update collisions with new title
         for (_, values) in &mut collisions {
-            if values.len()>0 { // we have a collision
+            if values.len() > 1 {
                 let mut splits = Vec::new();
-                for (path, _ctrl_id, _id, _out) in values.iter_mut() {
+                for (path, _, _) in values.iter_mut() {
                     // we have to find the shortest unique path combo
                     let item: Vec<String> = path.split("/").map( | v | v.to_string()).collect();
                     splits.push(item);
                 }
-                // ok now we walk over all until all of them are different
+                // compare each pair
                 let mut max_equal = 0;
                 for i in 0..splits.len() - 1 {
-                    // lets compare 2 and find when they are different
-                    // lets iterate from the end of
                     let a = &splits[i];
                     let b = &splits[i + 1];
-                    // lets pair iterate from the end both a and b
                     for i in 0..a.len().min(b.len()) {
                         if a[a.len() - i - 1] != b[b.len() - i - 1] {
-                            if i > max_equal{
+                            if i > max_equal {
                                 max_equal = i;
+                            }
+                            break;
+                        }
+                    }
+                }
+                if max_equal == 0{
+                    continue;
+                } 
+                for (index, (_, scan_ctrl_id, tab_id)) in values.iter_mut().enumerate() {
+                    let split = &splits[index];
+                    let mut dock_walker = self.dock.walker(dock_items);
+                    while let Some((ctrl_id, dock_item)) = dock_walker.walk_dock_item() {
+                        if ctrl_id == *scan_ctrl_id {
+                            if let DockItem::TabControl {tabs, ..} = dock_item {
+                                let tab = &mut tabs[*tab_id];
+                                // ok lets set the tab title
+                                let new_title = if max_equal == 0{
+                                    split[split.len()-1].clone()
+                                }
+                                else{
+                                    split[(split.len()-max_equal-1)..].join("/")
+                                };
+                                if new_title != tab.title{
+                                    tab.title = new_title;
+                                }
                             }
                         }
                     }
-                    
                 }
-                println!("MAX {}", max_equal);
-                break;
             }
         }
-        // run again, using collision titles
     }
     
     pub fn highest_file_editor_id(&self) -> u64 {
