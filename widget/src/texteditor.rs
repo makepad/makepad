@@ -17,7 +17,7 @@ pub struct TextEditor {
     pub cursor_row: Quad,
     pub paren_pair: Quad,
     pub indent_lines: Quad,
-    
+    pub shadow: Quad.
     pub message_marker: Quad,
     pub text: Text,
     pub line_number_text: Text,
@@ -162,6 +162,11 @@ impl TextEditor {
             },
             view: ScrollView::proto(cx),
             bg: Quad {
+                do_h_scroll: false,
+                do_v_scroll: false,
+                ..Quad::proto(cx)
+            },
+            shadow: Quad {
                 do_h_scroll: false,
                 do_v_scroll: false,
                 ..Quad::proto(cx)
@@ -491,7 +496,7 @@ impl TextEditor {
         cx.set_down_mouse_cursor(MouseCursor::Text);
         // give us the focus
         self.set_key_focus(cx);
-                self._undo_id += 1;
+        self._undo_id += 1;
         
         let offset;
         //let scroll_pos = self._bg_area.get_scroll_pos(cx);
@@ -636,7 +641,7 @@ impl TextEditor {
                     else {
                         self.cursors.move_down(1, ke.modifiers.shift, text_buffer);
                     }
-                self._undo_id += 1;
+                    self._undo_id += 1;
                     true
                 }
             },
@@ -857,7 +862,7 @@ impl TextEditor {
                 }
                 // update the cursor uniform to blink it.
                 self._cursor_blink_flipflop = 1.0 - self._cursor_blink_flipflop;
-                self._undo_id +=1;
+                self._undo_id += 1;
                 self._highlight_visibility = 1.0;
                 self._cursor_area.write_uniform_float(cx, Self::uniform_cursor_blink(), self._cursor_blink_flipflop);
                 if self.highlight_area_on {
