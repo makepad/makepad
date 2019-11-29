@@ -1,6 +1,6 @@
 use crate::cx::*;
 
-#[derive(Default, Clone, Debug)]
+#[derive(Default, Clone)]
 pub struct Pass {
     pub pass_id: Option<usize>
 }
@@ -110,7 +110,7 @@ impl Pass {
     
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub enum ClearColor {
     InitWith(Color),
     ClearWith(Color)
@@ -122,19 +122,36 @@ impl Default for ClearColor {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub enum ClearDepth {
     InitWith(f64),
     ClearWith(f64)
 }
 
-#[derive(Default, Clone, Debug)]
+#[derive(Default, Clone)]
 pub struct CxPassColorTexture {
     pub clear_color: ClearColor,
     pub texture_id: usize
 }
 
-#[derive(Clone, Debug)]
+#[derive(Default, Clone)]
+#[repr(C)]
+pub struct PassUniforms{
+    camera_projection:[f32;16],
+    camera_view:[f32;16],
+    dpi_factor:f32,
+    dpi_dilate:f32,
+    pad1:f32,
+    pad2:f32
+}
+
+impl PassUniforms{
+    pub fn as_slice(&self)->&[f32;std::mem::size_of::<PassUniforms>()]{
+        unsafe{std::mem::transmute(self)}
+    }
+}
+
+#[derive(Clone)]
 pub struct CxPass {
     pub color_textures: Vec<CxPassColorTexture>,
     pub depth_texture: Option<usize>,
@@ -145,18 +162,16 @@ pub struct CxPass {
     pub dep_of: CxPassDepOf,
     pub paint_dirty: bool,
     pub pass_size: Vec2,
-    pub uniforms: Vec<f32>,
+    pub pass_uniforms: PassUniforms,
     pub zbias_step: f32,
     pub platform: CxPlatformPass,
 }
 
 impl Default for CxPass {
     fn default() -> Self {
-        let mut uniforms: Vec<f32> = Vec::new();
-        uniforms.resize(CX_UNI_SIZE, 0.0);
         CxPass {
             zbias_step: 0.001,
-            uniforms: uniforms,
+            pass_uniforms: PassUniforms::default(),
             color_textures: Vec::new(),
             depth_texture: None,
             override_dpi_factor: None,
@@ -178,40 +193,35 @@ pub enum CxPassDepOf {
     None
 }
 
-const CX_UNI_CAMERA_PROJECTION: usize = 0;
-const CX_UNI_CAMERA_VIEW: usize = 16;
-const CX_UNI_DPI_FACTOR: usize = 32;
-const CX_UNI_DPI_DILATE: usize = 33;
-const CX_UNI_SIZE: usize = 36;
 
 impl CxPass {
     pub fn def_uniforms(sg: ShaderGen) -> ShaderGen {
         sg.compose(shader_ast!({
-            let camera_projection: mat4<UniformCx>;
-            let camera_view: mat4<UniformCx>;
-            let dpi_factor: float<UniformCx>;
-            let dpi_dilate: float<UniformCx>;
+            let camera_projection: mat4<PassUniform>;
+            let camera_view: mat4<PassUniform>;
+            let dpi_factor: float<PassUniform>;
+            let dpi_dilate: float<PassUniform>;
         }))
     }
     
     pub fn uniform_camera_projection(&mut self, v: &Mat4) {
         //dump in uniforms
         for i in 0..16 {
-            self.uniforms[CX_UNI_CAMERA_PROJECTION + i] = v.v[i];
+            self.pass_uniforms.camera_projection[i] = v.v[i];
         }
     }
     
     pub fn uniform_camera_view(&mut self, v: &Mat4) {
         //dump in uniforms
         for i in 0..16 {
-            self.uniforms[CX_UNI_CAMERA_VIEW + i] = v.v[i];
+            self.pass_uniforms.camera_view[i] =  v.v[i];
         }
     }
     
     pub fn set_dpi_factor(&mut self, dpi_factor: f32) {
         let dpi_dilate = (2. - dpi_factor).max(0.).min(1.);
-        self.uniforms[CX_UNI_DPI_FACTOR + 0] = dpi_factor;
-        self.uniforms[CX_UNI_DPI_DILATE + 0] = dpi_dilate;
+        self.pass_uniforms.dpi_factor = dpi_factor;
+        self.pass_uniforms.dpi_dilate = dpi_dilate;
     }
     
     pub fn set_ortho_matrix(&mut self, offset: Vec2, size: Vec2) {

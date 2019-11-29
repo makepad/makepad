@@ -9,7 +9,7 @@ use std::time::Duration;
 use std::collections::HashMap;
 use serde::{Serialize, Deserialize};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum HttpServerConfig {
     Offline,
     Localhost(u16),
@@ -33,7 +33,7 @@ pub struct HttpServer {
 }
 
 impl HttpServer {
-    pub fn start_http_server(config: &HttpServerConfig, projects_arc: Arc<Mutex<HashMap<String, String>>>) -> Option<HttpServer> {
+    pub fn start_http_server(config: &HttpServerConfig, workspaces_arc: Arc<Mutex<HashMap<String, String>>>) -> Option<HttpServer> {
         
         let listen_address = match config {
             HttpServerConfig::Offline => return None,
@@ -43,7 +43,7 @@ impl HttpServer {
         };
         
         let listener = if let Ok(listener) = TcpListener::bind(listen_address.clone()) {listener} else {println!("Cannot bind http server port"); return None};
-        let projects = Arc::clone(&projects_arc);
+        let workspaces = Arc::clone(&workspaces_arc);
         let shared = Arc::new(Mutex::new(HttpServerShared::default()));
         
         let listen_thread = {
@@ -58,7 +58,7 @@ impl HttpServer {
                     let mut tcp_stream = tcp_stream.expect("Incoming stream failure");
                     let (tx_write, rx_write) = mpsc::channel::<String>();
                     let mut reader = BufReader::new(tcp_stream.try_clone().expect("Cannot clone tcp stream"));
-                    let projects = Arc::clone(&projects);
+                    let workspaces = Arc::clone(&workspaces);
                     let shared = Arc::clone(&shared);
                     let _read_thread = std::thread::spawn(move || {
                         
@@ -71,8 +71,11 @@ impl HttpServer {
                         
                         let line = &line[5..];
                         let space = line.find(' ').expect("http space fail");
-                        let url = &line[0..space];
-                        let url_lc = url.to_string();
+                        let mut url = line[0..space].to_string();
+                        if url.ends_with("/"){
+                            url.push_str("index.html");
+                        }
+                        let url_lc = url.clone();
                         url_lc.to_lowercase();
                         if url_lc.ends_with("/key.ron") || url.find("..").is_some() || url.starts_with("/") {
                             let _ = tcp_stream.shutdown(Shutdown::Both);
@@ -107,14 +110,21 @@ impl HttpServer {
                             };
                             return
                         }
-                        
+
+                        if url.ends_with("favicon.ico"){
+                            let header =  "HTTP/1.1 200 OK\r\nContent-Type: image/x-icon\r\nTransfer-encoding: identity\r\nContent-Length: 0\r\n: close\r\n\r\n";
+                            write_bytes_to_tcp_stream_no_error(&mut tcp_stream, header.as_bytes());
+                            let _ = tcp_stream.shutdown(Shutdown::Both);
+                            return
+                        }
+
                         // lets look up the first part of url, the project.
                         let file_path = if let Some(file_pos) = url.find('/') {
-                            let (project, rest) = url.split_at(file_pos);
+                            let (workspace, rest) = url.split_at(file_pos);
                             let (_, rest) = rest.split_at(1);
                             // find the project
-                            if let Ok(projects) = projects.lock() {
-                                if let Some(abs_path) = projects.get(project) {
+                            if let Ok(workspaces) = workspaces.lock() {
+                                if let Some(abs_path) = workspaces.get(workspace) {
                                     Some(format!("{}/{}", abs_path, rest))
                                 }
                                 else {None}
@@ -128,7 +138,12 @@ impl HttpServer {
                             return
                         }
                         let file_path = file_path.unwrap();
-                        
+                        let file_path = if file_path.ends_with("/"){
+                            format!("{}/{}", file_path, "index.html")
+                        }
+                        else{
+                            file_path
+                        };
                         // keep track of the files we read
                         if let Ok(mut shared) = shared.lock() {
                             if shared.files_read.iter().find( | v | **v == url).is_none() {
@@ -136,8 +151,9 @@ impl HttpServer {
                             }
                         };
                         
+                        
                         // lets read the file from disk and dump it back.
-                        println!("HTTP Server serving file: {}", file_path);
+                        //println!("HTTP Server serving file: {}", file_path);
                         if let Ok(data) = std::fs::read(&file_path) {
                             let mime_type = if url.ends_with(".html") {"text/html"}
                             else if url.ends_with(".wasm") {"application/wasm"}
@@ -155,7 +171,7 @@ impl HttpServer {
                             let _ = tcp_stream.shutdown(Shutdown::Both);
                         }
                         else { // 404
-                            let _ = tcp_stream.write("HTTP/1.1 404 NotFound\r\n".as_bytes());
+                            write_bytes_to_tcp_stream_no_error(&mut tcp_stream, "HTTP/1.1 404 NotFound\r\n".as_bytes());
                             let _ = tcp_stream.shutdown(Shutdown::Both);
                         }
                     });
@@ -192,7 +208,7 @@ impl HttpServer {
     }
     
     pub fn send_build_start(&mut self) {
-        self.send_json_message(&format!("{{\"type\":\"build_start\"}}"));
+        //self.send_json_message(&format!("{{\"type\":\"build_start\"}}"));
     }
     
     pub fn terminate(&mut self) {

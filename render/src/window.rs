@@ -159,7 +159,7 @@ impl Window {
     }
 }
 
-#[derive(Clone, Default, Debug, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct WindowGeom {
     pub dpi_factor: f32,
     pub vr_is_presenting: bool,

@@ -6,7 +6,7 @@ use crate::hubclient::*;
 use crate::hubrouter::*;
 use serde::{Serialize, Deserialize};
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize,PartialEq, Deserialize)]
 pub enum HubServerConfig {
     Offline, // no network connectivity
     Announced, // 0.0.0.0:0

@@ -18,8 +18,5 @@ path="../../widget"
 [dependencies.render]
 path="../../render"
 
-[dependencies.editor]
-path="../editor"
-
 [dependencies.hub]
 path="../hub"
