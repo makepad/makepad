@@ -53,7 +53,7 @@ impl TextCursor {
         let pos = text_buffer.offset_to_text_pos_next(self.head, old.0, old.1);
         self.max = pos.col;
         return (pos, self.head)
-    }
+    } 
     
     pub fn move_home(&mut self, text_buffer: &TextBuffer) {
         let pos = text_buffer.offset_to_text_pos(self.head);
@@ -328,7 +328,7 @@ impl TextCursorSet {
         let mut offset = text_buffer.text_pos_to_offset(TextPos {row: top, col: 0});
         for row in top..(bottom + 1) {
             let line = &text_buffer.lines[row];
-            if left < line.len() {
+            if left <= line.len() {
                 if start_pos.col < end_pos.col {
                     self.set.push(TextCursor {
                         tail: offset + left,
@@ -347,6 +347,14 @@ impl TextCursorSet {
             offset += line.len() + 1;
         }
         // depending on the direction the last cursor remains
+        if self.set.len() == 0{
+            let offset = text_buffer.text_pos_to_offset(end_pos);
+            self.set.push(TextCursor{
+                head:offset,
+                tail:offset,
+                max:0
+            })
+        }
         self.last_cursor = 0;
         self.set != change_check
     }
@@ -490,8 +498,8 @@ impl TextCursorSet {
                 text.push_str(post);
                 let op = text_buffer.replace_lines_with_string(start, end - start, &text);
                 // we wanna keep the original selection pushed by l
-                cursor.head += pre_chars;
-                cursor.tail += pre_chars;
+                cursor.head += pre_chars + delta as usize;
+                cursor.tail += pre_chars + delta as usize;
                 delta += (pre_chars + post_chars) as isize;
                 ops.push(op);
             }
@@ -504,15 +512,15 @@ impl TextCursorSet {
                     text.push_str(pre);
                     text.push_str(post);
                     let op = text_buffer.replace_lines_with_string(start, 0, &text);
-                    cursor.head += pre_chars;
-                    cursor.tail += pre_chars;
+                    cursor.head += pre_chars + delta as usize;
+                    cursor.tail += pre_chars + delta as usize;
                     delta += (pre_chars + post_chars) as isize;
                     ops.push(op);
                 }
                 else {
                     let op = text_buffer.replace_lines_with_string(start, 0, pre);
-                    cursor.head += pre_chars;
-                    cursor.tail += pre_chars;
+                    cursor.head += pre_chars + delta as usize;
+                    cursor.tail += pre_chars + delta as usize;
                     delta += (pre_chars + post_chars) as isize;
                     ops.push(op);
                 }
@@ -642,7 +650,7 @@ impl TextCursorSet {
         }
     }
     
-    pub fn backspace(&mut self, text_buffer: &mut TextBuffer, undo_id:u64) {
+    pub fn backspace(&mut self, text_buffer: &mut TextBuffer, undo_id: u64) {
         let mut delta: isize = 0;
         // rolling delta to displace cursors
         let mut ops = Vec::new();
