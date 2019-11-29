@@ -206,8 +206,9 @@ impl InstanceType{
 pub enum ShVarStore {
     Uniform(UniformType),
     UniformColor(ColorId),
-    UniformVw,
-    UniformCx,
+    DrawUniform,
+    ViewUniform,
+    PassUniform,
     Instance(InstanceType),
     Geometry,
     Texture,

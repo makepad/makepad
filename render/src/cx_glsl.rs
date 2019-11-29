@@ -306,9 +306,10 @@ impl Cx {
         let instances = sg.flat_vars(|v| if let ShVarStore::Instance(_) = *v{true} else {false});
         let mut varyings = sg.flat_vars(|v| if let ShVarStore::Varying = *v{true} else {false});
         let locals = sg.flat_vars(|v| if let ShVarStore::Local = *v{true} else {false});
-        let uniforms_cx = sg.flat_vars(|v| if let ShVarStore::UniformCx = *v{true} else {false});
-        let uniforms_vw = sg.flat_vars(|v| if let ShVarStore::UniformVw = *v{true} else {false});
-        let uniforms_dr = sg.flat_vars(|v| if let ShVarStore::Uniform(_) = *v{true} else {false});
+        let pass_uniforms = sg.flat_vars(|v| if let ShVarStore::PassUniform = *v{true} else {false});
+        let view_uniforms = sg.flat_vars(|v| if let ShVarStore::ViewUniform = *v{true} else {false});
+        let draw_uniforms = sg.flat_vars(|v| if let ShVarStore::DrawUniform = *v{true} else {false});
+        let uniforms = sg.flat_vars(|v| if let ShVarStore::Uniform(_) = *v{true} else {false});
         
         let mut const_cx = SlCx {
             depth: 0,
@@ -378,12 +379,14 @@ impl Cx {
         let mut shared = String::new();
         shared.push_str("// Consts\n");
         shared.push_str(&consts_out);
-        shared.push_str("//Context uniforms\n");
-        shared.push_str(&Self::gl_assemble_uniforms(&uniforms_cx));
+        shared.push_str("//Pass uniforms\n");
+        shared.push_str(&Self::gl_assemble_uniforms(&pass_uniforms));
         shared.push_str("//View uniforms\n");
-        shared.push_str(&Self::gl_assemble_uniforms(&uniforms_vw));
+        shared.push_str(&Self::gl_assemble_uniforms(&view_uniforms));
         shared.push_str("//Draw uniforms\n");
-        shared.push_str(&Self::gl_assemble_uniforms(&uniforms_dr));
+        shared.push_str(&Self::gl_assemble_uniforms(&draw_uniforms));
+        shared.push_str("//Uniforms\n");
+        shared.push_str(&Self::gl_assemble_uniforms(&uniforms));
         shared.push_str("//Texture slots\n");
         shared.push_str(&Self::gl_assemble_texture_slots(&texture_slots));
         shared.push_str("// Varyings\n");
@@ -460,20 +463,20 @@ impl Cx {
         // we can also flatten our uniform variable set
         
         // lets composite our ShAst structure into a set of methods
-        let uniform_props = UniformProps::construct(sg, &uniforms_dr);
+        let uniform_props = UniformProps::construct(sg, &uniforms);
         Ok((vtx_out, pix_out, CxShaderMapping {
-            zbias_uniform_prop: uniform_props.find_zbias_uniform_prop(),
             instance_props: InstanceProps::construct(sg, &instances),
             rect_instance_props: RectInstanceProps::construct(sg, &instances),
             uniform_props,
-            instances: instances,
-            geometries: geometries,
-            geometry_slots: geometry_slots,
-            instance_slots: instance_slots,
-            uniforms_dr: uniforms_dr,
-            uniforms_vw: uniforms_vw,
-            uniforms_cx: uniforms_cx,
-            texture_slots: texture_slots,
+            instances,
+            geometries,
+            instance_slots,
+            geometry_slots,
+            draw_uniforms,
+            view_uniforms,
+            pass_uniforms,
+            uniforms,
+            texture_slots,
         }))
     }
 }

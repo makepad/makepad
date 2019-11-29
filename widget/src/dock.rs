@@ -3,7 +3,7 @@ use std::mem;
 use render::*;
 use crate::splitter::*;
 use crate::tabcontrol::*;
-use crate::widgettheme::*;
+use crate::widgetstyle::*;
 use serde::*;
 
 #[derive(Clone)]
@@ -762,7 +762,7 @@ where TItem: Clone
                         self._tweening_quad = Some((id, rc, alpha));
                         (rc, alpha)
                     };
-                    self.drop_quad.color = Theme::color_drop_quad().base(cx);
+                    self.drop_quad.color = Theme::color_drop_quad().get(cx);
                     self.drop_quad.color.a = alpha * 0.8;
                     found_drop_zone = true;
                     self.drop_quad.draw_quad_rel(cx, dr);

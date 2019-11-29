@@ -287,7 +287,6 @@ impl Cx {
 
 #[derive(Default)]
 pub struct CxPlatform {
-    pub uni_cx: D3d11Buffer,
     pub post_id: u64,
     pub set_ime_position: Option<Vec2>,
     pub start_timer: Vec<(u64, f64, bool)>,
@@ -296,3 +295,4 @@ pub struct CxPlatform {
     pub desktop: CxDesktop,
     pub d3d11_cx: Option<*const D3d11Cx>
 }
+

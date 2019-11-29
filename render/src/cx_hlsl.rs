@@ -119,9 +119,10 @@ impl Cx {
         let instances = sg.flat_vars(|v| if let ShVarStore::Instance(_) = *v{true} else {false});
         let mut varyings = sg.flat_vars(|v| if let ShVarStore::Varying = *v{true} else {false});
         let locals = sg.flat_vars(|v| if let ShVarStore::Local = *v{true} else {false});
-        let uniforms_cx = sg.flat_vars(|v| if let ShVarStore::UniformCx = *v{true} else {false});
-        let uniforms_vw = sg.flat_vars(|v| if let ShVarStore::UniformVw = *v{true} else {false});
-        let uniforms_dr = sg.flat_vars(|v| if let ShVarStore::Uniform(_) = *v{true} else {false});
+        let pass_uniforms = sg.flat_vars(|v| if let ShVarStore::PassUniform = *v{true} else {false});
+        let view_uniforms = sg.flat_vars(|v| if let ShVarStore::ViewUniform = *v{true} else {false});
+        let draw_uniforms = sg.flat_vars(|v| if let ShVarStore::DrawUniform = *v{true} else {false});
+        let uniforms = sg.flat_vars(|v| if let ShVarStore::Uniform(_) = *v{true} else {false});
         
         // lets count the slots
         let geometry_slots = sg.compute_slot_total(&geometries);
@@ -131,9 +132,10 @@ impl Cx {
         
         hlsl_out.push_str(&Self::hlsl_assemble_struct("struct", "_Geom", &geometries, "GEOM_", "", ""));
         hlsl_out.push_str(&Self::hlsl_assemble_struct("struct", "_Inst", &instances, "INST_", "", ""));
-        hlsl_out.push_str(&Self::hlsl_assemble_struct("cbuffer", "_Uni_Cx", &uniforms_cx, "", "", ": register(b0)"));
-        hlsl_out.push_str(&Self::hlsl_assemble_struct("cbuffer", "_Uni_Vw", &uniforms_vw, "", "", ": register(b1)"));
-        hlsl_out.push_str(&Self::hlsl_assemble_struct("cbuffer", "_Uni_Dr", &uniforms_dr, "", "", ": register(b2)"));
+        hlsl_out.push_str(&Self::hlsl_assemble_struct("cbuffer", "_Uni_Ps", &pass_uniforms, "", "", ": register(b0)"));
+        hlsl_out.push_str(&Self::hlsl_assemble_struct("cbuffer", "_Uni_Vw", &view_uniforms, "", "", ": register(b1)"));
+        hlsl_out.push_str(&Self::hlsl_assemble_struct("cbuffer", "_Uni_Dr", &draw_uniforms, "", "", ": register(b2)"));
+        hlsl_out.push_str(&Self::hlsl_assemble_struct("cbuffer", "_Uni", &uniforms, "", "", ": register(b3)"));
         hlsl_out.push_str(&Self::hlsl_assemble_struct("struct", "_Loc", &locals, "", "", ""));
         
         // we need to figure out which texture slots exist
@@ -251,19 +253,19 @@ impl Cx {
             }
         }
         
-        let uniform_props = UniformProps::construct(sg, &uniforms_dr);
+        let uniform_props = UniformProps::construct(sg, &uniforms);
         Ok((hlsl_out, CxShaderMapping {
-            zbias_uniform_prop: uniform_props.find_zbias_uniform_prop(),
             rect_instance_props: RectInstanceProps::construct(sg, &instances),
             instance_props: InstanceProps::construct(sg, &instances),
             uniform_props,
-            geometries: geometries,
-            instances: instances,
-            geometry_slots: geometry_slots,
-            instance_slots: instance_slots,
-            uniforms_dr: uniforms_dr,
-            uniforms_vw: uniforms_vw,
-            uniforms_cx: uniforms_cx,
+            geometries,
+            instances,
+            geometry_slots,
+            instance_slots,
+            draw_uniforms,
+            view_uniforms,
+            pass_uniforms,
+            uniforms,
             texture_slots: texture_slots,
         }))
     }
@@ -462,8 +464,9 @@ impl<'a> SlCx<'a> {
         //let mty = Cx::hlsl_type(&var.ty);
         match var.store {
             ShVarStore::Uniform(_) => return var.name.clone(), //format!("_uni_dr.{}", var.name),
-            ShVarStore::UniformVw => return var.name.clone(), //format!("_uni_dl.{}", var.name),
-            ShVarStore::UniformCx => return var.name.clone(), //format!("_uni_cx.{}", var.name),
+            ShVarStore::ViewUniform => return var.name.clone(), //format!("_uni_dl.{}", var.name),
+            ShVarStore::PassUniform => return var.name.clone(), //format!("_uni_cx.{}", var.name),
+            ShVarStore::DrawUniform => return var.name.clone(), //format!("_uni_cx.{}", var.name),
             ShVarStore::UniformColor(_) => return var.name.clone(), //format!("_uni_cx.{}", var.name),
             ShVarStore::Instance(_) => {
                 if let SlTarget::Pixel = self.target {

@@ -1,8 +1,6 @@
 use render::*; 
 use widget::*; 
 use crate::appstorage::*;
-use editor::*;
-
 
 #[derive(Clone)]
 pub struct Keyboard {

@@ -1,10 +1,9 @@
 use render::*;
 use serde::*;
-use crate::widgettheme::*;
+use crate::widgetstyle::*;
 
 #[derive(Clone)]
 pub struct Splitter {
-    pub class: ClassId,
     pub axis: Axis,
     pub align: SplitterAlign,
     pub pos: f32,
@@ -41,7 +40,6 @@ pub enum SplitterEvent {
 impl Splitter {
     pub fn proto(cx: &mut Cx) -> Self {
         Self {
-            class: ClassId::base(),
             axis: Axis::Vertical,
             align: SplitterAlign::First,
             pos: 0.0,
@@ -67,21 +65,21 @@ impl Splitter {
     
     pub fn get_default_anim(cx: &Cx) -> Anim {
         Anim::new(Play::Cut {duration: 0.5}, vec![
-            Track::color(Quad::instance_color(), Ease::Lin, vec![(1.0, Theme::color_bg_splitter().base(cx))]),
+            Track::color(Quad::instance_color(), Ease::Lin, vec![(1.0, Theme::color_bg_splitter().get(cx))]),
         ])
     }
     
     pub fn get_over_anim(cx: &Cx) -> Anim {
         Anim::new(Play::Cut {duration: 0.05}, vec![
-            Track::color(Quad::instance_color(), Ease::Lin, vec![(1.0,Theme::color_bg_splitter_over().base(cx))]),
+            Track::color(Quad::instance_color(), Ease::Lin, vec![(1.0,Theme::color_bg_splitter_over().get(cx))]),
         ])
     }
     
     pub fn get_moving_anim(cx: &Cx) -> Anim {
         Anim::new(Play::Cut {duration: 0.2}, vec![
             Track::color(Quad::instance_color(), Ease::Lin, vec![
-                (0.0, Theme::color_bg_splitter_peak().base(cx)),
-                (1.0, Theme::color_bg_splitter_drag().base(cx))
+                (0.0, Theme::color_bg_splitter_peak().get(cx)),
+                (1.0, Theme::color_bg_splitter_drag().get(cx))
             ]),
         ])
     }

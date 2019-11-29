@@ -5,7 +5,7 @@ use crate::hubmsg::*;
 #[derive(PartialEq)]
 pub enum HubRouteType{
     Unknown,
-    Workspace(String),
+    Builder(String),
     Clone(String),
     UI
 }
@@ -103,14 +103,14 @@ impl HubRouteSend{
             HubRouteSend::Networked{tx_write_arc,..}=>{
                 if let Ok(tx_write) = tx_write_arc.lock(){
                     if let Some(tx_write) = &*tx_write{
-                        tx_write.send(msg).expect("Cannot tx_write.send - unexpected");;
+                        tx_write.send(msg).expect("Cannot tx_write.send - unexpected");
                     }//else{ // lets queue up
                     //    self.hub_log.log("HubUI - Warning, trying to send messages whilst disconnected from hub");
                    // }
                 }
             },
             HubRouteSend::Direct{tx_pump,own_addr,..}=>{
-                tx_pump.send((*own_addr, msg)).expect("Cannot tx_write.send - unexpected");;
+                tx_pump.send((*own_addr, msg)).expect("Cannot tx_write.send - unexpected");
             }
         }
     }
@@ -177,10 +177,10 @@ impl HubRouter{
                         if let Some(cid) = routes.iter().position( | c | c.peer_addr == htc_msg.from) {
                             if routes[cid].route_type == HubRouteType::Unknown {
                                 match &htc_msg.msg {
-                                    HubMsg::ConnectWorkspace(ws_name) => { // send it to all clients
+                                    HubMsg::ConnectBuilder(ws_name) => { // send it to all clients
                                         let mut connection_refused = false;
                                         for route in routes.iter() {
-                                            if let HubRouteType::Workspace(existing_ws_name) = &route.route_type{
+                                            if let HubRouteType::Builder(existing_ws_name) = &route.route_type{
                                                 if *existing_ws_name == *ws_name{
                                                     connection_refused = true;
                                                     break;
@@ -195,7 +195,7 @@ impl HubRouter{
                                             routes.remove(cid);
                                             continue;
                                         }
-                                        routes[cid].route_type = HubRouteType::Workspace(ws_name.to_string());
+                                        routes[cid].route_type = HubRouteType::Builder(ws_name.to_string());
                                     },
                                     HubMsg::ConnectClone(ws_name)=>{
                                         routes[cid].route_type = HubRouteType::Clone(ws_name.to_string());
@@ -230,10 +230,10 @@ impl HubRouter{
                                     }
                                 }
                             },
-                            HubMsgTo::Workspace(to_ws_name)=>{
+                            HubMsgTo::Builder(to_ws_name)=>{
                                 for route in routes.iter() {
                                     match &route.route_type{
-                                        HubRouteType::Workspace(ws_name)=>if to_ws_name == *ws_name{
+                                        HubRouteType::Builder(ws_name)=>if to_ws_name == *ws_name{
                                             route.tx_write.send(htc_msg.clone()).expect("Could not tx_write.send");
                                         },
                                         HubRouteType::Clone(ws_name)=>if to_ws_name == *ws_name{
@@ -260,7 +260,7 @@ impl HubRouter{
                                             let msg = FromHubMsg{
                                                 from:htc_msg.from,
                                                 msg: match &routes[pos].route_type{
-                                                    HubRouteType::Workspace(ws_name)=>HubMsg::DisconnectWorkspace(ws_name.clone()),
+                                                    HubRouteType::Builder(ws_name)=>HubMsg::DisconnectBuilder(ws_name.clone()),
                                                     HubRouteType::Clone(ws_name)=>HubMsg::DisconnectClone(ws_name.clone()),
                                                     HubRouteType::UI=>HubMsg::DisconnectUI,
                                                     HubRouteType::Unknown=>{
@@ -274,11 +274,11 @@ impl HubRouter{
                                             }
                                         }
                                     },
-                                    HubMsg::ListWorkspacesRequest{uid}=>{
-                                        let mut workspaces = Vec::new();
+                                    HubMsg::ListBuildersRequest{uid}=>{
+                                        let mut builders = Vec::new();
                                         for route in routes.iter() {
                                             match &route.route_type{
-                                                HubRouteType::Workspace(ws_name)=>workspaces.push(ws_name.to_string()),
+                                                HubRouteType::Builder(ws_name)=>builders.push(ws_name.to_string()),
                                                 _=>()
                                             }
                                         }
@@ -286,9 +286,9 @@ impl HubRouter{
                                         if let Some(route) = routes.iter().find( | c | c.peer_addr == htc_msg.from) {
                                             route.tx_write.send(FromHubMsg{
                                                 from:htc_msg.from,
-                                                msg:HubMsg::ListWorkspacesResponse{
+                                                msg:HubMsg::ListBuildersResponse{
                                                     uid:*uid,
-                                                    workspaces:workspaces
+                                                    builders:builders
                                                 }
                                             }).expect("Could not tx_write.send");
                                         }

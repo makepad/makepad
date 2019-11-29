@@ -2,7 +2,7 @@
 use render::*;
 use widget::*;
 use serde::*;
-use editor::*;
+use std::collections::HashMap;
 
 use crate::appstorage::*;
 use crate::fileeditor::*;
@@ -21,7 +21,7 @@ pub enum Panel {
     Keyboard,
     FileTree,
     FileEditorTarget,
-    FileEditor {path: String, scroll_pos:Vec2, editor_id: u64}
+    FileEditor {path: String, scroll_pos: Vec2, editor_id: u64}
 }
 
 #[derive(Clone)]
@@ -50,7 +50,7 @@ pub struct AppState {
 }
 
 impl AppWindow {
-    pub fn style(cx: &mut Cx) -> Self {
+    pub fn proto(cx: &mut Cx) -> Self {
         Self {
             desktop_window: DesktopWindow {
                 caption: "Makepad".to_string(),
@@ -98,10 +98,12 @@ impl AppWindow {
             match item {
                 Panel::LogList => {
                     match self.log_list.handle_log_list(cx, event, storage, build_manager) {
-                         LogListEvent::SelectLocMessage {loc_message} => {
+                        LogListEvent::SelectLocMessage {loc_message} => {
                             // just make it open an editor
                             if loc_message.path.len()>0 {
-                                file_tree_event = FileTreeEvent::SelectFile {path: loc_message.path.clone()};
+                                // ok so. lets lookup the path in our remap list
+                                //println!("TRYING TO SELECT FILE {} ")
+                                file_tree_event = FileTreeEvent::SelectFile {path: storage.remap_sync_path(&loc_message.path)};
                             }
                             self.log_item.load_loc_message(cx, &loc_message);
                         },
@@ -171,13 +173,14 @@ impl AppWindow {
                 // search for the tabcontrol with the maximum amount of editors
                 if self.focus_or_new_editor(cx, window_index, state, &path) {
                     storage.save_state(cx, state);
+                    //self.ensure_unique_tab_title_for_file_editors(window_index, )
                 }
             },
             FileTreeEvent::SelectFolder {..} => {
                 state.windows[window_index].open_folders = self.file_panel.file_tree.save_open_folders();
                 storage.save_state(cx, state);
             },
-            _ => {}
+            _ => {} 
         }
         
         let dock_items = &mut state.windows[window_index].dock_items;
@@ -192,12 +195,12 @@ impl AppWindow {
                 // lets change up our editor_id
                 let max_id = self.highest_file_editor_id();
                 let mut dock_walker = self.dock.walker(dock_items);
-                while let Some((ctrl_id,dock_item)) = dock_walker.walk_dock_item() {
+                while let Some((ctrl_id, dock_item)) = dock_walker.walk_dock_item() {
                     match dock_item {
                         DockItem::TabControl {tabs, ..} => if ctrl_id == tab_control_id {
-                            if let Some(tab) = tabs.get_mut(tab_id){
+                            if let Some(tab) = tabs.get_mut(tab_id) {
                                 match &mut tab.item {
-                                    Panel::FileEditor {editor_id,..} => {
+                                    Panel::FileEditor {editor_id, ..} => {
                                         // we need to make a new editor_id here.
                                         *editor_id = max_id + 1;
                                         break;
@@ -216,27 +219,27 @@ impl AppWindow {
         }
     }
     
-    pub fn draw_app_window(&mut self, cx: &mut Cx, menu:&Menu, window_index: usize, state: &mut AppState, storage: &mut AppStorage, build_manager: &mut BuildManager) {
+    pub fn draw_app_window(&mut self, cx: &mut Cx, menu: &Menu, window_index: usize, state: &mut AppState, storage: &mut AppStorage, build_manager: &mut BuildManager) {
         if self.desktop_window.begin_desktop_window(cx, Some(menu)).is_err() {return}
-
+        
         self.dock.draw_dock(cx);
         
         let dock_items = &mut state.windows[window_index].dock_items;
         let mut dock_walker = self.dock.walker(dock_items);
         let file_panel = &mut self.file_panel;
-        while let Some(item) = dock_walker.walk_draw_dock(cx, |cx, tab_control, tab, selected|{
+        while let Some(item) = dock_walker.walk_draw_dock(cx, | cx, tab_control, tab, selected | {
             // this draws the tabs, so we can customimze it
-            match tab.item{
-                Panel::FileTree=>{
-                    // we can now draw our own things 
+            match tab.item {
+                Panel::FileTree => {
+                    // we can now draw our own things
                     let tab = tab_control.get_draw_tab(cx, &tab.title, selected, tab.closeable);
-                    // lets open up a draw API in the tab 
-                    if tab.begin_tab(cx).is_ok(){
+                    // lets open up a draw API in the tab
+                    if tab.begin_tab(cx).is_ok() {
                         file_panel.draw_tab_buttons(cx);
                         tab.end_tab(cx);
                     };
                 },
-                _=>tab_control.draw_tab(cx, &tab.title, selected, tab.closeable)
+                _ => tab_control.draw_tab(cx, &tab.title, selected, tab.closeable)
             }
         }) {
             match item {
@@ -274,6 +277,65 @@ impl AppWindow {
         self.desktop_window.end_desktop_window(cx);
     }
     
+    pub fn ensure_unique_tab_title_for_file_editors(&mut self, window_index: usize, state: &mut AppState) {
+        // we walk through the dock collecting tab titles, if we run into a collision
+        // we need to find the shortest uniqueness
+        let mut collisions: HashMap<String, Vec<(String, usize, usize, String)>> = HashMap::new();
+        let dock_items = &mut state.windows[window_index].dock_items;
+        // enumerate dockspace and collect all names
+        let mut dock_walker = self.dock.walker(dock_items);
+        while let Some((ctrl_id, dock_item)) = dock_walker.walk_dock_item() {
+            match dock_item {
+                DockItem::TabControl {tabs, ..} => for (id, tab) in tabs.iter().enumerate() {
+                    match &tab.item {
+                        Panel::FileEditor {path, ..} => {
+                            let title = path_file_name(&path);
+                            if let Some(items) = collisions.get_mut(&title) {
+                                items.push((path.clone(), ctrl_id, id, String::new()));
+                            }
+                            else {
+                                collisions.insert(title, vec![(path.clone(), ctrl_id, id, String::new())]);
+                            }
+                        },
+                        _ => ()
+                    }
+                },
+                _ => ()
+            }
+        }
+        // walk through hashmap and update collisions with new title
+        for (_, values) in &mut collisions {
+            if values.len()>0 { // we have a collision
+                let mut splits = Vec::new();
+                for (path, _ctrl_id, _id, _out) in values.iter_mut() {
+                    // we have to find the shortest unique path combo
+                    let item: Vec<String> = path.split("/").map( | v | v.to_string()).collect();
+                    splits.push(item);
+                }
+                // ok now we walk over all until all of them are different
+                let mut max_equal = 0;
+                for i in 0..splits.len() - 1 {
+                    // lets compare 2 and find when they are different
+                    // lets iterate from the end of
+                    let a = &splits[i];
+                    let b = &splits[i + 1];
+                    // lets pair iterate from the end both a and b
+                    for i in 0..a.len().min(b.len()) {
+                        if a[a.len() - i - 1] != b[b.len() - i - 1] {
+                            if i > max_equal{
+                                max_equal = i;
+                            }
+                        }
+                    }
+                    
+                }
+                println!("MAX {}", max_equal);
+                break;
+            }
+        }
+        // run again, using collision titles
+    }
+    
     pub fn highest_file_editor_id(&self) -> u64 {
         let mut max_id = 0;
         for id in &self.file_editors.element_list {
@@ -290,7 +352,7 @@ impl AppWindow {
             title: path_file_name(&path),
             item: Panel::FileEditor {
                 path: path.to_string(),
-                scroll_pos:Vec2::zero(),
+                scroll_pos: Vec2::zero(),
                 editor_id: self.highest_file_editor_id() + 1
             }
         }
@@ -300,13 +362,13 @@ impl AppWindow {
         let mut target_ctrl_id = None;
         let dock_items = &mut state.windows[window_index].dock_items;
         let mut dock_walker = self.dock.walker(dock_items);
-        // first find existing editor, or 
+        // first find existing editor, or
         while let Some((ctrl_id, dock_item)) = dock_walker.walk_dock_item() {
             match dock_item {
-                DockItem::TabControl {current, previous:_, tabs} => {
+                DockItem::TabControl {current, tabs, ..} => {
                     for (id, tab) in tabs.iter().enumerate() {
                         match &tab.item {
-                            Panel::FileEditor {path, scroll_pos:_, editor_id} => {
+                            Panel::FileEditor {path, scroll_pos: _, editor_id} => {
                                 if *path == file_path {
                                     *current = id;
                                     if let Some(file_editor) = &mut self.file_editors.get(*editor_id) {
@@ -326,13 +388,13 @@ impl AppWindow {
                 _ => ()
             }
         }
-        if let Some(target_ctrl_id) = target_ctrl_id{ // open a new one
+        if let Some(target_ctrl_id) = target_ctrl_id { // open a new one
             let new_tab = self.new_file_editor_tab(file_path);
             let dock_items = &mut state.windows[window_index].dock_items;
             let mut dock_walker = self.dock.walker(dock_items);
             while let Some((ctrl_id, dock_item)) = dock_walker.walk_dock_item() {
-                if ctrl_id == target_ctrl_id { 
-                    if let DockItem::TabControl {current, previous:_, tabs} = dock_item {
+                if ctrl_id == target_ctrl_id {
+                    if let DockItem::TabControl {current, tabs, ..} = dock_item {
                         tabs.insert(*current + 1, new_tab);
                         *current = *current + 1;
                         cx.redraw_child_area(Area::All);
