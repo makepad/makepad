@@ -21,7 +21,7 @@ pub struct App {
 impl App {
     
     pub fn proto(cx: &mut Cx) -> Self {
-        let default_opt = StyleOptions{scale:1.0, dark:true};
+        let default_opt = StyleOptions {scale: 1.0, dark: true};
         set_widget_style(cx, &default_opt);
         set_makepad_style(cx, &default_opt);
         let ms = cx.new_signal();
@@ -47,7 +47,7 @@ impl App {
                     Menu::item("Close Editor", "w", false, ms, 2),
                     Menu::item("Remove Folder from Workspace", "", false, ms, 2),
                     Menu::item("Close Window", "W", false, ms, 2),
-                ]),                 
+                ]),
                 Menu::sub("Edit", "e", vec![
                     Menu::item("Undo", "z", false, ms, 2),
                     Menu::item("Redo", "Z", false, ms, 2),
@@ -83,10 +83,10 @@ impl App {
                     Menu::item("Bring All to Front", "", false, ms, 2),
                 ]),
                 Menu::sub("Help", "h", vec![
-                    Menu::item("About Makepad", "",false, ms, 2),
+                    Menu::item("About Makepad", "", false, ms, 2),
                 ])
             ]),
-            menu_signal:ms,
+            menu_signal: ms,
             app_window_template: AppWindow::proto(cx),
             app_window_state_template: AppWindowState {
                 open_folders: Vec::new(),
@@ -166,7 +166,7 @@ impl App {
         cx.redraw_child_area(Area::All);
     }
     
-    pub fn reload_style(&mut self, cx: &mut Cx){
+    pub fn reload_style(&mut self, cx: &mut Cx) {
         set_widget_style(cx, &self.storage.settings.style_options);
         set_makepad_style(cx, &self.storage.settings.style_options);
     }
@@ -183,27 +183,27 @@ impl App {
                 KeyCode::KeyR => if ke.modifiers.logo || ke.modifiers.control {
                     self.storage.reload_builders();
                 },
-                KeyCode::Key0=>if ke.modifiers.logo || ke.modifiers.control {
+                KeyCode::Key0 => if ke.modifiers.logo || ke.modifiers.control {
                     self.storage.settings.style_options.scale = 1.0;
                     self.reload_style(cx);
                     cx.reset_font_atlas_and_redraw();
                     self.storage.save_settings(cx);
                 },
-                KeyCode::Equals=>if ke.modifiers.logo || ke.modifiers.control {
-                    let scale = self.storage.settings.style_options.scale *1.1;
+                KeyCode::Equals => if ke.modifiers.logo || ke.modifiers.control {
+                    let scale = self.storage.settings.style_options.scale * 1.1;
                     self.storage.settings.style_options.scale = scale.min(3.0).max(0.3);
                     self.reload_style(cx);
                     cx.reset_font_atlas_and_redraw();
                     self.storage.save_settings(cx);
                 },
-                KeyCode::Minus=>if ke.modifiers.logo || ke.modifiers.control {
-                    let scale = self.storage.settings.style_options.scale /1.1;
+                KeyCode::Minus => if ke.modifiers.logo || ke.modifiers.control {
+                    let scale = self.storage.settings.style_options.scale / 1.1;
                     self.storage.settings.style_options.scale = scale.min(3.0).max(0.3);
                     self.reload_style(cx);
                     cx.reset_font_atlas_and_redraw();
                     self.storage.save_settings(cx);
                 },
-                _ => () 
+                _ => ()
             },
             Event::Signal(se) => {
                 // process network messages for hub_ui
@@ -219,16 +219,16 @@ impl App {
                     }
                 }
                 if self.storage.settings_changed.is_signal(se) {
-                    if self.storage.settings_old.builders != self.storage.settings.builders{
+                    if self.storage.settings_old.builders != self.storage.settings.builders {
                         self.storage.reload_builders();
                     }
-                    if self.storage.settings_old.style_options != self.storage.settings.style_options{
+                    if self.storage.settings_old.style_options != self.storage.settings.style_options {
                         self.reload_style(cx);
                         cx.reset_font_atlas_and_redraw();
                     }
-                    if self.storage.settings_old.builds != self.storage.settings.builds{
+                    if self.storage.settings_old.builds != self.storage.settings.builds {
                         self.build_manager.restart_build(cx, &mut self.storage);
-                    }                    
+                    }
                 }
             },
             Event::FileRead(fr) => {
@@ -291,6 +291,9 @@ impl App {
                     else { // load default window
                         self.default_layout(cx);
                     }
+                    for (window_index, window) in self.windows.iter_mut().enumerate() {
+                        window.ensure_unique_tab_title_for_file_editors(window_index, &mut self.state);
+                    }
                 }
                 else if let Some(utf8_data) = self.storage.app_settings_file_read.resolve_utf8(fr) {
                     if let Ok(utf8_data) = utf8_data {
@@ -307,14 +310,14 @@ impl App {
                     for (_path, atb) in &mut self.storage.text_buffers {
                         if let Some(utf8_data) = atb.file_read.resolve_utf8(fr) {
                             if let Ok(utf8_data) = utf8_data {
-                                atb.text_buffer.load_from_utf8( utf8_data);
+                                atb.text_buffer.load_from_utf8(utf8_data);
                                 atb.text_buffer.send_textbuffer_loaded_signal(cx);
                                 break;
                             }
                         }
                     }
                 }
-            },
+            }, 
             
             _ => ()
         }
