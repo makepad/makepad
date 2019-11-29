@@ -38,10 +38,10 @@ impl CodeIcon {
     
     pub fn walk()->WalkId{uid!()}
     
-    pub fn style(cx:&mut Cx, _opt:&StyleOptions){
+    pub fn style(cx:&mut Cx, opt:&StyleOptions){
         Self::walk().set(cx, Walk{
-            width: Width::Fix(14.0),
-            height: Height::Fix(14.0),
+            width: Width::Fix(14.0*opt.scale),
+            height: Height::Fix(14.0*opt.scale),
             margin: Margin {l: 0., t: 0.5, r: 4., b: 0.},
         })
     }

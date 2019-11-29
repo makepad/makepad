@@ -70,7 +70,7 @@ impl BuildManager {
                 }
                 
                 // search for insert point
-                let mut inserted = false;
+                let mut inserted = None;
                 if messages.cursors.len()>0 {
                     for i in (0..messages.cursors.len()).rev() {
                         if let Some((head, tail)) = loc_message.range {
@@ -80,13 +80,13 @@ impl BuildManager {
                                     tail: tail,
                                     max: 0
                                 });
-                                inserted = true;
+                                inserted = Some(i);
                                 break;
                             }
                         }
                     }
                 }
-                if !inserted {
+                if inserted.is_none() {
                     if let Some((head, tail)) = loc_message.range {
                         messages.cursors.push(TextCursor {
                             head: head,
@@ -95,8 +95,7 @@ impl BuildManager {
                         })
                     }
                 }
-                
-                text_buffer.messages.bodies.push(TextBufferMessage {
+                let msg = TextBufferMessage {
                     body: loc_message.body.clone(),
                     level: match dm {
                         HubLogItem::LocPanic(_) => TextBufferMessageLevel::Log,
@@ -107,7 +106,13 @@ impl BuildManager {
                         HubLogItem::Warning(_) => TextBufferMessageLevel::Warning,
                         HubLogItem::Message(_) => TextBufferMessageLevel::Log,
                     }
-                });
+                };
+                if let Some(pos) = inserted{
+                    text_buffer.messages.bodies.insert(pos, msg);
+                }
+                else{
+                    text_buffer.messages.bodies.push(msg);
+                }
             }
             else {
                 break

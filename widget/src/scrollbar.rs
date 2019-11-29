@@ -65,9 +65,14 @@ impl ScrollBar {
         }
     }
 
+    pub fn bar_size()->FloatId{uid!()}
     pub fn instance_is_vertical()->InstanceFloat{uid!()}
     pub fn instance_norm_handle()->InstanceFloat{uid!()}
     pub fn instance_norm_scroll()->InstanceFloat{uid!()}
+
+    pub fn style(cx:&mut Cx, opt:&StyleOptions){
+        Self::bar_size().set(cx, 12.*opt.scale.powf(0.5));
+    }
 
     pub fn get_over_anim(cx:&Cx)->Anim{
         Anim::new(Play::Cut {duration: 0.05}, vec![
@@ -373,7 +378,7 @@ impl ScrollBar {
         self._sb_area = Area::Empty;
         self._view_area = view_area;
         self.axis = axis;
-        
+        self.bar_size = Self::bar_size().get(cx);
         match self.axis {
             Axis::Horizontal => {
                 self._visible = view_total.x > view_rect.w + 0.1;
