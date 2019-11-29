@@ -13,7 +13,7 @@ impl HomePage {
         Self {
             view: ScrollView::proto(cx),
             text: Text::proto(cx),
-            example_texts: ElementsCounted::new(
+            example_texts: ElementsCounted::new(  
                 TextInput::proto(cx, TextInputOptions{
                     multiline:true,
                     read_only:false,
