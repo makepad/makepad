@@ -27,10 +27,12 @@ pub struct TextEditor {
     pub open_font_scale: f32,
     pub folded_font_scale: f32,
     pub line_number_width: f32,
+    pub line_number_click_margin: f32,
     pub draw_line_numbers: bool,
     pub top_padding: f32,
     //pub colors: CodeEditorColors,
     pub cursor_blink_speed: f64,
+    pub _undo_id: u64,
     pub highlight_area_on: bool,
     
     pub mark_unmatched_parens: bool,
@@ -197,6 +199,7 @@ impl TextEditor {
             open_font_scale: 1.0,
             folded_font_scale: 0.07,
             line_number_width: 45.,
+            line_number_click_margin: 10.,
             draw_line_numbers: true,
             cursor_blink_speed: 0.5,
             top_padding: 27.,
@@ -213,6 +216,7 @@ impl TextEditor {
             //_line_was_visible: false,
             _scroll_pos: Vec2::zero(),
             _visible_lines: 0,
+            _undo_id: 0,
             
             
             _line_geometry: Vec::new(),
@@ -487,10 +491,11 @@ impl TextEditor {
         cx.set_down_mouse_cursor(MouseCursor::Text);
         // give us the focus
         self.set_key_focus(cx);
+                self._undo_id += 1;
         
         let offset;
         //let scroll_pos = self._bg_area.get_scroll_pos(cx);
-        if fe.rel.x < self.line_number_width {
+        if fe.rel.x < self.line_number_width - self.line_number_click_margin {
             offset = self.compute_offset_from_ypos(cx, fe.abs.y, text_buffer, false);
             let range = text_buffer.get_nearest_line_range(offset);
             self.cursors.set_last_clamp_range(range);
@@ -614,6 +619,7 @@ impl TextEditor {
                     else {
                         self.cursors.move_up(1, ke.modifiers.shift, text_buffer);
                     }
+                    self._undo_id += 1;
                     true
                 }
             },
@@ -630,6 +636,7 @@ impl TextEditor {
                     else {
                         self.cursors.move_down(1, ke.modifiers.shift, text_buffer);
                     }
+                self._undo_id += 1;
                     true
                 }
             },
@@ -640,6 +647,7 @@ impl TextEditor {
                 else {
                     self.cursors.move_left(1, ke.modifiers.shift, text_buffer);
                 }
+                self._undo_id += 1;
                 true
             },
             KeyCode::ArrowRight => {
@@ -649,28 +657,32 @@ impl TextEditor {
                 else {
                     self.cursors.move_right(1, ke.modifiers.shift, text_buffer);
                 }
+                self._undo_id += 1;
                 true
             },
             KeyCode::PageUp => {
-                
                 self.cursors.move_up(self._visible_lines.max(5) - 4, ke.modifiers.shift, text_buffer);
+                self._undo_id += 1;
                 true
             },
             KeyCode::PageDown => {
                 self.cursors.move_down(self._visible_lines.max(5) - 4, ke.modifiers.shift, text_buffer);
+                self._undo_id += 1;
                 true
             },
             KeyCode::Home => {
                 self.cursors.move_home(ke.modifiers.shift, text_buffer);
+                self._undo_id += 1;
                 true
             },
             KeyCode::End => {
                 self.cursors.move_end(ke.modifiers.shift, text_buffer);
+                self._undo_id += 1;
                 true
             },
             KeyCode::Backspace => {
                 if !self.read_only {
-                    self.cursors.backspace(text_buffer);
+                    self.cursors.backspace(text_buffer, self._undo_id);
                     true
                 }
                 else {
@@ -845,6 +857,7 @@ impl TextEditor {
                 }
                 // update the cursor uniform to blink it.
                 self._cursor_blink_flipflop = 1.0 - self._cursor_blink_flipflop;
+                self._undo_id +=1;
                 self._highlight_visibility = 1.0;
                 self._cursor_area.write_uniform_float(cx, Self::uniform_cursor_blink(), self._cursor_blink_flipflop);
                 if self.highlight_area_on {
@@ -1214,7 +1227,7 @@ impl TextEditor {
                 self.line_number_text.color = self.colors.line_number_normal;
             }
             let chunk_width = self._monospace_size.x * 5.0;
-            self.line_number_text.add_text(cx, origin.x + (self.line_number_width - chunk_width - 10.), origin.y + line_geom.walk.y, 0, self._line_number_inst.as_mut().unwrap(), chunk, | _, _, _, _ | {0.});
+            self.line_number_text.add_text(cx, origin.x + (self.line_number_width - chunk_width - self.line_number_click_margin), origin.y + line_geom.walk.y, 0, self._line_number_inst.as_mut().unwrap(), chunk, | _, _, _, _ | {0.});
         }
         
         cx.turtle_new_line_min_height(self._monospace_size.y);

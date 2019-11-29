@@ -326,6 +326,7 @@ impl AppWindow {
                             if i > max_equal {
                                 max_equal = i;
                             }
+                            break;
                         }
                     }
                 }
