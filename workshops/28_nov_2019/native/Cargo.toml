@@ -1,8 +1,0 @@
-[package]
-name = "native"
-version = "0.1.0"
-authors = ["Eddy Bruel <ejpbruel@gmail.com>"]
-edition = "2018"
-
-[dependencies]
-wasm = { path = "../wasm" }
