@@ -19,7 +19,7 @@ pub use crate::elements::*;
 pub use crate::animator::*;
 pub use crate::area::*;
 pub use crate::menu::*;
-pub use crate::theming::*;
+pub use crate::styling::*;
 
 #[cfg(all(not(feature = "ipc"), target_os = "linux"))]
 pub use crate::cx_linux::*;
@@ -148,17 +148,26 @@ pub struct Cx {
     pub _frame_callbacks: Vec<Area>,
 
     pub signals: Vec<(Signal, usize)>,
-
-    pub theme_colors: HashMap<(ColorId,ClassId), Color>,
-    pub theme_text_styles: HashMap<(TextStyleId,ClassId), TextStyle>,
-    pub theme_layouts: HashMap<(LayoutId,ClassId), Layout>,
-    pub theme_walks: HashMap<(WalkId,ClassId), Walk>, 
-    pub theme_anims: HashMap<(AnimId,ClassId), Anim>, 
-    pub theme_shaders: HashMap<(ShaderId,ClassId), Shader>,
+    pub style_base: CxStyle,
+    pub styles: Vec<CxStyle>,
+    pub style_map: HashMap<StyleId, usize>,
+    pub style_stack: Vec<usize>,
+    
     pub panic_now: bool,
     pub panic_redraw: bool,
     
     pub platform: CxPlatform,
+}
+
+#[derive(Default)]
+pub struct CxStyle{
+    pub colors: HashMap<ColorId, Color>,
+    pub text_styles: HashMap<TextStyleId, TextStyle>,
+    pub layouts: HashMap<LayoutId, Layout>,
+    pub walks: HashMap<WalkId, Walk>, 
+    pub anims: HashMap<AnimId, Anim>, 
+    pub shaders: HashMap<ShaderId, Shader>,
+    pub floats: HashMap<FloatId, f32>,
 }
 
 pub const NUM_FINGERS: usize = 10;
@@ -246,12 +255,10 @@ impl Default for Cx {
             finger_over_last_area: Area::Empty,
             _finger_over_last_area: Area::Empty,
 
-            theme_colors: HashMap::new(),
-            theme_text_styles: HashMap::new(),
-            theme_layouts: HashMap::new(),
-            theme_walks: HashMap::new(),
-            theme_anims: HashMap::new(),
-            theme_shaders: HashMap::new(),
+            style_base: CxStyle::default(),
+            styles: Vec::new(),
+            style_map: HashMap::new(),
+            style_stack: Vec::new(),
 
             playing_anim_areas: Vec::new(),
             ended_anim_areas: Vec::new(),
@@ -270,12 +277,9 @@ impl Default for Cx {
     }
 }
 
-#[derive(Default, PartialEq, Copy, Clone, Debug)]
-pub struct CxId(usize);
 
 impl Cx {
     
-        
     pub fn add_shader(&mut self, sg: ShaderGen, name: &str) -> Shader {
         let inst_id = self.shader_instance_id;
         self.shader_instance_id += 1;
@@ -712,7 +716,9 @@ impl Cx {
     }
 
     pub fn send_signal(&mut self, signal: Signal, message: usize) {
-        self.signals.push((signal, message));
+        if signal.signal_id != 0{
+            self.signals.push((signal, message));
+        }
     }
 
     pub fn call_signals<F>(&mut self, mut event_handler: F)

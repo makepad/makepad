@@ -2,7 +2,7 @@ use render::*;
 use crate::buttonlogic::*;
 use crate::desktopbutton::*;
 use crate::windowmenu::*;
-use crate::widgettheme::*;
+use crate::widgetstyle::*;
 
 #[derive(Clone)]
 pub struct DesktopWindow {
@@ -69,8 +69,8 @@ impl DesktopWindow {
     
     pub fn text_style_window_caption() ->TextStyleId{uid!()}
     
-    pub fn theme(cx:&mut Cx){
-        Self::text_style_window_caption().set_base(cx, Theme::text_style_normal().base(cx));
+    pub fn style(cx:&mut Cx, _opt:&StyleOptions){
+        Self::text_style_window_caption().set(cx, Theme::text_style_unscaled().get(cx));
     }
     
     pub fn handle_desktop_window(&mut self, cx: &mut Cx, event: &mut Event) -> DesktopWindowEvent {
@@ -162,8 +162,8 @@ impl DesktopWindow {
             walk:Walk::wh(Width::Fill, Height::Compute),
             ..Layout::default()
         }).is_ok() {
-            self.caption_text.text_style = Self::text_style_window_caption().base(cx);
-            self.caption_bg.color = Theme::color_bg_selected_over().base(cx);//cx.colors[self.caption_bg_color];
+            self.caption_text.text_style = Self::text_style_window_caption().get(cx);
+            self.caption_bg.color = Theme::color_bg_selected_over().get(cx);//cx.colors[self.caption_bg_color];
             // alright here we draw our platform buttons.
             match cx.platform_type {
                 PlatformType::Linux | PlatformType::Windows => {

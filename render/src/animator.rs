@@ -1,14 +1,14 @@
 use crate::cx::*;
 use std::f64::consts::PI;
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct AnimArea {
     pub area: Area,
     pub start_time: f64,
     pub total_time: f64
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct Anim {
     pub mode: Play,
     pub tracks: Vec<Track>
@@ -475,7 +475,7 @@ impl Animator {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub enum Ease {
     Lin,
     InQuad,
@@ -859,7 +859,7 @@ impl Ease {
 }
 
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct FloatTrack {
     pub ident: InstanceFloat,
     pub ease: Ease,
@@ -867,7 +867,7 @@ pub struct FloatTrack {
     pub track: Vec<(f64, f32)>
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct Vec2Track {
     pub ident: InstanceVec2,
     pub ease: Ease,
@@ -875,7 +875,7 @@ pub struct Vec2Track {
     pub track: Vec<(f64, Vec2)>
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct Vec3Track {
     pub ident: InstanceVec3,
     pub ease: Ease,
@@ -883,7 +883,7 @@ pub struct Vec3Track {
     pub track: Vec<(f64, Vec3)>
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct Vec4Track {
     pub ident: InstanceVec4,
     pub ease: Ease,
@@ -891,7 +891,7 @@ pub struct Vec4Track {
     pub track: Vec<(f64, Vec4)>
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct ColorTrack {
     pub ident: InstanceColor,
     pub ease: Ease,
@@ -899,7 +899,7 @@ pub struct ColorTrack {
     pub track: Vec<(f64, Color)>
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub enum Track {
     Float(FloatTrack),
     Vec2(Vec2Track),
@@ -1173,7 +1173,7 @@ impl Anim {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub enum Play {
     Chain {duration: f64},
     Cut {duration: f64},

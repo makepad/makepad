@@ -1,6 +1,6 @@
 //use syn::Type;
 use render::*;
-use editor::*;
+use widget::*;
 
 #[derive(Clone)]
 pub struct FileEditorTemplates {
@@ -25,10 +25,10 @@ pub enum FileEditorEvent {
     Change
 }
 
-fn code_editor_to_file_editor(event: CodeEditorEvent)->FileEditorEvent {
+fn code_editor_to_file_editor(event: TextEditorEvent)->FileEditorEvent {
     match event {
-        CodeEditorEvent::Change => FileEditorEvent::Change,
-        CodeEditorEvent::LagChange => FileEditorEvent::LagChange,
+        TextEditorEvent::Change => FileEditorEvent::Change,
+        TextEditorEvent::LagChange => FileEditorEvent::LagChange,
         _ => FileEditorEvent::None
     }
 }
@@ -44,25 +44,25 @@ impl FileEditor {
     
     pub fn set_key_focus(&mut self, cx: &mut Cx) {
         match self {
-            FileEditor::Rust(re) => re.code_editor.set_key_focus(cx),
-            FileEditor::JS(re) => re.code_editor.set_key_focus(cx),
-            FileEditor::Plain(re) => re.code_editor.set_key_focus(cx),
+            FileEditor::Rust(re) => re.text_editor.set_key_focus(cx),
+            FileEditor::JS(re) => re.text_editor.set_key_focus(cx),
+            FileEditor::Plain(re) => re.text_editor.set_key_focus(cx),
         }
     }
 
     pub fn get_scroll_pos(&mut self, cx: &mut Cx)->Vec2{
         match self {
-            FileEditor::Rust(re) => re.code_editor.view.get_scroll_pos(cx),
-            FileEditor::JS(re) => re.code_editor.view.get_scroll_pos(cx),
-            FileEditor::Plain(re) => re.code_editor.view.get_scroll_pos(cx),
+            FileEditor::Rust(re) => re.text_editor.view.get_scroll_pos(cx),
+            FileEditor::JS(re) => re.text_editor.view.get_scroll_pos(cx),
+            FileEditor::Plain(re) => re.text_editor.view.get_scroll_pos(cx),
         }
     }
     
     pub fn set_scroll_pos_on_load(&mut self, pos:Vec2){
         match self {
-            FileEditor::Rust(re) => re.code_editor._scroll_pos_on_load = Some(pos),
-            FileEditor::JS(re) => re.code_editor._scroll_pos_on_load = Some(pos),
-            FileEditor::Plain(re) => re.code_editor._scroll_pos_on_load = Some(pos),
+            FileEditor::Rust(re) => re.text_editor._scroll_pos_on_load = Some(pos),
+            FileEditor::JS(re) => re.text_editor._scroll_pos_on_load = Some(pos),
+            FileEditor::Plain(re) => re.text_editor._scroll_pos_on_load = Some(pos),
         }
     }
 

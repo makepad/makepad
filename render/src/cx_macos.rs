@@ -270,7 +270,9 @@ impl Cx {
     }
     
     pub fn post_signal(signal: Signal, value: usize) {
-        CocoaApp::post_signal(signal.signal_id, value);
+        if signal.signal_id != 0{
+            CocoaApp::post_signal(signal.signal_id, value);
+        }
     }
     
     pub fn update_menu(&mut self, menu:&Menu){

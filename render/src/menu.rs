@@ -1,6 +1,6 @@
 use crate::cx::*;
 
-#[derive(PartialEq, Debug, Clone)]
+#[derive(PartialEq, Clone)]
 pub enum Menu {
     Main {items:Vec<Menu>},
     Item {name: String, key: String, signal: Signal, value:usize, enabled:bool},

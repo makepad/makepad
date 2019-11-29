@@ -37,7 +37,6 @@ impl Default for TextStyle {
 
 #[derive(Clone)]
 pub struct Text {
-    pub class: ClassId,
     pub text_style: TextStyle,
     pub shader: Shader,
     pub color: Color,
@@ -52,7 +51,6 @@ pub struct Text {
 impl Text {
     pub fn proto(cx: &mut Cx) -> Self {
         Self {
-            class: ClassId::base(),
             text_style: TextStyle::default(),
             shader: cx.add_shader(Self::def_text_shader(), "TextAtlas"),
             do_h_scroll: true,
@@ -87,10 +85,8 @@ impl Text {
     pub fn instance_marker() -> InstanceFloat {uid!()}
     pub fn instance_char_offset() -> InstanceFloat {uid!()}
     
-    pub fn uniform_zbias() -> UniformFloat {uid!()}
     pub fn uniform_brightness() -> UniformFloat {uid!()}
     pub fn uniform_curve() -> UniformFloat {uid!()}
-    pub fn uniform_view_do_scroll() -> UniformVec2 {uid!()}
     
     pub fn def_text_shader() -> ShaderGen {
         // lets add the draw shader lib
@@ -118,16 +114,14 @@ impl Text {
             let tex_coord2: vec2<Varying>;
             let tex_coord3: vec2<Varying>;
             let clipped: vec2<Varying>;
-            let rect: vec4<Varying>;
+            //let rect: vec4<Varying>;
             
-            let zbias: Self::uniform_zbias();
             let brightness: Self::uniform_brightness();
             let curve: Self::uniform_curve();
-            let view_do_scroll: Self::uniform_view_do_scroll();
             
             fn pixel() -> vec4 {
-                let dx = dfdx(vec2(tex_coord1.x * 4096.0, 0.)).x;
-                let dp = 1.0 / 4096.0;
+                let dx = dfdx(vec2(tex_coord1.x * 2048.0, 0.)).x;
+                let dp = 1.0 / 2048.0;
                 
                 // basic hardcoded mipmapping so it stops 'swimming' in VR
                 let s = 1.0;
@@ -151,24 +145,23 @@ impl Text {
                 else {
                     s = sample2d(texturez, tex_coord1.xy).x;
                 }
+                
                 s = pow(s, curve);
                 return vec4(s * color.rgb * brightness * color.a, s * color.a); // + color("#a");
             }
             
             fn vertex() -> vec4 {
-                let shift: vec2 = -view_scroll * view_do_scroll; // + vec2(x, y);
-                
                 let min_pos = vec2(x, y);
                 let max_pos = vec2(x + w, y - h);
                 
                 clipped = clamp(
-                    mix(min_pos, max_pos, geom) + shift,
-                    view_clip.xy,
-                    view_clip.zw
+                    mix(min_pos, max_pos, geom) - draw_scroll,
+                    draw_clip.xy,
+                    draw_clip.zw
                 );
                 
-                let normalized: vec2 = (clipped - min_pos - shift) / (max_pos - min_pos);
-                rect = vec4(min_pos.x, min_pos.y, max_pos.x, max_pos.y) + shift.xyxy;
+                let normalized: vec2 = (clipped - min_pos + draw_scroll) / vec2(w,-h);
+                //rect = vec4(min_pos.x, min_pos.y, max_pos.x, max_pos.y) - draw_scroll.xyxy;
                 
                 tex_coord1 = mix(
                     font_tc.xy,
@@ -188,7 +181,7 @@ impl Text {
                     normalized.xy
                 );
                 
-                return camera_projection * (camera_view * (view_transform * vec4(clipped.x, clipped.y, z + zbias, 1.)));
+                return camera_projection * (camera_view * (view_transform * vec4(clipped.x, clipped.y, z + draw_zbias, 1.)));
             }
         }))
     }
@@ -208,14 +201,8 @@ impl Text {
             //tex_size
             //aligned.inst.push_uniform_vec2(cx, self.font.texture_size);
             
-            aligned.inst.push_uniform_float(cx, 0.);
             aligned.inst.push_uniform_float(cx, brightness);
             aligned.inst.push_uniform_float(cx, curve);
-            aligned.inst.push_uniform_vec2f(
-                cx,
-                if self.do_h_scroll {1.0}else {0.0},
-                if self.do_v_scroll {1.0}else {0.0}
-            );
             //aligned.inst.push_uniform_float(cx, if self.do_subpixel_aa{1.0}else{0.0});
             //list_clip
             //area.push_uniform_vec4f(cx, -50000.0,-50000.0,50000.0,50000.0);
@@ -279,7 +266,7 @@ impl Text {
             let scaled_min_pos_y = geom_y - font_size_logical * self.font_scale * glyph.bounds.p_min.y + text_style.font_size * self.font_scale * text_style.top_drop - subpixel_y_fract;
             
             // only use a subpixel id for really small fonts
-            let subpixel_id = if text_style.font_size>12.0 {
+            let subpixel_id = if text_style.font_size>32.0 {
                 0
             }
             else { // subtle 64 index subpixel id
@@ -288,6 +275,7 @@ impl Text {
             };
             
             let tc = if let Some(tc) = &atlas_page.atlas_glyphs[glyph_id][subpixel_id] {
+                //println!("{} {} {} {}", tc.tx1,tc.tx2,tc.ty1,tc.ty2);
                 tc
             }
             else {
@@ -457,7 +445,7 @@ impl Text {
                         if x > spos.x + w * 0.5 || y > spos.y {
                             let prev_index = if index == 0 {0}else {index - 1};
                             let prev_x = read.buffer[read.offset + x_o + prev_index * read.slots];
-                            let prev_w = read.buffer[read.offset + w_o + index * read.slots];
+                            let prev_w = read.buffer[read.offset + w_o + prev_index * read.slots];
                             if index < read.count - 1 && prev_x > spos.x + prev_w { // fix newline jump-back
                                 return read.buffer[read.offset + char_offset_o + index * read.slots] as usize;
                             }

@@ -4,7 +4,7 @@ use std::{ptr};
 use winapi::um::{libloaderapi, winuser, winbase, dwmapi};
 use winapi::shared::minwindef::{LPARAM, LRESULT, DWORD, WPARAM, BOOL, UINT, FALSE};
 use winapi::shared::ntdef::{NULL};
-use winapi::um::winnt::{LPCWSTR, HRESULT, LPCSTR};
+use winapi::um::winnt::{LPCWSTR, HRESULT, LPCSTR}; 
 use std::ffi::OsStr;
 use std::os::windows::ffi::OsStrExt;
 use std::mem;
@@ -25,7 +25,7 @@ pub struct Win32App {
     pub time_start: u64,
     pub event_callback: Option<*mut dyn FnMut(&mut Win32App, &mut Vec<Event>) -> bool>,
     pub event_recur_block: bool,
-    pub event_loop_running: bool,
+    pub event_loop_running: bool, 
     pub class_name_wstr: Vec<u16>,
     pub all_windows: Vec<HWND>,
     pub timers: Vec<Win32Timer>,
@@ -123,10 +123,12 @@ impl Win32App {
             );
             
             while self.event_loop_running {
-                let mut msg = mem::uninitialized();
-                
+                 
                 if self.loop_block {
-                    if winuser::GetMessageW(&mut msg, ptr::null_mut(), 0, 0) == 0 {
+                    let mut msg = std::mem::MaybeUninit::uninit();   
+                    let ret =  winuser::GetMessageW(msg.as_mut_ptr(), ptr::null_mut(), 0, 0);
+                    let msg = msg.assume_init();
+                    if ret == 0 {
                         // Only happens if the message is `WM_QUIT`.
                         debug_assert_eq!(msg.message, winuser::WM_QUIT);
                         self.event_loop_running = false;
@@ -138,7 +140,10 @@ impl Win32App {
                     }
                 }
                 else {
-                    if winuser::PeekMessageW(&mut msg, ptr::null_mut(), 0, 0, 1) == 0 {
+                    let mut msg = std::mem::MaybeUninit::uninit();   
+                    let ret = winuser::PeekMessageW(msg.as_mut_ptr(), ptr::null_mut(), 0, 0, 1);
+                    let msg = msg.assume_init();
+                    if ret == 0 {
                         self.do_callback(&mut vec![Event::Paint])
                     }
                     else {
@@ -552,7 +557,7 @@ impl Win32Window {
                         window_id: window.window_id,
                         scroll: Vec2 {
                             x: 0.0,
-                            y: delta
+                            y: -delta
                         },
                         abs: window.last_mouse_pos,
                         rel: window.last_mouse_pos,
@@ -844,7 +849,8 @@ impl Win32Window {
     
     pub fn get_is_maximized(&self) -> bool {
         unsafe {
-            let mut wp: winuser::WINDOWPLACEMENT = mem::uninitialized();
+            let wp:mem::MaybeUninit<winuser::WINDOWPLACEMENT> = mem::MaybeUninit::uninit();
+            let mut wp = wp.assume_init();
             wp.length = mem::size_of::<winuser::WINDOWPLACEMENT>() as u32;
             winuser::GetWindowPlacement(self.hwnd.unwrap(), &mut wp);
             if wp.showCmd as i32 == winuser::SW_MAXIMIZE {

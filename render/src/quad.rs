@@ -5,12 +5,12 @@ pub struct Quad {
     pub shader: Shader,
     pub do_h_scroll: bool,
     pub do_v_scroll: bool,
-    pub z:f32,
+    pub z: f32,
     pub color: Color
 }
 
 impl Quad {
-    pub fn proto_with_shader(cx: &mut Cx, shader:ShaderGen, name:&str) -> Self {
+    pub fn proto_with_shader(cx: &mut Cx, shader: ShaderGen, name: &str) -> Self {
         Self {
             shader: cx.add_shader(shader, name),
             ..Self::proto(cx)
@@ -20,21 +20,20 @@ impl Quad {
     pub fn proto(cx: &mut Cx) -> Self {
         Self {
             shader: cx.add_shader(Self::def_quad_shader(), "Quad"),
-            do_h_scroll:true,
-            do_v_scroll:true,
-            z:0.0,
+            do_h_scroll: true,
+            do_v_scroll: true,
+            z: 0.0,
             color: color("green")
         }
     }
     
-    pub fn instance_x()->InstanceFloat{uid!()}
-    pub fn instance_y()->InstanceFloat{uid!()}
-    pub fn instance_w()->InstanceFloat{uid!()}
-    pub fn instance_h()->InstanceFloat{uid!()}
-    pub fn instance_z()->InstanceFloat{uid!()}
-    pub fn instance_color()->InstanceColor{uid!()}
-    pub fn uniform_view_do_scroll()->UniformVec2{uid!()}
-    pub fn uniform_zbias()->UniformFloat{uid!()}
+    pub fn instance_x() -> InstanceFloat {uid!()}
+    pub fn instance_y() -> InstanceFloat {uid!()}
+    pub fn instance_w() -> InstanceFloat {uid!()}
+    pub fn instance_h() -> InstanceFloat {uid!()}
+    pub fn instance_z() -> InstanceFloat {uid!()}
+    pub fn instance_color() -> InstanceColor {uid!()}
+    pub fn uniform_view_do_scroll() -> UniformVec2 {uid!()}
     
     pub fn def_quad_shader() -> ShaderGen {
         // lets add the draw shader lib
@@ -51,24 +50,22 @@ impl Quad {
             let y: Self::instance_y();
             let w: Self::instance_w();
             let h: Self::instance_h();
-            let z: Self::instance_z(); 
+            let z: Self::instance_z();
             let color: Self::instance_color();
-
+            
             let view_do_scroll: Self::uniform_view_do_scroll();
-            let zbias: Self::uniform_zbias();
             //let dpi_dilate: float<Uniform>;
             
             fn vertex() -> vec4 {
                 // return vec4(geom.x-0.5, geom.y, 0., 1.);
-                let shift: vec2 = -view_scroll * view_do_scroll;
                 let clipped: vec2 = clamp(
-                    geom * vec2(w, h) + vec2(x, y) + shift,
-                    view_clip.xy,
-                    view_clip.zw
+                    geom * vec2(w, h) + vec2(x, y) - draw_scroll,
+                    draw_clip.xy,
+                    draw_clip.zw
                 );
-                pos = (clipped - shift - vec2(x, y)) / vec2(w, h);
+                pos = (clipped + draw_scroll - vec2(x, y)) / vec2(w, h);
                 // only pass the clipped position forward
-                return camera_projection*(camera_view*(view_transform*vec4(clipped.x, clipped.y, z+zbias, 1.)));
+                return camera_projection * (camera_view * (view_transform * vec4(clipped.x, clipped.y, z + draw_zbias, 1.)));
             }
             
             fn pixel() -> vec4 {
@@ -84,7 +81,7 @@ impl Quad {
         cx.begin_turtle(layout, area);
         inst
     }
-    
+
     pub fn end_quad(&mut self, cx: &mut Cx, inst: &InstanceArea) -> Area {
         // at this point, we should fill in any missing slots.
         
@@ -94,7 +91,20 @@ impl Quad {
         area
     }
     
-    pub fn draw_quad(&mut self, cx: &mut Cx, walk:Walk) -> InstanceArea {
+    pub fn begin_quad_fill(&mut self, cx: &mut Cx) -> InstanceArea {
+        let inst = self.draw_quad_rel(cx, Rect::zero());
+        inst
+    }
+
+    pub fn end_quad_fill(&mut self, cx: &mut Cx, inst: &InstanceArea) -> Area {
+        // at this point, we should fill in any missing slots.
+        let area:Area = inst.clone().into();
+        let pos = cx.get_turtle_origin();
+        area.set_rect(cx, &Rect {x: pos.x, y: pos.y, w: cx.get_width_total(), h: cx.get_height_total()});
+        area
+    }
+    
+    pub fn draw_quad(&mut self, cx: &mut Cx, walk: Walk) -> InstanceArea {
         let geom = cx.walk_turtle(walk);
         let inst = self.draw_quad_abs(cx, geom);
         cx.align_instance(inst);
@@ -116,7 +126,7 @@ impl Quad {
                 if self.do_h_scroll {1.0}else {0.0},
                 if self.do_v_scroll {1.0}else {0.0}
             );
-            inst.push_uniform_float(cx, 0.); 
+            inst.push_uniform_float(cx, 0.);
         }
         //println!("{:?} {}", area, cx.current_draw_list_id);
         let data = [
