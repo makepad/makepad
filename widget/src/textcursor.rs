@@ -642,7 +642,7 @@ impl TextCursorSet {
         }
     }
     
-    pub fn backspace(&mut self, text_buffer: &mut TextBuffer) {
+    pub fn backspace(&mut self, text_buffer: &mut TextBuffer, undo_id:u64) {
         let mut delta: isize = 0;
         // rolling delta to displace cursors
         let mut ops = Vec::new();
@@ -673,7 +673,7 @@ impl TextCursorSet {
         if ops.len()>0 {
             text_buffer.undo_stack.push(TextUndo {
                 ops: ops,
-                grouping: TextUndoGrouping::Backspace,
+                grouping: TextUndoGrouping::Backspace(undo_id),
                 cursors: cursors_clone
             })
         }
