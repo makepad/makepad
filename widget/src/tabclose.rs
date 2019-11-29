@@ -1,6 +1,6 @@
 use render::*;
 use crate::buttonlogic::*;
-use crate::widgettheme::*;
+use crate::widgetstyle::*;
 
 #[derive(Clone)]
 pub struct TabClose {
@@ -18,42 +18,48 @@ impl TabClose {
         }
     }
     
-    pub fn walk()->WalkId{uid!()}
-    pub fn instance_hover()->InstanceFloat{uid!()}
-    pub fn instance_down()->InstanceFloat{uid!()}
+    pub fn walk() -> WalkId {uid!()}
+    pub fn instance_hover() -> InstanceFloat {uid!()}
+    pub fn instance_down() -> InstanceFloat {uid!()}
     
-    pub fn theme(cx: &mut Cx){
-        Self::walk().set_base(cx, Walk {
-            width: Width::Fix(10.),
-            height: Height::Fix(10.),
+    pub fn style(cx: &mut Cx, opt: &StyleOptions) {
+        Self::walk().set(cx, Walk {
+            width: Width::Fix(10. * opt.scale),
+            height: Height::Fix(10. * opt.scale),
             margin: Margin {l: -4., t: 0., r: 4., b: 0.}
         });
     }
     
-    pub fn get_default_anim(cx:&Cx)->Anim{
+    pub fn get_default_anim(cx: &Cx) -> Anim {
         Anim::new(Play::Cut {duration: 0.2}, vec![
-            Track::color(Quad::instance_color(), Ease::Lin, vec![(1.0, Theme::color_text_deselected_focus().base(cx))]),
+            Track::color(Quad::instance_color(), Ease::Lin, vec![(1.0, Theme::color_text_deselected_focus().get(cx))]),
             Track::float(Self::instance_hover(), Ease::Lin, vec![(1.0, 0.)]),
             Track::float(Self::instance_down(), Ease::Lin, vec![(1.0, 0.)]),
         ])
     }
     
-    pub fn get_over_anim(cx:&Cx)->Anim{
+    pub fn get_over_anim(cx: &Cx) -> Anim {
         Anim::new(Play::Cut {duration: 0.2}, vec![
-            Track::color(Quad::instance_color(), Ease::Lin, vec![(0.0, Theme::color_text_selected_focus().base(cx)), (1.0, Theme::color_text_selected_focus().base(cx))]),
+            Track::color(Quad::instance_color(), Ease::Lin, vec![
+                (0.0, Theme::color_text_selected_focus().get(cx)),
+                (1.0, Theme::color_text_selected_focus().get(cx))
+            ]),
             Track::float(Self::instance_hover(), Ease::Lin, vec![(1.0, 1.0)]),
             Track::float(Self::instance_down(), Ease::Lin, vec![(1.0, 0.)]),
         ])
     }
     
-    pub fn get_down_anim(cx:&Cx)->Anim{
+    pub fn get_down_anim(cx: &Cx) -> Anim {
         Anim::new(Play::Cut {duration: 0.2}, vec![
-            Track::color(Quad::instance_color(), Ease::Lin, vec![(0.0, Theme::color_text_selected_focus().base(cx)), (1.0, Theme::color_text_selected_focus().base(cx))]),
+            Track::color(Quad::instance_color(), Ease::Lin, vec![
+                (0.0, Theme::color_text_selected_focus().get(cx)),
+                (1.0, Theme::color_text_selected_focus().get(cx))
+            ]),
             Track::float(Self::instance_hover(), Ease::Lin, vec![(1.0, 1.0)]),
             Track::float(Self::instance_down(), Ease::OutExp, vec![(0.0, 0.0), (1.0, 3.1415 * 0.5)]),
         ])
     }
-
+    
     pub fn def_bg_shader() -> ShaderGen {
         Quad::def_quad_shader().compose(shader_ast!({
             let hover: Self::instance_hover();
@@ -113,9 +119,9 @@ impl TabClose {
     }
     
     pub fn draw_tab_close(&mut self, cx: &mut Cx) {
-        self.animator.init(cx, |cx| Self::get_default_anim(cx));
+        self.animator.init(cx, | cx | Self::get_default_anim(cx));
         self.bg.color = self.animator.last_color(cx, Quad::instance_color());
-        let bg_inst = self.bg.draw_quad(cx, Self::walk().base(cx));
+        let bg_inst = self.bg.draw_quad(cx, Self::walk().get(cx));
         bg_inst.push_last_float(cx, &self.animator, Self::instance_hover());
         bg_inst.push_last_float(cx, &self.animator, Self::instance_down());
         self._bg_area = bg_inst.into();

@@ -74,7 +74,7 @@ impl Area{
         }
     }
     
-    pub fn get_scroll_pos(&self, cx:&Cx)->Vec2{
+    pub fn get_local_scroll_pos(&self, cx:&Cx)->Vec2{
         return match self{
             Area::Instance(inst)=>{
                 let cxview = &cx.views[inst.view_id];
@@ -93,7 +93,30 @@ impl Area{
         }
     }
 
-    pub fn get_rect(&self, cx:&Cx, no_scrolling:bool)->Rect{
+    pub fn get_scroll_pos(&self, cx:&Cx)->Vec2{
+        return match self{
+            Area::Instance(inst)=>{
+                let cxview = &cx.views[inst.view_id];
+                if cxview.redraw_id != inst.redraw_id {
+                    Vec2::zero()
+                }
+                else{
+                    let draw_call = &cxview.draw_calls[inst.draw_call_id];
+                    Vec2{
+                        x:draw_call.draw_uniforms.draw_scroll_x,
+                        y:draw_call.draw_uniforms.draw_scroll_y
+                    }
+                }
+            },
+            Area::View(view_area)=>{
+                let cxview = &cx.views[view_area.view_id];
+                cxview.parent_scroll
+            },
+            _=>Vec2::zero(),
+        }
+    }
+    // returns the final screen rect
+    pub fn get_rect(&self, cx:&Cx)->Rect{
 
         return match self{
             Area::Instance(inst)=>{
@@ -116,12 +139,7 @@ impl Area{
                             let w = draw_call.instance[inst.instance_offset + iw];
                             if let Some(ih) = sh.mapping.rect_instance_props.h{
                                 let h = draw_call.instance[inst.instance_offset + ih];
-                                if no_scrolling{
-                                    return Rect{x:x,y:y,w:w,h:h}
-                                }
-                                else{
-                                    return cxview.clip_and_scroll_rect(x,y,w,h);
-                                }
+                                return draw_call.clip_and_scroll_rect(x,y,w,h);
                             }
                         }
                     }
@@ -130,13 +148,18 @@ impl Area{
             },
             Area::View(view_area)=>{
                 let cxview = &cx.views[view_area.view_id];
-                cxview.rect.clone()
+                Rect{
+                    x:cxview.rect.x - cxview.parent_scroll.x,
+                    y:cxview.rect.y - cxview.parent_scroll.y,
+                    w:cxview.rect.w,
+                    h:cxview.rect.h
+                }
             },
             _=>Rect::zero(),
         }
     }
 
-    pub fn abs_to_rel(&self, cx:&Cx, abs:Vec2, no_scrolling:bool)->Vec2{
+    pub fn abs_to_rel(&self, cx:&Cx, abs:Vec2)->Vec2{
         return match self{
             Area::Instance(inst)=>{
                 if inst.instance_count == 0{
@@ -154,18 +177,9 @@ impl Area{
                     let x = draw_call.instance[inst.instance_offset + ix];
                     if let Some(iy) = sh.mapping.rect_instance_props.y{
                         let y = draw_call.instance[inst.instance_offset + iy];
-                        if no_scrolling{
-                            return Vec2{
-                                x:abs.x - x,
-                                y:abs.y - y
-                            }
-                        }
-                        else{
-                            let scroll = cxview.unsnapped_scroll;
-                            return Vec2{
-                                x:abs.x - x + scroll.x,
-                                y:abs.y - y + scroll.y
-                            }
+                        return Vec2{
+                            x:abs.x - x + draw_call.draw_uniforms.draw_scroll_x,
+                            y:abs.y - y + draw_call.draw_uniforms.draw_scroll_y
                         }
                     }
                 }
@@ -173,18 +187,9 @@ impl Area{
             },
             Area::View(view_area)=>{
                 let cxview = &cx.views[view_area.view_id];
-                if no_scrolling{
-                    return Vec2{
-                        x:abs.x - cxview.rect.x,
-                        y:abs.y - cxview.rect.y
-                    }
-                }
-                else{
-                    let scroll = cxview.unsnapped_scroll;
-                    return Vec2{
-                        x:abs.x - cxview.rect.x + scroll.x,
-                        y:abs.y - cxview.rect.y + scroll.y
-                    }
+                return Vec2{
+                    x:abs.x - cxview.rect.x + cxview.parent_scroll.x + cxview.unsnapped_scroll.x,
+                    y:abs.y - cxview.rect.y - cxview.parent_scroll.y + cxview.unsnapped_scroll.y
                 }
             },
             _=>abs,
@@ -625,6 +630,18 @@ impl InstanceArea{
         draw_call.instance.push(value.b);
         draw_call.instance.push(value.a);
     }
+
+    pub fn set_do_scroll(&self, cx:&mut Cx, hor:bool, ver:bool){
+        let cxview = &mut cx.views[self.view_id];
+        if cxview.redraw_id != self.redraw_id {
+            println!("need_uniforms_now called on invalid area pointer, use mark/sweep correctly!");
+            return
+        }
+        let draw_call = &mut cxview.draw_calls[self.draw_call_id];
+        draw_call.do_h_scroll = hor;
+        draw_call.do_v_scroll = ver;
+    }
+
 
     pub fn need_uniforms_now(&self, cx:&mut Cx)->bool{
         let cxview = &mut cx.views[self.view_id];

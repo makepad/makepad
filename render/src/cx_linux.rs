@@ -21,7 +21,7 @@ impl Cx{
         
         self.call_event_handler(&mut event_handler, &mut Event::Construct);
         
-        self.redraw_child_area(Area::All);
+        self.redraw_child_area(Area::All); 
         
         let mut passes_todo = Vec::new();
         
@@ -182,6 +182,7 @@ impl Cx{
                                                 dpi_factor,
                                                 opengl_window,
                                                 &opengl_cx,
+                                                false
                                             ){
                                                 // paint it again a few times, apparently this is necessary
                                                 self.passes[*pass_id].paint_dirty = true;

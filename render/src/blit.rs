@@ -34,7 +34,6 @@ impl Blit {
     pub fn instance_max_y()->InstanceFloat{uid!()}
     pub fn instance_z()->InstanceFloat{uid!()}
     pub fn instance_color()->InstanceColor{uid!()}
-    pub fn uniform_view_do_scroll()->UniformVec2{uid!()}
     pub fn uniform_alpha()->UniformFloat{uid!()}
     
     pub fn def_blit_shader() -> ShaderGen {
@@ -56,7 +55,6 @@ impl Blit {
             let max_x: Self::instance_max_x();
             let max_y: Self::instance_max_y();
             let tc: vec2<Varying>;
-            let view_do_scroll: Self::uniform_view_do_scroll();
             let alpha: Self::uniform_alpha();
             let texturez:texture2d<Texture>;
             let v_pixel: vec2<Varying>;
@@ -64,11 +62,11 @@ impl Blit {
             
             fn vertex() -> vec4 {
                 // return vec4(geom.x-0.5, geom.y, 0., 1.);
-                let shift: vec2 = -view_scroll * view_do_scroll;
+                let shift: vec2 = -draw_scroll;
                 let clipped: vec2 = clamp(
                     geom * vec2(w, h) + vec2(x, y) + shift,
-                    view_clip.xy,
-                    view_clip.zw
+                    draw_clip.xy,
+                    draw_clip.zw
                 ); 
                 let pos = (clipped - shift - vec2(x, y)) / vec2(w, h);
                 tc = mix(vec2(min_x,min_y), vec2(max_x,max_y), pos);

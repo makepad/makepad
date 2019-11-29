@@ -647,7 +647,7 @@
             //gl.OES_texture_float_linear = gl.getExtension('OES_texture_float_linear')
             //gl.OES_texture_half_float = gl.getExtension('OES_texture_half_float')
             //gl.OES_texture_float = gl.getExtension('OES_texture_float')
-            //gl.WEBGL_depth_texture = gl.getExtension("WEBGL_depth_texture") || gl.getExtension("WEBKIT_WEBGL_depth_texture") 
+            //gl.WEBGL_depth_texture = gl.getExtension("WEBGL_depth_texture") || gl.getExtension("WEBKIT_WEBGL_depth_texture")
             this.on_screen_resize()
         }
         
@@ -734,9 +734,10 @@
             this.shaders[ash.shader_id] = {
                 geom_attribs: this.get_attrib_locations(program, "geomattr", ash.geometry_slots),
                 inst_attribs: this.get_attrib_locations(program, "instattr", ash.instance_slots),
-                uniforms_cx: this.get_uniform_locations(program, ash.uniforms_cx),
-                uniforms_dr: this.get_uniform_locations(program, ash.uniforms_dr),
-                uniforms_dl: this.get_uniform_locations(program, ash.uniforms_dl),
+                pass_uniforms: this.get_uniform_locations(program, ash.pass_uniforms),
+                view_uniforms: this.get_uniform_locations(program, ash.view_uniforms),
+                draw_uniforms: this.get_uniform_locations(program, ash.draw_uniforms),
+                uniforms: this.get_uniform_locations(program, ash.uniforms),
                 texture_slots: this.get_uniform_locations(program, ash.texture_slots),
                 instance_slots: ash.instance_slots,
                 program: program,
@@ -879,7 +880,7 @@
                 this.to_wasm.finger_down(mouse_to_finger(e))
                 this.do_wasm_io();
             }
-
+            
             canvas.addEventListener('mousedown', this.mouse_down_handler)
             
             this.mouse_up_handler = e => {
@@ -888,7 +889,7 @@
                 this.to_wasm.finger_up(mouse_to_finger(e))
                 this.do_wasm_io();
             }
-
+            
             window.addEventListener('mouseup', this.mouse_up_handler)
             
             let mouse_move = e => {
@@ -956,7 +957,7 @@
             
             var last_wheel_time;
             var last_was_wheel;
-            this.mouse_wheel_handler =  e => {
+            this.mouse_wheel_handler = e => {
                 var finger = mouse_to_finger(e)
                 e.preventDefault()
                 let delta = e.timeStamp - last_wheel_time;
@@ -1100,7 +1101,7 @@
             ta.addEventListener('mousedown', this.mouse_down_handler);
             ta.addEventListener('mouseup', this.mouse_up_handler);
             ta.addEventListener('wheel', this.mouse_wheel_handler);
-            ta.addEventListener('contextmenu', e=>{
+            ta.addEventListener('contextmenu', e => {
                 e.preventDefault()
             });
             //ta.addEventListener('touchmove', e => {
@@ -1287,7 +1288,15 @@
             
         }
         
-        draw_call(shader_id, vao_id, uniforms_cx_ptr, uni_cx_update, uniforms_dl_ptr, uni_dl_update, uniforms_dr_ptr, uni_dr_update, textures_ptr) {
+        draw_call(
+            shader_id,
+            vao_id,
+            pass_uniforms_ptr,
+            view_uniforms_ptr,
+            draw_uniforms_ptr,
+            uniforms_ptr,
+            textures_ptr
+        ) {
             var gl = this.gl;
             
             let shader = this.shaders[shader_id];
@@ -1300,7 +1309,7 @@
             let instance_buffer = this.array_buffers[vao.inst_vb_id];
             // set up uniforms TODO do this a bit more incremental based on uniform layer
             // also possibly use webGL2 uniform buffers. For now this will suffice for webGL 1 compat
-            let uniforms_cx = shader.uniforms_cx;
+            let pass_uniforms = shader.pass_uniforms;
             // if vr_presenting
             if (this.is_main_canvas && this.vr_is_presenting) {
                 // the first 2 matrices are project and view
@@ -1312,27 +1321,33 @@
                     gl.uniformMatrix4fv(uniforms_cx[0].loc, false, this.vr_frame_data.leftProjectionMatrix)
                     gl.uniformMatrix4fv(uniforms_cx[1].loc, false, this.vr_left_view_matrix)
                 }
-                for (let i = 2; i < uniforms_cx.length; i ++) {
-                    let uni = uniforms_cx[i];
-                    uni.fn(this, uni.loc, uni.offset + uniforms_cx_ptr);
+                for (let i = 2; i < pass_uniforms.length; i ++) {
+                    let uni = pass_uniforms[i];
+                    uni.fn(this, uni.loc, uni.offset + pass_uniforms_ptr);
                 }
             }
             else {
-                for (let i = 0; i < uniforms_cx.length; i ++) {
-                    let uni = uniforms_cx[i];
-                    uni.fn(this, uni.loc, uni.offset + uniforms_cx_ptr);
+                for (let i = 0; i < pass_uniforms.length; i ++) {
+                    let uni = pass_uniforms[i];
+                    uni.fn(this, uni.loc, uni.offset + pass_uniforms_ptr);
                 }
             }
-            let uniforms_dl = shader.uniforms_dl;
-            for (let i = 0; i < uniforms_dl.length; i ++) {
-                let uni = uniforms_dl[i];
-                uni.fn(this, uni.loc, uni.offset + uniforms_dl_ptr);
+            let view_uniforms = shader.view_uniforms;
+            for (let i = 0; i < view_uniforms.length; i ++) {
+                let uni = view_uniforms[i];
+                uni.fn(this, uni.loc, uni.offset + view_uniforms_ptr);
             }
-            let uniforms_dr = shader.uniforms_dr;
-            for (let i = 0; i < uniforms_dr.length; i ++) {
-                let uni = uniforms_dr[i];
-                uni.fn(this, uni.loc, uni.offset + uniforms_dr_ptr);
+            let draw_uniforms = shader.draw_uniforms;
+            for (let i = 0; i < draw_uniforms.length; i ++) {
+                let uni = draw_uniforms[i];
+                uni.fn(this, uni.loc, uni.offset + draw_uniforms_ptr);
             }
+            let uniforms = shader.uniforms;
+            for (let i = 0; i < uniforms.length; i ++) {
+                let uni = uniforms[i];
+                uni.fn(this, uni.loc, uni.offset + uniforms_ptr);
+            }            
+            
             let texture_slots = shader.texture_slots;
             for (let i = 0; i < texture_slots.length; i ++) {
                 let tex_slot = texture_slots[i];
@@ -1384,7 +1399,7 @@
                 mat4_multiply(this.vr_left_view_matrix, this.vr_frame_data.leftViewMatrix, inv);
                 mat4_multiply(this.vr_right_view_matrix, this.vr_frame_data.rightViewMatrix, inv);
             }
-            else{
+            else {
                 gl.viewport(0, 0, this.canvas.width, this.canvas.height);
             }
         }
@@ -1551,9 +1566,10 @@
                 vertex: self.parse_string(),
                 geometry_slots: self.mu32[self.parse ++],
                 instance_slots: self.mu32[self.parse ++],
-                uniforms_cx: self.parse_shvarvec(),
-                uniforms_dl: self.parse_shvarvec(),
-                uniforms_dr: self.parse_shvarvec(),
+                pass_uniforms: self.parse_shvarvec(),
+                view_uniforms: self.parse_shvarvec(),
+                draw_uniforms: self.parse_shvarvec(),
+                uniforms: self.parse_shvarvec(),
                 texture_slots: self.parse_shvarvec()
             }
             self.compile_webgl_shader(ash);
@@ -1584,21 +1600,17 @@
             let shader_id = self.mu32[self.parse ++];
             let vao_id = self.mu32[self.parse ++];
             let uniforms_cx_ptr = self.mu32[self.parse ++];
-            let uni_cx_update = self.mu32[self.parse ++];
             let uniforms_dl_ptr = self.mu32[self.parse ++];
-            let uni_dl_update = self.mu32[self.parse ++];
             let uniforms_dr_ptr = self.mu32[self.parse ++];
-            let uni_dr_update = self.mu32[self.parse ++];
+            let uniforms_ptr = self.mu32[self.parse ++];
             let textures = self.mu32[self.parse ++];
             self.draw_call(
                 shader_id,
                 vao_id,
                 uniforms_cx_ptr,
-                uni_cx_update,
                 uniforms_dl_ptr,
-                uni_dl_update,
                 uniforms_dr_ptr,
-                uni_dr_update,
+                uniforms_ptr,
                 textures
             );
         },
@@ -1668,7 +1680,7 @@
             self.loop_vr_draw_eye();
         },
         function begin_render_targets_23(self) {
-            let pass_id = self.mu32[self.parse++];
+            let pass_id = self.mu32[self.parse ++];
             let width = self.mu32[self.parse ++];
             let height = self.mu32[self.parse ++];
             self.begin_render_targets(pass_id, width, height);
@@ -1694,7 +1706,7 @@
         function set_default_depth_and_blend_mode_27(self) {
             self.set_default_depth_and_blend_mode();
         },
-        function begin_main_canvas_28(self){
+        function begin_main_canvas_28(self) {
             let r = self.mf32[self.parse ++];
             let g = self.mf32[self.parse ++];
             let b = self.mf32[self.parse ++];
@@ -1957,12 +1969,12 @@
             if (req.status === 201) return watchFileChange();
             if (req.status === 200) {
                 var msg = JSON.parse(req.response);
-                if(msg.type == "file_change"){
+                if (msg.type == "file_change") {
                     location.href = location.href
                 }
-                if(msg.type == "build_start"){  
+                if (msg.type == "build_start") {
                     let note = "Rebuilding application..."
-                    if(document.title != note){
+                    if (document.title != note) {
                         document.title = note;
                         console.log(note);
                     }

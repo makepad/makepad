@@ -20,13 +20,13 @@ mod filetree;
 pub use crate::filetree::*;
 mod buildmanager;
 pub use crate::buildmanager::*;
-mod makepadtheme;
-pub use crate::makepadtheme::*;
+mod makepadstyle;
+pub use crate::makepadstyle::*;
 
 //mod rustcompiler;
 //pub use crate::rustcompiler::*;
 use render::*;
-#[path = "../../workspace/src/main.rs"]
-mod workspace_main;
+#[path = "../../builder/src/main.rs"]
+mod builder_main;
 
 main_app!(App);

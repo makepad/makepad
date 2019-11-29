@@ -1,37 +1,55 @@
 //use syn::Type;
 use render::*;
-use editor::*;
+use widget::*;
 use hub::*;
 use crate::appwindow::*;
 use crate::filetree::*;
 use std::collections::HashMap;
 use serde::{Serialize, Deserialize};
-use crate::workspace_main;
+use crate::builder_main;
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppSettings {
     pub build_on_save: bool,
     pub exec_when_done: bool,
+    pub style_options: StyleOptions,
     pub hub_server: HubServerConfig,
-    pub workspaces: HashMap<String, HubWsConfig>,
+    pub builders: HashMap<String, HubBuilderConfig>,
     pub builds: Vec<BuildTarget>,
     pub sync: HashMap<String, Vec<String>>,
 }
 
 impl Default for AppSettings {
+
     fn default() -> Self {
         Self {
             exec_when_done: false,
             build_on_save: true,
+            style_options: StyleOptions{scale:1.0, dark:true},
             hub_server: HubServerConfig::Offline,
-            workspaces: {
+            builders: HashMap::new(),
+            sync: HashMap::new(),
+            builds: vec![]
+        }
+    }
+}
+
+impl AppSettings{
+    pub fn initial()->Self{
+        Self {
+            exec_when_done: false,
+            build_on_save: true,
+            style_options: StyleOptions{scale:1.0, dark:true},
+            hub_server: HubServerConfig::Offline,
+            builders: {
                 let mut cfg = HashMap::new();
-                cfg.insert("main".to_string(), HubWsConfig {
-                    http_server: HttpServerConfig::Localhost(2001),
-                    projects: {
-                        let mut project = HashMap::new();
-                        project.insert("makepad".to_string(), ".".to_string());
-                        project
+                cfg.insert("main".to_string(), HubBuilderConfig {
+                    http_server: HttpServerConfig::Localhost(8000),
+                    workspaces: {
+                        let mut workspace = HashMap::new();
+                        workspace.insert("makepad".to_string(), ".".to_string());
+                        workspace.insert("rust_workshop".to_string(), "./workshops/28_nov_2019".to_string());
+                        workspace
                     }
                 });
                 cfg
@@ -42,33 +60,36 @@ impl Default for AppSettings {
                 sync
             },
             builds: vec![
-           BuildTarget {
-                workspace: "main".to_string(),
-                project: "makepad".to_string(),
-                package: "nov28_step1_wasm".to_string(),
-                config: "debug".to_string()
-            }    
-    ]
+                BuildTarget {
+                    builder: "main".to_string(),
+                    workspace: "rust_workshop".to_string(),
+                    package: "step_0".to_string(),
+                    config: "release".to_string()
+                }
+            ]
         }
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct BuildTarget {
+    pub builder: String,
     pub workspace: String,
-    pub project: String,
     pub package: String,
     pub config: String
 }
 
 pub struct AppStorage {
-    pub workspaces_request_uid: HubUid,
-    pub workspace_sync_uid: HubUid,
+    pub init_builders_counter:usize,
+    pub builders_request_uid: HubUid,
+    pub builder_sync_uid: HubUid,
     pub hub_router: Option<HubRouter>,
     pub hub_server: Option<HubServer>,
+    pub builder_route_send: Option<HubRouteSend>,
     pub hub_ui: Option<HubUI>,
     pub hub_ui_message: Signal,
     pub settings_changed: Signal,
+    pub settings_old: AppSettings,
     pub settings: AppSettings,
     pub file_tree_file_read: FileRead,
     pub app_state_file_read: FileRead,
@@ -84,15 +105,18 @@ pub struct AppTextBuffer {
 }
 
 impl AppStorage {
-    pub fn style(cx: &mut Cx) -> Self {
+    pub fn proto(cx: &mut Cx) -> Self {
         AppStorage {
-            workspaces_request_uid: HubUid::zero(),
-            workspace_sync_uid: HubUid::zero(),
+            init_builders_counter:2,
+            builders_request_uid: HubUid::zero(),
+            builder_sync_uid: HubUid::zero(),
+            builder_route_send: None,
             hub_router: None,
             hub_server: None,
             hub_ui: None,
             hub_ui_message: cx.new_signal(),
             settings_changed: cx.new_signal(),
+            settings_old: AppSettings::default(),
             settings: AppSettings::default(),
             //rust_compiler: RustCompiler::style(cx),
             text_buffers: HashMap::new(),
@@ -118,8 +142,8 @@ impl AppStorage {
                 }
             });
             
-            HubWorkspace::run_workspace_direct("main", &mut hub_router, | ws, htc | {workspace_main::workspace(ws, htc)});
-            
+            let send = HubBuilder::run_builder_direct("main", &mut hub_router, | ws, htc | {builder_main::builder(ws, htc)});
+            self.builder_route_send = Some(send);
             self.hub_router = Some(hub_router);
             self.hub_ui = Some(hub_ui);
         }
@@ -131,17 +155,32 @@ impl AppStorage {
     pub fn load_settings(&mut self, cx: &mut Cx, utf8_data: &str) {
         match ron::de::from_str(utf8_data) {
             Ok(settings) => {
+                self.settings_old = self.settings.clone();
                 self.settings = settings;
+                self.settings.style_options.scale = self.settings.style_options.scale.min(3.0).max(0.3);
                 cx.send_signal(self.settings_changed, 0);
                 
                 // so now, here we restart our hub_server if need be.
                 if cx.platform_type.is_desktop() {
-                    self.restart_hub_server();
+                    if self.settings_old.hub_server != self.settings.hub_server{
+                        self.restart_hub_server();
+                    }
                 }
             },
             Err(e) => {
                 println!("Cannot deserialize settings {:?}", e);
             }
+        }
+    }
+    
+    pub fn save_settings(&mut self, cx:&mut Cx){
+        if let Ok(utf8_data) = ron::ser::to_string_pretty(&self.settings, ron::ser::PrettyConfig::default()){
+            let path = "makepad_settings.ron";
+            if let Some(atb) = self.text_buffers.get_mut(path) {
+                atb.text_buffer.load_from_utf8(&utf8_data);
+                atb.text_buffer.send_textbuffer_loaded_signal(cx);
+            }
+            cx.file_write(path, utf8_data.as_bytes());
         }
     }
     
@@ -178,6 +217,20 @@ impl AppStorage {
         let ron = ron::ser::to_string_pretty(state, ron::ser::PrettyConfig::default()).unwrap();
         cx.file_write("makepad_state.ron", ron.as_bytes());
     }
+
+    pub fn remap_sync_path(&self, path:&str)->String{
+        let mut path = path.to_string();
+        for (key,sync_to) in &self.settings.sync{
+            for sync in sync_to{
+                if path.starts_with(sync){
+                    path.replace_range(0..sync.len(), key);
+                    break
+                }
+            }
+        }
+        path
+    }
+    
     
     pub fn text_buffer_from_path(&mut self, cx: &mut Cx, path: &str) -> &mut TextBuffer {
         
@@ -189,9 +242,7 @@ impl AppStorage {
                     read_msg: None,
                     // write_msg: None,
                     text_buffer: TextBuffer {
-                        is_loading: true,
                         signal: cx.new_signal(),
-                        mutation_id: 1,
                         ..Default::default()
                     }
                 }
@@ -201,13 +252,13 @@ impl AppStorage {
         else {
             let hub_ui = self.hub_ui.as_mut().unwrap();
             let atb = self.text_buffers.entry(path.to_string()).or_insert_with( || {
-                // lets find the right workspace
-                let workspace_pos = path.find('/').unwrap();
+                // lets find the right builder
+                let builder_pos = path.find('/').unwrap();
                 let uid = hub_ui.route_send.alloc_uid();
-                let (workspace, rest) = path.split_at(workspace_pos);
+                let (builder, rest) = path.split_at(builder_pos);
                 let (_, rest) = rest.split_at(1);
                 let msg = ToHubMsg {
-                    to: HubMsgTo::Workspace(workspace.to_string()),
+                    to: HubMsgTo::Builder(builder.to_string()),
                     msg: HubMsg::FileReadRequest {
                         uid: uid.clone(),
                         path: rest.to_string()
@@ -218,12 +269,7 @@ impl AppStorage {
                     file_read: FileRead::default(),
                     read_msg: Some(msg),
                     // write_msg: None,
-                    text_buffer: TextBuffer {
-                        is_loading: true,
-                        signal: cx.new_signal(),
-                        mutation_id: 1,
-                        ..Default::default()
-                    }
+                    text_buffer: TextBuffer::with_signal(cx)
                 }
             });
             atb
@@ -238,12 +284,12 @@ impl AppStorage {
                     let hub_ui = self.hub_ui.as_mut().unwrap();
                     let utf8_data = atb.text_buffer.get_as_string();
                     fn send_file_write_request(hub_ui: &HubUI, uid: HubUid, path: &str, data: &Vec<u8>) {
-                        if let Some(workspace_pos) = path.find('/') {
-                            let (workspace, rest) = path.split_at(workspace_pos);
+                        if let Some(builder_pos) = path.find('/') {
+                            let (builder, rest) = path.split_at(builder_pos);
                             let (_, rest) = rest.split_at(1);
                             
                             hub_ui.route_send.send(ToHubMsg {
-                                to: HubMsgTo::Workspace(workspace.to_string()),
+                                to: HubMsgTo::Builder(builder.to_string()),
                                 msg: HubMsg::FileWriteRequest {
                                     uid: uid.clone(),
                                     path: rest.to_string(),
@@ -257,10 +303,10 @@ impl AppStorage {
                     let utf8_bytes = utf8_data.into_bytes();
                     send_file_write_request(hub_ui, uid, path, &utf8_bytes);
                     // lets send our file write to all sync points.
-                    for (sync, points) in &self.settings.sync{
-                        if path.starts_with(sync){
-                            let mut sync_path = path.to_string();
-                            for point in points{
+                    for (sync, points) in &self.settings.sync {
+                        if path.starts_with(sync) {
+                            for point in points {
+                                let mut sync_path = path.to_string();
                                 sync_path.replace_range(0..sync.len(), point);
                                 send_file_write_request(hub_ui, uid, &sync_path, &utf8_bytes);
                             }
@@ -281,57 +327,59 @@ impl AppStorage {
         }
     }
     
-    pub fn reload_workspaces(&mut self) {
+    pub fn reload_builders(&mut self) {
         let hub_ui = self.hub_ui.as_mut().unwrap();
         let uid = hub_ui.route_send.alloc_uid();
         hub_ui.route_send.send(ToHubMsg {
             to: HubMsgTo::Hub,
-            msg: HubMsg::ListWorkspacesRequest {uid: uid}
+            msg: HubMsg::ListBuildersRequest {uid: uid}
         });
-        self.workspaces_request_uid = uid;
+        self.builders_request_uid = uid;
     }
     
-    pub fn handle_hub_msg(&mut self, cx: &mut Cx, htc: FromHubMsg, windows: &mut Vec<AppWindow>, state: &AppState) {
+    pub fn handle_hub_msg(&mut self, cx: &mut Cx, htc: &FromHubMsg, windows: &mut Vec<AppWindow>, state: &AppState) {
         let hub_ui = self.hub_ui.as_mut().unwrap();
         // only in ConnectUI of ourselves do we list the workspaces
-        match htc.msg {
+        match &htc.msg {
             // our own connectUI message, means we are ready to talk to the hub
             HubMsg::ConnectUI => if hub_ui.route_send.is_own_addr(&htc.from) {
                 // now start talking
-                self.reload_workspaces();
             },
-            HubMsg::DisconnectWorkspace(_) | HubMsg::ConnectWorkspace(_) => {
-                self.reload_workspaces();
+            HubMsg::DisconnectBuilder(_) | HubMsg::ConnectBuilder(_) => {
+                let own = if let Some(send) = &self.builder_route_send{send.is_own_addr(&htc.from)}else{false};
+                if !own{
+                    self.reload_builders();
+                }
             },
-            HubMsg::ListWorkspacesResponse {uid, workspaces} => if uid == self.workspaces_request_uid {
+            HubMsg::ListBuildersResponse {uid, builders} => if *uid == self.builders_request_uid {
                 let uid = hub_ui.route_send.alloc_uid();
                 // from these workspaces query filetrees
-                for workspace in &workspaces {
+                for builder in builders {
                     // lets look up a workspace and configure it!
                     // lets config it
-                    if let Some(workspace_config) = self.settings.workspaces.get(workspace) {
+                    if let Some(builder_config) = self.settings.builders.get(builder) {
                         hub_ui.route_send.send(ToHubMsg {
-                            to: HubMsgTo::Workspace(workspace.clone()),
-                            msg: HubMsg::WorkspaceConfig {uid: uid, config: workspace_config.clone()}
+                            to: HubMsgTo::Builder(builder.clone()),
+                            msg: HubMsg::BuilderConfig {uid: uid, config: builder_config.clone()}
                         });
                     }
                     hub_ui.route_send.send(ToHubMsg {
-                        to: HubMsgTo::Workspace(workspace.clone()),
-                        msg: HubMsg::WorkspaceFileTreeRequest {uid: uid, create_digest: false}
+                        to: HubMsgTo::Builder(builder.clone()),
+                        msg: HubMsg::BuilderFileTreeRequest {uid: uid, create_digest: false}
                     });
                     hub_ui.route_send.send(ToHubMsg {
-                        to: HubMsgTo::Workspace(workspace.clone()),
+                        to: HubMsgTo::Builder(builder.clone()),
                         msg: HubMsg::ListPackagesRequest {uid: uid}
                     });
                 }
-                self.workspaces_request_uid = uid;
+                self.builders_request_uid = uid;
                 // add all workspace nodes
                 for window in windows {
                     window.file_panel.file_tree.root_node = FileNode::Folder {
                         name: "".to_string(),
                         draw: None,
                         state: NodeState::Open,
-                        folder: workspaces.iter().map( | v | FileNode::Folder {
+                        folder: builders.iter().map( | v | FileNode::Folder {
                             name: v.clone(),
                             draw: None,
                             state: NodeState::Open,
@@ -353,9 +401,9 @@ impl AppStorage {
                 }
                 
             },
-            HubMsg::WorkspaceFileTreeResponse {uid, tree} => if uid == self.workspaces_request_uid {
+            HubMsg::BuilderFileTreeResponse {uid, tree} => if *uid == self.builders_request_uid {
                 // replace a workspace node
-                if let WorkspaceFileTreeNode::Folder {name, ..} = &tree {
+                if let BuilderFileTreeNode::Folder {name, ..} = &tree {
                     let workspace = name.clone();
                     // insert each filetree at the right childnode
                     for (window_index, window) in windows.iter_mut().enumerate() {
@@ -377,11 +425,12 @@ impl AppStorage {
                 for (_path, atb) in &mut self.text_buffers {
                     if let Some(cth_msg) = &atb.read_msg {
                         if let HubMsg::FileReadRequest {uid: read_uid, ..} = &cth_msg.msg {
-                            if *read_uid == uid {
+                            if *read_uid == *uid {
                                 atb.read_msg = None;
                                 if let Some(data) = data {
-                                    if let Ok(utf8_data) = String::from_utf8(data) {
-                                        atb.text_buffer.load_from_utf8(cx, &utf8_data);
+                                    if let Ok(utf8_data) = std::str::from_utf8(data) {
+                                        atb.text_buffer.load_from_utf8(&utf8_data);
+                                        atb.text_buffer.send_textbuffer_loaded_signal(cx);
                                     }
                                 }
                                 else {
@@ -399,13 +448,13 @@ impl AppStorage {
     }
 }
 
-pub fn hub_to_tree(node: &WorkspaceFileTreeNode) -> FileNode {
+pub fn hub_to_tree(node: &BuilderFileTreeNode) -> FileNode {
     match node {
-        WorkspaceFileTreeNode::File {name, ..} => FileNode::File {
+        BuilderFileTreeNode::File {name, ..} => FileNode::File {
             name: name.clone(),
             draw: None
         },
-        WorkspaceFileTreeNode::Folder {name, folder, ..} => {
+        BuilderFileTreeNode::Folder {name, folder, ..} => {
             FileNode::Folder {
                 name: name.clone(),
                 folder: folder.iter().map( | v | hub_to_tree(v)).collect(),

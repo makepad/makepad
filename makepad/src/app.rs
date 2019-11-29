@@ -1,12 +1,11 @@
 //use syn::Type;
 use render::*;
 use widget::*;
-use editor::*;
 use crate::appwindow::*;
 use crate::appstorage::*;
 use crate::filetree::*;
 use crate::buildmanager::*;
-use crate::makepadtheme::*;
+use crate::makepadstyle::*;
 
 pub struct App {
     pub app_window_state_template: AppWindowState,
@@ -22,10 +21,9 @@ pub struct App {
 impl App {
     
     pub fn proto(cx: &mut Cx) -> Self {
-
-        set_dark_widget_theme(cx);
-        set_dark_editor_theme(cx);
-        set_dark_makepad_theme(cx);
+        let default_opt = StyleOptions{scale:1.0, dark:true};
+        set_widget_style(cx, &default_opt);
+        set_makepad_style(cx, &default_opt);
         let ms = cx.new_signal();
         Self {
             menu: Menu::main(vec![
@@ -89,7 +87,7 @@ impl App {
                 ])
             ]),
             menu_signal:ms,
-            app_window_template: AppWindow::style(cx),
+            app_window_template: AppWindow::proto(cx),
             app_window_state_template: AppWindowState {
                 open_folders: Vec::new(),
                 window_inner_size: Vec2::zero(),
@@ -158,7 +156,7 @@ impl App {
             windows: vec![],
             build_manager: BuildManager::new(cx),
             state: AppState::default(),
-            storage: AppStorage::style(cx)
+            storage: AppStorage::proto(cx)
         }
     }
     
@@ -166,6 +164,11 @@ impl App {
         self.state.windows = vec![self.app_window_state_template.clone()];
         self.windows = vec![self.app_window_template.clone()];
         cx.redraw_child_area(Area::All);
+    }
+    
+    pub fn reload_style(&mut self, cx: &mut Cx){
+        set_widget_style(cx, &self.storage.settings.style_options);
+        set_makepad_style(cx, &self.storage.settings.style_options);
     }
     
     pub fn handle_app(&mut self, cx: &mut Cx, event: &mut Event) {
@@ -178,9 +181,29 @@ impl App {
             },
             Event::KeyDown(ke) => match ke.key_code {
                 KeyCode::KeyR => if ke.modifiers.logo || ke.modifiers.control {
-                    self.storage.reload_workspaces();
+                    self.storage.reload_builders();
                 },
-                _ => ()
+                KeyCode::Key0=>if ke.modifiers.logo || ke.modifiers.control {
+                    self.storage.settings.style_options.scale = 1.0;
+                    self.reload_style(cx);
+                    cx.reset_font_atlas_and_redraw();
+                    self.storage.save_settings(cx);
+                },
+                KeyCode::Equals=>if ke.modifiers.logo || ke.modifiers.control {
+                    let scale = self.storage.settings.style_options.scale *1.1;
+                    self.storage.settings.style_options.scale = scale.min(3.0).max(0.3);
+                    self.reload_style(cx);
+                    cx.reset_font_atlas_and_redraw();
+                    self.storage.save_settings(cx);
+                },
+                KeyCode::Minus=>if ke.modifiers.logo || ke.modifiers.control {
+                    let scale = self.storage.settings.style_options.scale /1.1;
+                    self.storage.settings.style_options.scale = scale.min(3.0).max(0.3);
+                    self.reload_style(cx);
+                    cx.reset_font_atlas_and_redraw();
+                    self.storage.save_settings(cx);
+                },
+                _ => () 
             },
             Event::Signal(se) => {
                 // process network messages for hub_ui
@@ -188,16 +211,24 @@ impl App {
                     if self.storage.hub_ui_message.is_signal(se) {
                         if let Some(mut msgs) = hub_ui.get_messages() {
                             for htc in msgs.drain(..) {
+                                self.storage.handle_hub_msg(cx, &htc, &mut self.windows, &mut self.state);
                                 self.build_manager.handle_hub_msg(cx, &mut self.storage, &htc);
-                                self.storage.handle_hub_msg(cx, htc, &mut self.windows, &mut self.state);
                             }
                             return
                         }
                     }
                 }
                 if self.storage.settings_changed.is_signal(se) {
-                    // we have to reload settings.
-                    self.storage.reload_workspaces();
+                    if self.storage.settings_old.builders != self.storage.settings.builders{
+                        self.storage.reload_builders();
+                    }
+                    if self.storage.settings_old.style_options != self.storage.settings.style_options{
+                        self.reload_style(cx);
+                        cx.reset_font_atlas_and_redraw();
+                    }
+                    if self.storage.settings_old.builds != self.storage.settings.builds{
+                        self.build_manager.restart_build(cx, &mut self.storage);
+                    }                    
                 }
             },
             Event::FileRead(fr) => {
@@ -266,7 +297,8 @@ impl App {
                         self.storage.load_settings(cx, utf8_data);
                     }
                     else { // create default settings file
-                        let ron = ron::ser::to_string_pretty(&self.storage.settings, ron::ser::PrettyConfig::default()).expect("cannot serialize settings");
+                        let def_settings = AppSettings::initial();
+                        let ron = ron::ser::to_string_pretty(&def_settings, ron::ser::PrettyConfig::default()).expect("cannot serialize settings");
                         cx.file_write("makepad_settings.ron", ron.as_bytes());
                         self.storage.load_settings(cx, &ron);
                     }
@@ -275,7 +307,8 @@ impl App {
                     for (_path, atb) in &mut self.storage.text_buffers {
                         if let Some(utf8_data) = atb.file_read.resolve_utf8(fr) {
                             if let Ok(utf8_data) = utf8_data {
-                                atb.text_buffer.load_from_utf8(cx, utf8_data);
+                                atb.text_buffer.load_from_utf8( utf8_data);
+                                atb.text_buffer.send_textbuffer_loaded_signal(cx);
                                 break;
                             }
                         }

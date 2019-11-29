@@ -332,12 +332,14 @@ impl ListLogic {
                     }
                 }
                 self.selection.truncate(0);
-                self.selection.push(select_index);
-                let dm = &mut self.list_items[select_index];
-                dm.is_selected = true;
-                cb(cx, ListLogicEvent::Over, dm, select_index);
-                
-                return ListEvent::SelectSingle(select_index)
+                if select_index < self.list_items.len(){
+                    self.selection.push(select_index);
+                    let dm = &mut self.list_items[select_index];
+                    dm.is_selected = true;
+                    cb(cx, ListLogicEvent::Over, dm, select_index);
+                    
+                    return ListEvent::SelectSingle(select_index)
+                }
             },
             _ => ()
         }

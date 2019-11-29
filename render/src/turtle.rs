@@ -644,10 +644,10 @@ impl Cx {
     
     pub fn get_width_total(&self) -> f32 {
         if let Some(turtle) = self.turtles.last() {
-            let nan_val = max_zero_keep_nan(turtle.width - (turtle.layout.padding.l + turtle.layout.padding.r));
+            let nan_val = max_zero_keep_nan(turtle.width/* - (turtle.layout.padding.l + turtle.layout.padding.r)*/);
             if nan_val.is_nan() { // if we are a computed width, if some value is known, use that
                 if turtle.bound_right_bottom.x != std::f32::NEG_INFINITY {
-                    return turtle.bound_right_bottom.x - turtle.origin.x
+                    return turtle.bound_right_bottom.x - turtle.origin.x + turtle.layout.padding.r
                 }
             }
             return nan_val
@@ -669,7 +669,7 @@ impl Cx {
             let nan_val = max_zero_keep_nan(turtle.height - turtle.height_used - (turtle.pos.y - turtle.origin.y));
             if nan_val.is_nan() { // if we are a computed height, if some value is known, use that
                 if turtle.bound_right_bottom.y != std::f32::NEG_INFINITY {
-                    return turtle.bound_right_bottom.y - turtle.origin.y
+                    return turtle.bound_right_bottom.y - turtle.origin.y 
                 }
             }
             return nan_val
@@ -688,15 +688,33 @@ impl Cx {
     
     pub fn get_height_total(&self) -> f32 {
         if let Some(turtle) = self.turtles.last() {
-            let nan_val = max_zero_keep_nan(turtle.height - (turtle.layout.padding.t + turtle.layout.padding.b));
+            let nan_val = max_zero_keep_nan(turtle.height /*- (turtle.layout.padding.t + turtle.layout.padding.b)*/);
             if nan_val.is_nan() { // if we are a computed height, if some value is known, use that
                 if turtle.bound_right_bottom.y != std::f32::NEG_INFINITY {
-                    return turtle.bound_right_bottom.y - turtle.origin.y
+                    return turtle.bound_right_bottom.y - turtle.origin.y + turtle.layout.padding.b
                 }
             }
             return nan_val
         }
         0.
+    }
+    
+    pub fn is_height_computed(&self)->bool{
+        if let Some(turtle) = self.turtles.last() {
+            if let Height::Compute = turtle.layout.walk.height{
+                return true
+            }
+        }
+        false
+    }
+
+    pub fn is_width_computed(&self)->bool{
+        if let Some(turtle) = self.turtles.last() {
+            if let Width::Compute = turtle.layout.walk.width{
+                return true
+            }
+        }
+        false
     }
     
 }

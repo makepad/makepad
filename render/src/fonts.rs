@@ -10,6 +10,17 @@ impl Cx {
         self.load_font_path(&self.font(style))
     }
     */
+    pub fn reset_font_atlas_and_redraw(&mut self){
+        for font in &mut self.fonts{
+            font.atlas_pages.truncate(0);
+        }
+        self.fonts_atlas.alloc_xpos = 0.;
+        self.fonts_atlas.alloc_ypos = 0.;
+        self.fonts_atlas.alloc_hmax = 0.;
+        self.fonts_atlas.clear_buffer = true;
+        self.redraw_child_area(Area::All);
+    }
+    
     pub fn load_font(&mut self, path: &str) -> Font {
         let found = self.fonts.iter().position( | v | v.path == path);
         if let Some(font_id) = found {
@@ -262,7 +273,6 @@ impl TrapezoidText {
                 
                 let font_scale_logical = atlas_page.font_size * 96.0 / (72.0 * font.units_per_em);
                 let font_scale_pixels = font_scale_logical * atlas_page.dpi_factor;
-                
                 let mut trapezoids = Vec::new();
                 trapezoids.extend_from_internal_iter(
                     self.trapezoidator.trapezoidate(
@@ -308,7 +318,7 @@ pub struct CxAfterDraw {
 
 impl CxAfterDraw {
     pub fn proto(cx: &mut Cx) -> Self {
-        cx.fonts_atlas.texture_size = Vec2 {x: 4096.0, y: 4096.0};
+        cx.fonts_atlas.texture_size = Vec2 {x: 2048.0, y: 2048.0};
         let mut atlas_texture = Texture::default();
         atlas_texture.set_desc(cx, None);
         cx.fonts_atlas.texture_id = atlas_texture.texture_id.unwrap();
@@ -331,7 +341,14 @@ impl CxAfterDraw {
         if cx.fonts_atlas.atlas_todo.len()>0 {
             self.atlas_pass.begin_pass(cx);
             self.atlas_pass.set_size(cx, cx.fonts_atlas.texture_size);
-            self.atlas_pass.add_color_texture(cx, &mut self.atlas_texture, ClearColor::InitWith(Color::zero()));
+            let clear = if cx.fonts_atlas.clear_buffer{
+                cx.fonts_atlas.clear_buffer = false;
+                ClearColor::ClearWith(Color::zero())
+            }
+            else{
+                ClearColor::InitWith(Color::zero())
+            };
+            self.atlas_pass.add_color_texture(cx, &mut self.atlas_texture, clear);
             let _ = self.atlas_view.begin_view(cx, Layout::default());
             let mut atlas_todo = Vec::new();
             std::mem::swap(&mut cx.fonts_atlas.atlas_todo, &mut atlas_todo);
@@ -384,6 +401,7 @@ pub struct CxFontsAtlasTodo {
 pub struct CxFontsAtlas {
     pub texture_id: usize,
     pub texture_size: Vec2,
+    pub clear_buffer: bool,
     pub alloc_xpos: f32,
     pub alloc_ypos: f32,
     pub alloc_hmax: f32,

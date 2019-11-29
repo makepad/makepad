@@ -2,21 +2,40 @@
 use crate::cx::*;
 
 impl Cx {
-    pub fn render_view(&mut self, pass_id: usize, view_id: usize, vr_is_presenting: bool, zbias: &mut f32, zbias_step: f32) {
+    pub fn render_view(
+        &mut self,
+        pass_id: usize,
+        view_id: usize,
+        scroll: Vec2,
+        clip: (Vec2, Vec2),
+        vr_is_presenting: bool,
+        zbias: &mut f32,
+        zbias_step: f32
+    ) {
         // tad ugly otherwise the borrow checker locks 'self' and we can't recur
         let draw_calls_len = self.views[view_id].draw_calls_len;
-        self.views[view_id].set_clipping_uniforms();
         if vr_is_presenting {
             self.views[view_id].uniform_view_transform(&Mat4::scale_translate(0.0005, -0.0005, 0.001, -0.3, 1.8, -0.4));
         }
         else {
             self.views[view_id].uniform_view_transform(&Mat4::identity());
         }
+        self.views[view_id].parent_scroll = scroll;
+        let local_scroll = self.views[view_id].get_local_scroll();
+        let clip = self.views[view_id].intersect_clip(clip);
         for draw_call_id in 0..draw_calls_len {
             
             let sub_view_id = self.views[view_id].draw_calls[draw_call_id].sub_view_id;
             if sub_view_id != 0 {
-                self.render_view(pass_id, sub_view_id, vr_is_presenting, zbias, zbias_step);
+                self.render_view(
+                    pass_id,
+                    sub_view_id,
+                    Vec2 {x: local_scroll.x + scroll.x, y: local_scroll.y + scroll.y},
+                    clip,
+                    vr_is_presenting,
+                    zbias,
+                    zbias_step
+                );
             }
             else {
                 let cxview = &mut self.views[view_id];
@@ -35,12 +54,10 @@ impl Cx {
                     );
                 }
                 
-                if draw_call.uniforms.len() > 0 {
-                    if let Some(zbias_offset) = sh.mapping.zbias_uniform_prop {
-                        draw_call.uniforms[zbias_offset] = *zbias;
-                        *zbias += zbias_step;
-                    }
-                }
+                draw_call.set_zbias(*zbias);
+                draw_call.set_local_scroll(scroll, local_scroll);
+                draw_call.set_clip(clip);
+                *zbias += zbias_step;
                 
                 // update/alloc textures?
                 for texture_id in &draw_call.textures_2d {
@@ -51,26 +68,24 @@ impl Cx {
                         //Self::update_platform_texture_image2d(&mut self.platform);
                     }
                 }
-                let cxuniforms = &self.passes[pass_id].uniforms;
+                
+                let pass_uniforms = self.passes[pass_id].pass_uniforms.as_slice();
+                let view_uniforms = cxview.view_uniforms.as_slice();
+                let draw_uniforms = draw_call.draw_uniforms.as_slice();
                 
                 self.platform.from_wasm.draw_call(
                     draw_call.shader_id,
                     draw_call.platform.vao_id,
-                    cxuniforms,
-                    self.redraw_id as usize,
-                    // update once a frame
-                    &cxview.uniforms,
-                    view_id,
-                    // update on drawlist change
+                    pass_uniforms,
+                    view_uniforms,
+                    draw_uniforms,
                     &draw_call.uniforms,
-                    draw_call.draw_call_id,
-                    // update on drawcall id change
                     &draw_call.textures_2d
                 );
             }
         }
     }
-
+    
     pub fn setup_render_pass(&mut self, pass_id: usize, inherit_dpi_factor: f32) {
         let pass_size = self.passes[pass_id].pass_size;
         self.passes[pass_id].set_ortho_matrix(Vec2::zero(), pass_size);
@@ -85,10 +100,10 @@ impl Cx {
         };
         self.passes[pass_id].set_dpi_factor(dpi_factor);
     }
-
+    
     pub fn draw_pass_to_canvas(&mut self, pass_id: usize, vr_is_presenting: bool, dpi_factor: f32) {
         let view_id = self.passes[pass_id].main_view_id.unwrap();
-
+        
         // get the color and depth
         let clear_color = if self.passes[pass_id].color_textures.len() == 0 {
             Color::zero()
@@ -104,18 +119,26 @@ impl Cx {
             ClearDepth::ClearWith(depth) => depth
         };
         self.platform.from_wasm.begin_main_canvas(clear_color, clear_depth as f32);
-
+        
         self.setup_render_pass(pass_id, dpi_factor);
-    
+        
         self.platform.from_wasm.set_default_depth_and_blend_mode();
-
+        
         let mut zbias = 0.0;
         let zbias_step = self.passes[pass_id].zbias_step;
         
         if vr_is_presenting {
             self.platform.from_wasm.mark_vr_draw_eye();
-        }
-        self.render_view(pass_id, view_id, vr_is_presenting, &mut zbias, zbias_step);
+        } 
+        self.render_view(
+            pass_id,
+            view_id,
+            Vec2::zero(),
+            (Vec2 {x: -50000., y: -50000.}, Vec2 {x: 50000., y: 50000.}),
+            vr_is_presenting,
+            &mut zbias,
+            zbias_step
+        );
         if vr_is_presenting {
             self.platform.from_wasm.loop_vr_draw_eye();
         }
@@ -126,7 +149,7 @@ impl Cx {
         let view_id = self.passes[pass_id].main_view_id.unwrap();
         
         self.setup_render_pass(pass_id, dpi_factor);
-
+        
         self.platform.from_wasm.begin_render_targets(pass_id, (pass_size.x * dpi_factor) as usize, (pass_size.y * dpi_factor) as usize);
         
         for color_texture in &self.passes[pass_id].color_textures {
@@ -155,11 +178,19 @@ impl Cx {
         self.platform.from_wasm.end_render_targets();
         
         // set the default depth and blendmode
-        self.platform.from_wasm.set_default_depth_and_blend_mode();    
+        self.platform.from_wasm.set_default_depth_and_blend_mode();
         let mut zbias = 0.0;
         let zbias_step = self.passes[pass_id].zbias_step;
         
-        self.render_view(pass_id, view_id, false, &mut zbias, zbias_step);
+        self.render_view(
+            pass_id,
+            view_id,
+            Vec2::zero(),
+            (Vec2{x:-50000.,y:-50000.},Vec2{x:50000.,y:50000.}),
+            false,
+            &mut zbias,
+            zbias_step
+        );
     }
     
     
@@ -205,7 +236,7 @@ impl Cx {
     
 }
 
-#[derive(Default, Clone, Debug)]
+#[derive(Default, Clone)]
 pub struct CxPlatformPass {
 }
 

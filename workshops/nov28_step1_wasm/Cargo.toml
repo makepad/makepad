@@ -1,8 +1,0 @@
-[package]
-name = "nov28_step1_wasm"
-version = "0.1.0"
-authors = ["makepaddev"]
-edition = "2018"
-
-[lib]
-crate-type = ["cdylib"]

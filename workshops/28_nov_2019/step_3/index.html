@@ -1,0 +1,28 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+  </head>
+  <body>
+    <canvas id="canvas" width="512" height="512"></canvas>
+    <script type="module" src="static/main.js"></script>
+    <script>
+      function reload() {
+        var request = new XMLHttpRequest()
+        request.responseType = "text";
+    	request.timeout = 60000;
+        request.open("GET", "/$watch?" + Math.random().toString(16).slice(2));
+        request.send()
+        request.addEventListener("load", () => {
+          if (request.status === 200) {
+            location.href = location.href;
+          }
+          if (request.status === 201) {
+            return reload();
+          }
+        });
+      }
+      reload();
+    </script>
+  </body>
+</html>
