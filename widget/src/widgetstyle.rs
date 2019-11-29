@@ -7,6 +7,7 @@ use crate::tabclose::*;
 use crate::texteditor::*;
 use crate::codeicon::*;
 use crate::textinput::*;
+use crate::scrollbar::*;
 use serde::{Serialize, Deserialize};
 
 #[derive(Debug, Copy, Clone, Serialize, Deserialize, PartialEq)]
@@ -159,4 +160,5 @@ pub fn set_widget_style(cx: &mut Cx, opt: &StyleOptions) {
     TextEditor::style(cx, opt);
     CodeIcon::style(cx, opt);
     TextInput::style(cx, opt);
+    ScrollBar::style(cx, opt);
 }
