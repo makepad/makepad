@@ -48,15 +48,6 @@ cargo run -p makepad --release
 
 Right now makepad is set up to run a live wasm-example for a workshop, thats why you want the wasm32 toolchain.
 
-And now you can open this in the browser: (open the devtools in console mode too)
-```
-http://127.0.0.1:2001/makepad/workshops/nov28_step1_wasm/index.html
-```
-and open these files in desktop makepad for some wasm livecoding
-```
-makepad/workshops/nov28_step1_wasm/main.js
-makepad/workshops/nov28_step1_wasm/src/lib.rs 
-```
 
 # Troubleshooting
 
