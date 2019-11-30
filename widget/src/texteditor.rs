@@ -11,7 +11,7 @@ pub struct TextEditor {
     pub bg: Quad,
     pub gutter_bg: Quad,
     pub cursor: Quad,
-    pub selection: Quad, 
+    pub selection: Quad,
     pub token_highlight: Quad,
     //pub select_highlight: Quad,
     pub cursor_row: Quad,
@@ -169,7 +169,8 @@ impl TextEditor {
             shadow: Quad {
                 do_h_scroll: false,
                 do_v_scroll: false,
-                ..Quad::proto(cx)
+                z: 10.,
+                ..Quad::proto_with_shader(cx, Self::def_shadow_shader(), "Editor.shadow")
             },
             gutter_bg: Quad {
                 z: 9.0,
@@ -276,6 +277,7 @@ impl TextEditor {
     
     pub fn gutter_width() -> FloatId {uid!()}
     pub fn padding_top() -> FloatId {uid!()}
+    pub fn shadow_size() -> FloatId {uid!()}
     
     pub fn layout_bg() -> LayoutId {uid!()}
     pub fn text_style_editor_text() -> TextStyleId {uid!()}
@@ -324,6 +326,7 @@ impl TextEditor {
     pub fn color_defocus() -> ColorId {uid!()}
     
     pub fn style(cx: &mut Cx, _opt: &StyleOptions) {
+        Self::shadow_size().set(cx, 6.0);
         Self::gutter_width().set(cx, 45.0);
         Self::padding_top().set(cx, 27.);
         Self::text_style_editor_text().set(cx, Theme::text_style_fixed().get(cx));
@@ -337,6 +340,7 @@ impl TextEditor {
     pub fn instance_select_next_x() -> InstanceFloat {uid!()}
     pub fn instance_select_next_w() -> InstanceFloat {uid!()}
     pub fn uniform_highlight_visible() -> UniformFloat {uid!()}
+    pub fn instance_shadow_dir() -> InstanceFloat {uid!()}
     
     pub fn def_indent_lines_shader() -> ShaderGen {
         Quad::def_quad_shader().compose(shader_ast !({
@@ -370,6 +374,26 @@ impl TextEditor {
                 }
                 else {
                     return vec4(0., 0., 0., 0.);
+                }
+            }
+        }))
+    }
+    
+    pub fn def_shadow_shader() -> ShaderGen {
+        Quad::def_quad_shader().compose(shader_ast !({
+            let shadow_dir: Self::instance_shadow_dir();
+            fn pixel() -> vec4 { // TODO make the corner overlap properly with a distance field eq.
+                if shadow_dir<0.5 {
+                    return mix(vec4(0., 0., 0., 1.), vec4(0., 0., 0., 0.), pow(geom.x,0.5));
+                }
+                else  if shadow_dir<1.5 {
+                    return mix(vec4(0., 0., 0., 1.), vec4(0., 0., 0., 0.), pow(geom.y,0.5));
+                }
+                else  if shadow_dir<2.5 {
+                    return mix(vec4(0., 0., 0., 1.), vec4(0., 0., 0., 0.), pow(1.0- geom.x,0.5));
+                }
+                else  {
+                    return mix(vec4(0., 0., 0., 1.), vec4(0., 0., 0., 0.), pow(1.0-geom.y,0.5));
                 }
             }
         }))
@@ -1653,10 +1677,12 @@ impl TextEditor {
         self.do_selection_scrolling(cx, text_buffer);
         self.place_ime_and_draw_cursor_row(cx);
         self.set_indent_line_highlight_id(cx);
-        
+        self.draw_shadows(cx);
         self.bg.end_quad_fill(cx, &self._bg_inst.take().unwrap());
         
         self.view.end_view(cx);
+        
+        
         
         if self._jump_to_offset {
             self._jump_to_offset = false;
@@ -1688,6 +1714,30 @@ impl TextEditor {
                     //blink
                 }
             }
+        }
+    }
+    
+    fn draw_shadows(&mut self, cx: &mut Cx) {
+        let scroll_pos = self.view.get_scroll_pos(cx);
+        let shadow_size = Self::shadow_size().get(cx);
+        let gutter_width = Self::gutter_width().get(cx);
+        if scroll_pos.y > 0. {
+            let inst = self.shadow.draw_quad_rel(cx, Rect {
+                x: 0.,
+                y: 0.,
+                w: cx.get_width_total(),
+                h: shadow_size
+            });
+            inst.push_float(cx, 1.);
+        }
+        if scroll_pos.x > 0. {
+            let inst = self.shadow.draw_quad_rel(cx, Rect {
+                x: gutter_width,
+                y: 0.,
+                w: shadow_size,
+                h: cx.get_height_total()
+            });
+            inst.push_float(cx, 0.);
         }
     }
     
