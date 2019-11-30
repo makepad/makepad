@@ -138,7 +138,7 @@ impl HubBuilder {
                 println!("Builder cannot connect to to {:?}, retrying", address);
                 std::thread::sleep(std::time::Duration::from_millis(500));
                 continue;
-            }
+            };
             
             let mut hub_client = .expect("cannot connect to hub");
             
