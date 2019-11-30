@@ -512,13 +512,13 @@ impl HubBuilder {
             let mut tracing_panic = false;
             let mut panic_stack = Vec::new();
             for line in stderr {
-                if tracing_panic == false && line.starts_with("thread '") { // this is how we recognise a stacktrace start..Very sturdy.
+                let mut trimmed = line.trim_start().to_string();
+                trimmed.retain( | c | c != '\0');
+                if tracing_panic == false && (trimmed.starts_with("thread '") || trimmed.starts_with("0:")) { // this is how we recognise a stacktrace start..Very sturdy.
                     tracing_panic = true;
                     panic_stack.truncate(0);
                 }
                 if tracing_panic {
-                    let mut trimmed = line.trim_start().to_string();
-                    trimmed.retain( | c | c != '\0');
                     panic_stack.push(trimmed);
                 }
                 else {
@@ -526,7 +526,7 @@ impl HubBuilder {
                         to: HubMsgTo::UI,
                         msg: HubMsg::LogItem {
                             uid: uid,
-                            item: HubLogItem::Error(line.clone())
+                            item: HubLogItem::Error(trimmed.clone())
                         }
                     });
                 }
