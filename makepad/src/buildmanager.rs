@@ -54,7 +54,6 @@ impl BuildManager {
     }
     
     pub fn export_messages_to_textbuffers(&self, cx: &mut Cx, storage: &mut AppStorage) {
-        
         for dm in &self.log_items {
             //println!("{:?}", dm.item.level);
             if let Some(loc_message) = dm.get_loc_message() {
@@ -71,9 +70,15 @@ impl BuildManager {
                 
                 // search for insert point
                 let mut inserted = None;
-                if messages.cursors.len()>0 {
-                    for i in (0..messages.cursors.len()).rev() {
-                        if let Some((head, tail)) = loc_message.range {
+                println!("sort insert");
+            
+                if let Some((head, tail)) = loc_message.range {
+                    if messages.cursors.len()>0 {
+                        for i in (0..messages.cursors.len()).rev() {
+                            println!("{} {} {}", i, head, messages.cursors[i].head);
+                            if head >= messages.cursors[i].head{
+                                break;
+                            }
                             if head < messages.cursors[i].head && (i == 0 || head >= messages.cursors[i - 1].head) {
                                 messages.cursors.insert(i, TextCursor {
                                     head: head,
@@ -86,6 +91,7 @@ impl BuildManager {
                         }
                     }
                 }
+                
                 if inserted.is_none() {
                     if let Some((head, tail)) = loc_message.range {
                         messages.cursors.push(TextCursor {
@@ -107,10 +113,10 @@ impl BuildManager {
                         HubLogItem::Message(_) => TextBufferMessageLevel::Log,
                     }
                 };
-                if let Some(pos) = inserted{
+                if let Some(pos) = inserted {
                     text_buffer.messages.bodies.insert(pos, msg);
                 }
-                else{
+                else {
                     text_buffer.messages.bodies.push(msg);
                 }
             }
@@ -154,7 +160,7 @@ impl BuildManager {
     pub fn handle_hub_msg(&mut self, cx: &mut Cx, storage: &mut AppStorage, htc: &FromHubMsg) {
         //let hub_ui = storage.hub_ui.as_mut().unwrap();
         match &htc.msg {
-            HubMsg::ListBuildersResponse{..}=>{
+            HubMsg::ListBuildersResponse {..} => {
                 self.restart_build(cx, storage);
             },
             HubMsg::CargoBegin {uid} => if self.is_running_uid(uid) {
