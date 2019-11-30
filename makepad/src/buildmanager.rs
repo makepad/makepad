@@ -92,8 +92,11 @@ impl BuildManager {
             HubMsg::CargoBegin {uid} => if self.is_running_uid(uid) {
             },
             HubMsg::LogItem {uid, item} => if self.is_running_uid(uid) {
+                if self.log_items.len() > 700000{
+                    self.log_items.truncate(100000);
+                    self.log_items.push(HubLogItem::Message("------------ Log truncated here -----------".to_string()));
+                } 
                 self.log_items.push(item.clone());
-
                 if let Some(loc_message) = item.get_loc_message() {
                     
                     let text_buffer = storage.text_buffer_from_path(cx, &storage.remap_sync_path(&loc_message.path));
