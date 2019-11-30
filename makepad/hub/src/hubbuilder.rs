@@ -39,12 +39,12 @@ pub enum HubWsError {
 }
 
 const INCLUDED_FILES: &[&'static str] = &[".json", ".toml", ".js", ".rs", ".txt", ".text", ".ron", ".html"];
-const EXCLUDED_FILES: &[&'static str] = &["key.ron","makepad_state.ron"];
-const EXCLUDED_DIRS: &[&'static str] = &["target",".git",".github","edit_repo"];
+const EXCLUDED_FILES: &[&'static str] = &["key.ron", "makepad_state.ron"];
+const EXCLUDED_DIRS: &[&'static str] = &["target", ".git", ".github", "edit_repo"];
 
 impl HubBuilder {
     
-    pub fn run_builder_direct<F>(builder: &str, hub_router: &mut HubRouter, event_handler: F)->HubRouteSend
+    pub fn run_builder_direct<F>(builder: &str, hub_router: &mut HubRouter, event_handler: F) -> HubRouteSend
     where F: Fn(&mut HubBuilder, FromHubMsg) -> Result<(), HubWsError> + Clone + Send + 'static {
         let workspaces = Arc::new(Mutex::new(HashMap::<String, String>::new()));
         let http_server = Arc::new(Mutex::new(None));
@@ -242,7 +242,7 @@ impl HubBuilder {
                 let key_file = args[3].to_string();
                 let builder = args[4].to_string();
                 let utf8_data = std::fs::read_to_string(key_file).expect("Can't read key file");
-                let digest:Digest = ron::de::from_str(&utf8_data).expect("Can't load key file");
+                let digest: Digest = ron::de::from_str(&utf8_data).expect("Can't load key file");
                 println!("Starting workspace connecting to ip");
                 Self::run_builder_networked(digest, Some(addr), &builder, HubLog::None, event_handler);
                 return
@@ -266,13 +266,13 @@ impl HubBuilder {
                     config: args[4].clone()
                 }, args[2].clone())
             },
-            "index" =>{
+            "index" => {
                 if args.len() != 3 {
                     return print_help();
                 }
                 (HubMsg::BuilderFileTreeRequest {
                     uid: HubUid::zero(),
-                    create_digest:false,
+                    create_digest: false,
                 }, args[2].clone())
             },
             _ => {
@@ -311,14 +311,14 @@ impl HubBuilder {
         let thread = std::thread::spawn(move || {
             while let Ok((_addr, htc)) = rx_write.recv() {
                 match htc.msg {
-                    HubMsg::BuilderFileTreeResponse{tree, ..}=>{
+                    HubMsg::BuilderFileTreeResponse {tree, ..} => {
                         //write index.ron
-                        if let BuilderFileTreeNode::Folder{folder,..} = tree{
+                        if let BuilderFileTreeNode::Folder {folder, ..} = tree {
                             let ron = ron::ser::to_string_pretty(&folder[0], ron::ser::PrettyConfig::default()).expect("cannot serialize settings");
                             fs::write("index.ron", ron).expect("cannot write index.ron");
                             println!("Written index.ron")
                         }
-                        return  
+                        return
                     },
                     HubMsg::ListPackagesResponse {packages, ..} => {
                         println!("{:?}", packages);
@@ -332,11 +332,11 @@ impl HubBuilder {
                     HubMsg::CargoEnd {build_result, ..} => {
                         println!("CargoEnd {:?}", build_result);
                     }
-                    HubMsg::BuildSuccess{..}=>{
+                    HubMsg::BuildSuccess {..} => {
                         println!("Success!");
                         return
                     },
-                    HubMsg::BuildFailure{..}=>{
+                    HubMsg::BuildFailure {..} => {
                         println!("Failure!");
                         return
                     },
@@ -347,18 +347,18 @@ impl HubBuilder {
         
         let result = event_handler(&mut hub_builder, FromHubMsg {
             from: HubAddr::None,
-            msg:message
+            msg: message
         });
         if result.is_ok() {
-            let _ = tx_write.send((HubAddr::None,ToHubMsg {
+            let _ = tx_write.send((HubAddr::None, ToHubMsg {
                 to: HubMsgTo::All,
-                msg:HubMsg::BuildSuccess{uid:HubUid{id:0, addr:HubAddr::None}}
+                msg: HubMsg::BuildSuccess {uid: HubUid {id: 0, addr: HubAddr::None}}
             }));
         }
         else {
-            let _ = tx_write.send((HubAddr::None,ToHubMsg {
+            let _ = tx_write.send((HubAddr::None, ToHubMsg {
                 to: HubMsgTo::All,
-                msg:HubMsg::BuildFailure{uid:HubUid{id:0, addr:HubAddr::None}}
+                msg: HubMsg::BuildFailure {uid: HubUid {id: 0, addr: HubAddr::None}}
             }));
         }
         let _ = thread.join();
@@ -368,7 +368,7 @@ impl HubBuilder {
         // if we have a http server. just shut it down
         if let Ok(mut workspaces) = self.workspaces.lock() {
             *workspaces = config.workspaces;
-            for (_, rel_path) in workspaces.iter_mut(){
+            for (_, rel_path) in workspaces.iter_mut() {
                 *rel_path = rel_to_abs_path(&self.abs_cwd_path, &rel_path)
             }
         };
@@ -475,7 +475,7 @@ impl HubBuilder {
         if let Err(e) = process {
             return Err(
                 self.error(uid, format!("Builder {} program run {} {} not found {:?}", self.builder, abs_dir, sub_path, e))
-            ); 
+            );
         }
         let mut process = process.unwrap();
         
@@ -511,17 +511,17 @@ impl HubBuilder {
             
             let mut tracing_panic = false;
             let mut panic_stack = Vec::new();
-            for line in stderr{
+            for line in stderr {
                 if tracing_panic == false && line.starts_with("thread '") { // this is how we recognise a stacktrace start..Very sturdy.
                     tracing_panic = true;
                     panic_stack.truncate(0);
                 }
                 if tracing_panic {
                     let mut trimmed = line.trim_start().to_string();
-                    trimmed.retain(|c| c != '\0');
+                    trimmed.retain( | c | c != '\0');
                     panic_stack.push(trimmed);
                 }
-                else{
+                else {
                     route_send.send(ToHubMsg {
                         to: HubMsgTo::UI,
                         msg: HubMsg::LogItem {
@@ -536,7 +536,7 @@ impl HubBuilder {
             let mut path = None;
             let mut row = 0;
             let mut rendered = Vec::new();
-            if panic_stack.len()>0{rendered.push(panic_stack[0].clone())};
+            if panic_stack.len()>0 {rendered.push(panic_stack[0].clone())};
             let mut last_fn_name = String::new();
             for panic_line in &panic_stack {
                 if panic_line.starts_with("at ")
@@ -584,10 +584,10 @@ impl HubBuilder {
             });
         }
         
-        loop{
+        loop {
             let result = rx_line.recv_timeout(std::time::Duration::from_millis(100));
-            match result{
-                Ok(line)=>{
+            match result {
+                Ok(line) => {
                     if let Some((is_stderr, line)) = line {
                         if is_stderr { // start collecting stderr
                             stderr.push(line);
@@ -608,12 +608,12 @@ impl HubBuilder {
                         }
                     }
                 },
-                Err(err)=>{
+                Err(err) => {
                     if stderr.len() > 0 {
                         try_parse_stderr(uid, &builder, &workspace, &stderr, &route_mode);
                         stderr.truncate(0);
                     }
-                    if let RecvTimeoutError::Disconnected = err{
+                    if let RecvTimeoutError::Disconnected = err {
                         break
                     }
                 }
@@ -651,7 +651,7 @@ impl HubBuilder {
             if let Some(http_server) = &mut *http_server {
                 http_server.send_build_start();
             }
-        }; 
+        };
         
         let abs_root_path = self.get_workspace_abs(uid, workspace) ?;
         
@@ -684,16 +684,20 @@ impl HubBuilder {
         let mut build_result = BuildResult::NoOutput;
         while let Ok(line) = rx_line.recv() {
             if let Some((is_stderr, line)) = line {
-                if is_stderr && line != "\n" && !line.contains("Finished") && !line.contains("Blocking")&& !line.contains("Compiling"){
+                if is_stderr && line != "\n"
+                    && !line.contains("Finished")
+                    && !line.contains("Blocking")
+                    && !line.contains("Compiling")
+                    && !line.contains("--verbose") { 
                     route_send.send(ToHubMsg {
                         to: HubMsgTo::UI,
                         msg: HubMsg::LogItem {
                             uid: uid,
                             item: HubLogItem::Error(line.clone())
-                        } 
-                    });                    
+                        }
+                    });
                 }
-                // lets parse the line 
+                // lets parse the line
                 let mut parsed: serde_json::Result<RustcCompilerMessage> = serde_json::from_str(&line);
                 match &mut parsed {
                     Err(_) => (), //self.hub_log.log(&format!("Json Parse Error {:?} {}", err, line)),
@@ -705,15 +709,15 @@ impl HubBuilder {
                                 let span = spans[i].clone();
                                 if !span.is_primary {
                                     continue
-                                }    
-                                      
+                                }
+                                
                                 let mut msg = message.message.clone();
-                                  
+                                
                                 for child in &message.children {
                                     msg.push_str(" - ");
                                     msg.push_str(&child.message);
-                                } 
-                                msg = msg.replace("\n","");
+                                }
+                                msg = msg.replace("\n", "");
                                 // lets try to pull path out of rendered, this fixes some rust bugs
                                 let mut path = span.file_name;
                                 let row = span.line_start as usize;
@@ -732,7 +736,7 @@ impl HubBuilder {
                                 }
                                 let loc_message = LocMessage {
                                     //package_id: parsed.package_id.clone(),
-                                    path: format!("{}/{}/{}", builder, workspace, de_relativize_path(&path)).replace("\\","/"),
+                                    path: format!("{}/{}/{}", builder, workspace, de_relativize_path(&path)).replace("\\", "/"),
                                     row: row,
                                     col: col,
                                     range: Some((span.byte_start as usize, span.byte_end as usize)),
@@ -758,9 +762,9 @@ impl HubBuilder {
                             }
                         }
                         else { // other type of message
-                            route_send.send(ToHubMsg { 
+                            route_send.send(ToHubMsg {
                                 to: HubMsgTo::UI,
-                                msg: HubMsg::CargoArtifact { 
+                                msg: HubMsg::CargoArtifact {
                                     uid: uid,
                                     package_id: parsed.package_id.clone(),
                                     fresh: if let Some(fresh) = parsed.fresh {fresh}else {false}
@@ -771,8 +775,8 @@ impl HubBuilder {
                                 if let Some(executable) = &parsed.executable {
                                     if !executable.ends_with(".rmeta") && abs_root_path.len() + 1 < executable.len() {
                                         let last = executable.clone().split_off(abs_root_path.len() + 1);
-
-                                        build_result = BuildResult::Executable {path: format!("{}/{}", workspace, last).replace("\\","/")};
+                                        
+                                        build_result = BuildResult::Executable {path: format!("{}/{}", workspace, last).replace("\\", "/")};
                                     }
                                 }
                                 // detect wasm files being build and tell the http server
@@ -780,7 +784,7 @@ impl HubBuilder {
                                     for filename in filenames {
                                         if filename.ends_with(".wasm") && abs_root_path.len() + 1 < filename.len() {
                                             let last = filename.clone().split_off(abs_root_path.len() + 1);
-                                            let path = format!("{}/{}", workspace, last).replace("\\","/");
+                                            let path = format!("{}/{}", workspace, last).replace("\\", "/");
                                             if let Ok(mut http_server) = self.http_server.lock() {
                                                 if let Some(http_server) = &mut *http_server {
                                                     http_server.send_file_change(&path);
@@ -1023,21 +1027,21 @@ impl HubBuilder {
         }
     }
     
-    pub fn workspace_file_tree(&mut self, create_digest:bool, ext_inc: &[&str], file_ex:&[&str], dir_ex:&[&str])->BuilderFileTreeNode {
-        fn digest_folder(create_digest:bool, name:&str, folder:&Vec<BuilderFileTreeNode>)->Option<Box<Digest>>{
-            if !create_digest{
+    pub fn workspace_file_tree(&mut self, create_digest: bool, ext_inc: &[&str], file_ex: &[&str], dir_ex: &[&str]) -> BuilderFileTreeNode {
+        fn digest_folder(create_digest: bool, name: &str, folder: &Vec<BuilderFileTreeNode>) -> Option<Box<Digest>> {
+            if !create_digest {
                 return None;
             }
             let mut digest_out = Digest::default();
-            for item in folder{
-                match item{
-                    BuilderFileTreeNode::File{digest, ..}=>{
-                        if let Some(digest) = digest{
+            for item in folder {
+                match item {
+                    BuilderFileTreeNode::File {digest, ..} => {
+                        if let Some(digest) = digest {
                             digest_out.digest_other(&*digest);
                         }
                     },
-                    BuilderFileTreeNode::Folder{digest, ..}=>{
-                        if let Some(digest) = digest{
+                    BuilderFileTreeNode::Folder {digest, ..} => {
+                        if let Some(digest) = digest {
                             digest_out.digest_other(&*digest);
                         }
                     },
@@ -1047,7 +1051,7 @@ impl HubBuilder {
             Some(Box::new(digest_out))
         }
         
-        fn read_recur(path: &str, create_digest:bool, ext_inc: &Vec<String>, file_ex: &Vec<String>, dir_ex: &Vec<String>) -> Vec<BuilderFileTreeNode> {
+        fn read_recur(path: &str, create_digest: bool, ext_inc: &Vec<String>, file_ex: &Vec<String>, dir_ex: &Vec<String>) -> Vec<BuilderFileTreeNode> {
             let mut ret = Vec::new();
             if let Ok(read_dir) = fs::read_dir(path) {
                 for entry in read_dir {
@@ -1057,12 +1061,12 @@ impl HubBuilder {
                                 if ty.is_dir() {
                                     let mut ignore = false;
                                     for dir in dir_ex {
-                                        if name == *dir{
+                                        if name == *dir {
                                             ignore = true;
                                             break;
                                         }
                                     }
-                                    if ignore{
+                                    if ignore {
                                         continue;
                                     }
                                     // sort the folders on name
@@ -1077,21 +1081,21 @@ impl HubBuilder {
                                 else {
                                     let mut ignore = false;
                                     for file in file_ex {
-                                        if name == *file{
+                                        if name == *file {
                                             ignore = true;
                                             break;
                                         }
                                     }
-                                    if ignore{
+                                    if ignore {
                                         continue;
                                     }
                                     for ext in ext_inc {
                                         if name.ends_with(ext) {
-                                            if create_digest{
+                                            if create_digest {
                                                 
                                             }
                                             ret.push(BuilderFileTreeNode::File {
-                                                digest:None,
+                                                digest: None,
                                                 name: name
                                             });
                                             break;
@@ -1117,9 +1121,9 @@ impl HubBuilder {
         
         if let Ok(workspaces) = self.workspaces.lock() {
             for (project, abs_path) in workspaces.iter() {
-
+                
                 let folder = read_recur(&abs_path, create_digest, &ext_inc, &file_ex, &dir_ex);
-                let tree =BuilderFileTreeNode::Folder {
+                let tree = BuilderFileTreeNode::Folder {
                     name: project.clone(),
                     digest: digest_folder(create_digest, &project, &folder),
                     folder: folder
@@ -1150,7 +1154,7 @@ fn de_relativize_path(path: &str) -> String {
         if split == ".." && out.len()>0 {
             out.pop();
         }
-        else if split != "."{
+        else if split != "." {
             out.push(split);
         }
     }

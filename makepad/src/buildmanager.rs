@@ -39,91 +39,18 @@ pub struct ActiveBuild {
 
 impl BuildManager {
     
-    fn gc_textbuffer_messages(&self, cx: &mut Cx, storage: &mut AppStorage) {
+    fn clear_textbuffer_messages(&self, cx: &mut Cx, storage: &mut AppStorage) {
         // clear all files we missed
         for (_, atb) in &mut storage.text_buffers {
-            if atb.text_buffer.messages.gc_id != cx.event_id {
+            //if atb.text_buffer.messages.gc_id != cx.event_id {
                 atb.text_buffer.messages.cursors.truncate(0);
                 atb.text_buffer.messages.bodies.truncate(0);
                 cx.send_signal(atb.text_buffer.signal, SIGNAL_TEXTBUFFER_MESSAGE_UPDATE);
-            }
-            else {
-                cx.send_signal(atb.text_buffer.signal, SIGNAL_TEXTBUFFER_MESSAGE_UPDATE);
-            }
+           // }
+            //else {
+            //    cx.send_signal(atb.text_buffer.signal, SIGNAL_TEXTBUFFER_MESSAGE_UPDATE);
+            //}
         }
-    }
-    
-    pub fn export_messages_to_textbuffers(&self, cx: &mut Cx, storage: &mut AppStorage) {
-        for dm in &self.log_items {
-            //println!("{:?}", dm.item.level);
-            if let Some(loc_message) = dm.get_loc_message() {
-                
-                let text_buffer = storage.text_buffer_from_path(cx, &storage.remap_sync_path(&loc_message.path));
-                
-                let messages = &mut text_buffer.messages;
-                messages.mutation_id = text_buffer.mutation_id;
-                if messages.gc_id != cx.event_id {
-                    messages.gc_id = cx.event_id;
-                    messages.cursors.truncate(0);
-                    messages.bodies.truncate(0);
-                }
-                
-                // search for insert point
-                let mut inserted = None;
-            
-                if let Some((head, tail)) = loc_message.range {
-                    if messages.cursors.len()>0 {
-                        for i in (0..messages.cursors.len()).rev() {
-                            println!("{} {} {}", i, head, messages.cursors[i].head);
-                            if head >= messages.cursors[i].head{
-                                break;
-                            }
-                            if head < messages.cursors[i].head && (i == 0 || head >= messages.cursors[i - 1].head) {
-                                messages.cursors.insert(i, TextCursor {
-                                    head: head,
-                                    tail: tail,
-                                    max: 0
-                                });
-                                inserted = Some(i);
-                                break;
-                            }
-                        }
-                    }
-                }
-                
-                if inserted.is_none() {
-                    if let Some((head, tail)) = loc_message.range {
-                        messages.cursors.push(TextCursor {
-                            head: head,
-                            tail: tail,
-                            max: 0
-                        })
-                    } 
-                }
-                let msg = TextBufferMessage {
-                    body: loc_message.body.clone(),
-                    level: match dm {
-                        HubLogItem::LocPanic(_) => TextBufferMessageLevel::Log,
-                        HubLogItem::LocError(_) => TextBufferMessageLevel::Error,
-                        HubLogItem::LocWarning(_) => TextBufferMessageLevel::Warning,
-                        HubLogItem::LocMessage(_) => TextBufferMessageLevel::Log,
-                        HubLogItem::Error(_) => TextBufferMessageLevel::Error,
-                        HubLogItem::Warning(_) => TextBufferMessageLevel::Warning,
-                        HubLogItem::Message(_) => TextBufferMessageLevel::Log,
-                    }
-                };
-                if let Some(pos) = inserted {
-                    text_buffer.messages.bodies.insert(pos, msg);
-                }
-                else {
-                    text_buffer.messages.bodies.push(msg);
-                }
-            }
-            else {
-                break
-            }
-        }
-        self.gc_textbuffer_messages(cx, storage);
     }
     
     pub fn is_running_uid(&self, uid: &HubUid) -> bool {
@@ -165,30 +92,64 @@ impl BuildManager {
             HubMsg::CargoBegin {uid} => if self.is_running_uid(uid) {
             },
             HubMsg::LogItem {uid, item} => if self.is_running_uid(uid) {
-              
-                let mut export = false;
-                if let Some(loc_msg) = item.get_loc_message() {
-                    for check_msg in &self.log_items {
-                        if let Some(check_msg) = check_msg.get_loc_message() {
-                            if check_msg.body == loc_msg.body
-                                && check_msg.row == loc_msg.row
-                                && check_msg.col == loc_msg.col
-                                && check_msg.path == loc_msg.path { // ignore duplicates
-                                return
+                self.log_items.push(item.clone());
+
+                if let Some(loc_message) = item.get_loc_message() {
+                    
+                    let text_buffer = storage.text_buffer_from_path(cx, &storage.remap_sync_path(&loc_message.path));
+                    
+                    let messages = &mut text_buffer.messages;
+                    messages.mutation_id = text_buffer.mutation_id;
+                    let mut inserted = None;
+                    
+                    if let Some((head, tail)) = loc_message.range {
+                        if messages.cursors.len()>0 {
+                            for i in (0..messages.cursors.len()).rev() {
+                                if head >= messages.cursors[i].head {
+                                    break;
+                                }
+                                if head < messages.cursors[i].head && (i == 0 || head >= messages.cursors[i - 1].head) {
+                                    messages.cursors.insert(i, TextCursor {
+                                        head: head,
+                                        tail: tail,
+                                        max: 0
+                                    });
+                                    inserted = Some(i);
+                                    break;
+                                }
                             }
                         }
-                        else {
-                            break;
+                    }
+                    
+                    if inserted.is_none() {
+                        if let Some((head, tail)) = loc_message.range {
+                            messages.cursors.push(TextCursor {
+                                head: head,
+                                tail: tail,
+                                max: 0
+                            })
                         }
                     }
-                    export = true;
+                    let msg = TextBufferMessage {
+                        body: loc_message.body.clone(),
+                        level: match item {
+                            HubLogItem::LocPanic(_) => TextBufferMessageLevel::Log,
+                            HubLogItem::LocError(_) => TextBufferMessageLevel::Error,
+                            HubLogItem::LocWarning(_) => TextBufferMessageLevel::Warning,
+                            HubLogItem::LocMessage(_) => TextBufferMessageLevel::Log,
+                            HubLogItem::Error(_) => TextBufferMessageLevel::Error,
+                            HubLogItem::Warning(_) => TextBufferMessageLevel::Warning,
+                            HubLogItem::Message(_) => TextBufferMessageLevel::Log,
+                        }
+                    };
+                    if let Some(pos) = inserted {
+                        text_buffer.messages.bodies.insert(pos, msg);
+                    }
+                    else {
+                        text_buffer.messages.bodies.push(msg);
+                    }
                 }
-                else {
-                }
-                self.log_items.push(item.clone());
-                if export {
-                    self.export_messages_to_textbuffers(cx, storage);
-                }
+
                 cx.send_signal(self.signal, SIGNAL_BUILD_MANAGER_NEW_LOG_ITEM);
                 //println!("LOG ITEM RECEIVED");
             },
@@ -228,7 +189,7 @@ impl BuildManager {
             },
             _ => ()
         }
-    } 
+    }
     
     pub fn run_all_artifacts(&mut self, storage: &mut AppStorage) {
         let hub_ui = storage.hub_ui.as_mut().unwrap();
@@ -276,7 +237,7 @@ impl BuildManager {
         self.artifacts.truncate(0);
         self.log_items.truncate(0);
         //self.selection.truncate(0);
-        self.gc_textbuffer_messages(cx, storage);
+        self.clear_textbuffer_messages(cx, storage);
         
         let hub_ui = storage.hub_ui.as_mut().unwrap();
         self.exec_when_done = storage.settings.exec_when_done;
