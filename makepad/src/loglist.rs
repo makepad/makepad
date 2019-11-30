@@ -18,6 +18,7 @@ pub struct LogItemDraw {
     pub code_icon: CodeIcon,
     pub path_color: ColorId,
     pub message_color: ColorId,
+    pub shadow: ScrollShadow,
 }
 
 impl LogItemDraw {
@@ -31,16 +32,17 @@ impl LogItemDraw {
             code_icon: CodeIcon::proto(cx),
             path_color: Theme::color_text_defocus(),
             message_color: Theme::color_text_focus(),
+            shadow: ScrollShadow{z:0.01,..ScrollShadow::proto(cx)}
         }
     }
     
     pub fn layout_item() -> LayoutId {uid!()}
-    pub fn text_style_item() ->TextStyleId{uid!()}
-
-    pub fn style(cx: &mut Cx, opt:&StyleOptions) {
+    pub fn text_style_item() -> TextStyleId {uid!()}
+    
+    pub fn style(cx: &mut Cx, opt: &StyleOptions) {
         
         Self::layout_item().set(cx, Layout {
-            walk: Walk::wh(Width::Fill, Height::Fix(20.* opt.scale)),
+            walk: Walk::wh(Width::Fill, Height::Fix(20. * opt.scale)),
             align: Align::left_center(),
             padding: Padding::zero(), // {l: 2., t: 3., b: 2., r: 0.},
             line_wrap: LineWrap::None,
@@ -48,6 +50,26 @@ impl LogItemDraw {
         });
         
         Self::text_style_item().set(cx, Theme::text_style_normal().get(cx));
+    }
+    
+    pub fn def_shadow_shader() -> ShaderGen {
+        Quad::def_quad_shader().compose(shader_ast !({
+            let is_viz: float<Varying>;
+            
+            fn scroll() -> vec2 {
+                if draw_scroll.y > 0. {
+                    is_viz = 1.0
+                }
+                else {
+                    is_viz = 0.0;
+                }
+                return vec2(0., 0.);
+            }
+            
+            fn pixel() -> vec4 { // TODO make the corner overlap properly with a distance field eq.
+                return mix(vec4(0., 0., 0., is_viz), vec4(0., 0., 0., 0.), pow(geom.y, 0.5));
+            }
+        }))
     }
     
     pub fn get_default_anim(cx: &Cx, counter: usize, marked: bool) -> Anim {
@@ -216,7 +238,7 @@ impl LogList {
         }
     }
     
-    pub fn style(cx: &mut Cx, opt:&StyleOptions) {
+    pub fn style(cx: &mut Cx, opt: &StyleOptions) {
         LogItemDraw::style(cx, opt);
     }
     
@@ -394,6 +416,20 @@ impl LogList {
             self.item_draw.draw_filler(cx, counter);
             counter += 1;
         }
+        
+        self.item_draw.shadow.draw_shadow_left(cx, Rect {
+            x: 0.,
+            y: 0.,
+            w: 0.,
+            h: cx.get_height_total()
+        });
+        
+        self.item_draw.shadow.draw_shadow_top(cx, Rect {
+            x: 0.,
+            y: 0.,
+            w: cx.get_width_total(),
+            h: 0.
+        });
         
         self.list.end_list(cx, &mut self.view);
     }

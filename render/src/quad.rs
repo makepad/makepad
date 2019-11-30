@@ -3,8 +3,6 @@ use crate::cx::*;
 #[derive(Clone)]
 pub struct Quad {
     pub shader: Shader,
-    pub do_h_scroll: bool,
-    pub do_v_scroll: bool,
     pub z: f32,
     pub color: Color
 }
@@ -20,8 +18,6 @@ impl Quad {
     pub fn proto(cx: &mut Cx) -> Self {
         Self {
             shader: cx.add_shader(Self::def_quad_shader(), "Quad"),
-            do_h_scroll: true,
-            do_v_scroll: true,
             z: 0.0,
             color: color("green")
         }
@@ -33,7 +29,6 @@ impl Quad {
     pub fn instance_h() -> InstanceFloat {uid!()}
     pub fn instance_z() -> InstanceFloat {uid!()}
     pub fn instance_color() -> InstanceColor {uid!()}
-    pub fn uniform_view_do_scroll() -> UniformVec2 {uid!()}
     
     pub fn def_quad_shader() -> ShaderGen {
         // lets add the draw shader lib
@@ -53,7 +48,6 @@ impl Quad {
             let z: Self::instance_z();
             let color: Self::instance_color();
             
-            let view_do_scroll: Self::uniform_view_do_scroll();
             //let dpi_dilate: float<Uniform>;
             fn scroll() -> vec2{
                 return draw_scroll
@@ -125,12 +119,6 @@ impl Quad {
     pub fn draw_quad_abs(&mut self, cx: &mut Cx, rect: Rect) -> InstanceArea {
         let inst = cx.new_instance(&self.shader, 1);
         if inst.need_uniforms_now(cx) {
-            inst.push_uniform_vec2f(
-                cx,
-                if self.do_h_scroll {1.0}else {0.0},
-                if self.do_v_scroll {1.0}else {0.0}
-            );
-            inst.push_uniform_float(cx, 0.);
         }
         //println!("{:?} {}", area, cx.current_draw_list_id);
         let data = [
