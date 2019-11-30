@@ -55,15 +55,19 @@ impl Quad {
             
             let view_do_scroll: Self::uniform_view_do_scroll();
             //let dpi_dilate: float<Uniform>;
+            fn scroll() -> vec2{
+                return draw_scroll
+            }
             
             fn vertex() -> vec4 {
                 // return vec4(geom.x-0.5, geom.y, 0., 1.);
+                let scr = scroll();
                 let clipped: vec2 = clamp(
-                    geom * vec2(w, h) + vec2(x, y) - draw_scroll,
+                    geom * vec2(w, h) + vec2(x, y) - scr,
                     draw_clip.xy,
                     draw_clip.zw
                 );
-                pos = (clipped + draw_scroll - vec2(x, y)) / vec2(w, h);
+                pos = (clipped + scr - vec2(x, y)) / vec2(w, h);
                 // only pass the clipped position forward
                 return camera_projection * (camera_view * (view_transform * vec4(clipped.x, clipped.y, z + draw_zbias, 1.)));
             }
