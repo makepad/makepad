@@ -5,7 +5,7 @@ pub struct FileTreeItemDraw {
     pub filler: Quad,
     pub tree_text: Text,
     pub node_bg: Quad,
-    pub shadow: Quad,
+    pub shadow: ScrollShadow,
 }
 
 #[derive(Clone)]
@@ -176,9 +176,9 @@ impl FileTreeItemDraw {
                 z: 0.001,
                 ..Quad::proto_with_shader(cx, Self::def_filler_shader(), "FileTree.filler")
             },
-            shadow: Quad {
+            shadow: ScrollShadow {
                 z: 0.01,
-                ..Quad::proto_with_shader(cx, Self::def_shadow_shader(), "FileTree.filler")
+                ..ScrollShadow::proto(cx)
             },
         }
     }
@@ -823,14 +823,12 @@ impl FileTree {
             }
         }
         
-        let shadow_size = FileTreeItemDraw::shadow_size().get(cx);
-        let inst = self.item_draw.shadow.draw_quad_rel(cx, Rect {
+        self.item_draw.shadow.draw_shadow_top(cx, Rect {
             x: 0.,
             y: 0.,
             w: cx.get_width_total(),
-            h: shadow_size
+            h: 0.
         });
-        self._shadow_area = inst.into();
     
         self.view.end_view(cx);
     }
