@@ -43,5 +43,7 @@ mod plaineditor;
 pub use crate::plaineditor::*;
 mod textinput;
 pub use crate::textinput::*;
+mod scrollshadow;
+pub use crate::scrollshadow::*;
 //mod texteditor;
 //pub use crate::texteditor::*;

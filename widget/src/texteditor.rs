@@ -3,6 +3,7 @@ use crate::scrollview::*;
 use crate::textbuffer::*;
 use crate::textcursor::*;
 use crate::widgetstyle::*;
+use crate::scrollshadow::*;
 
 #[derive(Clone)]
 pub struct TextEditor {
@@ -17,7 +18,7 @@ pub struct TextEditor {
     pub cursor_row: Quad,
     pub paren_pair: Quad,
     pub indent_lines: Quad,
-    pub shadow: Quad,
+    pub shadow: ScrollShadow,
     pub message_marker: Quad,
     pub text: Text,
     pub line_number_text: Text,
@@ -161,21 +162,13 @@ impl TextEditor {
                 ..Quad::proto_with_shader(cx, Self::def_indent_lines_shader(), "Editor.indent_lines")
             },
             view: ScrollView::proto(cx),
-            bg: Quad {
-                do_h_scroll: false,
-                do_v_scroll: false,
-                ..Quad::proto(cx)
-            },
-            shadow: Quad {
-                do_h_scroll: false,
-                do_v_scroll: false,
+            bg: Quad ::proto(cx),
+            shadow: ScrollShadow{
                 z: 10.,
-                ..Quad::proto_with_shader(cx, Self::def_shadow_shader(), "Editor.shadow")
+                ..ScrollShadow::proto(cx)
             },
             gutter_bg: Quad {
                 z: 9.0,
-                do_h_scroll: false,
-                do_v_scroll: false,
                 ..Quad::proto(cx)
             },
             colors: CodeEditorColors::default(),
@@ -197,7 +190,6 @@ impl TextEditor {
             },
             line_number_text: Text {
                 z: 9.,
-                do_h_scroll: false,
                 wrapping: Wrapping::Line,
                 ..Text::proto(cx)
             },
@@ -384,16 +376,16 @@ impl TextEditor {
             let shadow_dir: Self::instance_shadow_dir();
             fn pixel() -> vec4 { // TODO make the corner overlap properly with a distance field eq.
                 if shadow_dir<0.5 {
-                    return mix(vec4(0., 0., 0., 1.), vec4(0., 0., 0., 0.), pow(geom.x,0.5));
+                    return mix(vec4(0., 0., 0., 1.), vec4(0., 0., 0., 0.), pow(geom.x, 0.5));
                 }
-                else  if shadow_dir<1.5 {
-                    return mix(vec4(0., 0., 0., 1.), vec4(0., 0., 0., 0.), pow(geom.y,0.5));
+                else if shadow_dir<1.5 {
+                    return mix(vec4(0., 0., 0., 1.), vec4(0., 0., 0., 0.), pow(geom.y, 0.5));
                 }
-                else  if shadow_dir<2.5 {
-                    return mix(vec4(0., 0., 0., 1.), vec4(0., 0., 0., 0.), pow(1.0- geom.x,0.5));
+                else if shadow_dir<2.5 {
+                    return mix(vec4(0., 0., 0., 1.), vec4(0., 0., 0., 0.), pow(1.0 - geom.x, 0.5));
                 }
-                else  {
-                    return mix(vec4(0., 0., 0., 1.), vec4(0., 0., 0., 0.), pow(1.0-geom.y,0.5));
+                else {
+                    return mix(vec4(0., 0., 0., 1.), vec4(0., 0., 0., 0.), pow(1.0 - geom.y, 0.5));
                 }
             }
         }))
@@ -1718,27 +1710,20 @@ impl TextEditor {
     }
     
     fn draw_shadows(&mut self, cx: &mut Cx) {
-        let scroll_pos = self.view.get_scroll_pos(cx);
-        let shadow_size = Self::shadow_size().get(cx);
-        let gutter_width = Self::gutter_width().get(cx);
-        if scroll_pos.y > 0. {
-            let inst = self.shadow.draw_quad_rel(cx, Rect {
-                x: 0.,
-                y: 0.,
-                w: cx.get_width_total(),
-                h: shadow_size
-            });
-            inst.push_float(cx, 1.);
-        }
-        if scroll_pos.x > 0. {
-            let inst = self.shadow.draw_quad_rel(cx, Rect {
-                x: gutter_width,
-                y: 0.,
-                w: shadow_size,
-                h: cx.get_height_total()
-            });
-            inst.push_float(cx, 0.);
-        }
+        let gutter_width = Self::gutter_width().get(cx);        
+        self.shadow.draw_shadow_left(cx, Rect {
+            x: gutter_width,
+            y: 0.,
+            w: 0.,
+            h: cx.get_height_total()
+        });
+        
+        self.shadow.draw_shadow_top(cx, Rect {
+            x: 0.,
+            y: 0.,
+            w: cx.get_width_total(),
+            h: 0.
+        });
     }
     
     fn draw_message_markers(&mut self, cx: &mut Cx, text_buffer: &TextBuffer) {
