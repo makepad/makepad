@@ -131,7 +131,7 @@ impl HubBuilder {
             hub_log.msg("Builder connecting to {:?}", &address);
             
             // ok now connect to that address
-            let hub_client = if let Some(hub_client) = HubClient::connect_to_server(digest.clone(), address, hub_log.clone()){
+            let mut hub_client = if let Ok(hub_client) = HubClient::connect_to_server(digest.clone(), address, hub_log.clone()){
                 hub_client
             }
             else{
@@ -139,8 +139,6 @@ impl HubBuilder {
                 std::thread::sleep(std::time::Duration::from_millis(500));
                 continue;
             };
-            
-            let mut hub_client = .expect("cannot connect to hub");
             
             println!("Builder connected to {:?}", hub_client.own_addr);
             
