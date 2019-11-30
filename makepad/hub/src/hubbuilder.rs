@@ -131,7 +131,7 @@ impl HubBuilder {
             hub_log.msg("Builder connecting to {:?}", &address);
             
             // ok now connect to that address
-            if let Some(hub_client) = HubClient::connect_to_server(digest.clone(), address, hub_log.clone()){
+            let hub_client = if let Some(hub_client) = HubClient::connect_to_server(digest.clone(), address, hub_log.clone()){
                 hub_client
             }
             else{
