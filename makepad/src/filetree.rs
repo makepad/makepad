@@ -5,6 +5,7 @@ pub struct FileTreeItemDraw {
     pub filler: Quad,
     pub tree_text: Text,
     pub node_bg: Quad,
+    pub shadow: Quad,
 }
 
 #[derive(Clone)]
@@ -15,6 +16,7 @@ pub struct FileTree {
     pub root_node: FileNode,
     pub item_draw: FileTreeItemDraw,
     pub drag_bg: Quad,
+    pub _shadow_area: Area,
 }
 
 #[derive(Clone, PartialEq)]
@@ -174,8 +176,13 @@ impl FileTreeItemDraw {
                 z: 0.001,
                 ..Quad::proto_with_shader(cx, Self::def_filler_shader(), "FileTree.filler")
             },
+            shadow: Quad {
+                z: 0.01,
+                ..Quad::proto_with_shader(cx, Self::def_shadow_shader(), "FileTree.filler")
+            },
         }
     }
+    pub fn shadow_size()->FloatId{uid!()}
       
     pub fn layout_drag_bg()->LayoutId{uid!()}
     pub fn layout_node()->LayoutId{uid!()}
@@ -192,6 +199,7 @@ impl FileTreeItemDraw {
     pub fn instance_anim_pos()->InstanceFloat{uid!()}
 
     pub fn style(cx: &mut Cx, opt:&StyleOptions){
+        Self::shadow_size().set(cx, 6.0);
         Self::color_tree_folder().set(cx, Theme::color_text_selected_focus().get(cx));
         Self::color_tree_file().set(cx, Theme::color_text_deselected_focus().get(cx));
         Self::color_filler().set(cx, Theme::color_icon().get(cx));
@@ -225,6 +233,26 @@ impl FileTreeItemDraw {
             height:Height::Fill, 
             margin: Margin {l: 0., t: 0., r: 2., b: 0.}
         });
+    }
+
+    pub fn def_shadow_shader() -> ShaderGen {
+        Quad::def_quad_shader().compose(shader_ast !({
+            let is_viz : float<Varying>;
+            
+            fn scroll()-> vec2{
+                if draw_scroll.y > 0.{
+                    is_viz = 1.0
+                }
+                else{
+                    is_viz = 0.0;
+                }
+                return vec2(0.,0.);
+            } 
+            
+            fn pixel() -> vec4 { // TODO make the corner overlap properly with a distance field eq.
+                return mix(vec4(0., 0., 0., is_viz), vec4(0., 0., 0., 0.), pow(geom.y,0.5));
+            }
+        }))
     }
     
     pub fn def_filler_shader() -> ShaderGen {
@@ -295,6 +323,7 @@ impl FileTree {
                 ..View::proto(cx)
             },
             _drag_move: None,
+            _shadow_area: Area::Empty
         }
     }
 
@@ -679,8 +708,8 @@ impl FileTree {
                     }
                 }
             };
-            self.item_draw.filler.z = depth as f32 + 1.0;
-            self.item_draw.tree_text.z = depth as f32 + 1.0;
+            //self.item_draw.filler.z = depth as f32 + 1.0;
+            //self.item_draw.tree_text.z = depth as f32 + 1.0;
             //self.item_draw.tree_text.font_size = self.font_size;
             self.item_draw.tree_text.font_scale = scale as f32;
             match node {
@@ -793,6 +822,16 @@ impl FileTree {
                 self.drag_view.end_view(cx);
             }
         }
+        
+        let shadow_size = FileTreeItemDraw::shadow_size().get(cx);
+        let inst = self.item_draw.shadow.draw_quad_rel(cx, Rect {
+            x: 0.,
+            y: 0.,
+            w: cx.get_width_total(),
+            h: shadow_size
+        });
+        self._shadow_area = inst.into();
+    
         self.view.end_view(cx);
     }
     
