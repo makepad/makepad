@@ -70,7 +70,6 @@ impl BuildManager {
                 
                 // search for insert point
                 let mut inserted = None;
-                println!("sort insert");
             
                 if let Some((head, tail)) = loc_message.range {
                     if messages.cursors.len()>0 {
@@ -99,7 +98,7 @@ impl BuildManager {
                             tail: tail,
                             max: 0
                         })
-                    }
+                    } 
                 }
                 let msg = TextBufferMessage {
                     body: loc_message.body.clone(),
@@ -166,6 +165,7 @@ impl BuildManager {
             HubMsg::CargoBegin {uid} => if self.is_running_uid(uid) {
             },
             HubMsg::LogItem {uid, item} => if self.is_running_uid(uid) {
+              
                 let mut export = false;
                 if let Some(loc_msg) = item.get_loc_message() {
                     for check_msg in &self.log_items {
@@ -228,7 +228,7 @@ impl BuildManager {
             },
             _ => ()
         }
-    }
+    } 
     
     pub fn run_all_artifacts(&mut self, storage: &mut AppStorage) {
         let hub_ui = storage.hub_ui.as_mut().unwrap();
