@@ -136,7 +136,7 @@ impl HubBuilder {
             }
             else{
                 println!("Builder cannot connect to to {:?}, retrying", address);
-                std::thread::sleep(time::Duration::from_millis(500));
+                std::thread::sleep(std::time::Duration::from_millis(500));
                 continue;
             }
             
