@@ -151,6 +151,7 @@ impl BuildManager {
                         else {
                             text_buffer.messages.bodies.push(msg);
                         }
+                        cx.send_signal(text_buffer.signal, SIGNAL_TEXTBUFFER_MESSAGE_UPDATE);
                     }
                 }
 
