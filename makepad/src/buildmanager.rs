@@ -98,7 +98,6 @@ impl BuildManager {
                 } 
                 self.log_items.push(item.clone());
                 if let Some(loc_message) = item.get_loc_message() {
-                    println!("Got path {}",storage.remap_sync_path(&loc_message.path));
                     let text_buffer = storage.text_buffer_from_path(cx, &storage.remap_sync_path(&loc_message.path));
                     
                     let messages = &mut text_buffer.messages;
