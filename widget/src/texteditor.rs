@@ -384,7 +384,7 @@ impl TextEditor {
             const border_radius: float = 2.;
             
             fn vertex() -> vec4 { // custom vertex shader because we widen the draweable area a bit for the gloopiness
-                let shift: vec2 = -draw_scroll;
+                let shift: vec2 = -draw_scroll.xy;
                 let clipped: vec2 = clamp(
                     geom * vec2(w + 16., h) + vec2(x, y) + shift - vec2(8., 0.),
                     draw_clip.xy,
