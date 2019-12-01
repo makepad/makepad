@@ -118,7 +118,7 @@ pub enum ClearColor {
 
 impl Default for ClearColor {
     fn default() -> Self {
-        ClearColor::ClearWith(Color::zero())
+        ClearColor::ClearWith(Color::default())
     }
 }
 
@@ -180,7 +180,7 @@ impl Default for CxPass {
             main_view_id: None,
             dep_of: CxPassDepOf::None,
             paint_dirty: false,
-            pass_size: Vec2::zero(),
+            pass_size: Vec2::default(),
             platform: CxPlatformPass::default()
         }
     }

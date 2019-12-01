@@ -9,12 +9,25 @@ use crate::codeicon::*;
 use crate::textinput::*;
 use crate::scrollbar::*;
 use crate::scrollshadow::*;
+use crate::desktopbutton::*;
+use crate::splitter::*;
+use crate::tabcontrol::*;
+
 use serde::{Serialize, Deserialize};
 
 #[derive(Debug, Copy, Clone, Serialize, Deserialize, PartialEq)]
 pub struct StyleOptions {
     pub scale: f32,
     pub dark: bool
+}
+
+impl Default for StyleOptions{
+    fn default()->Self{
+        Self{
+            scale:1.0,
+            dark:true,
+        }
+    }
 }
 
 pub struct Theme {}
@@ -163,4 +176,7 @@ pub fn set_widget_style(cx: &mut Cx, opt: &StyleOptions) {
     TextInput::style(cx, opt);
     ScrollBar::style(cx, opt);
     ScrollShadow::style(cx, opt);
+    DesktopButton::style(cx, opt);
+    Splitter::style(cx, opt);
+    TabControl::style(cx, opt);
 }

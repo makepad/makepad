@@ -131,7 +131,7 @@ impl Cx {
     pub fn setup_render_pass_descriptor(&mut self, render_pass_descriptor: &RenderPassDescriptorRef, pass_id: usize, inherit_dpi_factor: f32, first_texture: Option<&metal::TextureRef>, metal_cx: &MetalCx) {
         let pass_size = self.passes[pass_id].pass_size;
         
-        self.passes[pass_id].set_ortho_matrix(Vec2::zero(), pass_size);
+        self.passes[pass_id].set_ortho_matrix(Vec2::default(), pass_size);
         self.passes[pass_id].uniform_camera_view(&Mat4::identity());
         self.passes[pass_id].paint_dirty = false;
         let dpi_factor = if let Some(override_dpi_factor) = self.passes[pass_id].override_dpi_factor {
@@ -251,7 +251,7 @@ impl Cx {
             self.render_view(
                 pass_id,
                 view_id,
-                Vec2::zero(),
+                Vec2::default(),
                 (Vec2 {x: -50000., y: -50000.}, Vec2 {x: 50000., y: 50000.}),
                 &mut zbias,
                 zbias_step,
@@ -292,7 +292,7 @@ impl Cx {
         self.render_view(
             pass_id,
             view_id,
-            Vec2::zero(),
+            Vec2::default(),
             (Vec2 {x: -50000., y: -50000.}, Vec2 {x: 50000., y: 50000.}),
             &mut zbias,
             zbias_step,
@@ -484,7 +484,7 @@ impl MetalWindow {
         MetalWindow {
             first_draw: true,
             window_id,
-            cal_size: Vec2::zero(),
+            cal_size: Vec2::default(),
             core_animation_layer,
             window_geom: cocoa_window.get_window_geom(),
             cocoa_window

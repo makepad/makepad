@@ -140,6 +140,14 @@ impl TabControl {
         tab_control_event
     }
     
+    pub fn tab_control_style()->StyleId{uid!()}
+
+    pub fn style(cx:&mut Cx, opt:&StyleOptions){
+        cx.begin_style(Self::tab_control_style());
+        ScrollBar::bar_size().set(cx, 8. * opt.scale.powf(0.5));
+        cx.end_style(Self::tab_control_style());
+    }
+    
     pub fn get_tab_rects(&mut self, cx: &Cx) -> Vec<Rect> {
         let mut rects = Vec::new();
         for tab in self.tabs.iter() {
@@ -213,7 +221,7 @@ impl TabControl {
         self.tabs.sweep(cx, | _, _ | ());
         if let Some((fe, id)) = &self._dragging_tab {
             if let Ok(()) = self.drag_tab_view.begin_view(cx, Layout {
-                abs_origin: Some(Vec2::zero()),
+                abs_origin: Some(Vec2::default()),
                 ..Default::default()
             }) {
                 
@@ -226,7 +234,9 @@ impl TabControl {
                 self.drag_tab_view.end_view(cx);
             }
         }
+        cx.begin_style(Self::tab_control_style());
         self.tabs_view.end_view(cx);
+        cx.end_style(Self::tab_control_style());
         if self._tab_now_selected != self._tab_last_selected{
             // lets scroll the thing into view
             if let Some(tab_id) = self._tab_now_selected{
