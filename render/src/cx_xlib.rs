@@ -544,7 +544,7 @@ impl XlibApp {
                         X11_sys::KeyPress => {
                             if let Some(window_ptr) = self.window_map.get(&event.xkey.window) {
                                 let window = &mut (**window_ptr);
-                                if event.xkey.keycode != 0 {
+                                let block_text = if event.xkey.keycode != 0 {
                                     let key_code = self.xkeyevent_to_keycode(&mut event.xkey);
                                     let modifiers = self.xkeystate_to_modifiers(event.xkey.state);
                                     
@@ -597,40 +597,43 @@ impl XlibApp {
                                             _ => ()
                                         }
                                     }
-                                    
+                                    let block_text = modifiers.control || modifiers.logo || modifiers.alt;
                                     self.do_callback(&mut vec![Event::KeyDown(KeyEvent {
                                         key_code: key_code,
                                         is_repeat: false,
                                         modifiers: modifiers,
                                         time: self.time_now()
                                     })]);
-                                }
+                                    block_text
+                                }else{false};
                                 
-                                // decode the character
-                                let mut buffer = [0u8; 32];
-                                let mut keysym = mem::MaybeUninit::uninit();
-                                let mut status = mem::MaybeUninit::uninit();
-                                let count = X11_sys::Xutf8LookupString(
-                                    window.xic.unwrap(),
-                                    &mut event.xkey,
-                                    buffer.as_mut_ptr() as *mut c_char,
-                                    buffer.len() as c_int,
-                                    keysym.as_mut_ptr(),
-                                    status.as_mut_ptr(),
-                                );
-                                //let keysym = keysym.assume_init();
-                                let status = status.assume_init();
-                                if status != X11_sys::XBufferOverflow {
-                                    let utf8 = std::str::from_utf8(&buffer[..count as usize]).unwrap_or("").to_string();
-                                    let char_code = utf8.chars().next().unwrap_or('\0');
-                                    if char_code >= ' ' && char_code != 127 as char {
-                                        self.do_callback(&mut vec![
-                                            Event::TextInput(TextInputEvent {
-                                                input: utf8,
-                                                was_paste: false,
-                                                replace_last: false
-                                            })
-                                        ]);
+                                if !block_text{
+                                    // decode the character
+                                    let mut buffer = [0u8; 32];
+                                    let mut keysym = mem::MaybeUninit::uninit();
+                                    let mut status = mem::MaybeUninit::uninit();
+                                    let count = X11_sys::Xutf8LookupString(
+                                        window.xic.unwrap(),
+                                        &mut event.xkey,
+                                        buffer.as_mut_ptr() as *mut c_char,
+                                        buffer.len() as c_int,
+                                        keysym.as_mut_ptr(),
+                                        status.as_mut_ptr(),
+                                    );
+                                    //let keysym = keysym.assume_init();
+                                    let status = status.assume_init();
+                                    if status != X11_sys::XBufferOverflow {
+                                        let utf8 = std::str::from_utf8(&buffer[..count as usize]).unwrap_or("").to_string();
+                                        let char_code = utf8.chars().next().unwrap_or('\0');
+                                        if char_code >= ' ' && char_code != 127 as char {
+                                            self.do_callback(&mut vec![
+                                                Event::TextInput(TextInputEvent {
+                                                    input: utf8,
+                                                    was_paste: false,
+                                                    replace_last: false
+                                                })
+                                            ]);
+                                        }
                                     }
                                 }
                             }

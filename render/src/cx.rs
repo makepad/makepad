@@ -716,7 +716,7 @@ impl Cx {
     }
 
     pub fn send_signal(&mut self, signal: Signal, message: usize) {
-        if signal.signal_id != 0{
+        if signal.signal_id != 0 && self.signals.iter().find(|v| v.0 == signal && v.1 == message).is_none(){
             self.signals.push((signal, message));
         }
     }
