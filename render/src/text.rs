@@ -155,12 +155,12 @@ impl Text {
                 let max_pos = vec2(x + w, y - h);
                 
                 clipped = clamp(
-                    mix(min_pos, max_pos, geom) - draw_scroll,
+                    mix(min_pos, max_pos, geom) - draw_scroll.xy,
                     draw_clip.xy,
                     draw_clip.zw
                 );
                 
-                let normalized: vec2 = (clipped - min_pos + draw_scroll) / vec2(w,-h);
+                let normalized: vec2 = (clipped - min_pos + draw_scroll.xy) / vec2(w,-h);
                 //rect = vec4(min_pos.x, min_pos.y, max_pos.x, max_pos.y) - draw_scroll.xyxy;
                 
                 tex_coord1 = mix(

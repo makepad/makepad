@@ -28,22 +28,12 @@ impl ScrollShadow {
             let shadow_top: Self::shadow_top();
             fn scroll() -> vec2 {
                 if shadow_top > 0.5 {
-                    if draw_scroll.y > 0. {
-                        is_viz = 1.0
-                    }
-                    else {
-                        is_viz = 0.0;
-                    }
+                    is_viz = clamp(draw_scroll.w*0.1,0.,1.)
                 }
                 else {
-                    if draw_scroll.x > 0. {
-                        is_viz = 1.0
-                    }
-                    else {
-                        is_viz = 0.0;
-                    }
+                    is_viz = clamp(draw_scroll.z*0.1,0.,1.)
                 }
-                return vec2(0., 0.);
+                return draw_scroll.xy;
             }
             
             fn pixel() -> vec4 { // TODO make the corner overlap properly with a distance field eq.
@@ -59,6 +49,7 @@ impl ScrollShadow {
         self.bg.shader = Self::shader_bg().get(cx);
         self.bg.z = self.z;
         let inst = self.bg.draw_quad_rel(cx, Rect{h:ScrollShadow::shadow_size().get(cx),..rect});
+        inst.set_do_scroll(cx, false, false);
         inst.push_float(cx, 1.0);
     }
 
@@ -66,6 +57,7 @@ impl ScrollShadow {
         self.bg.shader = Self::shader_bg().get(cx);
         self.bg.z = self.z;
         let inst = self.bg.draw_quad_rel(cx, Rect{w:ScrollShadow::shadow_size().get(cx),..rect});
+        inst.set_do_scroll(cx, false, false);
         inst.push_float(cx, 0.0);
     }
     
