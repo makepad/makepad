@@ -374,7 +374,7 @@ impl AppWindow {
             title: path_file_name(&path),
             item: Panel::FileEditor {
                 path: path.to_string(),
-                scroll_pos: Vec2::zero(),
+                scroll_pos: Vec2::default(),
                 editor_id: self.highest_file_editor_id() + 1
             }
         }

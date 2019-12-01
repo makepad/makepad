@@ -9,9 +9,7 @@ pub struct Rect{
 }
 
 impl Rect{
-    pub fn zero()->Rect{
-        Rect{x:0.0,y:0.0,w:0.0,h:0.0}
-    }
+
     pub fn contains(&self, x:f32, y:f32)->bool{
         return x >= self.x && x <= self.x + self.w &&
             y >= self.y && y <= self.y + self.h;
@@ -38,9 +36,6 @@ pub struct Vec2{
 }
 
 impl Vec2{
-    pub fn zero()->Vec2{
-        Vec2{x:0.0,y:0.0}
-    }
 
     pub fn distance(&self, other:&Vec2)->f32{
         let dx = self.x - other.x;
@@ -60,12 +55,6 @@ pub struct Vec3{
     pub z: f32
 }
 
-impl Vec3{
-    pub fn zero()->Vec3{
-        Vec3{x:0.0,y:0.0,z:0.0}
-    }
-}
-
 /*
 pub fn vec3(x:f32, y:f32, z:f32)->Vec3{
     Vec3{x:x, y:y, z:z}
@@ -79,12 +68,6 @@ pub struct Vec4{
     pub w: f32
 }
 
-impl Vec4{
-    pub fn zero()->Vec4{
-        Vec4{x:0.0,y:0.0,z:0.0,w:0.0}
-    }
-}
-
 
 #[derive(Clone, Copy, Default, Debug)]
 pub struct Color{
@@ -93,13 +76,6 @@ pub struct Color{
     pub b: f32,
     pub a: f32
 }
-
-impl Color{
-    pub fn zero()->Color{
-        Color{r:0.0, g:0.0, b:0.0, a:0.0}
-    }
-}
-
 
 /*
 pub fn vec4(x:f32, y:f32, z:f32, w:f32)->Vec4{
