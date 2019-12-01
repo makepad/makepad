@@ -42,7 +42,7 @@ pub struct TextBufferKeyboard {
 
 #[derive(Clone, Default)]
 pub struct TextBufferMessages {
-    pub gc_id: u64,
+    //pub gc_id: u64,
     // gc id for the update pass
     pub mutation_id: u64,
     // only if this matches the textbuffer mutation id are the messages valid
