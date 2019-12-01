@@ -52,32 +52,12 @@ impl LogItemDraw {
         Self::text_style_item().set(cx, Theme::text_style_normal().get(cx));
     }
     
-    pub fn def_shadow_shader() -> ShaderGen {
-        Quad::def_quad_shader().compose(shader_ast !({
-            let is_viz: float<Varying>;
-            
-            fn scroll() -> vec2 {
-                if draw_scroll.y > 0. {
-                    is_viz = 1.0
-                }
-                else {
-                    is_viz = 0.0;
-                }
-                return vec2(0., 0.);
-            }
-            
-            fn pixel() -> vec4 { // TODO make the corner overlap properly with a distance field eq.
-                return mix(vec4(0., 0., 0., is_viz), vec4(0., 0., 0., 0.), pow(geom.y, 0.5));
-            }
-        }))
-    }
-    
     pub fn get_default_anim(cx: &Cx, counter: usize, marked: bool) -> Anim {
         Anim::new(Play::Chain {duration: 0.01}, vec![
             Track::color(Quad::instance_color(), Ease::Lin, vec![
                 (1.0, if marked {Theme::color_bg_marked().get(cx)} else if counter & 1 == 0 {Theme::color_bg_selected().get(cx)}else {Theme::color_bg_odd().get(cx)})
             ])
-        ])
+        ]) 
     }
     
     pub fn get_default_anim_cut(cx: &Cx, counter: usize, marked: bool) -> Anim {
@@ -85,7 +65,7 @@ impl LogItemDraw {
             Track::color(Quad::instance_color(), Ease::Lin, vec![
                 (0.0, if marked {Theme::color_bg_marked().get(cx)} else if counter & 1 == 0 {Theme::color_bg_selected().get(cx)}else {Theme::color_bg_odd().get(cx)})
             ])
-        ])
+        ]) 
     }
     
     pub fn get_over_anim(cx: &Cx, counter: usize, marked: bool) -> Anim {
@@ -100,7 +80,7 @@ impl LogItemDraw {
     pub fn draw_log_path(&mut self, cx: &mut Cx, path: &str, row: usize) {
         self.text.color = self.path_color.get(cx);
         self.text.draw_text(cx, &format!("{}:{} - ", path, row));
-    }
+    } 
     
     pub fn draw_log_body(&mut self, cx: &mut Cx, body: &str) {
         self.text.color = self.message_color.get(cx);
@@ -231,7 +211,6 @@ impl LogList {
         Self {
             item_draw: LogItemDraw::proto(cx),
             list: ListLogic {
-                tail_list: true,
                 ..ListLogic::default()
             },
             view: ScrollView::proto(cx),
@@ -244,13 +223,11 @@ impl LogList {
     
     pub fn handle_log_list(&mut self, cx: &mut Cx, event: &mut Event, storage: &mut AppStorage, bm: &mut BuildManager) -> LogListEvent {
         
-        if bm.log_items.len() < self.list.list_items.len() {
-            self.list.tail_list = true;
-        }
-        
         self.list.set_list_len(bm.log_items.len());
         
-        self.list.handle_list_scroll_bars(cx, event, &mut self.view);
+        if self.list.handle_list_scroll_bars(cx, event, &mut self.view){
+            bm.tail_log_items = false;
+        }
         
         let mut select = ListSelect::None;
         let mut select_at_end = false;
@@ -260,13 +237,13 @@ impl LogList {
                 KeyCode::Period => if ke.modifiers.logo || ke.modifiers.control {
                     select = self.list.get_next_single_selection();
                     self.list.scroll_item_in_view = select.item_index();
-                    self.list.tail_list = false;
+                    bm.tail_log_items = false;
                     select_at_end = ke.modifiers.shift;
                 },
                 KeyCode::Comma => if ke.modifiers.logo || ke.modifiers.control {
                     // lets find the
                     select = self.list.get_prev_single_selection();
-                    self.list.tail_list = false;
+                    bm.tail_log_items = false;
                     self.list.scroll_item_in_view = select.item_index();
                     select_at_end = ke.modifiers.shift;
                 },
@@ -275,12 +252,12 @@ impl LogList {
                 },
                 KeyCode::KeyT => if ke.modifiers.logo || ke.modifiers.control {
                     // lock scroll
-                    self.list.tail_list = true;
+                    bm.tail_log_items = true;
                     self.view.redraw_view_area(cx);
                 },
                 KeyCode::KeyK => if ke.modifiers.logo || ke.modifiers.control {
                     // clear and tail log
-                    self.list.tail_list = true;
+                    bm.tail_log_items = true;
                     bm.log_items.truncate(0);
                     self.view.redraw_view_area(cx);
                 },
@@ -398,7 +375,7 @@ impl LogList {
         
         let row_height = LogItemDraw::layout_item().get(cx).walk.height.fixed();
         
-        if self.list.begin_list(cx, &mut self.view, row_height).is_err() {return}
+        if self.list.begin_list(cx, &mut self.view, bm.tail_log_items, row_height).is_err() {return}
         
         let mut counter = 0;
         for i in self.list.start_item..self.list.end_item {
@@ -419,9 +396,9 @@ impl LogList {
         
         self.item_draw.shadow.draw_shadow_left(cx, Rect {
             x: 0.,
-            y: 0.,
-            w: 0.,
-            h: cx.get_height_total()
+            y: 0., 
+            w: 0., 
+            h: cx.get_height_total() 
         });
         
         self.item_draw.shadow.draw_shadow_top(cx, Rect {

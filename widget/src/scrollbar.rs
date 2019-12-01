@@ -390,6 +390,7 @@ impl ScrollBar {
                 } -self._bar_side_margin * 2.;
                 self._view_total = view_total.x;
                 self._view_visible = view_rect.w;
+                self._scroll_pos = self._scroll_pos.min(self._view_total - self._view_visible).max(0.);
                 
                 if self._visible {
                     let sb_inst = self.sb.draw_quad_rel(
@@ -421,6 +422,7 @@ impl ScrollBar {
                 } -self._bar_side_margin * 2.;
                 self._view_total = view_total.y;
                 self._view_visible = view_rect.h;
+                self._scroll_pos = self._scroll_pos.min(self._view_total - self._view_visible).max(0.);
                 if self._visible {
                     let sb_inst = self.sb.draw_quad_rel(
                         cx,
