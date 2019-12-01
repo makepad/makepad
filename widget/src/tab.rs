@@ -39,10 +39,7 @@ impl Tab {
             label: "Tab".to_string(),
             is_closeable: true,
             z: 0.,
-            bg: Quad {
-                shader: cx.add_shader(Self::def_bg_shader(), "Tab.bg"),
-                ..Quad::proto(cx)
-            },
+            bg: Quad ::proto(cx),
             tab_close: TabClose::proto(cx),
             text: Text::proto(cx),
             animator: Animator::default(),
@@ -51,7 +48,7 @@ impl Tab {
             _is_focussed: false,
             _is_down: false,
             _is_drag: false,
-            _close_anim_rect: Rect::zero(),
+            _close_anim_rect: Rect::default(),
             _text_area: Area::Empty,
             _bg_area: Area::Empty,
             _bg_inst: None,
@@ -60,22 +57,42 @@ impl Tab {
         tab
     }
     
-    pub fn layout_bg() -> LayoutId{uid!()}
-    pub fn text_style_title() ->TextStyleId{uid!()}
-    pub fn instance_border_color()->InstanceColor{uid!()}
-    pub fn tab_closing()->InstanceFloat{uid!()}
+    pub fn layout_bg() -> LayoutId {uid!()}
+    pub fn text_style_title() -> TextStyleId {uid!()}
+    pub fn instance_border_color() -> InstanceColor {uid!()}
+    pub fn tab_closing() -> InstanceFloat {uid!()}
+    pub fn shader_bg() -> ShaderId {uid!()}
     
-    pub fn style(cx:&mut Cx, opt:&StyleOptions){ 
+    pub fn style(cx: &mut Cx, opt: &StyleOptions) {
+        
         Self::layout_bg().set(cx, Layout {
             align: Align::left_center(),
-            walk: Walk::wh(Width::Compute, Height::Fix(40.* opt.scale.powf(0.5))),
+            walk: Walk::wh(Width::Compute, Height::Fix(40. * opt.scale.powf(0.5))),
             padding: Padding {l: 16.0, t: 1.0, r: 16.0, b: 0.0},
             ..Default::default()
         });
+        
         Self::text_style_title().set(cx, Theme::text_style_normal().get(cx));
-    }   
+        
+        Self::shader_bg().set(cx, Quad::def_quad_shader().compose(shader_ast!({
+            
+            let border_color: Self::instance_border_color();
+            const border_width: float = 1.0;
+            
+            fn pixel() -> vec4 {
+                df_viewport(pos * vec2(w, h));
+                df_rect(-1., -1., w + 2., h + 2.);
+                df_fill(color);
+                df_move_to(w, 0.);
+                df_line_to(w, h);
+                df_move_to(0., 0.);
+                df_line_to(0., h);
+                return df_stroke(border_color, 1.);
+            }
+        })));
+    }
     
-    pub fn get_bg_color(&self, cx:&Cx) -> Color {
+    pub fn get_bg_color(&self, cx: &Cx) -> Color {
         if self._is_selected {
             Theme::color_bg_selected().get(cx)
         }
@@ -84,7 +101,7 @@ impl Tab {
         }
     }
     
-    pub fn get_text_color(&self, cx:&Cx) -> Color {
+    pub fn get_text_color(&self, cx: &Cx) -> Color {
         if self._is_selected {
             if self._is_focussed {
                 Theme::color_text_selected_focus().get(cx)
@@ -126,7 +143,7 @@ impl Tab {
             Track::color(Quad::instance_color(), Ease::Lin, vec![(1.0, self.get_bg_color(cx))]),
             Track::color(Self::instance_border_color(), Ease::Lin, vec![(1.0, Theme::color_bg_selected().get(cx))]),
             Track::color(Text::instance_color(), Ease::Lin, vec![(1.0, self.get_text_color(cx))]),
-           // Track::color_id(cx, "icon.color", Ease::Lin, vec![(1.0, self.get_text_color(cx))])
+            // Track::color_id(cx, "icon.color", Ease::Lin, vec![(1.0, self.get_text_color(cx))])
         ])
     }
     
@@ -134,25 +151,6 @@ impl Tab {
         Anim::new(Play::Single {duration: 0.1, cut: true, term: true, end: 1.0}, vec![
             Track::float(Self::tab_closing(), Ease::OutExp, vec![(0.0, 1.0), (1.0, 0.0)]),
         ])
-    }
-    
-    pub fn def_bg_shader() -> ShaderGen {
-        Quad::def_quad_shader().compose(shader_ast!({
-            
-            let border_color: Self::instance_border_color();
-            const border_width: float = 1.0;
-            
-            fn pixel() -> vec4 {
-                df_viewport(pos * vec2(w, h));
-                df_rect(-1., -1., w + 2., h + 2.);
-                df_fill(color);
-                df_move_to(w, 0.);
-                df_line_to(w, h);
-                df_move_to(0., 0.);
-                df_line_to(0., h);
-                return df_stroke(border_color, 1.);
-            }
-        }))
     }
     
     pub fn set_tab_focus(&mut self, cx: &mut Cx, focus: bool) {
@@ -279,6 +277,7 @@ impl Tab {
     
     pub fn begin_tab(&mut self, cx: &mut Cx) -> Result<(), ()> {
         // pull the bg color from our animation system, uses 'default' value otherwise
+        self.bg.shader = Self::shader_bg().get(cx);
         self.bg.z = self.z;
         self.bg.color = self.animator.last_color(cx, Quad::instance_color());
         

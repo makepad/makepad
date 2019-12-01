@@ -26,7 +26,7 @@ impl Cx {
             (Vec2 {x: layout.walk.margin.l + parent.pos.x, y: layout.walk.margin.t + parent.pos.y}, parent.abs_size)
         }
         else {
-            (Vec2 {x: layout.walk.margin.l, y: layout.walk.margin.t}, Vec2::zero())
+            (Vec2 {x: layout.walk.margin.l, y: layout.walk.margin.t}, Vec2::default())
         };
         
         // see if layout overrode size
@@ -112,7 +112,7 @@ impl Cx {
         
         // when a turtle is x-abs / y-abs you dont walk the parent
         if !old.layout.abs_origin.is_none() {
-            let abs_origin = if let Some(abs_origin) = old.layout.abs_origin {abs_origin} else {Vec2::zero()};
+            let abs_origin = if let Some(abs_origin) = old.layout.abs_origin {abs_origin} else {Vec2::default()};
             let w = if let Width::Fix(vw) = w {vw} else {0.};
             let h = if let Height::Fix(vh) = h {vh} else {0.};
             return Rect {x: abs_origin.x, y: abs_origin.y, w: w, h: h};
@@ -386,7 +386,7 @@ impl Cx {
                 h: turtle.height
             }
         };
-        return Rect::zero();
+        return Rect::default();
     }
     
     pub fn get_turtle_biggest(&self) -> f32 {
@@ -406,7 +406,7 @@ impl Cx {
                 y: if turtle.bound_right_bottom.y<0. {0.}else {turtle.bound_right_bottom.y} + turtle.layout.padding.b - turtle.origin.y
             };
         }
-        return Vec2::zero()
+        return Vec2::default()
     }
     
     pub fn set_turtle_bounds(&mut self, bound: Vec2) {
@@ -422,7 +422,7 @@ impl Cx {
         if let Some(turtle) = self.turtles.last() {
             return turtle.origin;
         }
-        return Vec2::zero()
+        return Vec2::default()
     }
     
     pub fn move_turtle(&mut self, dx: f32, dy: f32) {
@@ -437,7 +437,7 @@ impl Cx {
             turtle.pos
         }
         else {
-            Vec2::zero()
+            Vec2::default()
         }
     }
     
@@ -452,7 +452,7 @@ impl Cx {
             Vec2 {x: turtle.pos.x - turtle.origin.x, y: turtle.pos.y - turtle.origin.y}
         }
         else {
-            Vec2::zero()
+            Vec2::default()
         }
     }
     
@@ -961,7 +961,7 @@ impl Walk{
 impl Layout{
     pub fn abs_origin_zero()->Self{
         Layout {
-            abs_origin: Some(Vec2::zero()),
+            abs_origin: Some(Vec2::default()),
             ..Default::default()
         }
     }

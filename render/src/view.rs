@@ -183,7 +183,7 @@ impl View {
             let cxview = &cx.views[view_id];
             return cxview.rect
         }
-        Rect::zero()
+        Rect::default()
     }
     
     

@@ -180,9 +180,9 @@ impl Default for Cx {
         let mut finger_down_rel_start = Vec::new();
 
         captured_fingers.resize(NUM_FINGERS, Area::Empty);
-        finger_tap_count.resize(NUM_FINGERS, (Vec2::zero(), 0.0, 0));
-        finger_down_abs_start.resize(NUM_FINGERS, Vec2::zero());
-        finger_down_rel_start.resize(NUM_FINGERS, Vec2::zero());
+        finger_tap_count.resize(NUM_FINGERS, (Vec2::default(), 0.0, 0));
+        finger_down_abs_start.resize(NUM_FINGERS, Vec2::default());
+        finger_down_rel_start.resize(NUM_FINGERS, Vec2::default());
 
         let textures = vec![CxTexture {
             desc: TextureDesc {
