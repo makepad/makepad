@@ -159,11 +159,11 @@ impl TextEditor {
             cursors: TextCursorSet::new(),
             indent_lines: Quad {
                 z: 0.001,
-                ..Quad::proto_with_shader(cx, Self::def_indent_lines_shader(), "Editor.indent_lines")
+                ..Quad::proto(cx)
             },
             view: ScrollView::proto(cx),
             bg: Quad ::proto(cx),
-            shadow: ScrollShadow{
+            shadow: ScrollShadow {
                 z: 10.,
                 ..ScrollShadow::proto(cx)
             },
@@ -174,13 +174,13 @@ impl TextEditor {
             colors: CodeEditorColors::default(),
             selection: Quad {
                 z: 0.,
-                ..Quad::proto_with_shader(cx, Self::def_selection_shader(), "Editor.selection")
+                ..Quad::proto(cx)
             },
-            token_highlight: Quad::proto_with_shader(cx, Self::def_token_highlight_shader(), "Editor.token_highlight"),
-            cursor: Quad::proto_with_shader(cx, Self::def_cursor_shader(), "Editor.cursor"),
-            cursor_row: Quad::proto_with_shader(cx, Self::def_cursor_row_shader(), "Editor.cursor_row"),
-            paren_pair: Quad::proto_with_shader(cx, Self::def_paren_pair_shader(), "Editor.paren_pair"),
-            message_marker: Quad::proto_with_shader(cx, Self::def_message_marker_shader(), "Editor.message_marker"),
+            token_highlight: Quad::proto(cx),
+            cursor: Quad::proto(cx),
+            cursor_row: Quad::proto(cx),
+            paren_pair: Quad::proto(cx),
+            message_marker: Quad::proto(cx),
             //code_icon: CodeIcon::proto(cx),
             view_layout: Layout::default(),
             text: Text {
@@ -317,12 +317,13 @@ impl TextEditor {
     pub fn color_error() -> ColorId {uid!()}
     pub fn color_defocus() -> ColorId {uid!()}
     
-    pub fn style(cx: &mut Cx, _opt: &StyleOptions) {
-        Self::shadow_size().set(cx, 6.0);
-        Self::gutter_width().set(cx, 45.0);
-        Self::padding_top().set(cx, 27.);
-        Self::text_style_editor_text().set(cx, Theme::text_style_fixed().get(cx));
-    }
+    pub fn shader_indent_lines() -> ShaderId {uid!()}
+    pub fn shader_cursor() -> ShaderId {uid!()}
+    pub fn shader_selection() -> ShaderId {uid!()}
+    pub fn shader_paren_pair() -> ShaderId {uid!()}
+    pub fn shader_cursor_row() -> ShaderId {uid!()}
+    pub fn shader_token_highlight() -> ShaderId {uid!()}
+    pub fn shader_message_marker() -> ShaderId {uid!()}
     
     pub fn instance_indent_id() -> InstanceFloat {uid!()}
     pub fn uniform_indent_sel() -> UniformFloat {uid!()}
@@ -334,8 +335,14 @@ impl TextEditor {
     pub fn uniform_highlight_visible() -> UniformFloat {uid!()}
     pub fn instance_shadow_dir() -> InstanceFloat {uid!()}
     
-    pub fn def_indent_lines_shader() -> ShaderGen {
-        Quad::def_quad_shader().compose(shader_ast !({
+    pub fn style(cx: &mut Cx, _opt: &StyleOptions) {
+        
+        Self::shadow_size().set(cx, 6.0);
+        Self::gutter_width().set(cx, 45.0);
+        Self::padding_top().set(cx, 27.);
+        Self::text_style_editor_text().set(cx, Theme::text_style_fixed().get(cx));
+        
+        Self::shader_indent_lines().set(cx, Quad::def_quad_shader().compose(shader_ast !({
             let indent_id: Self::instance_indent_id();
             // uniforms
             let indent_sel: Self::uniform_indent_sel();
@@ -354,11 +361,9 @@ impl TextEditor {
                 df_line_to(1., h + 1.);
                 return df_stroke(col, thickness);
             }
-        }))
-    }
-    
-    pub fn def_cursor_shader() -> ShaderGen {
-        Quad::def_quad_shader().compose(shader_ast !({
+        })));
+        
+        Self::shader_cursor().set(cx, Quad::def_quad_shader().compose(shader_ast !({
             let blink: Self::uniform_cursor_blink();
             fn pixel() -> vec4 {
                 if blink<0.5 {
@@ -368,31 +373,9 @@ impl TextEditor {
                     return vec4(0., 0., 0., 0.);
                 }
             }
-        }))
-    }
-    
-    pub fn def_shadow_shader() -> ShaderGen {
-        Quad::def_quad_shader().compose(shader_ast !({
-            let shadow_dir: Self::instance_shadow_dir();
-            fn pixel() -> vec4 { // TODO make the corner overlap properly with a distance field eq.
-                if shadow_dir<0.5 {
-                    return mix(vec4(0., 0., 0., 1.), vec4(0., 0., 0., 0.), pow(geom.x, 0.5));
-                }
-                else if shadow_dir<1.5 {
-                    return mix(vec4(0., 0., 0., 1.), vec4(0., 0., 0., 0.), pow(geom.y, 0.5));
-                }
-                else if shadow_dir<2.5 {
-                    return mix(vec4(0., 0., 0., 1.), vec4(0., 0., 0., 0.), pow(1.0 - geom.x, 0.5));
-                }
-                else {
-                    return mix(vec4(0., 0., 0., 1.), vec4(0., 0., 0., 0.), pow(1.0 - geom.y, 0.5));
-                }
-            }
-        }))
-    }
-    
-    pub fn def_selection_shader() -> ShaderGen {
-        Quad::def_quad_shader().compose(shader_ast !({
+        })));
+        
+        Self::shader_selection().set(cx, Quad::def_quad_shader().compose(shader_ast !({
             let prev_x: Self::instance_select_prev_x();
             let prev_w: Self::instance_select_prev_w();
             let next_x: Self::instance_select_next_x();
@@ -425,11 +408,9 @@ impl TextEditor {
                 //df_shape *= cos(pos.x*8.)+cos(pos.y*16.);
                 return df_fill(color);
             }
-        }))
-    }
-    
-    pub fn def_paren_pair_shader() -> ShaderGen {
-        Quad::def_quad_shader().compose(shader_ast!({
+        })));
+        
+        Self::shader_paren_pair().set(cx, Quad::def_quad_shader().compose(shader_ast!({
             fn pixel() -> vec4 {
                 df_viewport(pos * vec2(w, h));
                 //df_rect(0.,0.,w,h);
@@ -441,11 +422,9 @@ impl TextEditor {
                 //df_rect(0.01,0.,w,h);
                 //return df_fill(color);
             }
-        }))
-    }
-    
-    pub fn def_cursor_row_shader() -> ShaderGen {
-        Quad::def_quad_shader().compose(shader_ast!({
+        })));
+        
+        Self::shader_cursor_row().set(cx, Quad::def_quad_shader().compose(shader_ast!({
             fn pixel() -> vec4 {
                 df_viewport(pos * vec2(w, h));
                 df_rect(0., 0., w, h);
@@ -457,21 +436,17 @@ impl TextEditor {
                 df_line_to(w,h-0.5);
                 returndf_stroke(color,0.75+dpi_dilate*0.75);*/
             }
-        }))
-    }
-    
-    pub fn def_select_highlight_shader() -> ShaderGen {
-        Quad::def_quad_shader().compose(shader_ast!({
+        })));
+        /*
+        Self::shader_select_highlight().set(cx,   Quad::def_quad_shader().compose(shader_ast!({
             fn pixel() -> vec4 {
                 df_viewport(pos * vec2(w, h));
                 df_box(0.5, 0.5, w - 1., h - 1., 1.);
                 return df_fill(color);
             }
-        }))
-    }
-    
-    pub fn def_token_highlight_shader() -> ShaderGen {
-        Quad::def_quad_shader().compose(shader_ast!({
+        })));*/
+        
+        Self::shader_token_highlight().set(cx, Quad::def_quad_shader().compose(shader_ast!({
             let visible: Self::uniform_highlight_visible();
             fn pixel() -> vec4 {
                 if visible<0.5 {
@@ -481,10 +456,9 @@ impl TextEditor {
                 df_box(0.5, 0.5, w - 1., h - 1., 1.);
                 return df_fill(color);
             }
-        }))
-    }
-    pub fn def_message_marker_shader() -> ShaderGen {
-        Quad::def_quad_shader().compose(shader_ast!({
+        })));
+        
+        Self::shader_message_marker().set(cx, Quad::def_quad_shader().compose(shader_ast!({
             fn pixel() -> vec4 {
                 let pos2 = vec2(pos.x, pos.y + 0.03 * sin(pos.x * w));
                 df_viewport(pos2 * vec2(w, h));
@@ -493,7 +467,68 @@ impl TextEditor {
                 df_line_to(w, h - 1.);
                 return df_stroke(color, 0.8);
             }
-        }))
+        })));
+    }
+    
+    pub fn apply_style(&mut self, cx: &mut Cx) {
+        // copy over colors
+        self.colors.indent_line_unknown = Self::color_indent_line_unknown().get(cx);
+        self.colors.indent_line_fn = Self::color_indent_line_fn().get(cx);
+        self.colors.indent_line_typedef = Self::color_indent_line_typedef().get(cx);
+        self.colors.indent_line_looping = Self::color_indent_line_looping().get(cx);
+        self.colors.indent_line_flow = Self::color_indent_line_flow().get(cx);
+        
+        self.colors.paren_pair_match = Self::color_paren_pair_match().get(cx);
+        self.colors.paren_pair_fail = Self::color_paren_pair_fail().get(cx);
+        self.colors.marker_error = Self::color_marker_error().get(cx);
+        self.colors.marker_warning = Self::color_marker_warning().get(cx);
+        self.colors.marker_log = Self::color_marker_log().get(cx);
+        self.colors.line_number_normal = Self::color_line_number_normal().get(cx);
+        self.colors.line_number_highlight = Self::color_line_number_highlight().get(cx);
+        self.colors.whitespace = Self::color_whitespace().get(cx);
+        self.colors.keyword = Self::color_keyword().get(cx);
+        self.colors.flow = Self::color_flow().get(cx);
+        self.colors.looping = Self::color_looping().get(cx);
+        self.colors.identifier = Self::color_identifier().get(cx);
+        self.colors.call = Self::color_call().get(cx);
+        self.colors.type_name = Self::color_type_name().get(cx);
+        self.colors.theme_name = Self::color_theme_name().get(cx);
+        self.colors.string = Self::color_string().get(cx);
+        self.colors.number = Self::color_number().get(cx);
+        self.colors.comment = Self::color_comment().get(cx);
+        self.colors.doc_comment = Self::color_doc_comment().get(cx);
+        self.colors.paren_d1 = Self::color_paren_d1().get(cx);
+        self.colors.paren_d2 = Self::color_paren_d2().get(cx);
+        self.colors.operator = Self::color_operator().get(cx);
+        self.colors.delimiter = Self::color_delimiter().get(cx);
+        self.colors.unexpected = Self::color_unexpected().get(cx);
+        self.colors.warning = Self::color_warning().get(cx);
+        self.colors.error = Self::color_error().get(cx);
+        self.colors.defocus = Self::color_defocus().get(cx);
+        self.bg.color = Self::color_bg().get(cx);
+        self.gutter_bg.color = Self::color_gutter_bg().get(cx);
+        
+        self.line_number_width = Self::gutter_width().get(cx);
+        self.top_padding = Self::padding_top().get(cx);
+        
+        self.selection.color = if self.has_key_focus(cx) {
+            Self::color_selection().get(cx)
+        }else {
+            Self::color_selection_defocus().get(cx)
+        };
+        self.token_highlight.color = Self::color_highlight().get(cx);
+        self.cursor.color = Self::color_cursor().get(cx);
+        self.cursor_row.color = Self::color_cursor_row().get(cx);
+        self.text.text_style = Self::text_style_editor_text().get(cx);
+        self.line_number_text.text_style = Self::text_style_editor_text().get(cx);
+        
+        self.indent_lines.shader = Self::shader_indent_lines().get(cx);
+        self.cursor.shader = Self::shader_cursor().get(cx);
+        self.selection.shader = Self::shader_selection().get(cx);
+        self.paren_pair.shader = Self::shader_paren_pair().get(cx);
+        self.cursor_row.shader = Self::shader_cursor_row().get(cx);
+        self.token_highlight.shader = Self::shader_token_highlight().get(cx);
+        self.message_marker.shader = Self::shader_message_marker().get(cx);
     }
     
     fn reset_highlight_visible(&mut self, cx: &mut Cx) {
@@ -989,64 +1024,12 @@ impl TextEditor {
         self.reset_cursor_blinker(cx);
     }
     
-    pub fn apply_theme(&mut self, cx: &mut Cx) {
-        // copy over colors
-        self.colors.indent_line_unknown = Self::color_indent_line_unknown().get(cx);
-        self.colors.indent_line_fn = Self::color_indent_line_fn().get(cx);
-        self.colors.indent_line_typedef = Self::color_indent_line_typedef().get(cx);
-        self.colors.indent_line_looping = Self::color_indent_line_looping().get(cx);
-        self.colors.indent_line_flow = Self::color_indent_line_flow().get(cx);
-        
-        self.colors.paren_pair_match = Self::color_paren_pair_match().get(cx);
-        self.colors.paren_pair_fail = Self::color_paren_pair_fail().get(cx);
-        self.colors.marker_error = Self::color_marker_error().get(cx);
-        self.colors.marker_warning = Self::color_marker_warning().get(cx);
-        self.colors.marker_log = Self::color_marker_log().get(cx);
-        self.colors.line_number_normal = Self::color_line_number_normal().get(cx);
-        self.colors.line_number_highlight = Self::color_line_number_highlight().get(cx);
-        self.colors.whitespace = Self::color_whitespace().get(cx);
-        self.colors.keyword = Self::color_keyword().get(cx);
-        self.colors.flow = Self::color_flow().get(cx);
-        self.colors.looping = Self::color_looping().get(cx);
-        self.colors.identifier = Self::color_identifier().get(cx);
-        self.colors.call = Self::color_call().get(cx);
-        self.colors.type_name = Self::color_type_name().get(cx);
-        self.colors.theme_name = Self::color_theme_name().get(cx);
-        self.colors.string = Self::color_string().get(cx);
-        self.colors.number = Self::color_number().get(cx);
-        self.colors.comment = Self::color_comment().get(cx);
-        self.colors.doc_comment = Self::color_doc_comment().get(cx);
-        self.colors.paren_d1 = Self::color_paren_d1().get(cx);
-        self.colors.paren_d2 = Self::color_paren_d2().get(cx);
-        self.colors.operator = Self::color_operator().get(cx);
-        self.colors.delimiter = Self::color_delimiter().get(cx);
-        self.colors.unexpected = Self::color_unexpected().get(cx);
-        self.colors.warning = Self::color_warning().get(cx);
-        self.colors.error = Self::color_error().get(cx);
-        self.colors.defocus = Self::color_defocus().get(cx);
-        self.bg.color = Self::color_bg().get(cx);
-        self.gutter_bg.color = Self::color_gutter_bg().get(cx);
-        
-        self.line_number_width = Self::gutter_width().get(cx);
-        self.top_padding = Self::padding_top().get(cx);
-        
-        self.selection.color = if self.has_key_focus(cx) {
-            Self::color_selection().get(cx)
-        }else {
-            Self::color_selection_defocus().get(cx)
-        };
-        self.token_highlight.color = Self::color_highlight().get(cx);
-        self.cursor.color = Self::color_cursor().get(cx);
-        self.cursor_row.color = Self::color_cursor_row().get(cx);
-        self.text.text_style = Self::text_style_editor_text().get(cx);
-        self.line_number_text.text_style = Self::text_style_editor_text().get(cx);
-    }
     
     pub fn begin_text_editor(&mut self, cx: &mut Cx, text_buffer: &TextBuffer) -> Result<(), ()> {
         // adjust dilation based on DPI factor
         self.view.begin_view(cx, self.view_layout) ?;
         
-        self.apply_theme(cx);
+        self.apply_style(cx);
         
         self._last_indent_color = self.colors.indent_line_unknown;
         //self.select_highlight.color = self.colors.highlight;
@@ -1710,7 +1693,7 @@ impl TextEditor {
     }
     
     fn draw_shadows(&mut self, cx: &mut Cx) {
-        let gutter_width = Self::gutter_width().get(cx);        
+        let gutter_width = Self::gutter_width().get(cx);
         self.shadow.draw_shadow_left(cx, Rect {
             x: gutter_width,
             y: 0.,
