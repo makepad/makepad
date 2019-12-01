@@ -9,6 +9,9 @@ use crate::codeicon::*;
 use crate::textinput::*;
 use crate::scrollbar::*;
 use crate::scrollshadow::*;
+use crate::desktopbutton::*;
+use crate::splitter::*;
+
 use serde::{Serialize, Deserialize};
 
 #[derive(Debug, Copy, Clone, Serialize, Deserialize, PartialEq)]
@@ -172,4 +175,6 @@ pub fn set_widget_style(cx: &mut Cx, opt: &StyleOptions) {
     TextInput::style(cx, opt);
     ScrollBar::style(cx, opt);
     ScrollShadow::style(cx, opt);
+    DesktopButton::style(cx, opt);
+    Splitter::style(cx, opt);
 }
