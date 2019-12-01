@@ -79,7 +79,7 @@ impl Area{
             Area::Instance(inst)=>{
                 let cxview = &cx.views[inst.view_id];
                 if cxview.redraw_id != inst.redraw_id {
-                    Vec2::zero()
+                    Vec2::default()
                 }
                 else{
                     cxview.unsnapped_scroll
@@ -89,7 +89,7 @@ impl Area{
                 let cxview = &cx.views[view_area.view_id];
                 cxview.unsnapped_scroll
             },
-            _=>Vec2::zero(),
+            _=>Vec2::default(),
         }
     }
 
@@ -98,7 +98,7 @@ impl Area{
             Area::Instance(inst)=>{
                 let cxview = &cx.views[inst.view_id];
                 if cxview.redraw_id != inst.redraw_id {
-                    Vec2::zero()
+                    Vec2::default()
                 }
                 else{
                     let draw_call = &cxview.draw_calls[inst.draw_call_id];
@@ -112,7 +112,7 @@ impl Area{
                 let cxview = &cx.views[view_area.view_id];
                 cxview.parent_scroll
             },
-            _=>Vec2::zero(),
+            _=>Vec2::default(),
         }
     }
     // returns the final screen rect
@@ -122,11 +122,11 @@ impl Area{
             Area::Instance(inst)=>{
                 if inst.instance_count == 0{
                     println!("get_rect called on instance_count ==0 area pointer, use mark/sweep correctly!");
-                    return Rect::zero()
+                    return Rect::default()
                 }
                 let cxview = &cx.views[inst.view_id];
                 if cxview.redraw_id != inst.redraw_id {
-                    return Rect::zero();
+                    return Rect::default();
                 }
                 let draw_call = &cxview.draw_calls[inst.draw_call_id];
                 let sh = &cx.shaders[draw_call.shader_id];
@@ -144,7 +144,7 @@ impl Area{
                         }
                     }
                 }
-                Rect::zero()
+                Rect::default()
             },
             Area::View(view_area)=>{
                 let cxview = &cx.views[view_area.view_id];
@@ -155,7 +155,7 @@ impl Area{
                     h:cxview.rect.h
                 }
             },
-            _=>Rect::zero(),
+            _=>Rect::default(),
         }
     }
 
@@ -382,7 +382,7 @@ impl Area{
                 }
             }
         }
-        Vec2::zero()
+        Vec2::default()
     }
 
    pub fn write_vec3(&self, cx:&mut Cx, prop_ident:InstanceVec3, value:Vec3){
@@ -409,7 +409,7 @@ impl Area{
                 }
             }
         }
-        Vec3::zero()
+        Vec3::default()
     }
 
    pub fn write_vec4(&self, cx:&mut Cx, prop_ident:InstanceVec4, value:Vec4){
@@ -438,7 +438,7 @@ impl Area{
                 }
             }
         }
-        Vec4::zero()
+        Vec4::default()
     }
 
     pub fn write_color(&self, cx:&mut Cx, prop_ident:InstanceColor, value:Color){
@@ -467,7 +467,7 @@ impl Area{
                 }
             }
         }
-        Color::zero()
+        Color::default()
     }
 
     pub fn write_uniform_float(&self, cx:&mut Cx, prop_ident:UniformFloat, v:f32){

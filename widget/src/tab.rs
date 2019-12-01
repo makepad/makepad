@@ -51,7 +51,7 @@ impl Tab {
             _is_focussed: false,
             _is_down: false,
             _is_drag: false,
-            _close_anim_rect: Rect::zero(),
+            _close_anim_rect: Rect::default(),
             _text_area: Area::Empty,
             _bg_area: Area::Empty,
             _bg_inst: None,

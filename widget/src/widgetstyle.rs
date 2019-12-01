@@ -17,6 +17,15 @@ pub struct StyleOptions {
     pub dark: bool
 }
 
+impl Default for StyleOptions{
+    fn default()->Self{
+        Self{
+            scale:1.0,
+            dark:true,
+        }
+    }
+}
+
 pub struct Theme {}
 impl Theme {
     pub fn text_style_unscaled() -> TextStyleId {uid!()}

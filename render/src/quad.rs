@@ -74,7 +74,7 @@ impl Quad {
     }
     
     pub fn begin_quad(&mut self, cx: &mut Cx, layout: Layout) -> InstanceArea {
-        let inst = self.draw_quad_rel(cx, Rect::zero());
+        let inst = self.draw_quad_rel(cx, Rect::default());
         let area = inst.clone().into();
         cx.begin_turtle(layout, area);
         inst
@@ -90,7 +90,7 @@ impl Quad {
     }
     
     pub fn begin_quad_fill(&mut self, cx: &mut Cx) -> InstanceArea {
-        let inst = self.draw_quad_rel(cx, Rect::zero());
+        let inst = self.draw_quad_rel(cx, Rect::default());
         inst
     }
 

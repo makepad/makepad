@@ -213,7 +213,7 @@ impl TabControl {
         self.tabs.sweep(cx, | _, _ | ());
         if let Some((fe, id)) = &self._dragging_tab {
             if let Ok(()) = self.drag_tab_view.begin_view(cx, Layout {
-                abs_origin: Some(Vec2::zero()),
+                abs_origin: Some(Vec2::default()),
                 ..Default::default()
             }) {
                 

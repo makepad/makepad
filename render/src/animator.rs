@@ -53,7 +53,7 @@ impl Animator {
             let ident = track.ident();
             match track {
                 Track::Color(ft) => {
-                    let val = if ft.track.len()>0 {ft.track.last().unwrap().1}else {Color::zero()};
+                    let val = if ft.track.len()>0 {ft.track.last().unwrap().1}else {Color::default()};
                     if let Some((_name, value)) = self.last_values.iter_mut().find( | (name, _) | *name == ident) {
                         *value = AnimLastValue::Color(val);
                     }
@@ -62,7 +62,7 @@ impl Animator {
                     }
                 },
                 Track::Vec4(ft) => {
-                    let val = if ft.track.len()>0 {ft.track.last().unwrap().1}else {Vec4::zero()};
+                    let val = if ft.track.len()>0 {ft.track.last().unwrap().1}else {Vec4::default()};
                     if let Some((_name, value)) = self.last_values.iter_mut().find( | (name, _) | *name == ident) {
                         *value = AnimLastValue::Vec4(val);
                     }
@@ -71,7 +71,7 @@ impl Animator {
                     }
                 },
                 Track::Vec3(ft) => {
-                    let val = if ft.track.len()>0 {ft.track.last().unwrap().1}else {Vec3::zero()};
+                    let val = if ft.track.len()>0 {ft.track.last().unwrap().1}else {Vec3::default()};
                     if let Some((_name, value)) = self.last_values.iter_mut().find( | (name, _) | *name == ident) {
                         *value = AnimLastValue::Vec3(val);
                     }
@@ -80,7 +80,7 @@ impl Animator {
                     }
                 },
                 Track::Vec2(ft) => {
-                    let val = if ft.track.len()>0 {ft.track.last().unwrap().1}else {Vec2::zero()};
+                    let val = if ft.track.len()>0 {ft.track.last().unwrap().1}else {Vec2::default()};
                     if let Some((_name, value)) = self.last_values.iter_mut().find( | (name, _) | *name == ident) {
                         *value = AnimLastValue::Vec2(val);
                     }
@@ -280,7 +280,7 @@ impl Animator {
                 return *value
             }
         }
-        return Vec2::zero()
+        return Vec2::default()
     }
     
     pub fn set_last_vec2(&mut self, ident: InstanceVec2, value: Vec2) {
@@ -321,7 +321,7 @@ impl Animator {
                 return *value
             }
         }
-        return Vec3::zero()
+        return Vec3::default()
     }
     
     pub fn set_last_vec3(&mut self, ident: InstanceVec3, value: Vec3) {
@@ -362,7 +362,7 @@ impl Animator {
                 return *value
             }
         }
-        return Vec4::zero()
+        return Vec4::default()
     }
     
     pub fn set_last_vec4(&mut self, ident: InstanceVec4, value: Vec4) {
@@ -391,7 +391,7 @@ impl Animator {
             }
         }
         
-        return Color::zero();
+        return Color::default();
     }
     
     pub fn last_color(&self, _cx: &Cx, ident: InstanceColor) -> Color {
@@ -400,7 +400,7 @@ impl Animator {
                 return *value
             }
         }
-        Color::zero()
+        Color::default()
     }
     
     pub fn _last_color(ident: InstanceColor, last_values: &Vec<(InstanceType, AnimLastValue)>) -> Color {
@@ -410,7 +410,7 @@ impl Animator {
             }
         }
         
-        return Color::zero()
+        return Color::default()
     }
     
     pub fn set_last_color(&mut self, ident: InstanceColor, value: Color) {
