@@ -9,6 +9,7 @@ pub struct BuildManager {
     pub active_builds: Vec<ActiveBuild>,
     pub exec_when_done: bool,
     pub log_items: Vec<HubLogItem>,
+    pub tail_log_items: bool,
     pub artifacts: Vec<String>,
 }
 
@@ -18,6 +19,7 @@ impl BuildManager {
             signal: cx.new_signal(),
             exec_when_done: false,
             log_items: Vec::new(),
+            tail_log_items: true, 
             artifacts: Vec::new(),
             active_builds: Vec::new(),
         }
@@ -92,65 +94,79 @@ impl BuildManager {
             HubMsg::CargoBegin {uid} => if self.is_running_uid(uid) {
             },
             HubMsg::LogItem {uid, item} => if self.is_running_uid(uid) {
-                if self.log_items.len() > 700000{ // out of memory safety
-                    self.log_items.truncate(500000);
-                    self.log_items.push(HubLogItem::Message("------------ Log truncated here -----------".to_string()));
-                } 
-                self.log_items.push(item.clone());
-                if let Some(loc_message) = item.get_loc_message() {
-                    let text_buffer = storage.text_buffer_from_path(cx, &storage.remap_sync_path(&loc_message.path));
-                    
-                    let messages = &mut text_buffer.messages;
-                    messages.mutation_id = text_buffer.mutation_id;
-                    let mut inserted = None;
-                    if messages.cursors.len() < 100000{ // crash saftey
-                        if let Some((head, tail)) = loc_message.range {
-                            if messages.cursors.len()>0 {
-                                for i in (0..messages.cursors.len()).rev() {
-                                    if head >= messages.cursors[i].head {
-                                        break;
-                                    }
-                                    if head < messages.cursors[i].head && (i == 0 || head >= messages.cursors[i - 1].head) {
-                                        messages.cursors.insert(i, TextCursor {
-                                            head: head,
-                                            tail: tail,
-                                            max: 0
-                                        });
-                                        inserted = Some(i);
-                                        break;
+                let proc_log_item = if self.log_items.len() >= 700000 { // out of memory safety
+                    if self.tail_log_items{
+                        self.log_items.truncate(500000);
+                        self.log_items.push(HubLogItem::Message("------------ Log truncated here -----------".to_string()));
+                        true
+                    }
+                    else{
+                        if self.log_items.len() != 700001{
+                            self.log_items.push(HubLogItem::Message("------------ Log skipping, press tail to resume -----------".to_string()));
+                        }
+                        false
+                    }
+                }else{
+                    true
+                };
+                
+                if proc_log_item{
+                    self.log_items.push(item.clone());
+                    if let Some(loc_message) = item.get_loc_message() {
+                        let text_buffer = storage.text_buffer_from_path(cx, &storage.remap_sync_path(&loc_message.path));
+                        
+                        let messages = &mut text_buffer.messages;
+                        messages.mutation_id = text_buffer.mutation_id;
+                        let mut inserted = None;
+                        if messages.cursors.len() < 100000{ // crash saftey
+                            if let Some((head, tail)) = loc_message.range {
+                                if messages.cursors.len()>0 {
+                                    for i in (0..messages.cursors.len()).rev() {
+                                        if head >= messages.cursors[i].head {
+                                            break;
+                                        }
+                                        if head < messages.cursors[i].head && (i == 0 || head >= messages.cursors[i - 1].head) {
+                                            messages.cursors.insert(i, TextCursor {
+                                                head: head,
+                                                tail: tail,
+                                                max: 0
+                                            });
+                                            inserted = Some(i);
+                                            break;
+                                        }
                                     }
                                 }
                             }
-                        }
-                        
-                        if inserted.is_none() {
-                            if let Some((head, tail)) = loc_message.range {
-                                messages.cursors.push(TextCursor {
-                                    head: head,
-                                    tail: tail,
-                                    max: 0
-                                })
+                            
+                            if inserted.is_none() {
+                                if let Some((head, tail)) = loc_message.range {
+                                    messages.cursors.push(TextCursor {
+                                        head: head,
+                                        tail: tail,
+                                        max: 0
+                                    })
+                                }
                             }
-                        }
-                        let msg = TextBufferMessage {
-                            body: loc_message.body.clone(),
-                            level: match item {
-                                HubLogItem::LocPanic(_) => TextBufferMessageLevel::Log,
-                                HubLogItem::LocError(_) => TextBufferMessageLevel::Error,
-                                HubLogItem::LocWarning(_) => TextBufferMessageLevel::Warning,
-                                HubLogItem::LocMessage(_) => TextBufferMessageLevel::Log,
-                                HubLogItem::Error(_) => TextBufferMessageLevel::Error,
-                                HubLogItem::Warning(_) => TextBufferMessageLevel::Warning,
-                                HubLogItem::Message(_) => TextBufferMessageLevel::Log,
+                            let msg = TextBufferMessage {
+                                body: loc_message.body.clone(),
+                                level: match item {
+                                    HubLogItem::LocPanic(_) => TextBufferMessageLevel::Log,
+                                    HubLogItem::LocError(_) => TextBufferMessageLevel::Error,
+                                    HubLogItem::LocWarning(_) => TextBufferMessageLevel::Warning,
+                                    HubLogItem::LocMessage(_) => TextBufferMessageLevel::Log,
+                                    HubLogItem::Error(_) => TextBufferMessageLevel::Error,
+                                    HubLogItem::Warning(_) => TextBufferMessageLevel::Warning,
+                                    HubLogItem::Message(_) => TextBufferMessageLevel::Log,
+                                }
+                            };
+                            if let Some(pos) = inserted {
+                                text_buffer.messages.bodies.insert(pos, msg);
                             }
-                        };
-                        if let Some(pos) = inserted {
-                            text_buffer.messages.bodies.insert(pos, msg);
+                            else {
+                                text_buffer.messages.bodies.push(msg);
+                            }
+                            cx.send_signal(text_buffer.signal, SIGNAL_TEXTBUFFER_MESSAGE_UPDATE);
                         }
-                        else {
-                            text_buffer.messages.bodies.push(msg);
-                        }
-                        cx.send_signal(text_buffer.signal, SIGNAL_TEXTBUFFER_MESSAGE_UPDATE);
                     }
                 }
 
