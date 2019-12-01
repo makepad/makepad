@@ -10,7 +10,7 @@ pub struct Splitter {
     
     pub min_size: f32,
     pub split_size: f32,
-    pub split: Quad,
+    pub bg: Quad,
     pub animator: Animator,
     pub realign_dist: f32,
     pub split_view: View,
@@ -55,46 +55,41 @@ impl Splitter {
             split_size: 2.0,
             min_size: 25.0,
             split_view: View::proto(cx),
-            split: Quad {
-                shader: cx.add_shader(Self::def_split_shader(), "Splitter.split"),
-                ..Quad::proto(cx)
-            },
+            bg: Quad::proto(cx),
             animator: Animator::default(),
         }
     }
     
-    pub fn get_default_anim(cx: &Cx) -> Anim {
-        Anim::new(Play::Cut {duration: 0.5}, vec![
+    pub fn anim_default() -> AnimId {uid!()}
+    pub fn anim_over() -> AnimId {uid!()}
+    pub fn anim_down() -> AnimId {uid!()}
+    pub fn shader_bg() -> ShaderId {uid!()}
+    
+    pub fn style(cx: &mut Cx, _opt: &StyleOptions) {
+        
+        Self::anim_default().set(cx, Anim::new(Play::Cut {duration: 0.5}, vec![
             Track::color(Quad::instance_color(), Ease::Lin, vec![(1.0, Theme::color_bg_splitter().get(cx))]),
-        ])
-    }
-    
-    pub fn get_over_anim(cx: &Cx) -> Anim {
-        Anim::new(Play::Cut {duration: 0.05}, vec![
-            Track::color(Quad::instance_color(), Ease::Lin, vec![(1.0,Theme::color_bg_splitter_over().get(cx))]),
-        ])
-    }
-    
-    pub fn get_moving_anim(cx: &Cx) -> Anim {
-        Anim::new(Play::Cut {duration: 0.2}, vec![
+        ]));
+        
+        Self::anim_over().set(cx, Anim::new(Play::Cut {duration: 0.05}, vec![
+            Track::color(Quad::instance_color(), Ease::Lin, vec![(1.0, Theme::color_bg_splitter_over().get(cx))]),
+        ]));
+        
+        Self::anim_down().set(cx, Anim::new(Play::Cut {duration: 0.2}, vec![
             Track::color(Quad::instance_color(), Ease::Lin, vec![
                 (0.0, Theme::color_bg_splitter_peak().get(cx)),
                 (1.0, Theme::color_bg_splitter_drag().get(cx))
             ]),
-        ])
-    }
-    
-    pub fn def_split_shader() -> ShaderGen {
-        Quad::def_quad_shader().compose(shader_ast!({
-            
-            const border_radius: float = 1.5;
+        ]));
+        
+        Self::shader_bg().set(cx, Quad::def_quad_shader().compose(shader_ast!({
             
             fn pixel() -> vec4 {
                 df_viewport(pos * vec2(w, h));
                 df_box(0., 0., w, h, 0.5);
                 return df_fill(color);
             }
-        }))
+        })));
     }
     
     pub fn handle_splitter(&mut self, cx: &mut Cx, event: &mut Event) -> SplitterEvent {
@@ -105,7 +100,7 @@ impl Splitter {
             Event::AnimEnded(_) => self.animator.end(),
             Event::FingerDown(fe) => {
                 self._is_moving = true;
-                self.animator.play_anim(cx, Self::get_moving_anim(cx));
+                self.animator.play_anim(cx, Self::anim_down().get(cx));
                 match self.axis {
                     Axis::Horizontal => cx.set_down_mouse_cursor(MouseCursor::RowResize),
                     Axis::Vertical => cx.set_down_mouse_cursor(MouseCursor::ColResize)
@@ -124,10 +119,10 @@ impl Splitter {
                 if !self._is_moving {
                     match fe.hover_state {
                         HoverState::In => {
-                            self.animator.play_anim(cx, Self::get_over_anim(cx));
+                            self.animator.play_anim(cx, Self::anim_over().get(cx));
                         },
                         HoverState::Out => {
-                            self.animator.play_anim(cx, Self::get_default_anim(cx));
+                            self.animator.play_anim(cx, Self::anim_default().get(cx));
                         },
                         _ => ()
                     }
@@ -137,14 +132,14 @@ impl Splitter {
                 self._is_moving = false;
                 if fe.is_over {
                     if !fe.is_touch {
-                        self.animator.play_anim(cx, Self::get_over_anim(cx));
+                        self.animator.play_anim(cx, Self::anim_over().get(cx));
                     }
                     else {
-                        self.animator.play_anim(cx, Self::get_default_anim(cx));
+                        self.animator.play_anim(cx, Self::anim_default().get(cx));
                     }
                 }
                 else {
-                    self.animator.play_anim(cx, Self::get_default_anim(cx));
+                    self.animator.play_anim(cx, Self::anim_default().get(cx));
                 }
                 // we should change our mode based on which edge we are closest to
                 // the rule is center - 30 + 30
@@ -240,7 +235,7 @@ impl Splitter {
     }
     
     pub fn begin_splitter(&mut self, cx: &mut Cx) {
-        self.animator.init(cx, |cx| Self::get_default_anim(cx));
+        self.animator.init(cx, | cx | Self::anim_default().get(cx));
         let rect = cx.get_turtle_rect();
         self._calc_pos = match self.align {
             SplitterAlign::First => self.pos,
@@ -275,7 +270,8 @@ impl Splitter {
         cx.end_turtle(Area::Empty);
         let rect = cx.get_turtle_rect();
         let origin = cx.get_turtle_origin();
-        self.split.color = self.animator.last_color(cx, Quad::instance_color());
+        self.bg.shader = Self::shader_bg().get(cx);
+        self.bg.color = self.animator.last_color(cx, Quad::instance_color());
         match self.axis {
             Axis::Horizontal => {
                 cx.set_turtle_pos(Vec2 {x: origin.x, y: origin.y + self._calc_pos});
@@ -283,7 +279,7 @@ impl Splitter {
                     walk: Walk::wh(Width::Fix(rect.w), Height::Fix(self.split_size)),
                     ..Layout::default()
                 }) {
-                    self._split_area = self.split.draw_quad_rel(cx, Rect {x: 0., y: 0., w: rect.w, h: self.split_size}).into();
+                    self._split_area = self.bg.draw_quad_rel(cx, Rect {x: 0., y: 0., w: rect.w, h: self.split_size}).into();
                     self.split_view.end_view(cx);
                 }
                 cx.set_turtle_pos(Vec2 {x: origin.x, y: origin.y + self._calc_pos + self.split_size});
@@ -294,7 +290,7 @@ impl Splitter {
                     walk: Walk::wh(Width::Fix(self.split_size), Height::Fix(rect.h)),
                     ..Layout::default()
                 }) {
-                    self._split_area = self.split.draw_quad_rel(cx, Rect {x: 0., y: 0., w: self.split_size, h: rect.h}).into();
+                    self._split_area = self.bg.draw_quad_rel(cx, Rect {x: 0., y: 0., w: self.split_size, h: rect.h}).into();
                     self.split_view.end_view(cx);
                 }
             }

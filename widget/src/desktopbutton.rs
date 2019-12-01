@@ -1,5 +1,6 @@
 use render::*;
 use crate::buttonlogic::*;
+use crate::widgetstyle::*;
 
 #[derive(Clone)]
 pub struct DesktopButton {
@@ -33,7 +34,7 @@ impl DesktopButton {
     pub fn proto(cx: &mut Cx) -> Self {
         Self {
             button: ButtonLogic::default(),
-            bg: Quad::proto_with_shader(cx, Self::def_bg_shader(), "Button.bg"),
+            bg: Quad::proto(cx),
             animator: Animator::default(),
             _bg_area: Area::Empty,
         }
@@ -42,30 +43,30 @@ impl DesktopButton {
     pub fn instance_hover()->InstanceFloat{uid!()}
     pub fn instance_down()->InstanceFloat{uid!()}
     pub fn instance_type()->InstanceFloat{uid!()}
+
+    pub fn anim_default() -> AnimId {uid!()}
+    pub fn anim_over() -> AnimId {uid!()}
+    pub fn anim_down() -> AnimId {uid!()}
+    pub fn shader_bg() -> ShaderId {uid!()}
     
-    pub fn get_default_anim(_cx:&Cx)->Anim{
-        Anim::new(Play::Cut {duration: 0.2}, vec![
+    pub fn style(cx: &mut Cx, _opt: &StyleOptions) {
+        
+        Self::anim_default().set(cx,Anim::new(Play::Cut {duration: 0.2}, vec![
             Track::float(Self::instance_hover(), Ease::Lin, vec![(1.0, 0.)]),
             Track::float(Self::instance_down(), Ease::Lin, vec![(1.0, 0.)]),
-        ])
-    }
-    
-    pub fn get_over_anim(_cx:&Cx)->Anim{
-        Anim::new(Play::Cut {duration: 0.2}, vec![
+        ]));
+        
+        Self::anim_over().set(cx, Anim::new(Play::Cut {duration: 0.2}, vec![
             Track::float(Self::instance_down(), Ease::Lin, vec![(1.0, 0.)]),
             Track::float(Self::instance_hover(), Ease::Lin, vec![(0.0, 1.0), (1.0, 1.0)]),
-        ])
-    }
-    
-    pub fn get_down_anim(_cx:&Cx)->Anim{
-        Anim::new(Play::Cut {duration: 0.2}, vec![
+        ]));
+        
+        Self::anim_down().set(cx,Anim::new(Play::Cut {duration: 0.2}, vec![
             Track::float(Self::instance_down(), Ease::OutExp, vec![(0.0, 0.0), (1.0, 3.1415 * 0.5)]),
             Track::float(Self::instance_hover(), Ease::Lin, vec![(1.0, 1.0)]),
-        ])
-    }
-
-    pub fn def_bg_shader() -> ShaderGen {
-        Quad::def_quad_shader().compose(shader_ast!({
+        ]));
+        
+        Self::shader_bg().set(cx,Quad::def_quad_shader().compose(shader_ast!({
             
             let hover: Self::instance_hover();
             let down: Self::instance_down();
@@ -140,7 +141,7 @@ impl DesktopButton {
                 df_blur = 2.;
                 return df_glow(glow_color, glow_size);*/
             }
-        }))
+        })));
     }
     
     pub fn handle_button(&mut self, cx: &mut Cx, event: &mut Event) -> ButtonEvent {
@@ -149,15 +150,15 @@ impl DesktopButton {
         self.button.handle_button_logic(cx, event, self._bg_area, | cx, logic_event, area | match logic_event {
             ButtonLogicEvent::Animate(ae) => animator.calc_area(cx, area, ae.time),
             ButtonLogicEvent::AnimEnded(_)=> animator.end(),
-            ButtonLogicEvent::Down => animator.play_anim(cx, Self::get_down_anim(cx)),
-            ButtonLogicEvent::Default=> animator.play_anim(cx, Self::get_default_anim(cx)),
-            ButtonLogicEvent::Over=>animator.play_anim(cx, Self::get_over_anim(cx))
+            ButtonLogicEvent::Down => animator.play_anim(cx, Self::anim_down().get(cx)),
+            ButtonLogicEvent::Default=> animator.play_anim(cx, Self::anim_default().get(cx)),
+            ButtonLogicEvent::Over=>animator.play_anim(cx, Self::anim_over().get(cx))
         })
     }
 
     pub fn draw_desktop_button(&mut self, cx: &mut Cx, ty: DesktopButtonType) {
         //self.bg.color = self.animator.last_color(cx, Quad_color::id());
-        self.animator.init(cx, |cx| Self::get_default_anim(cx));
+        self.animator.init(cx, |cx| Self::anim_default().get(cx));
         let (w,h) = match ty {
             DesktopButtonType::WindowsMin 
             | DesktopButtonType::WindowsMax 
@@ -165,7 +166,7 @@ impl DesktopButton {
             | DesktopButtonType::WindowsClose => (46.,29.),
             DesktopButtonType::VRMode => (50.,36.),
         };
-
+        self.bg.shader = Self::shader_bg().get(cx);
         let bg_inst = self.bg.draw_quad(cx, Walk::wh(Width::Fix(w), Height::Fix(h)));
         bg_inst.push_last_float(cx, &self.animator, Self::instance_down());
         bg_inst.push_last_float(cx, &self.animator, Self::instance_hover());
