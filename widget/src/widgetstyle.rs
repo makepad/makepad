@@ -11,6 +11,7 @@ use crate::scrollbar::*;
 use crate::scrollshadow::*;
 use crate::desktopbutton::*;
 use crate::splitter::*;
+use crate::tabcontrol::*;
 
 use serde::{Serialize, Deserialize};
 
@@ -177,4 +178,5 @@ pub fn set_widget_style(cx: &mut Cx, opt: &StyleOptions) {
     ScrollShadow::style(cx, opt);
     DesktopButton::style(cx, opt);
     Splitter::style(cx, opt);
+    TabControl::style(cx, opt);
 }
