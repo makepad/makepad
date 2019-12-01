@@ -1657,15 +1657,14 @@ impl TextEditor {
         
         self.view.end_view(cx);
         
-        
-        
         if self._jump_to_offset {
             self._jump_to_offset = false;
+            self._scroll_pos_on_load = None;
             self.do_jump_to_offset(cx, text_buffer);
         }
         else if let Some(scroll_pos_on_load) = self._scroll_pos_on_load {
-            self.view.set_scroll_pos(cx, scroll_pos_on_load);
-            self._scroll_pos_on_load = None;
+           self.view.set_scroll_pos(cx, scroll_pos_on_load);
+           self._scroll_pos_on_load = None;
         }
     }
     
@@ -1900,6 +1899,7 @@ impl TextEditor {
                 w: mono_size.x * 4. + self.line_number_width,
                 h: mono_size.y * 4. + height_pad
             };
+            
             // scroll this cursor into view
             self.view.scroll_into_view(cx, rect);
         }

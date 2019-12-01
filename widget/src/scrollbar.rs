@@ -157,6 +157,7 @@ impl ScrollBar {
     }
     
     pub fn move_towards_scroll_target(&mut self, cx: &mut Cx) -> bool {
+        
         if self.smoothing.is_none() {
             return false;
         }
@@ -288,6 +289,7 @@ impl ScrollBar {
                 },
                 Event::AnimEnded(_) => self.animator.end(),
                 Event::Frame(_ae) => {
+                    
                     if self.move_towards_scroll_target(cx) {
                         cx.next_frame(self._bg_area);
                     }
