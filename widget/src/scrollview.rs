@@ -70,7 +70,7 @@ impl ScrollView{
             cxview.unsnapped_scroll
         }
         else {
-            Vec2::zero()
+            Vec2::default()
         }
     }
     

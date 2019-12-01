@@ -55,7 +55,7 @@ impl Window {
         if let Some(window_id) = self.window_id {
             return cx.windows[window_id].get_inner_size()
         }
-        return Vec2::zero();
+        return Vec2::default();
     }
     
     pub fn get_position(&mut self, cx: &mut Cx) -> Option<Vec2> {
@@ -211,7 +211,7 @@ impl CxWindow {
         match &self.window_state {
             CxWindowState::Create {inner_size, ..} => *inner_size,
             CxWindowState::Created => self.window_geom.inner_size,
-            _ => Vec2::zero()
+            _ => Vec2::default()
         }
     }
     

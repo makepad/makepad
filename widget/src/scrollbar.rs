@@ -370,8 +370,6 @@ impl ScrollBar {
     }
     
     pub fn draw_scroll_bar(&mut self, cx: &mut Cx, axis: Axis, view_area: Area, view_rect: Rect, view_total: Vec2) -> f32 {
-        // pull the bg color from our animation system, uses 'default' value otherwise
-        
         self.animator.init(cx, |cx| Self::get_default_anim(cx));
         
         self.sb.color = self.animator.last_color(cx, Quad::instance_color());
