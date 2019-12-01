@@ -8,6 +8,7 @@ use crate::texteditor::*;
 use crate::codeicon::*;
 use crate::textinput::*;
 use crate::scrollbar::*;
+use crate::scrollshadow::*;
 use serde::{Serialize, Deserialize};
 
 #[derive(Debug, Copy, Clone, Serialize, Deserialize, PartialEq)]
@@ -161,4 +162,5 @@ pub fn set_widget_style(cx: &mut Cx, opt: &StyleOptions) {
     CodeIcon::style(cx, opt);
     TextInput::style(cx, opt);
     ScrollBar::style(cx, opt);
+    ScrollShadow::style(cx, opt);
 }

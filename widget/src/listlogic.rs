@@ -6,7 +6,7 @@ pub struct ListLogic {
     pub list_items: Vec<ListItem>,
     pub scroll_item_in_view: Option<usize>,
     pub set_scroll_pos: Option<Vec2>,
-    pub tail_list: bool,
+    //pub tail_list: bool,
     pub start_item: usize,
     pub end_item: usize,
     pub end_fill: usize,
@@ -55,7 +55,7 @@ impl ListSelect {
 }
 
 impl ListLogic {
-    pub fn set_list_len(&mut self,  len: usize)
+    pub fn set_list_len(&mut self, len: usize)
     {
         if self.list_items.len() < len {
             for _ in self.list_items.len()..len {
@@ -71,29 +71,30 @@ impl ListLogic {
     }
     
     pub fn handle_list_scroll_bars(&mut self, cx: &mut Cx, event: &mut Event, view: &mut ScrollView)
-    {
+        -> bool {
         if view.handle_scroll_bars(cx, event) {
             view.redraw_view_area(cx);
             match &event {
                 Event::FingerScroll {..} => {
-                    self.tail_list = false;
+                    return true;
                 },
                 Event::FingerMove {..} => {
-                    self.tail_list = false;
+                    return true;
                 },
                 _ => ()
             }
         }
+        return false
     }
     
-    pub fn begin_list(&mut self, cx: &mut Cx, view: &mut ScrollView, row_height: f32) -> Result<(), ()>
+    pub fn begin_list(&mut self, cx: &mut Cx, view: &mut ScrollView, tail_list: bool, row_height: f32) -> Result<(), ()>
     {
         view.begin_view(cx, Layout {
             direction: Direction::Down,
             ..Layout::default()
         }) ?;
         
-        self.set_visible_range_and_scroll(cx, view, row_height);
+        self.set_visible_range_and_scroll(cx, view, tail_list, row_height);
         
         Ok(())
     }
@@ -112,14 +113,14 @@ impl ListLogic {
         }
     }
     
-    pub fn set_visible_range_and_scroll(&mut self, cx: &mut Cx, view: &mut ScrollView, row_height: f32) {
+    pub fn set_visible_range_and_scroll(&mut self, cx: &mut Cx, view: &mut ScrollView, tail_list: bool, row_height: f32) {
         let view_rect = cx.get_turtle_rect();
         
         // the maximum scroll position given the amount of log items
         let max_scroll_y = ((self.list_items.len() + 1) as f32 * row_height - view_rect.h).max(0.);
         
         // tail the log
-        let (scroll_pos, set_scroll_pos) = if self.tail_list {
+        let (scroll_pos, set_scroll_pos) = if tail_list {
             (Vec2 {x: 0., y: max_scroll_y}, true)
         }
         else {
@@ -332,7 +333,7 @@ impl ListLogic {
                     }
                 }
                 self.selection.truncate(0);
-                if select_index < self.list_items.len(){
+                if select_index < self.list_items.len() {
                     self.selection.push(select_index);
                     let dm = &mut self.list_items[select_index];
                     dm.is_selected = true;

@@ -3,6 +3,7 @@ use crate::scrollview::*;
 use crate::textbuffer::*;
 use crate::textcursor::*;
 use crate::widgetstyle::*;
+use crate::scrollshadow::*;
 
 #[derive(Clone)]
 pub struct TextEditor {
@@ -17,7 +18,7 @@ pub struct TextEditor {
     pub cursor_row: Quad,
     pub paren_pair: Quad,
     pub indent_lines: Quad,
-    
+    pub shadow: ScrollShadow,
     pub message_marker: Quad,
     pub text: Text,
     pub line_number_text: Text,
@@ -161,15 +162,13 @@ impl TextEditor {
                 ..Quad::proto_with_shader(cx, Self::def_indent_lines_shader(), "Editor.indent_lines")
             },
             view: ScrollView::proto(cx),
-            bg: Quad {
-                do_h_scroll: false,
-                do_v_scroll: false,
-                ..Quad::proto(cx)
+            bg: Quad ::proto(cx),
+            shadow: ScrollShadow{
+                z: 10.,
+                ..ScrollShadow::proto(cx)
             },
             gutter_bg: Quad {
                 z: 9.0,
-                do_h_scroll: false,
-                do_v_scroll: false,
                 ..Quad::proto(cx)
             },
             colors: CodeEditorColors::default(),
@@ -191,7 +190,6 @@ impl TextEditor {
             },
             line_number_text: Text {
                 z: 9.,
-                do_h_scroll: false,
                 wrapping: Wrapping::Line,
                 ..Text::proto(cx)
             },
@@ -271,6 +269,7 @@ impl TextEditor {
     
     pub fn gutter_width() -> FloatId {uid!()}
     pub fn padding_top() -> FloatId {uid!()}
+    pub fn shadow_size() -> FloatId {uid!()}
     
     pub fn layout_bg() -> LayoutId {uid!()}
     pub fn text_style_editor_text() -> TextStyleId {uid!()}
@@ -319,6 +318,7 @@ impl TextEditor {
     pub fn color_defocus() -> ColorId {uid!()}
     
     pub fn style(cx: &mut Cx, _opt: &StyleOptions) {
+        Self::shadow_size().set(cx, 6.0);
         Self::gutter_width().set(cx, 45.0);
         Self::padding_top().set(cx, 27.);
         Self::text_style_editor_text().set(cx, Theme::text_style_fixed().get(cx));
@@ -332,6 +332,7 @@ impl TextEditor {
     pub fn instance_select_next_x() -> InstanceFloat {uid!()}
     pub fn instance_select_next_w() -> InstanceFloat {uid!()}
     pub fn uniform_highlight_visible() -> UniformFloat {uid!()}
+    pub fn instance_shadow_dir() -> InstanceFloat {uid!()}
     
     pub fn def_indent_lines_shader() -> ShaderGen {
         Quad::def_quad_shader().compose(shader_ast !({
@@ -365,6 +366,26 @@ impl TextEditor {
                 }
                 else {
                     return vec4(0., 0., 0., 0.);
+                }
+            }
+        }))
+    }
+    
+    pub fn def_shadow_shader() -> ShaderGen {
+        Quad::def_quad_shader().compose(shader_ast !({
+            let shadow_dir: Self::instance_shadow_dir();
+            fn pixel() -> vec4 { // TODO make the corner overlap properly with a distance field eq.
+                if shadow_dir<0.5 {
+                    return mix(vec4(0., 0., 0., 1.), vec4(0., 0., 0., 0.), pow(geom.x, 0.5));
+                }
+                else if shadow_dir<1.5 {
+                    return mix(vec4(0., 0., 0., 1.), vec4(0., 0., 0., 0.), pow(geom.y, 0.5));
+                }
+                else if shadow_dir<2.5 {
+                    return mix(vec4(0., 0., 0., 1.), vec4(0., 0., 0., 0.), pow(1.0 - geom.x, 0.5));
+                }
+                else {
+                    return mix(vec4(0., 0., 0., 1.), vec4(0., 0., 0., 0.), pow(1.0 - geom.y, 0.5));
                 }
             }
         }))
@@ -491,7 +512,7 @@ impl TextEditor {
         cx.set_down_mouse_cursor(MouseCursor::Text);
         // give us the focus
         self.set_key_focus(cx);
-                self._undo_id += 1;
+        self._undo_id += 1;
         
         let offset;
         //let scroll_pos = self._bg_area.get_scroll_pos(cx);
@@ -636,7 +657,7 @@ impl TextEditor {
                     else {
                         self.cursors.move_down(1, ke.modifiers.shift, text_buffer);
                     }
-                self._undo_id += 1;
+                    self._undo_id += 1;
                     true
                 }
             },
@@ -857,7 +878,7 @@ impl TextEditor {
                 }
                 // update the cursor uniform to blink it.
                 self._cursor_blink_flipflop = 1.0 - self._cursor_blink_flipflop;
-                self._undo_id +=1;
+                self._undo_id += 1;
                 self._highlight_visibility = 1.0;
                 self._cursor_area.write_uniform_float(cx, Self::uniform_cursor_blink(), self._cursor_blink_flipflop);
                 if self.highlight_area_on {
@@ -1648,10 +1669,12 @@ impl TextEditor {
         self.do_selection_scrolling(cx, text_buffer);
         self.place_ime_and_draw_cursor_row(cx);
         self.set_indent_line_highlight_id(cx);
-        
+        self.draw_shadows(cx);
         self.bg.end_quad_fill(cx, &self._bg_inst.take().unwrap());
         
         self.view.end_view(cx);
+        
+        
         
         if self._jump_to_offset {
             self._jump_to_offset = false;
@@ -1684,6 +1707,23 @@ impl TextEditor {
                 }
             }
         }
+    }
+    
+    fn draw_shadows(&mut self, cx: &mut Cx) {
+        let gutter_width = Self::gutter_width().get(cx);        
+        self.shadow.draw_shadow_left(cx, Rect {
+            x: gutter_width,
+            y: 0.,
+            w: 0.,
+            h: cx.get_height_total()
+        });
+        
+        self.shadow.draw_shadow_top(cx, Rect {
+            x: 0.,
+            y: 0.,
+            w: cx.get_width_total(),
+            h: 0.
+        });
     }
     
     fn draw_message_markers(&mut self, cx: &mut Cx, text_buffer: &TextBuffer) {
