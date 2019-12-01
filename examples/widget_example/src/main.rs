@@ -42,7 +42,7 @@ main_app!(App);
 
 impl App {
     pub fn proto(cx: &mut Cx) -> Self {
-        set_dark_widget_theme(cx);
+        set_widget_style(cx, &StyleOptions::default());
         let menu_signal = cx.new_signal();
         Self {
             desktop_window: DesktopWindow::proto(cx),

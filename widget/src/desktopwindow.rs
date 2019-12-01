@@ -60,7 +60,7 @@ impl DesktopWindow {
             caption_text: Text::proto(cx),
             //caption_bg_color: Color_bg_selected_over::id(cx),
             caption_bg: Quad::proto(cx),
-            caption_size: Vec2::zero(),
+            caption_size: Vec2::default(),
             caption: "Makepad".to_string(),
             inner_over_chrome: false,
             _last_menu: None
@@ -225,7 +225,7 @@ impl DesktopWindow {
         cx.turtle_new_line();
         
         if self.inner_over_chrome {
-            let _ = self.inner_view.begin_view(cx, Layout {abs_origin: Some(Vec2::zero()), ..Layout::default()});
+            let _ = self.inner_view.begin_view(cx, Layout {abs_origin: Some(Vec2::default()), ..Layout::default()});
         }
         else {
             let _ = self.inner_view.begin_view(cx, Layout::default());

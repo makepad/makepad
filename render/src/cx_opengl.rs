@@ -201,7 +201,7 @@ impl Cx {
             };
             
             let pass_size = self.passes[pass_id].pass_size;
-            self.passes[pass_id].set_ortho_matrix(Vec2::zero(), pass_size);
+            self.passes[pass_id].set_ortho_matrix(Vec2::default(), pass_size);
             
             let pix_width = opengl_window.window_geom.inner_size.x * opengl_window.window_geom.dpi_factor;
             let pix_height = opengl_window.window_geom.inner_size.y * opengl_window.window_geom.dpi_factor;
@@ -214,7 +214,7 @@ impl Cx {
                 }
                 gl::Viewport(0, 0, pix_width as i32, pix_height as i32);
             }
-            view_rect = Rect::zero();
+            view_rect = Rect::default();
         }
         else {
             if view_bounds.max_x == std::f32::NEG_INFINITY
@@ -284,7 +284,7 @@ impl Cx {
         self.passes[pass_id].set_dpi_factor(dpi_factor);
         // set up the
         let clear_color = if self.passes[pass_id].color_textures.len() == 0 {
-            Color::zero()
+            Color::default()
         }
         else {
             match self.passes[pass_id].color_textures[0].clear_color {
@@ -311,7 +311,7 @@ impl Cx {
         self.render_view(
             pass_id,
             view_id,
-            Vec2::zero(),
+            Vec2::default(),
             (Vec2 {x: -50000., y: -50000.}, Vec2 {x: 50000., y: 50000.}),
             full_repaint,
             &view_rect,
@@ -334,7 +334,7 @@ impl Cx {
     ) {
         
         let pass_size = self.passes[pass_id].pass_size;
-        self.passes[pass_id].set_ortho_matrix(Vec2::zero(), pass_size);
+        self.passes[pass_id].set_ortho_matrix(Vec2::default(), pass_size);
         self.passes[pass_id].uniform_camera_view(&Mat4::identity());
         self.passes[pass_id].paint_dirty = false;
         
@@ -346,7 +346,7 @@ impl Cx {
         };
         self.passes[pass_id].set_dpi_factor(dpi_factor);
         
-        let mut clear_color = Color::zero();
+        let mut clear_color = Color::default();
         let mut clear_depth = 1.0;
         let mut clear_flags = 0;
         
@@ -426,10 +426,10 @@ impl Cx {
         self.render_view(
             pass_id,
             view_id,
-            Vec2::zero(),
+            Vec2::default(),
             (Vec2 {x: -50000., y: -50000.}, Vec2 {x: 50000., y: 50000.}),
             true,
-            &Rect::zero(),
+            &Rect::default(),
             &opengl_cx,
             &mut zbias,
             zbias_step
@@ -961,7 +961,7 @@ impl OpenglWindow {
             first_draw: true,
             window_id,
             opening_repaint_count: 0,
-            cal_size: Vec2::zero(),
+            cal_size: Vec2::default(),
             window_geom: xlib_window.get_window_geom(),
             xlib_window
         }
