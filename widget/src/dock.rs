@@ -192,12 +192,14 @@ where TItem: Clone
                         if !tab_control.is_none() {
                             match tab_control.unwrap().handle_tab_control(cx, event) {
                                 TabControlEvent::TabSelect {tab_id} => {
-                                    *previous = *current;
-                                    *current = tab_id;
-                                    // someday ill fix this. Luckily entire UI redraws are millisecond span
-                                    cx.redraw_child_area(Area::All);
-                                    *self._tab_select = Some((stack_top.uid, tab_id));
-                                    defocus = true;
+                                    if *current != tab_id{
+                                        *previous = *current;
+                                        *current = tab_id;
+                                        // someday ill fix this. Luckily entire UI redraws are millisecond span
+                                        cx.redraw_child_area(Area::All);
+                                        *self._tab_select = Some((stack_top.uid, tab_id));
+                                        defocus = true;
+                                    }
                                 },
                                 TabControlEvent::TabDragMove {fe, ..} => {
                                     *self._drag_move = Some(fe);
