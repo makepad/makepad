@@ -88,7 +88,7 @@ impl Cx {
     
     pub fn setup_render_pass(&mut self, pass_id: usize, inherit_dpi_factor: f32) {
         let pass_size = self.passes[pass_id].pass_size;
-        self.passes[pass_id].set_ortho_matrix(Vec2::zero(), pass_size);
+        self.passes[pass_id].set_ortho_matrix(Vec2::default(), pass_size);
         self.passes[pass_id].uniform_camera_view(&Mat4::identity());
         self.passes[pass_id].paint_dirty = false;
         
@@ -106,7 +106,7 @@ impl Cx {
         
         // get the color and depth
         let clear_color = if self.passes[pass_id].color_textures.len() == 0 {
-            Color::zero()
+            Color::default()
         }
         else {
             match self.passes[pass_id].color_textures[0].clear_color {
@@ -133,7 +133,7 @@ impl Cx {
         self.render_view(
             pass_id,
             view_id,
-            Vec2::zero(),
+            Vec2::default(),
             (Vec2 {x: -50000., y: -50000.}, Vec2 {x: 50000., y: 50000.}),
             vr_is_presenting,
             &mut zbias,
@@ -185,7 +185,7 @@ impl Cx {
         self.render_view(
             pass_id,
             view_id,
-            Vec2::zero(),
+            Vec2::default(),
             (Vec2{x:-50000.,y:-50000.},Vec2{x:50000.,y:50000.}),
             false,
             &mut zbias,

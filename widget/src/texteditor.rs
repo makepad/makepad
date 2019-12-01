@@ -206,13 +206,13 @@ impl TextEditor {
             draw_cursor_row: true,
             _scroll_pos_on_load: None,
             _jump_to_offset: true,
-            _monospace_size: Vec2::zero(),
-            _monospace_base: Vec2::zero(),
+            _monospace_size: Vec2::default(),
+            _monospace_base: Vec2::default(),
             _last_finger_move: None,
             _tokens_on_line: 0,
             _line_was_folded: false,
             //_line_was_visible: false,
-            _scroll_pos: Vec2::zero(),
+            _scroll_pos: Vec2::default(),
             _visible_lines: 0,
             _undo_id: 0,
             
@@ -255,7 +255,7 @@ impl TextEditor {
             _highlight_selection: Vec::new(),
             _highlight_token: Vec::new(),
             _last_cursor_pos: TextPos::zero(),
-            _last_indent_color: Color::zero(),
+            _last_indent_color: Color::default(),
             
             _cursor_blink_timer: Timer::empty(),
             _cursor_blink_flipflop: 0.,
@@ -1925,7 +1925,7 @@ impl TextEditor {
     fn compute_grid_text_pos_from_abs(&mut self, cx: &Cx, abs: Vec2) -> TextPos {
         //
         let rel = self.view.get_view_area(cx).abs_to_rel(cx, abs);
-        let mut mono_size = Vec2::zero();
+        let mut mono_size = Vec2::default();
         for (row, geom) in self._line_geometry.iter().enumerate() {
             //let geom = &self._line_geometry[pos.row];
             mono_size = Vec2 {x: self._monospace_base.x * geom.font_size, y: self._monospace_base.y * geom.font_size};

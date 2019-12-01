@@ -90,8 +90,8 @@ impl App {
             app_window_template: AppWindow::proto(cx),
             app_window_state_template: AppWindowState {
                 open_folders: Vec::new(),
-                window_inner_size: Vec2::zero(),
-                window_position: Vec2::zero(),
+                window_inner_size: Vec2::default(),
+                window_position: Vec2::default(),
                 dock_items: DockItem::Splitter {
                     axis: Axis::Vertical,
                     align: SplitterAlign::First,
