@@ -721,8 +721,8 @@ impl FileTree {
                     }
                 }
             };
-            //self.item_draw.filler.z = depth as f32 + 1.0;
-            //self.item_draw.tree_text.z = depth as f32 + 1.0;
+            self.item_draw.filler.z = 0.;
+            self.item_draw.tree_text.z = 0.;
             //self.item_draw.tree_text.font_size = self.font_size;
             self.item_draw.tree_text.font_scale = scale as f32;
             match node {
@@ -822,6 +822,8 @@ impl FileTree {
                 while let Some((_depth, _index, _len, node)) = file_walker.walk() {
                     let node_draw = if let Some(node_draw) = node.get_draw() {node_draw}else {continue};
                     if node_draw.marked != 0 {
+                        self.drag_bg.z = 10.0;
+                        self.item_draw.tree_text.z = 10.0;
                         self.drag_bg.color = Self::color_drag_bg().get(cx);
                         let inst = self.drag_bg.begin_quad(cx, FileTreeItemDraw::layout_drag_bg().get(cx));
                         self.item_draw.tree_text.color = FileTreeItemDraw::color_tree_folder().get(cx);
@@ -836,12 +838,7 @@ impl FileTree {
             }
         }
         
-        self.item_draw.shadow.draw_shadow_top(cx, Rect {
-            x: 0.,
-            y: 0.,
-            w: cx.get_width_total(),
-            h: 0.
-        });
+        self.item_draw.shadow.draw_shadow_top(cx);
         
         self.view.end_view(cx);
     }
