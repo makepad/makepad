@@ -145,7 +145,7 @@ pub fn set_widget_style(cx: &mut Cx, opt: &StyleOptions) {
         font: font,
         font_size: 8.0,
         brightness: 1.0,
-        curve: 0.7,
+        curve: 0.6,
         line_spacing: 1.4,
         top_drop: 1.1,
         height_factor: 1.3,
@@ -163,7 +163,7 @@ pub fn set_widget_style(cx: &mut Cx, opt: &StyleOptions) {
         font_size: 8.0 * opt.scale, 
         line_spacing: 1.8,
         top_drop: 1.3,
-        ..TextStyle::default()
+        ..Theme::text_style_unscaled().get(cx)
     });
     
     TabClose::style(cx, opt);

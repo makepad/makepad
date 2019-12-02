@@ -642,7 +642,6 @@ impl InstanceArea{
         draw_call.do_v_scroll = ver;
     }
 
-
     pub fn need_uniforms_now(&self, cx:&mut Cx)->bool{
         let cxview = &mut cx.views[self.view_id];
         if cxview.redraw_id != self.redraw_id {
