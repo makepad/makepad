@@ -57,21 +57,50 @@ impl RustEditor {
 
 pub struct RustTokenizer {
     pub comment_single: bool,
-    pub comment_depth: usize
+    pub comment_depth: usize,
+    pub in_string: bool
 }
 
 impl RustTokenizer {
     pub fn new() -> RustTokenizer {
         RustTokenizer {
             comment_single: false,
-            comment_depth: 0
+            comment_depth: 0,
+            in_string: false
         }
     }
     
     pub fn next_token<'a>(&mut self, state: &mut TokenizerState<'a>, chunk: &mut Vec<char>, token_chunks: &Vec<TokenChunk>) -> TokenType {
         let start = chunk.len();
         //chunk.truncate(0);
-        if self.comment_depth >0 { // parse comments
+        if self.in_string{
+            loop {
+                if state.next == '\0' {
+                    self.in_string = false;
+                    return TokenType::String
+                }
+                else if state.next == '\n' {
+                    if (chunk.len() - start)>0 {
+                        return TokenType::String
+                    }
+                    chunk.push(state.next);
+                    state.advance();
+                    return TokenType::Newline
+                }
+                else if state.next == '"' && state.prev != '\\' {
+                    chunk.push(state.next);
+                    state.advance();
+                    self.in_string = false;
+                    return TokenType::String
+                }
+                else {
+                    chunk.push(state.next);
+                    state.advance();
+                }
+            }
+            
+        }
+        else if self.comment_depth >0 { // parse comments
             loop {
                 if state.next == '\0' {
                     self.comment_depth = 0;
@@ -214,6 +243,9 @@ impl RustTokenizer {
                             break;
                         }
                     };
+                    if state.next == '\n'{
+                        self.in_string = true;
+                    }
                     return TokenType::String;
                 },
                 '0'..='9' => { // try to parse numbers

@@ -42,14 +42,14 @@ impl TextInput {
         }
     }
     
-    pub fn text_input_style()->StyleId{uid!()}
+    pub fn style_text_input()->StyleId{uid!()}
     
     pub fn style(cx: &mut Cx, _opt: &StyleOptions) {
-        cx.begin_style(Self::text_input_style());
+        cx.begin_style(Self::style_text_input());
         TextEditor::color_bg().set(cx, Theme::color_bg_normal().get(cx));
         TextEditor::gutter_width().set(cx, 0.);
         TextEditor::padding_top().set(cx, 0.);
-        cx.end_style(Self::text_input_style());
+        cx.end_style(Self::style_text_input());
     }
     
     pub fn handle_plain_text(&mut self, cx: &mut Cx, event: &mut Event) -> TextEditorEvent {
@@ -75,7 +75,7 @@ impl TextInput {
     }
     
     pub fn draw_plain_text(&mut self, cx: &mut Cx) {
-        cx.begin_style(Self::text_input_style());
+        cx.begin_style(Self::style_text_input());
         let text_buffer = &mut self.text_buffer;
         if text_buffer.needs_token_chunks() && text_buffer.lines.len() >0 {
             
@@ -106,6 +106,6 @@ impl TextInput {
         }
         
         self.text_editor.end_text_editor(cx, text_buffer);
-        cx.end_style(Self::text_input_style());
+        cx.end_style(Self::style_text_input());
     }
 }
