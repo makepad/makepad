@@ -85,7 +85,7 @@ impl NormalButton {
         })));
     }
     
-    pub fn handle_button(&mut self, cx: &mut Cx, event: &mut Event) -> ButtonEvent {
+    pub fn handle_normal_button(&mut self, cx: &mut Cx, event: &mut Event) -> ButtonEvent {
         //let mut ret_event = ButtonEvent::None;
         let animator = &mut self.animator;
         self.button.handle_button_logic(cx, event, self._bg_area, | cx, logic_event, area | match logic_event {
@@ -97,7 +97,7 @@ impl NormalButton {
         })
     }
     
-    pub fn draw_button(&mut self, cx: &mut Cx, label: &str) {
+    pub fn draw_normal_button(&mut self, cx: &mut Cx, label: &str) {
         self.bg.shader = Self::shader_bg().get(cx);
         
         self.animator.init(cx, | cx | Self::anim_default().get(cx));

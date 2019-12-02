@@ -44,8 +44,6 @@ pub struct TextEditor {
     pub read_only: bool,
     pub multiline: bool,
     
-    pub empty_message: String,
-    
     //pub _bg_area: Area,
     pub _scroll_pos_on_load: Option<Vec2>,
     pub _jump_to_offset: bool,
@@ -153,7 +151,6 @@ impl TextEditor {
     
     pub fn proto(cx: &mut Cx) -> Self {
         Self {
-            empty_message: "".to_string(),
             read_only: false,
             multiline: true,
             cursors: TextCursorSet::new(),
@@ -1051,12 +1048,7 @@ impl TextEditor {
             inst.set_do_scroll(cx, false, false); // don't scroll the bg
             self._bg_inst = Some(inst);
             
-            if text_buffer.is_empty() {
-                let pos = cx.get_turtle_pos();
-                self.text.color = color("#666");
-                self.text.draw_text(cx, &self.empty_message);
-                cx.set_turtle_pos(pos);
-            }
+          
             
             //let bg_area = bg_inst.into_area();
             let view_area = self.view.get_view_area(cx);
@@ -1693,19 +1685,14 @@ impl TextEditor {
     
     fn draw_shadows(&mut self, cx: &mut Cx) {
         let gutter_width = Self::gutter_width().get(cx);
-        self.shadow.draw_shadow_left(cx, Rect {
+        self.shadow.draw_shadow_left_at(cx, Rect {
             x: gutter_width,
             y: 0.,
             w: 0.,
             h: cx.get_height_total()
         });
         
-        self.shadow.draw_shadow_top(cx, Rect {
-            x: 0.,
-            y: 0.,
-            w: cx.get_width_total(),
-            h: 0.
-        });
+        self.shadow.draw_shadow_top(cx);
     }
     
     fn draw_message_markers(&mut self, cx: &mut Cx, text_buffer: &TextBuffer) {

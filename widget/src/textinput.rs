@@ -7,6 +7,7 @@ use crate::widgetstyle::*;
 pub struct TextInput {
     pub text_editor: TextEditor,
     pub text_buffer: TextBuffer,
+    pub empty_message: String,
 }
 
 pub struct TextInputOptions {
@@ -22,7 +23,6 @@ impl TextInput {
             text_editor: TextEditor {
                 read_only: opt.read_only,
                 multiline: opt.multiline,
-                empty_message: opt.empty_message,
                 draw_line_numbers: false,
                 draw_cursor_row: false,
                 highlight_area_on: false,
@@ -37,6 +37,7 @@ impl TextInput {
                 folding_depth: 3,
                 ..TextEditor::proto(cx)
             },
+            empty_message:opt.empty_message,
             text_buffer: TextBuffer::from_utf8(""),
         }
     }
@@ -92,6 +93,13 @@ impl TextInput {
         }
         
         if self.text_editor.begin_text_editor(cx, text_buffer).is_err() {return}
+    
+        if text_buffer.is_empty() {
+            let pos = cx.get_turtle_pos();
+            self.text_editor.text.color = color("#666");
+            self.text_editor.text.draw_text(cx, &self.empty_message);
+            cx.set_turtle_pos(pos);
+        }
         
         for (index, token_chunk) in text_buffer.token_chunks.iter_mut().enumerate() {
             self.text_editor.draw_chunk(cx, index, &text_buffer.flat_text, token_chunk, &text_buffer.messages.cursors);

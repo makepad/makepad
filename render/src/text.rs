@@ -27,7 +27,7 @@ impl Default for TextStyle {
             font: Font::default(),
             font_size: 8.0,
             brightness: 1.0,
-            curve: 0.7,
+            curve: 0.6,
             line_spacing: 1.4,
             top_drop: 1.1,
             height_factor: 1.3,
