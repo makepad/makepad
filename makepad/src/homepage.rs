@@ -92,8 +92,16 @@ impl HomePage {
         
         t.color = Self::color_body().get(cx);
         t.text_style = Self::text_style_body().get(cx);
-        t.draw_text(cx, "Makepad is a creative software development platform built around Rust. We aim to make the creative software development process as fun as possible! To do this we will provide a set of visual design tools that modify your application in real time, as well as a library ecosystem that allows you to write highly performant multimedia applications.\n");
-        t.draw_text(cx, "As we're working towards our first public alpha version, you'll be able to see our final steps towards it here. The alpha version of Makepad Basic will show off the development platform, but does not include the visual design tools or library ecosystem yet.\n");
+        t.draw_text(cx, "\
+            Makepad is a creative software development platform built around Rust. \
+            We aim to make the creative software development process as fun as possible! \
+            To do this we will provide a set of visual design tools that modify your application in real time, \
+            as well as a library ecosystem that allows you to write highly performant multimedia applications.\n");
+        t.draw_text(cx, "\
+            As we're working towards our first public alpha version, \
+            you'll be able to see our final steps towards it here. \
+            The alpha version of Makepad Basic will show off the development platform, \
+            but does not include the visual design tools or library ecosystem yet.\n");
         t.draw_text(cx, "the web build of Makepad does not feature any compiler integration. If you want to be able to compile code, you have to install Makepad locally.\n");
         t.draw_text(cx, "The Makepad development platform and library ecosystem are MIT licensed, and will be available for free as part of Makepad Basic. In the near future, we will also introduce Makepad Pro, which will be available as a subscription model. Makepad Pro will include the visual design tools. Because the library ecosystem is MIT licensed, all applications made with the Pro version are entirely free licensed.\n");
         t.draw_text(cx, "Features:\n");

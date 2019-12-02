@@ -74,24 +74,34 @@ impl RustTokenizer {
         let start = chunk.len();
         //chunk.truncate(0);
         if self.in_string{
+            if state.next == ' ' || state.next == '\t'{
+                while state.next == ' ' || state.next == '\t'{
+                    chunk.push(state.next);
+                    state.advance();
+                }
+                return TokenType::Whitespace;
+            }
             loop {
                 if state.next == '\0' {
                     self.in_string = false;
-                    return TokenType::String
+                    return TokenType::StringChunk
                 }
                 else if state.next == '\n' {
                     if (chunk.len() - start)>0 {
-                        return TokenType::String
+                        return TokenType::StringChunk
                     }
                     chunk.push(state.next);
                     state.advance();
                     return TokenType::Newline
                 }
                 else if state.next == '"' && state.prev != '\\' {
+                    if (chunk.len() - start)>0 {
+                        return TokenType::StringChunk
+                    }
                     chunk.push(state.next);
                     state.advance();
                     self.in_string = false;
-                    return TokenType::String
+                    return TokenType::StringMultiEnd
                 }
                 else {
                     chunk.push(state.next);
@@ -169,7 +179,7 @@ impl RustTokenizer {
                 },
                 ' ' | '\t' => { // eat as many spaces as possible
                     chunk.push(state.cur);
-                    while state.next == ' ' {
+                    while state.next == ' ' || state.next == '\t'{
                         chunk.push(state.next);
                         state.advance();
                     }
@@ -245,6 +255,7 @@ impl RustTokenizer {
                     };
                     if state.next == '\n'{
                         self.in_string = true;
+                        return TokenType::StringMultiBegin;
                     }
                     return TokenType::String;
                 },
@@ -812,12 +823,12 @@ impl RustTokenizer {
         let mut is_unary_operator = true;
         let mut in_multline_comment = false;
         let mut in_singleline_comment = false;
-        
+        let mut in_multiline_string = false;
         while tp.advance() {
             
             match tp.cur_type() {
                 TokenType::Whitespace => {
-                    if in_singleline_comment || in_multline_comment {
+                    if in_singleline_comment || in_multline_comment{
                         out.extend(tp.cur_chunk());
                     }
                     else if !first_on_line && tp.next_type() != TokenType::Newline
@@ -831,7 +842,7 @@ impl RustTokenizer {
                 TokenType::Newline => {
                     in_singleline_comment = false;
                     //paren_stack.last_mut().unwrap().angle_counter = 0;
-                    if  in_singleline_comment || in_multline_comment{
+                    if  in_singleline_comment || in_multline_comment || in_multiline_string{
                         out.new_line();
                         first_on_line = true;
                     }
@@ -953,6 +964,31 @@ impl RustTokenizer {
                     in_multline_comment = false;
                     if first_on_line {
                         first_on_line = false;
+                    }
+                    out.extend(tp.cur_chunk());
+                },
+                TokenType::StringMultiBegin => {
+                    in_multiline_string = true;
+                    if first_on_line {
+                        first_on_line = false;
+                        out.indent(expected_indent);
+                    }
+                    expected_indent += 4;
+                    out.extend(tp.cur_chunk());
+                },
+                TokenType::StringChunk => {
+                    if first_on_line {
+                        first_on_line = false;
+                        out.indent(expected_indent);
+                    }
+                    out.extend(tp.cur_chunk());
+                },
+                TokenType::StringMultiEnd => {
+                    expected_indent -= 4;
+                    in_multiline_string = false;
+                    if first_on_line {
+                        first_on_line = false;
+                        out.indent(expected_indent);
                     }
                     out.extend(tp.cur_chunk());
                 },

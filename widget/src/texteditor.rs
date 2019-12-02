@@ -1443,6 +1443,11 @@ impl TextEditor {
                 TokenType::Regex => self.colors.string,
                 TokenType::String => self.colors.string,
                 TokenType::Number => self.colors.number,
+
+                TokenType::StringMultiBegin => self.colors.string,
+                TokenType::StringChunk => self.colors.string,
+                TokenType::StringMultiEnd => self.colors.string,
+
                 TokenType::CommentMultiBegin => self.colors.comment,
                 TokenType::CommentMultiEnd => self.colors.comment,
                 TokenType::CommentLine => self.colors.comment,
