@@ -852,6 +852,10 @@ pub enum TokenType {
     Number,
     Bool,
     
+    StringMultiBegin,
+    StringChunk,
+    StringMultiEnd,
+    
     CommentLine,
     CommentMultiBegin,
     CommentChunk,
