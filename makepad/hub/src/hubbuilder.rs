@@ -131,10 +131,10 @@ impl HubBuilder {
             hub_log.msg("Builder connecting to {:?}", &address);
             
             // ok now connect to that address
-            let mut hub_client = if let Ok(hub_client) = HubClient::connect_to_server(digest.clone(), address, hub_log.clone()){
+            let mut hub_client = if let Ok(hub_client) = HubClient::connect_to_server(digest.clone(), address, hub_log.clone()) {
                 hub_client
             }
-            else{
+            else {
                 println!("Builder cannot connect to to {:?}, retrying", address);
                 std::thread::sleep(std::time::Duration::from_millis(500));
                 continue;
@@ -695,7 +695,7 @@ impl HubBuilder {
                     && !line.contains("Finished")
                     && !line.contains("Blocking")
                     && !line.contains("Compiling")
-                    && !line.contains("--verbose") { 
+                    && !line.contains("--verbose") {
                     route_send.send(ToHubMsg {
                         to: HubMsgTo::UI,
                         msg: HubMsg::LogItem {
@@ -1066,15 +1066,8 @@ impl HubBuilder {
                         if let Ok(ty) = entry.file_type() {
                             if let Ok(name) = entry.file_name().into_string() {
                                 if ty.is_dir() {
-                                    let mut ignore = false;
-                                    for dir in dir_ex {
-                                        if name == *dir {
-                                            ignore = true;
-                                            break;
-                                        }
-                                    }
-                                    if ignore {
-                                        continue;
+                                    if dir_ex.iter().find( | dir | **dir == name).is_some() {
+                                        continue
                                     }
                                     // sort the folders on name
                                     // then digest them
@@ -1086,27 +1079,18 @@ impl HubBuilder {
                                     });
                                 }
                                 else {
-                                    let mut ignore = false;
-                                    for file in file_ex {
-                                        if name == *file {
-                                            ignore = true;
-                                            break;
-                                        }
+                                    if file_ex.iter().find( | file | **file == name).is_some() {
+                                        continue
                                     }
-                                    if ignore {
-                                        continue;
-                                    }
-                                    for ext in ext_inc {
-                                        if name.ends_with(ext) {
-                                            if create_digest {
-                                                
-                                            }
-                                            ret.push(BuilderFileTreeNode::File {
-                                                digest: None,
-                                                name: name
-                                            });
-                                            break;
+                                    if ext_inc.iter().find(|ext| name.ends_with(*ext)).is_some(){
+                                        if create_digest {
+                                            
                                         }
+                                        ret.push(BuilderFileTreeNode::File {
+                                            digest: None,
+                                            name: name
+                                        });
+                                        break;
                                     }
                                 }
                             }
