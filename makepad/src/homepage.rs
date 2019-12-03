@@ -6,6 +6,7 @@ pub struct HomePage {
     pub view: ScrollView,
     pub shadow: ScrollShadow,
     pub text: Text,
+    pub email_input: TextInput,
     pub example_texts: ElementsCounted<TextInput>,
     pub send_mail_button: NormalButton,
 }
@@ -17,11 +18,16 @@ impl HomePage {
             text: Text::proto(cx),
             shadow: ScrollShadow::proto(cx),
             send_mail_button: NormalButton::proto(cx),
+            email_input: TextInput::proto(cx, TextInputOptions {
+                multiline: false,
+                read_only: false,
+                empty_message: "Enter email".to_string()
+            }),
             example_texts: ElementsCounted::new(
                 TextInput::proto(cx, TextInputOptions {
                     multiline: true,
-                    read_only: false,
-                    empty_message: "Enter email".to_string()
+                    read_only: true,
+                    empty_message: "".to_string()
                 })
             ),
         }
@@ -67,9 +73,8 @@ impl HomePage {
     }
     
     pub fn handle_home_page(&mut self, cx: &mut Cx, event: &mut Event) {
-        for example in self.example_texts.iter() {
-            example.handle_plain_text(cx, event);
-        }
+        self.email_input.handle_text_input(cx, event);
+
         if let ButtonEvent::Clicked = self.send_mail_button.handle_normal_button(cx, event) {
             
         }
@@ -79,10 +84,6 @@ impl HomePage {
     
     pub fn draw_home_page(&mut self, cx: &mut Cx) {
         if self.view.begin_view(cx, Self::layout_main().get(cx)).is_err() {return};
-        
-        self.example_texts.get_draw(cx).draw_plain_text(cx);
-        self.send_mail_button.draw_normal_button(cx, "Subscribe to mailing list");
-        cx.turtle_new_line();
         
         let t = &mut self.text;
         
@@ -104,6 +105,10 @@ impl HomePage {
             you'll be able to see our final steps towards it here. \
             The alpha version of Makepad Basic will show off the development platform, \
             but does not include the visual design tools or library ecosystem yet.\n");
+        
+        self.email_input.draw_text_input(cx);
+        self.send_mail_button.draw_normal_button(cx, "Subscribe to mailing list");
+        cx.turtle_new_line();
         
         t.draw_text(cx, "\
             the web build of Makepad does not feature any compiler integration. \
