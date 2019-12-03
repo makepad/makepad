@@ -313,7 +313,8 @@ impl TextEditor {
     pub fn color_warning() -> ColorId {uid!()}
     pub fn color_error() -> ColorId {uid!()}
     pub fn color_defocus() -> ColorId {uid!()}
-    
+
+    pub fn shader_bg() -> ShaderId {uid!()}
     pub fn shader_indent_lines() -> ShaderId {uid!()}
     pub fn shader_cursor() -> ShaderId {uid!()}
     pub fn shader_selection() -> ShaderId {uid!()}
@@ -465,6 +466,9 @@ impl TextEditor {
                 return df_stroke(color, 0.8);
             }
         })));
+        
+        Self::shader_bg().set(cx, Quad::def_quad_shader().compose(shader_ast!({
+        })));
     }
     
     pub fn apply_style(&mut self, cx: &mut Cx) {
@@ -518,7 +522,8 @@ impl TextEditor {
         self.cursor_row.color = Self::color_cursor_row().get(cx);
         self.text.text_style = Self::text_style_editor_text().get(cx);
         self.line_number_text.text_style = Self::text_style_editor_text().get(cx);
-        
+
+        self.bg.shader = Self::shader_bg().get(cx);
         self.indent_lines.shader = Self::shader_indent_lines().get(cx);
         self.cursor.shader = Self::shader_cursor().get(cx);
         self.selection.shader = Self::shader_selection().get(cx);

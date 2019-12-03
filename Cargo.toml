@@ -7,6 +7,10 @@ members = [
     "examples/bare_example",
     "examples/widget_example",
     "examples/cmdline_example",
+    "tools/webserver",
     "builder"
 ]
+
+[profile.release]
+lto=true
  
