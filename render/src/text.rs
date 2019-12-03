@@ -119,6 +119,10 @@ impl Text {
             let brightness: Self::uniform_brightness();
             let curve: Self::uniform_curve();
             
+            fn get_color()->vec4{
+                return color
+            }
+            
             fn pixel() -> vec4 {
                 let dx = dfdx(vec2(tex_coord1.x * 2048.0, 0.)).x;
                 let dp = 1.0 / 2048.0;
@@ -147,7 +151,8 @@ impl Text {
                 }
                 
                 s = pow(s, curve);
-                return vec4(s * color.rgb * brightness * color.a, s * color.a); // + color("#a");
+                let col = get_color();
+                return vec4(s * col.rgb * brightness * col.a, s * col.a); // + color("#a");
             }
             
             fn vertex() -> vec4 {

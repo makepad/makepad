@@ -21,7 +21,7 @@ impl ScrollShadow {
     
     pub fn style(cx: &mut Cx, _opt: &StyleOptions) {
         
-        Self::shadow_size().set(cx, 6.0);
+        Self::shadow_size().set(cx, 4.0);
         
         Self::shader_bg().set(cx, Quad::def_quad_shader().compose(shader_ast !({
             let is_viz: float<Varying>;

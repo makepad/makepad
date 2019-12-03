@@ -550,8 +550,10 @@ impl InstanceArea{
         draw_call.instance.extend_from_slice(data);
     }
 
-    pub fn push_last_float(&self, cx:&mut Cx, animator:&Animator, ident:InstanceFloat){
-        self.push_float(cx, animator.last_float(cx, ident))
+    pub fn push_last_float(&self, cx:&mut Cx, animator:&Animator, ident:InstanceFloat)->f32{
+        let ret = animator.last_float(cx, ident);
+        self.push_float(cx, ret);
+        ret
     }
 
     pub fn push_float(&self, cx:&mut Cx, value:f32){
@@ -565,8 +567,10 @@ impl InstanceArea{
         draw_call.instance.push(value);
     }
 
-    pub fn push_last_vec2(&self, cx:&mut Cx, animator:&Animator, ident:InstanceVec2){
-        self.push_vec2(cx, animator.last_vec2(cx, ident))
+    pub fn push_last_vec2(&self, cx:&mut Cx, animator:&Animator, ident:InstanceVec2)->Vec2{
+        let ret =  animator.last_vec2(cx, ident);
+        self.push_vec2(cx, ret);
+        ret
     }
 
     pub fn push_vec2(&self, cx:&mut Cx, value:Vec2){
@@ -581,8 +585,10 @@ impl InstanceArea{
         draw_call.instance.push(value.y);
     }
 
-    pub fn push_last_vec3(&self, cx:&mut Cx, animator:&Animator, ident:InstanceVec3){
-        self.push_vec3(cx, animator.last_vec3(cx, ident))
+    pub fn push_last_vec3(&self, cx:&mut Cx, animator:&Animator, ident:InstanceVec3)->Vec3{
+        let ret = animator.last_vec3(cx, ident);
+        self.push_vec3(cx, ret);
+        ret
     }
 
     pub fn push_vec3(&self, cx:&mut Cx, value:Vec3){
@@ -597,8 +603,10 @@ impl InstanceArea{
         draw_call.instance.push(value.z);
     }
 
-    pub fn push_last_vec4(&self, cx:&mut Cx, animator:&Animator, ident:InstanceVec4){
-        self.push_vec4(cx, animator.last_vec4(cx, ident));
+    pub fn push_last_vec4(&self, cx:&mut Cx, animator:&Animator, ident:InstanceVec4)->Vec4{
+        let ret = animator.last_vec4(cx, ident);
+        self.push_vec4(cx, ret);
+        ret
     }
 
     pub fn push_vec4(&self, cx:&mut Cx, value:Vec4){
@@ -614,8 +622,10 @@ impl InstanceArea{
         draw_call.instance.push(value.w);
     }
 
-    pub fn push_last_color(&self, cx:&mut Cx, animator:&Animator, ident:InstanceColor){
-        self.push_color(cx, animator.last_color(cx, ident));
+    pub fn push_last_color(&self, cx:&mut Cx, animator:&Animator, ident:InstanceColor)->Color{
+        let ret = animator.last_color(cx, ident);
+        self.push_color(cx, ret);
+        ret
     }
 
     pub fn push_color(&self, cx:&mut Cx, value:Color){
