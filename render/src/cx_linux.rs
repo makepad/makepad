@@ -11,7 +11,7 @@ impl Cx{
         
         xlib_app.init();
         
-        let opengl_cx = OpenglCx::new();
+        let opengl_cx = OpenglCx::new(xlib_app.display);
         
         let mut opengl_windows: Vec<OpenglWindow> = Vec::new();
         

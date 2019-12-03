@@ -29,6 +29,7 @@ objc = "0.2"
 
 [target.x86_64-unknown-linux-gnu.dependencies]
 EGL-sys = { path = "./bind/EGL-sys" }
+GLX-sys = { path = "./bind/GLX-sys" }
 X11-sys = { path = "./bind/X11-sys" }
 libc = "*"
 gl = "*"
@@ -36,6 +37,7 @@ time = "0.1.4"
 
 [target.armv7-unknown-linux-gnueabihf.dependencies]
 EGL-sys = { path = "./bind/EGL-sys" }
+GLX-sys = { path = "./bind/GLX-sys" }
 X11-sys = { path = "./bind/X11-sys" }
 libc = "*"
 gl = "*"
