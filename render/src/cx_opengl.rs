@@ -145,7 +145,7 @@ impl Cx {
         dpi_factor: f32,
         opengl_window: &mut OpenglWindow,
         opengl_cx: &OpenglCx,
-        force_full_repaint: bool,
+        _force_full_repaint: bool,
     ) -> bool {
         let view_id = self.passes[pass_id].main_view_id.unwrap();
         
