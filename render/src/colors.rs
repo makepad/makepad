@@ -433,16 +433,16 @@ pub fn color(name:&str)->Color{
                         return  Color{r:r, g:g, b:b, a:a}
                     },
                     7=>{ // #aabbcc
-                        let r = ((hex_to_int(bytes[1] as u32)<<8)+hex_to_int(bytes[2] as u32)) as f32 / 255.0;
-                        let g = ((hex_to_int(bytes[3] as u32)<<8)+hex_to_int(bytes[4] as u32)) as f32 / 255.0;
-                        let b = ((hex_to_int(bytes[5] as u32)<<8)+hex_to_int(bytes[6] as u32)) as f32 / 255.0;
+                        let r = ((hex_to_int(bytes[1] as u32)<<4)+hex_to_int(bytes[2] as u32)) as f32 / 255.0;
+                        let g = ((hex_to_int(bytes[3] as u32)<<4)+hex_to_int(bytes[4] as u32)) as f32 / 255.0;
+                        let b = ((hex_to_int(bytes[5] as u32)<<4)+hex_to_int(bytes[6] as u32)) as f32 / 255.0;
                         return  Color{r:r, g:g, b:b, a:1.0}
                     },
                     9=>{
-                        let r = ((hex_to_int(bytes[1] as u32)<<8)+hex_to_int(bytes[2] as u32)) as f32 / 255.0;
-                        let g = ((hex_to_int(bytes[3] as u32)<<8)+hex_to_int(bytes[4] as u32)) as f32 / 255.0;
-                        let b = ((hex_to_int(bytes[5] as u32)<<8)+hex_to_int(bytes[6] as u32)) as f32 / 255.0;
-                        let a = ((hex_to_int(bytes[7] as u32)<<8)+hex_to_int(bytes[8] as u32)) as f32 / 255.0;
+                        let r = ((hex_to_int(bytes[1] as u32)<<4)+hex_to_int(bytes[2] as u32)) as f32 / 255.0;
+                        let g = ((hex_to_int(bytes[3] as u32)<<4)+hex_to_int(bytes[4] as u32)) as f32 / 255.0;
+                        let b = ((hex_to_int(bytes[5] as u32)<<4)+hex_to_int(bytes[6] as u32)) as f32 / 255.0;
+                        let a = ((hex_to_int(bytes[7] as u32)<<4)+hex_to_int(bytes[8] as u32)) as f32 / 255.0;
                         return  Color{r:r, g:g, b:b, a:a}
                     }
                     _=>()

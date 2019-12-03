@@ -147,7 +147,7 @@ pub fn set_widget_style(cx: &mut Cx, opt: &StyleOptions) {
         brightness: 1.0,
         curve: 0.6,
         line_spacing: 1.4,
-        top_drop: 1.1,
+        top_drop: 1.2,
         height_factor: 1.3,
     });
     
