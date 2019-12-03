@@ -1,28 +1,8 @@
 use crate::cx::*;
 use crate::cx_xlib::*;
-use std::ffi::{CStr, CString};
+use std::ffi::{CStr, CString, c_void};
 use std::ptr;
 use std::mem;
-
-fn get_egl_error_string(error: i32) -> &'static str {
-    match error as u32 {
-        EGL_sys::EGL_NOT_INITIALIZED => "EGL_NOT_INITIALIZED",
-        EGL_sys::EGL_BAD_ACCESS => "EGL_BAD_ACCESS",
-        EGL_sys::EGL_BAD_ALLOC => "EGL_BAD_ALLOC",
-        EGL_sys::EGL_BAD_ATTRIBUTE => "EGL_BAD_ATTRIBUTE",
-        EGL_sys::EGL_BAD_CONTEXT => "EGL_BAD_CONTEXT",
-        EGL_sys::EGL_BAD_CONFIG => "EGL_BAD_CONFIG",
-        EGL_sys::EGL_BAD_CURRENT_SURFACE => "EGL_BAD_CURRENT_SURFACE",
-        EGL_sys::EGL_BAD_DISPLAY => "EGL_BAD_DISPLAY",
-        EGL_sys::EGL_BAD_SURFACE => "EGL_BAD_SURFACE",
-        EGL_sys::EGL_BAD_MATCH => "EGL_BAD_MATCH",
-        EGL_sys::EGL_BAD_PARAMETER => "EGL_BAD_PARAMETER",
-        EGL_sys::EGL_BAD_NATIVE_PIXMAP => "EGL_NATIVE_PIXMAP",
-        EGL_sys::EGL_BAD_NATIVE_WINDOW => "EGL_BAD_NATIVE_WINDOW",
-        EGL_sys::EGL_CONTEXT_LOST => "EGL_CONTEXT_LOST",
-        _ => panic!(),
-    }
-}
 
 impl Cx {
     
@@ -181,24 +161,11 @@ impl Cx {
             init_repaint = true;
         }
         let window;
-        let surface;
         let view_rect;
         if full_repaint {
             opengl_window.xlib_window.hide_child_windows();
             
             window = opengl_window.xlib_window.window.unwrap();
-            
-            surface = unsafe {
-                if opengl_window.xlib_window.surface.is_none() {
-                    // Create EGL window surface
-                    let surface = EGL_sys::eglCreateWindowSurface(opengl_cx.display, opengl_cx.config, window, ptr::null_mut());
-                    if surface.is_null() {
-                        panic!("can't create EGL window surface: {}", get_egl_error_string(EGL_sys::eglGetError()));
-                    }
-                    opengl_window.xlib_window.surface = Some(surface);
-                }
-                opengl_window.xlib_window.surface.unwrap()
-            };
             
             let pass_size = self.passes[pass_id].pass_size;
             self.passes[pass_id].set_ortho_matrix(Vec2::default(), pass_size);
@@ -207,11 +174,7 @@ impl Cx {
             let pix_height = opengl_window.window_geom.inner_size.y * opengl_window.window_geom.dpi_factor;
             
             unsafe {
-                // Make EGL context current
-                if EGL_sys::eglMakeCurrent(opengl_cx.display, surface, surface, opengl_cx.context) == EGL_sys::EGL_FALSE {
-                    
-                    panic!("can't make EGL context current: {}", get_egl_error_string(EGL_sys::eglGetError()));
-                }
+                GLX_sys::glXMakeCurrent(opengl_cx.display, window, opengl_cx.context);
                 gl::Viewport(0, 0, pix_width as i32, pix_height as i32);
             }
             view_rect = Rect::default();
@@ -249,21 +212,6 @@ impl Cx {
                 pix_height as u32
             ).unwrap();
             
-            surface = unsafe {
-                let cwindow = opengl_window.xlib_window.child_windows.iter_mut().find(|cw| cw.window == window).unwrap();
-                if cwindow.surface.is_none() {
-                    // Create EGL window surface
-                    let surface = EGL_sys::eglCreateWindowSurface(opengl_cx.display, opengl_cx.config, window, ptr::null_mut());
-                    if surface.is_null() {
-                        // do a full repaint
-                        return self.draw_pass_to_window(pass_id, dpi_factor, opengl_window, opengl_cx, true);
-                        //panic!("can't create EGL window surface: {} {}", get_egl_error_string(EGL_sys::eglGetError()), window);
-                    }
-                    cwindow.surface = Some(surface);
-                }
-                cwindow.surface.unwrap()
-            };
-            
             //let pass_size = self.passes[pass_id].pass_size;
             self.passes[pass_id].set_ortho_matrix(
                 Vec2 {x: view_bounds.min_x, y: view_bounds.min_y},
@@ -271,10 +219,7 @@ impl Cx {
             );
             
             unsafe {
-                // Make EGL context current
-                if EGL_sys::eglMakeCurrent(opengl_cx.display, surface, surface, opengl_cx.context) == EGL_sys::EGL_FALSE {
-                    panic!("can't make EGL context current: {}", get_egl_error_string(EGL_sys::eglGetError()));
-                }
+                GLX_sys::glXMakeCurrent(opengl_cx.display, window, opengl_cx.context);
                 gl::Viewport(0, 0, pix_width as i32, pix_height as i32);
             }
             view_rect = Rect {x: view_bounds.min_x, y: view_bounds.min_y, w: view_bounds.max_x - view_bounds.min_x, h: view_bounds.max_y - view_bounds.min_y}
@@ -321,7 +266,7 @@ impl Cx {
         );
         
         unsafe {
-            EGL_sys::eglSwapBuffers(opengl_cx.display, surface);
+            GLX_sys::glXSwapBuffers(opengl_cx.display, window);
         }
         return init_repaint;
     }
@@ -469,10 +414,11 @@ impl Cx {
     
     pub fn opengl_compile_all_shaders(&mut self, opengl_cx: &OpenglCx) {
         unsafe {
-            // Make EGL context current
-            if EGL_sys::eglMakeCurrent(opengl_cx.display, opengl_cx.surface, opengl_cx.surface, opengl_cx.context) == EGL_sys::EGL_FALSE {
-                panic!("can't make EGL context current: {}", get_egl_error_string(EGL_sys::eglGetError()));
-            }
+            let default_screen = GLX_sys::XDefaultScreen(opengl_cx.display);
+            let root_window = GLX_sys::XRootWindow(opengl_cx.display, default_screen);
+            println!("FOO 1");
+            GLX_sys::glXMakeCurrent(opengl_cx.display, root_window, opengl_cx.context);
+            println!("BAR 1");
         }
         for sh in &mut self.shaders {
             let openglsh = Self::opengl_compile_shader(sh, opengl_cx);
@@ -690,99 +636,131 @@ impl ViewBounds {
         }
     }
 }
-
 pub struct OpenglCx {
-    pub display: EGL_sys::EGLDisplay,
-    pub config: EGL_sys::EGLConfig,
-    pub context: EGL_sys::EGLContext,
-    pub surface: EGL_sys::EGLSurface,
+    pub display: *mut GLX_sys::Display,
+    pub context: GLX_sys::GLXContext,
+    pub visual_info: GLX_sys::XVisualInfo,
 }
 
 impl OpenglCx {
-    pub fn new() -> OpenglCx {
-        // Load the gl function pointers
-        gl::load_with( | symbol | {
-            unsafe {
-                EGL_sys::eglGetProcAddress(CString::new(symbol).unwrap().as_ptr()).map_or(ptr::null(), | ptr | ptr as *const _)
-            }
-        });
-        
-        // start a cx
-        // The default screen of the display
+    pub fn new(display: *mut X11_sys::Display) -> OpenglCx {
         unsafe {
-            // Open EGL display connection
-            let display = EGL_sys::eglGetDisplay(ptr::null_mut());
-            if display.is_null() {
-                panic!("can't open EGL display connection");
+            let display = display as *mut GLX_sys::Display;
+            let screen = GLX_sys::XDefaultScreen(display);
+
+            // Query GLX version.
+            let mut major = 0;
+            let mut minor = 0;
+            assert!(
+                GLX_sys::glXQueryVersion(display, &mut major, &mut minor) >= 0,
+                "can't query GLX version"
+            );
+
+            // Check that GLX version number is 1.4 or higher.
+            assert!(
+                major > 1 || major == 1 && minor >= 4,
+                "GLX version must be 1.4 or higher, got {}.{}",
+                major,
+                minor,
+            );
+
+            // Query extensions string
+            let supported_extensions = GLX_sys::glXQueryExtensionsString(display, screen);
+            assert!(
+                !supported_extensions.is_null(),
+                "can't query GLX extensions string"
+            );
+            let supported_extensions = CStr::from_ptr(supported_extensions).to_str().unwrap();
+
+            // Check that required extensions are supported.
+            let required_extensions = &["GLX_ARB_get_proc_address", "GLX_ARB_create_context"];
+            for required_extension in required_extensions {
+                assert!(
+                    supported_extensions.contains(required_extension),
+                    "extension {} is required, but not supported",
+                    required_extension,
+                );
             }
-            
-            // Initialize EGL display connection
-            if EGL_sys::eglInitialize(display, ptr::null_mut(), ptr::null_mut()) == EGL_sys::EGL_FALSE {
-                panic!("can't initialize EGL display connection:: {}", get_egl_error_string(EGL_sys::eglGetError()));
-            }
-            
-            // Choose EGL config
-            let attribs = [
-                EGL_sys::EGL_RENDERABLE_TYPE as i32,
-                EGL_sys::EGL_OPENGL_ES3_BIT as i32,
-                EGL_sys::EGL_SURFACE_TYPE as i32,
-                EGL_sys::EGL_PBUFFER_BIT as i32 | EGL_sys::EGL_WINDOW_BIT as i32,
-                EGL_sys::EGL_RED_SIZE as i32,
+
+            // Load GLX function pointers.
+            #[allow(non_snake_case)]
+            let glXCreateContextAttribsARB = mem::transmute::<
+                _,
+                GLX_sys::PFNGLXCREATECONTEXTATTRIBSARBPROC,
+            >(GLX_sys::glXGetProcAddressARB(
+                CString::new("glXCreateContextAttribsARB")
+                    .unwrap()
+                    .to_bytes_with_nul()
+                    .as_ptr(),
+            ))
+            .expect("can't load glXCreateContextAttribsARB function pointer");
+
+            // Load GL function pointers.
+            gl::load_with(|symbol| {
+                GLX_sys::glXGetProcAddressARB(
+                    CString::new(symbol).unwrap().to_bytes_with_nul().as_ptr(),
+                )
+                .map_or(ptr::null(), |ptr| ptr as *const c_void)
+            });
+
+            // Choose framebuffer configuration.
+            let config_attribs = &[
+                GLX_sys::GLX_DOUBLEBUFFER as i32,
+                GLX_sys::True as i32,
+                GLX_sys::GLX_RED_SIZE as i32,
                 8,
-                EGL_sys::EGL_GREEN_SIZE as i32,
+                GLX_sys::GLX_GREEN_SIZE as i32,
                 8,
-                EGL_sys::EGL_BLUE_SIZE as i32,
+                GLX_sys::GLX_BLUE_SIZE as i32,
                 8,
-                EGL_sys::EGL_DEPTH_SIZE as i32,
-                24,
-                EGL_sys::EGL_STENCIL_SIZE as i32,
+                GLX_sys::GLX_ALPHA_SIZE as i32,
                 8,
-                EGL_sys::EGL_NONE as i32,
+                GLX_sys::None as i32,
             ];
-            let mut capacity = 0;
-            if EGL_sys::eglChooseConfig(display, attribs.as_ptr(), ptr::null_mut(), 0, &mut capacity) == EGL_sys::EGL_FALSE {
-                panic!("can't choose EGL config: {}", get_egl_error_string(EGL_sys::eglGetError()));
+            let mut config_count = 0;
+            let configs = GLX_sys::glXChooseFBConfig(
+                display,
+                GLX_sys::XDefaultScreen(display),
+                config_attribs.as_ptr(),
+                &mut config_count,
+            );
+            if configs.is_null() {
+                panic!("can't choose framebuffer configuration");
             }
-            let mut configs = Vec::with_capacity(capacity as usize);
-            let mut len = 0;
-            if EGL_sys::eglChooseConfig(display, attribs.as_ptr(), configs.as_mut_ptr(), capacity, &mut len) == EGL_sys::EGL_FALSE {
-                panic!("can't choose EGL config: {}", get_egl_error_string(EGL_sys::eglGetError()));
-            }
-            configs.set_len(len as usize);
-            if configs.is_empty() {
-                panic!("can't choose EGL config");
-            }
-            let config = configs[0];
-            
-            // Create a gl context
-            let attribs = [
-                EGL_sys::EGL_CONTEXT_CLIENT_VERSION as i32,
+            let config = *configs;
+            GLX_sys::XFree(configs as *mut c_void);
+
+            // Create GLX context.
+            let context_attribs = &[
+                GLX_sys::GLX_CONTEXT_MAJOR_VERSION_ARB as i32,
                 3,
-                EGL_sys::EGL_NONE as i32,
+                GLX_sys::GLX_CONTEXT_MINOR_VERSION_ARB as i32,
+                0,
+                GLX_sys::GLX_CONTEXT_PROFILE_MASK_ARB as i32,
+                GLX_sys::GLX_CONTEXT_ES_PROFILE_BIT_EXT as i32,
+                GLX_sys::None as i32
             ];
-            let context = EGL_sys::eglCreateContext(display, config, ptr::null_mut(), attribs.as_ptr());
-            if context.is_null() {
-                panic!("can't create EGL context: {}", get_egl_error_string(EGL_sys::eglGetError()));
-            }
-            
-            // Create EGL pbuffer surface
-            let attribs = [
-                EGL_sys::EGL_WIDTH as i32,
-                16,
-                EGL_sys::EGL_HEIGHT as i32,
-                16,
-                EGL_sys::EGL_NONE as i32,
-            ];
-            let surface = EGL_sys::eglCreatePbufferSurface(display, config, attribs.as_ptr());
-            if surface.is_null() {
-                panic!("can't create EGL pbuffer surface: {}", get_egl_error_string(EGL_sys::eglGetError()));
-            }
-            
-            OpenglCx {
+            let context = glXCreateContextAttribsARB(
                 display,
                 config,
+                ptr::null_mut(),
+                GLX_sys::True as i32,
+                context_attribs.as_ptr(),
+            );
+
+            // Get visual from framebuffer configuration.
+            let visual_info_ptr = GLX_sys::glXGetVisualFromFBConfig(display, config);
+            assert!(
+                !visual_info_ptr.is_null(),
+                "can't get visual from framebuffer configuration"
+            );
+            let visual_info = *visual_info_ptr;
+            GLX_sys::XFree(visual_info_ptr as *mut c_void);
+
+            OpenglCx {
+                display,
                 context,
-                surface,
+                visual_info,
             }
         }
     }
@@ -946,16 +924,8 @@ impl OpenglWindow {
         
         let mut xlib_window = XlibWindow::new(xlib_app, window_id);
         
-        // Get native visual id
-        let visual_id = unsafe {
-            let mut visual_id = 0;
-            if EGL_sys::eglGetConfigAttrib(opengl_cx.display, opengl_cx.config, EGL_sys::EGL_NATIVE_VISUAL_ID as i32, &mut visual_id) == EGL_sys::EGL_FALSE {
-                panic!("can't get native visual id");
-            }
-            visual_id
-        };
-        
-        xlib_window.init(title, inner_size, position, visual_id as X11_sys::VisualID);
+        let visual_info = unsafe { mem::transmute(opengl_cx.visual_info) };
+        xlib_window.init(title, inner_size, position, visual_info);
         
         OpenglWindow {
             first_draw: true,
