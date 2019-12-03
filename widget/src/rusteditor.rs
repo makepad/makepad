@@ -77,7 +77,7 @@ impl RustTokenizer {
             if state.next == ' ' || state.next == '\t'{
                 while state.next == ' ' || state.next == '\t'{
                     chunk.push(state.next);
-                    state.advance();
+                    state.advance_with_cur();
                 }
                 return TokenType::Whitespace;
             }
@@ -91,23 +91,23 @@ impl RustTokenizer {
                         return TokenType::StringChunk
                     }
                     chunk.push(state.next);
-                    state.advance();
+                    state.advance_with_cur();
                     return TokenType::Newline
                 }
-                else if state.next == '"' && state.prev != '\\' {
+                else if state.next == '"' && state.cur != '\\'  {
                     if (chunk.len() - start)>0 {
                         return TokenType::StringChunk
                     }
                     chunk.push(state.next);
-                    state.advance();
+                    state.advance_with_cur();
                     self.in_string = false;
                     return TokenType::StringMultiEnd
                 }
                 else {
                     chunk.push(state.next);
-                    state.advance();
+                    state.advance_with_cur();
                 }
-            }
+            } 
             
         }
         else if self.comment_depth >0 { // parse comments
@@ -250,7 +250,7 @@ impl RustTokenizer {
                         else {
                             chunk.push(state.next);
                             state.advance();
-                            break;
+                            return TokenType::String;
                         }
                     };
                     if state.next == '\n'{

@@ -258,9 +258,11 @@ impl Cx {
         dc.instance.truncate(0);
         dc.current_instance_offset = 0;
         dc.uniforms.truncate(0);
-        dc.textures_2d.truncate(0);
+        dc.textures_2d.truncate(0); 
         dc.instance_dirty = true;
         dc.uniforms_dirty = true;
+        dc.do_h_scroll = true;
+        dc.do_v_scroll = true;
         return dc.get_current_instance_area(instance_count);
     }
     
