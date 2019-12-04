@@ -297,6 +297,3 @@ impl Cx {
         }
     }
 }
-
-pub const HTTP_SEND_OK: usize = 1;
-pub const HTTP_SEND_FAIL: usize = 2;

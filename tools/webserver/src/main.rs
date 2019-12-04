@@ -131,7 +131,7 @@ impl HttpServer {
                                     .unwrap();
                                     
                                 data.push('\n' as u8);
-                                if let Err(e) = file.write(&data){
+                                if let Err(_) = file.write(&data){
                                     println!("Couldn't append email to file");
                                 }
                             }
@@ -154,7 +154,7 @@ impl HttpServer {
                         if url.ends_with("/") {
                             url.push_str("index.html");
                         }
-                        
+                        println("URL {}", url);
                         if let Some(data) = filecache.get(&url){ 
                             let mime_type = if url.ends_with(".html") {"text/html"}
                                 else if url.ends_with(".wasm") {"application/wasm"}
