@@ -99,8 +99,8 @@ impl HttpServer {
                         let mut line = String::new();
                         reader.read_line(&mut line).expect("http read line fail");
                         
-                        if line.starts_with("POST"){ // writing email address
-                            
+                        if line.starts_with("POST /"){ // writing email address
+                            println!("{}", line);
                         }
 
                         if !line.starts_with("GET /") || line.len() < 10 {
@@ -136,10 +136,7 @@ impl HttpServer {
                         else{
                             write_bytes_to_tcp_stream_no_error(&mut tcp_stream, "HTTP/1.1 404 NotFound\r\n".as_bytes());
                             let _ = tcp_stream.shutdown(Shutdown::Both);
-                            return
                         }
-                        
-
                     });
                 }
             })
