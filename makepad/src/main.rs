@@ -26,7 +26,6 @@ pub use crate::makepadstyle::*;
 //mod rustcompiler;
 //pub use crate::rustcompiler::*;
 use render::*;
-#[path = "../../builder/src/main.rs"]
-mod builder_main;
+mod builder;
 
 main_app!(App);
