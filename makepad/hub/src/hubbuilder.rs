@@ -1090,7 +1090,6 @@ impl HubBuilder {
                                             digest: None,
                                             name: name
                                         });
-                                        break;
                                     }
                                 }
                             }
