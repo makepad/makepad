@@ -117,6 +117,9 @@ impl HttpServer {
                                 if len == 0{
                                     break
                                 }
+                                if data.len()>255{
+                                    break
+                                }
                                 reader.consume(len);
                             }
                             if data.len()>0 && data.len()<255{
