@@ -1,5 +1,6 @@
 use crate::cx::*;
 use crate::cx_xlib::*;
+use makepad_glx_sys as glx_sys;
 use std::ffi::{CStr, CString, c_void};
 use std::ptr;
 use std::mem;
@@ -174,7 +175,7 @@ impl Cx {
             let pix_height = opengl_window.window_geom.inner_size.y * opengl_window.window_geom.dpi_factor;
             
             unsafe {
-                GLX_sys::glXMakeCurrent(opengl_cx.display, window, opengl_cx.context);
+                glx_sys::glXMakeCurrent(opengl_cx.display, window, opengl_cx.context);
                 gl::Viewport(0, 0, pix_width as i32, pix_height as i32);
             }
             view_rect = Rect::default();
@@ -190,7 +191,7 @@ impl Cx {
             }
             /*
             unsafe {
-                GLX_sys::glXMakeCurrent(xlib_app.display, opengl_window.xlib_window.window.unwrap(), opengl_cx.context);
+                glx_sys::glXMakeCurrent(xlib_app.display, opengl_window.xlib_window.window.unwrap(), opengl_cx.context);
                 gl::Viewport(
                     0,
                     0,
@@ -199,7 +200,7 @@ impl Cx {
                 );
                 gl::ClearColor(0.0, 1.0, 0.0, 0.0);
                 gl::Clear(gl::COLOR_BUFFER_BIT | gl::DEPTH_BUFFER_BIT);
-                GLX_sys::glXSwapBuffers(xlib_app.display, opengl_window.xlib_window.window.unwrap());
+                glx_sys::glXSwapBuffers(xlib_app.display, opengl_window.xlib_window.window.unwrap());
             }*/
             
             let pix_width = (view_bounds.max_x - view_bounds.min_x) * opengl_window.window_geom.dpi_factor;
@@ -219,7 +220,7 @@ impl Cx {
             );
             
             unsafe {
-                GLX_sys::glXMakeCurrent(opengl_cx.display, window, opengl_cx.context);
+                glx_sys::glXMakeCurrent(opengl_cx.display, window, opengl_cx.context);
                 gl::Viewport(0, 0, pix_width as i32, pix_height as i32);
             }
             view_rect = Rect {x: view_bounds.min_x, y: view_bounds.min_y, w: view_bounds.max_x - view_bounds.min_x, h: view_bounds.max_y - view_bounds.min_y}
@@ -266,7 +267,7 @@ impl Cx {
         );
         
         unsafe {
-            GLX_sys::glXSwapBuffers(opengl_cx.display, window);
+            glx_sys::glXSwapBuffers(opengl_cx.display, window);
         }
         return init_repaint;
     }
@@ -414,10 +415,10 @@ impl Cx {
     
     pub fn opengl_compile_all_shaders(&mut self, opengl_cx: &OpenglCx) {
         unsafe {
-            let default_screen = GLX_sys::XDefaultScreen(opengl_cx.display);
-            let root_window = GLX_sys::XRootWindow(opengl_cx.display, default_screen);
+            let default_screen = glx_sys::XDefaultScreen(opengl_cx.display);
+            let root_window = glx_sys::XRootWindow(opengl_cx.display, default_screen);
             println!("FOO 1");
-            GLX_sys::glXMakeCurrent(opengl_cx.display, root_window, opengl_cx.context);
+            glx_sys::glXMakeCurrent(opengl_cx.display, root_window, opengl_cx.context);
             println!("BAR 1");
         }
         for sh in &mut self.shaders {
@@ -637,22 +638,22 @@ impl ViewBounds {
     }
 }
 pub struct OpenglCx {
-    pub display: *mut GLX_sys::Display,
-    pub context: GLX_sys::GLXContext,
-    pub visual_info: GLX_sys::XVisualInfo,
+    pub display: *mut glx_sys::Display,
+    pub context: glx_sys::GLXContext,
+    pub visual_info: glx_sys::XVisualInfo,
 }
 
 impl OpenglCx {
     pub fn new(display: *mut X11_sys::Display) -> OpenglCx {
         unsafe {
-            let display = display as *mut GLX_sys::Display;
-            let screen = GLX_sys::XDefaultScreen(display);
+            let display = display as *mut glx_sys::Display;
+            let screen = glx_sys::XDefaultScreen(display);
 
             // Query GLX version.
             let mut major = 0;
             let mut minor = 0;
             assert!(
-                GLX_sys::glXQueryVersion(display, &mut major, &mut minor) >= 0,
+                glx_sys::glXQueryVersion(display, &mut major, &mut minor) >= 0,
                 "can't query GLX version"
             );
 
@@ -665,7 +666,7 @@ impl OpenglCx {
             );
 
             // Query extensions string
-            let supported_extensions = GLX_sys::glXQueryExtensionsString(display, screen);
+            let supported_extensions = glx_sys::glXQueryExtensionsString(display, screen);
             assert!(
                 !supported_extensions.is_null(),
                 "can't query GLX extensions string"
@@ -686,8 +687,8 @@ impl OpenglCx {
             #[allow(non_snake_case)]
             let glXCreateContextAttribsARB = mem::transmute::<
                 _,
-                GLX_sys::PFNGLXCREATECONTEXTATTRIBSARBPROC,
-            >(GLX_sys::glXGetProcAddressARB(
+                glx_sys::PFNGLXCREATECONTEXTATTRIBSARBPROC,
+            >(glx_sys::glXGetProcAddressARB(
                 CString::new("glXCreateContextAttribsARB")
                     .unwrap()
                     .to_bytes_with_nul()
@@ -697,7 +698,7 @@ impl OpenglCx {
 
             // Load GL function pointers.
             gl::load_with(|symbol| {
-                GLX_sys::glXGetProcAddressARB(
+                glx_sys::glXGetProcAddressARB(
                     CString::new(symbol).unwrap().to_bytes_with_nul().as_ptr(),
                 )
                 .map_or(ptr::null(), |ptr| ptr as *const c_void)
@@ -705,22 +706,22 @@ impl OpenglCx {
 
             // Choose framebuffer configuration.
             let config_attribs = &[
-                GLX_sys::GLX_DOUBLEBUFFER as i32,
-                GLX_sys::True as i32,
-                GLX_sys::GLX_RED_SIZE as i32,
+                glx_sys::GLX_DOUBLEBUFFER as i32,
+                glx_sys::True as i32,
+                glx_sys::GLX_RED_SIZE as i32,
                 8,
-                GLX_sys::GLX_GREEN_SIZE as i32,
+                glx_sys::GLX_GREEN_SIZE as i32,
                 8,
-                GLX_sys::GLX_BLUE_SIZE as i32,
+                glx_sys::GLX_BLUE_SIZE as i32,
                 8,
-                GLX_sys::GLX_ALPHA_SIZE as i32,
+                glx_sys::GLX_ALPHA_SIZE as i32,
                 8,
-                GLX_sys::None as i32,
+                glx_sys::None as i32,
             ];
             let mut config_count = 0;
-            let configs = GLX_sys::glXChooseFBConfig(
+            let configs = glx_sys::glXChooseFBConfig(
                 display,
-                GLX_sys::XDefaultScreen(display),
+                glx_sys::XDefaultScreen(display),
                 config_attribs.as_ptr(),
                 &mut config_count,
             );
@@ -728,34 +729,34 @@ impl OpenglCx {
                 panic!("can't choose framebuffer configuration");
             }
             let config = *configs;
-            GLX_sys::XFree(configs as *mut c_void);
+            glx_sys::XFree(configs as *mut c_void);
 
             // Create GLX context.
             let context_attribs = &[
-                GLX_sys::GLX_CONTEXT_MAJOR_VERSION_ARB as i32,
+                glx_sys::GLX_CONTEXT_MAJOR_VERSION_ARB as i32,
                 3,
-                GLX_sys::GLX_CONTEXT_MINOR_VERSION_ARB as i32,
+                glx_sys::GLX_CONTEXT_MINOR_VERSION_ARB as i32,
                 0,
-                GLX_sys::GLX_CONTEXT_PROFILE_MASK_ARB as i32,
-                GLX_sys::GLX_CONTEXT_ES_PROFILE_BIT_EXT as i32,
-                GLX_sys::None as i32
+                glx_sys::GLX_CONTEXT_PROFILE_MASK_ARB as i32,
+                glx_sys::GLX_CONTEXT_ES_PROFILE_BIT_EXT as i32,
+                glx_sys::None as i32
             ];
             let context = glXCreateContextAttribsARB(
                 display,
                 config,
                 ptr::null_mut(),
-                GLX_sys::True as i32,
+                glx_sys::True as i32,
                 context_attribs.as_ptr(),
             );
 
             // Get visual from framebuffer configuration.
-            let visual_info_ptr = GLX_sys::glXGetVisualFromFBConfig(display, config);
+            let visual_info_ptr = glx_sys::glXGetVisualFromFBConfig(display, config);
             assert!(
                 !visual_info_ptr.is_null(),
                 "can't get visual from framebuffer configuration"
             );
             let visual_info = *visual_info_ptr;
-            GLX_sys::XFree(visual_info_ptr as *mut c_void);
+            glx_sys::XFree(visual_info_ptr as *mut c_void);
 
             OpenglCx {
                 display,
