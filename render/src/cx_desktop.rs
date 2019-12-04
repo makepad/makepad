@@ -238,7 +238,7 @@ impl Cx {
         let _ = io::stdout().flush();
     }
     
-    pub fn http_send(&self, verb: &str, path: &str, domain: &str, port: u16, content_type: &str, body: &[u8], signal: Signal) {
+    pub fn http_send(&self, verb: &str, path: &str, _proto:&str, domain: &str, port: u16, content_type: &str, body: &[u8], signal: Signal) {
         
         fn write_bytes_to_tcp_stream(tcp_stream: &mut TcpStream, bytes: &[u8]) -> bool {
             let bytes_total = bytes.len();

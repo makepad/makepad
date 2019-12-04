@@ -121,7 +121,7 @@ impl HomePage {
                 EmailState::Valid | EmailState::ErrorSending => {
                     self.email_state = EmailState::Sending;
                     let email = self.email_input.get_value();
-                    cx.http_send("POST", "/subscribe", "makepad.nl", 80, "text/plain", email.as_bytes(), self.email_signal);
+                    cx.http_send("POST", "/subscribe", "http", "makepad.nl", 80, "text/plain", email.as_bytes(), self.email_signal);
                     self.view.redraw_view_area(cx);
                 },
                 _ => ()
