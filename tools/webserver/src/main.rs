@@ -112,9 +112,14 @@ impl HttpServer {
                         reader.read_line(&mut line).expect("http read line fail");
                         
                         if line.starts_with("POST /subscribe"){ // writing email address
+                            let mut content_size:u32 = 0;
                             while let Ok(_) = reader.read_line(&mut line){
                                 if line == "\r\n"{ // the newline
                                     break;
+                                }
+                                let lc = line.to_ascii_lowercase();
+                                if lc.starts_with("content-length: "){
+                                    content_size = lc[16..(lc.len()-2)].parse().expect("can't parse content size");
                                 }
                                 line.truncate(0);
                             }
@@ -128,7 +133,7 @@ impl HttpServer {
                                 if len == 0{
                                     break
                                 }
-                                if data.len()>255{
+                                if data.len()>255 || data.len() as u32 >= content_size{
                                     break
                                 }
                                 reader.consume(len);
@@ -166,7 +171,7 @@ impl HttpServer {
                             url.push_str("index.html");
                         }
 
-                        if let Some(data) = filecache.get(&url){ 
+                        if let Some(data) = filecache.get(&url){  
                             let mime_type = if url.ends_with(".html") {"text/html"}
                                 else if url.ends_with(".wasm") {"application/wasm"}
                                 else if url.ends_with(".js") {"text/javascript"}
