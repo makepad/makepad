@@ -1,5 +1,3 @@
-// this is the simplest local development http server you can write in Rust
-
 use std::net::{TcpListener, TcpStream, SocketAddr, Shutdown};
 use std::sync::{mpsc, Arc, Mutex};
 use std::io::prelude::*;
@@ -98,7 +96,7 @@ impl HttpServer {
                                     let _ = tcp_stream.shutdown(Shutdown::Both);
                                 }
                             }
-                            // remove from our watchers array
+
                             if let Ok(mut shared) = shared.lock() {
                                 for i in 0..shared.watch_pending.len() {
                                     let (id, _) = &shared.watch_pending[i];
@@ -118,11 +116,9 @@ impl HttpServer {
                             return
                         }
 
-                        // lets look up the first part of url, the project.
                         let file_path = if let Some(file_pos) = url.find('/') {
                             let (workspace, rest) = url.split_at(file_pos);
                             let (_, rest) = rest.split_at(1);
-                            // find the project
                             if let Ok(workspaces) = workspaces.lock() {
                                 if let Some(abs_path) = workspaces.get(workspace) {
                                     Some(format!("{}/{}", abs_path, rest))
@@ -144,16 +140,13 @@ impl HttpServer {
                         else{
                             file_path
                         };
-                        // keep track of the files we read
+
                         if let Ok(mut shared) = shared.lock() {
                             if shared.files_read.iter().find( | v | **v == url).is_none() {
                                 shared.files_read.push(url.to_string());
                             }
                         };
                         
-                        
-                        // lets read the file from disk and dump it back.
-                        //println!("HTTP Server serving file: {}", file_path);
                         if let Ok(data) = std::fs::read(&file_path) {
                             let mime_type = if url.ends_with(".html") {"text/html"}
                             else if url.ends_with(".wasm") {"application/wasm"}
@@ -220,7 +213,6 @@ impl HttpServer {
         }
         if let Some(listen_address) = self.listen_address {
             self.listen_address = None;
-            // just do a single connection to the listen address to break the wait.
             if let Ok(_) = TcpStream::connect(listen_address) {
                 self.listen_thread.take().expect("cant take listen thread").join().expect("cant join listen thread");
             }

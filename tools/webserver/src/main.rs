@@ -7,6 +7,7 @@ use std::sync::{Arc};
 use std::io::prelude::*;
 use std::io::BufReader;
 use std::fs;
+use std::fs::OpenOptions;
 
 fn main() {
     // read the entire file tree, and brotli it.
@@ -65,7 +66,7 @@ fn main() {
     ); 
     
     let http_server = HttpServer::start_http_server(
-        SocketAddr::from(([0, 0, 0, 0], 8002)),
+        SocketAddr::from(([0, 0, 0, 0], 8003)),
         Arc::new(filecache),
     ).expect("Can't start server");
     http_server.listen_thread.unwrap().join().expect("can't join thread");
@@ -99,8 +100,42 @@ impl HttpServer {
                         let mut line = String::new();
                         reader.read_line(&mut line).expect("http read line fail");
                         
-                        if line.starts_with("POST /"){ // writing email address
-                            println!("{}", line);
+                        if line.starts_with("POST /subscribe"){ // writing email address
+                            while let Ok(_) = reader.read_line(&mut line){
+                                if line == "\r\n"{ // the newline
+                                    break;
+                                }
+                                line.truncate(0);
+                            }
+                            //read the rest
+                            let mut data = Vec::new();
+                            loop {
+                                let len = if let Ok(buf) = reader.fill_buf(){
+                                    data.extend_from_slice(buf);
+                                    buf.len()
+                                }else{0};
+                                if len == 0{
+                                    break
+                                }
+                                reader.consume(len);
+                            }
+                            if data.len()>0 && data.len()<255{
+                                let mut file = OpenOptions::new()
+                                    .create(true)
+                                    .write(true)
+                                    .append(true)
+                                    .open("subscribe.db")
+                                    .unwrap();
+                                    
+                                data.push('\n' as u8);
+                                if let Err(e) = file.write(&data){
+                                    println!("Couldn't append email to file");
+                                }
+                            }
+                            // lets append this to our file 
+                            write_bytes_to_tcp_stream_no_error(&mut tcp_stream, "HTTP/1.1 200 OK\r\n\r\n".as_bytes());
+                            let _ = tcp_stream.shutdown(Shutdown::Both);
+                            return 
                         }
 
                         if !line.starts_with("GET /") || line.len() < 10 {

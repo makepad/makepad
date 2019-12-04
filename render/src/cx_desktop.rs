@@ -106,7 +106,7 @@ impl Cx {
                 //    self.hover_mouse_cursor = None;
                 //}
             },
-            Event::FingerScroll(_)=>{
+            Event::FingerScroll(_) => {
                 // check for anything being paint or dra dirty
                 if self.redraw_child_areas.len()>0 || self.redraw_parent_areas.len()>0 {
                     self.platform.desktop.repaint_via_scroll_event = true;
@@ -124,7 +124,7 @@ impl Cx {
             self.call_animation_event(&mut event_handler, time);
         }
         
-        let mut vsync = false;//self.platform.desktop.repaint_via_scroll_event;
+        let mut vsync = false; //self.platform.desktop.repaint_via_scroll_event;
         self.platform.desktop.repaint_via_scroll_event = false;
         if self.frame_callbacks.len() != 0 {
             self.call_frame_event(&mut event_handler, time);
@@ -200,7 +200,7 @@ impl Cx {
     
     pub fn load_theme_fonts(&mut self) {
         // lets load all fonts that aren't loaded yet
-        for cxfont in &mut self.fonts{
+        for cxfont in &mut self.fonts {
             let path = cxfont.path.clone();
             if cxfont.font_loaded.is_none() {
                 // load it
@@ -238,19 +238,51 @@ impl Cx {
         let _ = io::stdout().flush();
     }
     
-    pub fn http_send(&self, verb: &str, path: &str, domain: &str, port: &str, body: &str) {
-        let host = format!("{}:{}", domain, port);
-        let stream = TcpStream::connect(&host);
-        if let Ok(mut stream) = stream {
-            let byte_len = body.as_bytes().len();
-            let data = format!("{} /{} HTTP/1.1\r\nHost: {}\r\nConnect: close\r\nContent-Length:{}\r\n\r\n{}", verb, path, domain, byte_len, body);
-            if let Err(e) = stream.write(data.as_bytes()) {
-                println!("http_send error writing stream {}", e);
+    pub fn http_send(&self, verb: &str, path: &str, domain: &str, port: u16, content_type: &str, body: &[u8], signal: Signal) {
+        
+        fn write_bytes_to_tcp_stream(tcp_stream: &mut TcpStream, bytes: &[u8]) -> bool {
+            let bytes_total = bytes.len();
+            let mut bytes_left = bytes_total;
+            while bytes_left > 0 {
+                let buf = &bytes[(bytes_total - bytes_left)..bytes_total];
+                if let Ok(bytes_written) = tcp_stream.write(buf) {
+                    if bytes_written == 0 {
+                        return false
+                    }
+                    bytes_left -= bytes_written;
+                }
+                else {
+                    return true
+                }
             }
+            return false
         }
-        else {
-            println!("http_send error connecting");
-        }
+        
+        // start a thread, connect, and report back.
+        let data = body.to_vec();
+        let byte_len = data.len();
+        let header = format!(
+            "{} {} HTTP/1.1\r\nHost: {}\r\nConnect: close\r\nContent-Type:{}\r\nContent-Length:{}\r\n\r\n",
+            verb,
+            path,
+            domain,
+            content_type,
+            byte_len
+        );
+        let host = format!("{}:{}", domain, port);
+        let _connect_thread = {
+            std::thread::spawn(move || {
+                let stream = TcpStream::connect(&host);
+                if let Ok(mut stream) = stream {
+                    if !write_bytes_to_tcp_stream(&mut stream, header.as_bytes())
+                        && !write_bytes_to_tcp_stream(&mut stream, &data) {
+                        Cx::post_signal(signal, HTTP_SEND_OK);
+                        return
+                    }
+                }
+                Cx::post_signal(signal, HTTP_SEND_FAIL);
+            })
+        };
     }
     
     
@@ -265,3 +297,6 @@ impl Cx {
         }
     }
 }
+
+pub const HTTP_SEND_OK: usize = 1;
+pub const HTTP_SEND_FAIL: usize = 2;

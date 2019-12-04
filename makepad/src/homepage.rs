@@ -7,8 +7,20 @@ pub struct HomePage {
     pub shadow: ScrollShadow,
     pub text: Text,
     pub email_input: TextInput,
+    pub email_state: EmailState,
+    pub email_signal: Signal,
     pub example_texts: ElementsCounted<TextInput>,
     pub send_mail_button: NormalButton,
+}
+
+#[derive(Clone)]
+pub enum EmailState {
+    Empty,
+    Invalid,
+    Valid,
+    Sending,
+    ErrorSending,
+    OkSending
 }
 
 impl HomePage {
@@ -18,11 +30,13 @@ impl HomePage {
             text: Text::proto(cx),
             shadow: ScrollShadow::proto(cx),
             send_mail_button: NormalButton::proto(cx),
+            email_signal: cx.new_signal(),
             email_input: TextInput::proto(cx, TextInputOptions {
                 multiline: false,
                 read_only: false,
                 empty_message: "Enter email".to_string()
             }),
+            email_state: EmailState::Empty,
             example_texts: ElementsCounted::new(
                 TextInput::proto(cx, TextInputOptions {
                     multiline: true,
@@ -73,10 +87,45 @@ impl HomePage {
     }
     
     pub fn handle_home_page(&mut self, cx: &mut Cx, event: &mut Event) {
-        self.email_input.handle_text_input(cx, event);
-
-        if let ButtonEvent::Clicked = self.send_mail_button.handle_normal_button(cx, event) {
+        if let Event::Signal(sig) = event{
+            if self.email_signal.is_signal(sig){
+                match sig.value{
+                    HTTP_SEND_OK=>{
+                        self.email_state = EmailState::OkSending;
+                    },
+                    HTTP_SEND_FAIL=>{
+                        self.email_state = EmailState::ErrorSending;
+                    },
+                    _=>()
+                }
+                self.view.redraw_view_area(cx);
+            }
+        }
+        if let TextEditorEvent::Change = self.email_input.handle_text_input(cx, event) {
+            let email = self.email_input.get_value();
             
+            if email.len()> 0 && !email.find("@").is_some() {
+                self.email_state = EmailState::Invalid
+            }
+            else if email.len()>0 {
+                self.email_state = EmailState::Valid
+            }
+            else {
+                self.email_state = EmailState::Empty
+            }
+            self.view.redraw_view_area(cx);
+        }
+        
+        if let ButtonEvent::Clicked = self.send_mail_button.handle_normal_button(cx, event) {
+            match self.email_state{
+                EmailState::Valid | EmailState::ErrorSending=>{
+                    self.email_state = EmailState::Sending;
+                    let email = self.email_input.get_value();
+                    cx.http_send("POST", "/subscribe", "makepad.nl", 80, "text/plain", email.as_bytes(), self.email_signal );
+                    self.view.redraw_view_area(cx);
+                },
+                _=>()
+            }
         }
         
         self.view.handle_scroll_bars(cx, event);
@@ -107,7 +156,14 @@ impl HomePage {
             but does not include the visual design tools or library ecosystem yet.\n");
         
         self.email_input.draw_text_input(cx);
-        self.send_mail_button.draw_normal_button(cx, "Subscribe to mailing list");
+        self.send_mail_button.draw_normal_button(cx, match self.email_state {
+            EmailState::Empty => "Enter email address to subscribe to our newsletter",
+            EmailState::Invalid => "Email adress invalid",
+            EmailState::Valid => "Click here to subscribe to our newsletter",
+            EmailState::Sending=>"Submitting your email adress..",
+            EmailState::ErrorSending=>"Could not send your email adress, please retry!",
+            EmailState::OkSending=>"Thank you, we'll keep up informed!"
+        });
         cx.turtle_new_line();
         
         t.draw_text(cx, "\
@@ -133,7 +189,7 @@ impl HomePage {
             -Log viewer with a virtual viewport, that can handle printlns in an infinite loop.\n\
             -Dock panel system / file tree.\n\
             -Rust compiler integration, with errors/warning in the IDE.\n\
-            ");
+        ");
         
         /*
         cx.begin_turtle(Layout{
