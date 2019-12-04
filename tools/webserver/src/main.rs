@@ -166,16 +166,6 @@ impl HttpServer {
                             url.push_str("index.html");
                         }
 
-                        println!("URL {}", url);
-                        let mut read_line = String::new();
-                        while let Ok(_) = reader.read_line(&mut read_line){
-                            if read_line == "\r\n"{ // the newline
-                                break;
-                            }
-                            println!("LINE {}", read_line);
-                            read_line.truncate(0);
-                        }
-
                         if let Some(data) = filecache.get(&url){ 
                             let mime_type = if url.ends_with(".html") {"text/html"}
                                 else if url.ends_with(".wasm") {"application/wasm"}
