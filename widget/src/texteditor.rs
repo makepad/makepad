@@ -907,6 +907,7 @@ impl TextEditor {
             // in JS this wasn't possible performantly but in Rust its a breeze.
             self.view.redraw_view_area(cx);
         }
+        let last_mutation_id = text_buffer.mutation_id;
         // global events
         match event {
             Event::Timer(te) => if self._cursor_blink_timer.is_timer(te) {
@@ -1014,7 +1015,12 @@ impl TextEditor {
             },
             _ => ()
         };
-        TextEditorEvent::None
+        if last_mutation_id != text_buffer.mutation_id{
+            TextEditorEvent::Change
+        }
+        else{
+            TextEditorEvent::None
+        }
     }
     
     pub fn has_key_focus(&self, cx: &Cx) -> bool {
