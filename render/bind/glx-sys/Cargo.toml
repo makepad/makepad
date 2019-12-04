@@ -1,7 +1,7 @@
 [package]
 name = "makepad-glx-sys"
 version = "0.1.0"
-authors = []
+authors = ["Makepad <info@makepad.nl>"]
 edition = "2018"
 description = "Makepad GLX bindings"
 license = "MIT"
