@@ -488,7 +488,7 @@ impl Cx {
         }
     }
     
-    pub fn http_send(&self, _verb: &str, _path: &str, _domain: &str, _port: &str, _body: &str) {
+    pub fn http_send(&self, _verb: &str, _path: &str, _domain: &str, _port: u16, _content_type: &str, _body: &[u8], _signal: Signal) {
     }
     
     pub fn update_menu(&mut self, _menu: &Menu) {
