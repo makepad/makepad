@@ -16,7 +16,7 @@ Makepad currently has the following features:
 - Rust compiler integration, with errors/warning in the IDE.
 
 If you're interested in Makepad, you can check out the web build here:
-https://makepad.github.io/
+http://makepad.nl/
 
 Note that the web build of Makepad does not feature any compiler integration. If you want to be able to compile code, you have to install Makepad locally.
 
