@@ -17,9 +17,12 @@ ron = "0.5"
 
 [dependencies.widget]
 path="../widget"
+version="0.1"
 
 [dependencies.render]
 path="../render"
+version="0.1"
 
 [dependencies.hub]
 path="./hub"
+version="0.1"
