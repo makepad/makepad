@@ -66,7 +66,7 @@ fn main() {
     ); 
     
     let http_server = HttpServer::start_http_server(
-        SocketAddr::from(([0, 0, 0, 0], 8003)),
+        SocketAddr::from(([0, 0, 0, 0], 80)),
         Arc::new(filecache),
     ).expect("Can't start server");
     http_server.listen_thread.unwrap().join().expect("can't join thread");
