@@ -6,7 +6,7 @@ use crate::appwindow::*;
 use crate::filetree::*;
 use std::collections::HashMap;
 use serde::{Serialize, Deserialize};
-use crate::builder_main;
+use crate::builder;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppSettings {
@@ -142,7 +142,7 @@ impl AppStorage {
                 }
             });
             
-            let send = HubBuilder::run_builder_direct("main", &mut hub_router, | ws, htc | {builder_main::builder(ws, htc)});
+            let send = HubBuilder::run_builder_direct("main", &mut hub_router, | ws, htc | {builder::builder(ws, htc)});
             self.builder_route_send = Some(send);
             self.hub_router = Some(hub_router);
             self.hub_ui = Some(hub_ui);
