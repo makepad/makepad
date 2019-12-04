@@ -60,7 +60,7 @@ fn main() {
         "",
         "./",
         &[".rs", ".js", ".toml", ".html", ".js", ".wasm", ".ttf", ".ron"],
-        &[],
+        &["bindings.rs"],
         &["deps", "build", "edit_repo"],
         &mut filecache
     ); 
@@ -154,7 +154,16 @@ impl HttpServer {
                         if url.ends_with("/") {
                             url.push_str("index.html");
                         }
+
                         println!("URL {}", url);
+                        while let Ok(_) = reader.read_line(&mut line){
+                            if line == "\r\n"{ // the newline
+                                break;
+                            }
+                            println!("LINE {}", line);
+                            line.truncate(0);
+                        }
+
                         if let Some(data) = filecache.get(&url){ 
                             let mime_type = if url.ends_with(".html") {"text/html"}
                                 else if url.ends_with(".wasm") {"application/wasm"}
