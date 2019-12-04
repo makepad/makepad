@@ -8,12 +8,15 @@ use std::io::prelude::*;
 use std::io::BufReader;
 use std::fs;
 use std::fs::OpenOptions;
+use std::io::Write;
+use deflate::Compression;
+use deflate::write::ZlibEncoder;
 
 fn main() {
     // read the entire file tree, and brotli it.
     let mut filecache = HashMap::new();
     
-    fn brotli_tree_recursive(base_path: &str, calc_path: &str, ext_inc: &[&str], file_ex: &[&str], dir_ex: &[&str], filecache: &mut HashMap<String, Vec<u8>>) {
+    fn compress_tree_recursive(base_path: &str, calc_path: &str, ext_inc: &[&str], file_ex: &[&str], dir_ex: &[&str], filecache: &mut HashMap<String, Vec<u8>>) {
         if let Ok(read_dir) = fs::read_dir(calc_path) {
             for entry in read_dir {
                 if entry.is_err() {continue};
@@ -32,7 +35,7 @@ fn main() {
                     if dir_ex.iter().find( | dir | **dir == name).is_some() {
                         continue
                     }
-                    brotli_tree_recursive(&format!("{}/{}", base_path, name), &format!("{}/{}", calc_path, name), ext_inc, file_ex, dir_ex, filecache);
+                    compress_tree_recursive(&format!("{}/{}", base_path, name), &format!("{}/{}", calc_path, name), ext_inc, file_ex, dir_ex, filecache);
                 }
                 else {
                     if file_ex.iter().find( | file | **file == name).is_some() {
@@ -43,11 +46,19 @@ fn main() {
                         let read_path = format!("{}/{}", calc_path, name);
                         let data = fs::read(read_path).expect("Can't read file");
                         // lets brotli it
+                        
+                        /*
                         let mut result = Vec::new();
                         {
                             let mut writer = brotli::CompressorWriter::new(&mut result, 4096 /* buffer size */, 11, 22);
                             writer.write_all(&data).expect("Can't write data");
                         }
+                        */
+                        
+                        let mut encoder = ZlibEncoder::new(Vec::new(), Compression::Default);
+                        encoder.write_all(&data).expect("Write error!");
+                        let result = encoder.finish().expect("Failed to finish compression!");
+                        
                         println!("Compressed {} {}->{}", key_path, data.len(), result.len());
                         filecache.insert(key_path, result);
                     }
@@ -56,7 +67,7 @@ fn main() {
         }
     }
     
-    brotli_tree_recursive(
+    compress_tree_recursive(
         "",
         "./",
         &[".rs", ".js", ".toml", ".html", ".js", ".wasm", ".ttf", ".ron"],
@@ -173,7 +184,7 @@ impl HttpServer {
                             
                             // write the header
                             let header = format!(
-                                "HTTP/1.1 200 OK\r\nContent-Type: {}\r\nContent-encoding: br\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                                "HTTP/1.1 200 OK\r\nContent-Type: {}\r\nContent-encoding: deflate\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
                                 mime_type,
                                 data.len()
                             );

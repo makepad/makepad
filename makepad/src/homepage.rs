@@ -87,16 +87,16 @@ impl HomePage {
     }
     
     pub fn handle_home_page(&mut self, cx: &mut Cx, event: &mut Event) {
-        if let Event::Signal(sig) = event{
-            if self.email_signal.is_signal(sig){
-                match sig.value{
-                    HTTP_SEND_OK=>{
+        if let Event::Signal(sig) = event {
+            if self.email_signal.is_signal(sig) {
+                match sig.value {
+                    HTTP_SEND_OK => {
                         self.email_state = EmailState::OkSending;
                     },
-                    HTTP_SEND_FAIL=>{
+                    HTTP_SEND_FAIL => {
                         self.email_state = EmailState::ErrorSending;
                     },
-                    _=>()
+                    _ => ()
                 }
                 self.view.redraw_view_area(cx);
             }
@@ -117,14 +117,14 @@ impl HomePage {
         }
         
         if let ButtonEvent::Clicked = self.send_mail_button.handle_normal_button(cx, event) {
-            match self.email_state{
-                EmailState::Valid | EmailState::ErrorSending=>{
+            match self.email_state {
+                EmailState::Valid | EmailState::ErrorSending => {
                     self.email_state = EmailState::Sending;
                     let email = self.email_input.get_value();
-                    cx.http_send("POST", "/subscribe", "makepad.nl", 80, "text/plain", email.as_bytes(), self.email_signal );
+                    cx.http_send("POST", "/subscribe", "makepad.nl", 80, "text/plain", email.as_bytes(), self.email_signal);
                     self.view.redraw_view_area(cx);
                 },
-                _=>()
+                _ => ()
             }
         }
         
@@ -160,9 +160,9 @@ impl HomePage {
             EmailState::Empty => "Enter email address to subscribe to our newsletter",
             EmailState::Invalid => "Email adress invalid",
             EmailState::Valid => "Click here to subscribe to our newsletter",
-            EmailState::Sending=>"Submitting your email adress..",
-            EmailState::ErrorSending=>"Could not send your email adress, please retry!",
-            EmailState::OkSending=>"Thank you, we'll keep up informed!"
+            EmailState::Sending => "Submitting your email adress..",
+            EmailState::ErrorSending => "Could not send your email adress, please retry!",
+            EmailState::OkSending => "Thank you, we'll keep up informed!"
         });
         cx.turtle_new_line();
         
