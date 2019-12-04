@@ -156,12 +156,13 @@ impl HttpServer {
                         }
 
                         println!("URL {}", url);
-                        while let Ok(_) = reader.read_line(&mut line){
-                            if line == "\r\n"{ // the newline
+                        let mut read_line = String::new();
+                        while let Ok(_) = reader.read_line(&mut read_line){
+                            if read_line == "\r\n"{ // the newline
                                 break;
                             }
-                            println!("LINE {}", line);
-                            line.truncate(0);
+                            println!("LINE {}", read_line);
+                            read_line.truncate(0);
                         }
 
                         if let Some(data) = filecache.get(&url){ 
