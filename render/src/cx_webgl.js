@@ -233,6 +233,13 @@
             let pos = this.fit(1);
             this.mu32[pos ++] = 21;
         }
+
+        http_send_response(signal_id, success) {
+            let pos = this.fit(3);
+            this.mu32[pos ++] = 22;
+            this.mu32[pos ++] = signal_id;
+            this.mu32[pos ++] = success?1:2;
+        }
         
         end() {
             let pos = this.fit(1);
@@ -474,6 +481,40 @@
                 if (c != 0) str += String.fromCharCode(c);
             }
             return str
+        }
+        
+        parse_u8slice(){
+            var str = "";
+            var u8_len = this.mu32[this.parse ++];
+            let len = u8_len >> 2;
+            let data = new Uint8Array(u8_len);
+            let spare = u8_len & 3;
+            for(let i  = 0; i < len; i++){
+                let u8_pos = i<<2;
+                let u32 = this.mu32[this.parse++];
+                data[u8_pos + 0] = u32&0xff;
+                data[u8_pos + 1] = (u32>>8)&0xff;
+                data[u8_pos + 2] = (u32>>16)&0xff;
+                data[u8_pos + 3] = (u32>>24)&0xff;
+            } 
+            let u8_pos = len<<2;
+            if(spare == 1){
+                let u32 = this.mu32[this.parse++];
+                data[u8_pos + 0] = u32&0xff;
+            }
+            else if(spare == 2){
+                let u32 = this.mu32[this.parse++];
+                data[u8_pos + 0] = u32&0xff;
+                data[u8_pos + 1] = (u32>>8)&0xff;
+            }
+            else if(spare == 3){
+                let u32 = this.mu32[this.parse++];
+                data[u8_pos + 0] = u32&0xff;
+                data[u8_pos + 1] = (u32>>8)&0xff;
+                data[u8_pos + 2] = (u32>>16)&0xff;
+            }
+            console.log(data);
+            return data
         }
         
         parse_f64() {
@@ -1346,7 +1387,7 @@
             for (let i = 0; i < uniforms.length; i ++) {
                 let uni = uniforms[i];
                 uni.fn(this, uni.loc, uni.offset + uniforms_ptr);
-            }            
+            }
             
             let texture_slots = shader.texture_slots;
             for (let i = 0; i < texture_slots.length; i ++) {
@@ -1549,6 +1590,31 @@
             }
             //console.log("Timer ID not found!")
         }
+        
+        http_send(verb, path, proto, domain, port, content_type, body, signal_id){
+
+            var req = new XMLHttpRequest()
+            req.addEventListener("error", _=> {
+                // signal fail
+                this.to_wasm.http_send_response(signal_id, 2);
+                this.do_wasm_io();
+            })
+            req.addEventListener("load", _=> {
+                if (req.status !== 200) {
+                    // signal fail
+                    this.to_wasm.http_send_response(signal_id, 2);
+                }
+                else{
+                    //signal success
+                    this.to_wasm.http_send_response(signal_id, 1);
+                }
+                this.do_wasm_io();
+            })
+            req.open(verb, proto+"://"+domain+":"+port+path, true);
+            console.log(verb, proto+"://"+domain+":"+port+path, body);
+            req.send(body.buffer);
+            req.end();
+        }
     }
     
     // array of function id's wasm can call on us, self is pointer to WasmApp
@@ -1713,6 +1779,18 @@
             let a = self.mf32[self.parse ++];
             let depth = self.mf32[self.parse ++];
             self.begin_main_canvas(r, g, b, a, depth);
+        },
+        function http_send_29(self) {
+            let port = self.mu32[self.parse ++];
+            let signal_id = self.mu32[self.parse ++];
+            let verb = self.parse_string();
+            let path = self.parse_string();
+            let proto = self.parse_string();
+            let domain = self.parse_string();
+            let content_type = self.parse_string();
+            let body = self.parse_u8slice();
+            // do XHR.
+            self.http_send(verb, path, proto, domain, port, content_type, body, signal_id);
         }
     ]
     
