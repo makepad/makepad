@@ -24,10 +24,9 @@ fn main() {
                 
                 let ty = entry.file_type();
                 if ty.is_err() {continue};
-                
                 let ty = ty.unwrap();
-                let name = entry.file_name().into_string();
                 
+                let name = entry.file_name().into_string();
                 if name.is_err() {continue};
                 let name = name.unwrap();
                 
@@ -54,7 +53,7 @@ fn main() {
                             writer.write_all(&data).expect("Can't write data");
                         }
                         */
-                        
+                        // brotli no work on http, i guess we'll do gzip for now
                         let mut encoder = ZlibEncoder::new(Vec::new(), Compression::Default);
                         encoder.write_all(&data).expect("Write error!");
                         let result = encoder.finish().expect("Failed to finish compression!");

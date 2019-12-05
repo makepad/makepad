@@ -47,8 +47,7 @@ impl HomePage {
         }
     }
     
-    pub fn color_heading() -> ColorId {uid!()}
-    pub fn color_body() -> ColorId {uid!()}
+    pub fn text_color() -> ColorId {uid!()}
     pub fn layout_main() -> LayoutId {uid!()}
     pub fn text_style_heading() -> TextStyleId {uid!()}
     pub fn text_style_body() -> TextStyleId {uid!()}
@@ -76,8 +75,7 @@ impl HomePage {
             ..Theme::text_style_normal().get(cx)
         });
         
-        Self::color_heading().set(cx, color("#e"));
-        Self::color_body().set(cx, color("#b"));
+        Self::text_color().set(cx, color("#b"));
         Self::layout_main().set(cx, Layout {
             padding: Padding {l: 10., t: 10., r: 10., b: 10.},
             new_line_padding: 15.,
@@ -128,6 +126,10 @@ impl HomePage {
             }
         }
         
+        for text_input in self.example_texts.iter(){
+            text_input.handle_text_input(cx, event);
+        }
+        
         self.view.handle_scroll_bars(cx, event);
     }
     
@@ -136,28 +138,23 @@ impl HomePage {
         
         let t = &mut self.text;
         
-        t.color = Self::color_heading().get(cx);
+        t.color = Self::text_color().get(cx);
+        
         t.text_style = Self::text_style_heading().get(cx);
         t.draw_text(cx, "Introducing Makepad\n");
         
-        t.color = Self::color_body().get(cx);
         t.text_style = Self::text_style_body().get(cx);
-        
         t.draw_text(cx, "\
             Makepad is a creative software development platform built around Rust. \
             We aim to make the creative software development process as fun as possible! \
-            To do this we will provide a set of visual design tools that modify your application in real time, \
-            as well as a library ecosystem that allows you to write highly performant multimedia applications.\n");
+            To do this we will provide a set of visual design tools that modify your \
+            application in real time, as well as a library ecosystem that allows you to \
+            write highly performant multimedia applications.\n");
         
-        t.draw_text(cx, "\
-            As we're working towards our first public alpha version, \
-            you'll be able to see our final steps towards it here. \
-            The alpha version of Makepad Basic will show off the development platform, \
-            but does not include the visual design tools or library ecosystem yet.\n");
         
         self.email_input.draw_text_input(cx);
         self.send_mail_button.draw_normal_button(cx, match self.email_state {
-            EmailState::Empty => "Enter email address to subscribe to our newsletter",
+            EmailState::Empty => "Excited about makepad? Sign up for our newsletter here.",
             EmailState::Invalid => "Email adress invalid",
             EmailState::Valid => "Click here to subscribe to our newsletter",
             EmailState::Sending => "Submitting your email adress..",
@@ -167,29 +164,87 @@ impl HomePage {
         cx.turtle_new_line();
         
         t.draw_text(cx, "\
+            The Makepad development platform and library ecosystem are MIT licensed, \
+            and will be available for free as part of Makepad Basic. In the near future, \
+            we will also introduce Makepad Pro, which will be available as a subscription \
+            model. Makepad Pro will include the visual design tools. Because the library \
+            ecosystem is MIT licensed, all applications made with the Pro version are \
+            entirely free licensed.\n");
+        
+        /*t.draw_text(cx, "\
             the web build of Makepad does not feature any compiler integration. \
             If you want to be able to compile code, you have to install Makepad locally.\n");
-        
+        */
         t.draw_text(cx, "\
-            The Makepad development platform and library ecosystem are MIT licensed,\
-            and will be available for free as part of Makepad Basic. \
-            In the near future, we will also introduce Makepad Pro, \
-            which will be available as a subscription model. \
-            Makepad Pro will include the visual design tools. Because the library ecosystem is MIT licensed, \
-            all applications made with the Pro version are entirely free licensed.\n");
+            Today, we launch an early alpha of Makepad Basic. This version shows off \
+            the development platform, but does not include the visual design tools or \
+            library ecosystem yet. It is intended as a starting point for feedback \
+            from you! Although Makepad is primarily a native application, its UI \
+            is perfectly capable of running on the web. If you want to get a taste \
+            of what Makepad looks like, play around with the web version, you are \
+            looking at it right now (try browsing the source code and pressing alt \
+            in a large code file!). To compile code yourself, you have to install \
+            the native version. Right now makepad is set up to run natively, and it \
+            compiles a simple WASM example you run in a browser from a localhost url.\n");
         
-        t.draw_text(cx, "Features:\n");
+        t.text_style = Self::text_style_heading().get(cx);
+        t.draw_text(cx, "How to use\n");
         
-        t.text_style = Self::text_style_point().get(cx);
+        t.text_style = Self::text_style_body().get(cx);
         t.draw_text(cx, "\
-            -Compiles natively to Linux, MacOS, and Windows.\n\
-            -Compiles to WebAssembly for demo purposes (see caveats below).\n\
-            -Built-in HTTP server with live reload support for WebAssembly development.\n\
-            -Code editor with live code folding (press alt).\n\
-            -Log viewer with a virtual viewport, that can handle printlns in an infinite loop.\n\
-            -Dock panel system / file tree.\n\
-            -Rust compiler integration, with errors/warning in the IDE.\n\
-        ");
+            After install (see below) you can open the following file in makepad, and when you change the rust code, \
+            the browser should live reload the wasm application as you type.\
+            \n");
+        
+        self.example_texts.get_draw(cx).draw_text_input_static(cx,"\
+            open this file the makepad editor UI: main/makepad/examples/webgl_example_wasm/src/main.rs \n\
+            open this url in your browser: http://127.0.0.1:8000/makepad/examples/webgl_example_wasm/");
+        cx.turtle_new_line();
+        
+        t.text_style = Self::text_style_heading().get(cx);
+        t.draw_text(cx, "How to install\n");
+        
+        t.text_style = Self::text_style_body().get(cx);
+        t.draw_text(cx, "\
+            On all platforms first install Rust, follow the instructions here. \
+            On windows feel free to ignore the warnings about MSVC, makepad uses the gnu chain. \
+            Copy this url to your favorite browser. I am sorry, i'm too lazy to implement clickable links on 4 platforms right now.\
+            \n");
+
+        self.example_texts.get_draw(cx).draw_text_input_static(cx,"\
+            https://www.rust-lang.org/tools/install");
+        cx.turtle_new_line();
+        
+        t.text_style = Self::text_style_heading().get(cx);
+        t.draw_text(cx, "MacOS\n");
+        
+        self.example_texts.get_draw(cx).draw_text_input_static(cx,"\
+            git clone https://github.com/makepad/makepad\n\
+            cd makepad\n\
+            tools/macos_rustup.sh\n\
+            cargo run -p makepad --release");
+        cx.turtle_new_line();
+
+        t.text_style = Self::text_style_heading().get(cx);
+        t.draw_text(cx, "Windows\n");
+
+        self.example_texts.get_draw(cx).draw_text_input_static(cx,"\
+            Clone this repo using either gitub desktop or commandline: https://github.com/makepad/makepad\n\
+            Open a cmd.exe in the directory you just cloned. Gh desktop makes: Documents\\Github\\makepad\n\
+            tools/windows_rustup.bat\n\
+            cargo run -p makepad --release --target x86_64-pc-windows-gnu");
+        cx.turtle_new_line();
+
+        t.text_style = Self::text_style_heading().get(cx);
+        t.draw_text(cx, "Linux\n");
+
+        self.example_texts.get_draw(cx).draw_text_input_static(cx,"\
+            git clone https://github.com/makepad/makepad\n\
+            cd makepad\n\
+            tools/linux_rustup.sh\n\
+            cargo run -p makepad --release");
+        cx.turtle_new_line();
+        
         
         /*
         cx.begin_turtle(Layout{
