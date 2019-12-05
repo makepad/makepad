@@ -10,10 +10,12 @@ Today, we launch an early alpha of Makepad Basic. This version shows off the dev
 
 After install (see below) you can open the following file in makepad, and when you change the rust code, the browser should live reload the wasm application as you type.
 
+open this file the makepad editor UI: 
 ```
-open this file the makepad editor UI: main/makepad/examples/webgl_example_wasm/src/sierpinski.rs \n\
-open this url in your browser: http://127.0.0.1:8000/makepad/examples/webgl_example_wasm/
+main/makepad/examples/webgl_example_wasm/src/sierpinski.rs
 ```
+open this url in your browser: 
+http://127.0.0.1:8000/makepad/examples/webgl_example_wasm/
 
 # How to install
 
