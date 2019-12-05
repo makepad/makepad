@@ -468,6 +468,9 @@ impl TextEditor {
         })));
         
         Self::shader_bg().set(cx, Quad::def_quad_shader().compose(shader_ast!({
+            fn pixel() -> vec4 {
+                return vec4(color.rgb * color.a, color.a);
+            }
         })));
     }
     
@@ -1058,8 +1061,6 @@ impl TextEditor {
             let inst = self.bg.begin_quad_fill(cx);
             inst.set_do_scroll(cx, false, false); // don't scroll the bg
             self._bg_inst = Some(inst);
-            
-          
             
             //let bg_area = bg_inst.into_area();
             let view_area = self.view.get_view_area(cx);
