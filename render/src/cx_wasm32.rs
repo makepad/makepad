@@ -337,7 +337,12 @@ impl Cx {
                 },
                 21 => { // paint_dirty, only set the passes of the main window to dirty
                     self.passes[self.windows[0].main_pass_id.unwrap()].paint_dirty = true;
-                }
+                },
+                22 => { //http_send_response
+                    let signal_id = to_wasm.mu32();
+                    let success = to_wasm.mu32();
+                    self.signals.push((Signal{signal_id: signal_id as usize}, success as usize));
+                },
                 _ => {
                     panic!("Message unknown")
                 }
@@ -488,7 +493,8 @@ impl Cx {
         }
     }
     
-    pub fn http_send(&self, _verb: &str, _path: &str, _domain: &str, _port: &str, _body: &str) {
+    pub fn http_send(&mut self, verb: &str, path: &str, proto:&str, domain: &str, port: u16, content_type: &str, body: &[u8], signal: Signal) {
+        self.platform.from_wasm.http_send(verb, path, proto, domain, port, content_type, body, signal);
     }
     
     pub fn update_menu(&mut self, _menu: &Menu) {
@@ -1087,6 +1093,39 @@ impl FromWasm {
         }
         self.check();
     }
+    
+    fn add_u8slice(&mut self, msg: &[u8]) {
+        let u8_len = msg.len();
+        let len = u8_len>>2;
+        let spare = u8_len&3;
+        self.fit(len + if spare > 0{1}else{0} + 1);
+        self.mu32(u8_len as u32);
+        // this is terrible. im sure this can be done so much nicer
+        for i in 0..len{
+            self.mu32( ((msg[(i<<2)+0] as u32)) | ((msg[(i<<2)+1] as u32) << 8) | ((msg[(i<<2)+2] as u32)<<16)  | ((msg[(i<<2)+3] as u32)<<24) );
+        }
+        match spare{
+            1=>self.mu32( msg[(len<<2)+0] as u32 ),
+            2=>self.mu32( (msg[(len<<2)+0] as u32) | ((msg[(len<<2)+1] as u32) << 8) ),
+            3=>self.mu32( (msg[(len<<2)+0] as u32) | ((msg[(len<<2)+1] as u32) << 8) | ((msg[(len<<2)+2] as u32) << 16) ),
+            _=>()
+        }
+        self.check();
+    }
+    
+    fn http_send(&mut self, verb: &str, path: &str, proto:&str, domain: &str, port: u16, content_type: &str, body: &[u8], signal: Signal) {
+        self.fit(3);
+        self.mu32(29); 
+        self.mu32(port as u32);
+        self.mu32(signal.signal_id as u32);
+        self.add_string(verb);
+        self.add_string(path);
+        self.add_string(proto);
+        self.add_string(domain);
+        self.add_string(content_type);
+        self.add_u8slice(body);
+    }
+    
     
 }
 

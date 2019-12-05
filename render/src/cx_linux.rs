@@ -11,7 +11,7 @@ impl Cx{
         
         xlib_app.init();
         
-        let opengl_cx = OpenglCx::new();
+        let opengl_cx = OpenglCx::new(xlib_app.display);
         
         let mut opengl_windows: Vec<OpenglWindow> = Vec::new();
         
@@ -281,7 +281,7 @@ pub struct CxPlatform {
     pub set_window_outer_size: Option<Vec2>,
     pub set_ime_position: Option<Vec2>,
     pub start_timer: Vec<(u64, f64, bool)>,
-    pub stop_timer: Vec<(u64)>,
+    pub stop_timer: Vec<u64>,
     pub text_clipboard_response: Option<String>,
     pub desktop: CxDesktop,
 }

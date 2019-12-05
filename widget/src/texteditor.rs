@@ -44,8 +44,6 @@ pub struct TextEditor {
     pub read_only: bool,
     pub multiline: bool,
     
-    pub empty_message: String,
-    
     //pub _bg_area: Area,
     pub _scroll_pos_on_load: Option<Vec2>,
     pub _jump_to_offset: bool,
@@ -153,7 +151,6 @@ impl TextEditor {
     
     pub fn proto(cx: &mut Cx) -> Self {
         Self {
-            empty_message: "".to_string(),
             read_only: false,
             multiline: true,
             cursors: TextCursorSet::new(),
@@ -316,7 +313,8 @@ impl TextEditor {
     pub fn color_warning() -> ColorId {uid!()}
     pub fn color_error() -> ColorId {uid!()}
     pub fn color_defocus() -> ColorId {uid!()}
-    
+
+    pub fn shader_bg() -> ShaderId {uid!()}
     pub fn shader_indent_lines() -> ShaderId {uid!()}
     pub fn shader_cursor() -> ShaderId {uid!()}
     pub fn shader_selection() -> ShaderId {uid!()}
@@ -384,7 +382,7 @@ impl TextEditor {
             const border_radius: float = 2.;
             
             fn vertex() -> vec4 { // custom vertex shader because we widen the draweable area a bit for the gloopiness
-                let shift: vec2 = -draw_scroll;
+                let shift: vec2 = -draw_scroll.xy;
                 let clipped: vec2 = clamp(
                     geom * vec2(w + 16., h) + vec2(x, y) + shift - vec2(8., 0.),
                     draw_clip.xy,
@@ -468,6 +466,12 @@ impl TextEditor {
                 return df_stroke(color, 0.8);
             }
         })));
+        
+        Self::shader_bg().set(cx, Quad::def_quad_shader().compose(shader_ast!({
+            fn pixel() -> vec4 {
+                return vec4(color.rgb * color.a, color.a);
+            }
+        })));
     }
     
     pub fn apply_style(&mut self, cx: &mut Cx) {
@@ -521,7 +525,8 @@ impl TextEditor {
         self.cursor_row.color = Self::color_cursor_row().get(cx);
         self.text.text_style = Self::text_style_editor_text().get(cx);
         self.line_number_text.text_style = Self::text_style_editor_text().get(cx);
-        
+
+        self.bg.shader = Self::shader_bg().get(cx);
         self.indent_lines.shader = Self::shader_indent_lines().get(cx);
         self.cursor.shader = Self::shader_cursor().get(cx);
         self.selection.shader = Self::shader_selection().get(cx);
@@ -905,6 +910,7 @@ impl TextEditor {
             // in JS this wasn't possible performantly but in Rust its a breeze.
             self.view.redraw_view_area(cx);
         }
+        let last_mutation_id = text_buffer.mutation_id;
         // global events
         match event {
             Event::Timer(te) => if self._cursor_blink_timer.is_timer(te) {
@@ -1012,7 +1018,12 @@ impl TextEditor {
             },
             _ => ()
         };
-        TextEditorEvent::None
+        if last_mutation_id != text_buffer.mutation_id{
+            TextEditorEvent::Change
+        }
+        else{
+            TextEditorEvent::None
+        }
     }
     
     pub fn has_key_focus(&self, cx: &Cx) -> bool {
@@ -1050,13 +1061,6 @@ impl TextEditor {
             let inst = self.bg.begin_quad_fill(cx);
             inst.set_do_scroll(cx, false, false); // don't scroll the bg
             self._bg_inst = Some(inst);
-            
-            if text_buffer.is_empty() {
-                let pos = cx.get_turtle_pos();
-                self.text.color = color("#666");
-                self.text.draw_text(cx, &self.empty_message);
-                cx.set_turtle_pos(pos);
-            }
             
             //let bg_area = bg_inst.into_area();
             let view_area = self.view.get_view_area(cx);
@@ -1451,6 +1455,11 @@ impl TextEditor {
                 TokenType::Regex => self.colors.string,
                 TokenType::String => self.colors.string,
                 TokenType::Number => self.colors.number,
+
+                TokenType::StringMultiBegin => self.colors.string,
+                TokenType::StringChunk => self.colors.string,
+                TokenType::StringMultiEnd => self.colors.string,
+
                 TokenType::CommentMultiBegin => self.colors.comment,
                 TokenType::CommentMultiEnd => self.colors.comment,
                 TokenType::CommentLine => self.colors.comment,
@@ -1693,19 +1702,14 @@ impl TextEditor {
     
     fn draw_shadows(&mut self, cx: &mut Cx) {
         let gutter_width = Self::gutter_width().get(cx);
-        self.shadow.draw_shadow_left(cx, Rect {
+        self.shadow.draw_shadow_left_at(cx, Rect {
             x: gutter_width,
             y: 0.,
             w: 0.,
             h: cx.get_height_total()
         });
         
-        self.shadow.draw_shadow_top(cx, Rect {
-            x: 0.,
-            y: 0.,
-            w: cx.get_width_total(),
-            h: 0.
-        });
+        self.shadow.draw_shadow_top(cx);
     }
     
     fn draw_message_markers(&mut self, cx: &mut Cx, text_buffer: &TextBuffer) {

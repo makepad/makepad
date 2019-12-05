@@ -6,7 +6,7 @@ use crate::appwindow::*;
 use crate::filetree::*;
 use std::collections::HashMap;
 use serde::{Serialize, Deserialize};
-use crate::builder_main;
+use crate::builder;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppSettings {
@@ -48,7 +48,6 @@ impl AppSettings{
                     workspaces: {
                         let mut workspace = HashMap::new();
                         workspace.insert("makepad".to_string(), ".".to_string());
-                        workspace.insert("rust_workshop".to_string(), "./workshops/28_nov_2019".to_string());
                         workspace
                     }
                 });
@@ -62,8 +61,8 @@ impl AppSettings{
             builds: vec![
                 BuildTarget {
                     builder: "main".to_string(),
-                    workspace: "rust_workshop".to_string(),
-                    package: "step_0".to_string(),
+                    workspace: "makepad".to_string(),
+                    package: "webgl_example_wasm".to_string(),
                     config: "release".to_string()
                 }
             ]
@@ -142,7 +141,7 @@ impl AppStorage {
                 }
             });
             
-            let send = HubBuilder::run_builder_direct("main", &mut hub_router, | ws, htc | {builder_main::builder(ws, htc)});
+            let send = HubBuilder::run_builder_direct("main", &mut hub_router, | ws, htc | {builder::builder(ws, htc)});
             self.builder_route_send = Some(send);
             self.hub_router = Some(hub_router);
             self.hub_ui = Some(hub_ui);

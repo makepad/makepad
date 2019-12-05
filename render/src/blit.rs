@@ -62,7 +62,7 @@ impl Blit {
             
             fn vertex() -> vec4 {
                 // return vec4(geom.x-0.5, geom.y, 0., 1.);
-                let shift: vec2 = -draw_scroll;
+                let shift: vec2 = -draw_scroll.xy;
                 let clipped: vec2 = clamp(
                     geom * vec2(w, h) + vec2(x, y) + shift,
                     draw_clip.xy,
