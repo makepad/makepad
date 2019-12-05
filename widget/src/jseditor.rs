@@ -1,4 +1,4 @@
-use render::*; 
+use render::*;
 
 use crate::textbuffer::*;
 use crate::texteditor::*;
@@ -11,14 +11,14 @@ pub struct JSEditor {
 impl JSEditor {
     pub fn proto(cx: &mut Cx) -> Self {
         Self {
-            text_editor: TextEditor{
+            text_editor: TextEditor {
                 folding_depth: 3,
                 ..TextEditor::proto(cx)
             }
         }
     }
     
-    pub fn handle_js_editor(&mut self, cx: &mut Cx, event: &mut Event,  text_buffer: &mut TextBuffer) -> TextEditorEvent {
+    pub fn handle_js_editor(&mut self, cx: &mut Cx, event: &mut Event, text_buffer: &mut TextBuffer) -> TextEditorEvent {
         let ce = self.text_editor.handle_text_editor(cx, event, text_buffer);
         match ce {
             TextEditorEvent::AutoFormat => {
@@ -32,7 +32,7 @@ impl JSEditor {
     }
     
     pub fn draw_js_editor(&mut self, cx: &mut Cx, text_buffer: &mut TextBuffer) {
-        if text_buffer.needs_token_chunks() && text_buffer.lines.len() >0{
+        if text_buffer.needs_token_chunks() && text_buffer.lines.len() >0 {
             let mut state = TokenizerState::new(&text_buffer.lines);
             let mut tokenizer = JSTokenizer::new();
             let mut pair_stack = Vec::new();
@@ -48,7 +48,7 @@ impl JSEditor {
         
         if self.text_editor.begin_text_editor(cx, text_buffer).is_err() {return}
         
-        for (index, token_chunk) in text_buffer.token_chunks.iter_mut().enumerate(){
+        for (index, token_chunk) in text_buffer.token_chunks.iter_mut().enumerate() {
             self.text_editor.draw_chunk(cx, index, &text_buffer.flat_text, token_chunk, &text_buffer.messages.cursors);
         }
         
@@ -94,7 +94,7 @@ impl JSTokenizer {
                         self.comment_depth = 0;
                     }
                     // output current line
-                    if (chunk.len()-start)>0 {
+                    if (chunk.len() - start)>0 {
                         return TokenType::CommentChunk
                     }
                     
@@ -103,7 +103,7 @@ impl JSTokenizer {
                     return TokenType::Newline
                 }
                 else if state.next == ' ' {
-                    if (chunk.len()-start)>0 {
+                    if (chunk.len() - start)>0 {
                         return TokenType::CommentChunk
                     }
                     while state.next == ' ' {
@@ -658,12 +658,12 @@ impl JSTokenizer {
         let mut is_unary_operator = true;
         let mut in_multline_comment = false;
         let mut in_singleline_comment = false;
-        
+        let mut in_multline_string = false;
         while tp.advance() {
             
             match tp.cur_type() {
                 TokenType::Whitespace => {
-                    if in_singleline_comment || in_multline_comment {
+                    if in_singleline_comment || in_multline_comment || in_multline_string {
                         out.extend(tp.cur_chunk());
                     }
                     else if !first_on_line && tp.next_type() != TokenType::Newline
@@ -677,7 +677,7 @@ impl JSTokenizer {
                 TokenType::Newline => {
                     in_singleline_comment = false;
                     //paren_stack.last_mut().unwrap().angle_counter = 0;
-                    if first_on_line && !in_singleline_comment && !in_multline_comment {
+                    if first_on_line && !in_singleline_comment && !in_multline_comment && !in_multline_string{
                         out.indent(expected_indent);
                     }
                     else {
@@ -797,6 +797,27 @@ impl JSTokenizer {
                     }
                     out.extend(tp.cur_chunk());
                 },
+                TokenType::StringMultiBegin => {
+                    in_multline_string = true;
+                    if first_on_line {
+                        first_on_line = false;
+                        out.indent(expected_indent);
+                    }
+                    out.extend(tp.cur_chunk());
+                },
+                TokenType::StringChunk => {
+                    if first_on_line {
+                        first_on_line = false;
+                    }
+                    out.extend(tp.cur_chunk());
+                },
+                TokenType::StringMultiEnd => {
+                    in_multline_string = false;
+                    if first_on_line {
+                        first_on_line = false;
+                    }
+                    out.extend(tp.cur_chunk());
+                },
                 TokenType::Colon => {
                     is_unary_operator = true;
                     out.strip_space();
@@ -875,7 +896,7 @@ impl JSTokenizer {
                 // these are followeable by non unary operators
                 TokenType::Identifier | TokenType::BuiltinType | TokenType::TypeName | TokenType::ThemeName |
                 TokenType::Call | TokenType::String | TokenType::Regex | TokenType::Number |
-                TokenType::Bool | TokenType::Unexpected | TokenType::Error | TokenType::Warning | TokenType::Defocus=> {
+                TokenType::Bool | TokenType::Unexpected | TokenType::Error | TokenType::Warning | TokenType::Defocus => {
                     is_unary_operator = false;
                     
                     first_after_open = false;

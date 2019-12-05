@@ -50,7 +50,7 @@ impl Quad {
             
             //let dpi_dilate: float<Uniform>;
             fn scroll() -> vec2{
-                return draw_scroll
+                return draw_scroll.xy
             }
             
             fn vertex() -> vec4 {

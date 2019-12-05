@@ -56,7 +56,6 @@ pub struct XlibApp {
 #[derive(Clone)]
 pub struct XlibWindow {
     pub window: Option<c_ulong>,
-    pub surface: Option<EGL_sys::EGLSurface>,
     pub xic: Option<X11_sys::XIC>,
     pub attributes: Option<X11_sys::XSetWindowAttributes>,
     pub visual_info: Option<X11_sys::XVisualInfo>,
@@ -77,7 +76,6 @@ pub struct XlibWindow {
 #[derive(Clone)]
 pub struct XlibChildWindow {
     pub window: c_ulong,
-    pub surface: Option<EGL_sys::EGLSurface>,
     visible: bool,
     x: i32,
     y: i32,
@@ -1023,7 +1021,6 @@ impl XlibWindow {
         
         XlibWindow {
             window: None,
-            surface: None,
             xic: None,
             attributes: None,
             visual_info: None,
@@ -1040,24 +1037,9 @@ impl XlibWindow {
         }
     }
     
-    pub fn init(&mut self, _title: &str, size: Vec2, position: Option<Vec2>, visual_id: X11_sys::VisualID) {
+    pub fn init(&mut self, _title: &str, size: Vec2, position: Option<Vec2>, visual_info: X11_sys::XVisualInfo) {
         unsafe {
             let display = (*self.xlib_app).display;
-            
-            // Get visual info by id
-            let mut visual_info = mem::zeroed::<X11_sys::XVisualInfo>();
-            visual_info.visualid = visual_id;
-            let mut len = 0;
-            let ptr = X11_sys::XGetVisualInfo(display, X11_sys::VisualIDMask as c_long, &mut visual_info, &mut len);
-            if ptr.is_null() {
-                panic!("can't get visual info by id1");
-            }
-            let visual_infos = slice::from_raw_parts(ptr, len as usize);
-            if visual_infos.len() != 1 {
-                panic!("can't get visual info by id2");
-            }
-            visual_info = visual_infos[0];
-            X11_sys::XFree(ptr as *mut _);
             
             // The default screen of the display
             let default_screen = X11_sys::XDefaultScreen(display);
@@ -1072,7 +1054,6 @@ impl XlibWindow {
             attributes.colormap =
             X11_sys::XCreateColormap(display, root_window, visual_info.visual, X11_sys::AllocNone as i32);
             attributes.event_mask = (X11_sys::ExposureMask | X11_sys::StructureNotifyMask | X11_sys::ButtonMotionMask | X11_sys::PointerMotionMask | X11_sys::ButtonPressMask | X11_sys::ButtonReleaseMask | X11_sys::KeyPressMask | X11_sys::KeyReleaseMask | X11_sys::VisibilityChangeMask | X11_sys::FocusChangeMask | X11_sys::EnterWindowMask | X11_sys::LeaveWindowMask) as c_long;
-            
             
             let dpi_factor = self.get_dpi_factor();
             // Create a window
@@ -1201,7 +1182,6 @@ impl XlibWindow {
             
             self.child_windows.push(XlibChildWindow {
                 window: new_child,
-                surface: None,
                 x: x,
                 y: y,
                 w: w,

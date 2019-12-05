@@ -394,19 +394,8 @@ impl LogList {
             counter += 1;
         }
         
-        self.item_draw.shadow.draw_shadow_left(cx, Rect {
-            x: 0.,
-            y: 0., 
-            w: 0., 
-            h: cx.get_height_total() 
-        });
-        
-        self.item_draw.shadow.draw_shadow_top(cx, Rect {
-            x: 0.,
-            y: 0.,
-            w: cx.get_width_total(),
-            h: 0.
-        });
+        self.item_draw.shadow.draw_shadow_left(cx);
+        self.item_draw.shadow.draw_shadow_top(cx);
         
         self.list.end_list(cx, &mut self.view);
     }

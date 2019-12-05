@@ -258,9 +258,11 @@ impl Cx {
         dc.instance.truncate(0);
         dc.current_instance_offset = 0;
         dc.uniforms.truncate(0);
-        dc.textures_2d.truncate(0);
+        dc.textures_2d.truncate(0); 
         dc.instance_dirty = true;
         dc.uniforms_dirty = true;
+        dc.do_h_scroll = true;
+        dc.do_v_scroll = true;
         return dc.get_current_instance_area(instance_count);
     }
     
@@ -345,8 +347,12 @@ pub struct DrawUniforms {
     pub draw_clip_y2: f32,
     pub draw_scroll_x: f32,
     pub draw_scroll_y: f32,
+    pub draw_scroll_z: f32,
+    pub draw_scroll_w: f32,
     pub draw_zbias: f32,
-    pub pad1: f32
+    pub pad1: f32,
+    pub pad2: f32,
+    pub pad3: f32
 }
 
 impl DrawUniforms {
@@ -394,7 +400,8 @@ impl DrawCall {
         if self.do_v_scroll {
             self.draw_uniforms.draw_scroll_y += local_scroll.y;
         }
-        
+        self.draw_uniforms.draw_scroll_z = local_scroll.x;
+        self.draw_uniforms.draw_scroll_w = local_scroll.y;
     }
     
     pub fn set_zbias(&mut self, zbias:f32){
@@ -525,7 +532,7 @@ impl CxView {
         sg.compose(shader_ast!({
             let view_transform: mat4<ViewUniform>;
             let draw_clip: vec4<DrawUniform>;
-            let draw_scroll: vec2<DrawUniform>;
+            let draw_scroll: vec4<DrawUniform>;
             let draw_zbias: float<DrawUniform>;
         }))
     }

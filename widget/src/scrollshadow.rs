@@ -11,7 +11,7 @@ impl ScrollShadow {
     pub fn proto(cx: &mut Cx) -> Self {
         Self {
             bg: Quad ::proto(cx),
-            z: 0.,
+            z: 10.,
         }
     }
     
@@ -21,29 +21,19 @@ impl ScrollShadow {
     
     pub fn style(cx: &mut Cx, _opt: &StyleOptions) {
         
-        Self::shadow_size().set(cx, 6.0);
+        Self::shadow_size().set(cx, 4.0);
         
         Self::shader_bg().set(cx, Quad::def_quad_shader().compose(shader_ast !({
             let is_viz: float<Varying>;
             let shadow_top: Self::shadow_top();
             fn scroll() -> vec2 {
                 if shadow_top > 0.5 {
-                    if draw_scroll.y > 0. {
-                        is_viz = 1.0
-                    }
-                    else {
-                        is_viz = 0.0;
-                    }
+                    is_viz = clamp(draw_scroll.w*0.1,0.,1.)
                 }
                 else {
-                    if draw_scroll.x > 0. {
-                        is_viz = 1.0
-                    }
-                    else {
-                        is_viz = 0.0;
-                    }
+                    is_viz = clamp(draw_scroll.z*0.1,0.,1.)
                 }
-                return vec2(0., 0.);
+                return draw_scroll.xy;
             }
             
             fn pixel() -> vec4 { // TODO make the corner overlap properly with a distance field eq.
@@ -54,18 +44,38 @@ impl ScrollShadow {
             }
         })));
     }
-
-    pub fn draw_shadow_top(&mut self, cx:&mut Cx, rect:Rect){
+    
+    pub fn draw_shadow_top(&mut self, cx:&mut Cx){
+        self.draw_shadow_top_at(cx, Rect {
+            x: 0.,
+            y: 0.,
+            w: cx.get_width_total(),
+            h: 0.
+        });
+    }
+    
+    pub fn draw_shadow_top_at(&mut self, cx:&mut Cx, rect:Rect){
         self.bg.shader = Self::shader_bg().get(cx);
         self.bg.z = self.z;
         let inst = self.bg.draw_quad_rel(cx, Rect{h:ScrollShadow::shadow_size().get(cx),..rect});
+        inst.set_do_scroll(cx, false, false);
         inst.push_float(cx, 1.0);
     }
 
-    pub fn draw_shadow_left(&mut self, cx:&mut Cx, rect:Rect){
+    pub fn draw_shadow_left(&mut self, cx:&mut Cx){
+        self.draw_shadow_left_at(cx, Rect {
+            x: 0.,
+            y: 0.,
+            w: 0.,
+            h: cx.get_height_total()
+        });
+    } 
+
+    pub fn draw_shadow_left_at(&mut self, cx:&mut Cx, rect:Rect){
         self.bg.shader = Self::shader_bg().get(cx);
         self.bg.z = self.z;
         let inst = self.bg.draw_quad_rel(cx, Rect{w:ScrollShadow::shadow_size().get(cx),..rect});
+        inst.set_do_scroll(cx, false, false);
         inst.push_float(cx, 0.0);
     }
     
