@@ -1613,7 +1613,6 @@
             req.open(verb, proto+"://"+domain+":"+port+path, true);
             console.log(verb, proto+"://"+domain+":"+port+path, body);
             req.send(body.buffer);
-            req.end();
         }
     }
     

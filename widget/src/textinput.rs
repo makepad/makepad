@@ -30,7 +30,7 @@ impl TextInput {
                 top_padding: 0.,
                 mark_unmatched_parens: false,
                 view_layout: Layout {
-                    walk: Walk {width: Width::Fix(150.), height: Height::Compute, margin: Margin {t: 4., l: 0., r: 0., b: 0.}},
+                    walk: Walk {width: Width::Compute, height: Height::Compute, margin: Margin {t: 4., l: 0., r: 0., b: 0.}},
                     padding: Padding::all(7.),
                     ..Layout::default()
                 },
