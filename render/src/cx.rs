@@ -619,7 +619,7 @@ impl Cx {
 
     pub fn set_key_focus(&mut self, focus_area: Area) {
         self.key_focus = focus_area;
-    }
+    } 
 
     pub fn has_key_focus(&self, focus_area: Area) -> bool {
         self.key_focus == focus_area
