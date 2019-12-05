@@ -15,15 +15,8 @@ impl Cx{
         }
     }
     
-    pub fn end_style(&mut self, style_id:StyleId){
-        if let Some(index) = self.style_map.get(&style_id){
-            if self.style_stack.pop().expect("end_style pop failed") != *index{
-                panic!("end_style does not match style_id");
-            };
-        }
-        else{
-            panic!("end_style does not have the right style_id");
-        }
+    pub fn end_style(&mut self){
+        self.style_stack.pop().expect("end_style pop failed");
     }
     
     pub fn get_mut_style_top(&mut self)->&mut CxStyle{

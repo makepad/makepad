@@ -149,7 +149,7 @@ impl HomePage {
             We aim to make the creative software development process as fun as possible! \
             To do this we will provide a set of visual design tools that modify your \
             application in real time, as well as a library ecosystem that allows you to \
-            write highly performant multimedia applications.\n");
+            write highly performant multimedia applications. Please note the following text input doesn't work on mobile-web yet.\n");
         
         
         self.email_input.draw_text_input(cx);
@@ -171,21 +171,14 @@ impl HomePage {
             ecosystem is MIT licensed, all applications made with the Pro version are \
             entirely free licensed.\n");
         
-        /*t.draw_text(cx, "\
-            the web build of Makepad does not feature any compiler integration. \
-            If you want to be able to compile code, you have to install Makepad locally.\n");
-        */
         t.draw_text(cx, "\
             Today, we launch an early alpha of Makepad Basic. This version shows off \
             the development platform, but does not include the visual design tools or \
             library ecosystem yet. It is intended as a starting point for feedback \
             from you! Although Makepad is primarily a native application, its UI \
-            is perfectly capable of running on the web. If you want to get a taste \
-            of what Makepad looks like, play around with the web version, you are \
-            looking at it right now (try browsing the source code and pressing alt \
-            in a large code file!). To compile code yourself, you have to install \
-            the native version. Right now makepad is set up to run natively, and it \
-            compiles a simple WASM example you run in a browser from a localhost url.\n");
+            is perfectly capable of running on the web. Try browsing the source code and pressing alt \
+            in a large code file!. To compile code yourself, you have to install \
+            the native version. Right now makepad is set up compile a simple WASM example you run in a browser from a localhost url.\n");
         
         t.text_style = Self::text_style_heading().get(cx);
         t.draw_text(cx, "How to use\n");
@@ -197,7 +190,7 @@ impl HomePage {
             \n");
         
         self.example_texts.get_draw(cx).draw_text_input_static(cx,"\
-            open this file the makepad editor UI: main/makepad/examples/webgl_example_wasm/src/main.rs \n\
+            open this file the makepad editor UI: main/makepad/examples/webgl_example_wasm/src/sierpinski.rs \n\
             open this url in your browser: http://127.0.0.1:8000/makepad/examples/webgl_example_wasm/");
         cx.turtle_new_line();
         
@@ -206,10 +199,9 @@ impl HomePage {
         
         t.text_style = Self::text_style_body().get(cx);
         t.draw_text(cx, "\
-            On all platforms first install Rust, follow the instructions here. \
+            On all platforms first install Rust. \
             On windows feel free to ignore the warnings about MSVC, makepad uses the gnu chain. \
-            Copy this url to your favorite browser. I am sorry, i'm too lazy to implement clickable links on 4 platforms right now.\
-            \n");
+            Copy this url to your favorite browser.\n");
 
         self.example_texts.get_draw(cx).draw_text_input_static(cx,"\
             https://www.rust-lang.org/tools/install");
@@ -245,17 +237,19 @@ impl HomePage {
             cargo run -p makepad --release");
         cx.turtle_new_line();
         
-        
-        /*
-        cx.begin_turtle(Layout{
-            walk:Walk::wh(Width::Fix(250.0), Height::Fix(250.)),
-            ..Layout::default()
-        }, Area::Empty);
-        self.editor.code_editor.class = Self::my_code_editor();
-        self.editor.draw_rust_editor(cx, &mut self.text_buffer);
-        cx.end_turtle(Area::Empty);  
-        */
+        t.text_style = Self::text_style_heading().get(cx);
+        t.draw_text(cx, "Troubleshooting\n"); 
+
+        self.example_texts.get_draw(cx).draw_text_input_static(cx,"\
+            Delete old settings unix: rm *.ron\n\
+            Delete old settings windows: del *.ron\n\
+            Make sure you are on master: git checkout master\n\
+            Update rust: rustup update\n\
+            Make sure you have wasm: rustup target add wasm32-unknown-unknown\n\
+            Pull the latest: git pull\n\
+            Still have a problem? Report here: https://github.com/makepad/makepad/issues");
         cx.turtle_new_line();
+
         self.shadow.draw_shadow_top(cx);
         self.view.end_view(cx);
     }

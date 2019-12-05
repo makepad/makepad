@@ -56,7 +56,7 @@ impl TextInput {
                 return df_fill(color);
             }
         })));
-        cx.end_style(Self::style_text_input());
+        cx.end_style();
     }
     
     pub fn handle_text_input(&mut self, cx: &mut Cx, event: &mut Event) -> TextEditorEvent {
@@ -99,7 +99,7 @@ impl TextInput {
             }
         }
         
-        if self.text_editor.begin_text_editor(cx, text_buffer).is_err() {return}
+        if self.text_editor.begin_text_editor(cx, text_buffer).is_err() {return cx.end_style();}
         
         if text_buffer.is_empty() {
             let pos = cx.get_turtle_pos();
@@ -113,6 +113,6 @@ impl TextInput {
         }
         
         self.text_editor.end_text_editor(cx, text_buffer);
-        cx.end_style(Self::style_text_input());
+        cx.end_style();
     }
 }
