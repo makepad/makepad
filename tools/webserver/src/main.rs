@@ -1,5 +1,4 @@
-// this webserver is serving our site. Why? WHYYY. Because it was fun to write.
-// And i don't like figuring out how to do brotli with nginx. This is much more fun. And probably faster.
+// this webserver is serving our site. Why? WHYYY. Because it was fun to write. And MUCH faster and MUCH simpler than anything else imaginable.
 
 use std::net::{TcpListener, TcpStream, SocketAddr, Shutdown};
 use std::collections::HashMap;
