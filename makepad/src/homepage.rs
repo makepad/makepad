@@ -4,8 +4,23 @@ use widget::*;
 #[derive(Clone)]
 pub struct HomePage {
     pub view: ScrollView,
+    pub shadow: ScrollShadow,
     pub text: Text,
-    pub example_texts: ElementsCounted<TextInput>
+    pub email_input: TextInput,
+    pub email_state: EmailState,
+    pub email_signal: Signal,
+    pub example_texts: ElementsCounted<TextInput>,
+    pub send_mail_button: NormalButton,
+}
+
+#[derive(Clone)]
+pub enum EmailState {
+    Empty,
+    Invalid,
+    Valid,
+    Sending,
+    ErrorSending,
+    OkSending
 }
 
 impl HomePage {
@@ -13,47 +28,54 @@ impl HomePage {
         Self {
             view: ScrollView::proto(cx),
             text: Text::proto(cx),
-            example_texts: ElementsCounted::new(  
-                TextInput::proto(cx, TextInputOptions{
-                    multiline:true,
-                    read_only:false,
-                    empty_message: "Enter email".to_string()
+            shadow: ScrollShadow::proto(cx),
+            send_mail_button: NormalButton::proto(cx),
+            email_signal: cx.new_signal(),
+            email_input: TextInput::proto(cx, TextInputOptions {
+                multiline: false,
+                read_only: false,
+                empty_message: "Enter email".to_string()
+            }),
+            email_state: EmailState::Empty,
+            example_texts: ElementsCounted::new(
+                TextInput::proto(cx, TextInputOptions {
+                    multiline: true,
+                    read_only: true,
+                    empty_message: "".to_string()
                 })
             ),
         }
     }
     
-    pub fn color_heading() -> ColorId {uid!()}
-    pub fn color_body() -> ColorId {uid!()}
+    pub fn text_color() -> ColorId {uid!()}
     pub fn layout_main() -> LayoutId {uid!()}
     pub fn text_style_heading() -> TextStyleId {uid!()}
     pub fn text_style_body() -> TextStyleId {uid!()}
     pub fn text_style_point() -> TextStyleId {uid!()}
     pub fn walk_paragraph() -> WalkId {uid!()}
     
-    pub fn style(cx: &mut Cx, opt:&StyleOptions) {
-        //TextEditor::color_bg().set_class(cx, Self::my_mail_input(), color("#4"));
-        //CodeEditor::color_gutter_bg().set_class(cx, Self::my_code_editor(), color("#4"));
+    pub fn style(cx: &mut Cx, opt: &StyleOptions) {
         
         Self::text_style_heading().set(cx, TextStyle {
             font_size: 28.0 * opt.scale,
             line_spacing: 2.0,
             ..Theme::text_style_normal().get(cx)
         });
+        
         Self::text_style_body().set(cx, TextStyle {
             font_size: 10.0 * opt.scale,
             height_factor: 2.0,
             line_spacing: 3.0,
             ..Theme::text_style_normal().get(cx)
         });
+        
         Self::text_style_point().set(cx, TextStyle {
             font_size: 8.0 * opt.scale,
             line_spacing: 2.5,
             ..Theme::text_style_normal().get(cx)
         });
         
-        Self::color_heading().set(cx, color("#e"));
-        Self::color_body().set(cx, color("#b"));
+        Self::text_color().set(cx, color("#b"));
         Self::layout_main().set(cx, Layout {
             padding: Padding {l: 10., t: 10., r: 10., b: 10.},
             new_line_padding: 15.,
@@ -63,52 +85,172 @@ impl HomePage {
     }
     
     pub fn handle_home_page(&mut self, cx: &mut Cx, event: &mut Event) {
-        for example in self.example_texts.iter() {
-            example.handle_plain_text(cx, event);
+        if let Event::Signal(sig) = event {
+            if self.email_signal.is_signal(sig) {
+                match sig.value {
+                    HTTP_SEND_OK => {
+                        self.email_state = EmailState::OkSending;
+                    },
+                    HTTP_SEND_FAIL => {
+                        self.email_state = EmailState::ErrorSending;
+                    },
+                    _ => ()
+                }
+                self.view.redraw_view_area(cx);
+            }
         }
+        if let TextEditorEvent::Change = self.email_input.handle_text_input(cx, event) {
+            let email = self.email_input.get_value();
+            
+            if email.len()> 0 && !email.find("@").is_some() {
+                self.email_state = EmailState::Invalid
+            }
+            else if email.len()>0 {
+                self.email_state = EmailState::Valid
+            }
+            else {
+                self.email_state = EmailState::Empty
+            }
+            self.view.redraw_view_area(cx);
+        }
+        
+        if let ButtonEvent::Clicked = self.send_mail_button.handle_normal_button(cx, event) {
+            match self.email_state {
+                EmailState::Valid | EmailState::ErrorSending => {
+                    self.email_state = EmailState::Sending;
+                    let email = self.email_input.get_value();
+                    cx.http_send("POST", "/subscribe", "http", "makepad.nl", 80, "text/plain", email.as_bytes(), self.email_signal);
+                    self.view.redraw_view_area(cx);
+                },
+                _ => ()
+            }
+        }
+        
+        for text_input in self.example_texts.iter(){
+            text_input.handle_text_input(cx, event);
+        }
+        
         self.view.handle_scroll_bars(cx, event);
     }
     
     pub fn draw_home_page(&mut self, cx: &mut Cx) {
         if self.view.begin_view(cx, Self::layout_main().get(cx)).is_err() {return};
-        //self.example_texts.template().class = Self::my_mail_input();
-        //self.example_texts.get_draw(cx).draw_plain_text(cx);
         
+        let t = &mut self.text;
+        
+        t.color = Self::text_color().get(cx);
+        
+        t.text_style = Self::text_style_heading().get(cx);
+        t.draw_text(cx, "Introducing Makepad\n");
+        
+        t.text_style = Self::text_style_body().get(cx);
+        t.draw_text(cx, "\
+            Makepad is a creative software development platform built around Rust. \
+            We aim to make the creative software development process as fun as possible! \
+            To do this we will provide a set of visual design tools that modify your \
+            application in real time, as well as a library ecosystem that allows you to \
+            write highly performant multimedia applications. Please note the following text input doesn't work on mobile-web yet.\n");
+        
+        
+        self.email_input.draw_text_input(cx);
+        self.send_mail_button.draw_normal_button(cx, match self.email_state {
+            EmailState::Empty => "Excited about makepad? Sign up for our newsletter here.",
+            EmailState::Invalid => "Email adress invalid",
+            EmailState::Valid => "Click here to subscribe to our newsletter",
+            EmailState::Sending => "Submitting your email adress..",
+            EmailState::ErrorSending => "Could not send your email adress, please retry!",
+            EmailState::OkSending => "Thank you, we'll keep up informed!"
+        });
         cx.turtle_new_line();
         
-        self.text.color = Self::color_heading().get(cx);
-        self.text.text_style = Self::text_style_heading().get(cx);
-        self.text.draw_text(cx, "Introducing Makepad\n");
+        t.draw_text(cx, "\
+            The Makepad development platform and library ecosystem are MIT licensed, \
+            and will be available for free as part of Makepad Basic. In the near future, \
+            we will also introduce Makepad Pro, which will be available as a subscription \
+            model. Makepad Pro will include the visual design tools. Because the library \
+            ecosystem is MIT licensed, all applications made with the Pro version are \
+            entirely free licensed.\n");
         
-        self.text.color = Self::color_body().get(cx);
-        self.text.text_style = Self::text_style_body().get(cx);
-        self.text.draw_text(cx, "Makepad is a creative software development platform built around Rust. We aim to make the creative software development process as fun as possible! To do this we will provide a set of visual design tools that modify your application in real time, as well as a library ecosystem that allows you to write highly performant multimedia applications.\n");
+        t.draw_text(cx, "\
+            Today, we launch an early alpha of Makepad Basic. This version shows off \
+            the development platform, but does not include the visual design tools or \
+            library ecosystem yet. It is intended as a starting point for feedback \
+            from you! Although Makepad is primarily a native application, its UI \
+            is perfectly capable of running on the web. Try browsing the source code and pressing alt \
+            in a large code file!. To compile code yourself, you have to install \
+            the native version. Right now makepad is set up compile a simple WASM example you run in a browser from a localhost url.\n");
         
-        self.text.draw_text(cx, "As we're working towards our first public alpha version, you'll be able to see our final steps towards it here. The alpha version of Makepad Basic will show off the development platform, but does not include the visual design tools or library ecosystem yet.\n");
-        self.text.draw_text(cx, "the web build of Makepad does not feature any compiler integration. If you want to be able to compile code, you have to install Makepad locally.\n");
-        self.text.draw_text(cx, "The Makepad development platform and library ecosystem are MIT licensed, and will be available for free as part of Makepad Basic. In the near future, we will also introduce Makepad Pro, which will be available as a subscription model. Makepad Pro will include the visual design tools. Because the library ecosystem is MIT licensed, all applications made with the Pro version are entirely free licensed.\n");
-        self.text.draw_text(cx, "Features:\n");
-        self.text.text_style = Self::text_style_point().get(cx);
-        self.text.draw_text(cx, "-Compiles natively to Linux, MacOS, and Windows.\n");
-        self.text.draw_text(cx, "-Compiles to WebAssembly for demo purposes (see caveats below).\n");
-        self.text.draw_text(cx, "-Built-in HTTP server with live reload support for WebAssembly development.\n");
-        self.text.draw_text(cx, "-Code editor with live code folding (press alt).\n");
-        self.text.draw_text(cx, "-Log viewer with a virtual viewport, that can handle printlns in an infinite loop.\n");
-        self.text.draw_text(cx, "-Dock panel system / file tree.\n");
-        self.text.draw_text(cx, "-Rust compiler integration, with errors/warning in the IDE.\n");
+        t.text_style = Self::text_style_heading().get(cx);
+        t.draw_text(cx, "How to use\n");
         
+        t.text_style = Self::text_style_body().get(cx);
+        t.draw_text(cx, "\
+            After install (see below) you can open the following file in makepad, and when you change the rust code, \
+            the browser should live reload the wasm application as you type.\
+            \n");
+        
+        self.example_texts.get_draw(cx).draw_text_input_static(cx,"\
+            open this file the makepad editor UI: main/makepad/examples/webgl_example_wasm/src/sierpinski.rs \n\
+            open this url in your browser: http://127.0.0.1:8000/makepad/examples/webgl_example_wasm/");
+        cx.turtle_new_line();
+        
+        t.text_style = Self::text_style_heading().get(cx);
+        t.draw_text(cx, "How to install\n");
+        
+        t.text_style = Self::text_style_body().get(cx);
+        t.draw_text(cx, "\
+            On all platforms first install Rust. \
+            On windows feel free to ignore the warnings about MSVC, makepad uses the gnu chain. \
+            Copy this url to your favorite browser.\n");
 
-        /*
-        cx.begin_turtle(Layout{
-            walk:Walk::wh(Width::Fix(250.0), Height::Fix(250.)),
-            ..Layout::default()
-        }, Area::Empty);
-        self.editor.code_editor.class = Self::my_code_editor();
-        self.editor.draw_rust_editor(cx, &mut self.text_buffer);
-        cx.end_turtle(Area::Empty);  
-        */
+        self.example_texts.get_draw(cx).draw_text_input_static(cx,"\
+            https://www.rust-lang.org/tools/install");
         cx.turtle_new_line();
         
+        t.text_style = Self::text_style_heading().get(cx);
+        t.draw_text(cx, "MacOS\n");
+        
+        self.example_texts.get_draw(cx).draw_text_input_static(cx,"\
+            git clone https://github.com/makepad/makepad\n\
+            cd makepad\n\
+            tools/macos_rustup.sh\n\
+            cargo run -p makepad --release");
+        cx.turtle_new_line();
+
+        t.text_style = Self::text_style_heading().get(cx);
+        t.draw_text(cx, "Windows\n");
+
+        self.example_texts.get_draw(cx).draw_text_input_static(cx,"\
+            Clone this repo using either gitub desktop or commandline: https://github.com/makepad/makepad\n\
+            Open a cmd.exe in the directory you just cloned. Gh desktop makes: Documents\\Github\\makepad\n\
+            tools/windows_rustup.bat\n\
+            cargo run -p makepad --release --target x86_64-pc-windows-gnu");
+        cx.turtle_new_line();
+
+        t.text_style = Self::text_style_heading().get(cx);
+        t.draw_text(cx, "Linux\n");
+
+        self.example_texts.get_draw(cx).draw_text_input_static(cx,"\
+            git clone https://github.com/makepad/makepad\n\
+            cd makepad\n\
+            tools/linux_rustup.sh\n\
+            cargo run -p makepad --release");
+        cx.turtle_new_line();
+        
+        t.text_style = Self::text_style_heading().get(cx);
+        t.draw_text(cx, "Troubleshooting\n"); 
+
+        self.example_texts.get_draw(cx).draw_text_input_static(cx,"\
+            Delete old settings unix: rm *.ron\n\
+            Delete old settings windows: del *.ron\n\
+            Make sure you are on master: git checkout master\n\
+            Update rust: rustup update\n\
+            Make sure you have wasm: rustup target add wasm32-unknown-unknown\n\
+            Pull the latest: git pull\n\
+            Still have a problem? Report here: https://github.com/makepad/makepad/issues");
+        cx.turtle_new_line();
+
+        self.shadow.draw_shadow_top(cx);
         self.view.end_view(cx);
     }
 }

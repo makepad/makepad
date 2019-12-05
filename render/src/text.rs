@@ -27,7 +27,7 @@ impl Default for TextStyle {
             font: Font::default(),
             font_size: 8.0,
             brightness: 1.0,
-            curve: 0.7,
+            curve: 0.6,
             line_spacing: 1.4,
             top_drop: 1.1,
             height_factor: 1.3,
@@ -119,6 +119,10 @@ impl Text {
             let brightness: Self::uniform_brightness();
             let curve: Self::uniform_curve();
             
+            fn get_color()->vec4{
+                return color
+            }
+            
             fn pixel() -> vec4 {
                 let dx = dfdx(vec2(tex_coord1.x * 2048.0, 0.)).x;
                 let dp = 1.0 / 2048.0;
@@ -147,7 +151,8 @@ impl Text {
                 }
                 
                 s = pow(s, curve);
-                return vec4(s * color.rgb * brightness * color.a, s * color.a); // + color("#a");
+                let col = get_color();
+                return vec4(s * col.rgb * brightness * col.a, s * col.a); // + color("#a");
             }
             
             fn vertex() -> vec4 {
@@ -155,12 +160,12 @@ impl Text {
                 let max_pos = vec2(x + w, y - h);
                 
                 clipped = clamp(
-                    mix(min_pos, max_pos, geom) - draw_scroll,
+                    mix(min_pos, max_pos, geom) - draw_scroll.xy,
                     draw_clip.xy,
                     draw_clip.zw
                 );
                 
-                let normalized: vec2 = (clipped - min_pos + draw_scroll) / vec2(w,-h);
+                let normalized: vec2 = (clipped - min_pos + draw_scroll.xy) / vec2(w,-h);
                 //rect = vec4(min_pos.x, min_pos.y, max_pos.x, max_pos.y) - draw_scroll.xyxy;
                 
                 tex_coord1 = mix(
