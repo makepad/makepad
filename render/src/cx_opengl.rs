@@ -417,6 +417,7 @@ impl Cx {
         unsafe {
             let default_screen = glx_sys::XDefaultScreen(opengl_cx.display);
             let root_window = glx_sys::XRootWindow(opengl_cx.display, default_screen);
+            println!("here!");
             glx_sys::glXMakeCurrent(opengl_cx.display, root_window, opengl_cx.context);
         }
         for sh in &mut self.shaders {

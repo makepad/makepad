@@ -149,7 +149,8 @@ impl HomePage {
             We aim to make the creative software development process as fun as possible! \
             To do this we will provide a set of visual design tools that modify your \
             application in real time, as well as a library ecosystem that allows you to \
-            write highly performant multimedia applications. Please note the following text input doesn't work on mobile-web yet.\n");
+            write highly performant multimedia applications. Please note the following text \
+            input doesn't work on mobile-web yet. We also won't email you a confirmation, we are just making a list for now.\n");
         
         
         self.email_input.draw_text_input(cx);
