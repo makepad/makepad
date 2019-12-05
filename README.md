@@ -4,7 +4,7 @@ Makepad is a creative software development platform built around Rust. We aim to
 
 The Makepad development platform and library ecosystem are MIT licensed, and will be available for free as part of Makepad Basic. In the near future, we will also introduce Makepad Pro, which will be available as a subscription model. Makepad Pro will include the visual design tools. Because the library ecosystem is MIT licensed, all applications made with the Pro version are entirely free licensed.
 
-Today, we launch an early alpha of Makepad Basic. This version shows off the development platform, but does not include the visual design tools or library ecosystem yet. It is intended as a starting point for feedback from you! Although Makepad is primarily a native application, its UI is perfectly capable of running on the web. Try browsing the source code and pressing alt in a large code file!. To compile code yourself, you have to install the native version. Right now makepad is set up compile a simple WASM example you run in a browser from a localhost url.
+Today, we launch an early alpha of Makepad Basic. This version shows off the development platform, but does not include the visual design tools or library ecosystem yet. It is intended as a starting point for feedback from you! Although Makepad is primarily a native application, its UI is perfectly capable of running on the web. The web build can be tried here http://makepad.nl Try browsing the source code and pressing alt in a large code file!. To compile code yourself, you have to install the native version. Right now makepad is set up compile a simple WASM example you run in a browser from a localhost url.
 
 # How to use
 
