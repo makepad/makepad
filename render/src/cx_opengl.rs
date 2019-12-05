@@ -18,7 +18,7 @@ impl Cx {
         opengl_cx: &OpenglCx,
         zbias: &mut f32,
         zbias_step: f32
-    ) {
+    ) { 
         
         // tad ugly otherwise the borrow checker locks 'self' and we can't recur
         let draw_calls_len = self.views[view_id].draw_calls_len;
@@ -417,9 +417,7 @@ impl Cx {
         unsafe {
             let default_screen = glx_sys::XDefaultScreen(opengl_cx.display);
             let root_window = glx_sys::XRootWindow(opengl_cx.display, default_screen);
-            println!("FOO 1");
             glx_sys::glXMakeCurrent(opengl_cx.display, root_window, opengl_cx.context);
-            println!("BAR 1");
         }
         for sh in &mut self.shaders {
             let openglsh = Self::opengl_compile_shader(sh, opengl_cx);
