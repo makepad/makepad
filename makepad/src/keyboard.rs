@@ -64,7 +64,7 @@ impl Keyboard {
         }
         let mut update_textbuffers = false;
         for (key_type, btn) in self.buttons.enumerate() {
-            match btn.handle_button(cx, event) {
+            match btn.handle_normal_button(cx, event) {
                 ButtonEvent::Down => {
                     match key_type {
                         KeyType::Control => {
@@ -123,7 +123,7 @@ impl Keyboard {
         for key in keys {
             self.buttons.get_draw(cx, key.clone(), | _cx, templ | {
                 templ.clone()
-            }).draw_button(cx, &key.name());
+            }).draw_normal_button(cx, &key.name());
         }
         
         self.view.end_view(cx);

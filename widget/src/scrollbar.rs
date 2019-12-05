@@ -78,11 +78,11 @@ impl ScrollBar {
         Self::bar_size().set(cx, 12. * opt.scale.powf(0.5));
         
         Self::anim_default().set(cx, Anim::new(Play::Cut {duration: 0.5}, vec![
-            Track::color(Quad::instance_color(), Ease::Lin, vec![(1.0, Theme::color_scrollbar_over().get(cx))])
+            Track::color(Quad::instance_color(), Ease::Lin, vec![(1.0, Theme::color_scrollbar_base().get(cx))])
         ]));
         
         Self::anim_over().set(cx, Anim::new(Play::Cut {duration: 0.05}, vec![
-            Track::color(Quad::instance_color(), Ease::Lin, vec![(1.0, Theme::color_scrollbar_base().get(cx))])
+            Track::color(Quad::instance_color(), Ease::Lin, vec![(1.0, Theme::color_scrollbar_over().get(cx))])
         ]));
         
         Self::anim_down().set(cx, Anim::new(Play::Cut {duration: 0.05}, vec![

@@ -7,6 +7,7 @@ use crate::widgetstyle::*;
 pub struct TextInput {
     pub text_editor: TextEditor,
     pub text_buffer: TextBuffer,
+    pub empty_message: String,
 }
 
 pub struct TextInputOptions {
@@ -22,7 +23,6 @@ impl TextInput {
             text_editor: TextEditor {
                 read_only: opt.read_only,
                 multiline: opt.multiline,
-                empty_message: opt.empty_message,
                 draw_line_numbers: false,
                 draw_cursor_row: false,
                 highlight_area_on: false,
@@ -30,28 +30,36 @@ impl TextInput {
                 top_padding: 0.,
                 mark_unmatched_parens: false,
                 view_layout: Layout {
-                    walk: Walk::wh(Width::Fix(150.), Height::Compute),
-                    padding: Padding::all(10.),
+                    walk: Walk {width: Width::Compute, height: Height::Compute, margin: Margin {t: 4., l: 0., r: 0., b: 0.}},
+                    padding: Padding::all(7.),
                     ..Layout::default()
                 },
                 folding_depth: 3,
                 ..TextEditor::proto(cx)
             },
+            empty_message: opt.empty_message,
             text_buffer: TextBuffer::from_utf8(""),
         }
     }
     
-    pub fn text_input_style()->StyleId{uid!()}
+    pub fn style_text_input() -> StyleId {uid!()}
     
     pub fn style(cx: &mut Cx, _opt: &StyleOptions) {
-        cx.begin_style(Self::text_input_style());
+        cx.begin_style(Self::style_text_input());
         TextEditor::color_bg().set(cx, Theme::color_bg_normal().get(cx));
         TextEditor::gutter_width().set(cx, 0.);
         TextEditor::padding_top().set(cx, 0.);
-        cx.end_style(Self::text_input_style());
+        TextEditor::shader_bg().set(cx, Quad::def_quad_shader().compose(shader_ast!({
+            fn pixel() -> vec4 {
+                df_viewport(pos * vec2(w, h));
+                df_box(0., 0., w, h, 2.5);
+                return df_fill(color);
+            }
+        })));
+        cx.end_style();
     }
     
-    pub fn handle_plain_text(&mut self, cx: &mut Cx, event: &mut Event) -> TextEditorEvent {
+    pub fn handle_text_input(&mut self, cx: &mut Cx, event: &mut Event) -> TextEditorEvent {
         let text_buffer = &mut self.text_buffer;
         let ce = self.text_editor.handle_text_editor(cx, event, text_buffer);
         ce
@@ -67,14 +75,14 @@ impl TextInput {
         self.text_buffer.get_as_string()
     }
     
-    pub fn draw_plain_text_static(&mut self, cx: &mut Cx, text: &str) {
+    pub fn draw_text_input_static(&mut self, cx: &mut Cx, text: &str) {
         let text_buffer = &mut self.text_buffer;
         text_buffer.load_from_utf8(text);
-        self.draw_plain_text(cx);
+        self.draw_text_input(cx);
     }
     
-    pub fn draw_plain_text(&mut self, cx: &mut Cx) {
-        cx.begin_style(Self::text_input_style());
+    pub fn draw_text_input(&mut self, cx: &mut Cx) {
+        cx.begin_style(Self::style_text_input());
         let text_buffer = &mut self.text_buffer;
         if text_buffer.needs_token_chunks() && text_buffer.lines.len() >0 {
             
@@ -91,13 +99,20 @@ impl TextInput {
             }
         }
         
-        if self.text_editor.begin_text_editor(cx, text_buffer).is_err() {return}
+        if self.text_editor.begin_text_editor(cx, text_buffer).is_err() {return cx.end_style();}
+        
+        if text_buffer.is_empty() {
+            let pos = cx.get_turtle_pos();
+            self.text_editor.text.color = color("#666");
+            self.text_editor.text.draw_text(cx, &self.empty_message);
+            cx.set_turtle_pos(pos);
+        }
         
         for (index, token_chunk) in text_buffer.token_chunks.iter_mut().enumerate() {
             self.text_editor.draw_chunk(cx, index, &text_buffer.flat_text, token_chunk, &text_buffer.messages.cursors);
         }
         
         self.text_editor.end_text_editor(cx, text_buffer);
-        cx.end_style(Self::text_input_style());
+        cx.end_style();
     }
 }

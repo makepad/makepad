@@ -328,7 +328,7 @@ impl TextCursorSet {
         let mut offset = text_buffer.text_pos_to_offset(TextPos {row: top, col: 0});
         for row in top..(bottom + 1) {
             let line = &text_buffer.lines[row];
-            if left <= line.len() {
+            if left < line.len() {
                 if start_pos.col < end_pos.col {
                     self.set.push(TextCursor {
                         tail: offset + left,

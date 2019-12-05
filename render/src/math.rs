@@ -77,6 +77,16 @@ pub struct Color{
     pub a: f32
 }
 
+pub fn mix(a:Color, b:Color, f:f32)->Color{
+    let nf = 1.0 - f;
+    return Color{
+        r: nf * a.r + f * b.r,
+        g: nf * a.g + f * b.g,
+        b: nf * a.b + f * b.b,
+        a: nf * a.a + f * b.a,
+    }
+}
+
 /*
 pub fn vec4(x:f32, y:f32, z:f32, w:f32)->Vec4{
     Vec4{x:x, y:y, z:z, w:w}
