@@ -1,7 +1,8 @@
 use crate::cx::*;
 use crate::cx_xlib::*;
 use makepad_glx_sys as glx_sys;
-use std::ffi::{CStr, CString, c_void};
+use std::ffi::{CStr, CString};
+use std::os::raw::{c_ulong, c_void};
 use std::ptr;
 use std::mem;
 
@@ -415,10 +416,7 @@ impl Cx {
     
     pub fn opengl_compile_all_shaders(&mut self, opengl_cx: &OpenglCx) {
         unsafe {
-            let default_screen = glx_sys::XDefaultScreen(opengl_cx.display);
-            let root_window = glx_sys::XRootWindow(opengl_cx.display, default_screen);
-            println!("here!");
-            glx_sys::glXMakeCurrent(opengl_cx.display, root_window, opengl_cx.context);
+            glx_sys::glXMakeCurrent(opengl_cx.display, opengl_cx.hidden_window, opengl_cx.context);
         }
         for sh in &mut self.shaders {
             let openglsh = Self::opengl_compile_shader(sh, opengl_cx);
@@ -640,13 +638,13 @@ pub struct OpenglCx {
     pub display: *mut glx_sys::Display,
     pub context: glx_sys::GLXContext,
     pub visual_info: glx_sys::XVisualInfo,
+    pub hidden_window: glx_sys::Window,
 }
 
 impl OpenglCx {
     pub fn new(display: *mut X11_sys::Display) -> OpenglCx {
         unsafe {
             let display = display as *mut glx_sys::Display;
-            let screen = glx_sys::XDefaultScreen(display);
 
             // Query GLX version.
             let mut major = 0;
@@ -663,6 +661,8 @@ impl OpenglCx {
                 major,
                 minor,
             );
+            
+            let screen = glx_sys::XDefaultScreen(display);
 
             // Query extensions string
             let supported_extensions = glx_sys::glXQueryExtensionsString(display, screen);
@@ -757,10 +757,45 @@ impl OpenglCx {
             let visual_info = *visual_info_ptr;
             glx_sys::XFree(visual_info_ptr as *mut c_void);
 
+            let root_window = glx_sys::XRootWindow(display, screen);
+
+            // Create hidden window compatible with visual
+            //
+            // We need a hidden window because we sometimes want to create OpenGL resources, such as
+            // shaders, when Makepad does not have any windows open. In cases such as these, we need
+            // *some* window to make the OpenGL context current on.
+            let mut attributes = mem::zeroed::<glx_sys::XSetWindowAttributes>();
+
+            // We need a color map that is compatible with our visual. Otherwise, the call to
+            // XCreateWindow below will fail. 
+            attributes.colormap = glx_sys::XCreateColormap(
+                display,
+                root_window,
+                visual_info.visual,
+                glx_sys::AllocNone as i32
+            );
+            let hidden_window = glx_sys::XCreateWindow(
+                display,
+                root_window,
+                0,
+                0,
+                16,
+                16,
+                0,
+                visual_info.depth,
+                glx_sys::InputOutput as u32,
+                visual_info.visual,
+                glx_sys::CWColormap as c_ulong,
+                &mut attributes,
+            );
+
+            // To make sure the window stays hidden, we simply never call XMapWindow on it.
+
             OpenglCx {
                 display,
                 context,
                 visual_info,
+                hidden_window,
             }
         }
     }
