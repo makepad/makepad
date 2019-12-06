@@ -79,7 +79,7 @@ impl HomePage {
         Self::layout_main().set(cx, Layout {
             padding: Padding {l: 10., t: 10., r: 10., b: 10.},
             new_line_padding: 15.,
-            line_wrap: LineWrap::MaxSize(800.),
+            line_wrap: LineWrap::MaxSize(550.),
             ..Layout::default()
         });
     }
