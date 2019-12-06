@@ -151,7 +151,7 @@ impl Cx {
                         LineWrap::MaxSize(max_size) => {
                             let new_size = turtle.pos.x + walk.margin.l + w;
                             if new_size > (turtle.origin.x + turtle.width - turtle.layout.padding.r)
-                                || new_size > turtle.origin.x + (turtle.origin.x + max_size - turtle.layout.padding.r) {
+                                || new_size > (turtle.origin.x + max_size - turtle.layout.padding.r) {
                                 // what is the move delta.
                                 let old_x = turtle.pos.x;
                                 let old_y = turtle.pos.y;
