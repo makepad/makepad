@@ -148,6 +148,19 @@ impl Cx {
                                 align_dy = turtle.pos.y - old_y;
                             }
                         },
+                        LineWrap::MaxSize(max_size)=>{
+                            let new_size = turtle.pos.x + walk.margin.l + w;
+                             if new_size > (turtle.origin.x + turtle.width - turtle.layout.padding.r) || new_size > max_size {
+                                // what is the move delta.
+                                let old_x = turtle.pos.x;
+                                let old_y = turtle.pos.y;
+                                turtle.pos.x = turtle.origin.x + turtle.layout.padding.l;
+                                turtle.pos.y += turtle.biggest;
+                                turtle.biggest = 0.0;
+                                align_dx = turtle.pos.x - old_x;
+                                align_dy = turtle.pos.y - old_y;
+                            }
+                        },
                         LineWrap::None => {
                         }
                     }
@@ -169,6 +182,19 @@ impl Cx {
                         LineWrap::NewLine => {
                             if (turtle.pos.y + walk.margin.t + h) >
                             (turtle.origin.y + turtle.height - turtle.layout.padding.b) {
+                                // what is the move delta.
+                                let old_x = turtle.pos.x;
+                                let old_y = turtle.pos.y;
+                                turtle.pos.y = turtle.origin.y + turtle.layout.padding.t;
+                                turtle.pos.x += turtle.biggest;
+                                turtle.biggest = 0.0;
+                                align_dx = turtle.pos.x - old_x;
+                                align_dy = turtle.pos.y - old_y;
+                            }
+                        },
+                        LineWrap::MaxSize(max_size) => {
+                            let new_size= turtle.pos.y + walk.margin.t + h;
+                            if new_size > (turtle.origin.y + turtle.height - turtle.layout.padding.b) || new_size > max_size{
                                 // what is the move delta.
                                 let old_x = turtle.pos.x;
                                 let old_y = turtle.pos.y;
@@ -923,7 +949,8 @@ impl Default for Axis {
 #[derive(Copy, Clone, Debug)]
 pub enum LineWrap {
     None,
-    NewLine
+    NewLine,
+    MaxSize(f32)
 }
 impl Default for LineWrap {
     fn default() -> Self {
