@@ -79,7 +79,7 @@ impl HomePage {
         Self::layout_main().set(cx, Layout {
             padding: Padding {l: 10., t: 10., r: 10., b: 10.},
             new_line_padding: 15.,
-            line_wrap: LineWrap::NewLine,
+            line_wrap: LineWrap::MaxSize(800.),
             ..Layout::default()
         });
     }
@@ -155,12 +155,12 @@ impl HomePage {
         
         self.email_input.draw_text_input(cx);
         self.send_mail_button.draw_normal_button(cx, match self.email_state {
-            EmailState::Empty => "Excited about makepad? Sign up for our newsletter here.",
+            EmailState::Empty => "Sign up for our newsletter here.",
             EmailState::Invalid => "Email adress invalid",
             EmailState::Valid => "Click here to subscribe to our newsletter",
             EmailState::Sending => "Submitting your email adress..",
             EmailState::ErrorSending => "Could not send your email adress, please retry!",
-            EmailState::OkSending => "Thank you, we'll keep up informed!"
+            EmailState::OkSending => "Thank you, we'll keep you informed!"
         });
         cx.turtle_new_line();
         
