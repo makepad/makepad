@@ -267,8 +267,8 @@ impl Cx{
         }
     }
     
-    pub fn post_signal(signal: Signal, value: usize) {
-        XlibApp::post_signal(signal.signal_id, value);
+    pub fn post_signal(signal: Signal, status: StatusId) {
+        XlibApp::post_signal(signal, status);
     }
 
     pub fn update_menu(&mut self, _menu:&Menu){

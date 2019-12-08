@@ -771,10 +771,10 @@ impl XlibApp {
         }
     }
     
-    pub fn post_signal(signal_id: usize, value: usize) {
+    pub fn post_signal(signal:Signal, status:StatusId) {
         unsafe {
             if let Ok(mut signals) = (*GLOBAL_XLIB_APP).signals.lock() {
-                signals.push(Event::Signal(SignalEvent {signal_id, value}));
+                signals.push(Event::Signal(SignalEvent {signal, status}));
                 //let mut f = unsafe { File::from_raw_fd((*GLOBAL_XLIB_APP).display_fd) };
                 //let _ = write!(&mut f, "\0");
                 // !TODO unblock the select!

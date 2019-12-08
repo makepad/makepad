@@ -74,11 +74,11 @@ pub struct CocoaApp {
     pub init_app_after_first_window: bool,
     pub cursors: HashMap<MouseCursor, id>,
     pub current_cursor: MouseCursor,
-    pub cmd_map: Mutex<CocoaCmdMap>
+    pub status_map: Mutex<CocoaStatusMap>
 }
 
 #[derive(Default)]
-pub struct CocoaCmdMap {
+pub struct CocoaStatusMap {
     pub status_to_usize: HashMap<StatusId, usize>,
     pub usize_to_status: HashMap<usize, StatusId>,
     pub command_to_usize: HashMap<CommandId, usize>,
@@ -519,14 +519,14 @@ impl CocoaApp {
             let post_delegate_instance: id = msg_send![cocoa_app.post_delegate_class, new];
             
             // lock it
-            let status_id = if let Ok(mut cmd_map) = cocoa_app.cmd_map.lock() {
-                if let Some(id) = cmd_map.status_to_usize.get(&status) {
+            let status_id = if let Ok(mut status_map) = cocoa_app.status_map.lock() {
+                if let Some(id) = status_map.status_to_usize.get(&status) {
                     *id
                 }
                 else {
-                    let id = cmd_map.status_to_usize.len();
-                    cmd_map.status_to_usize.insert(status, id);
-                    cmd_map.usize_to_status.insert(id, status);
+                    let id = status_map.status_to_usize.len();
+                    status_map.status_to_usize.insert(status, id);
+                    status_map.usize_to_status.insert(id, status);
                     id
                 }
             }
