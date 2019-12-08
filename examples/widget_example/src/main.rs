@@ -35,7 +35,7 @@ use widget::*;
 struct App {
     desktop_window: DesktopWindow,
     menu: Menu,
-    menu_signal: Signal
+    //menu_signal: Signal
 }
 
 main_app!(App);
@@ -43,10 +43,10 @@ main_app!(App);
 impl App {
     pub fn proto(cx: &mut Cx) -> Self {
         set_widget_style(cx, &StyleOptions::default());
-        let menu_signal = cx.new_signal();
+        //let menu_signal = cx.new_signal();
         Self {
             desktop_window: DesktopWindow::proto(cx),
-            menu: Menu::main(vec![
+            menu: Menu::main(vec![])/*
                 Menu::sub("Makepad", "M", vec![
                     Menu::item("Quitter!", "q", false, menu_signal, 0),
                     Menu::line(),
@@ -57,8 +57,8 @@ impl App {
                     Menu::line(),
                     Menu::item("Paste", "v", false, menu_signal, 3),
                 ])
-            ]),
-            menu_signal,
+            ])*/,
+            //menu_signal,
         }
     }
     
@@ -66,9 +66,6 @@ impl App {
         self.desktop_window.handle_desktop_window(cx, event);
         match event {
             Event::Construct => {
-            },
-            Event::Signal(se) => if self.menu_signal.is_signal(se){
-                println!("CLICKED {}", se.value);
             },
             _ => ()
         }
