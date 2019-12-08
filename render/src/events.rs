@@ -504,8 +504,7 @@ impl FileRead {
         self.read_id != 0
     }
     
-    pub fn resolve_utf8<'a>(&mut self, fr: &'a FileReadEvent) -> Option<Result<&'a str,
-    String>> {
+    pub fn resolve_utf8<'a>(&mut self, fr: &'a FileReadEvent) -> Option<Result<&'a str,String>> {
         if fr.read_id == self.read_id {
             self.read_id = 0;
             if let Ok(str_data) = &fr.data {
