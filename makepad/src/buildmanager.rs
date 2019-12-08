@@ -24,12 +24,12 @@ impl BuildManager {
             active_builds: Vec::new(),
         }
     }
+    
+    pub fn status_new_log_item()->StatusId{uid!()}
+    pub fn status_new_artifact()->StatusId{uid!()}
+    pub fn status_cargo_end()->StatusId{uid!()}
+    pub fn status_program_end()->StatusId{uid!()}
 }
-
-const SIGNAL_BUILD_MANAGER_NEW_LOG_ITEM: usize = 0;
-const SIGNAL_BUILD_MANAGER_NEW_ARTIFACT: usize = 1;
-const SIGNAL_BUILD_MANAGER_CARGO_EXEC_END: usize = 2;
-const SIGNAL_BUILD_MANAGER_ARTIFACT_EXEC_END: usize = 3;
 
 #[derive(Clone)]
 pub struct ActiveBuild {
@@ -47,7 +47,7 @@ impl BuildManager {
             //if atb.text_buffer.messages.gc_id != cx.event_id {
                 atb.text_buffer.messages.cursors.truncate(0);
                 atb.text_buffer.messages.bodies.truncate(0);
-                cx.send_signal(atb.text_buffer.signal, SIGNAL_TEXTBUFFER_MESSAGE_UPDATE);
+                cx.send_signal(atb.text_buffer.signal, TextBuffer::status_message_update());
            // }
             //else {
             //    cx.send_signal(atb.text_buffer.signal, SIGNAL_TEXTBUFFER_MESSAGE_UPDATE);
@@ -102,7 +102,7 @@ impl BuildManager {
                     else{ // if not tailing, just throw it away
                         if self.log_items.len() != 700001{
                             self.log_items.push(HubLogItem::Message("------------ Log skipping, press tail to resume -----------".to_string()));
-                            cx.send_signal(self.signal, SIGNAL_BUILD_MANAGER_NEW_LOG_ITEM);
+                            cx.send_signal(self.signal, BuildManager::status_new_log_item());
                         }
                         return
                     }
@@ -162,15 +162,15 @@ impl BuildManager {
                         else {
                             text_buffer.messages.bodies.push(msg);
                         }
-                        cx.send_signal(text_buffer.signal, SIGNAL_TEXTBUFFER_MESSAGE_UPDATE);
+                        cx.send_signal(text_buffer.signal, TextBuffer::status_message_update());
                     }
                 }
-                cx.send_signal(self.signal, SIGNAL_BUILD_MANAGER_NEW_LOG_ITEM);
+                cx.send_signal(self.signal, BuildManager::status_new_log_item());
             },
             
             HubMsg::CargoArtifact {uid, package_id, fresh: _} => if self.is_running_uid(uid) {
                 self.artifacts.push(package_id.clone());
-                cx.send_signal(self.signal, SIGNAL_BUILD_MANAGER_NEW_ARTIFACT);
+                cx.send_signal(self.signal, BuildManager::status_new_artifact());
             },
             HubMsg::BuildFailure {uid} => if self.is_running_uid(uid) {
                 // if we didnt have any errors, check if we need to run
@@ -190,7 +190,7 @@ impl BuildManager {
                 if !self.is_any_cargo_running() && self.exec_when_done {
                     self.run_all_artifacts(storage)
                 }
-                cx.send_signal(self.signal, SIGNAL_BUILD_MANAGER_CARGO_EXEC_END);
+                cx.send_signal(self.signal, BuildManager::status_cargo_end());
             },
             HubMsg::ProgramEnd {uid} => if self.is_running_uid(uid) {
                 // if we didnt have any errors, check if we need to run
@@ -199,7 +199,7 @@ impl BuildManager {
                         ab.run_uid = None;
                     }
                 }
-                cx.send_signal(self.signal, SIGNAL_BUILD_MANAGER_ARTIFACT_EXEC_END);
+                cx.send_signal(self.signal, BuildManager::status_program_end());
             },
             _ => ()
         }

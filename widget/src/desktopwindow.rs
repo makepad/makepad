@@ -24,6 +24,7 @@ pub struct DesktopWindow {
     pub caption: String,
     
     pub window_menu: WindowMenu,
+    pub default_menu: Menu,
     
     pub _last_menu: Option<Menu>,
     
@@ -56,7 +57,11 @@ impl DesktopWindow {
             vr_btn: DesktopButton::proto(cx),
             
             window_menu: WindowMenu::proto(cx),
-            
+            default_menu: Menu::main(vec![
+                Menu::sub("App", vec![
+                    Menu::item("Quit App",  Cx::command_quit()),
+                ]),
+            ]),
             caption_text: Text::proto(cx),
             //caption_bg_color: Color_bg_selected_over::id(cx),
             caption_bg: Quad::proto(cx),
@@ -205,6 +210,9 @@ impl DesktopWindow {
                 PlatformType::OSX => { // mac still uses the built in buttons, TODO, replace that.
                     if let Some(menu) = menu {
                         cx.update_menu(menu);
+                    }
+                    else{
+                        cx.update_menu(&self.default_menu);
                     }
                     let bg_inst = self.caption_bg.begin_quad(cx, Layout {
                         align: Align::center(),

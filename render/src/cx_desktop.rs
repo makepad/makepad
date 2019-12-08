@@ -276,11 +276,11 @@ impl Cx {
                 if let Ok(mut stream) = stream {
                     if !write_bytes_to_tcp_stream(&mut stream, header.as_bytes())
                         && !write_bytes_to_tcp_stream(&mut stream, &data) {
-                        Cx::post_signal(signal, HTTP_SEND_OK);
+                        Cx::post_signal(signal, Cx::status_http_send_ok());
                         return
                     }
                 }
-                Cx::post_signal(signal, HTTP_SEND_FAIL);
+                Cx::post_signal(signal, Cx::status_http_send_fail());
             })
         };
     }
