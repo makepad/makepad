@@ -757,8 +757,6 @@ impl Cx {
     pub fn status_http_send_ok()->StatusId{uid!()}
     pub fn status_http_send_fail()->StatusId{uid!()}
 
-    pub fn command_quit()->CommandId{uid!()}
-
     /*
     pub fn debug_draw_tree_recur(&mut self, draw_list_id: usize, depth:usize){
         if draw_list_id >= self.draw_lists.len(){
