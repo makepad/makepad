@@ -125,6 +125,9 @@ impl AppStorage {
         }
     }
     
+    pub fn status_new_message()->StatusId{uid!()}
+    pub fn status_settings_changed()->StatusId{uid!()}
+     
     pub fn init(&mut self, cx: &mut Cx) {
         if cx.platform_type.is_desktop() {
             
@@ -137,7 +140,7 @@ impl AppStorage {
             let hub_ui = HubUI::start_hub_ui_direct(&mut hub_router, {
                 let signal = self.hub_ui_message.clone();
                 move || {
-                    Cx::post_signal(signal, 0);
+                    Cx::post_signal(signal, Self::status_new_message());
                 }
             });
             
@@ -157,7 +160,7 @@ impl AppStorage {
                 self.settings_old = self.settings.clone();
                 self.settings = settings;
                 self.settings.style_options.scale = self.settings.style_options.scale.min(3.0).max(0.3);
-                cx.send_signal(self.settings_changed, 0);
+                cx.send_signal(self.settings_changed, Self::status_settings_changed());
                 
                 // so now, here we restart our hub_server if need be.
                 if cx.platform_type.is_desktop() {

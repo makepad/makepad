@@ -54,7 +54,7 @@ impl Keyboard {
             atb.text_buffer.keyboard.modifiers = self.modifiers.clone();
             atb.text_buffer.keyboard.key_down = self.key_down.clone();
             atb.text_buffer.keyboard.key_up = self.key_up.clone();
-            cx.send_signal(atb.text_buffer.signal, SIGNAL_TEXTBUFFER_KEYBOARD_UPDATE);
+            cx.send_signal(atb.text_buffer.signal, TextBuffer::status_keyboard_update());
         }
     }
     
