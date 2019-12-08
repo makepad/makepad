@@ -147,16 +147,26 @@ pub struct Cx {
     pub frame_callbacks: Vec<Area>,
     pub _frame_callbacks: Vec<Area>,
 
-    pub signals: Vec<(Signal, usize)>,
+    pub signals: Vec<(Signal, StatusId)>,
+
     pub style_base: CxStyle,
     pub styles: Vec<CxStyle>,
     pub style_map: HashMap<StyleId, usize>,
     pub style_stack: Vec<usize>,
+
+    pub command_settings: HashMap<CommandId, CxCommandSetting>,
     
     pub panic_now: bool,
     pub panic_redraw: bool,
     
     pub platform: CxPlatform,
+}
+
+#[derive(Clone, Copy, Default)]
+pub struct CxCommandSetting{
+    pub shift: bool,
+    pub key_code: KeyCode,
+    pub enabled: bool
 }
 
 #[derive(Default)]
@@ -260,13 +270,14 @@ impl Default for Cx {
             style_map: HashMap::new(),
             style_stack: Vec::new(),
 
+            command_settings: HashMap::new(),
+
             playing_anim_areas: Vec::new(),
             ended_anim_areas: Vec::new(),
 
             frame_callbacks: Vec::new(),
             _frame_callbacks: Vec::new(),
 
-            //custom_before_draw:Vec::new(),
             signals: Vec::new(),
 
             panic_now: false,
@@ -275,7 +286,7 @@ impl Default for Cx {
             platform: CxPlatform {..Default::default()},
         }
     }
-}
+} 
 
 
 impl Cx {
@@ -715,9 +726,9 @@ impl Cx {
         return Signal {signal_id: self.signal_id}
     }
 
-    pub fn send_signal(&mut self, signal: Signal, message: usize) {
-        if signal.signal_id != 0 && self.signals.iter().find(|v| v.0 == signal && v.1 == message).is_none(){
-            self.signals.push((signal, message));
+    pub fn send_signal(&mut self, signal: Signal, status: StatusId) {
+        if signal.signal_id != 0 && self.signals.iter().find(|v| v.0 == signal && v.1 == status).is_none(){
+            self.signals.push((signal, status));
         }
     }
 
@@ -730,10 +741,10 @@ impl Cx {
             let mut signals = Vec::new();
             std::mem::swap(&mut self.signals, &mut signals);
 
-            for (signal, value) in signals {
+            for (signal, status) in signals {
                 self.call_event_handler(&mut event_handler, &mut Event::Signal(SignalEvent {
-                    signal_id: signal.signal_id,
-                    value: value
+                    signal: signal,
+                    status: status
                 }));
             }
             if counter > 100 {
@@ -742,6 +753,11 @@ impl Cx {
             }
         }
     }
+
+    pub fn status_http_send_ok()->StatusId{uid!()}
+    pub fn status_http_send_fail()->StatusId{uid!()}
+
+    pub fn command_quit()->CommandId{uid!()}
 
     /*
     pub fn debug_draw_tree_recur(&mut self, draw_list_id: usize, depth:usize){
@@ -863,6 +879,3 @@ macro_rules!main_app {
         }
     };
 }
-
-pub const HTTP_SEND_OK: usize = 1;
-pub const HTTP_SEND_FAIL: usize = 2;
