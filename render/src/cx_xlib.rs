@@ -1396,7 +1396,7 @@ impl XlibWindow {
             let display = (*self.xlib_app).display;
             let resource_string = X11_sys::XResourceManagerString(display);
             if resource_string == std::ptr::null_mut(){
-                return 2.0
+                return 1.0
             }
             let db = X11_sys::XrmGetStringDatabase(resource_string);
             let mut ty = mem::MaybeUninit::uninit();
@@ -1411,7 +1411,7 @@ impl XlibWindow {
             //let ty = ty.assume_init();
             let value = value.assume_init();
             if value.addr == std::ptr::null_mut() {
-                return 2.0; // TODO find some other way to figure it out
+                return 1.0; // TODO find some other way to figure it out
             }
             else {
                 let dpi: f32 = CStr::from_ptr(value.addr).to_str().unwrap().parse().unwrap();
