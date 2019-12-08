@@ -1395,6 +1395,9 @@ impl XlibWindow {
             //return 2.0;
             let display = (*self.xlib_app).display;
             let resource_string = X11_sys::XResourceManagerString(display);
+            if resource_string == std::ptr::null_mut(){
+                return 2.0
+            }
             let db = X11_sys::XrmGetStringDatabase(resource_string);
             let mut ty = mem::MaybeUninit::uninit();
             let mut value = mem::MaybeUninit::uninit();

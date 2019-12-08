@@ -30,24 +30,14 @@ impl App {
     pub fn command_close_editor()->CommandId{uid!()}
     pub fn command_remove_folder_from_builder()->CommandId{uid!()}
     pub fn command_close_window()->CommandId{uid!()}
-    pub fn command_undo()->CommandId{uid!()}
-    pub fn command_redo()->CommandId{uid!()}
-    pub fn command_cut()->CommandId{uid!()}
-    pub fn command_copy()->CommandId{uid!()}
-    pub fn command_paste()->CommandId{uid!()}
     pub fn command_find()->CommandId{uid!()}
     pub fn command_replace()->CommandId{uid!()}
     pub fn command_find_in_files()->CommandId{uid!()}
     pub fn command_replace_in_files()->CommandId{uid!()}
     pub fn command_toggle_line_comment()->CommandId{uid!()}
     pub fn command_toggle_block_comment()->CommandId{uid!()}
-    pub fn command_select_all()->CommandId{uid!()}
-    pub fn command_zoom_in()->CommandId{uid!()}
-    pub fn command_zoom_out()->CommandId{uid!()}
     pub fn command_start_program()->CommandId{uid!()}
     pub fn command_stop_program()->CommandId{uid!()}
-    pub fn command_minimize()->CommandId{uid!()}
-    pub fn command_zoom()->CommandId{uid!()}
     pub fn command_bring_all_to_front()->CommandId{uid!()}
 
     pub fn proto(cx: &mut Cx) -> Self {
@@ -57,23 +47,14 @@ impl App {
         let ms = cx.new_signal();
         
         // set up the keyboard map
-        
         Self::command_preferences().set_key(cx, KeyCode::Comma);
-        Cx::command_quit().set_key(cx, KeyCode::KeyQ);
         Self::command_new_file().set_key(cx, KeyCode::KeyN);
         Self::command_new_window().set_key(cx, KeyCode::KeyN).set_shift(cx, true);
         Self::command_save_as().set_key(cx, KeyCode::KeyS).set_shift(cx, true);
         Self::command_close_editor().set_key(cx, KeyCode::KeyW);
         Self::command_close_window().set_key(cx, KeyCode::KeyW).set_shift(cx, true);
-        Self::command_undo().set_key(cx, KeyCode::KeyZ);
-        Self::command_redo().set_key(cx, KeyCode::KeyZ).set_shift(cx, true);
-        Self::command_cut().set_key(cx, KeyCode::KeyX);
-        Self::command_copy().set_key(cx, KeyCode::KeyC);
-        Self::command_paste().set_key(cx, KeyCode::KeyV);
-        Self::command_select_all().set_key(cx, KeyCode::KeyA);
-        Self::command_zoom_out().set_key(cx, KeyCode::Minus);
-        Self::command_zoom_in().set_key(cx, KeyCode::Equals);
-        Self::command_minimize().set_key(cx, KeyCode::KeyM);
+
+        cx.command_default_keymap();
         
         Self {
             menu: Menu::main(vec![
@@ -99,12 +80,12 @@ impl App {
                     Menu::item("Close Window", Self::command_close_window()),
                 ]),
                 Menu::sub("Edit", vec![
-                    Menu::item("Undo", Self::command_undo()),
-                    Menu::item("Redo", Self::command_redo()),
+                    Menu::item("Undo", Cx::command_undo()),
+                    Menu::item("Redo", Cx::command_redo()),
                     Menu::line(),
-                    Menu::item("Cut", Self::command_cut()),
-                    Menu::item("Copy", Self::command_copy()),
-                    Menu::item("Paste", Self::command_paste()),
+                    Menu::item("Cut", Cx::command_cut()),
+                    Menu::item("Copy", Cx::command_copy()),
+                    Menu::item("Paste", Cx::command_paste()),
                     Menu::line(),
                     Menu::item("Find", Self::command_find()),
                     Menu::item("Replace",Self::command_replace()),
@@ -116,19 +97,19 @@ impl App {
                     Menu::item("Toggle Block Comment", Self::command_toggle_block_comment()),
                 ]),
                 Menu::sub("Selection", vec![
-                    Menu::item("Select All", Self::command_select_all()),
+                    Menu::item("Select All", Cx::command_select_all()),
                 ]),
                 Menu::sub("View", vec![
-                    Menu::item("Zoom In", Self::command_zoom_in()),
-                    Menu::item("Zoom Out", Self::command_zoom_out()),
+                    Menu::item("Zoom In", Cx::command_zoom_in()),
+                    Menu::item("Zoom Out", Cx::command_zoom_out()),
                 ]),
                 Menu::sub("Run", vec![
                     Menu::item("Start Program", Self::command_start_program()),
                     Menu::item("Stop Program", Self::command_stop_program()),
                 ]),
                 Menu::sub("Window", vec![
-                    Menu::item("Minimize", Self::command_minimize()),
-                    Menu::item("Zoom", Self::command_zoom()),
+                    Menu::item("Minimize", Cx::command_minimize()),
+                    Menu::item("Zoom", Cx::command_zoom()),
                     Menu::line(),
                     Menu::item("Bring All to Front", Self::command_bring_all_to_front()),
                 ]),
