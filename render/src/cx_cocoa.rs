@@ -126,7 +126,7 @@ impl CocoaApp {
                 event_recur_block: false,
                 event_loop_running: true,
                 cursors: HashMap::new(),
-                cmd_map: Mutex::new(CocoaCmdMap::default()),
+                status_map: Mutex::new(CocoaStatusMap::default()),
                 current_cursor: MouseCursor::Default,
             }
         }
@@ -138,7 +138,7 @@ impl CocoaApp {
             delegate: id,
             menu_target_class: *const Class,
             menu: &Menu,
-            cmd_map: &Mutex<CocoaCmdMap>,
+            status_map: &Mutex<CocoaStatusMap>,
             command_settings: &HashMap<CommandId, CxCommandSetting>
         ) {
             match menu {
@@ -149,7 +149,7 @@ impl CocoaApp {
                     let () = msg_send![main_menu, setDelegate: delegate];
                     
                     for item in items {
-                        make_menu(main_menu, delegate, menu_target_class, item, cmd_map, command_settings);
+                        make_menu(main_menu, delegate, menu_target_class, item, status_map, command_settings);
                     }
                     let ns_app = appkit::NSApp();
                     let () = msg_send![
@@ -172,7 +172,7 @@ impl CocoaApp {
                     // connect submenu
                     let () = msg_send![parent_menu, setSubmenu: sub_menu forItem: sub_item];
                     for item in items {
-                        make_menu(sub_menu, delegate, menu_target_class, item, cmd_map, command_settings);
+                        make_menu(sub_menu, delegate, menu_target_class, item, status_map, command_settings);
                     }
                 },
                 Menu::Item {name, command} => {
@@ -192,14 +192,14 @@ impl CocoaApp {
                     let () = msg_send![sub_item, setTarget: target];
                     let () = msg_send![sub_item, setEnabled:if settings.enabled{YES}else{NO}];
                     
-                    let command_usize = if let Ok(mut cmd_map) = cmd_map.lock() {
-                        if let Some(id) = cmd_map.command_to_usize.get(&command) {
+                    let command_usize = if let Ok(mut status_map) = status_map.lock() {
+                        if let Some(id) = status_map.command_to_usize.get(&command) {
                             *id
                         }
                         else {
-                            let id = cmd_map.status_to_usize.len();
-                            cmd_map.command_to_usize.insert(*command, id);
-                            cmd_map.usize_to_command.insert(id, *command);
+                            let id = status_map.status_to_usize.len();
+                            status_map.command_to_usize.insert(*command, id);
+                            status_map.usize_to_command.insert(id, *command);
                             id
                         }
                     }
@@ -219,7 +219,7 @@ impl CocoaApp {
             }
         }
         unsafe {
-            make_menu(nil, self.menu_delegate_instance, self.menu_target_class, menu, &self.cmd_map, command_settings);
+            make_menu(nil, self.menu_delegate_instance, self.menu_target_class, menu, &self.status_map, command_settings);
         }
     }
     
@@ -1373,8 +1373,8 @@ pub fn define_menu_target_class() -> *const Class {
         let ca = get_cocoa_app(this);
         unsafe {
             let command_usize: usize = *this.get_ivar("command_usize");
-            let cmd = if let Ok(cmd_map) = ca.cmd_map.lock() {
-                *cmd_map.usize_to_command.get(&command_usize).expect("")
+            let cmd = if let Ok(status_map) = ca.status_map.lock() {
+                *status_map.usize_to_command.get(&command_usize).expect("")
             }
             else {
                 panic!("Cannot lock cmd_map")
@@ -1424,8 +1424,8 @@ pub fn define_cocoa_post_delegate() -> *const Class {
         unsafe {
             let signal_id: usize = *this.get_ivar("signal_id");
             let status: usize = *this.get_ivar("status");
-            let status = if let Ok(cmd_map) = ca.cmd_map.lock() {
-                *cmd_map.usize_to_status.get(&status).expect("status invalid")
+            let status = if let Ok(status_map) = ca.status_map.lock() {
+                *status_map.usize_to_status.get(&status).expect("status invalid")
             }
             else {
                 panic!("cannot lock cmd_map")
