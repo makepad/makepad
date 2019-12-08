@@ -159,7 +159,7 @@ impl Cx {
                         if self.platform.set_menu{
                             self.platform.set_menu = false;
                             if let Some(menu) = &self.platform.last_menu{
-                                cocoa_app.update_app_menu(menu)
+                                cocoa_app.update_app_menu(menu, &self.command_settings)
                             }
                         }
                         
@@ -269,9 +269,9 @@ impl Cx {
         }
     }
     
-    pub fn post_signal(signal: Signal, value: usize) {
+    pub fn post_signal(signal: Signal, status: StatusId) {
         if signal.signal_id != 0{
-            CocoaApp::post_signal(signal.signal_id, value);
+            CocoaApp::post_signal(signal.signal_id, status);
         }
     }
     

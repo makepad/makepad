@@ -11,6 +11,7 @@ use cocoa::foundation::{NSAutoreleasePool, NSString};
 use objc::runtime::{Class, Object, Protocol, Sel, BOOL, YES, NO};
 use objc::declare::ClassDecl;
 use std::os::raw::c_void;
+use std::sync::{Mutex};
 use objc::*;
 use core_graphics::display::CGDisplay;
 use time::precise_time_ns;
@@ -70,9 +71,20 @@ pub struct CocoaApp {
     pub event_recur_block: bool,
     pub event_loop_running: bool,
     pub loop_block: bool,
+    pub init_app_after_first_window: bool,
     pub cursors: HashMap<MouseCursor, id>,
     pub current_cursor: MouseCursor,
+    pub cmd_map: Mutex<CocoaCmdMap>
 }
+
+#[derive(Default)]
+pub struct CocoaCmdMap {
+    pub status_to_usize: HashMap<StatusId, usize>,
+    pub usize_to_status: HashMap<usize, StatusId>,
+    pub command_to_usize: HashMap<CommandId, usize>,
+    pub usize_to_command: HashMap<usize, CommandId>,
+}
+
 
 impl CocoaApp {
     pub fn new() -> CocoaApp {
@@ -91,6 +103,7 @@ impl CocoaApp {
                     NSString::alloc(nil).init_str("NSMarkedClauseSegment"),
                     NSString::alloc(nil).init_str("NSGlyphInfo")
                 ]),
+                init_app_after_first_window: false,
                 const_empty_string: NSString::alloc(nil).init_str(""),
                 pasteboard: msg_send![class!(NSPasteboard), generalPasteboard],
                 time_start: precise_time_ns(),
@@ -113,13 +126,21 @@ impl CocoaApp {
                 event_recur_block: false,
                 event_loop_running: true,
                 cursors: HashMap::new(),
+                cmd_map: Mutex::new(CocoaCmdMap::default()),
                 current_cursor: MouseCursor::Default,
             }
         }
     }
     
-    pub fn update_app_menu(&mut self, menu: &Menu) {
-        unsafe fn make_menu(parent_menu: id, delegate: id, menu_target_class: *const Class, menu: &Menu) {
+    pub fn update_app_menu(&mut self, menu: &Menu, command_settings: &HashMap<CommandId, CxCommandSetting>, ) {
+        unsafe fn make_menu(
+            parent_menu: id,
+            delegate: id,
+            menu_target_class: *const Class,
+            menu: &Menu,
+            cmd_map: &Mutex<CocoaCmdMap>,
+            command_settings: &HashMap<CommandId, CxCommandSetting>
+        ) {
             match menu {
                 Menu::Main {items} => {
                     let main_menu: id = msg_send![class!(NSMenu), new];
@@ -128,7 +149,7 @@ impl CocoaApp {
                     let () = msg_send![main_menu, setDelegate: delegate];
                     
                     for item in items {
-                        make_menu(main_menu, delegate, menu_target_class, item);
+                        make_menu(main_menu, delegate, menu_target_class, item, cmd_map, command_settings);
                     }
                     let ns_app = appkit::NSApp();
                     let () = msg_send![
@@ -136,7 +157,7 @@ impl CocoaApp {
                         setMainMenu: main_menu
                     ];
                 },
-                Menu::Sub {name, key, items} => {
+                Menu::Sub {name, items} => {
                     let sub_menu: id = msg_send![class!(NSMenu), new];
                     let () = msg_send![sub_menu, setTitle: NSString::alloc(nil).init_str(name)];
                     let () = msg_send![sub_menu, setAutoenablesItems: NO];
@@ -146,27 +167,47 @@ impl CocoaApp {
                         parent_menu,
                         addItemWithTitle: NSString::alloc(nil).init_str(name)
                         action: nil
-                        keyEquivalent: NSString::alloc(nil).init_str(key)
+                        keyEquivalent: NSString::alloc(nil).init_str("")
                     ];
                     // connect submenu
                     let () = msg_send![parent_menu, setSubmenu: sub_menu forItem: sub_item];
                     for item in items {
-                        make_menu(sub_menu, delegate, menu_target_class, item);
+                        make_menu(sub_menu, delegate, menu_target_class, item, cmd_map, command_settings);
                     }
                 },
-                Menu::Item {name, key, signal, value, enabled} => {
+                Menu::Item {name, command} => {
+                    let settings = if let Some(settings) = command_settings.get(command){
+                        *settings
+                    }
+                    else{
+                        CxCommandSetting::default()
+                    };
                     let sub_item: id = msg_send![
                         parent_menu,
                         addItemWithTitle: NSString::alloc(nil).init_str(name)
                         action: sel!(menuAction:)
-                        keyEquivalent: NSString::alloc(nil).init_str(key)
+                        keyEquivalent: NSString::alloc(nil).init_str(keycode_to_menu_key(settings.key_code, settings.shift))
                     ];
                     let target: id = msg_send![menu_target_class, new];
-                    let () = msg_send![sub_item, setTarget:target];
-                    let () = msg_send![sub_item, setEnabled:if *enabled{YES}else{NO}];
+                    let () = msg_send![sub_item, setTarget: target];
+                    let () = msg_send![sub_item, setEnabled:if settings.enabled{YES}else{NO}];
+                    
+                    let command_usize = if let Ok(mut cmd_map) = cmd_map.lock() {
+                        if let Some(id) = cmd_map.command_to_usize.get(&command) {
+                            *id
+                        }
+                        else {
+                            let id = cmd_map.status_to_usize.len();
+                            cmd_map.command_to_usize.insert(*command, id);
+                            cmd_map.usize_to_command.insert(id, *command);
+                            id
+                        }
+                    }
+                    else {
+                        panic!("cannot lock cmd_map");
+                    };
                     (*target).set_ivar("cocoa_app_ptr", GLOBAL_COCOA_APP as *mut _ as *mut c_void);
-                    (*target).set_ivar("signal_id", signal.signal_id);                    
-                    (*target).set_ivar("value", *value);
+                    (*target).set_ivar("command_usize", command_usize);
                 },
                 Menu::Line => {
                     let sep_item: id = msg_send![class!(NSMenuItem), separatorItem];
@@ -178,21 +219,28 @@ impl CocoaApp {
             }
         }
         unsafe {
-            make_menu(nil, self.menu_delegate_instance, self.menu_target_class, menu);
+            make_menu(nil, self.menu_delegate_instance, self.menu_target_class, menu, &self.cmd_map, command_settings);
         }
+    }
+    
+    pub fn init_app_after_first_window(&mut self){
+        if self.init_app_after_first_window{
+            return
+        }
+        self.init_app_after_first_window = true;
+        unsafe{
+            let ns_app = appkit::NSApp();
+            ns_app.setActivationPolicy_(appkit::NSApplicationActivationPolicy::NSApplicationActivationPolicyRegular);
+            ns_app.finishLaunching();
+            let current_app = appkit::NSRunningApplication::currentApplication(nil);
+            current_app.activateWithOptions_(appkit::NSApplicationActivateIgnoringOtherApps);
+        }        
     }
     
     pub fn init(&mut self) {
         unsafe {
             GLOBAL_COCOA_APP = self;
             let ns_app = appkit::NSApp();
-            if ns_app == nil {
-                panic!("App is nil");
-            }
-            ns_app.setActivationPolicy_(appkit::NSApplicationActivationPolicy::NSApplicationActivationPolicyRegular);
-            ns_app.finishLaunching();
-            let current_app = appkit::NSRunningApplication::currentApplication(nil);
-            current_app.activateWithOptions_(appkit::NSApplicationActivateIgnoringOtherApps);
             (*self.timer_delegate_instance).set_ivar("cocoa_app_ptr", self as *mut _ as *mut c_void);
             (*self.menu_delegate_instance).set_ivar("cocoa_app_ptr", self as *mut _ as *mut c_void);
             (*self.app_delegate_instance).set_ivar("cocoa_app_ptr", self as *mut _ as *mut c_void);
@@ -463,16 +511,32 @@ impl CocoaApp {
         }
     }
     
-    pub fn post_signal(signal_id: usize, value: usize) {
+    pub fn post_signal(signal_id: usize, status: StatusId) {
         unsafe {
             let pool = foundation::NSAutoreleasePool::new(cocoa::base::nil);
             
             let cocoa_app = &mut (*GLOBAL_COCOA_APP);
             let post_delegate_instance: id = msg_send![cocoa_app.post_delegate_class, new];
             
+            // lock it
+            let status_id = if let Ok(mut cmd_map) = cocoa_app.cmd_map.lock() {
+                if let Some(id) = cmd_map.status_to_usize.get(&status) {
+                    *id
+                }
+                else {
+                    let id = cmd_map.status_to_usize.len();
+                    cmd_map.status_to_usize.insert(status, id);
+                    cmd_map.usize_to_status.insert(id, status);
+                    id
+                }
+            }
+            else {
+                panic!("Cannot lock cmd_map");
+            };
+            
             (*post_delegate_instance).set_ivar("cocoa_app_ptr", GLOBAL_COCOA_APP as *mut _ as *mut c_void);
             (*post_delegate_instance).set_ivar("signal_id", signal_id);
-            (*post_delegate_instance).set_ivar("value", value);
+            (*post_delegate_instance).set_ivar("status", status_id);
             let nstimer: id = msg_send![
                 class!(NSTimer),
                 timerWithTimeInterval: 0.
@@ -570,15 +634,24 @@ impl CocoaApp {
         }
     }
     
-    pub fn send_signal_event(&mut self, signal_id: usize, value: usize) {
+    pub fn send_signal_event(&mut self, signal: Signal, status: StatusId) {
         self.do_callback(&mut vec![
             Event::Signal(SignalEvent {
-                signal_id: signal_id,
-                value: value
+                signal: signal,
+                status: status
             })
         ]);
         self.do_callback(&mut vec![Event::Paint]);
     }
+    
+    
+    pub fn send_command_event(&mut self, command: CommandId) {
+        self.do_callback(&mut vec![
+            Event::Command(command)
+        ]);
+        self.do_callback(&mut vec![Event::Paint]);
+    }
+    
     
     pub fn send_paint_event(&mut self) {
         self.do_callback(&mut vec![Event::Paint]);
@@ -590,8 +663,6 @@ impl CocoaWindow {
     
     pub fn new(cocoa_app: &mut CocoaApp, window_id: usize) -> CocoaWindow {
         unsafe {
-            
-            
             let autoreleasepool = NSAutoreleasePool::new(nil);
             
             let window: id = msg_send![cocoa_app.window_class, alloc];
@@ -622,6 +693,7 @@ impl CocoaWindow {
     // complete window initialization with pointers to self
     pub fn init(&mut self, title: &str, size: Vec2, position: Option<Vec2>) {
         unsafe {
+            (*self.cocoa_app).init_app_after_first_window();
             self.fingers_down.resize(NUM_FINGERS, false);
             
             let autoreleasepool = NSAutoreleasePool::new(nil);
@@ -677,6 +749,7 @@ impl CocoaWindow {
             let () = msg_send![input_context, invalidateCharacterCoordinates];
             
             let _: () = msg_send![autoreleasepool, drain];
+            
         }
     }
     
@@ -1132,6 +1205,119 @@ fn get_event_keycode(event: id) -> Option<KeyCode> {
     })
 }
 
+fn keycode_to_menu_key(keycode: KeyCode, shift: bool) -> &'static str {
+    if !shift {
+        match keycode {
+            KeyCode::Backtick => "`",
+            KeyCode::Key0 => "0",
+            KeyCode::Key1 => "1",
+            KeyCode::Key2 => "2",
+            KeyCode::Key3 => "3",
+            KeyCode::Key4 => "4",
+            KeyCode::Key5 => "5",
+            KeyCode::Key6 => "6",
+            KeyCode::Key7 => "7",
+            KeyCode::Key8 => "8",
+            KeyCode::Key9 => "9",
+            KeyCode::Minus => "-",
+            KeyCode::Equals => "=",
+            
+            KeyCode::KeyQ => "q",
+            KeyCode::KeyW => "w",
+            KeyCode::KeyE => "e",
+            KeyCode::KeyR => "r",
+            KeyCode::KeyT => "t",
+            KeyCode::KeyY => "y",
+            KeyCode::KeyU => "u",
+            KeyCode::KeyI => "i",
+            KeyCode::KeyO => "o",
+            KeyCode::KeyP => "p",
+            KeyCode::LBracket => "[",
+            KeyCode::RBracket => "]",
+            
+            KeyCode::KeyA => "a",
+            KeyCode::KeyS => "s",
+            KeyCode::KeyD => "d",
+            KeyCode::KeyF => "f",
+            KeyCode::KeyG => "g",
+            KeyCode::KeyH => "h",
+            KeyCode::KeyJ => "j",
+            KeyCode::KeyK => "l",
+            KeyCode::KeyL => "l",
+            KeyCode::Semicolon => ";",
+            KeyCode::Quote => "'",
+            KeyCode::Backslash => "\\",
+            
+            KeyCode::KeyZ => "z",
+            KeyCode::KeyX => "x",
+            KeyCode::KeyC => "c",
+            KeyCode::KeyV => "v",
+            KeyCode::KeyB => "b",
+            KeyCode::KeyN => "n",
+            KeyCode::KeyM => "m",
+            KeyCode::Comma => ",",
+            KeyCode::Period => ".",
+            KeyCode::Slash => "/",
+            _ => ""
+        }
+    }
+    else {
+        match keycode {
+            KeyCode::Backtick => "~",
+            KeyCode::Key0 => "!",
+            KeyCode::Key1 => "@",
+            KeyCode::Key2 => "#",
+            KeyCode::Key3 => "$",
+            KeyCode::Key4 => "%",
+            KeyCode::Key5 => "^",
+            KeyCode::Key6 => "&",
+            KeyCode::Key7 => "*",
+            KeyCode::Key8 => "(",
+            KeyCode::Key9 => ")",
+            KeyCode::Minus => "_",
+            KeyCode::Equals => "+",
+            
+            KeyCode::KeyQ => "Q",
+            KeyCode::KeyW => "W",
+            KeyCode::KeyE => "E",
+            KeyCode::KeyR => "R",
+            KeyCode::KeyT => "T",
+            KeyCode::KeyY => "Y",
+            KeyCode::KeyU => "U",
+            KeyCode::KeyI => "I",
+            KeyCode::KeyO => "O",
+            KeyCode::KeyP => "P",
+            KeyCode::LBracket => "{",
+            KeyCode::RBracket => "}",
+            
+            KeyCode::KeyA => "A",
+            KeyCode::KeyS => "S",
+            KeyCode::KeyD => "D",
+            KeyCode::KeyF => "F",
+            KeyCode::KeyG => "G",
+            KeyCode::KeyH => "H",
+            KeyCode::KeyJ => "J",
+            KeyCode::KeyK => "K",
+            KeyCode::KeyL => "L",
+            KeyCode::Semicolon => ":",
+            KeyCode::Quote => "\"",
+            KeyCode::Backslash => "|",
+            
+            KeyCode::KeyZ => "Z",
+            KeyCode::KeyX => "X",
+            KeyCode::KeyC => "C",
+            KeyCode::KeyV => "V",
+            KeyCode::KeyB => "B",
+            KeyCode::KeyN => "N",
+            KeyCode::KeyM => "M",
+            KeyCode::Comma => "<",
+            KeyCode::Period => ">",
+            KeyCode::Slash => "?",
+            _ => ""
+        }
+    }
+}
+
 fn get_cocoa_window(this: &Object) -> &mut CocoaWindow {
     unsafe {
         let ptr: *mut c_void = *this.get_ivar("cocoa_window_ptr");
@@ -1173,7 +1359,7 @@ pub fn define_cocoa_timer_delegate() -> *const Class {
 }
 
 pub fn define_app_delegate() -> *const Class {
-
+    
     let superclass = class!(NSObject);
     let mut decl = ClassDecl::new("NSAppDelegate", superclass).unwrap();
     decl.add_ivar::<*mut c_void>("cocoa_app_ptr");
@@ -1185,10 +1371,15 @@ pub fn define_menu_target_class() -> *const Class {
     extern fn menu_action(this: &Object, _sel: Sel, _item: id) {
         //println!("markedRange");
         let ca = get_cocoa_app(this);
-        unsafe{
-            let signal_id: usize = *this.get_ivar("signal_id");
-            let value: usize = *this.get_ivar("value");
-            ca.send_signal_event(signal_id, value);
+        unsafe {
+            let command_usize: usize = *this.get_ivar("command_usize");
+            let cmd = if let Ok(cmd_map) = ca.cmd_map.lock() {
+                *cmd_map.usize_to_command.get(&command_usize).expect("")
+            }
+            else {
+                panic!("Cannot lock cmd_map")
+            };
+            ca.send_command_event(cmd);
         }
     }
     
@@ -1198,8 +1389,7 @@ pub fn define_menu_target_class() -> *const Class {
         decl.add_method(sel!(menuAction:), menu_action as extern fn(&Object, Sel, id));
     }
     decl.add_ivar::<*mut c_void>("cocoa_app_ptr");
-    decl.add_ivar::<usize>("signal_id");
-    decl.add_ivar::<usize>("value");
+    decl.add_ivar::<usize>("command_usize");
     return decl.register();
 }
 
@@ -1233,8 +1423,14 @@ pub fn define_cocoa_post_delegate() -> *const Class {
         let ca = get_cocoa_app(this);
         unsafe {
             let signal_id: usize = *this.get_ivar("signal_id");
-            let value: usize = *this.get_ivar("value");
-            ca.send_signal_event(signal_id, value);
+            let status: usize = *this.get_ivar("status");
+            let status = if let Ok(cmd_map) = ca.cmd_map.lock() {
+                *cmd_map.usize_to_status.get(&status).expect("status invalid")
+            }
+            else {
+                panic!("cannot lock cmd_map")
+            };
+            ca.send_signal_event(Signal {signal_id: signal_id}, status);
         }
     }
     
@@ -1248,7 +1444,7 @@ pub fn define_cocoa_post_delegate() -> *const Class {
     // Store internal state as user data
     decl.add_ivar::<*mut c_void>("cocoa_app_ptr");
     decl.add_ivar::<usize>("signal_id");
-    decl.add_ivar::<usize>("value");
+    decl.add_ivar::<usize>("status");
     
     return decl.register();
 }

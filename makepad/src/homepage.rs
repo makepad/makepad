@@ -86,15 +86,12 @@ impl HomePage {
     
     pub fn handle_home_page(&mut self, cx: &mut Cx, event: &mut Event) {
         if let Event::Signal(sig) = event {
-            if self.email_signal.is_signal(sig) {
-                match sig.value {
-                    HTTP_SEND_OK => {
-                        self.email_state = EmailState::OkSending;
-                    },
-                    HTTP_SEND_FAIL => {
-                        self.email_state = EmailState::ErrorSending;
-                    },
-                    _ => ()
+            if sig.signal == self.email_signal {
+                if sig.status == Cx::status_http_send_ok(){
+                    self.email_state = EmailState::OkSending;
+                }
+                else if sig.status == Cx::status_http_send_fail(){
+                    self.email_state = EmailState::ErrorSending;
                 }
                 self.view.redraw_view_area(cx);
             }
@@ -150,7 +147,7 @@ impl HomePage {
             To do this we will provide a set of visual design tools that modify your \
             application in real time, as well as a library ecosystem that allows you to \
             write highly performant multimedia applications. Please note the following text \
-            input doesn't work on mobile-web yet. We also won't email you a confirmation, we are just making a list for now.\n");
+            input doesn't work on mobile-web yet. We also won't email you a confirmation right now, that will follow later.\n");
         
         
         self.email_input.draw_text_input(cx);

@@ -270,7 +270,7 @@ impl LogList {
                 },
                 _ => ()
             },
-            Event::Signal(se) => if bm.signal.is_signal(se) {
+            Event::Signal(se) => if se.signal == bm.signal {
                 // we have new things
                 self.view.redraw_view_area(cx);
                 //println!("SIGNAL!");
@@ -325,7 +325,7 @@ impl LogList {
                     else {
                         text_buffer.messages.jump_to_offset = text_buffer.text_pos_to_offset(TextPos {row: loc_message.row.max(1) - 1, col: loc_message.col.max(1) - 1})
                     }
-                    cx.send_signal(text_buffer.signal, SIGNAL_TEXTBUFFER_JUMP_TO_OFFSET);
+                    cx.send_signal(text_buffer.signal, TextBuffer::status_jump_to_offset());
                     
                     LogListEvent::SelectLocMessage {
                         loc_message: loc_message.clone(),

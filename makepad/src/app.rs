@@ -20,70 +20,120 @@ pub struct App {
 
 impl App {
     
+    pub fn command_about_makepad()->CommandId{uid!()}
+    pub fn command_preferences()->CommandId{uid!()}
+    pub fn command_new_file()->CommandId{uid!()}
+    pub fn command_new_window()->CommandId{uid!()}
+    pub fn command_add_folder_to_builder()->CommandId{uid!()}
+    pub fn command_save_as()->CommandId{uid!()}
+    pub fn command_rename()->CommandId{uid!()}
+    pub fn command_close_editor()->CommandId{uid!()}
+    pub fn command_remove_folder_from_builder()->CommandId{uid!()}
+    pub fn command_close_window()->CommandId{uid!()}
+    pub fn command_undo()->CommandId{uid!()}
+    pub fn command_redo()->CommandId{uid!()}
+    pub fn command_cut()->CommandId{uid!()}
+    pub fn command_copy()->CommandId{uid!()}
+    pub fn command_paste()->CommandId{uid!()}
+    pub fn command_find()->CommandId{uid!()}
+    pub fn command_replace()->CommandId{uid!()}
+    pub fn command_find_in_files()->CommandId{uid!()}
+    pub fn command_replace_in_files()->CommandId{uid!()}
+    pub fn command_toggle_line_comment()->CommandId{uid!()}
+    pub fn command_toggle_block_comment()->CommandId{uid!()}
+    pub fn command_select_all()->CommandId{uid!()}
+    pub fn command_zoom_in()->CommandId{uid!()}
+    pub fn command_zoom_out()->CommandId{uid!()}
+    pub fn command_start_program()->CommandId{uid!()}
+    pub fn command_stop_program()->CommandId{uid!()}
+    pub fn command_minimize()->CommandId{uid!()}
+    pub fn command_zoom()->CommandId{uid!()}
+    pub fn command_bring_all_to_front()->CommandId{uid!()}
+
     pub fn proto(cx: &mut Cx) -> Self {
         let default_opt = StyleOptions {scale: 1.0, dark: true};
         set_widget_style(cx, &default_opt);
         set_makepad_style(cx, &default_opt);
         let ms = cx.new_signal();
+        
+        // set up the keyboard map
+        
+        Self::command_preferences().set_key(cx, KeyCode::Comma);
+        Cx::command_quit().set_key(cx, KeyCode::KeyQ);
+        Self::command_new_file().set_key(cx, KeyCode::KeyN);
+        Self::command_new_window().set_key(cx, KeyCode::KeyN).set_shift(cx, true);
+        Self::command_save_as().set_key(cx, KeyCode::KeyS).set_shift(cx, true);
+        Self::command_close_editor().set_key(cx, KeyCode::KeyW);
+        Self::command_close_window().set_key(cx, KeyCode::KeyW).set_shift(cx, true);
+        Self::command_undo().set_key(cx, KeyCode::KeyZ);
+        Self::command_redo().set_key(cx, KeyCode::KeyZ).set_shift(cx, true);
+        Self::command_cut().set_key(cx, KeyCode::KeyX);
+        Self::command_copy().set_key(cx, KeyCode::KeyC);
+        Self::command_paste().set_key(cx, KeyCode::KeyV);
+        Self::command_select_all().set_key(cx, KeyCode::KeyA);
+        Self::command_zoom_out().set_key(cx, KeyCode::Minus);
+        Self::command_zoom_in().set_key(cx, KeyCode::Equals);
+        Self::command_minimize().set_key(cx, KeyCode::KeyM);
+        
         Self {
             menu: Menu::main(vec![
-                Menu::sub("Makepad", "M", vec![
-                    Menu::item("About Makepad", "", false, ms, 2),
+                Menu::sub("Makepad", vec![
+                    Menu::item("About Makepad",  Self::command_about_makepad()),
                     Menu::line(),
-                    Menu::item("Preferences", ",", false, ms, 2),
+                    Menu::item("Preferences", Self::command_preferences()),
                     Menu::line(),
-                    Menu::item("Quit Makepad", "q", false, ms, 0),
+                    Menu::item("Quit Makepad",  Cx::command_quit()),
                 ]),
-                Menu::sub("File", "f", vec![
-                    Menu::item("New File", "n", true, ms, 2),
-                    Menu::item("New Window", "N", false, ms, 2),
+                Menu::sub("File",  vec![
+                    Menu::item("New File", Self::command_new_file()),
+                    Menu::item("New Window", Self::command_new_window()),
                     Menu::line(),
-                    Menu::item("Add Folder to Workspace", "", false, ms, 2),
+                    Menu::item("Add Folder to Builder", Self::command_add_folder_to_builder()),
                     Menu::line(),
-                    Menu::item("Save As", "S", false, ms, 2),
+                    Menu::item("Save As", Self::command_save_as()),
                     Menu::line(),
-                    Menu::item("Rename", "", false, ms, 2),
+                    Menu::item("Rename", Self::command_rename()),
                     Menu::line(),
-                    Menu::item("Close Editor", "w", false, ms, 2),
-                    Menu::item("Remove Folder from Workspace", "", false, ms, 2),
-                    Menu::item("Close Window", "W", false, ms, 2),
+                    Menu::item("Close Editor",  Self::command_close_editor()),
+                    Menu::item("Remove Folder from Builder", Self::command_remove_folder_from_builder()),
+                    Menu::item("Close Window", Self::command_close_window()),
                 ]),
-                Menu::sub("Edit", "e", vec![
-                    Menu::item("Undo", "z", false, ms, 2),
-                    Menu::item("Redo", "Z", false, ms, 2),
+                Menu::sub("Edit", vec![
+                    Menu::item("Undo", Self::command_undo()),
+                    Menu::item("Redo", Self::command_redo()),
                     Menu::line(),
-                    Menu::item("Cut", "x", false, ms, 2),
-                    Menu::item("Copy", "c", false, ms, 2),
-                    Menu::item("Paste", "v", false, ms, 3),
+                    Menu::item("Cut", Self::command_cut()),
+                    Menu::item("Copy", Self::command_copy()),
+                    Menu::item("Paste", Self::command_paste()),
                     Menu::line(),
-                    Menu::item("Find", "", false, ms, 2),
-                    Menu::item("Replace", "", false, ms, 2),
+                    Menu::item("Find", Self::command_find()),
+                    Menu::item("Replace",Self::command_replace()),
                     Menu::line(),
-                    Menu::item("Find in Files", "", false, ms, 2),
-                    Menu::item("Replace in Files", "", false, ms, 2),
+                    Menu::item("Find in Files", Self::command_find_in_files()),
+                    Menu::item("Replace in Files", Self::command_replace_in_files()),
                     Menu::line(),
-                    Menu::item("Toggle Line Comment", "", false, ms, 3),
-                    Menu::item("Toggle Block Comment", "", false, ms, 3),
+                    Menu::item("Toggle Line Comment", Self::command_toggle_line_comment()),
+                    Menu::item("Toggle Block Comment", Self::command_toggle_block_comment()),
                 ]),
-                Menu::sub("Selection", "s", vec![
-                    Menu::item("Select All", "a", false, ms, 2),
+                Menu::sub("Selection", vec![
+                    Menu::item("Select All", Self::command_select_all()),
                 ]),
-                Menu::sub("View", "v", vec![
-                    Menu::item("Zoom In", "+", false, ms, 2),
-                    Menu::item("Zoom Out", "-", false, ms, 2),
+                Menu::sub("View", vec![
+                    Menu::item("Zoom In", Self::command_zoom_in()),
+                    Menu::item("Zoom Out", Self::command_zoom_out()),
                 ]),
-                Menu::sub("Run", "s", vec![
-                    Menu::item("Start Program", "`", false, ms, 2),
-                    Menu::item("Stop Program", "~", false, ms, 2),
+                Menu::sub("Run", vec![
+                    Menu::item("Start Program", Self::command_start_program()),
+                    Menu::item("Stop Program", Self::command_stop_program()),
                 ]),
-                Menu::sub("Window", "w", vec![
-                    Menu::item("Minimize", "m", false, ms, 2),
-                    Menu::item("Zoom", "", false, ms, 2),
+                Menu::sub("Window", vec![
+                    Menu::item("Minimize", Self::command_minimize()),
+                    Menu::item("Zoom", Self::command_zoom()),
                     Menu::line(),
-                    Menu::item("Bring All to Front", "", false, ms, 2),
+                    Menu::item("Bring All to Front", Self::command_bring_all_to_front()),
                 ]),
-                Menu::sub("Help", "h", vec![
-                    Menu::item("About Makepad", "", false, ms, 2),
+                Menu::sub("Help", vec![
+                    Menu::item("About Makepad", Self::command_about_makepad()),
                 ])
             ]),
             menu_signal: ms,
@@ -208,7 +258,7 @@ impl App {
             Event::Signal(se) => {
                 // process network messages for hub_ui
                 if let Some(hub_ui) = &mut self.storage.hub_ui {
-                    if self.storage.hub_ui_message.is_signal(se) {
+                    if se.signal == self.storage.hub_ui_message {
                         if let Some(mut msgs) = hub_ui.get_messages() {
                             for htc in msgs.drain(..) {
                                 self.storage.handle_hub_msg(cx, &htc, &mut self.windows, &mut self.state);
@@ -218,7 +268,7 @@ impl App {
                         }
                     }
                 }
-                if self.storage.settings_changed.is_signal(se) {
+                if se.signal == self.storage.settings_changed {
                     if self.storage.settings_old.builders != self.storage.settings.builders {
                         self.storage.reload_builders();
                     }

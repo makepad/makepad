@@ -889,7 +889,7 @@ impl TextEditor {
         self.view.redraw_view_area(cx);
         self.reset_cursor_blinker(cx);
         
-        cx.send_signal(text_buffer.signal, SIGNAL_TEXTBUFFER_DATA_UPDATE);
+        cx.send_signal(text_buffer.signal, TextBuffer::status_data_update());
         
     }
     
@@ -934,41 +934,37 @@ impl TextEditor {
                     }
                 }
             },
-            Event::Signal(se) => if text_buffer.signal.is_signal(se) {
-                match se.value {
-                    SIGNAL_TEXTBUFFER_LOADED => {
-                        self.view.redraw_view_area(cx);
-                    },
-                    SIGNAL_TEXTBUFFER_MESSAGE_UPDATE | SIGNAL_TEXTBUFFER_DATA_UPDATE => {
-                        self.view.redraw_view_area(cx);
-                    },
-                    SIGNAL_TEXTBUFFER_JUMP_TO_OFFSET => {
-                        if !text_buffer.is_loaded {
-                            self._jump_to_offset = true;
+            Event::Signal(se) => if text_buffer.signal == se.signal {
+                if se.status == TextBuffer::status_loaded()
+                 || se.status == TextBuffer::status_message_update()
+                  || se.status == TextBuffer::status_data_update(){
+                    self.view.redraw_view_area(cx);
+                }
+                else if se.status == TextBuffer::status_jump_to_offset(){
+                    if !text_buffer.is_loaded {
+                        self._jump_to_offset = true;
+                    }
+                    else {
+                        self.do_jump_to_offset(cx, text_buffer);
+                    }
+                }
+                else if se.status == TextBuffer::status_keyboard_update(){
+                    if let Some(key_down) = &text_buffer.keyboard.key_down {
+                        match key_down {
+                            KeyCode::Alt => {
+                                self.start_code_folding(cx, text_buffer);
+                            },
+                            _ => ()
                         }
-                        else {
-                            self.do_jump_to_offset(cx, text_buffer);
+                    }
+                    if let Some(key_up) = &text_buffer.keyboard.key_up {
+                        match key_up {
+                            KeyCode::Alt => {
+                                self.start_code_unfolding(cx, text_buffer);
+                            },
+                            _ => ()
                         }
-                    },
-                    SIGNAL_TEXTBUFFER_KEYBOARD_UPDATE => {
-                        if let Some(key_down) = &text_buffer.keyboard.key_down {
-                            match key_down {
-                                KeyCode::Alt => {
-                                    self.start_code_folding(cx, text_buffer);
-                                },
-                                _ => ()
-                            }
-                        }
-                        if let Some(key_up) = &text_buffer.keyboard.key_up {
-                            match key_up {
-                                KeyCode::Alt => {
-                                    self.start_code_unfolding(cx, text_buffer);
-                                },
-                                _ => ()
-                            }
-                        }
-                    },
-                    _ => ()
+                    }
                 }
             },
             _ => ()
