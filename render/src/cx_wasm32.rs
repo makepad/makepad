@@ -341,7 +341,11 @@ impl Cx {
                 22 => { //http_send_response
                     let signal_id = to_wasm.mu32();
                     let success = to_wasm.mu32();
-                    self.signals.push((Signal{signal_id: signal_id as usize}, success as usize));
+                    
+                    self.signals.push((Signal{signal_id: signal_id as usize}, match success{
+                        1=>Cx::status_http_send_ok(),
+                        _=>Cx::status_http_send_fail()
+                    }));
                 },
                 _ => {
                     panic!("Message unknown")
@@ -451,7 +455,7 @@ impl Cx {
         //let _=io::stdout().flush();
     }
     
-    pub fn post_signal(_signal: Signal, _value: usize) {
+    pub fn post_signal(_signal: Signal, _value: StatusId) {
         // todo
     }
     
