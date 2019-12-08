@@ -163,6 +163,9 @@ impl HttpServer {
                         let line = &line[4..];
                         
                         let space = line.find(' ').expect("http space fail");
+                        let space = if let Some(q) = line.find('?'){
+                            space.min(q)
+                        }else{space};
                         
                         let mut url = line[0..space].to_string();
                         if url.ends_with("/") {
