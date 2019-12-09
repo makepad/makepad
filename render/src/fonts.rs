@@ -367,7 +367,7 @@ impl CxAfterDraw {
 #[derive(Default)]
 pub struct CxFont {
     pub path: String,
-    pub font_loaded: Option<font::Font>,
+    pub font_loaded: Option<makepad_font::Font>,
     pub atlas_pages: Vec<CxFontAtlasPage>,
 }
 
