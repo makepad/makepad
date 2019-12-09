@@ -1,6 +1,7 @@
 use crate::cx::*;
 use crate::cx_xlib::*;
 use makepad_glx_sys as glx_sys;
+use makepad_x11_sys as X11_sys;
 use std::ffi::{CStr, CString};
 use std::os::raw::{c_ulong, c_void};
 use std::ptr;
