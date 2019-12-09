@@ -2,7 +2,7 @@ use makepad_render::*;
 use crate::filetree::*;
 use crate::loglist::*;
 use crate::homepage::*;
-use widget::*;
+use makepad_widget::*;
 
 pub fn set_makepad_style(cx: &mut Cx, opt:&StyleOptions) {
     HomePage::style(cx, opt);

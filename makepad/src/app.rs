@@ -1,6 +1,6 @@
 //use syn::Type;
 use makepad_render::*;
-use widget::*;
+use makepad_widget::*;
 use crate::appwindow::*;
 use crate::appstorage::*;
 use crate::filetree::*;
