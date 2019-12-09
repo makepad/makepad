@@ -30,31 +30,31 @@ objc_id = "0.1"
 objc = "0.2"
 
 [target.x86_64-unknown-linux-gnu.dependencies]
-makepad-glx-sys = { path = "./bind/glx-sys" }
-makepad-x11-sys = { path = "./bind/x11-sys" }
-libc = "*"
-gl = "*"
+makepad-glx-sys = { path = "./bind/glx-sys", version = "0.1" }
+makepad-x11-sys = { path = "./bind/x11-sys", version = "0.1" }
+libc = "0.2"
+gl = "0.14"
 time = "0.1.4"
 
 [target.armv7-unknown-linux-gnueabihf.dependencies]
-makepad-glx-sys = { path = "./bind/glx-sys" }
-makepad-x11-sys = { path = "./bind/x11-sys" }
-libc = "*"
-gl = "*"
+makepad-glx-sys = { path = "./bind/glx-sys", version = "0.1" }
+makepad-x11-sys = { path = "./bind/x11-sys", version = "0.1" }
+libc = "0.2"
+gl = "0.14"
 time = "0.1.4"
 
 [target.x86_64-pc-windows-gnu.dependencies]
-wio = "*"
+wio = "0.2"
 time = "0.1.4"
 
 [target.x86_64-pc-windows-gnu.dependencies.winapi]
-version = "*"
+version = "0.3"
 features = ["dwmapi", "libloaderapi", "shellscalingapi", "winuser", "winbase", "d3d11", "d3d11sdklayers", "d3dcommon", "d3dcompiler", "dxgi1_2", "dxgiformat", "dxgitype", "winerror"]
 
 [target.x86_64-pc-windows-msvc.dependencies]
-wio = "*"
+wio = "0.2"
 time = "0.1.4"
 
 [target.x86_64-pc-windows-msvc.dependencies.winapi]
-version = "*"
+version = "0.3"
 features = ["dwmapi","libloaderapi", "shellscalingapi", "winuser", "winbase", "d3d11", "d3d11sdklayers", "d3dcommon", "d3dcompiler", "dxgi1_2", "dxgiformat", "dxgitype", "winerror"]
