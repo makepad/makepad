@@ -1,5 +1,5 @@
 use geometry::{LineSegment, Point, Trapezoid};
-use internal_iter::InternalIterator;
+use makepad_internal_iter::InternalIterator;
 use path::{LinePathCommand, LinePathIterator};
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
