@@ -8,5 +8,5 @@ edition = "2018"
 
 [dependencies]
 font = { path = "../font" }
-geometry = { path = "../geometry" }
+makepad-geometry = { path = "../geometry" }
 makepad-internal-iter = { path = "../internal_iter" }

@@ -1,5 +1,5 @@
 use font::{Font, Glyph, HorizontalMetrics, Outline, OutlinePoint};
-use geometry::{
+use makepad_geometry::{
     AffineTransformation, LinearTransformation, Point, Rectangle, Transform, Vector,
 };
 use makepad_internal_iter::ExtendFromInternalIterator;
