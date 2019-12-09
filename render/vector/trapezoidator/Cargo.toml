@@ -9,4 +9,4 @@ edition = "2018"
 [dependencies]
 makepad-geometry = { path = "../geometry" }
 makepad-internal-iter = { path = "../internal_iter" }
-path = { path = "../path" }
+makepad-path = { path = "../path" }

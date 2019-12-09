@@ -1,6 +1,6 @@
 use makepad_geometry::{LineSegment, Point, Trapezoid};
 use makepad_internal_iter::InternalIterator;
-use path::{LinePathCommand, LinePathIterator};
+use makepad_path::{LinePathCommand, LinePathIterator};
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
 use std::mem;
