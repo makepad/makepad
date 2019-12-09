@@ -1,4 +1,4 @@
-use render::*;
+use makepad_render::*;
 use widget::*;
 use hub::*;
 use crate::appstorage::*;
