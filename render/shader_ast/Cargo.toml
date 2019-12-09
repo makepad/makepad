@@ -5,5 +5,5 @@ authors = ["makepaddev"]
 edition = "2018"
 
 [dependencies]
-shader_ast_impl = {path="./shader_ast_impl"}
+makepad-shader-ast-impl = { path = "./shader_ast_impl" }
 proc-macro-hack = "*"
