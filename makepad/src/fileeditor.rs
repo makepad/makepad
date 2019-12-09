@@ -1,6 +1,6 @@
 //use syn::Type;
 use makepad_render::*;
-use widget::*;
+use makepad_widget::*;
 
 #[derive(Clone)]
 pub struct FileEditorTemplates {
