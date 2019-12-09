@@ -13,7 +13,7 @@ makepad-geometry = { path = "./vector/geometry" }
 makepad-internal-iter = { path = "./vector/internal_iter" }
 shader_ast = {path="./shader_ast"}
 serde = { version = "1.0", features = ["derive"] }
-trapezoidator = { path = "./vector/trapezoidator" }
+makepad-trapezoidator = { path = "./vector/trapezoidator" }
 ttf_parser = { path = "./vector/ttf_parser" }
 makepad-path = { path = "./vector/path" }
 
