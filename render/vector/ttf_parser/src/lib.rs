@@ -1,4 +1,4 @@
-use font::{Font, Glyph, HorizontalMetrics, Outline, OutlinePoint};
+use makepad_font::{Font, Glyph, HorizontalMetrics, Outline, OutlinePoint};
 use makepad_geometry::{
     AffineTransformation, LinearTransformation, Point, Rectangle, Transform, Vector,
 };
