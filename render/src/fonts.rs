@@ -1,7 +1,7 @@
 use crate::cx::*;
 use trapezoidator::Trapezoidator;
 use geometry::{AffineTransformation, Transform, Vector};
-use internal_iter::*;
+use makepad_internal_iter::*;
 use path::PathIterator;
 
 impl Cx {
