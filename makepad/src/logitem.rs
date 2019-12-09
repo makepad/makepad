@@ -1,6 +1,6 @@
 use makepad_render::*;
 use hub::*;
-use widget::*;
+use makepad_widget::*;
 
 #[derive(Clone)]
 pub struct LogItem {
