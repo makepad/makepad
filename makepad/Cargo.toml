@@ -23,6 +23,6 @@ version="0.1"
 path="../render"
 version="0.1"
 
-[dependencies.hub]
+[dependencies.makepad-hub]
 path="./hub"
 version="0.1"
