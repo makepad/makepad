@@ -441,8 +441,8 @@ impl CxFontsAtlas {
 }
 
 impl CxFont {
-    pub fn load_from_ttf_bytes(&mut self, bytes: &[u8]) -> ttf_parser::Result<()> {
-        let font = ttf_parser::parse_ttf(bytes) ?;
+    pub fn load_from_ttf_bytes(&mut self, bytes: &[u8]) -> makepad_ttf_parser::Result<()> {
+        let font = makepad_ttf_parser::parse_ttf(bytes) ?;
         self.font_loaded = Some(font);
         Ok(())
     }

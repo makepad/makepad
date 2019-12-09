@@ -1,8 +1,10 @@
 [package]
 name = "render"
 version = "0.1.0"
-authors = ["makepaddev"]
+authors = ["Makepad <info@makepad.nl>"]
 edition = "2018"
+description = "Makepad renderer"
+license = "MIT"
 
 [features]
 ipc=[]
@@ -14,7 +16,7 @@ makepad-internal-iter = { path = "./vector/internal_iter" }
 makepad-shader-ast = { path="./shader_ast" }
 serde = { version = "1.0", features = ["derive"] }
 makepad-trapezoidator = { path = "./vector/trapezoidator" }
-ttf_parser = { path = "./vector/ttf_parser" }
+makepad-ttf-parser = { path = "./vector/ttf_parser" }
 makepad-path = { path = "./vector/path" }
 
 [target.x86_64-apple-darwin.dependencies]
