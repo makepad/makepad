@@ -1,4 +1,4 @@
-use render::*;
+use makepad_render::*;
 use crate::scrollview::*;
 use crate::textbuffer::*;
 use crate::textcursor::*;

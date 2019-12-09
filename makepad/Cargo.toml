@@ -19,7 +19,7 @@ ron = "0.5"
 path="../widget"
 version="0.1"
 
-[dependencies.render]
+[dependencies.makepad-render]
 path="../render"
 version="0.1"
 
