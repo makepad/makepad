@@ -9,7 +9,7 @@ ipc=[]
 
 [dependencies]
 font = { path = "./vector/font" }
-geometry = { path = "./vector/geometry" }
+makepad-geometry = { path = "./vector/geometry" }
 makepad-internal-iter = { path = "./vector/internal_iter" }
 shader_ast = {path="./shader_ast"}
 serde = { version = "1.0", features = ["derive"] }
