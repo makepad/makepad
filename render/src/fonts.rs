@@ -1,5 +1,5 @@
 use crate::cx::*;
-use trapezoidator::Trapezoidator;
+use makepad_trapezoidator::Trapezoidator;
 use makepad_geometry::{AffineTransformation, Transform, Vector};
 use makepad_internal_iter::*;
 use makepad_path::PathIterator;
