@@ -1,5 +1,5 @@
 use makepad_render::*; 
-use widget::*; 
+use makepad_widget::*; 
 use crate::appstorage::*;
 
 #[derive(Clone)]

@@ -1,5 +1,5 @@
 use makepad_render::*;
-use widget::*;
+use makepad_widget::*;
 use hub::*;
 use crate::appstorage::*;
 use crate::buildmanager::*;
