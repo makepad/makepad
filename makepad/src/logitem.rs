@@ -1,5 +1,5 @@
 use makepad_render::*;
-use hub::*;
+use makepad_hub::*;
 use makepad_widget::*;
 
 #[derive(Clone)]

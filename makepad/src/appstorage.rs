@@ -1,7 +1,7 @@
 //use syn::Type;
 use makepad_render::*;
 use makepad_widget::*;
-use hub::*;
+use makepad_hub::*;
 use crate::appwindow::*;
 use crate::filetree::*;
 use std::collections::HashMap;

@@ -18,5 +18,5 @@ path="../../widget"
 [dependencies.makepad-render]
 path="../../render"
 
-[dependencies.hub]
+[dependencies.makepad-hub]
 path="../hub"
