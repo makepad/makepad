@@ -1,6 +1,6 @@
 use crate::OutlinePoint;
 use geometry::{Point, Transform, Transformation};
-use internal_iter::{
+use makepad_internal_iter::{
     ExtendFromInternalIterator, InternalIterator, IntoInternalIterator,
 };
 use path::PathCommand;

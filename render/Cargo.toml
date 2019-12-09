@@ -10,7 +10,7 @@ ipc=[]
 [dependencies]
 font = { path = "./vector/font" }
 geometry = { path = "./vector/geometry" }
-internal_iter = { path = "./vector/internal_iter" }
+makepad-internal-iter = { path = "./vector/internal_iter" }
 shader_ast = {path="./shader_ast"}
 serde = { version = "1.0", features = ["derive"] }
 trapezoidator = { path = "./vector/trapezoidator" }

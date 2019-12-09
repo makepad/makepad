@@ -8,5 +8,5 @@ edition = "2018"
 
 [dependencies]
 geometry = { path = "../geometry" }
-internal_iter = { path = "../internal_iter" }
+makepad-internal-iter = { path = "../internal_iter" }
 path = { path = "../path" }
