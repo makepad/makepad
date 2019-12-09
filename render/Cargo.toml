@@ -29,14 +29,14 @@ objc = "0.2"
 
 [target.x86_64-unknown-linux-gnu.dependencies]
 makepad-glx-sys = { path = "./bind/glx-sys" }
-X11-sys = { path = "./bind/X11-sys" }
+makepad-x11-sys = { path = "./bind/x11-sys" }
 libc = "*"
 gl = "*"
 time = "0.1.4"
 
 [target.armv7-unknown-linux-gnueabihf.dependencies]
 makepad-glx-sys = { path = "./bind/glx-sys" }
-X11-sys = { path = "./bind/X11-sys" }
+makepad-x11-sys = { path = "./bind/x11-sys" }
 libc = "*"
 gl = "*"
 time = "0.1.4"
