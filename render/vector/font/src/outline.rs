@@ -1,5 +1,5 @@
 use crate::OutlinePoint;
-use geometry::{Point, Transform, Transformation};
+use makepad_geometry::{Point, Transform, Transformation};
 use makepad_internal_iter::{
     ExtendFromInternalIterator, InternalIterator, IntoInternalIterator,
 };
