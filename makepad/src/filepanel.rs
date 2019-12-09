@@ -4,7 +4,7 @@
 // Quad entry
 // QuadwShader entry
 
-use render::*;
+use makepad_render::*;
 use widget::*;
 use crate::filetree::*;
 
