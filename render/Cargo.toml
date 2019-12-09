@@ -15,7 +15,7 @@ shader_ast = {path="./shader_ast"}
 serde = { version = "1.0", features = ["derive"] }
 trapezoidator = { path = "./vector/trapezoidator" }
 ttf_parser = { path = "./vector/ttf_parser" }
-path = { path = "./vector/path" }
+makepad-path = { path = "./vector/path" }
 
 [target.x86_64-apple-darwin.dependencies]
 time = "0.1.4"
