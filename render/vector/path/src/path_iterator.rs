@@ -1,5 +1,5 @@
 use crate::{LinePathCommand, PathCommand};
-use geometry::QuadraticSegment;
+use makepad_geometry::QuadraticSegment;
 use makepad_internal_iter::InternalIterator;
 
 /// An extension trait for iterators over path commands.
