@@ -1,4 +1,4 @@
-use render::*;
+use makepad_render::*;
 use crate::texteditor::*;
 use crate::textbuffer::*;
 use crate::widgetstyle::*;
@@ -163,4 +163,3 @@ impl TextInputTokenizer {
         }
     }
 }
-

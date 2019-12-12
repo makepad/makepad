@@ -1,8 +1,8 @@
 use crate::cx::*;
-use trapezoidator::Trapezoidator;
-use geometry::{AffineTransformation, Transform, Vector};
-use internal_iter::*;
-use path::PathIterator;
+use makepad_trapezoidator::Trapezoidator;
+use makepad_geometry::{AffineTransformation, Transform, Vector};
+use makepad_internal_iter::*;
+use makepad_path::PathIterator;
 
 impl Cx {
     /*
@@ -367,7 +367,7 @@ impl CxAfterDraw {
 #[derive(Default)]
 pub struct CxFont {
     pub path: String,
-    pub font_loaded: Option<font::Font>,
+    pub font_loaded: Option<makepad_font::Font>,
     pub atlas_pages: Vec<CxFontAtlasPage>,
 }
 
@@ -441,8 +441,8 @@ impl CxFontsAtlas {
 }
 
 impl CxFont {
-    pub fn load_from_ttf_bytes(&mut self, bytes: &[u8]) -> ttf_parser::Result<()> {
-        let font = ttf_parser::parse_ttf(bytes) ?;
+    pub fn load_from_ttf_bytes(&mut self, bytes: &[u8]) -> makepad_ttf_parser::Result<()> {
+        let font = makepad_ttf_parser::parse_ttf(bytes) ?;
         self.font_loaded = Some(font);
         Ok(())
     }

@@ -1,5 +1,5 @@
 use crate::LinePathCommand;
-use internal_iter::InternalIterator;
+use makepad_internal_iter::InternalIterator;
 
 /// An extension trait for iterators over line path commands.
 pub trait LinePathIterator: InternalIterator<Item = LinePathCommand> {}

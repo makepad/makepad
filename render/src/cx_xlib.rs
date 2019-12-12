@@ -1,6 +1,7 @@
 use crate::cx::*;
 use libc;
 use libc::timeval;
+use makepad_x11_sys as X11_sys;
 use std::collections::{HashMap, VecDeque};
 use std::ffi::CString;
 use std::ffi::CStr;

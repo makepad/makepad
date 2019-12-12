@@ -1,6 +1,6 @@
 use std::mem;
 
-use render::*;
+use makepad_render::*;
 use crate::splitter::*;
 use crate::tabcontrol::*;
 use crate::widgetstyle::*;

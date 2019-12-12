@@ -1,6 +1,6 @@
 //use syn::Type;
-use render::*;
-use widget::*;
+use makepad_render::*;
+use makepad_widget::*;
 
 use crate::jseditor::*;
 use crate::rusteditor::*;

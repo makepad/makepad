@@ -1,6 +1,6 @@
 use crate::PathCommand;
-use geometry::{Point, Transform, Transformation};
-use internal_iter::{
+use makepad_geometry::{Point, Transform, Transformation};
+use makepad_internal_iter::{
     ExtendFromInternalIterator, FromInternalIterator, InternalIterator, IntoInternalIterator,
 };
 use std::iter::Cloned;
