@@ -1,9 +1,9 @@
-use render::*;
+use makepad_render::*;
+use makepad_widget::*;
 use crate::filetree::*;
 use crate::loglist::*;
 use crate::homepage::*;
 use crate::codeicon::*;
-use widget::*;
 
 pub fn set_makepad_style(cx: &mut Cx, opt:&StyleOptions) {
     CodeIcon::style(cx, opt);

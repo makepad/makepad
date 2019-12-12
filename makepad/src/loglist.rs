@@ -1,6 +1,6 @@
-use render::*;
-use widget::*;
-use hub::*;
+use makepad_render::*;
+use makepad_widget::*;
+use makepad_hub::*;
 use crate::appstorage::*;
 use crate::buildmanager::*;
 use crate::codeicon::*;

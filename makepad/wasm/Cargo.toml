@@ -12,11 +12,11 @@ crate-type = ["cdylib"]
 ron = "0.5"
 serde = { version = "1.0", features = ["derive"] }
 
-[dependencies.widget]
+[dependencies.makepad-widget]
 path="../../widget"
 
-[dependencies.render]
+[dependencies.makepad-render]
 path="../../render"
 
-[dependencies.hub]
+[dependencies.makepad-hub]
 path="../hub"

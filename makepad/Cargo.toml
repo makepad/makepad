@@ -1,8 +1,10 @@
 [package]
 name = "makepad"
 version = "0.1.0"
-authors = ["makepaddev"]
+authors = ["Makepad <info@makepad.nl>"]
 edition = "2018"
+description = "Makepad"
+license = "MIT"
 
 #[profile.release]
 #lto = true
@@ -15,14 +17,14 @@ edition = "2018"
 serde = { version = "1.0", features = ["derive"] }
 ron = "0.5"
 
-[dependencies.widget]
+[dependencies.makepad-widget]
 path="../widget"
 version="0.1"
 
-[dependencies.render]
+[dependencies.makepad-render]
 path="../render"
 version="0.1"
 
-[dependencies.hub]
+[dependencies.makepad-hub]
 path="./hub"
 version="0.1"

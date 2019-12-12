@@ -29,7 +29,7 @@
 // Multi cursor/grid cursor also works with ctrl+click / ctrl+shift+click
 // press alt or escape for animated codefolding outline view!
 
-use render::*;
+use makepad_render::*;
 use widget::*;
 
 struct App {
