@@ -15,5 +15,5 @@ proc-macro-hack = "0.5"
 proc-macro2 = "1.0.1"
 
 [dependencies.syn]
-version = "1.0.4"
+version = "1.0"
 features = ["full"]
