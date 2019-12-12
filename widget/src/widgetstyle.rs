@@ -5,7 +5,6 @@ use crate::desktopwindow::*;
 use crate::windowmenu::*;
 use crate::tabclose::*;
 use crate::texteditor::*;
-use crate::codeicon::*;
 use crate::textinput::*;
 use crate::scrollbar::*;
 use crate::scrollshadow::*;
@@ -172,7 +171,6 @@ pub fn set_widget_style(cx: &mut Cx, opt: &StyleOptions) {
     Tab::style(cx, opt);
     MenuItemDraw::style(cx, opt);
     TextEditor::style(cx, opt);
-    CodeIcon::style(cx, opt);
     TextInput::style(cx, opt);
     ScrollBar::style(cx, opt);
     ScrollShadow::style(cx, opt);

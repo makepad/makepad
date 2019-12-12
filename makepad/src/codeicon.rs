@@ -1,5 +1,5 @@
 use render::*;
-use crate::widgetstyle::*;
+use widget::*;
 
 #[derive(Clone)]
 pub struct CodeIcon {
