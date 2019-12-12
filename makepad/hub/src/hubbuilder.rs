@@ -18,7 +18,7 @@ pub struct HubBuilder {
     pub route_send: HubRouteSend,
     pub http_server: Arc<Mutex<Option<HttpServer>>>,
     pub workspaces: Arc<Mutex<HashMap<String, String>>>,
-    pub builder: String,
+    pub builder: String, 
     pub abs_cwd_path: String,
     pub processes: Arc<Mutex<Vec<HubProcess>>>,
 }
@@ -859,8 +859,16 @@ impl HubBuilder {
 
         if let Ok(data) = fs::read(&filepath) {
             if let Ok(strip) = wasm_strip_debug(&data) {
+                
                 let uncomp_len = strip.len();
                 let mut enc = snap::Encoder::new();
+                /*
+                let mut result = Vec::new();
+                {
+                    let mut writer = brotli::CompressorWriter::new(&mut result, 4096 /* buffer size */, 11, 22);
+                    writer.write_all(&strip).expect("Can't write data");
+                }*/
+
                 let comp_len = if let Ok(compressed) = enc.compress_vec(&strip) {compressed.len()}else {0};
                 
                 if let Err(_) = fs::write(&filepath, strip) {

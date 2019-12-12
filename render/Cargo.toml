@@ -18,7 +18,7 @@ serde = { version = "1.0", features = ["derive"] }
 makepad-trapezoidator = { path = "./vector/trapezoidator", version = "0.1" }
 makepad-ttf-parser = { path = "./vector/ttf_parser", version = "0.1" }
 makepad-path = { path = "./vector/path", version = "0.1" }
-
+ 
 [target.x86_64-apple-darwin.dependencies]
 time = "0.1.4"
 objc = "0.2"

@@ -2,7 +2,7 @@
 
 #[path = "../../makepad/src/builder.rs"]
 mod builder;
-use hub::*;
+use makepad_hub::*;
 
 #[allow(dead_code)]
 pub fn main() {
