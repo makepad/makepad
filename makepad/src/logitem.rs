@@ -1,6 +1,8 @@
 use render::*;
 use hub::*;
 use widget::*;
+use crate::rusteditor::*;
+use crate::plaineditor::*;
 
 #[derive(Clone)]
 pub struct LogItem {

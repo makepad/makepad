@@ -23,6 +23,8 @@ mod cx_metalsl;
 mod cx_cocoa;
 #[cfg(all(not(feature="ipc"),any(target_os = "macos")))]
 mod cx_macos;
+#[cfg(all(not(feature="ipc"),any(target_os = "macos")))]
+mod cx_apple;
 
 #[cfg(all(not(feature="ipc"),target_os = "windows"))]
 mod cx_dx11;

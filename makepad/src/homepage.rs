@@ -221,7 +221,7 @@ impl HomePage {
         self.example_texts.get_draw(cx).draw_text_input_static(cx,"\
             Clone this repo using either gitub desktop or commandline: https://github.com/makepad/makepad\n\
             Open a cmd.exe in the directory you just cloned. Gh desktop makes: Documents\\Github\\makepad\n\
-            tools/windows_rustup.bat\n\
+            tools\\windows_rustup.bat\n\
             cargo run -p makepad --release --target x86_64-pc-windows-gnu");
         cx.turtle_new_line();
 
@@ -245,6 +245,7 @@ impl HomePage {
             Update rust: rustup update\n\
             Make sure you have wasm: rustup target add wasm32-unknown-unknown\n\
             Pull the latest: git pull\n\
+            If gnu chain for some reason doesn't work on windows, use the msvc chain\n\
             Still have a problem? Report here: https://github.com/makepad/makepad/issues");
         cx.turtle_new_line();
 

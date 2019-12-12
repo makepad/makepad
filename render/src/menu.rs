@@ -17,7 +17,7 @@ impl Cx{
     pub fn command_default_keymap(&mut self){
         Cx::command_quit().set_key(self, KeyCode::KeyQ);
         Cx::command_undo().set_key(self, KeyCode::KeyZ);
-        Cx::command_redo().set_key(self, KeyCode::KeyZ).set_shift(self, true);
+        Cx::command_redo().set_key_shift(self, KeyCode::KeyZ);
         Cx::command_cut().set_key(self, KeyCode::KeyX);
         Cx::command_copy().set_key(self, KeyCode::KeyC);
         Cx::command_paste().set_key(self, KeyCode::KeyV);
@@ -26,7 +26,6 @@ impl Cx{
         Cx::command_zoom_in().set_key(self, KeyCode::Equals);
         Cx::command_minimize().set_key(self, KeyCode::KeyM);
     }
-    
 }
 
 
@@ -43,17 +42,18 @@ impl CommandId{
         cx.command_settings.insert(*self, s);
         *self
     }
-        
-    pub fn set_shift(&self, cx:&mut Cx, shift:bool)->Self{
-        let mut s = if let Some(s) = cx.command_settings.get(self){*s}else{CxCommandSetting::default()};
-        s.shift = shift;
-        cx.command_settings.insert(*self, s);
-        *self
-    }
-
 
     pub fn set_key(&self, cx:&mut Cx, key_code:KeyCode)->Self{
         let mut s = if let Some(s) = cx.command_settings.get(self){*s}else{CxCommandSetting::default()};
+        s.shift = false;
+        s.key_code = key_code;
+        cx.command_settings.insert(*self, s);
+        *self
+    }
+    
+    pub fn set_key_shift(&self, cx:&mut Cx, key_code:KeyCode)->Self{
+        let mut s = if let Some(s) = cx.command_settings.get(self){*s}else{CxCommandSetting::default()};
+        s.shift = true;
         s.key_code = key_code;
         cx.command_settings.insert(*self, s);
         *self

@@ -1,7 +1,6 @@
 use render::*;
 use crate::texteditor::*;
 use crate::textbuffer::*;
-use crate::plaineditor::*;
 use crate::widgetstyle::*;
 #[derive(Clone)]
 pub struct TextInput {
@@ -87,7 +86,7 @@ impl TextInput {
         if text_buffer.needs_token_chunks() && text_buffer.lines.len() >0 {
             
             let mut state = TokenizerState::new(&text_buffer.lines);
-            let mut tokenizer = PlainTokenizer::new();
+            let mut tokenizer = TextInputTokenizer::new();
             let mut pair_stack = Vec::new();
             loop {
                 let offset = text_buffer.flat_text.len();
@@ -116,3 +115,52 @@ impl TextInput {
         cx.end_style();
     }
 }
+
+
+pub struct TextInputTokenizer {
+}
+
+impl TextInputTokenizer {
+    pub fn new() -> TextInputTokenizer {
+        TextInputTokenizer {}
+    }
+    
+    pub fn next_token<'a>(&mut self, state: &mut TokenizerState<'a>, chunk: &mut Vec<char>, _token_chunks: &Vec<TokenChunk>) -> TokenType {
+        let start = chunk.len();
+        loop {
+            if state.next == '\0' {
+		if (chunk.len()-start)>0 { 
+                    return TokenType::Identifier
+                }
+		state.advance();
+                chunk.push(' ');
+                return TokenType::Eof
+            }
+            else if state.next == '\n' {
+                // output current line
+                if (chunk.len()-start)>0 {
+                    return TokenType::Identifier
+                }
+                
+                chunk.push(state.next);
+                state.advance();
+                return TokenType::Newline
+            }
+            else if state.next == ' ' {
+                if (chunk.len()-start)>0 {
+                    return TokenType::Identifier
+                }
+                while state.next == ' ' {
+                    chunk.push(state.next);
+                    state.advance();
+                }
+                return TokenType::Whitespace
+            }
+            else {
+                chunk.push(state.next);
+                state.advance();
+            }
+        }
+    }
+}
+
