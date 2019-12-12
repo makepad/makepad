@@ -1,5 +1,5 @@
 use crate::{HorizontalMetrics, Outline};
-use geometry::Rectangle;
+use makepad_geometry::Rectangle;
 
 /// A glyph in a font.
 #[derive(Clone, Debug, PartialEq)]

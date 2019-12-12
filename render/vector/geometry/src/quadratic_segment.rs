@@ -1,5 +1,5 @@
 use crate::{Point, Transform, Transformation};
-use internal_iter::InternalIterator;
+use makepad_internal_iter::InternalIterator;
 
 /// A quadratic bezier curve segment in 2-dimensional Euclidian space.
 #[derive(Clone, Copy, Debug, PartialEq)]

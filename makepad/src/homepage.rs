@@ -1,5 +1,5 @@
-use render::*;
-use widget::*;
+use makepad_render::*;
+use makepad_widget::*;
 
 #[derive(Clone)]
 pub struct HomePage {

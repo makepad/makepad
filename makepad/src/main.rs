@@ -35,7 +35,7 @@ pub use crate::plaineditor::*;
 
 //mod rustcompiler;
 //pub use crate::rustcompiler::*;
-use render::*;
+use makepad_render::*;
 mod builder;
 
 main_app!(App);

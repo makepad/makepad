@@ -1,9 +1,9 @@
 use crate::OutlinePoint;
-use geometry::{Point, Transform, Transformation};
-use internal_iter::{
+use makepad_geometry::{Point, Transform, Transformation};
+use makepad_internal_iter::{
     ExtendFromInternalIterator, InternalIterator, IntoInternalIterator,
 };
-use path::PathCommand;
+use makepad_path::PathCommand;
 use std::iter::Cloned;
 use std::slice::Iter;
 
