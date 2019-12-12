@@ -16,9 +16,9 @@ impl Cx {
         let mut metal_cx = MetalCx::new();
         
         let mut metal_windows: Vec<MetalWindow> = Vec::new();
-        
+
         self.mtl_compile_all_shaders(&metal_cx);
-        
+
         self.load_theme_fonts();
         
         self.call_event_handler(&mut event_handler, &mut Event::Construct);
@@ -187,7 +187,7 @@ impl Cx {
                                             self.draw_pass_to_layer(
                                                 *pass_id,
                                                 dpi_factor,
-                                                &metal_window.core_animation_layer,
+                                                metal_window.ca_layer,
                                                 &mut metal_cx,
                                             );
                                             // call redraw if we guessed the dpi wrong on startup

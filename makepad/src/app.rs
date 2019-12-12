@@ -49,10 +49,10 @@ impl App {
         // set up the keyboard map
         Self::command_preferences().set_key(cx, KeyCode::Comma);
         Self::command_new_file().set_key(cx, KeyCode::KeyN);
-        Self::command_new_window().set_key(cx, KeyCode::KeyN).set_shift(cx, true);
-        Self::command_save_as().set_key(cx, KeyCode::KeyS).set_shift(cx, true);
+        Self::command_new_window().set_key_shift(cx, KeyCode::KeyN);
+        Self::command_save_as().set_key_shift(cx, KeyCode::KeyS);
         Self::command_close_editor().set_key(cx, KeyCode::KeyW);
-        Self::command_close_window().set_key(cx, KeyCode::KeyW).set_shift(cx, true);
+        Self::command_close_window().set_key_shift(cx, KeyCode::KeyW);
 
         cx.command_default_keymap();
         
