@@ -1,11 +1,13 @@
 [package]
-name = "hub"
+name = "makepad-hub"
 version = "0.1.0"
-authors = ["makepaddev"]
+authors = ["Makepad <info@makepad.nl>"]
 edition = "2018"
+description = "Makepad hub"
+license = "MIT"
 
 [dependencies]
-serde_json = "*"
+serde_json = "1.0"
 bincode = "1.2"
 snap = "0.1"
 libc = "0.2"

@@ -1,7 +1,7 @@
 
 // Shader AST typedefs
 
-pub use shader_ast::*;
+pub use makepad_shader_ast::*;
 pub use crate::cx::*;
 pub use crate::math::*;
 pub use crate::colors::*;
