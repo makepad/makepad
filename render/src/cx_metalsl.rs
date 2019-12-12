@@ -1,11 +1,11 @@
 
-use metal::*;
 use crate::cx::*;
+use crate::cx_apple::*;
 
 #[derive(Clone)]
 pub struct CxPlatformShader {
-    pub library: metal::Library,
-    pub pipeline_state: metal::RenderPipelineState,
+    pub library: id,
+    pub pipeline_state: id,
     pub geom_vbuf: MetalBuffer,
     pub geom_ibuf: MetalBuffer,
 }
@@ -101,15 +101,15 @@ impl Cx {
         let mut mtl_out = "#include <metal_stdlib>\nusing namespace metal;\n".to_string();
         
         // ok now define samplers from our sh.
-        let texture_slots = sg.flat_vars(|v| if let ShVarStore::Texture = *v{true} else {false});
-        let geometries = sg.flat_vars(|v| if let ShVarStore::Geometry = *v{true} else {false});
-        let instances = sg.flat_vars(|v| if let ShVarStore::Instance(_) = *v{true} else {false});
-        let mut varyings = sg.flat_vars(|v| if let ShVarStore::Varying = *v{true} else {false});
-        let locals = sg.flat_vars(|v| if let ShVarStore::Local = *v{true} else {false});
-        let pass_uniforms = sg.flat_vars(|v| if let ShVarStore::PassUniform = *v{true} else {false});
-        let view_uniforms = sg.flat_vars(|v| if let ShVarStore::ViewUniform = *v{true} else {false});
-        let draw_uniforms = sg.flat_vars(|v| if let ShVarStore::DrawUniform = *v{true} else {false});
-        let uniforms = sg.flat_vars(|v| if let ShVarStore::Uniform(_) = *v{true} else {false});
+        let texture_slots = sg.flat_vars( | v | if let ShVarStore::Texture = *v {true} else {false});
+        let geometries = sg.flat_vars( | v | if let ShVarStore::Geometry = *v {true} else {false});
+        let instances = sg.flat_vars( | v | if let ShVarStore::Instance(_) = *v {true} else {false});
+        let mut varyings = sg.flat_vars( | v | if let ShVarStore::Varying = *v {true} else {false});
+        let locals = sg.flat_vars( | v | if let ShVarStore::Local = *v {true} else {false});
+        let pass_uniforms = sg.flat_vars( | v | if let ShVarStore::PassUniform = *v {true} else {false});
+        let view_uniforms = sg.flat_vars( | v | if let ShVarStore::ViewUniform = *v {true} else {false});
+        let draw_uniforms = sg.flat_vars( | v | if let ShVarStore::DrawUniform = *v {true} else {false});
+        let uniforms = sg.flat_vars( | v | if let ShVarStore::Uniform(_) = *v {true} else {false});
         
         // lets count the slots
         let geometry_slots = sg.compute_slot_total(&geometries);
@@ -233,8 +233,8 @@ impl Cx {
         if sg.log != 0 {
             println!("---- Metal shader -----\n{}", mtl_out);
         }
-
-        let uniform_props =  UniformProps::construct(sg, &uniforms);
+        
+        let uniform_props = UniformProps::construct(sg, &uniforms);
         Ok((mtl_out, CxShaderMapping {
             rect_instance_props: RectInstanceProps::construct(sg, &instances),
             instance_props: InstanceProps::construct(sg, &instances),
@@ -254,51 +254,68 @@ impl Cx {
     pub fn mtl_compile_shader(sh: &mut CxShader, metal_cx: &MetalCx) -> Result<(), SlErr> {
         let (mtlsl, mapping) = Self::mtl_assemble_shader(&sh.shader_gen) ?;
         
-        let options = CompileOptions::new();
-        let library = metal_cx.device.new_library_with_source(&mtlsl, &options);
+        let options: id = unsafe {msg_send![class!(MTLCompileOptions), new]};
+        let ns_mtlsl: id = str_to_nsstring(&mtlsl);
+        let mut err: id = nil;
+        let library: id = unsafe {msg_send![
+            metal_cx.device,
+            newLibraryWithSource: ns_mtlsl
+            options: options
+            error: &mut err
+        ]};
+
+        if library == nil {
+            let err_str: id = unsafe {msg_send![err, localizedDescription]};
+            return Err(SlErr {msg: nsstring_to_string(err_str)})
+        }
         
-        match library {
-            Err(library) => return Err(SlErr {msg: library}),
-            Ok(library) => {
-                sh.mapping = mapping;
-                sh.platform = Some(CxPlatformShader {
-                    pipeline_state: {
-                        let vert = library.get_function("_vertex_shader", None).unwrap();
-                        let frag = library.get_function("_fragment_shader", None).unwrap();
-                        let rpd = RenderPipelineDescriptor::new();
-                        rpd.set_vertex_function(Some(&vert));
-                        rpd.set_fragment_function(Some(&frag));
-                        //rpd.set_sample_count(2);
-                        //rpd.set_alpha_to_coverage_enabled(false);
-                        let color = rpd.color_attachments().object_at(0).unwrap();
-                        color.set_pixel_format(MTLPixelFormat::BGRA8Unorm);
-                        color.set_blending_enabled(true);
-                        color.set_source_rgb_blend_factor(MTLBlendFactor::One);
-                        color.set_destination_rgb_blend_factor(MTLBlendFactor::OneMinusSourceAlpha);
-                        color.set_source_alpha_blend_factor(MTLBlendFactor::One);
-                        color.set_destination_alpha_blend_factor(MTLBlendFactor::OneMinusSourceAlpha);
-                        color.set_rgb_blend_operation(MTLBlendOperation::Add);
-                        color.set_alpha_blend_operation(MTLBlendOperation::Add);
-                        
-                        rpd.set_depth_attachment_pixel_format(MTLPixelFormat::Depth32Float_Stencil8);
-                        
-                        metal_cx.device.new_render_pipeline_state(&rpd).unwrap()
-                    },
-                    library: library,
-                    geom_ibuf: {
-                        let mut geom_ibuf = MetalBuffer {..Default::default()};
-                        geom_ibuf.update_with_u32_data(metal_cx, &sh.shader_gen.geometry_indices);
-                        geom_ibuf
-                    },
-                    geom_vbuf: {
-                        let mut geom_vbuf = MetalBuffer {..Default::default()};
-                        geom_vbuf.update_with_f32_data(metal_cx, &sh.shader_gen.geometry_vertices);
-                        geom_vbuf
-                    }
-                });
-                return Ok(());
+        sh.mapping = mapping;
+        sh.platform = Some(CxPlatformShader {
+            pipeline_state: unsafe {
+                let vert: id = msg_send![library, newFunctionWithName: str_to_nsstring("_vertex_shader")];
+                let frag: id = msg_send![library, newFunctionWithName: str_to_nsstring("_fragment_shader")];
+                let rpd: id = msg_send![class!(MTLRenderPipelineDescriptor), new];
+                
+                let () = msg_send![rpd, setVertexFunction: vert];
+                let () = msg_send![rpd, setFragmentFunction: frag];
+                
+                let color_attachments: id = msg_send![rpd, colorAttachments];
+                
+                let ca: id = msg_send![color_attachments, objectAtIndexedSubscript: 0u64];
+                let () = msg_send![ca, setPixelFormat: MTLPixelFormat::BGRA8Unorm];
+                let () = msg_send![ca, setBlendingEnabled: YES];
+                let () = msg_send![ca, setSourceRGBBlendFactor: MTLBlendFactor::One];
+                let () = msg_send![ca, setDestinationRGBBlendFactor: MTLBlendFactor::OneMinusSourceAlpha];
+                let () = msg_send![ca, setSourceAlphaBlendFactor: MTLBlendFactor::One];
+                let () = msg_send![ca, setDestinationAlphaBlendFactor: MTLBlendFactor::OneMinusSourceAlpha];
+                let () = msg_send![ca, setRgbBlendOperation: MTLBlendOperation::Add];
+                let () = msg_send![ca, setAlphaBlendOperation: MTLBlendOperation::Add];
+                let () = msg_send![rpd, setDepthAttachmentPixelFormat: MTLPixelFormat::Depth32Float_Stencil8];
+                
+                let mut err: id = nil;
+                let rps: id = msg_send![
+                    metal_cx.device,
+                    newRenderPipelineStateWithDescriptor: rpd 
+                    error: &mut err
+                ];
+                if rps == nil{
+                    panic!("Could not create render pipeline state")
+                }
+                rps//.expect("Could not create render pipeline state")
+            },
+            library: library,
+            geom_ibuf: {
+                let mut geom_ibuf = MetalBuffer {..Default::default()};
+                geom_ibuf.update_with_u32_data(metal_cx, &sh.shader_gen.geometry_indices);
+                geom_ibuf
+            },
+            geom_vbuf: {
+                let mut geom_vbuf = MetalBuffer {..Default::default()};
+                geom_vbuf.update_with_f32_data(metal_cx, &sh.shader_gen.geometry_vertices);
+                geom_vbuf
             }
-        };
+        });
+        return Ok(());
     }
 }
 
@@ -332,12 +349,12 @@ impl<'a> SlCx<'a> {
         Cx::mtl_type_to_metal(ty)
     }
     
-    pub fn map_constructor(&self, name: &str, args: &Vec<Sl>)->String{
+    pub fn map_constructor(&self, name: &str, args: &Vec<Sl>) -> String {
         let mut out = String::new();
         out.push_str(&self.map_type(name));
         out.push_str("(");
-        for (i,arg) in args.iter().enumerate(){
-            if i != 0{
+        for (i, arg) in args.iter().enumerate() {
+            if i != 0 {
                 out.push_str(", ");
             }
             out.push_str(&arg.sl);
@@ -345,7 +362,7 @@ impl<'a> SlCx<'a> {
         out.push_str(")");
         return out;
     }
-        
+    
     pub fn map_var(&mut self, var: &ShVar) -> String {
         let mty = Cx::mtl_type_to_metal(&var.ty);
         match var.store {

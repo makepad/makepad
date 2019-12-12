@@ -23,6 +23,16 @@ pub use crate::buildmanager::*;
 mod makepadstyle;
 pub use crate::makepadstyle::*;
 
+pub mod codeicon;
+pub use crate::codeicon::*;
+mod rusteditor;
+pub use crate::rusteditor::*;
+mod jseditor;
+pub use crate::jseditor::*;
+mod plaineditor;
+pub use crate::plaineditor::*;
+
+
 //mod rustcompiler;
 //pub use crate::rustcompiler::*;
 use render::*;

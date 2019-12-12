@@ -3,6 +3,7 @@ use widget::*;
 use hub::*;
 use crate::appstorage::*;
 use crate::buildmanager::*;
+use crate::codeicon::*;
 
 #[derive(Clone)]
 pub struct LogList {

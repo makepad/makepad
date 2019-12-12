@@ -1,7 +1,5 @@
 use render::*; 
-
-use crate::textbuffer::*;
-use crate::texteditor::*;
+use widget::*;
 
 #[derive(Clone)]  
 pub struct PlainEditor {

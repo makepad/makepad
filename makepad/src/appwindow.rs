@@ -14,6 +14,10 @@ use crate::keyboard::*;
 use crate::buildmanager::*;
 use crate::homepage::*;
 
+use crate::rusteditor::*;
+use crate::jseditor::*;
+use crate::plaineditor::*;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Panel {
     LogList,

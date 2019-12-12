@@ -2,6 +2,11 @@
 use render::*;
 use widget::*;
 
+use crate::jseditor::*;
+use crate::rusteditor::*;
+use crate::plaineditor::*;
+
+
 #[derive(Clone)]
 pub struct FileEditorTemplates {
     pub rust_editor: RustEditor,

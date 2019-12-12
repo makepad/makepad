@@ -971,6 +971,8 @@ impl TextEditor {
         }
         // editor local
         match event.hits(cx, self.view.get_view_area(cx), HitOpt::default()) {
+            Event::KeyFocus(_kf)=>{
+            },
             Event::KeyFocusLost(_kf) => {
                 self.view.redraw_view_area(cx)
             },
@@ -1014,6 +1016,8 @@ impl TextEditor {
             },
             _ => ()
         };
+        // i need to know if selection changed, ifso
+        // 
         if last_mutation_id != text_buffer.mutation_id{
             TextEditorEvent::Change
         }
