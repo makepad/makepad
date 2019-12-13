@@ -8,7 +8,7 @@ use std::ptr;
 use std::mem;
 
 impl Cx {
-    
+
     pub fn render_view(
         &mut self,
         pass_id: usize,
@@ -20,8 +20,8 @@ impl Cx {
         opengl_cx: &OpenglCx,
         zbias: &mut f32,
         zbias_step: f32
-    ) { 
-        
+    ) {
+
         // tad ugly otherwise the borrow checker locks 'self' and we can't recur
         let draw_calls_len = self.views[view_id].draw_calls_len;
         if !full_repaint && !view_rect.intersects(self.views[view_id].get_scrolled_rect()) {
@@ -52,38 +52,38 @@ impl Cx {
                 let draw_call = &mut cxview.draw_calls[draw_call_id];
                 let sh = &self.shaders[draw_call.shader_id];
                 let shp = sh.platform.as_ref().unwrap();
-                
+
                 if draw_call.instance_dirty {
                     draw_call.instance_dirty = false;
                     draw_call.platform.inst_vbuf.update_with_f32_data(opengl_cx, &draw_call.instance);
                 }
-                
+
                 draw_call.platform.check_vao(draw_call.shader_id, &shp);
-                
+
                 draw_call.set_zbias(*zbias);
                 draw_call.set_local_scroll(scroll, local_scroll);
                 draw_call.set_clip(clip);
                 *zbias += zbias_step;
-                
+
                 if draw_call.uniforms_dirty {
                     draw_call.uniforms_dirty = false;
                 }
-                
+
                 unsafe {
                     gl::UseProgram(shp.program);
                     gl::BindVertexArray(draw_call.platform.vao.unwrap());
                     let instances = draw_call.instance.len() / sh.mapping.instance_slots;
                     let indices = sh.shader_gen.geometry_indices.len();
-                    
+
                     let pass_uniforms = self.passes[pass_id].pass_uniforms.as_slice();
                     let view_uniforms = cxview.view_uniforms.as_slice();
                     let draw_uniforms = draw_call.draw_uniforms.as_slice();
-                    
+
                     opengl_cx.set_uniform_buffer(&shp.pass_uniforms, pass_uniforms);
                     opengl_cx.set_uniform_buffer(&shp.view_uniforms, view_uniforms);
                     opengl_cx.set_uniform_buffer(&shp.draw_uniforms, draw_uniforms);
                     opengl_cx.set_uniform_buffer(&shp.uniforms, &draw_call.uniforms);
-                    
+
                     // lets set our textures
                     for (i, texture_id) in draw_call.textures_2d.iter().enumerate() {
                         let cxtexture = &mut self.textures[*texture_id as usize];
@@ -99,7 +99,7 @@ impl Cx {
                             gl::BindTexture(gl::TEXTURE_2D, 0);
                         }
                     }
-                    
+
                     gl::DrawElementsInstanced(
                         gl::TRIANGLES,
                         indices as i32,
@@ -109,9 +109,9 @@ impl Cx {
                     );
                 }
             }
-        } 
+        }
     }
-    
+
     pub fn calc_dirty_bounds(&mut self, pass_id: usize, view_id: usize, view_bounds: &mut ViewBounds) {
         let draw_calls_len = self.views[view_id].draw_calls_len;
         for draw_call_id in 0..draw_calls_len {
@@ -124,14 +124,14 @@ impl Cx {
                 let draw_call = &mut cxview.draw_calls[draw_call_id];
                 //let sh = &self.shaders[draw_call.shader_id];
                 //let shp = sh.platform.as_ref().unwrap();
-                
+
                 if draw_call.instance_dirty || draw_call.uniforms_dirty {
                     view_bounds.add_rect(&cxview.get_inverse_scrolled_rect());
                 }
             }
         }
     }
-    
+
     pub fn set_default_depth_and_blend_mode() {
         unsafe {
             gl::Enable(gl::DEPTH_TEST);
@@ -141,7 +141,7 @@ impl Cx {
             gl::Enable(gl::BLEND);
         }
     }
-    
+
     pub fn draw_pass_to_window(
         &mut self,
         pass_id: usize,
@@ -151,7 +151,7 @@ impl Cx {
         _force_full_repaint: bool,
     ) -> bool {
         let view_id = self.passes[pass_id].main_view_id.unwrap();
-        
+
         let mut view_bounds = ViewBounds::new();
         let mut init_repaint = false;
         self.calc_dirty_bounds(pass_id, view_id, &mut view_bounds);
@@ -167,15 +167,15 @@ impl Cx {
         let view_rect;
         if full_repaint {
             opengl_window.xlib_window.hide_child_windows();
-            
+
             window = opengl_window.xlib_window.window.unwrap();
-            
+
             let pass_size = self.passes[pass_id].pass_size;
             self.passes[pass_id].set_ortho_matrix(Vec2::default(), pass_size);
-            
+
             let pix_width = opengl_window.window_geom.inner_size.x * opengl_window.window_geom.dpi_factor;
             let pix_height = opengl_window.window_geom.inner_size.y * opengl_window.window_geom.dpi_factor;
-            
+
             unsafe {
                 glx_sys::glXMakeCurrent(opengl_cx.display, window, opengl_cx.context);
                 gl::Viewport(0, 0, pix_width as i32, pix_height as i32);
@@ -204,30 +204,30 @@ impl Cx {
                 gl::Clear(gl::COLOR_BUFFER_BIT | gl::DEPTH_BUFFER_BIT);
                 glx_sys::glXSwapBuffers(xlib_app.display, opengl_window.xlib_window.window.unwrap());
             }*/
-            
+
             let pix_width = (view_bounds.max_x - view_bounds.min_x) * opengl_window.window_geom.dpi_factor;
             let pix_height = (view_bounds.max_y - view_bounds.min_y) * opengl_window.window_geom.dpi_factor;
-            
+
             window = opengl_window.xlib_window.alloc_child_window(
                 (view_bounds.min_x * opengl_window.window_geom.dpi_factor) as i32,
                 (view_bounds.min_y * opengl_window.window_geom.dpi_factor) as i32,
                 pix_width as u32,
                 pix_height as u32
             ).unwrap();
-            
+
             //let pass_size = self.passes[pass_id].pass_size;
             self.passes[pass_id].set_ortho_matrix(
                 Vec2 {x: view_bounds.min_x, y: view_bounds.min_y},
                 Vec2 {x: pix_width / opengl_window.window_geom.dpi_factor, y: pix_height / opengl_window.window_geom.dpi_factor}
             );
-            
+
             unsafe {
                 glx_sys::glXMakeCurrent(opengl_cx.display, window, opengl_cx.context);
                 gl::Viewport(0, 0, pix_width as i32, pix_height as i32);
             }
             view_rect = Rect {x: view_bounds.min_x, y: view_bounds.min_y, w: view_bounds.max_x - view_bounds.min_x, h: view_bounds.max_y - view_bounds.min_y}
         }
-        
+
         self.passes[pass_id].uniform_camera_view(&Mat4::identity());
         self.passes[pass_id].set_dpi_factor(dpi_factor);
         // set up the
@@ -244,7 +244,7 @@ impl Cx {
             ClearDepth::InitWith(depth) => depth,
             ClearDepth::ClearWith(depth) => depth
         };
-        
+
         unsafe {
             gl::BindFramebuffer(gl::FRAMEBUFFER, 0);
             gl::ClearDepth(clear_depth);
@@ -252,10 +252,10 @@ impl Cx {
             gl::Clear(gl::COLOR_BUFFER_BIT | gl::DEPTH_BUFFER_BIT);
         }
         Self::set_default_depth_and_blend_mode();
-        
+
         let mut zbias = 0.0;
         let zbias_step = self.passes[pass_id].zbias_step;
-        
+
         self.render_view(
             pass_id,
             view_id,
@@ -267,25 +267,25 @@ impl Cx {
             &mut zbias,
             zbias_step
         );
-        
+
         unsafe {
             glx_sys::glXSwapBuffers(opengl_cx.display, window);
         }
         return init_repaint;
     }
-    
+
     pub fn draw_pass_to_texture(
         &mut self,
         pass_id: usize,
         inherit_dpi_factor: f32,
         opengl_cx: &OpenglCx,
     ) {
-        
+
         let pass_size = self.passes[pass_id].pass_size;
         self.passes[pass_id].set_ortho_matrix(Vec2::default(), pass_size);
         self.passes[pass_id].uniform_camera_view(&Mat4::identity());
         self.passes[pass_id].paint_dirty = false;
-        
+
         let dpi_factor = if let Some(override_dpi_factor) = self.passes[pass_id].override_dpi_factor {
             override_dpi_factor
         }
@@ -293,11 +293,11 @@ impl Cx {
             inherit_dpi_factor
         };
         self.passes[pass_id].set_dpi_factor(dpi_factor);
-        
+
         let mut clear_color = Color::default();
         let mut clear_depth = 1.0;
         let mut clear_flags = 0;
-        
+
         // make a framebuffer
         if self.passes[pass_id].platform.gl_framebuffer.is_none() {
             unsafe {
@@ -306,12 +306,12 @@ impl Cx {
                 self.passes[pass_id].platform.gl_framebuffer = Some(gl_framebuffer.assume_init());
             }
         }
-        
+
         // bind the framebuffer
         unsafe {
             gl::BindFramebuffer(gl::FRAMEBUFFER, self.passes[pass_id].platform.gl_framebuffer.unwrap());
         }
-        
+
         for (index, color_texture) in self.passes[pass_id].color_textures.iter().enumerate() {
             match color_texture.clear_color {
                 ClearColor::InitWith(color) => {
@@ -332,7 +332,7 @@ impl Cx {
                 }
             }
         }
-        
+
         // attach/clear depth buffers, if any
         if let Some(depth_texture_id) = self.passes[pass_id].depth_texture {
             match self.passes[pass_id].clear_depth {
@@ -364,13 +364,13 @@ impl Cx {
                 gl::Clear(clear_flags);
             }
         }
-        
+
         Self::set_default_depth_and_blend_mode();
-        
+
         let mut zbias = 0.0;
         let zbias_step = self.passes[pass_id].zbias_step;
         let view_id = self.passes[pass_id].main_view_id.unwrap();
-        
+
         self.render_view(
             pass_id,
             view_id,
@@ -382,12 +382,12 @@ impl Cx {
             &mut zbias,
             zbias_step
         );
-        
+
     }
-    
+
     //let view_id = self.passes[pass_id].main_view_id.unwrap();
     //let _pass_size = self.passes[pass_id].pass_size;
-    
+
     /*
         for (index, color_texture) in self.passes[pass_id].color_textures.iter().enumerate() {
 
@@ -414,7 +414,7 @@ impl Cx {
     //self.render_view(pass_id, view_id, true, &Rect::zero(), &opengl_cx);
     // commit
     //}
-    
+
     pub fn opengl_compile_all_shaders(&mut self, opengl_cx: &OpenglCx) {
         unsafe {
             glx_sys::glXMakeCurrent(opengl_cx.display, opengl_cx.hidden_window, opengl_cx.context);
@@ -426,20 +426,20 @@ impl Cx {
             }
         };
     }
-    
+
     pub fn opengl_has_shader_error(compile: bool, shader: usize, source: &str) -> Option<String> {
         //None
         unsafe {
-            
+
             let mut success = i32::from(gl::FALSE);
-            
+
             if compile {
                 gl::GetShaderiv(shader as u32, gl::COMPILE_STATUS, &mut success);
             }
             else {
                 gl::GetProgramiv(shader as u32, gl::LINK_STATUS, &mut success);
             };
-            
+
             if success != i32::from(gl::TRUE) {
                 let mut length = 0;
                 if compile {
@@ -471,17 +471,17 @@ impl Cx {
             }
         }
     }
-    
+
     pub fn opengl_get_attributes(program: u32, prefix: &str, slots: usize) -> Vec<OpenglAttribute> {
         let mut attribs = Vec::new();
-        
+
         let stride = (slots * mem::size_of::<f32>()) as i32;
         let num_attr = Self::ceil_div4(slots);
         for i in 0..num_attr {
             let mut name = prefix.to_string();
             name.push_str(&i.to_string());
             name.push_str("\0");
-            
+
             let mut size = ((slots - i * 4)) as i32;
             if size > 4 {
                 size = 4;
@@ -499,10 +499,10 @@ impl Cx {
         }
         attribs
     }
-    
+
     pub fn opengl_get_uniforms(program: u32, sg: &ShaderGen, unis: &Vec<ShVar>) -> Vec<OpenglUniform> {
         let mut gl_uni = Vec::new();
-        
+
         for uni in unis {
             let mut name0 = "".to_string();
             name0.push_str(&uni.name);
@@ -517,10 +517,10 @@ impl Cx {
         }
         gl_uni
     }
-    
+
     pub fn opengl_get_texture_slots(program: u32, texture_slots: &Vec<ShVar>) -> Vec<OpenglUniform> {
         let mut gl_texture_slots = Vec::new();
-        
+
         for slot in texture_slots {
             let mut name0 = "".to_string();
             name0.push_str(&slot.name);
@@ -536,9 +536,9 @@ impl Cx {
         }
         gl_texture_slots
     }
-    
+
     pub fn opengl_compile_shader(sh: &mut CxShader, opengl_cx: &OpenglCx) -> Result<(), SlErr> {
-        
+
         let (vertex, fragment, mapping) = Self::gl_assemble_shader(&sh.shader_gen, GLShaderType::OpenGL) ?;
         // now we have a pixel and a vertex shader
         // so lets now pass it to GL
@@ -551,7 +551,7 @@ impl Cx {
                     msg: format!("ERROR::SHADER::VERTEX::COMPILATION_FAILED\n{}", error)
                 })
             }
-            
+
             let fs = gl::CreateShader(gl::FRAGMENT_SHADER);
             gl::ShaderSource(fs, 1, [fragment.as_ptr() as *const _].as_ptr(), ptr::null());
             gl::CompileShader(fs);
@@ -560,7 +560,7 @@ impl Cx {
                     msg: format!("ERROR::SHADER::FRAGMENT::COMPILATION_FAILED\n{}", error)
                 })
             }
-            
+
             let program = gl::CreateProgram();
             gl::AttachShader(program, vs);
             gl::AttachShader(program, fs);
@@ -572,13 +572,13 @@ impl Cx {
             }
             gl::DeleteShader(vs);
             gl::DeleteShader(fs);
-            
+
             let geom_attribs = Self::opengl_get_attributes(program, "geomattr", mapping.geometry_slots);
             let inst_attribs = Self::opengl_get_attributes(program, "instattr", mapping.instance_slots);
-            
+
             // lets fetch the uniform positions for our uniforms
             sh.platform = Some(CxPlatformShader {
-                program: program, 
+                program: program,
                 geom_ibuf: {
                     let mut buf = OpenglBuffer::default();
                     buf.update_with_u32_data(opengl_cx, &sh.shader_gen.geometry_indices);
@@ -619,7 +619,7 @@ impl ViewBounds {
             max_y: std::f32::NEG_INFINITY,
         }
     }
-    
+
     fn add_rect(&mut self, rect: &Rect) {
         if rect.x < self.min_x {
             self.min_x = rect.x;
@@ -662,7 +662,7 @@ impl OpenglCx {
                 major,
                 minor,
             );
-            
+
             let screen = glx_sys::XDefaultScreen(display);
 
             // Query extensions string
@@ -768,7 +768,7 @@ impl OpenglCx {
             let mut attributes = mem::zeroed::<glx_sys::XSetWindowAttributes>();
 
             // We need a color map that is compatible with our visual. Otherwise, the call to
-            // XCreateWindow below will fail. 
+            // XCreateWindow below will fail.
             attributes.colormap = glx_sys::XCreateColormap(
                 display,
                 root_window,
@@ -800,9 +800,9 @@ impl OpenglCx {
             }
         }
     }
-    
+
     pub fn set_uniform_buffer(&self, locs: &Vec<OpenglUniform>, uni: &[f32]) {
-        
+
         let mut o = 0;
         for loc in locs {
             if o + loc.size > uni.len() {
@@ -813,7 +813,7 @@ impl OpenglCx {
             }
             if loc.loc >= 0 {
                 unsafe {
-                    
+
                     match loc.size {
                         1 => {
                             gl::Uniform1f(loc.loc as i32, uni[o]);
@@ -832,26 +832,26 @@ impl OpenglCx {
             };
             o = o + loc.size;
         }
-        
+
     }
-    
+
     pub fn update_platform_texture_image2d(&self, cxtexture: &mut CxTexture) {
-        
+
         if cxtexture.desc.width.is_none() || cxtexture.desc.height.is_none() {
             println!("update_platform_texture_image2d without width/height");
             return;
         }
-        
+
         let width = cxtexture.desc.width.unwrap();
         let height = cxtexture.desc.height.unwrap();
-        
+
         // allocate new texture if descriptor change
         if cxtexture.platform.alloc_desc != cxtexture.desc {
-            
+
             cxtexture.platform.alloc_desc = cxtexture.desc.clone();
             cxtexture.platform.width = width as u64;
             cxtexture.platform.height = height as u64;
-            
+
             let gl_texture = match cxtexture.platform.gl_texture {
                 None => {
                     unsafe {
@@ -874,35 +874,35 @@ impl OpenglCx {
                 gl::BindTexture(gl::TEXTURE_2D, 0);
             }
         }
-        
+
         cxtexture.update_image = false;
     }
-    
+
     pub fn update_platform_render_target(&self, cxtexture: &mut CxTexture, dpi_factor: f32, size: Vec2, is_depth: bool) -> bool {
         let width = if let Some(width) = cxtexture.desc.width {width as u64} else {(size.x * dpi_factor) as u64};
         let height = if let Some(height) = cxtexture.desc.height {height as u64} else {(size.y * dpi_factor) as u64};
-        
+
         if cxtexture.platform.width == width && cxtexture.platform.height == height && cxtexture.platform.alloc_desc == cxtexture.desc {
             return false
         }
-        
+
         unsafe {
             if let Some(gl_texture) = cxtexture.platform.gl_texture {
                 gl::DeleteTextures(1, &gl_texture);
             }
-            
+
             let mut gl_texture = std::mem::MaybeUninit::uninit();
             gl::GenTextures(1, gl_texture.as_mut_ptr());
             let gl_texture = gl_texture.assume_init();
             gl::BindTexture(gl::TEXTURE_2D, gl_texture);
             gl::TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_MIN_FILTER, gl::LINEAR as i32);
             gl::TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_MAG_FILTER, gl::LINEAR as i32);
-            
+
             cxtexture.platform.alloc_desc = cxtexture.desc.clone();
             cxtexture.platform.width = width;
             cxtexture.platform.height = height;
             cxtexture.platform.gl_texture = Some(gl_texture);
-            
+
             if !is_depth {
                 match cxtexture.desc.format {
                     TextureFormat::Default | TextureFormat::RenderBGRA => {
@@ -925,7 +925,7 @@ impl OpenglCx {
                     }
                 }
             }
-            
+
         }
         return true;
     }
@@ -957,12 +957,12 @@ pub struct OpenglWindow {
 
 impl OpenglWindow {
     pub fn new(window_id: usize, opengl_cx: &OpenglCx, xlib_app: &mut XlibApp, inner_size: Vec2, position: Option<Vec2>, title: &str) -> OpenglWindow {
-        
+
         let mut xlib_window = XlibWindow::new(xlib_app, window_id);
-        
+
         let visual_info = unsafe { mem::transmute(opengl_cx.visual_info) };
         xlib_window.init(title, inner_size, position, visual_info);
-        
+
         OpenglWindow {
             first_draw: true,
             window_id,
@@ -972,7 +972,7 @@ impl OpenglWindow {
             xlib_window
         }
     }
-    
+
     pub fn resize_framebuffer(&mut self, _opengl_cx: &OpenglCx) -> bool {
         let cal_size = Vec2 {
             x: self.window_geom.inner_size.x * self.window_geom.dpi_factor,
@@ -987,7 +987,7 @@ impl OpenglWindow {
             false
         }
     }
-    
+
 }
 
 #[derive(Default, Clone)]
@@ -1023,7 +1023,7 @@ pub struct CxPlatformDrawCall {
 }
 
 impl CxPlatformDrawCall {
-    
+
     pub fn check_vao(&mut self, shader_id: usize, shp: &CxPlatformShader) {
         if self.vao_shader_id.is_none() || self.vao_shader_id.unwrap() != shader_id {
             self.free_vao();
@@ -1033,32 +1033,32 @@ impl CxPlatformDrawCall {
                 gl::GenVertexArrays(1, vao.as_mut_ptr());
                 let vao = vao.assume_init();
                 gl::BindVertexArray(vao);
-                
+
                 // bind the vertex and indexbuffers
                 gl::BindBuffer(gl::ARRAY_BUFFER, shp.geom_vbuf.gl_buffer.unwrap());
                 for attr in &shp.geom_attribs {
                     gl::VertexAttribPointer(attr.loc, attr.size, gl::FLOAT, 0, attr.stride, attr.offset as *const () as *const _);
                     gl::EnableVertexAttribArray(attr.loc);
                 }
-                
+
                 gl::BindBuffer(gl::ARRAY_BUFFER, self.inst_vbuf.gl_buffer.unwrap());
-                
+
                 for attr in &shp.inst_attribs {
                     gl::VertexAttribPointer(attr.loc, attr.size, gl::FLOAT, 0, attr.stride, attr.offset as *const () as *const _);
                     gl::EnableVertexAttribArray(attr.loc);
                     gl::VertexAttribDivisor(attr.loc, 1 as gl::types::GLuint);
                 }
-                
+
                 // bind the indexbuffer
                 gl::BindBuffer(gl::ELEMENT_ARRAY_BUFFER, shp.geom_ibuf.gl_buffer.unwrap());
                 gl::BindVertexArray(0);
-                
+
                 self.vao_shader_id = Some(shader_id);
                 self.vao = Some(vao);
             }
         }
     }
-    
+
     fn free_vao(&mut self) {
         unsafe {
             if let Some(mut vao) = self.vao {
@@ -1088,7 +1088,7 @@ pub struct OpenglBuffer {
 }
 
 impl OpenglBuffer {
-    
+
     pub fn alloc_gl_buffer(&mut self) {
         unsafe {
             let mut gl_buffer = std::mem::MaybeUninit::uninit();
@@ -1096,7 +1096,7 @@ impl OpenglBuffer {
             self.gl_buffer = Some(gl_buffer.assume_init());
         }
     }
-    
+
     pub fn update_with_f32_data(&mut self, _opengl_cx: &OpenglCx, data: &Vec<f32>) {
         if self.gl_buffer.is_none() {
             self.alloc_gl_buffer();
@@ -1106,7 +1106,7 @@ impl OpenglBuffer {
             gl::BufferData(gl::ARRAY_BUFFER, (data.len() * mem::size_of::<f32>()) as gl::types::GLsizeiptr, data.as_ptr() as *const _, gl::STATIC_DRAW);
         }
     }
-    
+
     pub fn update_with_u32_data(&mut self, _opengl_cx: &OpenglCx, data: &Vec<u32>) {
         if self.gl_buffer.is_none() {
             self.alloc_gl_buffer();

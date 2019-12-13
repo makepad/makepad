@@ -85,14 +85,14 @@ impl PlatformType {
 pub struct Cx {
     pub running: bool,
     pub platform_type: PlatformType,
-    
+
     pub windows: Vec<CxWindow>,
     pub windows_free: Vec<usize>,
     pub passes: Vec<CxPass>,
     pub passes_free: Vec<usize>,
     pub views: Vec<CxView>,
     pub views_free: Vec<usize>,
-    
+
     pub fonts: Vec<CxFont>,
     pub fonts_atlas: CxFontsAtlas,
     pub textures: Vec<CxTexture>,
@@ -100,10 +100,10 @@ pub struct Cx {
     pub shaders: Vec<CxShader>,
     pub shader_map: HashMap<ShaderGen, usize>,
     pub shader_instance_id: usize,
-    
+
     pub str_to_id: RefCell<HashMap<String, usize>>,
     pub id_to_str: RefCell<HashMap<usize, String>>,
-    
+
     pub is_in_redraw_cycle: bool,
     pub vr_can_present: bool,
     pub default_dpi_factor: f32,
@@ -113,25 +113,25 @@ pub struct Cx {
     pub view_stack: Vec<usize>,
     pub turtles: Vec<Turtle>,
     pub align_list: Vec<Area>,
-    
+
     pub redraw_child_areas: Vec<Area>,
     pub redraw_parent_areas: Vec<Area>,
     pub _redraw_child_areas: Vec<Area>,
     pub _redraw_parent_areas: Vec<Area>,
-    
+
     pub redraw_id: u64,
     pub repaint_id: u64,
     pub event_id: u64,
     pub timer_id: u64,
     pub signal_id: usize,
     pub theme_update_id: usize,
-    
+
     pub last_key_focus: Area,
     pub key_focus: Area,
     pub keys_down: Vec<KeyEvent>,
-    
+
     pub debug_area: Area,
-    
+
     pub down_mouse_cursor: Option<MouseCursor>,
     pub hover_mouse_cursor: Option<MouseCursor>,
     pub captured_fingers: Vec<Area>,
@@ -140,25 +140,25 @@ pub struct Cx {
     pub finger_down_rel_start: Vec<Vec2>,
     pub finger_over_last_area: Area,
     pub _finger_over_last_area: Area,
-    
+
     pub playing_anim_areas: Vec<AnimArea>,
     pub ended_anim_areas: Vec<AnimArea>,
-    
+
     pub frame_callbacks: Vec<Area>,
     pub _frame_callbacks: Vec<Area>,
-    
+
     pub signals: Vec<(Signal, StatusId)>,
-    
+
     pub style_base: CxStyle,
     pub styles: Vec<CxStyle>,
     pub style_map: HashMap<StyleId, usize>,
     pub style_stack: Vec<usize>,
-    
+
     pub command_settings: HashMap<CommandId, CxCommandSetting>,
-    
+
     pub panic_now: bool,
     pub panic_redraw: bool,
-    
+
     pub platform: CxPlatform,
 }
 
@@ -188,12 +188,12 @@ impl Default for Cx {
         let mut finger_tap_count = Vec::new();
         let mut finger_down_abs_start = Vec::new();
         let mut finger_down_rel_start = Vec::new();
-        
+
         captured_fingers.resize(NUM_FINGERS, Area::Empty);
         finger_tap_count.resize(NUM_FINGERS, (Vec2::default(), 0.0, 0));
         finger_down_abs_start.resize(NUM_FINGERS, Vec2::default());
         finger_down_rel_start.resize(NUM_FINGERS, Vec2::default());
-        
+
         let textures = vec![CxTexture {
             desc: TextureDesc {
                 format: TextureFormat::ImageBGRA,
@@ -206,18 +206,18 @@ impl Default for Cx {
             update_image: true,
             platform: CxPlatformTexture::default()
         }];
-        
+
         Self {
             platform_type: PlatformType::Windows,
             running: true,
-            
+
             windows: Vec::new(),
             windows_free: Vec::new(),
             passes: Vec::new(),
             passes_free: Vec::new(),
             views: vec![CxView {..Default::default()}],
             views_free: Vec::new(),
-            
+
             fonts: Vec::new(),
             fonts_atlas: CxFontsAtlas::default(),
             textures: textures,
@@ -226,7 +226,7 @@ impl Default for Cx {
             shader_map: HashMap::new(),
             id_to_str: RefCell::new(HashMap::new()),
             str_to_id: RefCell::new(HashMap::new()),
-            
+
             default_dpi_factor: 1.0,
             current_dpi_factor: 1.0,
             is_in_redraw_cycle: false,
@@ -236,12 +236,12 @@ impl Default for Cx {
             view_stack: Vec::new(),
             turtles: Vec::new(),
             align_list: Vec::new(),
-            
+
             redraw_parent_areas: Vec::new(),
             _redraw_parent_areas: Vec::new(),
             redraw_child_areas: Vec::new(),
             _redraw_child_areas: Vec::new(),
-            
+
             redraw_id: 1,
             event_id: 1,
             repaint_id: 1,
@@ -249,13 +249,13 @@ impl Default for Cx {
             signal_id: 1,
             shader_instance_id: 1,
             theme_update_id: 1,
-            
+
             last_key_focus: Area::Empty,
             key_focus: Area::Empty,
             keys_down: Vec::new(),
-            
+
             debug_area: Area::Empty,
-            
+
             down_mouse_cursor: None,
             hover_mouse_cursor: None,
             captured_fingers: captured_fingers,
@@ -264,25 +264,25 @@ impl Default for Cx {
             finger_down_rel_start: finger_down_rel_start,
             finger_over_last_area: Area::Empty,
             _finger_over_last_area: Area::Empty,
-            
+
             style_base: CxStyle::default(),
             styles: Vec::new(),
             style_map: HashMap::new(),
             style_stack: Vec::new(),
-            
+
             command_settings: HashMap::new(),
-            
+
             playing_anim_areas: Vec::new(),
             ended_anim_areas: Vec::new(),
-            
+
             frame_callbacks: Vec::new(),
             _frame_callbacks: Vec::new(),
-            
+
             signals: Vec::new(),
-            
+
             panic_now: false,
             panic_redraw: false,
-            
+
             platform: CxPlatform {..Default::default()},
         }
     }
@@ -290,14 +290,14 @@ impl Default for Cx {
 
 
 impl Cx {
-    
+
     pub fn add_shader(&mut self, sg: ShaderGen, name: &str) -> Shader {
         let inst_id = self.shader_instance_id;
         self.shader_instance_id += 1;
         if let Some(stored_id) = self.shader_map.get(&sg) {
             return Shader {shader_id: Some((*stored_id, inst_id))}
         }
-        
+
         let new_id = self.shaders.len();
         self.shader_map.insert(sg.clone(), new_id);
         self.shaders.push(CxShader {
@@ -308,13 +308,13 @@ impl Cx {
         });
         Shader {shader_id: Some((new_id, inst_id))}
     }
-    
+
     pub fn process_tap_count(&mut self, digit: usize, pos: Vec2, time: f64) -> u32 {
         if digit >= self.finger_tap_count.len() {
             return 0
         };
         let (last_pos, last_time, count) = self.finger_tap_count[digit];
-        
+
         if (time - last_time) < 0.5 && pos.distance(&last_pos) < 10. {
             self.finger_tap_count[digit] = (pos, time, count + 1);
             count + 1
@@ -324,7 +324,7 @@ impl Cx {
             1
         }
     }
-    
+
     pub fn get_dpi_factor_of(&mut self, area: &Area) -> f32 {
         match area {
             Area::Instance(ia) => {
@@ -339,7 +339,7 @@ impl Cx {
         }
         return 1.0;
     }
-    
+
     pub fn get_delegated_dpi_factor(&mut self, pass_id: usize) -> f32 {
         let mut dpi_factor = 1.0;
         let mut pass_id_walk = pass_id;
@@ -365,10 +365,10 @@ impl Cx {
         }
         dpi_factor
     }
-    
+
     pub fn compute_passes_to_repaint(&mut self, passes_todo: &mut Vec<usize>, windows_need_repaint: &mut usize) {
         passes_todo.truncate(0);
-        
+
         for (pass_id, cxpass) in self.passes.iter().enumerate() {
             if cxpass.paint_dirty {
                 let mut inserted = false;
@@ -396,7 +396,7 @@ impl Cx {
             }
         }
     }
-    
+
     pub fn redraw_pass_of(&mut self, area: Area) {
         // we walk up the stack of area
         match area {
@@ -424,7 +424,7 @@ impl Cx {
             }
         }
     }
-    
+
     pub fn redraw_pass_and_dep_of_passes(&mut self, pass_id: usize) {
         let mut walk_pass_id = pass_id;
         loop {
@@ -441,7 +441,7 @@ impl Cx {
             }
         }
     }
-    
+
     pub fn redraw_pass_and_sub_passes(&mut self, pass_id: usize) {
         let cxpass = &self.passes[pass_id];
         if let Some(main_view_id) = cxpass.main_view_id {
@@ -456,13 +456,13 @@ impl Cx {
             }
         }
     }
-    
+
     pub fn redraw_child_area(&mut self, area: Area) {
         if self.panic_redraw {
             #[cfg(debug_assertions)]
             panic!("Panic Redraw triggered")
         }
-        
+
         // if we are redrawing all, clear the rest
         if area == Area::All {
             self.redraw_child_areas.truncate(0);
@@ -477,13 +477,13 @@ impl Cx {
         }
         self.redraw_child_areas.push(area);
     }
-    
+
     pub fn redraw_parent_area(&mut self, area: Area) {
         if self.panic_redraw {
             #[cfg(debug_assertions)]
             panic!("Panic Redraw triggered")
         }
-        
+
         // if we are redrawing all, clear the rest
         if area == Area::All {
             self.redraw_parent_areas.truncate(0);
@@ -498,7 +498,7 @@ impl Cx {
         }
         self.redraw_parent_areas.push(area);
     }
-    
+
     pub fn redraw_previous_areas(&mut self) {
         for area in self._redraw_child_areas.clone() {
             self.redraw_child_area(area);
@@ -507,9 +507,9 @@ impl Cx {
             self.redraw_parent_area(area);
         }
     }
-    
+
     pub fn view_will_redraw(&self, view_id: usize) -> bool {
-        
+
         // figure out if areas are in some way a child of draw_list_id, then we need to redraw
         for area in &self._redraw_child_areas {
             match area {
@@ -573,14 +573,14 @@ impl Cx {
                             return true
                         }
                     }
-                    
+
                 }
             }
         }
-        
+
         false
     }
-    
+
     pub fn check_ended_anim_areas(&mut self, time: f64) {
         let mut i = 0;
         self.ended_anim_areas.truncate(0);
@@ -598,16 +598,16 @@ impl Cx {
             }
         }
     }
-    
+
     pub fn update_area_refs(&mut self, old_area: Area, new_area: Area) {
         if old_area == Area::Empty || old_area == Area::All {
             return
         }
-        
+
         if let Some(anim_anim) = self.playing_anim_areas.iter_mut().find( | v | v.area == old_area) {
             anim_anim.area = new_area.clone()
         }
-        
+
         if let Some(digit_area) = self.captured_fingers.iter_mut().find( | v | **v == old_area) {
             *digit_area = new_area.clone()
         }
@@ -615,12 +615,12 @@ impl Cx {
         if self.key_focus == old_area {
             self.key_focus = new_area.clone()
         }
-        
+
         // update capture keyboard
         if self.last_key_focus == old_area {
             self.last_key_focus = new_area.clone()
         }
-        
+
         if self._finger_over_last_area == old_area {
             self._finger_over_last_area = new_area.clone()
         }
@@ -629,22 +629,22 @@ impl Cx {
             *next_frame = new_area.clone()
         }
     }
-    
+
     pub fn set_key_focus(&mut self, focus_area: Area) {
         self.key_focus = focus_area;
     }
-    
+
     pub fn has_key_focus(&self, focus_area: Area) -> bool {
         self.key_focus == focus_area
     }
-    
+
     pub fn process_key_down(&mut self, key_event: KeyEvent) {
         if let Some(_) = self.keys_down.iter().position( | k | k.key_code == key_event.key_code) {
             return;
         }
         self.keys_down.push(key_event);
     }
-    
+
     pub fn process_key_up(&mut self, key_event: &KeyEvent) {
         for i in 0..self.keys_down.len() {
             if self.keys_down[i].key_code == key_event.key_code {
@@ -653,7 +653,7 @@ impl Cx {
             }
         }
     }
-    
+
     pub fn call_all_keys_up<F>(&mut self, mut event_handler: F)
     where F: FnMut(&mut Cx, &mut Event)
     {
@@ -663,15 +663,15 @@ impl Cx {
             self.call_event_handler(&mut event_handler, &mut Event::KeyUp(key_event))
         }
     }
-    
+
     // event handler wrappers
-    
+
     pub fn call_event_handler<F>(&mut self, mut event_handler: F, event: &mut Event)
     where F: FnMut(&mut Cx, &mut Event)
     {
         self.event_id += 1;
         event_handler(self, event);
-        
+
         if self.last_key_focus != self.key_focus {
             let last_key_focus = self.last_key_focus;
             self.last_key_focus = self.key_focus;
@@ -681,7 +681,7 @@ impl Cx {
             }))
         }
     }
-    
+
     pub fn call_draw_event<F>(&mut self, mut event_handler: F)
     where F: FnMut(&mut Cx, &mut Event)
     {
@@ -697,7 +697,7 @@ impl Cx {
         self.is_in_redraw_cycle = false;
         //self.profile();
     }
-    
+
     pub fn call_animation_event<F>(&mut self, mut event_handler: F, time: f64)
     where F: FnMut(&mut Cx, &mut Event)
     {
@@ -707,7 +707,7 @@ impl Cx {
             self.call_event_handler(&mut event_handler, &mut Event::AnimEnded(AnimateEvent {time: time, frame: self.repaint_id}));
         }
     }
-    
+
     pub fn call_frame_event<F>(&mut self, mut event_handler: F, time: f64)
     where F: FnMut(&mut Cx, &mut Event)
     {
@@ -715,25 +715,25 @@ impl Cx {
         self.frame_callbacks.truncate(0);
         self.call_event_handler(&mut event_handler, &mut Event::Frame(FrameEvent {time: time, frame: self.repaint_id}));
     }
-    
+
     pub fn next_frame(&mut self, area: Area) {
         if let Some(_) = self.frame_callbacks.iter().position( | a | *a == area) {
             return;
         }
         self.frame_callbacks.push(area);
     }
-    
+
     pub fn new_signal(&mut self) -> Signal {
         self.signal_id += 1;
         return Signal {signal_id: self.signal_id}
     }
-    
+
     pub fn send_signal(&mut self, signal: Signal, status: StatusId) {
         if signal.signal_id != 0 && self.signals.iter().find( | v | v.0 == signal && v.1 == status).is_none() {
             self.signals.push((signal, status));
         }
     }
-    
+
     pub fn call_signals<F>(&mut self, mut event_handler: F)
     where F: FnMut(&mut Cx, &mut Event)
     {
@@ -742,7 +742,7 @@ impl Cx {
             counter += 1;
             let mut signals = Vec::new();
             std::mem::swap(&mut self.signals, &mut signals);
-            
+
             for (signal, status) in signals {
                 self.call_event_handler(&mut event_handler, &mut Event::Signal(SignalEvent {
                     signal: signal,
@@ -755,10 +755,10 @@ impl Cx {
             }
         }
     }
-    
+
     pub fn status_http_send_ok() -> StatusId {uid!()}
     pub fn status_http_send_fail() -> StatusId {uid!()}
-    
+
     /*
     pub fn debug_draw_tree_recur(&mut self, draw_list_id: usize, depth:usize){
         if draw_list_id >= self.draw_lists.len(){
@@ -856,7 +856,7 @@ macro_rules!main_app {
                 app.handle_app(cx, &mut event);
             });
         }
-        
+
         #[export_name = "create_wasm_app"]
         pub extern "C" fn create_wasm_app() -> u32 {
             let mut cx = Box::new(Cx::default());
@@ -864,7 +864,7 @@ macro_rules!main_app {
             let cxafterdraw = Box::new(CxAfterDraw::proto(&mut cx));
             Box::into_raw(Box::new((Box::into_raw(app), Box::into_raw(cx), Box::into_raw(cxafterdraw)))) as u32
         }
-        
+
         #[export_name = "process_to_wasm"]
         pub unsafe extern "C" fn process_to_wasm(appcx: u32, msg_bytes: u32) -> u32 {
             let appcx = &*(appcx as *mut (*mut $ app, *mut Cx, *mut CxAfterDraw));

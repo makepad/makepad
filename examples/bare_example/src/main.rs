@@ -51,7 +51,7 @@ impl App {
             main_view: View::proto(cx),
         }
     }
-    
+
     fn handle_app(&mut self, _cx: &mut Cx, event: &mut Event) {
         match event {
             Event::Construct => {
@@ -59,15 +59,15 @@ impl App {
             _ => ()
         }
     }
-    
+
     fn draw_app(&mut self, cx: &mut Cx) {
         self.window.begin_window(cx);
         self.pass.begin_pass(cx);
         self.pass.add_color_texture(cx, &mut self.color_texture, ClearColor::ClearWith(color256(255, 0, 0)));
         if self.main_view.begin_view(cx, Layout::default()).is_ok() {
-            
+
             self.quad.draw_quad_abs(cx, Rect{x:0.,y:0.,w:100.,h:100.});
-            
+
             self.main_view.end_view(cx);
         }
         self.pass.end_pass(cx);

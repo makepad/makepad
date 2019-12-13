@@ -15,7 +15,7 @@ impl JSEditor {
             }
         }
     }
-    
+
     pub fn handle_js_editor(&mut self, cx: &mut Cx, event: &mut Event, text_buffer: &mut TextBuffer) -> TextEditorEvent {
         let ce = self.text_editor.handle_text_editor(cx, event, text_buffer);
         match ce {
@@ -28,7 +28,7 @@ impl JSEditor {
         }
         ce
     }
-    
+
     pub fn draw_js_editor(&mut self, cx: &mut Cx, text_buffer: &mut TextBuffer) {
         if text_buffer.needs_token_chunks() && text_buffer.lines.len() >0 {
             let mut state = TokenizerState::new(&text_buffer.lines);
@@ -43,13 +43,13 @@ impl JSEditor {
                 }
             }
         }
-        
+
         if self.text_editor.begin_text_editor(cx, text_buffer).is_err() {return}
-        
+
         for (index, token_chunk) in text_buffer.token_chunks.iter_mut().enumerate() {
             self.text_editor.draw_chunk(cx, index, &text_buffer.flat_text, token_chunk, &text_buffer.messages.cursors);
         }
-        
+
         self.text_editor.end_text_editor(cx, text_buffer);
     }
 }
@@ -66,7 +66,7 @@ impl JSTokenizer {
             comment_depth: 0
         }
     }
-    
+
     pub fn next_token<'a>(&mut self, state: &mut TokenizerState<'a>, chunk: &mut Vec<char>, token_chunks: &Vec<TokenChunk>) -> TokenType {
         let start = chunk.len();
         if self.comment_depth >0 { // parse comments
@@ -95,7 +95,7 @@ impl JSTokenizer {
                     if (chunk.len() - start)>0 {
                         return TokenType::CommentChunk
                     }
-                    
+
                     chunk.push(state.next);
                     state.advance();
                     return TokenType::Newline
@@ -119,7 +119,7 @@ impl JSTokenizer {
         else {
             state.advance_with_cur();
             match state.cur {
-                
+
                 '\0' => { // eof insert a terminating space and end
                     chunk.push(' ');
                     return TokenType::Eof
@@ -261,7 +261,7 @@ impl JSTokenizer {
                             state.advance();
                         }
                     }
-                    
+
                     return TokenType::Operator;
                 },
                 '.' => {
@@ -349,9 +349,9 @@ impl JSTokenizer {
                 },
                 'a'..='z' | 'A'..='Z' => { // try to parse keywords or identifiers
                     chunk.push(state.cur);
-                    
+
                     let keyword_type = Self::parse_js_keyword(state, chunk, token_chunks);
-                    
+
                     if Self::parse_js_ident_tail(state, chunk) {
                         if state.next == '(' {
                             return TokenType::Call;
@@ -371,7 +371,7 @@ impl JSTokenizer {
             }
         }
     }
-    
+
     fn parse_js_ident_tail<'a>(state: &mut TokenizerState<'a>, chunk: &mut Vec<char>) -> bool {
         let mut ret = false;
         while state.next_is_digit() || state.next_is_letter() || state.next == '_' || state.next == '$' {
@@ -381,8 +381,8 @@ impl JSTokenizer {
         }
         ret
     }
-    
-    
+
+
     fn parse_js_escape_char<'a>(state: &mut TokenizerState<'a>, chunk: &mut Vec<char>) -> bool {
         if state.next == '\\' {
             chunk.push(state.next);
@@ -438,7 +438,7 @@ impl JSTokenizer {
             }
         }
     }
-    
+
     fn parse_js_keyword<'a>(state: &mut TokenizerState<'a>, chunk: &mut Vec<char>, _token_chunks: &Vec<TokenChunk>) -> TokenType {
         match state.cur {
             'b' => {
@@ -627,29 +627,29 @@ impl JSTokenizer {
             return TokenType::Identifier;
         }
     }
-    
+
     // js autoformatter. nothing fancy.
     pub fn auto_format(text_buffer: &mut TextBuffer) -> FormatOutput {
-        
+
         let extra_spacey = false;
         let pre_spacey = true;
         let mut out = FormatOutput::new();
         let mut tp = TokenParser::new(&text_buffer.flat_text, &text_buffer.token_chunks);
-        
+
         struct ParenStack {
             expecting_newlines: bool,
             expected_indent: usize
         }
-        
+
         let mut paren_stack: Vec<ParenStack> = Vec::new();
-        
+
         paren_stack.push(ParenStack {
             expecting_newlines: true,
             expected_indent: 0,
         });
-        
+
         out.new_line();
-        
+
         let mut first_on_line = true;
         let mut first_after_open = false;
         let mut expected_indent = 0;
@@ -658,7 +658,7 @@ impl JSTokenizer {
         let mut in_singleline_comment = false;
         let mut in_multline_string = false;
         while tp.advance() {
-            
+
             match tp.cur_type() {
                 TokenType::Whitespace => {
                     if in_singleline_comment || in_multline_comment || in_multline_string {
@@ -696,15 +696,15 @@ impl JSTokenizer {
                     if first_on_line {
                         out.indent(expected_indent);
                     }
-                    
+
                     paren_stack.push(ParenStack {
                         expecting_newlines: false,
                         expected_indent: expected_indent,
                     });
-                    
+
                     first_after_open = true;
                     is_unary_operator = true;
-                    
+
                     let is_curly = tp.cur_char() == '{';
                     if tp.cur_char() == '(' && (
                         tp.prev_type() == TokenType::Flow || tp.prev_type() == TokenType::Looping || tp.prev_type() == TokenType::Keyword
@@ -720,30 +720,30 @@ impl JSTokenizer {
                     else if !pre_spacey {
                         out.strip_space();
                     }
-                    
+
                     out.extend(tp.cur_chunk());
-                    
+
                     if extra_spacey && is_curly && tp.next_type() != TokenType::Newline {
                         out.add_space();
                     }
                     first_on_line = false;
                 },
                 TokenType::ParenClose => {
-                    
+
                     out.strip_space();
-                    
+
                     let expecting_newlines = paren_stack.last().unwrap().expecting_newlines;
-                    
+
                     if extra_spacey && tp.cur_char() == '}' && !expecting_newlines {
                         out.add_space();
                     }
-                    
+
                     first_after_open = false;
                     if !first_on_line && expecting_newlines { // we are expecting newlines!
                         out.new_line();
                         first_on_line = true;
                     }
-                    
+
                     expected_indent = if paren_stack.len()>1 {
                         paren_stack.pop().unwrap().expected_indent
                     }
@@ -760,7 +760,7 @@ impl JSTokenizer {
                     else {
                         is_unary_operator = false;
                     }
-                    
+
                     out.extend(tp.cur_chunk());
                 },
                 TokenType::CommentLine => {
@@ -853,13 +853,13 @@ impl JSTokenizer {
                     is_unary_operator = true;
                 },
                 TokenType::Operator => {
-                    
+
                     if first_on_line {
                         first_on_line = false;
                         let extra_indent = if is_unary_operator {0}else {4};
                         out.indent(expected_indent + extra_indent);
                     }
-                    
+
                     if (is_unary_operator && (tp.cur_char() == '-' || tp.cur_char() == '*' || tp.cur_char() == '&'))
                         || tp.cur_char() == '.' || tp.cur_char() == '!' {
                         out.extend(tp.cur_chunk());
@@ -876,14 +876,14 @@ impl JSTokenizer {
                             out.add_space();
                         }
                     }
-                    
+
                     is_unary_operator = true;
                 },
                 // these are followed by unary operators (some)
                 TokenType::TypeDef | TokenType::Fn | TokenType::Hash | TokenType::Splat | TokenType::Namespace |
                 TokenType::Keyword | TokenType::Flow | TokenType::Looping => {
                     is_unary_operator = true;
-                    
+
                     first_after_open = false;
                     if first_on_line {
                         first_on_line = false;
@@ -896,14 +896,14 @@ impl JSTokenizer {
                 TokenType::Call | TokenType::String | TokenType::Regex | TokenType::Number |
                 TokenType::Bool | TokenType::Unexpected | TokenType::Error | TokenType::Warning | TokenType::Defocus => {
                     is_unary_operator = false;
-                    
+
                     first_after_open = false;
                     if first_on_line {
                         first_on_line = false;
                         out.indent(expected_indent);
                     }
                     out.extend(tp.cur_chunk());
-                    
+
                 },
             }
         };

@@ -52,7 +52,7 @@ impl Mandelbrot {
             height: Some(self.height),
             multisample: None
         }));
-        
+
         unsafe fn calc_mandel_avx2(c_x: __m256d, c_y: __m256d, max_iter: usize, cen_x: f64, cen_y: f64, sin_t: f64, cos_t: f64) -> (__m256d, __m256d) {
             // rotate points with simd
             let mcen_x = _mm256_set1_pd(cen_x);
@@ -65,12 +65,12 @@ impl Mandelbrot {
             let start_y = _mm256_add_pd(_mm256_add_pd(_mm256_mul_pd(my, mcos_t), _mm256_mul_pd(mx, msin_t)), mcen_y);
             let mut x = start_x;
             let mut y = start_y;
-            
+
             let mut count = _mm256_set1_pd(0.0);
             let mut merge_sum = _mm256_set1_pd(0.0);
             let add = _mm256_set1_pd(1.0);
             let max_dist = _mm256_set1_pd(4.0);
-            
+
             for _ in 0..max_iter {
                 let xy = _mm256_mul_pd(x, y);
                 let xx = _mm256_mul_pd(x, x);
@@ -88,7 +88,7 @@ impl Mandelbrot {
             }
             return (_mm256_set1_pd(2.0), merge_sum);
         }
-        
+
         // lets spawn fractal.height over 32 threads
         let num_threads = self.num_threads;
         let num_iters = self.num_iters;
@@ -99,7 +99,7 @@ impl Mandelbrot {
         let awidth = 5.33 / self.width as f64;
         let aheight = 3.0 / self.height as f64;
         let chunk_height = height / num_threads;
-        
+
         // stuff that goes into the threads
         let mut thread_pool = scoped_threadpool::Pool::new(self.num_threads as u32);
         let frame_signal = self.frame_signal.clone();
@@ -180,13 +180,13 @@ impl Mandelbrot {
                 }
                 else if !has_hires || !high_delta_zoom && re_render {
                     // fancy antialised version rendering 8k effectively
-                    
+
                     thread_pool.scoped( | scope | {
                         if let Some(mapped_texture) = cxthread.lock_mapped_texture_f32(&texture, user_data) {
-                            
+
                             let dx = 0.5 * awidth * loc.zoom;
                             let dy = 0.5 * aheight * loc.zoom;
-                            
+
                             let mut iter = mapped_texture.chunks_mut((chunk_height * width * 2) as usize);
                             for i in 0..num_threads {
                                 let thread_num = i;
@@ -227,11 +227,11 @@ impl Mandelbrot {
                     Cx::send_signal(frame_signal, 0);
                     std::thread::sleep(std::time::Duration::from_millis(1));
                 }
-                
+
             }
         });
     }
-    
+
     pub fn handle_signal(&mut self, _cx: &mut Cx, event: &Event) -> bool {
         if let Event::Signal(se) = event {
             if self.frame_signal.is_signal(se) { // we haz new texture
@@ -240,7 +240,7 @@ impl Mandelbrot {
         }
         false
     }
-    
+
     pub fn send_new_loc(&mut self, index: usize, new_loc: MandelbrotLoc, high_delta_zoom: bool) {
         if let Some(sender) = &self.sender {
             let _ = sender.send((index, new_loc, high_delta_zoom));

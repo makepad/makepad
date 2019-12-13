@@ -36,12 +36,12 @@ impl LogItemDraw {
             shadow: ScrollShadow{z:0.01,..ScrollShadow::proto(cx)}
         }
     }
-    
+
     pub fn layout_item() -> LayoutId {uid!()}
     pub fn text_style_item() -> TextStyleId {uid!()}
-    
+
     pub fn style(cx: &mut Cx, opt: &StyleOptions) {
-        
+
         Self::layout_item().set(cx, Layout {
             walk: Walk::wh(Width::Fill, Height::Fix(20. * opt.scale)),
             align: Align::left_center(),
@@ -49,26 +49,26 @@ impl LogItemDraw {
             line_wrap: LineWrap::None,
             ..Default::default()
         });
-        
+
         Self::text_style_item().set(cx, Theme::text_style_normal().get(cx));
     }
-    
+
     pub fn get_default_anim(cx: &Cx, counter: usize, marked: bool) -> Anim {
         Anim::new(Play::Chain {duration: 0.01}, vec![
             Track::color(Quad::instance_color(), Ease::Lin, vec![
                 (1.0, if marked {Theme::color_bg_marked().get(cx)} else if counter & 1 == 0 {Theme::color_bg_selected().get(cx)}else {Theme::color_bg_odd().get(cx)})
             ])
-        ]) 
+        ])
     }
-    
+
     pub fn get_default_anim_cut(cx: &Cx, counter: usize, marked: bool) -> Anim {
         Anim::new(Play::Cut {duration: 0.01}, vec![
             Track::color(Quad::instance_color(), Ease::Lin, vec![
                 (0.0, if marked {Theme::color_bg_marked().get(cx)} else if counter & 1 == 0 {Theme::color_bg_selected().get(cx)}else {Theme::color_bg_odd().get(cx)})
             ])
-        ]) 
+        ])
     }
-    
+
     pub fn get_over_anim(cx: &Cx, counter: usize, marked: bool) -> Anim {
         let over_color = if marked {Theme::color_bg_marked_over().get(cx)} else if counter & 1 == 0 {Theme::color_bg_selected_over().get(cx)}else {Theme::color_bg_odd_over().get(cx)};
         Anim::new(Play::Cut {duration: 0.02}, vec![
@@ -77,12 +77,12 @@ impl LogItemDraw {
             ])
         ])
     }
-    
+
     pub fn draw_log_path(&mut self, cx: &mut Cx, path: &str, row: usize) {
         self.text.color = self.path_color.get(cx);
         self.text.draw_text(cx, &format!("{}:{} - ", path, row));
-    } 
-    
+    }
+
     pub fn draw_log_body(&mut self, cx: &mut Cx, body: &str) {
         self.text.color = self.message_color.get(cx);
         if body.len()>500 {
@@ -92,22 +92,22 @@ impl LogItemDraw {
             self.text.draw_text(cx, &body);
         }
     }
-    
+
     pub fn draw_log_item(&mut self, cx: &mut Cx, index: usize, list_item: &mut ListItem, log_item: &HubLogItem) {
-        
+
         list_item.animator.init(cx, | cx | LogItemDraw::get_default_anim(cx, index, false));
-        
+
         self.item_bg.color = list_item.animator.last_color(cx, Quad::instance_color());
-        
+
         let bg_inst = self.item_bg.begin_quad(cx, Self::layout_item().get(cx)); //&self.get_line_layout());
-        
+
         match log_item {
             HubLogItem::LocPanic(loc_msg) => {
                 self.code_icon.draw_icon(cx, CodeIconType::Panic);
                 cx.turtle_align_y();
                 self.draw_log_path(cx, &loc_msg.path, loc_msg.row);
                 self.draw_log_body(cx, &loc_msg.body);
-                
+
             },
             HubLogItem::LocError(loc_msg) => {
                 self.code_icon.draw_icon(cx, CodeIconType::Error);
@@ -139,16 +139,16 @@ impl LogItemDraw {
                 self.draw_log_body(cx, &msg);
             }
         }
-        
+
         let bg_area = self.item_bg.end_quad(cx, &bg_inst);
         list_item.animator.set_area(cx, bg_area);
     }
-    
+
     pub fn draw_status_line(&mut self, cx: &mut Cx, counter: usize, bm: &BuildManager) {
         // draw status line
         self.item_bg.color = if counter & 1 == 0 {Theme::color_bg_selected().get(cx)}else {Theme::color_bg_odd().get(cx)};
         let bg_inst = self.item_bg.begin_quad(cx, Self::layout_item().get(cx));
-        
+
         if !bm.is_any_cargo_running() {
             self.text.color = self.path_color.get(cx);
             self.code_icon.draw_icon(cx, CodeIconType::Ok);
@@ -187,7 +187,7 @@ impl LogItemDraw {
         }
         self.item_bg.end_quad(cx, &bg_inst);
     }
-    
+
     pub fn draw_filler(&mut self, cx: &mut Cx, counter: usize) {
         let view_total = cx.get_turtle_bounds();
         self.item_bg.color = if counter & 1 == 0 {Theme::color_bg_selected().get(cx)} else {Theme::color_bg_odd().get(cx)};
@@ -217,19 +217,19 @@ impl LogList {
             view: ScrollView::proto(cx),
         }
     }
-    
+
     pub fn style(cx: &mut Cx, opt: &StyleOptions) {
         LogItemDraw::style(cx, opt);
     }
-    
+
     pub fn handle_log_list(&mut self, cx: &mut Cx, event: &mut Event, storage: &mut AppStorage, bm: &mut BuildManager) -> LogListEvent {
-        
+
         self.list.set_list_len(bm.log_items.len());
-        
+
         if self.list.handle_list_scroll_bars(cx, event, &mut self.view){
             bm.tail_log_items = false;
         }
-        
+
         let mut select = ListSelect::None;
         let mut select_at_end = false;
         // global key handle
@@ -278,7 +278,7 @@ impl LogList {
             },
             _ => ()
         }
-        
+
         let le = self.list.handle_list_logic(cx, event, select, | cx, item_event, item, item_index | match item_event {
             ListLogicEvent::Animate(ae) => {
                 item.animator.calc_area(cx, item.animator.area, ae.time);
@@ -302,7 +302,7 @@ impl LogList {
                 item.animator.play_anim(cx, LogItemDraw::get_default_anim(cx, item_index, item.is_selected));
             }
         });
-        
+
         match le {
             ListEvent::SelectSingle(select_index) => {
                 self.view.redraw_view_area(cx);
@@ -327,7 +327,7 @@ impl LogList {
                         text_buffer.messages.jump_to_offset = text_buffer.text_pos_to_offset(TextPos {row: loc_message.row.max(1) - 1, col: loc_message.col.max(1) - 1})
                     }
                     cx.send_signal(text_buffer.signal, TextBuffer::status_jump_to_offset());
-                    
+
                     LogListEvent::SelectLocMessage {
                         loc_message: loc_message.clone(),
                     }
@@ -357,7 +357,7 @@ impl LogList {
                         }
                     }
                 }
-                
+
                 LogListEvent::SelectMessages {
                     items: items,
                 }
@@ -367,37 +367,37 @@ impl LogList {
             }
         }
     }
-    
+
     pub fn draw_log_list(&mut self, cx: &mut Cx, bm: &BuildManager) {
-        
+
         self.list.set_list_len(bm.log_items.len());
-        
+
         self.item_draw.text.text_style = LogItemDraw::text_style_item().get(cx);
-        
+
         let row_height = LogItemDraw::layout_item().get(cx).walk.height.fixed();
-        
+
         if self.list.begin_list(cx, &mut self.view, bm.tail_log_items, row_height).is_err() {return}
-        
+
         let mut counter = 0;
         for i in self.list.start_item..self.list.end_item {
             self.item_draw.draw_log_item(cx, i, &mut self.list.list_items[i], &bm.log_items[i]);
             counter += 1;
         }
-        
+
         self.list.walk_turtle_to_end(cx, row_height);
-        
+
         self.item_draw.draw_status_line(cx, counter, &bm);
         counter += 1;
-        
+
         // draw filler nodes
         for _ in (self.list.end_item + 1)..self.list.end_fill {
             self.item_draw.draw_filler(cx, counter);
             counter += 1;
         }
-        
+
         self.item_draw.shadow.draw_shadow_left(cx);
         self.item_draw.shadow.draw_shadow_top(cx);
-        
+
         self.list.end_list(cx, &mut self.view);
     }
 }

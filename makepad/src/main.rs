@@ -8,7 +8,7 @@ mod homepage;
 pub use crate::homepage::*;
 mod loglist;
 pub use crate::loglist::*;
-mod logitem; 
+mod logitem;
 pub use crate::logitem::*;
 mod app;
 pub use crate::app::*;

@@ -61,7 +61,7 @@ impl Text {
             font_scale: 1.0,
         }
     }
-    
+
     pub fn instance_font_tc() -> InstanceVec4 {uid!()}
     pub fn instance_color() -> InstanceColor {uid!()}
     pub fn instance_x() -> InstanceFloat {uid!()}
@@ -74,10 +74,10 @@ impl Text {
     pub fn instance_font_size() -> InstanceFloat {uid!()}
     pub fn instance_marker() -> InstanceFloat {uid!()}
     pub fn instance_char_offset() -> InstanceFloat {uid!()}
-    
+
     pub fn uniform_brightness() -> UniformFloat {uid!()}
     pub fn uniform_curve() -> UniformFloat {uid!()}
-    
+
     pub fn def_text_shader() -> ShaderGen {
         // lets add the draw shader lib
         let mut sg = ShaderGen::new();
@@ -86,7 +86,7 @@ impl Text {
         sg.compose(shader_ast!({
             let geom: vec2<Geometry>;
             let texturez: texture2d<Texture>;
-            
+
             let font_tc: Self::instance_font_tc();
             let color: Self::instance_color();
             let x: Self::instance_x();
@@ -99,31 +99,31 @@ impl Text {
             let font_size: Self::instance_font_size();
             let char_offset: Self::instance_char_offset();
             let marker: Self::instance_marker();
-            
+
             let tex_coord1: vec2<Varying>;
             let tex_coord2: vec2<Varying>;
             let tex_coord3: vec2<Varying>;
             let clipped: vec2<Varying>;
             //let rect: vec4<Varying>;
-            
+
             let brightness: Self::uniform_brightness();
             let curve: Self::uniform_curve();
-            
+
             fn get_color()->vec4{
                 return color
             }
-            
+
             fn pixel() -> vec4 {
                 let dx = dfdx(vec2(tex_coord1.x * 2048.0, 0.)).x;
                 let dp = 1.0 / 2048.0;
-                
+
                 // basic hardcoded mipmapping so it stops 'swimming' in VR
                 // mipmaps are stored in red/green/blue channel
                 let s = 1.0;
                 if dx > 5.0 {
                     s = 0.7;
                 }
-                else if dx > 2.75 { 
+                else if dx > 2.75 {
                     s = (
                         sample2d(texturez, tex_coord3.xy + vec2(0., 0.)).z
                             + sample2d(texturez, tex_coord3.xy + vec2(dp, 0.)).z
@@ -131,7 +131,7 @@ impl Text {
                             + sample2d(texturez, tex_coord3.xy + vec2(dp, dp)).z
                     ) * 0.25;
                 }
-                else if dx > 1.75 { 
+                else if dx > 1.75 {
                     s = sample2d(texturez, tex_coord3.xy).z;
                 }
                 else if dx > 1.3 {
@@ -140,50 +140,50 @@ impl Text {
                 else {
                     s = sample2d(texturez, tex_coord1.xy).x;
                 }
-                
+
                 s = pow(s, curve);
                 let col = get_color();
                 return vec4(s * col.rgb * brightness * col.a, s * col.a); // + color("#a");
             }
-            
+
             fn vertex() -> vec4 {
                 let min_pos = vec2(x, y);
                 let max_pos = vec2(x + w, y - h);
-                
+
                 clipped = clamp(
                     mix(min_pos, max_pos, geom) - draw_scroll.xy,
                     draw_clip.xy,
                     draw_clip.zw
                 );
-                
+
                 let normalized: vec2 = (clipped - min_pos + draw_scroll.xy) / vec2(w,-h);
                 //rect = vec4(min_pos.x, min_pos.y, max_pos.x, max_pos.y) - draw_scroll.xyxy;
-                
+
                 tex_coord1 = mix(
                     font_tc.xy,
                     font_tc.zw,
                     normalized.xy
                 );
-                
+
                 tex_coord2 = mix(
                     font_tc.xy,
                     font_tc.xy + (font_tc.zw - font_tc.xy) * 0.75,
                     normalized.xy
                 );
-                
+
                 tex_coord3 = mix(
                     font_tc.xy,
                     font_tc.xy + (font_tc.zw - font_tc.xy) * 0.6,
                     normalized.xy
                 );
-                
+
                 return camera_projection * (camera_view * (view_transform * vec4(clipped.x, clipped.y, z + draw_zbias, 1.)));
             }
         }))
     }
-    
+
     pub fn begin_text(&mut self, cx: &mut Cx) -> AlignedInstance {
-        
+
         //let font_id = self.font.font_id.unwrap();
         let inst = cx.new_instance(&self.shader, 0);
         let aligned = cx.align_instance(inst);
@@ -197,7 +197,7 @@ impl Text {
         }
         return aligned
     }
-    
+
     pub fn add_text<F>(&mut self, cx: &mut Cx, geom_x: f32, geom_y: f32, char_offset: usize, aligned: &mut AlignedInstance, chunk: &[char], mut char_callback: F)
     where F: FnMut(char, usize, f32, f32) -> f32
     {
@@ -205,27 +205,27 @@ impl Text {
         let mut geom_x = geom_x;
         let mut char_offset = char_offset;
         let font_id = text_style.font.font_id.unwrap();
-        
+
         let cxfont = &mut cx.fonts[font_id];
-        
+
         let dpi_factor = cx.current_dpi_factor;
-        
+
         //let geom_y = (geom_y * dpi_factor).floor() / dpi_factor;
         let atlas_page_id = cxfont.get_atlas_page_id(dpi_factor, text_style.font_size);
-        
+
         let font = &mut cxfont.font_loaded.as_ref().unwrap();
-        
+
         let font_size_logical = text_style.font_size * 96.0 / (72.0 * font.units_per_em);
         let font_size_pixels = font_size_logical * dpi_factor;
-        
+
         let atlas_page = &mut cxfont.atlas_pages[atlas_page_id];
-        
+
         let instance = {
             let cxview = &mut cx.views[aligned.inst.view_id];
             let draw_call = &mut cxview.draw_calls[aligned.inst.draw_call_id];
             &mut draw_call.instance
         };
-        
+
         for wc in chunk {
             let unicode = *wc as usize;
             let glyph_id = font.char_code_to_glyph_index_map[unicode];
@@ -234,25 +234,25 @@ impl Text {
                 continue;
             }
             let glyph = &font.glyphs[glyph_id];
-            
+
             let advance = glyph.horizontal_metrics.advance_width * font_size_logical * self.font_scale;
-            
+
             // snap width/height to pixel granularity
             let w = ((glyph.bounds.p_max.x - glyph.bounds.p_min.x) * font_size_pixels).ceil() + 1.0;
             let h = ((glyph.bounds.p_max.y - glyph.bounds.p_min.y) * font_size_pixels).ceil() + 1.0;
-            
+
             // this one needs pixel snapping
             let min_pos_x = geom_x + font_size_logical * glyph.bounds.p_min.x;
             let min_pos_y = geom_y - font_size_logical * glyph.bounds.p_min.y + text_style.font_size * text_style.top_drop;
-            
+
             // compute subpixel shift
             let subpixel_x_fract = min_pos_x - (min_pos_x * dpi_factor).floor() / dpi_factor;
             let subpixel_y_fract = min_pos_y - (min_pos_y * dpi_factor).floor() / dpi_factor;
-            
+
             // scale and snap it
             let scaled_min_pos_x = geom_x + font_size_logical * self.font_scale * glyph.bounds.p_min.x - subpixel_x_fract;
             let scaled_min_pos_y = geom_y - font_size_logical * self.font_scale * glyph.bounds.p_min.y + text_style.font_size * self.font_scale * text_style.top_drop - subpixel_y_fract;
-            
+
             // only use a subpixel id for small fonts
             let subpixel_id = if text_style.font_size>32.0 {
                 0
@@ -261,7 +261,7 @@ impl Text {
                 ((subpixel_y_fract * 7.0) as usize) << 3 |
                 (subpixel_x_fract * 7.0) as usize
             };
-            
+
             let tc = if let Some(tc) = &atlas_page.atlas_glyphs[glyph_id][subpixel_id] {
                 //println!("{} {} {} {}", tc.tx1,tc.tx2,tc.ty1,tc.ty2);
                 tc
@@ -277,17 +277,17 @@ impl Text {
                     glyph_id,
                     subpixel_id
                 });
-                
+
                 atlas_page.atlas_glyphs[glyph_id][subpixel_id] = Some(
                     cx.fonts_atlas.alloc_atlas_glyph(&cxfont.path, w, h)
                 );
-                
+
                 atlas_page.atlas_glyphs[glyph_id][subpixel_id].as_ref().unwrap()
             };
-            
+
             // give the callback a chance to do things
             let marker = char_callback(*wc, char_offset, geom_x, advance);
-            
+
             let data = [
                 tc.tx1,
                 tc.ty1,
@@ -310,21 +310,21 @@ impl Text {
             ];
             instance.extend_from_slice(&data);
             // !TODO make sure a derived shader adds 'empty' values here.
-            
+
             geom_x += advance;
             char_offset += 1;
             aligned.inst.instance_count += 1;
         }
     }
-    
+
     pub fn end_text(&mut self, cx: &mut Cx, aligned: &AlignedInstance) -> Area {
         cx.update_aligned_instance_count(aligned);
         aligned.inst.into()
     }
-    
+
     pub fn draw_text(&mut self, cx: &mut Cx, text: &str) -> Area {
         let mut aligned = self.begin_text(cx);
-        
+
         let mut chunk = Vec::new();
         let mut width = 0.0;
         let mut elipct = 0;
@@ -333,13 +333,13 @@ impl Text {
         let line_spacing = text_style.line_spacing;
         let height_factor = text_style.height_factor;
         let mut iter = text.chars().peekable();
-        
+
         let font_id = text_style.font.font_id.unwrap();
         let font_size_logical = text_style.font_size * 96.0 / (72.0 * cx.fonts[font_id].font_loaded.as_ref().unwrap().units_per_em);
-        
+
         while let Some(c) = iter.next() {
             let last = iter.peek().is_none();
-            
+
             let mut emit = last;
             let mut newline = false;
             let slot = if c < '\u{10000}' {
@@ -350,7 +350,7 @@ impl Text {
             if c == '\n' {
                 emit = true;
                 newline = true;
-            }            
+            }
             if slot != 0 {
                 let glyph = &cx.fonts[font_id].font_loaded.as_ref().unwrap().glyphs[slot];
                 width += glyph.horizontal_metrics.advance_width * font_size_logical * self.font_scale;
@@ -395,7 +395,7 @@ impl Text {
                     height: Height::Fix(height),
                     margin: Margin::zero()
                 });
-                
+
                 self.add_text(cx, geom.x, geom.y, 0, &mut aligned, &chunk, | _, _, _, _ | {0.0});
                 width = 0.0;
                 chunk.truncate(0);
@@ -406,7 +406,7 @@ impl Text {
         }
         self.end_text(cx, &aligned)
     }
-    
+
     // looks up text with the behavior of a text selection mouse cursor
     pub fn find_closest_offset(&self, cx: &Cx, area: &Area, pos: Vec2) -> usize {
         let scroll_pos = area.get_scroll_pos(cx);
@@ -451,13 +451,13 @@ impl Text {
         }
         return 0
     }
-    
+
     pub fn get_monospace_base(&self, cx: &Cx) -> Vec2 {
         let font_id = self.text_style.font.font_id.unwrap();
         let font = cx.fonts[font_id].font_loaded.as_ref().unwrap();
         let slot = font.char_code_to_glyph_index_map[33];
         let glyph = &font.glyphs[slot];
-        
+
         //let font_size = if let Some(font_size) = font_size{font_size}else{self.font_size};
         Vec2 {
             x: glyph.horizontal_metrics.advance_width * (96.0 / (72.0 * font.units_per_em)),

@@ -13,7 +13,7 @@ impl TextCursor {
     pub fn has_selection(&self) -> bool {
         self.head != self.tail
     }
-    
+
     pub fn order(&self) -> (usize, usize) {
         if self.head > self.tail {
             (self.tail, self.head)
@@ -22,7 +22,7 @@ impl TextCursor {
             (self.head, self.tail)
         }
     }
-    
+
     pub fn clamp_range(&mut self, range: &Option<(usize, usize)>) {
         if let Some((off, len)) = range {
             if self.head >= self.tail {
@@ -35,29 +35,29 @@ impl TextCursor {
             }
         }
     }
-    
-    
+
+
     pub fn delta(&self, delta: isize) -> (usize, usize) {
         let (start, end) = self.order();
         (((start as isize) + delta) as usize, ((end as isize) + delta) as usize)
     }
-    
+
     pub fn collapse(&mut self, start: usize, end: usize, new_len: usize) -> isize {
         self.head = start + new_len;
         self.tail = self.head;
         ((new_len as isize) - (end - start) as isize)
     }
-    
-    
+
+
     pub fn calc_max(&mut self, text_buffer: &TextBuffer, old: (TextPos, usize)) -> (TextPos, usize) {
         let pos = text_buffer.offset_to_text_pos_next(self.head, old.0, old.1);
         self.max = pos.col;
         return (pos, self.head)
-    } 
-    
+    }
+
     pub fn move_home(&mut self, text_buffer: &TextBuffer) {
         let pos = text_buffer.offset_to_text_pos(self.head);
-        
+
         // alright lets walk the line from the left till its no longer 9 or 32
         for (index, ch) in text_buffer.lines[pos.row].iter().enumerate() {
             if *ch != '\t' && *ch != ' ' {
@@ -66,13 +66,13 @@ impl TextCursor {
             }
         }
     }
-    
+
     pub fn move_end(&mut self, text_buffer: &TextBuffer) {
         let pos = text_buffer.offset_to_text_pos(self.head);
         // alright lets walk the line from the left till its no longer 9 or 32
         self.head = text_buffer.text_pos_to_offset(TextPos {row: pos.row, col: text_buffer.lines[pos.row].len()});
     }
-    
+
     pub fn move_left(&mut self, char_count: usize, _text_buffer: &TextBuffer) {
         if self.head >= char_count {
             self.head -= char_count;
@@ -81,7 +81,7 @@ impl TextCursor {
             self.head = 0;
         }
     }
-    
+
     pub fn move_right(&mut self, char_count: usize, total_char_count: usize, _text_buffer: &TextBuffer) {
         if self.head + char_count < total_char_count {
             self.head += char_count;
@@ -90,7 +90,7 @@ impl TextCursor {
             self.head = total_char_count;
         }
     }
-    
+
     pub fn move_up(&mut self, line_count: usize, text_buffer: &TextBuffer) {
         let pos = text_buffer.offset_to_text_pos(self.head);
         if pos.row >= line_count {
@@ -100,12 +100,12 @@ impl TextCursor {
             self.head = 0;
         }
     }
-    
+
     pub fn move_down(&mut self, line_count: usize, total_char_count: usize, text_buffer: &TextBuffer) {
         let pos = text_buffer.offset_to_text_pos(self.head);
-        
+
         if pos.row + line_count < text_buffer.get_line_count() - 1 {
-            
+
             self.head = text_buffer.text_pos_to_offset(TextPos {row: pos.row + line_count, col: self.max});
         }
         else {
@@ -131,7 +131,7 @@ impl TextCursorSet {
             last_clamp_range: None
         }
     }
-    
+
     pub fn get_all_as_string(&self, text_buffer: &TextBuffer) -> String {
         let mut ret = String::new();
         for cursor in &self.set {
@@ -140,7 +140,7 @@ impl TextCursorSet {
         }
         ret
     }
-    
+
     fn fuse_adjacent(&mut self, text_buffer: &TextBuffer) {
         let mut index = 0;
         let mut old_calc = (TextPos {row: 0, col: 0}, 0);
@@ -173,7 +173,7 @@ impl TextCursorSet {
             index += 1;
         }
     }
-    
+
     fn remove_collisions(&mut self, offset: usize, len: usize) -> usize {
         // remove any cursor that intersects us
         let mut index = 0;
@@ -194,7 +194,7 @@ impl TextCursorSet {
             }
         }
     }
-    
+
     // puts the head down
     fn set_last_cursor(&mut self, head: usize, tail: usize, text_buffer: &TextBuffer) {
         // widen the head to include the min range
@@ -204,17 +204,17 @@ impl TextCursorSet {
         else {
             (head, 0)
         };
-        
+
         // cut out all the collisions with the head range including 'last_cursor'
         let index = self.remove_collisions(off, len);
-        
+
         // make a new cursor
         let mut cursor = TextCursor {
             head: head,
             tail: tail,
             max: 0
         };
-        
+
         // clamp its head/tail to min range
         cursor.clamp_range(&self.last_clamp_range);
         // recompute maximum h pos
@@ -223,7 +223,7 @@ impl TextCursorSet {
         self.set.insert(index, cursor);
         self.last_cursor = index;
     }
-    
+
     pub fn add_last_cursor_head_and_tail(&mut self, offset: usize, text_buffer: &TextBuffer) {
         self.insert_undo_group += 1;
         // check if we dont already have exactly that cursor. ifso just remove it
@@ -238,13 +238,13 @@ impl TextCursorSet {
         }
         self.set_last_cursor(offset, offset, text_buffer);
     }
-    
+
     pub fn clear_and_set_last_cursor_head_and_tail(&mut self, offset: usize, text_buffer: &TextBuffer) {
         self.insert_undo_group += 1;
         self.set.truncate(0);
         self.set_last_cursor(offset, offset, text_buffer);
     }
-    
+
     pub fn set_last_cursor_head(&mut self, offset: usize, text_buffer: &TextBuffer) -> bool {
         self.insert_undo_group += 1;
         if self.set[self.last_cursor].head != offset {
@@ -257,22 +257,22 @@ impl TextCursorSet {
             false
         }
     }
-    
+
     pub fn clear_and_set_last_cursor_head(&mut self, offset: usize, text_buffer: &TextBuffer) {
         self.insert_undo_group += 1;
         let cursor_tail = self.set[self.last_cursor].tail;
         self.set.truncate(0);
         self.set_last_cursor(offset, cursor_tail, text_buffer);
     }
-    
+
     pub fn get_last_cursor_text_pos(&self, text_buffer: &TextBuffer) -> TextPos {
         text_buffer.offset_to_text_pos(self.set[self.last_cursor].head)
     }
-    
+
     pub fn get_last_cursor_order(&self) -> (usize, usize) {
         self.set[self.last_cursor].order()
     }
-    
+
     pub fn get_last_cursor_singular(&self) -> Option<usize> {
         let cursor = &self.set[self.last_cursor];
         if cursor.head != cursor.tail {
@@ -282,12 +282,12 @@ impl TextCursorSet {
             Some(cursor.head)
         }
     }
-    
+
     pub fn is_last_cursor_singular(&self) -> bool {
         let cursor = &self.set[self.last_cursor];
         cursor.head == cursor.tail
     }
-    
+
     pub fn grid_select_corner(&mut self, new_pos: TextPos, text_buffer: &TextBuffer) -> TextPos {
         self.insert_undo_group += 1;
         // we need to compute the furthest row/col in our cursor set
@@ -313,15 +313,15 @@ impl TextCursorSet {
         }
         return max_pos;
     }
-    
+
     pub fn grid_select(&mut self, start_pos: TextPos, end_pos: TextPos, text_buffer: &TextBuffer) -> bool {
         self.insert_undo_group += 1;
         let (left, right) = if start_pos.col < end_pos.col {(start_pos.col, end_pos.col)}
         else {(end_pos.col, start_pos.col)};
-        
+
         let (top, bottom) = if start_pos.row < end_pos.row {(start_pos.row, end_pos.row)}
         else {(end_pos.row, start_pos.row)};
-        
+
         let change_check = self.set.clone();
         self.set.truncate(0);
         // lets start the cursor gen
@@ -358,15 +358,15 @@ impl TextCursorSet {
         self.last_cursor = 0;
         self.set != change_check
     }
-    
+
     pub fn set_last_clamp_range(&mut self, range: (usize, usize)) {
         self.last_clamp_range = Some(range);
     }
-    
+
     pub fn clear_last_clamp_range(&mut self) {
         self.last_clamp_range = None;
     }
-    
+
     pub fn insert_newline_with_indent(&mut self, text_buffer: &mut TextBuffer) {
         let mut delta: isize = 0;
         // rolling delta to displace cursors
@@ -379,7 +379,7 @@ impl TextCursorSet {
             if start == end && start > 0 && start < text_buffer.flat_text.len() {
                 // insert spaces till indent level
                 let (pre_base, pre_spaces) = text_buffer.calc_next_line_indent_depth(start, 4);
-                
+
                 let pch = text_buffer.flat_text[start - 1];
                 let nch = text_buffer.flat_text[start];
                 // we have to insert more newlines and spaces because we were between () {} or []
@@ -426,7 +426,7 @@ impl TextCursorSet {
                 delta += cursor.collapse(start, end, op.len);
                 ops.push(op);
             };
-            
+
             old_max = cursor.calc_max(text_buffer, old_max);
         }
         text_buffer.redo_stack.truncate(0);
@@ -436,7 +436,7 @@ impl TextCursorSet {
             cursors: cursors_clone
         })
     }
-    
+
     pub fn replace_text(&mut self, text: &str, text_buffer: &mut TextBuffer) {
         let grouping = if text.len() == 1 {
             // check if we are space
@@ -457,7 +457,7 @@ impl TextCursorSet {
         else {
             TextUndoGrouping::Block
         };
-        
+
         let mut delta: isize = 0;
         // rolling delta to displace cursors
         let mut ops = Vec::new();
@@ -477,7 +477,7 @@ impl TextCursorSet {
             cursors: cursors_clone
         })
     }
-    
+
     pub fn insert_around(&mut self, pre: &str, post: &str, text_buffer: &mut TextBuffer) {
         let mut delta: isize = 0;
         // rolling delta to displace cursors
@@ -488,7 +488,7 @@ impl TextCursorSet {
             let (start, end) = cursor.delta(delta);
             let pre_chars = pre.chars().count();
             let post_chars = post.chars().count();
-            
+
             // check if we should
             if start != end {
                 // lets serialize our selection
@@ -534,7 +534,7 @@ impl TextCursorSet {
             cursors: cursors_clone
         })
     }
-    
+
     pub fn overwrite_if_exists_or_deindent(&mut self, thing: &str, deindent: usize, text_buffer: &mut TextBuffer) {
         let mut delta: isize = 0;
         // rolling delta to displace cursors
@@ -547,7 +547,7 @@ impl TextCursorSet {
             let mut next = String::new();
             let thing_chars = thing.chars().count();
             text_buffer.get_range_as_string(start, thing_chars, &mut next);
-            
+
             if start == end && thing == next {
                 // replace thing with next as an op even though its a noop
                 let op = text_buffer.replace_lines_with_string(start, thing_chars, thing);
@@ -578,7 +578,7 @@ impl TextCursorSet {
                         let op = text_buffer.replace_lines_with_string(start, 0, thing);
                         delta += cursor.collapse(start, start, op.len);
                         ops.push(op);
-                        
+
                     }
                 }
                 else {
@@ -596,7 +596,7 @@ impl TextCursorSet {
             cursors: cursors_clone
         })
     }
-    
+
     pub fn delete(&mut self, text_buffer: &mut TextBuffer) {
         let mut delta: isize = 0;
         // rolling delta to displace cursors
@@ -649,7 +649,7 @@ impl TextCursorSet {
             })
         }
     }
-    
+
     pub fn backspace(&mut self, text_buffer: &mut TextBuffer, undo_id: u64) {
         let mut delta: isize = 0;
         // rolling delta to displace cursors
@@ -686,7 +686,7 @@ impl TextCursorSet {
             })
         }
     }
-    
+
     pub fn insert_tab(&mut self, text_buffer: &mut TextBuffer, tab_str: &str) {
         let mut delta: usize = 0;
         // rolling delta to displace cursors
@@ -745,14 +745,14 @@ impl TextCursorSet {
             cursors: cursors_clone
         })
     }
-    
+
     pub fn replace_lines_formatted(&mut self, mut out_lines: Vec<Vec<char>>, text_buffer: &mut TextBuffer) {
-        
+
         let mut top_row = 0;
         while top_row < text_buffer.lines.len() && top_row < out_lines.len() && text_buffer.lines[top_row] == out_lines[top_row] {
             top_row += 1;
         }
-        
+
         let mut bottom_row_old = text_buffer.get_line_count();
         let mut bottom_row_new = out_lines.len();
         while bottom_row_old > top_row && bottom_row_new > top_row && text_buffer.lines[bottom_row_old - 1] == out_lines[bottom_row_new - 1] {
@@ -762,7 +762,7 @@ impl TextCursorSet {
         // alright we now have a line range to replace.
         if top_row != bottom_row_new {
             let changed = out_lines.splice(top_row..(bottom_row_new + 1).min(out_lines.len()), vec![]).collect();
-            
+
             let cursors_clone = self.clone();
             let op = text_buffer.replace_lines(top_row, bottom_row_old + 1, changed);
             text_buffer.redo_stack.truncate(0);
@@ -813,9 +813,9 @@ impl TextCursorSet {
         cursors:cursors_clone
         })
     }*/
-    
+
     pub fn remove_tab(&mut self, text_buffer: &mut TextBuffer, num_spaces: usize) {
-        
+
         let mut delta: usize = 0;
         // rolling delta to displace cursors
         let mut ops = Vec::new();
@@ -827,7 +827,7 @@ impl TextCursorSet {
             let end_pos = text_buffer.offset_to_text_pos_next(end, start_pos, start);
             let mut off = start - start_pos.col;
             let mut total_cut_len = 0;
-            
+
             let last_line = if start_pos.row == end_pos.row || end_pos.col>0 {1}else {0};
             for row in start_pos.row..(end_pos.row + last_line) {
                 let indents = text_buffer.calc_line_indent_depth(row);
@@ -856,10 +856,10 @@ impl TextCursorSet {
             grouping: TextUndoGrouping::Tab,
             cursors: cursors_clone
         })
-        
+
     }
-    
-    
+
+
     pub fn select_all(&mut self, text_buffer: &mut TextBuffer) {
         self.set.truncate(0);
         self.insert_undo_group += 1;
@@ -872,7 +872,7 @@ impl TextCursorSet {
         cursor.calc_max(text_buffer, (TextPos {row: 0, col: 0}, 0));
         self.set.push(cursor);
     }
-    
+
     pub fn move_home(&mut self, only_head: bool, text_buffer: &TextBuffer) {
         self.insert_undo_group += 1;
         for cursor in &mut self.set {
@@ -881,7 +881,7 @@ impl TextCursorSet {
         }
         self.fuse_adjacent(text_buffer)
     }
-    
+
     pub fn move_end(&mut self, only_head: bool, text_buffer: &TextBuffer) {
         self.insert_undo_group += 1;
         for cursor in &mut self.set {
@@ -890,7 +890,7 @@ impl TextCursorSet {
         }
         self.fuse_adjacent(text_buffer)
     }
-    
+
     pub fn move_up(&mut self, line_count: usize, only_head: bool, text_buffer: &TextBuffer) {
         self.insert_undo_group += 1;
         for cursor in &mut self.set {
@@ -899,7 +899,7 @@ impl TextCursorSet {
         }
         self.fuse_adjacent(text_buffer)
     }
-    
+
     pub fn move_down(&mut self, line_count: usize, only_head: bool, text_buffer: &TextBuffer) {
         self.insert_undo_group += 1;
         let total_char_count = text_buffer.calc_char_count();
@@ -909,7 +909,7 @@ impl TextCursorSet {
         }
         self.fuse_adjacent(text_buffer)
     }
-    
+
     pub fn move_left(&mut self, char_count: usize, only_head: bool, text_buffer: &TextBuffer) {
         self.insert_undo_group += 1;
         let mut old_max = (TextPos {row: 0, col: 0}, 0);
@@ -925,7 +925,7 @@ impl TextCursorSet {
         }
         self.fuse_adjacent(text_buffer)
     }
-    
+
     pub fn move_right(&mut self, char_count: usize, only_head: bool, text_buffer: &TextBuffer) {
         let mut old_max = (TextPos {row: 0, col: 0}, 0);
         let total_char_count = text_buffer.calc_char_count();
@@ -941,7 +941,7 @@ impl TextCursorSet {
         }
         self.fuse_adjacent(text_buffer)
     }
-    
+
     pub fn get_nearest_token_chunk_boundary(left: bool, offset: usize, text_buffer: &TextBuffer) -> usize {
         let token_chunks = &text_buffer.token_chunks;
         for i in 0..token_chunks.len() {
@@ -963,7 +963,7 @@ impl TextCursorSet {
                     return token_chunks[i - 1].offset + token_chunks[i - 1].len
                 }
                 else { // jump right
-                    
+
                     if i < token_chunks.len() - 1 && token_chunks[i].token_type == TokenType::Whitespace {
                         return token_chunks[i + 1].offset + token_chunks[i + 1].len;
                     }
@@ -973,7 +973,7 @@ impl TextCursorSet {
         };
         0
     }
-    
+
     pub fn get_nearest_token_chunk(offset: usize, text_buffer: &TextBuffer) -> Option<(usize, usize)> {
         let token_chunks = &text_buffer.token_chunks;
         for i in 0..token_chunks.len() {
@@ -985,7 +985,7 @@ impl TextCursorSet {
                     return Some((token_chunks[i + 1].offset, token_chunks[i + 1].len))
                 }
             };
-            
+
             if offset >= token_chunks[i].offset && offset < token_chunks[i].offset + token_chunks[i].len {
                 let i = if token_chunks[i].token_type == TokenType::Newline && i > 0 {i - 1}else {i};
                 let pair_token = token_chunks[i].pair_token;
@@ -1030,7 +1030,7 @@ impl TextCursorSet {
         };
         None
     }
-    
+
     pub fn move_left_nearest_token(&mut self, only_head: bool, text_buffer: &TextBuffer) {
         self.insert_undo_group += 1;
         for cursor in &mut self.set {
@@ -1041,7 +1041,7 @@ impl TextCursorSet {
         }
         self.fuse_adjacent(text_buffer)
     }
-    
+
     pub fn move_right_nearest_token(&mut self, only_head: bool, text_buffer: &TextBuffer) {
         self.insert_undo_group += 1;
         for cursor in &mut self.set {
@@ -1052,7 +1052,7 @@ impl TextCursorSet {
         }
         self.fuse_adjacent(text_buffer)
     }
-    
+
     pub fn get_token_highlight(&self, text_buffer: &TextBuffer) -> Vec<char> {
         let cursor = &self.set[self.last_cursor];
         if cursor.head != cursor.tail {
@@ -1096,7 +1096,7 @@ impl TextCursorSet {
             }*/
             //else {
             let start_pos = text_buffer.offset_to_text_pos(offset);
-            
+
             text_buffer.copy_line(start_pos.row, start_pos.col, len)
             //}
         }
@@ -1104,7 +1104,7 @@ impl TextCursorSet {
             vec![]
         }
     }
-    
+
     pub fn get_selection_highlight(&self, text_buffer: &TextBuffer) -> Vec<char> {
         let cursor = &self.set[self.last_cursor];
         if cursor.head != cursor.tail {
@@ -1181,11 +1181,11 @@ impl DrawCursors {
             last_cursor: None
         }
     }
-    
+
     pub fn term(&mut self, cursors: &Vec<TextCursor>) {
         self.next_index = cursors.len();
     }
-    
+
     pub fn set_next(&mut self, cursors: &Vec<TextCursor>) -> bool {
         if self.next_index < cursors.len() {
             self.emit_selection();
@@ -1205,7 +1205,7 @@ impl DrawCursors {
             false
         }
     }
-    
+
     pub fn emit_cursor(&mut self, x: f32, y: f32, h: f32, z: f32) {
         self.cursors.push(CursorRect {
             x: x,
@@ -1215,7 +1215,7 @@ impl DrawCursors {
             z: z
         })
     }
-    
+
     pub fn emit_selection(&mut self) {
         if !self.first {
             self.first = true;
@@ -1233,7 +1233,7 @@ impl DrawCursors {
             self.right_bottom.y = 0.;
         }
     }
-    
+
     pub fn emit_selection_new_line(&mut self) {
         if !self.first {
             self.first = true;
@@ -1249,7 +1249,7 @@ impl DrawCursors {
             self.right_bottom.y = 0.;
         }
     }
-    
+
     pub fn process_cursor(&mut self, last_cursor: usize, offset: usize, x: f32, y: f32, h: f32, z: f32) {
         if offset == self.head { // emit a cursor
             if self.next_index > 0 && self.next_index - 1 == last_cursor {
@@ -1258,7 +1258,7 @@ impl DrawCursors {
             self.emit_cursor(x, y, h, z);
         }
     }
-    
+
     pub fn process_geom(&mut self, x: f32, y: f32, w: f32, h: f32) {
         if self.first { // store left top of rect
             self.first = false;
@@ -1276,14 +1276,14 @@ impl DrawCursors {
             self.right_bottom.y = y + h;
         }
     }
-    
+
     pub fn process_newline(&mut self) {
         if !self.first { // we have some selection data to emit
             self.emit_selection_new_line();
             self.first = true;
         }
     }
-    
+
     pub fn mark_text_select_only(&mut self, cursors: &Vec<TextCursor>, offset: usize, x: f32, y: f32, w: f32, h: f32) {
         // check if we need to skip cursors
         while offset >= self.end { // jump to next cursor
@@ -1303,7 +1303,7 @@ impl DrawCursors {
             }
         }
     }
-    
+
     pub fn mark_text_with_cursor(&mut self, cursors: &Vec<TextCursor>, ch: char, offset: usize, x: f32, y: f32, w: f32, h: f32, z: f32, last_cursor: usize, mark_spaces: f32) -> f32 {
         // check if we need to skip cursors
         while offset >= self.end { // jump to next cursor

@@ -74,9 +74,9 @@ impl AppWindow {
             dock: Dock ::proto(cx),
         }
     }
-    
+
     pub fn handle_app_window(&mut self, cx: &mut Cx, event: &mut Event, window_index: usize, state: &mut AppState, storage: &mut AppStorage, build_manager: &mut BuildManager) {
-        
+
         match self.desktop_window.handle_desktop_window(cx, event) {
             DesktopWindowEvent::EventForOtherWindow => {
                 return
@@ -94,7 +94,7 @@ impl AppWindow {
             },
             _ => ()
         }
-        
+
         let dock_items = &mut state.windows[window_index].dock_items;
         let mut dock_walker = self.dock.walker(dock_items);
         let mut file_tree_event = FileTreeEvent::None;
@@ -131,21 +131,21 @@ impl AppWindow {
                 },
                 Panel::FileEditor {path, scroll_pos, editor_id} => {
                     if let Some(file_editor) = &mut self.file_editors.get(*editor_id) {
-                        
+
                         let text_buffer = storage.text_buffer_from_path(cx, path);
-                        
+
                         match file_editor.handle_file_editor(cx, event, text_buffer) {
                             FileEditorEvent::LagChange => {
-                                
+
                                 // HERE WE SAVE
                                 storage.text_buffer_file_write(cx, path);
-                                
+
                                 // lets re-trigger the rust compiler
                                 if storage.settings.build_on_save {
                                     build_manager.restart_build(cx, storage);
                                     self.log_item.clear_msg(cx);
                                 }
-                                
+
                                 //app_global.rust_compiler.restart_rust_checker(cx, &mut app_global.text_buffers);
                             },
                             _ => ()
@@ -187,7 +187,7 @@ impl AppWindow {
             },
             _ => {}
         }
-        
+
         let dock_items = &mut state.windows[window_index].dock_items;
         match self.dock.handle_dock(cx, event, dock_items) {
             DockEvent::DockChanged => { // thats a bit bland event. lets let the thing know which file closed
@@ -224,12 +224,12 @@ impl AppWindow {
             _ => ()
         }
     }
-    
+
     pub fn draw_app_window(&mut self, cx: &mut Cx, menu: &Menu, window_index: usize, state: &mut AppState, storage: &mut AppStorage, build_manager: &mut BuildManager) {
         if self.desktop_window.begin_desktop_window(cx, Some(menu)).is_err() {return}
-        
+
         self.dock.draw_dock(cx);
-        
+
         let dock_items = &mut state.windows[window_index].dock_items;
         let mut dock_walker = self.dock.walker(dock_items);
         let file_panel = &mut self.file_panel;
@@ -282,7 +282,7 @@ impl AppWindow {
         }
         self.desktop_window.end_desktop_window(cx);
     }
-    
+
     pub fn ensure_unique_tab_title_for_file_editors(&mut self, window_index: usize, state: &mut AppState){
         // we walk through the dock collecting tab titles, if we run into a collision
         // we need to find the shortest uniqueness
@@ -310,7 +310,7 @@ impl AppWindow {
                 _ => ()
             }
         }
-                
+
         // walk through hashmap and update collisions with new title
         for (_, values) in &mut collisions {
             if values.len() > 1 {
@@ -336,7 +336,7 @@ impl AppWindow {
                 }
                 if max_equal == 0{
                     continue;
-                } 
+                }
                 for (index, (_, scan_ctrl_id, tab_id)) in values.iter_mut().enumerate() {
                     let split = &splits[index];
                     let mut dock_walker = self.dock.walker(dock_items);
@@ -361,7 +361,7 @@ impl AppWindow {
             }
         }
     }
-    
+
     pub fn highest_file_editor_id(&self) -> u64 {
         let mut max_id = 0;
         for id in &self.file_editors.element_list {
@@ -371,7 +371,7 @@ impl AppWindow {
         }
         max_id
     }
-    
+
     pub fn new_file_editor_tab(&self, path: &str) -> DockTab<Panel> {
         DockTab {
             closeable: true,
@@ -383,7 +383,7 @@ impl AppWindow {
             }
         }
     }
-    
+
     pub fn focus_or_new_editor(&mut self, cx: &mut Cx, window_index: usize, state: &mut AppState, file_path: &str) -> bool {
         let mut target_ctrl_id = None;
         let dock_items = &mut state.windows[window_index].dock_items;

@@ -26,7 +26,7 @@ impl View {
             view_id: None,
         }
     }
-    
+
     pub fn proto(_cx: &mut Cx) -> Self {
         Self {
             is_clipped: true,
@@ -35,16 +35,16 @@ impl View {
             view_id: None,
         }
     }
-    
+
     pub fn begin_view(&mut self, cx: &mut Cx, layout: Layout) -> ViewRedraw {
-        
+
         if !cx.is_in_redraw_cycle {
             panic!("calling begin_view outside of redraw cycle is not possible!");
         }
-        
+
         // check if we have a pass id parent
         let pass_id = *cx.pass_stack.last().expect("No pass found when begin_view");
-        
+
         if self.view_id.is_none() { // we need a draw_list_id
             if cx.views_free.len() != 0 {
                 self.view_id = Some(cx.views_free.pop().unwrap());
@@ -56,16 +56,16 @@ impl View {
             let cxview = &mut cx.views[self.view_id.unwrap()];
             cxview.initialize(pass_id, self.is_clipped, cx.redraw_id);
         }
-        
+
         let view_id = self.view_id.unwrap();
-        
+
         let nesting_view_id = if cx.view_stack.len() > 0 {
             *cx.view_stack.last().unwrap()
         }
         else { // return the root draw list
             0
         };
-        
+
         let (override_layout, is_root_for_pass) = if cx.passes[pass_id].main_view_id.is_none() {
             // we are the first view on a window
             let cxpass = &mut cx.passes[pass_id];
@@ -80,7 +80,7 @@ impl View {
         else {
             (layout, false)
         };
-        
+
         let cxpass = &mut cx.passes[pass_id];
         // find the parent draw list id
         let parent_view_id = if self.is_overlay {
@@ -98,15 +98,15 @@ impl View {
                 view_id
             }
         };
-        
+
         // push ourselves up the parent draw_stack
         if view_id != parent_view_id {
             // we need a new draw
             let parent_cxview = &mut cx.views[parent_view_id];
-            
+
             let id = parent_cxview.draw_calls_len;
             parent_cxview.draw_calls_len = parent_cxview.draw_calls_len + 1;
-            
+
             // see if we need to add a new one
             if parent_cxview.draw_calls_len > parent_cxview.draw_calls.len() {
                 parent_cxview.draw_calls.push({
@@ -125,40 +125,40 @@ impl View {
                 draw.redraw_id = cx.redraw_id;
             }
         }
-        
+
         // set nesting draw list id for incremental repaint scanning
         cx.views[view_id].nesting_view_id = nesting_view_id;
-        
+
         if !self.always_redraw && cx.views[view_id].draw_calls_len != 0 && !cx.view_will_redraw(view_id) {
-            
+
             // walk the turtle because we aren't drawing
             let w = Width::Fix(cx.views[view_id].rect.w);
             let h = Height::Fix(cx.views[view_id].rect.h);
             cx.walk_turtle(Walk {width: w, height: h, margin: override_layout.walk.margin});
             return Err(());
         }
-        
+
         // prepare drawlist for drawing
         let cxview = &mut cx.views[view_id];
-        
+
         // update drawlist ids
         cxview.redraw_id = cx.redraw_id;
         cxview.draw_calls_len = 0;
-        
+
         cx.view_stack.push(view_id);
-        
+
         cx.begin_turtle(override_layout, Area::View(ViewArea {
             view_id: view_id,
             redraw_id: cx.redraw_id
         }));
-        
+
         if is_root_for_pass {
             cx.passes[pass_id].paint_dirty = true;
         }
-        
+
         Ok(())
     }
-    
+
     pub fn view_will_redraw(&mut self, cx: &mut Cx) -> bool {
         if let Some(view_id) = self.view_id {
             cx.view_will_redraw(view_id)
@@ -167,7 +167,7 @@ impl View {
             true
         }
     }
-    
+
     pub fn end_view(&mut self, cx: &mut Cx) -> Area {
         let view_id = self.view_id.unwrap();
         let view_area = Area::View(ViewArea {view_id: view_id, redraw_id: cx.redraw_id});
@@ -177,7 +177,7 @@ impl View {
         cx.view_stack.pop();
         view_area
     }
-    
+
     pub fn get_rect(&mut self, cx: &Cx) -> Rect {
         if let Some(view_id) = self.view_id {
             let cxview = &cx.views[view_id];
@@ -185,8 +185,8 @@ impl View {
         }
         Rect::default()
     }
-    
-    
+
+
     pub fn redraw_view_area(&self, cx: &mut Cx) {
         if let Some(view_id) = self.view_id {
             let cxview = &cx.views[view_id];
@@ -197,7 +197,7 @@ impl View {
             cx.redraw_child_area(Area::All)
         }
     }
-    
+
     pub fn get_view_area(&self, cx: &Cx) -> Area {
         if let Some(view_id) = self.view_id {
             let cxview = &cx.views[view_id];
@@ -210,18 +210,18 @@ impl View {
 }
 
 impl Cx {
-    
+
     pub fn new_instance_draw_call(&mut self, shader: &Shader, instance_count: usize) -> InstanceArea {
         let (shader_id, shader_instance_id) = shader.shader_id.unwrap();
         let sh = &self.shaders[shader_id];
-        
+
         let current_view_id = *self.view_stack.last().unwrap();
-        
+
         let draw_list = &mut self.views[current_view_id];
         // we need a new draw call
         let draw_call_id = draw_list.draw_calls_len;
         draw_list.draw_calls_len = draw_list.draw_calls_len + 1;
-        
+
         // see if we need to add a new one
         if draw_call_id >= draw_list.draw_calls.len() {
             draw_list.draw_calls.push(DrawCall {
@@ -246,7 +246,7 @@ impl Cx {
             let dc = &mut draw_list.draw_calls[draw_call_id];
             return dc.get_current_instance_area(instance_count);
         }
-        
+
         // reuse a draw
         let dc = &mut draw_list.draw_calls[draw_call_id];
         dc.shader_id = shader_id;
@@ -258,14 +258,14 @@ impl Cx {
         dc.instance.truncate(0);
         dc.current_instance_offset = 0;
         dc.uniforms.truncate(0);
-        dc.textures_2d.truncate(0); 
+        dc.textures_2d.truncate(0);
         dc.instance_dirty = true;
         dc.uniforms_dirty = true;
         dc.do_h_scroll = true;
         dc.do_v_scroll = true;
         return dc.get_current_instance_area(instance_count);
     }
-    
+
     pub fn new_instance(&mut self, shader: &Shader, instance_count: usize) -> InstanceArea {
         let (shader_id, shader_instance_id) = shader.shader_id.expect("shader id invalid");
         if !self.is_in_redraw_cycle {
@@ -289,10 +289,10 @@ impl Cx {
                 }
             }
         }
-        
+
         self.new_instance_draw_call(shader, instance_count)
     }
-    
+
     pub fn align_instance(&mut self, instance_area: InstanceArea) -> AlignedInstance {
         let align_index = self.align_list.len();
         self.align_list.push(Area::Instance(instance_area.clone()));
@@ -301,13 +301,13 @@ impl Cx {
             index: align_index
         }
     }
-    
+
     pub fn update_aligned_instance_count(&mut self, aligned_instance: &AlignedInstance) {
         if let Area::Instance(instance) = &mut self.align_list[aligned_instance.index] {
             instance.instance_count = aligned_instance.inst.instance_count;
         }
     }
-    
+
     pub fn set_view_scroll_x(&mut self, view_id: usize, scroll_pos: f32) {
         let fac = self.get_delegated_dpi_factor(self.views[view_id].pass_id);
         let cxview = &mut self.views[view_id];
@@ -318,8 +318,8 @@ impl Cx {
             self.passes[cxview.pass_id].paint_dirty = true;
         }
     }
-    
-    
+
+
     pub fn set_view_scroll_y(&mut self, view_id: usize, scroll_pos: f32) {
         let fac = self.get_delegated_dpi_factor(self.views[view_id].pass_id);
         let cxview = &mut self.views[view_id];
@@ -371,15 +371,15 @@ pub struct DrawCall {
     pub shader_instance_id: usize,
     pub instance: Vec<f32>,
     pub current_instance_offset: usize, // offset of current instance
-    
+
     pub draw_uniforms: DrawUniforms, // draw uniforms
-    
+
     pub uniforms: Vec<f32>, // user uniforms
     pub uniforms_required: usize,
-    
+
     pub do_v_scroll: bool,
     pub do_h_scroll: bool,
-    
+
     pub textures_2d: Vec<u32>,
     pub instance_dirty: bool,
     pub uniforms_dirty: bool,
@@ -390,7 +390,7 @@ impl DrawCall {
     pub fn need_uniforms_now(&self) -> bool {
         self.uniforms.len() < self.uniforms_required
     }
-    
+
     pub fn set_local_scroll(&mut self, scroll: Vec2, local_scroll: Vec2) {
         self.draw_uniforms.draw_scroll_x = scroll.x;
         if self.do_h_scroll {
@@ -403,18 +403,18 @@ impl DrawCall {
         self.draw_uniforms.draw_scroll_z = local_scroll.x;
         self.draw_uniforms.draw_scroll_w = local_scroll.y;
     }
-    
+
     pub fn set_zbias(&mut self, zbias:f32){
         self.draw_uniforms.draw_zbias = zbias;
     }
-    
+
     pub fn set_clip(&mut self, clip: (Vec2, Vec2)) {
         self.draw_uniforms.draw_clip_x1 = clip.0.x;
         self.draw_uniforms.draw_clip_y1 = clip.0.y;
         self.draw_uniforms.draw_clip_x2 = clip.1.x;
         self.draw_uniforms.draw_clip_y2 = clip.1.y;
     }
-    
+
     pub fn get_current_instance_area(&self, instance_count: usize) -> InstanceArea {
         InstanceArea {
             view_id: self.view_id,
@@ -424,7 +424,7 @@ impl DrawCall {
             instance_count: instance_count
         }
     }
-    
+
     pub fn clip_and_scroll_rect(&self, x: f32, y: f32, w: f32, h: f32) -> Rect {
         let mut x1 = x - self.draw_uniforms.draw_scroll_x;
         let mut y1 = y - self.draw_uniforms.draw_scroll_y;
@@ -468,18 +468,18 @@ pub struct CxView {
     pub clipped: bool
 }
 
-impl CxView { 
+impl CxView {
     pub fn initialize(&mut self, pass_id: usize, clipped: bool, redraw_id: u64) {
         self.clipped = clipped;
         self.redraw_id = redraw_id;
-        self.pass_id = pass_id; 
-    } 
-    
+        self.pass_id = pass_id;
+    }
+
     pub fn get_scrolled_rect(&self)->Rect{
         Rect{
             x:self.rect.x + self.parent_scroll.x,
             y:self.rect.y + self.parent_scroll.y,
-            w:self.rect.w, 
+            w:self.rect.w,
             h:self.rect.h ,
         }
     }
@@ -488,18 +488,18 @@ impl CxView {
         Rect{
             x:self.rect.x - self.parent_scroll.x,
             y:self.rect.y - self.parent_scroll.y,
-            w:self.rect.w, 
+            w:self.rect.w,
             h:self.rect.h ,
         }
     }
-    
+
     pub fn intersect_clip(&self, clip: (Vec2, Vec2)) -> (Vec2, Vec2) {
         if self.clipped {
             let min_x = self.rect.x - self.parent_scroll.x;
             let min_y = self.rect.y - self.parent_scroll.y;
             let max_x = self.rect.x + self.rect.w - self.parent_scroll.x;
             let max_y = self.rect.y + self.rect.h - self.parent_scroll.y;
-            
+
             (Vec2 {
                 x: min_x.max(clip.0.x),
                 y: min_y.max(clip.0.y)
@@ -521,13 +521,13 @@ impl CxView {
             self.uniform_view_clip(-50000.0, -50000.0, 50000.0, 50000.0);
         }
     }*/
-    
+
     pub fn get_local_scroll(&self) -> Vec2 {
         let xs = if self.do_v_scroll {self.snapped_scroll.x}else {0.};
         let ys = if self.do_h_scroll {self.snapped_scroll.y}else {0.};
         Vec2 {x: xs, y: ys}
     }
-    
+
     pub fn def_uniforms(sg: ShaderGen) -> ShaderGen {
         sg.compose(shader_ast!({
             let view_transform: mat4<ViewUniform>;
@@ -536,12 +536,12 @@ impl CxView {
             let draw_zbias: float<DrawUniform>;
         }))
     }
-    
+
     pub fn uniform_view_transform(&mut self, v: &Mat4) {
         //dump in uniforms
         for i in 0..16 {
             self.view_uniforms.view_transform[i] = v.v[i];
         }
     }
-    
+
 }

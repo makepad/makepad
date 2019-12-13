@@ -18,7 +18,7 @@ pub struct HubBuilder {
     pub route_send: HubRouteSend,
     pub http_server: Arc<Mutex<Option<HttpServer>>>,
     pub workspaces: Arc<Mutex<HashMap<String, String>>>,
-    pub builder: String, 
+    pub builder: String,
     pub abs_cwd_path: String,
     pub processes: Arc<Mutex<Vec<HubProcess>>>,
 }
@@ -43,16 +43,16 @@ const EXCLUDED_FILES: &[&'static str] = &["key.ron", "makepad_state.ron"];
 const EXCLUDED_DIRS: &[&'static str] = &["target", ".git", ".github", "edit_repo"];
 
 impl HubBuilder {
-    
+
     pub fn run_builder_direct<F>(builder: &str, hub_router: &mut HubRouter, event_handler: F) -> HubRouteSend
     where F: Fn(&mut HubBuilder, FromHubMsg) -> Result<(), HubWsError> + Clone + Send + 'static {
         let workspaces = Arc::new(Mutex::new(HashMap::<String, String>::new()));
         let http_server = Arc::new(Mutex::new(None));
         let abs_cwd_path = format!("{}", std::env::current_dir().unwrap().display());
         let processes = Arc::new(Mutex::new(Vec::<HubProcess>::new()));
-        
+
         let (tx_write, rx_write) = mpsc::channel::<FromHubMsg>();
-        
+
         let route_send = hub_router.connect_direct(HubRouteType::Builder(builder.to_string()), tx_write);
         // mode direct
         let _thread = {
@@ -80,9 +80,9 @@ impl HubBuilder {
                         };
                         std::thread::spawn(move || {
                             let is_build_uid = if let HubMsg::Build {uid, ..} = &htc.msg {Some(*uid)}else {None};
-                            
+
                             let result = event_handler(&mut hub_builder, htc);
-                            
+
                             if let Some(is_build_uid) = is_build_uid {
                                 if result.is_ok() {
                                     hub_builder.route_send.send(ToHubMsg {
@@ -107,15 +107,15 @@ impl HubBuilder {
         };
         route_send.clone()
     }
-    
+
     pub fn run_builder_networked<F>(digest: Digest, in_address: Option<SocketAddr>, builder: &str, hub_log: HubLog, event_handler: F)
     where F: Fn(&mut HubBuilder, FromHubMsg) -> Result<(), HubWsError> + Clone + Send + 'static {
-        
+
         let workspaces = Arc::new(Mutex::new(HashMap::<String, String>::new()));
         let http_server = Arc::new(Mutex::new(None));
         let abs_cwd_path = format!("{}", std::env::current_dir().unwrap().display());
         let processes = Arc::new(Mutex::new(Vec::<HubProcess>::new()));
-        
+
         loop {
             let address = if let Some(address) = in_address {
                 address
@@ -125,7 +125,7 @@ impl HubBuilder {
 
                 HubClient::wait_for_announce(digest.clone()).expect("cannot wait for announce")
             };
-            
+
             hub_log.msg("Builder connecting to {:?}", &address);
 
             let mut hub_client = if let Ok(hub_client) = HubClient::connect_to_server(digest.clone(), address, hub_log.clone()) {
@@ -136,18 +136,18 @@ impl HubBuilder {
                 std::thread::sleep(std::time::Duration::from_millis(500));
                 continue;
             };
-            
+
             println!("Builder connected to {:?}", hub_client.own_addr);
-            
+
             let route_send = hub_client.get_route_send();
-            
+
             route_send.send(ToHubMsg {
                 to: HubMsgTo::All,
                 msg: HubMsg::ConnectBuilder(builder.to_string())
             });
-            
+
             let rx_read = hub_client.rx_read.take().unwrap();
-            
+
             while let Ok(htc) = rx_read.recv() {
                 match &htc.msg {
                     HubMsg::ConnectionError(_e) => {
@@ -169,9 +169,9 @@ impl HubBuilder {
                     };
                     std::thread::spawn(move || {
                         let is_build_uid = if let HubMsg::Build {uid, ..} = &htc.msg {Some(*uid)}else {None};
-                        
+
                         let result = event_handler(&mut hub_builder, htc);
-                        
+
                         if let Some(is_build_uid) = is_build_uid {
                             if result.is_ok() {
                                 hub_builder.route_send.send(ToHubMsg {
@@ -194,10 +194,10 @@ impl HubBuilder {
             }
         }
     }
-    
+
     pub fn run_builder_commandline<F>(args: Vec<String>, event_handler: F)
     where F: Fn(&mut HubBuilder, FromHubMsg) -> Result<(), HubWsError> + Clone + Send + 'static {
-        
+
         fn print_help() {
             println!("----- Builder commandline interface -----");
             println!("Connect to a specific hub server:");
@@ -220,11 +220,11 @@ impl HubBuilder {
             println!("cargo run -p builder -- index <path>");
             println!("example: cargo run -p workspace -- index edit_repo");
         }
-        
+
         if args.len()<2 {
             return print_help();
         }
-        
+
         let (message, path) = match args[1].as_ref() {
             "listen" => {
                 if args.len() != 4 {
@@ -283,21 +283,21 @@ impl HubBuilder {
                 return print_help();
             }
         };
-        
+
         let workspaces = Arc::new(Mutex::new(HashMap::<String, String>::new()));
         let http_server = Arc::new(Mutex::new(None));
         let processes = Arc::new(Mutex::new(Vec::<HubProcess>::new()));
         let abs_cwd_path = format!("{}", std::env::current_dir().unwrap().display());
-        
+
         if let Ok(mut workspaces) = workspaces.lock() {
             workspaces.insert(
                 "main".to_string(),
                 rel_to_abs_path(&abs_cwd_path, &path)
             );
         };
-        
+
         let (tx_write, rx_write) = mpsc::channel::<(HubAddr, ToHubMsg)>();
-        
+
         let mut hub_builder = HubBuilder {
             route_send: HubRouteSend::Direct {
                 uid_alloc: Arc::new(Mutex::new(0)),
@@ -310,7 +310,7 @@ impl HubBuilder {
             workspaces: Arc::clone(&workspaces),
             abs_cwd_path: abs_cwd_path.clone()
         };
-        
+
         // lets check our command. its either build or list
         let thread = std::thread::spawn(move || {
             while let Ok((_addr, htc)) = rx_write.recv() {
@@ -348,7 +348,7 @@ impl HubBuilder {
                 }
             }
         });
-        
+
         let result = event_handler(&mut hub_builder, FromHubMsg {
             from: HubAddr::None,
             msg: message
@@ -367,7 +367,7 @@ impl HubBuilder {
         }
         let _ = thread.join();
     }
-    
+
     pub fn set_config(&mut self, _uid: HubUid, config: HubBuilderConfig) -> Result<(), HubWsError> {
         // if we have a http server. just shut it down
         if let Ok(mut workspaces) = self.workspaces.lock() {
@@ -376,21 +376,21 @@ impl HubBuilder {
                 *rel_path = rel_to_abs_path(&self.abs_cwd_path, &rel_path)
             }
         };
-        
+
         let workspaces = Arc::clone(&self.workspaces);
-        
+
         if let Ok(mut http_server) = self.http_server.lock() {
             if let Some(http_server) = &mut *http_server {
                 http_server.terminate();
             }
-            
+
             *http_server = HttpServer::start_http_server(&config.http_server, workspaces);
         }
-        
-        
+
+
         Ok(())
     }
-    
+
     pub fn default(&mut self, htc: FromHubMsg) -> Result<(), HubWsError> {
         let ws = self;
         match htc.msg {
@@ -437,7 +437,7 @@ impl HubBuilder {
             _ => Ok(())
         }
     }
-    
+
     pub fn process_kill(&mut self, uid: HubUid) {
         if let Ok(mut procs) = self.processes.lock() {
             for proc in procs.iter_mut() {
@@ -447,7 +447,7 @@ impl HubBuilder {
             }
         };
     }
-    
+
     pub fn workspace_split_from_path(&mut self, uid: HubUid, path: &str) -> Result<(String, String, String), HubWsError> {
         if let Some(workspace_pos) = path.find("/") {
             let (workspace, rest) = path.split_at(workspace_pos);
@@ -459,7 +459,7 @@ impl HubBuilder {
             self.error(uid, format!("Builder {} path {} incorrent", self.builder, path))
         )
     }
-    
+
     pub fn get_workspace_abs(&mut self, uid: HubUid, workspace: &str) -> Result<String, HubWsError> {
         if let Ok(workspaces) = self.workspaces.lock() {
             if let Some(abs_dir) = workspaces.get(workspace) {
@@ -470,7 +470,7 @@ impl HubBuilder {
             self.error(uid, format!("Builder {} workspace {} not found", self.builder, workspace))
         )
     }
-    
+
     pub fn program_run(&mut self, uid: HubUid, path: &str, args: &[&str]) -> Result<(), HubWsError> {
 
         let (abs_dir, workspace, sub_path) = self.workspace_split_from_path(uid, path) ?;
@@ -484,22 +484,22 @@ impl HubBuilder {
         let mut process = process.unwrap();
 
         let route_mode = self.route_send.clone();
-        
+
         let rx_line = process.rx_line.take().unwrap();
-        
+
         if let Ok(mut processes) = self.processes.lock() {
             processes.push(HubProcess {
                 uid: uid,
                 process: process,
             });
         };
-        
+
         let builder = self.builder.clone();
         route_mode.send(ToHubMsg {
             to: HubMsgTo::UI,
             msg: HubMsg::ProgramBegin {uid: uid}
         });
-        
+
         fn starts_with_digit(val: &str) -> bool {
             if val.len() <= 1 {
                 return false;
@@ -507,11 +507,11 @@ impl HubBuilder {
             let c1 = val.chars().next().unwrap();
             c1 >= '0' && c1 <= '9'
         }
-        
+
         let mut stderr: Vec<String> = Vec::new();
-        
+
         fn try_parse_stderr(uid: HubUid, builder: &str, workspace: &str, stderr: &Vec<String>, route_send: &HubRouteSend) {
-            
+
             let mut tracing_panic = false;
             let mut panic_stack = Vec::new();
             for line in stderr {
@@ -534,7 +534,7 @@ impl HubBuilder {
                     });
                 }
             }
-            
+
             let mut path = None;
             let mut row = 0;
             let mut rendered = Vec::new();
@@ -549,7 +549,7 @@ impl HubBuilder {
                     if let Some(end) = panic_line.find(":") {
                         let proc_path = format!("{}/{}/{}", builder, workspace, panic_line.get(3..end).unwrap().to_string());
                         let proc_row = panic_line.get((end + 1)..(panic_line.len() - 1)).unwrap().parse::<usize>().unwrap();
-                        
+
                         rendered.push(format!("{}:{} - {}", proc_path, proc_row, last_fn_name));
                         if path.is_none() {
                             path = Some(proc_path);
@@ -564,11 +564,11 @@ impl HubBuilder {
                 }
             }
             rendered.push("\n".to_string());
-            
+
             if panic_stack.len()<3 {
                 return;
             }
-            
+
             route_send.send(ToHubMsg {
                 to: HubMsgTo::UI,
                 msg: HubMsg::LogItem {
@@ -585,7 +585,7 @@ impl HubBuilder {
                 }
             });
         }
-        
+
         loop {
             let result = rx_line.recv_timeout(std::time::Duration::from_millis(100));
             match result {
@@ -621,38 +621,38 @@ impl HubBuilder {
                 }
             }
         }
-        
+
         route_mode.send(ToHubMsg {
             to: HubMsgTo::UI,
             msg: HubMsg::ProgramEnd {
                 uid: uid,
             }
         });
-        
+
         if let Ok(mut processes) = self.processes.lock() {
             if let Some(index) = processes.iter().position( | p | p.uid == uid) {
                 processes.remove(index);
             }
         };
-        
+
         Ok(())
     }
-    
-    
+
+
     pub fn cannot_find_build(&mut self, uid: HubUid, package: &str, target: &str) -> Result<(), HubWsError> {
         Err(
             self.error(uid, format!("Builder {} Cannot find package {} and target {}", self.builder, package, target))
         )
     }
-    
+
     pub fn cargo(&mut self, uid: HubUid, workspace: &str, args: &[&str], env: &[(&str, &str)]) -> Result<BuildResult, HubWsError> {
-        
+
         if let Ok(mut http_server) = self.http_server.lock() {
             if let Some(http_server) = &mut *http_server {
                 http_server.send_build_start();
             }
         };
-        
+
         let abs_root_path = self.get_workspace_abs(uid, workspace) ?;
 
         let mut extargs = args.to_vec();
@@ -660,23 +660,23 @@ impl HubBuilder {
         let mut process = Process::start("cargo", &extargs, &abs_root_path, env).expect("Cannot start process");
 
         let route_send = self.route_send.clone();
-        
+
         let rx_line = process.rx_line.take().unwrap();
-        
+
         if let Ok(mut processes) = self.processes.lock() {
             processes.push(HubProcess {
                 uid: uid,
                 process: process,
             });
         };
-        
+
         route_send.send(ToHubMsg {
             to: HubMsgTo::UI,
             msg: HubMsg::CargoBegin {uid: uid}
         });
-        
+
         let builder = self.builder.clone();
-        
+
         let mut errors = Vec::new();
         let mut build_result = BuildResult::NoOutput;
         while let Ok(line) = rx_line.recv() {
@@ -706,9 +706,9 @@ impl HubBuilder {
                                 if !span.is_primary {
                                     continue
                                 }
-                                
+
                                 let mut msg = message.message.clone();
-                                
+
                                 for child in &message.children {
                                     msg.push_str(" - ");
                                     msg.push_str(&child.message);
@@ -725,7 +725,7 @@ impl HubBuilder {
                                             if let Some(end) = lines[1].find(":") {
                                                 path = lines[1].get((start + 4)..end).unwrap().to_string();
                                                 // TODO parse row/col from this line
-                                                
+
                                             }
                                         }
                                     }
@@ -746,7 +746,7 @@ impl HubBuilder {
                                     },
                                     _ => HubLogItem::LocWarning(loc_message),
                                 };
-                                
+
                                 route_send.send(ToHubMsg {
                                     to: HubMsgTo::UI,
                                     msg: HubMsg::LogItem {
@@ -770,7 +770,7 @@ impl HubBuilder {
                                 if let Some(executable) = &parsed.executable {
                                     if !executable.ends_with(".rmeta") && abs_root_path.len() + 1 < executable.len() {
                                         let last = executable.clone().split_off(abs_root_path.len() + 1);
-                                        
+
                                         build_result = BuildResult::Executable {path: format!("{}/{}", workspace, last).replace("\\", "/")};
                                     }
                                 }
@@ -801,7 +801,7 @@ impl HubBuilder {
                 break;
             }
         }
-        
+
         // process ends as well
         route_send.send(ToHubMsg {
             to: HubMsgTo::UI,
@@ -810,7 +810,7 @@ impl HubBuilder {
                 build_result: build_result.clone()
             }
         });
-        
+
         // remove process from process list
         if let Ok(mut processes) = self.processes.lock() {
             if let Some(index) = processes.iter().position( | p | p.uid == uid) {
@@ -823,9 +823,9 @@ impl HubBuilder {
         }
         return Ok(build_result);
     }
-    
+
     pub fn packages_response(&mut self, from: HubAddr, uid: HubUid, packages: Vec<HubPackage>) {
-        
+
         self.route_send.send(ToHubMsg {
             to: HubMsgTo::Client(from),
             msg: HubMsg::ListPackagesResponse {
@@ -834,32 +834,32 @@ impl HubBuilder {
             }
         });
     }
-    
+
     pub fn error(&mut self, uid: HubUid, msg: String) -> HubWsError {
         self.route_send.send(ToHubMsg {
             to: HubMsgTo::UI,
             msg: HubMsg::LogItem {uid: uid, item: HubLogItem::Error(msg.clone())}
         });
-        
+
         return HubWsError::Error(msg)
     }
-    
+
     pub fn message(&mut self, uid: HubUid, msg: String) {
         self.route_send.send(ToHubMsg {
             to: HubMsgTo::UI,
             msg: HubMsg::LogItem {uid: uid, item: HubLogItem::Message(msg.clone())}
         });
     }
-    
+
     pub fn wasm_strip_debug(&mut self, uid: HubUid, path: &str) -> Result<BuildResult, HubWsError> {
-        
+
         let (abs_root_path, _project, sub_path) = self.workspace_split_from_path(uid, path) ?;
-        
+
         let filepath = format!("{}/{}", abs_root_path, sub_path);
 
         if let Ok(data) = fs::read(&filepath) {
             if let Ok(strip) = wasm_strip_debug(&data) {
-                
+
                 let uncomp_len = strip.len();
                 let mut enc = snap::Encoder::new();
                 /*
@@ -870,7 +870,7 @@ impl HubBuilder {
                 }*/
 
                 let comp_len = if let Ok(compressed) = enc.compress_vec(&strip) {compressed.len()}else {0};
-                
+
                 if let Err(_) = fs::write(&filepath, strip) {
                     return Err(self.error(uid, format!("Cannot write stripped wasm {}", filepath)));
                 }
@@ -885,7 +885,7 @@ impl HubBuilder {
         }
         Err(self.error(uid, format!("Cannot read wasm {}", filepath)))
     }
-    
+
     pub fn read_packages(&mut self, uid: HubUid) -> Vec<(String, String)> {
         let mut packages = Vec::new();
         let workspaces = Arc::clone(&self.workspaces);
@@ -964,11 +964,11 @@ impl HubBuilder {
         }
         return packages
     }
-    
+
     pub fn file_read(&mut self, from: HubAddr, uid: HubUid, path: &str) {
 
         if let Ok((abs_dir, _workspace, sub_path)) = self.workspace_split_from_path(uid, path) {
-            
+
             if let Some(_) = sub_path.find("..") {
                 self.error(uid, format!("file_read got relative path, ignoring {}", path));
                 return
@@ -977,14 +977,14 @@ impl HubBuilder {
                 self.error(uid, format!("Ends with key.ron, ignoring {}", path));
                 return
             }
-            
+
             let data = if let Ok(data) = std::fs::read(format!("{}/{}", abs_dir, sub_path)) {
                 Some(data)
             }
             else {
                 None
             };
-            
+
             self.route_send.send(ToHubMsg {
                 to: HubMsgTo::Client(from),
                 msg: HubMsg::FileReadResponse {
@@ -995,16 +995,16 @@ impl HubBuilder {
             });
         }
     }
-    
+
     pub fn file_write(&mut self, from: HubAddr, uid: HubUid, path: &str, data: Vec<u8>) {
         if let Ok((abs_dir, _project, sub_path)) = self.workspace_split_from_path(uid, path) {
-            
+
             if path.contains("..") {
                 self.error(uid, format!("file_write got relative path, ignoring {}", path));
                 println!("file_read got relative path, ignoring {}", path);
                 return
             }
-            
+
             let done = std::fs::write(format!("{}/{}", abs_dir, sub_path), &data).is_ok();
 
             if let Ok(mut http_server) = self.http_server.lock() {
@@ -1012,7 +1012,7 @@ impl HubBuilder {
                     http_server.send_file_change(path);
                 }
             };
-            
+
             self.route_send.send(ToHubMsg {
                 to: HubMsgTo::Client(from),
                 msg: HubMsg::FileWriteResponse {
@@ -1023,7 +1023,7 @@ impl HubBuilder {
             });
         }
     }
-    
+
     pub fn workspace_file_tree(&mut self, create_digest: bool, ext_inc: &[&str], file_ex: &[&str], dir_ex: &[&str]) -> BuilderFileTreeNode {
         fn digest_folder(create_digest: bool, name: &str, folder: &Vec<BuilderFileTreeNode>) -> Option<Box<Digest>> {
             if !create_digest {
@@ -1047,7 +1047,7 @@ impl HubBuilder {
             digest_out.digest_buffer(name.as_bytes());
             Some(Box::new(digest_out))
         }
-        
+
         fn read_recur(path: &str, create_digest: bool, ext_inc: &Vec<String>, file_ex: &Vec<String>, dir_ex: &Vec<String>) -> Vec<BuilderFileTreeNode> {
             let mut ret = Vec::new();
             if let Ok(read_dir) = fs::read_dir(path) {
@@ -1072,7 +1072,7 @@ impl HubBuilder {
                                     }
                                     if ext_inc.iter().find(|ext| name.ends_with(*ext)).is_some(){
                                         if create_digest {
-                                            
+
                                         }
                                         ret.push(BuilderFileTreeNode::File {
                                             digest: None,
@@ -1086,19 +1086,19 @@ impl HubBuilder {
                 }
             }
             ret.sort();
-            
+
             ret
         }
-        
+
         let ext_inc: Vec<String> = ext_inc.to_vec().iter().map( | v | v.to_string()).collect();
         let file_ex: Vec<String> = file_ex.to_vec().iter().map( | v | v.to_string()).collect();
         let dir_ex: Vec<String> = dir_ex.to_vec().iter().map( | v | v.to_string()).collect();
-        
+
         let mut root_folder = Vec::new();
-        
+
         if let Ok(workspaces) = self.workspaces.lock() {
             for (project, abs_path) in workspaces.iter() {
-                
+
                 let folder = read_recur(&abs_path, create_digest, &ext_inc, &file_ex, &dir_ex);
                 let tree = BuilderFileTreeNode::Folder {
                     name: project.clone(),

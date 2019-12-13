@@ -61,7 +61,7 @@ impl App {
             //menu_signal,
         }
     }
-    
+
     fn handle_app(&mut self, cx: &mut Cx, event: &mut Event) {
         self.desktop_window.handle_desktop_window(cx, event);
         match event {
@@ -70,12 +70,12 @@ impl App {
             _ => ()
         }
     }
-    
+
     fn draw_app(&mut self, cx: &mut Cx) {
         if self.desktop_window.begin_desktop_window(cx, Some(&self.menu)).is_err() {
             return
         };
-        
+
         self.desktop_window.end_desktop_window(cx);
     }
 }

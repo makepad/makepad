@@ -14,11 +14,11 @@ impl Cx{
             self.style_stack.push(index);
         }
     }
-    
+
     pub fn end_style(&mut self){
         self.style_stack.pop().expect("end_style pop failed");
     }
-    
+
     pub fn get_mut_style_top(&mut self)->&mut CxStyle{
         if let Some(last) = self.style_stack.last(){
             &mut self.styles[*last]
@@ -40,7 +40,7 @@ impl FloatId {
     pub fn set(&self, cx: &mut Cx, value: f32) {
         cx.get_mut_style_top().floats.insert(*self, value);
     }
-    
+
     pub fn get(&self, cx: &Cx) -> f32 {
         for style_id in &cx.style_stack{
             if let Some(value) = cx.styles[*style_id].floats.get(self){
@@ -67,7 +67,7 @@ impl ColorId {
     pub fn set(&self, cx: &mut Cx, value: Color) {
         cx.get_mut_style_top().colors.insert(*self, value);
     }
-    
+
     pub fn get(&self, cx: &Cx) -> Color {
         for style_id in &cx.style_stack{
             if let Some(value) = cx.styles[*style_id].colors.get(self){
@@ -94,7 +94,7 @@ impl TextStyleId {
     pub fn set(&self, cx: &mut Cx, value: TextStyle) {
         cx.get_mut_style_top().text_styles.insert(*self, value);
     }
-    
+
     pub fn get(&self, cx: &Cx) -> TextStyle {
         for style_id in &cx.style_stack{
             if let Some(value) = cx.styles[*style_id].text_styles.get(self){
@@ -119,7 +119,7 @@ impl LayoutId {
     pub fn set(&self, cx: &mut Cx, value: Layout) {
         cx.get_mut_style_top().layouts.insert(*self, value);
     }
-    
+
     pub fn get(&self, cx: &Cx) -> Layout {
         for style_id in &cx.style_stack{
             if let Some(value) = cx.styles[*style_id].layouts.get(self){
@@ -145,7 +145,7 @@ impl WalkId {
     pub fn set(&self, cx: &mut Cx, value: Walk) {
         cx.get_mut_style_top().walks.insert(*self, value);
     }
-    
+
     pub fn get(&self, cx: &Cx) -> Walk {
         for style_id in &cx.style_stack{
             if let Some(value) = cx.styles[*style_id].walks.get(self){
@@ -173,7 +173,7 @@ impl AnimId {
     pub fn set(&self, cx: &mut Cx, value: Anim) {
         cx.get_mut_style_top().anims.insert(*self, value);
     }
-    
+
     pub fn get(&self, cx: &Cx) -> Anim {
         for style_id in &cx.style_stack{
             if let Some(value) = cx.styles[*style_id].anims.get(self){
@@ -199,7 +199,7 @@ impl ShaderId {
         let shader = cx.add_shader(sg, &format!("{:?}", self.0));
         cx.get_mut_style_top().shaders.insert(*self, shader);
     }
-    
+
     pub fn get(&self, cx: &Cx) -> Shader {
         for style_id in &cx.style_stack{
             if let Some(value) = cx.styles[*style_id].shaders.get(self){

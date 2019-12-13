@@ -46,7 +46,7 @@ impl FileEditor {
             FileEditor::Plain(re) => code_editor_to_file_editor(re.handle_plain_editor(cx, event, text_buffer)),
         }
     }
-    
+
     pub fn set_key_focus(&mut self, cx: &mut Cx) {
         match self {
             FileEditor::Rust(re) => re.text_editor.set_key_focus(cx),
@@ -62,7 +62,7 @@ impl FileEditor {
             FileEditor::Plain(re) => re.text_editor.view.get_scroll_pos(cx),
         }
     }
-    
+
     pub fn set_scroll_pos_on_load(&mut self, pos:Vec2){
         match self {
             FileEditor::Rust(re) => re.text_editor._scroll_pos_on_load = Some(pos),
@@ -78,7 +78,7 @@ impl FileEditor {
             FileEditor::Plain(re) => re.draw_plain_editor(cx, text_buffer),
         }
     }
-    
+
     pub fn create_file_editor_for_path(path: &str, template: &FileEditorTemplates) -> FileEditor {
         // check which file extension we have to spawn a new editor
         if path.ends_with(".rs") || path.ends_with(".toml")  || path.ends_with(".ron"){

@@ -5,7 +5,7 @@ impl Cx {
     //pub fn debug_pt(&self, x:f32, y:f32, color:i32){
     //self.debug_pts.borrow_mut().push((x,y,color));
     //}
-    
+
     pub fn set_count_of_aligned_instance(&mut self, instance_count: usize) -> Area {
         let mut area = self.align_list.last_mut().unwrap();
         if let Area::Instance(inst) = &mut area {
@@ -13,14 +13,14 @@ impl Cx {
         }
         area.clone()
     }
-    
+
     // begin a new turtle with a layout
     pub fn begin_turtle(&mut self, layout: Layout, guard_area: Area) {
-        
+
         if !self.is_in_redraw_cycle {
             panic!("calling begin_turtle outside of redraw cycle is not possible!");
         }
-        
+
         // fetch origin and size from parent
         let (mut origin, mut abs_size) = if let Some(parent) = self.turtles.last() {
             (Vec2 {x: layout.walk.margin.l + parent.pos.x, y: layout.walk.margin.t + parent.pos.y}, parent.abs_size)
@@ -28,12 +28,12 @@ impl Cx {
         else {
             (Vec2 {x: layout.walk.margin.l, y: layout.walk.margin.t}, Vec2::default())
         };
-        
+
         // see if layout overrode size
         if let Some(layout_abs_size) = layout.abs_size {
             abs_size = layout_abs_size;
         }
-        
+
         // same for origin
         let is_abs_origin;
         if let Some(abs_origin) = layout.abs_origin {
@@ -43,11 +43,11 @@ impl Cx {
         else {
             is_abs_origin = false;
         }
-        
+
         // abs origin overrides the computation of width/height to use the parent abs_origin
         let width = layout.walk.width.eval_width(self, layout.walk.margin, is_abs_origin, abs_size.x);
         let height = layout.walk.height.eval_height(self, layout.walk.margin, is_abs_origin, abs_size.y);
-        
+
         let turtle = Turtle {
             align_list_x: self.align_list.len(),
             align_list_y: self.align_list.len(),
@@ -65,16 +65,16 @@ impl Cx {
             guard_area: guard_area,
             //..Default::default()
         };
-        
+
         self.turtles.push(turtle);
     }
-    
+
     pub fn end_turtle(&mut self, guard_area: Area) -> Rect {
         let old = self.turtles.pop().unwrap();
         if guard_area != old.guard_area {
             panic!("End turtle guard area misaligned!, begin/end pair not matched begin {:?} end {:?}", old.guard_area, guard_area)
         }
-        
+
         let w = if old.width.is_nan() {
             if old.bound_right_bottom.x == std::f32::NEG_INFINITY { // nothing happened, use padding
                 Width::Fix(old.layout.padding.l + old.layout.padding.r)
@@ -86,7 +86,7 @@ impl Cx {
         else {
             Width::Fix(old.width)
         };
-        
+
         let h = if old.height.is_nan() {
             if old.bound_right_bottom.y == std::f32::NEG_INFINITY { // nothing happened use the padding
                 Height::Fix(old.layout.padding.t + old.layout.padding.b)
@@ -98,7 +98,7 @@ impl Cx {
         else {
             Height::Fix(old.height)
         };
-        
+
         let margin = old.layout.walk.margin.clone();
         // if we have alignment set, we should now align our childnodes
         let dx = Self::compute_align_turtle_x(&old);
@@ -109,7 +109,7 @@ impl Cx {
         if dy > 0.0 {
             self.do_align_y(dy, old.align_list_y);
         }
-        
+
         // when a turtle is x-abs / y-abs you dont walk the parent
         if !old.layout.abs_origin.is_none() {
             let abs_origin = if let Some(abs_origin) = old.layout.abs_origin {abs_origin} else {Vec2::default()};
@@ -117,14 +117,14 @@ impl Cx {
             let h = if let Height::Fix(vh) = h {vh} else {0.};
             return Rect {x: abs_origin.x, y: abs_origin.y, w: w, h: h};
         }
-        
+
         return self.walk_turtle_with_old(Walk {width: w, height: h, margin}, Some(&old))
     }
-    
+
     pub fn walk_turtle(&mut self, walk: Walk) -> Rect {
         self.walk_turtle_with_old(walk, None)
     }
-    
+
     // walk the turtle with a 'w/h' and a margin
     pub fn walk_turtle_with_old(&mut self, walk: Walk, old_turtle: Option<&Turtle>) -> Rect {
         let mut align_dx = 0.0;
@@ -165,12 +165,12 @@ impl Cx {
                         LineWrap::None => {
                         }
                     }
-                    
+
                     let x = turtle.pos.x + walk.margin.l;
                     let y = turtle.pos.y + walk.margin.t;
                     // walk it normally
                     turtle.pos.x += w + walk.margin.l + walk.margin.r;
-                    
+
                     // keep track of biggest item in the line (include item margin bottom)
                     let biggest = h + walk.margin.t + walk.margin.b;
                     if biggest > turtle.biggest {
@@ -210,12 +210,12 @@ impl Cx {
                         LineWrap::None => {
                         }
                     }
-                    
+
                     let x = turtle.pos.x + walk.margin.l;
                     let y = turtle.pos.y + walk.margin.t;
                     // walk it normally
                     turtle.pos.y += h + walk.margin.t + walk.margin.b;
-                    
+
                     // keep track of biggest item in the line (include item margin bottom)
                     let biggest = w + walk.margin.r + walk.margin.l;
                     if biggest > turtle.biggest {
@@ -227,7 +227,7 @@ impl Cx {
                     (turtle.pos.x + walk.margin.l, turtle.pos.y + walk.margin.t)
                 }
             };
-            
+
             let bound_x2 = x + w + if walk.margin.r < 0. {walk.margin.r} else {0.};
             if bound_x2 > turtle.bound_right_bottom.x {
                 turtle.bound_right_bottom.x = bound_x2;
@@ -237,7 +237,7 @@ impl Cx {
             if bound_y2 > turtle.bound_right_bottom.y {
                 turtle.bound_right_bottom.y = bound_y2;
             }
-            
+
             if x < turtle.bound_left_top.x {
                 turtle.bound_left_top.x = x;
             }
@@ -245,7 +245,7 @@ impl Cx {
                 turtle.bound_left_top.y = y;
             }
             // we could directly h or v align this thing
-            
+
             Rect {
                 x: x,
                 y: y,
@@ -261,7 +261,7 @@ impl Cx {
                 h: h
             }
         };
-        
+
         if align_dx != 0.0 {
             if let Some(old_turtle) = old_turtle {
                 self.do_align_x(align_dx, old_turtle.align_list_x);
@@ -272,10 +272,10 @@ impl Cx {
                 self.do_align_y(align_dy, old_turtle.align_list_y);
             }
         };
-        
+
         ret
     }
-    
+
     // high perf turtle with no indirections and compute visibility
     pub fn walk_turtle_right_no_wrap(&mut self, w: f32, h: f32, scroll: Vec2) -> Option<Rect> {
         if let Some(turtle) = self.turtles.last_mut() {
@@ -283,7 +283,7 @@ impl Cx {
             let y = turtle.pos.y;
             // walk it normally
             turtle.pos.x += w;
-            
+
             // keep track of biggest item in the line (include item margin bottom)
             let biggest = h;
             if biggest > turtle.biggest {
@@ -299,12 +299,12 @@ impl Cx {
             if bound_y2 > turtle.bound_right_bottom.y {
                 turtle.bound_right_bottom.y = bound_y2;
             }
-            
+
             let vx = turtle.origin.x + scroll.x;
             let vy = turtle.origin.y + scroll.y;
             let vw = turtle.width;
             let vh = turtle.height;
-            
+
             if x > vx + vw || x + w < vx || y > vy + vh || y + h < vy {
                 None
             }
@@ -321,7 +321,7 @@ impl Cx {
             None
         }
     }
-    
+
     pub fn turtle_new_line(&mut self) {
         if let Some(turtle) = self.turtles.last_mut() {
             match turtle.layout.direction {
@@ -339,14 +339,14 @@ impl Cx {
             }
         }
     }
-    
+
     pub fn turtle_line_is_visible(&mut self, min_height: f32, scroll: Vec2) -> bool {
         if let Some(turtle) = self.turtles.last_mut() {
             let y = turtle.pos.y;
             let h = turtle.biggest.max(min_height);
             let vy = turtle.origin.y + scroll.y;
             let vh = turtle.height;
-            
+
             if y > vy + vh || y + h < vy {
                 return false
             }
@@ -356,7 +356,7 @@ impl Cx {
         }
         false
     }
-    
+
     pub fn turtle_new_line_min_height(&mut self, min_height: f32) {
         if let Some(turtle) = self.turtles.last_mut() {
             turtle.pos.x = turtle.origin.x + turtle.layout.padding.l;
@@ -364,7 +364,7 @@ impl Cx {
             turtle.biggest = 0.0;
         }
     }
-    
+
     fn do_align_x(&mut self, dx: f32, align_start: usize) {
         let dx = (dx * self.current_dpi_factor).floor() / self.current_dpi_factor;
         for i in align_start..self.align_list.len() {
@@ -384,7 +384,7 @@ impl Cx {
             }
         }
     }
-    
+
     fn do_align_y(&mut self, dy: f32, align_start: usize) {
         let dy = (dy * self.current_dpi_factor).floor() / self.current_dpi_factor;
         for i in align_start..self.align_list.len() {
@@ -404,7 +404,7 @@ impl Cx {
             }
         }
     }
-    
+
     pub fn get_turtle_rect(&self) -> Rect {
         if let Some(turtle) = self.turtles.last() {
             return Rect {
@@ -416,7 +416,7 @@ impl Cx {
         };
         return Rect::default();
     }
-    
+
     pub fn get_turtle_biggest(&self) -> f32 {
         if let Some(turtle) = self.turtles.last() {
             turtle.biggest
@@ -425,10 +425,10 @@ impl Cx {
             0.
         }
     }
-    
+
     pub fn get_turtle_bounds(&self) -> Vec2 {
         if let Some(turtle) = self.turtles.last() {
-            
+
             return Vec2 {
                 x: if turtle.bound_right_bottom.x<0. {0.}else {turtle.bound_right_bottom.x} + turtle.layout.padding.r - turtle.origin.x,
                 y: if turtle.bound_right_bottom.y<0. {0.}else {turtle.bound_right_bottom.y} + turtle.layout.padding.b - turtle.origin.y
@@ -436,7 +436,7 @@ impl Cx {
         }
         return Vec2::default()
     }
-    
+
     pub fn set_turtle_bounds(&mut self, bound: Vec2) {
         if let Some(turtle) = self.turtles.last_mut() {
             turtle.bound_right_bottom = Vec2 {
@@ -445,21 +445,21 @@ impl Cx {
             }
         }
     }
-    
+
     pub fn get_turtle_origin(&self) -> Vec2 {
         if let Some(turtle) = self.turtles.last() {
             return turtle.origin;
         }
         return Vec2::default()
     }
-    
+
     pub fn move_turtle(&mut self, dx: f32, dy: f32) {
         if let Some(turtle) = self.turtles.last_mut() {
             turtle.pos.x += dx;
             turtle.pos.y += dy;
         }
     }
-    
+
     pub fn get_turtle_pos(&self) -> Vec2 {
         if let Some(turtle) = self.turtles.last() {
             turtle.pos
@@ -468,13 +468,13 @@ impl Cx {
             Vec2::default()
         }
     }
-    
+
     pub fn set_turtle_pos(&mut self, pos: Vec2) {
         if let Some(turtle) = self.turtles.last_mut() {
             turtle.pos = pos
         }
     }
-    
+
     pub fn get_rel_turtle_pos(&self) -> Vec2 {
         if let Some(turtle) = self.turtles.last() {
             Vec2 {x: turtle.pos.x - turtle.origin.x, y: turtle.pos.y - turtle.origin.y}
@@ -483,13 +483,13 @@ impl Cx {
             Vec2::default()
         }
     }
-    
+
     pub fn set_turtle_padding(&mut self, padding: Padding) {
         if let Some(turtle) = self.turtles.last_mut() {
             turtle.layout.padding = padding
         }
     }
-    
+
     pub fn visible_in_turtle(&self, geom: Rect, scroll: Vec2) -> bool {
         if let Some(turtle) = self.turtles.last() {
             let view = Rect {
@@ -498,14 +498,14 @@ impl Cx {
                 w: turtle.width, // + margin.l + margin.r,
                 h: turtle.height, // + margin.t + margin.b
             };
-            
+
             return view.intersects(geom)
         }
         else {
             false
         }
     }
-    
+
     fn compute_align_turtle_x(turtle: &Turtle) -> f32 {
         if turtle.layout.align.fx > 0.0 {
             let dx = turtle.layout.align.fx *
@@ -517,7 +517,7 @@ impl Cx {
             0.
         }
     }
-    
+
     fn compute_align_turtle_y(turtle: &Turtle) -> f32 {
         if turtle.layout.align.fy > 0.0 {
             let dy = turtle.layout.align.fy *
@@ -529,7 +529,7 @@ impl Cx {
             0.
         }
     }
-    
+
     pub fn compute_turtle_width(&mut self) {
         if let Some(turtle) = self.turtles.last_mut() {
             if turtle.width.is_nan() {
@@ -541,7 +541,7 @@ impl Cx {
             }
         }
     }
-    
+
     pub fn compute_turtle_height(&mut self) {
         if let Some(turtle) = self.turtles.last_mut() {
             if turtle.height.is_nan() {
@@ -553,7 +553,7 @@ impl Cx {
             }
         }
     }
-    
+
     // used for a<b>c layouts horizontally
     pub fn change_turtle_align_x(&mut self, fx: f32) {
         let (dx, align_origin_x) = if let Some(turtle) = self.turtles.last_mut() {
@@ -573,7 +573,7 @@ impl Cx {
             turtle.bound_right_bottom.x = std::f32::NEG_INFINITY;
         }
     }
-    
+
     // used for a<b>c layouts vertically
     pub fn change_turtle_align_y(&mut self, fy: f32) {
         let (dy, align_origin_y) = if let Some(turtle) = self.turtles.last_mut() {
@@ -593,7 +593,7 @@ impl Cx {
             turtle.bound_right_bottom.y = std::f32::NEG_INFINITY;
         }
     }
-    
+
     // call this every time to align the last group on the y axis
     pub fn turtle_align_y(&mut self) {
         let fy = if let Some(turtle) = self.turtles.last_mut() {
@@ -607,7 +607,7 @@ impl Cx {
             turtle.height_used = 0.;
         }
     }
-    
+
     pub fn turtle_align_x(&mut self) {
         let fx = if let Some(turtle) = self.turtles.last_mut() {
             turtle.layout.align.fx
@@ -620,14 +620,14 @@ impl Cx {
             turtle.width_used = 0.;
         }
     }
-    
+
     pub fn reset_turtle_bounds(&mut self) {
         if let Some(turtle) = self.turtles.last_mut() {
             turtle.bound_left_top = Vec2 {x: std::f32::INFINITY, y: std::f32::INFINITY};
             turtle.bound_right_bottom = Vec2 {x: std::f32::NEG_INFINITY, y: std::f32::NEG_INFINITY};
         }
     }
-    
+
     pub fn reset_turtle_pos(&mut self) {
         if let Some(turtle) = self.turtles.last_mut() {
             // subtract used size so 'fill' works
@@ -637,8 +637,8 @@ impl Cx {
             };
         }
     }
-    
-    
+
+
     fn _get_width_left(&self, abs: bool, abs_size: f32) -> f32 {
         if !abs {
             self.get_width_left()
@@ -647,7 +647,7 @@ impl Cx {
             abs_size
         }
     }
-    
+
     pub fn get_width_left(&self) -> f32 {
         if let Some(turtle) = self.turtles.last() {
             let nan_val = max_zero_keep_nan(turtle.width - turtle.width_used - (turtle.pos.x - turtle.origin.x));
@@ -660,7 +660,7 @@ impl Cx {
         }
         0.
     }
-    
+
     fn _get_width_total(&self, abs: bool, abs_size: f32) -> f32 {
         if !abs {
             self.get_width_total()
@@ -669,7 +669,7 @@ impl Cx {
             abs_size
         }
     }
-    
+
     pub fn get_width_total(&self) -> f32 {
         if let Some(turtle) = self.turtles.last() {
             let nan_val = max_zero_keep_nan(turtle.width/* - (turtle.layout.padding.l + turtle.layout.padding.r)*/);
@@ -682,7 +682,7 @@ impl Cx {
         }
         0.
     }
-    
+
     fn _get_height_left(&self, abs: bool, abs_size: f32) -> f32 {
         if !abs {
             self.get_height_left()
@@ -691,7 +691,7 @@ impl Cx {
             abs_size
         }
     }
-    
+
     pub fn get_height_left(&self) -> f32 {
         if let Some(turtle) = self.turtles.last() {
             let nan_val = max_zero_keep_nan(turtle.height - turtle.height_used - (turtle.pos.y - turtle.origin.y));
@@ -704,7 +704,7 @@ impl Cx {
         }
         0.
     }
-    
+
     fn _get_height_total(&self, abs: bool, abs_size: f32) -> f32 {
         if !abs {
             self.get_height_total()
@@ -713,7 +713,7 @@ impl Cx {
             abs_size
         }
     }
-    
+
     pub fn get_height_total(&self) -> f32 {
         if let Some(turtle) = self.turtles.last() {
             let nan_val = max_zero_keep_nan(turtle.height /*- (turtle.layout.padding.t + turtle.layout.padding.b)*/);
@@ -726,7 +726,7 @@ impl Cx {
         }
         0.
     }
-    
+
     pub fn is_height_computed(&self) -> bool {
         if let Some(turtle) = self.turtles.last() {
             if let Height::Compute = turtle.layout.walk.height {
@@ -735,7 +735,7 @@ impl Cx {
         }
         false
     }
-    
+
     pub fn is_width_computed(&self) -> bool {
         if let Some(turtle) = self.turtles.last() {
             if let Width::Compute = turtle.layout.walk.width {
@@ -744,7 +744,7 @@ impl Cx {
         }
         false
     }
-    
+
 }
 /*
 thread_local!(pub static debug_pts_store: RefCell<Vec<(f32,f32,i32,String)>> = RefCell::new(Vec::new()));
@@ -819,7 +819,7 @@ impl Width {
             _ => 0.
         }
     }
-    
+
     pub fn eval_width(&self, cx: &Cx, margin: Margin, abs: bool, abs_pos: f32) -> f32 {
         match self {
             Width::Compute => std::f32::NAN,
@@ -885,7 +885,7 @@ impl Margin {
     pub fn zero() -> Margin {
         Margin {l: 0.0, t: 0.0, r: 0.0, b: 0.0}
     }
-    
+
     pub fn all(v: f32) -> Margin {
         Margin {l: v, t: v, r: v, b: v}
     }
@@ -900,7 +900,7 @@ impl Rect {
         else {
             return self.contains(x, y);
         }
-        
+
     }
 }
 

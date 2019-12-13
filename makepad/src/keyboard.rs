@@ -1,5 +1,5 @@
-use makepad_render::*; 
-use makepad_widget::*; 
+use makepad_render::*;
+use makepad_widget::*;
 use crate::appstorage::*;
 
 #[derive(Clone)]
@@ -44,10 +44,10 @@ impl Keyboard {
             modifiers: KeyModifiers::default(),
             key_down: None,
             key_up: None,
-            
+
         }
     }
-    
+
     fn send_textbuffers_update(&mut self, cx: &mut Cx, app_storage: &mut AppStorage) {
         // clear all files we missed
         for (_, atb) in &mut app_storage.text_buffers {
@@ -57,7 +57,7 @@ impl Keyboard {
             cx.send_signal(atb.text_buffer.signal, TextBuffer::status_keyboard_update());
         }
     }
-    
+
     pub fn handle_keyboard(&mut self, cx: &mut Cx, event: &mut Event, app_storage: &mut AppStorage) -> KeyboardEvent {
         // do shit here
         if self.view.handle_scroll_bars(cx, event) {
@@ -111,21 +111,21 @@ impl Keyboard {
         if update_textbuffers {
             self.send_textbuffers_update(cx, app_storage);
         }
-        
+
         KeyboardEvent::None
     }
-    
+
     pub fn draw_keyboard(&mut self, cx: &mut Cx) {
         if self.view.begin_view(cx, Layout::default()).is_err() {return}
-        
+
         let keys = vec![KeyType::Alt, KeyType::Control, KeyType::Shift];
-        
+
         for key in keys {
             self.buttons.get_draw(cx, key.clone(), | _cx, templ | {
                 templ.clone()
             }).draw_normal_button(cx, &key.name());
         }
-        
+
         self.view.end_view(cx);
     }
 }

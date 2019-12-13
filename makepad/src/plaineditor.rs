@@ -1,7 +1,7 @@
-use makepad_render::*; 
-use makepad_widget::*; 
+use makepad_render::*;
+use makepad_widget::*;
 
-#[derive(Clone)]  
+#[derive(Clone)]
 pub struct PlainEditor {
     pub text_editor: TextEditor,
 }
@@ -16,12 +16,12 @@ impl PlainEditor {
         };
         editor
     }
-    
+
     pub fn handle_plain_editor(&mut self, cx: &mut Cx, event: &mut Event,  text_buffer: &mut TextBuffer) -> TextEditorEvent {
         let ce = self.text_editor.handle_text_editor(cx, event, text_buffer);
         ce
     }
-    
+
     pub fn draw_plain_editor(&mut self, cx: &mut Cx, text_buffer: &mut TextBuffer) {
         if text_buffer.needs_token_chunks() && text_buffer.lines.len() >0{
             let mut state = TokenizerState::new(&text_buffer.lines);
@@ -36,13 +36,13 @@ impl PlainEditor {
                 }
             }
         }
-        
+
         if self.text_editor.begin_text_editor(cx, text_buffer).is_err() {return}
-        
+
         for (index, token_chunk) in text_buffer.token_chunks.iter_mut().enumerate(){
             self.text_editor.draw_chunk(cx, index, &text_buffer.flat_text, token_chunk, &text_buffer.messages.cursors);
         }
-        
+
         self.text_editor.end_text_editor(cx, text_buffer);
     }
 }
@@ -54,12 +54,12 @@ impl PlainTokenizer {
     pub fn new() -> PlainTokenizer {
         PlainTokenizer {}
     }
-    
+
     pub fn next_token<'a>(&mut self, state: &mut TokenizerState<'a>, chunk: &mut Vec<char>, _token_chunks: &Vec<TokenChunk>) -> TokenType {
         let start = chunk.len();
         loop {
             if state.next == '\0' {
-		if (chunk.len()-start)>0 { 
+		if (chunk.len()-start)>0 {
                     return TokenType::Identifier
                 }
 		state.advance();
@@ -71,7 +71,7 @@ impl PlainTokenizer {
                 if (chunk.len()-start)>0 {
                     return TokenType::Identifier
                 }
-                
+
                 chunk.push(state.next);
                 state.advance();
                 return TokenType::Newline

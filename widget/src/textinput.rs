@@ -16,7 +16,7 @@ pub struct TextInputOptions {
 }
 
 impl TextInput {
-    
+
     pub fn proto(cx: &mut Cx, opt: TextInputOptions) -> Self {
         Self {
             text_editor: TextEditor {
@@ -40,9 +40,9 @@ impl TextInput {
             text_buffer: TextBuffer::from_utf8(""),
         }
     }
-    
+
     pub fn style_text_input() -> StyleId {uid!()}
-    
+
     pub fn style(cx: &mut Cx, _opt: &StyleOptions) {
         cx.begin_style(Self::style_text_input());
         TextEditor::color_bg().set(cx, Theme::color_bg_normal().get(cx));
@@ -57,34 +57,34 @@ impl TextInput {
         })));
         cx.end_style();
     }
-    
+
     pub fn handle_text_input(&mut self, cx: &mut Cx, event: &mut Event) -> TextEditorEvent {
         let text_buffer = &mut self.text_buffer;
         let ce = self.text_editor.handle_text_editor(cx, event, text_buffer);
         ce
     }
-    
+
     pub fn set_value(&mut self, cx: &mut Cx, text: &str) {
         let text_buffer = &mut self.text_buffer;
         text_buffer.load_from_utf8(text);
         self.text_editor.view.redraw_view_area(cx);
     }
-    
+
     pub fn get_value(&self) -> String {
         self.text_buffer.get_as_string()
     }
-    
+
     pub fn draw_text_input_static(&mut self, cx: &mut Cx, text: &str) {
         let text_buffer = &mut self.text_buffer;
         text_buffer.load_from_utf8(text);
         self.draw_text_input(cx);
     }
-    
+
     pub fn draw_text_input(&mut self, cx: &mut Cx) {
         cx.begin_style(Self::style_text_input());
         let text_buffer = &mut self.text_buffer;
         if text_buffer.needs_token_chunks() && text_buffer.lines.len() >0 {
-            
+
             let mut state = TokenizerState::new(&text_buffer.lines);
             let mut tokenizer = TextInputTokenizer::new();
             let mut pair_stack = Vec::new();
@@ -97,20 +97,20 @@ impl TextInput {
                 }
             }
         }
-        
+
         if self.text_editor.begin_text_editor(cx, text_buffer).is_err() {return cx.end_style();}
-        
+
         if text_buffer.is_empty() {
             let pos = cx.get_turtle_pos();
             self.text_editor.text.color = color("#666");
             self.text_editor.text.draw_text(cx, &self.empty_message);
             cx.set_turtle_pos(pos);
         }
-        
+
         for (index, token_chunk) in text_buffer.token_chunks.iter_mut().enumerate() {
             self.text_editor.draw_chunk(cx, index, &text_buffer.flat_text, token_chunk, &text_buffer.messages.cursors);
         }
-        
+
         self.text_editor.end_text_editor(cx, text_buffer);
         cx.end_style();
     }
@@ -124,12 +124,12 @@ impl TextInputTokenizer {
     pub fn new() -> TextInputTokenizer {
         TextInputTokenizer {}
     }
-    
+
     pub fn next_token<'a>(&mut self, state: &mut TokenizerState<'a>, chunk: &mut Vec<char>, _token_chunks: &Vec<TokenChunk>) -> TokenType {
         let start = chunk.len();
         loop {
             if state.next == '\0' {
-		if (chunk.len()-start)>0 { 
+		if (chunk.len()-start)>0 {
                     return TokenType::Identifier
                 }
 		state.advance();
@@ -141,7 +141,7 @@ impl TextInputTokenizer {
                 if (chunk.len()-start)>0 {
                     return TokenType::Identifier
                 }
-                
+
                 chunk.push(state.next);
                 state.advance();
                 return TokenType::Newline

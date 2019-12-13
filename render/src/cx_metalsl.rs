@@ -40,7 +40,7 @@ impl Cx {
             ty => ty.to_string()
         }
     }
-    
+
     pub fn mtl_type_to_metal(ty: &str) -> String {
         match ty.as_ref() {
             "float" => "float".to_string(),
@@ -54,7 +54,7 @@ impl Cx {
             ty => ty.to_string()
         }
     }
-    
+
     pub fn mtl_assemble_struct(name: &str, vars: &Vec<ShVar>, pack_type: PackType, field: &str) -> String {
         let mut out = String::new();
         out.push_str("struct ");
@@ -77,12 +77,12 @@ impl Cx {
                     out.push_str(";\n");
                 }
             }
-            
+
         };
         out.push_str("};\n\n");
         out
     }
-    
+
     pub fn mtl_assemble_texture_slots(textures: &Vec<ShVar>) -> String {
         let mut out = String::new();
         out.push_str("struct ");
@@ -95,11 +95,11 @@ impl Cx {
         out.push_str("};\n\n");
         out
     }
-    
+
     pub fn mtl_assemble_shader(sg: &ShaderGen) -> Result<(String, CxShaderMapping), SlErr> {
-        
+
         let mut mtl_out = "#include <metal_stdlib>\nusing namespace metal;\n".to_string();
-        
+
         // ok now define samplers from our sh.
         let texture_slots = sg.flat_vars( | v | if let ShVarStore::Texture = *v {true} else {false});
         let geometries = sg.flat_vars( | v | if let ShVarStore::Geometry = *v {true} else {false});
@@ -110,12 +110,12 @@ impl Cx {
         let view_uniforms = sg.flat_vars( | v | if let ShVarStore::ViewUniform = *v {true} else {false});
         let draw_uniforms = sg.flat_vars( | v | if let ShVarStore::DrawUniform = *v {true} else {false});
         let uniforms = sg.flat_vars( | v | if let ShVarStore::Uniform(_) = *v {true} else {false});
-        
+
         // lets count the slots
         let geometry_slots = sg.compute_slot_total(&geometries);
         let instance_slots = sg.compute_slot_total(&instances);
         //let varying_slots = sh.compute_slot_total(&varyings);
-        
+
         mtl_out.push_str(&Self::mtl_assemble_struct("_Geom", &geometries, PackType::Packed, ""));
         mtl_out.push_str(&Self::mtl_assemble_struct("_Inst", &instances, PackType::Packed, ""));
         mtl_out.push_str(&Self::mtl_assemble_struct("_UniPs", &pass_uniforms, PackType::Unpacked, ""));
@@ -123,10 +123,10 @@ impl Cx {
         mtl_out.push_str(&Self::mtl_assemble_struct("_UniDr", &draw_uniforms, PackType::Unpacked, ""));
         mtl_out.push_str(&Self::mtl_assemble_struct("_Uni", &uniforms, PackType::Unpacked, ""));
         mtl_out.push_str(&Self::mtl_assemble_struct("_Loc", &locals, PackType::Unpacked, ""));
-        
+
         // we need to figure out which texture slots exist
         mtl_out.push_str(&Self::mtl_assemble_texture_slots(&texture_slots));
-        
+
         // we need to figure out which texture slots exist
         // mtl_out.push_str(&Self::assemble_constants(&texture_slots));
         let mut const_cx = SlCx {
@@ -151,7 +151,7 @@ impl Cx {
             mtl_out.push_str(&const_init.sl);
             mtl_out.push_str(")\n");
         }
-        
+
         let mut vtx_cx = SlCx {
             depth: 0,
             target: SlTarget::Vertex,
@@ -177,20 +177,20 @@ impl Cx {
             fn_done: vtx_cx.fn_done,
             auto_vary: Vec::new()
         };
-        
+
         let pix_fns = assemble_fn_and_deps(sg, &mut pix_cx) ?;
-        
+
         // lets add the auto_vary ones to the varyings struct
         for auto in &pix_cx.auto_vary {
             varyings.push(auto.clone());
         }
         mtl_out.push_str(&Self::mtl_assemble_struct("_Vary", &varyings, PackType::Unpacked, "  float4 mtl_position [[position]];\n"));
-        
+
         mtl_out.push_str("//Vertex shader\n");
         mtl_out.push_str(&vtx_fns);
         mtl_out.push_str("//Pixel shader\n");
         mtl_out.push_str(&pix_fns);
-        
+
         // lets define the vertex shader
         mtl_out.push_str("vertex _Vary _vertex_shader(_Tex _tex, device _Geom *in_geometries [[buffer(0)]], device _Inst *in_instances [[buffer(1)]],\n");
         mtl_out.push_str("  device _UniPs &_uni_ps [[buffer(2)]], device _UniVw &_uni_vw [[buffer(3)]], device _UniDr &_uni_dr [[buffer(4)]], device _Uni &_uni [[buffer(5)]],\n");
@@ -202,7 +202,7 @@ impl Cx {
         mtl_out.push_str("  _vary.mtl_position = _vertex(");
         mtl_out.push_str(&vtx_cx.defargs_call);
         mtl_out.push_str(");\n\n");
-        
+
         for auto in pix_cx.auto_vary {
             if let ShVarStore::Geometry = auto.store {
                 mtl_out.push_str("       _vary.");
@@ -219,7 +219,7 @@ impl Cx {
                 mtl_out.push_str(";\n");
             }
         }
-        
+
         mtl_out.push_str("       return _vary;\n");
         mtl_out.push_str("};\n");
         // then the fragment shader
@@ -229,11 +229,11 @@ impl Cx {
         mtl_out.push_str("  return _pixel(");
         mtl_out.push_str(&pix_cx.defargs_call);
         mtl_out.push_str(");\n};\n");
-        
+
         if sg.log != 0 {
             println!("---- Metal shader -----\n{}", mtl_out);
         }
-        
+
         let uniform_props = UniformProps::construct(sg, &uniforms);
         Ok((mtl_out, CxShaderMapping {
             rect_instance_props: RectInstanceProps::construct(sg, &instances),
@@ -250,10 +250,10 @@ impl Cx {
             texture_slots,
         }))
     }
-    
+
     pub fn mtl_compile_shader(sh: &mut CxShader, metal_cx: &MetalCx) -> Result<(), SlErr> {
         let (mtlsl, mapping) = Self::mtl_assemble_shader(&sh.shader_gen) ?;
-        
+
         let options: id = unsafe {msg_send![class!(MTLCompileOptions), new]};
         let ns_mtlsl: id = str_to_nsstring(&mtlsl);
         let mut err: id = nil;
@@ -268,19 +268,19 @@ impl Cx {
             let err_str: id = unsafe {msg_send![err, localizedDescription]};
             return Err(SlErr {msg: nsstring_to_string(err_str)})
         }
-        
+
         sh.mapping = mapping;
         sh.platform = Some(CxPlatformShader {
             pipeline_state: unsafe {
                 let vert: id = msg_send![library, newFunctionWithName: str_to_nsstring("_vertex_shader")];
                 let frag: id = msg_send![library, newFunctionWithName: str_to_nsstring("_fragment_shader")];
                 let rpd: id = msg_send![class!(MTLRenderPipelineDescriptor), new];
-                
+
                 let () = msg_send![rpd, setVertexFunction: vert];
                 let () = msg_send![rpd, setFragmentFunction: frag];
-                
+
                 let color_attachments: id = msg_send![rpd, colorAttachments];
-                
+
                 let ca: id = msg_send![color_attachments, objectAtIndexedSubscript: 0u64];
                 let () = msg_send![ca, setPixelFormat: MTLPixelFormat::BGRA8Unorm];
                 let () = msg_send![ca, setBlendingEnabled: YES];
@@ -291,11 +291,11 @@ impl Cx {
                 let () = msg_send![ca, setRgbBlendOperation: MTLBlendOperation::Add];
                 let () = msg_send![ca, setAlphaBlendOperation: MTLBlendOperation::Add];
                 let () = msg_send![rpd, setDepthAttachmentPixelFormat: MTLPixelFormat::Depth32Float_Stencil8];
-                
+
                 let mut err: id = nil;
                 let rps: id = msg_send![
                     metal_cx.device,
-                    newRenderPipelineStateWithDescriptor: rpd 
+                    newRenderPipelineStateWithDescriptor: rpd
                     error: &mut err
                 ];
                 if rps == nil{
@@ -340,15 +340,15 @@ impl<'a> SlCx<'a> {
             _ => return MapCallResult::None
         }
     }
-    
+
     pub fn mat_mul(&self, left: &str, right: &str) -> String {
         format!("{}*{}", left, right)
     }
-    
+
     pub fn map_type(&self, ty: &str) -> String {
         Cx::mtl_type_to_metal(ty)
     }
-    
+
     pub fn map_constructor(&self, name: &str, args: &Vec<Sl>) -> String {
         let mut out = String::new();
         out.push_str(&self.map_type(name));
@@ -362,7 +362,7 @@ impl<'a> SlCx<'a> {
         out.push_str(")");
         return out;
     }
-    
+
     pub fn map_var(&mut self, var: &ShVar) -> String {
         let mty = Cx::mtl_type_to_metal(&var.ty);
         match var.store {
@@ -390,7 +390,7 @@ impl<'a> SlCx<'a> {
                     return format!("_vary.{}", var.name);
                 }
                 else {
-                    
+
                     return format!("{}(_geom.{})", mty, var.name);
                 }
             },

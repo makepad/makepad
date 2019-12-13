@@ -31,7 +31,7 @@ impl LogItem {
         };
         editor
     }
-    
+
     pub fn load_loc_message(&mut self, cx: &mut Cx, loc_message: &LocMessage) {
         self.needs_formatting = true;
 
@@ -46,7 +46,7 @@ impl LogItem {
         else {
             loc_message.body.clone()
         };
-        
+
         self.text_buffer.load_from_utf8(&text);
         self.text_editor.view.redraw_view_area(cx);
     }
@@ -62,7 +62,7 @@ impl LogItem {
         self.text_buffer.load_from_utf8("");
         self.text_editor.view.redraw_view_area(cx);
     }
-    
+
     pub fn handle_log_item(&mut self, cx: &mut Cx, event: &mut Event) -> TextEditorEvent {
         let text_buffer = &mut self.text_buffer;
         let ce = self.text_editor.handle_text_editor(cx, event, text_buffer);
@@ -75,13 +75,13 @@ impl LogItem {
             _ => ()
         }
         ce
-        
+
     }
-    
+
     pub fn draw_log_item(&mut self, cx: &mut Cx) {
         let text_buffer = &mut self.text_buffer;
         if text_buffer.needs_token_chunks() && text_buffer.lines.len() >0 {
-            
+
             if self.needs_formatting {
                 let mut state = TokenizerState::new(&text_buffer.lines);
                 let mut tokenizer = RustTokenizer::new();
@@ -102,7 +102,7 @@ impl LogItem {
                     if token_type == TokenType::Operator && val == "`" {
                         backtick_toggle = !backtick_toggle;
                     }
-                    
+
                     let inside_backtick = !backtick_toggle || token_type == TokenType::Operator && val == "`";
                     if line_count == 2 {
                         first_block = true;
@@ -110,7 +110,7 @@ impl LogItem {
                     if first_block && token_count == 0 && token_type == TokenType::Number {
                         first_block_code_line = true;
                     }
-                    
+
                     // Gray out everything thats not in backticks or code
                     if (line_count == 0 && inside_backtick || line_count == 1 || first_block && token_count <= 2 && (val == "|" || token_type == TokenType::Number) || first_block && !first_block_code_line && inside_backtick || !first_block && inside_backtick)
                         && token_type != TokenType::Whitespace
@@ -118,16 +118,16 @@ impl LogItem {
                         && token_type != TokenType::Eof {
                         token_type = TokenType::Defocus;
                     }
-                    
+
                     // color the ^^
                     if first_block && !first_block_code_line && val == "^" {
                         token_type = message_type;
                     }
-                    
+
                     if first_block && token_count == 1 && val != "|" && token_type != TokenType::Whitespace {
                         first_block = false;
                     }
-                    
+
                     if line_count == 0 && token_count == 0 {
                         if val == "warning" {
                             token_type = TokenType::Warning
@@ -137,12 +137,12 @@ impl LogItem {
                             token_type = TokenType::Error
                         }
                     }
-                    
-                    
+
+
                     //println!("{:?} {}", token_type, val);
-                    
+
                     TokenChunk::push_with_pairing(&mut text_buffer.token_chunks, &mut pair_stack, state.next, offset, text_buffer.flat_text.len(), token_type);
-                    
+
                     token_count += 1;
                     if token_type == TokenType::Newline {
                         line_count += 1;
@@ -168,13 +168,13 @@ impl LogItem {
                 }
             }
         }
-        
+
         if self.text_editor.begin_text_editor(cx, text_buffer).is_err() {return}
 
         for (index, token_chunk) in text_buffer.token_chunks.iter_mut().enumerate() {
             self.text_editor.draw_chunk(cx, index, &text_buffer.flat_text, token_chunk, &text_buffer.messages.cursors);
         }
-        
+
         self.text_editor.end_text_editor(cx, text_buffer);
     }
 }

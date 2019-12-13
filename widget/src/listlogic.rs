@@ -69,7 +69,7 @@ impl ListLogic {
             self.list_items.truncate(len);
         }
     }
-    
+
     pub fn handle_list_scroll_bars(&mut self, cx: &mut Cx, event: &mut Event, view: &mut ScrollView)
         -> bool {
         if view.handle_scroll_bars(cx, event) {
@@ -86,46 +86,46 @@ impl ListLogic {
         }
         return false
     }
-    
+
     pub fn begin_list(&mut self, cx: &mut Cx, view: &mut ScrollView, tail_list: bool, row_height: f32) -> Result<(), ()>
     {
         view.begin_view(cx, Layout {
             direction: Direction::Down,
             ..Layout::default()
         }) ?;
-        
+
         self.set_visible_range_and_scroll(cx, view, tail_list, row_height);
-        
+
         Ok(())
     }
-    
-    
+
+
     pub fn walk_turtle_to_end(&mut self, cx: &mut Cx, row_height: f32) {
         let left = (self.list_items.len() - self.end_item) as f32 * row_height;
         cx.walk_turtle(Walk::wh(Width::Fill, Height::Fix(left)));
     }
-    
-    
+
+
     pub fn end_list(&mut self, cx: &mut Cx, view: &mut ScrollView) {
         view.end_view(cx);
         if let Some(set_scroll_pos) = self.set_scroll_pos {
             view.set_scroll_pos(cx, set_scroll_pos);
         }
     }
-    
+
     pub fn set_visible_range_and_scroll(&mut self, cx: &mut Cx, view: &mut ScrollView, tail_list: bool, row_height: f32) {
         let view_rect = cx.get_turtle_rect();
-        
+
         // the maximum scroll position given the amount of log items
         let max_scroll_y = ((self.list_items.len() + 1) as f32 * row_height - view_rect.h).max(0.);
-        
+
         // tail the log
         let (scroll_pos, set_scroll_pos) = if tail_list {
             (Vec2 {x: 0., y: max_scroll_y}, true)
         }
         else {
             let sp = view.get_scroll_pos(cx);
-            
+
             // scroll item into view
             if let Some(scroll_item_in_view) = self.scroll_item_in_view {
                 self.scroll_item_in_view = None;
@@ -151,14 +151,14 @@ impl ListLogic {
                 }
             }
         };
-        
+
         let start_item = (scroll_pos.y / row_height).floor() as usize;
         let end_item = ((scroll_pos.y + view_rect.h + row_height) / row_height).ceil() as usize;
-        
+
         self.start_item = start_item.min(self.list_items.len());
         self.end_fill = end_item;
         self.end_item = end_item.min(self.list_items.len());
-        
+
         let start_scroll = (self.start_item as f32) * row_height;
         if set_scroll_pos {
             self.set_scroll_pos = Some(scroll_pos);
@@ -169,7 +169,7 @@ impl ListLogic {
         // lets jump the turtle forward by scrollpos.y
         cx.move_turtle(0., start_scroll);
     }
-    
+
     pub fn get_next_single_selection(&self) -> ListSelect {
         if let Some(last) = self.selection.last() {
             let next = last + 1;
@@ -184,7 +184,7 @@ impl ListLogic {
             ListSelect::Single(0)
         }
     }
-    
+
     pub fn get_prev_single_selection(&self) -> ListSelect {
         if let Some(first) = self.selection.last() {
             if *first == 0 { // wrap around
@@ -198,12 +198,12 @@ impl ListLogic {
             ListSelect::Single(0)
         }
     }
-    
+
     pub fn handle_list_logic<F>(&mut self, cx: &mut Cx, event: &mut Event, select: ListSelect, mut cb: F) -> ListEvent
     where F: FnMut(&mut Cx, ListLogicEvent, &mut ListItem, usize)
     {
         let mut select = select;
-        
+
         for counter in self.start_item..self.end_item {
             if counter >= self.list_items.len() {
                 break;
@@ -260,12 +260,12 @@ impl ListLogic {
             }
         }
         self.last_range = Some((self.start_item, self.end_item));
-        
+
         match select {
             ListSelect::Range(select_index) => {
                 if let Some(first) = self.selection.first() {
                     if let Some(last) = self.selection.last() {
-                        
+
                         let (start, end) = if select_index < *first {
                             (select_index, *last)
                         }
@@ -275,7 +275,7 @@ impl ListLogic {
                         else {
                             (select_index, select_index)
                         };
-                        
+
                         for counter in &self.selection {
                             if *counter >= self.list_items.len() || *counter >= start && *counter <= end {
                                 continue;
@@ -293,7 +293,7 @@ impl ListLogic {
                             cb(cx, ListLogicEvent::Select, dm, i);
                             self.selection.push(i);
                         }
-                        
+
                     }
                 }
             },
@@ -338,7 +338,7 @@ impl ListLogic {
                     let dm = &mut self.list_items[select_index];
                     dm.is_selected = true;
                     cb(cx, ListLogicEvent::Over, dm, select_index);
-                    
+
                     return ListEvent::SelectSingle(select_index)
                 }
             },
@@ -350,7 +350,7 @@ impl ListLogic {
             },
             _ => ListEvent::None
         }
-        
+
     }
-    
+
 }

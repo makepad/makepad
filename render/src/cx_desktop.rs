@@ -25,11 +25,11 @@ impl Default for CxDesktop {
 }
 
 impl Cx {
-    
+
     pub fn get_default_window_size(&self) -> Vec2 {
         return Vec2 {x: 800., y: 600.}
     }
-    
+
     pub fn file_read(&mut self, path: &str) -> FileRead {
         let desktop = &mut self.platform.desktop;
         desktop.file_read_id += 1;
@@ -41,7 +41,7 @@ impl Cx {
         desktop.file_reads.push(file_read.clone());
         file_read
     }
-    
+
     pub fn file_write(&mut self, path: &str, data: &[u8]) -> u64 {
         // just write it right now
         if let Ok(mut file) = File::create(path) {
@@ -56,7 +56,7 @@ impl Cx {
         }
         0
     }
-    
+
     pub fn process_desktop_pre_event<F>(&mut self, event: &mut Event, mut event_handler: F)
     where F: FnMut(&mut Cx, &mut Event)
     {
@@ -94,7 +94,7 @@ impl Cx {
             _ => ()
         };
     }
-    
+
     pub fn process_desktop_post_event(&mut self, event: &mut Event) -> bool {
         match event {
             Event::FingerUp(fe) => { // decapture automatically
@@ -116,14 +116,14 @@ impl Cx {
         }
         false
     }
-    
+
     pub fn process_desktop_paint_callbacks<F>(&mut self, time: f64, mut event_handler: F) -> bool
     where F: FnMut(&mut Cx, &mut Event)
     {
         if self.playing_anim_areas.len() != 0 {
             self.call_animation_event(&mut event_handler, time);
         }
-        
+
         let mut vsync = false; //self.platform.desktop.repaint_via_scroll_event;
         self.platform.desktop.repaint_via_scroll_event = false;
         if self.frame_callbacks.len() != 0 {
@@ -132,9 +132,9 @@ impl Cx {
                 vsync = true;
             }
         }
-        
+
         self.call_signals(&mut event_handler);
-        
+
         // call redraw event
         if self.redraw_child_areas.len()>0 || self.redraw_parent_areas.len()>0 {
             self.call_draw_event(&mut event_handler);
@@ -142,25 +142,25 @@ impl Cx {
         if self.redraw_child_areas.len()>0 || self.redraw_parent_areas.len()>0 {
             vsync = true;
         }
-        
+
         self.process_desktop_file_reads(&mut event_handler);
-        
+
         self.call_signals(&mut event_handler);
-        
+
         vsync
     }
-    
-    
+
+
     pub fn process_desktop_file_reads<F>(&mut self, mut event_handler: F)
     where F: FnMut(&mut Cx, &mut Event)
     {
         if self.platform.desktop.file_reads.len() == 0 {
             return
         }
-        
+
         let file_read_requests = self.platform.desktop.file_reads.clone();
         self.platform.desktop.file_reads.truncate(0);
-        
+
         for read_req in file_read_requests {
             let file_result = File::open(&read_req.path);
             if let Ok(mut file) = file_result {
@@ -186,18 +186,18 @@ impl Cx {
                 }))
             }
         }
-        
+
         if self.platform.desktop.file_reads.len() != 0 {
             self.process_desktop_file_reads(event_handler);
         }
     }
-    
+
     pub fn process_to_wasm<F>(&mut self, _msg: u32, mut _event_handler: F) -> u32
     where F: FnMut(&mut Cx, &mut Event)
     {
         0
     }
-    
+
     pub fn load_theme_fonts(&mut self) {
         // lets load all fonts that aren't loaded yet
         for cxfont in &mut self.fonts {
@@ -222,24 +222,24 @@ impl Cx {
                 else {
                     println!("Error loading font {} ", path);
                 }
-                
+
             }
         }
     }
-    
+
     /*pub fn log(&mut self, val:&str){
         let mut stdout = io::stdout();
         let _e = stdout.write(val.as_bytes());
         let _e = stdout.flush();
     }*/
-    
+
     pub fn write_log(data: &str) {
         let _ = io::stdout().write(data.as_bytes());
         let _ = io::stdout().flush();
     }
-    
+
     pub fn http_send(&self, verb: &str, path: &str, _proto:&str, domain: &str, port: u16, content_type: &str, body: &[u8], signal: Signal) {
-        
+
         fn write_bytes_to_tcp_stream(tcp_stream: &mut TcpStream, bytes: &[u8]) -> bool {
             let bytes_total = bytes.len();
             let mut bytes_left = bytes_total;
@@ -257,7 +257,7 @@ impl Cx {
             }
             return false
         }
-        
+
         // start a thread, connect, and report back.
         let data = body.to_vec();
         let byte_len = data.len();
@@ -284,8 +284,8 @@ impl Cx {
             })
         };
     }
-    
-    
+
+
     pub fn profile(&mut self) {
         if let Some(start) = self.platform.desktop.profiler_start {
             let delta = precise_time_ns() - start;

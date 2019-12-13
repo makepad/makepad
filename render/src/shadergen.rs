@@ -35,14 +35,14 @@ impl ShaderGen {
         let sg = CxView::def_uniforms(sg);
         sg
     }
-    
+
     pub fn compose(mut self, ast: ShAst) -> Self {
         self.asts.push(ast);
         self
     }
-    
+
     // flatten our
-    pub fn flat_vars<F>(&self, cb:F) -> Vec<ShVar> 
+    pub fn flat_vars<F>(&self, cb:F) -> Vec<ShVar>
     where F: Fn(&ShVarStore)->bool{
         let mut ret = Vec::new();
         for ast in self.asts.iter() {
@@ -54,7 +54,7 @@ impl ShaderGen {
         }
         ret
     }
-    
+
     // flatten our
     pub fn flat_consts(&self) -> Vec<ShConst> {
         let mut ret = Vec::new();
@@ -65,7 +65,7 @@ impl ShaderGen {
         };
         ret
     }
-    
+
     // find a function
     pub fn find_fn(&self, name: &str) -> Option<&ShFn> {
         for ast in self.asts.iter().rev() {
@@ -77,7 +77,7 @@ impl ShaderGen {
         }
         None
     }
-    
+
     pub fn find_var(&self, name: &str) -> Option<&ShVar> {
         for ast in self.asts.iter().rev() {
             for shvar in &ast.vars {
@@ -88,7 +88,7 @@ impl ShaderGen {
         }
         None
     }
-    
+
     pub fn find_const(&self, name: &str) -> Option<&ShConst> {
         for ast in self.asts.iter().rev() {
             for shconst in &ast.consts {
@@ -99,7 +99,7 @@ impl ShaderGen {
         }
         None
     }
-    
+
     pub fn find_type(&self, name: &str) -> Option<&ShType> {
         for ast in self.asts.iter().rev() {
             for shtype in &ast.types {
@@ -110,14 +110,14 @@ impl ShaderGen {
         }
         None
     }
-    
+
     pub fn get_type_slots(&self, name: &str) -> usize {
         if let Some(ty) = self.find_type(name) {
             return ty.slots;
         }
         0
     }
-    
+
     pub fn compute_slot_total(&self, vars: &Vec<ShVar>) -> usize {
         let mut slots: usize = 0;
         for var in vars {
@@ -177,7 +177,7 @@ pub fn sh_fn(name:&str, args:&[ShFnArg], ret:&str, block:Option<ShBlock>)->ShFn{
         ret:ret.to_string(),
         block:block
     }
-    
+
 }
 
 #[derive(Clone, Hash, PartialEq)]
@@ -852,7 +852,7 @@ impl ShField {
         else {
             let mut mode = 0;
             let slots = shty.slots;
-            
+
             if shty.name != "float" && shty.name != "vec2" && shty.name != "vec3" && shty.name != "vec4" {
                 return Err(SlErr {
                     msg: format!("member {} not found {}", self.member, base.ty)
@@ -887,7 +887,7 @@ impl ShField {
                     }
                 }
             }
-            
+
             match self.member.len() {
                 1 => return Ok(Sl {
                     sl: format!("{}.{}", base.sl, self.member),
@@ -935,7 +935,7 @@ impl ShIndex {
 impl ShAssign {
     pub fn sl(&self, slcx: &mut SlCx) -> Result<Sl, SlErr> {
         // if we are assigning to a geom
-        
+
         let left = self.left.sl(slcx) ?;
         let right = self.right.sl(slcx) ?;
         if left.ty != right.ty {
@@ -956,7 +956,7 @@ impl ShAssignOp {
     pub fn sl(&self, slcx: &mut SlCx) -> Result<Sl, SlErr> {
         let left = self.left.sl(slcx) ?;
         let right = self.right.sl(slcx) ?;
-        
+
         if left.ty != right.ty {
             Err(SlErr {
                 msg: format!("Left type {} not the same as right {} in assign op {}{}{}", left.ty, self.op.to_string(), right.ty, left.sl, right.sl)
@@ -1036,7 +1036,7 @@ impl ShBinary {
                     sl: slcx.mat_mul(&left.sl, &right.sl),
                     ty: left.ty
                 })
-                
+
             }
             else {
                 Ok(Sl {
@@ -1108,7 +1108,7 @@ impl ShCall {
         let mut out = String::new();
         if let Some(shfn) = slcx.shader_gen.find_fn(&self.call) {
             let mut defargs_call = "".to_string();
-            
+
             if let Some(_block) = &shfn.block { // not internal, so its a dep
                 let index = slcx.fn_deps.iter().position( | i | **i == self.call);
                 if let Some(index) = index {
@@ -1118,21 +1118,21 @@ impl ShCall {
                 defargs_call = slcx.defargs_call.to_string();
                 out.push_str(&slcx.call_prefix);
             };
-            
-            
+
+
             // lets check our args and compose return type
             let mut gen_t = "".to_string();
-            
+
             let mut args_gl = Vec::new();
             // loop over args and typecheck / fill in generics
             for arg in &self.args {
                 let arg_gl = arg.sl(slcx) ?;
                 args_gl.push(arg_gl);
             };
-            
+
             let map_call = slcx.map_call(&self.call, &args_gl);
             let ret_ty;
-            
+
             if let MapCallResult::Rewrite(rewrite, rty) = map_call {
                 out.push_str(&rewrite);
                 ret_ty = rty;
@@ -1145,7 +1145,7 @@ impl ShCall {
                     out.push_str(&self.call);
                 }
                 out.push_str("(");
-                
+
                 // loop over args and typecheck / fill in generics
                 for (i, arg_gl) in args_gl.iter().enumerate() {
                     //let arg_gl = args_gl[i];//.sl(cx)?;
@@ -1231,11 +1231,11 @@ impl ShCall {
         else {
             // its a constructor call
             if let Some(slty) = slcx.shader_gen.find_type(&self.call) {
-                
+
                 // HLSL doesn't allow vec3(0.) so we have to polyfill it
-                // vec3(x), vec3(xy,z) vec3(x,yz), 
+                // vec3(x), vec3(xy,z) vec3(x,yz),
                 let mut args = Vec::new();
-                
+
                 // TODO check args
                 let mut arg_slots = 0;
                 for arg in &self.args {
@@ -1265,10 +1265,10 @@ impl ShCall {
                         msg: format!("Constructor slots don't match given {} need {} - {}", arg_slots, slty.slots, out)
                     })
                 }
-                
+
                 // lets sum up the arg type slots and see if it fits in our constructor
                 // if it does lets pass it to map_constructor so each platform can polyfill it
-                
+
                 out.push_str(&slcx.map_constructor(&self.call, &args));
                 Ok(Sl {
                     sl: out,
@@ -1281,7 +1281,7 @@ impl ShCall {
                 })
             }
         }
-        
+
     }
 }
 
@@ -1292,16 +1292,16 @@ impl ShIf {
         let cond = self.cond.sl(cx) ?;
         out.push_str(&cond.sl);
         out.push_str(")");
-        
+
         let then = self.then_branch.sl(cx) ?;
-        
+
         out.push_str(&then.sl);
         if let Some(else_branch) = &self.else_branch {
             let else_gl = else_branch.sl(cx) ?;
             out.push_str("else ");
             out.push_str(&else_gl.sl);
         }
-        
+
         Ok(Sl {
             sl: out,
             ty: "void".to_string()
@@ -1316,11 +1316,11 @@ impl ShWhile {
         let cond = self.cond.sl(cx) ?;
         out.push_str(&cond.sl);
         out.push_str(")");
-        
+
         let body = self.body.sl(cx) ?;
-        
+
         out.push_str(&body.sl);
-        
+
         Ok(Sl {
             sl: out,
             ty: "void".to_string()
@@ -1331,29 +1331,29 @@ impl ShWhile {
 impl ShForLoop {
     pub fn sl(&self, cx: &mut SlCx) -> Result<Sl, SlErr> {
         let mut out = "".to_string();
-        
+
         out.push_str("for(int ");
         out.push_str(&self.iter);
         out.push_str("=");
-        
+
         let from = self.from.sl(cx) ?;
         out.push_str(&from.sl);
-        
+
         out.push_str(";");
         out.push_str(&self.iter);
         out.push_str(" < ");
-        
+
         let to = self.to.sl(cx) ?;
         out.push_str(&to.sl);
-        
+
         out.push_str(";");
         out.push_str(&self.iter);
         out.push_str("++)");
-        
+
         let body = self.body.sl(cx) ?;
-        
+
         out.push_str(&body.sl);
-        
+
         Ok(Sl {
             sl: out,
             ty: "void".to_string()
@@ -1401,25 +1401,25 @@ impl ShLet {
     pub fn sl(&self, cx: &mut SlCx) -> Result<Sl, SlErr> {
         let mut out = "".to_string();
         let init = self.init.sl(cx) ?;
-        
+
         let ty = init.ty.clone();
         if self.ty != "" && self.ty != init.ty {
             return Err(SlErr {
                 msg: format!("Let definition {} type {} is different from initializer {}", self.name, self.ty, init.ty)
             })
         }
-        
+
         out.push_str(&cx.map_type(&ty));
         out.push_str(" ");
         out.push_str(&self.name);
         out.push_str(" = ");
-        
+
         // lets define our identifier on scope
         cx.scope.push(SlDecl {
             name: self.name.clone(),
             ty: init.ty.clone()
         });
-        
+
         out.push_str(&init.sl);
         Ok(Sl {
             sl: out,
@@ -1467,10 +1467,10 @@ impl ShFn {
 }
 
 pub fn assemble_fn_and_deps(sg: &ShaderGen, cx: &mut SlCx) -> Result<String, SlErr> {
-    
+
     let mut fn_local = Vec::new();
     loop {
-        
+
         // find what deps we haven't done yet
         let fn_not_done = cx.fn_deps.iter().find( | cxfn | {
             if let Some(_done) = cx.fn_done.iter().find( | i | i.ty == **cxfn) {

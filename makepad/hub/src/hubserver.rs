@@ -29,7 +29,7 @@ pub struct HubServer {
 
 impl HubServer {
     pub fn start_hub_server(digest: Digest, config: &HubServerConfig, hub_router:&HubRouter) -> Option<HubServer> {
-        
+
         let (listen_address, announce) = match config {
             HubServerConfig::Offline => return None,
             HubServerConfig::Announced=>(SocketAddr::from(([0, 0, 0, 0], 0)),true),
@@ -40,14 +40,14 @@ impl HubServer {
 
         let listener = if let Ok(listener) = TcpListener::bind(listen_address){listener}else{println!("start_hub_server bind server address");return None};
         let listen_address = listener.local_addr().expect("Cannot get local address");
-        
+
         let tx_pump = hub_router.tx_pump.clone();
         let routes = Arc::clone(&hub_router.routes);//Arc::new(Mutex::new(Vec::<HubServerConnection>::new()));
         let shared = Arc::new(Mutex::new(HubServerShared{
             connections:Vec::new(),
             terminate:false
         }));
-        
+
         let listen_thread = {
             //let hub_log = hub_log.clone();
             let routes = Arc::clone(&routes);
@@ -69,7 +69,7 @@ impl HubServer {
                         let tcp_stream = tcp_stream.try_clone().expect("Cannot clone tcp stream");
                         shared.connections.push((peer_addr, tcp_stream));
                     }
-                    
+
                     let (tx_write, rx_write) = mpsc::channel::<FromHubMsg>();
                     let tx_write_copy = tx_write.clone();
                     // clone our transmit-to-pump
@@ -137,7 +137,7 @@ impl HubServer {
                             }
                         })
                     };
-                    
+
                     if let Ok(mut routes) = routes.lock() {
                         routes.push(HubRoute {
                             route_type: HubRouteType::Unknown,
@@ -149,7 +149,7 @@ impl HubServer {
                 }
             })
         };
-        
+
         let mut hub_server = HubServer {
             shared: shared,
             listen_address: Some(listen_address),
@@ -157,11 +157,11 @@ impl HubServer {
             //router_thread: Some(router_thread),
             announce_thread: None
         };
-        
+
         if announce{
             hub_server.start_announce_server_default(digest.clone());
         }
-        
+
         return Some(hub_server);
     }
 
@@ -173,7 +173,7 @@ impl HubServer {
             SocketAddr::from(([127, 0, 0, 1], HUB_ANNOUNCE_PORT)),
         )
     }
-    
+
     pub fn start_announce_server(&mut self, digest: Digest, announce_bind: SocketAddr, announce_send: SocketAddr, announce_backup: SocketAddr) {
         let listen_port = if let Some(listen_address) = self.listen_address{
             listen_address.port()
@@ -181,23 +181,23 @@ impl HubServer {
         else{
             panic!("No port to announce")
         };
-        
+
         let mut dwd = DigestWithData{
             digest:digest,
             data:listen_port as u64
         };
         dwd.digest.buf[0] ^= listen_port as u64;
         dwd.digest.digest_cycle();
-        
+
         let digest_u8 = unsafe {std::mem::transmute::<DigestWithData, [u8; 26 * 8]>(dwd)};
 
         let shared = Arc::clone(&self.shared);
 
         let announce_thread = std::thread::spawn(move || {
-            
+
             let socket = UdpSocket::bind(announce_bind).expect("Server: Cannot bind announce port");
             socket.set_broadcast(true).expect("Server: cannot set broadcast on announce ip");
-            
+
             let thread_sleep_time = time::Duration::from_millis(100);
             loop {
                 if let Ok(shared) = shared.lock() {
@@ -216,7 +216,7 @@ impl HubServer {
         });
         self.announce_thread = Some(announce_thread);
     }
-    
+
     pub fn terminate(&mut self){
         if let Ok(mut shared) = self.shared.lock() {
             shared.terminate = true;

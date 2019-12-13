@@ -19,12 +19,12 @@ impl BuildManager {
             signal: cx.new_signal(),
             exec_when_done: false,
             log_items: Vec::new(),
-            tail_log_items: true, 
+            tail_log_items: true,
             artifacts: Vec::new(),
             active_builds: Vec::new(),
         }
     }
-    
+
     pub fn status_new_log_item()->StatusId{uid!()}
     pub fn status_new_artifact()->StatusId{uid!()}
     pub fn status_cargo_end()->StatusId{uid!()}
@@ -40,7 +40,7 @@ pub struct ActiveBuild {
 }
 
 impl BuildManager {
-    
+
     fn clear_textbuffer_messages(&self, cx: &mut Cx, storage: &mut AppStorage) {
         // clear all files we missed
         for (_, atb) in &mut storage.text_buffers {
@@ -54,7 +54,7 @@ impl BuildManager {
             //}
         }
     }
-    
+
     pub fn is_running_uid(&self, uid: &HubUid) -> bool {
         for ab in &self.active_builds {
             if ab.build_uid == Some(*uid) {
@@ -66,7 +66,7 @@ impl BuildManager {
         }
         return false
     }
-    
+
     pub fn is_any_cargo_running(&self) -> bool {
         for ab in &self.active_builds {
             if ab.build_uid.is_some() {
@@ -75,7 +75,7 @@ impl BuildManager {
         }
         return false
     }
-    
+
     pub fn is_any_artifact_running(&self) -> bool {
         for ab in &self.active_builds {
             if ab.run_uid.is_some() {
@@ -84,7 +84,7 @@ impl BuildManager {
         }
         return false
     }
-    
+
     pub fn handle_hub_msg(&mut self, cx: &mut Cx, storage: &mut AppStorage, htc: &FromHubMsg) {
         //let hub_ui = storage.hub_ui.as_mut().unwrap();
         match &htc.msg {
@@ -107,7 +107,7 @@ impl BuildManager {
                         return
                     }
                 }
-                
+
                 self.log_items.push(item.clone());
                 if let Some(loc_message) = item.get_loc_message() {
                     let text_buffer = storage.text_buffer_from_path(cx, &storage.remap_sync_path(&loc_message.path));
@@ -143,7 +143,7 @@ impl BuildManager {
                                 })
                             }
                         }
-                        
+
                         let msg = TextBufferMessage {
                             body: loc_message.body.clone(),
                             level: match item {
@@ -167,7 +167,7 @@ impl BuildManager {
                 }
                 cx.send_signal(self.signal, BuildManager::status_new_log_item());
             },
-            
+
             HubMsg::CargoArtifact {uid, package_id, fresh: _} => if self.is_running_uid(uid) {
                 self.artifacts.push(package_id.clone());
                 cx.send_signal(self.signal, BuildManager::status_new_artifact());
@@ -204,7 +204,7 @@ impl BuildManager {
             _ => ()
         }
     }
-    
+
     pub fn run_all_artifacts(&mut self, storage: &mut AppStorage) {
         let hub_ui = storage.hub_ui.as_mut().unwrap();
         // otherwise execute all we have artifacts for
@@ -233,7 +233,7 @@ impl BuildManager {
             }
         }
     }
-    
+
     pub fn artifact_run(&mut self, storage: &mut AppStorage) {
         if self.is_any_cargo_running() {
             self.exec_when_done = true;
@@ -242,17 +242,17 @@ impl BuildManager {
             self.run_all_artifacts(storage)
         }
     }
-    
+
     pub fn restart_build(&mut self, cx: &mut Cx, storage: &mut AppStorage) {
         if !cx.platform_type.is_desktop() {
             return
         }
-        
+
         self.artifacts.truncate(0);
         self.log_items.truncate(0);
         //self.selection.truncate(0);
         self.clear_textbuffer_messages(cx, storage);
-        
+
         let hub_ui = storage.hub_ui.as_mut().unwrap();
         self.exec_when_done = storage.settings.exec_when_done;
         for ab in &mut self.active_builds {
@@ -276,10 +276,10 @@ impl BuildManager {
                 ab.run_uid = None
             }
         }
-        
+
         // lets reset active targets
         self.active_builds.truncate(0);
-        
+
         for build_target in &storage.settings.builds {
             let uid = hub_ui.route_send.alloc_uid();
             hub_ui.route_send.send(ToHubMsg {

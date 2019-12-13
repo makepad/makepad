@@ -87,7 +87,7 @@ mod quad;
 mod blit;
 mod text;
 mod events;
-mod menu; 
+mod menu;
 
 pub use crate::cx::*;
 pub use crate::quad::*;
