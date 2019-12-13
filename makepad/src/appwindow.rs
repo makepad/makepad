@@ -1,6 +1,6 @@
 //use syn::Type;
-use render::*;
-use widget::*;
+use makepad_render::*;
+use makepad_widget::*;
 use serde::*;
 use std::collections::HashMap;
 
@@ -13,6 +13,10 @@ use crate::logitem::*;
 use crate::keyboard::*;
 use crate::buildmanager::*;
 use crate::homepage::*;
+
+use crate::rusteditor::*;
+use crate::jseditor::*;
+use crate::plaineditor::*;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Panel {

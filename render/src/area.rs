@@ -12,7 +12,7 @@ pub struct InstanceArea{
 #[derive(Clone, Default, Debug, PartialEq, Copy)]
 pub struct ViewArea{
     pub view_id:usize,
-    pub redraw_id:u64
+    pub redraw_id:u64 
 }
 
 #[derive(Clone, Debug, PartialEq, Copy)]
@@ -26,13 +26,13 @@ pub enum Area{
 impl Default for Area{
     fn default()->Area{
         Area::Empty
-    }
-}
+    } 
+}  
 
 pub struct InstanceReadRef<'a>{
     pub offset:usize,
     pub slots:usize,
-    pub count:usize,
+    pub count:usize, 
     pub buffer:&'a Vec<f32>
 }
 

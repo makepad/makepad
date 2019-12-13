@@ -59,16 +59,6 @@ impl Text {
             wrapping: Wrapping::Word,
             color: color("white"),
             font_scale: 1.0,
-            /*
-            font: cx.load_font_path("resources/Ubuntu-R.ttf"),
-            font_size: 8.0,
-            font_scale: 1.0,
-            line_spacing: 1.4,
-            top_drop: 1.1,
-            height_factor: 1.3,
-            curve: 0.7,
-            brightness: 1.0,
-            */
         }
     }
     
@@ -128,11 +118,12 @@ impl Text {
                 let dp = 1.0 / 2048.0;
                 
                 // basic hardcoded mipmapping so it stops 'swimming' in VR
+                // mipmaps are stored in red/green/blue channel
                 let s = 1.0;
                 if dx > 5.0 {
                     s = 0.7;
                 }
-                else if dx > 2.75 { // combine 3x3
+                else if dx > 2.75 { 
                     s = (
                         sample2d(texturez, tex_coord3.xy + vec2(0., 0.)).z
                             + sample2d(texturez, tex_coord3.xy + vec2(dp, 0.)).z
@@ -140,10 +131,10 @@ impl Text {
                             + sample2d(texturez, tex_coord3.xy + vec2(dp, dp)).z
                     ) * 0.25;
                 }
-                else if dx > 1.75 { // combine 3x3
+                else if dx > 1.75 { 
                     s = sample2d(texturez, tex_coord3.xy).z;
                 }
-                else if dx > 1.3 { // combine 2x2
+                else if dx > 1.3 {
                     s = sample2d(texturez, tex_coord2.xy).y;
                 }
                 else {
@@ -200,17 +191,9 @@ impl Text {
         let brightness = text_style.brightness;
         let curve = text_style.curve;
         if aligned.inst.need_uniforms_now(cx) {
-            
-            // cx.fonts[font_id].width as f32 , cx.fonts[font_id].height as f32
             aligned.inst.push_uniform_texture_2d_id(cx, cx.fonts_atlas.texture_id);
-            //tex_size
-            //aligned.inst.push_uniform_vec2(cx, self.font.texture_size);
-            
             aligned.inst.push_uniform_float(cx, brightness);
             aligned.inst.push_uniform_float(cx, curve);
-            //aligned.inst.push_uniform_float(cx, if self.do_subpixel_aa{1.0}else{0.0});
-            //list_clip
-            //area.push_uniform_vec4f(cx, -50000.0,-50000.0,50000.0,50000.0);
         }
         return aligned
     }
@@ -270,7 +253,7 @@ impl Text {
             let scaled_min_pos_x = geom_x + font_size_logical * self.font_scale * glyph.bounds.p_min.x - subpixel_x_fract;
             let scaled_min_pos_y = geom_y - font_size_logical * self.font_scale * glyph.bounds.p_min.y + text_style.font_size * self.font_scale * text_style.top_drop - subpixel_y_fract;
             
-            // only use a subpixel id for really small fonts
+            // only use a subpixel id for small fonts
             let subpixel_id = if text_style.font_size>32.0 {
                 0
             }
@@ -302,7 +285,7 @@ impl Text {
                 atlas_page.atlas_glyphs[glyph_id][subpixel_id].as_ref().unwrap()
             };
             
-            // lets allocate
+            // give the callback a chance to do things
             let marker = char_callback(*wc, char_offset, geom_x, advance);
             
             let data = [
