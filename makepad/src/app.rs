@@ -4,9 +4,9 @@ use makepad_widget::*;
 use crate::appwindow::*;
 use crate::appstorage::*;
 use crate::filetree::*;
-use crate::buildmanager::*;
+use crate::buildmanager::*;  
 use crate::makepadstyle::*;
-
+   
 pub struct App {
     pub app_window_state_template: AppWindowState,
     pub app_window_template: AppWindow,
