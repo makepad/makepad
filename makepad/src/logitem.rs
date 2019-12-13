@@ -1,6 +1,8 @@
-use render::*;
-use hub::*;
-use widget::*;
+use crate::rusteditor::*;
+use crate::plaineditor::*;
+use makepad_render::*;
+use makepad_hub::*;
+use makepad_widget::*;
 
 #[derive(Clone)]
 pub struct LogItem {

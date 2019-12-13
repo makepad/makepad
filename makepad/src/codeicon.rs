@@ -1,5 +1,5 @@
-use render::*;
-use crate::widgetstyle::*;
+use makepad_render::*;
+use makepad_widget::*;
 
 #[derive(Clone)]
 pub struct CodeIcon {
