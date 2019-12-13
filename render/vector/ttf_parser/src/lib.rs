@@ -1,8 +1,8 @@
-use font::{Font, Glyph, HorizontalMetrics, Outline, OutlinePoint};
-use geometry::{
+use makepad_font::{Font, Glyph, HorizontalMetrics, Outline, OutlinePoint};
+use makepad_geometry::{
     AffineTransformation, LinearTransformation, Point, Rectangle, Transform, Vector,
 };
-use internal_iter::ExtendFromInternalIterator;
+use makepad_internal_iter::ExtendFromInternalIterator;
 use std::{mem, result};
 
 #[derive(Clone, Debug)]

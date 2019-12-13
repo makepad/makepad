@@ -1,11 +1,13 @@
 [package]
-name = "hub"
+name = "makepad-hub"
 version = "0.1.0"
-authors = ["makepaddev"]
+authors = ["Makepad <info@makepad.nl>"]
 edition = "2018"
+description = "Makepad hub"
+license = "MIT"
 
 [dependencies]
-serde_json = "*"
+serde_json = "1.0"
 bincode = "1.2"
 snap = "0.1"
 libc = "0.2"
@@ -13,3 +15,4 @@ ron = "0.5"
 toml = "0.5"
 serde = { version = "1.0", features = ["derive"] }
 time = "0.1.4"
+#brotli = "3.3.0"

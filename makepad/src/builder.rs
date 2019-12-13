@@ -1,5 +1,5 @@
  
-use hub::*;
+use makepad_hub::*;
 
 pub fn builder(ws: &mut HubBuilder, htc: FromHubMsg) -> Result<(), HubWsError> {
     match htc.msg {

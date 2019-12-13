@@ -1,6 +1,6 @@
 use crate::{LinePathCommand, PathCommand};
-use geometry::QuadraticSegment;
-use internal_iter::InternalIterator;
+use makepad_geometry::QuadraticSegment;
+use makepad_internal_iter::InternalIterator;
 
 /// An extension trait for iterators over path commands.
 pub trait PathIterator: InternalIterator<Item = PathCommand> {

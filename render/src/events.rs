@@ -1,4 +1,5 @@
 use crate::cx::*;
+use std::any::TypeId;
 
 #[derive(Clone, Debug, PartialEq, Default)]
 pub struct KeyModifiers {
@@ -141,8 +142,8 @@ pub struct TimerEvent {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct SignalEvent {
-    pub signal_id: usize,
-    pub value: usize
+    pub signal: Signal,
+    pub status: StatusId
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -237,6 +238,7 @@ pub enum Event {
     FileWrite(FileWriteEvent),
     Timer(TimerEvent),
     Signal(SignalEvent),
+    Command(CommandId),
     KeyFocus(KeyFocusEvent),
     KeyFocusLost(KeyFocusEvent),
     KeyDown(KeyEvent),
@@ -466,10 +468,30 @@ impl Signal {
         self.signal_id == 0
     }
     
-    pub fn is_signal(&self, se: &SignalEvent) -> bool {
-        se.signal_id == self.signal_id
+    pub fn send(&self, cx:&mut Cx, status:StatusId){
+        cx.send_signal(*self, status);
+    }
+
+    pub fn post(&self, status:StatusId){
+        Cx::post_signal(*self, status);
     }
 }
+
+
+// Status
+
+
+#[derive(PartialEq, Copy, Clone, Hash, Eq, Debug)]
+pub struct StatusId(pub TypeId);
+
+impl Into<StatusId> for UniqueId {
+    fn into(self) -> StatusId {StatusId(self.0)}
+}
+
+
+
+
+
 
 #[derive(Clone, Debug, Default)]
 pub struct FileRead {
@@ -482,8 +504,7 @@ impl FileRead {
         self.read_id != 0
     }
     
-    pub fn resolve_utf8<'a>(&mut self, fr: &'a FileReadEvent) -> Option<Result<&'a str,
-    String>> {
+    pub fn resolve_utf8<'a>(&mut self, fr: &'a FileReadEvent) -> Option<Result<&'a str,String>> {
         if fr.read_id == self.read_id {
             self.read_id = 0;
             if let Ok(str_data) = &fr.data {
@@ -559,7 +580,7 @@ impl Event {
 }
 
 // lowest common denominator keymap between desktop and web
-#[derive(Clone, PartialEq, Debug)]
+#[derive(Clone, Copy, PartialEq, Debug)]
 pub enum KeyCode {
     Escape,
     
@@ -682,3 +703,6 @@ pub enum KeyCode {
     Unknown
 }
 
+impl Default for KeyCode{
+    fn default()->Self{KeyCode::Unknown}
+}

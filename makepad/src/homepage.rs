@@ -1,5 +1,5 @@
-use render::*;
-use widget::*;
+use makepad_render::*;
+use makepad_widget::*;
 
 #[derive(Clone)]
 pub struct HomePage {
@@ -86,15 +86,12 @@ impl HomePage {
     
     pub fn handle_home_page(&mut self, cx: &mut Cx, event: &mut Event) {
         if let Event::Signal(sig) = event {
-            if self.email_signal.is_signal(sig) {
-                match sig.value {
-                    HTTP_SEND_OK => {
-                        self.email_state = EmailState::OkSending;
-                    },
-                    HTTP_SEND_FAIL => {
-                        self.email_state = EmailState::ErrorSending;
-                    },
-                    _ => ()
+            if sig.signal == self.email_signal {
+                if sig.status == Cx::status_http_send_ok(){
+                    self.email_state = EmailState::OkSending;
+                }
+                else if sig.status == Cx::status_http_send_fail(){
+                    self.email_state = EmailState::ErrorSending;
                 }
                 self.view.redraw_view_area(cx);
             }
@@ -150,7 +147,7 @@ impl HomePage {
             To do this we will provide a set of visual design tools that modify your \
             application in real time, as well as a library ecosystem that allows you to \
             write highly performant multimedia applications. Please note the following text \
-            input doesn't work on mobile-web yet. We also won't email you a confirmation, we are just making a list for now.\n");
+            input doesn't work on mobile-web yet. We also won't email you a confirmation right now, that will follow later.\n");
         
         
         self.email_input.draw_text_input(cx);
@@ -224,7 +221,7 @@ impl HomePage {
         self.example_texts.get_draw(cx).draw_text_input_static(cx,"\
             Clone this repo using either gitub desktop or commandline: https://github.com/makepad/makepad\n\
             Open a cmd.exe in the directory you just cloned. Gh desktop makes: Documents\\Github\\makepad\n\
-            tools/windows_rustup.bat\n\
+            tools\\windows_rustup.bat\n\
             cargo run -p makepad --release --target x86_64-pc-windows-gnu");
         cx.turtle_new_line();
 
@@ -248,6 +245,7 @@ impl HomePage {
             Update rust: rustup update\n\
             Make sure you have wasm: rustup target add wasm32-unknown-unknown\n\
             Pull the latest: git pull\n\
+            If gnu chain for some reason doesn't work on windows, use the msvc chain\n\
             Still have a problem? Report here: https://github.com/makepad/makepad/issues");
         cx.turtle_new_line();
 

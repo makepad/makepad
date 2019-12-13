@@ -55,15 +55,7 @@ fn generate_shvar_defs(stmt:Local)->TokenStream{
         let store;
         if let Type::Path(typath) = &*pat.ty{
             if typath.path.segments.len() != 1{
-                 
-                return quote!{
-                    ShVar{
-                        name:#name.to_string(),
-                        ty:#typath.shader_type(),
-                        store:#typath.var_store()
-                    }
-                }
-                
+                return quote!{sh_var(#name, &#typath.shader_type(), #typath.var_store())}
             }
 
             if typath.path.segments.len() != 1{
@@ -100,13 +92,7 @@ fn generate_shvar_defs(stmt:Local)->TokenStream{
         else{
             return error(stmt.span(), "Please give the variable a type of the form float<Local> ");
         }
-        return quote!{
-            ShVar{
-                name:#name.to_string(),
-                ty:#found_type.to_string(),
-                store:ShVarStore::#store
-            }
-        }
+        return quote!{sh_var(#name, #found_type, ShVarStore::#store)}
     }
     else{
         return error(stmt.span(), "Please only use simple identifiers such as x or var_iable {:?}")
@@ -136,9 +122,7 @@ fn generate_fn_def(item:ItemFn)->TokenStream{
                 else{
                     return error(arg.span(), "arg type not simple");
                 }
-                args.push(quote!{
-                    ShFnArg::new(#name, #found_type)
-                })
+                args.push(quote!{sh_fnarg(#name, #found_type)})
             }
             else{
                 return error(arg.span(), "arg pattern not simple identifier")
@@ -166,14 +150,7 @@ fn generate_fn_def(item:ItemFn)->TokenStream{
         //return error(item.span(), "function needs to specify return type")
     }
     let block = generate_block(*item.block);
-    quote!{
-        ShFn{
-            name:#name.to_string(),
-            args:{let mut v=Vec::new();#(v.push(#args);)*v},
-            ret:#return_type.to_string(),
-            block:Some(#block)
-        }
-    }
+    quote!{sh_fn(#name, &[#(#args,)*], #return_type, Some(#block))}
 }
 
 // generate a let statement inside a function
@@ -188,13 +165,7 @@ fn generate_let(local:Local)->TokenStream{
             return error(local.span(), "let pattern misses initializer");
         };
 
-        return quote!{
-            ShLet{
-                name:#name.to_string(),
-                ty:String::new(),
-                init:Box::new(#init)
-            }
-        }
+        return quote!{sh_let(#name, "", #init)}
     }
     else if let Pat::Type(pat) = &local.pat{
         let name =  if let Pat::Ident(ident) = &*pat.pat{
@@ -222,13 +193,7 @@ fn generate_let(local:Local)->TokenStream{
             return error(local.span(), "let pattern misses initializer");
         };
         
-        return quote!{
-            ShLet{
-                name:#name.to_string(),
-                ty:#ty.to_string(),
-                init:Box::new(#init)
-            }
-        }
+        return quote!{sh_let(#name, #ty, #init)}
     }
     else{
         return error(local.span(), "let pattern doesn't need type");
@@ -280,32 +245,22 @@ fn generate_block(block:Block)->TokenStream{
         match stmt{
             Stmt::Local(stmt)=>{
                 let letstmt = generate_let(stmt);
-                stmts.push(quote!{
-                    ShStmt::ShLet(#letstmt)
-                })
+                stmts.push(letstmt)
             }
             Stmt::Item(stmt)=>{
                 return error(stmt.span(), "Shader functions don't support items");
             }
             Stmt::Expr(stmt)=>{
                 let expr = generate_expr(stmt);
-                stmts.push(quote!{
-                    ShStmt::ShExpr(#expr)
-                })
+                stmts.push(quote!{sh_exps(#expr)})
             }
             Stmt::Semi(stmt, _tok)=>{
                 let expr = generate_expr(stmt);
-                stmts.push(quote!{
-                    ShStmt::ShSemi(#expr)
-                })
+                stmts.push(quote!{sh_sems(#expr)})
             }
         }
     }
-    return quote!{
-        ShBlock{
-            stmts:{let mut v=Vec::new();#(v.push(Box::new(#stmts));)*v}
-        }
-    }
+    return quote!{sh_block(&[#(#stmts,)*])}
 }
 
 // return the string name of a BinOp enum 
@@ -357,7 +312,8 @@ fn generate_expr(expr:Expr)->TokenStream{
                     args.push(generate_expr(arg));
                 }
                 
-                return quote!{ShExpr::ShCall(ShCall{call:#seg.to_string(), args:{let mut v=Vec::new();#(v.push(Box::new(#args));)*v}})}
+                //return quote!{ShExpr::ShCall(ShCall{call:#seg.to_string(), args:{let mut v=Vec::new();#(v.push(#args);)*v}})}
+                return quote!{sh_call(#seg, &[#(#args,)*])}
             }
             else{
                  return error(expr.span(), "call identifier not simple");
@@ -367,7 +323,7 @@ fn generate_expr(expr:Expr)->TokenStream{
             let left = generate_expr(*expr.left);
             let right = generate_expr(*expr.right);
             let op = Ident::new(get_binop(expr.op), Span::call_site());
-            return quote!{ShExpr::ShBinary(ShBinary{left:Box::new(#left),op:ShBinOp::#op,right:Box::new(#right)})}
+            return quote!{sh_bin(#left, #right, ShOp::#op)}
         }
         Expr::Unary(expr)=>{
             let op;
@@ -381,25 +337,25 @@ fn generate_expr(expr:Expr)->TokenStream{
                 return error(expr.span(), "Deref not implemented");
             }
             let right = generate_expr(*expr.expr);
-            return quote!{ShExpr::ShUnary(ShUnary{op:ShUnaryOp::#op,expr:Box::new(#right)})}
+            return quote!{sh_unary(#right, ShUnaryOp::#op)}
         }
         Expr::Lit(expr)=>{
             match expr.lit{
                 Lit::Str(lit)=>{
                     let value = lit.value();
-                    return quote!{ShExpr::ShLit(ShLit::Str(#value.to_string()))}
+                    return quote!{sh_str(#value)}
                 }
                 Lit::Int(lit)=>{
                     let value = lit.base10_parse::<i64>().unwrap();
-                    return quote!{ShExpr::ShLit(ShLit::Int(#value))}
+                    return quote!{sh_int(#value)}
                 }
                 Lit::Float(lit)=>{
                     let value = lit.base10_parse::<f64>().unwrap();
-                    return quote!{ShExpr::ShLit(ShLit::Float(#value))}
+                    return quote!{sh_fl(#value)}
                 }
                 Lit::Bool(lit)=>{
                     let value = lit.value;
-                    return quote!{ShExpr::ShLit(ShLit::Bool(#value))}
+                    return quote!{sh_bool(#value)}
                 }
                 _=>{
                     return error(expr.span(), "Unsupported literal for shader")
@@ -415,32 +371,15 @@ fn generate_expr(expr:Expr)->TokenStream{
 
             if let Some((_,else_branch)) = expr.else_branch{
                 let else_branch = generate_expr(*else_branch);
-                return quote!{
-                    ShExpr::ShIf(ShIf{
-                        cond:Box::new(#cond),
-                        then_branch:#then_branch,
-                        else_branch:Some(Box::new(#else_branch))
-                    })
-                }
+                return quote!{sh_if_else(#cond, #then_branch, #else_branch)}
             }
-            return quote!{
-               ShExpr::ShIf(ShIf{
-                   cond:Box::new(#cond),
-                   then_branch:#then_branch,
-                   else_branch:None
-                })
-            }
+            return quote!{sh_if(#cond, #then_branch)}
         }
         Expr::While(expr)=>{
             let cond = generate_expr(*expr.cond);
             let block = generate_block(expr.body);
-            return quote!{
-               ShExpr::ShWhile(ShWhile{
-                   cond:Box::new(#cond),
-                   body:#block
-                })
-            }
-        }
+            return quote!{sh_while(#cond, #block)}
+       }
         Expr::ForLoop(expr)=>{
               // lets define a local with storage specified
             let span = expr.span();
@@ -466,14 +405,7 @@ fn generate_expr(expr:Expr)->TokenStream{
                 else{
                     return error(span, "Must provide range expression")
                 }
-                return quote!{
-                    ShExpr::ShForLoop(ShForLoop{
-                        iter:#name.to_string(),
-                        from:Box::new(#from_ts),
-                        to:Box::new(#to_ts),
-                        body:#body
-                    })
-                }
+                return quote!{sh_for(#name, #from_ts, #to_ts, #body)}
             }
             else{
                 return error(expr.span(), "Use simple identifier for for loop")
@@ -482,13 +414,14 @@ fn generate_expr(expr:Expr)->TokenStream{
         Expr::Assign(expr)=>{
             let left = generate_expr(*expr.left);
             let right = generate_expr(*expr.right);
-            return quote!{ShExpr::ShAssign(ShAssign{left:Box::new(#left),right:Box::new(#right)})}
+            return quote!{sh_asn(#left, #right)};//ShExpr::ShAssign(ShAssign{left:Box::new(#left),right:Box::new(#right)})}
         }
         Expr::AssignOp(expr)=>{
             let left = generate_expr(*expr.left);
             let right = generate_expr(*expr.right);
             let op = Ident::new(get_binop(expr.op), Span::call_site());
-            return quote!{ShExpr::ShAssignOp(ShAssignOp{left:Box::new(#left),op:ShBinOp::#op,right:Box::new(#right)})}
+            return quote!{sh_asn_op(#left, #right, ShOp::#op)}
+            // return quote!{ShExpr::ShAssignOp(ShAssignOp{left:Box::new(#left),op:ShBinOp::#op,right:Box::new(#right)})}
         }
         Expr::Field(expr)=>{
             let member;
@@ -499,23 +432,23 @@ fn generate_expr(expr:Expr)->TokenStream{
                 return error(expr.span(), "No unnamed members supported")
             }
             let base = generate_expr(*expr.base);
-            return quote!{ShExpr::ShField(ShField{base:Box::new(#base),member:#member.to_string()})}
+            return quote!{sh_fd(#base, #member)}//ShExpr::ShField(ShField{base:Box::new(#base),member:#member.to_string()})}
         }
         Expr::Index(expr)=>{
             let base = generate_expr(*expr.expr);
             let index = generate_expr(*expr.index);
-            return quote!{ShExpr::ShIndex(ShIndex{base:Box::new(#base),index:Box::new(#index)})}
+            return quote!{sh_idx(#base, #index)}//ShExpr::ShIndex(ShIndex{base:Box::new(#base),index:Box::new(#index)})}
         }
         Expr::Path(expr)=>{
             if expr.path.segments.len() != 1{
                 return error(expr.span(), "type not simple");
             }
             let seg = &expr.path.segments[0].ident.to_string();
-            return quote!{ShExpr::ShId(ShId{name:#seg.to_string()})}
+            return quote!{sh_id(#seg)}//ShExpr::ShId(ShId{name:#seg.to_string()})}
         }
         Expr::Paren(expr)=>{
             let expr = generate_expr(*expr.expr);
-            return quote!{ShExpr::ShParen(ShParen{expr:Box::new(#expr)})}
+            return quote!{sh_par(#expr)}//ShExpr::ShParen(ShParen{expr:Box::new(#expr)})}
         }
         Expr::Block(expr)=>{ // process a block expression
             let block = generate_block(expr.block); 
@@ -524,9 +457,9 @@ fn generate_expr(expr:Expr)->TokenStream{
         Expr::Return(expr)=>{
             if let Some(expr) = expr.expr{
                 let expr = generate_expr(*expr);
-                return quote!{ShExpr::ShReturn(ShReturn{expr:Some(Box::new(#expr))})}
+                return quote!{sh_ret(#expr)}
             }
-            return quote!{ShExpr::ShReturn(ShReturn{expr:None})}
+            return quote!{sh_retn()}
         }
         Expr::Break(_)=>{
             return quote!{ShExpr::ShBreak(ShBreak{})}
@@ -619,7 +552,7 @@ fn generate_root(expr:Expr)->TokenStream{
             types:Vec::new(),//{let mut v=Vec::new();#(v.push(#types);)*v},
             vars:{let mut v=Vec::new();#(v.push(#vars);)*v},
             consts:{let mut v=Vec::new();#(v.push(#consts);)*v},
-            fns:{let mut v=Vec::new();#(v.push(#fns);)*v}
+            fns:{let mut v=Vec::new();#(v.push(#fns);)*v} 
         }
     }
 
@@ -632,6 +565,6 @@ pub fn shader_ast(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
     let parsed = syn::parse_macro_input!(input as syn::Expr);
 
     let ts = generate_root(parsed);
-    //println!("----- GENERATED FROM MACRO ---- {}", ts.to_string());
     proc_macro::TokenStream::from(ts)
 }
+ 
