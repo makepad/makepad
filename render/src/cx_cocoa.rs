@@ -2,27 +2,16 @@
 // Gleaned/learned/templated from https://github.com/tomaka/winit/blob/master/src/platform/macos/
 
 use std::collections::HashMap;
-
-use cocoa::base::{id, nil};
-use cocoa::{appkit, foundation};
-use cocoa::appkit::{NSStringPboardType, NSApplication, NSEventModifierFlags, NSImage, NSEvent, NSApplicationDefined, NSWindow, NSView, NSEventMask, NSRunningApplication};
-use cocoa::foundation::{NSArray, NSPoint, NSDictionary, NSRect, NSSize, NSUInteger, NSInteger};
-use cocoa::foundation::{NSAutoreleasePool, NSString};
-use objc::runtime::{Class, Object, Protocol, Sel, BOOL, YES, NO};
-use objc::declare::ClassDecl;
+use crate::cx_apple::*;
 use std::os::raw::c_void;
-use objc::*;
-use core_graphics::display::CGDisplay;
+use std::sync::{Mutex};
+//use core_graphics::display::CGDisplay;
 use time::precise_time_ns;
+
 static mut GLOBAL_COCOA_APP: *mut CocoaApp = 0 as *mut _;
 
-#[link(name = "Foundation", kind = "framework")]
-extern {
-    pub static NSRunLoopCommonModes: id;
-}
-
-use crate::cx::*;
-
+use crate::cx::*; 
+ 
 #[derive(Clone)]
 pub struct CocoaWindow {
     pub window_id: usize,
@@ -70,9 +59,20 @@ pub struct CocoaApp {
     pub event_recur_block: bool,
     pub event_loop_running: bool,
     pub loop_block: bool,
+    pub init_app_after_first_window: bool,
     pub cursors: HashMap<MouseCursor, id>,
     pub current_cursor: MouseCursor,
+    pub status_map: Mutex<CocoaStatusMap>
 }
+
+#[derive(Default)]
+pub struct CocoaStatusMap {
+    pub status_to_usize: HashMap<StatusId, usize>,
+    pub usize_to_status: HashMap<usize, StatusId>,
+    pub command_to_usize: HashMap<CommandId, usize>,
+    pub usize_to_command: HashMap<usize, CommandId>,
+}
+
 
 impl CocoaApp {
     pub fn new() -> CocoaApp {
@@ -85,13 +85,20 @@ impl CocoaApp {
             let app_delegate_class = define_app_delegate();
             let app_delegate_instance: id = msg_send![app_delegate_class, new];
             
+            let const_attributes = vec![
+                str_to_nsstring("NSMarkedClauseSegment"),
+                str_to_nsstring("NSGlyphInfo")
+            ];
+            
             // Construct the bits that are shared between windows
             CocoaApp {
-                const_attributes_for_marked_text: NSArray::arrayWithObjects(nil, &vec![
-                    NSString::alloc(nil).init_str("NSMarkedClauseSegment"),
-                    NSString::alloc(nil).init_str("NSGlyphInfo")
-                ]),
-                const_empty_string: NSString::alloc(nil).init_str(""),
+                const_attributes_for_marked_text: msg_send![
+                    class!(NSArray),
+                    arrayWithObjects: const_attributes.as_ptr()
+                    count: const_attributes.len()
+                ],
+                init_app_after_first_window: false,
+                const_empty_string: str_to_nsstring(""),
                 pasteboard: msg_send![class!(NSPasteboard), generalPasteboard],
                 time_start: precise_time_ns(),
                 timer_delegate_instance: timer_delegate_instance,
@@ -113,60 +120,88 @@ impl CocoaApp {
                 event_recur_block: false,
                 event_loop_running: true,
                 cursors: HashMap::new(),
+                status_map: Mutex::new(CocoaStatusMap::default()),
                 current_cursor: MouseCursor::Default,
             }
         }
     }
     
-    pub fn update_app_menu(&mut self, menu: &Menu) {
-        unsafe fn make_menu(parent_menu: id, delegate: id, menu_target_class: *const Class, menu: &Menu) {
+    pub fn update_app_menu(&mut self, menu: &Menu, command_settings: &HashMap<CommandId, CxCommandSetting>,) {
+        unsafe fn make_menu(
+            parent_menu: id,
+            delegate: id,
+            menu_target_class: *const Class,
+            menu: &Menu,
+            status_map: &Mutex<CocoaStatusMap>,
+            command_settings: &HashMap<CommandId, CxCommandSetting>
+        ) {
             match menu {
                 Menu::Main {items} => {
                     let main_menu: id = msg_send![class!(NSMenu), new];
-                    let () = msg_send![main_menu, setTitle: NSString::alloc(nil).init_str("MainMenu")];
+                    let () = msg_send![main_menu, setTitle: str_to_nsstring("MainMenu")];
                     let () = msg_send![main_menu, setAutoenablesItems: NO];
                     let () = msg_send![main_menu, setDelegate: delegate];
                     
                     for item in items {
-                        make_menu(main_menu, delegate, menu_target_class, item);
+                        make_menu(main_menu, delegate, menu_target_class, item, status_map, command_settings);
                     }
-                    let ns_app = appkit::NSApp();
+                    let ns_app: id = msg_send![class!(NSApplication), sharedApplication];
                     let () = msg_send![
                         ns_app,
                         setMainMenu: main_menu
                     ];
                 },
-                Menu::Sub {name, key, items} => {
+                Menu::Sub {name, items} => {
                     let sub_menu: id = msg_send![class!(NSMenu), new];
-                    let () = msg_send![sub_menu, setTitle: NSString::alloc(nil).init_str(name)];
+                    let () = msg_send![sub_menu, setTitle: str_to_nsstring(name)];
                     let () = msg_send![sub_menu, setAutoenablesItems: NO];
                     let () = msg_send![sub_menu, setDelegate: delegate];
                     // append item to parebt
                     let sub_item: id = msg_send![
                         parent_menu,
-                        addItemWithTitle: NSString::alloc(nil).init_str(name)
+                        addItemWithTitle: str_to_nsstring(name)
                         action: nil
-                        keyEquivalent: NSString::alloc(nil).init_str(key)
+                        keyEquivalent: str_to_nsstring("")
                     ];
                     // connect submenu
                     let () = msg_send![parent_menu, setSubmenu: sub_menu forItem: sub_item];
                     for item in items {
-                        make_menu(sub_menu, delegate, menu_target_class, item);
+                        make_menu(sub_menu, delegate, menu_target_class, item, status_map, command_settings);
                     }
                 },
-                Menu::Item {name, key, signal, value, enabled} => {
+                Menu::Item {name, command} => {
+                    let settings = if let Some(settings) = command_settings.get(command) {
+                        *settings
+                    }
+                    else {
+                        CxCommandSetting::default()
+                    };
                     let sub_item: id = msg_send![
                         parent_menu,
-                        addItemWithTitle: NSString::alloc(nil).init_str(name)
+                        addItemWithTitle: str_to_nsstring(name)
                         action: sel!(menuAction:)
-                        keyEquivalent: NSString::alloc(nil).init_str(key)
+                        keyEquivalent: str_to_nsstring(keycode_to_menu_key(settings.key_code, settings.shift))
                     ];
                     let target: id = msg_send![menu_target_class, new];
-                    let () = msg_send![sub_item, setTarget:target];
-                    let () = msg_send![sub_item, setEnabled:if *enabled{YES}else{NO}];
+                    let () = msg_send![sub_item, setTarget: target];
+                    let () = msg_send![sub_item, setEnabled: if settings.enabled {YES}else {NO}];
+                    
+                    let command_usize = if let Ok(mut status_map) = status_map.lock() {
+                        if let Some(id) = status_map.command_to_usize.get(&command) {
+                            *id
+                        }
+                        else {
+                            let id = status_map.status_to_usize.len();
+                            status_map.command_to_usize.insert(*command, id);
+                            status_map.usize_to_command.insert(id, *command);
+                            id
+                        }
+                    }
+                    else {
+                        panic!("cannot lock cmd_map");
+                    };
                     (*target).set_ivar("cocoa_app_ptr", GLOBAL_COCOA_APP as *mut _ as *mut c_void);
-                    (*target).set_ivar("signal_id", signal.signal_id);                    
-                    (*target).set_ivar("value", *value);
+                    (*target).set_ivar("command_usize", command_usize);
                 },
                 Menu::Line => {
                     let sep_item: id = msg_send![class!(NSMenuItem), separatorItem];
@@ -178,21 +213,28 @@ impl CocoaApp {
             }
         }
         unsafe {
-            make_menu(nil, self.menu_delegate_instance, self.menu_target_class, menu);
+            make_menu(nil, self.menu_delegate_instance, self.menu_target_class, menu, &self.status_map, command_settings);
+        }
+    }
+    
+    pub fn init_app_after_first_window(&mut self) {
+        if self.init_app_after_first_window {
+            return
+        }
+        self.init_app_after_first_window = true;
+        unsafe {
+            let ns_app: id = msg_send![class!(NSApplication), sharedApplication];
+            let () = msg_send![ns_app, setActivationPolicy: NSApplicationActivationPolicy::NSApplicationActivationPolicyRegular as i64];
+            let () = msg_send![ns_app, finishLaunching];
+            let current_app: id = msg_send![class!(NSRunningApplication), currentApplication];
+            let () = msg_send![current_app, activateWithOptions: NSApplicationActivationOptions::NSApplicationActivateIgnoringOtherApps as u64];
         }
     }
     
     pub fn init(&mut self) {
         unsafe {
             GLOBAL_COCOA_APP = self;
-            let ns_app = appkit::NSApp();
-            if ns_app == nil {
-                panic!("App is nil");
-            }
-            ns_app.setActivationPolicy_(appkit::NSApplicationActivationPolicy::NSApplicationActivationPolicyRegular);
-            ns_app.finishLaunching();
-            let current_app = appkit::NSRunningApplication::currentApplication(nil);
-            current_app.activateWithOptions_(appkit::NSApplicationActivateIgnoringOtherApps);
+            let ns_app: id = msg_send![class!(NSApplication), sharedApplication];
             (*self.timer_delegate_instance).set_ivar("cocoa_app_ptr", self as *mut _ as *mut c_void);
             (*self.menu_delegate_instance).set_ivar("cocoa_app_ptr", self as *mut _ as *mut c_void);
             (*self.app_delegate_instance).set_ivar("cocoa_app_ptr", self as *mut _ as *mut c_void);
@@ -205,21 +247,24 @@ impl CocoaApp {
         (time_now - self.time_start) as f64 / 1_000_000_000.0
     }
     
-    unsafe fn process_ns_event(&mut self, ns_event: cocoa::base::id) {
-        if ns_event == cocoa::base::nil {
+    unsafe fn process_ns_event(&mut self, ns_event: id) {
+        if ns_event == nil {
             return;
         }
         
-        if ns_event.eventType() as u64 == 21 { // some missing event from cocoa-rs crate
+        let ev_type: NSEventType = msg_send![ns_event, type];
+        
+        if ev_type as u64 == 21 { // some missing event from cocoa-rs crate
             return;
         }
         
-        appkit::NSApp().sendEvent_(ns_event);
+        let ns_app: id = msg_send![class!(NSApplication), sharedApplication];
+        let () = msg_send![ns_app, sendEvent: ns_event];
         
-        match ns_event.eventType() {
-            appkit::NSApplicationDefined => { // event loop unblocker
+        match ev_type {
+            NSEventType::NSApplicationDefined => { // event loop unblocker
             },
-            appkit::NSKeyUp => {
+            NSEventType::NSKeyUp => {
                 if let Some(key_code) = get_event_keycode(ns_event) {
                     let modifiers = get_event_key_modifier(ns_event);
                     //let key_char = get_event_char(ns_event);
@@ -235,7 +280,7 @@ impl CocoaApp {
                     ]);
                 }
             },
-            appkit::NSKeyDown => {
+            NSEventType::NSKeyDown => {
                 if let Some(key_code) = get_event_keycode(ns_event) {
                     let modifiers = get_event_key_modifier(ns_event);
                     //let key_char = get_event_char(ns_event);
@@ -268,7 +313,7 @@ impl CocoaApp {
                             match &events[0] {
                                 Event::TextCopy(req) => if let Some(response) = &req.response {
                                     // plug it into the apple clipboard
-                                    let nsstring: id = NSString::alloc(nil).init_str(&response);
+                                    let nsstring: id = str_to_nsstring(&response);
                                     let array: id = msg_send![class!(NSArray), arrayWithObject: NSStringPboardType];
                                     let () = msg_send![self.pasteboard, declareTypes: array owner: nil];
                                     let () = msg_send![self.pasteboard, setString: nsstring forType: NSStringPboardType];
@@ -303,7 +348,7 @@ impl CocoaApp {
                     
                 }
             },
-            appkit::NSFlagsChanged => {
+            NSEventType::NSFlagsChanged => {
                 let modifiers = get_event_key_modifier(ns_event);
                 let last_key_mod = self.last_key_mod.clone();
                 self.last_key_mod = modifiers.clone();
@@ -334,8 +379,8 @@ impl CocoaApp {
                     self.do_callback(&mut events);
                 }
             },
-            appkit::NSMouseEntered => {},
-            appkit::NSMouseExited => {},
+            NSEventType::NSMouseEntered => {},
+            NSEventType::NSMouseExited => {},
             /*
             appkit::NSMouseMoved |
             appkit::NSLeftMouseDragged |
@@ -359,26 +404,25 @@ impl CocoaApp {
                 
                 cocoa_window.send_finger_hover_and_move(mouse_pos, get_event_key_modifier(ns_event));
             },*/
-            appkit::NSScrollWheel => {
-                let window: id = ns_event.window();
+            NSEventType::NSScrollWheel => {
+                let window: id = msg_send![ns_event, window];
                 if window == nil {
                     return
                 }
-                let window_delegate = NSWindow::delegate(window);
+                let window_delegate: id = msg_send![window, delegate];
                 if window_delegate == nil {
                     return
                 }
                 let ptr: *mut c_void = *(*window_delegate).get_ivar("cocoa_window_ptr");
                 let cocoa_window = &mut *(ptr as *mut CocoaWindow);
-                
-                return if ns_event.hasPreciseScrollingDeltas() == cocoa::base::YES {
+                let dx: f64 = msg_send![ns_event, scrollingDeltaX];
+                let dy: f64 = msg_send![ns_event, scrollingDeltaY];
+                let has_prec: BOOL = msg_send![ns_event, hasPreciseScrollingDeltas];
+                return if has_prec == YES {
                     self.do_callback(&mut vec![
                         Event::FingerScroll(FingerScrollEvent {
                             window_id: cocoa_window.window_id,
-                            scroll: Vec2 {
-                                x: -ns_event.scrollingDeltaX() as f32,
-                                y: -ns_event.scrollingDeltaY() as f32
-                            },
+                            scroll: Vec2 {x: -dx as f32, y: -dy as f32},
                             abs: cocoa_window.last_mouse_pos,
                             rel: cocoa_window.last_mouse_pos,
                             rect: Rect::default(),
@@ -392,10 +436,7 @@ impl CocoaApp {
                     self.do_callback(&mut vec![
                         Event::FingerScroll(FingerScrollEvent {
                             window_id: cocoa_window.window_id,
-                            scroll: Vec2 {
-                                x: -ns_event.scrollingDeltaX() as f32 * 32.,
-                                y: -ns_event.scrollingDeltaY() as f32 * 32.
-                            },
+                            scroll: Vec2 {x: -dx as f32 * 32., y: -dy as f32 * 32.},
                             abs: cocoa_window.last_mouse_pos,
                             rel: cocoa_window.last_mouse_pos,
                             rect: Rect::default(),
@@ -407,7 +448,7 @@ impl CocoaApp {
                     ]);
                 }
             },
-            appkit::NSEventTypePressure => {},
+            NSEventType::NSEventTypePressure => {},
             _ => (),
         }
     }
@@ -423,19 +464,22 @@ impl CocoaApp {
             self.event_callback = Some(&mut event_handler as *const dyn FnMut(&mut CocoaApp, &mut Vec<Event>) -> bool as *mut dyn FnMut(&mut CocoaApp, &mut Vec<Event>) -> bool);
             
             while self.event_loop_running {
-                let pool = foundation::NSAutoreleasePool::new(cocoa::base::nil);
+                let pool: id = msg_send![class!(NSAutoreleasePool), new];
                 
                 // in here the event loop state is handled
-                let ns_event = appkit::NSApp().nextEventMatchingMask_untilDate_inMode_dequeue_(
-                    NSEventMask::NSAnyEventMask.bits() | NSEventMask::NSEventMaskPressure.bits(),
-                    if self.loop_block {
-                        foundation::NSDate::distantFuture(cocoa::base::nil)
-                    }else {
-                        foundation::NSDate::distantPast(cocoa::base::nil)
-                    },
-                    foundation::NSDefaultRunLoopMode,
-                    cocoa::base::YES
-                );
+                let ns_app: id = msg_send![class!(NSApplication), sharedApplication];
+                let ns_until: id = if self.loop_block {
+                    msg_send![class!(NSDate), distantFuture]
+                }else {
+                    msg_send![class!(NSDate), distantPast]
+                };
+                let ns_event: id = msg_send![
+                    ns_app,
+                    nextEventMatchingMask: NSEventMask::NSAnyEventMask.bits() | NSEventMask::NSEventMaskPressure.bits()
+                    untilDate: ns_until
+                    inMode: NSDefaultRunLoopMode
+                    dequeue: YES
+                ];
                 
                 if ns_event != nil {
                     self.process_ns_event(ns_event);
@@ -445,7 +489,7 @@ impl CocoaApp {
                     self.do_callback(&mut vec![Event::Paint]);
                 }
                 
-                let _: () = msg_send![pool, release];
+                let () = msg_send![pool, release];
             }
             self.event_callback = None;
         }
@@ -463,16 +507,32 @@ impl CocoaApp {
         }
     }
     
-    pub fn post_signal(signal_id: usize, value: usize) {
+    pub fn post_signal(signal_id: usize, status: StatusId) {
         unsafe {
-            let pool = foundation::NSAutoreleasePool::new(cocoa::base::nil);
+            let pool: id = msg_send![class!(NSAutoreleasePool), new];
             
             let cocoa_app = &mut (*GLOBAL_COCOA_APP);
             let post_delegate_instance: id = msg_send![cocoa_app.post_delegate_class, new];
             
+            // lock it
+            let status_id = if let Ok(mut status_map) = cocoa_app.status_map.lock() {
+                if let Some(id) = status_map.status_to_usize.get(&status) {
+                    *id
+                }
+                else {
+                    let id = status_map.status_to_usize.len();
+                    status_map.status_to_usize.insert(status, id);
+                    status_map.usize_to_status.insert(id, status);
+                    id
+                }
+            }
+            else {
+                panic!("Cannot lock cmd_map");
+            };
+            
             (*post_delegate_instance).set_ivar("cocoa_app_ptr", GLOBAL_COCOA_APP as *mut _ as *mut c_void);
             (*post_delegate_instance).set_ivar("signal_id", signal_id);
-            (*post_delegate_instance).set_ivar("value", value);
+            (*post_delegate_instance).set_ivar("status", status_id);
             let nstimer: id = msg_send![
                 class!(NSTimer),
                 timerWithTimeInterval: 0.
@@ -484,7 +544,7 @@ impl CocoaApp {
             let nsrunloop: id = msg_send![class!(NSRunLoop), mainRunLoop];
             let () = msg_send![nsrunloop, addTimer: nstimer forMode: NSRunLoopCommonModes];
             
-            let _: () = msg_send![pool, release];
+            let () = msg_send![pool, release];
         }
     }
     
@@ -505,7 +565,7 @@ impl CocoaApp {
     
     pub fn start_timer(&mut self, timer_id: u64, interval: f64, repeats: bool) {
         unsafe {
-            let pool = foundation::NSAutoreleasePool::new(cocoa::base::nil);
+            let pool: id = msg_send![class!(NSAutoreleasePool), new];
             
             let nstimer: id = msg_send![
                 class!(NSTimer),
@@ -523,7 +583,7 @@ impl CocoaApp {
                 nstimer: nstimer,
                 repeats: repeats
             });
-            let _: () = msg_send![pool, release];
+            let () = msg_send![pool, release];
         }
     }
     
@@ -549,11 +609,11 @@ impl CocoaApp {
                 self.do_callback(&mut vec![Event::Timer(TimerEvent {timer_id: timer_id})]);
                 // break the eventloop if its in blocked mode
                 unsafe {
-                    let pool = foundation::NSAutoreleasePool::new(cocoa::base::nil);
+                    let pool: id = msg_send![class!(NSAutoreleasePool), new];
                     let nsevent: id = msg_send![
                         class!(NSEvent),
-                        otherEventWithType: NSApplicationDefined
-                        location: NSPoint::new(0., 0.)
+                        otherEventWithType: NSEventType::NSApplicationDefined
+                        location: NSPoint {x: 0., y: 0.}
                         modifierFlags: 0u64
                         timestamp: 0f64
                         windowNumber: 1u64
@@ -562,23 +622,33 @@ impl CocoaApp {
                         data1: 0u64
                         data2: 0u64
                     ];
-                    let () = msg_send![appkit::NSApp(), postEvent: nsevent atStart: 0];
-                    let _: () = msg_send![pool, release];
+                    let ns_app: id = msg_send![class!(NSApplication), sharedApplication];
+                    let () = msg_send![ns_app, postEvent: nsevent atStart: 0];
+                    let () = msg_send![pool, release];
                 }
                 return;
             }
         }
     }
     
-    pub fn send_signal_event(&mut self, signal_id: usize, value: usize) {
+    pub fn send_signal_event(&mut self, signal: Signal, status: StatusId) {
         self.do_callback(&mut vec![
             Event::Signal(SignalEvent {
-                signal_id: signal_id,
-                value: value
+                signal: signal,
+                status: status
             })
         ]);
         self.do_callback(&mut vec![Event::Paint]);
     }
+    
+    
+    pub fn send_command_event(&mut self, command: CommandId) {
+        self.do_callback(&mut vec![
+            Event::Command(command)
+        ]);
+        self.do_callback(&mut vec![Event::Paint]);
+    }
+    
     
     pub fn send_paint_event(&mut self) {
         self.do_callback(&mut vec![Event::Paint]);
@@ -590,16 +660,13 @@ impl CocoaWindow {
     
     pub fn new(cocoa_app: &mut CocoaApp, window_id: usize) -> CocoaWindow {
         unsafe {
-            
-            
-            let autoreleasepool = NSAutoreleasePool::new(nil);
+            let pool: id = msg_send![class!(NSAutoreleasePool), new];
             
             let window: id = msg_send![cocoa_app.window_class, alloc];
             let window_delegate: id = msg_send![cocoa_app.window_delegate_class, new];
-            //let layer_delegate: id = msg_send![cocoa_app.layer_delegate_class, new];
             let view: id = msg_send![cocoa_app.view_class, alloc];
             
-            let _: () = msg_send![autoreleasepool, drain];
+            let () = msg_send![pool, drain];
             cocoa_app.cocoa_windows.push((window, view));
             CocoaWindow {
                 is_fullscreen: false,
@@ -622,9 +689,10 @@ impl CocoaWindow {
     // complete window initialization with pointers to self
     pub fn init(&mut self, title: &str, size: Vec2, position: Option<Vec2>) {
         unsafe {
+            (*self.cocoa_app).init_app_after_first_window();
             self.fingers_down.resize(NUM_FINGERS, false);
             
-            let autoreleasepool = NSAutoreleasePool::new(nil);
+            let pool: id = msg_send![class!(NSAutoreleasePool), new];
             
             // set the backpointeers
             (*self.window_delegate).set_ivar("cocoa_window_ptr", self as *mut _ as *mut c_void);
@@ -632,51 +700,53 @@ impl CocoaWindow {
             let () = msg_send![self.view, initWithPtr: self as *mut _ as *mut c_void];
             
             let left_top = if let Some(position) = position {
-                NSPoint::new(position.x as f64, position.y as f64)
+                NSPoint {x: position.x as f64, y: position.y as f64}
             }
             else {
-                NSPoint::new(0., 0.)
+                NSPoint {x: 0., y: 0.}
             };
-            let ns_size = NSSize::new(size.x as f64, size.y as f64);
-            let window_frame = NSRect::new(left_top, ns_size);
-            let window_masks = appkit::NSWindowStyleMask::NSClosableWindowMask
-                | appkit::NSWindowStyleMask::NSMiniaturizableWindowMask
-                | appkit::NSWindowStyleMask::NSResizableWindowMask
-                | appkit::NSWindowStyleMask::NSTitledWindowMask
-                | appkit::NSWindowStyleMask::NSFullSizeContentViewWindowMask;
+            let ns_size = NSSize {width: size.x as f64, height: size.y as f64};
+            let window_frame = NSRect {origin: left_top, size: ns_size};
+            let window_masks = NSWindowStyleMask::NSClosableWindowMask
+                | NSWindowStyleMask::NSMiniaturizableWindowMask
+                | NSWindowStyleMask::NSResizableWindowMask
+                | NSWindowStyleMask::NSTitledWindowMask
+                | NSWindowStyleMask::NSFullSizeContentViewWindowMask;
             
-            self.window.initWithContentRect_styleMask_backing_defer_(
-                window_frame,
-                window_masks,
-                appkit::NSBackingStoreBuffered,
-                NO
-            );
+            let () = msg_send![
+                self.window,
+                initWithContentRect: window_frame
+                styleMask: window_masks.bits()
+                backing: NSBackingStoreType::NSBackingStoreBuffered as u64
+                defer: NO
+            ];
             
             let () = msg_send![self.window, setDelegate: self.window_delegate];
             
-            let title = NSString::alloc(nil).init_str(title);
-            self.window.setReleasedWhenClosed_(NO);
-            self.window.setTitle_(title);
-            let () = msg_send![self.window, setTitleVisibility: appkit::NSWindowTitleVisibility::NSWindowTitleHidden];
+            let title = str_to_nsstring(title);
+            let () = msg_send![self.window, setReleasedWhenClosed: NO];
+            let () = msg_send![self.window, setTitle: title];
+            let () = msg_send![self.window, setTitleVisibility: NSWindowTitleVisibility::NSWindowTitleHidden];
             let () = msg_send![self.window, setTitlebarAppearsTransparent: YES];
             
             //let subviews:id = msg_send![self.window, getSubviews];
             //println!("{}", subviews as u64);
-            
-            self.window.setAcceptsMouseMovedEvents_(YES);
+            let () = msg_send![self.window, setAcceptsMouseMovedEvents: YES];
             
             let () = msg_send![self.view, setLayerContentsRedrawPolicy: 2]; //duringViewResize
             
-            self.window.setContentView_(self.view);
-            self.window.makeFirstResponder_(self.view);
-            self.window.makeKeyAndOrderFront_(nil);
+            let () = msg_send![self.window, setContentView: self.view];
+            let () = msg_send![self.window, makeFirstResponder: self.view];
+            let () = msg_send![self.window, makeKeyAndOrderFront: nil];
+            
             if position.is_none() {
-                self.window.center();
+                let () = msg_send![self.window, center];
             }
             let input_context: id = msg_send![self.view, inputContext];
             let () = msg_send![input_context, invalidateCharacterCoordinates];
             
-            let _: () = msg_send![autoreleasepool, drain];
+            let () = msg_send![pool, drain];
+            
         }
     }
     
@@ -694,7 +764,7 @@ impl CocoaWindow {
     
     pub fn start_live_resize(&mut self) {
         unsafe {
-            let pool = foundation::NSAutoreleasePool::new(cocoa::base::nil);
+            let pool: id = msg_send![class!(NSAutoreleasePool), new];
             let cocoa_app = &(*self.cocoa_app);
             self.live_resize_timer = msg_send![
                 class!(NSTimer),
@@ -707,7 +777,7 @@ impl CocoaWindow {
             let nsrunloop: id = msg_send![class!(NSRunLoop), mainRunLoop];
             let () = msg_send![nsrunloop, addTimer: self.live_resize_timer forMode: NSRunLoopCommonModes];
             
-            let _: () = msg_send![pool, release];
+            let () = msg_send![pool, release];
         }
     }
     
@@ -770,7 +840,7 @@ impl CocoaWindow {
     }
     
     pub fn set_position(&mut self, pos: Vec2) {
-        let mut window_frame = unsafe {NSWindow::frame(self.window)};
+        let mut window_frame: NSRect = unsafe {msg_send![self.window, frame]};
         window_frame.origin.x = pos.x as f64;
         window_frame.origin.y = pos.y as f64;
         //not very nice: CGDisplay::main().pixels_high() as f64
@@ -778,40 +848,40 @@ impl CocoaWindow {
     }
     
     pub fn get_position(&self) -> Vec2 {
-        let window_frame = unsafe {NSWindow::frame(self.window)};
+        let window_frame: NSRect = unsafe {msg_send![self.window, frame]};
         Vec2 {x: window_frame.origin.x as f32, y: window_frame.origin.y as f32}
     }
     
     fn get_ime_origin(&self) -> Vec2 {
-        let rect = NSRect::new(
-            NSPoint::new(0.0, 0.0),
+        let rect = NSRect {
+            origin: NSPoint {x: 0.0, y: 0.0},
             //view_frame.size.height),
-            NSSize::new(0.0, 0.0),
-        );
-        let out = unsafe {NSWindow::convertRectToScreen_(self.window, rect)};
+            size: NSSize {width: 0.0, height: 0.0},
+        };
+        let out: NSRect = unsafe {msg_send![self.window, convertRectToScreen: rect]};
         Vec2 {x: out.origin.x as f32, y: out.origin.y as f32}
     }
     
     pub fn get_inner_size(&self) -> Vec2 {
-        let view_frame = unsafe {NSView::frame(self.view)};
+        let view_frame: NSRect = unsafe {msg_send![self.view, frame]};
         Vec2 {x: view_frame.size.width as f32, y: view_frame.size.height as f32}
     }
     
     pub fn get_outer_size(&self) -> Vec2 {
-        let window_frame = unsafe {NSWindow::frame(self.window)};
+        let window_frame: NSRect = unsafe {msg_send![self.window, frame]};
         Vec2 {x: window_frame.size.width as f32, y: window_frame.size.height as f32}
     }
     
     pub fn set_outer_size(&self, size: Vec2) {
-        let mut window_frame = unsafe {NSWindow::frame(self.window)};
+        let mut window_frame: NSRect = unsafe {msg_send![self.window, frame]};
         window_frame.size.width = size.x as f64;
         window_frame.size.height = size.y as f64;
         unsafe {let () = msg_send![self.window, setFrame: window_frame display: YES];};
     }
     
     pub fn get_dpi_factor(&self) -> f32 {
-        let scale = unsafe {NSWindow::backingScaleFactor(self.window) as f32};
-        scale
+        let scale: f64 = unsafe {msg_send![self.window, backingScaleFactor]};
+        scale as f32
     }
     
     pub fn send_change_event(&mut self) {
@@ -824,7 +894,6 @@ impl CocoaWindow {
             new_geom.clone()
         };
         self.last_window_geom = Some(new_geom.clone());
-        
         self.do_callback(&mut vec![
             Event::WindowGeomChange(WindowGeomChangeEvent {
                 window_id: self.window_id,
@@ -968,22 +1037,17 @@ fn get_event_char(event: id) -> char {
         if characters == nil {
             return '\0'
         }
-        if characters.len() == 0 {
+        let chars = nsstring_to_string(characters);
+        
+        if chars.len() == 0 {
             return '\0'
         }
-        let slice = std::slice::from_raw_parts(
-            characters.UTF8String() as *const std::os::raw::c_uchar,
-            characters.len(),
-        );
-        let string = std::str::from_utf8_unchecked(slice);
-        string.chars().next().unwrap()
+        chars.chars().next().unwrap()
     }
 }
 
 fn get_event_key_modifier(event: id) -> KeyModifiers {
-    let flags = unsafe {
-        NSEvent::modifierFlags(event)
-    };
+    let flags: NSEventModifierFlags = unsafe {msg_send![event, modifierFlags]};
     KeyModifiers {
         shift: flags.contains(NSEventModifierFlags::NSShiftKeyMask),
         control: flags.contains(NSEventModifierFlags::NSControlKeyMask),
@@ -1132,6 +1196,119 @@ fn get_event_keycode(event: id) -> Option<KeyCode> {
     })
 }
 
+fn keycode_to_menu_key(keycode: KeyCode, shift: bool) -> &'static str {
+    if !shift {
+        match keycode {
+            KeyCode::Backtick => "`",
+            KeyCode::Key0 => "0",
+            KeyCode::Key1 => "1",
+            KeyCode::Key2 => "2",
+            KeyCode::Key3 => "3",
+            KeyCode::Key4 => "4",
+            KeyCode::Key5 => "5",
+            KeyCode::Key6 => "6",
+            KeyCode::Key7 => "7",
+            KeyCode::Key8 => "8",
+            KeyCode::Key9 => "9",
+            KeyCode::Minus => "-",
+            KeyCode::Equals => "=",
+            
+            KeyCode::KeyQ => "q",
+            KeyCode::KeyW => "w",
+            KeyCode::KeyE => "e",
+            KeyCode::KeyR => "r",
+            KeyCode::KeyT => "t",
+            KeyCode::KeyY => "y",
+            KeyCode::KeyU => "u",
+            KeyCode::KeyI => "i",
+            KeyCode::KeyO => "o",
+            KeyCode::KeyP => "p",
+            KeyCode::LBracket => "[",
+            KeyCode::RBracket => "]",
+            
+            KeyCode::KeyA => "a",
+            KeyCode::KeyS => "s",
+            KeyCode::KeyD => "d",
+            KeyCode::KeyF => "f",
+            KeyCode::KeyG => "g",
+            KeyCode::KeyH => "h",
+            KeyCode::KeyJ => "j",
+            KeyCode::KeyK => "l",
+            KeyCode::KeyL => "l",
+            KeyCode::Semicolon => ";",
+            KeyCode::Quote => "'",
+            KeyCode::Backslash => "\\",
+            
+            KeyCode::KeyZ => "z",
+            KeyCode::KeyX => "x",
+            KeyCode::KeyC => "c",
+            KeyCode::KeyV => "v",
+            KeyCode::KeyB => "b",
+            KeyCode::KeyN => "n",
+            KeyCode::KeyM => "m",
+            KeyCode::Comma => ",",
+            KeyCode::Period => ".",
+            KeyCode::Slash => "/",
+            _ => ""
+        }
+    }
+    else {
+        match keycode {
+            KeyCode::Backtick => "~",
+            KeyCode::Key0 => "!",
+            KeyCode::Key1 => "@",
+            KeyCode::Key2 => "#",
+            KeyCode::Key3 => "$",
+            KeyCode::Key4 => "%",
+            KeyCode::Key5 => "^",
+            KeyCode::Key6 => "&",
+            KeyCode::Key7 => "*",
+            KeyCode::Key8 => "(",
+            KeyCode::Key9 => ")",
+            KeyCode::Minus => "_",
+            KeyCode::Equals => "+",
+            
+            KeyCode::KeyQ => "Q",
+            KeyCode::KeyW => "W",
+            KeyCode::KeyE => "E",
+            KeyCode::KeyR => "R",
+            KeyCode::KeyT => "T",
+            KeyCode::KeyY => "Y",
+            KeyCode::KeyU => "U",
+            KeyCode::KeyI => "I",
+            KeyCode::KeyO => "O",
+            KeyCode::KeyP => "P",
+            KeyCode::LBracket => "{",
+            KeyCode::RBracket => "}",
+            
+            KeyCode::KeyA => "A",
+            KeyCode::KeyS => "S",
+            KeyCode::KeyD => "D",
+            KeyCode::KeyF => "F",
+            KeyCode::KeyG => "G",
+            KeyCode::KeyH => "H",
+            KeyCode::KeyJ => "J",
+            KeyCode::KeyK => "K",
+            KeyCode::KeyL => "L",
+            KeyCode::Semicolon => ":",
+            KeyCode::Quote => "\"",
+            KeyCode::Backslash => "|",
+            
+            KeyCode::KeyZ => "Z",
+            KeyCode::KeyX => "X",
+            KeyCode::KeyC => "C",
+            KeyCode::KeyV => "V",
+            KeyCode::KeyB => "B",
+            KeyCode::KeyN => "N",
+            KeyCode::KeyM => "M",
+            KeyCode::Comma => "<",
+            KeyCode::Period => ">",
+            KeyCode::Slash => "?",
+            _ => ""
+        }
+    }
+}
+
 fn get_cocoa_window(this: &Object) -> &mut CocoaWindow {
     unsafe {
         let ptr: *mut c_void = *this.get_ivar("cocoa_window_ptr");
@@ -1173,7 +1350,7 @@ pub fn define_cocoa_timer_delegate() -> *const Class {
 }
 
 pub fn define_app_delegate() -> *const Class {
-
+    
     let superclass = class!(NSObject);
     let mut decl = ClassDecl::new("NSAppDelegate", superclass).unwrap();
     decl.add_ivar::<*mut c_void>("cocoa_app_ptr");
@@ -1185,10 +1362,15 @@ pub fn define_menu_target_class() -> *const Class {
     extern fn menu_action(this: &Object, _sel: Sel, _item: id) {
         //println!("markedRange");
         let ca = get_cocoa_app(this);
-        unsafe{
-            let signal_id: usize = *this.get_ivar("signal_id");
-            let value: usize = *this.get_ivar("value");
-            ca.send_signal_event(signal_id, value);
+        unsafe {
+            let command_usize: usize = *this.get_ivar("command_usize");
+            let cmd = if let Ok(status_map) = ca.status_map.lock() {
+                *status_map.usize_to_command.get(&command_usize).expect("")
+            }
+            else {
+                panic!("Cannot lock cmd_map")
+            };
+            ca.send_command_event(cmd);
         }
     }
     
@@ -1198,8 +1380,7 @@ pub fn define_menu_target_class() -> *const Class {
         decl.add_method(sel!(menuAction:), menu_action as extern fn(&Object, Sel, id));
     }
     decl.add_ivar::<*mut c_void>("cocoa_app_ptr");
-    decl.add_ivar::<usize>("signal_id");
-    decl.add_ivar::<usize>("value");
+    decl.add_ivar::<usize>("command_usize");
     return decl.register();
 }
 
@@ -1233,8 +1414,14 @@ pub fn define_cocoa_post_delegate() -> *const Class {
         let ca = get_cocoa_app(this);
         unsafe {
             let signal_id: usize = *this.get_ivar("signal_id");
-            let value: usize = *this.get_ivar("value");
-            ca.send_signal_event(signal_id, value);
+            let status: usize = *this.get_ivar("status");
+            let status = if let Ok(status_map) = ca.status_map.lock() {
+                *status_map.usize_to_status.get(&status).expect("status invalid")
+            }
+            else {
+                panic!("cannot lock cmd_map")
+            };
+            ca.send_signal_event(Signal {signal_id: signal_id}, status);
         }
     }
     
@@ -1248,7 +1435,7 @@ pub fn define_cocoa_post_delegate() -> *const Class {
     // Store internal state as user data
     decl.add_ivar::<*mut c_void>("cocoa_app_ptr");
     decl.add_ivar::<usize>("signal_id");
-    decl.add_ivar::<usize>("value");
+    decl.add_ivar::<usize>("status");
     
     return decl.register();
 }
@@ -1486,9 +1673,9 @@ pub fn define_cocoa_view_class() -> *const Class {
         // We have to do this to have access to the `NSView` trait...
         unsafe {
             let view: id = this as *const _ as *mut _;
-            let window_point = event.locationInWindow();
-            let view_point = view.convertPoint_fromView_(window_point, nil);
-            let view_rect = NSView::frame(view);
+            let window_point: NSPoint = msg_send![event, locationInWindow]; //.locationInWindow();
+            let view_point: NSPoint = msg_send![view, convertPoint: window_point fromView: nil]; // view.convertPoint_fromView_(window_point, nil);
+            let view_rect: NSRect = msg_send![view, frame];
             Vec2 {x: view_point.x as f32, y: view_rect.size.height as f32 - view_point.y as f32}
         }
     }
@@ -1548,10 +1735,13 @@ pub fn define_cocoa_view_class() -> *const Class {
             let marked_text: id = *this.get_ivar("markedText");
             let length = marked_text.length();
             if length >0 {
-                NSRange::new(0, length - 1)
+                NSRange {
+                    location: 0,
+                    length: length - 1
+                }
             } else {
                 NSRange {
-                    location: NSInteger::max_value() as NSUInteger,
+                    location: i64::max_value() as u64,
                     length: 0,
                 }
             }
@@ -1611,7 +1801,7 @@ pub fn define_cocoa_view_class() -> *const Class {
         nil
     }
     
-    extern fn character_index_for_point(_this: &Object, _sel: Sel, _point: NSPoint) -> NSUInteger {
+    extern fn character_index_for_point(_this: &Object, _sel: Sel, _point: NSPoint) -> u64 {
         // println!("character_index_for_point");
         0
     }
@@ -1622,16 +1812,16 @@ pub fn define_cocoa_view_class() -> *const Class {
         let view: id = this as *const _ as *mut _;
         //let window_point = event.locationInWindow();
         //et view_point = view.convertPoint_fromView_(window_point, nil);
-        let view_rect = unsafe {NSView::frame(view)};
-        let window_rect = unsafe {NSWindow::frame(cw.window)};
+        let view_rect: NSRect = unsafe {msg_send![view, frame]};
+        let window_rect: NSRect = unsafe {msg_send![cw.window, frame]};
         
         let origin = cw.get_ime_origin();
         let bar = (window_rect.size.height - view_rect.size.height) as f32 - 5.;
-        NSRect::new(
-            NSPoint::new((origin.x + cw.ime_spot.x) as f64, (origin.y + (view_rect.size.height as f32 - cw.ime_spot.y - bar)) as f64),
+        NSRect {
+            origin: NSPoint {x: (origin.x + cw.ime_spot.x) as f64, y: (origin.y + (view_rect.size.height as f32 - cw.ime_spot.y - bar)) as f64},
             // as _, y as _),
-            NSSize::new(0.0, 0.0),
-        )
+            size: NSSize {width: 0.0, height: 0.0},
+        }
     }
     
     extern fn insert_text(this: &Object, _sel: Sel, string: id, replacement_range: NSRange) {
@@ -1735,7 +1925,7 @@ pub fn define_cocoa_view_class() -> *const Class {
         );
         decl.add_method(
             sel!(characterIndexForPoint:),
-            character_index_for_point as extern fn(&Object, Sel, NSPoint) -> NSUInteger,
+            character_index_for_point as extern fn(&Object, Sel, NSPoint) -> u64,
         );
         decl.add_method(
             sel!(firstRectForCharacterRange: actualRange:),
@@ -1777,7 +1967,8 @@ pub unsafe fn superclass<'a>(this: &'a Object) -> &'a Class {
 }
 
 pub fn bottom_left_to_top_left(rect: NSRect) -> f64 {
-    CGDisplay::main().pixels_high() as f64 - (rect.origin.y + rect.size.height)
+    let height = unsafe {CGDisplayPixelsHigh(CGMainDisplayID())};
+    height as f64 - (rect.origin.y + rect.size.height)
 }
 
 fn load_mouse_cursor(cursor: MouseCursor) -> id {
@@ -1830,128 +2021,5 @@ fn load_mouse_cursor(cursor: MouseCursor) -> id {
         // https://stackoverflow.com/a/21786835/5435443
         MouseCursor::Move /*| MouseCursor::AllScroll*/ => load_webkit_cursor("move"),
         // MouseCursor::Cell => load_webkit_cursor("cell"),
-    }
-}
-
-fn load_native_cursor(cursor_name: &str) -> id {
-    let sel = Sel::register(cursor_name);
-    let id: id = unsafe {msg_send![class!(NSCursor), performSelector: sel]};
-    id
-}
-
-fn load_undocumented_cursor(cursor_name: &str) -> id {
-    unsafe {
-        let class = class!(NSCursor);
-        let sel = Sel::register(cursor_name);
-        let sel: id = msg_send![class, respondsToSelector: sel];
-        let id: id = msg_send![class, performSelector: sel];
-        id
-    }
-}
-
-fn load_webkit_cursor(cursor_name_str: &str) -> id {
-    unsafe {
-        static CURSOR_ROOT: &'static str = "/System/Library/Frameworks/ApplicationServices.framework/Versions/A/Frameworks/HIServices.framework/Versions/A/Resources/cursors";
-        let cursor_root = NSString::alloc(nil).init_str(CURSOR_ROOT);
-        let cursor_name = NSString::alloc(nil).init_str(cursor_name_str);
-        let cursor_pdf = NSString::alloc(nil).init_str("cursor.pdf");
-        let cursor_plist = NSString::alloc(nil).init_str("info.plist");
-        let key_x = NSString::alloc(nil).init_str("hotx");
-        let key_y = NSString::alloc(nil).init_str("hoty");
-        
-        let cursor_path: id = msg_send![cursor_root, stringByAppendingPathComponent: cursor_name];
-        let pdf_path: id = msg_send![cursor_path, stringByAppendingPathComponent: cursor_pdf];
-        let info_path: id = msg_send![cursor_path, stringByAppendingPathComponent: cursor_plist];
-        
-        let image = NSImage::alloc(nil).initByReferencingFile_(pdf_path);
-        let info = NSDictionary::dictionaryWithContentsOfFile_(nil, info_path);
-        
-        let x = info.valueForKey_(key_x);
-        let y = info.valueForKey_(key_y);
-        let point = NSPoint::new(
-            msg_send![x, doubleValue],
-            msg_send![y, doubleValue],
-        );
-        let cursor: id = msg_send![class!(NSCursor), alloc];
-        msg_send![cursor, initWithImage: image hotSpot: point]
-    }
-}
-
-unsafe fn nsstring_to_string(string: id) -> String {
-    let slice = std::slice::from_raw_parts(
-        string.UTF8String() as *const std::os::raw::c_uchar,
-        string.len(),
-    );
-    std::str::from_utf8_unchecked(slice).to_owned()
-}
-
-
-
-
-#[repr(C)]
-pub struct NSRange {
-    pub location: NSUInteger,
-    pub length: NSUInteger,
-}
-
-impl NSRange {
-    #[inline]
-    pub fn new(location: NSUInteger, length: NSUInteger) -> NSRange {
-        NSRange {location, length}
-    }
-}
-
-unsafe impl objc::Encode for NSRange {
-    fn encode() -> objc::Encoding {
-        let encoding = format!(
-            // TODO: Verify that this is correct
-            "{{NSRange={}{}}}",
-            NSUInteger::encode().as_str(),
-            NSUInteger::encode().as_str(),
-        );
-        unsafe {objc::Encoding::from_str(&encoding)}
-    }
-}
-
-pub trait NSMutableAttributedString: Sized {
-    unsafe fn alloc(_: Self) -> id {
-        msg_send![class!(NSMutableAttributedString), alloc]
-    }
-    
-    unsafe fn init(self) -> id;
-    // *mut NSMutableAttributedString
-    unsafe fn init_with_string(self, string: id) -> id;
-    unsafe fn init_with_attributed_string(self, string: id) -> id;
-    
-    unsafe fn string(self) -> id;
-    // *mut NSString
-    unsafe fn mutable_string(self) -> id;
-    // *mut NSMutableString
-    unsafe fn length(self) -> NSUInteger;
-}
-
-impl NSMutableAttributedString for id {
-    unsafe fn init(self) -> id {
-        msg_send![self, init]
-    }
-    
-    unsafe fn init_with_string(self, string: id) -> id {
-        msg_send![self, initWithString: string]
-    }
-    
-    unsafe fn init_with_attributed_string(self, string: id) -> id {
-        msg_send![self, initWithAttributedString: string]
-    }
-    
-    unsafe fn string(self) -> id {
-        msg_send![self, string]
-    }
-    
-    unsafe fn mutable_string(self) -> id {
-        msg_send![self, mutableString]
-    }
-    
-    unsafe fn length(self) -> NSUInteger {
-        msg_send![self, length]
     }
 }

@@ -1,4 +1,4 @@
-use render::*;
+use makepad_render::*;
 
 use crate::textcursor::*;
 
@@ -26,12 +26,13 @@ pub struct TextBuffer {
     pub keyboard: TextBufferKeyboard,
 }
 
-
-pub const SIGNAL_TEXTBUFFER_LOADED: usize = 1;
-pub const SIGNAL_TEXTBUFFER_MESSAGE_UPDATE: usize = 2;
-pub const SIGNAL_TEXTBUFFER_JUMP_TO_OFFSET: usize = 3;
-pub const SIGNAL_TEXTBUFFER_DATA_UPDATE: usize = 4;
-pub const SIGNAL_TEXTBUFFER_KEYBOARD_UPDATE: usize = 5;
+impl TextBuffer{
+    pub fn status_loaded()->StatusId{uid!()}
+    pub fn status_message_update()->StatusId{uid!()}
+    pub fn status_jump_to_offset()->StatusId{uid!()}
+    pub fn status_data_update()->StatusId{uid!()}
+    pub fn status_keyboard_update()->StatusId{uid!()}
+}
 
 #[derive(Clone, Default)]
 pub struct TextBufferKeyboard {
@@ -424,7 +425,7 @@ impl TextBuffer {
     }
     
     pub fn send_textbuffer_loaded_signal(&self, cx: &mut Cx) {
-        cx.send_signal(self.signal, SIGNAL_TEXTBUFFER_LOADED);
+        cx.send_signal(self.signal, TextBuffer::status_loaded());
     }
     
     pub fn load_from_utf8(&mut self, utf8: &str) {

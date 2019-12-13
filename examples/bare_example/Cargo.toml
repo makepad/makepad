@@ -6,5 +6,5 @@ edition = "2018"
 
 [dependencies]
 
-[dependencies.render]
+[dependencies.makepad-render]
 path="../../render"

@@ -1,58 +1,55 @@
 [package]
-name = "render"
+name = "makepad-render"
 version = "0.1.0"
-authors = ["makepaddev"]
+authors = ["Makepad <info@makepad.nl>"]
 edition = "2018"
+description = "Makepad renderer"
+license = "MIT"
 
 [features]
 ipc=[]
 
 [dependencies]
-font = { path = "./vector/font" }
-geometry = { path = "./vector/geometry" }
-internal_iter = { path = "./vector/internal_iter" }
-shader_ast = {path="./shader_ast"}
+makepad-font = { path = "./vector/font", version = "0.1" }
+makepad-geometry = { path = "./vector/geometry", version = "0.1" }
+makepad-internal-iter = { path = "./vector/internal_iter", version = "0.1" }
+makepad-shader-ast = { path="./shader_ast", version = "0.1" }
 serde = { version = "1.0", features = ["derive"] }
-trapezoidator = { path = "./vector/trapezoidator" }
-ttf_parser = { path = "./vector/ttf_parser" }
-path = { path = "./vector/path" }
-
+makepad-trapezoidator = { path = "./vector/trapezoidator", version = "0.1" }
+makepad-ttf-parser = { path = "./vector/ttf_parser", version = "0.1" }
+makepad-path = { path = "./vector/path", version = "0.1" }
+ 
 [target.x86_64-apple-darwin.dependencies]
 time = "0.1.4"
-libc = "0.2"
-metal = "0.17"
-cocoa = "0.19"
-core-graphics = "0.17.3"
-objc-foundation = "0.1"
-objc_id = "0.1"
 objc = "0.2"
+bitflags = "1.2.1"
 
 [target.x86_64-unknown-linux-gnu.dependencies]
-makepad-glx-sys = { path = "./bind/glx-sys" }
-X11-sys = { path = "./bind/X11-sys" }
-libc = "*"
-gl = "*"
+makepad-glx-sys = { path = "./bind/glx-sys", version = "0.1" }
+makepad-x11-sys = { path = "./bind/x11-sys", version = "0.1" }
+libc = "0.2"
+gl = "0.14"
 time = "0.1.4"
 
 [target.armv7-unknown-linux-gnueabihf.dependencies]
-makepad-glx-sys = { path = "./bind/glx-sys" }
-X11-sys = { path = "./bind/X11-sys" }
-libc = "*"
-gl = "*"
+makepad-glx-sys = { path = "./bind/glx-sys", version = "0.1" }
+makepad-x11-sys = { path = "./bind/x11-sys", version = "0.1" }
+libc = "0.2"
+gl = "0.14"
 time = "0.1.4"
 
 [target.x86_64-pc-windows-gnu.dependencies]
-wio = "*"
+wio = "0.2"
 time = "0.1.4"
 
 [target.x86_64-pc-windows-gnu.dependencies.winapi]
-version = "*"
+version = "0.3"
 features = ["dwmapi", "libloaderapi", "shellscalingapi", "winuser", "winbase", "d3d11", "d3d11sdklayers", "d3dcommon", "d3dcompiler", "dxgi1_2", "dxgiformat", "dxgitype", "winerror"]
 
 [target.x86_64-pc-windows-msvc.dependencies]
-wio = "*"
+wio = "0.2"
 time = "0.1.4"
 
 [target.x86_64-pc-windows-msvc.dependencies.winapi]
-version = "*"
+version = "0.3"
 features = ["dwmapi","libloaderapi", "shellscalingapi", "winuser", "winbase", "d3d11", "d3d11sdklayers", "d3dcommon", "d3dcompiler", "dxgi1_2", "dxgiformat", "dxgitype", "winerror"]

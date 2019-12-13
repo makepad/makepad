@@ -4,7 +4,7 @@ use std::{ptr};
 use winapi::um::{libloaderapi, winuser, winbase, dwmapi};
 use winapi::shared::minwindef::{LPARAM, LRESULT, DWORD, WPARAM, BOOL, UINT, FALSE};
 use winapi::shared::ntdef::{NULL};
-use winapi::um::winnt::{LPCWSTR, HRESULT, LPCSTR}; 
+use winapi::um::winnt::{LPCWSTR, HRESULT, LPCSTR};
 use std::ffi::OsStr;
 use std::os::windows::ffi::OsStrExt;
 use std::mem;
@@ -17,7 +17,8 @@ use winapi::um::shellscalingapi::{MDT_EFFECTIVE_DPI, MONITOR_DPI_TYPE, PROCESS_D
 use winapi::um::wingdi::{GetDeviceCaps, LOGPIXELSX};
 use winapi::um::winuser::{MONITOR_DEFAULTTONEAREST, TRACKMOUSEEVENT};
 use winapi::um::uxtheme::MARGINS;
-use std::sync::{Arc, Mutex};
+use std::sync::{Mutex};
+use std::collections::HashMap;
 
 static mut GLOBAL_WIN32_APP: *mut Win32App = 0 as *mut _;
 
@@ -25,15 +26,17 @@ pub struct Win32App {
     pub time_start: u64,
     pub event_callback: Option<*mut dyn FnMut(&mut Win32App, &mut Vec<Event>) -> bool>,
     pub event_recur_block: bool,
-    pub event_loop_running: bool, 
+    pub event_loop_running: bool,
     pub class_name_wstr: Vec<u16>,
     pub all_windows: Vec<HWND>,
     pub timers: Vec<Win32Timer>,
     pub free_timers: Vec<usize>,
-    pub race_signals: Arc<Mutex<Vec<(usize,isize)>>>,
+    pub race_signals: Mutex<Vec<(usize, isize)>>,
     pub loop_block: bool,
     pub dpi_functions: DpiFunctions,
     pub current_cursor: MouseCursor,
+    pub status_to_usize: HashMap<StatusId, usize>,
+    pub usize_to_status: HashMap<usize, StatusId>,
 }
 
 #[derive(Clone)]
@@ -90,7 +93,7 @@ impl Win32App {
         let win32_app = Win32App {
             class_name_wstr: class_name_wstr,
             time_start: precise_time_ns(),
-            race_signals: Arc::new(Mutex::new(Vec::new())),
+            race_signals: Mutex::new(Vec::new()),
             event_callback: None,
             event_recur_block: false,
             event_loop_running: true,
@@ -99,7 +102,9 @@ impl Win32App {
             timers: Vec::new(),
             free_timers: Vec::new(),
             dpi_functions: DpiFunctions::new(),
-            current_cursor: MouseCursor::Default
+            current_cursor: MouseCursor::Default,
+            status_to_usize: HashMap::new(),
+            usize_to_status: HashMap::new(),
         };
         
         win32_app.dpi_functions.become_dpi_aware();
@@ -123,10 +128,10 @@ impl Win32App {
             );
             
             while self.event_loop_running {
-                 
+                
                 if self.loop_block {
-                    let mut msg = std::mem::MaybeUninit::uninit();   
-                    let ret =  winuser::GetMessageW(msg.as_mut_ptr(), ptr::null_mut(), 0, 0);
+                    let mut msg = std::mem::MaybeUninit::uninit();
+                    let ret = winuser::GetMessageW(msg.as_mut_ptr(), ptr::null_mut(), 0, 0);
                     let msg = msg.assume_init();
                     if ret == 0 {
                         // Only happens if the message is `WM_QUIT`.
@@ -140,7 +145,7 @@ impl Win32App {
                     }
                 }
                 else {
-                    let mut msg = std::mem::MaybeUninit::uninit();   
+                    let mut msg = std::mem::MaybeUninit::uninit();
                     let ret = winuser::PeekMessageW(msg.as_mut_ptr(), ptr::null_mut(), 0, 0, 1);
                     let msg = msg.assume_init();
                     if ret == 0 {
@@ -256,15 +261,30 @@ impl Win32App {
         }
     }
     
-    pub fn post_signal(signal_id: usize, value: usize) {
+    pub fn post_signal(signal: Signal, status: StatusId) {
         unsafe {
             let win32_app = &mut (*GLOBAL_WIN32_APP);
-            if let Ok(mut sigs) = win32_app.race_signals.lock(){
-                if win32_app.all_windows.len()>0 {
-                    winuser::PostMessageW(win32_app.all_windows[0], winuser::WM_USER, signal_id as usize, value as isize);
+            if let Ok(mut sigs) = win32_app.race_signals.lock() {
+                let status_id = if let Some(id) = win32_app.status_to_usize.get(&status) {
+                    *id
                 }
-                else{ // we have no windows
-                    sigs.push((signal_id, value as isize));
+                else {
+                    let id = win32_app.status_to_usize.len();
+                    win32_app.status_to_usize.insert(status, id);
+                    win32_app.usize_to_status.insert(id, status);
+                    id
+                };
+                
+                if win32_app.all_windows.len()>0 {
+                    winuser::PostMessageW(
+                        win32_app.all_windows[0],
+                        winuser::WM_USER,
+                        signal.signal_id as usize,
+                        status_id as isize
+                    );
+                }
+                else { // we have no windows
+                    sigs.push((signal.signal_id as usize, status_id as isize));
                 }
             }
         }
@@ -300,15 +320,15 @@ impl Win32App {
                 MouseCursor::Wait => winuser::IDC_ARROW,
                 MouseCursor::Help => winuser::IDC_HELP,
                 MouseCursor::NotAllowed => winuser::IDC_NO,
-
-                MouseCursor::EResize =>  winuser::IDC_SIZEWE,
+                
+                MouseCursor::EResize => winuser::IDC_SIZEWE,
                 MouseCursor::NResize => winuser::IDC_SIZENS,
                 MouseCursor::NeResize => winuser::IDC_SIZENESW,
                 MouseCursor::NwResize => winuser::IDC_SIZENWSE,
                 MouseCursor::SResize => winuser::IDC_SIZENS,
                 MouseCursor::SeResize => winuser::IDC_SIZENWSE,
                 MouseCursor::SwResize => winuser::IDC_SIZENESW,
-                MouseCursor::WResize =>  winuser::IDC_SIZEWE,
+                MouseCursor::WResize => winuser::IDC_SIZEWE,
                 
                 
                 MouseCursor::NsResize => winuser::IDC_SIZENS,
@@ -398,15 +418,15 @@ impl Win32Window {
             winuser::ShowWindow(hwnd, winuser::SW_SHOW);
             
             (*self.win32_app).dpi_functions.enable_non_client_dpi_scaling(self.hwnd.unwrap());
-
-            if let Ok(mut sigs) = (*self.win32_app).race_signals.lock(){
+            
+            if let Ok(mut sigs) = (*self.win32_app).race_signals.lock() {
                 (*self.win32_app).all_windows.push(hwnd);
-                for sig in sigs.iter(){
+                for sig in sigs.iter() {
                     winuser::PostMessageW(hwnd, winuser::WM_USER, sig.0, sig.1 as isize);
                 }
                 sigs.truncate(0);
             }
-
+            
         }
     }
     
@@ -419,12 +439,12 @@ impl Win32Window {
         
         let window = &mut (*(user_data as *mut Win32Window));
         match msg {
-            winuser::WM_ACTIVATE=>{
-                if wparam&0xffff == winuser::WA_ACTIVE as usize{
-                     window.do_callback(&mut vec![Event::AppFocus]);
+            winuser::WM_ACTIVATE => {
+                if wparam & 0xffff == winuser::WA_ACTIVE as usize {
+                    window.do_callback(&mut vec![Event::AppFocus]);
                 }
-                else{
-                     window.do_callback(&mut vec![Event::AppFocusLost]);
+                else {
+                    window.do_callback(&mut vec![Event::AppFocusLost]);
                 }
             },
             winuser::WM_NCCALCSIZE => {
@@ -702,12 +722,21 @@ impl Win32Window {
                 // }
             },
             winuser::WM_USER => {
-                window.do_callback(&mut vec![
-                    Event::Signal(SignalEvent {
-                        signal_id: wparam as usize,
-                        value: lparam as usize
-                    })
-                ]);
+                let status = if let Ok(_) = (*window.win32_app).race_signals.lock() {
+                    if let Some(status) = (*window.win32_app).usize_to_status.get(&(lparam as usize)) {
+                        Some(*status)
+                    }
+                    else {None}
+                }
+                else {None};
+                if let Some(status) = status{
+                    window.do_callback(&mut vec![
+                        Event::Signal(SignalEvent {
+                            signal: Signal {signal_id: wparam as usize},
+                            status: status
+                        })
+                    ]);
+                }
             },
             winuser::WM_CLOSE => { // close requested
                 let mut events = vec![Event::WindowCloseRequested(WindowCloseRequestedEvent {
@@ -849,7 +878,7 @@ impl Win32Window {
     
     pub fn get_is_maximized(&self) -> bool {
         unsafe {
-            let wp:mem::MaybeUninit<winuser::WINDOWPLACEMENT> = mem::MaybeUninit::uninit();
+            let wp: mem::MaybeUninit<winuser::WINDOWPLACEMENT> = mem::MaybeUninit::uninit();
             let mut wp = wp.assume_init();
             wp.length = mem::size_of::<winuser::WINDOWPLACEMENT>() as u32;
             winuser::GetWindowPlacement(self.hwnd.unwrap(), &mut wp);

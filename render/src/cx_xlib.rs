@@ -1,6 +1,7 @@
 use crate::cx::*;
 use libc;
 use libc::timeval;
+use makepad_x11_sys as X11_sys;
 use std::collections::{HashMap, VecDeque};
 use std::ffi::CString;
 use std::ffi::CStr;
@@ -771,10 +772,10 @@ impl XlibApp {
         }
     }
     
-    pub fn post_signal(signal_id: usize, value: usize) {
+    pub fn post_signal(signal:Signal, status:StatusId) {
         unsafe {
             if let Ok(mut signals) = (*GLOBAL_XLIB_APP).signals.lock() {
-                signals.push(Event::Signal(SignalEvent {signal_id, value}));
+                signals.push(Event::Signal(SignalEvent {signal, status}));
                 //let mut f = unsafe { File::from_raw_fd((*GLOBAL_XLIB_APP).display_fd) };
                 //let _ = write!(&mut f, "\0");
                 // !TODO unblock the select!
@@ -1395,6 +1396,9 @@ impl XlibWindow {
             //return 2.0;
             let display = (*self.xlib_app).display;
             let resource_string = X11_sys::XResourceManagerString(display);
+            if resource_string == std::ptr::null_mut(){
+                return 1.0
+            }
             let db = X11_sys::XrmGetStringDatabase(resource_string);
             let mut ty = mem::MaybeUninit::uninit();
             let mut value = mem::MaybeUninit::uninit();
@@ -1408,7 +1412,7 @@ impl XlibWindow {
             //let ty = ty.assume_init();
             let value = value.assume_init();
             if value.addr == std::ptr::null_mut() {
-                return 2.0; // TODO find some other way to figure it out
+                return 1.0; // TODO find some other way to figure it out
             }
             else {
                 let dpi: f32 = CStr::from_ptr(value.addr).to_str().unwrap().parse().unwrap();

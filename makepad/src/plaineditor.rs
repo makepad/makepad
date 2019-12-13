@@ -1,7 +1,5 @@
-use render::*; 
-
-use crate::textbuffer::*;
-use crate::texteditor::*;
+use makepad_render::*; 
+use makepad_widget::*; 
 
 #[derive(Clone)]  
 pub struct PlainEditor {

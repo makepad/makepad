@@ -16,9 +16,9 @@ impl Cx {
         let mut metal_cx = MetalCx::new();
         
         let mut metal_windows: Vec<MetalWindow> = Vec::new();
-        
+
         self.mtl_compile_all_shaders(&metal_cx);
-        
+
         self.load_theme_fonts();
         
         self.call_event_handler(&mut event_handler, &mut Event::Construct);
@@ -159,7 +159,7 @@ impl Cx {
                         if self.platform.set_menu{
                             self.platform.set_menu = false;
                             if let Some(menu) = &self.platform.last_menu{
-                                cocoa_app.update_app_menu(menu)
+                                cocoa_app.update_app_menu(menu, &self.command_settings)
                             }
                         }
                         
@@ -187,7 +187,7 @@ impl Cx {
                                             self.draw_pass_to_layer(
                                                 *pass_id,
                                                 dpi_factor,
-                                                &metal_window.core_animation_layer,
+                                                metal_window.ca_layer,
                                                 &mut metal_cx,
                                             );
                                             // call redraw if we guessed the dpi wrong on startup
@@ -269,9 +269,9 @@ impl Cx {
         }
     }
     
-    pub fn post_signal(signal: Signal, value: usize) {
+    pub fn post_signal(signal: Signal, status: StatusId) {
         if signal.signal_id != 0{
-            CocoaApp::post_signal(signal.signal_id, value);
+            CocoaApp::post_signal(signal.signal_id, status);
         }
     }
     

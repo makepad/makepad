@@ -143,6 +143,15 @@ pub struct ShFnArg {
     pub ty: String
 }
 
+
+#[inline(never)]
+pub fn sh_fnarg(name:&str, ty:&str)->ShFnArg{
+    ShFnArg{
+        name:name.to_string(),
+        ty:ty.to_string()
+    }
+}
+
 impl ShFnArg {
     pub fn new(name: &str, ty: &str) -> Self {
         Self {
@@ -158,6 +167,17 @@ pub struct ShFn {
     pub args: Vec<ShFnArg>,
     pub ret: String,
     pub block: Option<ShBlock>,
+}
+
+#[inline(never)]
+pub fn sh_fn(name:&str, args:&[ShFnArg], ret:&str, block:Option<ShBlock>)->ShFn{
+    ShFn{
+        name:name.to_string(),
+        args:args.to_vec(),
+        ret:ret.to_string(),
+        block:block
+    }
+    
 }
 
 #[derive(Clone, Hash, PartialEq)]
@@ -223,6 +243,16 @@ pub struct ShVar {
     pub store: ShVarStore
 }
 
+
+#[inline(never)]
+pub fn sh_var(name:&str, ty:&str, store:ShVarStore)->ShVar{
+    ShVar{
+        name:name.to_string(),
+        ty:ty.to_string(),
+        store:store
+    }
+}
+
 #[derive(Clone, Hash, PartialEq)]
 pub struct ShConst {
     pub name: String,
@@ -277,7 +307,7 @@ pub enum ShExpr {
 }
 
 #[derive(Clone, Hash, PartialEq)]
-pub enum ShBinOp {
+pub enum ShOp {
     Add,
     Sub,
     Mul,
@@ -308,37 +338,37 @@ pub enum ShBinOp {
     ShrEq
 }
 
-impl ShBinOp {
+impl ShOp {
     pub fn to_string(&self) -> &str {
         match self {
-            ShBinOp::Add => "+",
-            ShBinOp::Sub => "-",
-            ShBinOp::Mul => "*",
-            ShBinOp::Div => "/",
-            ShBinOp::Rem => "%",
-            ShBinOp::And => "&&",
-            ShBinOp::Or => "||",
-            ShBinOp::BitXor => "^",
-            ShBinOp::BitAnd => "&",
-            ShBinOp::BitOr => "|",
-            ShBinOp::Shl => "<<",
-            ShBinOp::Shr => ">>",
-            ShBinOp::Eq => "==",
-            ShBinOp::Lt => "<",
-            ShBinOp::Le => "<=",
-            ShBinOp::Ne => "!=",
-            ShBinOp::Ge => ">=",
-            ShBinOp::Gt => ">",
-            ShBinOp::AddEq => "+=",
-            ShBinOp::SubEq => "-=",
-            ShBinOp::MulEq => "*=",
-            ShBinOp::DivEq => "/=",
-            ShBinOp::RemEq => "%=",
-            ShBinOp::BitXorEq => "^=",
-            ShBinOp::BitAndEq => "&=",
-            ShBinOp::BitOrEq => "|=",
-            ShBinOp::ShlEq => "<<=",
-            ShBinOp::ShrEq => ">>=",
+            ShOp::Add => "+",
+            ShOp::Sub => "-",
+            ShOp::Mul => "*",
+            ShOp::Div => "/",
+            ShOp::Rem => "%",
+            ShOp::And => "&&",
+            ShOp::Or => "||",
+            ShOp::BitXor => "^",
+            ShOp::BitAnd => "&",
+            ShOp::BitOr => "|",
+            ShOp::Shl => "<<",
+            ShOp::Shr => ">>",
+            ShOp::Eq => "==",
+            ShOp::Lt => "<",
+            ShOp::Le => "<=",
+            ShOp::Ne => "!=",
+            ShOp::Ge => ">=",
+            ShOp::Gt => ">",
+            ShOp::AddEq => "+=",
+            ShOp::SubEq => "-=",
+            ShOp::MulEq => "*=",
+            ShOp::DivEq => "/=",
+            ShOp::RemEq => "%=",
+            ShOp::BitXorEq => "^=",
+            ShOp::BitAndEq => "&=",
+            ShOp::BitOrEq => "|=",
+            ShOp::ShlEq => "<<=",
+            ShOp::ShrEq => ">>=",
         }
     }
 }
@@ -348,6 +378,11 @@ pub struct ShId {
     pub name: String
 }
 
+#[inline(never)]
+pub fn sh_id(name:&str)->ShExpr{
+    ShExpr::ShId(ShId{name:name.to_string()})
+}
+
 #[derive(Clone)]
 pub enum ShLit {
     Int(i64),
@@ -355,6 +390,28 @@ pub enum ShLit {
     Str(String),
     Bool(bool)
 }
+
+#[inline(never)]
+pub fn sh_int(val:i64)->ShExpr{
+    ShExpr::ShLit(ShLit::Int(val))
+}
+
+#[inline(never)]
+pub fn sh_fl(val:f64)->ShExpr{
+    ShExpr::ShLit(ShLit::Float(val))
+}
+
+
+#[inline(never)]
+pub fn sh_str(val:&str)->ShExpr{
+    ShExpr::ShLit(ShLit::Str(val.to_string()))
+}
+
+#[inline(never)]
+pub fn sh_bool(val:bool)->ShExpr{
+    ShExpr::ShLit(ShLit::Bool(val))
+}
+
 
 impl Hash for ShLit {
     fn hash<H: Hasher>(&self, state: &mut H) {
@@ -396,11 +453,30 @@ pub struct ShField {
     pub member: String
 }
 
+#[inline(never)]
+pub fn sh_fd(base:ShExpr, member:&str)->ShExpr{
+      ShExpr::ShField(ShField{
+        base:Box::new(base),
+        member:member.to_string()
+    })
+}
+
+
 #[derive(Clone, Hash, PartialEq)]
 pub struct ShIndex {
     pub base: Box<ShExpr>,
     pub index: Box<ShExpr>
 }
+
+#[inline(never)]
+pub fn sh_idx(base:ShExpr, index:ShExpr)->ShExpr{
+      ShExpr::ShIndex(ShIndex{
+        base:Box::new(base),
+        index:Box::new(index)
+    })
+}
+
+
 
 #[derive(Clone, Hash, PartialEq)]
 pub struct ShAssign {
@@ -408,18 +484,45 @@ pub struct ShAssign {
     pub right: Box<ShExpr>
 }
 
+#[inline(never)]
+pub fn sh_asn(left:ShExpr, right:ShExpr)->ShExpr{
+      ShExpr::ShAssign(ShAssign{
+        left:Box::new(left),
+        right:Box::new(right)
+    })
+}
+
 #[derive(Clone, Hash, PartialEq)]
 pub struct ShAssignOp {
     pub left: Box<ShExpr>,
     pub right: Box<ShExpr>,
-    pub op: ShBinOp
+    pub op: ShOp
 }
+
+#[inline(never)]
+pub fn sh_asn_op(left:ShExpr, right:ShExpr, op:ShOp)->ShExpr{
+      ShExpr::ShAssignOp(ShAssignOp{
+        left:Box::new(left),
+        right:Box::new(right),
+        op:op
+    })
+}
+
 
 #[derive(Clone, Hash, PartialEq)]
 pub struct ShBinary {
     pub left: Box<ShExpr>,
     pub right: Box<ShExpr>,
-    pub op: ShBinOp
+    pub op: ShOp
+}
+
+#[inline(never)]
+pub fn sh_bin(left:ShExpr, right:ShExpr, op:ShOp)->ShExpr{
+    ShExpr::ShBinary(ShBinary{
+        left:Box::new(left),
+        right:Box::new(right),
+        op:op
+    })
 }
 
 #[derive(Clone, Hash, PartialEq)]
@@ -443,9 +546,23 @@ pub struct ShUnary {
     pub op: ShUnaryOp
 }
 
+#[inline(never)]
+pub fn sh_unary(expr:ShExpr, op:ShUnaryOp)->ShExpr{
+    ShExpr::ShUnary(ShUnary{
+        expr:Box::new(expr),
+        op:op
+    })
+}
+
+
 #[derive(Clone, Hash, PartialEq)]
 pub struct ShParen {
     pub expr: Box<ShExpr>,
+}
+
+#[inline(never)]
+pub fn sh_par(expr:ShExpr)->ShExpr{
+    ShExpr::ShParen(ShParen{expr:Box::new(expr)})
 }
 
 #[derive(Clone, Hash, PartialEq)]
@@ -455,15 +572,38 @@ pub enum ShStmt {
     ShSemi(ShExpr)
 }
 
+#[inline(never)]
+pub fn sh_sems(expr:ShExpr)->ShStmt{
+    ShStmt::ShSemi(expr)
+}
+
+#[inline(never)]
+pub fn sh_exps(expr:ShExpr)->ShStmt{
+    ShStmt::ShExpr(expr)
+}
+
 #[derive(Clone, Hash, PartialEq)]
 pub struct ShBlock {
-    pub stmts: Vec<Box<ShStmt>>
+    pub stmts: Vec<ShStmt>
+}
+
+#[inline(never)]
+pub fn sh_block(stmts:&[ShStmt])->ShBlock{
+    ShBlock{stmts:stmts.to_vec()}
 }
 
 #[derive(Clone, Hash, PartialEq)]
 pub struct ShCall {
     pub call: String,
-    pub args: Vec<Box<ShExpr>>
+    pub args: Vec<ShExpr>
+}
+
+#[inline(never)]
+pub fn sh_call(call:&str, args:&[ShExpr])->ShExpr{
+    ShExpr::ShCall(ShCall{
+        call:call.to_string(),
+        args:args.to_vec()
+    })
 }
 
 #[derive(Clone, Hash, PartialEq)]
@@ -473,11 +613,38 @@ pub struct ShIf {
     pub else_branch: Option<Box<ShExpr>>,
 }
 
+#[inline(never)]
+pub fn sh_if(cond:ShExpr, then_branch:ShBlock)->ShExpr{
+    ShExpr::ShIf(ShIf{
+        cond:Box::new(cond),
+        then_branch:then_branch,
+        else_branch:None
+    })
+}
+
+#[inline(never)]
+pub fn sh_if_else(cond:ShExpr, then_branch:ShBlock, else_branch:ShExpr)->ShExpr{
+    ShExpr::ShIf(ShIf{
+        cond:Box::new(cond),
+        then_branch:then_branch,
+        else_branch:Some(Box::new(else_branch))
+    })
+}
+
 #[derive(Clone, Hash, PartialEq)]
 pub struct ShWhile {
     pub cond: Box<ShExpr>,
     pub body: ShBlock,
 }
+
+#[inline(never)]
+pub fn sh_while(cond:ShExpr, body:ShBlock)->ShExpr{
+    ShExpr::ShWhile(ShWhile{
+        cond:Box::new(cond),
+        body:body
+    })
+}
+
 
 #[derive(Clone, Hash, PartialEq)]
 pub struct ShForLoop {
@@ -487,10 +654,35 @@ pub struct ShForLoop {
     pub body: ShBlock
 }
 
+#[inline(never)]
+pub fn sh_for(iter:&str, from_ts:ShExpr, to_ts:ShExpr, body:ShBlock)->ShExpr{
+      ShExpr::ShForLoop(ShForLoop{
+        iter:iter.to_string(),
+        from:Box::new(from_ts),
+        to:Box::new(to_ts),
+        body:body
+    })
+}
+
 #[derive(Clone, Hash, PartialEq)]
 pub struct ShReturn {
     pub expr: Option<Box<ShExpr>>
 }
+
+#[inline(never)]
+pub fn sh_ret(expr:ShExpr)->ShExpr{
+    ShExpr::ShReturn(ShReturn{
+        expr:Some(Box::new(expr)),
+    })
+}
+
+#[inline(never)]
+pub fn sh_retn()->ShExpr{
+    ShExpr::ShReturn(ShReturn{
+        expr:None
+    })
+}
+
 
 #[derive(Clone, Hash, PartialEq)]
 pub struct ShBreak {
@@ -505,6 +697,16 @@ pub struct ShLet {
     pub name: String,
     pub ty: String,
     pub init: Box<ShExpr>
+}
+
+
+#[inline(never)]
+pub fn sh_let(name:&str, ty:&str, init:ShExpr)->ShStmt{
+    ShStmt::ShLet(ShLet{
+        name:name.to_string(),
+        ty:ty.to_string(),
+        init:Box::new(init)
+    })
 }
 
 #[derive(Clone)]
@@ -875,7 +1077,7 @@ impl ShBlock {
             for _i in 0..slcx.depth {
                 sl.push_str("  ");
             }
-            match &**stmt {
+            match stmt {
                 ShStmt::ShLet(stmt) => {
                     let out = stmt.sl(slcx) ?;
                     sl.push_str(&out.sl);
