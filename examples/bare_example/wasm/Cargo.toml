@@ -1,0 +1,14 @@
+[package]
+name = "bare_example_wasm"
+version = "0.1.0"
+authors = ["arc"]
+edition = "2018"
+
+[lib]
+path = "../src/main.rs"
+crate-type = ["cdylib"]
+
+[dependencies]
+
+[dependencies.makepad-render]
+path="../../../render"
