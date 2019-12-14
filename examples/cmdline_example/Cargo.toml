@@ -5,3 +5,5 @@ edition = "2018"
 
 [dependencies]
 
+[dependencies.makepad-tinyserde] 
+path="../../render/tinyserde"

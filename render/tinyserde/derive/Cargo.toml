@@ -1,0 +1,18 @@
+[package]
+name = "makepad-tinyserde-derive"
+version = "0.1.0"
+authors = ["Makepad <info@makepad.nl>"]
+edition = "2018"
+description = "tinyserde derive"
+license = "MIT"
+
+[lib]
+proc-macro = true
+
+[dependencies]
+quote = "1.0.2"
+proc-macro2 = "1.0.1"
+
+[dependencies.syn]
+version = "1.0"
+features = ["full"]
