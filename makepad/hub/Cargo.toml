@@ -16,3 +16,4 @@ toml = "0.5"
 serde = { version = "1.0", features = ["derive"] }
 time = "0.1.4"
 #brotli = "3.3.0"
+makepad-tinyserde = {path = "../../render/tinyserde", version = "0.1"}
