@@ -4,15 +4,15 @@ use std::{time, thread};
 use crate::hubmsg::*;
 use crate::hubclient::*;
 use crate::hubrouter::*;
-use serde::{Serialize, Deserialize};
+use makepad_tinyserde::*;
 
-#[derive(Debug, Clone, Serialize,PartialEq, Deserialize)]
+#[derive(Debug, Clone, SerBin, DeBin, PartialEq)]
 pub enum HubServerConfig {
     Offline, // no network connectivity
     Announced, // 0.0.0.0:0
     Network(u16), // 0.0.0.0:port
     Localhost(u16), // 127.0.0.1:port
-    InterfaceV4((u16, [u8; 4]))
+    InterfaceV4(u16, [u8; 4])
 }
 
 pub struct HubServerShared {
@@ -35,7 +35,7 @@ impl HubServer {
             HubServerConfig::Announced=>(SocketAddr::from(([0, 0, 0, 0], 0)),true),
             HubServerConfig::Localhost(port) => (SocketAddr::from(([127, 0, 0, 1], *port)),false),
             HubServerConfig::Network(port) => (SocketAddr::from(([0, 0, 0, 0], *port)),false),
-            HubServerConfig::InterfaceV4((port, ip)) => (SocketAddr::from((*ip, *port)),false),
+            HubServerConfig::InterfaceV4(port, ip) => (SocketAddr::from((*ip, *port)),false),
         };
 
         let listener = if let Ok(listener) = TcpListener::bind(listen_address){listener}else{println!("start_hub_server bind server address");return None};
@@ -83,7 +83,7 @@ impl HubServer {
                             loop {
                                 match read_block_from_tcp_stream(&mut tcp_stream, digest.clone()) {
                                     Ok(msg_buf) => {
-                                        let cth_msg: ToHubMsg = bincode::deserialize(&msg_buf).expect("read_thread hub message deserialize fail - should never happen");
+                                        let cth_msg: ToHubMsg = DeBin::de_bin(&mut 0, &msg_buf);
                                         tx_pump.send((peer_addr.clone(), cth_msg)).expect("tx_pump.send fails - should never happen");
                                     }
                                     Err(e) => {
@@ -119,7 +119,9 @@ impl HubServer {
                                     },
                                     _=>()
                                 }
-                                let msg_buf = bincode::serialize(&htc_msg).expect("write_thread hub message serialize fail");
+                                let mut msg_buf = Vec::new();
+                                htc_msg.ser_bin(&mut msg_buf);
+                                
                                 if let Err(e) = write_block_to_tcp_stream(&mut tcp_stream, &msg_buf, digest.clone()) {
                                     // disconnect the socket and send shutdown
                                     let _ = tcp_stream.shutdown(Shutdown::Both);

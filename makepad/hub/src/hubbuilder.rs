@@ -233,22 +233,22 @@ impl HubBuilder {
                 let key_file = args[2].to_string();
                 let builder = args[3].to_string();
                 let utf8_data = std::fs::read_to_string(key_file).expect("Can't read key file");
-                let digest: Digest = ron::de::from_str(&utf8_data).expect("Can't load key file");
+                //let digest: Digest = ron::de::from_str(&utf8_data).expect("Can't load key file");
                 println!("Starting workspace listening to announce");
-                Self::run_builder_networked(digest, None, &builder, HubLog::None, event_handler);
+               // Self::run_builder_networked(digest, None, &builder, HubLog::None, event_handler);
                 return
             },
             "connect" => {
                 if args.len() != 5 {
                     return print_help();
                 }
-                let addr = args[2].parse().expect("cant parse address");
+               // let addr = args[2].parse().expect("cant parse address");
                 let key_file = args[3].to_string();
                 let builder = args[4].to_string();
                 let utf8_data = std::fs::read_to_string(key_file).expect("Can't read key file");
-                let digest: Digest = ron::de::from_str(&utf8_data).expect("Can't load key file");
+                //let digest: Digest = ron::de::from_str(&utf8_data).expect("Can't load key file");
                 println!("Starting workspace connecting to ip");
-                Self::run_builder_networked(digest, Some(addr), &builder, HubLog::None, event_handler);
+                //Self::run_builder_networked(digest, Some(addr), &builder, HubLog::None, event_handler);
                 return
             },
             "list" => {

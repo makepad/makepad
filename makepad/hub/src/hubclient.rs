@@ -1,11 +1,11 @@
 use crate::hubmsg::*;
 use crate::hubrouter::*;
+use makepad_tinyserde::*;
 
 use std::net::{TcpStream, UdpSocket, SocketAddr, SocketAddrV4, SocketAddrV6, Shutdown};
 use std::io::prelude::*;
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
-use serde::{Serialize, Deserialize};
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 use std::os::unix::io::AsRawFd;
@@ -125,7 +125,7 @@ pub struct HubClient {
     pub tx_write: mpsc::Sender<ToHubMsg>
 }
 
-#[derive(Default, Eq, PartialEq, Debug, Clone, Serialize, Deserialize)]
+#[derive(Default, Eq, PartialEq, Debug, Clone, SerBin, DeBin)]
 pub struct DigestWithData{
     pub digest:Digest,
     pub data: u64
@@ -162,7 +162,7 @@ impl HubClient {
                 loop {
                     match read_block_from_tcp_stream(&mut tcp_stream, digest.clone()) {
                         Ok(msg_buf) => {
-                            let htc_msg: FromHubMsg = bincode::deserialize(&msg_buf).expect("read_thread hub message deserialize fail - version conflict!");
+                            let htc_msg: FromHubMsg = DeBin::de_bin(&mut 0, &msg_buf);
                             hub_log.msg("HubClient received", &htc_msg);
                             tx_read.send(htc_msg).expect("tx_read.send fails - should never happen");
                         },
@@ -198,8 +198,8 @@ impl HubClient {
                         },
                         _ => ()
                     }
-                    
-                    let msg_buf = bincode::serialize(&cth_msg).expect("write_thread hub message serialize fail - should never happen");
+                    let mut msg_buf = Vec::new();
+                    cth_msg.ser_bin(&mut msg_buf);
                     if let Err(e) = write_block_to_tcp_stream(&mut tcp_stream, &msg_buf, digest.clone()) {
                         // disconnect the socket and send shutdown
                         let _ = tcp_stream.shutdown(Shutdown::Both);
@@ -310,7 +310,7 @@ impl HubClient {
 }
 
 
-#[derive(Eq, PartialEq, Debug, Clone, Serialize, Deserialize)]
+#[derive(Eq, PartialEq, Debug, Clone, SerBin, DeBin)]
 pub struct Digest {
     pub buf: [u64; 25]
 }
