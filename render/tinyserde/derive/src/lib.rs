@@ -168,7 +168,6 @@ fn derive_ser_bin_enum(input: &DeriveInput, enumeration: &DataEnum) -> TokenStre
                     }
                 });
             },
-            //_ => return error(variant.span(), "Invalid variant: only simple enum variants without fields are supported"),
         }
     }
     
@@ -278,9 +277,6 @@ pub fn derive_de_bin(input: proc_macro::TokenStream) -> proc_macro::TokenStream 
         },
         _ => error(Span::call_site(), "only structs or enums supported")
     };
-    
-    println!("{}", ts.to_string());
-    
     
     proc_macro::TokenStream::from(ts)
 }
