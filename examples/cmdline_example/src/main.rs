@@ -1,5 +1,5 @@
 use makepad_tinyserde::*;
-
+/*
 #[derive(SerRon, DeRon, PartialEq, Debug)]
 enum TestEnum{
     X{x:u32, y:Option<u32>},
@@ -15,7 +15,6 @@ struct TestStruct{
     v: TestNew,
     w: TestEnum
 }
-
 
 fn main() {
     let x = TestStruct {
@@ -40,7 +39,7 @@ fn main() {
     let y: TestStruct = DeRon::deserialize_ron(&output).expect("can't parse");
     
     println!("{:?}", y);*/
-}
+}*/
 
 /*
 #[derive(SerRon, DeRon, PartialEq, Debug)]
@@ -75,11 +74,11 @@ fn main() {
     println!("{:?}", y);
 }
 */
-/*
+
 #[derive(SerBin, DeBin, PartialEq, Debug)]
 struct TestStruct {
     t: Vec<u8>,
-    y: [u8;3],
+    //y: [u8;3],
     v: String,
     x: f64,
 }
@@ -100,21 +99,20 @@ fn main(){
     
     let mut s = Vec::new();
     
-    let x = TestStruct{x:10.0, v:"hello".to_string(), t:vec![1,2,3,4], y:[1,2,3]};
+    let x = TestStruct{x:10.0, v:"hello".to_string(), t:vec![1,2,3,4]};//, y:[1,2,3]};
     x.ser_bin(&mut s);
     
-    let y: TestStruct = DeBin::de_bin(&mut 0, &s);
+    let y: TestStruct = DeBin::de_bin(&mut 0, &s).expect("Could not parse");
 
     println!("{:?}", y);
     
     let mut s = Vec::new();
     let x = TestEnum::A(TestTuple(3,4));
     x.ser_bin(&mut s);
-    let y: TestEnum = DeBin::de_bin(&mut 0, &s);
+    let y: TestEnum = DeBin::de_bin(&mut 0, &s).expect("Could not parse");
 
     println!("{:?}", y);
     
     // lets deserialize it
     
 }
-*/
