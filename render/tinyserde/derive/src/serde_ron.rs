@@ -11,9 +11,6 @@ use syn::{
     LitInt,
     LitStr,
     Type,
-    // Generics,
-    // WherePredicate,
-    // WhereClause
 };
 use quote::quote;
 use quote::format_ident;
@@ -141,12 +138,28 @@ pub fn derive_ser_ron_enum(input: &DeriveInput, enumeration: &DataEnum) -> Token
                 })
             },
             Fields::Named(fields_named) => {
+                let mut items = Vec::new();
                 let mut field_names = Vec::new();
-                let mut field_strings = Vec::new();
                 for field in &fields_named.named {
-                    if let Some(ident) = &field.ident {
-                        field_strings.push(LitStr::new(&ident.to_string(), ident.span()));
-                        field_names.push(ident);
+                    if let Some(field_name) = &field.ident {
+                        let field_string = LitStr::new(&field_name.to_string(), field_name.span());
+                        if type_is_option(&field.ty) {
+                            items.push(quote!{
+                                if #field_name.is_some(){
+                                    s.field(d+1, #field_string);
+                                    #field_name.ser_ron(d+1, s);
+                                    s.conl();
+                                }
+                            })
+                        }
+                        else{
+                            items.push(quote!{
+                                s.field(d+1, #field_string);
+                                #field_name.ser_ron(d+1, s);
+                                s.conl();
+                            })
+                        }
+                        field_names.push(field_name);
                     }
                 }
                 match_item.push(quote!{
@@ -154,9 +167,7 @@ pub fn derive_ser_ron_enum(input: &DeriveInput, enumeration: &DataEnum) -> Token
                         s.out.push_str(#lit);
                         s.st_pre();
                         #(
-                            s.field(d+1, #field_strings);
-                            #field_names.ser_ron(d+1, s);
-                            s.conl();
+                            #items
                         )*
                         s.st_post(d);
                     }
