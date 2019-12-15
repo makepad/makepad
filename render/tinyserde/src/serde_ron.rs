@@ -570,7 +570,7 @@ impl<T> SerRon for Option<T> where T: SerRon {
     }
 }
 
-impl<T> DeRon for Option<T> where T: DeRon + std::fmt::Debug {
+impl<T> DeRon for Option<T> where T: DeRon {
     fn de_ron(s: &mut DeRonState, i: &mut Chars) -> Result<Self,
     DeRonErr> {
         if let DeRonTok::Ident(name) = &s.tok {

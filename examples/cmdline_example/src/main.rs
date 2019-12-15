@@ -1,15 +1,15 @@
 use makepad_tinyserde::*;
-/*
-#[derive(SerRon, DeRon, PartialEq, Debug)]
+
+#[derive(SerJson, DeJson, PartialEq, Debug)]
 enum TestEnum{
     X{x:u32, y:Option<u32>},
     Y
 }
 
-#[derive(SerRon, DeRon,PartialEq, Debug)]
+#[derive(SerJson, DeJson, PartialEq, Debug)]
 struct TestNew(u32);
 
-#[derive(SerRon,  DeRon,PartialEq, Debug)]
+#[derive(SerJson, DeJson, PartialEq, Debug)]
 struct TestStruct{
     t: [u32;4],
     v: TestNew,
@@ -22,10 +22,10 @@ fn main() {
         v:TestNew(10),
         w:TestEnum::X{x:10,y:None}
     };
-    let output = x.serialize_ron();
-    println!("{}", output);
+    let output = x.serialize_json();
+    println!("{}", output); 
     
-    let y:TestStruct = DeRon::deserialize_ron(&output).expect("can't parse");
+    let y:TestStruct = DeJson::deserialize_json(&output).expect("can't parse");
     println!("{:?}", y);
     // ok . lets serialise Test to a binary
     /*
@@ -39,7 +39,7 @@ fn main() {
     let y: TestStruct = DeRon::deserialize_ron(&output).expect("can't parse");
     
     println!("{:?}", y);*/
-}*/
+}
 
 /*
 #[derive(SerRon, DeRon, PartialEq, Debug)]
@@ -73,7 +73,7 @@ fn main() {
     
     println!("{:?}", y);
 }
-*/
+
 
 #[derive(SerBin, DeBin, PartialEq, Debug)]
 struct TestStruct {
@@ -115,3 +115,4 @@ fn main(){
     // lets deserialize it
     
 }
+*/
