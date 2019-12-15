@@ -1,5 +1,32 @@
 use makepad_tinyserde::*;
 
+fn main() {
+    let root_cargo = match std::fs::read_to_string("Cargo.toml") {
+        Err(_) => {
+            panic!("ERR");
+        },
+        Ok(v) => v
+    };
+    
+    let toml = match TomlParser::parse(&root_cargo) {
+        Err(e) => {
+            println!("HERE@L#I$UJL#");
+            panic!(format!("Parse error {:?}", e));
+        },
+        Ok(v) => v
+    };
+
+    if let Some(Toml::Array(members)) = toml.get("workspace.members") {
+        for member in members {
+            if let Toml::Str(member) = member {
+                println!("{}", member);
+            }
+        }
+    }
+}
+
+
+/*
 #[derive(SerJson, DeJson, PartialEq, Debug)]
 enum TestEnum{
     X{x:u32, y:Option<u32>},
@@ -40,7 +67,7 @@ fn main() {
     
     println!("{:?}", y);*/
 }
-
+*/
 /*
 #[derive(SerRon, DeRon, PartialEq, Debug)]
 struct TestStruct {

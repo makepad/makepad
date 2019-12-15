@@ -13,8 +13,6 @@ use std::sync::{mpsc};
 use std::sync::mpsc::RecvTimeoutError;
 use std::collections::HashMap;
 use std::net::{SocketAddr};
-use std::io::Write;
-
 
 pub struct HubBuilder {
     pub route_send: HubRouteSend,
@@ -671,7 +669,7 @@ impl HubBuilder {
                 process: process,
             });
         };
-        
+         
         route_send.send(ToHubMsg {
             to: HubMsgTo::UI,
             msg: HubMsg::CargoBegin {uid: uid}
@@ -696,10 +694,11 @@ impl HubBuilder {
                         }
                     });
                 }
-/*
-                let mut parsed: serde_json::Result<RustcCompilerMessage> = serde_json::from_str(&line);
+
+                
+                let mut parsed: Result<RustcCompilerMessage, DeJsonErr> = DeJson::deserialize_json(&line);
                 match &mut parsed {
-                    Err(_) => (), //self.hub_log.log(&format!("Json Parse Error {:?} {}", err, line)),
+                    Err(_) => (),//println!("JSON Parse error {:?} {}", e, line),
                     Ok(parsed) => {
                         if let Some(message) = &mut parsed.message { //.spans;
                             let spans = &message.spans;
@@ -722,7 +721,7 @@ impl HubBuilder {
                                 let col = span.column_start as usize;
                                 if let Some(rendered) = &message.rendered {
                                     let lines: Vec<&str> = rendered.split('\n').collect();
-                                    if lines.len() >= 1 {
+                                    if lines.len() > 1 {
                                         if let Some(start) = lines[1].find("--> ") {
                                             if let Some(end) = lines[1].find(":") {
                                                 path = lines[1].get((start + 4)..end).unwrap().to_string();
@@ -797,7 +796,7 @@ impl HubBuilder {
                             }
                         }
                     }
-                }*/
+                }
             }
             else { // process terminated
                 break;
@@ -864,14 +863,14 @@ impl HubBuilder {
                 
                 let uncomp_len = strip.len();
                 let mut enc = snap::Encoder::new();
-                
+                /*
                 let mut result = Vec::new();
                 {
                     let mut writer = brotli::CompressorWriter::new(&mut result, 4096 /* buffer size */, 11, 22);
                     writer.write_all(&strip).expect("Can't write data");
-                }
+                }*/
 
-                let comp_len = result.len();//if let Ok(compressed) = enc.compress_vec(&strip) {compressed.len()}else {0};
+                let comp_len = if let Ok(compressed) = enc.compress_vec(&strip) {compressed.len()}else {0};
                 
                 if let Err(_) = fs::write(&filepath, strip) {
                     return Err(self.error(uid, format!("Cannot write stripped wasm {}", filepath)));
@@ -889,9 +888,7 @@ impl HubBuilder {
     }
     
     pub fn read_packages(&mut self, uid: HubUid) -> Vec<(String, String)> {
-        println!("READ PKG");
-        return vec![]
-        /*
+
         let mut packages = Vec::new();
         let workspaces = Arc::clone(&self.workspaces);
         if let Ok(workspaces) = workspaces.lock() {
@@ -904,70 +901,43 @@ impl HubBuilder {
                     },
                     Ok(v) => v
                 };
-                let value = match root_cargo.parse::<Value>() {
+                
+                let toml = match TomlParser::parse(&root_cargo) {
                     Err(e) => {
                         self.error(uid, format!("Cannot parse {} {:?}", vis_path, e));
                         continue;
                     },
                     Ok(v) => v
                 };
-                let mut ws_members = Vec::new();
-                if let Value::Table(table) = &value {
-                    if let Some(table) = table.get("workspace") {
-                        if let Value::Table(table) = table {
-                            if let Some(members) = table.get("members") {
-                                if let Value::Array(members) = members {
-                                    for member in members {
-                                        if let Value::String(member) = member {
-                                            ws_members.push(member);
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    else if let Some(table) = table.get("package") {
-                        if let Value::Table(table) = table {
-                            if let Some(name) = table.get("name") {
-                                if let Value::String(name) = name {
-                                    packages.push((workspace.clone(), name.clone()));
-                                }
-                            }
-                        }
-                    }
-                }
-                for member in ws_members {
-                    let file_path = format!("{}/{}/Cargo.toml", abs_path, member);
-                    let vis_path = format!("{}/{}/{}/Cargo.toml", self.builder, workspace, member);
-                    let cargo = match std::fs::read_to_string(&file_path) {
-                        Err(_) => {
-                            self.error(uid, format!("Cannot read cargo {}", vis_path));
-                            continue;
-                        },
-                        Ok(v) => v
-                    };
-                    let value = match cargo.parse::<Value>() {
-                        Err(e) => {
-                            self.error(uid, format!("Cannot parse cargo {} {:?}", vis_path, e));
-                            continue;
-                        },
-                        Ok(v) => v
-                    };
-                    if let Value::Table(table) = &value {
-                        if let Some(table) = table.get("package") {
-                            if let Value::Table(table) = table {
-                                if let Some(name) = table.get("name") {
-                                    if let Value::String(name) = name {
-                                        packages.push((workspace.clone(), name.clone()));
-                                    }
-                                }
+
+                if let Some(Toml::Array(members)) = toml.get("workspace.members") {
+                    for member in members {
+                        if let Toml::Str(member) = member {
+                            let file_path = format!("{}/{}/Cargo.toml", abs_path, member);
+                            let vis_path = format!("{}/{}/{}/Cargo.toml", self.builder, workspace, member);
+                            let cargo = match std::fs::read_to_string(&file_path) {
+                                Err(_) => {
+                                    self.error(uid, format!("Cannot read cargo {}", vis_path));
+                                    continue;
+                                },
+                                Ok(v) => v
+                            };
+                            let toml = match TomlParser::parse(&cargo) {
+                                Err(e) => {
+                                    self.error(uid, format!("Cannot parse cargo {} {:?}", vis_path, e));
+                                    continue;
+                                },
+                                Ok(v) => v
+                            };
+                            if let Some(Toml::Str(name)) = toml.get("package.name") {
+                                packages.push((workspace.clone(), name.clone()));
                             }
                         }
                     }
                 }
             }
         }
-        return packages*/
+        return packages
     }
     
     pub fn file_read(&mut self, from: HubAddr, uid: HubUid, path: &str) {
@@ -1143,25 +1113,26 @@ fn de_relativize_path(path: &str) -> String {
     out.join("/")
 }
 
-/*
+
 // rust compiler output json structs
-#[derive(Clone, Deserialize, Default)]
+#[derive(Clone, DeJson, Default)]
 pub struct RustcTarget {
     kind: Vec<String>,
     crate_types: Vec<String>,
     name: String,
     src_path: String,
-    edition: String
+    edition: String,
+    doctest: bool
 }
 
-#[derive(Clone, Deserialize, Default)]
+#[derive(Clone, DeJson, Default)]
 pub struct RustcText {
     text: String,
     highlight_start: u32,
     highlight_end: u32
 }
 
-#[derive(Clone, Deserialize, Default)]
+#[derive(Clone, DeJson, Default)]
 pub struct RustcSpan {
     file_name: String,
     byte_start: u32,
@@ -1174,25 +1145,25 @@ pub struct RustcSpan {
     text: Vec<RustcText>,
     label: Option<String>,
     suggested_replacement: Option<String>,
-    sugggested_applicability: Option<String>,
+    suggestion_applicability: Option<String>,
     expansion: Option<Box<RustcExpansion>>,
     level: Option<String>
 }
 
-#[derive(Clone, Deserialize, Default)]
+#[derive(Clone, DeJson, Default)]
 pub struct RustcExpansion {
     span: Option<RustcSpan>,
     macro_decl_name: String,
     def_site_span: Option<RustcSpan>
 }
 
-#[derive(Clone, Deserialize, Default)]
+#[derive(Clone, DeJson, Default)]
 pub struct RustcCode {
     code: String,
     explanation: Option<String>
 }
 
-#[derive(Clone, Deserialize, Default)]
+#[derive(Clone, DeJson, Default)]
 pub struct RustcMessage {
     message: String,
     code: Option<RustcCode>,
@@ -1202,7 +1173,7 @@ pub struct RustcMessage {
     rendered: Option<String>
 }
 
-#[derive(Clone, Deserialize, Default)]
+#[derive(Clone, DeJson, Default)]
 pub struct RustcProfile {
     opt_level: String,
     debuginfo: Option<u32>,
@@ -1211,10 +1182,14 @@ pub struct RustcProfile {
     test: bool
 }
 
-#[derive(Clone, Deserialize, Default)]
+#[derive(Clone, DeJson, Default)]
 pub struct RustcCompilerMessage {
     reason: String,
     package_id: String,
+    linked_libs:Option<Vec<String>>,
+    linked_paths:Option<Vec<String>>,
+    cfgs:Option<Vec<String>>,
+    env:Option<Vec<String>>,
     target: Option<RustcTarget>,
     message: Option<RustcMessage>,
     profile: Option<RustcProfile>,
@@ -1222,4 +1197,4 @@ pub struct RustcCompilerMessage {
     filenames: Option<Vec<String>>,
     executable: Option<String>,
     fresh: Option<bool>
-}*/
+}
