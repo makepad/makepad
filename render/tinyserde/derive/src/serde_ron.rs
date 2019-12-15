@@ -72,7 +72,7 @@ pub fn derive_de_ron_named(ident:TokenStream, fields: &FieldsNamed) -> TokenStre
             unwraps.push(quote! {if let Some(t) = #localvar {t}else {None}})
         }
         else {
-            unwraps.push(quote! {if let Some(t) = #localvar {t}else {return Err(s.nf(#fieldstring))}})
+            unwraps.push(quote! {if let Some(t) = #localvar {t}else {return Err(s.err_nf(#fieldstring))}})
         }
         
         field_names.push(fieldname);
@@ -91,7 +91,7 @@ pub fn derive_de_ron_named(ident:TokenStream, fields: &FieldsNamed) -> TokenStre
                 #(
                     #field_strings => #local_vars = Some(DeRon::de_ron(s, i) ?),
                 ) *
-                _ => s.unexp(&key) ?
+                _ => return Err(s.err_exp(&key))
             }
             s.eat_comma_paren(i) ?
         }
@@ -112,7 +112,7 @@ pub fn derive_de_ron_struct(input: &DeriveInput, fields: &FieldsNamed) -> TokenS
     quote!{
         impl #impl_generics DeRon for #ident #ty_generics #bounded_where_clause {
             fn de_ron(s: &mut makepad_tinyserde::DeRonState, i: &mut std::str::Chars) -> Result<Self,
-            String> {
+            DeRonErr> {
                 Ok({#body})
             }
         }
@@ -255,14 +255,14 @@ pub fn derive_de_ron_enum(input: &DeriveInput, enumeration: &DataEnum) -> TokenS
     
     quote! {
         impl #impl_generics DeRon for #ident #ty_generics #bounded_where_clause {
-            fn de_ron(s: &mut DeRonState, i: &mut std::str::Chars) -> Result<Self,String> {
+            fn de_ron(s: &mut DeRonState, i: &mut std::str::Chars) -> Result<Self,DeRonErr> {
                 // we are expecting an identifier
                 let id = s.ident(i)?;
                 Ok(match id.as_ref() {
                     #(
                         #match_item
                     ) *
-                    _ => return Err(s.invenum(&id))
+                    _ => return Err(s.err_enum(&id))
                 })
             }
         }
@@ -318,7 +318,7 @@ pub fn derive_de_ron_struct_unnamed(input: &DeriveInput, fields:&FieldsUnnamed) 
 
     quote! {
         impl #impl_generics DeRon for #ident #ty_generics #bounded_where_clause {
-            fn de_ron(s: &mut makepad_tinyserde::DeRonState, i: &mut std::str::Chars) -> Result<Self,String> {
+            fn de_ron(s: &mut makepad_tinyserde::DeRonState, i: &mut std::str::Chars) -> Result<Self,DeRonErr> {
                 s.paren_open(i)?;
                 let r = Self(
                     #(

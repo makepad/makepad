@@ -50,7 +50,7 @@ pub trait SerRon {
 pub trait DeRon: Sized {
     
     fn deserialize_ron(input: &str) -> Result<Self,
-    String> {
+    DeRonErr> {
         let mut state = DeRonState::default();
         let mut chars = input.chars();
         state.next(&mut chars);
@@ -59,7 +59,7 @@ pub trait DeRon: Sized {
     }
     
     fn de_ron(s: &mut DeRonState, i: &mut Chars) -> Result<Self,
-    String>;
+    DeRonErr>;
 }
 
 #[derive(PartialEq, Debug)]
@@ -91,31 +91,68 @@ impl Default for DeRonTok {
 pub struct DeRonState {
     cur: char,
     tok: DeRonTok,
+    line: usize,
+    col: usize
+}
+
+pub struct DeRonErr{
+    pub msg:String,
+    pub line:usize,
+    pub col:usize
+}
+
+impl std::fmt::Debug for DeRonErr {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Ron Deserialize error: {}, line:{} col:{}", self.msg, self.line+1, self.col+1)
+    }
 }
 
 impl DeRonState {
     pub fn next(&mut self, i: &mut Chars) {
         if let Some(c) = i.next() {
             self.cur = c;
+            if self.cur == '\n'{
+                self.line += 1;
+                self.col = 0;
+            }
+            else{
+                self.col = 0;
+            }
         }
         else {
             self.cur = '\0';
         }
     }
     
-    pub fn unexp(&self, name: &str) -> Result<(), String> {
-        Err(format!("Unexpected key {}", name))
+    pub fn err_exp(&self, name: &str) -> DeRonErr {
+        DeRonErr{msg:format!("Unexpected key {}", name), line:self.line, col:self.col}
     }
     
-    pub fn nf(&self, name: &str) -> String {
-        format!("Key not defined {}", name)
+    pub fn err_nf(&self, name: &str) -> DeRonErr {
+        DeRonErr{msg:format!("Key not found {}", name), line:self.line, col:self.col}
     }
     
-    pub fn invenum(&self, name: &str) -> String {
-        format!("Enum option not defined {}", name)
+    pub fn err_enum(&self, name: &str) -> DeRonErr {
+        DeRonErr{msg:format!("Enum not defined {}", name), line:self.line, col:self.col}
     }
     
-    pub fn eat_comma_paren(&mut self, i: &mut Chars) -> Result<(), String> {
+     pub fn err_token(&self, what:&str) -> DeRonErr {
+        DeRonErr{msg:format!("Unexpected token {:?} expected {} ", self.tok, what), line:self.line, col:self.col}
+    }
+
+    pub fn err_range(&self, what:&str) -> DeRonErr {
+        DeRonErr{msg:format!("Value out of range {} ", what), line:self.line, col:self.col}
+    }
+
+    pub fn err_type(&self, what:&str) -> DeRonErr {
+        DeRonErr{msg:format!("Token wrong type {} ", what), line:self.line, col:self.col}
+    }
+
+    pub fn err_parse(&self, what:&str) -> DeRonErr {
+        DeRonErr{msg:format!("Cannot parse {} ", what), line:self.line, col:self.col}
+    }
+    
+    pub fn eat_comma_paren(&mut self, i: &mut Chars) -> Result<(), DeRonErr> {
         match self.tok {
             DeRonTok::Comma => {
                 self.next_tok(i) ?;
@@ -125,12 +162,12 @@ impl DeRonState {
                 Ok(())
             }
             _ => {
-                Err(format!("Unexpected token {:?}", self.tok))
+                Err(self.err_token(", or )"))
             }
         }
     }
     
-    pub fn eat_comma_block(&mut self, i: &mut Chars) -> Result<(), String> {
+    pub fn eat_comma_block(&mut self, i: &mut Chars) -> Result<(), DeRonErr> {
         match self.tok {
             DeRonTok::Comma => {
                 self.next_tok(i) ?;
@@ -140,12 +177,12 @@ impl DeRonState {
                 Ok(())
             }
             _ => {
-                Err(format!("Unexpected token {:?}", self.tok))
+                Err(self.err_token(", or ]"))
             }
         }
     }
     
-    pub fn eat_comma_curly(&mut self, i: &mut Chars) -> Result<(), String> {
+    pub fn eat_comma_curly(&mut self, i: &mut Chars) -> Result<(), DeRonErr> {
         match self.tok {
             DeRonTok::Comma => {
                 self.next_tok(i) ?;
@@ -155,24 +192,24 @@ impl DeRonState {
                 Ok(())
             }
             _ => {
-                Err(format!("Unexpected token {:?}", self.tok))
+                Err(self.err_token(", or }"))
             }
         }
     }
     
-    pub fn colon(&mut self, i: &mut Chars) -> Result<(), String> {
+    pub fn colon(&mut self, i: &mut Chars) -> Result<(), DeRonErr> {
         match self.tok {
             DeRonTok::Colon => {
                 self.next_tok(i) ?;
                 Ok(())
             },
             _ => {
-                Err(format!("Unexpected token {:?}", self.tok))
+                Err(self.err_token(":"))
             }
         }
     }
     
-    pub fn ident(&mut self, i: &mut Chars) -> Result<String, String> {
+    pub fn ident(&mut self, i: &mut Chars) -> Result<String, DeRonErr> {
         match &mut self.tok {
             DeRonTok::Ident(val) => {
                 let mut ret = String::new();
@@ -181,12 +218,12 @@ impl DeRonState {
                 Ok(ret)
             },
             _ => {
-                Err(format!("Unexpected token {:?}", self.tok))
+                Err(self.err_token("Identifier"))
             }
         }
     }
     
-    pub fn next_colon(&mut self, i: &mut Chars) -> Result<(), String> {
+    pub fn next_colon(&mut self, i: &mut Chars) -> Result<(), DeRonErr> {
         self.next_tok(i) ?;
         self.colon(i) ?;
         Ok(())
@@ -203,85 +240,85 @@ impl DeRonState {
         }
     }
     
-    pub fn paren_open(&mut self, i: &mut Chars) -> Result<(), String> {
+    pub fn paren_open(&mut self, i: &mut Chars) -> Result<(), DeRonErr> {
         if self.tok == DeRonTok::ParenOpen {
             self.next_tok(i) ?;
             return Ok(())
         }
-        Err(format!("Next token not paren open {:?}", self.tok))
+        Err(self.err_token("("))
     }
     
     
-    pub fn paren_close(&mut self, i: &mut Chars) -> Result<(), String> {
+    pub fn paren_close(&mut self, i: &mut Chars) -> Result<(), DeRonErr> {
         if self.tok == DeRonTok::ParenClose {
             self.next_tok(i) ?;
             return Ok(())
         }
-        Err(format!("Next token not paren close {:?}", self.tok))
+        Err(self.err_token(")"))
     }
     
-    pub fn block_open(&mut self, i: &mut Chars) -> Result<(), String> {
+    pub fn block_open(&mut self, i: &mut Chars) -> Result<(), DeRonErr> {
         if self.tok == DeRonTok::BlockOpen {
             self.next_tok(i) ?;
             return Ok(())
         }
-        Err(format!("Next token not block open {:?}", self.tok))
+        Err(self.err_token("["))
     }
     
     
-    pub fn block_close(&mut self, i: &mut Chars) -> Result<(), String> {
+    pub fn block_close(&mut self, i: &mut Chars) -> Result<(), DeRonErr> {
         if self.tok == DeRonTok::BlockClose {
             self.next_tok(i) ?;
             return Ok(())
         }
-        Err(format!("Next token not block close {:?}", self.tok))
+        Err(self.err_token("]"))
     }
     
-    pub fn curly_open(&mut self, i: &mut Chars) -> Result<(), String> {
+    pub fn curly_open(&mut self, i: &mut Chars) -> Result<(), DeRonErr> {
         if self.tok == DeRonTok::CurlyOpen {
             self.next_tok(i) ?;
             return Ok(())
         }
-        Err(format!("Next token not curly open {:?}", self.tok))
+        Err(self.err_token("{"))
     }
     
     
-    pub fn curly_close(&mut self, i: &mut Chars) -> Result<(), String> {
+    pub fn curly_close(&mut self, i: &mut Chars) -> Result<(), DeRonErr> {
         if self.tok == DeRonTok::CurlyClose {
             self.next_tok(i) ?;
             return Ok(())
         }
-        Err(format!("Next token not curly close {:?}", self.tok))
+        Err(self.err_token("}"))
     }
     
     
-    pub fn u64_range(&mut self, max: u64) -> Result<u64, String> {
+    pub fn u64_range(&mut self, max: u64) -> Result<u64, DeRonErr> {
         if let DeRonTok::U64(value) = self.tok {
             if value > max {
-                return Err(format!("Value out of range {}>{}", value, max))
+                return Err(self.err_range(&format!("{}>{}", value, max)))
             }
             return Ok(value)
         }
-        Err(format!("Next token not a integer<{} {:?}", max, self.tok))
+        Err(self.err_token("unsigned integer"))
     }
     
-    pub fn i64_range(&mut self, min: i64, max: i64) -> Result<i64, String> {
+    pub fn i64_range(&mut self, min: i64, max: i64) -> Result<i64, DeRonErr> {
         if let DeRonTok::I64(value) = self.tok {
             if value< min {
-                return Err(format!("Value out of range {}<{}", value, min))
+                return Err(self.err_range(&format!("{}<{}", value, min)))
             }
             return Ok(value)
         }
         if let DeRonTok::U64(value) = self.tok {
             if value as i64 > max {
-                return Err(format!("Value out of range {}>{}", value, max))
+                return Err(self.err_range(&format!("{}>{}", value, max)))
             }
             return Ok(value as i64)
         }
-        Err(format!("Next token not a signed integer {:?}", self.tok))
+        Err(self.err_token("signed integer"))
     }
     
-    pub fn as_f64(&mut self) -> Result<f64, String> {
+    pub fn as_f64(&mut self) -> Result<f64, DeRonErr> {
         if let DeRonTok::I64(value) = self.tok {
             return Ok(value as f64)
         }
@@ -291,26 +328,26 @@ impl DeRonState {
         if let DeRonTok::F64(value) = self.tok {
             return Ok(value)
         }
-        Err(format!("Next token not a number {:?}", self.tok))
+        Err(self.err_token("floating point"))
     }
     
-    pub fn as_bool(&mut self) -> Result<bool, String> {
+    pub fn as_bool(&mut self) -> Result<bool, DeRonErr> {
         if let DeRonTok::Bool(value) = self.tok {
             return Ok(value)
         }
-        Err(format!("Next token not a boolean {:?}", self.tok))
+        Err(self.err_token("boolean"))
     }
     
-    pub fn as_string(&mut self) -> Result<String, String> {
+    pub fn as_string(&mut self) -> Result<String, DeRonErr> {
         if let DeRonTok::Str(value) = &mut self.tok {
             let mut val = String::new();
             std::mem::swap(&mut val, value);
             return Ok(val)
         }
-        Err(format!("Next token not a string {:?}", self.tok))
+        Err(self.err_token("string"))
     }
     
-    pub fn next_tok(&mut self, i: &mut Chars) -> Result<(), String> {
+    pub fn next_tok(&mut self, i: &mut Chars) -> Result<(), DeRonErr> {
         while self.cur == '\n' || self.cur == '\r' || self.cur == '\t' || self.cur == ' ' {
             self.next(i);
         }
@@ -385,7 +422,7 @@ impl DeRonState {
                         return Ok(())
                     }
                     else {
-                        return Err(format!("cannot parse number {}", num));
+                        return Err(self.err_parse("number"));
                     }
                 }
                 else {
@@ -395,7 +432,7 @@ impl DeRonState {
                             return Ok(())
                         }
                         else {
-                            return Err(format!("cannot parse number {}", num));
+                            return Err(self.err_parse("number"));
                         }
                     }
                     if let Ok(num) = num.parse() {
@@ -403,7 +440,7 @@ impl DeRonState {
                         return Ok(())
                     }
                     else {
-                        return Err(format!("cannot parse number {}", num));
+                        return Err(self.err_parse("number"));
                     }
                 }
             },
@@ -434,7 +471,7 @@ impl DeRonState {
                         self.next(i);
                     }
                     if self.cur == '\0' {
-                        return Err(format!("Unexpected end of string"));
+                        return Err(self.err_parse("string"));
                     }
                     val.push(self.cur);
                     self.next(i);
@@ -444,7 +481,7 @@ impl DeRonState {
                 return Ok(())
             },
             _ => {
-                return Err(format!("Unexpected token {}", self.cur));
+                return Err(self.err_token("tokenizer"));
             }
         }
     }
@@ -460,7 +497,7 @@ macro_rules!impl_ser_de_ron_unsigned {
         
         impl DeRon for $ ty {
             fn de_ron(s: &mut DeRonState, i: &mut Chars) -> Result< $ ty,
-            String> {
+            DeRonErr> {
                 //s.is_prefix(p, i) ?;
                 let val = s.u64_range( $ max as u64) ?;
                 s.next_tok(i) ?;
@@ -480,7 +517,7 @@ macro_rules!impl_ser_de_ron_signed {
         
         impl DeRon for $ ty {
             fn de_ron(s: &mut DeRonState, i: &mut Chars) -> Result< $ ty,
-            String> {
+            DeRonErr> {
                 //s.is_prefix(p, i) ?;
                 let val = s.i64_range( $ min as i64, $ max as i64) ?;
                 s.next_tok(i) ?;
@@ -500,7 +537,7 @@ macro_rules!impl_ser_de_ron_float {
         
         impl DeRon for $ ty {
             fn de_ron(s: &mut DeRonState, i: &mut Chars) -> Result< $ ty,
-            String> {
+            DeRonErr> {
                 //s.is_prefix(p, i) ?;
                 let val = s.as_f64() ?;
                 s.next_tok(i) ?;
@@ -534,7 +571,7 @@ impl<T> SerRon for Option<T> where T: SerRon {
 
 impl<T> DeRon for Option<T> where T: DeRon + std::fmt::Debug {
     fn de_ron(s: &mut DeRonState, i: &mut Chars) -> Result<Self,
-    String> {
+    DeRonErr> {
         if let DeRonTok::Ident(name) = &s.tok {
             if name == "None" {
                 s.next_tok(i) ?;
@@ -557,7 +594,7 @@ impl SerRon for bool {
 }
 
 impl DeRon for bool {
-    fn de_ron(s: &mut DeRonState, i: &mut Chars) -> Result<bool, String> {
+    fn de_ron(s: &mut DeRonState, i: &mut Chars) -> Result<bool, DeRonErr> {
         let val = s.as_bool() ?;
         s.next_tok(i) ?;
         return Ok(val);
@@ -578,7 +615,7 @@ impl SerRon for String {
 }
 
 impl DeRon for String {
-    fn de_ron(s: &mut DeRonState, i: &mut Chars) -> Result<String, String> {
+    fn de_ron(s: &mut DeRonState, i: &mut Chars) -> Result<String, DeRonErr> {
         let val = s.as_string() ?;
         s.next_tok(i) ?;
         return Ok(val);
@@ -599,7 +636,7 @@ impl<T> SerRon for Vec<T> where T: SerRon {
 }
 
 impl<T> DeRon for Vec<T> where T: DeRon {
-    fn de_ron(s: &mut DeRonState, i: &mut Chars) -> Result<Vec<T>, String> {
+    fn de_ron(s: &mut DeRonState, i: &mut Chars) -> Result<Vec<T>, DeRonErr> {
         let mut out = Vec::new();
         s.block_open(i) ?;
         
@@ -626,7 +663,7 @@ impl<T> SerRon for [T] where T: SerRon {
     }
 }
 
-unsafe fn de_ron_array_impl_inner<T>(top: *mut T, count: usize, s: &mut DeRonState, i: &mut Chars) -> Result<(), String> where T:DeRon{
+unsafe fn de_ron_array_impl_inner<T>(top: *mut T, count: usize, s: &mut DeRonState, i: &mut Chars) -> Result<(), DeRonErr> where T:DeRon{
     s.paren_open(i) ?;
     for c in 0..count {
         top.add(c).write(DeRon::de_ron(s, i) ?);
@@ -641,7 +678,7 @@ macro_rules!de_ron_array_impl {
         $(
         impl<T> DeRon for [T; $count] where T: DeRon {
             fn de_ron(s: &mut DeRonState, i: &mut Chars) -> Result<Self,
-            String> {
+            DeRonErr> {
                 unsafe{
                     let mut to = std::mem::MaybeUninit::<[T; $count]>::uninit();
                     let top: *mut T = std::mem::transmute(&mut to);
@@ -656,7 +693,7 @@ macro_rules!de_ron_array_impl {
 
 de_ron_array_impl!(2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32);
 
-fn de_ron_comma_paren<T>(s: &mut DeRonState, i: &mut Chars) -> Result<T, String> where T: DeRon {
+fn de_ron_comma_paren<T>(s: &mut DeRonState, i: &mut Chars) -> Result<T, DeRonErr> where T: DeRon {
     let t = DeRon::de_ron(s, i);
     s.eat_comma_paren(i) ?;
     t
@@ -675,7 +712,7 @@ B: SerRon {
 
 impl<A, B> DeRon for (A, B) where A: DeRon,
 B: DeRon {
-    fn de_ron(s: &mut DeRonState, i: &mut Chars) -> Result<(A, B), String> {
+    fn de_ron(s: &mut DeRonState, i: &mut Chars) -> Result<(A, B), DeRonErr> {
         s.paren_open(i) ?;
         let r = (de_ron_comma_paren(s, i) ?, de_ron_comma_paren(s, i) ?);
         s.paren_close(i) ?;
@@ -700,7 +737,7 @@ C: SerRon {
 impl<A, B, C> DeRon for (A, B, C) where A: DeRon,
 B: DeRon,
 C: DeRon {
-    fn de_ron(s: &mut DeRonState, i: &mut Chars) -> Result<(A, B, C), String> {
+    fn de_ron(s: &mut DeRonState, i: &mut Chars) -> Result<(A, B, C), DeRonErr> {
         s.paren_open(i) ?;
         let r = (de_ron_comma_paren(s, i) ?, de_ron_comma_paren(s, i) ?, de_ron_comma_paren(s, i) ?);
         s.paren_close(i) ?;
@@ -729,7 +766,7 @@ impl<A, B, C, D> DeRon for (A, B, C, D) where A: DeRon,
 B: DeRon,
 C: DeRon,
 D: DeRon {
-    fn de_ron(s: &mut DeRonState, i: &mut Chars) -> Result<(A, B, C, D), String> {
+    fn de_ron(s: &mut DeRonState, i: &mut Chars) -> Result<(A, B, C, D), DeRonErr> {
         s.paren_open(i) ?;
         let r = (de_ron_comma_paren(s, i) ?, de_ron_comma_paren(s, i) ?, de_ron_comma_paren(s, i) ?, de_ron_comma_paren(s, i) ?);
         s.paren_close(i) ?;
@@ -756,7 +793,7 @@ V: SerRon {
 impl<K, V> DeRon for HashMap<K, V> where K: DeRon + Eq + Hash,
 V: DeRon + Eq {
     fn de_ron(s: &mut DeRonState, i: &mut Chars) -> Result<Self,
-    String> {
+    DeRonErr> {
         let mut h = HashMap::new();
         s.curly_open(i) ?;
         while s.tok != DeRonTok::CurlyClose {
@@ -778,7 +815,7 @@ impl<T> SerRon for Box<T> where T: SerRon {
 }
 
 impl<T> DeRon for Box<T> where T: DeRon {
-    fn de_ron(s: &mut DeRonState, i: &mut Chars) -> Result<Box<T>, String> {
+    fn de_ron(s: &mut DeRonState, i: &mut Chars) -> Result<Box<T>, DeRonErr> {
         Ok(Box::new(DeRon::de_ron(s, i) ?))
     }
 }
