@@ -5,3 +5,6 @@ pub use crate::serde_bin::*;
 
 mod serde_ron;
 pub use crate::serde_ron::*;
+
+mod serde_json;
+pub use crate::serde_json::*;
