@@ -293,29 +293,30 @@ pub fn derive_ser_ron_struct_unnamed(input: &DeriveInput, fields:&FieldsUnnamed)
     }
 }
 
-/*
+
 pub fn derive_de_ron_struct_unnamed(input: &DeriveInput, fields:&FieldsUnnamed) -> TokenStream {
     let (impl_generics, ty_generics, _) = input.generics.split_for_impl();
     let ident = &input.ident;
-    let bound = parse_quote!(DeBin);
+    let bound = parse_quote!(DeRon);
     let bounded_where_clause = where_clause_with_bound(&input.generics, bound);
 
-    let mut fieldname = Vec::new();
-    for (index, field) in fields.unnamed.iter().enumerate() {
-        fieldname.push(LitInt::new(&format!("{}", index), field.span()));
+    let mut items = Vec::new();
+    for _ in &fields.unnamed {
+        items.push(quote!{{let r = DeRon::de_ron(s,i)?;s.eat_comma_paren(i)?;r}});
     }
 
     quote! {
-        impl #impl_generics DeBin for #ident #ty_generics #bounded_where_clause {
-            fn de_bin(o:&mut usize, d:&[u8]) -> Self {
-                Self {
+        impl #impl_generics DeRon for #ident #ty_generics #bounded_where_clause {
+            fn de_ron(s: &mut makepad_tinyserde::DeRonState, i: &mut std::str::Chars) -> Result<Self,String> {
+                s.paren_open(i)?;
+                let r = Self(
                     #(
-                        #fieldname: DeBin::de_bin(o,d),
+                        #items
                     ) *
-                }
+                );
+                s.paren_close(i)?;
+                Ok(r)
             }
         }
     }
 }
-
-*/
