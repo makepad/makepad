@@ -4,63 +4,117 @@ use syn::{
     parse_quote,
     //Ident,
     DeriveInput,
-   // Fields,
+    // Fields,
     FieldsNamed,
-   // FieldsUnnamed,
-   // DataEnum,
-   // LitInt,
-   LitStr,
-   // Generics,
-   // WherePredicate,
-   // WhereClause
+    // FieldsUnnamed,
+    // DataEnum,
+    // LitInt,
+    LitStr,
+    Type,
+    // Generics,
+    // WherePredicate,
+    // WhereClause
 };
 use quote::quote;
+use quote::format_ident;
 
 pub fn derive_ser_ron_struct(input: &DeriveInput, fields: &FieldsNamed) -> TokenStream {
     let (impl_generics, ty_generics, _) = input.generics.split_for_impl();
     let bound = parse_quote!(SerRon);
     let bounded_where_clause = where_clause_with_bound(&input.generics, bound);
     let ident = &input.ident;
-    let fieldname = fields.named.iter().map( | f | f.ident.clone().unwrap()).collect::<Vec<_>>();
-    let fieldstring = fields.named.iter().map( | f | {
-        let ident = f.ident.clone().unwrap();
-        LitStr::new(&ident.to_string(), ident.span())
-    }).collect::<Vec<_>>();
-    
-    quote! {
+
+    let mut fieldnames = Vec::new();
+    let mut fieldstrings = Vec::new();
+    let mut outputs = Vec::new();
+    for field in &fields.named {
+        
+        let fieldname = field.ident.clone().unwrap();
+        let fieldstring = LitStr::new(&fieldname.to_string(), ident.span());
+        
+        if type_is_option(&field.ty) {
+            outputs.push(quote! {if let Some(t) = self.#fieldname {s.field(d+1,#fieldstring);t.ser_ron(d+1, s);s.conl();};})
+        }
+        else {
+            outputs.push(quote! {s.field(d+1,#fieldstring);self.#fieldname.ser_ron(d+1, s);s.conl();})
+        }
+        
+        fieldnames.push(fieldname);
+        fieldstrings.push(fieldstring);
+    }
+
+    quote!{
         impl #impl_generics SerRon for #ident #ty_generics #bounded_where_clause {
-            fn ser_ron(&self, d:usize, p:&str, s: &mut String) {
-                makepad_tinyserde::ser_ron_struct_pre(d,p,s);
+            fn ser_ron(&self, d: usize, s: &mut makepad_tinyserde::SerRonState) {
+                s.st_pre();
                 #(
-                    self.#fieldname.ser_ron(d+1, #fieldstring, s);
+                    #outputs
                 ) *
-                makepad_tinyserde::ser_ron_struct_post(d,p,s);
+                s.st_post(d);
             }
         }
     }
 }
 
+pub fn type_is_option(ty: &Type) -> bool {
+    if let Type::Path(tp) = ty {
+        if tp.path.segments.len() == 1 && tp.path.segments[0].ident.to_string() == "Option" {
+            return true;
+        }
+    }
+    return false
+}
 
-pub fn derive_de_ron_struct(input: &DeriveInput, fields:&FieldsNamed) -> TokenStream {
+pub fn derive_de_ron_struct(input: &DeriveInput, fields: &FieldsNamed) -> TokenStream {
     let (impl_generics, ty_generics, _) = input.generics.split_for_impl();
     let bound = parse_quote!(DeRon);
     let bounded_where_clause = where_clause_with_bound(&input.generics, bound);
     let ident = &input.ident;
-    let fieldname = fields.named.iter().map( | f | f.ident.clone().unwrap()).collect::<Vec<_>>();
-    let fieldstring = fields.named.iter().map( | f | {
-        let ident = f.ident.clone().unwrap();
-        LitStr::new(&ident.to_string(), ident.span())
-    }).collect::<Vec<_>>();
     
-    quote! {
+    let mut localvars = Vec::new();
+    let mut fieldnames = Vec::new();
+    let mut fieldstrings = Vec::new();
+    let mut unwraps = Vec::new();
+    for field in &fields.named {
+        
+        let fieldname = field.ident.clone().unwrap();
+        let localvar = format_ident!("_{}", fieldname);
+        let fieldstring = LitStr::new(&fieldname.to_string(), ident.span());
+        
+        if type_is_option(&field.ty) {
+            unwraps.push(quote! {if let Some(t) = #localvar {t}else {None}})
+        }
+        else {
+            unwraps.push(quote! {if let Some(t) = #localvar {t}else {return Err(s.nf(#fieldstring))}})
+        }
+        
+        fieldnames.push(fieldname);
+        localvars.push(localvar);
+        fieldstrings.push(fieldstring);
+    }
+    
+    quote!{
         impl #impl_generics DeRon for #ident #ty_generics #bounded_where_clause {
-            fn de_ron(p: &str, s: &mut makepad_tinyserde::DeRonState, i: &mut std::str::Chars)->Result<Self, String> {
-                s.is_prefix_paren_open(p, i)?;
-                let r = #ident{#(
-                    #fieldname: DeRon::de_ron(#fieldstring, s, i)?,
-                ) *};
-                s.is_paren_close(i)?;
-                Ok(r)
+            fn de_ron(s: &mut makepad_tinyserde::DeRonState, i: &mut std::str::Chars) -> Result<Self,
+            String> {
+                #(
+                    let mut #localvars = None;
+                ) *
+                s.paren_open(i) ?;
+                while let Some(key) = s.next_ident() {
+                    s.colon(i) ?;
+                    match key.as_ref() {
+                        #(
+                            #fieldstrings => #localvars = Some(DeRon::de_ron(s, i) ?),
+                        ) *
+                        _ => s.unexp(&key) ?
+                    }
+                    s.eat_comma_paren(i) ?
+                }
+                s.paren_close(i) ?;
+                Ok(#ident {#(
+                    #fieldnames: #unwraps,
+                ) *})
             }
         }
     }
