@@ -165,6 +165,7 @@ pub fn derive_ser_json_enum(input: &DeriveInput, enumeration: &DataEnum) -> Toke
                 match_item.push(quote!{
                     Self::#ident {#(#field_names,) *} => {
                         s.label(#lit);
+                        s.out.push(':');
                         s.st_pre();
                         #(
                             #items
@@ -206,13 +207,15 @@ pub fn derive_ser_json_enum(input: &DeriveInput, enumeration: &DataEnum) -> Toke
     quote! {
         impl #impl_generics SerJson for #ident #ty_generics #bounded_where_clause {
             fn ser_json(&self, d: usize, s: &mut makepad_tinyserde::SerJsonState) {
+                s.out.push('{');
                 match self {
                     #(
                         #match_item
                     ) *
                 }
+                s.out.push('}');
             }
-        }
+        } 
     }
 }
 
@@ -257,13 +260,17 @@ pub fn derive_de_json_enum(input: &DeriveInput, enumeration: &DataEnum) -> Token
         impl #impl_generics DeJson for #ident #ty_generics #bounded_where_clause {
             fn de_json(s: &mut DeJsonState, i: &mut std::str::Chars) -> Result<Self,DeJsonErr> {
                 // we are expecting an identifier
+                s.curly_open(i)?;
                 let id = s.string(i)?;
-                Ok(match id.as_ref() {
+                s.colon(i)?;
+                let r = Ok(match id.as_ref() {
                     #(
                         #match_item
                     ) *
                     _ => return Err(s.err_enum(&id))
-                })
+                });
+                s.curly_close(i)?;
+                r
             }
         }
     }

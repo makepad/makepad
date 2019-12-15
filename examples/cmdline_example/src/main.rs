@@ -1,5 +1,5 @@
 use makepad_tinyserde::*;
-
+/*
 fn main() {
     let root_cargo = match std::fs::read_to_string("Cargo.toml") {
         Err(_) => {
@@ -24,9 +24,9 @@ fn main() {
         }
     }
 }
+*/
 
 
-/*
 #[derive(SerJson, DeJson, PartialEq, Debug)]
 enum TestEnum{
     X{x:u32, y:Option<u32>},
@@ -67,7 +67,7 @@ fn main() {
     
     println!("{:?}", y);*/
 }
-*/
+
 /*
 #[derive(SerRon, DeRon, PartialEq, Debug)]
 struct TestStruct {
