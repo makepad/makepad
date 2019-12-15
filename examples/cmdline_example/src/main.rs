@@ -6,10 +6,10 @@ enum TestEnum{
     Y
 }
 
-#[derive(SerRon, PartialEq, Debug)]
+#[derive(SerRon, DeRon,PartialEq, Debug)]
 struct TestNew(u32);
 
-#[derive(SerRon,  PartialEq, Debug)]
+#[derive(SerRon,  DeRon,PartialEq, Debug)]
 struct TestStruct{
     t: [u32;4],
     v: TestNew,
@@ -25,6 +25,9 @@ fn main() {
     };
     let output = x.serialize_ron();
     println!("{}", output);
+    
+    let y:TestStruct = DeRon::deserialize_ron(&output).expect("can't parse");
+    println!("{:?}", y);
     // ok . lets serialise Test to a binary
     /*
     let x = TestStruct {
