@@ -889,6 +889,7 @@ impl HubBuilder {
     }
     
     pub fn read_packages(&mut self, uid: HubUid) -> Vec<(String, String)> {
+        println!("READ PKG");
         return vec![]
         /*
         let mut packages = Vec::new();
