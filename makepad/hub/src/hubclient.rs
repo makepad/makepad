@@ -162,7 +162,7 @@ impl HubClient {
                 loop {
                     match read_block_from_tcp_stream(&mut tcp_stream, digest.clone()) {
                         Ok(msg_buf) => {
-                            let htc_msg: FromHubMsg = DeBin::de_bin(&mut 0, &msg_buf);
+                            let htc_msg: FromHubMsg = DeBin::deserialize_bin(&msg_buf).expect("Cannot parse binary");
                             hub_log.msg("HubClient received", &htc_msg);
                             tx_read.send(htc_msg).expect("tx_read.send fails - should never happen");
                         },
@@ -310,7 +310,7 @@ impl HubClient {
 }
 
 
-#[derive(Eq, PartialEq, Debug, Clone, SerBin, DeBin)]
+#[derive(Eq, PartialEq, Debug, Clone, SerBin, DeBin, SerRon, DeRon)]
 pub struct Digest {
     pub buf: [u64; 25]
 }

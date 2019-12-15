@@ -143,7 +143,7 @@ impl HubMsg{
     }
 }
 
-#[derive(Eq, PartialEq, Debug, Clone, SerBin, DeBin)]
+#[derive(Eq, PartialEq, Debug, Clone, SerBin, DeBin, SerRon, DeRon)]
 pub enum BuilderFileTreeNode {
     File {name: String, digest:Option<Box<Digest>>},
     Folder {name: String, digest:Option<Box<Digest>>, folder: Vec<BuilderFileTreeNode>}
@@ -210,7 +210,7 @@ impl HubPackage {
 }
 
 
-#[derive(Debug, Clone, SerBin, DeBin, PartialEq)]
+#[derive(Debug, Clone, SerBin, DeBin, PartialEq, SerRon, DeRon)]
 pub struct HubBuilderConfig {
     pub http_server: HttpServerConfig,
     pub workspaces: HashMap<String, String>,
