@@ -1,4 +1,5 @@
 use makepad_render::*;
+use makepad_tinyserde::*;
 use crate::normalbutton::*;
 use crate::tab::*;
 use crate::desktopwindow::*;
@@ -12,9 +13,7 @@ use crate::desktopbutton::*;
 use crate::splitter::*;
 use crate::tabcontrol::*;
 
-use serde::{Serialize, Deserialize};
-
-#[derive(Debug, Copy, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Copy, Clone, SerRon, DeRon, PartialEq)]
 pub struct StyleOptions {
     pub scale: f32,
     pub dark: bool

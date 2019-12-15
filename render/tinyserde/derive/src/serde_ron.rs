@@ -244,7 +244,7 @@ pub fn derive_de_ron_enum(input: &DeriveInput, enumeration: &DataEnum) -> TokenS
             Fields::Unnamed(fields_unnamed) => {
                 let mut field_names = Vec::new();
                 for _ in &fields_unnamed.unnamed {
-                    field_names.push(quote! {{let r = DeRon::de_ron(s,i)?;s.eat_comma_paren(i);r}});
+                    field_names.push(quote! {{let r = DeRon::de_ron(s,i)?;s.eat_comma_paren(i)?;r}});
                 }
                 match_item.push(quote!{
                     #lit => {s.paren_open(i)?;let r = Self::#ident(#(#field_names,) *); s.paren_close(i)?;r},

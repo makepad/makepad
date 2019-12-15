@@ -1,5 +1,5 @@
 use crate::cx::*;
-use serde::*;
+use makepad_tinyserde::*;
 
 impl Cx {
     //pub fn debug_pt(&self, x:f32, y:f32, color:i32){
@@ -936,7 +936,7 @@ impl Default for Direction {
     }
 }
 
-#[derive(Copy, Clone, Serialize, Deserialize)]
+#[derive(Copy, Clone, SerRon, DeRon)]
 pub enum Axis {
     Horizontal,
     Vertical

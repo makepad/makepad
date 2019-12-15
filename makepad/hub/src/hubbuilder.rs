@@ -5,14 +5,16 @@ use crate::hubclient::*;
 use crate::httpserver::*;
 use crate::wasmstrip::*;
 
-use serde::{Deserialize};
+use makepad_tinyserde::*;
+
 use std::sync::{Arc, Mutex};
 use std::fs;
 use std::sync::{mpsc};
 use std::sync::mpsc::RecvTimeoutError;
-use toml::Value;
 use std::collections::HashMap;
 use std::net::{SocketAddr};
+use std::io::Write;
+
 
 pub struct HubBuilder {
     pub route_send: HubRouteSend,
@@ -233,22 +235,22 @@ impl HubBuilder {
                 let key_file = args[2].to_string();
                 let builder = args[3].to_string();
                 let utf8_data = std::fs::read_to_string(key_file).expect("Can't read key file");
-                //let digest: Digest = ron::de::from_str(&utf8_data).expect("Can't load key file");
+                let digest: Digest = DeRon::deserialize_ron(&utf8_data).expect("Can't load key file");
                 println!("Starting workspace listening to announce");
-               // Self::run_builder_networked(digest, None, &builder, HubLog::None, event_handler);
+                Self::run_builder_networked(digest, None, &builder, HubLog::None, event_handler);
                 return
             },
             "connect" => {
                 if args.len() != 5 {
                     return print_help();
                 }
-               // let addr = args[2].parse().expect("cant parse address");
+                let addr = args[2].parse().expect("cant parse address");
                 let key_file = args[3].to_string();
                 let builder = args[4].to_string();
                 let utf8_data = std::fs::read_to_string(key_file).expect("Can't read key file");
-                //let digest: Digest = ron::de::from_str(&utf8_data).expect("Can't load key file");
+                let digest: Digest = DeRon::deserialize_ron(&utf8_data).expect("Can't load key file");
                 println!("Starting workspace connecting to ip");
-                //Self::run_builder_networked(digest, Some(addr), &builder, HubLog::None, event_handler);
+                Self::run_builder_networked(digest, Some(addr), &builder, HubLog::None, event_handler);
                 return
             },
             "list" => {
@@ -318,7 +320,7 @@ impl HubBuilder {
                     HubMsg::BuilderFileTreeResponse {tree, ..} => {
                         //write index.ron
                         if let BuilderFileTreeNode::Folder {folder, ..} = tree {
-                            let ron = ron::ser::to_string_pretty(&folder[0], ron::ser::PrettyConfig::default()).expect("cannot serialize settings");
+                            let ron = folder[0].serialize_ron();//ron::ser::to_string_pretty(&folder[0], ron::ser::PrettyConfig::default()).expect("cannot serialize settings");
                             fs::write("index.ron", ron).expect("cannot write index.ron");
                             println!("Written index.ron")
                         }
@@ -694,7 +696,7 @@ impl HubBuilder {
                         }
                     });
                 }
-
+/*
                 let mut parsed: serde_json::Result<RustcCompilerMessage> = serde_json::from_str(&line);
                 match &mut parsed {
                     Err(_) => (), //self.hub_log.log(&format!("Json Parse Error {:?} {}", err, line)),
@@ -795,7 +797,7 @@ impl HubBuilder {
                             }
                         }
                     }
-                }
+                }*/
             }
             else { // process terminated
                 break;
@@ -862,20 +864,20 @@ impl HubBuilder {
                 
                 let uncomp_len = strip.len();
                 let mut enc = snap::Encoder::new();
-                /*
+                
                 let mut result = Vec::new();
                 {
                     let mut writer = brotli::CompressorWriter::new(&mut result, 4096 /* buffer size */, 11, 22);
                     writer.write_all(&strip).expect("Can't write data");
-                }*/
+                }
 
-                let comp_len = if let Ok(compressed) = enc.compress_vec(&strip) {compressed.len()}else {0};
+                let comp_len = result.len();//if let Ok(compressed) = enc.compress_vec(&strip) {compressed.len()}else {0};
                 
                 if let Err(_) = fs::write(&filepath, strip) {
                     return Err(self.error(uid, format!("Cannot write stripped wasm {}", filepath)));
                 }
                 else {
-                    self.message(uid, format!("Wasm file stripped size: {} kb uncompressed {} kb with snap", uncomp_len>>10, comp_len>>10));
+                    self.message(uid, format!("Wasm file stripped size: {} kb uncompressed {}", uncomp_len>>10, comp_len>>10));
                     return Ok(BuildResult::Wasm {path: path.to_string()})
                 }
             }
@@ -887,6 +889,8 @@ impl HubBuilder {
     }
     
     pub fn read_packages(&mut self, uid: HubUid) -> Vec<(String, String)> {
+        return vec![]
+        /*
         let mut packages = Vec::new();
         let workspaces = Arc::clone(&self.workspaces);
         if let Ok(workspaces) = workspaces.lock() {
@@ -962,7 +966,7 @@ impl HubBuilder {
                 }
             }
         }
-        return packages
+        return packages*/
     }
     
     pub fn file_read(&mut self, from: HubAddr, uid: HubUid, path: &str) {
@@ -1138,7 +1142,7 @@ fn de_relativize_path(path: &str) -> String {
     out.join("/")
 }
 
-
+/*
 // rust compiler output json structs
 #[derive(Clone, Deserialize, Default)]
 pub struct RustcTarget {
@@ -1217,4 +1221,4 @@ pub struct RustcCompilerMessage {
     filenames: Option<Vec<String>>,
     executable: Option<String>,
     fresh: Option<bool>
-}
+}*/
