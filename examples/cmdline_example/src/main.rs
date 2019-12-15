@@ -2,7 +2,7 @@ use makepad_tinyserde::*;
 
 #[derive(SerRon, DeRon, PartialEq, Debug)]
 enum TestEnum{
-    X{x:u32, y:u32},
+    X{x:u32, y:Option<u32>},
     Y
 }
 
@@ -21,7 +21,7 @@ fn main() {
     let x = TestStruct {
         t:[1,2,3,4],
         v:TestNew(10),
-        w:TestEnum::Y
+        w:TestEnum::X{x:10,y:None}
     };
     let output = x.serialize_ron();
     println!("{}", output);
