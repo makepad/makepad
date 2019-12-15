@@ -66,7 +66,6 @@ pub trait DeRon: Sized {
 pub enum DeRonTok {
     Ident(String),
     Str(String),
-    Char(char),
     U64(u64),
     I64(i64),
     F64(f64),
