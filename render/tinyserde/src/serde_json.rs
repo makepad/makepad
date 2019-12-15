@@ -430,7 +430,7 @@ impl DeJsonState {
                     return Ok(())
                 }
                 self.tok = DeJsonTok::BareIdent;
-                return Err(self.err_token("true, false, null"));
+                return Err(self.err_token(&format!("Got ##{}## needed true, false, null", ident)));
             }
             '"' => {
                 let mut val = String::new();
