@@ -2,10 +2,12 @@ use makepad_tinyserde::*;
 
 #[derive(SerRon, DeRon, PartialEq, Debug)]
 struct TestStruct {
+    o: [Option<u8>;3],
     t: u8,
     v: Option<u8>,
     x: Option<u8>,
     z: bool,
+    s: String,
     y: f32
 }
 
@@ -13,7 +15,15 @@ struct TestStruct {
 fn main() {
     // ok . lets serialise Test to a binary
     
-    let x = TestStruct {t: 10,z:false, y:0.5, v: Some(20), x: None};
+    let x = TestStruct {
+        o: [None,Some(3),None],
+        t: 10,
+        z: false,
+        s: "hello".to_string(),
+        y: 0.5,
+        v: None,
+        x: Some(20)
+    };
     let output = x.serialize_ron();
     println!("{}", output);
     let y: TestStruct = DeRon::deserialize_ron(&output).expect("can't parse");
