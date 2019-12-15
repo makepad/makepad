@@ -1,6 +1,7 @@
 //use syn::Type;
 use makepad_render::*;
 use makepad_widget::*;
+use makepad_tinyserde::*;
 use crate::appwindow::*;
 use crate::appstorage::*;
 use crate::filetree::*;
@@ -266,7 +267,7 @@ impl App {
                 // lets see which file we loaded
                 if let Some(utf8_data) = self.storage.file_tree_file_read.resolve_utf8(fr) {
                     if let Ok(utf8_data) = utf8_data {
-                        if let Ok(tree) = ron::de::from_str(utf8_data) {
+                        if let Ok(tree) = DeRon::deserialize_ron(utf8_data) {
                             for window in &mut self.windows {
                                 window.file_panel.file_tree.root_node = hub_to_tree(&tree);
                                 if let FileNode::Folder {folder, state, name, ..} = &mut window.file_panel.file_tree.root_node {
@@ -285,7 +286,7 @@ impl App {
                 }
                 else if let Some(utf8_data) = self.storage.app_state_file_read.resolve_utf8(fr) {
                     if let Ok(utf8_data) = utf8_data {
-                        if let Ok(state) = ron::de::from_str(&utf8_data) {
+                        if let Ok(state) = DeRon::deserialize_ron(utf8_data) {
                             self.state = state;
                             self.windows.truncate(0);
                             // create our windows with the serialized positions/size
@@ -332,7 +333,7 @@ impl App {
                     }
                     else { // create default settings file
                         let def_settings = AppSettings::initial();
-                        let ron = ron::ser::to_string_pretty(&def_settings, ron::ser::PrettyConfig::default()).expect("cannot serialize settings");
+                        let ron = def_settings.serialize_ron();
                         cx.file_write("makepad_settings.ron", ron.as_bytes());
                         self.storage.load_settings(cx, &ron);
                     }

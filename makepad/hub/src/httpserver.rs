@@ -7,7 +7,7 @@ use std::time::Duration;
 use std::collections::HashMap;
 use makepad_tinyserde::*;
 
-#[derive(Debug, Clone, SerBin, DeBin, PartialEq)]
+#[derive(Debug, Clone, SerBin, DeBin, PartialEq, SerRon, DeRon)]
 pub enum HttpServerConfig {
     Offline,
     Localhost(u16),
