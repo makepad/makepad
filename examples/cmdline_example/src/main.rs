@@ -93,7 +93,6 @@ enum TestEnum {
     C
 }
 
-
 fn main(){ 
     // ok . lets serialise Test to a binary
     

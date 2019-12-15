@@ -2,13 +2,13 @@
 use makepad_render::*;
 use makepad_widget::*;
 use makepad_hub::*;
+use makepad_tinyserde::*;
 use crate::appwindow::*;
 use crate::filetree::*;
 use std::collections::HashMap;
-use serde::{Serialize, Deserialize};
 use crate::builder;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, SerRon, DeRon)]
 pub struct AppSettings {
     pub build_on_save: bool,
     pub exec_when_done: bool,
@@ -70,7 +70,7 @@ impl AppSettings{
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Clone, Debug, SerRon, DeRon, PartialEq)]
 pub struct BuildTarget {
     pub builder: String,
     pub workspace: String,
@@ -155,7 +155,7 @@ impl AppStorage {
     }
     
     pub fn load_settings(&mut self, cx: &mut Cx, utf8_data: &str) {
-        match ron::de::from_str(utf8_data) {
+        match DeRon::deserialize_ron(utf8_data) {
             Ok(settings) => {
                 self.settings_old = self.settings.clone();
                 self.settings = settings;
@@ -176,14 +176,13 @@ impl AppStorage {
     }
     
     pub fn save_settings(&mut self, cx:&mut Cx){
-        if let Ok(utf8_data) = ron::ser::to_string_pretty(&self.settings, ron::ser::PrettyConfig::default()){
-            let path = "makepad_settings.ron";
-            if let Some(atb) = self.text_buffers.get_mut(path) {
-                atb.text_buffer.load_from_utf8(&utf8_data);
-                atb.text_buffer.send_textbuffer_loaded_signal(cx);
-            }
-            cx.file_write(path, utf8_data.as_bytes());
+        let utf8_data = self.settings.serialize_ron();
+        let path = "makepad_settings.ron";
+        if let Some(atb) = self.text_buffers.get_mut(path) {
+            atb.text_buffer.load_from_utf8(&utf8_data);
+            atb.text_buffer.send_textbuffer_loaded_signal(cx);
         }
+        cx.file_write(path, utf8_data.as_bytes());
     }
     
     pub fn restart_hub_server(&mut self) {
@@ -201,22 +200,20 @@ impl AppStorage {
     pub fn read_or_generate_key_ron() -> Digest {
         // read or generate key.ron
         if let Ok(utf8_data) = std::fs::read_to_string("key.ron") {
-            if let Ok(digest) = ron::de::from_str::<Digest>(&utf8_data) {
+            if let Ok(digest) = DeRon::deserialize_ron(&utf8_data) {
                 return digest
             }
         }
-        
         let digest = Digest::generate();
-        if let Ok(utf8_data) = ron::ser::to_string(&digest) {
-            if std::fs::write("key.ron", utf8_data.as_bytes()).is_err() {
-                println!("Cannot generate key.ron");
-            }
+        let utf8_data = digest.serialize_ron();
+        if std::fs::write("key.ron", utf8_data.as_bytes()).is_err() {
+            println!("Cannot generate key.ron");
         }
         digest
     }
     
     pub fn save_state(&mut self, cx: &mut Cx, state: &AppState) {
-        let ron = ron::ser::to_string_pretty(state, ron::ser::PrettyConfig::default()).unwrap();
+        let ron = state.serialize_ron();
         cx.file_write("makepad_state.ron", ron.as_bytes());
     }
 

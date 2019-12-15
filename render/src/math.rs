@@ -1,6 +1,6 @@
-use serde::*; 
+use makepad_tinyserde::*;
 
-#[derive(Clone, Copy, Default, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Default, Debug, PartialEq, SerRon, DeRon)]
 pub struct Rect{
     pub x:f32,
     pub y:f32,
@@ -29,7 +29,7 @@ pub struct Mat4{
     pub v: [f32; 16],
 }
 
-#[derive(Clone, Copy, Default, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Default, Debug, PartialEq, SerRon, DeRon)]
 pub struct Vec2{
     pub x: f32,
     pub y: f32,

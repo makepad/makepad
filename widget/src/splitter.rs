@@ -1,5 +1,5 @@
 use makepad_render::*;
-use serde::*;
+use makepad_tinyserde::*;
 use crate::widgetstyle::*;
 
 #[derive(Clone)]
@@ -23,7 +23,7 @@ pub struct Splitter {
     pub _hit_state_margin: Option<Margin>,
 }
 
-#[derive(Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, SerRon, DeRon)]
 pub enum SplitterAlign {
     First,
     Last,

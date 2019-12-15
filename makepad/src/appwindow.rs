@@ -1,7 +1,7 @@
 //use syn::Type;
 use makepad_render::*;
 use makepad_widget::*;
-use serde::*;
+use makepad_tinyserde::*;
 use std::collections::HashMap;
 
 use crate::appstorage::*;
@@ -18,7 +18,7 @@ use crate::rusteditor::*;
 use crate::jseditor::*;
 use crate::plaineditor::*;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, SerRon, DeRon)]
 pub enum Panel {
     LogList,
     LogItem,
@@ -40,7 +40,7 @@ pub struct AppWindow {
     pub dock: Dock<Panel>,
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, SerRon, DeRon)]
 pub struct AppWindowState {
     pub open_folders: Vec<String>,
     pub window_position: Vec2,
@@ -48,7 +48,7 @@ pub struct AppWindowState {
     pub dock_items: DockItem<Panel>,
 }
 
-#[derive(Default, Clone, Serialize, Deserialize)]
+#[derive(Default, Clone, SerRon, DeRon)]
 pub struct AppState {
     pub windows: Vec<AppWindowState>
 }

@@ -6,7 +6,7 @@ use crate::hubclient::*;
 use crate::hubrouter::*;
 use makepad_tinyserde::*;
 
-#[derive(Debug, Clone, SerBin, DeBin, PartialEq)]
+#[derive(Debug, Clone, SerBin, DeBin, SerRon, DeRon, PartialEq)]
 pub enum HubServerConfig {
     Offline, // no network connectivity
     Announced, // 0.0.0.0:0
@@ -83,7 +83,7 @@ impl HubServer {
                             loop {
                                 match read_block_from_tcp_stream(&mut tcp_stream, digest.clone()) {
                                     Ok(msg_buf) => {
-                                        let cth_msg: ToHubMsg = DeBin::de_bin(&mut 0, &msg_buf);
+                                        let cth_msg: ToHubMsg = DeBin::deserialize_bin(&msg_buf).expect("Can't parse binary");
                                         tx_pump.send((peer_addr.clone(), cth_msg)).expect("tx_pump.send fails - should never happen");
                                     }
                                     Err(e) => {

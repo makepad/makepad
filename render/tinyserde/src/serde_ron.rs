@@ -547,6 +547,7 @@ macro_rules!impl_ser_de_ron_float {
     }
 }
 
+impl_ser_de_ron_unsigned!(usize, std::u64::MAX);
 impl_ser_de_ron_unsigned!(u64, std::u64::MAX);
 impl_ser_de_ron_unsigned!(u32, std::u32::MAX);
 impl_ser_de_ron_unsigned!(u16, std::u16::MAX);
@@ -791,7 +792,7 @@ V: SerRon {
 }
 
 impl<K, V> DeRon for HashMap<K, V> where K: DeRon + Eq + Hash,
-V: DeRon + Eq {
+V: DeRon  {
     fn de_ron(s: &mut DeRonState, i: &mut Chars) -> Result<Self,
     DeRonErr> {
         let mut h = HashMap::new();
