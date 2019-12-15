@@ -63,12 +63,12 @@ pub fn derive_de_bin_struct(input: &DeriveInput, fields:&FieldsNamed) -> TokenSt
 
     quote! {
         impl #impl_generics DeBin for #ident #ty_generics #bounded_where_clause {
-            fn de_bin(o:&mut usize, d:&[u8]) -> Self {
-                Self {
+            fn de_bin(o:&mut usize, d:&[u8]) -> Result<Self, DeBinErr> {
+                Ok(Self {
                     #(
-                        #fieldname: DeBin::de_bin(o,d),
+                        #fieldname: DeBin::de_bin(o,d)?,
                     ) *
-                }
+                })
             }
         }
     }
@@ -87,12 +87,12 @@ pub fn derive_de_bin_struct_unnamed(input: &DeriveInput, fields:&FieldsUnnamed) 
 
     quote! {
         impl #impl_generics DeBin for #ident #ty_generics #bounded_where_clause {
-            fn de_bin(o:&mut usize, d:&[u8]) -> Self {
-                Self {
+            fn de_bin(o:&mut usize, d:&[u8]) -> Result<Self,DeBinErr> {
+                Ok(Self {
                     #(
-                        #fieldname: DeBin::de_bin(o,d),
+                        #fieldname: DeBin::de_bin(o,d)?,
                     ) *
-                }
+                })
             }
         }
     }
@@ -180,7 +180,7 @@ pub fn derive_de_bin_enum(input: &DeriveInput, enumeration: &DataEnum) -> TokenS
                 let mut field_names = Vec::new();
                 for field in &fields_named.named {
                     if let Some(ident) = &field.ident {
-                        field_names.push(quote!{#ident: DeBin::de_bin(o,d)});
+                        field_names.push(quote!{#ident: DeBin::de_bin(o,d)?});
                     }
                 }
                 match_item.push(quote!{
@@ -190,7 +190,7 @@ pub fn derive_de_bin_enum(input: &DeriveInput, enumeration: &DataEnum) -> TokenS
             Fields::Unnamed(fields_unnamed) => {
                 let mut field_names = Vec::new();
                 for _ in &fields_unnamed.unnamed {
-                    field_names.push(quote! {DeBin::de_bin(o,d)});
+                    field_names.push(quote! {DeBin::de_bin(o,d)?});
                 }
                 match_item.push(quote!{
                     #lit => Self::#ident(#(#field_names,) *),
@@ -201,14 +201,14 @@ pub fn derive_de_bin_enum(input: &DeriveInput, enumeration: &DataEnum) -> TokenS
     
     quote! {
         impl #impl_generics DeBin for #ident #ty_generics #bounded_where_clause {
-            fn de_bin(o:&mut usize, d:&[u8]) -> Self {
-                let id: u16 = DeBin::de_bin(o,d);
-                match id {
+            fn de_bin(o:&mut usize, d:&[u8]) -> Result<Self, DeBinErr> {
+                let id: u16 = DeBin::de_bin(o,d)?;
+                Ok(match id {
                     #(
                         #match_item
                     ) *
-                    _ => panic!("enum match failed")
-                }
+                    _ => return Err(DeBinErr{o:*o, l:0, s:d.len()})
+                })
             }
         }
     }

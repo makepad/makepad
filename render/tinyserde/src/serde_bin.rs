@@ -12,11 +12,24 @@ pub trait SerBin {
 }
 
 pub trait DeBin:Sized {
-    fn deserialize_bin(&self, d:&[u8])->Self{
+    fn deserialize_bin(&self, d:&[u8])->Result<Self, DeBinErr>{
         DeBin::de_bin(&mut 0, d)
     }
 
-    fn de_bin(o:&mut usize, d:&[u8]) -> Self;
+    fn de_bin(o:&mut usize, d:&[u8]) -> Result<Self, DeBinErr>;
+}
+
+
+pub struct DeBinErr{
+    pub o:usize,
+    pub l: usize,
+    pub s: usize
+}
+
+impl std::fmt::Debug for DeBinErr {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Bin deserialize error at:{} wanted:{} bytes but max size is {}", self.o, self.l, self.s)
+    }
 }
 
 macro_rules! impl_ser_de_bin_for {
@@ -29,11 +42,15 @@ macro_rules! impl_ser_de_bin_for {
         }
         
         impl DeBin for $ty {
-            fn de_bin(o:&mut usize, d:&[u8]) -> $ty {
+            fn de_bin(o:&mut usize, d:&[u8]) -> Result<$ty, DeBinErr> {
+                let l = std::mem::size_of::<$ty>();
+                if *o + l > d.len(){
+                    return Err(DeBinErr{o:*o, l:l, s:d.len()})
+                } 
                 let mut m = [0 as $ty];
                 unsafe {std::ptr::copy_nonoverlapping(d.as_ptr().offset(*o as isize) as *const $ty, m.as_mut_ptr() as *mut $ty, 1)}
-                *o += std::mem::size_of::<$ty>();
-                m[0]
+                *o += l;
+                Ok(m[0])
             }
         }
     };
@@ -49,10 +66,13 @@ impl_ser_de_bin_for!(i16);
 impl_ser_de_bin_for!(usize);
 
 impl DeBin for u8 {
-    fn de_bin(o:&mut usize, d:&[u8]) -> u8 {
+    fn de_bin(o:&mut usize, d:&[u8]) -> Result<u8,DeBinErr> {
+        if *o + 1 > d.len(){
+            return Err(DeBinErr{o:*o, l:1, s:d.len()})
+        } 
         let m = d[*o];
         *o += 1;
-        m
+        Ok(m)
     }
 }
 
@@ -69,10 +89,13 @@ impl SerBin for bool {
 }
 
 impl DeBin for bool {
-    fn de_bin(o:&mut usize, d:&[u8]) -> bool {
+    fn de_bin(o:&mut usize, d:&[u8]) -> Result<bool, DeBinErr> {
+        if *o + 1 > d.len(){
+            return Err(DeBinErr{o:*o, l:1, s:d.len()})
+        } 
         let m = d[*o];
         *o += 1;
-        if m == 0{false} else {true}
+        if m == 0{Ok(false)} else {Ok(true)}
     }
 }
 
@@ -85,11 +108,14 @@ impl SerBin for String {
 }
 
 impl DeBin for String {
-    fn de_bin(o:&mut usize, d:&[u8])->String {
-        let len:usize = DeBin::de_bin(o,d);
+    fn de_bin(o:&mut usize, d:&[u8])->Result<String, DeBinErr> {
+        let len:usize = DeBin::de_bin(o,d)?;
+        if *o + len > d.len(){
+            return Err(DeBinErr{o:*o, l:1, s:d.len()})
+        } 
         let r = std::str::from_utf8(&d[*o..(*o+len)]).unwrap().to_string();
         *o += len;
-        r
+        Ok(r)
     }
 }
 
@@ -104,13 +130,13 @@ impl<T> SerBin for Vec<T> where T: SerBin {
 }
 
 impl<T> DeBin for Vec<T> where T:DeBin{
-    fn de_bin(o:&mut usize, d:&[u8])->Vec<T> {
-        let len:usize = DeBin::de_bin(o,d);
+    fn de_bin(o:&mut usize, d:&[u8])->Result<Vec<T>, DeBinErr> {
+        let len:usize = DeBin::de_bin(o,d)?;
         let mut out = Vec::new();
         for _ in 0..len{
-            out.push(DeBin::de_bin(o,d))
+            out.push(DeBin::de_bin(o,d)?)
         }
-        out
+        Ok(out)
     }
 }
 
@@ -127,14 +153,17 @@ impl<T> SerBin for Option<T> where T: SerBin {
 }
 
 impl<T> DeBin for Option<T> where T:DeBin{
-    fn de_bin(o:&mut usize, d:&[u8])->Option<T> {
+    fn de_bin(o:&mut usize, d:&[u8])->Result<Option<T>, DeBinErr> {
+        if *o + 1 > d.len(){
+            return Err(DeBinErr{o:*o, l:1, s:d.len()})
+        } 
         let m = d[*o];
         *o += 1;
         if m == 1{
-            Some(DeBin::de_bin(o,d))
+            Ok(Some(DeBin::de_bin(o,d)?))
         }
         else{
-            None
+            Ok(None)
         }
     }
 }
@@ -146,6 +175,8 @@ impl<T> SerBin for [T] where T: SerBin {
         }
     }
 }
+
+
 /*
 unsafe fn de_bin_array_impl_inner<T>(top: *mut T, count: usize, s: &mut DeRonState, i: &mut Chars) -> Result<(), String> where T:DeRon{
     for c in 0..count {
@@ -222,7 +253,7 @@ impl<A,B> SerBin for (A,B) where A: SerBin, B:SerBin {
 }
 
 impl<A,B> DeBin for (A,B) where A:DeBin, B:DeBin{
-    fn de_bin(o:&mut usize, d:&[u8])->(A,B) {(DeBin::de_bin(o,d),DeBin::de_bin(o,d))}
+    fn de_bin(o:&mut usize, d:&[u8])->Result<(A,B), DeBinErr> {Ok((DeBin::de_bin(o,d)?,DeBin::de_bin(o,d)?))}
 }
 
 impl<A,B,C> SerBin for (A,B,C) where A: SerBin, B:SerBin, C:SerBin {
@@ -234,7 +265,7 @@ impl<A,B,C> SerBin for (A,B,C) where A: SerBin, B:SerBin, C:SerBin {
 }
 
 impl<A,B,C> DeBin for (A,B,C) where A:DeBin, B:DeBin, C:DeBin{
-    fn de_bin(o:&mut usize, d:&[u8])->(A,B,C) {(DeBin::de_bin(o,d),DeBin::de_bin(o,d),DeBin::de_bin(o,d))}
+    fn de_bin(o:&mut usize, d:&[u8])->Result<(A,B,C), DeBinErr> {Ok((DeBin::de_bin(o,d)?,DeBin::de_bin(o,d)?,DeBin::de_bin(o,d)?))}
 }
 
 impl<A,B,C,D> SerBin for (A,B,C,D) where A: SerBin, B:SerBin, C:SerBin, D:SerBin {
@@ -247,7 +278,7 @@ impl<A,B,C,D> SerBin for (A,B,C,D) where A: SerBin, B:SerBin, C:SerBin, D:SerBin
 }
 
 impl<A,B,C,D> DeBin for (A,B,C,D) where A:DeBin, B:DeBin, C:DeBin, D:DeBin{
-    fn de_bin(o:&mut usize, d:&[u8])->(A,B,C,D) {(DeBin::de_bin(o,d),DeBin::de_bin(o,d),DeBin::de_bin(o,d),DeBin::de_bin(o,d))}
+    fn de_bin(o:&mut usize, d:&[u8])->Result<(A,B,C,D), DeBinErr> {Ok((DeBin::de_bin(o,d)?,DeBin::de_bin(o,d)?,DeBin::de_bin(o,d)?,DeBin::de_bin(o,d)?))}
 }
 
 impl<K, V> SerBin for HashMap<K, V> where K: SerBin,
@@ -264,15 +295,15 @@ V: SerBin {
 
 impl<K, V> DeBin for HashMap<K, V> where K: DeBin + Eq + Hash,
 V: DeBin + Eq {
-    fn de_bin(o:&mut usize, d:&[u8])->Self{
-        let len:usize = DeBin::de_bin(o,d);
+    fn de_bin(o:&mut usize, d:&[u8])->Result<Self, DeBinErr>{
+        let len:usize = DeBin::de_bin(o,d)?;
         let mut h = HashMap::new();
         for _ in 0..len{
-            let k = DeBin::de_bin(o,d);
-            let v = DeBin::de_bin(o,d);
+            let k = DeBin::de_bin(o,d)?;
+            let v = DeBin::de_bin(o,d)?;
             h.insert(k, v);
         }
-        h
+        Ok(h)
     }
 }
 
@@ -284,7 +315,7 @@ impl<T> SerBin for Box<T> where T: SerBin {
 }
 
 impl<T> DeBin for Box<T> where T: DeBin {
-    fn de_bin(o:&mut usize, d:&[u8])->Box<T> {
-        Box::new(DeBin::de_bin(o,d))
+    fn de_bin(o:&mut usize, d:&[u8])->Result<Box<T>, DeBinErr> {
+        Ok(Box::new(DeBin::de_bin(o,d)?))
     }
 }
