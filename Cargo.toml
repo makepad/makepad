@@ -15,5 +15,5 @@ members = [
 ]
 
 [profile.release]
-lto=true
+#lto=true
  
