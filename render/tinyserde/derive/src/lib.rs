@@ -66,13 +66,13 @@ pub fn derive_ser_ron(input: proc_macro::TokenStream) -> proc_macro::TokenStream
     let ts = match &input.data {
         Data::Struct(DataStruct {fields: Fields::Named(fields), ..}) => {
             derive_ser_ron_struct(&input, fields)
-        },/*
+        },
         Data::Struct(DataStruct {fields: Fields::Unnamed(fields), ..}) => {
-            derive_ser_bin_struct_unnamed(&input, fields)
+            derive_ser_ron_struct_unnamed(&input, fields)
         },
         Data::Enum(enumeration) => {
-            derive_ser_bin_enum(&input, enumeration)
-        },*/
+            derive_ser_ron_enum(&input, enumeration)
+        },
         _ => error(Span::call_site(), "only structs or enums supported")
     };
     proc_macro::TokenStream::from(ts)
@@ -88,13 +88,12 @@ pub fn derive_de_ron(input: proc_macro::TokenStream) -> proc_macro::TokenStream 
         },/*
         Data::Struct(DataStruct {fields: Fields::Unnamed(fields), ..}) => {
             derive_de_bin_struct_unnamed(&input, fields)
-        },
-        Data::Enum(enumeration) => {
-            derive_de_bin_enum(&input, enumeration)
         },*/
+        Data::Enum(enumeration) => {
+            derive_de_ron_enum(&input, enumeration)
+        },
         _ => error(Span::call_site(), "only structs or enums supported")
     };
-    
     proc_macro::TokenStream::from(ts)
 }
 

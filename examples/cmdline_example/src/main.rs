@@ -2,27 +2,41 @@ use makepad_tinyserde::*;
 
 #[derive(SerRon, DeRon, PartialEq, Debug)]
 enum TestEnum{
-    X,
+    X{x:u32, y:u32},
     Y
 }
 
-#[derive(SerRon, DeRon, PartialEq, Debug)]
+#[derive(SerRon, PartialEq, Debug)]
+struct TestNew(u32);
+
+#[derive(SerRon,  PartialEq, Debug)]
 struct TestStruct{
-    v: TestEnum
+    t: [u32;4],
+    v: TestNew,
+    w: TestEnum
 }
 
 
 fn main() {
-    // ok . lets serialise Test to a binary
-    
     let x = TestStruct {
-        v:TestEnum::X
+        t:[1,2,3,4],
+        v:TestNew(10),
+        w:TestEnum::Y
+    };
+    let output = x.serialize_ron();
+    println!("{}", output);
+    // ok . lets serialise Test to a binary
+    /*
+    let x = TestStruct {
+        t:[1,2,3,4],
+        v:TestEnum::X{x:10,y:10},
+        w:TestEnum::Y
     };
     let output = x.serialize_ron();
     println!("{}", output);
     let y: TestStruct = DeRon::deserialize_ron(&output).expect("can't parse");
     
-    println!("{:?}", y);
+    println!("{:?}", y);*/
 }
 
 /*
