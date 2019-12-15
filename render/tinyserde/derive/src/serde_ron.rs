@@ -102,7 +102,7 @@ pub fn derive_de_ron_struct(input: &DeriveInput, fields: &FieldsNamed) -> TokenS
                 ) *
                 s.paren_open(i) ?;
                 while let Some(key) = s.next_ident() {
-                    s.colon(i) ?;
+                    s.next_colon(i) ?;
                     match key.as_ref() {
                         #(
                             #fieldstrings => #localvars = Some(DeRon::de_ron(s, i) ?),

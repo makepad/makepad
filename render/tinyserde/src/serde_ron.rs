@@ -1,5 +1,5 @@
-//use std::collections::{HashMap};
-//use std::hash::Hash;
+use std::collections::{HashMap};
+use std::hash::Hash;
 use std::str::Chars;
 
 pub struct SerRonState {
@@ -140,8 +140,22 @@ impl DeRonState {
         }
     }
     
+     pub fn eat_comma_curly(&mut self, i: &mut Chars) -> Result<(), String> {
+        match self.tok {
+            DeRonTok::Comma => {
+                self.next_tok(i) ?;
+                Ok(())
+            },
+            DeRonTok::CurlyClose => {
+                Ok(())
+            }
+            _ => {
+                Err(format!("Unexpected token {:?}", self.tok))
+            }
+        }
+    }
+    
     pub fn colon(&mut self, i: &mut Chars) -> Result<(), String> {
-        self.next_tok(i) ?;
         match self.tok {
             DeRonTok::Colon => {
                 self.next_tok(i) ?;
@@ -151,6 +165,12 @@ impl DeRonState {
                 Err(format!("Unexpected token {:?}", self.tok))
             }
         }
+    }
+    
+    pub fn next_colon(&mut self, i: &mut Chars) -> Result<(), String>{
+        self.next_tok(i)?;
+        self.colon(i)?;
+        Ok(())
     }
     
     pub fn next_ident(&mut self) -> Option<String> {
@@ -175,7 +195,6 @@ impl DeRonState {
     
     pub fn paren_close(&mut self, i: &mut Chars) -> Result<(), String> {
         if self.tok == DeRonTok::ParenClose {
-            // could be final token
             self.next_tok(i) ?;
             return Ok(())
         }
@@ -187,17 +206,33 @@ impl DeRonState {
             self.next_tok(i) ?;
             return Ok(())
         }
-        Err(format!("Next token not paren open {:?}", self.tok))
+        Err(format!("Next token not block open {:?}", self.tok))
     }
     
     
     pub fn block_close(&mut self, i: &mut Chars) -> Result<(), String> {
         if self.tok == DeRonTok::BlockClose {
-            // could be final token
             self.next_tok(i) ?;
             return Ok(())
         }
-        Err(format!("Next token not paren close {:?}", self.tok))
+        Err(format!("Next token not block close {:?}", self.tok))
+    }
+    
+    pub fn curly_open(&mut self, i: &mut Chars) -> Result<(), String> {
+        if self.tok == DeRonTok::CurlyOpen {
+            self.next_tok(i) ?;
+            return Ok(())
+        }
+        Err(format!("Next token not curly open {:?}", self.tok))
+    }
+    
+    
+    pub fn curly_close(&mut self, i: &mut Chars) -> Result<(), String> {
+        if self.tok == DeRonTok::CurlyClose {
+            self.next_tok(i) ?;
+            return Ok(())
+        }
+        Err(format!("Next token not curly close {:?}", self.tok))
     }
     
     
@@ -553,7 +588,7 @@ impl<T> DeRon for Vec<T> where T: DeRon {
             out.push(DeRon::de_ron(s, i) ?);
             s.eat_comma_block(i) ?;
         }
-        s.next_tok(i) ?;
+        s.block_close(i) ?;
         Ok(out)
     }
 }
@@ -611,81 +646,117 @@ impl<T> DeRon for [T; 29] where T: DeRon {fn de_ron(s: &mut DeRonState, i: &mut 
 impl<T> DeRon for [T; 30] where T: DeRon {fn de_ron(s: &mut DeRonState, i: &mut Chars) -> Result<Self, String> {s.block_open(i) ?; let r = expand_de_ron!(s, i, i, i, i, i, i, i, i, i, i, i, i, i, i, i, i, i, i, i, i, i, i, i, i, i, i, i, i, i, i); s.block_close(i) ?; Ok(r)}}
 impl<T> DeRon for [T; 31] where T: DeRon {fn de_ron(s: &mut DeRonState, i: &mut Chars) -> Result<Self, String> {s.block_open(i) ?; let r = expand_de_ron!(s, i, i, i, i, i, i, i, i, i, i, i, i, i, i, i, i, i, i, i, i, i, i, i, i, i, i, i, i, i, i, i); s.block_close(i) ?; Ok(r)}}
 impl<T> DeRon for [T; 32] where T: DeRon {fn de_ron(s: &mut DeRonState, i: &mut Chars) -> Result<Self, String> {s.block_open(i) ?; let r = expand_de_ron!(s, i, i, i, i, i, i, i, i, i, i, i, i, i, i, i, i, i, i, i, i, i, i, i, i, i, i, i, i, i, i, i, i); s.block_close(i) ?; Ok(r)}}
-/*
+
+fn de_ron_comma_paren<T>(s: &mut DeRonState, i: &mut Chars) -> Result<T, String> where T: DeRon {
+    let t = DeRon::de_ron(s, i);
+    s.eat_comma_paren(i) ?;
+    t
+}
+
 impl<A,B> SerRon for (A,B) where A: SerRon, B:SerRon {
-    fn ser_bin(&self, s: &mut Vec<u8>) {
-        ser_ron_pref(d, p, s);
-        s.push_str("(");
-        self.0.ser_bin(s);
-        s.push_str(", ");
-        self.1.ser_bin(s);
-        s.push_str(")");
-    }
-}*//*
-impl<A,B> DeBin for (A,B) where A:DeBin, B:DeBin{
-    fn de_bin(o:&mut usize, d:&[u8])->(A,B) {(DeBin::de_bin(o,d),DeBin::de_bin(o,d))}
-}*/
-/*
-impl<A,B,C> SerBin for (A,B,C) where A: SerBin, B:SerBin, C:SerBin {
-    fn ser_bin(&self, s: &mut Vec<u8>) {
-        self.0.ser_bin(s);
-        self.1.ser_bin(s);
-        self.2.ser_bin(s);
+    fn ser_ron(&self, d: usize, s: &mut SerRonState) {
+        s.out.push('(');
+        self.0.ser_ron(d, s);
+        s.out.push_str(", ");
+        self.1.ser_ron(d, s);
+        s.out.push(')');
     }
 }
 
-impl<A,B,C> DeBin for (A,B,C) where A:DeBin, B:DeBin, C:DeBin{
-    fn de_bin(o:&mut usize, d:&[u8])->(A,B,C) {(DeBin::de_bin(o,d),DeBin::de_bin(o,d),DeBin::de_bin(o,d))}
-}
-
-impl<A,B,C,D> SerBin for (A,B,C,D) where A: SerBin, B:SerBin, C:SerBin, D:SerBin {
-    fn ser_bin(&self, s: &mut Vec<u8>) {
-        self.0.ser_bin(s);
-        self.1.ser_bin(s);
-        self.2.ser_bin(s);
-        self.3.ser_bin(s);
+impl<A,B> DeRon for (A,B) where A:DeRon, B:DeRon{
+    fn de_ron(s: &mut DeRonState, i: &mut Chars)->Result<(A,B),String> {
+        s.paren_open(i)?;
+        let r = (de_ron_comma_paren(s,i)?,de_ron_comma_paren(s,i)?);
+        s.paren_close(i)?;
+        Ok(r)
     }
 }
 
-impl<A,B,C,D> DeBin for (A,B,C,D) where A:DeBin, B:DeBin, C:DeBin, D:DeBin{
-    fn de_bin(o:&mut usize, d:&[u8])->(A,B,C,D) {(DeBin::de_bin(o,d),DeBin::de_bin(o,d),DeBin::de_bin(o,d),DeBin::de_bin(o,d))}
+impl<A,B,C> SerRon for (A,B,C) where A: SerRon, B:SerRon, C:SerRon {
+    fn ser_ron(&self, d: usize, s: &mut SerRonState) {
+        s.out.push('(');
+        self.0.ser_ron(d, s);
+        s.out.push_str(", ");
+        self.1.ser_ron(d, s);
+        s.out.push_str(", ");
+        self.2.ser_ron(d, s);
+        s.out.push(')');
+    }
 }
 
-impl<K, V> SerBin for HashMap<K, V> where K: SerBin,
-V: SerBin {
-    fn ser_bin(&self, s: &mut Vec<u8>) {
-        let len = self.len();
-        len.ser_bin(s);
+impl<A,B,C> DeRon for (A,B,C) where A:DeRon, B:DeRon, C:DeRon{
+    fn de_ron(s: &mut DeRonState, i: &mut Chars)->Result<(A,B,C),String> {
+        s.paren_open(i)?;
+        let r = (de_ron_comma_paren(s,i)?,de_ron_comma_paren(s,i)?,de_ron_comma_paren(s,i)?);
+        s.paren_close(i)?;
+        Ok(r)
+    }
+}
+
+impl<A,B,C,D> SerRon for (A,B,C,D) where A: SerRon, B:SerRon, C:SerRon, D:SerRon {
+    fn ser_ron(&self, d: usize, s: &mut SerRonState) {
+        s.out.push('(');
+        self.0.ser_ron(d, s);
+        s.out.push_str(", ");
+        self.1.ser_ron(d, s);
+        s.out.push_str(", ");
+        self.2.ser_ron(d, s);
+        s.out.push_str(", ");
+        self.3.ser_ron(d, s);
+        s.out.push(')');
+    }
+}
+
+impl<A,B,C,D> DeRon for (A,B,C,D) where A:DeRon, B:DeRon, C:DeRon, D:DeRon{
+    fn de_ron(s: &mut DeRonState, i: &mut Chars)->Result<(A,B,C,D),String> {
+        s.paren_open(i)?;
+        let r = (de_ron_comma_paren(s,i)?,de_ron_comma_paren(s,i)?,de_ron_comma_paren(s,i)?,de_ron_comma_paren(s,i)?);
+        s.paren_close(i)?;
+        Ok(r)
+    }
+}
+
+impl<K, V> SerRon for HashMap<K, V> where K: SerRon,
+V: SerRon {
+    fn ser_ron(&self, d: usize, s: &mut SerRonState) {
+        s.out.push_str("{\n");
         for (k, v) in self {
-            k.ser_bin(s);
-            v.ser_bin(s);
+            s.indent(d+1);
+            k.ser_ron(d+1,s);
+            s.out.push_str(":");
+            v.ser_ron(d+1,s);
+            s.conl();
         }
+        s.indent(d);
+        s.out.push('}');
     }
 }
 
-impl<K, V> DeBin for HashMap<K, V> where K: DeBin + Eq + Hash,
-V: DeBin + Eq {
-    fn de_bin(o:&mut usize, d:&[u8])->Self{
-        let len:usize = DeBin::de_bin(o,d);
+impl<K, V> DeRon for HashMap<K, V> where K: DeRon + Eq + Hash,
+V: DeRon + Eq {
+    fn de_ron(s: &mut DeRonState, i: &mut Chars)->Result<Self, String>{
         let mut h = HashMap::new();
-        for _ in 0..len{
-            let k = DeBin::de_bin(o,d);
-            let v = DeBin::de_bin(o,d);
+        s.curly_open(i) ?;
+        while s.tok != DeRonTok::CurlyClose {
+            let k = DeRon::de_ron(s,i)?;
+            s.colon(i)?;
+            let v = DeRon::de_ron(s,i)?;
+            s.eat_comma_curly(i)?;
             h.insert(k, v);
         }
-        h
+        s.curly_close(i)?;
+        Ok(h)
     }
 }
 
-
-impl<T> SerBin for Box<T> where T: SerBin {
-    fn ser_bin(&self, s: &mut Vec<u8>) {
-        (**self).ser_bin(s)
+impl<T> SerRon for Box<T> where T: SerRon {
+    fn ser_ron(&self, d: usize, s: &mut SerRonState) {
+        (**self).ser_ron(d,s)
     }
 }
 
-impl<T> DeBin for Box<T> where T: DeBin {
-    fn de_bin(o:&mut usize, d:&[u8])->Box<T> {
-        Box::new(DeBin::de_bin(o,d))
+impl<T> DeRon for Box<T> where T: DeRon {
+    fn de_ron(s: &mut DeRonState, i: &mut Chars)->Result<Box<T>,String> {
+        Ok(Box::new(DeRon::de_ron(s,i)?))
     }
-}*/
+}
