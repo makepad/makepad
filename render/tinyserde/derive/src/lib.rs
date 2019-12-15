@@ -55,7 +55,7 @@ pub fn derive_de_bin(input: proc_macro::TokenStream) -> proc_macro::TokenStream 
         },
         _ => error(Span::call_site(), "only structs or enums supported")
     };
-    
+    println!("{}", ts.to_string());
     proc_macro::TokenStream::from(ts)
 }
 
