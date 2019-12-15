@@ -85,10 +85,10 @@ pub fn derive_de_ron(input: proc_macro::TokenStream) -> proc_macro::TokenStream 
     let ts = match &input.data {
         Data::Struct(DataStruct {fields: Fields::Named(fields), ..}) => {
             derive_de_ron_struct(&input, fields)
-        },/*
+        },
         Data::Struct(DataStruct {fields: Fields::Unnamed(fields), ..}) => {
-            derive_de_bin_struct_unnamed(&input, fields)
-        },*/
+            derive_de_ron_struct_unnamed(&input, fields)
+        },
         Data::Enum(enumeration) => {
             derive_de_ron_enum(&input, enumeration)
         },
