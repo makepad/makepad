@@ -35,6 +35,7 @@ fn main() {
     }
     
     let ron = x.serialize_ron();
+    println!("{}", ron);
     let y:TestStruct = DeRon::deserialize_ron(&ron).expect("cant parse");
     
     println!("RON equal: {}", x == y);
