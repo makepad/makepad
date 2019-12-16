@@ -7,7 +7,7 @@ pub struct SerJsonState {
 }
 
 impl SerJsonState {
-    pub fn indent(&mut self, d: usize) {
+    pub fn indent(&mut self, _d: usize) {
         //for _ in 0..d {
         //    self.out.push_str("    ");
         //}
