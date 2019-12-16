@@ -1,68 +1,52 @@
 use std::collections::{HashMap};
 use makepad_tinyserde::*;
-//use serde::*;
-//use serde_json::*;
-/*
-fn main() {
-    let root_cargo = match std::fs::read_to_string("Cargo.toml") {
-        Err(_) => {
-            panic!("ERR");
-        },
-        Ok(v) => v
-    };
-    
-    let toml = match TomlParser::parse(&root_cargo) {
-        Err(e) => {
-            println!("HERE@L#I$UJL#");
-            panic!(format!("Parse error {:?}", e));
-        },
-        Ok(v) => v
-    };
 
-    if let Some(Toml::Array(members)) = toml.get("workspace.members") {
-        for member in members {
-            if let Toml::Str(member) = member {
-                println!("{}", member);
-            }
-        }
-    }
-}
-*/
-
-
-#[derive(SerRon, DeRon, PartialEq, Debug, Clone, Serialize, Deserialize)]
+#[derive(SerRon, DeRon, SerJson, DeJson, SerBin, DeBin, PartialEq, Debug, Clone)]
 enum TestEnum{ 
     X{x:u32, y:Option<u32>},
-    Y
+    Y(u32, Option<TestNew>),
+    Z
 }
 
-
-#[derive(SerRon, DeRon, PartialEq, Debug, Clone,Serialize, Deserialize)]
+#[derive(SerRon, DeRon, SerJson, DeJson, SerBin, DeBin, PartialEq, Debug, Clone)]
 struct TestNew(u32);
 
-#[derive(SerRon, DeRon, PartialEq, Debug, Clone, Serialize, Deserialize)]
+#[derive(SerRon, DeRon, SerJson, DeJson, SerBin, DeBin, PartialEq, Debug, Clone)]
 struct TestStruct{
     t: [u32;4],
     s: Vec<TestStruct>,
-    v: TestNew,
-    w: TestEnum
+    w: TestEnum,
+    h: TestEnum,
+    v: TestEnum
 }
 
 fn main() {
     let mut x = TestStruct {
         t:[1,2,3,4],
         s:vec![],
-        v:TestNew(10),
-        w:TestEnum::X{x:10,y:None}
+        w:TestEnum::Y(1, Some(TestNew(10))),
+        h:TestEnum::X{x:10,y:Some(10)},
+        v:TestEnum::Z
     };
-    for i in 0..20{
+    for _ in 0..1{
         x.s.push(x.clone());
     }
     
-    //let serd = ron::ser::to_string_pretty(&x,ron::ser::PrettyConfig::default()).unwrap();
-    //let y:TestStruct = ron::de::from_str(&serd).expect("cant parse");
-    let output = x.serialize_ron();
-    let y:TestStruct = DeRon::deserialize_ron(&output).expect("cant parse");
+    let ron = x.serialize_ron();
+    let y:TestStruct = DeRon::deserialize_ron(&ron).expect("cant parse");
+    
+    println!("RON equal: {}", x == y);
+
+    let json = x.serialize_json();
+    let y:TestStruct = DeJson::deserialize_json(&json).expect("cant parse");
+
+    println!("JSON equal: {}", x == y);
+
+    let bin = x.serialize_bin();
+    let y:TestStruct = DeBin::deserialize_bin(&bin).expect("cant parse");
+
+    println!("BIN equal: {}", x == y);
+
     //println!("{}", output); 
     
     //let y:TestStruct = DeJson::deserialize_json(&output).expect("can't parse");
