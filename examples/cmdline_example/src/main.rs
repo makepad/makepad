@@ -28,19 +28,19 @@ fn main() {
     }
 }
 */
-/*
 
-#[derive(SerJson, DeJson, PartialEq, Debug, Clone, Serialize, Deserialize)]
+
+#[derive(SerRon, DeRon, PartialEq, Debug, Clone, Serialize, Deserialize)]
 enum TestEnum{ 
     X{x:u32, y:Option<u32>},
     Y
 }
 
 
-#[derive(SerJson, DeJson, PartialEq, Debug, Clone,Serialize, Deserialize)]
+#[derive(SerRon, DeRon, PartialEq, Debug, Clone,Serialize, Deserialize)]
 struct TestNew(u32);
 
-#[derive(SerJson, DeJson, PartialEq, Debug, Clone, Serialize, Deserialize)]
+#[derive(SerRon, DeRon, PartialEq, Debug, Clone, Serialize, Deserialize)]
 struct TestStruct{
     t: [u32;4],
     s: Vec<TestStruct>,
@@ -59,10 +59,10 @@ fn main() {
         x.s.push(x.clone());
     }
     
-    //let serd = serde_json::to_string(&x).unwrap();
-    //let y:TestStruct = serde_json::from_str(&serd).expect("cant parse");
-    let output = x.serialize_json();
-    let y:TestStruct = DeJson::deserialize_json(&output).expect("cant parse");
+    //let serd = ron::ser::to_string_pretty(&x,ron::ser::PrettyConfig::default()).unwrap();
+    //let y:TestStruct = ron::de::from_str(&serd).expect("cant parse");
+    let output = x.serialize_ron();
+    let y:TestStruct = DeRon::deserialize_ron(&output).expect("cant parse");
     //println!("{}", output); 
     
     //let y:TestStruct = DeJson::deserialize_json(&output).expect("can't parse");
@@ -79,8 +79,8 @@ fn main() {
     let y: TestStruct = DeRon::deserialize_ron(&output).expect("can't parse");
     
     println!("{:?}", y);*/
-}*/
-
+}
+/*
 
 #[derive(SerRon, DeRon, PartialEq, Debug)]
 struct TestTuple(u32, u32);
@@ -123,7 +123,7 @@ fn main() {
     let y: TestStruct = DeRon::deserialize_ron(&output).expect("can't parse");
     
     println!("{:?}", y);
-}
+}*/
 /*
 
 #[derive(SerBin, DeBin, PartialEq, Debug)]

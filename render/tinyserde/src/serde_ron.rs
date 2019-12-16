@@ -70,6 +70,7 @@ pub enum DeRonTok {
     I64(i64),
     F64(f64),
     Bool(bool),
+    Char(char),
     Colon,
     CurlyOpen,
     CurlyClose,
@@ -349,137 +350,178 @@ impl DeRonState {
         while self.cur == '\n' || self.cur == '\r' || self.cur == '\t' || self.cur == ' ' {
             self.next(i);
         }
-        if self.cur == '\0' {
-            self.tok = DeRonTok::Eof;
-            return Ok(())
-        }
-        match self.cur {
-            ':' => {
-                self.next(i);
-                self.tok = DeRonTok::Colon;
-                return Ok(())
-            }
-            ',' => {
-                self.next(i);
-                self.tok = DeRonTok::Comma;
-                return Ok(())
-            }
-            '[' => {
-                self.next(i);
-                self.tok = DeRonTok::BlockOpen;
-                return Ok(())
-            }
-            ']' => {
-                self.next(i);
-                self.tok = DeRonTok::BlockClose;
-                return Ok(())
-            }
-            '(' => {
-                self.next(i);
-                self.tok = DeRonTok::ParenOpen;
-                return Ok(())
-            }
-            ')' => {
-                self.next(i);
-                self.tok = DeRonTok::ParenClose;
-                return Ok(())
-            }
-            '{' => {
-                self.next(i);
-                self.tok = DeRonTok::CurlyOpen;
-                return Ok(())
-            }
-            '}' => {
-                self.next(i);
-                self.tok = DeRonTok::CurlyClose;
-                return Ok(())
-            }
-            '-' | '0'..='9' => {
-                self.numbuf.truncate(0);
-                let is_neg = if self.cur == '-' {
-                    self.numbuf.push(self.cur);
+        loop{
+            match self.cur {
+                '\0'=>{
+                    self.tok = DeRonTok::Eof;
+                    return Ok(())
+                },
+                ':' => {
                     self.next(i);
-                    true
+                    self.tok = DeRonTok::Colon;
+                    return Ok(())
                 }
-                else {
-                    false
-                };
-                while self.cur >= '0' && self.cur <= '9' {
-                    self.numbuf.push(self.cur);
+                ',' => {
                     self.next(i);
+                    self.tok = DeRonTok::Comma;
+                    return Ok(())
                 }
-                if self.cur == '.' {
-                    self.numbuf.push(self.cur);
+                '[' => {
                     self.next(i);
+                    self.tok = DeRonTok::BlockOpen;
+                    return Ok(())
+                }
+                ']' => {
+                    self.next(i);
+                    self.tok = DeRonTok::BlockClose;
+                    return Ok(())
+                }
+                '(' => {
+                    self.next(i);
+                    self.tok = DeRonTok::ParenOpen;
+                    return Ok(())
+                }
+                ')' => {
+                    self.next(i);
+                    self.tok = DeRonTok::ParenClose;
+                    return Ok(())
+                }
+                '{' => {
+                    self.next(i);
+                    self.tok = DeRonTok::CurlyOpen;
+                    return Ok(())
+                }
+                '}' => {
+                    self.next(i);
+                    self.tok = DeRonTok::CurlyClose;
+                    return Ok(())
+                }
+                '/' =>{
+                    self.next(i);
+                    if self.cur == '/'{ // single line comment
+                        while self.cur != '\0'{
+                            if self.cur == '\n' {
+                                self.next(i);
+                                break;
+                            }
+                            self.next(i);
+                        }
+                    }
+                    else if self.cur == '*'{ // multline comment
+                        let mut last_star = false;
+                        while self.cur != '\0'{
+                            if self.cur == '/' && last_star{
+                                self.next(i);
+                                break;
+                            }
+                            if self.cur == '*'{last_star = true}else{last_star = false}
+                            self.next(i);
+                        }
+                    }
+                    else{
+                        return Err(self.err_parse("comment"));
+                    }
+                },
+                '-' | '0'..='9' => {
+                    self.numbuf.truncate(0);
+                    let is_neg = if self.cur == '-' {
+                        self.numbuf.push(self.cur);
+                        self.next(i);
+                        true
+                    }
+                    else {
+                        false
+                    };
                     while self.cur >= '0' && self.cur <= '9' {
                         self.numbuf.push(self.cur);
                         self.next(i);
                     }
-                    if let Ok(num) = self.numbuf.parse() {
-                        self.tok = DeRonTok::F64(num);
-                        return Ok(())
-                    }
-                    else {
-                        return Err(self.err_parse("number"));
-                    }
-                }
-                else {
-                    if is_neg {
+                    if self.cur == '.' {
+                        self.numbuf.push(self.cur);
+                        self.next(i);
+                        while self.cur >= '0' && self.cur <= '9' {
+                            self.numbuf.push(self.cur);
+                            self.next(i);
+                        }
                         if let Ok(num) = self.numbuf.parse() {
-                            self.tok = DeRonTok::I64(num);
+                            self.tok = DeRonTok::F64(num);
                             return Ok(())
                         }
                         else {
                             return Err(self.err_parse("number"));
                         }
                     }
-                    if let Ok(num) = self.numbuf.parse() {
-                        self.tok = DeRonTok::U64(num);
-                        return Ok(())
-                    }
                     else {
-                        return Err(self.err_parse("number"));
+                        if is_neg {
+                            if let Ok(num) = self.numbuf.parse() {
+                                self.tok = DeRonTok::I64(num);
+                                return Ok(())
+                            }
+                            else {
+                                return Err(self.err_parse("number"));
+                            }
+                        }
+                        if let Ok(num) = self.numbuf.parse() {
+                            self.tok = DeRonTok::U64(num);
+                            return Ok(())
+                        }
+                        else {
+                            return Err(self.err_parse("number"));
+                        }
                     }
-                }
-            },
-            'a'..='z' | 'A'..='Z' | '_' => {
-                self.identbuf.truncate(0);
-                while self.cur >= 'a' && self.cur <= 'z'
-                    || self.cur >= 'A' && self.cur <= 'Z'
-                    || self.cur == '_' {
-                    self.identbuf.push(self.cur);
-                    self.next(i);
-                }
-                if self.identbuf == "true" {
-                    self.tok = DeRonTok::Bool(true);
-                    return Ok(())
-                }
-                if self.identbuf == "false" {
-                    self.tok = DeRonTok::Bool(false);
-                    return Ok(())
-                }
-                self.tok = DeRonTok::Ident;
-                return Ok(())
-            },
-            '"' => {
-                self.strbuf.truncate(0);
-                self.next(i);
-                while self.cur != '"' {
-                    if self.cur == '\\' {
+                },
+                'a'..='z' | 'A'..='Z' | '_' => {
+                    self.identbuf.truncate(0);
+                    while self.cur >= 'a' && self.cur <= 'z'
+                        || self.cur >= 'A' && self.cur <= 'Z'
+                        || self.cur == '_' {
+                        self.identbuf.push(self.cur);
                         self.next(i);
                     }
-                    if self.cur == '\0' {
-                        return Err(self.err_parse("string"));
+                    if self.identbuf == "true" {
+                        self.tok = DeRonTok::Bool(true);
+                        return Ok(())
                     }
-                    self.strbuf.push(self.cur);
+                    if self.identbuf == "false" {
+                        self.tok = DeRonTok::Bool(false);
+                        return Ok(())
+                    }
+                    self.tok = DeRonTok::Ident;
+                    return Ok(())
+                },
+                '\''=>{
                     self.next(i);
+                    if self.cur == '\\'{
+                        self.next(i);
+                    }
+                    let chr = self.cur;
+                    self.next(i);
+                    if self.cur != '\''{
+                        return Err(self.err_token("char"));
+                    }
+                    self.next(i);
+                    self.tok = DeRonTok::Char(chr);
+                },
+                '"' => {
+                    self.strbuf.truncate(0);
+                    self.next(i);
+                    while self.cur != '"' {
+                        if self.cur == '\\' {
+                            self.next(i);
+                        }
+                        if self.cur == '\0' {
+                            return Err(self.err_parse("string"));
+                        }
+                        self.strbuf.push(self.cur);
+                        self.next(i);
+                    }
+                    self.next(i);
+                    self.tok = DeRonTok::Str;
+                    return Ok(())
+                },
+                _ => {
+                    return Err(self.err_token("tokenizer"));
                 }
-                self.next(i);
-                self.tok = DeRonTok::Str;
-                return Ok(())
-            },
-            _ => {
-                return Err(self.err_token("tokenizer"));
             }
         }
     }
