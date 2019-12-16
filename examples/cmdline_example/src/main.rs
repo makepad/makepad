@@ -1,5 +1,5 @@
-use std::collections::{HashMap};
 use makepad_tinyserde::*;
+use std::collections::{HashMap};
 
 #[derive(SerRon, DeRon, SerJson, DeJson, SerBin, DeBin, PartialEq, Debug, Clone)]
 enum TestEnum{ 
@@ -9,12 +9,13 @@ enum TestEnum{
 }
 
 #[derive(SerRon, DeRon, SerJson, DeJson, SerBin, DeBin, PartialEq, Debug, Clone)]
-struct TestNew(u32);
+struct TestNew(String);
 
 #[derive(SerRon, DeRon, SerJson, DeJson, SerBin, DeBin, PartialEq, Debug, Clone)]
 struct TestStruct{
     t: [u32;4],
     s: Vec<TestStruct>,
+    m: HashMap<String, u32>,
     w: TestEnum,
     h: TestEnum,
     v: TestEnum
@@ -24,7 +25,8 @@ fn main() {
     let mut x = TestStruct {
         t:[1,2,3,4],
         s:vec![],
-        w:TestEnum::Y(1, Some(TestNew(10))),
+        m:{let mut m = HashMap::new(); m.insert("hi".to_string(),1); m.insert("ho".to_string(),2);m},
+        w:TestEnum::Y(1, Some(TestNew("hello \"world".to_string()))),
         h:TestEnum::X{x:10,y:Some(10)},
         v:TestEnum::Z
     };
