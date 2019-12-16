@@ -85,13 +85,13 @@ pub fn derive_de_json_named(ident:TokenStream, fields: &FieldsNamed) -> TokenStr
             let mut #local_vars = None;
         ) *
         s.curly_open(i) ?;
-        while let Some(key) = s.next_str() {
+        while let Some(_) = s.next_str() {
             s.next_colon(i) ?;
-            match key.as_ref() {
+            match s.strbuf.as_ref() {
                 #(
                     #field_strings => #local_vars = Some(DeJson::de_json(s, i) ?),
                 ) *
-                _ => return Err(s.err_exp(&key))
+                _ => return std::result::Result::Err(s.err_exp(&s.strbuf))
             }
             s.eat_comma_curly(i) ?
         }
@@ -111,9 +111,9 @@ pub fn derive_de_json_struct(input: &DeriveInput, fields: &FieldsNamed) -> Token
     
     quote!{
         impl #impl_generics DeJson for #ident #ty_generics #bounded_where_clause {
-            fn de_json(s: &mut makepad_tinyserde::DeJsonState, i: &mut std::str::Chars) -> Result<Self,
+            fn de_json(s: &mut makepad_tinyserde::DeJsonState, i: &mut std::str::Chars) -> std::result::Result<Self,
             DeJsonErr> {
-                Ok({#body})
+                std::result::Result::Ok({#body})
             }
         }
     }
@@ -182,7 +182,7 @@ pub fn derive_ser_json_enum(input: &DeriveInput, enumeration: &DataEnum) -> Toke
                     let field_name = Ident::new(&format!("f{}", index), field.span());
                     if index != last{
                         str_names.push(quote!{
-                            #field_name.ser_json(d, s); s.out.push_str(", ");
+                            #field_name.ser_json(d, s); s.out.push(',');
                         });
                     }
                     else{
@@ -258,16 +258,16 @@ pub fn derive_de_json_enum(input: &DeriveInput, enumeration: &DataEnum) -> Token
     
     quote! {
         impl #impl_generics DeJson for #ident #ty_generics #bounded_where_clause {
-            fn de_json(s: &mut DeJsonState, i: &mut std::str::Chars) -> Result<Self,DeJsonErr> {
+            fn de_json(s: &mut DeJsonState, i: &mut std::str::Chars) -> std::result::Result<Self,DeJsonErr> {
                 // we are expecting an identifier
                 s.curly_open(i)?;
-                let id = s.string(i)?;
+                let _ = s.string(i)?;
                 s.colon(i)?;
-                let r = Ok(match id.as_ref() {
+                let r = std::result::Result::Ok(match s.strbuf.as_ref() {
                     #(
                         #match_item
                     ) *
-                    _ => return Err(s.err_enum(&id))
+                    _ => return std::result::Result::Err(s.err_enum(&s.strbuf))
                 });
                 s.curly_close(i)?;
                 r
@@ -325,7 +325,7 @@ pub fn derive_de_json_struct_unnamed(input: &DeriveInput, fields:&FieldsUnnamed)
 
     quote! {
         impl #impl_generics DeJson for #ident #ty_generics #bounded_where_clause {
-            fn de_json(s: &mut makepad_tinyserde::DeJsonState, i: &mut std::str::Chars) -> Result<Self,DeJsonErr> {
+            fn de_json(s: &mut makepad_tinyserde::DeJsonState, i: &mut std::str::Chars) -> std::result::Result<Self,DeJsonErr> {
                 s.block_open(i)?;
                 let r = Self(
                     #(
@@ -333,7 +333,7 @@ pub fn derive_de_json_struct_unnamed(input: &DeriveInput, fields:&FieldsUnnamed)
                     ) *
                 );
                 s.block_close(i)?;
-                Ok(r)
+                std::result::Result::Ok(r)
             }
         }
     }
