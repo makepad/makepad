@@ -10,7 +10,7 @@ impl SerJsonState {
     pub fn indent(&mut self, d: usize) {
         //for _ in 0..d {
         //    self.out.push_str("    ");
-       // }
+        //}
     }
     
     pub fn field(&mut self, d: usize, field: &str) {
