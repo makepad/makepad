@@ -63,8 +63,8 @@ pub fn derive_de_bin_struct(input: &DeriveInput, fields:&FieldsNamed) -> TokenSt
 
     quote! {
         impl #impl_generics DeBin for #ident #ty_generics #bounded_where_clause {
-            fn de_bin(o:&mut usize, d:&[u8]) -> Result<Self, DeBinErr> {
-                Ok(Self {
+            fn de_bin(o:&mut usize, d:&[u8]) -> std::result::Result<Self, DeBinErr> {
+                std::result::Result::Ok(Self {
                     #(
                         #fieldname: DeBin::de_bin(o,d)?,
                     ) *
@@ -87,8 +87,8 @@ pub fn derive_de_bin_struct_unnamed(input: &DeriveInput, fields:&FieldsUnnamed) 
 
     quote! {
         impl #impl_generics DeBin for #ident #ty_generics #bounded_where_clause {
-            fn de_bin(o:&mut usize, d:&[u8]) -> Result<Self,DeBinErr> {
-                Ok(Self {
+            fn de_bin(o:&mut usize, d:&[u8]) -> std::result::Result<Self,DeBinErr> {
+                std::result::Result::Ok(Self {
                     #(
                         #fieldname: DeBin::de_bin(o,d)?,
                     ) *
@@ -201,13 +201,13 @@ pub fn derive_de_bin_enum(input: &DeriveInput, enumeration: &DataEnum) -> TokenS
     
     quote! {
         impl #impl_generics DeBin for #ident #ty_generics #bounded_where_clause {
-            fn de_bin(o:&mut usize, d:&[u8]) -> Result<Self, DeBinErr> {
+            fn de_bin(o:&mut usize, d:&[u8]) -> std::result::Result<Self, DeBinErr> {
                 let id: u16 = DeBin::de_bin(o,d)?;
                 Ok(match id {
                     #(
                         #match_item
                     ) *
-                    _ => return Err(DeBinErr{o:*o, l:0, s:d.len()})
+                    _ => return std::result::Result::Err(DeBinErr{o:*o, l:0, s:d.len()})
                 })
             }
         }

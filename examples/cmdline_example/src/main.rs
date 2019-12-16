@@ -1,4 +1,7 @@
+use std::collections::{HashMap};
 use makepad_tinyserde::*;
+//use serde::*;
+//use serde_json::*;
 /*
 fn main() {
     let root_cargo = match std::fs::read_to_string("Cargo.toml") {
@@ -25,35 +28,45 @@ fn main() {
     }
 }
 */
+/*
 
-
-#[derive(SerJson, DeJson, PartialEq, Debug)]
-enum TestEnum{
+#[derive(SerJson, DeJson, PartialEq, Debug, Clone, Serialize, Deserialize)]
+enum TestEnum{ 
     X{x:u32, y:Option<u32>},
     Y
 }
 
-#[derive(SerJson, DeJson, PartialEq, Debug)]
+
+#[derive(SerJson, DeJson, PartialEq, Debug, Clone,Serialize, Deserialize)]
 struct TestNew(u32);
 
-#[derive(SerJson, DeJson, PartialEq, Debug)]
+#[derive(SerJson, DeJson, PartialEq, Debug, Clone, Serialize, Deserialize)]
 struct TestStruct{
     t: [u32;4],
+    s: Vec<TestStruct>,
     v: TestNew,
     w: TestEnum
 }
 
 fn main() {
-    let x = TestStruct {
+    let mut x = TestStruct {
         t:[1,2,3,4],
+        s:vec![],
         v:TestNew(10),
         w:TestEnum::X{x:10,y:None}
     };
-    let output = x.serialize_json();
-    println!("{}", output); 
+    for i in 0..20{
+        x.s.push(x.clone());
+    }
     
-    let y:TestStruct = DeJson::deserialize_json(&output).expect("can't parse");
-    println!("{:?}", y);
+    //let serd = serde_json::to_string(&x).unwrap();
+    //let y:TestStruct = serde_json::from_str(&serd).expect("cant parse");
+    let output = x.serialize_json();
+    let y:TestStruct = DeJson::deserialize_json(&output).expect("cant parse");
+    //println!("{}", output); 
+    
+    //let y:TestStruct = DeJson::deserialize_json(&output).expect("can't parse");
+    //println!("{:?}", y);
     // ok . lets serialise Test to a binary
     /*
     let x = TestStruct {
@@ -66,9 +79,18 @@ fn main() {
     let y: TestStruct = DeRon::deserialize_ron(&output).expect("can't parse");
     
     println!("{:?}", y);*/
-}
+}*/
 
-/*
+
+#[derive(SerRon, DeRon, PartialEq, Debug)]
+struct TestTuple(u32, u32);
+
+#[derive(SerRon, DeRon, PartialEq, Debug)]
+enum TestEnum {
+    A(TestTuple),
+    B,
+    C
+}
 #[derive(SerRon, DeRon, PartialEq, Debug)]
 struct TestStruct {
     o: [Option<u8>;3],
@@ -78,6 +100,7 @@ struct TestStruct {
     x: Option<u8>,
     z: bool,
     s: String,
+    en: TestEnum,
     y: f32
 }
 
@@ -91,6 +114,7 @@ fn main() {
         z: false,
         s: "hello".to_string(),
         y: 0.5,
+        en:TestEnum::A(TestTuple(3,2)),
         v: None,
         x: Some(20)
     };
@@ -100,7 +124,7 @@ fn main() {
     
     println!("{:?}", y);
 }
-
+/*
 
 #[derive(SerBin, DeBin, PartialEq, Debug)]
 struct TestStruct {
