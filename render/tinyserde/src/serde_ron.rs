@@ -64,8 +64,8 @@ pub trait DeRon: Sized {
 
 #[derive(PartialEq, Debug)]
 pub enum DeRonTok {
-    Ident(String),
-    Str(String),
+    Ident,
+    Str,
     U64(u64),
     I64(i64),
     F64(f64),
@@ -88,10 +88,13 @@ impl Default for DeRonTok {
 
 #[derive(Default)]
 pub struct DeRonState {
-    cur: char,
-    tok: DeRonTok,
-    line: usize,
-    col: usize
+    pub cur: char,
+    pub tok: DeRonTok,
+    pub strbuf:String,
+    pub numbuf:String,
+    pub identbuf:String,
+    pub line: usize,
+    pub col: usize
 }
 
 pub struct DeRonErr{
@@ -208,13 +211,11 @@ impl DeRonState {
         }
     }
     
-    pub fn ident(&mut self, i: &mut Chars) -> Result<String, DeRonErr> {
+    pub fn ident(&mut self, i: &mut Chars) -> Result<(), DeRonErr> {
         match &mut self.tok {
-            DeRonTok::Ident(val) => {
-                let mut ret = String::new();
-                std::mem::swap(val, &mut ret);
+            DeRonTok::Ident => {
                 self.next_tok(i) ?;
-                Ok(ret)
+                Ok(())
             },
             _ => {
                 Err(self.err_token("Identifier"))
@@ -228,11 +229,9 @@ impl DeRonState {
         Ok(())
     }
     
-    pub fn next_ident(&mut self) -> Option<String> {
-        if let DeRonTok::Ident(name) = &mut self.tok {
-            let mut s = String::new();
-            std::mem::swap(&mut s, name);
-            Some(s)
+    pub fn next_ident(&mut self) -> Option<()> {
+        if let DeRonTok::Ident = &mut self.tok {
+            Some(())
         }
         else {
             None
@@ -338,9 +337,9 @@ impl DeRonState {
     }
     
     pub fn as_string(&mut self) -> Result<String, DeRonErr> {
-        if let DeRonTok::Str(value) = &mut self.tok {
+        if let DeRonTok::Str = &mut self.tok {
             let mut val = String::new();
-            std::mem::swap(&mut val, value);
+            std::mem::swap(&mut val, &mut self.strbuf);
             return Ok(val)
         }
         Err(self.err_token("string"))
@@ -396,9 +395,9 @@ impl DeRonState {
                 return Ok(())
             }
             '-' | '0'..='9' => {
-                let mut num = String::new();
+                self.numbuf.truncate(0);
                 let is_neg = if self.cur == '-' {
-                    num.push(self.cur);
+                    self.numbuf.push(self.cur);
                     self.next(i);
                     true
                 }
@@ -406,17 +405,17 @@ impl DeRonState {
                     false
                 };
                 while self.cur >= '0' && self.cur <= '9' {
-                    num.push(self.cur);
+                    self.numbuf.push(self.cur);
                     self.next(i);
                 }
                 if self.cur == '.' {
-                    num.push(self.cur);
+                    self.numbuf.push(self.cur);
                     self.next(i);
                     while self.cur >= '0' && self.cur <= '9' {
-                        num.push(self.cur);
+                        self.numbuf.push(self.cur);
                         self.next(i);
                     }
-                    if let Ok(num) = num.parse() {
+                    if let Ok(num) = self.numbuf.parse() {
                         self.tok = DeRonTok::F64(num);
                         return Ok(())
                     }
@@ -426,7 +425,7 @@ impl DeRonState {
                 }
                 else {
                     if is_neg {
-                        if let Ok(num) = num.parse() {
+                        if let Ok(num) = self.numbuf.parse() {
                             self.tok = DeRonTok::I64(num);
                             return Ok(())
                         }
@@ -434,7 +433,7 @@ impl DeRonState {
                             return Err(self.err_parse("number"));
                         }
                     }
-                    if let Ok(num) = num.parse() {
+                    if let Ok(num) = self.numbuf.parse() {
                         self.tok = DeRonTok::U64(num);
                         return Ok(())
                     }
@@ -444,26 +443,26 @@ impl DeRonState {
                 }
             },
             'a'..='z' | 'A'..='Z' | '_' => {
-                let mut ident = String::new();
+                self.identbuf.truncate(0);
                 while self.cur >= 'a' && self.cur <= 'z'
                     || self.cur >= 'A' && self.cur <= 'Z'
                     || self.cur == '_' {
-                    ident.push(self.cur);
+                    self.identbuf.push(self.cur);
                     self.next(i);
                 }
-                if ident == "true" {
+                if self.identbuf == "true" {
                     self.tok = DeRonTok::Bool(true);
                     return Ok(())
                 }
-                if ident == "false" {
+                if self.identbuf == "false" {
                     self.tok = DeRonTok::Bool(false);
                     return Ok(())
                 }
-                self.tok = DeRonTok::Ident(ident);
+                self.tok = DeRonTok::Ident;
                 return Ok(())
             },
             '"' => {
-                let mut val = String::new();
+                self.strbuf.truncate(0);
                 self.next(i);
                 while self.cur != '"' {
                     if self.cur == '\\' {
@@ -472,11 +471,11 @@ impl DeRonState {
                     if self.cur == '\0' {
                         return Err(self.err_parse("string"));
                     }
-                    val.push(self.cur);
+                    self.strbuf.push(self.cur);
                     self.next(i);
                 }
                 self.next(i);
-                self.tok = DeRonTok::Str(val);
+                self.tok = DeRonTok::Str;
                 return Ok(())
             },
             _ => {
@@ -572,8 +571,8 @@ impl<T> SerRon for Option<T> where T: SerRon {
 impl<T> DeRon for Option<T> where T: DeRon {
     fn de_ron(s: &mut DeRonState, i: &mut Chars) -> Result<Self,
     DeRonErr> {
-        if let DeRonTok::Ident(name) = &s.tok {
-            if name == "None" {
+        if let DeRonTok::Ident = &s.tok {
+            if s.identbuf == "None" {
                 s.next_tok(i) ?;
                 return Ok(None)
             }

@@ -8,9 +8,9 @@ pub struct SerJsonState {
 
 impl SerJsonState {
     pub fn indent(&mut self, d: usize) {
-        for _ in 0..d {
-            self.out.push_str("    ");
-        }
+        //for _ in 0..d {
+        //    self.out.push_str("    ");
+       // }
     }
     
     pub fn field(&mut self, d: usize, field: &str) {
@@ -28,11 +28,11 @@ impl SerJsonState {
     }
     
     pub fn conl(&mut self) {
-        self.out.push_str(",\n")
+        self.out.push(',')
     }
     
     pub fn st_pre(&mut self) {
-        self.out.push_str("{\n");
+        self.out.push('{');
     }
     
     pub fn st_post(&mut self, d: usize) {
@@ -72,7 +72,7 @@ pub trait DeJson: Sized {
 
 #[derive(PartialEq, Debug)]
 pub enum DeJsonTok {
-    Str(String),
+    Str,
     Char(char),
     U64(u64),
     I64(i64),
@@ -96,10 +96,13 @@ impl Default for DeJsonTok {
 
 #[derive(Default)]
 pub struct DeJsonState {
-    cur: char,
-    tok: DeJsonTok,
-    line: usize,
-    col: usize
+    pub cur: char,
+    pub tok: DeJsonTok,
+    pub strbuf:String,
+    pub numbuf:String,
+    pub identbuf:String,
+    pub line: usize,
+    pub col: usize
 }
 
 pub struct DeJsonErr{
@@ -202,13 +205,11 @@ impl DeJsonState {
     }
     
     
-    pub fn string(&mut self, i: &mut Chars) -> Result<String, DeJsonErr> {
+    pub fn string(&mut self, i: &mut Chars) -> Result<(), DeJsonErr> {
         match &mut self.tok {
-            DeJsonTok::Str(val) => {
-                let mut ret = String::new();
-                std::mem::swap(val, &mut ret);
+            DeJsonTok::Str => {
                 self.next_tok(i) ?;
-                Ok(ret)
+                Ok(())
             },
             _ => {
                 Err(self.err_token("String"))
@@ -222,11 +223,11 @@ impl DeJsonState {
         Ok(())
     }
     
-    pub fn next_str(&mut self) -> Option<String> {
-        if let DeJsonTok::Str(name) = &mut self.tok {
-            let mut s = String::new();
-            std::mem::swap(&mut s, name);
-            Some(s)
+    pub fn next_str(&mut self) -> Option<()> {
+        if let DeJsonTok::Str = &mut self.tok {
+            //let mut s = String::new();
+            //std::mem::swap(&mut s, name);
+            Some(())
         }
         else {
             None
@@ -314,9 +315,9 @@ impl DeJsonState {
     }
     
     pub fn as_string(&mut self) -> Result<String, DeJsonErr> {
-        if let DeJsonTok::Str(value) = &mut self.tok {
+        if let DeJsonTok::Str = &mut self.tok {
             let mut val = String::new();
-            std::mem::swap(&mut val, value);
+            std::mem::swap(&mut val, &mut self.strbuf);
             return Ok(val)
         }
         Err(self.err_token("string"))
@@ -362,9 +363,9 @@ impl DeJsonState {
                 return Ok(())
             }
             '-' | '0'..='9' => {
-                let mut num = String::new();
+                self.numbuf.truncate(0);
                 let is_neg = if self.cur == '-' {
-                    num.push(self.cur);
+                    self.numbuf.push(self.cur);
                     self.next(i);
                     true
                 }
@@ -372,17 +373,17 @@ impl DeJsonState {
                     false
                 };
                 while self.cur >= '0' && self.cur <= '9' {
-                    num.push(self.cur);
+                    self.numbuf.push(self.cur);
                     self.next(i);
                 }
                 if self.cur == '.' {
-                    num.push(self.cur);
+                    self.numbuf.push(self.cur);
                     self.next(i);
                     while self.cur >= '0' && self.cur <= '9' {
-                        num.push(self.cur);
+                        self.numbuf.push(self.cur);
                         self.next(i);
                     }
-                    if let Ok(num) = num.parse() {
+                    if let Ok(num) = self.numbuf.parse() {
                         self.tok = DeJsonTok::F64(num);
                         return Ok(())
                     }
@@ -392,7 +393,7 @@ impl DeJsonState {
                 }
                 else {
                     if is_neg {
-                        if let Ok(num) = num.parse() {
+                        if let Ok(num) = self.numbuf.parse() {
                             self.tok = DeJsonTok::I64(num);
                             return Ok(())
                         }
@@ -400,7 +401,7 @@ impl DeJsonState {
                             return Err(self.err_parse("number"));
                         }
                     }
-                    if let Ok(num) = num.parse() {
+                    if let Ok(num) = self.numbuf.parse() {
                         self.tok = DeJsonTok::U64(num);
                         return Ok(())
                     }
@@ -410,30 +411,30 @@ impl DeJsonState {
                 }
             },
             'a'..='z' | 'A'..='Z' | '_' => {
-                let mut ident = String::new();
+                self.identbuf.truncate(0);
                 while self.cur >= 'a' && self.cur <= 'z'
                     || self.cur >= 'A' && self.cur <= 'Z'
                     || self.cur == '_' {
-                    ident.push(self.cur);
+                    self.identbuf.push(self.cur);
                     self.next(i);
                 }
-                if ident == "true" {
+                if self.identbuf == "true" {
                     self.tok = DeJsonTok::Bool(true);
                     return Ok(())
                 }
-                if ident == "false" {
+                if self.identbuf == "false" {
                     self.tok = DeJsonTok::Bool(false);
                     return Ok(())
                 }
-                if ident == "null" {
+                if self.identbuf == "null" {
                     self.tok = DeJsonTok::Null;
                     return Ok(())
                 }
                 self.tok = DeJsonTok::BareIdent;
-                return Err(self.err_token(&format!("Got ##{}## needed true, false, null", ident)));
+                return Err(self.err_token(&format!("Got ##{}## needed true, false, null", self.identbuf)));
             }
             '"' => {
-                let mut val = String::new();
+                self.strbuf.truncate(0);
                 self.next(i);
                 while self.cur != '"' {
                     if self.cur == '\\' {
@@ -442,11 +443,11 @@ impl DeJsonState {
                     if self.cur == '\0' {
                         return Err(self.err_parse("string"));
                     }
-                    val.push(self.cur);
+                    self.strbuf.push(self.cur);
                     self.next(i);
                 }
                 self.next(i);
-                self.tok = DeJsonTok::Str(val);
+                self.tok = DeJsonTok::Str;
                 return Ok(())
             },
             _ => {
@@ -467,7 +468,6 @@ macro_rules!impl_ser_de_json_unsigned {
         impl DeJson for $ ty {
             fn de_json(s: &mut DeJsonState, i: &mut Chars) -> Result< $ ty,
             DeJsonErr> {
-                //s.is_prefix(p, i) ?;
                 let val = s.u64_range( $ max as u64) ?;
                 s.next_tok(i) ?;
                 return Ok(val as $ ty);
