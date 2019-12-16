@@ -126,7 +126,7 @@ impl DeJsonState {
                 self.col = 0;
             }
             else{
-                self.col = 0;
+                self.col += 1;
             }
         }
         else {
@@ -592,11 +592,14 @@ impl DeJson for String {
 
 impl<T> SerJson for Vec<T> where T: SerJson {
     fn ser_json(&self, d: usize, s: &mut SerJsonState) {
-        s.out.push_str("[\n");
-        for item in self {
+        s.out.push('[');
+        let last = self.len() -1;
+        for (index,item) in self.iter().enumerate() {
             s.indent(d + 1);
             item.ser_json(d + 1, s);
-            s.conl();
+            if index != last{
+                s.out.push(',');
+            }
         }
         s.indent(d);
         s.out.push(']');
@@ -624,7 +627,7 @@ impl<T> SerJson for [T] where T: SerJson {
         for (index,item) in self.iter().enumerate() {
             item.ser_json(d + 1, s);
             if index != last{
-                s.out.push_str(", ");
+                s.out.push(',');
             }
         }
         s.out.push(']');
@@ -672,7 +675,7 @@ B: SerJson {
     fn ser_json(&self, d: usize, s: &mut SerJsonState) {
         s.out.push('[');
         self.0.ser_json(d, s);
-        s.out.push_str(", ");
+        s.out.push(',');
         self.1.ser_json(d, s);
         s.out.push(']');
     }
@@ -694,9 +697,9 @@ C: SerJson {
     fn ser_json(&self, d: usize, s: &mut SerJsonState) {
         s.out.push('[');
         self.0.ser_json(d, s);
-        s.out.push_str(", ");
+        s.out.push(',');
         self.1.ser_json(d, s);
-        s.out.push_str(", ");
+        s.out.push(',');
         self.2.ser_json(d, s);
         s.out.push(']');
     }
@@ -720,11 +723,11 @@ D: SerJson {
     fn ser_json(&self, d: usize, s: &mut SerJsonState) {
         s.out.push('[');
         self.0.ser_json(d, s);
-        s.out.push_str(", ");
+        s.out.push(',');
         self.1.ser_json(d, s);
-        s.out.push_str(", ");
+        s.out.push(',');
         self.2.ser_json(d, s);
-        s.out.push_str(", ");
+        s.out.push(',');
         self.3.ser_json(d, s);
         s.out.push(']');
     }
@@ -745,13 +748,18 @@ D: DeJson {
 impl<K, V> SerJson for HashMap<K, V> where K: SerJson,
 V: SerJson {
     fn ser_json(&self, d: usize, s: &mut SerJsonState) {
-        s.out.push_str("{\n");
+        s.out.push('{');
+        let last = self.len() - 1;
+        let mut index = 0;
         for (k, v) in self {
             s.indent(d + 1);
             k.ser_json(d + 1, s);
-            s.out.push_str(":");
+            s.out.push(':');
             v.ser_json(d + 1, s);
-            s.conl();
+            if index != last{
+                s.conl();
+            }
+            index += 1;
         }
         s.indent(d);
         s.out.push('}');
