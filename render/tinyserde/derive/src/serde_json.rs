@@ -98,10 +98,10 @@ pub fn derive_de_json_named(ident:TokenStream, fields: &FieldsNamed) -> TokenStr
         ) *
         s.curly_open(i) ?;
         while let Some(_) = s.next_str() {
-            s.next_colon(i) ?;
+            
             match s.strbuf.as_ref() {
                 #(
-                    #field_strings => #local_vars = Some(DeJson::de_json(s, i) ?),
+                    #field_strings => {s.next_colon(i) ?;#local_vars = Some(DeJson::de_json(s, i) ?)},
                 ) *
                 _ => return std::result::Result::Err(s.err_exp(&s.strbuf))
             }
