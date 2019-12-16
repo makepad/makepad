@@ -23,14 +23,26 @@ pub fn derive_ser_json_struct(input: &DeriveInput, fields: &FieldsNamed) -> Toke
     let ident = &input.ident;
 
     let mut outputs = Vec::new();
-    for field in &fields.named {
+    
+    let last = fields.named.len() -1;
+    for (index, field) in fields.named.iter().enumerate() {
         let fieldname = field.ident.clone().unwrap();
         let fieldstring = LitStr::new(&fieldname.to_string(), ident.span());
-        if type_is_option(&field.ty) {
-            outputs.push(quote! {if let Some(t) = self.#fieldname {s.field(d+1,#fieldstring);t.ser_json(d+1, s);s.conl();};})
+        if index == last{
+            if type_is_option(&field.ty) {
+                outputs.push(quote! {if let Some(t) = self.#fieldname {s.field(d+1,#fieldstring);t.ser_json(d+1, s);};})
+            }
+            else {
+                outputs.push(quote! {s.field(d+1,#fieldstring);self.#fieldname.ser_json(d+1, s);})
+            }
         }
-        else {
-            outputs.push(quote! {s.field(d+1,#fieldstring);self.#fieldname.ser_json(d+1, s);s.conl();})
+        else{
+            if type_is_option(&field.ty) {
+                outputs.push(quote! {if let Some(t) = self.#fieldname {s.field(d+1,#fieldstring);t.ser_json(d+1, s);s.conl();};})
+            }
+            else {
+                outputs.push(quote! {s.field(d+1,#fieldstring);self.#fieldname.ser_json(d+1, s);s.conl();})
+            }
         }
     }
 
@@ -134,30 +146,31 @@ pub fn derive_ser_json_enum(input: &DeriveInput, enumeration: &DataEnum) -> Toke
         match &variant.fields {
             Fields::Unit => {
                 match_item.push(quote!{
-                    Self::#ident => s.label(#lit),
+                    Self::#ident => {s.label(#lit);s.out.push_str(":[]");},
                 })
             },
             Fields::Named(fields_named) => {
                 let mut items = Vec::new();
                 let mut field_names = Vec::new();
-                for field in &fields_named.named {
+                let last = fields_named.named.len() - 1;
+                for (index, field) in fields_named.named.iter().enumerate() {
                     if let Some(field_name) = &field.ident {
                         let field_string = LitStr::new(&field_name.to_string(), field_name.span());
-                        if type_is_option(&field.ty) {
-                            items.push(quote!{
-                                if #field_name.is_some(){
-                                    s.field(d+1, #field_string);
-                                    #field_name.ser_json(d+1, s);
-                                    s.conl();
-                                }
-                            })
+                        if index == last{
+                            if type_is_option(&field.ty) {
+                                items.push(quote!{if #field_name.is_some(){s.field(d+1, #field_string);#field_name.ser_json(d+1, s);}})
+                            }
+                            else{
+                                items.push(quote!{s.field(d+1, #field_string);#field_name.ser_json(d+1, s);})
+                            }
                         }
                         else{
-                            items.push(quote!{
-                                s.field(d+1, #field_string);
-                                #field_name.ser_json(d+1, s);
-                                s.conl();
-                            })
+                            if type_is_option(&field.ty) {
+                                items.push(quote!{if #field_name.is_some(){s.field(d+1, #field_string);#field_name.ser_json(d+1, s);s.conl();}})
+                            }
+                            else{
+                                items.push(quote!{s.field(d+1, #field_string);#field_name.ser_json(d+1, s);s.conl();})
+                            }
                         }
                         field_names.push(field_name);
                     }
@@ -194,7 +207,8 @@ pub fn derive_ser_json_enum(input: &DeriveInput, enumeration: &DataEnum) -> Toke
                 }
                 match_item.push(quote!{
                     Self::#ident (#(#field_names,) *) => {
-                        s.out.push_str(#lit);
+                        s.label(#lit);
+                        s.out.push(':');
                         s.out.push('[');
                         #(#str_names) *
                         s.out.push(']');
@@ -235,7 +249,7 @@ pub fn derive_de_json_enum(input: &DeriveInput, enumeration: &DataEnum) -> Token
         match &variant.fields {
             Fields::Unit => {
                 match_item.push(quote!{
-                    #lit => Self::#ident,
+                    #lit => {s.block_open(i)?;s.block_close(i)?;Self::#ident},
                 })
             },
             Fields::Named(fields_named) => {
@@ -247,7 +261,7 @@ pub fn derive_de_json_enum(input: &DeriveInput, enumeration: &DataEnum) -> Token
             Fields::Unnamed(fields_unnamed) => {
                 let mut field_names = Vec::new();
                 for _ in &fields_unnamed.unnamed {
-                    field_names.push(quote! {{let r = DeJson::de_json(s,i)?;s.eat_comma_paren(i)?;r}});
+                    field_names.push(quote! {{let r = DeJson::de_json(s,i)?;s.eat_comma_block(i)?;r}});
                 }
                 match_item.push(quote!{
                     #lit => {s.block_open(i)?;let r = Self::#ident(#(#field_names,) *); s.block_close(i)?;r},
@@ -289,7 +303,7 @@ pub fn derive_ser_json_struct_unnamed(input: &DeriveInput, fields:&FieldsUnnamed
         if index != last{
             str_names.push(quote!{
                 self.#field_name.ser_json(d, s);
-                s.out.push_str(", ");
+                s.out.push(',');
             })
         }
         else{
