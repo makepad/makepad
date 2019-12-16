@@ -593,15 +593,16 @@ impl DeJson for String {
 impl<T> SerJson for Vec<T> where T: SerJson {
     fn ser_json(&self, d: usize, s: &mut SerJsonState) {
         s.out.push('[');
-        let last = self.len() -1;
-        for (index,item) in self.iter().enumerate() {
-            s.indent(d + 1);
-            item.ser_json(d + 1, s);
-            if index != last{
-                s.out.push(',');
+        if self.len() > 0{
+            let last = self.len() -1;
+            for (index,item) in self.iter().enumerate() {
+                s.indent(d + 1);
+                item.ser_json(d + 1, s);
+                if index != last{
+                    s.out.push(',');
+                }
             }
         }
-        s.indent(d);
         s.out.push(']');
     }
 }
