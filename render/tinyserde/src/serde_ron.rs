@@ -347,10 +347,10 @@ impl DeRonState {
     }
     
     pub fn next_tok(&mut self, i: &mut Chars) -> Result<(), DeRonErr> {
-        while self.cur == '\n' || self.cur == '\r' || self.cur == '\t' || self.cur == ' ' {
-            self.next(i);
-        }
         loop{
+            while self.cur == '\n' || self.cur == '\r' || self.cur == '\t' || self.cur == ' ' {
+                self.next(i);
+            }
             match self.cur {
                 '\0'=>{
                     self.tok = DeRonTok::Eof;
