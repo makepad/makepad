@@ -236,7 +236,7 @@ impl DesktopWindow {
             let _ = self.inner_view.begin_view(cx, Layout {abs_origin: Some(Vec2::default()), ..Layout::default()});
         }
         else {
-            let _ = self.inner_view.begin_view(cx, Layout::default());
+            let _ = self.inner_view.begin_view(cx, Layout{line_wrap:LineWrap::NewLine,..Layout::default()});
         }
         Ok(())
     }
