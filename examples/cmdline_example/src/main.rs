@@ -33,6 +33,9 @@ fn main() {
     for _ in 0..1{
         x.s.push(x.clone());
     }
+    for i in 0..1{  
+        println!("{}",i);
+    }
     
     let ron = x.serialize_ron();
     println!("{}", ron);
