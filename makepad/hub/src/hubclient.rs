@@ -8,7 +8,6 @@ use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-use std::os::unix::io::AsRawFd;
 
 trait ResultMsg<T> {
     fn expect_msg(self, msg: &str) -> Result<T, HubError>;
@@ -22,7 +21,7 @@ impl<T> ResultMsg<T> for Result<T, std::io::Error> {
         }
     }
 }
-
+/*
 impl<T> ResultMsg<T> for Result<T, snap::Error> {
     fn expect_msg(self, msg: &str) -> Result<T, HubError> {
         match self {
@@ -30,7 +29,7 @@ impl<T> ResultMsg<T> for Result<T, snap::Error> {
             Ok(v) => Ok(v)
         }
     }
-}
+}*/
 
 type HubResult<T> = Result<T, HubError>;
 
@@ -71,10 +70,10 @@ pub fn read_block_from_tcp_stream(tcp_stream: &mut TcpStream, mut check_digest: 
         return Err(HubError::new("read_block_from_tcp_stream: block digest check failed"))
     }
     
-    let mut dec = snap::Decoder::new();
-    let decompressed = dec.decompress_vec(&msg_buf).expect_msg("read_block_from_tcp_stream: cannot decompress_vec");
+    //let mut dec = snap::Decoder::new();
+    let decompressed = msg_buf;//dec.decompress_vec(&msg_buf).expect_msg("read_block_from_tcp_stream: cannot decompress_vec");
     
-    return decompressed;
+    return Ok(decompressed);
 }
 
 pub fn write_exact_bytes_to_tcp_stream(tcp_stream: &mut TcpStream, bytes: &[u8]) -> HubResult<()> {
@@ -98,8 +97,8 @@ pub fn write_block_to_tcp_stream(tcp_stream: &mut TcpStream, msg_buf: &[u8], dig
         return Err(HubError::new("read_block_from_tcp_stream: bytes_total more than 250mb"))
     }
     
-    let mut enc = snap::Encoder::new();
-    let compressed = enc.compress_vec(msg_buf).expect_msg("read_block_from_tcp_stream: cannot compress msgbuf") ?;
+    //let mut enc = snap::Encoder::new();
+    let compressed = msg_buf;//enc.compress_vec(msg_buf).expect_msg("read_block_from_tcp_stream: cannot compress msgbuf") ?;
     
     let mut dwd_write = DigestWithData{
         digest:digest,
@@ -230,7 +229,7 @@ impl HubClient {
     }
     
     pub fn wait_for_announce_on(digest: Digest, announce_address: SocketAddr) -> Result<SocketAddr, std::io::Error> {
-        
+        /*
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         fn reuse_addr(socket: &mut UdpSocket) {
             unsafe {
@@ -248,11 +247,11 @@ impl HubClient {
         #[cfg(any(target_os = "windows", target_arch = "wasm32"))]
         fn reuse_addr(_socket: &mut UdpSocket) {
         }
-        
+        */
         loop {
-            if let Ok(mut socket) = UdpSocket::bind(announce_address) {
+            if let Ok(socket) = UdpSocket::bind(announce_address) {
                 // TODO. FIX FOR WINDOWS
-                reuse_addr(&mut socket);
+               // reuse_addr(&mut socket);
                 let mut dwd_read = DigestWithData::default();
                 let dwd_u8 = unsafe {std::mem::transmute::<&mut DigestWithData, &mut [u8; 26 * 8]>(&mut dwd_read)};
                 
@@ -323,8 +322,8 @@ impl Digest {
     
     pub fn generate() -> Digest {
         let mut result = Digest::default();
-        for i in 0..25 {
-            result.buf[i] ^= time::precise_time_ns();
+        for i in 0..25 { 
+            //result.buf[i] ^= time::precise_time_ns();
             std::thread::sleep(std::time::Duration::from_millis(1));
             result.digest_cycle();
         }

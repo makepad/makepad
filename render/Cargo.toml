@@ -18,12 +18,9 @@ makepad-tinyserde = {path = "./tinyserde", version = "0.1"}
 makepad-trapezoidator = { path = "./vector/trapezoidator", version = "0.1" }
 makepad-ttf-parser = { path = "./vector/ttf_parser", version = "0.1" }
 makepad-path = { path = "./vector/path", version = "0.1" }
-#serde = { version = "1.0", features = ["derive"] }
  
 [target.x86_64-apple-darwin.dependencies]
-time = "0.1.4"
-objc = "0.2"
-bitflags = "1.2.1"
+makepad-objc-sys = {path = "./bind/objc-sys"}
 
 [target.x86_64-unknown-linux-gnu.dependencies]
 makepad-glx-sys = { path = "./bind/glx-sys", version = "0.1" }
