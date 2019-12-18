@@ -3,8 +3,8 @@
 //use cocoa::foundation::{NSAutoreleasePool, NSUInteger, NSRange};
 //use core_graphics::geometry::CGSize;
 //use core_graphics::color::CGColor;
-use objc::{msg_send, sel, sel_impl};
-use objc::runtime::YES;
+use makepad_objc_sys::{msg_send};
+use makepad_objc_sys::runtime::YES;
 //use metal::*;
 use crate::cx_apple::*;
 use crate::cx_cocoa::*;
@@ -663,7 +663,7 @@ impl MetalBuffer {
             let buffer: id = unsafe {msg_send![
                 metal_cx.device,
                 newBufferWithLength: (data.len() * std::mem::size_of::<f32>()) as u64
-                options: MTLResourceOptions::CPUCacheModeDefaultCache
+                options: MTLResourceOptions::StorageModeShared
             ]};
             if buffer == nil {elem.buffer = None} else {elem.buffer = Some(buffer)}
             elem.size = data.len()
@@ -694,7 +694,7 @@ impl MetalBuffer {
             let buffer: id = unsafe {msg_send![
                 metal_cx.device,
                 newBufferWithLength: (data.len() * std::mem::size_of::<u32>()) as u64
-                options: MTLResourceOptions::CPUCacheModeDefaultCache
+                options: MTLResourceOptions::StorageModeShared
             ]};
             if buffer == nil {elem.buffer = None} else {elem.buffer = Some(buffer)}
             elem.size = data.len()

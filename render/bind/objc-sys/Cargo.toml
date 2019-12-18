@@ -1,0 +1,13 @@
+#stripped version of makepad with its libc dependency removed
+[package]
+name = "makepad-objc-sys"
+version = "0.2.7"
+authors = ["Steven Sheldon"]
+exclude = [".gitignore", ".travis.yml", "doc.sh", "travis_install.sh", "travis_test.sh", "tests-ios/**"]
+description = "Objective-C Runtime bindings and wrapper for Rust."
+documentation = "http://ssheldon.github.io/rust-objc/objc/"
+readme = "README.md"
+keywords = ["objective-c", "osx", "ios", "cocoa", "uikit"]
+license = "MIT"
+repository = "http://github.com/SSheldon/rust-objc"
+
