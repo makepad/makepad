@@ -863,7 +863,7 @@ impl HubBuilder {
             if let Ok(strip) = wasm_strip_debug(&data) {
                 
                 let uncomp_len = strip.len();
-                let mut enc = snap::Encoder::new();
+                //let mut enc = snap::Encoder::new();
                 /*
                 let mut result = Vec::new();
                 {
@@ -871,13 +871,13 @@ impl HubBuilder {
                     writer.write_all(&strip).expect("Can't write data");
                 }*/
 
-                let comp_len = if let Ok(compressed) = enc.compress_vec(&strip) {compressed.len()}else {0};
+                //let comp_len = if let Ok(compressed) = enc.compress_vec(&strip) {compressed.len()}else {0};
                 
                 if let Err(_) = fs::write(&filepath, strip) {
                     return Err(self.error(uid, format!("Cannot write stripped wasm {}", filepath)));
                 }
                 else {
-                    self.message(uid, format!("Wasm file stripped size: {} kb uncompressed {}", uncomp_len>>10, comp_len>>10));
+                    self.message(uid, format!("Wasm file stripped size: {}", uncomp_len>>10));
                     return Ok(BuildResult::Wasm {path: path.to_string()})
                 }
             }
