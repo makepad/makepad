@@ -3,7 +3,7 @@ use std::io::prelude::*;
 use std::fs::File;
 use std::io;
 use std::net::TcpStream;
-use time::precise_time_ns;
+//use time::precise_time_ns;
 
 #[derive(Clone)]
 pub struct CxDesktop {
@@ -284,16 +284,16 @@ impl Cx {
             })
         };
     }
-    
+    /*
     
     pub fn profile(&mut self) {
         if let Some(start) = self.platform.desktop.profiler_start {
-            let delta = precise_time_ns() - start;
+            let delta = mach_absolute_time() - start;
             println!("Profile time:{} usec", delta / 1_000);
             self.platform.desktop.profiler_start = None
         }
         else {
             self.platform.desktop.profiler_start = Some(precise_time_ns())
         }
-    }
+    }*/
 }
