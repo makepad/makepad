@@ -468,7 +468,7 @@ impl XlibApp {
                                     self.do_callback(&mut vec![Event::FingerScroll(FingerScrollEvent {
                                         window_id: window.window_id,
                                         scroll: Vec2 {
-                                            x: if button.button == 7 {-speed as f32} else if button.button == 6 {speed as f32} else {0.},
+                                            x: if button.button == 6 {-speed as f32} else if button.button == 7 {speed as f32} else {0.},
                                             y: if button.button == 4 {-speed as f32} else if button.button == 5 {speed as f32} else {0.}
                                         },
                                         abs: window.last_mouse_pos,
