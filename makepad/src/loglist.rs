@@ -9,7 +9,8 @@ use crate::codeicon::*;
 pub struct LogList {
     pub view: ScrollView,
     pub item_draw: LogItemDraw,
-    pub list: ListLogic
+    pub list: ListLogic,
+    pub search_input: TextInput,
 }
 
 #[derive(Clone)]
@@ -39,8 +40,11 @@ impl LogItemDraw {
     
     pub fn layout_item() -> LayoutId {uid!()}
     pub fn text_style_item() -> TextStyleId {uid!()}
-    
+    pub fn layout_search_input()-> LayoutId{uid!()}
+
     pub fn style(cx: &mut Cx, opt: &StyleOptions) {
+        
+       
         
         Self::layout_item().set(cx, Layout {
             walk: Walk::wh(Width::Fill, Height::Fix(20. * opt.scale)),
@@ -210,6 +214,7 @@ pub enum LogListEvent {
 impl LogList {
     pub fn proto(cx: &mut Cx) -> Self {
         Self {
+            search_input:TextInput::proto(cx, TextInputOptions::default()),
             item_draw: LogItemDraw::proto(cx),
             list: ListLogic {
                 ..ListLogic::default()
@@ -217,13 +222,24 @@ impl LogList {
             view: ScrollView::proto(cx),
         }
     }
+
+    pub fn style_text_input() -> StyleId {uid!()}
     
     pub fn style(cx: &mut Cx, opt: &StyleOptions) {
+        cx.begin_style(Self::style_text_input());
+        TextEditor::layout_bg().set(cx, Layout {
+            walk: Walk {width: Width::Compute, height: Height::Compute, margin: Margin {t: 4., l: 14., r: 0., b: 0.}},
+            padding: Padding::all(7.),
+            ..Layout::default()
+        });
+        cx.end_style();
+        
         LogItemDraw::style(cx, opt);
     }
     
     pub fn handle_log_list(&mut self, cx: &mut Cx, event: &mut Event, storage: &mut AppStorage, bm: &mut BuildManager) -> LogListEvent {
         
+        self.search_input.handle_text_input(cx, event);
         self.list.set_list_len(bm.log_items.len());
         
         if self.list.handle_list_scroll_bars(cx, event, &mut self.view){
@@ -366,6 +382,12 @@ impl LogList {
                 LogListEvent::None
             }
         }
+    }
+    
+    pub fn draw_tab_contents(&mut self, cx: &mut Cx, bm: &BuildManager){
+        cx.begin_style(Self::style_text_input());
+        self.search_input.draw_text_input(cx);
+        cx.end_style();
     }
     
     pub fn draw_log_list(&mut self, cx: &mut Cx, bm: &BuildManager) {
