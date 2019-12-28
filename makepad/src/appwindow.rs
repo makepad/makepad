@@ -233,6 +233,7 @@ impl AppWindow {
         let dock_items = &mut state.windows[window_index].dock_items;
         let mut dock_walker = self.dock.walker(dock_items);
         let file_panel = &mut self.file_panel;
+        let log_list = &mut self.log_list;
         while let Some(item) = dock_walker.walk_draw_dock(cx, | cx, tab_control, tab, selected | {
             // this draws the tabs, so we can customimze it
             match tab.item {
@@ -245,12 +246,19 @@ impl AppWindow {
                         tab.end_tab(cx);
                     };
                 },
+                Panel::LogList =>{
+                    let tab = tab_control.get_draw_tab(cx, &tab.title, selected, tab.closeable);
+                    if tab.begin_tab(cx).is_ok() {
+                        log_list.draw_tab_contents(cx, build_manager);
+                        tab.end_tab(cx);
+                    };
+                }, 
                 _ => tab_control.draw_tab(cx, &tab.title, selected, tab.closeable)
             }
         }) {
             match item {
                 Panel::LogList => {
-                    self.log_list.draw_log_list(cx, build_manager);
+                    log_list.draw_log_list(cx, build_manager);
                 },
                 Panel::LogItem => {
                     self.log_item.draw_log_item(cx);

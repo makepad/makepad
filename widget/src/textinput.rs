@@ -9,6 +9,7 @@ pub struct TextInput {
     pub empty_message: String,
 }
 
+#[derive(Default)]
 pub struct TextInputOptions {
     pub multiline: bool,
     pub read_only: bool,
@@ -28,11 +29,6 @@ impl TextInput {
                 line_number_width: 0.,
                 top_padding: 0.,
                 mark_unmatched_parens: false,
-                view_layout: Layout {
-                    walk: Walk {width: Width::Compute, height: Height::Compute, margin: Margin {t: 4., l: 0., r: 0., b: 0.}},
-                    padding: Padding::all(7.),
-                    ..Layout::default()
-                },
                 folding_depth: 3,
                 ..TextEditor::proto(cx)
             },
@@ -45,6 +41,11 @@ impl TextInput {
     
     pub fn style(cx: &mut Cx, _opt: &StyleOptions) {
         cx.begin_style(Self::style_text_input());
+        TextEditor::layout_bg().set(cx, Layout {
+            walk: Walk {width: Width::Compute, height: Height::Compute, margin: Margin {t: 4., l: 0., r: 0., b: 0.}},
+            padding: Padding::all(7.),
+            ..Layout::default()
+        });
         TextEditor::color_bg().set(cx, Theme::color_bg_normal().get(cx));
         TextEditor::gutter_width().set(cx, 0.);
         TextEditor::padding_top().set(cx, 0.);
@@ -129,16 +130,16 @@ impl TextInputTokenizer {
         let start = chunk.len();
         loop {
             if state.next == '\0' {
-		if (chunk.len()-start)>0 { 
+                if (chunk.len() - start)>0 {
                     return TokenType::Identifier
                 }
-		state.advance();
+                state.advance();
                 chunk.push(' ');
                 return TokenType::Eof
             }
             else if state.next == '\n' {
                 // output current line
-                if (chunk.len()-start)>0 {
+                if (chunk.len() - start)>0 {
                     return TokenType::Identifier
                 }
                 
@@ -147,7 +148,7 @@ impl TextInputTokenizer {
                 return TokenType::Newline
             }
             else if state.next == ' ' {
-                if (chunk.len()-start)>0 {
+                if (chunk.len() - start)>0 {
                     return TokenType::Identifier
                 }
                 while state.next == ' ' {
