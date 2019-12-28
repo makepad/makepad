@@ -8,7 +8,7 @@ use crate::scrollshadow::*;
 #[derive(Clone)]
 pub struct TextEditor {
     pub view: ScrollView,
-    pub view_layout: Layout,
+    //pub view_layout: Layout,
     pub bg: Quad,
     pub gutter_bg: Quad,
     pub cursor: Quad,
@@ -179,7 +179,7 @@ impl TextEditor {
             paren_pair: Quad::proto(cx),
             message_marker: Quad::proto(cx),
             //code_icon: CodeIcon::proto(cx),
-            view_layout: Layout::default(),
+            //view_layout: Layout::default(),
             text: Text {
                 z: 2.00,
                 wrapping: Wrapping::Line,
@@ -313,7 +313,7 @@ impl TextEditor {
     pub fn color_warning() -> ColorId {uid!()}
     pub fn color_error() -> ColorId {uid!()}
     pub fn color_defocus() -> ColorId {uid!()}
-
+    
     pub fn shader_bg() -> ShaderId {uid!()}
     pub fn shader_indent_lines() -> ShaderId {uid!()}
     pub fn shader_cursor() -> ShaderId {uid!()}
@@ -334,7 +334,7 @@ impl TextEditor {
     pub fn instance_shadow_dir() -> InstanceFloat {uid!()}
     
     pub fn style(cx: &mut Cx, _opt: &StyleOptions) {
-        
+        Self::layout_bg().set(cx, Layout::default());
         Self::shadow_size().set(cx, 6.0);
         Self::gutter_width().set(cx, 45.0);
         Self::padding_top().set(cx, 27.);
@@ -525,7 +525,7 @@ impl TextEditor {
         self.cursor_row.color = Self::color_cursor_row().get(cx);
         self.text.text_style = Self::text_style_editor_text().get(cx);
         self.line_number_text.text_style = Self::text_style_editor_text().get(cx);
-
+        
         self.bg.shader = Self::shader_bg().get(cx);
         self.indent_lines.shader = Self::shader_indent_lines().get(cx);
         self.cursor.shader = Self::shader_cursor().get(cx);
@@ -936,11 +936,11 @@ impl TextEditor {
             },
             Event::Signal(se) => if text_buffer.signal == se.signal {
                 if se.status == TextBuffer::status_loaded()
-                 || se.status == TextBuffer::status_message_update()
-                  || se.status == TextBuffer::status_data_update(){
+                    || se.status == TextBuffer::status_message_update()
+                    || se.status == TextBuffer::status_data_update() {
                     self.view.redraw_view_area(cx);
                 }
-                else if se.status == TextBuffer::status_jump_to_offset(){
+                else if se.status == TextBuffer::status_jump_to_offset() {
                     if !text_buffer.is_loaded {
                         self._jump_to_offset = true;
                     }
@@ -948,7 +948,7 @@ impl TextEditor {
                         self.do_jump_to_offset(cx, text_buffer);
                     }
                 }
-                else if se.status == TextBuffer::status_keyboard_update(){
+                else if se.status == TextBuffer::status_keyboard_update() {
                     if let Some(key_down) = &text_buffer.keyboard.key_down {
                         match key_down {
                             KeyCode::Alt => {
@@ -971,7 +971,7 @@ impl TextEditor {
         }
         // editor local
         match event.hits(cx, self.view.get_view_area(cx), HitOpt::default()) {
-            Event::KeyFocus(_kf)=>{
+            Event::KeyFocus(_kf) => {
             },
             Event::KeyFocusLost(_kf) => {
                 self.view.redraw_view_area(cx)
@@ -1017,11 +1017,11 @@ impl TextEditor {
             _ => ()
         };
         // i need to know if selection changed, ifso
-        // 
-        if last_mutation_id != text_buffer.mutation_id{
+        //
+        if last_mutation_id != text_buffer.mutation_id {
             TextEditorEvent::Change
         }
-        else{
+        else {
             TextEditorEvent::None
         }
     }
@@ -1038,7 +1038,7 @@ impl TextEditor {
     
     pub fn begin_text_editor(&mut self, cx: &mut Cx, text_buffer: &TextBuffer) -> Result<(), ()> {
         // adjust dilation based on DPI factor
-        self.view.begin_view(cx, self.view_layout) ?;
+        self.view.begin_view(cx, Self::layout_bg().get(cx)) ?;
         
         self.apply_style(cx);
         
@@ -1455,11 +1455,11 @@ impl TextEditor {
                 TokenType::Regex => self.colors.string,
                 TokenType::String => self.colors.string,
                 TokenType::Number => self.colors.number,
-
+                
                 TokenType::StringMultiBegin => self.colors.string,
                 TokenType::StringChunk => self.colors.string,
                 TokenType::StringMultiEnd => self.colors.string,
-
+                
                 TokenType::CommentMultiBegin => self.colors.comment,
                 TokenType::CommentMultiEnd => self.colors.comment,
                 TokenType::CommentLine => self.colors.comment,
@@ -1672,8 +1672,8 @@ impl TextEditor {
             self.do_jump_to_offset(cx, text_buffer);
         }
         else if let Some(scroll_pos_on_load) = self._scroll_pos_on_load {
-           self.view.set_scroll_pos(cx, scroll_pos_on_load);
-           self._scroll_pos_on_load = None;
+            self.view.set_scroll_pos(cx, scroll_pos_on_load);
+            self._scroll_pos_on_load = None;
         }
     }
     

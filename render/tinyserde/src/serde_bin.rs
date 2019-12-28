@@ -55,6 +55,7 @@ macro_rules! impl_ser_de_bin_for {
         }
     };
 }
+
 impl_ser_de_bin_for!(f64);
 impl_ser_de_bin_for!(f32);
 impl_ser_de_bin_for!(u64);
@@ -63,7 +64,27 @@ impl_ser_de_bin_for!(u32);
 impl_ser_de_bin_for!(i32);
 impl_ser_de_bin_for!(u16);
 impl_ser_de_bin_for!(i16);
-impl_ser_de_bin_for!(usize);
+
+impl SerBin for usize {
+    fn ser_bin(&self, s: &mut Vec<u8>) {
+        let u64usize = *self as u64;
+        let du8 = unsafe {std::mem::transmute::<&u64, &[u8; std::mem::size_of::<u64>()]>(&u64usize)};
+        s.extend_from_slice(du8);
+    }
+}
+
+impl DeBin for usize {
+    fn de_bin(o:&mut usize, d:&[u8]) -> Result<usize, DeBinErr> {
+        let l = std::mem::size_of::<u64>();
+        if *o + l > d.len(){
+            return Err(DeBinErr{o:*o, l:l, s:d.len()})
+        } 
+        let mut m = [0 as u64];
+        unsafe {std::ptr::copy_nonoverlapping(d.as_ptr().offset(*o as isize) as *const u64, m.as_mut_ptr() as *mut u64, 1)}
+        *o += l;
+        Ok(m[0] as usize)
+    }
+}
 
 impl DeBin for u8 {
     fn de_bin(o:&mut usize, d:&[u8]) -> Result<u8,DeBinErr> {
