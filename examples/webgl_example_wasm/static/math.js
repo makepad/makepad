@@ -17,7 +17,7 @@ export const mat4 = {
     if (len == 0.0) {
       return null;
     }
-
+ 
     len = 1 / len;
     x *= len;
     y *= len;
