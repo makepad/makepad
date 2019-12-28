@@ -19,7 +19,7 @@ http://127.0.0.1:8000/makepad/examples/webgl_example_wasm/
 
 # How to install
 
-On all platforms first install Rust. On windows feel free to ignore the warnings about MSVC, makepad uses the gnu chain. 
+On all platforms first install Rust. We have seen the gnu chain fail a lot on windows, so if you are up for it also have to install msvc.
 
 https://www.rust-lang.org/tools/install
 
@@ -37,10 +37,20 @@ cargo run -p makepad --release
 Clone this repo using either gitub desktop or commandline: https://github.com/makepad/makepad
 Open a cmd.exe in the directory you just cloned. Gh desktop makes: Documents\\Github\\makepad
 
+Gnu chain (can fail):
 ```
+rustup default stable-gnu
 tools/windows_rustup.bat
-cargo run -p makepad --release --target x86_64-pc-windows-gnu
+cargo run -p makepad --release
 ```
+
+MSVC chain (install msvc first):
+```
+rustup default stable-msvc
+tools/windows_rustup.bat
+cargo run -p makepad --release
+```
+
 
 # Linux
 ```
