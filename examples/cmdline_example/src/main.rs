@@ -1,94 +1,109 @@
-use makepad_tinyserde::*;
-use std::collections::{HashMap};
-
-#[derive(SerRon, DeRon, SerJson, DeJson, SerBin, DeBin, PartialEq, Debug, Clone)]
-enum TestEnum{ 
-    X{x:u32, y:Option<u32>},
-    Y(u32, Option<TestNew>),
-    Z
+#[derive(Clone, Default)]
+struct TextNodeMap {
+    chr: char,
+    next: usize
 }
 
-#[derive(SerRon, DeRon, SerJson, DeJson, SerBin, DeBin, PartialEq, Debug, Clone)]
-struct TestNew(String);
+#[derive(Clone, Default, Debug)]
+struct TextNodeEnd {
+    gen: u64,
+    file: usize,
+    token: usize
+}
 
-#[derive(SerRon, DeRon, SerJson, DeJson, SerBin, DeBin, PartialEq, Debug, Clone)]
-struct TestStruct{
-    t: [u32;4],
-    s: Vec<TestStruct>,
-    k: String,
-    m: HashMap<String, u32>,
-    w: TestEnum,
-    h: TestEnum,
-    v: TestEnum
+#[derive(Clone, Default)]
+struct TextNode {
+    map: Vec<TextNodeMap>,
+    end: Vec<TextNodeEnd>
+}
+
+#[derive(Clone, Default)]
+struct TextIndex {
+    nodes: Vec<TextNode>
+}
+
+impl TextIndex {
+    
+    fn new() -> TextIndex {
+        TextIndex {
+            nodes: vec![TextNode::default()]
+        }
+    }
+    
+    fn write(&mut self, what: &str, gen: u64, file: usize, token: usize) {
+        let mut node_id = 0;
+        for c in what.chars() {
+            // lets go to the next node
+            node_id = if let Some(v) = self.nodes[node_id].map.iter().find( | v | v.chr == c) {
+                v.next
+            }
+            else {
+                let id = self.nodes.len();
+                self.nodes.push(TextNode::default());
+                self.nodes[node_id].map.push(TextNodeMap {chr: c, next: id});
+                id
+            };
+        }
+        // lets add val, overwriting old gen
+        if let Some(end) = self.nodes[node_id].end.iter_mut().find( | v | v.file == file && v.gen != gen) {
+            end.gen = gen;
+            end.token = token;
+        }
+        else {
+            self.nodes[node_id].end.push(TextNodeEnd {
+                gen: gen,
+                file: file,
+                token: token
+            });
+        }
+    }
+    
+    fn begins_with(&self, what: &str) -> Vec<TextNodeEnd> {
+        // ok so if i type a beginning of a word, i'd want all the endpoints
+        let mut results = Vec::new();
+        let mut node_id = 0;
+        for c in what.chars() {
+            // lets go to the next node
+            node_id = if let Some(v) = self.nodes[node_id].map.iter().find( | v | v.chr == c) {
+                v.next
+            }
+            else {
+                // nothing
+                return vec![]
+            };
+        }
+        let mut nexts = Vec::new();
+        loop {
+            for map in &self.nodes[node_id].map {
+                nexts.push(map.next);
+            }
+            results.extend_from_slice(&self.nodes[node_id].end);
+            if nexts.len() == 0 {
+                break;
+            }
+            node_id = nexts.pop().unwrap();
+        }
+        results
+    }
+    
+    fn calc_total_size(&self)->usize{
+        let mut total = 0;
+        for node in &self.nodes{
+            total += std::mem::size_of::<TextNode>();
+            total += std::mem::size_of::<TextNodeEnd>() * node.end.capacity();
+            total += std::mem::size_of::<TextNodeMap>() * node.map.capacity();
+        }
+        total
+    }
 }
 
 fn main() {
-    let mut x = TestStruct {
-        t:[1,2,3,4],
-        s:vec![],
-        k:"hello".to_string(),
-        m:{let mut m = HashMap::new(); m.insert("hi".to_string(),1); m.insert("ho".to_string(),2);m},
-        w:TestEnum::Y(1, Some(TestNew("hello \"world".to_string()))),
-        h:TestEnum::X{x:10,y:Some(10)},
-        v:TestEnum::Z
-    };
-    for _ in 0..1{
-        x.s.push(x.clone());
+    let mut t = TextIndex::new();
+    for i in 0..1000000 {
+         t.write(&format!("hi {}", i), 1, 1, i);
     }
-    for i in 0..1{  
-        println!("{}",i);
-    }
-    
-    let ron = x.serialize_ron();
-    //println!("{}", ron);
-    let y:TestStruct = DeRon::deserialize_ron(&ron).expect("cant parse");
-    
-    println!("RON equal: {}", x == y);
-
- // comment RON
-    let ron = "(
-        t:(1, 2, 3, 4),
-        s:[
-            (
-                t:(1, 2, 3, 4),
-                s:[
-                ],
-                k:\"hello\",
-                m:{
-                    \"ho\":2,
-                    \"hi\":1,
-                },
-                w:Y(1, (\"hello world\")),
-                h:X(
-                    x:10,
-                    //y:10,
-                ),
-                v:Z,
-            ),
-        ],
-        k:\"hello\",
-        m:{ 
-            \"ho\":2,
-            \"hi\":1,
-        },
-        w:Y(1, (\"hello world\")),
-        h:X(
-            x:10,
-            /*y:10,*/
-        ),
-        v:Z,
-    )";
-    let y:TestStruct = DeRon::deserialize_ron(&ron).expect("cant parse");
-
-
-    let json = x.serialize_json();
-    let y:TestStruct = DeJson::deserialize_json(&json).expect("cant parse");
-
-   
-    println!("JSON equal: {}", x == y);
-
-    let bin = x.serialize_bin();
-    let y:TestStruct = DeBin::deserialize_bin(&bin).expect("cant parse");
-
-    println!("BIN equal: {}", x == y);
+    t.write("ho", 1, 1, 2);
+    let res = t.begins_with("hi 1001");
+    println!("hello {:?}", res.len());
+    println!("{}", t.calc_total_size());
 }

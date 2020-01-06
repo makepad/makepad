@@ -334,6 +334,9 @@ impl DeRonState {
         if let DeRonTok::Bool(value) = self.tok {
             return Ok(value)
         }
+        if let DeRonTok::U64(value) = self.tok {
+            return Ok(value != 0)
+        }
         Err(self.err_token("boolean"))
     }
     

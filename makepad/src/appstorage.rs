@@ -5,6 +5,8 @@ use makepad_hub::*;
 use makepad_tinyserde::*;
 use crate::appwindow::*;
 use crate::filetree::*;
+use crate::fileeditor::*;
+use crate::buildmanager::*;
 use std::collections::HashMap;
 use crate::builder;
 
@@ -20,12 +22,12 @@ pub struct AppSettings {
 }
 
 impl Default for AppSettings {
-
+    
     fn default() -> Self {
         Self {
             exec_when_done: false,
             build_on_save: true,
-            style_options: StyleOptions{scale:1.0, dark:true},
+            style_options: StyleOptions {scale: 1.0, dark: true},
             hub_server: HubServerConfig::Offline,
             builders: HashMap::new(),
             sync: HashMap::new(),
@@ -34,12 +36,12 @@ impl Default for AppSettings {
     }
 }
 
-impl AppSettings{
-    pub fn initial()->Self{
+impl AppSettings {
+    pub fn initial() -> Self {
         Self {
             exec_when_done: false,
             build_on_save: true,
-            style_options: StyleOptions{scale:1.0, dark:true},
+            style_options: StyleOptions {scale: 1.0, dark: true},
             hub_server: HubServerConfig::Offline,
             builders: {
                 let mut cfg = HashMap::new();
@@ -79,7 +81,7 @@ pub struct BuildTarget {
 }
 
 pub struct AppStorage {
-    pub init_builders_counter:usize,
+    pub init_builders_counter: usize,
     pub builders_request_uid: HubUid,
     pub builder_sync_uid: HubUid,
     pub hub_router: Option<HubRouter>,
@@ -93,7 +95,7 @@ pub struct AppStorage {
     pub file_tree_file_read: FileRead,
     pub app_state_file_read: FileRead,
     pub app_settings_file_read: FileRead,
-    pub text_buffers: HashMap<String, AppTextBuffer>
+    pub text_buffers: HashMap<String, AppTextBuffer>,
 }
 
 pub struct AppTextBuffer {
@@ -106,7 +108,7 @@ pub struct AppTextBuffer {
 impl AppStorage {
     pub fn proto(cx: &mut Cx) -> Self {
         AppStorage {
-            init_builders_counter:2,
+            init_builders_counter: 2,
             builders_request_uid: HubUid::zero(),
             builder_sync_uid: HubUid::zero(),
             builder_route_send: None,
@@ -125,9 +127,9 @@ impl AppStorage {
         }
     }
     
-    pub fn status_new_message()->StatusId{uid!()}
-    pub fn status_settings_changed()->StatusId{uid!()}
-     
+    pub fn status_new_message() -> StatusId {uid!()}
+    pub fn status_settings_changed() -> StatusId {uid!()}
+    
     pub fn init(&mut self, cx: &mut Cx) {
         if cx.platform_type.is_desktop() {
             
@@ -164,7 +166,7 @@ impl AppStorage {
                 
                 // so now, here we restart our hub_server if need be.
                 if cx.platform_type.is_desktop() {
-                    if self.settings_old.hub_server != self.settings.hub_server{
+                    if self.settings_old.hub_server != self.settings.hub_server {
                         self.restart_hub_server();
                     }
                 }
@@ -175,7 +177,7 @@ impl AppStorage {
         }
     }
     
-    pub fn save_settings(&mut self, cx:&mut Cx){
+    pub fn save_settings(&mut self, cx: &mut Cx) {
         let utf8_data = self.settings.serialize_ron();
         let path = "makepad_settings.ron";
         if let Some(atb) = self.text_buffers.get_mut(path) {
@@ -216,12 +218,12 @@ impl AppStorage {
         let ron = state.serialize_ron();
         cx.file_write("makepad_state.ron", ron.as_bytes());
     }
-
-    pub fn remap_sync_path(&self, path:&str)->String{
+    
+    pub fn remap_sync_path(&self, path: &str) -> String {
         let mut path = path.to_string();
-        for (key,sync_to) in &self.settings.sync{
-            for sync in sync_to{
-                if path.starts_with(sync){
+        for (key, sync_to) in &self.settings.sync {
+            for sync in sync_to {
+                if path.starts_with(sync) {
                     path.replace_range(0..sync.len(), key);
                     break
                 }
@@ -336,7 +338,7 @@ impl AppStorage {
         self.builders_request_uid = uid;
     }
     
-    pub fn handle_hub_msg(&mut self, cx: &mut Cx, htc: &FromHubMsg, windows: &mut Vec<AppWindow>, state: &AppState) {
+    pub fn handle_hub_msg(&mut self, cx: &mut Cx, htc: &FromHubMsg, windows: &mut Vec<AppWindow>, state: &AppState, build_manager:&mut BuildManager) {
         let hub_ui = self.hub_ui.as_mut().unwrap();
         // only in ConnectUI of ourselves do we list the workspaces
         match &htc.msg {
@@ -345,8 +347,8 @@ impl AppStorage {
                 // now start talking
             },
             HubMsg::DisconnectBuilder(_) | HubMsg::ConnectBuilder(_) => {
-                let own = if let Some(send) = &self.builder_route_send{send.is_own_addr(&htc.from)}else{false};
-                if !own{
+                let own = if let Some(send) = &self.builder_route_send {send.is_own_addr(&htc.from)}else {false};
+                if !own {
                     self.reload_builders();
                 }
             },
@@ -398,7 +400,6 @@ impl AppStorage {
                         hub_ui.route_send.send(cth_msg.clone())
                     }
                 }
-                
             },
             HubMsg::BuilderFileTreeResponse {uid, tree} => if *uid == self.builders_request_uid {
                 // replace a workspace node
@@ -406,22 +407,27 @@ impl AppStorage {
                     let workspace = name.clone();
                     // insert each filetree at the right childnode
                     for (window_index, window) in windows.iter_mut().enumerate() {
+                        let mut paths = Vec::new();
                         if let FileNode::Folder {folder, ..} = &mut window.file_panel.file_tree.root_node {
                             for node in folder.iter_mut() {
                                 if let FileNode::Folder {name, ..} = node {
                                     if *name == workspace {
-                                        *node = hub_to_tree(&tree);
+                                        *node = hub_to_tree(&tree, "", &mut paths);
                                         break
                                     }
                                 }
                             }
+                        }
+                        // lets load the file
+                        for path in &paths{
+                            self.text_buffer_from_path(cx, path);
                         }
                         window.file_panel.file_tree.load_open_folders(cx, &state.windows[window_index].open_folders);
                     }
                 }
             },
             HubMsg::FileReadResponse {uid, data, ..} => {
-                for (_path, atb) in &mut self.text_buffers {
+                for (path, atb) in &mut self.text_buffers {
                     if let Some(cth_msg) = &atb.read_msg {
                         if let HubMsg::FileReadRequest {uid: read_uid, ..} = &cth_msg.msg {
                             if *read_uid == *uid {
@@ -430,6 +436,7 @@ impl AppStorage {
                                     if let Ok(utf8_data) = std::str::from_utf8(data) {
                                         atb.text_buffer.load_from_utf8(&utf8_data);
                                         atb.text_buffer.send_textbuffer_loaded_signal(cx);
+                                        FileEditor::update_token_chunks(&path, &mut atb.text_buffer, &mut build_manager.text_index);
                                     }
                                 }
                                 else {
@@ -447,16 +454,21 @@ impl AppStorage {
     }
 }
 
-pub fn hub_to_tree(node: &BuilderFileTreeNode) -> FileNode {
+pub fn hub_to_tree(node: &BuilderFileTreeNode, base: &str, paths: &mut Vec<String>) -> FileNode {
     match node {
-        BuilderFileTreeNode::File {name, ..} => FileNode::File {
-            name: name.clone(),
-            draw: None
+        BuilderFileTreeNode::File {name, ..} => {
+            let path = format!("{}/{}", base, name);
+            paths.push(path);
+            FileNode::File {
+                name: name.clone(),
+                draw: None
+            }
         },
         BuilderFileTreeNode::Folder {name, folder, ..} => {
+            let path = format!("{}/{}", base, name);
             FileNode::Folder {
                 name: name.clone(),
-                folder: folder.iter().map( | v | hub_to_tree(v)).collect(),
+                folder: folder.iter().map( | v | hub_to_tree(v, if base == ""{name}else{&path}, paths)).collect(),
                 draw: None,
                 state: NodeState::Closed
             }

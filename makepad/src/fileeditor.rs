@@ -5,7 +5,7 @@ use makepad_widget::*;
 use crate::jseditor::*;
 use crate::rusteditor::*;
 use crate::plaineditor::*;
-
+use crate::textindex::*;
 
 #[derive(Clone)]
 pub struct FileEditorTemplates {
@@ -71,11 +71,24 @@ impl FileEditor {
         }
     }
 
-    pub fn draw_file_editor(&mut self, cx: &mut Cx, text_buffer: &mut TextBuffer) {
+    pub fn draw_file_editor(&mut self, cx: &mut Cx, text_buffer: &mut TextBuffer, text_index: &mut TextIndex) {
         match self {
-            FileEditor::Rust(re) => re.draw_rust_editor(cx, text_buffer),
-            FileEditor::JS(re) => re.draw_js_editor(cx, text_buffer),
-            FileEditor::Plain(re) => re.draw_plain_editor(cx, text_buffer),
+            FileEditor::Rust(re) => re.draw_rust_editor(cx, text_buffer, text_index),
+            FileEditor::JS(re) => re.draw_js_editor(cx, text_buffer, text_index),
+            FileEditor::Plain(re) => re.draw_plain_editor(cx, text_buffer, text_index),
+        }
+    }
+    
+    pub fn update_token_chunks(path:&str, text_buffer: &mut TextBuffer, text_index: &mut TextIndex){
+        // check which file extension we have to spawn a new editor
+        if path.ends_with(".rs") || path.ends_with(".toml")  || path.ends_with(".ron"){
+            RustTokenizer::update_token_chunks(text_buffer, text_index);
+        }
+        else if path.ends_with(".js") || path.ends_with(".html"){
+            JSTokenizer::update_token_chunks(text_buffer, text_index);
+        }
+        else {
+            PlainTokenizer::update_token_chunks(text_buffer, text_index);
         }
     }
     
