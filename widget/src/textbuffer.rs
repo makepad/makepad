@@ -184,6 +184,11 @@ fn calc_char_count(lines: &Vec<Vec<char>>) -> usize {
 }
 
 impl TextBuffer {
+    pub fn last_chunk_flat_text(&self)->&[char]{
+        let chunk = self.token_chunks.last().unwrap();
+        &self.flat_text[chunk.offset..(chunk.offset+chunk.len)]
+    }
+    
     pub fn with_signal(cx:&mut Cx)->Self{
         let mut tb = TextBuffer::default();
         tb.signal = cx.new_signal();

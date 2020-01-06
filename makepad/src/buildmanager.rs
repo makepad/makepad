@@ -2,13 +2,14 @@ use makepad_render::*;
 use makepad_widget::*;
 use makepad_hub::*;
 use crate::appstorage::*;
-
+use crate::textindex::*;
 #[derive(Clone)]
 pub struct BuildManager {
     pub signal: Signal,
     pub active_builds: Vec<ActiveBuild>,
     pub exec_when_done: bool,
     pub log_items: Vec<HubLogItem>,
+    pub text_index: TextIndex,
     pub tail_log_items: bool,
     pub artifacts: Vec<String>,
 }
@@ -22,6 +23,7 @@ impl BuildManager {
             tail_log_items: true, 
             artifacts: Vec::new(),
             active_builds: Vec::new(),
+            text_index: TextIndex::new(),
         }
     }
     

@@ -1,5 +1,6 @@
 use makepad_render::*;
 use makepad_widget::*;
+use crate::textindex::*;
 
 #[derive(Clone)]
 pub struct RustEditor {
@@ -28,20 +29,8 @@ impl RustEditor {
         ce
     }
     
-    pub fn draw_rust_editor(&mut self, cx: &mut Cx, text_buffer: &mut TextBuffer) {
-        if text_buffer.needs_token_chunks() && text_buffer.lines.len() >0 {
-            let mut state = TokenizerState::new(&text_buffer.lines);
-            let mut tokenizer = RustTokenizer::new();
-            let mut pair_stack = Vec::new();
-            loop {
-                let offset = text_buffer.flat_text.len();
-                let token_type = tokenizer.next_token(&mut state, &mut text_buffer.flat_text, &text_buffer.token_chunks);
-                TokenChunk::push_with_pairing(&mut text_buffer.token_chunks, &mut pair_stack, state.next, offset, text_buffer.flat_text.len(), token_type);
-                if token_type == TokenType::Eof {
-                    break
-                }
-            }
-        }
+    pub fn draw_rust_editor(&mut self, cx: &mut Cx, text_buffer: &mut TextBuffer, text_index: &mut TextIndex) {
+        RustTokenizer::update_token_chunks(text_buffer, text_index);
         
         if self.text_editor.begin_text_editor(cx, text_buffer).is_err() {return}
         
@@ -60,6 +49,30 @@ pub struct RustTokenizer {
 }
 
 impl RustTokenizer {
+    pub fn update_token_chunks(text_buffer: &mut TextBuffer, text_index: &mut TextIndex){
+        if text_buffer.needs_token_chunks() && text_buffer.lines.len() >0 {
+            let mut state = TokenizerState::new(&text_buffer.lines);
+            let mut tokenizer = RustTokenizer::new();
+            let mut pair_stack = Vec::new();
+            loop {
+                let offset = text_buffer.flat_text.len();
+                let token_type = tokenizer.next_token(&mut state, &mut text_buffer.flat_text, &text_buffer.token_chunks);
+                TokenChunk::push_with_pairing(&mut text_buffer.token_chunks, &mut pair_stack, state.next, offset, text_buffer.flat_text.len(), token_type);
+                if token_type == TokenType::Eof {
+                    break
+                }
+                // pass it to the textindex
+                if token_type == TokenType::Identifier 
+                || token_type == TokenType::Call
+                || token_type == TokenType::TypeName{
+                    let last =  text_buffer.token_chunks.len() - 1;
+                    let chars = text_buffer.last_chunk_flat_text();
+                    text_index.write(chars, text_buffer.mutation_id, 0, last);
+                }
+            }
+        }
+    }
+    
     pub fn new() -> RustTokenizer {
         RustTokenizer {
             comment_single: false,
