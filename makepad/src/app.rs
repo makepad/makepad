@@ -212,6 +212,10 @@ impl App {
                 }
             },
             Event::KeyDown(ke) => match ke.key_code {
+                KeyCode::KeyD => if ke.modifiers.logo || ke.modifiers.control {
+                    let size = self.build_manager.text_index.calc_total_size();
+                    println!("Text Index size {}", size);
+                },
                 KeyCode::KeyR => if ke.modifiers.logo || ke.modifiers.control {
                     self.storage.reload_builders();
                 },
@@ -243,7 +247,7 @@ impl App {
                     if se.signal == self.storage.hub_ui_message {
                         if let Some(mut msgs) = hub_ui.get_messages() {
                             for htc in msgs.drain(..) {
-                                self.storage.handle_hub_msg(cx, &htc, &mut self.windows, &mut self.state);
+                                self.storage.handle_hub_msg(cx, &htc, &mut self.windows, &mut self.state, &mut self.build_manager);
                                 self.build_manager.handle_hub_msg(cx, &mut self.storage, &htc);
                             }
                             return
@@ -269,7 +273,8 @@ impl App {
                     if let Ok(utf8_data) = utf8_data {
                         if let Ok(tree) = DeRon::deserialize_ron(utf8_data) {
                             for window in &mut self.windows {
-                                window.file_panel.file_tree.root_node = hub_to_tree(&tree);
+                                let mut paths = Vec::new();
+                                window.file_panel.file_tree.root_node = hub_to_tree(&tree, "", &mut paths);
                                 if let FileNode::Folder {folder, state, name, ..} = &mut window.file_panel.file_tree.root_node {
                                     *name = "".to_string();
                                     *state = NodeState::Open;

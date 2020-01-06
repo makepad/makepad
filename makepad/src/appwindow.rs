@@ -281,7 +281,7 @@ impl AppWindow {
                         editor.set_scroll_pos_on_load(*scroll_pos);
                         editor
                     });
-                    file_editor.draw_file_editor(cx, text_buffer);
+                    file_editor.draw_file_editor(cx, text_buffer, &mut build_manager.text_index);
                     if set_key_focus {
                         file_editor.set_key_focus(cx);
                     }

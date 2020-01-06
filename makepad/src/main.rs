@@ -22,6 +22,8 @@ mod buildmanager;
 pub use crate::buildmanager::*;
 mod makepadstyle;
 pub use crate::makepadstyle::*;
+mod textindex;
+pub use crate::textindex::*;
 
 pub mod codeicon;
 pub use crate::codeicon::*;
