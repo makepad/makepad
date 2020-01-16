@@ -2,7 +2,7 @@ use makepad_render::*;
 
 use crate::textcursor::*;
 
-#[derive(Clone, Copy, Default, PartialEq, Hash, Eq)]
+#[derive(Clone, Copy, Default, PartialEq, Ord, PartialOrd, Hash, Eq)]
 pub struct TextBufferId(pub u16);
 
 #[derive(Clone, Default)]
