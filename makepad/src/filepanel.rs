@@ -13,14 +13,14 @@ pub struct FilePanel {
     pub file_tree: FileTree,
     pub new_file_btn: NormalButton,
 } 
-
+/*
 #[derive(Clone, PartialEq)]
 pub enum FilePanelEvent {
     NewFile {name: String, template: String},
     Cancel,
     None,
 }
-
+*/
 impl FilePanel {
     pub fn proto(cx: &mut Cx) -> Self {
         Self {

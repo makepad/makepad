@@ -637,10 +637,11 @@ impl CocoaApp {
     }
     
     pub fn send_signal_event(&mut self, signal: Signal, status: StatusId) {
+        let mut signals = HashMap::new();
+        signals.insert(signal, vec![status]);
         self.do_callback(&mut vec![
             Event::Signal(SignalEvent {
-                signal: signal,
-                status: status
+                signals: signals,
             })
         ]);
         self.do_callback(&mut vec![Event::Paint]);

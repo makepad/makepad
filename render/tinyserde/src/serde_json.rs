@@ -439,12 +439,25 @@ impl DeJsonState {
                 while self.cur != '"' {
                     if self.cur == '\\' {
                         self.next(i);
+                        match self.cur{
+                            'n'=>self.strbuf.push('\n'),
+                            'r'=>self.strbuf.push('\r'),
+                            't'=>self.strbuf.push('\t'),
+                            '0'=>self.strbuf.push('\0'),
+                            '\0'=>{
+                                return Err(self.err_parse("string"));
+                            },
+                            _=>self.strbuf.push(self.cur)
+                        }
+                        self.next(i);
                     }
-                    if self.cur == '\0' {
-                        return Err(self.err_parse("string"));
+                    else{
+                        if self.cur == '\0' {
+                            return Err(self.err_parse("string"));
+                        }
+                        self.strbuf.push(self.cur);
+                        self.next(i);
                     }
-                    self.strbuf.push(self.cur);
-                    self.next(i);
                 }
                 self.next(i);
                 self.tok = DeJsonTok::Str;
@@ -573,10 +586,15 @@ impl SerJson for String {
     fn ser_json(&self, _d: usize, s: &mut SerJsonState) {
         s.out.push('"');
         for c in self.chars() {
-            if c == '\\' || c == '"' {
-                s.out.push('\\');
+            match c{
+                '\n'=>{s.out.push('\\');s.out.push('n');},
+                '\r'=>{s.out.push('\\');s.out.push('r');},
+                '\t'=>{s.out.push('\\');s.out.push('t');},
+                '\0'=>{s.out.push('\\');s.out.push('0');},
+                '\\'=>{s.out.push('\\');s.out.push('\\');},
+                '"'=>{s.out.push('\\');s.out.push('"');},
+                _=>s.out.push(c)
             }
-            s.out.push(c)
         }
         s.out.push('"');
     }

@@ -147,7 +147,7 @@ pub struct Cx {
     pub frame_callbacks: Vec<Area>,
     pub _frame_callbacks: Vec<Area>,
     
-    pub signals: Vec<(Signal, StatusId)>,
+    pub signals: HashMap<Signal, Vec<StatusId>>,
     
     pub style_base: CxStyle,
     pub styles: Vec<CxStyle>,
@@ -278,7 +278,7 @@ impl Default for Cx {
             frame_callbacks: Vec::new(),
             _frame_callbacks: Vec::new(),
             
-            signals: Vec::new(),
+            signals: HashMap::new(),
             
             panic_now: false,
             panic_redraw: false,
@@ -729,8 +729,16 @@ impl Cx {
     }
     
     pub fn send_signal(&mut self, signal: Signal, status: StatusId) {
-        if signal.signal_id != 0 && self.signals.iter().find( | v | v.0 == signal && v.1 == status).is_none() {
-            self.signals.push((signal, status));
+        if signal.signal_id == 0{
+            return
+        }
+        if let Some(statusses) = self.signals.get_mut(&signal){
+            if statusses.iter().find(|s| **s == status).is_none(){
+                statusses.push(status);
+            }
+        }
+        else{
+            self.signals.insert(signal, vec![status]);
         }
     }
     
@@ -740,15 +748,13 @@ impl Cx {
         let mut counter = 0;
         while self.signals.len() != 0 {
             counter += 1;
-            let mut signals = Vec::new();
+            let mut signals = HashMap::new();
             std::mem::swap(&mut self.signals, &mut signals);
             
-            for (signal, status) in signals {
-                self.call_event_handler(&mut event_handler, &mut Event::Signal(SignalEvent {
-                    signal: signal,
-                    status: status
-                }));
-            }
+            self.call_event_handler(&mut event_handler, &mut Event::Signal(SignalEvent {
+                signals: signals,
+            }));
+
             if counter > 100 {
                 println!("Signal feedback loop detected");
                 break

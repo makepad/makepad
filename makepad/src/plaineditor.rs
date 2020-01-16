@@ -1,6 +1,6 @@
 use makepad_render::*;
 use makepad_widget::*;
-use crate::textindex::*;
+use crate::searchindex::*;
 
 #[derive(Clone)]
 pub struct PlainEditor {
@@ -23,8 +23,8 @@ impl PlainEditor {
         ce
     }
     
-    pub fn draw_plain_editor(&mut self, cx: &mut Cx, text_buffer: &mut TextBuffer, text_index: &mut TextIndex) {
-        PlainTokenizer::update_token_chunks(text_buffer, text_index);
+    pub fn draw_plain_editor(&mut self, cx: &mut Cx, text_buffer: &mut TextBuffer, search_index: &mut SearchIndex) {
+        PlainTokenizer::update_token_chunks(text_buffer, search_index);
         if self.text_editor.begin_text_editor(cx, text_buffer).is_err() {return}
         
         for (index, token_chunk) in text_buffer.token_chunks.iter_mut().enumerate() {
@@ -43,7 +43,7 @@ impl PlainTokenizer {
         PlainTokenizer {}
     }
     
-    pub fn update_token_chunks(text_buffer: &mut TextBuffer, text_index: &mut TextIndex) {
+    pub fn update_token_chunks(text_buffer: &mut TextBuffer, _search_index: &mut SearchIndex) {
         if text_buffer.needs_token_chunks() && text_buffer.lines.len() >0 {
             let mut state = TokenizerState::new(&text_buffer.lines);
             let mut tokenizer = PlainTokenizer::new();

@@ -1,10 +1,51 @@
 use std::collections::{HashMap};
+use crate::appstorage::*;
+use makepad_widget::*;
 
-#[derive(Clone, Default, Debug)]
-pub struct TextIndexEnd {
-    gen: u32,
-    file: u16,
-    token: u16
+#[derive(Clone)]
+pub struct SearchIndex {
+    identifiers: TextIndex,
+}
+
+impl SearchIndex {
+    
+    pub fn new() -> Self {
+        Self {
+            identifiers: TextIndex::new()
+        }
+    }
+    
+    pub fn new_rust_token(&mut self, text_buffer: &TextBuffer) {
+        // pass it to the textindex
+        let chunk_id = text_buffer.token_chunks.len() - 1;
+        let chunk = &text_buffer.token_chunks[chunk_id];
+        
+        match chunk.token_type {
+            TokenType::Identifier | TokenType::Call | TokenType::TypeName => {
+                let chars = &text_buffer.flat_text[chunk.offset..(chunk.offset + chunk.len)];
+                self.identifiers.write(
+                    chars,
+                    text_buffer.text_buffer_id,
+                    text_buffer.mutation_id as u32,
+                    chunk_id as u16
+                );
+            },
+            _ => ()
+        }
+    }
+    
+    pub fn begins_with(&mut self, what: &str, storage:&AppStorage) -> Vec<SearchResult>{
+        let mut out = Vec::new();
+        self.identifiers.begins_with(what, storage, &mut out);
+        out
+    }
+}
+
+
+#[derive(Clone, Default)]
+pub struct SearchResult {
+    pub text_buffer_id: TextBufferId,
+    pub token: u16
 }
 
 #[derive(Clone, Default)]
@@ -12,10 +53,10 @@ pub struct TextIndexNode {
     stem: [char; 6],
     used: usize,
     map: HashMap<char, usize>,
-    end: Vec<TextIndexEnd>
+    end: HashMap<(TextBufferId, u16), u32>
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct TextIndex {
     pub nodes: Vec<TextIndexNode>
 }
@@ -28,7 +69,7 @@ impl TextIndex {
         }
     }
     
-    pub fn write(&mut self, what: &[char], gen: u32, file: u16, token: u16) {
+    pub fn write(&mut self, what: &[char], text_buffer_id: TextBufferId, mut_id: u32, token: u16) {
         let mut o = 0;
         let mut id = 0;
         loop {
@@ -38,9 +79,9 @@ impl TextIndex {
                     if o >= what.len() || sc != what[o] { // split
                         // lets make a new node and swap in our end/map
                         let new_id = self.nodes.len();
-                        let mut new_end = Vec::new();
+                        let mut new_end = HashMap::new();
                         let mut new_map = HashMap::new();
-                        std::mem::swap(&mut new_end, mut self.nodes[id].end);
+                        std::mem::swap(&mut new_end, &mut self.nodes[id].end);
                         std::mem::swap(&mut new_map, &mut self.nodes[id].map);
                         self.nodes.push(TextIndexNode {
                             end: new_end,
@@ -86,39 +127,27 @@ impl TextIndex {
             };
         }
         
-        // lets add val, overwriting old gen
-        if let Some(end) = self.nodes[id].end.iter_mut().find( | v | v.file == file && v.gen != gen) {
-            end.gen = gen;
-            end.token = token;
-        }
-        else {
-            self.nodes[id].end.push(TextIndexEnd {
-                gen: gen,
-                file: file,
-                token: token
-            });
-        }
-        
+        self.nodes[id].end.insert((text_buffer_id, token), mut_id);
     }
     
-    pub fn write_str(&mut self, what: &str, gen: u32, file: u16, token: u16) {
+    pub fn _write_str(&mut self, what: &str, text_buffer_id: TextBufferId, gen: u32, token: u16) {
         let mut whatv = Vec::new();
         for c in what.chars() {
             whatv.push(c);
         }
-        self.write(&whatv, gen, file, token);
+        self.write(&whatv, text_buffer_id, gen, token);
     }
     
-    pub fn begins_with(&self, what: &str) -> Vec<TextIndexEnd> {
+    pub fn begins_with(&mut self, what: &str, storage:&AppStorage, out:&mut Vec<SearchResult>)  {
         // ok so if i type a beginning of a word, i'd want all the endpoints
-        let mut results = Vec::new();
+        
         let mut node_id = 0;
         let mut stem_eat = 0;
         for c in what.chars() {
             // first eat whats in the stem
             if stem_eat < self.nodes[node_id].used {
                 if c != self.nodes[node_id].stem[stem_eat] {
-                    return vec![]
+                    return 
                 }
                 stem_eat += 1;
             }
@@ -129,25 +158,37 @@ impl TextIndex {
                 }
                 else {
                     // nothing
-                    return vec![]
+                    return 
                 };
             }
         }
+
         let mut nexts = Vec::new();
+        let mut cleanup = Vec::new();
         loop {
             for (_key, next) in &self.nodes[node_id].map {
                 nexts.push(*next);
             }
-            results.extend_from_slice(&self.nodes[node_id].end);
+            cleanup.truncate(0);
+            for ((text_buffer_id, token), mut_id) in &self.nodes[node_id].end {
+                if storage.text_buffers[text_buffer_id.0 as usize].text_buffer.mutation_id == *mut_id{
+                    out.push(SearchResult{text_buffer_id:*text_buffer_id, token:*token});
+                }
+                else{
+                    cleanup.push((*text_buffer_id, *token));
+                }
+            }
+            for pair in &cleanup{
+                self.nodes[node_id].end.remove(pair);
+            }
             if nexts.len() == 0 {
                 break;
             }
             node_id = nexts.pop().unwrap();
         }
-        results
     }
     
-    pub fn dump_tree(&self, key: char, id: usize, depth: usize) {
+    pub fn _dump_tree(&self, key: char, id: usize, depth: usize) {
         let mut indent = String::new();
         for _ in 0..depth {indent.push_str(" - ");};
         let mut stem = String::new();
@@ -156,26 +197,17 @@ impl TextIndex {
         }
         println!("{}{} #{}#", indent, key, stem);
         for (key, val) in &self.nodes[id].map {
-            self.dump_tree(*key, *val, depth + 1);
+            self._dump_tree(*key, *val, depth + 1);
         }
     }
-    
-    pub fn calc_total_size(&self) -> usize {
+    /*
+    pub fn _calc_total_size(&self) -> usize {
         let mut total = 0;
         for node in &self.nodes {
-            total += std::mem::size_of::<TextIndexEnd>() * node.end.capacity();
+            total += std::mem::size_of::<TextIndexResult>() * node.end.capacity();
             total += std::mem::size_of::<usize>() * node.map.capacity();
         }
         total += std::mem::size_of::<TextIndexNode>() * self.nodes.capacity();
         total
-    }
-}
-
-fn main() {
-    let mut t = TextIndex::new();
-    t.write_str("hello world", 0, 0, 0);
-    t.write_str("hell12345678901", 1, 1, 1);
-    t.dump_tree(' ', 0, 0);
-    let res = t.begins_with("hell");
-    println!("{:?}", res);
+    }*/
 }
