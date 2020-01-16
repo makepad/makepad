@@ -7,8 +7,6 @@ use std::io::prelude::*;
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
-
 trait ResultMsg<T> {
     fn expect_msg(self, msg: &str) -> Result<T, HubError>;
 }
