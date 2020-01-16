@@ -178,7 +178,7 @@ impl LogItem {
         
         cx.begin_style(Self::style_text_editor());
         
-        if self.text_editor.begin_text_editor(cx, text_buffer).is_err() {return}
+        if self.text_editor.begin_text_editor(cx, text_buffer).is_err() {return cx.end_style();}
 
         for (index, token_chunk) in text_buffer.token_chunks.iter_mut().enumerate() {
             self.text_editor.draw_chunk(cx, index, &text_buffer.flat_text, token_chunk, &text_buffer.messages.cursors);
