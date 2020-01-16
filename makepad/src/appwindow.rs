@@ -13,7 +13,7 @@ use crate::logitem::*;
 use crate::keyboard::*;
 use crate::buildmanager::*;
 use crate::homepage::*;
-
+use crate::searchresults::*;
 use crate::rusteditor::*;
 use crate::jseditor::*;
 use crate::plaineditor::*;
@@ -21,6 +21,7 @@ use crate::plaineditor::*;
 #[derive(Debug, Clone, SerRon, DeRon)]
 pub enum Panel {
     LogList,
+    SearchResults,
     LogItem,
     Keyboard,
     FileTree,
@@ -35,6 +36,7 @@ pub struct AppWindow {
     pub home_page: HomePage,
     pub log_item: LogItem,
     pub log_list: LogList,
+    pub search_results: SearchResults,
     pub keyboard: Keyboard,
     pub file_editors: Elements<u64, FileEditor, FileEditorTemplates>,
     pub dock: Dock<Panel>,
@@ -70,6 +72,7 @@ impl AppWindow {
             keyboard: Keyboard::proto(cx),
             log_item: LogItem::proto(cx),
             log_list: LogList::proto(cx),
+            search_results: SearchResults::proto(cx),
             file_panel: FilePanel::proto(cx),
             dock: Dock ::proto(cx),
         }
@@ -119,6 +122,9 @@ impl AppWindow {
                 },
                 Panel::LogItem => {
                     self.log_item.handle_log_item(cx, event);
+                },
+                Panel::SearchResults => {
+                    self.search_results.handle_search_results(cx, event, &mut build_manager.search_index, storage);
                 },
                 Panel::Keyboard => {
                     self.keyboard.handle_keyboard(cx, event, storage);
@@ -225,7 +231,15 @@ impl AppWindow {
         }
     }
     
-    pub fn draw_app_window(&mut self, cx: &mut Cx, menu: &Menu, window_index: usize, state: &mut AppState, storage: &mut AppStorage, build_manager: &mut BuildManager) {
+    pub fn draw_app_window(
+        &mut self,
+        cx: &mut Cx,
+        menu: &Menu,
+        window_index: usize,
+        state: &mut AppState,
+        storage: &mut AppStorage,
+        build_manager: &mut BuildManager
+    ) {
         if self.desktop_window.begin_desktop_window(cx, Some(menu)).is_err() {return}
         
         self.dock.draw_dock(cx);
@@ -233,7 +247,7 @@ impl AppWindow {
         let dock_items = &mut state.windows[window_index].dock_items;
         let mut dock_walker = self.dock.walker(dock_items);
         let file_panel = &mut self.file_panel;
-        let log_list = &mut self.log_list;
+        let search_results = &mut self.search_results;
         while let Some(item) = dock_walker.walk_draw_dock(cx, | cx, tab_control, tab, selected | {
             // this draws the tabs, so we can customimze it
             match tab.item {
@@ -246,19 +260,22 @@ impl AppWindow {
                         tab.end_tab(cx);
                     };
                 },
-                Panel::LogList =>{
+                Panel::SearchResults => {
                     let tab = tab_control.get_draw_tab(cx, &tab.title, selected, tab.closeable);
                     if tab.begin_tab(cx).is_ok() {
-                        log_list.draw_tab_contents(cx, build_manager);
+                        search_results.draw_tab_contents(cx, &build_manager.search_index);
                         tab.end_tab(cx);
                     };
-                }, 
+                },
                 _ => tab_control.draw_tab(cx, &tab.title, selected, tab.closeable)
             }
         }) {
             match item {
                 Panel::LogList => {
-                    log_list.draw_log_list(cx, build_manager);
+                    self.log_list.draw_log_list(cx, build_manager);
+                },
+                Panel::SearchResults => {
+                    search_results.draw_search_results(cx, storage);
                 },
                 Panel::LogItem => {
                     self.log_item.draw_log_item(cx);
@@ -281,7 +298,7 @@ impl AppWindow {
                         editor.set_scroll_pos_on_load(*scroll_pos);
                         editor
                     });
-                    file_editor.draw_file_editor(cx, text_buffer, &mut build_manager.text_index);
+                    file_editor.draw_file_editor(cx, text_buffer, &mut build_manager.search_index);
                     if set_key_focus {
                         file_editor.set_key_focus(cx);
                     }
@@ -291,7 +308,7 @@ impl AppWindow {
         self.desktop_window.end_desktop_window(cx);
     }
     
-    pub fn ensure_unique_tab_title_for_file_editors(&mut self, window_index: usize, state: &mut AppState){
+    pub fn ensure_unique_tab_title_for_file_editors(&mut self, window_index: usize, state: &mut AppState) {
         // we walk through the dock collecting tab titles, if we run into a collision
         // we need to find the shortest uniqueness
         let mut collisions: HashMap<String, Vec<(String, usize, usize)>> = HashMap::new();
@@ -318,7 +335,7 @@ impl AppWindow {
                 _ => ()
             }
         }
-                
+        
         // walk through hashmap and update collisions with new title
         for (_, values) in &mut collisions {
             if values.len() > 1 {
@@ -342,9 +359,9 @@ impl AppWindow {
                         }
                     }
                 }
-                if max_equal == 0{
+                if max_equal == 0 {
                     continue;
-                } 
+                }
                 for (index, (_, scan_ctrl_id, tab_id)) in values.iter_mut().enumerate() {
                     let split = &splits[index];
                     let mut dock_walker = self.dock.walker(dock_items);
@@ -353,13 +370,13 @@ impl AppWindow {
                             if let DockItem::TabControl {tabs, ..} = dock_item {
                                 let tab = &mut tabs[*tab_id];
                                 // ok lets set the tab title
-                                let new_title = if max_equal == 0{
-                                    split[split.len()-1].clone()
+                                let new_title = if max_equal == 0 {
+                                    split[split.len() - 1].clone()
                                 }
-                                else{
-                                    split[(split.len()-max_equal-1)..].join("/")
+                                else {
+                                    split[(split.len() - max_equal - 1)..].join("/")
                                 };
-                                if new_title != tab.title{
+                                if new_title != tab.title {
                                     tab.title = new_title;
                                 }
                             }
