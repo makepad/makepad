@@ -40,7 +40,7 @@ impl TextIndex {
                         let new_id = self.nodes.len();
                         let mut new_end = Vec::new();
                         let mut new_map = HashMap::new();
-                        std::mem::swap(&mut new_end, mut self.nodes[id].end);
+                        std::mem::swap(&mut new_end, &mut self.nodes[id].end);
                         std::mem::swap(&mut new_map, &mut self.nodes[id].map);
                         self.nodes.push(TextIndexNode {
                             end: new_end,
