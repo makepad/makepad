@@ -48,9 +48,9 @@ impl SearchResultDraw {
     pub fn style(cx: &mut Cx, opt: &StyleOptions) {
         
         Self::layout_item().set(cx, Layout {
-            walk: Walk::wh(Width::Fill, Height::Fix(20. * opt.scale)),
-            align: Align::left_center(),
-            padding: Padding::zero(), // {l: 2., t: 3., b: 2., r: 0.},
+            walk: Walk::wh(Width::Fill, Height::Fix(80. * opt.scale)),
+            align: Align::left_top(),
+            padding: Padding{l: 2., t: 3., b: 2., r: 0.},
             line_wrap: LineWrap::None,
             ..Default::default()
         });
@@ -102,6 +102,7 @@ impl SearchResultDraw {
         let pos = text_buffer.offset_to_text_pos(tok.offset);
         self.text.color = self.path_color.get(cx);
         self.text.draw_text(cx, &format!("{}:{}", path, pos.row));
+        
         // ok now we have to draw a code bubble
         
         //println!("{}", result.text_buffer_id.0);
@@ -162,13 +163,14 @@ impl SearchResults {
             if s.len() > 0{
                 // lets search
                 self.results = search_index.begins_with(&s, storage);
-                /*self.results.sort_by(|a, b| {
+                // sort it
+                self.results.sort_by(|a, b| {
                     let cmp = a.text_buffer_id.cmp(&b.text_buffer_id);
                     if let std::cmp::Ordering::Equal = cmp{
                         return a.token.cmp(&b.token)
                     }
                     return cmp
-                })*/
+                })
             }
             else{
                 self.results.truncate(0);
@@ -249,6 +251,8 @@ impl SearchResults {
         let row_height = SearchResultDraw::layout_item().get(cx).walk.height.fixed();
         
         if self.list.begin_list(cx, &mut self.view, false, row_height).is_err() {return}
+
+        self.result_draw.text_editor.new_draw_calls(cx);
         
         let mut counter = 0;
         for i in self.list.start_item..self.list.end_item {
