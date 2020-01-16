@@ -2,14 +2,15 @@ use makepad_render::*;
 use makepad_widget::*;
 use makepad_hub::*;
 use crate::appstorage::*;
-use crate::textindex::*;
+use crate::searchindex::*;
+
 #[derive(Clone)]
 pub struct BuildManager {
     pub signal: Signal,
     pub active_builds: Vec<ActiveBuild>,
     pub exec_when_done: bool,
     pub log_items: Vec<HubLogItem>,
-    pub text_index: TextIndex,
+    pub search_index: SearchIndex,
     pub tail_log_items: bool,
     pub artifacts: Vec<String>,
 }
@@ -23,7 +24,7 @@ impl BuildManager {
             tail_log_items: true, 
             artifacts: Vec::new(),
             active_builds: Vec::new(),
-            text_index: TextIndex::new(),
+            search_index: SearchIndex::new(),
         }
     }
     
@@ -45,7 +46,7 @@ impl BuildManager {
     
     fn clear_textbuffer_messages(&self, cx: &mut Cx, storage: &mut AppStorage) {
         // clear all files we missed
-        for (_, atb) in &mut storage.text_buffers {
+        for atb in &mut storage.text_buffers {
             //if atb.text_buffer.messages.gc_id != cx.event_id {
                 atb.text_buffer.messages.cursors.truncate(0);
                 atb.text_buffer.messages.bodies.truncate(0);

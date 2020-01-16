@@ -732,6 +732,7 @@ impl HubBuilder {
                                         }
                                     }
                                 }
+                                println!("GOT LINE {}", message.rendered.as_ref().unwrap()); 
                                 let loc_message = LocMessage {
                                     path: format!("{}/{}/{}", builder, workspace, de_relativize_path(&path)).replace("\\", "/"),
                                     row: row,

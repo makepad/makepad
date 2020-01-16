@@ -100,7 +100,7 @@ pub struct TextEditor {
     
     pub _jump_to_offset_id: u64,
     
-    pub _last_lag_mutation_id: u64
+    pub _last_lag_mutation_id: u32
 }
 
 #[derive(Clone, PartialEq)]
@@ -934,35 +934,37 @@ impl TextEditor {
                     }
                 }
             },
-            Event::Signal(se) => if text_buffer.signal == se.signal {
-                if se.status == TextBuffer::status_loaded()
-                    || se.status == TextBuffer::status_message_update()
-                    || se.status == TextBuffer::status_data_update() {
-                    self.view.redraw_view_area(cx);
-                }
-                else if se.status == TextBuffer::status_jump_to_offset() {
-                    if !text_buffer.is_loaded {
-                        self._jump_to_offset = true;
+            Event::Signal(se) => if let Some(statusses) = se.signals.get(&text_buffer.signal) {
+                for status in statusses{
+                    if *status == TextBuffer::status_loaded()
+                        || *status == TextBuffer::status_message_update()
+                        || *status == TextBuffer::status_data_update() {
+                        self.view.redraw_view_area(cx);
                     }
-                    else {
-                        self.do_jump_to_offset(cx, text_buffer);
-                    }
-                }
-                else if se.status == TextBuffer::status_keyboard_update() {
-                    if let Some(key_down) = &text_buffer.keyboard.key_down {
-                        match key_down {
-                            KeyCode::Alt => {
-                                self.start_code_folding(cx, text_buffer);
-                            },
-                            _ => ()
+                    else if *status == TextBuffer::status_jump_to_offset() {
+                        if !text_buffer.is_loaded {
+                            self._jump_to_offset = true;
+                        }
+                        else {
+                            self.do_jump_to_offset(cx, text_buffer);
                         }
                     }
-                    if let Some(key_up) = &text_buffer.keyboard.key_up {
-                        match key_up {
-                            KeyCode::Alt => {
-                                self.start_code_unfolding(cx, text_buffer);
-                            },
-                            _ => ()
+                    else if *status == TextBuffer::status_keyboard_update() {
+                        if let Some(key_down) = &text_buffer.keyboard.key_down {
+                            match key_down {
+                                KeyCode::Alt => {
+                                    self.start_code_folding(cx, text_buffer);
+                                },
+                                _ => ()
+                            }
+                        }
+                        if let Some(key_up) = &text_buffer.keyboard.key_up {
+                            match key_up {
+                                KeyCode::Alt => {
+                                    self.start_code_unfolding(cx, text_buffer);
+                                },
+                                _ => ()
+                            }
                         }
                     }
                 }
@@ -1035,6 +1037,55 @@ impl TextEditor {
         self.reset_cursor_blinker(cx);
     }
     
+    pub fn begin_text_bubbles(&mut self, cx: &mut Cx){
+        self.apply_style(cx);
+        self.new_draw_calls(cx);
+    }
+    
+    pub fn begin_bubble(&mut self, cx: &mut Cx){
+        self.init_draw_state(cx);
+    }
+    
+    pub fn new_draw_calls(&mut self, cx: &mut Cx){
+        // layering, this sets the draw call order
+        self._highlight_area = cx.new_instance_draw_call(&self.token_highlight.shader, 0).into();
+        //cx.new_instance_layer(self.select_highlight.shader_id, 0);
+        cx.new_instance_draw_call(&self.cursor_row.shader, 0);
+        cx.new_instance_draw_call(&self.selection.shader, 0);
+        cx.new_instance_draw_call(&self.message_marker.shader, 0);
+        cx.new_instance_draw_call(&self.paren_pair.shader, 0);
+        
+        // force next begin_text in another drawcall
+        self._text_inst = Some(self.text.begin_text(cx));
+        self._indent_line_inst = Some(cx.new_instance_draw_call(&self.indent_lines.shader, 0));
+        
+        self._cursor_area = cx.new_instance_draw_call(&self.cursor.shader, 0).into();
+
+        if self.draw_line_numbers {
+            let inst = self.gutter_bg.draw_quad_rel(cx, Rect {x: 0., y: 0., w: self.line_number_width, h: cx.get_height_total()});
+            inst.set_do_scroll(cx, false, false);
+            let inst = self.line_number_text.begin_text(cx);
+            inst.inst.set_do_scroll(cx, false, true);
+            self._line_number_inst = Some(inst);
+        }
+    }
+    
+    pub fn init_draw_state(&mut self, cx:&mut Cx){
+        self._monospace_base = self.text.get_monospace_base(cx);
+        self.set_font_scale(cx, self.open_font_scale);
+        self._draw_cursors = DrawCursors::new();
+        self._draw_messages = DrawCursors::new();
+        self._tokens_on_line = 0;
+        self._visible_lines = 0;
+        self._newline_tabs = 0;
+        self._last_tabs = 0;
+        self._indent_stack.truncate(0);
+        self._indent_id_alloc = 1.0;
+        self._paren_stack.truncate(0);
+        self._draw_cursors.set_next(&self.cursors.set);        
+        self._line_geometry.truncate(0);
+        self._line_largest_font = self.text.text_style.font_size;
+    }
     
     pub fn begin_text_editor(&mut self, cx: &mut Cx, text_buffer: &TextBuffer) -> Result<(), ()> {
         // adjust dilation based on DPI factor
@@ -1058,37 +1109,17 @@ impl TextEditor {
             return Err(())
         }
         else {
-            let inst = self.bg.begin_quad_fill(cx);
-            inst.set_do_scroll(cx, false, false); // don't scroll the bg
-            self._bg_inst = Some(inst);
-            
             //let bg_area = bg_inst.into_area();
             let view_area = self.view.get_view_area(cx);
             cx.update_area_refs(self._view_area, view_area);
             //self._bg_area = bg_area;
             self._view_area = view_area;
-            // layering, this sets the draw call order
-            self._highlight_area = cx.new_instance_draw_call(&self.token_highlight.shader, 0).into();
-            //cx.new_instance_layer(self.select_highlight.shader_id, 0);
-            cx.new_instance_draw_call(&self.cursor_row.shader, 0);
-            cx.new_instance_draw_call(&self.selection.shader, 0);
-            cx.new_instance_draw_call(&self.message_marker.shader, 0);
-            cx.new_instance_draw_call(&self.paren_pair.shader, 0);
             
-            // force next begin_text in another drawcall
-            self._text_inst = Some(self.text.begin_text(cx));
-            self._indent_line_inst = Some(cx.new_instance_draw_call(&self.indent_lines.shader, 0));
+            let inst = self.bg.begin_quad_fill(cx);
+            inst.set_do_scroll(cx, false, false); // don't scroll the bg
+            self._bg_inst = Some(inst);
             
-            self._cursor_area = cx.new_instance_draw_call(&self.cursor.shader, 0).into();
-            
-            if self.draw_line_numbers {
-                let inst = self.gutter_bg.draw_quad_rel(cx, Rect {x: 0., y: 0., w: self.line_number_width, h: cx.get_height_total()});
-                inst.set_do_scroll(cx, false, false);
-                cx.new_instance_draw_call(&self.text.shader, 0);
-                let inst = self.line_number_text.begin_text(cx);
-                inst.inst.set_do_scroll(cx, false, true);
-                self._line_number_inst = Some(inst);
-            }
+            self.new_draw_calls(cx);
             
             if let Some(select_scroll) = &mut self._select_scroll {
                 let scroll_pos = self.view.get_scroll_pos(cx);
@@ -1103,19 +1134,8 @@ impl TextEditor {
                 }
             }
             
-            // initialize all drawing counters/stacks
-            self._monospace_base = self.text.get_monospace_base(cx);
-            self.set_font_scale(cx, self.open_font_scale);
-            self._draw_cursors = DrawCursors::new();
-            self._draw_messages = DrawCursors::new();
-            self._tokens_on_line = 0;
-            self._visible_lines = 0;
-            self._newline_tabs = 0;
-            self._last_tabs = 0;
-            self._indent_stack.truncate(0);
-            self._indent_id_alloc = 1.0;
-            self._paren_stack.truncate(0);
-            self._draw_cursors.set_next(&self.cursors.set);
+            self.init_draw_state(cx);
+
             if text_buffer.messages.mutation_id != text_buffer.mutation_id {
                 self._draw_messages.term(&text_buffer.messages.cursors);
             }
@@ -1130,8 +1150,6 @@ impl TextEditor {
             // lets compute our scroll line position and keep it where it is
             self.do_folding_animation_step(cx);
             
-            self._line_geometry.truncate(0);
-            self._line_largest_font = self.text.text_style.font_size;
             self._scroll_pos = self.view.get_scroll_pos(cx);
             
             return Ok(())

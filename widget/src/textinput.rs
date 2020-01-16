@@ -26,8 +26,6 @@ impl TextInput {
                 draw_line_numbers: false,
                 draw_cursor_row: false,
                 highlight_area_on: false,
-                line_number_width: 0.,
-                top_padding: 0.,
                 mark_unmatched_parens: false,
                 folding_depth: 3,
                 ..TextEditor::proto(cx)

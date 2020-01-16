@@ -10,7 +10,6 @@ pub struct LogList {
     pub view: ScrollView,
     pub item_draw: LogItemDraw,
     pub list: ListLogic,
-    pub search_input: TextInput,
 }
 
 #[derive(Clone)]
@@ -43,8 +42,6 @@ impl LogItemDraw {
     pub fn layout_search_input()-> LayoutId{uid!()}
 
     pub fn style(cx: &mut Cx, opt: &StyleOptions) {
-        
-       
         
         Self::layout_item().set(cx, Layout {
             walk: Walk::wh(Width::Fill, Height::Fix(20. * opt.scale)),
@@ -99,7 +96,7 @@ impl LogItemDraw {
     
     pub fn draw_log_item(&mut self, cx: &mut Cx, index: usize, list_item: &mut ListItem, log_item: &HubLogItem) {
         
-        list_item.animator.init(cx, | cx | LogItemDraw::get_default_anim(cx, index, false));
+        list_item.animator.init(cx, | cx | Self::get_default_anim(cx, index, false));
         
         self.item_bg.color = list_item.animator.last_color(cx, Quad::instance_color());
         
@@ -214,7 +211,6 @@ pub enum LogListEvent {
 impl LogList {
     pub fn proto(cx: &mut Cx) -> Self {
         Self {
-            search_input:TextInput::proto(cx, TextInputOptions::default()),
             item_draw: LogItemDraw::proto(cx),
             list: ListLogic {
                 ..ListLogic::default()
@@ -239,7 +235,6 @@ impl LogList {
     
     pub fn handle_log_list(&mut self, cx: &mut Cx, event: &mut Event, storage: &mut AppStorage, bm: &mut BuildManager) -> LogListEvent {
         
-        self.search_input.handle_text_input(cx, event);
         self.list.set_list_len(bm.log_items.len());
         
         if self.list.handle_list_scroll_bars(cx, event, &mut self.view){
@@ -287,7 +282,7 @@ impl LogList {
                 },
                 _ => ()
             },
-            Event::Signal(se) => if se.signal == bm.signal {
+            Event::Signal(se) => if let Some(_) = se.signals.get(&bm.signal) {
                 // we have new things
                 self.view.redraw_view_area(cx);
                 //println!("SIGNAL!");
@@ -382,12 +377,6 @@ impl LogList {
                 LogListEvent::None
             }
         }
-    }
-    
-    pub fn draw_tab_contents(&mut self, cx: &mut Cx, bm: &BuildManager){
-        cx.begin_style(Self::style_text_input());
-        self.search_input.draw_text_input(cx);
-        cx.end_style();
     }
     
     pub fn draw_log_list(&mut self, cx: &mut Cx, bm: &BuildManager) {
