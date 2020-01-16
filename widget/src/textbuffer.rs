@@ -2,6 +2,9 @@ use makepad_render::*;
 
 use crate::textcursor::*;
 
+#[derive(Clone, Copy, Default, PartialEq, Hash, Eq)]
+pub struct TextBufferId(pub u16);
+
 #[derive(Clone, Default)]
 pub struct TextBuffer {
     // Vec<Vec<char>> was chosen because, for all practical use (code) most lines are short
@@ -9,6 +12,7 @@ pub struct TextBuffer {
     // Also inserting lines is pretty cheap even approaching 100k lines.
     // If you want to load a 100 meg single line file or something with >100k lines
     // other options are better. But these are not usecases for this editor.
+    pub text_buffer_id: TextBufferId,
     pub lines: Vec<Vec<char>>,
     pub undo_stack: Vec<TextUndo>,
     pub redo_stack: Vec<TextUndo>,
@@ -17,21 +21,21 @@ pub struct TextBuffer {
     pub is_loaded: bool,
     pub signal: Signal,
     
-    pub mutation_id: u64,
+    pub mutation_id: u32,
     pub is_crlf: bool,
     pub messages: TextBufferMessages,
     pub flat_text: Vec<char>,
     pub token_chunks: Vec<TokenChunk>,
-    pub token_chunks_id: u64,
+    pub token_chunks_id: u32,
     pub keyboard: TextBufferKeyboard,
 }
 
-impl TextBuffer{
-    pub fn status_loaded()->StatusId{uid!()}
-    pub fn status_message_update()->StatusId{uid!()}
-    pub fn status_jump_to_offset()->StatusId{uid!()}
-    pub fn status_data_update()->StatusId{uid!()}
-    pub fn status_keyboard_update()->StatusId{uid!()}
+impl TextBuffer {
+    pub fn status_loaded() -> StatusId {uid!()}
+    pub fn status_message_update() -> StatusId {uid!()}
+    pub fn status_jump_to_offset() -> StatusId {uid!()}
+    pub fn status_data_update() -> StatusId {uid!()}
+    pub fn status_keyboard_update() -> StatusId {uid!()}
 }
 
 #[derive(Clone, Default)]
@@ -45,7 +49,7 @@ pub struct TextBufferKeyboard {
 pub struct TextBufferMessages {
     //pub gc_id: u64,
     // gc id for the update pass
-    pub mutation_id: u64,
+    pub mutation_id: u32,
     // only if this matches the textbuffer mutation id are the messages valid
     pub cursors: Vec<TextCursor>,
     pub bodies: Vec<TextBufferMessage>,
@@ -184,16 +188,6 @@ fn calc_char_count(lines: &Vec<Vec<char>>) -> usize {
 }
 
 impl TextBuffer {
-    pub fn last_chunk_flat_text(&self)->&[char]{
-        let chunk = self.token_chunks.last().unwrap();
-        &self.flat_text[chunk.offset..(chunk.offset+chunk.len)]
-    }
-    
-    pub fn with_signal(cx:&mut Cx)->Self{
-        let mut tb = TextBuffer::default();
-        tb.signal = cx.new_signal();
-        tb
-    }
     
     pub fn from_utf8(data: &str) -> Self {
         let mut tb = TextBuffer::default();

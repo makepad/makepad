@@ -180,6 +180,11 @@ impl App {
                                     title: "Log Item".to_string(),
                                     item: Panel::LogItem
                                 },
+                                DockTab {
+                                    closeable: false,
+                                    title: "Search".to_string(),
+                                    item: Panel::SearchResults
+                                },
                             ]
                         })
                     })
@@ -213,8 +218,8 @@ impl App {
             },
             Event::KeyDown(ke) => match ke.key_code {
                 KeyCode::KeyD => if ke.modifiers.logo || ke.modifiers.control {
-                    let size = self.build_manager.text_index.calc_total_size();
-                    println!("Text Index size {}", size);
+                    //let size = self.build_manager.search_index.calc_total_size();
+                    //println!("Text Index size {}", size);
                 },
                 KeyCode::KeyR => if ke.modifiers.logo || ke.modifiers.control {
                     self.storage.reload_builders();
@@ -244,7 +249,7 @@ impl App {
             Event::Signal(se) => {
                 // process network messages for hub_ui
                 if let Some(hub_ui) = &mut self.storage.hub_ui {
-                    if se.signal == self.storage.hub_ui_message {
+                    if let Some(_) = se.signals.get(&self.storage.hub_ui_message){
                         if let Some(mut msgs) = hub_ui.get_messages() {
                             for htc in msgs.drain(..) {
                                 self.storage.handle_hub_msg(cx, &htc, &mut self.windows, &mut self.state, &mut self.build_manager);
@@ -254,7 +259,7 @@ impl App {
                         }
                     }
                 }
-                if se.signal == self.storage.settings_changed {
+                if let Some(_statusses) = se.signals.get(&self.storage.settings_changed) {
                     if self.storage.settings_old.builders != self.storage.settings.builders {
                         self.storage.reload_builders();
                     }
@@ -344,7 +349,7 @@ impl App {
                     }
                 }
                 else {
-                    for (_path, atb) in &mut self.storage.text_buffers {
+                    for atb in &mut self.storage.text_buffers {
                         if let Some(utf8_data) = atb.file_read.resolve_utf8(fr) {
                             if let Ok(utf8_data) = utf8_data {
                                 atb.text_buffer.load_from_utf8(utf8_data);

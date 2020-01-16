@@ -18,8 +18,6 @@ impl LogItem {
                 read_only: true,
                 draw_line_numbers: false,
                 draw_cursor_row: false,
-                line_number_width: 10.,
-                top_padding: 10.,
                 mark_unmatched_parens: false,
                 folding_depth: 3,
                 ..TextEditor::proto(cx)
@@ -30,6 +28,15 @@ impl LogItem {
             needs_formatting: false,
         };
         editor
+    }
+    
+    pub fn style_text_editor() -> StyleId {uid!()}
+    
+    pub fn style(cx: &mut Cx, _opt: &StyleOptions) {
+        cx.begin_style(Self::style_text_editor());
+        TextEditor::gutter_width().set(cx, 10.);
+        TextEditor::padding_top().set(cx, 10.);
+        cx.end_style();
     }
     
     pub fn load_loc_message(&mut self, cx: &mut Cx, loc_message: &LocMessage) {
@@ -169,6 +176,8 @@ impl LogItem {
             }
         }
         
+        cx.begin_style(Self::style_text_editor());
+        
         if self.text_editor.begin_text_editor(cx, text_buffer).is_err() {return}
 
         for (index, token_chunk) in text_buffer.token_chunks.iter_mut().enumerate() {
@@ -176,5 +185,7 @@ impl LogItem {
         }
         
         self.text_editor.end_text_editor(cx, text_buffer);
+        
+        cx.end_style();
     }
 }

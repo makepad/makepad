@@ -1,5 +1,6 @@
 use crate::cx::*;
 use std::any::TypeId;
+use std::collections::HashMap;
 
 #[derive(Clone, Debug, PartialEq, Default)]
 pub struct KeyModifiers {
@@ -142,8 +143,7 @@ pub struct TimerEvent {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct SignalEvent {
-    pub signal: Signal,
-    pub status: StatusId
+    pub signals: HashMap<Signal, Vec<StatusId>>
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -452,7 +452,7 @@ impl Event {
     }
 }
 
-#[derive(PartialEq, Clone, Copy, Debug, Default)]
+#[derive(Hash, Eq, PartialEq, Clone, Copy, Debug, Default)]
 pub struct Signal {
     pub signal_id: usize
 }
