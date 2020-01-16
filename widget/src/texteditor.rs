@@ -935,7 +935,7 @@ impl TextEditor {
                 }
             },
             Event::Signal(se) => if let Some(statusses) = se.signals.get(&text_buffer.signal) {
-                for status in statusses{
+                for status in statusses {
                     if *status == TextBuffer::status_loaded()
                         || *status == TextBuffer::status_message_update()
                         || *status == TextBuffer::status_data_update() {
@@ -1037,16 +1037,16 @@ impl TextEditor {
         self.reset_cursor_blinker(cx);
     }
     
-    pub fn begin_text_bubbles(&mut self, cx: &mut Cx){
+    pub fn begin_text_bubbles(&mut self, cx: &mut Cx) {
         self.apply_style(cx);
         self.new_draw_calls(cx);
     }
     
-    pub fn begin_bubble(&mut self, cx: &mut Cx){
+    pub fn begin_bubble(&mut self, cx: &mut Cx) {
         self.init_draw_state(cx);
     }
     
-    pub fn new_draw_calls(&mut self, cx: &mut Cx){
+    pub fn new_draw_calls(&mut self, cx: &mut Cx) {
         // layering, this sets the draw call order
         self._highlight_area = cx.new_instance_draw_call(&self.token_highlight.shader, 0).into();
         //cx.new_instance_layer(self.select_highlight.shader_id, 0);
@@ -1060,7 +1060,7 @@ impl TextEditor {
         self._indent_line_inst = Some(cx.new_instance_draw_call(&self.indent_lines.shader, 0));
         
         self._cursor_area = cx.new_instance_draw_call(&self.cursor.shader, 0).into();
-
+        
         if self.draw_line_numbers {
             let inst = self.gutter_bg.draw_quad_rel(cx, Rect {x: 0., y: 0., w: self.line_number_width, h: cx.get_height_total()});
             inst.set_do_scroll(cx, false, false);
@@ -1070,7 +1070,7 @@ impl TextEditor {
         }
     }
     
-    pub fn init_draw_state(&mut self, cx:&mut Cx){
+    pub fn init_draw_state(&mut self, cx: &mut Cx) {
         self._monospace_base = self.text.get_monospace_base(cx);
         self.set_font_scale(cx, self.open_font_scale);
         self._draw_cursors = DrawCursors::new();
@@ -1082,7 +1082,7 @@ impl TextEditor {
         self._indent_stack.truncate(0);
         self._indent_id_alloc = 1.0;
         self._paren_stack.truncate(0);
-        self._draw_cursors.set_next(&self.cursors.set);        
+        self._draw_cursors.set_next(&self.cursors.set);
         self._line_geometry.truncate(0);
         self._line_largest_font = self.text.text_style.font_size;
     }
@@ -1134,8 +1134,6 @@ impl TextEditor {
                 }
             }
             
-            self.init_draw_state(cx);
-
             if text_buffer.messages.mutation_id != text_buffer.mutation_id {
                 self._draw_messages.term(&text_buffer.messages.cursors);
             }
@@ -1149,6 +1147,8 @@ impl TextEditor {
             
             // lets compute our scroll line position and keep it where it is
             self.do_folding_animation_step(cx);
+            
+            self.init_draw_state(cx);
             
             self._scroll_pos = self.view.get_scroll_pos(cx);
             
