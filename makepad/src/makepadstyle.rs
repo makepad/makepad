@@ -5,7 +5,7 @@ use crate::loglist::*;
 use crate::homepage::*;
 use crate::codeicon::*;
 use crate::searchresults::*;
-use crate::logitem::*;
+use crate::itemdisplay::*;
 
 pub fn set_makepad_style(cx: &mut Cx, opt:&StyleOptions) {
     CodeIcon::style(cx, opt);
@@ -13,5 +13,5 @@ pub fn set_makepad_style(cx: &mut Cx, opt:&StyleOptions) {
     FileTree::style(cx, opt);
     LogList::style(cx, opt);
     SearchResults::style(cx, opt);
-    LogItem::style(cx, opt);
+    ItemDisplay::style(cx, opt);
 }

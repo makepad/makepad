@@ -3,7 +3,6 @@ mod fileeditor;
 mod filepanel;
 mod homepage;
 mod loglist;
-mod logitem; 
 mod app;
 pub use crate::app::*;
 mod appwindow;
@@ -18,7 +17,7 @@ pub mod codeicon;
 mod rusteditor;
 mod jseditor;
 mod plaineditor;
-
+mod itemdisplay;
 
 //mod rustcompiler;
 //pub use crate::rustcompiler::*;

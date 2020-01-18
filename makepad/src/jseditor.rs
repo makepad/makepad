@@ -37,7 +37,7 @@ impl JSEditor {
         if self.text_editor.begin_text_editor(cx, text_buffer).is_err() {return}
         
         for (index, token_chunk) in text_buffer.token_chunks.iter_mut().enumerate() {
-            self.text_editor.draw_chunk(cx, index, &text_buffer.flat_text, token_chunk, &text_buffer.messages.cursors);
+            self.text_editor.draw_chunk(cx, index, &text_buffer.flat_text, token_chunk, &text_buffer.markers);
         }
         
         self.text_editor.end_text_editor(cx, text_buffer);
@@ -886,7 +886,7 @@ impl JSTokenizer {
                     is_unary_operator = true;
                 },
                 // these are followed by unary operators (some)
-                TokenType::TypeDef | TokenType::Fn | TokenType::Hash | TokenType::Splat | TokenType::Namespace |
+                TokenType::TypeDef |TokenType::Impl | TokenType::Fn | TokenType::Hash | TokenType::Splat | TokenType::Namespace |
                 TokenType::Keyword | TokenType::Flow | TokenType::Looping => {
                     is_unary_operator = true;
                     

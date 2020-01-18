@@ -9,7 +9,7 @@ use crate::fileeditor::*;
 use crate::filetree::*;
 use crate::filepanel::*;
 use crate::loglist::*;
-use crate::logitem::*;
+use crate::itemdisplay::*;
 use crate::keyboard::*;
 use crate::buildmanager::*;
 use crate::homepage::*;
@@ -22,7 +22,7 @@ use crate::plaineditor::*;
 pub enum Panel {
     LogList,
     SearchResults,
-    LogItem,
+    ItemDisplay,
     Keyboard,
     FileTree,
     FileEditorTarget,
@@ -34,7 +34,7 @@ pub struct AppWindow {
     pub desktop_window: DesktopWindow,
     pub file_panel: FilePanel,
     pub home_page: HomePage,
-    pub log_item: LogItem,
+    pub item_display: ItemDisplay,
     pub log_list: LogList,
     pub search_results: SearchResults,
     pub keyboard: Keyboard,
@@ -70,7 +70,7 @@ impl AppWindow {
             }),
             home_page: HomePage::proto(cx),
             keyboard: Keyboard::proto(cx),
-            log_item: LogItem::proto(cx),
+            item_display: ItemDisplay::proto(cx),
             log_list: LogList::proto(cx),
             search_results: SearchResults::proto(cx),
             file_panel: FilePanel::proto(cx),
@@ -101,6 +101,8 @@ impl AppWindow {
         let dock_items = &mut state.windows[window_index].dock_items;
         let mut dock_walker = self.dock.walker(dock_items);
         let mut file_tree_event = FileTreeEvent::None;
+        let mut do_search = None;
+        let mut focus_item_display = false;
         while let Some(item) = dock_walker.walk_handle_dock(cx, event) {
             match item {
                 Panel::LogList => {
@@ -112,19 +114,29 @@ impl AppWindow {
                                 //println!("TRYING TO SELECT FILE {} ")
                                 file_tree_event = FileTreeEvent::SelectFile {path: storage.remap_sync_path(&loc_message.path)};
                             }
-                            self.log_item.load_loc_message(cx, &loc_message);
+                            self.item_display.load_message(cx, &loc_message);
+                            focus_item_display = true;
                         },
                         LogListEvent::SelectMessages {items} => {
-                            self.log_item.load_plain_text(cx, &items);
+                            self.item_display.load_plain_text(cx, &items);
+                            focus_item_display = true;
                         }
                         _ => ()
                     }
                 },
-                Panel::LogItem => {
-                    self.log_item.handle_log_item(cx, event);
+                Panel::ItemDisplay => {
+                    self.item_display.handle_item_display(cx, event);
                 },
                 Panel::SearchResults => {
-                    self.search_results.handle_search_results(cx, event, &mut build_manager.search_index, storage);
+                    match self.search_results.handle_search_results(cx, event, &mut build_manager.search_index, storage){
+                        SearchResultEvent::DisplayFile{path:_, pos:_}=>{
+                            
+                        },
+                        SearchResultEvent::OpenFile{path, pos:_}=>{
+                            file_tree_event = FileTreeEvent::SelectFile {path: path};
+                        },
+                        _=>()
+                    }
                 },
                 Panel::Keyboard => {
                     self.keyboard.handle_keyboard(cx, event, storage);
@@ -141,7 +153,17 @@ impl AppWindow {
                         let text_buffer = storage.text_buffer_from_path(cx, path);
                         
                         match file_editor.handle_file_editor(cx, event, text_buffer) {
-                            FileEditorEvent::LagChange => {
+                            TextEditorEvent::Search => {
+                                // get last selection as string
+                                let search = file_editor.get_ident_around_last_cursor(text_buffer);
+                                do_search = Some((search, true));
+                            },
+                            TextEditorEvent::Decl => {
+                                // get last selection as string
+                                let search = file_editor.get_ident_around_last_cursor(text_buffer);
+                                do_search = Some((search, false));
+                            },
+                            TextEditorEvent::LagChange => {
                                 
                                 // HERE WE SAVE
                                 storage.text_buffer_file_write(cx, path);
@@ -149,7 +171,7 @@ impl AppWindow {
                                 // lets re-trigger the rust compiler
                                 if storage.settings.build_on_save {
                                     build_manager.restart_build(cx, storage);
-                                    self.log_item.clear_msg(cx);
+                                    //self.item_display.clear_msg(cx);
                                 }
                                 
                                 //app_global.rust_compiler.restart_rust_checker(cx, &mut app_global.text_buffers);
@@ -160,6 +182,14 @@ impl AppWindow {
                     }
                 }
             }
+        }
+        if let Some((do_search, focus)) = do_search{
+             self.focus_search_tab(cx, window_index, state);
+             self.search_results.set_search_input_value(cx, &do_search, focus);
+             self.search_results.do_search(cx, &mut build_manager.search_index, storage);
+        }
+        if focus_item_display{
+            self.focus_item_display(cx, window_index, state);
         }
         match file_tree_event {
             FileTreeEvent::DragMove {fe, ..} => {
@@ -277,8 +307,8 @@ impl AppWindow {
                 Panel::SearchResults => {
                     search_results.draw_search_results(cx, storage);
                 },
-                Panel::LogItem => {
-                    self.log_item.draw_log_item(cx);
+                Panel::ItemDisplay => {
+                    self.item_display.draw_item_display(cx);
                 },
                 Panel::Keyboard => {
                     self.keyboard.draw_keyboard(cx);
@@ -316,23 +346,19 @@ impl AppWindow {
         // enumerate dockspace and collect all names
         let mut dock_walker = self.dock.walker(dock_items);
         while let Some((ctrl_id, dock_item)) = dock_walker.walk_dock_item() {
-            match dock_item {
-                DockItem::TabControl {tabs, ..} => for (id, tab) in tabs.iter_mut().enumerate() {
-                    match &tab.item {
-                        Panel::FileEditor {path, ..} => {
-                            let title = path_file_name(&path);
-                            tab.title = title.clone(); // set the title here once
-                            if let Some(items) = collisions.get_mut(&title) {
-                                items.push((path.clone(), ctrl_id, id));
-                            }
-                            else {
-                                collisions.insert(title, vec![(path.clone(), ctrl_id, id)]);
-                            }
-                        },
-                        _ => ()
+            if let DockItem::TabControl {tabs, ..} = dock_item{
+                for (id, tab) in tabs.iter_mut().enumerate() {
+                    if let Panel::FileEditor {path, ..} = &tab.item{
+                        let title = path_file_name(&path);
+                        tab.title = title.clone(); // set the title here once
+                        if let Some(items) = collisions.get_mut(&title) {
+                            items.push((path.clone(), ctrl_id, id));
+                        }
+                        else {
+                            collisions.insert(title, vec![(path.clone(), ctrl_id, id)]);
+                        }
                     }
-                },
-                _ => ()
+                }
             }
         }
         
@@ -366,19 +392,20 @@ impl AppWindow {
                     let split = &splits[index];
                     let mut dock_walker = self.dock.walker(dock_items);
                     while let Some((ctrl_id, dock_item)) = dock_walker.walk_dock_item() {
-                        if ctrl_id == *scan_ctrl_id {
-                            if let DockItem::TabControl {tabs, ..} = dock_item {
-                                let tab = &mut tabs[*tab_id];
-                                // ok lets set the tab title
-                                let new_title = if max_equal == 0 {
-                                    split[split.len() - 1].clone()
-                                }
-                                else {
-                                    split[(split.len() - max_equal - 1)..].join("/")
-                                };
-                                if new_title != tab.title {
-                                    tab.title = new_title;
-                                }
+                        if ctrl_id != *scan_ctrl_id {
+                            continue;
+                        }
+                        if let DockItem::TabControl {tabs, ..} = dock_item {
+                            let tab = &mut tabs[*tab_id];
+                            // ok lets set the tab title
+                            let new_title = if max_equal == 0 {
+                                split[split.len() - 1].clone()
+                            }
+                            else {
+                                split[(split.len() - max_equal - 1)..].join("/")
+                            };
+                            if new_title != tab.title {
+                                tab.title = new_title;
                             }
                         }
                     }
@@ -408,41 +435,63 @@ impl AppWindow {
             }
         }
     }
+
+    pub fn focus_search_tab(&mut self, cx: &mut Cx, window_index: usize, state: &mut AppState){
+        let mut dock_walker = self.dock.walker(&mut state.windows[window_index].dock_items);
+        while let Some((_ctrl_id, dock_item)) = dock_walker.walk_dock_item() {
+            if let DockItem::TabControl {current, tabs, ..} = dock_item{
+                for (id, tab) in tabs.iter().enumerate() {
+                    if let Panel::SearchResults = &tab.item {
+                        *current = id;
+                        cx.redraw_child_area(Area::All);
+                    }
+                }
+            }
+        }
+    }
+    
+    pub fn focus_item_display(&mut self, cx: &mut Cx, window_index: usize, state: &mut AppState){
+        let mut dock_walker = self.dock.walker(&mut state.windows[window_index].dock_items);
+        while let Some((_ctrl_id, dock_item)) = dock_walker.walk_dock_item() {
+            if let DockItem::TabControl {current, tabs, ..} = dock_item {
+                for (id, tab) in tabs.iter().enumerate() {
+                    if let Panel::ItemDisplay = &tab.item{
+                        *current = id;
+                        cx.redraw_child_area(Area::All);
+                    }
+                }
+            }
+        }
+    }
     
     pub fn focus_or_new_editor(&mut self, cx: &mut Cx, window_index: usize, state: &mut AppState, file_path: &str) -> bool {
         let mut target_ctrl_id = None;
-        let dock_items = &mut state.windows[window_index].dock_items;
-        let mut dock_walker = self.dock.walker(dock_items);
-        // first find existing editor, or
+        let mut dock_walker = self.dock.walker(&mut state.windows[window_index].dock_items);
         while let Some((ctrl_id, dock_item)) = dock_walker.walk_dock_item() {
-            match dock_item {
-                DockItem::TabControl {current, tabs, ..} => {
-                    for (id, tab) in tabs.iter().enumerate() {
-                        match &tab.item {
-                            Panel::FileEditor {path, scroll_pos: _, editor_id} => {
-                                if *path == file_path {
-                                    *current = id;
-                                    if let Some(file_editor) = &mut self.file_editors.get(*editor_id) {
-                                        file_editor.set_key_focus(cx);
-                                    }
-                                    cx.redraw_child_area(Area::All);
-                                    return false
+            if let DockItem::TabControl {current, tabs, ..} = dock_item {
+                for (id, tab) in tabs.iter().enumerate() {
+                    match &tab.item {
+                        Panel::FileEditor {path, scroll_pos: _, editor_id} => {
+                            if *path == file_path {
+                                *current = id;
+                                if let Some(file_editor) = &mut self.file_editors.get(*editor_id) {
+                                    file_editor.set_key_focus(cx);
                                 }
-                            },
-                            Panel::FileEditorTarget => { // found the editor target
-                                target_ctrl_id = Some(ctrl_id);
-                            },
-                            _ => ()
-                        }
+                                cx.redraw_child_area(Area::All);
+                                return false
+                            }
+                        },
+                        Panel::FileEditorTarget => { // found the editor target
+                            target_ctrl_id = Some(ctrl_id);
+                        },
+                        _ => ()
                     }
-                },
-                _ => ()
+                }
             }
         }
         if let Some(target_ctrl_id) = target_ctrl_id { // open a new one
             let new_tab = self.new_file_editor_tab(file_path);
-            let dock_items = &mut state.windows[window_index].dock_items;
-            let mut dock_walker = self.dock.walker(dock_items);
+            let mut dock_walker = self.dock.walker( &mut state.windows[window_index].dock_items);
             while let Some((ctrl_id, dock_item)) = dock_walker.walk_dock_item() {
                 if ctrl_id == target_ctrl_id {
                     if let DockItem::TabControl {current, tabs, ..} = dock_item {

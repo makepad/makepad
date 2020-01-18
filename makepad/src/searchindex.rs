@@ -1,3 +1,4 @@
+use makepad_render::*;
 use std::collections::{HashMap};
 use crate::appstorage::*;
 use makepad_widget::*;
@@ -6,6 +7,9 @@ use makepad_widget::*;
 pub struct SearchIndex {
     identifiers: TextIndex,
 }
+
+// search ordering
+//
 
 impl SearchIndex {
     
@@ -17,26 +21,132 @@ impl SearchIndex {
     
     pub fn new_rust_token(&mut self, text_buffer: &TextBuffer) {
         // pass it to the textindex
-        let chunk_id = text_buffer.token_chunks.len() - 1;
-        let chunk = &text_buffer.token_chunks[chunk_id];
-        
-        match chunk.token_type {
+        if text_buffer.token_chunks.len() <= 1 {
+            return
+        }
+        let chunk_id = text_buffer.token_chunks.len() - 2;
+        // lets figure out if its a decl, an impl or a use
+        match text_buffer.token_chunks[chunk_id].token_type {
             TokenType::Identifier | TokenType::Call | TokenType::TypeName => {
-                let chars = &text_buffer.flat_text[chunk.offset..(chunk.offset + chunk.len)];
+                let prev_tt = {
+                    let mut i = if chunk_id > 0 {chunk_id - 1} else {0};
+                    loop {
+                        let tt = text_buffer.token_chunks[i].token_type;
+                        if i == 0 || !tt.should_ignore() {
+                            break tt;
+                        }
+                        i = i - 1;
+                    }
+                };
+                let (next_tt, next_char) = {
+                    let mut i = chunk_id + 1;
+                    loop {
+                        if i >= text_buffer.token_chunks.len() {
+                            break (TokenType::Unexpected, '\0');
+                        }
+                        let tt = text_buffer.token_chunks[i].token_type;
+                        if !tt.should_ignore() {
+                            break (tt, text_buffer.flat_text[text_buffer.token_chunks[i].offset]);
+                        }
+                        i = i + 1;
+                    }
+                };
+                let offset = text_buffer.token_chunks[chunk_id].offset;
+                let len = text_buffer.token_chunks[chunk_id].len;
+                let chars = &text_buffer.flat_text[offset..(offset + len)];
+                let mut_id = (text_buffer.mutation_id & 0xffff) as u16;
+                
+                let prio = match text_buffer.token_chunks[chunk_id].token_type {
+                    TokenType::Identifier => {
+                        match prev_tt {
+                            TokenType::Keyword => 0,
+                            _ => {
+                                if next_tt == TokenType::Colon {
+                                    0
+                                }
+                                else {
+                                    4
+                                }
+                            }
+                        }
+                    },
+                    TokenType::Call => {
+                        match prev_tt {
+                            TokenType::Fn => 0,
+                            _ => 4
+                        }
+                    },
+                    TokenType::TypeName => {
+                        match prev_tt {
+                            TokenType::TypeDef => 0,
+                            TokenType::Impl => 1,
+                            _ => { // look at the next token
+                                if next_tt == TokenType::Operator && next_char == '<' {
+                                    2
+                                }
+                                else if next_tt == TokenType::Namespace && next_char == ':' {
+                                    4
+                                }
+                                else {
+                                    3
+                                }
+                            }
+                        }
+                    },
+                    _ => 3
+                };
+
                 self.identifiers.write(
                     chars,
                     text_buffer.text_buffer_id,
-                    text_buffer.mutation_id as u32,
-                    chunk_id as u16
+                    mut_id,
+                    prio,
+                    chunk_id as u32
                 );
             },
             _ => ()
         }
     }
+     
+    pub fn clear_markers(&mut self, cx: &mut Cx, storage: &mut AppStorage) {
+        for atb in &mut storage.text_buffers {
+            if atb.text_buffer.markers.search_cursors.len()>0 {
+                cx.send_signal(atb.text_buffer.signal, TextBuffer::status_search_update());
+            }
+            atb.text_buffer.markers.search_cursors.truncate(0);
+        }
+    }
     
-    pub fn begins_with(&mut self, what: &str, storage:&AppStorage) -> Vec<SearchResult>{
+    pub fn search(&mut self, what: &str, cx: &mut Cx, storage: &mut AppStorage) -> Vec<SearchResult> {
         let mut out = Vec::new();
-        self.identifiers.begins_with(what, storage, &mut out);
+        
+        self.clear_markers(cx, storage);
+        
+        self.identifiers.search(what, storage, &mut out);
+        
+        // sort it
+        out.sort_by( | a, b | {
+            let prio = a.prio.cmp(&b.prio);
+            if let std::cmp::Ordering::Equal = prio {
+                let tb = a.text_buffer_id.cmp(&b.text_buffer_id);
+                if let std::cmp::Ordering::Equal = tb {
+                    return a.token.cmp(&b.token)
+                }
+                return tb
+            }
+            return prio
+        });
+        
+        
+        for atb in &mut storage.text_buffers {
+            atb.text_buffer.markers.search_cursors.sort_by( | a, b | {
+                a.tail.cmp(&b.tail)
+            });
+            if atb.text_buffer.markers.search_cursors.len()>0 {
+                cx.send_signal(atb.text_buffer.signal, TextBuffer::status_search_update());
+            }
+        }
+        
         out
     }
 }
@@ -45,7 +155,14 @@ impl SearchIndex {
 #[derive(Clone, Default)]
 pub struct SearchResult {
     pub text_buffer_id: TextBufferId,
-    pub token: u16
+    pub prio: u16,
+    pub token: u32,
+}
+
+#[derive(Clone, Default)]
+pub struct TextIndexEntry {
+    mut_id: u16,
+    prio: u16
 }
 
 #[derive(Clone, Default)]
@@ -53,7 +170,7 @@ pub struct TextIndexNode {
     stem: [char; 6],
     used: usize,
     map: HashMap<char, usize>,
-    end: HashMap<(TextBufferId, u16), u32>
+    end: HashMap<(TextBufferId, u32), TextIndexEntry>
 }
 
 #[derive(Clone)]
@@ -69,7 +186,7 @@ impl TextIndex {
         }
     }
     
-    pub fn write(&mut self, what: &[char], text_buffer_id: TextBufferId, mut_id: u32, token: u16) {
+    pub fn write(&mut self, what: &[char], text_buffer_id: TextBufferId, mut_id: u16, prio: u16, token: u32) {
         let mut o = 0;
         let mut id = 0;
         loop {
@@ -100,7 +217,7 @@ impl TextIndex {
                     o += 1;
                 }
             }
-            else if self.nodes[id].map.len() == 0 { // write stem
+            else if self.nodes[id].end.len() == 0 && self.nodes[id].map.len() == 0 { // write stem
                 for s in 0..self.nodes[id].stem.len() {
                     if o >= what.len() { // we are done
                         break;
@@ -127,27 +244,33 @@ impl TextIndex {
             };
         }
         
-        self.nodes[id].end.insert((text_buffer_id, token), mut_id);
+        self.nodes[id].end.insert((text_buffer_id, token), TextIndexEntry {mut_id, prio});
     }
     
-    pub fn _write_str(&mut self, what: &str, text_buffer_id: TextBufferId, gen: u32, token: u16) {
+    pub fn _write_str(&mut self, what: &str, text_buffer_id: TextBufferId, mut_id: u16, prio: u16, token: u32) {
         let mut whatv = Vec::new();
         for c in what.chars() {
             whatv.push(c);
         }
-        self.write(&whatv, text_buffer_id, gen, token);
+        self.write(&whatv, text_buffer_id, mut_id, prio, token);
     }
     
-    pub fn begins_with(&mut self, what: &str, storage:&AppStorage, out:&mut Vec<SearchResult>)  {
+    pub fn search(&mut self, what: &str, storage: &mut AppStorage, out: &mut Vec<SearchResult>) {
         // ok so if i type a beginning of a word, i'd want all the endpoints
         
         let mut node_id = 0;
         let mut stem_eat = 0;
+        let mut exact_only = true;
         for c in what.chars() {
+            if c == '*' {
+                exact_only = false;
+                continue;
+            }
+            
             // first eat whats in the stem
             if stem_eat < self.nodes[node_id].used {
                 if c != self.nodes[node_id].stem[stem_eat] {
-                    return 
+                    return
                 }
                 stem_eat += 1;
             }
@@ -158,27 +281,46 @@ impl TextIndex {
                 }
                 else {
                     // nothing
-                    return 
+                    return
                 };
             }
         }
-
+        if exact_only && stem_eat < self.nodes[node_id].used {
+            return
+        }
+        
         let mut nexts = Vec::new();
         let mut cleanup = Vec::new();
+
         loop {
             for (_key, next) in &self.nodes[node_id].map {
                 nexts.push(*next);
             }
             cleanup.truncate(0);
-            for ((text_buffer_id, token), mut_id) in &self.nodes[node_id].end {
-                if storage.text_buffers[text_buffer_id.0 as usize].text_buffer.mutation_id == *mut_id{
-                    out.push(SearchResult{text_buffer_id:*text_buffer_id, token:*token});
+            for ((text_buffer_id, token), entry) in &self.nodes[node_id].end {
+                let tb = &mut storage.text_buffers[text_buffer_id.0 as usize].text_buffer;
+                if (tb.mutation_id & 0xffff) as u16 == entry.mut_id {
+                    out.push(SearchResult {
+                        text_buffer_id: *text_buffer_id,
+                        token: *token,
+                        prio: entry.prio
+                    });
+                    // lets output a result cursor int he textbuffer
+                    let tok = &tb.token_chunks[*token as usize];
+                    tb.markers.search_cursors.push(TextCursor {
+                        head: tok.offset + tok.len,
+                        tail: tok.offset,
+                        max: 0
+                    });
                 }
-                else{
+                else {
                     cleanup.push((*text_buffer_id, *token));
                 }
             }
-            for pair in &cleanup{
+            if exact_only {
+                break;
+            }
+            for pair in &cleanup {
                 self.nodes[node_id].end.remove(pair);
             }
             if nexts.len() == 0 {
