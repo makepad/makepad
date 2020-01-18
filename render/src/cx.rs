@@ -21,7 +21,7 @@ pub use crate::area::*;
 pub use crate::menu::*;
 pub use crate::styling::*;
 
-#[cfg(all(not(feature = "ipc"), target_os = "linux"))]
+#[cfg(all(not(feature = "ipc"), target_os = "linux"))] 
 pub use crate::cx_linux::*;
 #[cfg(all(not(feature = "ipc"), target_os = "linux"))]
 pub use crate::cx_opengl::*;
