@@ -73,7 +73,7 @@ impl HubServer {
                     let (tx_write, rx_write) = mpsc::channel::<FromHubMsg>();
                     let tx_write_copy = tx_write.clone();
                     // clone our transmit-to-pump
-                    let _read_thread = {
+                    let _read_thread = { 
                         let tx_pump = tx_pump.clone();
                         let digest = digest.clone();
                         let peer_addr = peer_addr.clone();

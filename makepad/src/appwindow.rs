@@ -104,10 +104,17 @@ impl AppWindow {
                     if build_manager.active_builds.len() == 0 {
                         build_manager.restart_build(cx, storage);
                     }
+                    let mut clear = true;
+                    for ab in &build_manager.active_builds{
+                        if !ab.build_uid.is_none(){
+                            clear = false;
+                        }
+                    }
+                    if clear{
+                        build_manager.tail_log_items = true;
+                        build_manager.log_items.truncate(0);
+                    }
                     build_manager.artifact_run(storage);
-                    // give focus to log
-                    build_manager.tail_log_items = true;
-                    build_manager.log_items.truncate(0);
                     self.show_log_tab(cx, window_index, state);
                 }
                 _=>()
