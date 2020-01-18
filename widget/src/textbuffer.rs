@@ -23,7 +23,7 @@ pub struct TextBuffer {
     
     pub mutation_id: u32,
     pub is_crlf: bool,
-    pub messages: TextBufferMessages,
+    pub markers: TextBufferMarkers,
     pub flat_text: Vec<char>,
     pub token_chunks: Vec<TokenChunk>,
     pub token_chunks_id: u32,
@@ -33,6 +33,7 @@ pub struct TextBuffer {
 impl TextBuffer {
     pub fn status_loaded() -> StatusId {uid!()}
     pub fn status_message_update() -> StatusId {uid!()}
+    pub fn status_search_update() -> StatusId {uid!()}
     pub fn status_jump_to_offset() -> StatusId {uid!()}
     pub fn status_data_update() -> StatusId {uid!()}
     pub fn status_keyboard_update() -> StatusId {uid!()}
@@ -46,13 +47,12 @@ pub struct TextBufferKeyboard {
 }
 
 #[derive(Clone, Default)]
-pub struct TextBufferMessages {
-    //pub gc_id: u64,
-    // gc id for the update pass
+pub struct TextBufferMarkers {
     pub mutation_id: u32,
     // only if this matches the textbuffer mutation id are the messages valid
-    pub cursors: Vec<TextCursor>,
-    pub bodies: Vec<TextBufferMessage>,
+    pub search_cursors: Vec<TextCursor>,
+    pub message_cursors: Vec<TextCursor>,
+    pub message_bodies: Vec<TextBufferMessage>,
     pub jump_to_offset: usize
 }
 
@@ -108,7 +108,7 @@ impl TextBuffers {
     }
 }
 */
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Default)]
 pub struct TextPos {
     pub row: usize,
     pub col: usize
@@ -204,6 +204,33 @@ impl TextBuffer {
         }
         return false
     }
+    
+    pub fn scan_token_chunks_prev_line(&self, token:usize, lines:usize)->(usize, isize){
+        let mut nls = 0;
+        for i in (0..token).rev(){
+            if let TokenType::Newline = self.token_chunks[i].token_type{
+                nls += 1;
+                if nls == lines{
+                    return (i + 1, -1);
+                }
+            }
+        }
+        return (0, 0)
+    }
+
+    pub fn scan_token_chunks_next_line(&self, token:usize, lines:usize)->usize{
+        let mut nls = 0;
+        for i in token..self.token_chunks.len(){
+            if let TokenType::Newline = self.token_chunks[i].token_type{
+                nls += 1;
+                if nls == lines{
+                    return i+1;
+                }
+            }
+        }
+        return self.token_chunks.len();
+    }
+
     
     pub fn offset_to_text_pos(&self, char_offset: usize) -> TextPos {
         let mut char_count = 0;
@@ -839,6 +866,7 @@ pub enum TokenType {
     Flow,
     Fn,
     TypeDef,
+    Impl,
     Looping,
     Identifier,
     Call,

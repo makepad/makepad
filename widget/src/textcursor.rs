@@ -141,6 +141,28 @@ impl TextCursorSet {
         ret
     }
     
+    pub fn get_ident_around_last_cursor(&self, text_buffer: &TextBuffer) -> String {
+        let mut ret = String::new();
+        let cursor = &self.set[self.last_cursor];
+        let (start, end) = cursor.order();
+        if start == end{
+            // lets find the token we are in
+            for tok in &text_buffer.token_chunks{
+                if start >= tok.offset && start < tok.offset + tok.len{
+                    match &tok.token_type{
+                        TokenType::Identifier | TokenType::Call | TokenType::TypeName => {
+                            text_buffer.get_range_as_string(tok.offset, tok.len, &mut ret);
+                            return ret
+                        },
+                        _=>()
+                    }
+                }
+            }
+        }
+        text_buffer.get_range_as_string(start, end - start, &mut ret);
+        ret
+    }
+    
     fn fuse_adjacent(&mut self, text_buffer: &TextBuffer) {
         let mut index = 0;
         let mut old_calc = (TextPos {row: 0, col: 0}, 0);
@@ -239,10 +261,10 @@ impl TextCursorSet {
         self.set_last_cursor(offset, offset, text_buffer);
     }
     
-    pub fn clear_and_set_last_cursor_head_and_tail(&mut self, offset: usize, text_buffer: &TextBuffer) {
+    pub fn clear_and_set_last_cursor_head_and_tail(&mut self, offset: usize, len: usize, text_buffer: &TextBuffer) {
         self.insert_undo_group += 1;
         self.set.truncate(0);
-        self.set_last_cursor(offset, offset, text_buffer);
+        self.set_last_cursor(offset, offset+len, text_buffer);
     }
     
     pub fn set_last_cursor_head(&mut self, offset: usize, text_buffer: &TextBuffer) -> bool {
@@ -864,8 +886,8 @@ impl TextCursorSet {
         self.set.truncate(0);
         self.insert_undo_group += 1;
         let mut cursor = TextCursor {
-            head: 0,
-            tail: text_buffer.calc_char_count(),
+            head: text_buffer.calc_char_count(),
+            tail: 0,
             max: 0
         };
         self.last_cursor = 0;

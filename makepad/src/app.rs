@@ -149,43 +149,45 @@ impl App {
                                     closeable: false,
                                     title: "Edit".to_string(),
                                     item: Panel::FileEditorTarget
-                                },/*
-                                DockTab {
-                                    closeable: true,
-                                    title: "main.rs".to_string(),
-                                    item: Panel::FileEditor {
-                                        path: "examples/text_example/src/main.rs".to_string(),
-                                        scroll_pos: Vec2::zero(),
-                                        editor_id: 1
-                                    }
-                                }*/
+                                },
                             ],
                         }),
-                        last: Box::new(DockItem::TabControl {
-                            current: 0,
-                            previous: 0,
-                            tabs: vec![
-                                DockTab {
-                                    closeable: false,
-                                    title: "Keyboard".to_string(),
-                                    item: Panel::Keyboard
-                                },
-                                DockTab {
-                                    closeable: false,
-                                    title: "Log List".to_string(),
-                                    item: Panel::LogList
-                                },
-                                DockTab {
-                                    closeable: false,
-                                    title: "Log Item".to_string(),
-                                    item: Panel::LogItem
-                                },
-                                DockTab {
-                                    closeable: false,
-                                    title: "Search".to_string(),
-                                    item: Panel::SearchResults
-                                },
-                            ]
+                        last: Box::new(DockItem::Splitter {
+                            axis: Axis::Vertical,
+                            align: SplitterAlign::Last,
+                            pos: 150.0,
+                            first:Box::new(DockItem::TabControl {
+                                current: 0,
+                                previous: 0,
+                                tabs: vec![
+                                    DockTab {
+                                        closeable: false,
+                                        title: "Search".to_string(),
+                                        item: Panel::SearchResults
+                                    },
+                                    DockTab {
+                                        closeable: false,
+                                        title: "Log".to_string(),
+                                        item: Panel::LogList
+                                    },
+                                ]
+                            }),
+                            last:Box::new(DockItem::TabControl {
+                                current: 0,
+                                previous: 0,
+                                tabs: vec![
+                                    DockTab {
+                                        closeable: false,
+                                        title: "Item".to_string(),
+                                        item: Panel::ItemDisplay
+                                    },
+                                    DockTab {
+                                        closeable: false,
+                                        title: "Keyboard".to_string(),
+                                        item: Panel::Keyboard
+                                    },
+                                ]
+                            })
                         })
                     })
                 },

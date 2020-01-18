@@ -32,6 +32,7 @@ pub enum ListLogicEvent {
 
 pub enum ListEvent {
     SelectSingle(usize),
+    SelectDouble(usize),
     SelectMultiple,
     None
 }
@@ -57,6 +58,9 @@ impl ListSelect {
 impl ListLogic {
     pub fn set_list_len(&mut self, len: usize)
     {
+        if self.list_items.len() != len{
+            self.selection.truncate(0);
+        }
         if self.list_items.len() < len {
             for _ in self.list_items.len()..len {
                 self.list_items.push(ListItem {
@@ -174,13 +178,14 @@ impl ListLogic {
         if let Some(last) = self.selection.last() {
             let next = last + 1;
             if next >= self.list_items.len() { // wrap around
-                ListSelect::Single(0)
+                ListSelect::Single(*last)
             }
             else {
                 ListSelect::Single(next)
             }
         }
         else {
+            println!("GOT SELECT 0");
             ListSelect::Single(0)
         }
     }
@@ -188,7 +193,7 @@ impl ListLogic {
     pub fn get_prev_single_selection(&self) -> ListSelect {
         if let Some(first) = self.selection.last() {
             if *first == 0 { // wrap around
-                ListSelect::Single(self.list_items.len().max(1) - 1)
+                ListSelect::Single(*first)//self.list_items.len().max(1) - 1)
             }
             else {
                 ListSelect::Single(first - 1)
@@ -203,7 +208,7 @@ impl ListLogic {
     where F: FnMut(&mut Cx, ListLogicEvent, &mut ListItem, usize)
     {
         let mut select = select;
-        
+        let mut dblclick = false;
         for counter in self.start_item..self.end_item {
             if counter >= self.list_items.len() {
                 break;
@@ -225,7 +230,10 @@ impl ListLogic {
                         select = ListSelect::Range(counter)
                     }
                     else {
-                        select = ListSelect::Single(counter)
+                        select = ListSelect::Single(counter);
+                        if fe.tap_count > 1{
+                            dblclick = true;
+                        }
                     }
                 },
                 Event::FingerUp(_fe) => {
@@ -338,8 +346,12 @@ impl ListLogic {
                     let dm = &mut self.list_items[select_index];
                     dm.is_selected = true;
                     cb(cx, ListLogicEvent::Over, dm, select_index);
-                    
-                    return ListEvent::SelectSingle(select_index)
+                    if dblclick{
+                        return ListEvent::SelectDouble(select_index)
+                    }
+                    else{
+                        return ListEvent::SelectSingle(select_index)
+                    }
                 }
             },
             _ => ()

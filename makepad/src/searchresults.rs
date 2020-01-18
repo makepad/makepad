@@ -1,6 +1,5 @@
 use makepad_render::*;
 use makepad_widget::*;
-use makepad_hub::*;
 use crate::codeicon::*;
 use crate::searchindex::*;
 use crate::appstorage::*;
@@ -28,8 +27,8 @@ pub struct SearchResultDraw {
 impl SearchResultDraw {
     pub fn proto(cx: &mut Cx) -> Self {
         Self {
-            text_editor: TextEditor::proto(cx),
-            item_bg: Quad::proto(cx),
+            text_editor: TextEditor {mark_unmatched_parens: false, ..TextEditor::proto(cx)},
+            item_bg: Quad {z: 0.0001, ..Quad::proto(cx)},
             text: Text {
                 wrapping: Wrapping::Word,
                 ..Text::proto(cx)
@@ -44,18 +43,23 @@ impl SearchResultDraw {
     pub fn layout_item() -> LayoutId {uid!()}
     pub fn text_style_item() -> TextStyleId {uid!()}
     pub fn layout_search_input() -> LayoutId {uid!()}
+    pub fn style_text_editor() -> StyleId {uid!()}
     
     pub fn style(cx: &mut Cx, opt: &StyleOptions) {
         
         Self::layout_item().set(cx, Layout {
-            walk: Walk::wh(Width::Fill, Height::Fix(80. * opt.scale)),
+            walk: Walk::wh(Width::Fill, Height::Fix(65. * opt.scale)),
             align: Align::left_top(),
-            padding: Padding{l: 2., t: 3., b: 2., r: 0.},
+            padding: Padding {l: 2., t: 3., b: 2., r: 0.},
             line_wrap: LineWrap::None,
             ..Default::default()
         });
         
         Self::text_style_item().set(cx, Theme::text_style_normal().get(cx));
+        
+        cx.begin_style(Self::style_text_editor());
+        TextEditor::padding_top().set(cx, 0.);
+        cx.end_style();
     }
     
     pub fn get_default_anim(cx: &Cx, counter: usize, marked: bool) -> Anim {
@@ -90,7 +94,7 @@ impl SearchResultDraw {
         list_item: &mut ListItem,
         path: &str,
         text_buffer: &TextBuffer,
-        token: u16
+        token: u32
     ) {
         list_item.animator.init(cx, | cx | Self::get_default_anim(cx, index, false));
         
@@ -98,12 +102,36 @@ impl SearchResultDraw {
         
         let bg_inst = self.item_bg.begin_quad(cx, Self::layout_item().get(cx)); //&self.get_line_layout());
         
+        let (first_tok, delta) = text_buffer.scan_token_chunks_prev_line(token as usize, 2);
+        let last_tok = text_buffer.scan_token_chunks_next_line(token as usize, 2);
+        
         let tok = &text_buffer.token_chunks[token as usize];
         let pos = text_buffer.offset_to_text_pos(tok.offset);
+        
         self.text.color = self.path_color.get(cx);
         self.text.draw_text(cx, &format!("{}:{}", path, pos.row));
+        cx.turtle_new_line();
+        cx.move_turtle(0., 5.);
         
+        self.text_editor.search_markers_bypass.truncate(0);
+        self.text_editor.search_markers_bypass.push(TextCursor{
+            tail: tok.offset,
+            head: tok.offset + tok.len,
+            max:0
+        });
+        
+        self.text_editor.line_number_offset = (pos.row as isize + delta) as usize;
+        self.text_editor.init_draw_state(cx, text_buffer);
+        
+        for index in first_tok..last_tok {
+            let token_chunk = &text_buffer.token_chunks[index];
+            self.text_editor.draw_chunk(cx, index, &text_buffer.flat_text, token_chunk, &text_buffer.markers);
+        }
+        
+        self.text_editor.draw_search_markers(cx);
         // ok now we have to draw a code bubble
+        // its the 3 lines it consists of so.. we have to scan 'back from token to find the previous start
+        // and scan to end
         
         //println!("{}", result.text_buffer_id.0);
         
@@ -122,8 +150,13 @@ impl SearchResultDraw {
 
 #[derive(Clone)]
 pub enum SearchResultEvent {
-    Select {
-        loc_message: LocMessage,
+    DisplayFile {
+        path:String,
+        pos:TextPos
+    },
+    OpenFile{
+        path:String,
+        pos:TextPos
     },
     None,
 }
@@ -155,27 +188,41 @@ impl SearchResults {
         SearchResultDraw::style(cx, opt);
     }
     
-    pub fn handle_search_results(&mut self, cx: &mut Cx, event: &mut Event, search_index: &mut SearchIndex, storage: &AppStorage) -> SearchResultEvent {
+    pub fn set_search_input_value(&mut self, cx: &mut Cx, value: &str, focus:bool) {
+        if value.len()>0 {
+            self.search_input.set_value(cx, value);
+        }
+        if focus{
+            self.search_input.text_editor.set_key_focus(cx);
+        }
+        self.search_input.select_all(cx);
+    }
+    
+    pub fn do_search(&mut self, cx: &mut Cx, search_index: &mut SearchIndex, storage: &mut AppStorage) {
+        let s = self.search_input.get_value();
+        if s.len() > 0 {
+            // lets search
+            self.results = search_index.search(&s, cx, storage);
+            
+        }
+        else {
+            search_index.clear_markers(cx, storage);
+            self.results.truncate(0);
+        }
+        self.view.redraw_view_area(cx);
+    }
+    
+    pub fn handle_search_results(&mut self, cx: &mut Cx, event: &mut Event, search_index: &mut SearchIndex, storage: &mut AppStorage) -> SearchResultEvent {
         
         // if we have a text change, do a search.
-        if let TextEditorEvent::Change = self.search_input.handle_text_input(cx, event) {
-            let s = self.search_input.get_value();
-            if s.len() > 0{
-                // lets search
-                self.results = search_index.begins_with(&s, storage);
-                // sort it
-                self.results.sort_by(|a, b| {
-                    let cmp = a.text_buffer_id.cmp(&b.text_buffer_id);
-                    if let std::cmp::Ordering::Equal = cmp{
-                        return a.token.cmp(&b.token)
-                    }
-                    return cmp
-                })
-            }
-            else{
-                self.results.truncate(0);
-            }
-            self.view.redraw_view_area(cx);
+        match self.search_input.handle_text_input(cx, event) {
+            TextEditorEvent::Change => {
+                self.do_search(cx, search_index, storage);
+            },
+            TextEditorEvent::Escape | TextEditorEvent::Search => {
+                cx.revert_key_focus();
+            },
+            _ => ()
         }
         
         self.list.set_list_len(self.results.len());
@@ -186,17 +233,19 @@ impl SearchResults {
         let mut select = ListSelect::None;
         // global key handle
         match event {
-            Event::KeyDown(ke) => match ke.key_code {
-                KeyCode::RBracket => if ke.modifiers.logo || ke.modifiers.control {
-                    select = self.list.get_next_single_selection();
-                    self.list.scroll_item_in_view = select.item_index();
-                },
-                KeyCode::LBracket => if ke.modifiers.logo || ke.modifiers.control {
-                    // lets find the
-                    select = self.list.get_prev_single_selection();
-                    self.list.scroll_item_in_view = select.item_index();
-                },
-                _ => ()
+            Event::KeyDown(ke) => if self.search_input.text_editor.has_key_focus(cx) {
+                match ke.key_code {
+                    KeyCode::ArrowDown => {
+                        select = self.list.get_next_single_selection();
+                        self.list.scroll_item_in_view = select.item_index();
+                    },
+                    KeyCode::ArrowUp =>  {
+                        // lets find the
+                        select = self.list.get_prev_single_selection();
+                        self.list.scroll_item_in_view = select.item_index();
+                    },
+                    _ => ()
+                }
             },
             _ => ()
         }
@@ -227,7 +276,22 @@ impl SearchResults {
         
         match le {
             ListEvent::SelectSingle(_select_index) => {
+                // open the result in ItemDisplay
                 self.view.redraw_view_area(cx);
+            },
+            ListEvent::SelectDouble(select_index) => {
+                // open the corresponding editor
+                self.view.redraw_view_area(cx);
+                // we need to get a filepath 
+                let result = &self.results[select_index];
+                let text_buffer = &mut storage.text_buffers[result.text_buffer_id.0 as usize].text_buffer;
+                text_buffer.markers.jump_to_offset = text_buffer.token_chunks[result.token as usize].offset; 
+                cx.send_signal(text_buffer.signal, TextBuffer::status_jump_to_offset());
+                
+                return SearchResultEvent::OpenFile{
+                    path: storage.text_buffer_id_to_path.get(&result.text_buffer_id).expect("Path not found").clone(),
+                    pos:TextPos::default() 
+                };
             },
             ListEvent::SelectMultiple => {},
             ListEvent::None => {
@@ -251,8 +315,13 @@ impl SearchResults {
         let row_height = SearchResultDraw::layout_item().get(cx).walk.height.fixed();
         
         if self.list.begin_list(cx, &mut self.view, false, row_height).is_err() {return}
-
-        self.result_draw.text_editor.new_draw_calls(cx);
+        
+        cx.new_instance_draw_call(&self.result_draw.item_bg.shader, 0);
+        
+        cx.begin_style(SearchResultDraw::style_text_editor());
+        self.result_draw.text_editor.apply_style(cx);
+        self.result_draw.text_editor.new_draw_calls(cx, false);
+        cx.end_style();
         
         let mut counter = 0;
         for i in self.list.start_item..self.list.end_item {

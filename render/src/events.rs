@@ -163,7 +163,7 @@ pub struct KeyEvent {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct KeyFocusEvent {
-    pub last: Area,
+    pub prev: Area,
     pub focus: Area,
 }
 
@@ -269,7 +269,7 @@ impl Event {
     pub fn hits(&mut self, cx: &mut Cx, area: Area, opt: HitOpt) -> Event {
         match self {
             Event::KeyFocus(kf) => {
-                if area == kf.last {
+                if area == kf.prev {
                     return Event::KeyFocusLost(kf.clone())
                 }
                 else if area == kf.focus {

@@ -126,7 +126,8 @@ pub struct Cx {
     pub signal_id: usize,
     pub theme_update_id: usize,
     
-    pub last_key_focus: Area,
+    pub prev_key_focus: Area,
+    pub change_key_focus: Area,
     pub key_focus: Area,
     pub keys_down: Vec<KeyEvent>,
     
@@ -250,7 +251,8 @@ impl Default for Cx {
             shader_instance_id: 1,
             theme_update_id: 1,
             
-            last_key_focus: Area::Empty,
+            change_key_focus: Area::Empty,
+            prev_key_focus: Area::Empty,
             key_focus: Area::Empty,
             keys_down: Vec::new(),
             
@@ -617,10 +619,12 @@ impl Cx {
         }
         
         // update capture keyboard
-        if self.last_key_focus == old_area {
-            self.last_key_focus = new_area.clone()
+        if self.prev_key_focus == old_area {
+            self.prev_key_focus = new_area.clone()
         }
-        
+        if self.change_key_focus == old_area {
+            self.change_key_focus = new_area.clone()
+        }        
         if self._finger_over_last_area == old_area {
             self._finger_over_last_area = new_area.clone()
         }
@@ -632,6 +636,10 @@ impl Cx {
     
     pub fn set_key_focus(&mut self, focus_area: Area) {
         self.key_focus = focus_area;
+    }
+
+    pub fn revert_key_focus(&mut self) {
+        self.key_focus = self.prev_key_focus;
     }
     
     pub fn has_key_focus(&self, focus_area: Area) -> bool {
@@ -672,11 +680,11 @@ impl Cx {
         self.event_id += 1;
         event_handler(self, event);
         
-        if self.last_key_focus != self.key_focus {
-            let last_key_focus = self.last_key_focus;
-            self.last_key_focus = self.key_focus;
+        if self.change_key_focus != self.key_focus {
+            self.prev_key_focus = self.change_key_focus;
+            self.change_key_focus = self.key_focus;
             event_handler(self, &mut Event::KeyFocus(KeyFocusEvent {
-                last: last_key_focus,
+                prev: self.prev_key_focus,
                 focus: self.key_focus
             }))
         }
@@ -695,6 +703,21 @@ impl Cx {
         self.redraw_parent_areas.truncate(0);
         self.call_event_handler(&mut event_handler, &mut Event::Draw);
         self.is_in_redraw_cycle = false;
+        if self.style_stack.len()>0{
+            panic!("Style stack disaligned, forgot a cx.end_style()");
+        }
+        if self.view_stack.len()>0{
+            panic!("View stack disaligned, forgot an end_view(cx)");
+        }
+        if self.pass_stack.len()>0{
+            panic!("Pass stack disaligned, forgot an end_pass(cx)");
+        }
+        if self.window_stack.len()>0{
+            panic!("Window stack disaligned, forgot an end_window(cx)");
+        }
+        if self.turtles.len()>0{
+            panic!("Turtle stack disaligned, forgot an end_turtle()");
+        }
         //self.profile();
     }
     
