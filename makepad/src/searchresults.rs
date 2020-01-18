@@ -189,9 +189,7 @@ impl SearchResults {
     }
     
     pub fn set_search_input_value(&mut self, cx: &mut Cx, value: &str, focus:bool) {
-        if value.len()>0 {
-            self.search_input.set_value(cx, value);
-        }
+        self.search_input.set_value(cx, value);
         if focus{
             self.search_input.text_editor.set_key_focus(cx);
         }
