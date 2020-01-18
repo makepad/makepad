@@ -73,6 +73,11 @@ impl TextInput {
         self.text_buffer.get_as_string()
     }
     
+    pub fn select_all(&mut self, cx: &mut Cx){
+        self.text_editor.cursors.select_all(&mut self.text_buffer);
+        self.text_editor.view.redraw_view_area(cx);
+    }
+    
     pub fn draw_text_input_static(&mut self, cx: &mut Cx, text: &str) {
         let text_buffer = &mut self.text_buffer;
         text_buffer.load_from_utf8(text);
@@ -107,7 +112,7 @@ impl TextInput {
         }
         
         for (index, token_chunk) in text_buffer.token_chunks.iter_mut().enumerate() {
-            self.text_editor.draw_chunk(cx, index, &text_buffer.flat_text, token_chunk, &text_buffer.messages.cursors);
+            self.text_editor.draw_chunk(cx, index, &text_buffer.flat_text, token_chunk, &text_buffer.markers);
         }
         
         self.text_editor.end_text_editor(cx, text_buffer);

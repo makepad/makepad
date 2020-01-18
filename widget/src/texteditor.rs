@@ -20,6 +20,7 @@ pub struct TextEditor {
     pub indent_lines: Quad,
     pub shadow: ScrollShadow,
     pub message_marker: Quad,
+    pub search_marker: Quad,
     pub text: Text,
     pub line_number_text: Text,
     pub cursors: TextCursorSet,
@@ -38,11 +39,14 @@ pub struct TextEditor {
     
     pub mark_unmatched_parens: bool,
     pub draw_cursor_row: bool,
+    pub search_markers_bypass: Vec<TextCursor>,
     pub folding_depth: usize,
     pub colors: CodeEditorColors,
     
     pub read_only: bool,
     pub multiline: bool,
+    
+    pub line_number_offset: usize,
     
     //pub _bg_area: Area,
     pub _scroll_pos_on_load: Option<Vec2>,
@@ -108,7 +112,10 @@ pub enum TextEditorEvent {
     None,
     AutoFormat,
     LagChange,
-    Change
+    Change,
+    Escape,
+    Search,
+    Decl
 }
 
 #[derive(Default, Clone)]
@@ -120,9 +127,9 @@ pub struct CodeEditorColors {
     indent_line_flow: Color,
     paren_pair_match: Color,
     paren_pair_fail: Color,
-    marker_error: Color,
-    marker_warning: Color,
-    marker_log: Color,
+    message_marker_error: Color,
+    message_marker_warning: Color,
+    message_marker_log: Color,
     line_number_normal: Color,
     line_number_highlight: Color,
     whitespace: Color,
@@ -178,6 +185,7 @@ impl TextEditor {
             cursor_row: Quad::proto(cx),
             paren_pair: Quad::proto(cx),
             message_marker: Quad::proto(cx),
+            search_marker: Quad::proto(cx),
             //code_icon: CodeIcon::proto(cx),
             //view_layout: Layout::default(),
             text: Text {
@@ -201,6 +209,8 @@ impl TextEditor {
             mark_unmatched_parens: true,
             highlight_area_on: true,
             draw_cursor_row: true,
+            line_number_offset: 0,
+            search_markers_bypass: Vec::new(),
             _scroll_pos_on_load: None,
             _jump_to_offset: true,
             _monospace_size: Vec2::default(),
@@ -287,9 +297,10 @@ impl TextEditor {
     pub fn color_indent_line_flow() -> ColorId {uid!()}
     pub fn color_paren_pair_match() -> ColorId {uid!()}
     pub fn color_paren_pair_fail() -> ColorId {uid!()}
-    pub fn color_marker_error() -> ColorId {uid!()}
-    pub fn color_marker_warning() -> ColorId {uid!()}
-    pub fn color_marker_log() -> ColorId {uid!()}
+    pub fn color_message_marker_error() -> ColorId {uid!()}
+    pub fn color_message_marker_warning() -> ColorId {uid!()}
+    pub fn color_message_marker_log() -> ColorId {uid!()}
+    pub fn color_search_marker() -> ColorId {uid!()}
     pub fn color_line_number_normal() -> ColorId {uid!()}
     pub fn color_line_number_highlight() -> ColorId {uid!()}
     
@@ -321,6 +332,7 @@ impl TextEditor {
     pub fn shader_paren_pair() -> ShaderId {uid!()}
     pub fn shader_cursor_row() -> ShaderId {uid!()}
     pub fn shader_token_highlight() -> ShaderId {uid!()}
+    pub fn shader_search_marker() -> ShaderId {uid!()}
     pub fn shader_message_marker() -> ShaderId {uid!()}
     
     pub fn instance_indent_id() -> InstanceFloat {uid!()}
@@ -456,6 +468,21 @@ impl TextEditor {
             }
         })));
         
+        Self::shader_search_marker().set(cx, Quad::def_quad_shader().compose(shader_ast!({
+            fn pixel() -> vec4 {
+                let pos2 = vec2(pos.x, pos.y + 0.03 * sin(pos.x * w));
+                df_viewport(pos2 * vec2(w, h));
+                //df_rect(0.,0.,w,h);
+                df_move_to(0., h - 1.);
+                df_line_to(w, h - 1.);
+                return df_stroke(color("white"), 0.8);
+                /*
+                df_viewport(pos * vec2(w, h));
+                df_box(0.5, 0.5, w - 1., h - 1., 1.);
+                return df_fill(color);*/
+            }
+        })));
+        
         Self::shader_message_marker().set(cx, Quad::def_quad_shader().compose(shader_ast!({
             fn pixel() -> vec4 {
                 let pos2 = vec2(pos.x, pos.y + 0.03 * sin(pos.x * w));
@@ -481,12 +508,12 @@ impl TextEditor {
         self.colors.indent_line_typedef = Self::color_indent_line_typedef().get(cx);
         self.colors.indent_line_looping = Self::color_indent_line_looping().get(cx);
         self.colors.indent_line_flow = Self::color_indent_line_flow().get(cx);
-        
+        self.search_marker.color = Self::color_search_marker().get(cx);
         self.colors.paren_pair_match = Self::color_paren_pair_match().get(cx);
         self.colors.paren_pair_fail = Self::color_paren_pair_fail().get(cx);
-        self.colors.marker_error = Self::color_marker_error().get(cx);
-        self.colors.marker_warning = Self::color_marker_warning().get(cx);
-        self.colors.marker_log = Self::color_marker_log().get(cx);
+        self.colors.message_marker_error = Self::color_message_marker_error().get(cx);
+        self.colors.message_marker_warning = Self::color_message_marker_warning().get(cx);
+        self.colors.message_marker_log = Self::color_message_marker_log().get(cx);
         self.colors.line_number_normal = Self::color_line_number_normal().get(cx);
         self.colors.line_number_highlight = Self::color_line_number_highlight().get(cx);
         self.colors.whitespace = Self::color_whitespace().get(cx);
@@ -534,6 +561,7 @@ impl TextEditor {
         self.cursor_row.shader = Self::shader_cursor_row().get(cx);
         self.token_highlight.shader = Self::shader_token_highlight().get(cx);
         self.message_marker.shader = Self::shader_message_marker().get(cx);
+        self.search_marker.shader = Self::shader_search_marker().get(cx);
     }
     
     fn reset_highlight_visible(&mut self, cx: &mut Cx) {
@@ -606,7 +634,7 @@ impl TextEditor {
                 self._grid_select_corner = Some(self.cursors.grid_select_corner(pos, text_buffer));
                 self.cursors.grid_select(self._grid_select_corner.unwrap(), pos, text_buffer);
                 if self.cursors.set.len() == 0 {
-                    self.cursors.clear_and_set_last_cursor_head_and_tail(offset, text_buffer);
+                    self.cursors.clear_and_set_last_cursor_head_and_tail(offset, 0, text_buffer);
                 }
             }
             else { // simply place selection
@@ -618,7 +646,7 @@ impl TextEditor {
                 self.cursors.add_last_cursor_head_and_tail(offset, text_buffer);
             }
             else {
-                self.cursors.clear_and_set_last_cursor_head_and_tail(offset, text_buffer);
+                self.cursors.clear_and_set_last_cursor_head_and_tail(offset, 0, text_buffer);
             }
         }
         
@@ -668,7 +696,7 @@ impl TextEditor {
     fn handle_key_down(&mut self, cx: &mut Cx, ke: &KeyEvent, text_buffer: &mut TextBuffer) {
         let cursor_moved = match ke.key_code {
             KeyCode::ArrowUp => {
-                if ke.modifiers.logo || ke.modifiers.control {
+                if !self.multiline || ke.modifiers.logo || ke.modifiers.control {
                     false
                 }
                 else {
@@ -685,7 +713,7 @@ impl TextEditor {
                 }
             },
             KeyCode::ArrowDown => {
-                if ke.modifiers.logo || ke.modifiers.control {
+                if !self.multiline || ke.modifiers.logo || ke.modifiers.control {
                     false
                 }
                 else {
@@ -925,6 +953,7 @@ impl TextEditor {
                 if self.highlight_area_on {
                     self._highlight_area.write_uniform_float(cx, Self::uniform_highlight_visible(), self._highlight_visibility);
                 }
+                
                 // ok see if we changed.
                 if self._last_lag_mutation_id != text_buffer.mutation_id {
                     let was_filechange = self._last_lag_mutation_id != 0;
@@ -938,6 +967,7 @@ impl TextEditor {
                 for status in statusses {
                     if *status == TextBuffer::status_loaded()
                         || *status == TextBuffer::status_message_update()
+                        || *status == TextBuffer::status_search_update()
                         || *status == TextBuffer::status_data_update() {
                         self.view.redraw_view_area(cx);
                     }
@@ -974,6 +1004,8 @@ impl TextEditor {
         // editor local
         match event.hits(cx, self.view.get_view_area(cx), HitOpt::default()) {
             Event::KeyFocus(_kf) => {
+                self.reset_cursor_blinker(cx);
+                self.view.redraw_view_area(cx);
             },
             Event::KeyFocusLost(_kf) => {
                 self.view.redraw_view_area(cx)
@@ -991,6 +1023,15 @@ impl TextEditor {
                 self.handle_finger_move(cx, &fe, text_buffer);
             },
             Event::KeyDown(ke) => {
+                if ke.key_code == KeyCode::Escape {
+                    return TextEditorEvent::Escape
+                }
+                if ke.key_code == KeyCode::KeyD && (ke.modifiers.logo || ke.modifiers.control) {
+                    return TextEditorEvent::Decl
+                }
+                if ke.key_code == KeyCode::KeyF && (ke.modifiers.logo || ke.modifiers.control) {
+                    return TextEditorEvent::Search
+                }
                 if ke.key_code == KeyCode::Return && (ke.modifiers.logo || ke.modifiers.control) {
                     return TextEditorEvent::AutoFormat
                 }
@@ -1037,22 +1078,14 @@ impl TextEditor {
         self.reset_cursor_blinker(cx);
     }
     
-    pub fn begin_text_bubbles(&mut self, cx: &mut Cx) {
-        self.apply_style(cx);
-        self.new_draw_calls(cx);
-    }
-    
-    pub fn begin_bubble(&mut self, cx: &mut Cx) {
-        self.init_draw_state(cx);
-    }
-    
-    pub fn new_draw_calls(&mut self, cx: &mut Cx) {
+    pub fn new_draw_calls(&mut self, cx: &mut Cx, line_number_bg: bool) {
         // layering, this sets the draw call order
         self._highlight_area = cx.new_instance_draw_call(&self.token_highlight.shader, 0).into();
         //cx.new_instance_layer(self.select_highlight.shader_id, 0);
         cx.new_instance_draw_call(&self.cursor_row.shader, 0);
         cx.new_instance_draw_call(&self.selection.shader, 0);
         cx.new_instance_draw_call(&self.message_marker.shader, 0);
+        cx.new_instance_draw_call(&self.search_marker.shader, 0);
         cx.new_instance_draw_call(&self.paren_pair.shader, 0);
         
         // force next begin_text in another drawcall
@@ -1062,19 +1095,22 @@ impl TextEditor {
         self._cursor_area = cx.new_instance_draw_call(&self.cursor.shader, 0).into();
         
         if self.draw_line_numbers {
-            let inst = self.gutter_bg.draw_quad_rel(cx, Rect {x: 0., y: 0., w: self.line_number_width, h: cx.get_height_total()});
-            inst.set_do_scroll(cx, false, false);
+            if line_number_bg {
+                let inst = self.gutter_bg.draw_quad_rel(cx, Rect {x: 0., y: 0., w: self.line_number_width, h: cx.get_height_total()});
+                inst.set_do_scroll(cx, false, false);
+            }
             let inst = self.line_number_text.begin_text(cx);
             inst.inst.set_do_scroll(cx, false, true);
             self._line_number_inst = Some(inst);
         }
     }
     
-    pub fn init_draw_state(&mut self, cx: &mut Cx) {
+    pub fn init_draw_state(&mut self, cx: &mut Cx, text_buffer: &TextBuffer) {
         self._monospace_base = self.text.get_monospace_base(cx);
         self.set_font_scale(cx, self.open_font_scale);
         self._draw_cursors = DrawCursors::new();
         self._draw_messages = DrawCursors::new();
+        self._draw_search = DrawCursors::new();
         self._tokens_on_line = 0;
         self._visible_lines = 0;
         self._newline_tabs = 0;
@@ -1083,8 +1119,14 @@ impl TextEditor {
         self._indent_id_alloc = 1.0;
         self._paren_stack.truncate(0);
         self._draw_cursors.set_next(&self.cursors.set);
+        self._draw_search.set_next(
+            if self.search_markers_bypass.len() > 0 {&self.search_markers_bypass}else{&text_buffer.markers.search_cursors}
+        );
         self._line_geometry.truncate(0);
         self._line_largest_font = self.text.text_style.font_size;
+        self._last_indent_color = self.colors.indent_line_unknown;
+        // indent
+        cx.move_turtle(self.line_number_width, self.top_padding);
     }
     
     pub fn begin_text_editor(&mut self, cx: &mut Cx, text_buffer: &TextBuffer) -> Result<(), ()> {
@@ -1092,9 +1134,6 @@ impl TextEditor {
         self.view.begin_view(cx, Self::layout_bg().get(cx)) ?;
         
         self.apply_style(cx);
-        
-        self._last_indent_color = self.colors.indent_line_unknown;
-        //self.select_highlight.color = self.colors.highlight;
         
         if !text_buffer.is_loaded {
             //et bg_inst = self.bg.begin_quad(cx, &Layout {
@@ -1119,7 +1158,7 @@ impl TextEditor {
             inst.set_do_scroll(cx, false, false); // don't scroll the bg
             self._bg_inst = Some(inst);
             
-            self.new_draw_calls(cx);
+            self.new_draw_calls(cx, true);
             
             if let Some(select_scroll) = &mut self._select_scroll {
                 let scroll_pos = self.view.get_scroll_pos(cx);
@@ -1134,21 +1173,19 @@ impl TextEditor {
                 }
             }
             
-            if text_buffer.messages.mutation_id != text_buffer.mutation_id {
-                self._draw_messages.term(&text_buffer.messages.cursors);
+            if text_buffer.markers.mutation_id != text_buffer.mutation_id {
+                self._draw_messages.term(&text_buffer.markers.message_cursors);
             }
             else {
-                self._draw_messages.set_next(&text_buffer.messages.cursors);
+                self._draw_messages.set_next(&text_buffer.markers.message_cursors);
             }
             self._last_cursor_pos = self.cursors.get_last_cursor_text_pos(text_buffer);
             
-            // indent
-            cx.move_turtle(self.line_number_width, self.top_padding);
             
             // lets compute our scroll line position and keep it where it is
             self.do_folding_animation_step(cx);
             
-            self.init_draw_state(cx);
+            self.init_draw_state(cx, text_buffer);
             
             self._scroll_pos = self.view.get_scroll_pos(cx);
             
@@ -1227,7 +1264,7 @@ impl TextEditor {
             // yes this is dumb as rocks. but we need to be cheapnfast
             let chunk = &mut self._line_number_chunk;
             chunk.truncate(0);
-            let line_num = self._line_geometry.len() + 1;
+            let line_num = self._line_geometry.len() + 1 + self.line_number_offset;
             let mut scale = 10000;
             let mut fill = false;
             loop {
@@ -1319,7 +1356,7 @@ impl TextEditor {
         }
     }
     
-    pub fn draw_chunk(&mut self, cx: &mut Cx, token_chunks_index: usize, flat_text: &Vec<char>, token_chunk: &TokenChunk, message_cursors: &Vec<TextCursor>) {
+    pub fn draw_chunk(&mut self, cx: &mut Cx, token_chunks_index: usize, flat_text: &Vec<char>, token_chunk: &TokenChunk, markers: &TextBufferMarkers) {
         if token_chunk.len == 0 {
             return
         }
@@ -1442,6 +1479,9 @@ impl TextEditor {
                 TokenType::TypeDef => {
                     self.colors.keyword
                 }
+                TokenType::Impl => {
+                    self.colors.keyword
+                }
                 TokenType::Fn => {
                     self.colors.keyword
                 }
@@ -1494,7 +1534,7 @@ impl TextEditor {
                     if let Some(paren) = self._paren_stack.last_mut() {
                         paren.geom_close = Some(geom);
                     }
-                    else {
+                    else if self.mark_unmatched_parens {
                         self.paren_pair.color = self.colors.paren_pair_fail;
                         self.paren_pair.draw_quad_abs(cx, geom);
                     }
@@ -1525,24 +1565,26 @@ impl TextEditor {
             let last_cursor = self.cursors.last_cursor;
             let draw_cursors = &mut self._draw_cursors;
             let draw_messages = &mut self._draw_messages;
-            let height = self._monospace_size.y;
+            let draw_search = &mut self._draw_search;
             
+            let height = self._monospace_size.y;
+            let search_cursors = if self.search_markers_bypass.len()>0 {&self.search_markers_bypass} else {&markers.search_cursors};
             // actually generate the GPU data for the text
             let z = 2.0; // + self._paren_stack.len() as f32;
             //self.text.z = z;
-            if self._highlight_selection.len() > 0 { // slow loop
-                //let draw_search = &mut self._draw_search;
-                let line_chunk = &mut self._line_chunk;
+            let line_chunk = &mut self._line_chunk;
+            if search_cursors.len() > 0 { // slow loop
                 self.text.add_text(cx, geom.x, geom.y, offset, self._text_inst.as_mut().unwrap(), &chunk, | ch, offset, x, w | {
                     line_chunk.push((x, ch));
-                    //draw_search.mark_text_select_only(cursors, offset, x, geom.y, w, height);
-                    draw_messages.mark_text_select_only(message_cursors, offset, x, geom.y, w, height);
+                    draw_search.mark_text_select_only(search_cursors, offset, x, geom.y, w, height);
+                    draw_messages.mark_text_select_only(&markers.message_cursors, offset, x, geom.y, w, height);
                     draw_cursors.mark_text_with_cursor(cursors, ch, offset, x, geom.y, w, height, z, last_cursor, mark_spaces)
                 });
             }
-            else { // fast loop
+            else {
                 self.text.add_text(cx, geom.x, geom.y, offset, self._text_inst.as_mut().unwrap(), &chunk, | ch, offset, x, w | {
-                    draw_messages.mark_text_select_only(message_cursors, offset, x, geom.y, w, height);
+                    line_chunk.push((x, ch));
+                    draw_messages.mark_text_select_only(&markers.message_cursors, offset, x, geom.y, w, height);
                     draw_cursors.mark_text_with_cursor(cursors, ch, offset, x, geom.y, w, height, z, last_cursor, mark_spaces)
                 });
             }
@@ -1668,6 +1710,7 @@ impl TextEditor {
         self.draw_cursors(cx);
         //self.do_selection_animations(cx);
         self.draw_selections(cx);
+        self.draw_search_markers(cx);
         self.draw_message_markers(cx, text_buffer);
         
         // inject a final page
@@ -1696,9 +1739,9 @@ impl TextEditor {
     }
     
     fn do_jump_to_offset(&mut self, cx: &mut Cx, text_buffer: &TextBuffer) {
-        let offset = text_buffer.messages.jump_to_offset;
+        let offset = text_buffer.markers.jump_to_offset;
         // make one cursor, and start scrolling towards it
-        self.cursors.clear_and_set_last_cursor_head_and_tail(offset, text_buffer);
+        self.cursors.clear_and_set_last_cursor_head_and_tail(offset, 0, text_buffer);
         self.scroll_last_cursor_visible(cx, text_buffer, self._final_fill_height * 0.8);
         self.view.redraw_view_area(cx);
     }
@@ -1736,17 +1779,25 @@ impl TextEditor {
         
         for i in 0..message_markers.len() {
             let mark = &message_markers[i];
-            let body = &text_buffer.messages.bodies[mark.index];
+            let body = &text_buffer.markers.message_bodies[mark.index];
             self.message_marker.color = match body.level {
-                TextBufferMessageLevel::Warning => self.colors.marker_warning,
-                TextBufferMessageLevel::Error => self.colors.marker_error,
-                TextBufferMessageLevel::Log => self.colors.marker_log,
+                TextBufferMessageLevel::Warning => self.colors.message_marker_warning,
+                TextBufferMessageLevel::Error => self.colors.message_marker_error,
+                TextBufferMessageLevel::Log => self.colors.message_marker_log,
             };
             self.message_marker.draw_quad_rel(cx, Rect {x: mark.rc.x - origin.x, y: mark.rc.y - origin.y, w: mark.rc.w, h: mark.rc.h});
         }
     }
     
-    fn draw_selections(&mut self, cx: &mut Cx) {
+    pub fn draw_search_markers(&mut self, cx: &mut Cx) {
+        let origin = cx.get_turtle_origin();
+        
+        for mark in &self._draw_search.selections {
+            self.search_marker.draw_quad_rel(cx, Rect {x: mark.rc.x - origin.x, y: mark.rc.y - origin.y, w: mark.rc.w, h: mark.rc.h});
+        }
+    }
+    
+    pub fn draw_selections(&mut self, cx: &mut Cx) {
         let origin = cx.get_turtle_origin();
         let sel = &mut self._draw_cursors.selections;
         // draw selections

@@ -328,14 +328,14 @@ impl LogList {
                     // check if we have a range:
                     if let Some((head, tail)) = loc_message.range {
                         if select_at_end {
-                            text_buffer.messages.jump_to_offset = head;
+                            text_buffer.markers.jump_to_offset = head;
                         }
                         else {
-                            text_buffer.messages.jump_to_offset = tail;
+                            text_buffer.markers.jump_to_offset = tail;
                         }
                     }
                     else {
-                        text_buffer.messages.jump_to_offset = text_buffer.text_pos_to_offset(TextPos {row: loc_message.row.max(1) - 1, col: loc_message.col.max(1) - 1})
+                        text_buffer.markers.jump_to_offset = text_buffer.text_pos_to_offset(TextPos {row: loc_message.row.max(1) - 1, col: loc_message.col.max(1) - 1})
                     }
                     cx.send_signal(text_buffer.signal, TextBuffer::status_jump_to_offset());
                     
@@ -373,7 +373,7 @@ impl LogList {
                     items: items,
                 }
             },
-            ListEvent::None => {
+            ListEvent::SelectDouble(_) | ListEvent::None => {
                 LogListEvent::None
             }
         }

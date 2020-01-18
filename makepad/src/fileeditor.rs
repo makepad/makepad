@@ -23,27 +23,12 @@ pub enum FileEditor {
     //Text(TextEditor)
 }
 
-#[derive(Clone)]
-pub enum FileEditorEvent {
-    None,
-    LagChange,
-    Change
-}
-
-fn code_editor_to_file_editor(event: TextEditorEvent)->FileEditorEvent {
-    match event {
-        TextEditorEvent::Change => FileEditorEvent::Change,
-        TextEditorEvent::LagChange => FileEditorEvent::LagChange,
-        _ => FileEditorEvent::None
-    }
-}
-
 impl FileEditor {
-    pub fn handle_file_editor(&mut self, cx: &mut Cx, event: &mut Event, text_buffer: &mut TextBuffer) -> FileEditorEvent {
+    pub fn handle_file_editor(&mut self, cx: &mut Cx, event: &mut Event, text_buffer: &mut TextBuffer) -> TextEditorEvent {
         match self {
-            FileEditor::Rust(re) => code_editor_to_file_editor(re.handle_rust_editor(cx, event, text_buffer)),
-            FileEditor::JS(re) => code_editor_to_file_editor(re.handle_js_editor(cx, event, text_buffer)),
-            FileEditor::Plain(re) => code_editor_to_file_editor(re.handle_plain_editor(cx, event, text_buffer)),
+            FileEditor::Rust(re) => re.handle_rust_editor(cx, event, text_buffer),
+            FileEditor::JS(re) => re.handle_js_editor(cx, event, text_buffer),
+            FileEditor::Plain(re) => re.handle_plain_editor(cx, event, text_buffer),
         }
     }
     
@@ -60,6 +45,14 @@ impl FileEditor {
             FileEditor::Rust(re) => re.text_editor.view.get_scroll_pos(cx),
             FileEditor::JS(re) => re.text_editor.view.get_scroll_pos(cx),
             FileEditor::Plain(re) => re.text_editor.view.get_scroll_pos(cx),
+        }
+    }
+    
+    pub fn get_ident_around_last_cursor(&mut self, text_buffer: &mut TextBuffer)->String{
+        match self {
+            FileEditor::Rust(re) => re.text_editor.cursors.get_ident_around_last_cursor(text_buffer),
+            FileEditor::JS(re) => re.text_editor.cursors.get_ident_around_last_cursor(text_buffer),
+            FileEditor::Plain(re) => re.text_editor.cursors.get_ident_around_last_cursor(text_buffer),
         }
     }
     
