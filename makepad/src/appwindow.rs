@@ -163,6 +163,9 @@ impl AppWindow {
                                 let search = file_editor.get_ident_around_last_cursor(text_buffer);
                                 do_search = Some((search, false));
                             },
+                            TextEditorEvent::Escape => {
+                                do_search = Some(("".to_string(), false));
+                            },
                             TextEditorEvent::LagChange => {
                                 
                                 // HERE WE SAVE

@@ -60,14 +60,7 @@ impl SearchIndex {
                     TokenType::Identifier => {
                         match prev_tt {
                             TokenType::Keyword => 0,
-                            _ => {
-                                if next_tt == TokenType::Colon {
-                                    0
-                                }
-                                else {
-                                    4
-                                }
-                            }
+                            _ => 4
                         }
                     },
                     TokenType::Call => {
