@@ -95,7 +95,8 @@ pub struct AppStorage {
     pub file_tree_file_read: FileRead,
     pub app_state_file_read: FileRead,
     pub app_settings_file_read: FileRead,
-    pub text_buffer_map: HashMap<String, usize>,
+    pub text_buffer_path_to_id: HashMap<String, TextBufferId>,
+    pub text_buffer_id_to_path: HashMap<TextBufferId, String>,
     pub text_buffers: Vec<AppTextBuffer>,
 }
 
@@ -122,7 +123,8 @@ impl AppStorage {
             settings_old: AppSettings::default(),
             settings: AppSettings::default(),
             //rust_compiler: RustCompiler::style(cx),
-            text_buffer_map: HashMap::new(),
+            text_buffer_path_to_id: HashMap::new(),
+            text_buffer_id_to_path: HashMap::new(),
             text_buffers: Vec::new(),
             file_tree_file_read: FileRead::default(),
             app_state_file_read: FileRead::default(),
@@ -183,8 +185,8 @@ impl AppStorage {
     pub fn save_settings(&mut self, cx: &mut Cx) {
         let utf8_data = self.settings.serialize_ron();
         let path = "makepad_settings.ron";
-        if let Some(tb_id) = self.text_buffer_map.get(path) {
-            let atb  = &mut self.text_buffers[*tb_id];
+        if let Some(tb_id) = self.text_buffer_path_to_id.get(path) {
+            let atb = &mut self.text_buffers[tb_id.0 as usize];
             atb.text_buffer.load_from_utf8(&utf8_data);
             atb.text_buffer.send_textbuffer_loaded_signal(cx);
         }
@@ -241,32 +243,33 @@ impl AppStorage {
         
         // if online, fallback to readfile
         if !cx.platform_type.is_desktop() || path.find('/').is_none() {
-            if let Some(tb_id) = self.text_buffer_map.get(path){
-                &mut self.text_buffers[*tb_id].text_buffer
+            if let Some(tb_id) = self.text_buffer_path_to_id.get(path) {
+                &mut self.text_buffers[tb_id.0 as usize].text_buffer
             }
-            else{
-                let tb_id = self.text_buffers.len();
-                self.text_buffer_map.insert(path.to_string(), tb_id);
+            else {
+                let tb_id = TextBufferId(self.text_buffers.len() as u16);
+                self.text_buffer_path_to_id.insert(path.to_string(), tb_id);
+                self.text_buffer_id_to_path.insert(tb_id, path.to_string());
                 self.text_buffers.push(AppTextBuffer {
                     file_read: cx.file_read(path),
                     read_msg: None,
                     full_path: path.to_string(),
                     // write_msg: None,
                     text_buffer: TextBuffer {
-                        text_buffer_id: TextBufferId(tb_id as u16),
+                        text_buffer_id: tb_id,
                         signal: cx.new_signal(),
                         ..TextBuffer::default()
                     }
                 });
-                &mut self.text_buffers[tb_id].text_buffer
+                &mut self.text_buffers[tb_id.0 as usize].text_buffer
             }
         }
         else {
             let hub_ui = self.hub_ui.as_mut().unwrap();
-             if let Some(tb_id) = self.text_buffer_map.get(path){
-                &mut self.text_buffers[*tb_id].text_buffer
+            if let Some(tb_id) = self.text_buffer_path_to_id.get(path) {
+                &mut self.text_buffers[tb_id.0 as usize].text_buffer
             }
-            else{
+            else {
                 let builder_pos = path.find('/').unwrap();
                 let uid = hub_ui.route_send.alloc_uid();
                 let (builder, rest) = path.split_at(builder_pos);
@@ -279,22 +282,23 @@ impl AppStorage {
                     }
                 };
                 hub_ui.route_send.send(msg.clone());
-
-                let tb_id = self.text_buffers.len();
-                self.text_buffer_map.insert(path.to_string(), tb_id);
+                
+                let tb_id = TextBufferId(self.text_buffers.len() as u16);
+                self.text_buffer_path_to_id.insert(path.to_string(), tb_id);
+                self.text_buffer_id_to_path.insert(tb_id, path.to_string());
                 self.text_buffers.push(AppTextBuffer {
                     file_read: FileRead::default(),
                     read_msg: Some(msg),
                     full_path: path.to_string(),
                     // write_msg: None,
-                    text_buffer: TextBuffer{
-                        signal:cx.new_signal(),
-                        text_buffer_id: TextBufferId(tb_id as u16),
+                    text_buffer: TextBuffer {
+                        signal: cx.new_signal(),
+                        text_buffer_id: tb_id,
                         ..TextBuffer::default()
                     }
-                        
+                    
                 });
-                &mut self.text_buffers[tb_id].text_buffer
+                &mut self.text_buffers[tb_id.0 as usize].text_buffer
             }
         }
     }
@@ -302,8 +306,8 @@ impl AppStorage {
     pub fn text_buffer_file_write(&mut self, cx: &mut Cx, path: &str) {
         if cx.platform_type.is_desktop() {
             if path.find('/').is_some() {
-                if let Some(tb_id) = self.text_buffer_map.get(path) {
-                    let atb = &self.text_buffers[*tb_id];
+                if let Some(tb_id) = self.text_buffer_path_to_id.get(path) {
+                    let atb = &self.text_buffers[tb_id.0 as usize];
                     let hub_ui = self.hub_ui.as_mut().unwrap();
                     let utf8_data = atb.text_buffer.get_as_string();
                     fn send_file_write_request(hub_ui: &HubUI, uid: HubUid, path: &str, data: &Vec<u8>) {
@@ -338,8 +342,8 @@ impl AppStorage {
                 }
             }
             else { // its not a workspace, its a system (settings) file
-                if let Some(tb_id) = self.text_buffer_map.get(path) {
-                    let atb = &self.text_buffers[*tb_id];
+                if let Some(tb_id) = self.text_buffer_path_to_id.get(path) {
+                    let atb = &self.text_buffers[tb_id.0 as usize];
                     let utf8_data = atb.text_buffer.get_as_string();
                     cx.file_write(path, utf8_data.as_bytes());
                     // if its the settings, load it
@@ -361,7 +365,7 @@ impl AppStorage {
         self.builders_request_uid = uid;
     }
     
-    pub fn handle_hub_msg(&mut self, cx: &mut Cx, htc: &FromHubMsg, windows: &mut Vec<AppWindow>, state: &AppState, build_manager:&mut BuildManager) {
+    pub fn handle_hub_msg(&mut self, cx: &mut Cx, htc: &FromHubMsg, windows: &mut Vec<AppWindow>, state: &AppState, build_manager: &mut BuildManager) {
         let hub_ui = self.hub_ui.as_mut().unwrap();
         // only in ConnectUI of ourselves do we list the workspaces
         match &htc.msg {
@@ -442,7 +446,7 @@ impl AppStorage {
                             }
                         }
                         // lets load the file
-                        for path in &paths{
+                        for path in &paths {
                             self.text_buffer_from_path(cx, path);
                         }
                         window.file_panel.file_tree.load_open_folders(cx, &state.windows[window_index].open_folders);
@@ -450,8 +454,8 @@ impl AppStorage {
                 }
             },
             HubMsg::FileReadResponse {uid, data, ..} => {
-                for (path, tb_id) in &mut self.text_buffer_map {
-                    let atb = &mut self.text_buffers[*tb_id];
+                for (path, tb_id) in &mut self.text_buffer_path_to_id {
+                    let atb = &mut self.text_buffers[tb_id.0 as usize];
                     if let Some(cth_msg) = &atb.read_msg {
                         if let HubMsg::FileReadRequest {uid: read_uid, ..} = &cth_msg.msg {
                             if *read_uid == *uid {
@@ -492,7 +496,7 @@ pub fn hub_to_tree(node: &BuilderFileTreeNode, base: &str, paths: &mut Vec<Strin
             let path = format!("{}/{}", base, name);
             FileNode::Folder {
                 name: name.clone(),
-                folder: folder.iter().map( | v | hub_to_tree(v, if base == ""{name}else{&path}, paths)).collect(),
+                folder: folder.iter().map( | v | hub_to_tree(v, if base == "" {name}else {&path}, paths)).collect(),
                 draw: None,
                 state: NodeState::Closed
             }

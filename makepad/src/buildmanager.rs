@@ -48,8 +48,8 @@ impl BuildManager {
         // clear all files we missed
         for atb in &mut storage.text_buffers {
             //if atb.text_buffer.messages.gc_id != cx.event_id {
-                atb.text_buffer.messages.cursors.truncate(0);
-                atb.text_buffer.messages.bodies.truncate(0);
+                atb.text_buffer.markers.message_cursors.truncate(0);
+                atb.text_buffer.markers.message_bodies.truncate(0);
                 cx.send_signal(atb.text_buffer.signal, TextBuffer::status_message_update());
            // }
             //else {
@@ -114,20 +114,20 @@ impl BuildManager {
                 self.log_items.push(item.clone());
                 if let Some(loc_message) = item.get_loc_message() {
                     let text_buffer = storage.text_buffer_from_path(cx, &storage.remap_sync_path(&loc_message.path));
-                    let messages = &mut text_buffer.messages;
-                    messages.mutation_id = text_buffer.mutation_id.max(1);
-                    if messages.cursors.len() > 100000{ // crash saftey
+                    let markers = &mut text_buffer.markers;
+                    markers.mutation_id = text_buffer.mutation_id.max(1);
+                    if markers.message_cursors.len() > 100000{ // crash saftey
                         return
                     }
                     if let Some((head, tail)) = loc_message.range {
                         let mut inserted = None;
-                        if messages.cursors.len()>0 {
-                            for i in (0..messages.cursors.len()).rev() {
-                                if head >= messages.cursors[i].head {
+                        if markers.message_cursors.len()>0 {
+                            for i in (0..markers.message_cursors.len()).rev() {
+                                if head >= markers.message_cursors[i].head {
                                     break;
                                 }
-                                if head < messages.cursors[i].head && (i == 0 || head >= messages.cursors[i - 1].head) {
-                                    messages.cursors.insert(i, TextCursor {
+                                if head < markers.message_cursors[i].head && (i == 0 || head >= markers.message_cursors[i - 1].head) {
+                                    markers.message_cursors.insert(i, TextCursor {
                                         head: head,
                                         tail: tail,
                                         max: 0
@@ -139,7 +139,7 @@ impl BuildManager {
                         }
                         if inserted.is_none() {
                             if let Some((head, tail)) = loc_message.range {
-                                messages.cursors.push(TextCursor {
+                                markers.message_cursors.push(TextCursor {
                                     head: head,
                                     tail: tail,
                                     max: 0
@@ -160,10 +160,10 @@ impl BuildManager {
                             }
                         };
                         if let Some(pos) = inserted {
-                            text_buffer.messages.bodies.insert(pos, msg);
+                            text_buffer.markers.message_bodies.insert(pos, msg);
                         }
                         else {
-                            text_buffer.messages.bodies.push(msg);
+                            text_buffer.markers.message_bodies.push(msg);
                         }
                         cx.send_signal(text_buffer.signal, TextBuffer::status_message_update());
                     }
