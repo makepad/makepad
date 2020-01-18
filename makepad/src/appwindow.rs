@@ -214,6 +214,9 @@ impl AppWindow {
              self.show_search_tab(cx, window_index, state);
              self.search_results.set_search_input_value(cx, &do_search, focus);
              self.search_results.do_search(cx, &mut build_manager.search_index, storage);
+             if do_search.len() == 0{
+                 self.show_log_tab(cx, window_index, state);
+             }
         }
         if show_item_display_tab{
             self.show_item_display_tab(cx, window_index, state);
