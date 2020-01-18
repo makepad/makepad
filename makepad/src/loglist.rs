@@ -273,13 +273,6 @@ impl LogList {
                     bm.log_items.truncate(0);
                     self.view.redraw_view_area(cx);
                 },
-                KeyCode::Backtick => if ke.modifiers.logo || ke.modifiers.control {
-                    if bm.active_builds.len() == 0 {
-                        bm.restart_build(cx, storage);
-                    }
-                    bm.artifact_run(storage);
-                    self.view.redraw_view_area(cx);
-                },
                 _ => ()
             },
             Event::Signal(se) => if let Some(_) = se.signals.get(&bm.signal) {
