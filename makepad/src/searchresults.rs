@@ -45,6 +45,7 @@ impl SearchResultDraw {
     pub fn text_style_item() -> TextStyleId {uid!()}
     pub fn layout_search_input() -> LayoutId {uid!()}
     pub fn style_text_editor() -> StyleId {uid!()}
+    pub fn style_code_editor() -> StyleId {uid!()}
     
     pub fn style(cx: &mut Cx, opt: &StyleOptions) {
         
@@ -66,7 +67,7 @@ impl SearchResultDraw {
     pub fn get_default_anim(cx: &Cx, counter: usize, marked: bool) -> Anim {
         Anim::new(Play::Chain {duration: 0.01}, vec![
             Track::color(Quad::instance_color(), Ease::Lin, vec![
-                (1.0, if marked {Theme::color_bg_marked().get(cx)} else if counter & 1 == 0 {Theme::color_bg_selected().get(cx)}else {Theme::color_bg_odd().get(cx)})
+                (1.0, if marked {Theme::color_bg_marked().get(cx)} else  {Theme::color_bg_odd().get(cx)})
             ])
         ])
     }
@@ -74,13 +75,13 @@ impl SearchResultDraw {
     pub fn get_default_anim_cut(cx: &Cx, counter: usize, marked: bool) -> Anim {
         Anim::new(Play::Cut {duration: 0.01}, vec![
             Track::color(Quad::instance_color(), Ease::Lin, vec![
-                (0.0, if marked {Theme::color_bg_marked().get(cx)} else if counter & 1 == 0 {Theme::color_bg_selected().get(cx)}else {Theme::color_bg_odd().get(cx)})
+                (0.0, if marked {Theme::color_bg_marked().get(cx)} else {Theme::color_bg_odd().get(cx)})
             ])
         ])
     }
     
     pub fn get_over_anim(cx: &Cx, counter: usize, marked: bool) -> Anim {
-        let over_color = if marked {Theme::color_bg_marked_over().get(cx)} else if counter & 1 == 0 {Theme::color_bg_selected_over().get(cx)}else {Theme::color_bg_odd_over().get(cx)};
+        let over_color = if marked {Theme::color_bg_marked_over().get(cx)} else {Theme::color_bg_odd_over().get(cx)};
         Anim::new(Play::Cut {duration: 0.02}, vec![
             Track::color(Quad::instance_color(), Ease::Lin, vec![
                 (0., over_color),
@@ -97,7 +98,8 @@ impl SearchResultDraw {
         text_buffer: &TextBuffer,
         token: u32
     ) {
-        list_item.animator.init(cx, | cx | Self::get_default_anim(cx, index, false));
+        let selected = list_item.is_selected;
+        list_item.animator.init(cx, | cx | Self::get_default_anim(cx, index, selected));
         
         self.item_bg.color = list_item.animator.last_color(cx, Quad::instance_color());
 
@@ -110,7 +112,7 @@ impl SearchResultDraw {
         let pos = text_buffer.offset_to_text_pos(tok.offset);
         
         self.text.color = self.path_color.get(cx);
-        self.text.draw_text(cx, &format!("{}:{}", path, pos.row));
+        self.text.draw_text(cx, &format!("{}:{}", path.split('/').collect::<Vec<&str>>().join(" / "), pos.row));
         cx.turtle_new_line();
         cx.move_turtle(0., 5.);
         
@@ -168,7 +170,7 @@ impl SearchResults {
             search_input: TextInput::proto(cx, TextInputOptions::default()),
             result_draw: SearchResultDraw::proto(cx),
             list: ListLogic {
-                multi_select: true,
+                multi_select: false,
                 ..ListLogic::default()
             },
             do_select_first: false,
@@ -351,6 +353,7 @@ impl SearchResults {
             // lets get the path
             let result = &self.results[i];
             let tb = &storage.text_buffers[result.text_buffer_id.as_index()];
+            //println!("{} {}");
             self.result_draw.draw_result(
                 cx,
                 i,
