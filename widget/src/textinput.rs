@@ -44,7 +44,7 @@ impl TextInput {
             padding: Padding::all(7.),
             ..Layout::default()
         });
-        TextEditor::color_bg().set(cx, Theme::color_bg_normal().get(cx));
+        TextEditor::color_bg().set(cx, TextEditor::color_bg().get(cx));
         TextEditor::gutter_width().set(cx, 0.);
         TextEditor::padding_top().set(cx, 0.);
         TextEditor::shader_bg().set(cx, Quad::def_quad_shader().compose(shader_ast!({

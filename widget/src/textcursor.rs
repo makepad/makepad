@@ -146,7 +146,7 @@ impl TextCursorSet {
         let cursor = &self.set[self.last_cursor];
 
         for tok in &text_buffer.token_chunks{
-            if cursor.head >= tok.offset && cursor.head < tok.offset + tok.len{
+            if cursor.head >= tok.offset && cursor.head <= tok.offset + tok.len{
                 match &tok.token_type{
                     TokenType::Identifier | TokenType::Call | TokenType::TypeName => {
                         text_buffer.get_range_as_string(tok.offset, tok.len, &mut ret);

@@ -34,7 +34,7 @@ impl TextBuffer {
     pub fn status_loaded() -> StatusId {uid!()}
     pub fn status_message_update() -> StatusId {uid!()}
     pub fn status_search_update() -> StatusId {uid!()}
-    pub fn status_jump_to_offset() -> StatusId {uid!()}
+    //pub fn status_jump_to_offset() -> StatusId {uid!()}
     pub fn status_data_update() -> StatusId {uid!()}
     pub fn status_keyboard_update() -> StatusId {uid!()}
 }
@@ -53,7 +53,7 @@ pub struct TextBufferMarkers {
     pub search_cursors: Vec<TextCursor>,
     pub message_cursors: Vec<TextCursor>,
     pub message_bodies: Vec<TextBufferMessage>,
-    pub jump_to_offset: usize
+    //pub jump_to_offset: usize
 }
 
 #[derive(Clone, PartialEq)]
