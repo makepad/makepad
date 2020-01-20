@@ -144,26 +144,27 @@ impl AppWindow {
                                 //println!("TRYING TO SELECT FILE {} ")
                                 file_tree_event = FileTreeEvent::SelectFile {path: storage.remap_sync_path(&loc_message.path)};
                             }
-                            self.item_display.load_message(cx, &loc_message);
+                            self.item_display.display_message(cx, &loc_message);
                             do_jump_to_offset = Some(jump_to_offset);
                             show_item_display_tab = true;
                         },
                         LogListEvent::SelectMessages {items} => {
-                            self.item_display.load_plain_text(cx, &items);
+                            self.item_display.display_plain_text(cx, &items);
                             show_item_display_tab = true;
                         }
                         _ => ()
                     }
                 }
                 Panel::ItemDisplay => {
-                    self.item_display.handle_item_display(cx, event);
+                    self.item_display.handle_item_display(cx, event, storage);
                 }
                 Panel::SearchResults => {
                     match self.search_results.handle_search_results(cx, event, &mut build_manager.search_index, storage) {
-                        SearchResultEvent::DisplayFile {path: _, jump_to_offset} => {
-                            do_jump_to_offset = Some(jump_to_offset);
+                        SearchResultEvent::DisplayFile {text_buffer_id, jump_to_offset} => {
+                            self.item_display.display_rust_file(cx, text_buffer_id, jump_to_offset);
                         },
-                        SearchResultEvent::OpenFile {path, jump_to_offset} => {
+                        SearchResultEvent::OpenFile {text_buffer_id, jump_to_offset} => {
+                            let path = storage.text_buffer_id_to_path.get(&text_buffer_id).expect("Path not found").clone();
                             file_tree_event = FileTreeEvent::SelectFile {path: path};
                             do_jump_to_offset = Some(jump_to_offset);
                         },
@@ -351,7 +352,7 @@ impl AppWindow {
                     search_results.draw_search_results(cx, storage);
                 }
                 Panel::ItemDisplay => {
-                    self.item_display.draw_item_display(cx);
+                    self.item_display.draw_item_display(cx, storage);
                 }
                 Panel::Keyboard => {
                     self.keyboard.draw_keyboard(cx);
@@ -528,7 +529,7 @@ impl AppWindow {
                     match &tab.item {
                         Panel::FileEditor {path, scroll_pos: _, editor_id} => {
                             if *path == file_path {
-                                let (file_editor, is_new) = self.file_editors.get_file_editor_for_path(path, *editor_id);
+                                let (file_editor, _is_new) = self.file_editors.get_file_editor_for_path(path, *editor_id);
                                 file_editor.set_key_focus(cx);
                                 if let Some(offset) = do_jump_to_offset{
                                     file_editor.jump_to_offset(cx, offset);

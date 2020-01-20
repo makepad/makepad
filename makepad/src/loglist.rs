@@ -214,6 +214,7 @@ impl LogList {
         Self {
             item_draw: LogItemDraw::proto(cx),
             list: ListLogic {
+                multi_select: true,
                 ..ListLogic::default()
             },
             view: ScrollView::proto(cx),
@@ -284,7 +285,7 @@ impl LogList {
             _ => ()
         }
         
-        let le = self.list.handle_list_logic(cx, event, select, | cx, item_event, item, item_index | match item_event {
+        let le = self.list.handle_list_logic(cx, event, select, false, | cx, item_event, item, item_index | match item_event {
             ListLogicEvent::Animate(ae) => {
                 item.animator.calc_area(cx, item.animator.area, ae.time);
             },

@@ -29,7 +29,7 @@ impl RustEditor {
         ce
     }
     
-    pub fn draw_rust_editor(&mut self, cx: &mut Cx, text_buffer: &mut TextBuffer, search_index: &mut SearchIndex) {
+    pub fn draw_rust_editor(&mut self, cx: &mut Cx, text_buffer: &mut TextBuffer, search_index: Option<&mut SearchIndex>) {
         RustTokenizer::update_token_chunks(text_buffer, search_index);
         
         if self.text_editor.begin_text_editor(cx, text_buffer).is_err() {return}
@@ -49,7 +49,7 @@ pub struct RustTokenizer {
 }
 
 impl RustTokenizer {
-    pub fn update_token_chunks(text_buffer: &mut TextBuffer, search_index: &mut SearchIndex){
+    pub fn update_token_chunks(text_buffer: &mut TextBuffer, mut search_index: Option<&mut SearchIndex>){
         if text_buffer.needs_token_chunks() && text_buffer.lines.len() >0 {
             let mut state = TokenizerState::new(&text_buffer.lines);
             let mut tokenizer = RustTokenizer::new();
@@ -61,8 +61,9 @@ impl RustTokenizer {
                 if token_type == TokenType::Eof {
                     break
                 }
-                search_index.new_rust_token(&text_buffer);
-                
+                if let Some(search_index) = search_index.as_mut(){
+                    search_index.new_rust_token(&text_buffer);
+                }    
             }
         }
     }
