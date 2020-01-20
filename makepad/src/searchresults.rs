@@ -152,11 +152,11 @@ impl SearchResultDraw {
 pub enum SearchResultEvent {
     DisplayFile {
         path:String,
-        pos:TextPos
+        jump_to_offset:usize
     },
     OpenFile{
         path:String,
-        pos:TextPos
+        jump_to_offset:usize
     },
     None,
 }
@@ -209,19 +209,23 @@ impl SearchResults {
         }
         self.view.redraw_view_area(cx);
     }
-    
-    pub fn handle_search_results(&mut self, cx: &mut Cx, event: &mut Event, search_index: &mut SearchIndex, storage: &mut AppStorage) -> SearchResultEvent {
-        
+     
+    pub fn handle_search_input(&mut self, cx: &mut Cx, event: &mut Event, search_index: &mut SearchIndex, storage: &mut AppStorage) -> bool {
         // if we have a text change, do a search.
         match self.search_input.handle_text_input(cx, event) {
             TextEditorEvent::Change => {
                 self.do_search(cx, search_index, storage);
+                return true
             },
             TextEditorEvent::Escape | TextEditorEvent::Search => {
                 cx.revert_key_focus();
             },
             _ => ()
         }
+        return false
+    }
+    
+    pub fn handle_search_results(&mut self, cx: &mut Cx, event: &mut Event, search_index: &mut SearchIndex, storage: &mut AppStorage) -> SearchResultEvent {
         
         self.list.set_list_len(self.results.len());
         
@@ -273,22 +277,24 @@ impl SearchResults {
         });
         
         match le {
-            ListEvent::SelectSingle(_select_index) => {
-                // open the result in ItemDisplay
-                self.view.redraw_view_area(cx);
-            },
-            ListEvent::SelectDouble(select_index) => {
-                // open the corresponding editor
-                self.view.redraw_view_area(cx);
+            ListEvent::SelectSingle(select_index) => {
                 // we need to get a filepath 
                 let result = &self.results[select_index];
                 let text_buffer = &mut storage.text_buffers[result.text_buffer_id.0 as usize].text_buffer;
-                text_buffer.markers.jump_to_offset = text_buffer.token_chunks[result.token as usize].offset; 
-                cx.send_signal(text_buffer.signal, TextBuffer::status_jump_to_offset());
                 
+                return SearchResultEvent::DisplayFile{
+                    path: storage.text_buffer_id_to_path.get(&result.text_buffer_id).expect("Path not found").clone(),
+                    jump_to_offset: text_buffer.token_chunks[result.token as usize].offset
+                };
+            },
+            ListEvent::SelectDouble(select_index) => {
+                // we need to get a filepath 
+                let result = &self.results[select_index];
+                let text_buffer = &mut storage.text_buffers[result.text_buffer_id.0 as usize].text_buffer;
+
                 return SearchResultEvent::OpenFile{
                     path: storage.text_buffer_id_to_path.get(&result.text_buffer_id).expect("Path not found").clone(),
-                    pos:TextPos::default() 
+                    jump_to_offset: text_buffer.token_chunks[result.token as usize].offset
                 };
             },
             ListEvent::SelectMultiple => {},
