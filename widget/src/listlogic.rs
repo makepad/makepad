@@ -3,6 +3,7 @@ use crate::scrollview::*;
 
 #[derive(Clone, Default)]
 pub struct ListLogic {
+    pub multi_select: bool,
     pub list_items: Vec<ListItem>,
     pub scroll_item_in_view: Option<usize>,
     pub set_scroll_pos: Option<Vec2>,
@@ -204,11 +205,10 @@ impl ListLogic {
         }
     }
     
-    pub fn handle_list_logic<F>(&mut self, cx: &mut Cx, event: &mut Event, select: ListSelect, mut cb: F) -> ListEvent
+    pub fn handle_list_logic<F>(&mut self, cx: &mut Cx, event: &mut Event, select: ListSelect, mut dblclick:bool, mut cb: F) -> ListEvent
     where F: FnMut(&mut Cx, ListLogicEvent, &mut ListItem, usize)
     {
         let mut select = select;
-        let mut dblclick = false;
         for counter in self.start_item..self.end_item {
             if counter >= self.list_items.len() {
                 break;
@@ -223,10 +223,10 @@ impl ListLogic {
                 },
                 Event::FingerDown(fe) => {
                     cx.set_down_mouse_cursor(MouseCursor::Hand);
-                    if fe.modifiers.logo || fe.modifiers.control {
+                    if self.multi_select && (fe.modifiers.logo || fe.modifiers.control) {
                         select = ListSelect::Toggle(counter)
                     }
-                    else if fe.modifiers.shift {
+                    else if self.multi_select && fe.modifiers.shift {
                         select = ListSelect::Range(counter)
                     }
                     else {

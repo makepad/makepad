@@ -4,7 +4,9 @@ use crate::textcursor::*;
 
 #[derive(Clone, Copy, Default, PartialEq, Ord, PartialOrd, Hash, Eq)]
 pub struct TextBufferId(pub u16);
-
+impl TextBufferId{
+    pub fn as_index(&self )->usize{return self.0 as usize}
+}
 #[derive(Clone, Default)]
 pub struct TextBuffer {
     // Vec<Vec<char>> was chosen because, for all practical use (code) most lines are short

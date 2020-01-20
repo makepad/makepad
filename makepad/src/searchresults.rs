@@ -10,6 +10,7 @@ pub struct SearchResults {
     pub result_draw: SearchResultDraw,
     pub list: ListLogic,
     pub search_input: TextInput,
+    pub do_select_first: bool,
     pub results: Vec<SearchResult>
 }
 
@@ -99,7 +100,7 @@ impl SearchResultDraw {
         list_item.animator.init(cx, | cx | Self::get_default_anim(cx, index, false));
         
         self.item_bg.color = list_item.animator.last_color(cx, Quad::instance_color());
-        
+
         let bg_inst = self.item_bg.begin_quad(cx, Self::layout_item().get(cx)); //&self.get_line_layout());
         
         let (first_tok, delta) = text_buffer.scan_token_chunks_prev_line(token as usize, 2);
@@ -151,11 +152,11 @@ impl SearchResultDraw {
 #[derive(Clone)]
 pub enum SearchResultEvent {
     DisplayFile {
-        path:String,
+        text_buffer_id:TextBufferId,
         jump_to_offset:usize
     },
     OpenFile{
-        path:String,
+        text_buffer_id:TextBufferId,
         jump_to_offset:usize
     },
     None,
@@ -167,8 +168,10 @@ impl SearchResults {
             search_input: TextInput::proto(cx, TextInputOptions::default()),
             result_draw: SearchResultDraw::proto(cx),
             list: ListLogic {
+                multi_select: true,
                 ..ListLogic::default()
             },
+            do_select_first: false,
             view: ScrollView::proto(cx),
             results: Vec::new(),
         }
@@ -201,12 +204,13 @@ impl SearchResults {
         if s.len() > 0 {
             // lets search
             self.results = search_index.search(&s, cx, storage);
-            
+            self.do_select_first = true;
         }
         else {
             search_index.clear_markers(cx, storage);
             self.results.truncate(0);
         }
+        self.list.set_list_len(0);
         self.view.redraw_view_area(cx);
     }
      
@@ -225,7 +229,7 @@ impl SearchResults {
         return false
     }
     
-    pub fn handle_search_results(&mut self, cx: &mut Cx, event: &mut Event, search_index: &mut SearchIndex, storage: &mut AppStorage) -> SearchResultEvent {
+    pub fn handle_search_results(&mut self, cx: &mut Cx, event: &mut Event, _search_index: &mut SearchIndex, storage: &mut AppStorage) -> SearchResultEvent {
         
         self.list.set_list_len(self.results.len());
         
@@ -233,6 +237,7 @@ impl SearchResults {
         }
         
         let mut select = ListSelect::None;
+        let mut dblclick = false;
         // global key handle
         match event {
             Event::KeyDown(ke) => if self.search_input.text_editor.has_key_focus(cx) {
@@ -246,13 +251,24 @@ impl SearchResults {
                         select = self.list.get_prev_single_selection();
                         self.list.scroll_item_in_view = select.item_index();
                     },
+                    KeyCode::Return =>{
+                        if self.list.selection.len()>0{
+                            select = ListSelect::Single(self.list.selection[0]);
+                            dblclick = true;
+                        }
+                    },
                     _ => ()
                 }
             },
             _ => ()
         }
         
-        let le = self.list.handle_list_logic(cx, event, select, | cx, item_event, item, item_index | match item_event {
+        if self.do_select_first{
+            self.do_select_first = false;
+            select = ListSelect::Single(0);
+        }
+        
+        let le = self.list.handle_list_logic(cx, event, select, dblclick, | cx, item_event, item, item_index | match item_event {
             ListLogicEvent::Animate(ae) => {
                 item.animator.calc_area(cx, item.animator.area, ae.time);
             },
@@ -270,6 +286,7 @@ impl SearchResults {
             },
             ListLogicEvent::Over => {
                 item.animator.play_anim(cx, SearchResultDraw::get_over_anim(cx, item_index, item.is_selected));
+                let color = item.animator.last_color(cx, Quad::instance_color());
             },
             ListLogicEvent::Out => {
                 item.animator.play_anim(cx, SearchResultDraw::get_default_anim(cx, item_index, item.is_selected));
@@ -278,22 +295,24 @@ impl SearchResults {
         
         match le {
             ListEvent::SelectSingle(select_index) => {
-                // we need to get a filepath 
+                self.view.redraw_view_area(cx);
                 let result = &self.results[select_index];
-                let text_buffer = &mut storage.text_buffers[result.text_buffer_id.0 as usize].text_buffer;
-                
+                let text_buffer = &mut storage.text_buffers[result.text_buffer_id.as_index()].text_buffer;
+                if let Event::FingerDown(_) = event{
+                    self.search_input.text_editor.set_key_focus(cx);
+                }
                 return SearchResultEvent::DisplayFile{
-                    path: storage.text_buffer_id_to_path.get(&result.text_buffer_id).expect("Path not found").clone(),
+                    text_buffer_id: result.text_buffer_id,//storage.text_buffer_id_to_path.get(&result.text_buffer_id).expect("Path not found").clone(),
                     jump_to_offset: text_buffer.token_chunks[result.token as usize].offset
                 };
             },
             ListEvent::SelectDouble(select_index) => {
                 // we need to get a filepath 
                 let result = &self.results[select_index];
-                let text_buffer = &mut storage.text_buffers[result.text_buffer_id.0 as usize].text_buffer;
+                let text_buffer = &mut storage.text_buffers[result.text_buffer_id.as_index()].text_buffer;
 
                 return SearchResultEvent::OpenFile{
-                    path: storage.text_buffer_id_to_path.get(&result.text_buffer_id).expect("Path not found").clone(),
+                    text_buffer_id: result.text_buffer_id,
                     jump_to_offset: text_buffer.token_chunks[result.token as usize].offset
                 };
             },
@@ -319,7 +338,7 @@ impl SearchResults {
         let row_height = SearchResultDraw::layout_item().get(cx).walk.height.fixed();
         
         if self.list.begin_list(cx, &mut self.view, false, row_height).is_err() {return}
-        
+
         cx.new_instance_draw_call(&self.result_draw.item_bg.shader, 0);
         
         cx.begin_style(SearchResultDraw::style_text_editor());
@@ -331,7 +350,7 @@ impl SearchResults {
         for i in self.list.start_item..self.list.end_item {
             // lets get the path
             let result = &self.results[i];
-            let tb = &storage.text_buffers[result.text_buffer_id.0 as usize];
+            let tb = &storage.text_buffers[result.text_buffer_id.as_index()];
             self.result_draw.draw_result(
                 cx,
                 i,
