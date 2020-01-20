@@ -291,7 +291,7 @@ impl TextIndex {
             }
             cleanup.truncate(0);
             for ((text_buffer_id, token), entry) in &self.nodes[node_id].end {
-                let tb = &mut storage.text_buffers[text_buffer_id.0 as usize].text_buffer;
+                let tb = &mut storage.text_buffers[text_buffer_id.as_index()].text_buffer;
                 if (tb.mutation_id & 0xffff) as u16 == entry.mut_id {
                     out.push(SearchResult {
                         text_buffer_id: *text_buffer_id,

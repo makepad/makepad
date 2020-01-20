@@ -46,6 +46,8 @@ pub struct TextEditor {
     pub read_only: bool,
     pub multiline: bool,
     
+    pub jump_to_offset_at_top: bool,
+    
     pub line_number_offset: usize,
     
     //pub _bg_area: Area,
@@ -210,6 +212,7 @@ impl TextEditor {
             draw_cursor_row: true,
             line_number_offset: 0,
             search_markers_bypass: Vec::new(),
+            jump_to_offset_at_top: false,
             _scroll_pos_on_load: None,
             _set_key_focus_on_load: false,
             _jump_to_offset: None,
@@ -1075,6 +1078,7 @@ impl TextEditor {
     pub fn set_key_focus(&mut self, cx: &mut Cx) {
         if self._view_area == Area::Empty{
             self._set_key_focus_on_load = true;
+            return
         }
         cx.set_key_focus(self._view_area);
         self.reset_cursor_blinker(cx);
@@ -1156,6 +1160,7 @@ impl TextEditor {
             //self._bg_area = bg_area;
             self._view_area = view_area;
             if self._set_key_focus_on_load{
+                self._set_key_focus_on_load = false;
                 self.set_key_focus(cx);
             }
             
@@ -1736,12 +1741,19 @@ impl TextEditor {
             self._jump_to_offset = None;
             self._scroll_pos_on_load = None;
             self.cursors.clear_and_set_last_cursor_head_and_tail(offset, 0, text_buffer);
-            self.scroll_last_cursor_visible(cx, text_buffer, self._final_fill_height * 0.8);
-            self.view.redraw_view_area(cx);
+            // i want the thing to be the top
+            if self.jump_to_offset_at_top{
+                self.scroll_last_cursor_top(cx, text_buffer);
+            }
+            else{
+                self.scroll_last_cursor_visible(cx, text_buffer, self._final_fill_height*0.8);
+            }
+
+            self.view.redraw_view_area(cx); 
         }
         else if let Some(scroll_pos_on_load) = self._scroll_pos_on_load {
             self.view.set_scroll_pos(cx, scroll_pos_on_load);
-            self._scroll_pos_on_load = None;
+            self._scroll_pos_on_load = None; 
         }
     }
     
@@ -1955,6 +1967,10 @@ impl TextEditor {
         self._monospace_size.x = self._monospace_base.x * self.text.text_style.font_size * font_scale;
         self._monospace_size.y = self._monospace_base.y * self.text.text_style.font_size * font_scale;
     }
+
+    pub fn reset_cursors(&mut self){
+        self.cursors = TextCursorSet::new();
+    }
     
     fn scroll_last_cursor_visible(&mut self, cx: &mut Cx, text_buffer: &TextBuffer, height_pad: f32) {
         // so we have to compute (approximately) the rect of our cursor
@@ -1975,6 +1991,32 @@ impl TextEditor {
                 y: geom.walk.y - mono_size.y * 1. - 0.5 * height_pad,
                 w: mono_size.x * 4. + self.line_number_width,
                 h: mono_size.y * 4. + height_pad
+            };
+            
+            // scroll this cursor into view
+            self.view.scroll_into_view(cx, rect);
+        }
+    }
+    
+    fn scroll_last_cursor_top(&mut self, cx: &mut Cx, text_buffer: &TextBuffer) {
+        // so we have to compute (approximately) the rect of our cursor
+        if self.cursors.last_cursor >= self.cursors.set.len() {
+            panic !("LAST CURSOR INVALID");
+        }
+        
+        let pos = self.cursors.get_last_cursor_text_pos(text_buffer);
+        
+        // alright now lets query the line geometry
+        let row = pos.row.min(self._line_geometry.len() - 1);
+        if row < self._line_geometry.len() {
+            let geom = &self._line_geometry[row];
+            let mono_size = Vec2 {x: self._monospace_base.x * geom.font_size, y: self._monospace_base.y * geom.font_size};
+            //self.text.get_monospace_size(cx, geom.font_size);
+            let rect = Rect {
+                x: (pos.col as f32) * mono_size.x, // - self.line_number_width,
+                y: geom.walk.y - mono_size.y * 1.,
+                w: mono_size.x * 4. + self.line_number_width,
+                h: self._final_fill_height + mono_size.y * 1.
             };
             
             // scroll this cursor into view
