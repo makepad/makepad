@@ -46,6 +46,10 @@ impl ItemDisplay {
             },
             rust_disp: RustEditor {
                 text_editor: TextEditor {
+                    view:ScrollView{
+                        scroll_v:Some(ScrollBar::proto(cx)),
+                        ..ScrollView::proto(cx)
+                    },
                     read_only: true,
                     jump_to_offset_at_top: true,
                     ..RustEditor::proto(cx).text_editor
@@ -195,20 +199,23 @@ impl ItemDisplay {
         }
     }
     
-    pub fn handle_item_display(&mut self, cx: &mut Cx, event: &mut Event, storage:&mut AppStorage) {
+    pub fn handle_item_display(&mut self, cx: &mut Cx, event: &mut Event, storage:&mut AppStorage)->TextEditorEvent{
         if self.current < self.history.len() {
             match &self.history[self.current] {
                 ItemDisplayHistory::PlainText {..} => {
-                    self.text_disp.handle_text_editor(cx, event, &mut self.text_buffer);
+                    self.text_disp.handle_text_editor(cx, event, &mut self.text_buffer)
                 },
                 ItemDisplayHistory::Message {..} => {
-                    self.text_disp.handle_text_editor(cx, event, &mut self.text_buffer);
+                    self.text_disp.handle_text_editor(cx, event, &mut self.text_buffer)
                 },
                 ItemDisplayHistory::Rust {text_buffer_id, ..} => {
                     let text_buffer = &mut storage.text_buffers[text_buffer_id.as_index()].text_buffer;
-                    self.rust_disp.handle_rust_editor(cx, event, text_buffer);
+                    self.rust_disp.handle_rust_editor(cx, event, text_buffer)
                 }
             }
+        }
+        else{
+            TextEditorEvent::None
         }
     }
     

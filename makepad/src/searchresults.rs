@@ -49,7 +49,7 @@ impl SearchResultDraw {
     pub fn style(cx: &mut Cx, opt: &StyleOptions) {
         
         Self::layout_item().set(cx, Layout {
-            walk: Walk::wh(Width::Fill, Height::Fix(65. * opt.scale)),
+            walk: Walk::wh(Width::ComputeFill, Height::Fix(65. * opt.scale)),
             align: Align::left_top(),
             padding: Padding {l: 2., t: 3., b: 2., r: 0.},
             line_wrap: LineWrap::None,
@@ -221,7 +221,7 @@ impl SearchResults {
                 self.do_search(cx, search_index, storage);
                 return true
             },
-            TextEditorEvent::Escape | TextEditorEvent::Search => {
+            TextEditorEvent::Escape | TextEditorEvent::Search(_) => {
                 cx.revert_key_focus();
             },
             _ => ()

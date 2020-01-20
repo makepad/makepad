@@ -115,8 +115,8 @@ pub enum TextEditorEvent {
     LagChange,
     Change,
     Escape,
-    Search,
-    Decl
+    Search(String),
+    Decl(String)
 }
 
 #[derive(Default, Clone)]
@@ -1029,10 +1029,12 @@ impl TextEditor {
                     return TextEditorEvent::Escape
                 }
                 if ke.key_code == KeyCode::KeyD && (ke.modifiers.logo || ke.modifiers.control) {
-                    return TextEditorEvent::Decl
+                    let search = self.cursors.get_ident_around_last_cursor(text_buffer);
+                    return TextEditorEvent::Decl(search)
                 }
                 if ke.key_code == KeyCode::KeyF && (ke.modifiers.logo || ke.modifiers.control) {
-                    return TextEditorEvent::Search
+                    let search = self.cursors.get_ident_around_last_cursor(text_buffer);
+                    return TextEditorEvent::Search(search)
                 }
                 if ke.key_code == KeyCode::Return && (ke.modifiers.logo || ke.modifiers.control) {
                     return TextEditorEvent::AutoFormat
