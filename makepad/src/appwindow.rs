@@ -156,7 +156,16 @@ impl AppWindow {
                     }
                 }
                 Panel::ItemDisplay => {
-                    self.item_display.handle_item_display(cx, event, storage);
+                     match self.item_display.handle_item_display(cx, event, storage){
+                        TextEditorEvent::Search(search) => {
+                            // get last selection as string
+                            do_search = Some((search, true, false));
+                        }
+                        TextEditorEvent::Decl(search) => {
+                            do_search = Some((search, false, false));
+                        },
+                        _=>()
+                     }
                 }
                 Panel::SearchResults => {
                     match self.search_results.handle_search_results(cx, event, &mut build_manager.search_index, storage) {
@@ -186,14 +195,10 @@ impl AppWindow {
                         let text_buffer = storage.text_buffer_from_path(cx, path);
                         
                         match file_editor.handle_file_editor(cx, event, text_buffer) {
-                            TextEditorEvent::Search => {
-                                // get last selection as string
-                                let search = file_editor.get_ident_around_last_cursor(text_buffer);
+                            TextEditorEvent::Search(search) => {
                                 do_search = Some((search, true, false));
                             }
-                            TextEditorEvent::Decl => {
-                                // get last selection as string
-                                let search = file_editor.get_ident_around_last_cursor(text_buffer);
+                            TextEditorEvent::Decl(search) => {
                                 do_search = Some((search, false, false));
                             }
                             TextEditorEvent::Escape => {

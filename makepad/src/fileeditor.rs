@@ -59,14 +59,6 @@ impl FileEditor {
         }
     }
     
-    pub fn get_ident_around_last_cursor(&mut self, text_buffer: &mut TextBuffer) -> String {
-        match self {
-            FileEditor::Rust(re) => re.text_editor.cursors.get_ident_around_last_cursor(text_buffer),
-            FileEditor::JS(re) => re.text_editor.cursors.get_ident_around_last_cursor(text_buffer),
-            FileEditor::Plain(re) => re.text_editor.cursors.get_ident_around_last_cursor(text_buffer),
-        }
-    }
-    
     pub fn set_scroll_pos_on_load(&mut self, pos: Vec2) {
         match self {
             FileEditor::Rust(re) => re.text_editor._scroll_pos_on_load = Some(pos),
