@@ -15,7 +15,7 @@ pub use crate::shader::*;
 pub use crate::math::*;
 pub use crate::events::*;
 pub use crate::colors::*;
-pub use crate::elements::*;
+pub use crate::elements::*; 
 pub use crate::animator::*;
 pub use crate::area::*;
 pub use crate::menu::*;
@@ -127,7 +127,7 @@ pub struct Cx {
     pub theme_update_id: usize,
     
     pub prev_key_focus: Area,
-    pub change_key_focus: Area,
+    pub next_key_focus: Area,
     pub key_focus: Area,
     pub keys_down: Vec<KeyEvent>,
     
@@ -251,7 +251,7 @@ impl Default for Cx {
             shader_instance_id: 1,
             theme_update_id: 1,
             
-            change_key_focus: Area::Empty,
+            next_key_focus: Area::Empty,
             prev_key_focus: Area::Empty,
             key_focus: Area::Empty,
             keys_down: Vec::new(),
@@ -622,8 +622,8 @@ impl Cx {
         if self.prev_key_focus == old_area {
             self.prev_key_focus = new_area.clone()
         }
-        if self.change_key_focus == old_area {
-            self.change_key_focus = new_area.clone()
+        if self.next_key_focus == old_area {
+            self.next_key_focus = new_area.clone()
         }        
         if self._finger_over_last_area == old_area {
             self._finger_over_last_area = new_area.clone()
@@ -635,11 +635,11 @@ impl Cx {
     }
     
     pub fn set_key_focus(&mut self, focus_area: Area) {
-        self.key_focus = focus_area;
+        self.next_key_focus = focus_area;
     }
 
     pub fn revert_key_focus(&mut self) {
-        self.key_focus = self.prev_key_focus;
+        self.next_key_focus = self.prev_key_focus;
     }
     
     pub fn has_key_focus(&self, focus_area: Area) -> bool {
@@ -680,9 +680,9 @@ impl Cx {
         self.event_id += 1;
         event_handler(self, event);
         
-        if self.change_key_focus != self.key_focus {
-            self.prev_key_focus = self.change_key_focus;
-            self.change_key_focus = self.key_focus;
+        if self.next_key_focus != self.key_focus {
+            self.prev_key_focus = self.key_focus;
+            self.key_focus = self.next_key_focus;
             event_handler(self, &mut Event::KeyFocus(KeyFocusEvent {
                 prev: self.prev_key_focus,
                 focus: self.key_focus

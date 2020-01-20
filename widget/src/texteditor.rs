@@ -50,7 +50,8 @@ pub struct TextEditor {
     
     //pub _bg_area: Area,
     pub _scroll_pos_on_load: Option<Vec2>,
-    pub _jump_to_offset: bool,
+    pub _set_key_focus_on_load: bool,
+    pub _jump_to_offset: Option<usize>,
     pub _view_area: Area,
     pub _highlight_area: Area,
     pub _text_inst: Option<AlignedInstance>,
@@ -101,9 +102,7 @@ pub struct TextEditor {
     
     pub _last_tabs: usize,
     pub _newline_tabs: usize,
-    
-    pub _jump_to_offset_id: u64,
-    
+       
     pub _last_lag_mutation_id: u32
 }
 
@@ -212,7 +211,8 @@ impl TextEditor {
             line_number_offset: 0,
             search_markers_bypass: Vec::new(),
             _scroll_pos_on_load: None,
-            _jump_to_offset: true,
+            _set_key_focus_on_load: false,
+            _jump_to_offset: None,
             _monospace_size: Vec2::default(),
             _monospace_base: Vec2::default(),
             _last_finger_move: None,
@@ -270,7 +270,6 @@ impl TextEditor {
             _last_lag_mutation_id: 0,
             _last_tabs: 0,
             _newline_tabs: 0,
-            _jump_to_offset_id: 0
         }
     }
     
@@ -971,14 +970,14 @@ impl TextEditor {
                         || *status == TextBuffer::status_data_update() {
                         self.view.redraw_view_area(cx);
                     }
-                    else if *status == TextBuffer::status_jump_to_offset() {
-                        if !text_buffer.is_loaded {
-                            self._jump_to_offset = true;
-                        }
-                        else {
-                            self.do_jump_to_offset(cx, text_buffer);
-                        }
-                    }
+                    //else if *status == TextBuffer::status_jump_to_offset() {
+                    //    if !text_buffer.is_loaded {
+                    //        self._jump_to_offset = true;
+                    //    }
+                    //    else {
+                    //        self.do_jump_to_offset(cx, text_buffer);
+                    //    }
+                    // }
                     else if *status == TextBuffer::status_keyboard_update() {
                         if let Some(key_down) = &text_buffer.keyboard.key_down {
                             match key_down {
@@ -1074,6 +1073,9 @@ impl TextEditor {
     }
     
     pub fn set_key_focus(&mut self, cx: &mut Cx) {
+        if self._view_area == Area::Empty{
+            self._set_key_focus_on_load = true;
+        }
         cx.set_key_focus(self._view_area);
         self.reset_cursor_blinker(cx);
     }
@@ -1153,6 +1155,9 @@ impl TextEditor {
             cx.update_area_refs(self._view_area, view_area);
             //self._bg_area = bg_area;
             self._view_area = view_area;
+            if self._set_key_focus_on_load{
+                self.set_key_focus(cx);
+            }
             
             let inst = self.bg.begin_quad_fill(cx);
             inst.set_do_scroll(cx, false, false); // don't scroll the bg
@@ -1727,10 +1732,12 @@ impl TextEditor {
         
         self.view.end_view(cx);
         
-        if self._jump_to_offset {
-            self._jump_to_offset = false;
+        if let Some(offset) = self._jump_to_offset {
+            self._jump_to_offset = None;
             self._scroll_pos_on_load = None;
-            self.do_jump_to_offset(cx, text_buffer);
+            self.cursors.clear_and_set_last_cursor_head_and_tail(offset, 0, text_buffer);
+            self.scroll_last_cursor_visible(cx, text_buffer, self._final_fill_height * 0.8);
+            self.view.redraw_view_area(cx);
         }
         else if let Some(scroll_pos_on_load) = self._scroll_pos_on_load {
             self.view.set_scroll_pos(cx, scroll_pos_on_load);
@@ -1738,11 +1745,8 @@ impl TextEditor {
         }
     }
     
-    fn do_jump_to_offset(&mut self, cx: &mut Cx, text_buffer: &TextBuffer) {
-        let offset = text_buffer.markers.jump_to_offset;
-        // make one cursor, and start scrolling towards it
-        self.cursors.clear_and_set_last_cursor_head_and_tail(offset, 0, text_buffer);
-        self.scroll_last_cursor_visible(cx, text_buffer, self._final_fill_height * 0.8);
+    pub fn jump_to_offset(&mut self, cx: &mut Cx, offset: usize){
+        self._jump_to_offset = Some(offset);
         self.view.redraw_view_area(cx);
     }
     
