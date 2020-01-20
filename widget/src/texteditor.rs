@@ -2015,7 +2015,7 @@ impl TextEditor {
             let mono_size = Vec2 {x: self._monospace_base.x * geom.font_size, y: self._monospace_base.y * geom.font_size};
             //self.text.get_monospace_size(cx, geom.font_size);
             let rect = Rect {
-                x: (pos.col as f32) * mono_size.x, // - self.line_number_width,
+                x: 0.,// (pos.col as f32) * mono_size.x - self.line_number_width,
                 y: geom.walk.y - mono_size.y * 1.,
                 w: mono_size.x * 4. + self.line_number_width,
                 h: self._final_fill_height + mono_size.y * 1.
