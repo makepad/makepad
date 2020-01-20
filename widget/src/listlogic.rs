@@ -12,7 +12,7 @@ pub struct ListLogic {
     pub end_item: usize,
     pub end_fill: usize,
     pub selection: Vec<usize>,
-    pub last_range: Option<(usize, usize)>,
+    //pub last_range: Option<(usize, usize)>,
 }
 
 #[derive(Clone)]
@@ -21,6 +21,7 @@ pub struct ListItem {
     pub is_selected: bool
 }
 
+#[derive(Debug)]
 pub enum ListLogicEvent {
     Animate(AnimateEvent),
     AnimEnded,
@@ -255,7 +256,9 @@ impl ListLogic {
                 _ => ()
             }
         };
+        
         // clean up outside of window
+        /*
         if let Some(last_range) = self.last_range {
             for counter in last_range.0..last_range.1 {
                 if counter >= self.list_items.len() {
@@ -268,7 +271,7 @@ impl ListLogic {
             }
         }
         self.last_range = Some((self.start_item, self.end_item));
-        
+        */
         match select {
             ListSelect::Range(select_index) => {
                 if let Some(first) = self.selection.first() {

@@ -68,11 +68,17 @@ impl ItemDisplay {
     }
     
     pub fn style_text_editor() -> StyleId {uid!()}
+    pub fn style_rust_editor() -> StyleId {uid!()}
     
     pub fn style(cx: &mut Cx, _opt: &StyleOptions) {
         cx.begin_style(Self::style_text_editor());
         TextEditor::gutter_width().set(cx, 10.);
         TextEditor::padding_top().set(cx, 10.);
+        TextEditor::color_bg().set(cx, Theme::color_bg_odd().get(cx));
+        cx.end_style();
+        cx.begin_style(Self::style_rust_editor());
+        TextEditor::color_bg().set(cx, Theme::color_bg_odd().get(cx));
+        TextEditor::color_gutter_bg().set(cx, Theme::color_bg_odd().get(cx));
         cx.end_style();
     }
     
@@ -252,8 +258,10 @@ impl ItemDisplay {
                     cx.end_style();
                 },
                 ItemDisplayHistory::Rust {text_buffer_id, ..} => {
+                    cx.begin_style(Self::style_rust_editor());
                     let text_buffer = &mut storage.text_buffers[text_buffer_id.as_index()].text_buffer;
                     self.rust_disp.draw_rust_editor(cx, text_buffer, None);
+                    cx.end_style();
                 }
             }
         }
