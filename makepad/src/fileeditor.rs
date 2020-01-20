@@ -7,11 +7,14 @@ use crate::rusteditor::*;
 use crate::plaineditor::*;
 use crate::searchindex::*;
 
+use std::collections::HashMap;
+
 #[derive(Clone)]
-pub struct FileEditorTemplates {
+pub struct FileEditors {
     pub rust_editor: RustEditor,
     pub js_editor: JSEditor,
-    pub plain_editor: PlainEditor
+    pub plain_editor: PlainEditor,
+    pub editors: HashMap<u64, FileEditor>
     //text_editor: TextEditor
 }
 
@@ -32,6 +35,14 @@ impl FileEditor {
         }
     }
     
+    pub fn jump_to_offset(&mut self, cx: &mut Cx, offset:usize) {
+        match self {
+            FileEditor::Rust(re) => re.text_editor.jump_to_offset(cx, offset),
+            FileEditor::JS(re) => re.text_editor.jump_to_offset(cx, offset),
+            FileEditor::Plain(re) => re.text_editor.jump_to_offset(cx, offset),
+        }
+    }
+    
     pub fn set_key_focus(&mut self, cx: &mut Cx) {
         match self {
             FileEditor::Rust(re) => re.text_editor.set_key_focus(cx),
@@ -39,8 +50,8 @@ impl FileEditor {
             FileEditor::Plain(re) => re.text_editor.set_key_focus(cx),
         }
     }
-
-    pub fn get_scroll_pos(&mut self, cx: &mut Cx)->Vec2{
+    
+    pub fn get_scroll_pos(&mut self, cx: &mut Cx) -> Vec2 {
         match self {
             FileEditor::Rust(re) => re.text_editor.view.get_scroll_pos(cx),
             FileEditor::JS(re) => re.text_editor.view.get_scroll_pos(cx),
@@ -48,7 +59,7 @@ impl FileEditor {
         }
     }
     
-    pub fn get_ident_around_last_cursor(&mut self, text_buffer: &mut TextBuffer)->String{
+    pub fn get_ident_around_last_cursor(&mut self, text_buffer: &mut TextBuffer) -> String {
         match self {
             FileEditor::Rust(re) => re.text_editor.cursors.get_ident_around_last_cursor(text_buffer),
             FileEditor::JS(re) => re.text_editor.cursors.get_ident_around_last_cursor(text_buffer),
@@ -56,14 +67,14 @@ impl FileEditor {
         }
     }
     
-    pub fn set_scroll_pos_on_load(&mut self, pos:Vec2){
+    pub fn set_scroll_pos_on_load(&mut self, pos: Vec2) {
         match self {
             FileEditor::Rust(re) => re.text_editor._scroll_pos_on_load = Some(pos),
             FileEditor::JS(re) => re.text_editor._scroll_pos_on_load = Some(pos),
             FileEditor::Plain(re) => re.text_editor._scroll_pos_on_load = Some(pos),
         }
     }
-
+    
     pub fn draw_file_editor(&mut self, cx: &mut Cx, text_buffer: &mut TextBuffer, search_index: &mut SearchIndex) {
         match self {
             FileEditor::Rust(re) => re.draw_rust_editor(cx, text_buffer, search_index),
@@ -72,36 +83,57 @@ impl FileEditor {
         }
     }
     
-    pub fn update_token_chunks(path:&str, text_buffer: &mut TextBuffer, search_index: &mut SearchIndex){
+    pub fn update_token_chunks(path: &str, text_buffer: &mut TextBuffer, search_index: &mut SearchIndex) {
         // check which file extension we have to spawn a new editor
-        if path.ends_with(".rs") || path.ends_with(".toml")  || path.ends_with(".ron"){
+        if path.ends_with(".rs") || path.ends_with(".toml") || path.ends_with(".ron") {
             RustTokenizer::update_token_chunks(text_buffer, search_index);
         }
-        else if path.ends_with(".js") || path.ends_with(".html"){
+        else if path.ends_with(".js") || path.ends_with(".html") {
             JSTokenizer::update_token_chunks(text_buffer, search_index);
         }
         else {
             PlainTokenizer::update_token_chunks(text_buffer, search_index);
         }
     }
-    
-    pub fn create_file_editor_for_path(path: &str, template: &FileEditorTemplates) -> FileEditor {
+}
+
+impl FileEditors {
+    pub fn get_file_editor_for_path(&mut self, path: &str, editor_id:u64) -> (&mut FileEditor, bool) {
+        
         // check which file extension we have to spawn a new editor
-        if path.ends_with(".rs") || path.ends_with(".toml")  || path.ends_with(".ron"){
-            FileEditor::Rust(RustEditor {
-                ..template.rust_editor.clone()
-            })
+        let is_new = if !self.editors.contains_key(&editor_id) {
+            let editor = if path.ends_with(".rs") || path.ends_with(".toml") || path.ends_with(".ron") {
+                FileEditor::Rust(RustEditor {
+                    ..self.rust_editor.clone()
+                })
+            }
+            else if path.ends_with(".js") || path.ends_with(".html") {
+                FileEditor::JS(JSEditor {
+                    ..self.js_editor.clone()
+                })
+            }
+            else {
+                FileEditor::Plain(PlainEditor {
+                    ..self.plain_editor.clone()
+                })
+            };
+            self.editors.insert(editor_id, editor);
+            true
         }
-        else if path.ends_with(".js") || path.ends_with(".html"){
-            FileEditor::JS(JSEditor {
-                ..template.js_editor.clone()
-            })
+        else{
+            false
+        };
+        (self.editors.get_mut(&editor_id).unwrap(), is_new)
+    }
+    
+    pub fn highest_file_editor_id(&self) -> u64 {
+        let mut max_id = 0;
+        for (id, _) in &self.editors {
+            if *id > max_id {
+                max_id = *id;
+            }
         }
-        else {
-            FileEditor::Plain(PlainEditor {
-                ..template.plain_editor.clone()
-            })
-        }
+        max_id
     }
 }
 

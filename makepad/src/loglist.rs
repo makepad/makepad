@@ -201,6 +201,7 @@ impl LogItemDraw {
 pub enum LogListEvent {
     SelectLocMessage {
         loc_message: LocMessage,
+        jump_to_offset: usize
     },
     SelectMessages {
         items: String
@@ -315,25 +316,27 @@ impl LogList {
                     if loc_message.path.len() == 0 {
                         return LogListEvent::SelectLocMessage {
                             loc_message: loc_message.clone(),
+                            jump_to_offset: 0,
                         }
                     }
+                    
                     let text_buffer = storage.text_buffer_from_path(cx, &storage.remap_sync_path(&loc_message.path));
                     // check if we have a range:
-                    if let Some((head, tail)) = loc_message.range {
+                    let offset = if let Some((head, tail)) = loc_message.range {
                         if select_at_end {
-                            text_buffer.markers.jump_to_offset = head;
+                            head
                         }
                         else {
-                            text_buffer.markers.jump_to_offset = tail;
+                            tail
                         }
                     }
                     else {
-                        text_buffer.markers.jump_to_offset = text_buffer.text_pos_to_offset(TextPos {row: loc_message.row.max(1) - 1, col: loc_message.col.max(1) - 1})
-                    }
-                    cx.send_signal(text_buffer.signal, TextBuffer::status_jump_to_offset());
+                        text_buffer.text_pos_to_offset(TextPos {row: loc_message.row.max(1) - 1, col: loc_message.col.max(1) - 1})
+                    };
                     
                     LogListEvent::SelectLocMessage {
                         loc_message: loc_message.clone(),
+                        jump_to_offset: offset
                     }
                 }
                 else {
