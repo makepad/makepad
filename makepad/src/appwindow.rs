@@ -203,6 +203,7 @@ impl AppWindow {
                             }
                             TextEditorEvent::Decl(search) => {
                                 do_search = Some((Some(search), text_buffer.text_buffer_id, false, false));
+                                show_item_display_tab = true;
                             }
                             TextEditorEvent::Escape => {
                                 do_search = Some((Some("".to_string()), text_buffer.text_buffer_id, false, true));
