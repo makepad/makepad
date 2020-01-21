@@ -11,6 +11,7 @@ pub struct SearchResults {
     pub list: ListLogic,
     pub search_input: TextInput,
     pub do_select_first: bool,
+    pub first_tbid: TextBufferId,
     pub results: Vec<SearchResult>
 }
 
@@ -167,6 +168,7 @@ pub enum SearchResultEvent {
 impl SearchResults {
     pub fn proto(cx: &mut Cx) -> Self {
         Self {
+            first_tbid:TextBufferId(0),
             search_input: TextInput::proto(cx, TextInputOptions::default()),
             result_draw: SearchResultDraw::proto(cx),
             list: ListLogic {
@@ -193,8 +195,9 @@ impl SearchResults {
         SearchResultDraw::style(cx, opt);
     }
     
-    pub fn set_search_input_value(&mut self, cx: &mut Cx, value: &str, focus:bool) {
+    pub fn set_search_input_value(&mut self, cx: &mut Cx,  value: &str, first_tbid:TextBufferId, focus:bool) {
         self.search_input.set_value(cx, value);
+        self.first_tbid = first_tbid;
         if focus{
             self.search_input.text_editor.set_key_focus(cx);
         }
@@ -205,7 +208,7 @@ impl SearchResults {
         let s = self.search_input.get_value();
         if s.len() > 0 {
             // lets search
-            self.results = search_index.search(&s, cx, storage);
+            self.results = search_index.search(&s, self.first_tbid, cx,  storage);
             self.do_select_first = true;
         }
         else {
