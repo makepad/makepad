@@ -62,13 +62,6 @@ impl LogItemDraw {
         ]) 
     }
     
-    pub fn get_default_anim_cut(cx: &Cx, counter: usize, marked: bool) -> Anim {
-        Anim::new(Play::Cut {duration: 0.01}, vec![
-            Track::color(Quad::instance_color(), Ease::Lin, vec![
-                (0.0, if marked {Theme::color_bg_marked().get(cx)} else if counter & 1 == 0 {Theme::color_bg_selected().get(cx)}else {Theme::color_bg_odd().get(cx)})
-            ])
-        ]) 
-    }
     
     pub fn get_over_anim(cx: &Cx, counter: usize, marked: bool) -> Anim {
         let over_color = if marked {Theme::color_bg_marked_over().get(cx)} else if counter & 1 == 0 {Theme::color_bg_selected_over().get(cx)}else {Theme::color_bg_odd_over().get(cx)};
@@ -299,7 +292,7 @@ impl LogList {
                 item.animator.play_anim(cx, LogItemDraw::get_default_anim(cx, item_index, false));
             },
             ListLogicEvent::Cleanup => {
-                item.animator.play_anim(cx, LogItemDraw::get_default_anim_cut(cx, item_index, item.is_selected));
+                item.animator.play_anim(cx, LogItemDraw::get_default_anim(cx, item_index, item.is_selected));
             },
             ListLogicEvent::Over => {
                 item.animator.play_anim(cx, LogItemDraw::get_over_anim(cx, item_index, item.is_selected));

@@ -56,7 +56,7 @@ impl ItemDisplay {
                 },
                 ..RustEditor::proto(cx)
             },
-            last_text_buffer_id: 65537,
+            last_text_buffer_id: 0,
             prev_button: NormalButton::proto(cx),
             next_button: NormalButton::proto(cx),
             open_button: NormalButton::proto(cx),
