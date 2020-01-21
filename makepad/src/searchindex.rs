@@ -59,34 +59,34 @@ impl SearchIndex {
                 let prio = match text_buffer.token_chunks[chunk_id].token_type {
                     TokenType::Identifier => {
                         match prev_tt {
-                            TokenType::Keyword => 0,
-                            _ => 4
+                            TokenType::Keyword => 1,
+                            _ => 5
                         }
                     },
                     TokenType::Call => {
                         match prev_tt {
-                            TokenType::Fn => 0,
-                            _ => 4
+                            TokenType::Fn => 1,
+                            _ => 5
                         }
                     },
                     TokenType::TypeName => {
                         match prev_tt {
-                            TokenType::TypeDef => 0,
-                            TokenType::Impl => 1,
+                            TokenType::TypeDef => 1,
+                            TokenType::Impl => 2,
                             _ => { // look at the next token
                                 if next_tt == TokenType::Operator && next_char == '<' {
-                                    2
+                                    3
                                 }
                                 else if next_tt == TokenType::Namespace && next_char == ':' {
-                                    4
+                                    5
                                 }
                                 else {
-                                    3
+                                    4
                                 }
                             }
                         }
                     },
-                    _ => 3
+                    _ => 4
                 };
 
                 self.identifiers.write(
@@ -110,12 +110,12 @@ impl SearchIndex {
         }
     }
     
-    pub fn search(&mut self, what: &str, cx: &mut Cx, storage: &mut AppStorage) -> Vec<SearchResult> {
+    pub fn search(&mut self, what: &str, first_tbid:TextBufferId, cx: &mut Cx, storage: &mut AppStorage) -> Vec<SearchResult> {
         let mut out = Vec::new();
         
         self.clear_markers(cx, storage);
         
-        self.identifiers.search(what, storage, &mut out);
+        self.identifiers.search(what, first_tbid, storage, &mut out);
         
         // sort it
         out.sort_by( | a, b | {
@@ -248,7 +248,7 @@ impl TextIndex {
         self.write(&whatv, text_buffer_id, mut_id, prio, token);
     }
     
-    pub fn search(&mut self, what: &str, storage: &mut AppStorage, out: &mut Vec<SearchResult>) {
+    pub fn search(&mut self, what: &str, first_tbid:TextBufferId, storage: &mut AppStorage, out: &mut Vec<SearchResult>) {
         // ok so if i type a beginning of a word, i'd want all the endpoints
         
         let mut node_id = 0;
@@ -285,7 +285,7 @@ impl TextIndex {
         let mut nexts = Vec::new();
         let mut cleanup = Vec::new();
 
-        loop {
+        loop { 
             for (_key, next) in &self.nodes[node_id].map {
                 nexts.push(*next);
             }
@@ -296,7 +296,15 @@ impl TextIndex {
                     out.push(SearchResult {
                         text_buffer_id: *text_buffer_id,
                         token: *token,
-                        prio: entry.prio
+                        prio: if entry.prio == 1{
+                            if *text_buffer_id == first_tbid{
+                                0
+                            }
+                            else{
+                                1
+                            }
+                        }else{entry.prio}
+                        
                     });
                     // lets output a result cursor int he textbuffer
                     let tok = &tb.token_chunks[*token as usize];

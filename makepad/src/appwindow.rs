@@ -159,10 +159,10 @@ impl AppWindow {
                      match self.item_display.handle_item_display(cx, event, storage){
                         TextEditorEvent::Search(search) => {
                             // get last selection as string
-                            do_search = Some((search, true, false));
+                            do_search = Some((search, TextBufferId(0), true, false));
                         }
                         TextEditorEvent::Decl(search) => {
-                            do_search = Some((search, false, false));
+                            do_search = Some((search, TextBufferId(0), false, false));
                         },
                         _=>()
                      }
@@ -196,13 +196,13 @@ impl AppWindow {
                         
                         match file_editor.handle_file_editor(cx, event, text_buffer) {
                             TextEditorEvent::Search(search) => {
-                                do_search = Some((search, true, false));
+                                do_search = Some((search, text_buffer.text_buffer_id, true, false));
                             }
                             TextEditorEvent::Decl(search) => {
-                                do_search = Some((search, false, false));
+                                do_search = Some((search, text_buffer.text_buffer_id, false, false));
                             }
                             TextEditorEvent::Escape => {
-                                do_search = Some(("".to_string(), false, true));
+                                do_search = Some(("".to_string(), text_buffer.text_buffer_id, false, true));
                             }
                             TextEditorEvent::LagChange => {
                                 
@@ -225,14 +225,14 @@ impl AppWindow {
             }
         }
         
-        if let Some((search, focus, escape)) = do_search {
+        if let Some((search, first_tbid, focus, escape)) = do_search {
             if !escape {
                 self.show_search_tab(cx, window_index, state);
             }
             else {
                 self.show_log_tab(cx, window_index, state);
             }
-            self.search_results.set_search_input_value(cx, &search, focus);
+            self.search_results.set_search_input_value(cx, &search, first_tbid, focus);
             self.search_results.do_search(cx, &mut build_manager.search_index, storage);
         }
         
