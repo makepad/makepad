@@ -290,7 +290,7 @@ impl SearchResults {
             select = ListSelect::Single(0);
         }
         
-        let le = self.list.handle_list_logic(cx, event, select, dblclick, | cx, item_event, item, item_index | match item_event {
+        let le = self.list.handle_list_logic(cx, event, select, dblclick, | cx, item_event, item, _item_index | match item_event {
             ListLogicEvent::Animate(ae) => {
                 item.animator.calc_area(cx, item.animator.area, ae.time);
             },
@@ -308,7 +308,6 @@ impl SearchResults {
             },
             ListLogicEvent::Over => {
                 item.animator.play_anim(cx, SearchResultDraw::get_over_anim(cx, item.is_selected));
-                let color = item.animator.last_color(cx, Quad::instance_color());
             },
             ListLogicEvent::Out => {
                 item.animator.play_anim(cx, SearchResultDraw::get_default_anim(cx, item.is_selected));
@@ -323,19 +322,20 @@ impl SearchResults {
                 if let Event::FingerDown(_) = event{
                     self.search_input.text_editor.set_key_focus(cx);
                 }
+                let tok = &text_buffer.token_chunks[result.token as usize];
                 return SearchResultEvent::DisplayFile{
                     text_buffer_id: result.text_buffer_id,//storage.text_buffer_id_to_path.get(&result.text_buffer_id).expect("Path not found").clone(),
-                    jump_to_offset: text_buffer.token_chunks[result.token as usize].offset
+                    jump_to_offset: tok.offset + tok.len
                 };
             },
             ListEvent::SelectDouble(select_index) => {
                 // we need to get a filepath 
                 let result = &self.results[select_index];
                 let text_buffer = &mut storage.text_buffers[result.text_buffer_id.as_index()].text_buffer;
-
+                let tok = &text_buffer.token_chunks[result.token as usize];
                 return SearchResultEvent::OpenFile{
                     text_buffer_id: result.text_buffer_id,
-                    jump_to_offset: text_buffer.token_chunks[result.token as usize].offset
+                    jump_to_offset: tok.offset + tok.len
                 };
             },
             ListEvent::SelectMultiple => {},
