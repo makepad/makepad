@@ -5,9 +5,9 @@ use makepad_tinyserde::*;
 use crate::appwindow::*;
 use crate::appstorage::*;
 use crate::filetree::*;
-use crate::buildmanager::*;  
+use crate::buildmanager::*;
 use crate::makepadstyle::*;
-   
+
 pub struct App {
     pub app_window_state_template: AppWindowState,
     pub app_window_template: AppWindow,
@@ -21,26 +21,26 @@ pub struct App {
 
 impl App {
     
-    pub fn command_about_makepad()->CommandId{uid!()}
-    pub fn command_preferences()->CommandId{uid!()}
-    pub fn command_new_file()->CommandId{uid!()}
-    pub fn command_new_window()->CommandId{uid!()}
-    pub fn command_add_folder_to_builder()->CommandId{uid!()}
-    pub fn command_save_as()->CommandId{uid!()}
-    pub fn command_rename()->CommandId{uid!()}
-    pub fn command_close_editor()->CommandId{uid!()}
-    pub fn command_remove_folder_from_builder()->CommandId{uid!()}
-    pub fn command_close_window()->CommandId{uid!()}
-    pub fn command_find()->CommandId{uid!()}
-    pub fn command_replace()->CommandId{uid!()}
-    pub fn command_find_in_files()->CommandId{uid!()}
-    pub fn command_replace_in_files()->CommandId{uid!()}
-    pub fn command_toggle_line_comment()->CommandId{uid!()}
-    pub fn command_toggle_block_comment()->CommandId{uid!()}
-    pub fn command_start_program()->CommandId{uid!()}
-    pub fn command_stop_program()->CommandId{uid!()}
-    pub fn command_bring_all_to_front()->CommandId{uid!()}
-
+    pub fn command_about_makepad() -> CommandId {uid!()}
+    pub fn command_preferences() -> CommandId {uid!()}
+    pub fn command_new_file() -> CommandId {uid!()}
+    pub fn command_new_window() -> CommandId {uid!()}
+    pub fn command_add_folder_to_builder() -> CommandId {uid!()}
+    pub fn command_save_as() -> CommandId {uid!()}
+    pub fn command_rename() -> CommandId {uid!()}
+    pub fn command_close_editor() -> CommandId {uid!()}
+    pub fn command_remove_folder_from_builder() -> CommandId {uid!()}
+    pub fn command_close_window() -> CommandId {uid!()}
+    pub fn command_find() -> CommandId {uid!()}
+    pub fn command_replace() -> CommandId {uid!()}
+    pub fn command_find_in_files() -> CommandId {uid!()}
+    pub fn command_replace_in_files() -> CommandId {uid!()}
+    pub fn command_toggle_line_comment() -> CommandId {uid!()}
+    pub fn command_toggle_block_comment() -> CommandId {uid!()}
+    pub fn command_start_program() -> CommandId {uid!()}
+    pub fn command_stop_program() -> CommandId {uid!()}
+    pub fn command_bring_all_to_front() -> CommandId {uid!()}
+    
     pub fn proto(cx: &mut Cx) -> Self {
         let default_opt = StyleOptions {scale: 1.0, dark: true};
         set_widget_style(cx, &default_opt);
@@ -54,19 +54,19 @@ impl App {
         Self::command_save_as().set_key_shift(cx, KeyCode::KeyS);
         Self::command_close_editor().set_key(cx, KeyCode::KeyW);
         Self::command_close_window().set_key_shift(cx, KeyCode::KeyW);
-
+        
         cx.command_default_keymap();
         
         Self {
             menu: Menu::main(vec![
                 Menu::sub("Makepad", vec![
-                    Menu::item("About Makepad",  Self::command_about_makepad()),
+                    Menu::item("About Makepad", Self::command_about_makepad()),
                     Menu::line(),
                     Menu::item("Preferences", Self::command_preferences()),
                     Menu::line(),
-                    Menu::item("Quit Makepad",  Cx::command_quit()),
+                    Menu::item("Quit Makepad", Cx::command_quit()),
                 ]),
-                Menu::sub("File",  vec![
+                Menu::sub("File", vec![
                     Menu::item("New File", Self::command_new_file()),
                     Menu::item("New Window", Self::command_new_window()),
                     Menu::line(),
@@ -76,7 +76,7 @@ impl App {
                     Menu::line(),
                     Menu::item("Rename", Self::command_rename()),
                     Menu::line(),
-                    Menu::item("Close Editor",  Self::command_close_editor()),
+                    Menu::item("Close Editor", Self::command_close_editor()),
                     Menu::item("Remove Folder from Builder", Self::command_remove_folder_from_builder()),
                     Menu::item("Close Window", Self::command_close_window()),
                 ]),
@@ -89,7 +89,7 @@ impl App {
                     Menu::item("Paste", Cx::command_paste()),
                     Menu::line(),
                     Menu::item("Find", Self::command_find()),
-                    Menu::item("Replace",Self::command_replace()),
+                    Menu::item("Replace", Self::command_replace()),
                     Menu::line(),
                     Menu::item("Find in Files", Self::command_find_in_files()),
                     Menu::item("Replace in Files", Self::command_replace_in_files()),
@@ -131,11 +131,18 @@ impl App {
                     first: Box::new(DockItem::TabControl {
                         current: 0,
                         previous: 0,
-                        tabs: vec![DockTab {
-                            closeable: false,
-                            title: "Files".to_string(),
-                            item: Panel::FileTree
-                        }]
+                        tabs: vec![
+                            DockTab {
+                                closeable: false,
+                                title: "Files".to_string(),
+                                item: Panel::FileTree
+                            },
+                            DockTab {
+                                closeable: false,
+                                title: "".to_string(),
+                                item: Panel::SearchResults
+                            }
+                        ]
                     }),
                     last: Box::new(DockItem::Splitter {
                         axis: Axis::Horizontal,
@@ -156,15 +163,11 @@ impl App {
                             axis: Axis::Vertical,
                             align: SplitterAlign::Last,
                             pos: 150.0,
-                            first:Box::new(DockItem::TabControl {
+                            first: Box::new(DockItem::TabControl {
                                 current: 0,
                                 previous: 0,
                                 tabs: vec![
-                                    DockTab {
-                                        closeable: false,
-                                        title: "".to_string(),
-                                        item: Panel::SearchResults
-                                    },
+                                    
                                     DockTab {
                                         closeable: false,
                                         title: "Log".to_string(),
@@ -172,7 +175,7 @@ impl App {
                                     },
                                 ]
                             }),
-                            last:Box::new(DockItem::TabControl {
+                            last: Box::new(DockItem::TabControl {
                                 current: 0,
                                 previous: 0,
                                 tabs: vec![
@@ -251,7 +254,7 @@ impl App {
             Event::Signal(se) => {
                 // process network messages for hub_ui
                 if let Some(hub_ui) = &mut self.storage.hub_ui {
-                    if let Some(_) = se.signals.get(&self.storage.hub_ui_message){
+                    if let Some(_) = se.signals.get(&self.storage.hub_ui_message) {
                         if let Some(mut msgs) = hub_ui.get_messages() {
                             for htc in msgs.drain(..) {
                                 self.storage.handle_hub_msg(cx, &htc, &mut self.windows, &mut self.state, &mut self.build_manager);
@@ -361,7 +364,7 @@ impl App {
                         }
                     }
                 }
-            }, 
+            },
             
             _ => ()
         }
