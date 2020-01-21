@@ -16,9 +16,12 @@ impl RustEditor {
         editor
     }
       
-    pub fn handle_rust_editor(&mut self, cx: &mut Cx, event: &mut Event, text_buffer: &mut TextBuffer) -> TextEditorEvent {
+    pub fn handle_rust_editor(&mut self, cx: &mut Cx, event: &mut Event, text_buffer: &mut TextBuffer, search_index: Option<&mut SearchIndex>) -> TextEditorEvent {
         let ce = self.text_editor.handle_text_editor(cx, event, text_buffer);
         match ce {
+            TextEditorEvent::Change => {
+                RustTokenizer::update_token_chunks(text_buffer, search_index);
+            },
             TextEditorEvent::AutoFormat => {
                 let formatted = RustTokenizer::auto_format(text_buffer, false).out_lines;
                 self.text_editor.cursors.replace_lines_formatted(formatted, text_buffer);

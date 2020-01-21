@@ -27,9 +27,9 @@ pub enum FileEditor {
 }
 
 impl FileEditor {
-    pub fn handle_file_editor(&mut self, cx: &mut Cx, event: &mut Event, text_buffer: &mut TextBuffer) -> TextEditorEvent {
+    pub fn handle_file_editor(&mut self, cx: &mut Cx, event: &mut Event, text_buffer: &mut TextBuffer, search_index: Option<&mut SearchIndex>) -> TextEditorEvent {
         match self {
-            FileEditor::Rust(re) => re.handle_rust_editor(cx, event, text_buffer),
+            FileEditor::Rust(re) => re.handle_rust_editor(cx, event, text_buffer, search_index),
             FileEditor::JS(re) => re.handle_js_editor(cx, event, text_buffer),
             FileEditor::Plain(re) => re.handle_plain_editor(cx, event, text_buffer),
         }
