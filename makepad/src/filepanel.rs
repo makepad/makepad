@@ -34,7 +34,7 @@ impl FilePanel {
         self.file_tree.handle_file_tree(cx, event)
     }
     
-    pub fn draw_tab_buttons(&mut self, _cx: &mut Cx){
+    pub fn draw_file_panel_tab(&mut self, _cx: &mut Cx){
         //self.new_file_btn.draw_button(cx, "HELLO");
     }
     

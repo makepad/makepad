@@ -337,22 +337,28 @@ impl AppWindow {
         let mut dock_walker = self.dock.walker(dock_items);
         let file_panel = &mut self.file_panel;
         let search_results = &mut self.search_results;
+        let item_display = &mut self.item_display;
         while let Some(item) = dock_walker.walk_draw_dock(cx, | cx, tab_control, tab, selected | {
             // this draws the tabs, so we can customimze it
             match tab.item {
                 Panel::FileTree => {
-                    // we can now draw our own things
                     let tab = tab_control.get_draw_tab(cx, &tab.title, selected, tab.closeable);
-                    // lets open up a draw API in the tab
                     if tab.begin_tab(cx).is_ok() {
-                        file_panel.draw_tab_buttons(cx);
+                        file_panel.draw_file_panel_tab(cx);
                         tab.end_tab(cx);
                     };
                 }
                 Panel::SearchResults => {
                     let tab = tab_control.get_draw_tab(cx, &tab.title, selected, tab.closeable);
                     if tab.begin_tab(cx).is_ok() {
-                        search_results.draw_tab_contents(cx, &build_manager.search_index);
+                        search_results.draw_search_result_tab(cx, &build_manager.search_index);
+                        tab.end_tab(cx);
+                    };
+                }
+                Panel::ItemDisplay =>{
+                    let tab = tab_control.get_draw_tab(cx, &tab.title, selected, tab.closeable);
+                    if tab.begin_tab(cx).is_ok() {
+                        item_display.draw_item_display_tab(cx, storage);
                         tab.end_tab(cx);
                     };
                 }
@@ -367,7 +373,7 @@ impl AppWindow {
                     search_results.draw_search_results(cx, storage);
                 }
                 Panel::ItemDisplay => {
-                    self.item_display.draw_item_display(cx, storage);
+                    item_display.draw_item_display(cx, storage);
                 }
                 Panel::Keyboard => {
                     self.keyboard.draw_keyboard(cx);
