@@ -122,7 +122,7 @@ impl AppWindow {
             }
             _ => ()
         }
-        
+         
         if self.search_results.handle_search_input(cx, event, &mut build_manager.search_index, storage) {
             self.show_search_tab(cx, window_index, state);
         }
@@ -133,6 +133,19 @@ impl AppWindow {
         let mut do_jump_to_offset = None;
         let mut do_search = None;
         let mut show_item_display_tab = false;
+        
+        match self.search_results.handle_search_results(cx, event, &mut build_manager.search_index, storage) {
+            SearchResultEvent::DisplayFile {text_buffer_id, jump_to_offset} => {
+                self.item_display.display_rust_file(cx, text_buffer_id, jump_to_offset);
+            },
+            SearchResultEvent::OpenFile {text_buffer_id, jump_to_offset} => {
+                let path = storage.text_buffer_id_to_path.get(&text_buffer_id).expect("Path not found").clone();
+                file_tree_event = FileTreeEvent::SelectFile {path: path};
+                do_jump_to_offset = Some(jump_to_offset);
+            },
+            _ => ()
+        }
+        
         while let Some(item) = dock_walker.walk_handle_dock(cx, event) {
             match item {
                 Panel::LogList => {
@@ -159,26 +172,16 @@ impl AppWindow {
                      match self.item_display.handle_item_display(cx, event, storage){
                         TextEditorEvent::Search(search) => {
                             // get last selection as string
-                            do_search = Some((search, TextBufferId(0), true, false));
+                            do_search = Some((Some(search), TextBufferId(0), true, false));
                         }
                         TextEditorEvent::Decl(search) => {
-                            do_search = Some((search, TextBufferId(0), false, false));
+                            do_search = Some((Some(search), TextBufferId(0), false, false));
                         },
                         _=>()
                      }
                 }
                 Panel::SearchResults => {
-                    match self.search_results.handle_search_results(cx, event, &mut build_manager.search_index, storage) {
-                        SearchResultEvent::DisplayFile {text_buffer_id, jump_to_offset} => {
-                            self.item_display.display_rust_file(cx, text_buffer_id, jump_to_offset);
-                        },
-                        SearchResultEvent::OpenFile {text_buffer_id, jump_to_offset} => {
-                            let path = storage.text_buffer_id_to_path.get(&text_buffer_id).expect("Path not found").clone();
-                            file_tree_event = FileTreeEvent::SelectFile {path: path};
-                            do_jump_to_offset = Some(jump_to_offset);
-                        },
-                        _ => ()
-                    }
+                    
                 }
                 Panel::Keyboard => {
                     self.keyboard.handle_keyboard(cx, event, storage);
@@ -194,18 +197,21 @@ impl AppWindow {
                         
                         let text_buffer = storage.text_buffer_from_path(cx, path);
                         
-                        match file_editor.handle_file_editor(cx, event, text_buffer) {
+                        match file_editor.handle_file_editor(cx, event, text_buffer, Some(&mut build_manager.search_index)) {
                             TextEditorEvent::Search(search) => {
-                                do_search = Some((search, text_buffer.text_buffer_id, true, false));
+                                do_search = Some((Some(search), text_buffer.text_buffer_id, true, false));
                             }
                             TextEditorEvent::Decl(search) => {
-                                do_search = Some((search, text_buffer.text_buffer_id, false, false));
+                                do_search = Some((Some(search), text_buffer.text_buffer_id, false, false));
                             }
                             TextEditorEvent::Escape => {
-                                do_search = Some(("".to_string(), text_buffer.text_buffer_id, false, true));
+                                do_search = Some((Some("".to_string()), text_buffer.text_buffer_id, false, true));
+                            }
+                            TextEditorEvent::Change => {
+                                do_search = Some((None, TextBufferId(0), false, false));
                             }
                             TextEditorEvent::LagChange => {
-                                
+                                 
                                 // HERE WE SAVE
                                 storage.text_buffer_file_write(cx, path);
                                 
@@ -226,13 +232,16 @@ impl AppWindow {
         }
         
         if let Some((search, first_tbid, focus, escape)) = do_search {
-            if !escape {
+            if escape{
+                self.show_files_tab(cx, window_index, state);
+            }
+            if focus{
                 self.show_search_tab(cx, window_index, state);
+                self.show_item_display_tab(cx, window_index, state);
             }
-            else {
-                self.show_log_tab(cx, window_index, state);
+            if let Some(search) = search{
+                self.search_results.set_search_input_value(cx, &search, first_tbid, focus);
             }
-            self.search_results.set_search_input_value(cx, &search, first_tbid, focus);
             self.search_results.do_search(cx, &mut build_manager.search_index, storage);
         }
         
@@ -483,6 +492,22 @@ impl AppWindow {
             if let DockItem::TabControl {current, tabs, ..} = dock_item {
                 for (id, tab) in tabs.iter().enumerate() {
                     if let Panel::LogList = &tab.item {
+                        if *current != id {
+                            *current = id;
+                            cx.redraw_child_area(Area::All);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    pub fn show_files_tab(&mut self, cx: &mut Cx, window_index: usize, state: &mut AppState) {
+        let mut dock_walker = self.dock.walker(&mut state.windows[window_index].dock_items);
+        while let Some((_ctrl_id, dock_item)) = dock_walker.walk_dock_item() {
+            if let DockItem::TabControl {current, tabs, ..} = dock_item {
+                for (id, tab) in tabs.iter().enumerate() {
+                    if let Panel::FileTree = &tab.item {
                         if *current != id {
                             *current = id;
                             cx.redraw_child_area(Area::All);

@@ -29,7 +29,11 @@ pub struct SearchResultDraw {
 impl SearchResultDraw {
     pub fn proto(cx: &mut Cx) -> Self {
         Self {
-            text_editor: TextEditor {mark_unmatched_parens: false, ..TextEditor::proto(cx)},
+            text_editor: TextEditor {
+                mark_unmatched_parens: false, 
+                draw_line_numbers:false,
+                ..TextEditor::proto(cx)
+            },
             item_bg: Quad {z: 0.0001, ..Quad::proto(cx)},
             text: Text {
                 wrapping: Wrapping::Word,
@@ -51,7 +55,7 @@ impl SearchResultDraw {
     pub fn style(cx: &mut Cx, opt: &StyleOptions) {
         
         Self::layout_item().set(cx, Layout {
-            walk: Walk::wh(Width::ComputeFill, Height::Fix(65. * opt.scale)),
+            walk: Walk::wh(Width::ComputeFill, Height::Fix(37. * opt.scale)),
             align: Align::left_top(),
             padding: Padding {l: 2., t: 3., b: 2., r: 0.},
             line_wrap: LineWrap::None,
@@ -61,11 +65,12 @@ impl SearchResultDraw {
         Self::text_style_item().set(cx, Theme::text_style_normal().get(cx));
         
         cx.begin_style(Self::style_text_editor());
+        TextEditor::gutter_width().set(cx, 10.);
         TextEditor::padding_top().set(cx, 0.);
         cx.end_style();
     }
     
-    pub fn get_default_anim(cx: &Cx, counter: usize, marked: bool) -> Anim {
+    pub fn get_default_anim(cx: &Cx, marked: bool) -> Anim {
         Anim::new(Play::Chain {duration: 0.01}, vec![
             Track::color(Quad::instance_color(), Ease::Lin, vec![
                 (1.0, if marked {Theme::color_bg_marked().get(cx)} else  {Theme::color_bg_odd().get(cx)})
@@ -73,7 +78,7 @@ impl SearchResultDraw {
         ])
     }
     
-    pub fn get_default_anim_cut(cx: &Cx, counter: usize, marked: bool) -> Anim {
+    pub fn get_default_anim_cut(cx: &Cx, marked: bool) -> Anim {
         Anim::new(Play::Cut {duration: 0.01}, vec![
             Track::color(Quad::instance_color(), Ease::Lin, vec![
                 (0.0, if marked {Theme::color_bg_marked().get(cx)} else {Theme::color_bg_odd().get(cx)})
@@ -81,7 +86,7 @@ impl SearchResultDraw {
         ])
     }
     
-    pub fn get_over_anim(cx: &Cx, counter: usize, marked: bool) -> Anim {
+    pub fn get_over_anim(cx: &Cx, marked: bool) -> Anim {
         let over_color = if marked {Theme::color_bg_marked_over().get(cx)} else {Theme::color_bg_odd_over().get(cx)};
         Anim::new(Play::Cut {duration: 0.02}, vec![
             Track::color(Quad::instance_color(), Ease::Lin, vec![
@@ -100,20 +105,21 @@ impl SearchResultDraw {
         token: u32
     ) {
         let selected = list_item.is_selected;
-        list_item.animator.init(cx, | cx | Self::get_default_anim(cx, index, selected));
+        list_item.animator.init(cx, | cx | Self::get_default_anim(cx, selected));
         
         self.item_bg.color = list_item.animator.last_color(cx, Quad::instance_color());
 
         let bg_inst = self.item_bg.begin_quad(cx, Self::layout_item().get(cx)); //&self.get_line_layout());
         
-        let (first_tok, delta) = text_buffer.scan_token_chunks_prev_line(token as usize, 2);
-        let last_tok = text_buffer.scan_token_chunks_next_line(token as usize, 2);
+        let (first_tok, delta) = text_buffer.scan_token_chunks_prev_line(token as usize, 1);
+        let last_tok = text_buffer.scan_token_chunks_next_line(token as usize, 1);
         
         let tok = &text_buffer.token_chunks[token as usize];
         let pos = text_buffer.offset_to_text_pos(tok.offset);
         
         self.text.color = self.path_color.get(cx);
-        self.text.draw_text(cx, &format!("{}:{}", path.split('/').collect::<Vec<&str>>().join(" / "), pos.row));
+        let split = path.split('/').collect::<Vec<&str>>();
+        self.text.draw_text(cx, &format!("{}:{} - {}", split.last().unwrap(), pos.row, split[0..split.len()-1].join("/")));
         cx.turtle_new_line();
         cx.move_turtle(0., 5.);
         
@@ -127,8 +133,15 @@ impl SearchResultDraw {
         self.text_editor.line_number_offset = (pos.row as isize + delta) as usize;
         self.text_editor.init_draw_state(cx, text_buffer);
         
+        let mut first_ws = true;
         for index in first_tok..last_tok {
             let token_chunk = &text_buffer.token_chunks[index];
+            if first_ws && token_chunk.token_type == TokenType::Whitespace{
+                continue;
+            }
+            else{
+                first_ws = false;
+            }
             self.text_editor.draw_chunk(cx, index, &text_buffer.flat_text, token_chunk, &text_buffer.markers);
         }
         
@@ -208,6 +221,7 @@ impl SearchResults {
         let s = self.search_input.get_value();
         if s.len() > 0 {
             // lets search
+            println!("SEARCHING {}",s);
             self.results = search_index.search(&s, self.first_tbid, cx,  storage);
             self.do_select_first = true;
         }
@@ -281,20 +295,20 @@ impl SearchResults {
                 item.animator.end();
             },
             ListLogicEvent::Select => {
-                item.animator.play_anim(cx, SearchResultDraw::get_over_anim(cx, item_index, true));
+                item.animator.play_anim(cx, SearchResultDraw::get_over_anim(cx, true));
             },
             ListLogicEvent::Deselect => {
-                item.animator.play_anim(cx, SearchResultDraw::get_default_anim(cx, item_index, false));
+                item.animator.play_anim(cx, SearchResultDraw::get_default_anim(cx, false));
             },
             ListLogicEvent::Cleanup => {
-                item.animator.play_anim(cx, SearchResultDraw::get_default_anim_cut(cx, item_index, item.is_selected));
+                item.animator.play_anim(cx, SearchResultDraw::get_default_anim_cut(cx, item.is_selected));
             },
             ListLogicEvent::Over => {
-                item.animator.play_anim(cx, SearchResultDraw::get_over_anim(cx, item_index, item.is_selected));
+                item.animator.play_anim(cx, SearchResultDraw::get_over_anim(cx, item.is_selected));
                 let color = item.animator.last_color(cx, Quad::instance_color());
             },
             ListLogicEvent::Out => {
-                item.animator.play_anim(cx, SearchResultDraw::get_default_anim(cx, item_index, item.is_selected));
+                item.animator.play_anim(cx, SearchResultDraw::get_default_anim(cx, item.is_selected));
             }
         });
         

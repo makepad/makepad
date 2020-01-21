@@ -216,7 +216,7 @@ impl ItemDisplay {
                 },
                 ItemDisplayHistory::Rust {text_buffer_id, ..} => {
                     let text_buffer = &mut storage.text_buffers[text_buffer_id.as_index()].text_buffer;
-                    self.rust_disp.handle_rust_editor(cx, event, text_buffer)
+                    self.rust_disp.handle_rust_editor(cx, event, text_buffer, None)
                 }
             }
         }
