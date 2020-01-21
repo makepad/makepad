@@ -114,6 +114,8 @@ pub enum TextEditorEvent {
     AutoFormat,
     LagChange,
     Change,
+    KeyFocus,
+    KeyFocusLost,
     Escape,
     Search(String),
     Decl(String)
@@ -1008,9 +1010,11 @@ impl TextEditor {
             Event::KeyFocus(_kf) => {
                 self.reset_cursor_blinker(cx);
                 self.view.redraw_view_area(cx);
+                return TextEditorEvent::KeyFocus
             },
             Event::KeyFocusLost(_kf) => {
-                self.view.redraw_view_area(cx)
+                self.view.redraw_view_area(cx);
+                return TextEditorEvent::KeyFocusLost
             },
             Event::FingerDown(fe) => {
                 self.handle_finger_down(cx, &fe, text_buffer);
