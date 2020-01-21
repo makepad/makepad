@@ -262,7 +262,7 @@ impl FileTreeItemDraw {
                 if anim_pos<-0.5 {
                     df_move_to(0.5 * w, line_vec.x * h);
                     df_line_to(0.5 * w, line_vec.y * h);
-                    return df_stroke(color, 1.);
+                    return df_stroke(color*0.75, 1.);
                 }
                 else { // its a folder
                     df_box(0. * w, 0.35 * h, 0.87 * w, 0.39 * h, 0.75);

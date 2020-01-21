@@ -178,7 +178,7 @@ impl App {
                                 tabs: vec![
                                     DockTab {
                                         closeable: false,
-                                        title: "Item".to_string(),
+                                        title: "".to_string(),
                                         item: Panel::ItemDisplay
                                     },
                                     DockTab {

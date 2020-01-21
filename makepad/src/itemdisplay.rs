@@ -21,6 +21,7 @@ pub struct ItemDisplay {
     pub rust_disp: RustEditor,
     pub text_disp: TextEditor,
     pub text_buffer: TextBuffer,
+    pub text: Text,
     pub last_text_buffer_id: usize,
     pub prev_button: NormalButton,
     pub next_button: NormalButton,
@@ -31,6 +32,7 @@ pub struct ItemDisplay {
 impl ItemDisplay {
     pub fn proto(cx: &mut Cx) -> Self {
         let editor = Self {
+            text: Text::proto(cx),
             view: View::proto(cx),
             update_display: false,
             text_disp: TextEditor {
@@ -69,8 +71,12 @@ impl ItemDisplay {
     
     pub fn style_text_editor() -> StyleId {uid!()}
     pub fn style_rust_editor() -> StyleId {uid!()}
-    
+    pub fn text_color() -> ColorId {uid!()}
+    pub fn text_style_title() -> TextStyleId {uid!()}
+
     pub fn style(cx: &mut Cx, _opt: &StyleOptions) {
+        Self::text_style_title().set(cx, Theme::text_style_normal().get(cx));
+        Self::text_color().set(cx, Theme::color_text_deselected_focus().get(cx));
         cx.begin_style(Self::style_text_editor());
         TextEditor::gutter_width().set(cx, 10.);
         TextEditor::padding_top().set(cx, 10.);
@@ -103,6 +109,14 @@ impl ItemDisplay {
     }
     
     pub fn display_rust_file(&mut self, cx: &mut Cx, text_buffer_id: TextBufferId, offset: usize) {
+        if self.current < self.history.len(){
+            match self.history[self.current]{
+                 ItemDisplayHistory::Rust {text_buffer_id:tbid, offset:off}=> if tbid == text_buffer_id && offset == off{
+                     return
+                 }
+                 _=>()
+            }
+        }
         self.history.truncate(self.current);
         self.history.push(
             ItemDisplayHistory::Rust {text_buffer_id, offset}
@@ -222,6 +236,31 @@ impl ItemDisplay {
         }
         else{
             TextEditorEvent::None
+        }
+    }
+    
+    pub fn draw_item_display_tab(&mut self, cx: &mut Cx, storage:&mut AppStorage){
+        self.text.text_style = Self::text_style_title().get(cx);
+        self.text.color =  Self::text_color().get(cx);
+        if self.current < self.history.len() {
+            match &self.history[self.current] {
+                ItemDisplayHistory::PlainText {..} => {
+                    self.text.draw_text(cx, "Log Text");
+                },
+                ItemDisplayHistory::Message {..} => {
+                    self.text.draw_text(cx, "Log Msg");
+                },
+                ItemDisplayHistory::Rust {text_buffer_id,..} => {
+                    let path = storage.text_buffer_id_to_path.get(text_buffer_id).unwrap();
+                    let items = path.split('/').collect::<Vec<&str>>();
+                    let name = items.last().unwrap();
+                    
+                    self.text.draw_text(cx, &format!("Found:{}", name));
+                }
+            }
+        }
+        else{
+            self.text.draw_text(cx, "Item");            
         }
     }
     

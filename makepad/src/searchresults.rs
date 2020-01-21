@@ -345,7 +345,7 @@ impl SearchResults {
         SearchResultEvent::None
     }
     
-    pub fn draw_tab_contents(&mut self, cx: &mut Cx, _search_index: &SearchIndex) {
+    pub fn draw_search_result_tab(&mut self, cx: &mut Cx, _search_index: &SearchIndex) {
         cx.begin_style(Self::style_text_input());
         self.search_input.draw_text_input(cx);
         cx.end_style();
