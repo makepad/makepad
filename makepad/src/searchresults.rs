@@ -57,7 +57,7 @@ impl SearchResultDraw {
         Self::layout_item().set(cx, Layout {
             walk: Walk::wh(Width::ComputeFill, Height::Fix(37. * opt.scale)),
             align: Align::left_top(),
-            padding: Padding {l: 2., t: 3., b: 2., r: 0.},
+            padding: Padding {l: 5., t: 3., b: 2., r: 0.},
             line_wrap: LineWrap::None,
             ..Default::default()
         });
@@ -73,7 +73,7 @@ impl SearchResultDraw {
     pub fn get_default_anim(cx: &Cx, marked: bool) -> Anim {
         Anim::new(Play::Chain {duration: 0.01}, vec![
             Track::color(Quad::instance_color(), Ease::Lin, vec![
-                (1.0, if marked {Theme::color_bg_marked().get(cx)} else  {Theme::color_bg_odd().get(cx)})
+                (1.0, if marked {Theme::color_bg_marked().get(cx)} else  {TextEditor::color_bg().get(cx)})
             ])
         ])
     }
