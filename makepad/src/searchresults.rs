@@ -98,7 +98,7 @@ impl SearchResultDraw {
     pub fn draw_result(
         &mut self,
         cx: &mut Cx,
-        index: usize,
+        _index: usize,
         list_item: &mut ListItem,
         path: &str,
         text_buffer: &TextBuffer,
@@ -221,7 +221,6 @@ impl SearchResults {
         let s = self.search_input.get_value();
         if s.len() > 0 {
             // lets search
-            println!("SEARCHING {}",s);
             self.results = search_index.search(&s, self.first_tbid, cx,  storage);
             self.do_select_first = true;
         }
