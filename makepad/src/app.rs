@@ -162,7 +162,7 @@ impl App {
                                 tabs: vec![
                                     DockTab {
                                         closeable: false,
-                                        title: "Search".to_string(),
+                                        title: "".to_string(),
                                         item: Panel::SearchResults
                                     },
                                     DockTab {
