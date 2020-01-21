@@ -182,7 +182,7 @@ impl SearchResults {
     pub fn proto(cx: &mut Cx) -> Self {
         Self {
             first_tbid:TextBufferId(0),
-            search_input: TextInput::proto(cx, TextInputOptions::default()),
+            search_input: TextInput::proto(cx, TextInputOptions{multiline:false,read_only:false, empty_message:"search".to_string()}),
             result_draw: SearchResultDraw::proto(cx),
             list: ListLogic {
                 multi_select: false,
@@ -199,10 +199,11 @@ impl SearchResults {
     pub fn style(cx: &mut Cx, opt: &StyleOptions) {
         cx.begin_style(Self::style_text_input());
         TextEditor::layout_bg().set(cx, Layout {
-            walk: Walk {width: Width::Compute, height: Height::Compute, margin: Margin {t: 4., l: 14., r: 0., b: 0.}},
+            walk: Walk {width: Width::Compute, height: Height::Compute, margin: Margin {t: 6., l: 0., r: 0., b: 0.}},
             padding: Padding::all(7.),
             ..Layout::default()
         });
+        TextEditor::color_bg().set(cx, Theme::color_bg_normal().get(cx));
         cx.end_style();
         
         SearchResultDraw::style(cx, opt);
@@ -235,6 +236,9 @@ impl SearchResults {
     pub fn handle_search_input(&mut self, cx: &mut Cx, event: &mut Event, search_index: &mut SearchIndex, storage: &mut AppStorage) -> bool {
         // if we have a text change, do a search.
         match self.search_input.handle_text_input(cx, event) {
+            TextEditorEvent::KeyFocus=>{
+                return true
+            },
             TextEditorEvent::Change => {
                 self.do_search(cx, search_index, storage);
                 return true
