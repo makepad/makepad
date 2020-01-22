@@ -141,15 +141,18 @@ impl TextCursorSet {
         ret
     }
     
-    pub fn get_ident_around_last_cursor(&self, text_buffer: &TextBuffer) -> String {
+    pub fn get_ident_around_last_cursor_and_set(&mut self, text_buffer: &TextBuffer) -> String {
         let mut ret = String::new();
-        let cursor = &self.set[self.last_cursor];
+        let cursor = &mut self.set[self.last_cursor];
 
         for tok in &text_buffer.token_chunks{
             if cursor.head >= tok.offset && cursor.head <= tok.offset + tok.len{
                 match &tok.token_type{
                     TokenType::Identifier | TokenType::Call | TokenType::TypeName => {
                         text_buffer.get_range_as_string(tok.offset, tok.len, &mut ret);
+                        cursor.tail = tok.offset;
+                        cursor.head = tok.offset + tok.len;
+                        self.fuse_adjacent(text_buffer);
                         return ret
                     },
                     _=>()

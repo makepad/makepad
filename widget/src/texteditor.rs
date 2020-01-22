@@ -1094,12 +1094,14 @@ impl TextEditor {
                         }
                     }
                     if !repeat{
-                        let search = self.cursors.get_ident_around_last_cursor(text_buffer);
+                        let search = self.cursors.get_ident_around_last_cursor_and_set(text_buffer);
+                        // lets select the ident
+                        
                         return TextEditorEvent::Decl(search)
                     }
                 }
                 if ke.key_code == KeyCode::KeyF && (ke.modifiers.logo || ke.modifiers.control) {
-                    let search = self.cursors.get_ident_around_last_cursor(text_buffer);
+                    let search = self.cursors.get_ident_around_last_cursor_and_set(text_buffer);
                     return TextEditorEvent::Search(search)
                 }
                 if ke.key_code == KeyCode::Return && (ke.modifiers.logo || ke.modifiers.control) {
