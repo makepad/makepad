@@ -699,11 +699,8 @@ impl TextEditor {
     
     fn handle_key_down(&mut self, cx: &mut Cx, ke: &KeyEvent, text_buffer: &mut TextBuffer) {
         let cursor_moved = match ke.key_code {
-            KeyCode::ArrowUp => {
-                if !self.multiline {
-                    false
-                }
-                else if ke.modifiers.logo || ke.modifiers.control {
+            KeyCode::KeyS =>{
+                if ke.modifiers.logo || ke.modifiers.control {
                     let pos = self.cursors.get_last_cursor_head();
                     let mut moved = false;
                     for result in text_buffer.markers.search_cursors.iter().rev(){
@@ -720,6 +717,39 @@ impl TextEditor {
                     }
                     
                     moved
+                }
+                else{
+                    false
+                }
+            }
+            KeyCode::KeyX =>{
+                if ke.modifiers.logo || ke.modifiers.control {
+                    let pos = self.cursors.get_last_cursor_head();
+                    let mut moved = false;
+                    for result in text_buffer.markers.search_cursors.iter(){
+                        if result.tail > pos{
+                            if ke.modifiers.shift{
+                                self.cursors.add_last_cursor_head_and_tail(result.head, result.tail, text_buffer);
+                            }
+                            else{
+                                self.cursors.set_last_cursor_head_and_tail(result.head, result.tail, text_buffer);
+                            }
+                            moved = true;
+                            break;
+                        }
+                    }
+                    moved
+                }
+                else{
+                    false
+                }
+            }
+            KeyCode::ArrowUp => {
+                if !self.multiline {
+                    false
+                }
+                else if ke.modifiers.logo || ke.modifiers.control {
+                    false
                 }
                 else {
                     if self._anim_folding.state.is_folded() && self.cursors.set.len() == 1 {
@@ -739,21 +769,7 @@ impl TextEditor {
                     false
                 }
                 else if ke.modifiers.logo || ke.modifiers.control {
-                    let pos = self.cursors.get_last_cursor_head();
-                    let mut moved = false;
-                    for result in text_buffer.markers.search_cursors.iter(){
-                        if result.tail > pos{
-                            if ke.modifiers.shift{
-                                self.cursors.add_last_cursor_head_and_tail(result.head, result.tail, text_buffer);
-                            }
-                            else{
-                                self.cursors.set_last_cursor_head_and_tail(result.head, result.tail, text_buffer);
-                            }
-                            moved = true;
-                            break;
-                        }
-                    }
-                    moved
+                    false
                 }
                 else {
                     if self._anim_folding.state.is_folded() && self.cursors.set.len() == 1 {
