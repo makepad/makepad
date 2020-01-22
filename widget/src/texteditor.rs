@@ -699,7 +699,7 @@ impl TextEditor {
     
     fn handle_key_down(&mut self, cx: &mut Cx, ke: &KeyEvent, text_buffer: &mut TextBuffer) {
         let cursor_moved = match ke.key_code {
-            KeyCode::KeyS =>{
+            KeyCode::KeyW =>{
                 if ke.modifiers.logo || ke.modifiers.control {
                     let pos = self.cursors.get_last_cursor_head();
                     let mut moved = false;
@@ -722,7 +722,7 @@ impl TextEditor {
                     false
                 }
             }
-            KeyCode::KeyX =>{
+            KeyCode::KeyS =>{
                 if ke.modifiers.logo || ke.modifiers.control {
                     let pos = self.cursors.get_last_cursor_head();
                     let mut moved = false;
