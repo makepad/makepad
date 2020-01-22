@@ -699,7 +699,7 @@ impl TextEditor {
     
     fn handle_key_down(&mut self, cx: &mut Cx, ke: &KeyEvent, text_buffer: &mut TextBuffer) {
         let cursor_moved = match ke.key_code {
-            KeyCode::KeyW =>{
+            KeyCode::KeyS =>{
                 if ke.modifiers.logo || ke.modifiers.control {
                     let pos = self.cursors.get_last_cursor_head();
                     let mut moved = false;
@@ -722,7 +722,7 @@ impl TextEditor {
                     false
                 }
             }
-            KeyCode::KeyS =>{
+            KeyCode::KeyD =>{
                 if ke.modifiers.logo || ke.modifiers.control {
                     let pos = self.cursors.get_last_cursor_head();
                     let mut moved = false;
@@ -1084,8 +1084,19 @@ impl TextEditor {
                     return TextEditorEvent::Escape
                 }
                 if ke.key_code == KeyCode::KeyD && (ke.modifiers.logo || ke.modifiers.control) {
-                    let search = self.cursors.get_ident_around_last_cursor(text_buffer);
-                    return TextEditorEvent::Decl(search)
+                    // check if d is inside a search cursor
+                    let pos = self.cursors.get_last_cursor_head();
+                    let mut repeat = false;
+                    for result in text_buffer.markers.search_cursors.iter().rev(){
+                        if pos >= result.tail && pos <= result.head {
+                            repeat = true;
+                            break;
+                        }
+                    }
+                    if !repeat{
+                        let search = self.cursors.get_ident_around_last_cursor(text_buffer);
+                        return TextEditorEvent::Decl(search)
+                    }
                 }
                 if ke.key_code == KeyCode::KeyF && (ke.modifiers.logo || ke.modifiers.control) {
                     let search = self.cursors.get_ident_around_last_cursor(text_buffer);
