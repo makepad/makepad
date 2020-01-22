@@ -36,7 +36,6 @@ impl TextBuffer {
     pub fn status_loaded() -> StatusId {uid!()}
     pub fn status_message_update() -> StatusId {uid!()}
     pub fn status_search_update() -> StatusId {uid!()}
-    //pub fn status_jump_to_offset() -> StatusId {uid!()}
     pub fn status_data_update() -> StatusId {uid!()}
     pub fn status_keyboard_update() -> StatusId {uid!()}
 }
@@ -55,7 +54,6 @@ pub struct TextBufferMarkers {
     pub search_cursors: Vec<TextCursor>,
     pub message_cursors: Vec<TextCursor>,
     pub message_bodies: Vec<TextBufferMessage>,
-    //pub jump_to_offset: usize
 }
 
 #[derive(Clone, PartialEq)]
@@ -71,45 +69,6 @@ pub struct TextBufferMessage {
     pub body: String
 }
 
-/*
-impl TextBuffers {
-    pub fn from_path(&mut self, cx: &mut Cx, path: &str) -> &mut TextBuffer {
-        let root_path = &self.root_path;
-        self.storage.entry(path.to_string()).or_insert_with( || {
-            TextBuffer {
-                signal: cx.new_signal(),
-                mutation_id: 1,
-                load_file_read: cx.file_read(&format!("{}{}", root_path, path)),
-                ..Default::default()
-            }
-        })
-    }
-    
-    pub fn save_file(&mut self, cx: &mut Cx, path: &str) {
-        let text_buffer = self.storage.get(path);
-        if let Some(text_buffer) = text_buffer {
-            let string = text_buffer.get_as_string();
-            cx.file_write(&format!("{}{}", self.root_path, path), string.as_bytes());
-            //cx.http_send("POST", path, "192.168.0.20", "2001", &string);
-        }
-    }
-    
-    pub fn handle_file_read(&mut self, cx: &mut Cx, fr: &FileReadEvent) -> bool {
-        for (_path, text_buffer) in &mut self.storage {
-            if let Some(utf8_data) = text_buffer.load_file_read.resolve_utf8(fr) {
-                if let Ok(utf8_data) = utf8_data {
-                    // TODO HANDLE ERROR CASE
-                    text_buffer.is_crlf = !utf8_data.find("\r\n").is_none();
-                    text_buffer.lines = TextBuffer::split_string_to_lines(&utf8_data.to_string());
-                    cx.send_signal(text_buffer.signal, SIGNAL_TEXTBUFFER_LOADED);
-                }
-                return true
-            }
-        }
-        return false;
-    }
-}
-*/
 #[derive(Clone, Copy, PartialEq, Default)]
 pub struct TextPos {
     pub row: usize,
