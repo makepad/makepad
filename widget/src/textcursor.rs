@@ -243,25 +243,31 @@ impl TextCursorSet {
         self.last_cursor = index;
     }
     
-    pub fn add_last_cursor_head_and_tail(&mut self, offset: usize, text_buffer: &TextBuffer) {
+    pub fn add_last_cursor_head_and_tail(&mut self, head: usize, tail:usize, text_buffer: &TextBuffer) {
         self.insert_undo_group += 1;
         // check if we dont already have exactly that cursor. ifso just remove it
         if self.set.len()>1 {
             for i in 0..self.set.len() {
-                if self.set[i].head == self.set[i].tail && self.set[i].head == offset {
+                if self.set[i].head == self.set[i].tail && self.set[i].head == head {
                     self.set.remove(i);
                     self.last_cursor = self.set.len() - 1;
                     return
                 }
             }
         }
-        self.set_last_cursor(offset, offset, text_buffer);
+        self.set_last_cursor(head, tail, text_buffer);
     }
     
-    pub fn clear_and_set_last_cursor_head_and_tail(&mut self, offset: usize, len: usize, text_buffer: &TextBuffer) {
+    pub fn clear_and_set_last_cursor_head_and_tail(&mut self, head: usize, tail: usize, text_buffer: &TextBuffer) {
         self.insert_undo_group += 1;
         self.set.truncate(0);
-        self.set_last_cursor(offset, offset+len, text_buffer);
+        self.set_last_cursor(head, tail, text_buffer);
+    }
+
+    pub fn set_last_cursor_head_and_tail(&mut self, head: usize, tail: usize, text_buffer: &TextBuffer) {
+        self.insert_undo_group += 1;
+        self.set.remove(self.last_cursor);
+        self.set_last_cursor(head, tail, text_buffer);
     }
     
     pub fn set_last_cursor_head(&mut self, offset: usize, text_buffer: &TextBuffer) -> bool {
@@ -290,6 +296,10 @@ impl TextCursorSet {
     
     pub fn get_last_cursor_order(&self) -> (usize, usize) {
         self.set[self.last_cursor].order()
+    }
+    
+    pub fn get_last_cursor_head(&self) -> usize {
+        self.set[self.last_cursor].head
     }
     
     pub fn get_last_cursor_singular(&self) -> Option<usize> {
