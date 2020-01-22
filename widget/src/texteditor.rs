@@ -104,7 +104,7 @@ pub struct TextEditor {
     
     pub _last_tabs: usize,
     pub _newline_tabs: usize,
-       
+    
     pub _last_lag_mutation_id: u32
 }
 
@@ -638,7 +638,7 @@ impl TextEditor {
                 self._grid_select_corner = Some(self.cursors.grid_select_corner(pos, text_buffer));
                 self.cursors.grid_select(self._grid_select_corner.unwrap(), pos, text_buffer);
                 if self.cursors.set.len() == 0 {
-                    self.cursors.clear_and_set_last_cursor_head_and_tail(offset, 0, text_buffer);
+                    self.cursors.clear_and_set_last_cursor_head_and_tail(offset, offset, text_buffer);
                 }
             }
             else { // simply place selection
@@ -647,10 +647,10 @@ impl TextEditor {
         }
         else { // cursor drag with possible add
             if fe.modifiers.logo || fe.modifiers.control {
-                self.cursors.add_last_cursor_head_and_tail(offset, text_buffer);
+                self.cursors.add_last_cursor_head_and_tail(offset, offset, text_buffer);
             }
             else {
-                self.cursors.clear_and_set_last_cursor_head_and_tail(offset, 0, text_buffer);
+                self.cursors.clear_and_set_last_cursor_head_and_tail(offset, offset, text_buffer);
             }
         }
         
@@ -700,8 +700,26 @@ impl TextEditor {
     fn handle_key_down(&mut self, cx: &mut Cx, ke: &KeyEvent, text_buffer: &mut TextBuffer) {
         let cursor_moved = match ke.key_code {
             KeyCode::ArrowUp => {
-                if !self.multiline || ke.modifiers.logo || ke.modifiers.control {
+                if !self.multiline {
                     false
+                }
+                else if ke.modifiers.logo || ke.modifiers.control {
+                    let pos = self.cursors.get_last_cursor_head();
+                    let mut moved = false;
+                    for result in text_buffer.markers.search_cursors.iter().rev(){
+                        if result.head < pos{
+                            if ke.modifiers.shift{
+                                self.cursors.add_last_cursor_head_and_tail(result.head, result.tail, text_buffer);
+                            }
+                            else{
+                                self.cursors.set_last_cursor_head_and_tail(result.head, result.tail, text_buffer);
+                            }
+                            moved = true;
+                            break;
+                        }
+                    }
+                    
+                    moved
                 }
                 else {
                     if self._anim_folding.state.is_folded() && self.cursors.set.len() == 1 {
@@ -717,8 +735,25 @@ impl TextEditor {
                 }
             },
             KeyCode::ArrowDown => {
-                if !self.multiline || ke.modifiers.logo || ke.modifiers.control {
+                if !self.multiline{
                     false
+                }
+                else if ke.modifiers.logo || ke.modifiers.control {
+                    let pos = self.cursors.get_last_cursor_head();
+                    let mut moved = false;
+                    for result in text_buffer.markers.search_cursors.iter(){
+                        if result.tail > pos{
+                            if ke.modifiers.shift{
+                                self.cursors.add_last_cursor_head_and_tail(result.head, result.tail, text_buffer);
+                            }
+                            else{
+                                self.cursors.set_last_cursor_head_and_tail(result.head, result.tail, text_buffer);
+                            }
+                            moved = true;
+                            break;
+                        }
+                    }
+                    moved
                 }
                 else {
                     if self._anim_folding.state.is_folded() && self.cursors.set.len() == 1 {
@@ -1082,7 +1117,7 @@ impl TextEditor {
     }
     
     pub fn set_key_focus(&mut self, cx: &mut Cx) {
-        if self._view_area == Area::Empty{
+        if self._view_area == Area::Empty {
             self._set_key_focus_on_load = true;
             return
         }
@@ -1132,7 +1167,7 @@ impl TextEditor {
         self._paren_stack.truncate(0);
         self._draw_cursors.set_next(&self.cursors.set);
         self._draw_search.set_next(
-            if self.search_markers_bypass.len() > 0 {&self.search_markers_bypass}else{&text_buffer.markers.search_cursors}
+            if self.search_markers_bypass.len() > 0 {&self.search_markers_bypass}else {&text_buffer.markers.search_cursors}
         );
         self._line_geometry.truncate(0);
         self._line_largest_font = self.text.text_style.font_size;
@@ -1165,7 +1200,7 @@ impl TextEditor {
             cx.update_area_refs(self._view_area, view_area);
             //self._bg_area = bg_area;
             self._view_area = view_area;
-            if self._set_key_focus_on_load{
+            if self._set_key_focus_on_load {
                 self._set_key_focus_on_load = false;
                 self.set_key_focus(cx);
             }
@@ -1746,24 +1781,24 @@ impl TextEditor {
         if let Some(offset) = self._jump_to_offset {
             self._jump_to_offset = None;
             self._scroll_pos_on_load = None;
-            self.cursors.clear_and_set_last_cursor_head_and_tail(offset, 0, text_buffer);
+            self.cursors.clear_and_set_last_cursor_head_and_tail(offset, offset, text_buffer);
             // i want the thing to be the top
-            if self.jump_to_offset_at_top{
+            if self.jump_to_offset_at_top {
                 self.scroll_last_cursor_top(cx, text_buffer);
             }
-            else{
-                self.scroll_last_cursor_visible(cx, text_buffer, self._final_fill_height*0.8);
+            else {
+                self.scroll_last_cursor_visible(cx, text_buffer, self._final_fill_height * 0.8);
             }
-
-            self.view.redraw_view_area(cx); 
+            
+            self.view.redraw_view_area(cx);
         }
         else if let Some(scroll_pos_on_load) = self._scroll_pos_on_load {
             self.view.set_scroll_pos(cx, scroll_pos_on_load);
-            self._scroll_pos_on_load = None; 
+            self._scroll_pos_on_load = None;
         }
     }
     
-    pub fn jump_to_offset(&mut self, cx: &mut Cx, offset: usize){
+    pub fn jump_to_offset(&mut self, cx: &mut Cx, offset: usize) {
         self._jump_to_offset = Some(offset);
         self.view.redraw_view_area(cx);
     }
@@ -1973,8 +2008,8 @@ impl TextEditor {
         self._monospace_size.x = self._monospace_base.x * self.text.text_style.font_size * font_scale;
         self._monospace_size.y = self._monospace_base.y * self.text.text_style.font_size * font_scale;
     }
-
-    pub fn reset_cursors(&mut self){
+    
+    pub fn reset_cursors(&mut self) {
         self.cursors = TextCursorSet::new();
     }
     
@@ -2019,7 +2054,7 @@ impl TextEditor {
             let mono_size = Vec2 {x: self._monospace_base.x * geom.font_size, y: self._monospace_base.y * geom.font_size};
             //self.text.get_monospace_size(cx, geom.font_size);
             let rect = Rect {
-                x: 0.,// (pos.col as f32) * mono_size.x - self.line_number_width,
+                x: 0., // (pos.col as f32) * mono_size.x - self.line_number_width,
                 y: geom.walk.y - mono_size.y * 1.,
                 w: mono_size.x * 4. + self.line_number_width,
                 h: self._final_fill_height + mono_size.y * 1.
