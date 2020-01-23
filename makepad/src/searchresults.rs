@@ -46,7 +46,8 @@ impl SearchResultDraw {
         }
     }
     
-    pub fn layout_item() -> LayoutId {uid!()}
+    pub fn layout_item_open() -> LayoutId {uid!()}
+    pub fn layout_item_closed() -> LayoutId {uid!()}
     pub fn text_style_item() -> TextStyleId {uid!()}
     pub fn layout_search_input() -> LayoutId {uid!()}
     pub fn style_text_editor() -> StyleId {uid!()}
@@ -54,7 +55,7 @@ impl SearchResultDraw {
     
     pub fn style(cx: &mut Cx, opt: &StyleOptions) {
         
-        Self::layout_item().set(cx, Layout {
+        Self::layout_item_closed().set(cx, Layout {
             walk: Walk::wh(Width::ComputeFill, Height::Fix(37. * opt.scale)),
             align: Align::left_top(),
             padding: Padding {l: 5., t: 3., b: 2., r: 0.},
@@ -62,6 +63,14 @@ impl SearchResultDraw {
             ..Default::default()
         });
         
+        Self::layout_item_open().set(cx, Layout {
+            walk: Walk::wh(Width::ComputeFill, Height::Fix(85. * opt.scale)),
+            align: Align::left_top(),
+            padding: Padding {l: 5., t: 3., b: 2., r: 0.},
+            line_wrap: LineWrap::None,
+            ..Default::default()
+        });
+
         Self::text_style_item().set(cx, Theme::text_style_normal().get(cx));
         
         cx.begin_style(Self::style_text_editor());
@@ -109,10 +118,12 @@ impl SearchResultDraw {
         
         self.item_bg.color = list_item.animator.last_color(cx, Quad::instance_color());
 
-        let bg_inst = self.item_bg.begin_quad(cx, Self::layout_item().get(cx)); //&self.get_line_layout());
+        let bg_inst = self.item_bg.begin_quad(cx, if selected{Self::layout_item_open()}else{Self::layout_item_closed()}.get(cx)); //&self.get_line_layout());
         
-        let (first_tok, delta) = text_buffer.scan_token_chunks_prev_line(token as usize, 1);
-        let last_tok = text_buffer.scan_token_chunks_next_line(token as usize, 1);
+        let window_up = if selected{2} else {1};
+        let window_down = if selected{3} else {1};
+        let (first_tok, delta) = text_buffer.scan_token_chunks_prev_line(token as usize, window_up);
+        let last_tok = text_buffer.scan_token_chunks_next_line(token as usize, window_down);
         
         let tok = &text_buffer.token_chunks[token as usize];
         let pos = text_buffer.offset_to_text_pos(tok.offset);
@@ -133,7 +144,7 @@ impl SearchResultDraw {
         self.text_editor.line_number_offset = (pos.row as isize + delta) as usize;
         self.text_editor.init_draw_state(cx, text_buffer);
         
-        let mut first_ws = true;
+        let mut first_ws = !selected;
         for index in first_tok..last_tok {
             let token_chunk = &text_buffer.token_chunks[index];
             if first_ws && token_chunk.token_type == TokenType::Whitespace{
@@ -160,7 +171,7 @@ impl SearchResultDraw {
     pub fn draw_filler(&mut self, cx: &mut Cx, counter: usize) {
         let view_total = cx.get_turtle_bounds();
         self.item_bg.color = if counter & 1 == 0 {Theme::color_bg_selected().get(cx)} else {Theme::color_bg_odd().get(cx)};
-        self.item_bg.draw_quad(cx, Self::layout_item().get(cx).walk);
+        self.item_bg.draw_quad(cx, Self::layout_item_closed().get(cx).walk);
         cx.set_turtle_bounds(view_total); // do this so it doesnt impact the turtle
     }
 }
@@ -178,7 +189,7 @@ pub enum SearchResultEvent {
     None,
 }
 
-impl SearchResults {
+impl SearchResults { 
     pub fn proto(cx: &mut Cx) -> Self {
         Self {
             first_tbid:TextBufferId(0),
@@ -366,7 +377,7 @@ impl SearchResults {
         
         self.result_draw.text.text_style = SearchResultDraw::text_style_item().get(cx);
         
-        let row_height = SearchResultDraw::layout_item().get(cx).walk.height.fixed();
+        let row_height = SearchResultDraw::layout_item_closed().get(cx).walk.height.fixed();
         
         if self.list.begin_list(cx, &mut self.view, false, row_height).is_err() {return}
 
