@@ -98,6 +98,17 @@ impl FileEditor {
 }
 
 impl FileEditors {
+    pub fn does_path_match_editor_type(&mut self, path: &str, editor_id:u64)->bool{
+        if !self.editors.contains_key(&editor_id){
+            return false;
+        }
+        match self.editors.get(&editor_id).unwrap(){
+            FileEditor::Rust(_) =>path.ends_with(".rs") || path.ends_with(".toml") || path.ends_with(".ron"),
+            FileEditor::JS(_) => path.ends_with(".js") || path.ends_with(".html"),
+            FileEditor::Plain(_) => !(path.ends_with(".rs") || path.ends_with(".toml") || path.ends_with(".ron") || path.ends_with(".js") || path.ends_with(".html"))
+        }
+    }
+    
     pub fn get_file_editor_for_path(&mut self, path: &str, editor_id:u64) -> (&mut FileEditor, bool) {
         
         // check which file extension we have to spawn a new editor
