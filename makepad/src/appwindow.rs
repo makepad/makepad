@@ -623,14 +623,16 @@ impl AppWindow {
                         if target_tab_after + 1 < tabs.len(){
                             match &mut tabs[target_tab_after + 1].item {
                                 Panel::FileEditor {path, scroll_pos: _, editor_id} => {
-                                    *path = file_path.to_string();
-                                    let (file_editor, _is_new) = self.file_editors.get_file_editor_for_path(path, *editor_id);
-                                    if let Some(cursor) = set_last_cursor {
-                                        file_editor.set_last_cursor(cx, cursor, true);
+                                    if self.file_editors.does_path_match_editor_type(path, *editor_id){
+                                        *path = file_path.to_string();
+                                        let (file_editor, _is_new) = self.file_editors.get_file_editor_for_path(path, *editor_id);
+                                        if let Some(cursor) = set_last_cursor {
+                                            file_editor.set_last_cursor(cx, cursor, true);
+                                        }
+                                        *current = target_tab_after + 1;
+                                        cx.redraw_child_area(Area::All);
+                                        return true
                                     }
-                                    *current = target_tab_after + 1;
-                                    cx.redraw_child_area(Area::All);
-                                    return true
                                 },
                                 _ => ()
                             }
