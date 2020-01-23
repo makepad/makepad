@@ -1080,7 +1080,7 @@ impl TextEditor {
             Event::KeyDown(ke) => {
                 if ke.key_code == KeyCode::Escape {
                     return TextEditorEvent::Escape
-                }
+                }/*
                 if ke.key_code == KeyCode::KeyD && (ke.modifiers.logo || ke.modifiers.control) {
                     // check if d is inside a search cursor
                     let pos = self.cursors.get_last_cursor_head();
@@ -1090,17 +1090,22 @@ impl TextEditor {
                             repeat = true;
                             break;
                         }
-                    }
+                    }/*
                     if !repeat{
                         let search = self.cursors.get_ident_around_last_cursor_and_set(text_buffer);
                         // lets select the ident
                         
                         return TextEditorEvent::Decl(search)
-                    }
-                }
+                    }*/
+                }*/
                 if ke.key_code == KeyCode::KeyF && (ke.modifiers.logo || ke.modifiers.control) {
                     let search = self.cursors.get_ident_around_last_cursor_and_set(text_buffer);
-                    return TextEditorEvent::Search(search)
+                    if ke.modifiers.shift{
+                        return TextEditorEvent::Search(search)
+                    }
+                    else{
+                        return TextEditorEvent::Decl(search)
+                    }
                 }
                 if ke.key_code == KeyCode::Return && (ke.modifiers.logo || ke.modifiers.control) {
                     return TextEditorEvent::AutoFormat
