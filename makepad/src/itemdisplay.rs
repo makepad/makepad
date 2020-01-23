@@ -199,21 +199,21 @@ impl ItemDisplay {
                 },
             }
             self.update_display = false;
-            match &self.display { 
-                ItemDisplayType::Empty=>{
-                }
-                ItemDisplayType::PlainText {..} | ItemDisplayType::Message {..} => {
-                    let text_buffer = &mut self.text_buffer;
-                    cx.begin_style(Self::style_text_editor());
-                    if self.text_disp.begin_text_editor(cx, text_buffer).is_err() {return cx.end_style();}
-                    
-                    for (index, token_chunk) in text_buffer.token_chunks.iter_mut().enumerate() {
-                        self.text_disp.draw_chunk(cx, index, &text_buffer.flat_text, token_chunk, &text_buffer.markers);
-                    }
-                    self.text_disp.end_text_editor(cx, text_buffer);
-                    cx.end_style();
-                },
+        }
+        match &self.display { 
+            ItemDisplayType::Empty=>{
             }
+            ItemDisplayType::PlainText {..} | ItemDisplayType::Message {..} => {
+                let text_buffer = &mut self.text_buffer;
+                cx.begin_style(Self::style_text_editor());
+                if self.text_disp.begin_text_editor(cx, text_buffer).is_err() {return cx.end_style();}
+                
+                for (index, token_chunk) in text_buffer.token_chunks.iter_mut().enumerate() {
+                    self.text_disp.draw_chunk(cx, index, &text_buffer.flat_text, token_chunk, &text_buffer.markers);
+                }
+                self.text_disp.end_text_editor(cx, text_buffer);
+                cx.end_style();
+            },
         }
     }
 }
