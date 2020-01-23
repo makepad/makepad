@@ -242,7 +242,7 @@ impl AppWindow {
         
         if let Some(tbid) = do_display_rust_file{
             let path = storage.text_buffer_id_to_path.get(&tbid).unwrap();
-            if self.replace_focus_or_new_editor_item(cx, window_index, state, &path, set_last_cursor) {
+            if self.open_preview_editor_tab(cx, window_index, state, &path, set_last_cursor) {
                 storage.save_state(cx, state);
                 self.ensure_unique_tab_title_for_file_editors(cx, window_index, state);
             }
@@ -554,10 +554,20 @@ impl AppWindow {
         let mut dock_walker = self.dock.walker(&mut state.windows[window_index].dock_items);
         while let Some((ctrl_id, dock_item)) = dock_walker.walk_dock_item() {
             if let DockItem::TabControl {current, tabs, ..} = dock_item {
+                let mut item_ctrl_id = None;
                 for (id, tab) in tabs.iter().enumerate() {
                     match &tab.item {
+                        Panel::ItemDisplay => { // found the editor target
+                            item_ctrl_id = Some((ctrl_id,id));
+                        },
                         Panel::FileEditor {path, scroll_pos: _, editor_id} => {
                             if *path == file_path {
+                                // check if we aren't the preview..
+                                if let Some((item_ctrl_id, tab_id)) = item_ctrl_id{
+                                    if item_ctrl_id == ctrl_id && tab_id == id - 1{
+                                        continue
+                                    }
+                                }
                                 let (file_editor, _is_new) = self.file_editors.get_file_editor_for_path(path, *editor_id);
                                 file_editor.set_key_focus(cx);
                                 if let Some(cursor) = set_last_cursor {
@@ -595,7 +605,7 @@ impl AppWindow {
         return false
     }
     
-    pub fn replace_focus_or_new_editor_item(&mut self, cx: &mut Cx, window_index: usize, state: &mut AppState, file_path: &str, set_last_cursor: Option<(usize, usize)>) -> bool {
+    pub fn open_preview_editor_tab(&mut self, cx: &mut Cx, window_index: usize, state: &mut AppState, file_path: &str, set_last_cursor: Option<(usize, usize)>) -> bool {
         
         let mut target_ctrl_id = None;
         let mut target_tab_after = 0;
