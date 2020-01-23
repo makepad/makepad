@@ -774,8 +774,10 @@ impl XlibApp {
     
     pub fn post_signal(signal:Signal, status:StatusId) {
         unsafe {
-            if let Ok(mut signals) = (*GLOBAL_XLIB_APP).signals.lock() {
-                signals.push(Event::Signal(SignalEvent {signal, status}));
+            if let Ok(mut signals_locked) = (*GLOBAL_XLIB_APP).signals.lock() {
+                let mut signals = HashMap::new();
+                signals.insert(signal, vec![status]);
+                signals_locked.push(Event::Signal(SignalEvent {signals}));
                 //let mut f = unsafe { File::from_raw_fd((*GLOBAL_XLIB_APP).display_fd) };
                 //let _ = write!(&mut f, "\0");
                 // !TODO unblock the select!
@@ -783,7 +785,7 @@ impl XlibApp {
         }
     }
     
-    pub fn terminate_event_loop(&mut self) {
+    pub fn terminate_event_loop(&mut self) { 
         // maybe need to do more here
         self.event_loop_running = false;
         unsafe {X11_sys::XCloseIM(self.xim)};
