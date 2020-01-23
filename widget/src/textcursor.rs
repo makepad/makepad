@@ -144,6 +144,12 @@ impl TextCursorSet {
     pub fn get_ident_around_last_cursor_and_set(&mut self, text_buffer: &TextBuffer) -> String {
         let mut ret = String::new();
         let cursor = &mut self.set[self.last_cursor];
+        
+        if cursor.head != cursor.tail{
+            let (start, end) = cursor.order();
+            text_buffer.get_range_as_string(start, end - start, &mut ret);   
+            return ret;         
+        }
 
         for tok in &text_buffer.token_chunks{
             if cursor.head >= tok.offset && cursor.head <= tok.offset + tok.len{
