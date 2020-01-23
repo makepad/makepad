@@ -46,14 +46,12 @@ pub struct TextEditor {
     pub read_only: bool,
     pub multiline: bool,
     
-    pub jump_to_offset_at_top: bool,
-    
     pub line_number_offset: usize,
     
     //pub _bg_area: Area,
     pub _scroll_pos_on_load: Option<Vec2>,
     pub _set_key_focus_on_load: bool,
-    pub _jump_to_offset: Option<usize>,
+    pub _set_last_cursor: Option<((usize, usize),bool)>,
     pub _view_area: Area,
     pub _highlight_area: Area,
     pub _text_inst: Option<AlignedInstance>,
@@ -214,10 +212,9 @@ impl TextEditor {
             draw_cursor_row: true,
             line_number_offset: 0,
             search_markers_bypass: Vec::new(),
-            jump_to_offset_at_top: false,
             _scroll_pos_on_load: None,
             _set_key_focus_on_load: false,
-            _jump_to_offset: None,
+            _set_last_cursor: None,
             _monospace_size: Vec2::default(),
             _monospace_base: Vec2::default(),
             _last_finger_move: None,
@@ -1014,6 +1011,7 @@ impl TextEditor {
                     let was_filechange = self._last_lag_mutation_id != 0;
                     self._last_lag_mutation_id = text_buffer.mutation_id;
                     if was_filechange {
+                        // lets post a signal on the textbuffer
                         return TextEditorEvent::LagChange;
                     }
                 }
@@ -1807,12 +1805,12 @@ impl TextEditor {
         
         self.view.end_view(cx);
         
-        if let Some(offset) = self._jump_to_offset {
-            self._jump_to_offset = None;
+        if let Some(((head, tail), at_top)) = self._set_last_cursor {
+            self._set_last_cursor = None;
             self._scroll_pos_on_load = None;
-            self.cursors.clear_and_set_last_cursor_head_and_tail(offset, offset, text_buffer);
+            self.cursors.clear_and_set_last_cursor_head_and_tail(head, tail, text_buffer);
             // i want the thing to be the top
-            if self.jump_to_offset_at_top {
+            if at_top {
                 self.scroll_last_cursor_top(cx, text_buffer);
             }
             else {
@@ -1826,11 +1824,12 @@ impl TextEditor {
             self._scroll_pos_on_load = None;
         }
     }
-    
-    pub fn jump_to_offset(&mut self, cx: &mut Cx, offset: usize) {
-        self._jump_to_offset = Some(offset);
+
+    pub fn set_last_cursor(&mut self, cx: &mut Cx, cursor:(usize, usize), at_top:bool) {
+        self._set_last_cursor = Some((cursor, at_top));
         self.view.redraw_view_area(cx);
     }
+
     
     fn draw_cursors(&mut self, cx: &mut Cx) {
         if self.has_key_focus(cx) {
@@ -2090,7 +2089,7 @@ impl TextEditor {
             };
             
             // scroll this cursor into view
-            self.view.scroll_into_view(cx, rect);
+            self.view.scroll_into_view_no_smooth(cx, rect);
         }
     }
     
