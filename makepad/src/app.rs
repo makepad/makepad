@@ -181,7 +181,7 @@ impl App {
                                 tabs: vec![
                                     DockTab {
                                         closeable: false,
-                                        title: "".to_string(),
+                                        title: "Item".to_string(),
                                         item: Panel::ItemDisplay
                                     },
                                     DockTab {
@@ -339,7 +339,7 @@ impl App {
                         self.default_layout(cx);
                     }
                     for (window_index, window) in self.windows.iter_mut().enumerate() {
-                        window.ensure_unique_tab_title_for_file_editors(window_index, &mut self.state);
+                        window.ensure_unique_tab_title_for_file_editors(cx, window_index, &mut self.state);
                     }
                 }
                 else if let Some(utf8_data) = self.storage.app_settings_file_read.resolve_utf8(fr) {

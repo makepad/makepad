@@ -10,7 +10,7 @@ pub struct TextIndexEnd {
 #[derive(Clone, Default)]
 pub struct TextIndexNode {
     stem: [char; 6],
-    used: usize,e
+    used: usize,
     map: HashMap<char, usize>,
     end: Vec<TextIndexEnd>
 }

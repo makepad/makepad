@@ -169,11 +169,11 @@ impl SearchResultDraw {
 pub enum SearchResultEvent {
     DisplayFile {
         text_buffer_id:TextBufferId,
-        jump_to_offset:usize
+        cursor:(usize, usize)
     },
     OpenFile{
         text_buffer_id:TextBufferId,
-        jump_to_offset:usize
+        cursor:(usize, usize)
     },
     None,
 }
@@ -218,7 +218,7 @@ impl SearchResults {
         self.search_input.select_all(cx);
     }
     
-    pub fn do_search(&mut self, cx: &mut Cx, search_index: &mut SearchIndex, storage: &mut AppStorage) {
+    pub fn do_search(&mut self, cx: &mut Cx, search_index: &mut SearchIndex, storage: &mut AppStorage)->Option<(TextBufferId,(usize,usize))> {
         let s = self.search_input.get_value();
         if s.len() > 0 {
             // lets search
@@ -231,6 +231,15 @@ impl SearchResults {
         }
         self.list.set_list_len(0);
         self.view.redraw_view_area(cx);
+        if self.results.len()>0{
+            let result = &self.results[0];
+            let text_buffer = &mut storage.text_buffers[result.text_buffer_id.as_index()].text_buffer;
+            let tok = &text_buffer.token_chunks[result.token as usize];
+            Some((result.text_buffer_id, (tok.offset + tok.len, tok.offset)))
+        }
+        else{
+            None
+        }
     }
      
     pub fn handle_search_input(&mut self, cx: &mut Cx, event: &mut Event, search_index: &mut SearchIndex, storage: &mut AppStorage) -> bool {
@@ -325,7 +334,7 @@ impl SearchResults {
                 let tok = &text_buffer.token_chunks[result.token as usize];
                 return SearchResultEvent::DisplayFile{
                     text_buffer_id: result.text_buffer_id,//storage.text_buffer_id_to_path.get(&result.text_buffer_id).expect("Path not found").clone(),
-                    jump_to_offset: tok.offset + tok.len
+                    cursor: (tok.offset + tok.len, tok.offset)
                 };
             },
             ListEvent::SelectDouble(select_index) => {
@@ -335,7 +344,7 @@ impl SearchResults {
                 let tok = &text_buffer.token_chunks[result.token as usize];
                 return SearchResultEvent::OpenFile{
                     text_buffer_id: result.text_buffer_id,
-                    jump_to_offset: tok.offset + tok.len
+                    cursor: (tok.offset + tok.len, tok.offset)
                 };
             },
             ListEvent::SelectMultiple => {},

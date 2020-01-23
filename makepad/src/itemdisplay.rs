@@ -1,24 +1,21 @@
 use crate::rusteditor::*;
 use crate::plaineditor::*;
-use crate::appstorage::*;
 use makepad_render::*;
 use makepad_hub::*;
 use makepad_widget::*;
 
 #[derive(Clone, PartialEq)]
-pub enum ItemDisplayHistory {
+pub enum ItemDisplayType {
+    Empty,
     PlainText {text: String},
     Message {message: LocMessage},
-    Rust {text_buffer_id: TextBufferId, offset: usize},
 }
 
 #[derive(Clone)]
 pub struct ItemDisplay {
-    pub history: Vec<ItemDisplayHistory>,
-    pub current: usize,
+    pub display: ItemDisplayType,
     pub update_display: bool,
     pub view: View,
-    pub rust_disp: RustEditor,
     pub text_disp: TextEditor,
     pub text_buffer: TextBuffer,
     pub text: Text,
@@ -46,31 +43,17 @@ impl ItemDisplay {
             text_buffer: TextBuffer {
                 ..TextBuffer::default()
             },
-            rust_disp: RustEditor {
-                text_editor: TextEditor {
-                    view:ScrollView{
-                        scroll_v:Some(ScrollBar::proto(cx)),
-                        ..ScrollView::proto(cx)
-                    },
-                    read_only: true,
-                    jump_to_offset_at_top: true,
-                    ..RustEditor::proto(cx).text_editor
-                },
-                ..RustEditor::proto(cx)
-            },
             last_text_buffer_id: 0,
             prev_button: NormalButton::proto(cx),
             next_button: NormalButton::proto(cx),
             open_button: NormalButton::proto(cx),
             item_title: Text::proto(cx),
-            history: Vec::new(),
-            current: 0
+            display: ItemDisplayType::Empty,
         };
         editor
     }
     
     pub fn style_text_editor() -> StyleId {uid!()}
-    pub fn style_rust_editor() -> StyleId {uid!()}
     pub fn text_color() -> ColorId {uid!()}
     pub fn text_style_title() -> TextStyleId {uid!()}
 
@@ -82,46 +65,16 @@ impl ItemDisplay {
         TextEditor::padding_top().set(cx, 10.);
         TextEditor::color_bg().set(cx, Theme::color_bg_odd().get(cx));
         cx.end_style();
-        cx.begin_style(Self::style_rust_editor());
-        TextEditor::color_bg().set(cx, Theme::color_bg_odd().get(cx));
-        TextEditor::color_gutter_bg().set(cx, Theme::color_bg_odd().get(cx));
-        cx.end_style();
     }
     
     pub fn display_message(&mut self, cx: &mut Cx, loc_message: &LocMessage) {
-        self.history.truncate(self.current);
-        self.history.push(
-            ItemDisplayHistory::Message {message: loc_message.clone()}
-        );
-        self.current = self.history.len() - 1;
+        self.display = ItemDisplayType::Message {message: loc_message.clone()};
         self.update_display = true;
         self.view.redraw_view_parent_area(cx);
     }
     
     pub fn display_plain_text(&mut self, cx: &mut Cx, val: &str) {
-        self.history.truncate(self.current);
-        self.history.push(
-            ItemDisplayHistory::PlainText {text: val.to_string()}
-        );
-        self.current = self.history.len() - 1;
-        self.update_display = true;
-        self.view.redraw_view_parent_area(cx);
-    }
-    
-    pub fn display_rust_file(&mut self, cx: &mut Cx, text_buffer_id: TextBufferId, offset: usize) {
-        if self.current < self.history.len(){
-            match self.history[self.current]{
-                 ItemDisplayHistory::Rust {text_buffer_id:tbid, offset:off}=> if tbid == text_buffer_id && offset == off{
-                     return
-                 }
-                 _=>()
-            }
-        }
-        self.history.truncate(self.current);
-        self.history.push(
-            ItemDisplayHistory::Rust {text_buffer_id, offset}
-        );
-        self.current = self.history.len() - 1;
+        self.display = ItemDisplayType::PlainText {text: val.to_string()};
         self.update_display = true;
         self.view.redraw_view_parent_area(cx);
     }
@@ -219,73 +172,37 @@ impl ItemDisplay {
         }
     }
     
-    pub fn handle_item_display(&mut self, cx: &mut Cx, event: &mut Event, storage:&mut AppStorage)->TextEditorEvent{
-        if self.current < self.history.len() {
-            match &self.history[self.current] {
-                ItemDisplayHistory::PlainText {..} => {
-                    self.text_disp.handle_text_editor(cx, event, &mut self.text_buffer)
-                },
-                ItemDisplayHistory::Message {..} => {
-                    self.text_disp.handle_text_editor(cx, event, &mut self.text_buffer)
-                },
-                ItemDisplayHistory::Rust {text_buffer_id, ..} => {
-                    let text_buffer = &mut storage.text_buffers[text_buffer_id.as_index()].text_buffer;
-                    self.rust_disp.handle_rust_editor(cx, event, text_buffer, None)
-                }
-            }
-        }
-        else{
-            TextEditorEvent::None
+    pub fn handle_item_display(&mut self, cx: &mut Cx, event: &mut Event)->TextEditorEvent{
+        match &self.display {
+            ItemDisplayType::Empty=>{
+                TextEditorEvent::None
+            },
+            ItemDisplayType::PlainText {..} => {
+                self.text_disp.handle_text_editor(cx, event, &mut self.text_buffer)
+            },
+            ItemDisplayType::Message {..} => {
+                self.text_disp.handle_text_editor(cx, event, &mut self.text_buffer)
+            },
         }
     }
     
-    pub fn draw_item_display_tab(&mut self, cx: &mut Cx, storage:&mut AppStorage){
-        self.text.text_style = Self::text_style_title().get(cx);
-        self.text.color =  Self::text_color().get(cx);
-        if self.current < self.history.len() {
-            match &self.history[self.current] {
-                ItemDisplayHistory::PlainText {..} => {
-                    self.text.draw_text(cx, "Log Text");
+    pub fn draw_item_display(&mut self, cx: &mut Cx) {
+        if self.update_display {
+            match &self.display {
+                ItemDisplayType::Empty=>{
                 },
-                ItemDisplayHistory::Message {..} => {
-                    self.text.draw_text(cx, "Log Msg");
+                ItemDisplayType::PlainText {text} => {
+                    Self::update_plain_text_buffer(&mut self.text_buffer, text);
                 },
-                ItemDisplayHistory::Rust {text_buffer_id,..} => {
-                    let path = storage.text_buffer_id_to_path.get(text_buffer_id).unwrap();
-                    let items = path.split('/').collect::<Vec<&str>>();
-                    let name = items.last().unwrap();
-                    
-                    self.text.draw_text(cx, &format!("Found:{}", name));
-                }
+                ItemDisplayType::Message {message} => {
+                    Self::update_message_text_buffer(&mut self.text_buffer, message);
+                },
             }
-        }
-        else{
-            self.text.draw_text(cx, "Item");            
-        }
-    }
-    
-    pub fn draw_item_display(&mut self, cx: &mut Cx, storage:&mut AppStorage) {
-        if self.current < self.history.len() {
-            if self.update_display {
-                self.update_display = false;
-                match &self.history[self.current] {
-                    ItemDisplayHistory::PlainText {text} => {
-                        Self::update_plain_text_buffer(&mut self.text_buffer, text);
-                    },
-                    ItemDisplayHistory::Message {message} => {
-                        Self::update_message_text_buffer(&mut self.text_buffer, message);
-                    },
-                    ItemDisplayHistory::Rust {offset,text_buffer_id} => {
-                        if self.last_text_buffer_id != text_buffer_id.as_index(){
-                            self.last_text_buffer_id = text_buffer_id.as_index();
-                            self.rust_disp.text_editor.reset_cursors();
-                        }
-                        self.rust_disp.text_editor.jump_to_offset(cx, *offset);
-                    }
+            self.update_display = false;
+            match &self.display { 
+                ItemDisplayType::Empty=>{
                 }
-            }
-            match self.history[self.current] {
-                ItemDisplayHistory::PlainText {..} | ItemDisplayHistory::Message {..} => {
+                ItemDisplayType::PlainText {..} | ItemDisplayType::Message {..} => {
                     let text_buffer = &mut self.text_buffer;
                     cx.begin_style(Self::style_text_editor());
                     if self.text_disp.begin_text_editor(cx, text_buffer).is_err() {return cx.end_style();}
@@ -296,12 +213,6 @@ impl ItemDisplay {
                     self.text_disp.end_text_editor(cx, text_buffer);
                     cx.end_style();
                 },
-                ItemDisplayHistory::Rust {text_buffer_id, ..} => {
-                    cx.begin_style(Self::style_rust_editor());
-                    let text_buffer = &mut storage.text_buffers[text_buffer_id.as_index()].text_buffer;
-                    self.rust_disp.draw_rust_editor(cx, text_buffer, None);
-                    cx.end_style();
-                }
             }
         }
     }
