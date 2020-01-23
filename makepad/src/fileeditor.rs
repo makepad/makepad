@@ -35,11 +35,11 @@ impl FileEditor {
         }
     }
     
-    pub fn jump_to_offset(&mut self, cx: &mut Cx, offset:usize) {
+    pub fn set_last_cursor(&mut self, cx: &mut Cx, cursor:(usize, usize), at_top:bool) {
         match self {
-            FileEditor::Rust(re) => re.text_editor.jump_to_offset(cx, offset),
-            FileEditor::JS(re) => re.text_editor.jump_to_offset(cx, offset),
-            FileEditor::Plain(re) => re.text_editor.jump_to_offset(cx, offset),
+            FileEditor::Rust(re) => re.text_editor.set_last_cursor(cx, cursor, at_top),
+            FileEditor::JS(re) => re.text_editor.set_last_cursor(cx, cursor, at_top),
+            FileEditor::Plain(re) => re.text_editor.set_last_cursor(cx, cursor, at_top),
         }
     }
     
@@ -48,6 +48,14 @@ impl FileEditor {
             FileEditor::Rust(re) => re.text_editor.set_key_focus(cx),
             FileEditor::JS(re) => re.text_editor.set_key_focus(cx),
             FileEditor::Plain(re) => re.text_editor.set_key_focus(cx),
+        }
+    }
+    
+    pub fn has_key_focus(&mut self, cx: &mut Cx)->bool {
+        match self {
+            FileEditor::Rust(re) => re.text_editor.has_key_focus(cx),
+            FileEditor::JS(re) => re.text_editor.has_key_focus(cx),
+            FileEditor::Plain(re) => re.text_editor.has_key_focus(cx),
         }
     }
     

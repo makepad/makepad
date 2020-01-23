@@ -117,20 +117,29 @@ impl ScrollView{
     
     pub fn scroll_into_view(&mut self, cx: &mut Cx, rect: Rect) {
         if let Some(scroll_h) = &mut self.scroll_h {
-            scroll_h.scroll_into_view(cx, rect.x, rect.w);
+            scroll_h.scroll_into_view(cx, rect.x, rect.w, true);
         }
         if let Some(scroll_v) = &mut self.scroll_v {
-            scroll_v.scroll_into_view(cx, rect.y, rect.h);
+            scroll_v.scroll_into_view(cx, rect.y, rect.h, true);
+        }
+    }
+    
+    pub fn scroll_into_view_no_smooth(&mut self, cx: &mut Cx, rect: Rect) {
+        if let Some(scroll_h) = &mut self.scroll_h {
+            scroll_h.scroll_into_view(cx, rect.x, rect.w, false);
+        }
+        if let Some(scroll_v) = &mut self.scroll_v {
+            scroll_v.scroll_into_view(cx, rect.y, rect.h, false);
         }
     }
     
     pub fn scroll_into_view_abs(&mut self, cx: &mut Cx, rect: Rect) {
         let self_rect = self.get_rect(cx); 
         if let Some(scroll_h) = &mut self.scroll_h {
-            scroll_h.scroll_into_view(cx, rect.x - self_rect.x, rect.w);
+            scroll_h.scroll_into_view(cx, rect.x - self_rect.x, rect.w, true);
         }
         if let Some(scroll_v) = &mut self.scroll_v {
-            scroll_v.scroll_into_view(cx, rect.y  - self_rect.y, rect.h);
+            scroll_v.scroll_into_view(cx, rect.y  - self_rect.y, rect.h, true);
         }
     }
     
