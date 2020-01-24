@@ -1,6 +1,6 @@
-use std::net::{TcpListener, TcpStream, UdpSocket, SocketAddr, Shutdown};
+use std::net::{TcpListener, TcpStream, SocketAddr, Shutdown};
 use std::sync::{mpsc, Arc, Mutex};
-use std::{time, thread};
+
 use crate::hubmsg::*;
 use crate::hubclient::*;
 use crate::hubrouter::*;
@@ -9,7 +9,6 @@ use makepad_tinyserde::*;
 #[derive(Debug, Clone, SerBin, DeBin, SerRon, DeRon, PartialEq)]
 pub enum HubServerConfig {
     Offline, // no network connectivity
-    Announced, // 0.0.0.0:0
     Network(u16), // 0.0.0.0:port
     Localhost(u16), // 127.0.0.1:port
     InterfaceV4(u16, [u8; 4])
@@ -23,19 +22,17 @@ pub struct HubServerShared {
 pub struct HubServer {
     pub shared: Arc<Mutex<HubServerShared>>,
     pub listen_address: Option<SocketAddr>,
-    pub listen_thread: Option<std::thread::JoinHandle<()>>,
-    pub announce_thread: Option<std::thread::JoinHandle<()>>,
+    pub listen_thread: Option<std::thread::JoinHandle<()>>
 }
 
 impl HubServer {
     pub fn start_hub_server(digest: Digest, config: &HubServerConfig, hub_router:&HubRouter) -> Option<HubServer> {
         
-        let (listen_address, announce) = match config {
+        let listen_address = match config {
             HubServerConfig::Offline => return None,
-            HubServerConfig::Announced=>(SocketAddr::from(([0, 0, 0, 0], 0)),true),
-            HubServerConfig::Localhost(port) => (SocketAddr::from(([127, 0, 0, 1], *port)),false),
-            HubServerConfig::Network(port) => (SocketAddr::from(([0, 0, 0, 0], *port)),false),
-            HubServerConfig::InterfaceV4(port, ip) => (SocketAddr::from((*ip, *port)),false),
+            HubServerConfig::Localhost(port) => SocketAddr::from(([127, 0, 0, 1], *port)),
+            HubServerConfig::Network(port) => SocketAddr::from(([0, 0, 0, 0], *port)),
+            HubServerConfig::InterfaceV4(port, ip) => SocketAddr::from((*ip, *port)),
         };
 
         let listener = if let Ok(listener) = TcpListener::bind(listen_address){listener}else{println!("start_hub_server bind server address");return None};
@@ -152,73 +149,16 @@ impl HubServer {
             })
         };
         
-        let mut hub_server = HubServer {
+        let hub_server = HubServer {
             shared: shared,
             listen_address: Some(listen_address),
             listen_thread: Some(listen_thread),
-            //router_thread: Some(router_thread),
-            announce_thread: None
         };
         
-        if announce{
-            hub_server.start_announce_server_default(digest.clone());
-        }
-        
+
         return Some(hub_server);
     }
 
-    pub fn start_announce_server_default(&mut self, digest: Digest) {
-        self.start_announce_server(
-            digest,
-            SocketAddr::from(([0, 0, 0, 0], 0)),
-            SocketAddr::from(([255, 255, 255, 255], HUB_ANNOUNCE_PORT)),
-            SocketAddr::from(([127, 0, 0, 1], HUB_ANNOUNCE_PORT)),
-        )
-    }
-    
-    pub fn start_announce_server(&mut self, digest: Digest, announce_bind: SocketAddr, announce_send: SocketAddr, announce_backup: SocketAddr) {
-        let listen_port = if let Some(listen_address) = self.listen_address{
-            listen_address.port()
-        }
-        else{
-            panic!("No port to announce")
-        };
-        
-        let mut dwd = DigestWithData{
-            digest:digest,
-            data:listen_port as u64
-        };
-        dwd.digest.buf[0] ^= listen_port as u64;
-        dwd.digest.digest_cycle();
-        
-        let digest_u8 = unsafe {std::mem::transmute::<DigestWithData, [u8; 26 * 8]>(dwd)};
-
-        let shared = Arc::clone(&self.shared);
-
-        let announce_thread = std::thread::spawn(move || {
-            
-            let socket = UdpSocket::bind(announce_bind).expect("Server: Cannot bind announce port");
-            socket.set_broadcast(true).expect("Server: cannot set broadcast on announce ip");
-            
-            let thread_sleep_time = time::Duration::from_millis(100);
-            loop {
-                if let Ok(shared) = shared.lock() {
-                    if shared.terminate{
-                        return
-                    }
-                }
-                if let Err(_) = socket.send_to(&digest_u8, announce_send){
-                    if let Err(_) = socket.send_to(&digest_u8, announce_backup){
-                        println!("Cannot send to announce port");
-                        return
-                    }
-                }
-                thread::sleep(thread_sleep_time.clone());
-            }
-        });
-        self.announce_thread = Some(announce_thread);
-    }
-    
     pub fn terminate(&mut self){
         if let Ok(mut shared) = self.shared.lock() {
             shared.terminate = true;
@@ -229,10 +169,6 @@ impl HubServer {
             if let Ok(_) = TcpStream::connect(listen_address) {
                 self.listen_thread.take().expect("cant take listen thread").join().expect("cant join listen thread");
             }
-        }
-        //self.router_thread.take().expect("cant take router thread").join().expect("cant join router thread");
-        if self.announce_thread.is_some() {
-            self.announce_thread.take().expect("cant take announce thread").join().expect("cant join announce_thread thread");
         }
     }
 }

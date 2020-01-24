@@ -20,6 +20,7 @@ pub use crate::animator::*;
 pub use crate::area::*;
 pub use crate::menu::*;
 pub use crate::styling::*;
+pub use crate::liveclient::*;
 
 #[cfg(all(not(feature = "ipc"), target_os = "linux"))] 
 pub use crate::cx_linux::*;
@@ -160,6 +161,8 @@ pub struct Cx {
     pub panic_now: bool,
     pub panic_redraw: bool,
     
+    pub live_client: Option<LiveClient>,
+    
     pub platform: CxPlatform,
 }
 
@@ -211,6 +214,8 @@ impl Default for Cx {
         Self {
             platform_type: PlatformType::Windows,
             running: true,
+            
+            live_client: LiveClient::connect_to_live_server(None),
             
             windows: Vec::new(),
             windows_free: Vec::new(),

@@ -74,10 +74,10 @@ pub struct TextEditor {
     pub _select_scroll: Option<SelectScroll>,
     pub _grid_select_corner: Option<TextPos>,
     pub _is_row_select: bool,
-    pub _line_chunk: Vec<(f32, char)>,
+    //pub _line_chunk: Vec<(f32, char)>,
     
-    pub _highlight_selection: Vec<char>,
-    pub _highlight_token: Vec<char>,
+    //pub _highlight_selection: Vec<char>,
+    //pub _highlight_token: Vec<char>,
     pub _last_cursor_pos: TextPos,
     
     pub _anim_font_scale: f32,
@@ -260,9 +260,9 @@ impl TextEditor {
             _indent_id_alloc: 0.0,
             _indent_line_inst: None,
             
-            _line_chunk: Vec::new(),
-            _highlight_selection: Vec::new(),
-            _highlight_token: Vec::new(),
+            //_line_chunk: Vec::new(),
+            //_highlight_selection: Vec::new(),
+            //_highlight_token: Vec::new(),
             _last_cursor_pos: TextPos::zero(),
             _last_indent_color: Color::default(),
             
@@ -332,7 +332,7 @@ impl TextEditor {
     pub fn shader_selection() -> ShaderId {uid!()}
     pub fn shader_paren_pair() -> ShaderId {uid!()}
     pub fn shader_cursor_row() -> ShaderId {uid!()}
-    pub fn shader_token_highlight() -> ShaderId {uid!()}
+    //pub fn shader_token_highlight() -> ShaderId {uid!()}
     pub fn shader_search_marker() -> ShaderId {uid!()}
     pub fn shader_message_marker() -> ShaderId {uid!()}
     
@@ -456,7 +456,7 @@ impl TextEditor {
                 return df_fill(color);
             }
         })));*/
-        
+        /*
         Self::shader_token_highlight().set(cx, Quad::def_quad_shader().compose(shader_ast!({
             let visible: Self::uniform_highlight_visible();
             fn pixel() -> vec4 {
@@ -467,7 +467,7 @@ impl TextEditor {
                 df_box(0.5, 0.5, w - 1., h - 1., 1.);
                 return df_fill(color);
             }
-        })));
+        })));*/
         
         Self::shader_search_marker().set(cx, Quad::def_quad_shader().compose(shader_ast!({
             fn pixel() -> vec4 {
@@ -560,15 +560,15 @@ impl TextEditor {
         self.selection.shader = Self::shader_selection().get(cx);
         self.paren_pair.shader = Self::shader_paren_pair().get(cx);
         self.cursor_row.shader = Self::shader_cursor_row().get(cx);
-        self.token_highlight.shader = Self::shader_token_highlight().get(cx);
+        //self.token_highlight.shader = Self::shader_token_highlight().get(cx);
         self.message_marker.shader = Self::shader_message_marker().get(cx);
         self.search_marker.shader = Self::shader_search_marker().get(cx);
     }
-    
+    /*
     fn reset_highlight_visible(&mut self, cx: &mut Cx) {
         self._highlight_visibility = 0.0;
         self._highlight_area.write_uniform_float(cx, Self::uniform_highlight_visible(), self._highlight_visibility);
-    }
+    }*/
     
     fn reset_cursor_blinker(&mut self, cx: &mut Cx) {
         cx.stop_timer(&mut self._cursor_blink_timer);
@@ -653,7 +653,7 @@ impl TextEditor {
         
         self.view.redraw_view_area(cx);
         self._last_finger_move = Some(fe.abs);
-        self.update_highlight(cx, text_buffer);
+        //self.update_highlight(cx, text_buffer);
         self.reset_cursor_blinker(cx);
     }
     
@@ -673,9 +673,9 @@ impl TextEditor {
         self._last_finger_move = Some(fe.abs);
         // determine selection drag scroll dynamics
         let repaint_scroll = self.check_select_scroll_dynamics(&fe);
-        if cursor_moved {
-            self.update_highlight(cx, text_buffer);
-        };
+        //if cursor_moved {
+        //     self.update_highlight(cx, text_buffer);
+        //};
         if repaint_scroll || cursor_moved {
             self.view.redraw_view_area(cx);
         }
@@ -684,13 +684,13 @@ impl TextEditor {
         }
     }
     
-    fn handle_finger_up(&mut self, cx: &mut Cx, _fe: &FingerUpEvent, text_buffer: &mut TextBuffer) {
+    fn handle_finger_up(&mut self, cx: &mut Cx, _fe: &FingerUpEvent, _text_buffer: &mut TextBuffer) {
         self.cursors.clear_last_clamp_range();
         self._select_scroll = None;
         self._last_finger_move = None;
         self._grid_select_corner = None;
         self._is_row_select = false;
-        self.update_highlight(cx, text_buffer);
+        //self.update_highlight(cx, text_buffer);
         self.reset_cursor_blinker(cx);
     }
     
@@ -914,7 +914,7 @@ impl TextEditor {
             _ => false
         };
         if cursor_moved {
-            self.update_highlight(cx, text_buffer);
+            //self.update_highlight(cx, text_buffer);
             self.scroll_last_cursor_visible(cx, text_buffer, 0.);
             self.view.redraw_view_area(cx);
             self.reset_cursor_blinker(cx);
@@ -964,7 +964,7 @@ impl TextEditor {
                 self.cursors.replace_text(&te.input, text_buffer);
             }
         }
-        self.update_highlight(cx, text_buffer);
+        //self.update_highlight(cx, text_buffer);
         self.scroll_last_cursor_visible(cx, text_buffer, 0.);
         self.view.redraw_view_area(cx);
         self.reset_cursor_blinker(cx);
@@ -1320,7 +1320,7 @@ impl TextEditor {
             }
         }
     }
-    
+    /*
     fn update_highlight(&mut self, cx: &mut Cx, text_buffer: &TextBuffer) {
         self._highlight_selection = self.cursors.get_selection_highlight(text_buffer);
         let new_token = self.cursors.get_token_highlight(text_buffer);
@@ -1329,7 +1329,7 @@ impl TextEditor {
         }
         self._highlight_token = new_token;
         
-    }
+    }*/
     
     fn draw_new_line(&mut self, cx: &mut Cx) {
         // line geometry is used for scrolling look up of cursors
@@ -1387,7 +1387,7 @@ impl TextEditor {
         self._draw_messages.process_newline();
         
         // highlighting the selection
-        let hl_len = self._highlight_selection.len();
+        /*let hl_len = self._highlight_selection.len();
         if hl_len != 0 {
             for bp in 0..self._line_chunk.len().max(hl_len) - hl_len {
                 let mut found = true;
@@ -1410,7 +1410,7 @@ impl TextEditor {
                 }
             }
             self._line_chunk.truncate(0);
-        }
+        }*/
         
         // search for all markings
         self._line_geometry.push(line_geom);
@@ -1568,29 +1568,29 @@ impl TextEditor {
                 TokenType::Fn => {
                     self.colors.keyword
                 }
-                TokenType::Identifier => {
+                TokenType::Identifier => {/*
                     if chunk == &self._highlight_token[0..] {
                         self.draw_token_highlight_quad(cx, geom);
                         
-                    }
+                    }*/
                     self.colors.identifier
                 }
-                TokenType::Call => {
+                TokenType::Call => {/*
                     if chunk == &self._highlight_token[0..] {
                         self.draw_token_highlight_quad(cx, geom);
-                    }
+                    }*/
                     self.colors.call
                 },
-                TokenType::TypeName => {
+                TokenType::TypeName => {/*
                     if chunk == &self._highlight_token[0..] {
                         self.draw_token_highlight_quad(cx, geom);
-                    }
+                    }*/
                     self.colors.type_name
                 },
-                TokenType::ThemeName => {
+                TokenType::ThemeName => {/*
                     if chunk == &self._highlight_token[0..] {
                         self.draw_token_highlight_quad(cx, geom);
-                    }
+                    }*/
                     self.colors.theme_name
                 },
                 TokenType::Regex => self.colors.string,
@@ -1655,10 +1655,10 @@ impl TextEditor {
             // actually generate the GPU data for the text
             let z = 2.0; // + self._paren_stack.len() as f32;
             //self.text.z = z;
-            let line_chunk = &mut self._line_chunk;
+            //let line_chunk = &mut self._line_chunk;
             if search_cursors.len() > 0 { // slow loop
                 self.text.add_text(cx, geom.x, geom.y, offset, self._text_inst.as_mut().unwrap(), &chunk, | ch, offset, x, w | {
-                    line_chunk.push((x, ch));
+                    //line_chunk.push((x, ch));
                     draw_search.mark_text_select_only(search_cursors, offset, x, geom.y, w, height);
                     draw_messages.mark_text_select_only(&markers.message_cursors, offset, x, geom.y, w, height);
                     draw_cursors.mark_text_with_cursor(cursors, ch, offset, x, geom.y, w, height, z, last_cursor, mark_spaces)
@@ -1666,7 +1666,7 @@ impl TextEditor {
             }
             else {
                 self.text.add_text(cx, geom.x, geom.y, offset, self._text_inst.as_mut().unwrap(), &chunk, | ch, offset, x, w | {
-                    line_chunk.push((x, ch));
+                    //line_chunk.push((x, ch));
                     draw_messages.mark_text_select_only(&markers.message_cursors, offset, x, geom.y, w, height);
                     draw_cursors.mark_text_with_cursor(cursors, ch, offset, x, geom.y, w, height, z, last_cursor, mark_spaces)
                 });
@@ -1684,13 +1684,13 @@ impl TextEditor {
             }
         }
     }
-    
+    /*
     fn draw_token_highlight_quad(&mut self, cx: &mut Cx, geom: Rect) {
         let inst = self.token_highlight.draw_quad_abs(cx, geom);
         if inst.need_uniforms_now(cx) {
             inst.push_uniform_float(cx, self._highlight_visibility);
         }
-    }
+    }*/
     
     fn draw_paren_open(&mut self, token_chunks_index: usize, offset: usize, next_char: char, chunk: &[char]) {
         let marked = if let Some(pos) = self.cursors.get_last_cursor_singular() {

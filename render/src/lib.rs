@@ -88,6 +88,7 @@ mod blit;
 mod text;
 mod events;
 mod menu; 
+mod liveclient;
 
 pub use crate::cx::*;
 pub use crate::quad::*;
