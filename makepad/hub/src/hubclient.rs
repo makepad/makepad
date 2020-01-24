@@ -2,7 +2,7 @@ use crate::hubmsg::*;
 use crate::hubrouter::*;
 use makepad_tinyserde::*;
 
-use std::net::{TcpStream, UdpSocket, SocketAddr, SocketAddrV4, SocketAddrV6, Shutdown};
+use std::net::{TcpStream, SocketAddr, Shutdown};
 use std::io::prelude::*;
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
@@ -222,63 +222,6 @@ impl HubClient {
         })
     }
     
-    pub fn wait_for_announce(digest: Digest) -> Result<SocketAddr, std::io::Error> {
-        Self::wait_for_announce_on(digest, SocketAddr::from(([0, 0, 0, 0], HUB_ANNOUNCE_PORT)))
-    }
-    
-    pub fn wait_for_announce_on(digest: Digest, announce_address: SocketAddr) -> Result<SocketAddr, std::io::Error> {
-        /*
-        #[cfg(any(target_os = "linux", target_os = "macos"))]
-        fn reuse_addr(socket: &mut UdpSocket) {
-            unsafe {
-                let optval: libc::c_int = 1;
-                let _ = libc::setsockopt(
-                    socket.as_raw_fd(),
-                    libc::SOL_SOCKET,
-                    libc::SO_REUSEADDR,
-                    &optval as *const _ as *const libc::c_void,
-                    std::mem::size_of_val(&optval) as libc::socklen_t,
-                );
-            }
-        }
-        
-        #[cfg(any(target_os = "windows", target_arch = "wasm32"))]
-        fn reuse_addr(_socket: &mut UdpSocket) {
-        }
-        */
-        loop {
-            if let Ok(socket) = UdpSocket::bind(announce_address) {
-                // TODO. FIX FOR WINDOWS
-               // reuse_addr(&mut socket);
-                let mut dwd_read = DigestWithData::default();
-                let dwd_u8 = unsafe {std::mem::transmute::<&mut DigestWithData, &mut [u8; 26 * 8]>(&mut dwd_read)};
-                
-                let (bytes, from) = socket.recv_from(dwd_u8) ?;
-                if bytes != 26 * 8 {
-                    println!("Announce port wrong bytecount");
-                }
-                
-                let mut dwd_check = DigestWithData{
-                    digest: digest.clone(),
-                    data: dwd_read.data
-                };
-                dwd_check.data = dwd_read.data;
-                dwd_check.digest.buf[0] ^= dwd_read.data;
-                dwd_check.digest.digest_cycle();
-                
-                if dwd_check == dwd_read { // use this to support multiple hubs on one network
-                    let listen_port = dwd_read.data;
-                    return Ok(match from {
-                        SocketAddr::V4(v4) => SocketAddr::V4(SocketAddrV4::new(*v4.ip(), listen_port as u16)),
-                        SocketAddr::V6(v6) => SocketAddr::V6(SocketAddrV6::new(*v6.ip(), listen_port as u16, v6.flowinfo(), v6.scope_id())),
-                    })
-                }
-            }
-            //else{
-            //    println!("wait for announce bind failed");
-            //}
-        }
-    }
     
     pub fn join_threads(&mut self) {
         self.read_thread.take().expect("cant take read thread").join().expect("cant join read thread");
