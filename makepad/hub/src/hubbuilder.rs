@@ -108,7 +108,7 @@ impl HubBuilder {
         route_send.clone()
     }
     
-    pub fn run_builder_networked<F>(digest: Digest, in_address: Option<SocketAddr>, builder: &str, hub_log: HubLog, event_handler: F)
+    pub fn run_builder_networked<F>(digest: Digest, in_address: SocketAddr, builder: &str, hub_log: HubLog, event_handler: F)
     where F: Fn(&mut HubBuilder, FromHubMsg) -> Result<(), HubWsError> + Clone + Send + 'static {
         
         let workspaces = Arc::new(Mutex::new(HashMap::<String, String>::new()));
@@ -117,22 +117,14 @@ impl HubBuilder {
         let processes = Arc::new(Mutex::new(Vec::<HubProcess>::new()));
         
         loop {
-            let address = if let Some(address) = in_address {
-                address
-            }
-            else {
-                hub_log.msg("Builder waiting for hub announcement..", &builder);
-
-                HubClient::wait_for_announce(digest.clone()).expect("cannot wait for announce")
-            };
             
-            hub_log.msg("Builder connecting to {:?}", &address);
+            hub_log.msg("Builder connecting to {:?}", &in_address);
 
-            let mut hub_client = if let Ok(hub_client) = HubClient::connect_to_server(digest.clone(), address, hub_log.clone()) {
+            let mut hub_client = if let Ok(hub_client) = HubClient::connect_to_server(digest.clone(), in_address, hub_log.clone()) {
                 hub_client
             }
             else {
-                println!("Builder cannot connect to to {:?}, retrying", address);
+                println!("Builder cannot connect to to {:?}, retrying", in_address);
                 std::thread::sleep(std::time::Duration::from_millis(500));
                 continue;
             };
@@ -204,10 +196,6 @@ impl HubBuilder {
             println!("cargo run -p builder -- connect <ip>:<port> <key.ron> <workspace>");
             println!("example: cargo run -p builder -- connect 127.0.0.1:7243 key.ron windows");
             println!("");
-            println!("Listen to hub server announce");
-            println!("cargo run -p builder -- listen <key.ron> <workspace>");
-            println!("example: cargo run -p builder -- listen key.ron windows");
-            println!("");
             println!("Build a specific package");
             println!("cargo run -p builder -- build <path> <package> <config>");
             println!("example: cargo run -p builder -- build edit_repo makepad release");
@@ -226,18 +214,7 @@ impl HubBuilder {
         }
         
         let (message, path) = match args[1].as_ref() {
-            "listen" => {
-                if args.len() != 4 {
-                    return print_help();
-                }
-                let key_file = args[2].to_string();
-                let builder = args[3].to_string();
-                let utf8_data = std::fs::read_to_string(key_file).expect("Can't read key file");
-                let digest: Digest = DeRon::deserialize_ron(&utf8_data).expect("Can't load key file");
-                println!("Starting workspace listening to announce");
-                Self::run_builder_networked(digest, None, &builder, HubLog::None, event_handler);
-                return
-            },
+
             "connect" => {
                 if args.len() != 5 {
                     return print_help();
@@ -248,7 +225,7 @@ impl HubBuilder {
                 let utf8_data = std::fs::read_to_string(key_file).expect("Can't read key file");
                 let digest: Digest = DeRon::deserialize_ron(&utf8_data).expect("Can't load key file");
                 println!("Starting workspace connecting to ip");
-                Self::run_builder_networked(digest, Some(addr), &builder, HubLog::None, event_handler);
+                Self::run_builder_networked(digest, addr, &builder, HubLog::None, event_handler);
                 return
             },
             "list" => {
