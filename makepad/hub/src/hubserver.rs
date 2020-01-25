@@ -15,7 +15,7 @@ pub enum HubServerConfig {
 }
 
 pub struct HubServerShared {
-    pub terminate:bool,
+    pub terminate: bool,
     pub connections: Vec<(HubAddr, TcpStream)>
 }
 
@@ -26,7 +26,7 @@ pub struct HubServer {
 }
 
 impl HubServer {
-    pub fn start_hub_server(digest: Digest, config: &HubServerConfig, hub_router:&HubRouter) -> Option<HubServer> {
+    pub fn start_hub_server(digest: Digest, config: &HubServerConfig, hub_router: &HubRouter) -> Option<HubServer> {
         
         let listen_address = match config {
             HubServerConfig::Offline => return None,
@@ -34,15 +34,15 @@ impl HubServer {
             HubServerConfig::Network(port) => SocketAddr::from(([0, 0, 0, 0], *port)),
             HubServerConfig::InterfaceV4(port, ip) => SocketAddr::from((*ip, *port)),
         };
-
-        let listener = if let Ok(listener) = TcpListener::bind(listen_address){listener}else{println!("start_hub_server bind server address");return None};
+        
+        let listener = if let Ok(listener) = TcpListener::bind(listen_address) {listener}else {println!("start_hub_server bind server address"); return None};
         let listen_address = listener.local_addr().expect("Cannot get local address");
         
         let tx_pump = hub_router.tx_pump.clone();
-        let routes = Arc::clone(&hub_router.routes);//Arc::new(Mutex::new(Vec::<HubServerConnection>::new()));
-        let shared = Arc::new(Mutex::new(HubServerShared{
-            connections:Vec::new(),
-            terminate:false
+        let routes = Arc::clone(&hub_router.routes); //Arc::new(Mutex::new(Vec::<HubServerConnection>::new()));
+        let shared = Arc::new(Mutex::new(HubServerShared {
+            connections: Vec::new(),
+            terminate: false
         }));
         
         let listen_thread = {
@@ -54,10 +54,10 @@ impl HubServer {
                 for tcp_stream in listener.incoming() {
                     let tcp_stream = tcp_stream.expect("Incoming stream failure");
                     let peer_addr = HubAddr::from_socket_addr(tcp_stream.peer_addr().expect("No peer address"));
-
-                    if let Ok(mut shared) = shared.lock(){
-                        if shared.terminate{
-                            for (_, tcp_stream) in &mut shared.connections{
+                    
+                    if let Ok(mut shared) = shared.lock() {
+                        if shared.terminate {
+                            for (_, tcp_stream) in &mut shared.connections {
                                 let _ = tcp_stream.shutdown(Shutdown::Both);
                             }
                             // lets disconnect all our connections
@@ -70,7 +70,7 @@ impl HubServer {
                     let (tx_write, rx_write) = mpsc::channel::<FromHubMsg>();
                     let tx_write_copy = tx_write.clone();
                     // clone our transmit-to-pump
-                    let _read_thread = { 
+                    let _read_thread = {
                         let tx_pump = tx_pump.clone();
                         let digest = digest.clone();
                         let peer_addr = peer_addr.clone();
@@ -90,9 +90,9 @@ impl HubServer {
                                             msg: HubMsg::ConnectionError(e.clone())
                                         })).expect("tx_pump.send fails - should never happen");
                                         // lets break rx write
-                                        let _ = tx_write_copy.send(FromHubMsg{
-                                            from:peer_addr.clone(),
-                                            msg:HubMsg::ConnectionError(e)
+                                        let _ = tx_write_copy.send(FromHubMsg {
+                                            from: peer_addr.clone(),
+                                            msg: HubMsg::ConnectionError(e)
                                         });
                                         return
                                     }
@@ -109,14 +109,14 @@ impl HubServer {
                         //let hub_log = hub_log.clone();
                         std::thread::spawn(move || {
                             while let Ok(htc_msg) = rx_write.recv() {
-                                 match &htc_msg.msg{
-                                    HubMsg::ConnectionError(_)=>{ // we are closed by the read loop
+                                match &htc_msg.msg {
+                                    HubMsg::ConnectionError(_) => { // we are closed by the read loop
                                         let _ = tcp_stream.shutdown(Shutdown::Both);
                                         break
                                     },
-                                    _=>()
+                                    _ => ()
                                 }
-                                let mut msg_buf = Vec::new();
+                                let mut msg_buf = Vec::new(); 
                                 htc_msg.ser_bin(&mut msg_buf);
                                 
                                 if let Err(e) = write_block_to_tcp_stream(&mut tcp_stream, &msg_buf, digest.clone()) {
@@ -129,8 +129,8 @@ impl HubServer {
                                 }
                             }
                             // remove tx_write from our shared pool
-                            if let Ok(mut shared) = shared.lock(){
-                                while let Some(position) = shared.connections.iter().position(|(addr,_)| *addr == peer_addr){
+                            if let Ok(mut shared) = shared.lock() {
+                                while let Some(position) = shared.connections.iter().position( | (addr, _) | *addr == peer_addr) {
                                     shared.connections.remove(position);
                                 }
                             }
@@ -155,11 +155,11 @@ impl HubServer {
             listen_thread: Some(listen_thread),
         };
         
-
+        
         return Some(hub_server);
     }
-
-    pub fn terminate(&mut self){
+    
+    pub fn terminate(&mut self) {
         if let Ok(mut shared) = self.shared.lock() {
             shared.terminate = true;
         }
