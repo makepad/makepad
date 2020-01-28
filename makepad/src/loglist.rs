@@ -9,7 +9,7 @@ use crate::codeicon::*;
 pub struct LogList {
     pub view: ScrollView,
     pub item_draw: LogItemDraw,
-    pub list: ListLogic
+    pub list: ListLogic,
 }
 
 #[derive(Clone)]
@@ -39,7 +39,8 @@ impl LogItemDraw {
     
     pub fn layout_item() -> LayoutId {uid!()}
     pub fn text_style_item() -> TextStyleId {uid!()}
-    
+    pub fn layout_search_input()-> LayoutId{uid!()}
+
     pub fn style(cx: &mut Cx, opt: &StyleOptions) {
         
         Self::layout_item().set(cx, Layout {
@@ -61,13 +62,6 @@ impl LogItemDraw {
         ]) 
     }
     
-    pub fn get_default_anim_cut(cx: &Cx, counter: usize, marked: bool) -> Anim {
-        Anim::new(Play::Cut {duration: 0.01}, vec![
-            Track::color(Quad::instance_color(), Ease::Lin, vec![
-                (0.0, if marked {Theme::color_bg_marked().get(cx)} else if counter & 1 == 0 {Theme::color_bg_selected().get(cx)}else {Theme::color_bg_odd().get(cx)})
-            ])
-        ]) 
-    }
     
     pub fn get_over_anim(cx: &Cx, counter: usize, marked: bool) -> Anim {
         let over_color = if marked {Theme::color_bg_marked_over().get(cx)} else if counter & 1 == 0 {Theme::color_bg_selected_over().get(cx)}else {Theme::color_bg_odd_over().get(cx)};
@@ -95,7 +89,7 @@ impl LogItemDraw {
     
     pub fn draw_log_item(&mut self, cx: &mut Cx, index: usize, list_item: &mut ListItem, log_item: &HubLogItem) {
         
-        list_item.animator.init(cx, | cx | LogItemDraw::get_default_anim(cx, index, false));
+        list_item.animator.init(cx, | cx | Self::get_default_anim(cx, index, false));
         
         self.item_bg.color = list_item.animator.last_color(cx, Quad::instance_color());
         
@@ -200,6 +194,7 @@ impl LogItemDraw {
 pub enum LogListEvent {
     SelectLocMessage {
         loc_message: LocMessage,
+        jump_to_offset: usize
     },
     SelectMessages {
         items: String
@@ -212,13 +207,24 @@ impl LogList {
         Self {
             item_draw: LogItemDraw::proto(cx),
             list: ListLogic {
+                multi_select: true,
                 ..ListLogic::default()
             },
             view: ScrollView::proto(cx),
         }
     }
+
+    pub fn style_text_input() -> StyleId {uid!()}
     
     pub fn style(cx: &mut Cx, opt: &StyleOptions) {
+        cx.begin_style(Self::style_text_input());
+        TextEditor::layout_bg().set(cx, Layout {
+            walk: Walk {width: Width::Compute, height: Height::Compute, margin: Margin {t: 4., l: 14., r: 0., b: 0.}},
+            padding: Padding::all(7.),
+            ..Layout::default()
+        });
+        cx.end_style();
+        
         LogItemDraw::style(cx, opt);
     }
     
@@ -262,16 +268,9 @@ impl LogList {
                     bm.log_items.truncate(0);
                     self.view.redraw_view_area(cx);
                 },
-                KeyCode::Backtick => if ke.modifiers.logo || ke.modifiers.control {
-                    if bm.active_builds.len() == 0 {
-                        bm.restart_build(cx, storage);
-                    }
-                    bm.artifact_run(storage);
-                    self.view.redraw_view_area(cx);
-                },
                 _ => ()
             },
-            Event::Signal(se) => if se.signal == bm.signal {
+            Event::Signal(se) => if let Some(_) = se.signals.get(&bm.signal) {
                 // we have new things
                 self.view.redraw_view_area(cx);
                 //println!("SIGNAL!");
@@ -279,7 +278,7 @@ impl LogList {
             _ => ()
         }
         
-        let le = self.list.handle_list_logic(cx, event, select, | cx, item_event, item, item_index | match item_event {
+        let le = self.list.handle_list_logic(cx, event, select, false, | cx, item_event, item, item_index | match item_event {
             ListLogicEvent::Animate(ae) => {
                 item.animator.calc_area(cx, item.animator.area, ae.time);
             },
@@ -293,7 +292,7 @@ impl LogList {
                 item.animator.play_anim(cx, LogItemDraw::get_default_anim(cx, item_index, false));
             },
             ListLogicEvent::Cleanup => {
-                item.animator.play_anim(cx, LogItemDraw::get_default_anim_cut(cx, item_index, item.is_selected));
+                item.animator.play_anim(cx, LogItemDraw::get_default_anim(cx, item_index, item.is_selected));
             },
             ListLogicEvent::Over => {
                 item.animator.play_anim(cx, LogItemDraw::get_over_anim(cx, item_index, item.is_selected));
@@ -311,25 +310,27 @@ impl LogList {
                     if loc_message.path.len() == 0 {
                         return LogListEvent::SelectLocMessage {
                             loc_message: loc_message.clone(),
+                            jump_to_offset: 0,
                         }
                     }
+                    
                     let text_buffer = storage.text_buffer_from_path(cx, &storage.remap_sync_path(&loc_message.path));
                     // check if we have a range:
-                    if let Some((head, tail)) = loc_message.range {
+                    let offset = if let Some((head, tail)) = loc_message.range {
                         if select_at_end {
-                            text_buffer.messages.jump_to_offset = head;
+                            head
                         }
                         else {
-                            text_buffer.messages.jump_to_offset = tail;
+                            tail
                         }
                     }
                     else {
-                        text_buffer.messages.jump_to_offset = text_buffer.text_pos_to_offset(TextPos {row: loc_message.row.max(1) - 1, col: loc_message.col.max(1) - 1})
-                    }
-                    cx.send_signal(text_buffer.signal, TextBuffer::status_jump_to_offset());
+                        text_buffer.text_pos_to_offset(TextPos {row: loc_message.row.max(1) - 1, col: loc_message.col.max(1) - 1})
+                    };
                     
                     LogListEvent::SelectLocMessage {
                         loc_message: loc_message.clone(),
+                        jump_to_offset: offset
                     }
                 }
                 else {
@@ -362,7 +363,7 @@ impl LogList {
                     items: items,
                 }
             },
-            ListEvent::None => {
+            ListEvent::SelectDouble(_) | ListEvent::None => {
                 LogListEvent::None
             }
         }

@@ -10,6 +10,7 @@ members = [
     "examples/cmdline_example",
     "examples/webgl_example_wasm",
     "tools/webserver",
+    "tools/brotli_test",
     "builder"
 ]
 

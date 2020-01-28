@@ -1,5 +1,6 @@
 use makepad_render::*;
 use makepad_widget::*;
+use crate::searchindex::*;
 
 #[derive(Clone)]
 pub struct RustEditor {
@@ -15,9 +16,12 @@ impl RustEditor {
         editor
     }
       
-    pub fn handle_rust_editor(&mut self, cx: &mut Cx, event: &mut Event, text_buffer: &mut TextBuffer) -> TextEditorEvent {
+    pub fn handle_rust_editor(&mut self, cx: &mut Cx, event: &mut Event, text_buffer: &mut TextBuffer, search_index: Option<&mut SearchIndex>) -> TextEditorEvent {
         let ce = self.text_editor.handle_text_editor(cx, event, text_buffer);
         match ce {
+            TextEditorEvent::Change => {
+                RustTokenizer::update_token_chunks(text_buffer, search_index);
+            },
             TextEditorEvent::AutoFormat => {
                 let formatted = RustTokenizer::auto_format(text_buffer, false).out_lines;
                 self.text_editor.cursors.replace_lines_formatted(formatted, text_buffer);
@@ -28,25 +32,13 @@ impl RustEditor {
         ce
     }
     
-    pub fn draw_rust_editor(&mut self, cx: &mut Cx, text_buffer: &mut TextBuffer) {
-        if text_buffer.needs_token_chunks() && text_buffer.lines.len() >0 {
-            let mut state = TokenizerState::new(&text_buffer.lines);
-            let mut tokenizer = RustTokenizer::new();
-            let mut pair_stack = Vec::new();
-            loop {
-                let offset = text_buffer.flat_text.len();
-                let token_type = tokenizer.next_token(&mut state, &mut text_buffer.flat_text, &text_buffer.token_chunks);
-                TokenChunk::push_with_pairing(&mut text_buffer.token_chunks, &mut pair_stack, state.next, offset, text_buffer.flat_text.len(), token_type);
-                if token_type == TokenType::Eof {
-                    break
-                }
-            }
-        }
+    pub fn draw_rust_editor(&mut self, cx: &mut Cx, text_buffer: &mut TextBuffer, search_index: Option<&mut SearchIndex>) {
+        RustTokenizer::update_token_chunks(text_buffer, search_index);
         
         if self.text_editor.begin_text_editor(cx, text_buffer).is_err() {return}
         
         for (index, token_chunk) in text_buffer.token_chunks.iter_mut().enumerate() {
-            self.text_editor.draw_chunk(cx, index, &text_buffer.flat_text, token_chunk, &text_buffer.messages.cursors);
+            self.text_editor.draw_chunk(cx, index, &text_buffer.flat_text, token_chunk, &text_buffer.markers);
         }
         
         self.text_editor.end_text_editor(cx, text_buffer);
@@ -60,6 +52,26 @@ pub struct RustTokenizer {
 }
 
 impl RustTokenizer {
+    pub fn update_token_chunks(text_buffer: &mut TextBuffer, mut search_index: Option<&mut SearchIndex>){
+        if text_buffer.needs_token_chunks() && text_buffer.lines.len() >0 {
+            let mut state = TokenizerState::new(&text_buffer.lines);
+            let mut tokenizer = RustTokenizer::new();
+            let mut pair_stack = Vec::new();
+            loop {
+                let offset = text_buffer.flat_text.len();
+                let token_type = tokenizer.next_token(&mut state, &mut text_buffer.flat_text, &text_buffer.token_chunks);
+                TokenChunk::push_with_pairing(&mut text_buffer.token_chunks, &mut pair_stack, state.next, offset, text_buffer.flat_text.len(), token_type);
+                if token_type == TokenType::Eof {
+                    break
+                }
+                if let Some(search_index) = search_index.as_mut(){
+                    search_index.new_rust_token(&text_buffer);
+                }
+                // do running tree-based diff with previous tokens.
+            }
+        }
+    }
+      
     pub fn new() -> RustTokenizer {
         RustTokenizer {
             comment_single: false,
@@ -651,7 +663,7 @@ impl RustTokenizer {
                     return TokenType::Flow
                 }
                 if state.keyword(chunk, "mpl") {
-                    return TokenType::TypeDef
+                    return TokenType::Impl
                 }
                 if state.keyword(chunk, "size") {
                     return TokenType::BuiltinType
@@ -1089,7 +1101,7 @@ impl RustTokenizer {
                     out.extend(tp.cur_chunk());
                 },
                 // these are followed by unary operators (some)
-                TokenType::TypeDef | TokenType::Fn | TokenType::Hash | TokenType::Splat |
+                TokenType::TypeDef | TokenType::Impl | TokenType::Fn | TokenType::Hash | TokenType::Splat |
                 TokenType::Keyword | TokenType::Flow | TokenType::Looping => {
                     is_unary_operator = true;
                     paren_stack.last_mut().unwrap().angle_counter = 0;

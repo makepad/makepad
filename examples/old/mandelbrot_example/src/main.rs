@@ -123,7 +123,7 @@ struct App {
 
 main_app!(App, "Example");
 
-impl Style for App {
+impl Style for App{
     fn style(cx: &mut Cx) -> Self {
         set_dark_style(cx);
         let mut presets = Vec::new();

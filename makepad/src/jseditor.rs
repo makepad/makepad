@@ -1,5 +1,6 @@
 use makepad_render::*;
 use makepad_widget::*;
+use crate::searchindex::*;
 
 #[derive(Clone)]
 pub struct JSEditor {
@@ -29,25 +30,14 @@ impl JSEditor {
         ce
     }
     
-    pub fn draw_js_editor(&mut self, cx: &mut Cx, text_buffer: &mut TextBuffer) {
-        if text_buffer.needs_token_chunks() && text_buffer.lines.len() >0 {
-            let mut state = TokenizerState::new(&text_buffer.lines);
-            let mut tokenizer = JSTokenizer::new();
-            let mut pair_stack = Vec::new();
-            loop {
-                let offset = text_buffer.flat_text.len();
-                let token_type = tokenizer.next_token(&mut state, &mut text_buffer.flat_text, &text_buffer.token_chunks);
-                TokenChunk::push_with_pairing(&mut text_buffer.token_chunks, &mut pair_stack, state.next, offset, text_buffer.flat_text.len(), token_type);
-                if token_type == TokenType::Eof {
-                    break
-                }
-            }
-        }
+    pub fn draw_js_editor(&mut self, cx: &mut Cx, text_buffer: &mut TextBuffer, search_index: Option<&mut SearchIndex>) {
+        
+        JSTokenizer::update_token_chunks(text_buffer, search_index);
         
         if self.text_editor.begin_text_editor(cx, text_buffer).is_err() {return}
         
         for (index, token_chunk) in text_buffer.token_chunks.iter_mut().enumerate() {
-            self.text_editor.draw_chunk(cx, index, &text_buffer.flat_text, token_chunk, &text_buffer.messages.cursors);
+            self.text_editor.draw_chunk(cx, index, &text_buffer.flat_text, token_chunk, &text_buffer.markers);
         }
         
         self.text_editor.end_text_editor(cx, text_buffer);
@@ -64,6 +54,22 @@ impl JSTokenizer {
         JSTokenizer {
             comment_single: false,
             comment_depth: 0
+        }
+    }
+    
+    pub fn update_token_chunks(text_buffer: &mut TextBuffer, mut _search_index: Option<&mut SearchIndex>){
+            if text_buffer.needs_token_chunks() && text_buffer.lines.len() >0 {
+            let mut state = TokenizerState::new(&text_buffer.lines);
+            let mut tokenizer = JSTokenizer::new();
+            let mut pair_stack = Vec::new();
+            loop {
+                let offset = text_buffer.flat_text.len();
+                let token_type = tokenizer.next_token(&mut state, &mut text_buffer.flat_text, &text_buffer.token_chunks);
+                TokenChunk::push_with_pairing(&mut text_buffer.token_chunks, &mut pair_stack, state.next, offset, text_buffer.flat_text.len(), token_type);
+                if token_type == TokenType::Eof {
+                    break
+                }
+            }
         }
     }
     
@@ -880,7 +886,7 @@ impl JSTokenizer {
                     is_unary_operator = true;
                 },
                 // these are followed by unary operators (some)
-                TokenType::TypeDef | TokenType::Fn | TokenType::Hash | TokenType::Splat | TokenType::Namespace |
+                TokenType::TypeDef |TokenType::Impl | TokenType::Fn | TokenType::Hash | TokenType::Splat | TokenType::Namespace |
                 TokenType::Keyword | TokenType::Flow | TokenType::Looping => {
                     is_unary_operator = true;
                     
