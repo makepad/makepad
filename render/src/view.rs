@@ -198,6 +198,17 @@ impl View {
         }
     }
     
+    pub fn redraw_view_parent_area(&self, cx: &mut Cx) {
+        if let Some(view_id) = self.view_id {
+            let cxview = &cx.views[view_id];
+            let area = Area::View(ViewArea {view_id: view_id, redraw_id: cxview.redraw_id});
+            cx.redraw_parent_area(area);
+        }
+        else {
+            cx.redraw_parent_area(Area::All)
+        }
+    }
+    
     pub fn get_view_area(&self, cx: &Cx) -> Area {
         if let Some(view_id) = self.view_id {
             let cxview = &cx.views[view_id];

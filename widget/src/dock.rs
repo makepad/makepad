@@ -1,10 +1,10 @@
 use std::mem;
 
 use makepad_render::*;
+use makepad_tinyserde::*;
 use crate::splitter::*;
 use crate::tabcontrol::*;
 use crate::widgetstyle::*;
-use serde::*;
 
 #[derive(Clone)]
 pub struct Dock<TItem>
@@ -38,7 +38,7 @@ where TItem: Clone {
     NewItems {fe: FingerUpEvent, items: Vec<DockTab<TItem>>}
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, SerRon, DeRon)]
 pub struct DockTab<TItem>
 where TItem: Clone
 {
@@ -47,7 +47,7 @@ where TItem: Clone
     pub item: TItem
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, SerRon, DeRon)]
 pub enum DockItem<TItem>
 where TItem: Clone
 {

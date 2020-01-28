@@ -730,17 +730,16 @@ impl Win32Window {
                 }
                 else {None};
                 if let Some(status) = status{
+                    let mut signals = HashMap::new();
+                    signals.insert(Signal {signal_id: wparam as usize}, vec![status]);
                     window.do_callback(&mut vec![
-                        Event::Signal(SignalEvent {
-                            signal: Signal {signal_id: wparam as usize},
-                            status: status
-                        })
+                        Event::Signal(SignalEvent {signals})
                     ]);
                 }
             },
             winuser::WM_CLOSE => { // close requested
                 let mut events = vec![Event::WindowCloseRequested(WindowCloseRequestedEvent {
-                    window_id: window.window_id,
+                    window_id: window.window_id, 
                     accept_close: true
                 })];
                 window.do_callback(&mut events);

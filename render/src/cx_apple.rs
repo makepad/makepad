@@ -3,12 +3,13 @@
 #![allow(non_camel_case_types)]
 #![allow(non_upper_case_globals)]
 
-pub use objc::runtime::{Class, Object, Protocol, Sel, BOOL, YES, NO};
-pub use objc::declare::ClassDecl;
-pub use objc::{msg_send, sel, sel_impl, class};
-use bitflags::bitflags;
+pub use makepad_objc_sys::runtime::{Class, Object, Protocol, Sel, BOOL, YES, NO};
+pub use makepad_objc_sys::declare::ClassDecl;
+pub use makepad_objc_sys::{msg_send, sel,  class, sel_impl};
+pub use makepad_objc_sys::{Encode, Encoding};
+//use bitflags::bitflags;
 
-pub type id = *mut objc::runtime::Object;
+pub type id = *mut makepad_objc_sys::runtime::Object;
 pub const nil: id = 0 as id;
 
 
@@ -152,10 +153,10 @@ pub struct NSPoint {
 }
 
 
-unsafe impl objc::Encode for NSPoint {
-    fn encode() -> objc::Encoding {
+unsafe impl Encode for NSPoint {
+    fn encode() -> Encoding {
         let encoding = format!("{{CGPoint={}{}}}", f64::encode().as_str(), f64::encode().as_str());
-        unsafe {objc::Encoding::from_str(&encoding)}
+        unsafe {Encoding::from_str(&encoding)}
     }
 }
 
@@ -166,10 +167,10 @@ pub struct NSSize {
     pub height: f64,
 }
 
-unsafe impl objc::Encode for NSSize {
-    fn encode() -> objc::Encoding {
+unsafe impl Encode for NSSize {
+    fn encode() -> Encoding {
         let encoding = format!("{{CGSize={}{}}}", f64::encode().as_str(), f64::encode().as_str());
-        unsafe {objc::Encoding::from_str(&encoding)}
+        unsafe {Encoding::from_str(&encoding)}
     }
 }
 
@@ -181,25 +182,24 @@ pub struct NSRect {
     pub size: NSSize,
 }
 
-unsafe impl objc::Encode for NSRect {
-    fn encode() -> objc::Encoding {
+unsafe impl Encode for NSRect {
+    fn encode() -> Encoding {
         let encoding = format!("{{CGRect={}{}}}", NSPoint::encode().as_str(), NSSize::encode().as_str());
-        unsafe {objc::Encoding::from_str(&encoding)}
+        unsafe {Encoding::from_str(&encoding)}
     }
 }
 
-bitflags!{
-    pub struct NSEventModifierFlags: u64 {
-        const NSAlphaShiftKeyMask = 1 << 16;
-        const NSShiftKeyMask = 1 << 17;
-        const NSControlKeyMask = 1 << 18;
-        const NSAlternateKeyMask = 1 << 19;
-        const NSCommandKeyMask = 1 << 20;
-        const NSNumericPadKeyMask = 1 << 21;
-        const NSHelpKeyMask = 1 << 22;
-        const NSFunctionKeyMask = 1 << 23;
-        const NSDeviceIndependentModifierFlagsMask = 0xffff0000;
-    }
+#[repr(u64)] // NSUInteger
+pub enum NSEventModifierFlags {
+    NSAlphaShiftKeyMask = 1 << 16,
+    NSShiftKeyMask= 1 << 17,
+    NSControlKeyMask = 1 << 18,
+    NSAlternateKeyMask = 1 << 19,
+    NSCommandKeyMask = 1 << 20,
+    NSNumericPadKeyMask = 1 << 21,
+    NSHelpKeyMask = 1 << 22,
+    NSFunctionKeyMask = 1 << 23,
+    NSDeviceIndependentModifierFlagsMask = 0xffff0000
 }
 
 const UTF8_ENCODING: usize = 4;
@@ -246,57 +246,55 @@ pub enum NSEventType {
     NSEventTypePressure = 34,
 }
 
-bitflags! {
-    pub struct NSEventMask: u64 {
-        const NSLeftMouseDownMask = 1 << NSEventType::NSLeftMouseDown as u64;
-        const NSLeftMouseUpMask = 1 << NSEventType::NSLeftMouseUp as u64;
-        const NSRightMouseDownMask = 1 << NSEventType::NSRightMouseDown as u64;
-        const NSRightMouseUpMask = 1 << NSEventType::NSRightMouseUp as u64;
-        const NSMouseMovedMask = 1 << NSEventType::NSMouseMoved as u64;
-        const NSLeftMouseDraggedMask = 1 << NSEventType::NSLeftMouseDragged as u64;
-        const NSRightMouseDraggedMask = 1 << NSEventType::NSRightMouseDragged as u64;
-        const NSMouseEnteredMask = 1 << NSEventType::NSMouseEntered as u64;
-        const NSMouseExitedMask = 1 << NSEventType::NSMouseExited as u64;
-        const NSKeyDownMask = 1 << NSEventType::NSKeyDown as u64;
-        const NSKeyUpMask = 1 << NSEventType::NSKeyUp as u64;
-        const NSFlagsChangedMask = 1 << NSEventType::NSFlagsChanged as u64;
-        const NSAppKitDefinedMask = 1 << NSEventType::NSAppKitDefined as u64;
-        const NSSystemDefinedMask = 1 << NSEventType::NSSystemDefined as u64;
-        const NSApplicationDefinedMask = 1 << NSEventType::NSApplicationDefined as u64;
-        const NSPeriodicMask = 1 << NSEventType::NSPeriodic as u64;
-        const NSCursorUpdateMask = 1 << NSEventType::NSCursorUpdate as u64;
-        const NSScrollWheelMask = 1 << NSEventType::NSScrollWheel as u64;
-        const NSTabletPointMask = 1 << NSEventType::NSTabletPoint as u64;
-        const NSTabletProximityMask = 1 << NSEventType::NSTabletProximity as u64;
-        const NSOtherMouseDownMask = 1 << NSEventType::NSOtherMouseDown as u64;
-        const NSOtherMouseUpMask = 1 << NSEventType::NSOtherMouseUp as u64;
-        const NSOtherMouseDraggedMask = 1 << NSEventType::NSOtherMouseDragged as u64;
-        const NSEventMaskGesture = 1 << NSEventType::NSEventTypeGesture as u64;
-        const NSEventMaskSwipe = 1 << NSEventType::NSEventTypeSwipe as u64;
-        const NSEventMaskRotate = 1 << NSEventType::NSEventTypeRotate as u64;
-        const NSEventMaskBeginGesture = 1 << NSEventType::NSEventTypeBeginGesture as u64;
-        const NSEventMaskEndGesture = 1 << NSEventType::NSEventTypeEndGesture as u64;
-        const NSEventMaskPressure = 1 << NSEventType::NSEventTypePressure as u64;
-        const NSAnyEventMask = 0xffffffffffffffff;
-    }
+#[repr(u64)] // NSUInteger
+pub enum NSEventMask{
+    NSLeftMouseDownMask = 1 << NSEventType::NSLeftMouseDown as u64,
+    NSLeftMouseUpMask = 1 << NSEventType::NSLeftMouseUp as u64,
+    NSRightMouseDownMask = 1 << NSEventType::NSRightMouseDown as u64,
+    NSRightMouseUpMask = 1 << NSEventType::NSRightMouseUp as u64,
+    NSMouseMovedMask = 1 << NSEventType::NSMouseMoved as u64,
+    NSLeftMouseDraggedMask = 1 << NSEventType::NSLeftMouseDragged as u64,
+    NSRightMouseDraggedMask = 1 << NSEventType::NSRightMouseDragged as u64,
+    NSMouseEnteredMask = 1 << NSEventType::NSMouseEntered as u64,
+    NSMouseExitedMask = 1 << NSEventType::NSMouseExited as u64,
+    NSKeyDownMask = 1 << NSEventType::NSKeyDown as u64,
+    NSKeyUpMask = 1 << NSEventType::NSKeyUp as u64,
+    NSFlagsChangedMask = 1 << NSEventType::NSFlagsChanged as u64,
+    NSAppKitDefinedMask = 1 << NSEventType::NSAppKitDefined as u64,
+    NSSystemDefinedMask = 1 << NSEventType::NSSystemDefined as u64,
+    NSApplicationDefinedMask = 1 << NSEventType::NSApplicationDefined as u64,
+    NSPeriodicMask = 1 << NSEventType::NSPeriodic as u64,
+    NSCursorUpdateMask = 1 << NSEventType::NSCursorUpdate as u64,
+    NSScrollWheelMask = 1 << NSEventType::NSScrollWheel as u64,
+    NSTabletPointMask = 1 << NSEventType::NSTabletPoint as u64,
+    NSTabletProximityMask = 1 << NSEventType::NSTabletProximity as u64,
+    NSOtherMouseDownMask = 1 << NSEventType::NSOtherMouseDown as u64,
+    NSOtherMouseUpMask = 1 << NSEventType::NSOtherMouseUp as u64,
+    NSOtherMouseDraggedMask = 1 << NSEventType::NSOtherMouseDragged as u64,
+    NSEventMaskGesture = 1 << NSEventType::NSEventTypeGesture as u64,
+    NSEventMaskSwipe = 1 << NSEventType::NSEventTypeSwipe as u64,
+    NSEventMaskRotate = 1 << NSEventType::NSEventTypeRotate as u64,
+    NSEventMaskBeginGesture = 1 << NSEventType::NSEventTypeBeginGesture as u64,
+    NSEventMaskEndGesture = 1 << NSEventType::NSEventTypeEndGesture as u64,
+    NSEventMaskPressure = 1 << NSEventType::NSEventTypePressure as u64,
+    NSAnyEventMask = 0xffffffffffffffff
 }
 
-bitflags!{
-    pub struct NSWindowStyleMask: u64 {
-        const NSBorderlessWindowMask = 0;
-        const NSTitledWindowMask = 1 << 0;
-        const NSClosableWindowMask = 1 << 1;
-        const NSMiniaturizableWindowMask = 1 << 2;
-        const NSResizableWindowMask = 1 << 3;
-        
-        const NSTexturedBackgroundWindowMask = 1 << 8;
-        
-        const NSUnifiedTitleAndToolbarWindowMask = 1 << 12;
-        
-        const NSFullScreenWindowMask = 1 << 14;
-        
-        const NSFullSizeContentViewWindowMask = 1 << 15;
-    }
+#[repr(u64)] // NSUInteger
+pub enum NSWindowStyleMask{
+    NSBorderlessWindowMask = 0,
+    NSTitledWindowMask = 1 << 0,
+    NSClosableWindowMask = 1 << 1,
+    NSMiniaturizableWindowMask = 1 << 2,
+    NSResizableWindowMask = 1 << 3,
+    
+    NSTexturedBackgroundWindowMask = 1 << 8,
+    
+    NSUnifiedTitleAndToolbarWindowMask = 1 << 12,
+    
+    NSFullScreenWindowMask = 1 << 14,
+    
+    NSFullSizeContentViewWindowMask = 1 << 15,
 }
 
 #[repr(u64)]
@@ -336,15 +334,15 @@ impl NSRange {
     }
 }*/
 
-unsafe impl objc::Encode for NSRange {
-    fn encode() -> objc::Encoding {
+unsafe impl Encode for NSRange {
+    fn encode() -> Encoding {
         let encoding = format!(
             // TODO: Verify that this is correct
             "{{NSRange={}{}}}",
             u64::encode().as_str(),
             u64::encode().as_str(),
         );
-        unsafe {objc::Encoding::from_str(&encoding)}
+        unsafe {Encoding::from_str(&encoding)}
     }
 }
 
@@ -516,14 +514,14 @@ pub enum MTLTextureType {
     D3 = 7,
 }
 
-bitflags!{
-    pub struct MTLTextureUsage: u64 {
-        const Unknown = 0x0000;
-        const ShaderRead = 0x0001;
-        const ShaderWrite = 0x0002;
-        const RenderTarget = 0x0004;
-        const PixelFormatView = 0x0010;
-    }
+#[repr(u64)]
+#[allow(non_camel_case_types)]
+pub enum MTLTextureUsage {
+    Unknown = 0x0000,
+    ShaderRead = 0x0001,
+    ShaderWrite = 0x0002,
+    RenderTarget = 0x0004,
+    PixelFormatView = 0x0010,
 }
 
 #[repr(u64)]
@@ -579,15 +577,14 @@ pub const MTLResourceCPUCacheModeMask: u64 = (0xf << MTLResourceCPUCacheModeShif
 pub const MTLResourceStorageModeShift: u64 = 4;
 pub const MTLResourceStorageModeMask: u64 = (0xf << MTLResourceStorageModeShift);
 
-bitflags! {
-    #[allow(non_upper_case_globals)]
-    pub struct MTLResourceOptions: u64 {
-        const CPUCacheModeDefaultCache  = (MTLCPUCacheMode::DefaultCache as u64) << MTLResourceCPUCacheModeShift;
-        const CPUCacheModeWriteCombined = (MTLCPUCacheMode::WriteCombined as u64) << MTLResourceCPUCacheModeShift;
+#[allow(non_upper_case_globals)]
+#[repr(u64)]
+pub enum MTLResourceOptions {
+    //CPUCacheModeDefaultCache  = (MTLCPUCacheMode::DefaultCache as u64) << MTLResourceCPUCacheModeShift,
+    CPUCacheModeWriteCombined = (MTLCPUCacheMode::WriteCombined as u64) << MTLResourceCPUCacheModeShift,
 
-        const StorageModeShared  = (MTLStorageMode::Shared as u64)  << MTLResourceStorageModeShift;
-        const StorageModeManaged = (MTLStorageMode::Managed as u64) << MTLResourceStorageModeShift;
-        const StorageModePrivate = (MTLStorageMode::Private as u64) << MTLResourceStorageModeShift;
-        const StorageModeMemoryless = (MTLStorageMode::Memoryless as u64) << MTLResourceStorageModeShift;
-    }
+    StorageModeShared  = (MTLStorageMode::Shared as u64)  << MTLResourceStorageModeShift,
+    StorageModeManaged = (MTLStorageMode::Managed as u64) << MTLResourceStorageModeShift,
+    StorageModePrivate = (MTLStorageMode::Private as u64) << MTLResourceStorageModeShift,
+    StorageModeMemoryless = (MTLStorageMode::Memoryless as u64) << MTLResourceStorageModeShift,
 }

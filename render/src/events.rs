@@ -1,5 +1,6 @@
 use crate::cx::*;
 use std::any::TypeId;
+use std::collections::HashMap;
 
 #[derive(Clone, Debug, PartialEq, Default)]
 pub struct KeyModifiers {
@@ -142,8 +143,7 @@ pub struct TimerEvent {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct SignalEvent {
-    pub signal: Signal,
-    pub status: StatusId
+    pub signals: HashMap<Signal, Vec<StatusId>>
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -163,7 +163,7 @@ pub struct KeyEvent {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct KeyFocusEvent {
-    pub last: Area,
+    pub prev: Area,
     pub focus: Area,
 }
 
@@ -269,7 +269,7 @@ impl Event {
     pub fn hits(&mut self, cx: &mut Cx, area: Area, opt: HitOpt) -> Event {
         match self {
             Event::KeyFocus(kf) => {
-                if area == kf.last {
+                if area == kf.prev {
                     return Event::KeyFocusLost(kf.clone())
                 }
                 else if area == kf.focus {
@@ -452,7 +452,7 @@ impl Event {
     }
 }
 
-#[derive(PartialEq, Clone, Copy, Debug, Default)]
+#[derive(Hash, Eq, PartialEq, Clone, Copy, Debug, Default)]
 pub struct Signal {
     pub signal_id: usize
 }

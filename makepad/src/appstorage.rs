@@ -2,13 +2,15 @@
 use makepad_render::*;
 use makepad_widget::*;
 use makepad_hub::*;
+use makepad_tinyserde::*;
 use crate::appwindow::*;
 use crate::filetree::*;
+use crate::fileeditor::*;
+use crate::buildmanager::*;
 use std::collections::HashMap;
-use serde::{Serialize, Deserialize};
 use crate::builder;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, SerRon, DeRon)]
 pub struct AppSettings {
     pub build_on_save: bool,
     pub exec_when_done: bool,
@@ -20,12 +22,12 @@ pub struct AppSettings {
 }
 
 impl Default for AppSettings {
-
+    
     fn default() -> Self {
         Self {
             exec_when_done: false,
             build_on_save: true,
-            style_options: StyleOptions{scale:1.0, dark:true},
+            style_options: StyleOptions {scale: 1.0, dark: true},
             hub_server: HubServerConfig::Offline,
             builders: HashMap::new(),
             sync: HashMap::new(),
@@ -34,12 +36,12 @@ impl Default for AppSettings {
     }
 }
 
-impl AppSettings{
-    pub fn initial()->Self{
+impl AppSettings {
+    pub fn initial() -> Self {
         Self {
             exec_when_done: false,
             build_on_save: true,
-            style_options: StyleOptions{scale:1.0, dark:true},
+            style_options: StyleOptions {scale: 1.0, dark: true},
             hub_server: HubServerConfig::Offline,
             builders: {
                 let mut cfg = HashMap::new();
@@ -70,7 +72,7 @@ impl AppSettings{
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Clone, Debug, SerRon, DeRon, PartialEq)]
 pub struct BuildTarget {
     pub builder: String,
     pub workspace: String,
@@ -79,7 +81,7 @@ pub struct BuildTarget {
 }
 
 pub struct AppStorage {
-    pub init_builders_counter:usize,
+    pub init_builders_counter: usize,
     pub builders_request_uid: HubUid,
     pub builder_sync_uid: HubUid,
     pub hub_router: Option<HubRouter>,
@@ -93,12 +95,15 @@ pub struct AppStorage {
     pub file_tree_file_read: FileRead,
     pub app_state_file_read: FileRead,
     pub app_settings_file_read: FileRead,
-    pub text_buffers: HashMap<String, AppTextBuffer>
+    pub text_buffer_path_to_id: HashMap<String, TextBufferId>,
+    pub text_buffer_id_to_path: HashMap<TextBufferId, String>,
+    pub text_buffers: Vec<AppTextBuffer>,
 }
 
 pub struct AppTextBuffer {
     pub file_read: FileRead,
     pub read_msg: Option<ToHubMsg>,
+    pub full_path: String,
     //pub write_msg: Option<ToHubMsg>,
     pub text_buffer: TextBuffer,
 }
@@ -106,7 +111,7 @@ pub struct AppTextBuffer {
 impl AppStorage {
     pub fn proto(cx: &mut Cx) -> Self {
         AppStorage {
-            init_builders_counter:2,
+            init_builders_counter: 2,
             builders_request_uid: HubUid::zero(),
             builder_sync_uid: HubUid::zero(),
             builder_route_send: None,
@@ -118,16 +123,18 @@ impl AppStorage {
             settings_old: AppSettings::default(),
             settings: AppSettings::default(),
             //rust_compiler: RustCompiler::style(cx),
-            text_buffers: HashMap::new(),
+            text_buffer_path_to_id: HashMap::new(),
+            text_buffer_id_to_path: HashMap::new(),
+            text_buffers: Vec::new(),
             file_tree_file_read: FileRead::default(),
             app_state_file_read: FileRead::default(),
             app_settings_file_read: FileRead::default()
         }
     }
     
-    pub fn status_new_message()->StatusId{uid!()}
-    pub fn status_settings_changed()->StatusId{uid!()}
-     
+    pub fn status_new_message() -> StatusId {uid!()}
+    pub fn status_settings_changed() -> StatusId {uid!()}
+    
     pub fn init(&mut self, cx: &mut Cx) {
         if cx.platform_type.is_desktop() {
             
@@ -155,7 +162,7 @@ impl AppStorage {
     }
     
     pub fn load_settings(&mut self, cx: &mut Cx, utf8_data: &str) {
-        match ron::de::from_str(utf8_data) {
+        match DeRon::deserialize_ron(utf8_data) {
             Ok(settings) => {
                 self.settings_old = self.settings.clone();
                 self.settings = settings;
@@ -164,7 +171,7 @@ impl AppStorage {
                 
                 // so now, here we restart our hub_server if need be.
                 if cx.platform_type.is_desktop() {
-                    if self.settings_old.hub_server != self.settings.hub_server{
+                    if self.settings_old.hub_server != self.settings.hub_server {
                         self.restart_hub_server();
                     }
                 }
@@ -175,15 +182,15 @@ impl AppStorage {
         }
     }
     
-    pub fn save_settings(&mut self, cx:&mut Cx){
-        if let Ok(utf8_data) = ron::ser::to_string_pretty(&self.settings, ron::ser::PrettyConfig::default()){
-            let path = "makepad_settings.ron";
-            if let Some(atb) = self.text_buffers.get_mut(path) {
-                atb.text_buffer.load_from_utf8(&utf8_data);
-                atb.text_buffer.send_textbuffer_loaded_signal(cx);
-            }
-            cx.file_write(path, utf8_data.as_bytes());
+    pub fn save_settings(&mut self, cx: &mut Cx) {
+        let utf8_data = self.settings.serialize_ron();
+        let path = "makepad_settings.ron";
+        if let Some(tb_id) = self.text_buffer_path_to_id.get(path) {
+            let atb = &mut self.text_buffers[tb_id.0 as usize];
+            atb.text_buffer.load_from_utf8(&utf8_data);
+            atb.text_buffer.send_textbuffer_loaded_signal(cx);
         }
+        cx.file_write(path, utf8_data.as_bytes());
     }
     
     pub fn restart_hub_server(&mut self) {
@@ -201,30 +208,28 @@ impl AppStorage {
     pub fn read_or_generate_key_ron() -> Digest {
         // read or generate key.ron
         if let Ok(utf8_data) = std::fs::read_to_string("key.ron") {
-            if let Ok(digest) = ron::de::from_str::<Digest>(&utf8_data) {
+            if let Ok(digest) = DeRon::deserialize_ron(&utf8_data) {
                 return digest
             }
         }
-        
         let digest = Digest::generate();
-        if let Ok(utf8_data) = ron::ser::to_string(&digest) {
-            if std::fs::write("key.ron", utf8_data.as_bytes()).is_err() {
-                println!("Cannot generate key.ron");
-            }
+        let utf8_data = digest.serialize_ron();
+        if std::fs::write("key.ron", utf8_data.as_bytes()).is_err() {
+            println!("Cannot generate key.ron");
         }
         digest
     }
     
     pub fn save_state(&mut self, cx: &mut Cx, state: &AppState) {
-        let ron = ron::ser::to_string_pretty(state, ron::ser::PrettyConfig::default()).unwrap();
+        let ron = state.serialize_ron();
         cx.file_write("makepad_state.ron", ron.as_bytes());
     }
-
-    pub fn remap_sync_path(&self, path:&str)->String{
+    
+    pub fn remap_sync_path(&self, path: &str) -> String {
         let mut path = path.to_string();
-        for (key,sync_to) in &self.settings.sync{
-            for sync in sync_to{
-                if path.starts_with(sync){
+        for (key, sync_to) in &self.settings.sync {
+            for sync in sync_to {
+                if path.starts_with(sync) {
                     path.replace_range(0..sync.len(), key);
                     break
                 }
@@ -237,24 +242,34 @@ impl AppStorage {
     pub fn text_buffer_from_path(&mut self, cx: &mut Cx, path: &str) -> &mut TextBuffer {
         
         // if online, fallback to readfile
-        let atb = if !cx.platform_type.is_desktop() || path.find('/').is_none() {
-            let atb = self.text_buffers.entry(path.to_string()).or_insert_with( || {
-                AppTextBuffer {
+        if !cx.platform_type.is_desktop() || path.find('/').is_none() {
+            if let Some(tb_id) = self.text_buffer_path_to_id.get(path) {
+                &mut self.text_buffers[tb_id.0 as usize].text_buffer
+            }
+            else {
+                let tb_id = TextBufferId(self.text_buffers.len() as u16);
+                self.text_buffer_path_to_id.insert(path.to_string(), tb_id);
+                self.text_buffer_id_to_path.insert(tb_id, path.to_string());
+                self.text_buffers.push(AppTextBuffer {
                     file_read: cx.file_read(path),
                     read_msg: None,
+                    full_path: path.to_string(),
                     // write_msg: None,
                     text_buffer: TextBuffer {
+                        text_buffer_id: tb_id,
                         signal: cx.new_signal(),
-                        ..Default::default()
+                        ..TextBuffer::default()
                     }
-                }
-            });
-            atb
+                });
+                &mut self.text_buffers[tb_id.0 as usize].text_buffer
+            }
         }
         else {
             let hub_ui = self.hub_ui.as_mut().unwrap();
-            let atb = self.text_buffers.entry(path.to_string()).or_insert_with( || {
-                // lets find the right builder
+            if let Some(tb_id) = self.text_buffer_path_to_id.get(path) {
+                &mut self.text_buffers[tb_id.0 as usize].text_buffer
+            }
+            else {
                 let builder_pos = path.find('/').unwrap();
                 let uid = hub_ui.route_send.alloc_uid();
                 let (builder, rest) = path.split_at(builder_pos);
@@ -267,22 +282,32 @@ impl AppStorage {
                     }
                 };
                 hub_ui.route_send.send(msg.clone());
-                AppTextBuffer {
+                
+                let tb_id = TextBufferId(self.text_buffers.len() as u16);
+                self.text_buffer_path_to_id.insert(path.to_string(), tb_id);
+                self.text_buffer_id_to_path.insert(tb_id, path.to_string());
+                self.text_buffers.push(AppTextBuffer {
                     file_read: FileRead::default(),
                     read_msg: Some(msg),
+                    full_path: path.to_string(),
                     // write_msg: None,
-                    text_buffer: TextBuffer::with_signal(cx)
-                }
-            });
-            atb
-        };
-        &mut atb.text_buffer
+                    text_buffer: TextBuffer {
+                        signal: cx.new_signal(),
+                        text_buffer_id: tb_id,
+                        ..TextBuffer::default()
+                    }
+                    
+                });
+                &mut self.text_buffers[tb_id.0 as usize].text_buffer
+            }
+        }
     }
     
     pub fn text_buffer_file_write(&mut self, cx: &mut Cx, path: &str) {
         if cx.platform_type.is_desktop() {
             if path.find('/').is_some() {
-                if let Some(atb) = self.text_buffers.get_mut(path) {
+                if let Some(tb_id) = self.text_buffer_path_to_id.get(path) {
+                    let atb = &self.text_buffers[tb_id.0 as usize];
                     let hub_ui = self.hub_ui.as_mut().unwrap();
                     let utf8_data = atb.text_buffer.get_as_string();
                     fn send_file_write_request(hub_ui: &HubUI, uid: HubUid, path: &str, data: &Vec<u8>) {
@@ -317,7 +342,8 @@ impl AppStorage {
                 }
             }
             else { // its not a workspace, its a system (settings) file
-                if let Some(atb) = self.text_buffers.get_mut(path) {
+                if let Some(tb_id) = self.text_buffer_path_to_id.get(path) {
+                    let atb = &self.text_buffers[tb_id.0 as usize];
                     let utf8_data = atb.text_buffer.get_as_string();
                     cx.file_write(path, utf8_data.as_bytes());
                     // if its the settings, load it
@@ -339,7 +365,7 @@ impl AppStorage {
         self.builders_request_uid = uid;
     }
     
-    pub fn handle_hub_msg(&mut self, cx: &mut Cx, htc: &FromHubMsg, windows: &mut Vec<AppWindow>, state: &AppState) {
+    pub fn handle_hub_msg(&mut self, cx: &mut Cx, htc: &FromHubMsg, windows: &mut Vec<AppWindow>, state: &AppState, build_manager: &mut BuildManager) {
         let hub_ui = self.hub_ui.as_mut().unwrap();
         // only in ConnectUI of ourselves do we list the workspaces
         match &htc.msg {
@@ -348,8 +374,8 @@ impl AppStorage {
                 // now start talking
             },
             HubMsg::DisconnectBuilder(_) | HubMsg::ConnectBuilder(_) => {
-                let own = if let Some(send) = &self.builder_route_send{send.is_own_addr(&htc.from)}else{false};
-                if !own{
+                let own = if let Some(send) = &self.builder_route_send {send.is_own_addr(&htc.from)}else {false};
+                if !own {
                     self.reload_builders();
                 }
             },
@@ -396,12 +422,11 @@ impl AppStorage {
                     window.file_panel.file_tree.view.redraw_view_area(cx);
                 }
                 // lets resend the file load we haven't gotten
-                for (_path, atb) in &mut self.text_buffers {
+                for atb in &mut self.text_buffers {
                     if let Some(cth_msg) = &atb.read_msg {
                         hub_ui.route_send.send(cth_msg.clone())
                     }
                 }
-                
             },
             HubMsg::BuilderFileTreeResponse {uid, tree} => if *uid == self.builders_request_uid {
                 // replace a workspace node
@@ -409,22 +434,28 @@ impl AppStorage {
                     let workspace = name.clone();
                     // insert each filetree at the right childnode
                     for (window_index, window) in windows.iter_mut().enumerate() {
+                        let mut paths = Vec::new();
                         if let FileNode::Folder {folder, ..} = &mut window.file_panel.file_tree.root_node {
                             for node in folder.iter_mut() {
                                 if let FileNode::Folder {name, ..} = node {
                                     if *name == workspace {
-                                        *node = hub_to_tree(&tree);
+                                        *node = hub_to_tree(&tree, "", &mut paths);
                                         break
                                     }
                                 }
                             }
+                        }
+                        // lets load the file
+                        for path in &paths {
+                            self.text_buffer_from_path(cx, path);
                         }
                         window.file_panel.file_tree.load_open_folders(cx, &state.windows[window_index].open_folders);
                     }
                 }
             },
             HubMsg::FileReadResponse {uid, data, ..} => {
-                for (_path, atb) in &mut self.text_buffers {
+                for (path, tb_id) in &mut self.text_buffer_path_to_id {
+                    let atb = &mut self.text_buffers[tb_id.0 as usize];
                     if let Some(cth_msg) = &atb.read_msg {
                         if let HubMsg::FileReadRequest {uid: read_uid, ..} = &cth_msg.msg {
                             if *read_uid == *uid {
@@ -433,6 +464,7 @@ impl AppStorage {
                                     if let Ok(utf8_data) = std::str::from_utf8(data) {
                                         atb.text_buffer.load_from_utf8(&utf8_data);
                                         atb.text_buffer.send_textbuffer_loaded_signal(cx);
+                                        FileEditor::update_token_chunks(&path, &mut atb.text_buffer, &mut build_manager.search_index);
                                     }
                                 }
                                 else {
@@ -450,16 +482,21 @@ impl AppStorage {
     }
 }
 
-pub fn hub_to_tree(node: &BuilderFileTreeNode) -> FileNode {
+pub fn hub_to_tree(node: &BuilderFileTreeNode, base: &str, paths: &mut Vec<String>) -> FileNode {
     match node {
-        BuilderFileTreeNode::File {name, ..} => FileNode::File {
-            name: name.clone(),
-            draw: None
+        BuilderFileTreeNode::File {name, ..} => {
+            let path = format!("{}/{}", base, name);
+            paths.push(path);
+            FileNode::File {
+                name: name.clone(),
+                draw: None
+            }
         },
         BuilderFileTreeNode::Folder {name, folder, ..} => {
+            let path = format!("{}/{}", base, name);
             FileNode::Folder {
                 name: name.clone(),
-                folder: folder.iter().map( | v | hub_to_tree(v)).collect(),
+                folder: folder.iter().map( | v | hub_to_tree(v, if base == "" {name}else {&path}, paths)).collect(),
                 draw: None,
                 state: NodeState::Closed
             }
