@@ -14,7 +14,7 @@ license = "MIT"
 #bgcodegen-units = 1
 
 [dependencies]
-time = "*"
+#time = "*"
 
 [dependencies.makepad-tinyserde]
 path="../render/tinyserde"
