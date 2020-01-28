@@ -23,23 +23,25 @@ pub use crate::styling::*;
 pub use crate::liveclient::*;
 
 #[cfg(all(not(feature = "ipc"), target_os = "linux"))]
-pub use crate::cx_linux::*;
-#[cfg(all(not(feature = "ipc"), target_os = "linux"))]
-pub use crate::cx_opengl::*;
+pub use crate::{
+    cx_linux::*,
+    cx_opengl::*,
+};
 
 #[cfg(all(not(feature = "ipc"), target_os = "macos"))]
-pub use crate::cx_macos::*;
-#[cfg(all(not(feature = "ipc"), target_os = "macos"))]
-pub use crate::cx_metal::*;
-#[cfg(all(not(feature = "ipc"), target_os = "macos"))]
-pub use crate::cx_metalsl::*;
+pub use crate::{
+    cx_macos::*,
+    cx_metal::*,
+    cx_metalsl::*
+};
 
 #[cfg(all(not(feature = "ipc"), target_os = "windows"))]
-pub use crate::cx_windows::*;
-#[cfg(all(not(feature = "ipc"), target_os = "windows"))]
-pub use crate::cx_dx11::*;
-#[cfg(all(not(feature = "ipc"), target_os = "windows"))]
-pub use crate::cx_hlsl::*;
+pub use crate::{
+    cx_windows::*,
+    cx_dx11::*,
+    cx_hlsl::*,
+};
+
 
 #[cfg(all(not(feature = "ipc"), target_arch = "wasm32"))]
 pub use crate::cx_webgl::*;

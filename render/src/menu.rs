@@ -74,22 +74,22 @@ pub enum Menu {
 }
 
 impl Menu {
-    pub fn main(items: Vec<Menu>)->Menu{
+    pub fn main(items: Vec<Self>)->Self{
         Menu::Main{items:items}
     }
 
-    pub fn sub(name: &str, items: Vec<Menu>) -> Menu {
+    pub fn sub(name: &str, items: Vec<Menu>) -> Self {
         Menu::Sub {
             name: name.to_string(),
             items: items
         }
     }
 
-    pub fn line() -> Menu {
+    pub fn line() -> Self {
         Menu::Line
     }
 
-    pub fn item(name: &str, command: CommandId) -> Menu {
+    pub fn item(name: &str, command: CommandId) -> Self {
         Menu::Item {
             name: name.to_string(),
             command: command

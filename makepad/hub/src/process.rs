@@ -12,7 +12,7 @@ pub struct Process {
 
 impl Process {
 
-    pub fn start(cmd: &str, args: &[&str], current_dir: &str, env: &[(&str, &str)]) -> Result<Process, std::io::Error> {
+    pub fn start(cmd: &str, args: &[&str], current_dir: &str, env: &[(&str, &str)]) -> Result<Self, std::io::Error> {
         fn create_process(cmd: &str, args: &[&str], current_dir: &str, env: &[(&str, &str)]) -> Result<Child, std::io::Error> {
             let mut cbuild = if cmd.find("/").is_some() {
                 Command::new(&format!("{}/{}", current_dir, cmd))
@@ -93,7 +93,7 @@ impl Process {
             })
         };
 
-        Ok(Process {
+        Ok(Self {
             child: Some(child),
             rx_line: Some(rx_line),
         })
