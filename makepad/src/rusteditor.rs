@@ -66,7 +66,8 @@ impl RustTokenizer {
                 }
                 if let Some(search_index) = search_index.as_mut(){
                     search_index.new_rust_token(&text_buffer);
-                }    
+                }
+                // do running tree-based diff with previous tokens.
             }
         }
     }

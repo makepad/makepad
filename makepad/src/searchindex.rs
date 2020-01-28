@@ -27,6 +27,14 @@ impl SearchIndex {
         let chunk_id = text_buffer.token_chunks.len() - 2;
         // lets figure out if its a decl, an impl or a use
         match text_buffer.token_chunks[chunk_id].token_type {
+            TokenType::Operator =>{ // check if its an !
+                // check if the previous one is one of our live macros
+                // pick, bezier, whatnot
+                // how do we maintain an incremental datastructure?
+                // that we can copy on build, but also diff for changes?
+                // how do we detect a change thats NOT a live change?
+                
+            },
             TokenType::Identifier | TokenType::Call | TokenType::TypeName => {
                 let prev_tt = {
                     let mut i = if chunk_id > 0 {chunk_id - 1} else {0};
@@ -128,8 +136,7 @@ impl SearchIndex {
                 return tb
             }
             return prio
-        });
-        
+        }); 
         
         for atb in &mut storage.text_buffers {
             atb.text_buffer.markers.search_cursors.sort_by( | a, b | {
@@ -139,7 +146,7 @@ impl SearchIndex {
                 cx.send_signal(atb.text_buffer.signal, TextBuffer::status_search_update());
             }
         }
-        
+
         out
     }
 }
