@@ -85,6 +85,7 @@ impl PlatformType {
 
 pub struct Cx {
     pub running: bool,
+    pub counter: usize,
     pub platform_type: PlatformType,
     
     pub windows: Vec<CxWindow>,
@@ -212,6 +213,7 @@ impl Default for Cx {
         }];
         
         Self {
+            counter: 0,
             platform_type: PlatformType::Windows,
             running: true,
             
@@ -701,6 +703,7 @@ impl Cx {
         // self.profile();
         self.is_in_redraw_cycle = true;
         self.redraw_id += 1;
+        self.counter = 0;
         std::mem::swap(&mut self._redraw_child_areas, &mut self.redraw_child_areas);
         std::mem::swap(&mut self._redraw_parent_areas, &mut self.redraw_parent_areas);
         self.align_list.truncate(0);

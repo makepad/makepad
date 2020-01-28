@@ -7,6 +7,8 @@ mod shader;
 mod styling;
 #[macro_use]
 mod cx;
+#[macro_use]
+mod liveclient;
 
 #[cfg(all(not(feature="ipc"),target_os = "linux"))]
 mod cx_opengl;
@@ -88,7 +90,6 @@ mod blit;
 mod text;
 mod events;
 mod menu; 
-mod liveclient;
 
 pub use crate::cx::*;
 pub use crate::quad::*;
