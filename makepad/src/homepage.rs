@@ -86,14 +86,16 @@ impl HomePage {
     
     pub fn handle_home_page(&mut self, cx: &mut Cx, event: &mut Event) {
         if let Event::Signal(sig) = event {
-            if sig.signal == self.email_signal {
-                if sig.status == Cx::status_http_send_ok(){
-                    self.email_state = EmailState::OkSending;
+            if let Some(statusses) = sig.signals.get(&self.email_signal) {
+                for status in statusses{
+                    if *status == Cx::status_http_send_ok(){
+                        self.email_state = EmailState::OkSending;
+                    }
+                    else if *status == Cx::status_http_send_fail(){
+                        self.email_state = EmailState::ErrorSending;
+                    }
+                    self.view.redraw_view_area(cx);
                 }
-                else if sig.status == Cx::status_http_send_fail(){
-                    self.email_state = EmailState::ErrorSending;
-                }
-                self.view.redraw_view_area(cx);
             }
         }
         if let TextEditorEvent::Change = self.email_input.handle_text_input(cx, event) {

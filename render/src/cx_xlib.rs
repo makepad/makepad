@@ -298,7 +298,7 @@ impl XlibApp {
                                 type_: X11_sys::SelectionNotify as i32,
                                 serial: 0,
                                 send_event: 0,
-                                display: self.display,
+                                display: self.display, 
                                 requestor: request.requestor,
                                 selection: request.selection,
                                 target: request.target,
@@ -468,8 +468,8 @@ impl XlibApp {
                                     self.do_callback(&mut vec![Event::FingerScroll(FingerScrollEvent {
                                         window_id: window.window_id,
                                         scroll: Vec2 {
-                                            x: 0.0,
-                                            y: if button.button == 4 {-speed as f32} else {speed as f32}
+                                            x: if button.button == 6 {-speed as f32} else if button.button == 7 {speed as f32} else {0.},
+                                            y: if button.button == 4 {-speed as f32} else if button.button == 5 {speed as f32} else {0.}
                                         },
                                         abs: window.last_mouse_pos,
                                         rel: window.last_mouse_pos,
@@ -774,8 +774,10 @@ impl XlibApp {
     
     pub fn post_signal(signal:Signal, status:StatusId) {
         unsafe {
-            if let Ok(mut signals) = (*GLOBAL_XLIB_APP).signals.lock() {
-                signals.push(Event::Signal(SignalEvent {signal, status}));
+            if let Ok(mut signals_locked) = (*GLOBAL_XLIB_APP).signals.lock() {
+                let mut signals = HashMap::new();
+                signals.insert(signal, vec![status]);
+                signals_locked.push(Event::Signal(SignalEvent {signals}));
                 //let mut f = unsafe { File::from_raw_fd((*GLOBAL_XLIB_APP).display_fd) };
                 //let _ = write!(&mut f, "\0");
                 // !TODO unblock the select!
@@ -783,7 +785,7 @@ impl XlibApp {
         }
     }
     
-    pub fn terminate_event_loop(&mut self) {
+    pub fn terminate_event_loop(&mut self) { 
         // maybe need to do more here
         self.event_loop_running = false;
         unsafe {X11_sys::XCloseIM(self.xim)};

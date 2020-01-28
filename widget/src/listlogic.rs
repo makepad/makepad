@@ -3,6 +3,7 @@ use crate::scrollview::*;
 
 #[derive(Clone, Default)]
 pub struct ListLogic {
+    pub multi_select: bool,
     pub list_items: Vec<ListItem>,
     pub scroll_item_in_view: Option<usize>,
     pub set_scroll_pos: Option<Vec2>,
@@ -11,7 +12,7 @@ pub struct ListLogic {
     pub end_item: usize,
     pub end_fill: usize,
     pub selection: Vec<usize>,
-    pub last_range: Option<(usize, usize)>,
+    //pub last_range: Option<(usize, usize)>,
 }
 
 #[derive(Clone)]
@@ -20,6 +21,7 @@ pub struct ListItem {
     pub is_selected: bool
 }
 
+#[derive(Debug)]
 pub enum ListLogicEvent {
     Animate(AnimateEvent),
     AnimEnded,
@@ -32,6 +34,7 @@ pub enum ListLogicEvent {
 
 pub enum ListEvent {
     SelectSingle(usize),
+    SelectDouble(usize),
     SelectMultiple,
     None
 }
@@ -57,6 +60,9 @@ impl ListSelect {
 impl ListLogic {
     pub fn set_list_len(&mut self, len: usize)
     {
+        if self.list_items.len() != len{
+            self.selection.truncate(0);
+        }
         if self.list_items.len() < len {
             for _ in self.list_items.len()..len {
                 self.list_items.push(ListItem {
@@ -174,13 +180,14 @@ impl ListLogic {
         if let Some(last) = self.selection.last() {
             let next = last + 1;
             if next >= self.list_items.len() { // wrap around
-                ListSelect::Single(0)
+                ListSelect::Single(*last)
             }
             else {
                 ListSelect::Single(next)
             }
         }
         else {
+            println!("GOT SELECT 0");
             ListSelect::Single(0)
         }
     }
@@ -188,7 +195,7 @@ impl ListLogic {
     pub fn get_prev_single_selection(&self) -> ListSelect {
         if let Some(first) = self.selection.last() {
             if *first == 0 { // wrap around
-                ListSelect::Single(self.list_items.len().max(1) - 1)
+                ListSelect::Single(*first)//self.list_items.len().max(1) - 1)
             }
             else {
                 ListSelect::Single(first - 1)
@@ -199,11 +206,10 @@ impl ListLogic {
         }
     }
     
-    pub fn handle_list_logic<F>(&mut self, cx: &mut Cx, event: &mut Event, select: ListSelect, mut cb: F) -> ListEvent
+    pub fn handle_list_logic<F>(&mut self, cx: &mut Cx, event: &mut Event, select: ListSelect, mut dblclick:bool, mut cb: F) -> ListEvent
     where F: FnMut(&mut Cx, ListLogicEvent, &mut ListItem, usize)
     {
         let mut select = select;
-        
         for counter in self.start_item..self.end_item {
             if counter >= self.list_items.len() {
                 break;
@@ -218,14 +224,17 @@ impl ListLogic {
                 },
                 Event::FingerDown(fe) => {
                     cx.set_down_mouse_cursor(MouseCursor::Hand);
-                    if fe.modifiers.logo || fe.modifiers.control {
+                    if self.multi_select && (fe.modifiers.logo || fe.modifiers.control) {
                         select = ListSelect::Toggle(counter)
                     }
-                    else if fe.modifiers.shift {
+                    else if self.multi_select && fe.modifiers.shift {
                         select = ListSelect::Range(counter)
                     }
                     else {
-                        select = ListSelect::Single(counter)
+                        select = ListSelect::Single(counter);
+                        if fe.tap_count > 1{
+                            dblclick = true;
+                        }
                     }
                 },
                 Event::FingerUp(_fe) => {
@@ -247,7 +256,9 @@ impl ListLogic {
                 _ => ()
             }
         };
+        
         // clean up outside of window
+        /*
         if let Some(last_range) = self.last_range {
             for counter in last_range.0..last_range.1 {
                 if counter >= self.list_items.len() {
@@ -260,7 +271,7 @@ impl ListLogic {
             }
         }
         self.last_range = Some((self.start_item, self.end_item));
-        
+        */
         match select {
             ListSelect::Range(select_index) => {
                 if let Some(first) = self.selection.first() {
@@ -338,8 +349,12 @@ impl ListLogic {
                     let dm = &mut self.list_items[select_index];
                     dm.is_selected = true;
                     cb(cx, ListLogicEvent::Over, dm, select_index);
-                    
-                    return ListEvent::SelectSingle(select_index)
+                    if dblclick{
+                        return ListEvent::SelectDouble(select_index)
+                    }
+                    else{
+                        return ListEvent::SelectSingle(select_index)
+                    }
                 }
             },
             _ => ()

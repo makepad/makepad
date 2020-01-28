@@ -1,34 +1,3 @@
-/// This is Makepad, a work-in-progress livecoding IDE for 2D Design.
-// This application is nearly 100% Wasm running on webGL. NO HTML AT ALL.
-// The vision is to build a livecoding / design hybrid program,
-// here procedural design and code are fused in one environment.
-// If you have missed 'learnable programming' please check this out:
-// http://worrydream.com/LearnableProgramming/
-// Makepad aims to fulfill (some) of these ideas using a completely
-// from-scratch renderstack built on the GPU and Rust/wasm.
-// It will be like an IDE meets a vector designtool, and had offspring.
-// Direct manipulation of the vectors modifies the code, the code modifies the vectors.
-// And the result can be lasercut, embroidered or drawn using a plotter.
-// This means our first goal is 2D path CNC with booleans (hence the CAD),
-// and not dropshadowy-gradients.
-
-// Find the repo and more explanation at github.com/makepad/makepad.
-// We are developing the UI kit and code-editor as MIT, but the full stack
-// will be a cloud/native app product in a few months.
-
-// However to get to this amazing mixed-mode code editing-designtool,
-// we first have to build an actually nice code editor (what you are looking at)
-// And a vector stack with booleans (in progress)
-// Up next will be full multiplatform support and more visual UI.
-// All of the code is written in Rust, and it compiles to native and Wasm
-// Its built on a novel immediate-mode UI architecture
-// The styling is done with shaders written in Rust, transpiled to metal/glsl
-
-// for now enjoy how smooth a full GPU editor can scroll (try select scrolling the edge)
-// Also the tree fold-animates and the docking panel system works.
-// Multi cursor/grid cursor also works with ctrl+click / ctrl+shift+click
-// press alt or escape for animated codefolding outline view!
-
 use makepad_render::*;
 
 struct App {
@@ -36,25 +5,44 @@ struct App {
     pass: Pass,
     color_texture: Texture,
     main_view: View,
-    quad: Quad
+    quad: Quad,
+    count: f32
 }
 
 main_app!(App);
 
 impl App {
+    pub fn bg() -> ShaderId {uid!()}
+    pub fn counter() -> InstanceFloat {uid!()}
     pub fn proto(cx: &mut Cx) -> Self {
+        
+        Self::bg().set(cx, Quad::def_quad_shader().compose(shader_ast!({
+            let counter: Self::counter();
+            fn pixel() -> vec4 {
+                df_viewport(pos * vec2(w, h));
+                df_circle(0.5 * w, 0.5 * h, 0.5 * w);
+                //return df_fill(color("green"));
+                return df_fill(mix(color("green"), color("blue"), abs(sin(counter))));
+            }
+        })));
+        
         Self {
             window: Window::proto(cx),
             pass: Pass::default(),
             color_texture: Texture::default(),
             quad: Quad::proto(cx),
             main_view: View::proto(cx),
+            count: 0.
         }
     }
     
     fn handle_app(&mut self, _cx: &mut Cx, event: &mut Event) {
         match event {
             Event::Construct => {
+                
+            },
+            Event::FingerMove(fm)=>{
+                self.count = fm.abs.x*0.01;
             },
             _ => ()
         }
@@ -63,11 +51,26 @@ impl App {
     fn draw_app(&mut self, cx: &mut Cx) {
         self.window.begin_window(cx);
         self.pass.begin_pass(cx);
-        self.pass.add_color_texture(cx, &mut self.color_texture, ClearColor::ClearWith(color256(255, 0, 0)));
+        self.pass.add_color_texture(cx, &mut self.color_texture, ClearColor::ClearWith(color256(32, 0, 0)));
         if self.main_view.begin_view(cx, Layout::default()).is_ok() {
             
-            self.quad.draw_quad_abs(cx, Rect{x:0.,y:0.,w:100.,h:100.});
+            self.quad.shader = Self::bg().get(cx);
+            let k = self.quad.draw_quad_abs(cx, Rect{x:100.,y:100.,w:200.,h:200.});
+            k.push_float(cx,10.);
             
+            for i in 0..2500 {
+                let v = 0.3 * (i as f32);
+                let k = self.quad.draw_quad_abs(cx, Rect {
+                    x: 300. + (v + self.count).sin() * 100.,
+                    y: 300. + (v + self.count*8.).cos() * 100.,
+                    w: 10., 
+                    h: 10.
+                }); 
+                k.push_float(cx, v*2.+self.count*10.);
+            }
+            self.count += 0.001;
+            
+            self.main_view.redraw_view_area(cx);
             self.main_view.end_view(cx);
         }
         self.pass.end_pass(cx);

@@ -1,14 +1,11 @@
 use crate::hubmsg::*;
 use crate::hubrouter::*;
+use makepad_tinyserde::*;
 
-use std::net::{TcpStream, UdpSocket, SocketAddr, SocketAddrV4, SocketAddrV6, Shutdown};
+use std::net::{TcpStream, SocketAddr, Shutdown};
 use std::io::prelude::*;
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
-use serde::{Serialize, Deserialize};
-
-#[cfg(any(target_os = "linux", target_os = "macos"))]
-use std::os::unix::io::AsRawFd;
 
 trait ResultMsg<T> {
     fn expect_msg(self, msg: &str) -> Result<T, HubError>;
@@ -22,7 +19,7 @@ impl<T> ResultMsg<T> for Result<T, std::io::Error> {
         }
     }
 }
-
+/*
 impl<T> ResultMsg<T> for Result<T, snap::Error> {
     fn expect_msg(self, msg: &str) -> Result<T, HubError> {
         match self {
@@ -30,7 +27,7 @@ impl<T> ResultMsg<T> for Result<T, snap::Error> {
             Ok(v) => Ok(v)
         }
     }
-}
+}*/
 
 type HubResult<T> = Result<T, HubError>;
 
@@ -71,10 +68,10 @@ pub fn read_block_from_tcp_stream(tcp_stream: &mut TcpStream, mut check_digest: 
         return Err(HubError::new("read_block_from_tcp_stream: block digest check failed"))
     }
     
-    let mut dec = snap::Decoder::new();
-    let decompressed = dec.decompress_vec(&msg_buf).expect_msg("read_block_from_tcp_stream: cannot decompress_vec");
+    //let mut dec = snap::Decoder::new();
+    let decompressed = msg_buf;//dec.decompress_vec(&msg_buf).expect_msg("read_block_from_tcp_stream: cannot decompress_vec");
     
-    return decompressed;
+    return Ok(decompressed);
 }
 
 pub fn write_exact_bytes_to_tcp_stream(tcp_stream: &mut TcpStream, bytes: &[u8]) -> HubResult<()> {
@@ -98,8 +95,8 @@ pub fn write_block_to_tcp_stream(tcp_stream: &mut TcpStream, msg_buf: &[u8], dig
         return Err(HubError::new("read_block_from_tcp_stream: bytes_total more than 250mb"))
     }
     
-    let mut enc = snap::Encoder::new();
-    let compressed = enc.compress_vec(msg_buf).expect_msg("read_block_from_tcp_stream: cannot compress msgbuf") ?;
+    //let mut enc = snap::Encoder::new();
+    let compressed = msg_buf;//enc.compress_vec(msg_buf).expect_msg("read_block_from_tcp_stream: cannot compress msgbuf") ?;
     
     let mut dwd_write = DigestWithData{
         digest:digest,
@@ -125,7 +122,7 @@ pub struct HubClient {
     pub tx_write: mpsc::Sender<ToHubMsg>
 }
 
-#[derive(Default, Eq, PartialEq, Debug, Clone, Serialize, Deserialize)]
+#[derive(Default, Eq, PartialEq, Debug, Clone, SerBin, DeBin)]
 pub struct DigestWithData{
     pub digest:Digest,
     pub data: u64
@@ -162,7 +159,7 @@ impl HubClient {
                 loop {
                     match read_block_from_tcp_stream(&mut tcp_stream, digest.clone()) {
                         Ok(msg_buf) => {
-                            let htc_msg: FromHubMsg = bincode::deserialize(&msg_buf).expect("read_thread hub message deserialize fail - version conflict!");
+                            let htc_msg: FromHubMsg = DeBin::deserialize_bin(&msg_buf).expect("Cannot parse binary");
                             hub_log.msg("HubClient received", &htc_msg);
                             tx_read.send(htc_msg).expect("tx_read.send fails - should never happen");
                         },
@@ -198,8 +195,8 @@ impl HubClient {
                         },
                         _ => ()
                     }
-                    
-                    let msg_buf = bincode::serialize(&cth_msg).expect("write_thread hub message serialize fail - should never happen");
+                    let mut msg_buf = Vec::new();
+                    cth_msg.ser_bin(&mut msg_buf);
                     if let Err(e) = write_block_to_tcp_stream(&mut tcp_stream, &msg_buf, digest.clone()) {
                         // disconnect the socket and send shutdown
                         let _ = tcp_stream.shutdown(Shutdown::Both);
@@ -225,63 +222,6 @@ impl HubClient {
         })
     }
     
-    pub fn wait_for_announce(digest: Digest) -> Result<SocketAddr, std::io::Error> {
-        Self::wait_for_announce_on(digest, SocketAddr::from(([0, 0, 0, 0], HUB_ANNOUNCE_PORT)))
-    }
-    
-    pub fn wait_for_announce_on(digest: Digest, announce_address: SocketAddr) -> Result<SocketAddr, std::io::Error> {
-        
-        #[cfg(any(target_os = "linux", target_os = "macos"))]
-        fn reuse_addr(socket: &mut UdpSocket) {
-            unsafe {
-                let optval: libc::c_int = 1;
-                let _ = libc::setsockopt(
-                    socket.as_raw_fd(),
-                    libc::SOL_SOCKET,
-                    libc::SO_REUSEADDR,
-                    &optval as *const _ as *const libc::c_void,
-                    std::mem::size_of_val(&optval) as libc::socklen_t,
-                );
-            }
-        }
-        
-        #[cfg(any(target_os = "windows", target_arch = "wasm32"))]
-        fn reuse_addr(_socket: &mut UdpSocket) {
-        }
-        
-        loop {
-            if let Ok(mut socket) = UdpSocket::bind(announce_address) {
-                // TODO. FIX FOR WINDOWS
-                reuse_addr(&mut socket);
-                let mut dwd_read = DigestWithData::default();
-                let dwd_u8 = unsafe {std::mem::transmute::<&mut DigestWithData, &mut [u8; 26 * 8]>(&mut dwd_read)};
-                
-                let (bytes, from) = socket.recv_from(dwd_u8) ?;
-                if bytes != 26 * 8 {
-                    println!("Announce port wrong bytecount");
-                }
-                
-                let mut dwd_check = DigestWithData{
-                    digest: digest.clone(),
-                    data: dwd_read.data
-                };
-                dwd_check.data = dwd_read.data;
-                dwd_check.digest.buf[0] ^= dwd_read.data;
-                dwd_check.digest.digest_cycle();
-                
-                if dwd_check == dwd_read { // use this to support multiple hubs on one network
-                    let listen_port = dwd_read.data;
-                    return Ok(match from {
-                        SocketAddr::V4(v4) => SocketAddr::V4(SocketAddrV4::new(*v4.ip(), listen_port as u16)),
-                        SocketAddr::V6(v6) => SocketAddr::V6(SocketAddrV6::new(*v6.ip(), listen_port as u16, v6.flowinfo(), v6.scope_id())),
-                    })
-                }
-            }
-            //else{
-            //    println!("wait for announce bind failed");
-            //}
-        }
-    }
     
     pub fn join_threads(&mut self) {
         self.read_thread.take().expect("cant take read thread").join().expect("cant join read thread");
@@ -310,7 +250,7 @@ impl HubClient {
 }
 
 
-#[derive(Eq, PartialEq, Debug, Clone, Serialize, Deserialize)]
+#[derive(Eq, PartialEq, Debug, Clone, SerBin, DeBin, SerRon, DeRon)]
 pub struct Digest {
     pub buf: [u64; 25]
 }
@@ -324,7 +264,7 @@ impl Digest {
     pub fn generate() -> Digest {
         let mut result = Digest::default();
         for i in 0..25 {
-            result.buf[i] ^= time::precise_time_ns();
+            //result.buf[i] ^= time::precise_time_ns();
             std::thread::sleep(std::time::Duration::from_millis(1));
             result.digest_cycle();
         }

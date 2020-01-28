@@ -1,11 +1,11 @@
-use serde::{Serialize, Deserialize};
+use makepad_tinyserde::*;
 use std::net::SocketAddr;
 use std::cmp::Ordering;
 use std::collections::HashMap;
 use crate::httpserver::*;
 use crate::hubclient::*;
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, SerBin, DeBin)]
 pub enum HubMsg {
     ConnectBuilder(String),
     ConnectClone(String),
@@ -18,7 +18,7 @@ pub enum HubMsg {
     
     ConnectionError(HubError),
     
-    BuilderConfig {
+    BuilderConfig { 
         uid: HubUid,
         config: HubBuilderConfig
     },
@@ -143,7 +143,7 @@ impl HubMsg{
     }
 }
 
-#[derive(Eq, PartialEq, Debug, Clone, Serialize, Deserialize)]
+#[derive(Eq, PartialEq, Debug, Clone, SerBin, DeBin, SerRon, DeRon)]
 pub enum BuilderFileTreeNode {
     File {name: String, digest:Option<Box<Digest>>},
     Folder {name: String, digest:Option<Box<Digest>>, folder: Vec<BuilderFileTreeNode>}
@@ -183,7 +183,7 @@ impl PartialOrd for BuilderFileTreeNode {
 }
 
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, SerBin, DeBin)]
 pub enum BuildResult {
     Executable {path: String},
     Wasm {path: String},
@@ -192,7 +192,7 @@ pub enum BuildResult {
     Error,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, SerBin, DeBin)]
 pub struct HubPackage {
     pub project: String,
     pub package_name: String,
@@ -210,14 +210,14 @@ impl HubPackage {
 }
 
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, SerBin, DeBin, PartialEq, SerRon, DeRon)]
 pub struct HubBuilderConfig {
     pub http_server: HttpServerConfig,
     pub workspaces: HashMap<String, String>,
 }
 
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, SerBin, DeBin)]
 pub struct LocMessage {
     pub path: String,
     pub row: usize,
@@ -228,7 +228,7 @@ pub struct LocMessage {
     pub explanation: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, SerBin, DeBin)]
 pub enum HubLogItem {
     LocPanic(LocMessage),
     LocError(LocMessage),
@@ -264,19 +264,19 @@ impl HubLogItem {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, SerBin, DeBin)]
 pub struct HubCargoArtifact {
     pub package_id: String,
     pub fresh: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, SerBin, DeBin)]
 pub struct HubCargoCheck {
     pub target: String,
     pub args: String,
 }
 
-#[derive(PartialEq, Copy, Debug, Clone, Serialize, Deserialize)]
+#[derive(PartialEq, Copy, Debug, Clone, SerBin, DeBin)]
 pub enum HubAddr {
     None,
     Local {uid: u64},
@@ -308,7 +308,7 @@ impl HubAddr {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, SerBin, DeBin)]
 pub enum HubMsgTo {
     Client(HubAddr),
     Builder(String),
@@ -317,7 +317,7 @@ pub enum HubMsgTo {
     Hub
 }
 
-#[derive(PartialEq, Copy, Debug, Clone, Serialize, Deserialize)]
+#[derive(PartialEq, Copy, Debug, Clone, SerBin, DeBin)]
 pub struct HubUid {
     pub addr: HubAddr,
     pub id: u64
@@ -329,19 +329,19 @@ impl HubUid {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, SerBin, DeBin)]
 pub struct ToHubMsg {
     pub to: HubMsgTo,
     pub msg: HubMsg
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, SerBin, DeBin)]
 pub struct FromHubMsg {
     pub from: HubAddr,
     pub msg: HubMsg
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, SerBin, DeBin)]
 pub struct HubError {
     pub msg: String
 }

@@ -53,7 +53,7 @@ impl TextCursor {
         let pos = text_buffer.offset_to_text_pos_next(self.head, old.0, old.1);
         self.max = pos.col;
         return (pos, self.head)
-    } 
+    }
     
     pub fn move_home(&mut self, text_buffer: &TextBuffer) {
         let pos = text_buffer.offset_to_text_pos(self.head);
@@ -141,6 +141,44 @@ impl TextCursorSet {
         ret
     }
     
+    pub fn get_ident_around_last_cursor_and_set(&mut self, text_buffer: &TextBuffer) -> String {
+        let mut ret = String::new();
+        let cursor = &mut self.set[self.last_cursor];
+        
+        if cursor.head != cursor.tail {
+            let (start, end) = cursor.order();
+            text_buffer.get_range_as_string(start, end - start, &mut ret);
+            let mut exact = false;
+            for tok in &text_buffer.token_chunks {
+                if start == tok.offset && end == tok.offset + tok.len {
+                    exact = true;
+                    break;
+                }
+            }
+            if !exact{
+                ret.push('*');
+            }
+            return ret;
+        }
+        
+        for tok in &text_buffer.token_chunks {
+            if cursor.head >= tok.offset && cursor.head <= tok.offset + tok.len {
+                match &tok.token_type {
+                    TokenType::Identifier | TokenType::Call | TokenType::TypeName => {
+                        text_buffer.get_range_as_string(tok.offset, tok.len, &mut ret);
+                        cursor.tail = tok.offset;
+                        cursor.head = tok.offset + tok.len;
+                        self.fuse_adjacent(text_buffer);
+                        return ret
+                    },
+                    _ => ()
+                }
+            }
+        }
+        
+        ret
+    }
+    
     fn fuse_adjacent(&mut self, text_buffer: &TextBuffer) {
         let mut index = 0;
         let mut old_calc = (TextPos {row: 0, col: 0}, 0);
@@ -224,25 +262,31 @@ impl TextCursorSet {
         self.last_cursor = index;
     }
     
-    pub fn add_last_cursor_head_and_tail(&mut self, offset: usize, text_buffer: &TextBuffer) {
+    pub fn add_last_cursor_head_and_tail(&mut self, head: usize, tail: usize, text_buffer: &TextBuffer) {
         self.insert_undo_group += 1;
         // check if we dont already have exactly that cursor. ifso just remove it
         if self.set.len()>1 {
             for i in 0..self.set.len() {
-                if self.set[i].head == self.set[i].tail && self.set[i].head == offset {
+                if self.set[i].head == self.set[i].tail && self.set[i].head == head {
                     self.set.remove(i);
                     self.last_cursor = self.set.len() - 1;
                     return
                 }
             }
         }
-        self.set_last_cursor(offset, offset, text_buffer);
+        self.set_last_cursor(head, tail, text_buffer);
     }
     
-    pub fn clear_and_set_last_cursor_head_and_tail(&mut self, offset: usize, text_buffer: &TextBuffer) {
+    pub fn clear_and_set_last_cursor_head_and_tail(&mut self, head: usize, tail: usize, text_buffer: &TextBuffer) {
         self.insert_undo_group += 1;
         self.set.truncate(0);
-        self.set_last_cursor(offset, offset, text_buffer);
+        self.set_last_cursor(head, tail, text_buffer);
+    }
+    
+    pub fn set_last_cursor_head_and_tail(&mut self, head: usize, tail: usize, text_buffer: &TextBuffer) {
+        self.insert_undo_group += 1;
+        self.set.remove(self.last_cursor);
+        self.set_last_cursor(head, tail, text_buffer);
     }
     
     pub fn set_last_cursor_head(&mut self, offset: usize, text_buffer: &TextBuffer) -> bool {
@@ -271,6 +315,10 @@ impl TextCursorSet {
     
     pub fn get_last_cursor_order(&self) -> (usize, usize) {
         self.set[self.last_cursor].order()
+    }
+    
+    pub fn get_last_cursor_head(&self) -> usize {
+        self.set[self.last_cursor].head
     }
     
     pub fn get_last_cursor_singular(&self) -> Option<usize> {
@@ -347,12 +395,12 @@ impl TextCursorSet {
             offset += line.len() + 1;
         }
         // depending on the direction the last cursor remains
-        if self.set.len() == 0{
+        if self.set.len() == 0 {
             let offset = text_buffer.text_pos_to_offset(end_pos);
-            self.set.push(TextCursor{
-                head:offset,
-                tail:offset,
-                max:0
+            self.set.push(TextCursor {
+                head: offset,
+                tail: offset,
+                max: 0
             })
         }
         self.last_cursor = 0;
@@ -864,8 +912,8 @@ impl TextCursorSet {
         self.set.truncate(0);
         self.insert_undo_group += 1;
         let mut cursor = TextCursor {
-            head: 0,
-            tail: text_buffer.calc_char_count(),
+            head: text_buffer.calc_char_count(),
+            tail: 0,
             max: 0
         };
         self.last_cursor = 0;

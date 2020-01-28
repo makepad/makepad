@@ -1,7 +1,6 @@
 use std::mem;
 use std::ptr;
 use std::alloc;
-
 use crate::cx::*;
 
 impl Cx {
@@ -341,11 +340,10 @@ impl Cx {
                 22 => { //http_send_response
                     let signal_id = to_wasm.mu32();
                     let success = to_wasm.mu32();
-                    
-                    self.signals.push((Signal{signal_id: signal_id as usize}, match success{
+                    self.signals.insert(Signal {signal_id: signal_id as usize}, vec![match success{
                         1=>Cx::status_http_send_ok(),
                         _=>Cx::status_http_send_fail()
-                    }));
+                    }]);
                 },
                 _ => {
                     panic!("Message unknown")

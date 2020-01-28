@@ -1,12 +1,13 @@
 //use syn::Type;
 use makepad_render::*;
 use makepad_widget::*;
+use makepad_tinyserde::*;
 use crate::appwindow::*;
 use crate::appstorage::*;
 use crate::filetree::*;
-use crate::buildmanager::*;  
+use crate::buildmanager::*;
 use crate::makepadstyle::*;
-   
+
 pub struct App {
     pub app_window_state_template: AppWindowState,
     pub app_window_template: AppWindow,
@@ -20,26 +21,26 @@ pub struct App {
 
 impl App {
     
-    pub fn command_about_makepad()->CommandId{uid!()}
-    pub fn command_preferences()->CommandId{uid!()}
-    pub fn command_new_file()->CommandId{uid!()}
-    pub fn command_new_window()->CommandId{uid!()}
-    pub fn command_add_folder_to_builder()->CommandId{uid!()}
-    pub fn command_save_as()->CommandId{uid!()}
-    pub fn command_rename()->CommandId{uid!()}
-    pub fn command_close_editor()->CommandId{uid!()}
-    pub fn command_remove_folder_from_builder()->CommandId{uid!()}
-    pub fn command_close_window()->CommandId{uid!()}
-    pub fn command_find()->CommandId{uid!()}
-    pub fn command_replace()->CommandId{uid!()}
-    pub fn command_find_in_files()->CommandId{uid!()}
-    pub fn command_replace_in_files()->CommandId{uid!()}
-    pub fn command_toggle_line_comment()->CommandId{uid!()}
-    pub fn command_toggle_block_comment()->CommandId{uid!()}
-    pub fn command_start_program()->CommandId{uid!()}
-    pub fn command_stop_program()->CommandId{uid!()}
-    pub fn command_bring_all_to_front()->CommandId{uid!()}
-
+    pub fn command_about_makepad() -> CommandId {uid!()}
+    pub fn command_preferences() -> CommandId {uid!()}
+    pub fn command_new_file() -> CommandId {uid!()}
+    pub fn command_new_window() -> CommandId {uid!()}
+    pub fn command_add_folder_to_builder() -> CommandId {uid!()}
+    pub fn command_save_as() -> CommandId {uid!()}
+    pub fn command_rename() -> CommandId {uid!()}
+    pub fn command_close_editor() -> CommandId {uid!()}
+    pub fn command_remove_folder_from_builder() -> CommandId {uid!()}
+    pub fn command_close_window() -> CommandId {uid!()}
+    pub fn command_find() -> CommandId {uid!()}
+    pub fn command_replace() -> CommandId {uid!()}
+    pub fn command_find_in_files() -> CommandId {uid!()}
+    pub fn command_replace_in_files() -> CommandId {uid!()}
+    pub fn command_toggle_line_comment() -> CommandId {uid!()}
+    pub fn command_toggle_block_comment() -> CommandId {uid!()}
+    pub fn command_start_program() -> CommandId {uid!()}
+    pub fn command_stop_program() -> CommandId {uid!()}
+    pub fn command_bring_all_to_front() -> CommandId {uid!()}
+    
     pub fn proto(cx: &mut Cx) -> Self {
         let default_opt = StyleOptions {scale: 1.0, dark: true};
         set_widget_style(cx, &default_opt);
@@ -53,19 +54,19 @@ impl App {
         Self::command_save_as().set_key_shift(cx, KeyCode::KeyS);
         Self::command_close_editor().set_key(cx, KeyCode::KeyW);
         Self::command_close_window().set_key_shift(cx, KeyCode::KeyW);
-
+        
         cx.command_default_keymap();
         
         Self {
             menu: Menu::main(vec![
                 Menu::sub("Makepad", vec![
-                    Menu::item("About Makepad",  Self::command_about_makepad()),
+                    Menu::item("About Makepad", Self::command_about_makepad()),
                     Menu::line(),
                     Menu::item("Preferences", Self::command_preferences()),
                     Menu::line(),
-                    Menu::item("Quit Makepad",  Cx::command_quit()),
+                    Menu::item("Quit Makepad", Cx::command_quit()),
                 ]),
-                Menu::sub("File",  vec![
+                Menu::sub("File", vec![
                     Menu::item("New File", Self::command_new_file()),
                     Menu::item("New Window", Self::command_new_window()),
                     Menu::line(),
@@ -75,7 +76,7 @@ impl App {
                     Menu::line(),
                     Menu::item("Rename", Self::command_rename()),
                     Menu::line(),
-                    Menu::item("Close Editor",  Self::command_close_editor()),
+                    Menu::item("Close Editor", Self::command_close_editor()),
                     Menu::item("Remove Folder from Builder", Self::command_remove_folder_from_builder()),
                     Menu::item("Close Window", Self::command_close_window()),
                 ]),
@@ -88,7 +89,7 @@ impl App {
                     Menu::item("Paste", Cx::command_paste()),
                     Menu::line(),
                     Menu::item("Find", Self::command_find()),
-                    Menu::item("Replace",Self::command_replace()),
+                    Menu::item("Replace", Self::command_replace()),
                     Menu::line(),
                     Menu::item("Find in Files", Self::command_find_in_files()),
                     Menu::item("Replace in Files", Self::command_replace_in_files()),
@@ -130,11 +131,18 @@ impl App {
                     first: Box::new(DockItem::TabControl {
                         current: 0,
                         previous: 0,
-                        tabs: vec![DockTab {
-                            closeable: false,
-                            title: "Files".to_string(),
-                            item: Panel::FileTree
-                        }]
+                        tabs: vec![
+                            DockTab {
+                                closeable: false,
+                                title: "Files".to_string(),
+                                item: Panel::FileTree
+                            },
+                            DockTab {
+                                closeable: false,
+                                title: "".to_string(),
+                                item: Panel::SearchResults
+                            }
+                        ]
                     }),
                     last: Box::new(DockItem::Splitter {
                         axis: Axis::Horizontal,
@@ -148,38 +156,41 @@ impl App {
                                     closeable: false,
                                     title: "Edit".to_string(),
                                     item: Panel::FileEditorTarget
-                                },/*
-                                DockTab {
-                                    closeable: true,
-                                    title: "main.rs".to_string(),
-                                    item: Panel::FileEditor {
-                                        path: "examples/text_example/src/main.rs".to_string(),
-                                        scroll_pos: Vec2::zero(),
-                                        editor_id: 1
-                                    }
-                                }*/
+                                },
                             ],
                         }),
-                        last: Box::new(DockItem::TabControl {
-                            current: 0,
-                            previous: 0,
-                            tabs: vec![
-                                DockTab {
-                                    closeable: false,
-                                    title: "Keyboard".to_string(),
-                                    item: Panel::Keyboard
-                                },
-                                DockTab {
-                                    closeable: false,
-                                    title: "Log List".to_string(),
-                                    item: Panel::LogList
-                                },
-                                DockTab {
-                                    closeable: false,
-                                    title: "Log Item".to_string(),
-                                    item: Panel::LogItem
-                                },
-                            ]
+                        last: Box::new(DockItem::Splitter {
+                            axis: Axis::Vertical,
+                            align: SplitterAlign::Last,
+                            pos: 150.0,
+                            first: Box::new(DockItem::TabControl {
+                                current: 0,
+                                previous: 0,
+                                tabs: vec![
+                                    
+                                    DockTab {
+                                        closeable: false,
+                                        title: "Log".to_string(),
+                                        item: Panel::LogList
+                                    },
+                                ]
+                            }),
+                            last: Box::new(DockItem::TabControl {
+                                current: 0,
+                                previous: 0,
+                                tabs: vec![
+                                    DockTab {
+                                        closeable: false,
+                                        title: "Item".to_string(),
+                                        item: Panel::ItemDisplay
+                                    },
+                                    DockTab {
+                                        closeable: false,
+                                        title: "Keyboard".to_string(),
+                                        item: Panel::Keyboard
+                                    },
+                                ]
+                            })
                         })
                     })
                 },
@@ -211,6 +222,10 @@ impl App {
                 }
             },
             Event::KeyDown(ke) => match ke.key_code {
+                KeyCode::KeyD => if ke.modifiers.logo || ke.modifiers.control {
+                    //let size = self.build_manager.search_index.calc_total_size();
+                    //println!("Text Index size {}", size);
+                },
                 KeyCode::KeyR => if ke.modifiers.logo || ke.modifiers.control {
                     self.storage.reload_builders();
                 },
@@ -239,17 +254,17 @@ impl App {
             Event::Signal(se) => {
                 // process network messages for hub_ui
                 if let Some(hub_ui) = &mut self.storage.hub_ui {
-                    if se.signal == self.storage.hub_ui_message {
+                    if let Some(_) = se.signals.get(&self.storage.hub_ui_message) {
                         if let Some(mut msgs) = hub_ui.get_messages() {
                             for htc in msgs.drain(..) {
-                                self.storage.handle_hub_msg(cx, &htc, &mut self.windows, &mut self.state);
+                                self.storage.handle_hub_msg(cx, &htc, &mut self.windows, &mut self.state, &mut self.build_manager);
                                 self.build_manager.handle_hub_msg(cx, &mut self.storage, &htc);
                             }
                             return
                         }
                     }
                 }
-                if se.signal == self.storage.settings_changed {
+                if let Some(_statusses) = se.signals.get(&self.storage.settings_changed) {
                     if self.storage.settings_old.builders != self.storage.settings.builders {
                         self.storage.reload_builders();
                     }
@@ -266,9 +281,10 @@ impl App {
                 // lets see which file we loaded
                 if let Some(utf8_data) = self.storage.file_tree_file_read.resolve_utf8(fr) {
                     if let Ok(utf8_data) = utf8_data {
-                        if let Ok(tree) = ron::de::from_str(utf8_data) {
+                        if let Ok(tree) = DeRon::deserialize_ron(utf8_data) {
                             for window in &mut self.windows {
-                                window.file_panel.file_tree.root_node = hub_to_tree(&tree);
+                                let mut paths = Vec::new();
+                                window.file_panel.file_tree.root_node = hub_to_tree(&tree, "", &mut paths);
                                 if let FileNode::Folder {folder, state, name, ..} = &mut window.file_panel.file_tree.root_node {
                                     *name = "".to_string();
                                     *state = NodeState::Open;
@@ -285,7 +301,7 @@ impl App {
                 }
                 else if let Some(utf8_data) = self.storage.app_state_file_read.resolve_utf8(fr) {
                     if let Ok(utf8_data) = utf8_data {
-                        if let Ok(state) = ron::de::from_str(&utf8_data) {
+                        if let Ok(state) = DeRon::deserialize_ron(utf8_data) {
                             self.state = state;
                             self.windows.truncate(0);
                             // create our windows with the serialized positions/size
@@ -323,7 +339,7 @@ impl App {
                         self.default_layout(cx);
                     }
                     for (window_index, window) in self.windows.iter_mut().enumerate() {
-                        window.ensure_unique_tab_title_for_file_editors(window_index, &mut self.state);
+                        window.ensure_unique_tab_title_for_file_editors(cx, window_index, &mut self.state);
                     }
                 }
                 else if let Some(utf8_data) = self.storage.app_settings_file_read.resolve_utf8(fr) {
@@ -332,13 +348,13 @@ impl App {
                     }
                     else { // create default settings file
                         let def_settings = AppSettings::initial();
-                        let ron = ron::ser::to_string_pretty(&def_settings, ron::ser::PrettyConfig::default()).expect("cannot serialize settings");
+                        let ron = def_settings.serialize_ron();
                         cx.file_write("makepad_settings.ron", ron.as_bytes());
                         self.storage.load_settings(cx, &ron);
                     }
                 }
                 else {
-                    for (_path, atb) in &mut self.storage.text_buffers {
+                    for atb in &mut self.storage.text_buffers {
                         if let Some(utf8_data) = atb.file_read.resolve_utf8(fr) {
                             if let Ok(utf8_data) = utf8_data {
                                 atb.text_buffer.load_from_utf8(utf8_data);
@@ -348,7 +364,7 @@ impl App {
                         }
                     }
                 }
-            }, 
+            },
             
             _ => ()
         }

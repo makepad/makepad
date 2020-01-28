@@ -9,6 +9,7 @@ pub struct TextInput {
     pub empty_message: String,
 }
 
+#[derive(Default)]
 pub struct TextInputOptions {
     pub multiline: bool,
     pub read_only: bool,
@@ -25,14 +26,7 @@ impl TextInput {
                 draw_line_numbers: false,
                 draw_cursor_row: false,
                 highlight_area_on: false,
-                line_number_width: 0.,
-                top_padding: 0.,
                 mark_unmatched_parens: false,
-                view_layout: Layout {
-                    walk: Walk {width: Width::Compute, height: Height::Compute, margin: Margin {t: 4., l: 0., r: 0., b: 0.}},
-                    padding: Padding::all(7.),
-                    ..Layout::default()
-                },
                 folding_depth: 3,
                 ..TextEditor::proto(cx)
             },
@@ -45,7 +39,12 @@ impl TextInput {
     
     pub fn style(cx: &mut Cx, _opt: &StyleOptions) {
         cx.begin_style(Self::style_text_input());
-        TextEditor::color_bg().set(cx, Theme::color_bg_normal().get(cx));
+        TextEditor::layout_bg().set(cx, Layout {
+            walk: Walk {width: Width::Compute, height: Height::Compute, margin: Margin {t: 4., l: 0., r: 0., b: 0.}},
+            padding: Padding::all(7.),
+            ..Layout::default()
+        });
+        TextEditor::color_bg().set(cx, TextEditor::color_bg().get(cx));
         TextEditor::gutter_width().set(cx, 0.);
         TextEditor::padding_top().set(cx, 0.);
         TextEditor::shader_bg().set(cx, Quad::def_quad_shader().compose(shader_ast!({
@@ -72,6 +71,11 @@ impl TextInput {
     
     pub fn get_value(&self) -> String {
         self.text_buffer.get_as_string()
+    }
+    
+    pub fn select_all(&mut self, cx: &mut Cx){
+        self.text_editor.cursors.select_all(&mut self.text_buffer);
+        self.text_editor.view.redraw_view_area(cx);
     }
     
     pub fn draw_text_input_static(&mut self, cx: &mut Cx, text: &str) {
@@ -108,7 +112,7 @@ impl TextInput {
         }
         
         for (index, token_chunk) in text_buffer.token_chunks.iter_mut().enumerate() {
-            self.text_editor.draw_chunk(cx, index, &text_buffer.flat_text, token_chunk, &text_buffer.messages.cursors);
+            self.text_editor.draw_chunk(cx, index, &text_buffer.flat_text, token_chunk, &text_buffer.markers);
         }
         
         self.text_editor.end_text_editor(cx, text_buffer);
@@ -129,16 +133,16 @@ impl TextInputTokenizer {
         let start = chunk.len();
         loop {
             if state.next == '\0' {
-		if (chunk.len()-start)>0 { 
+                if (chunk.len() - start)>0 {
                     return TokenType::Identifier
                 }
-		state.advance();
+                state.advance();
                 chunk.push(' ');
                 return TokenType::Eof
             }
             else if state.next == '\n' {
                 // output current line
-                if (chunk.len()-start)>0 {
+                if (chunk.len() - start)>0 {
                     return TokenType::Identifier
                 }
                 
@@ -147,7 +151,7 @@ impl TextInputTokenizer {
                 return TokenType::Newline
             }
             else if state.next == ' ' {
-                if (chunk.len()-start)>0 {
+                if (chunk.len() - start)>0 {
                     return TokenType::Identifier
                 }
                 while state.next == ' ' {

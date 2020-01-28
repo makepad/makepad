@@ -15,13 +15,14 @@ pub use crate::shader::*;
 pub use crate::math::*;
 pub use crate::events::*;
 pub use crate::colors::*;
-pub use crate::elements::*;
+pub use crate::elements::*; 
 pub use crate::animator::*;
 pub use crate::area::*;
 pub use crate::menu::*;
 pub use crate::styling::*;
+pub use crate::liveclient::*;
 
-#[cfg(all(not(feature = "ipc"), target_os = "linux"))]
+#[cfg(all(not(feature = "ipc"), target_os = "linux"))] 
 pub use crate::cx_linux::*;
 #[cfg(all(not(feature = "ipc"), target_os = "linux"))]
 pub use crate::cx_opengl::*;
@@ -84,6 +85,7 @@ impl PlatformType {
 
 pub struct Cx {
     pub running: bool,
+    pub counter: usize,
     pub platform_type: PlatformType,
     
     pub windows: Vec<CxWindow>,
@@ -126,7 +128,8 @@ pub struct Cx {
     pub signal_id: usize,
     pub theme_update_id: usize,
     
-    pub last_key_focus: Area,
+    pub prev_key_focus: Area,
+    pub next_key_focus: Area,
     pub key_focus: Area,
     pub keys_down: Vec<KeyEvent>,
     
@@ -147,7 +150,7 @@ pub struct Cx {
     pub frame_callbacks: Vec<Area>,
     pub _frame_callbacks: Vec<Area>,
     
-    pub signals: Vec<(Signal, StatusId)>,
+    pub signals: HashMap<Signal, Vec<StatusId>>,
     
     pub style_base: CxStyle,
     pub styles: Vec<CxStyle>,
@@ -158,6 +161,8 @@ pub struct Cx {
     
     pub panic_now: bool,
     pub panic_redraw: bool,
+    
+    pub live_client: Option<LiveClient>,
     
     pub platform: CxPlatform,
 }
@@ -208,8 +213,11 @@ impl Default for Cx {
         }];
         
         Self {
+            counter: 0,
             platform_type: PlatformType::Windows,
             running: true,
+            
+            live_client: LiveClient::connect_to_live_server(None),
             
             windows: Vec::new(),
             windows_free: Vec::new(),
@@ -250,7 +258,8 @@ impl Default for Cx {
             shader_instance_id: 1,
             theme_update_id: 1,
             
-            last_key_focus: Area::Empty,
+            next_key_focus: Area::Empty,
+            prev_key_focus: Area::Empty,
             key_focus: Area::Empty,
             keys_down: Vec::new(),
             
@@ -278,7 +287,7 @@ impl Default for Cx {
             frame_callbacks: Vec::new(),
             _frame_callbacks: Vec::new(),
             
-            signals: Vec::new(),
+            signals: HashMap::new(),
             
             panic_now: false,
             panic_redraw: false,
@@ -617,10 +626,12 @@ impl Cx {
         }
         
         // update capture keyboard
-        if self.last_key_focus == old_area {
-            self.last_key_focus = new_area.clone()
+        if self.prev_key_focus == old_area {
+            self.prev_key_focus = new_area.clone()
         }
-        
+        if self.next_key_focus == old_area {
+            self.next_key_focus = new_area.clone()
+        }        
         if self._finger_over_last_area == old_area {
             self._finger_over_last_area = new_area.clone()
         }
@@ -631,7 +642,11 @@ impl Cx {
     }
     
     pub fn set_key_focus(&mut self, focus_area: Area) {
-        self.key_focus = focus_area;
+        self.next_key_focus = focus_area;
+    }
+
+    pub fn revert_key_focus(&mut self) {
+        self.next_key_focus = self.prev_key_focus;
     }
     
     pub fn has_key_focus(&self, focus_area: Area) -> bool {
@@ -672,11 +687,11 @@ impl Cx {
         self.event_id += 1;
         event_handler(self, event);
         
-        if self.last_key_focus != self.key_focus {
-            let last_key_focus = self.last_key_focus;
-            self.last_key_focus = self.key_focus;
+        if self.next_key_focus != self.key_focus {
+            self.prev_key_focus = self.key_focus;
+            self.key_focus = self.next_key_focus;
             event_handler(self, &mut Event::KeyFocus(KeyFocusEvent {
-                last: last_key_focus,
+                prev: self.prev_key_focus,
                 focus: self.key_focus
             }))
         }
@@ -688,6 +703,7 @@ impl Cx {
         // self.profile();
         self.is_in_redraw_cycle = true;
         self.redraw_id += 1;
+        self.counter = 0;
         std::mem::swap(&mut self._redraw_child_areas, &mut self.redraw_child_areas);
         std::mem::swap(&mut self._redraw_parent_areas, &mut self.redraw_parent_areas);
         self.align_list.truncate(0);
@@ -695,6 +711,21 @@ impl Cx {
         self.redraw_parent_areas.truncate(0);
         self.call_event_handler(&mut event_handler, &mut Event::Draw);
         self.is_in_redraw_cycle = false;
+        if self.style_stack.len()>0{
+            panic!("Style stack disaligned, forgot a cx.end_style()");
+        }
+        if self.view_stack.len()>0{
+            panic!("View stack disaligned, forgot an end_view(cx)");
+        }
+        if self.pass_stack.len()>0{
+            panic!("Pass stack disaligned, forgot an end_pass(cx)");
+        }
+        if self.window_stack.len()>0{
+            panic!("Window stack disaligned, forgot an end_window(cx)");
+        }
+        if self.turtles.len()>0{
+            panic!("Turtle stack disaligned, forgot an end_turtle()");
+        }
         //self.profile();
     }
     
@@ -729,8 +760,16 @@ impl Cx {
     }
     
     pub fn send_signal(&mut self, signal: Signal, status: StatusId) {
-        if signal.signal_id != 0 && self.signals.iter().find( | v | v.0 == signal && v.1 == status).is_none() {
-            self.signals.push((signal, status));
+        if signal.signal_id == 0{
+            return
+        }
+        if let Some(statusses) = self.signals.get_mut(&signal){
+            if statusses.iter().find(|s| **s == status).is_none(){
+                statusses.push(status);
+            }
+        }
+        else{
+            self.signals.insert(signal, vec![status]);
         }
     }
     
@@ -740,15 +779,13 @@ impl Cx {
         let mut counter = 0;
         while self.signals.len() != 0 {
             counter += 1;
-            let mut signals = Vec::new();
+            let mut signals = HashMap::new();
             std::mem::swap(&mut self.signals, &mut signals);
             
-            for (signal, status) in signals {
-                self.call_event_handler(&mut event_handler, &mut Event::Signal(SignalEvent {
-                    signal: signal,
-                    status: status
-                }));
-            }
+            self.call_event_handler(&mut event_handler, &mut Event::Signal(SignalEvent {
+                signals: signals,
+            }));
+
             if counter > 100 {
                 println!("Signal feedback loop detected");
                 break

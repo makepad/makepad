@@ -5,14 +5,14 @@ use std::io::BufReader;
 use std::str;
 use std::time::Duration;
 use std::collections::HashMap;
-use serde::{Serialize, Deserialize};
+use makepad_tinyserde::*;
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, SerBin, DeBin, PartialEq, SerRon, DeRon)]
 pub enum HttpServerConfig {
     Offline,
     Localhost(u16),
     Network(u16),
-    InterfaceV4((u16, [u8; 4]))
+    InterfaceV4(u16, [u8; 4])
 }
 
 #[derive(Default)]
@@ -37,7 +37,7 @@ impl HttpServer {
             HttpServerConfig::Offline => return None,
             HttpServerConfig::Localhost(port) => SocketAddr::from(([127, 0, 0, 1], *port)),
             HttpServerConfig::Network(port) => SocketAddr::from(([0, 0, 0, 0], *port)),
-            HttpServerConfig::InterfaceV4((port, ip)) => SocketAddr::from((*ip, *port)),
+            HttpServerConfig::InterfaceV4(port, ip) => SocketAddr::from((*ip, *port)),
         };
         
         let listener = if let Ok(listener) = TcpListener::bind(listen_address.clone()) {listener} else {println!("Cannot bind http server port"); return None};

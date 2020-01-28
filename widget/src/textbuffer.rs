@@ -2,6 +2,11 @@ use makepad_render::*;
 
 use crate::textcursor::*;
 
+#[derive(Clone, Copy, Default, PartialEq, Ord, PartialOrd, Hash, Eq)]
+pub struct TextBufferId(pub u16);
+impl TextBufferId{
+    pub fn as_index(&self )->usize{return self.0 as usize}
+}
 #[derive(Clone, Default)]
 pub struct TextBuffer {
     // Vec<Vec<char>> was chosen because, for all practical use (code) most lines are short
@@ -9,6 +14,7 @@ pub struct TextBuffer {
     // Also inserting lines is pretty cheap even approaching 100k lines.
     // If you want to load a 100 meg single line file or something with >100k lines
     // other options are better. But these are not usecases for this editor.
+    pub text_buffer_id: TextBufferId,
     pub lines: Vec<Vec<char>>,
     pub undo_stack: Vec<TextUndo>,
     pub redo_stack: Vec<TextUndo>,
@@ -17,21 +23,28 @@ pub struct TextBuffer {
     pub is_loaded: bool,
     pub signal: Signal,
     
-    pub mutation_id: u64,
+    pub mutation_id: u32,
     pub is_crlf: bool,
-    pub messages: TextBufferMessages,
+    pub markers: TextBufferMarkers,
     pub flat_text: Vec<char>,
+    pub last_flat_text: Vec<char>,
     pub token_chunks: Vec<TokenChunk>,
-    pub token_chunks_id: u64,
+    pub last_token_chunks: Vec<TokenChunk>,
+    pub token_chunks_id: u32,
     pub keyboard: TextBufferKeyboard,
 }
 
-impl TextBuffer{
-    pub fn status_loaded()->StatusId{uid!()}
-    pub fn status_message_update()->StatusId{uid!()}
-    pub fn status_jump_to_offset()->StatusId{uid!()}
-    pub fn status_data_update()->StatusId{uid!()}
-    pub fn status_keyboard_update()->StatusId{uid!()}
+impl TextBuffer {
+    pub fn status_loaded() -> StatusId {uid!()}
+    pub fn status_message_update() -> StatusId {uid!()}
+    pub fn status_search_update() -> StatusId {uid!()}
+    pub fn status_data_update() -> StatusId {uid!()}
+    pub fn status_keyboard_update() -> StatusId {uid!()}
+}
+
+#[derive(Clone, Copy, Default, PartialEq, Ord, PartialOrd, Hash, Eq)]
+pub struct LiveMacro{
+    pub token:usize,
 }
 
 #[derive(Clone, Default)]
@@ -42,14 +55,12 @@ pub struct TextBufferKeyboard {
 }
 
 #[derive(Clone, Default)]
-pub struct TextBufferMessages {
-    //pub gc_id: u64,
-    // gc id for the update pass
-    pub mutation_id: u64,
+pub struct TextBufferMarkers {
+    pub mutation_id: u32,
     // only if this matches the textbuffer mutation id are the messages valid
-    pub cursors: Vec<TextCursor>,
-    pub bodies: Vec<TextBufferMessage>,
-    pub jump_to_offset: usize
+    pub search_cursors: Vec<TextCursor>,
+    pub message_cursors: Vec<TextCursor>,
+    pub message_bodies: Vec<TextBufferMessage>,
 }
 
 #[derive(Clone, PartialEq)]
@@ -65,46 +76,7 @@ pub struct TextBufferMessage {
     pub body: String
 }
 
-/*
-impl TextBuffers {
-    pub fn from_path(&mut self, cx: &mut Cx, path: &str) -> &mut TextBuffer {
-        let root_path = &self.root_path;
-        self.storage.entry(path.to_string()).or_insert_with( || {
-            TextBuffer {
-                signal: cx.new_signal(),
-                mutation_id: 1,
-                load_file_read: cx.file_read(&format!("{}{}", root_path, path)),
-                ..Default::default()
-            }
-        })
-    }
-    
-    pub fn save_file(&mut self, cx: &mut Cx, path: &str) {
-        let text_buffer = self.storage.get(path);
-        if let Some(text_buffer) = text_buffer {
-            let string = text_buffer.get_as_string();
-            cx.file_write(&format!("{}{}", self.root_path, path), string.as_bytes());
-            //cx.http_send("POST", path, "192.168.0.20", "2001", &string);
-        }
-    }
-    
-    pub fn handle_file_read(&mut self, cx: &mut Cx, fr: &FileReadEvent) -> bool {
-        for (_path, text_buffer) in &mut self.storage {
-            if let Some(utf8_data) = text_buffer.load_file_read.resolve_utf8(fr) {
-                if let Ok(utf8_data) = utf8_data {
-                    // TODO HANDLE ERROR CASE
-                    text_buffer.is_crlf = !utf8_data.find("\r\n").is_none();
-                    text_buffer.lines = TextBuffer::split_string_to_lines(&utf8_data.to_string());
-                    cx.send_signal(text_buffer.signal, SIGNAL_TEXTBUFFER_LOADED);
-                }
-                return true
-            }
-        }
-        return false;
-    }
-}
-*/
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Default)]
 pub struct TextPos {
     pub row: usize,
     pub col: usize
@@ -184,11 +156,6 @@ fn calc_char_count(lines: &Vec<Vec<char>>) -> usize {
 }
 
 impl TextBuffer {
-    pub fn with_signal(cx:&mut Cx)->Self{
-        let mut tb = TextBuffer::default();
-        tb.signal = cx.new_signal();
-        tb
-    }
     
     pub fn from_utf8(data: &str) -> Self {
         let mut tb = TextBuffer::default();
@@ -199,12 +166,41 @@ impl TextBuffer {
     pub fn needs_token_chunks(&mut self) -> bool {
         if self.token_chunks_id != self.mutation_id && self.is_loaded {
             self.token_chunks_id = self.mutation_id;
+            std::mem::swap(&mut self.token_chunks, &mut self.last_token_chunks);
             self.token_chunks.truncate(0);
+            std::mem::swap(&mut self.flat_text, &mut self.last_flat_text);
             self.flat_text.truncate(0);
             return true
         }
         return false
     }
+    
+    pub fn scan_token_chunks_prev_line(&self, token:usize, lines:usize)->(usize, isize){
+        let mut nls = 0;
+        for i in (0..token).rev(){
+            if let TokenType::Newline = self.token_chunks[i].token_type{
+                nls += 1;
+                if nls == lines{
+                    return (i + 1, -1);
+                }
+            }
+        }
+        return (0, 0)
+    }
+
+    pub fn scan_token_chunks_next_line(&self, token:usize, lines:usize)->usize{
+        let mut nls = 0;
+        for i in token..self.token_chunks.len(){
+            if let TokenType::Newline = self.token_chunks[i].token_type{
+                nls += 1;
+                if nls == lines{
+                    return i+1;
+                }
+            }
+        }
+        return self.token_chunks.len();
+    }
+
     
     pub fn offset_to_text_pos(&self, char_offset: usize) -> TextPos {
         let mut char_count = 0;
@@ -741,6 +737,7 @@ pub struct TokenizerState<'a> {
     pub cur: char,
     pub next: char,
     pub lines: &'a Vec<Vec<char>>,
+    pub line_start: usize,
     pub line_counter: usize,
     pub offset: usize,
     iter: std::slice::Iter<'a, char>
@@ -750,6 +747,7 @@ impl<'a> TokenizerState<'a> {
     pub fn new(lines: &'a Vec<Vec<char>>) -> Self {
         let mut ret = Self {
             lines: lines,
+            line_start: 0,
             line_counter: 0,
             offset: 0,
             prev: '\0',
@@ -774,6 +772,7 @@ impl<'a> TokenizerState<'a> {
     pub fn next_line(&mut self) {
         if self.line_counter < self.lines.len() - 1 {
             self.line_counter += 1;
+            self.line_start = self.offset;
             self.offset += 1;
             self.iter = self.lines[self.line_counter].iter();
             self.next = '\n'
@@ -840,6 +839,7 @@ pub enum TokenType {
     Flow,
     Fn,
     TypeDef,
+    Impl,
     Looping,
     Identifier,
     Call,
